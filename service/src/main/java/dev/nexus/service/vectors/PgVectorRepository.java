@@ -167,6 +167,37 @@ public final class PgVectorRepository {
     }
 
     /**
+     * Test-only interleaving seam (RDR-181, bead nexus-f0r8p.4): an optional callback
+     * invoked by {@link #resolveNeedEmbedIdx} immediately after the existence SELECT
+     * resolves (the have-vector/need-embed partition is computed) and BEFORE the
+     * have-vector UPDATE loop begins. This is the exact window the RDR's Risks and
+     * Mitigations section describes — chash H is confirmed present by the SELECT, then
+     * a concurrent orphan-GC {@link #delete} of H can commit, then the have-vector
+     * UPDATE runs and must observe 0 affected rows (self-healing reroute to need-embed,
+     * never silent loss). Production code has no way to pause a transaction
+     * deterministically at this point, and the regression test proving the self-heal
+     * is safe cannot rely on {@code Thread.sleep} timing (flaky) — so this hook exists
+     * purely to let {@code PgVectorEmbedSkipGcRaceTest} block the writer thread here
+     * while a second thread's concurrent delete commits, then release it.
+     *
+     * <p>Default {@code null} (no-op): every call site does a single null-check before
+     * invoking it, costing nothing when unset. Never read or written by production
+     * code. A package-private setter would not reach the test class — it lives in
+     * {@code dev.nexus.service}, this repository in {@code dev.nexus.service.vectors} —
+     * so the setter is {@code public}, following the same public-accessor shape already
+     * established by {@link #sourceUriJoinCalls} / {@link #existenceSelectCalls}.
+     */
+    private volatile Runnable afterExistencePartitionHookForTests;
+
+    /**
+     * Test-only: install (or clear with {@code null}) the post-existence-partition
+     * pause hook — see {@link #afterExistencePartitionHookForTests}.
+     */
+    public void setAfterExistencePartitionHookForTests(Runnable hook) {
+        this.afterExistencePartitionHookForTests = hook;
+    }
+
+    /**
      * Pairs a value with the embedding token count consumed to produce it (bead nexus-ehc4q).
      *
      * <p>Returned by the {@code *WithTokens} sibling methods so the caller (VectorHandler)
@@ -2075,6 +2106,16 @@ public final class PgVectorRepository {
             return tenantScope.withTenant(tenant, ctx -> {
                 Map<String, String> existingText = selectExistingChashTextCtx(ctx, ch, collection, dedupIds);
                 ExistencePartition partition = partitionByExistence(dedupIds, existingText.keySet());
+                // Test-only interleaving seam (bead nexus-f0r8p.4) — see
+                // afterExistencePartitionHookForTests javadoc. Fires AFTER the existence
+                // SELECT resolves and BEFORE the have-vector UPDATE loop below, inside
+                // this SAME still-open transaction, so a test can pause here while a
+                // concurrent GC delete commits on another connection. No-op (null) in
+                // production.
+                Runnable hook = afterExistencePartitionHookForTests;
+                if (hook != null) {
+                    hook.run();
+                }
                 // Mutable working copy: ExistencePartition is an immutable record, and
                 // the reroute step ("if 0 rows, move that chash into need-embed") is a
                 // mutation partition.needEmbedIdx() cannot express directly.
