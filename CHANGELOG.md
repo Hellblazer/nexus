@@ -6,6 +6,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Server-side embed-skip on re-index (RDR-181).** `PgVectorRepository.upsertChunksInternal` (service mode) now checks which chashes already have a stored vector before embedding — unchanged chunks take a metadata-only UPDATE (position/metadata refreshed, vector untouched) instead of a redundant Voyage call. Live-proof measurement: 89.4% token reduction on a re-index that touched one file among several. Self-heals against a concurrent orphan-GC delete (a 0-row metadata UPDATE reroutes that chash back to embed+insert). A `forceReEmbed` escape (wired from `--force` / the deprecated `NX_UPSERT_SKIP_EXISTING=0`) bypasses the check entirely for model-drift recompute and keeps the first-index path free of the added SELECT.
+- **`nx service record-deploy`** — guarded-write engine-version tracker: GETs the deployed service's `/version`, asserts it matches the tag being recorded, and only then writes the `deployed-engine-version` T2 record. Closes the class of bug where a stale tracker silently disagreed with what the cloud was actually running.
+
+### Changed
+
+- **`skip_existing` client-side probe demoted to a deprecation shim.** `HttpVectorClient.upsert_chunks`'s `skip_existing` (and `NX_UPSERT_SKIP_EXISTING=1`) no longer prunes the outgoing batch — the server's existence-partition check now does this losslessly, including the metadata refresh the old client-side probe dropped. Setting either flag now only emits a one-time deprecation log; the full batch is always sent. `NX_UPSERT_SKIP_EXISTING=0` is repurposed as the `force_re_embed` escape hatch (see above) — its meaning has changed from "disable the client probe" to "force the server to re-embed everything."
+
+### Fixed
+
+- **Indexing throughput**: batched several serial per-file round-trips that dominated large re-index wall-clock — catalog `register_many` (kills a 333s serial-register sink), batched prune-misclassified manifest fetch (226s → one batched call), taxonomy/manifest batch endpoints (`assign_many`, `write_many`), deferred Claude-haiku topic labeling to a detached background process (no longer blocks the indexing wall), and skipped the taxonomy discover/label/project pass entirely on all-unchanged re-index runs.
+- **pgvector upsert deadlock** — a global chash lock order plus 40P01 retry belt closes a deadlock window between concurrent upsert batches touching overlapping chashes in different arrival orders.
+- **Chash dedup** in `ChashRepository.upsertMany` and catalog doc_id batch upserts — in-batch duplicate chashes no longer double-write within one statement.
+- **Bounded backoff retry** on transient gateway 502/503/504 during vector upsert, instead of failing the whole batch on one blip.
+- **Retrieval-plan library NULL-verb pollution** — the plan-save MCP boundary now refuses verb-less plan writes; implementation/pipeline plans go to beads + T2, not the shared plan library (was 79% NULL-verb pollution in the live cloud library before the fix).
+
+### Deprecated
+
+- **`NX_UPSERT_SKIP_EXISTING`** — kept for one deprecation cycle as a shim. `=1` (the old "skip probe" behavior) is now a no-op; `=0` now means "force full re-embed" (see Changed, above). New code should use the client's `force_re_embed` parameter directly rather than this env var.
+
 ## [6.2.0] - 2026-07-02
 
 The unattended-migration release (RDR-178). An incident-shaped migration gap

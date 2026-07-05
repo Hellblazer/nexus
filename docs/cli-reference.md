@@ -830,7 +830,7 @@ Carve-outs:
 
 Topic taxonomy — HDBSCAN clustering of T3 collection embeddings into topics for navigation, search grouping, and relevance boosting.
 
-Topics are auto-discovered after `nx index repo` and auto-labeled with Claude haiku when available. Search results are grouped by topic and boosted when results share a topic cluster.
+Topics are auto-discovered after `nx index repo`, gated on the run actually having indexed files (an all-unchanged re-index skips the discover/kmeans/label/project/L1 pass entirely — a self-heal guard still runs discovery if a target collection has zero topics). Labeling with Claude haiku runs in a DETACHED background process spawned at the end of indexing (nexus-qqc1v) — the CLI exits immediately and labels land minutes later (progress: `~/.config/nexus/logs/deferred_labeling.log`; run `nx taxonomy label` manually if the spawn failed or you don't want to wait). Search results are grouped by topic and boosted when results share a topic cluster.
 
 ```
 nx taxonomy status                              # health: collections, coverage, review state
