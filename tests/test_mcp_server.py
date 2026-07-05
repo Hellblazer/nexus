@@ -737,10 +737,26 @@ def test_plan_save_and_search(t2_path):
     result = plan_save(
         query="compare error handling",
         plan_json='{"steps": [{"step": 1, "operation": "search"}]}',
+        verb="analyze",
         project="testproj", tags="search,compare",
     )
     assert "Saved plan:" in result
     assert "compare error handling" in plan_search(query="error handling", project="testproj")
+
+
+def test_plan_save_refuses_verbless(t2_path):
+    # nexus-fiovt: the MCP plan_save tool must refuse a verb-less write — the
+    # source of the NULL-verb pollution (implementation plans keyed by task
+    # description that false-match non-verb-filtered nx_answer questions).
+    result = plan_save(
+        query="RDR-999 phased execution plan: do the thing",
+        plan_json='{"steps": []}',
+        project="testproj",
+    )
+    assert "Plan not saved" in result
+    assert "verb" in result.lower()
+    # And it did NOT persist — a search finds nothing.
+    assert "No matching plans" in plan_search(query="RDR-999 phased execution", project="testproj")
 
 
 def test_plan_search_empty(t2_path):

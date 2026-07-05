@@ -224,6 +224,7 @@ class TestWiring:
         plan_save(
             query="how does X relate to Y in the catalog",
             plan_json='{"steps":[{"tool":"search","args":{"query":"$intent"}}]}',
+            verb="query",
             project="nexus",
             tags="search",
         )

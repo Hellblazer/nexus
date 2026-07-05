@@ -66,7 +66,7 @@ mcp__plugin_conexus_nexus__scratch_manage(action="flag", entry_id="<id>"       #
 
 # Plan library (T2)
 mcp__plugin_conexus_nexus__plan_search(query="retrieval"                       # find reusable plans
-mcp__plugin_conexus_nexus__plan_save(query="...", plan_json="{...}"            # persist a successful plan
+mcp__plugin_conexus_nexus__plan_save(query="...", plan_json="{...}", verb="research"  # persist a reusable RETRIEVAL plan (verb REQUIRED; impl-plans -> beads/T2)
 ```
 
 ## When to reach for each

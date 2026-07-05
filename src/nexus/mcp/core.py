@@ -2978,23 +2978,33 @@ def collection_list() -> str:
 def plan_save(
     query: str,
     plan_json: str,
+    verb: str = "",
     project: str = "",
     outcome: str = "success",
     tags: str = "",
     ttl: int | None = None,
     scope_tags: str = "",
 ) -> str:
-    """Save a query execution plan to the T2 plan library.
+    """Save a *retrieval* query-execution plan to the T2 plan library.
 
     The plan_json should be a JSON string with the execution plan structure.
     Minimal schema: {"steps": [...], "tools_used": [...], "outcome_notes": "..."}
 
+    The library is verb-dimensional (RDR-078): a plan is matched to a
+    verb-shaped intent, so a ``verb`` is REQUIRED — a verb-less plan has no
+    dimensional identity, can never match a verb-filtered nx_answer question,
+    and only leaks in via raw FTS (the NULL-verb pollution class, nexus-fiovt).
+    This is for reusable *retrieval* plans; **implementation / pipeline / phased
+    execution plans belong in beads + T2 memory (``memory_put``), not here.**
+
     Args:
-        query: The original natural-language question
-        plan_json: JSON string of the execution plan (see schema above)
-        project: Project namespace for scoping (e.g. "nexus")
-        outcome: Plan outcome, "success" or "partial"
-        tags: Comma-separated tags (e.g. operation types used)
+        query: The original natural-language question the plan answers.
+        plan_json: JSON string of the execution plan (see schema above).
+        verb: REQUIRED retrieval verb (e.g. research / analyze / query / review
+            / debug / document). A verb-less save is refused.
+        project: Project namespace for scoping (e.g. "nexus").
+        outcome: Plan outcome, "success" or "partial".
+        tags: Comma-separated tags (e.g. operation types used).
         ttl: Time-to-live in days. None means permanent (no expiry).
         scope_tags: RDR-091 Phase 2a comma-separated scope-tag string
             (e.g. ``"rdr__arcaneum,code__nexus"``). When empty, inferred
@@ -3004,6 +3014,19 @@ def plan_save(
     try:
         if not query or not plan_json:
             return "Error: query and plan_json are required"
+        # nexus-fiovt: refuse verb-less writes. The plan library is
+        # verb-dimensional; a NULL-verb plan pollutes it (77/116 rows on the
+        # 2026-07-05 audit) — it can false-match non-verb-filtered nx_answer
+        # questions via FTS and is un-runnable by the retrieval plan runner.
+        # Every legitimate writer (nx_answer's grow path, seeds) sets a verb.
+        if not verb.strip():
+            return (
+                "Plan not saved: a 'verb' is required (a retrieval verb such as "
+                "research / analyze / query / review / debug / document). Verb-less "
+                "plans pollute the verb-dimensional retrieval-plan-match library. "
+                "Implementation / pipeline / phased-execution plans belong in beads "
+                "+ T2 memory (memory_put), not the plan library."
+            )
         # nexus-j5geq: route through the T2 daemon (plans.save_plan is in
         # _WRITE_OPS; the daemon serialises the write through its single WAL
         # writer, eliminating the "database is locked" races seen 2026-06-11).
@@ -3017,6 +3040,7 @@ def plan_save(
                 project=project,
                 ttl=ttl,
                 scope_tags=_sc_tags,
+                verb=verb.strip(),
             )
         )
         _record_tier_write(
