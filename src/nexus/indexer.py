@@ -1899,22 +1899,60 @@ def _prune_misclassified_in_collection(
         # chunks. Log at WARNING with the doc_id so operators see the
         # affected scope; count for the post-run summary.
         skipped_doc_ids: dict[str, str] = {}
-        for did in doc_ids:
-            try:
-                manifest = catalog.get_manifest(did)
-            except Exception as exc:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
-                skipped_doc_ids[did] = f"{type(exc).__name__}: {exc}"
-                _log.warning(
-                    "prune_misclassified_manifest_lookup_failed",
-                    doc_id=did,
-                    collection=getattr(col, "name", "?"),
-                    kind=kind,
-                    exc_info=True,
-                )
-                continue
-            for row in manifest:
-                if row.chash:
-                    natural_id_set.add(row.chash[:32])
+        # nexus-yz8bt (duoak.11 sink #3): resolve every doc's manifest in
+        # ONE batched call instead of a per-doc serial loop. At index
+        # scale (a --force run registers ~N docs) the old loop paid N
+        # sequential catalog round-trips — 226.6s on the 2,133-file gate,
+        # ~11% of wall — to prove a mostly-empty prune. ``get_manifests``
+        # (nexus-7lm3q, backed by /manifest/get_many) is internally paged
+        # and returns one dict; a doc ABSENT from the result has no
+        # manifest rows, i.e. nothing to prune (manifest is the canonical
+        # chunk list, so absent == no chunks anywhere == safe skip). The
+        # batch fails loud on any page error (its documented contract), so
+        # a failure falls back to the per-doc loop below — byte-identical
+        # to the pre-batch behaviour, preserving the skipped-doc accounting.
+        # The try guards ONLY the RPC (its contract is "a page failure
+        # PROPAGATES"). Row processing stays OUTSIDE it — exactly as the
+        # original per-doc loop kept ``for row in manifest`` outside its
+        # ``get_manifest`` try — so a malformed ``ManifestRow`` surfaces as
+        # a local bug instead of being masked as an infra failure and
+        # silently downgraded to the O(N) fallback.
+        manifests = None
+        try:
+            manifests = catalog.get_manifests(doc_ids)
+        except Exception:  # noqa: BLE001 — batch failed loud; fall back to the resilient per-doc path
+            _log.warning(
+                "prune_misclassified_batch_manifest_failed_falling_back_per_doc",
+                collection=getattr(col, "name", "?"),
+                kind=kind,
+                doc_count=len(doc_ids),
+                exc_info=True,
+            )
+        if manifests is not None:
+            for did in doc_ids:
+                rows = manifests.get(did)
+                if rows is None:
+                    continue
+                for row in rows:
+                    if row.chash:
+                        natural_id_set.add(row.chash[:32])
+        else:
+            for did in doc_ids:
+                try:
+                    manifest = catalog.get_manifest(did)
+                except Exception as exc:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
+                    skipped_doc_ids[did] = f"{type(exc).__name__}: {exc}"
+                    _log.warning(
+                        "prune_misclassified_manifest_lookup_failed",
+                        doc_id=did,
+                        collection=getattr(col, "name", "?"),
+                        kind=kind,
+                        exc_info=True,
+                    )
+                    continue
+                for row in manifest:
+                    if row.chash:
+                        natural_id_set.add(row.chash[:32])
         all_natural_ids: list[str] = list(natural_id_set)
         # Batched ``col.get`` to fetch the present subset, then batched
         # delete. _CHROMA_PAGE_SIZE caps the ids list per call.
@@ -2999,11 +3037,17 @@ def _run_index(
             f"{rdr_failed} failed ({time.monotonic() - _t:.1f}s)"
         )
 
-        # Prune misclassified chunks (reclassification cleanup). Left
-        # unconditional (nexus-qgc4b): the big all-skip cost is taxonomy
-        # discovery, gated in the caller; the prune passes are comparatively
-        # cheap and their safety when a file's classification changes without a
-        # content re-write is not airtight, so they stay in the run.
+        # Prune misclassified chunks (reclassification cleanup). Kept
+        # UNCONDITIONAL: prune safety when a file's classification changes
+        # without a content re-write is not airtight, and the only durable
+        # signal (a catalog physical_collection delta) is consumed by the
+        # register pass BEFORE this runs — a crash between the two would
+        # orphan stale chunks if we gated on it (nexus-yz8bt, nx_plan_audit
+        # CRITICAL). nexus-qgc4b originally called the prune passes "cheap";
+        # the duoak.11 gate disproved that (226.6s / ~11% of wall at 2,133
+        # files) — the cost was the per-doc serial manifest fetch, now
+        # batched inside _prune_misclassified_in_collection (nexus-yz8bt),
+        # so the pass stays unconditional AND fast.
         _phase("Pruning misclassified chunks…")
         _t = time.monotonic()
         _prune_misclassified(
