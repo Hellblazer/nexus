@@ -178,16 +178,30 @@ public final class ChashRepository {
         // appears twice in one statement, and real files emit duplicate chunk
         // text (nexus-85z0y). Dedup is semantics-free: a chash is a content
         // hash, so every occurrence is identical.
+        // sorted(): the multi-row INSERT locks CHASH_INDEX rows in values() order.
+        // tenant + collection are constant within this call, so chash is the only
+        // varying part of the (tenant, chash, physical_collection) conflict key —
+        // sorting by chash gives every concurrent batch one global lock order and
+        // removes the cross-batch deadlock (SQLSTATE 40P01, nexus-ps9wb; same class as
+        // PgVectorRepository.upsertChunks). distinct(): a multi-VALUES INSERT ..
+        // ON CONFLICT DO UPDATE raises "cannot affect row a second time" (-> HTTP 500)
+        // when the same chash appears twice in one statement, and real files emit
+        // duplicate chunk text (nexus-85z0y). Dedup is semantics-free: a chash is a
+        // content hash, so every occurrence is identical.
         List<String> valid = chashes.stream()
                 .filter(c -> c != null && !c.isBlank())
                 .distinct()
+                .sorted()
                 .toList();
         if (valid.isEmpty()) return;
 
         // Own short committed txn — bounds the first-registration convoy DURATION
         // (see registerCollectionShortTxn doc); also handles markKnown post-commit.
         registerCollectionShortTxn(tenant, collection);
-        tenantScope.withTenant(tenant, ctx -> {
+        // nexus-ps9wb belt: retry a residual cross-path deadlock (the sort removes the
+        // same-batch cycle; a concurrent writer on a different lock order can still
+        // deadlock). Idempotent ON CONFLICT batch, victim already rolled back → safe.
+        DeadlockRetry.run(collection, () -> tenantScope.withTenant(tenant, ctx -> {
             var insert = ctx.insertInto(CHASH_INDEX,
                                         CHASH_INDEX.TENANT_ID, CHASH_INDEX.CHASH, CHASH_INDEX.PHYSICAL_COLLECTION, CHASH_INDEX.CREATED_AT);
             var step = insert.values(tenant, valid.get(0), collection, now);
@@ -199,7 +213,7 @@ public final class ChashRepository {
                 .set(CHASH_INDEX.CREATED_AT, DSL.field("EXCLUDED.created_at", OffsetDateTime.class))
                 .execute();
             return null;
-        });
+        }));
     }
 
     // ── lookup ─────────────────────────────────────────────────────────────────

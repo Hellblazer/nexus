@@ -5,6 +5,7 @@ package dev.nexus.service.vectors;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.db.CollectionRegistry;
+import dev.nexus.service.db.DeadlockRetry;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.db.TenantScope;
@@ -25,6 +26,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -349,6 +352,36 @@ public final class PgVectorRepository {
                     collection, ids.size(), dedupIds.size(), collapsed);
         }
 
+        // nexus-ps9wb: PgVector DEADLOCK (SQLState 40P01) fix. Two concurrent upsert
+        // batches into the SAME collection that touch overlapping chashes in different
+        // arrival orders lock the shared rows in opposite orders on the multi-row
+        // INSERT ... ON CONFLICT below -> lock cycle -> Postgres kills a victim -> the
+        // caller sees HTTP 500. Sorting the dedup'd rows by chash (the ON CONFLICT key)
+        // gives EVERY batch one global lock-acquisition order, so no cycle can form.
+        // Done BEFORE embedding so the computed embeddings inherit the sorted order (no
+        // separate reorder of the possibly-immutable embeddings list). Mutated IN PLACE
+        // (clear + re-add) so the list references stay effectively-final for the lambda
+        // captures in the write transaction below.
+        if (dedupIds.size() > 1) {
+            Integer[] perm = new Integer[dedupIds.size()];
+            for (int i = 0; i < perm.length; i++) perm[i] = i;
+            Arrays.sort(perm, Comparator.comparing(dedupIds::get));
+            List<String> oIds = new ArrayList<>(dedupIds);
+            List<String> oDocs = new ArrayList<>(dedupDocs);
+            List<Map<String, Object>> oMetas = new ArrayList<>(dedupMetas);
+            List<float[]> oProvided = dedupProvided != null ? new ArrayList<>(dedupProvided) : null;
+            dedupIds.clear();
+            dedupDocs.clear();
+            dedupMetas.clear();
+            if (dedupProvided != null) dedupProvided.clear();
+            for (int idx : perm) {
+                dedupIds.add(oIds.get(idx));
+                dedupDocs.add(oDocs.get(idx));
+                dedupMetas.add(oMetas.get(idx));
+                if (dedupProvided != null) dedupProvided.add(oProvided.get(idx));
+            }
+        }
+
         // Embeddings: either caller-supplied (same-model PASSTHROUGH, nexus-hxry2)
         // or computed server-side (the default Seam B path). When the caller
         // supplies vectors we skip the embedder entirely — no Voyage call, token
@@ -432,7 +465,20 @@ public final class PgVectorRepository {
             CollectionRegistry.markKnown(tenant, collection);
         }
 
-        tenantScope.withTenant(tenant, ctx -> {
+        // nexus-ps9wb belt-and-suspenders: the chash sort above removes the
+        // same-collection lock cycle, but a residual deadlock is still possible
+        // against a concurrent writer on a DIFFERENT lock order (e.g. a concurrent
+        // delete, or the catalog_collections registration path). The deadlock victim's
+        // transaction is ALREADY rolled back by Postgres, so re-running the batch is
+        // safe (idempotent ON CONFLICT upsert). Bounded retries with jitter; on
+        // exhaustion the original exception propagates unchanged.
+        // nexus-ps9wb belt: the chash sort above removes the same-collection lock
+        // cycle, but a residual deadlock is still possible against a concurrent writer
+        // on a DIFFERENT lock order (e.g. a concurrent delete). The victim's txn is
+        // already rolled back, so re-running the idempotent ON CONFLICT batch is safe.
+        // Embeddings were computed ABOVE, outside this retry, so a retry never re-bills
+        // Voyage. Shared helper — same belt guards every multi-row upsert path.
+        DeadlockRetry.run(collection, () -> tenantScope.withTenant(tenant, ctx -> {
             // Bead nexus-h8rf6.2 (reduce per-request connection hold time): ONE
             // multi-row INSERT ... ON CONFLICT instead of dedupIds.size() sequential
             // round trips. The old per-row loop held this transaction's connection
@@ -466,7 +512,7 @@ public final class PgVectorRepository {
                       .execute();
             }
             return null;
-        });
+        }));
         log.debug("event=upsert_chunks_done collection={} table={} count={}",
                 collection, table, dedupIds.size());
     }

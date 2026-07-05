@@ -9,6 +9,7 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -416,24 +417,37 @@ public final class TaxonomyRepository {
      */
     public int assignMany(String tenant, List<Map<String, Object>> rows) {
         if (rows == null || rows.isEmpty()) return 0;
-        return tenantScope.withTenant(tenant, ctx -> {
+        // nexus-ps9wb: assignMany accumulates one row lock per assignOne across the
+        // whole transaction, in arrival order. Two concurrent assignMany calls (the
+        // flush-grain assign_many hook under multi-worker indexing) that touch
+        // overlapping (doc_id, topic_id) keys in different orders deadlock (SQLSTATE
+        // 40P01) — the same class as PgVectorRepository.upsertChunks. Sort rows by the
+        // (tenant constant) conflict key so every concurrent batch locks in one global
+        // order. Copy first — the caller's list may be immutable.
+        List<Map<String, Object>> ordered = new ArrayList<>(rows);
+        ordered.sort(Comparator
+                .comparing((Map<String, Object> r) -> reqS(r, "doc_id"))
+                .thenComparing(r -> reqL(r, "topic_id")));
+        // Belt: retry a residual cross-path deadlock; idempotent upserts, victim
+        // already rolled back → safe.
+        return DeadlockRetry.run("taxonomy.assignMany", () -> tenantScope.withTenant(tenant, ctx -> {
             // Review #5: register each distinct source_collection ONCE per
             // batch instead of one idempotent INSERT per projection row
             // (batches routinely share a single collection).
-            rows.stream()
+            ordered.stream()
                 .filter(r -> "projection".equals(r.get("assigned_by")))
                 .map(r -> optS(r, "source_collection"))
                 .filter(c -> c != null && !c.isBlank())
                 .distinct()
                 .forEach(c -> ensureCollectionRegistered(ctx, tenant, c));
-            for (Map<String, Object> r : rows) {
+            for (Map<String, Object> r : ordered) {
                 assignOne(ctx, tenant, reqS(r, "doc_id"), reqL(r, "topic_id"),
                           reqS(r, "assigned_by"), optD(r, "similarity"),
                           optS(r, "source_collection"), optS(r, "assigned_at"),
                           false);
             }
-            return rows.size();
-        });
+            return ordered.size();
+        }));
     }
 
     /**
@@ -964,7 +978,11 @@ public final class TaxonomyRepository {
      */
     public int importBatch(String tenant, String kind, List<Map<String, Object>> rows) {
         if (rows == null || rows.isEmpty()) return 0;
-        return tenantScope.withTenant(tenant, ctx -> {
+        // nexus-ps9wb belt: the import*Batch methods sort their deduped rows by the
+        // ON CONFLICT key (global lock order), and this retry covers a residual
+        // cross-path deadlock. Idempotent ON CONFLICT batch, victim already rolled
+        // back → safe.
+        return DeadlockRetry.run("taxonomy.importBatch." + kind, () -> tenantScope.withTenant(tenant, ctx -> {
             int n = switch (kind) {
                 case "topic"      -> importTopicsBatch(ctx, tenant, rows);
                 case "assignment" -> importAssignmentsBatch(ctx, tenant, rows);
@@ -974,7 +992,7 @@ public final class TaxonomyRepository {
             };
             log.debug("event=taxonomy_import_batch tenant={} kind={} rows={}", tenant, kind, rows.size());
             return n;
-        });
+        }));
     }
 
     /**
@@ -997,10 +1015,13 @@ public final class TaxonomyRepository {
         }
         for (String c : collections) ensureCollectionRegistered(ctx, tenant, c);
 
-        // Dedupe on id (the conflict key), last occurrence wins.
+        // Dedupe on id (the conflict key), last occurrence wins. Sort by id (the
+        // ON CONFLICT key) so concurrent batches lock TOPICS rows in one global order
+        // — deadlock avoidance, nexus-ps9wb.
         var unique = new LinkedHashMap<Long, Map<String, Object>>(rows.size());
         for (var r : rows) unique.put(reqL(r, "id"), r);
-        List<Map<String, Object>> deduped = List.copyOf(unique.values());
+        List<Map<String, Object>> deduped = new ArrayList<>(unique.values());
+        deduped.sort(Comparator.comparing(r -> reqL(r, "id")));
 
         final int cols = 10;
         final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
@@ -1033,10 +1054,15 @@ public final class TaxonomyRepository {
         }
         for (String c : collections) ensureCollectionRegistered(ctx, tenant, c);
 
-        // Conflict key: (tenant_id, doc_id, topic_id). tenant is constant for this call.
+        // Conflict key: (tenant_id, doc_id, topic_id). tenant is constant for this
+        // call. Sort by (doc_id, topic_id) so concurrent batches lock TOPIC_ASSIGNMENTS
+        // rows in one global order — deadlock avoidance, nexus-ps9wb.
         var unique = new LinkedHashMap<String, Map<String, Object>>(rows.size());
         for (var r : rows) unique.put(reqS(r, "doc_id") + "::" + reqL(r, "topic_id"), r);
-        List<Map<String, Object>> deduped = List.copyOf(unique.values());
+        List<Map<String, Object>> deduped = new ArrayList<>(unique.values());
+        deduped.sort(Comparator
+                .comparing((Map<String, Object> r) -> reqS(r, "doc_id"))
+                .thenComparing(r -> reqL(r, "topic_id")));
 
         final int cols = 7;
         final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
@@ -1075,10 +1101,15 @@ public final class TaxonomyRepository {
     }
 
     private static int importLinksBatch(DSLContext ctx, String tenant, List<Map<String, Object>> rows) {
-        // Conflict key: (tenant_id, from_topic_id, to_topic_id).
+        // Conflict key: (tenant_id, from_topic_id, to_topic_id). Sort by
+        // (from_topic_id, to_topic_id) so concurrent batches lock TOPIC_LINKS rows in
+        // one global order — deadlock avoidance, nexus-ps9wb.
         var unique = new LinkedHashMap<String, Map<String, Object>>(rows.size());
         for (var r : rows) unique.put(reqL(r, "from_topic_id") + "::" + reqL(r, "to_topic_id"), r);
-        List<Map<String, Object>> deduped = List.copyOf(unique.values());
+        List<Map<String, Object>> deduped = new ArrayList<>(unique.values());
+        deduped.sort(Comparator
+                .comparing((Map<String, Object> r) -> reqL(r, "from_topic_id"))
+                .thenComparing(r -> reqL(r, "to_topic_id")));
 
         final int cols = 5;
         final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
@@ -1106,10 +1137,13 @@ public final class TaxonomyRepository {
         for (var r : rows) collections.add(reqS(r, "collection"));
         for (String c : collections) ensureCollectionRegistered(ctx, tenant, c);
 
-        // Conflict key: (tenant_id, collection).
+        // Conflict key: (tenant_id, collection). Sort by collection so concurrent
+        // batches lock TAXONOMY_META rows in one global order — deadlock avoidance,
+        // nexus-ps9wb.
         var unique = new LinkedHashMap<String, Map<String, Object>>(rows.size());
         for (var r : rows) unique.put(reqS(r, "collection"), r);
-        List<Map<String, Object>> deduped = List.copyOf(unique.values());
+        List<Map<String, Object>> deduped = new ArrayList<>(unique.values());
+        deduped.sort(Comparator.comparing(r -> reqS(r, "collection")));
 
         final int cols = 4;
         final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
