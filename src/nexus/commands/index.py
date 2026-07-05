@@ -612,10 +612,31 @@ def index_repo_cmd(
     # bulk re-embeds. Extracted into ``run_collection_postprocessing``
     # so both ``nx index repo`` and ``nx collection reindex`` walk the
     # same path.
+    # nexus-qgc4b: skip the expensive post-index passes (taxonomy discover +
+    # kmeans + haiku labeling + cross-collection projection + L1 refresh) when
+    # no file changed this run. The 2026-07-04 all-skip re-index spent 655s
+    # re-clustering 1,461 unchanged chunks. Flush-grain incremental assignment
+    # already covered any deltas on the runs that did write, so a zero-write run
+    # has no new chunks to place — discovery would only rebuild an identical
+    # taxonomy.
+    #
+    # Self-heal guard (substantive-critic): discover_for_collection has no
+    # internal change-detection, so pre-qgc4b every run was an implicit RETRY of
+    # a previously-failed/never-run discover. We must not silently strand a
+    # collection whose taxonomy was never successfully built: if ANY target
+    # collection has zero topics, run the pass even on a no-change run. Once
+    # topics exist, a no-change run skips. Two residuals are tracked separately:
+    # re-discover on small nonzero drift (nexus-ou9uw), and a discover that
+    # fails AFTER a prior success while file churn has stopped (nexus-du6d0) —
+    # the latter needs a signal independent of index runs, not just this gate.
     if not frecency_only and not no_taxonomy and stats:
         info = reg.get(path) or {}
         collections = _collections_from_registry_info(info)
-        run_collection_postprocessing(collections, repo_path=path)
+        files_changed = stats.get("files_changed", 0)
+        if files_changed > 0 or _taxonomy_incomplete(collections):
+            run_collection_postprocessing(collections, repo_path=path)
+        else:
+            click.echo("  Taxonomy: no files changed — skipping discovery")
 
     if not frecency_only:
         try:
@@ -636,6 +657,34 @@ def index_repo_cmd(
     # index_repository (see `_emit_retry_summary`) so it fires on both
     # success and exception paths — Reviewer A/I-2.
     click.echo("Done.")
+
+
+def _taxonomy_incomplete(collections: list[str]) -> bool:
+    """Return True if ANY collection has no discovered topics yet.
+
+    nexus-qgc4b self-heal guard: gates whether a no-change ``nx index repo``
+    run must still run taxonomy discovery. A collection with zero topics has
+    never been successfully discovered (first index, or discover has been
+    failing), so discovery must run regardless of file changes — otherwise the
+    collection's taxonomy stays permanently empty until content next changes.
+    Read-only; runs only on the cheap no-change path (short-circuited after
+    ``files_changed > 0``). Fails safe: on any error, returns True (run
+    discovery) rather than risk stranding a collection.
+    """
+    if not collections:
+        return False
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deliberate function-local import (heavy T2 dep deferred to call time)
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
+
+    try:
+        with T2Database(default_db_path()) as db:  # epsilon-allow: read-only topic-existence probe; no WAL writer contention (RDR-128 P3)
+            for col in collections:
+                if not db.taxonomy.get_topics_for_collection(col):
+                    return True
+    except Exception:  # noqa: BLE001 — probe is best-effort; on failure err toward running discovery
+        _log.debug("taxonomy_incomplete_probe_failed", exc_info=True)
+        return True
+    return False
 
 
 def _collections_from_registry_info(info: dict) -> list[str]:
@@ -797,8 +846,17 @@ def run_collection_postprocessing(
                 try:
                     n = _discover_taxonomy(col_name, db.taxonomy, t3)
                     total_topics += n
-                except Exception:  # noqa: BLE001 — best-effort per-collection taxonomy discovery; failure logged and chain continues
-                    _log.debug("taxonomy_discover_failed", collection=col_name, exc_info=True)
+                except Exception as exc:  # noqa: BLE001 — best-effort per-collection taxonomy discovery; failure logged and chain continues
+                    # nexus-qgc4b: surface the failure. A silent debug-only log
+                    # meant a persistently-failing discover was invisible; with
+                    # the no-change skip, an unseen failure could leave a
+                    # collection's taxonomy stale. WARN + tell the operator the
+                    # manual remedy.
+                    _log.warning("taxonomy_discover_failed", collection=col_name, exc_info=True)
+                    _say(
+                        f"  Taxonomy: discover FAILED for {col_name} ({type(exc).__name__}) "
+                        f"— run `nx taxonomy discover` to retry"
+                    )
             _say(f"  Taxonomy: discover done ({_time.monotonic() - _tax_t0:.1f}s)")
             if total_topics:
                 _say(f"  Taxonomy: {total_topics} topics across {len(collections)} collections.")

@@ -20,7 +20,9 @@ def test_index_repo_triggers_taxonomy_discover(tmp_path) -> None:
 
     with ExitStack() as stack:
         stack.enter_context(patch("nexus.commands.index._discover_taxonomy", side_effect=fake_discover))
-        stack.enter_context(patch("nexus.indexer.index_repository", return_value={"code_indexed": 5}))
+        # files_changed > 0 gates the post-index taxonomy pass (nexus-qgc4b):
+        # a run that indexed files triggers discovery; an all-skip run does not.
+        stack.enter_context(patch("nexus.indexer.index_repository", return_value={"code_indexed": 5, "files_changed": 5}))
         stack.enter_context(patch("nexus.commands.index.tqdm", side_effect=lambda **kw: None))
         stack.enter_context(patch("nexus.db.make_t3"))
         stack.enter_context(patch("nexus.db.t2.T2Database"))
@@ -84,7 +86,9 @@ def test_index_repo_taxonomy_failure_nonfatal(tmp_path) -> None:
 
     with ExitStack() as stack:
         stack.enter_context(patch("nexus.commands.index._discover_taxonomy", side_effect=bad_discover))
-        stack.enter_context(patch("nexus.indexer.index_repository", return_value={"code_indexed": 1}))
+        # files_changed > 0 so the taxonomy pass actually runs and hits the
+        # failing discover (nexus-qgc4b gate — without it this test is vacuous).
+        stack.enter_context(patch("nexus.indexer.index_repository", return_value={"code_indexed": 1, "files_changed": 1}))
         stack.enter_context(patch("nexus.commands.index.tqdm", side_effect=lambda **kw: None))
         stack.enter_context(patch("nexus.db.make_t3"))
         stack.enter_context(patch("nexus.db.t2.T2Database"))

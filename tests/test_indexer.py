@@ -1092,7 +1092,9 @@ def test_run_index_passes_force_to_helpers(tmp_path, fname, content, target):
     f = repo / fname
     f.write_bytes(content) if isinstance(content, bytes) else f.write_text(content)
     db, _, _ = _tracking_db()
-    with _patches(db, extra={target: {}, "nexus.doc_indexer.batch_index_markdowns": {"return_value": {}}}) as mocks:
+    # target helper returns an int chunk-count per its contract (run_file_loop
+    # tallies files_written off it — nexus-qgc4b); {} would yield a MagicMock.
+    with _patches(db, extra={target: {"return_value": 1}, "nexus.doc_indexer.batch_index_markdowns": {"return_value": {}}}) as mocks:
         _run_index(repo, _reg(), force=True)
     h = mocks[target.split(".")[-1]]; h.assert_called(); assert h.call_args.kwargs.get("force") is True
 

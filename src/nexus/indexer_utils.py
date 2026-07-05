@@ -634,8 +634,12 @@ def run_file_loop(
     concurrency: int,
     on_file: Callable[[Path, int, float], None] | None,
     on_stage_timers: Callable[[Path, object], None] | None,
-) -> None:
+) -> int:
     """Drive one per-file indexing loop, sequentially or with a bounded pool.
+
+    Returns the number of files that wrote at least one chunk this run
+    (``index_one`` returned > 0); staleness-skipped and failed files return 0
+    and are not counted (nexus-qgc4b).
 
     ``index_one(file, score, timers) -> chunk_count`` is the loop body
     (the ``_index_code_file`` / ``_index_prose_file`` / ``_index_pdf_file``
@@ -669,11 +673,19 @@ def run_file_loop(
 
         return StageTimers()
 
+    # nexus-qgc4b: count files that actually wrote chunks (index_one > 0).
+    # A staleness-skipped or failed file returns 0. The caller gates the
+    # expensive post-index passes (taxonomy discover/kmeans/labeling) on this
+    # count being non-zero, so an all-skip re-index costs only the scan.
+    written = [0]
+
     def _process(score: float, file: Path) -> None:
         t0 = time.monotonic()
         timers = _make_timers()
         chunks = index_one(file, score, timers)
         with cb_lock:
+            if chunks > 0:
+                written[0] += 1
             if on_file:
                 on_file(file, chunks, time.monotonic() - t0)
             if on_stage_timers is not None and timers is not None:
@@ -682,7 +694,7 @@ def run_file_loop(
     if concurrency <= 1:
         for score, file in files:
             _process(score, file)
-        return
+        return written[0]
 
     from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait  # noqa: PLC0415 — leaf module keeps import surface minimal
 
@@ -692,7 +704,7 @@ def run_file_loop(
         futures = [pool.submit(_process, score, file) for score, file in files]
         done, not_done = wait(futures, return_when=FIRST_EXCEPTION)
         if not not_done and not any(f.exception() for f in done):
-            return
+            return written[0]
         # A failure (or spurious wake). Cancel everything not yet started,
         # let in-flight files finish, then harvest EVERY failure — a
         # concurrent secondary failure must be logged, never silently
@@ -708,7 +720,7 @@ def run_file_loop(
             if exc is not None:
                 failures.append((file, exc))
         if not failures:
-            return
+            return written[0]
         # Deterministic "first": earliest in submission (frecency) order.
         for file, exc in failures[1:]:
             _log.warning(

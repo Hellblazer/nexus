@@ -120,6 +120,39 @@ class TestRunFileLoop:
         )
         assert seen == {f"f{i}.py" for i in range(8)}
 
+    def test_returns_count_of_files_that_wrote_chunks_sequential(self):
+        # nexus-qgc4b: only files whose index_one returned > 0 count as written.
+        from nexus.indexer_utils import run_file_loop
+
+        def index_one(file, score, timers):
+            # f0, f2 skipped (0 chunks); f1, f3 wrote chunks.
+            return 0 if file.name in ("f0.py", "f2.py") else 5
+
+        written = run_file_loop(
+            self._files(4), index_one, concurrency=1,
+            on_file=None, on_stage_timers=None,
+        )
+        assert written == 2
+
+    def test_returns_zero_when_all_files_skipped(self):
+        # The all-skip incident shape: every file staleness-skips (returns 0).
+        from nexus.indexer_utils import run_file_loop
+
+        written = run_file_loop(
+            self._files(6), lambda f, s, t: 0, concurrency=3,
+            on_file=None, on_stage_timers=None,
+        )
+        assert written == 0
+
+    def test_returns_count_concurrent(self):
+        from nexus.indexer_utils import run_file_loop
+
+        written = run_file_loop(
+            self._files(8), lambda f, s, t: 3, concurrency=4,
+            on_file=None, on_stage_timers=None,
+        )
+        assert written == 8
+
     def test_workers_actually_overlap(self):
         """Two slow files at concurrency=2 finish in ~1x the sleep, not 2x —
         pins that the pool genuinely parallelizes."""

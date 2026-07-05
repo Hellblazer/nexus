@@ -455,7 +455,9 @@ def test_lint_baseline_unchanged_after_voyageai_extension():
     # mode branches; both route to the HTTP service, not a raw SQLite writer).
     # nexus-2c51v: 33 -> 34 (`nx aspects requeue-failed` epsilon-allow'd
     # read-only T2Database open, mirrors `aspects gc`).
-    assert result.t2database_constructions == 34, (
+    # nexus-qgc4b: 34 -> 35 (`_taxonomy_incomplete` epsilon-allow'd read-only
+    # T2Database open — no-change index gate topic-existence probe).
+    assert result.t2database_constructions == 35, (
         f"t2database_constructions baseline changed: {result.t2database_constructions}"
     )
 

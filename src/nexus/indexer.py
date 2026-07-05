@@ -1123,7 +1123,9 @@ def index_repository(
     ``{}`` immediately without indexing.  Frecency-only runs bypass the lock.
 
     Returns a stats dict (empty for frecency_only runs) with keys:
-    ``rdr_indexed``, ``rdr_current``, ``rdr_failed``.
+    ``rdr_indexed``, ``rdr_current``, ``rdr_failed``, and ``files_changed``
+    (count of files — code/prose/pdf plus rdr_indexed — that wrote at least
+    one chunk this run; drives the caller's post-index taxonomy gate, nexus-qgc4b).
     """
     lock_fd = None
     lock_path: Path | None = None
@@ -2834,7 +2836,10 @@ def _run_index(
             batcher=_batcher,
         )
 
-    run_file_loop(
+    # nexus-qgc4b: tally files that actually wrote chunks across all three
+    # loops; used below to skip the expensive post-index passes on all-skip runs.
+    _files_written = 0
+    _files_written += run_file_loop(
         code_files, _index_one_code, concurrency=_concurrency,
         on_file=on_file, on_stage_timers=on_stage_timers,
     )
@@ -2858,7 +2863,7 @@ def _run_index(
             batcher=_batcher,
         )
 
-    run_file_loop(
+    _files_written += run_file_loop(
         prose_files, _index_one_prose, concurrency=_concurrency,
         on_file=on_file, on_stage_timers=on_stage_timers,
     )
@@ -2882,7 +2887,7 @@ def _run_index(
             batcher=_batcher,
         )
 
-    run_file_loop(
+    _files_written += run_file_loop(
         pdf_files, _index_one_pdf, concurrency=_concurrency,
         on_file=on_file, on_stage_timers=on_stage_timers,
     )
@@ -2960,7 +2965,11 @@ def _run_index(
             f"{rdr_failed} failed ({time.monotonic() - _t:.1f}s)"
         )
 
-        # Prune misclassified chunks (reclassification cleanup)
+        # Prune misclassified chunks (reclassification cleanup). Left
+        # unconditional (nexus-qgc4b): the big all-skip cost is taxonomy
+        # discovery, gated in the caller; the prune passes are comparatively
+        # cheap and their safety when a file's classification changes without a
+        # content re-write is not airtight, so they stay in the run.
         _phase("Pruning misclassified chunks…")
         _t = time.monotonic()
         _prune_misclassified(
@@ -3019,7 +3028,15 @@ def _run_index(
         suffix = f" (interrupted: {type(post_error).__name__})" if post_error else ""
         _phase(f"Post-processing complete ({time.monotonic() - post_t0:.1f}s){suffix}")
 
-    return {"rdr_indexed": rdr_indexed, "rdr_current": rdr_current, "rdr_failed": rdr_failed}
+    # nexus-qgc4b: files_changed drives the caller's post-index gate. RDR
+    # (re)indexing is a content change too, so an RDR-only run still triggers
+    # taxonomy discovery.
+    return {
+        "rdr_indexed": rdr_indexed,
+        "rdr_current": rdr_current,
+        "rdr_failed": rdr_failed,
+        "files_changed": _files_written + rdr_indexed,
+    }
 
 
 def _is_under(child: Path, parent: Path) -> bool:
