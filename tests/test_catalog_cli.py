@@ -526,6 +526,54 @@ class TestDeleteCommand:
         result = runner.invoke(main, ["catalog", "delete", "1.1.999", "-y"])
         assert result.exit_code != 0
 
+    def test_delete_service_mode_never_touches_dir_or_db(self, catalog_env, tmp_path):
+        """GH #1374: ``nx catalog delete`` in service mode crashed with
+        ``AttributeError: 'HttpCatalogClient' object has no attribute
+        '_dir'`` inside the RDR-106 backup-before-delete snapshot step
+        (``catalog_backup.snapshot_documents`` read raw ``catalog._dir`` /
+        ``catalog._db``, which only exist on the local-mode Catalog).
+
+        Spec'd against the real ``HttpCatalogClient`` (not a bare
+        MagicMock) so any attribute it doesn't have raises instead of
+        silently auto-materializing — the same shakeout pattern that
+        caught the analogous ``t3 gc`` bug in
+        test_service_mode_cli_real_client.py.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from nexus.catalog.catalog import CatalogEntry
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+        from nexus.catalog.tumbler import Tumbler
+
+        t = Tumbler.parse("1.1.1")
+        entry = CatalogEntry(
+            tumbler=t, title="doomed", author="", year=0,
+            content_type="prose", file_path="doomed.md", corpus="",
+            physical_collection="", chunk_count=0, head_hash="",
+            indexed_at="",
+        )
+
+        fake_cat = MagicMock(spec=HttpCatalogClient)
+        fake_cat.resolve.return_value = entry
+        fake_cat.links_from.return_value = []
+        fake_cat.links_to.return_value = []
+
+        fake_writer = MagicMock(spec=HttpCatalogClient)
+        fake_writer.delete_document.return_value = True
+
+        with (
+            patch("nexus.commands.catalog._get_catalog", return_value=fake_cat),
+            patch("nexus.commands.catalog._get_catalog_writer", return_value=fake_writer),
+        ):
+            result = CliRunner().invoke(main, ["catalog", "delete", "1.1.1", "-y"])
+
+        assert result.exit_code == 0, result.output
+        assert "Deleted" in result.output
+        fake_writer.delete_document.assert_called_once_with(t)
+        # Backup snapshot was written via the public API, not raw SQL/_dir.
+        backup_dir = tmp_path / "catalog" / ".deleted-backups"
+        assert any(backup_dir.glob("catalog-delete-*.jsonl"))
+
 
 class TestLinkBulkDeleteCommand:
     def test_link_bulk_delete_dry_run(self, initialized_catalog, catalog_env):

@@ -795,10 +795,12 @@ def reconcile_cmd(dry_run: bool) -> None:
     from nexus.indexer import _paginated_get  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     from nexus.mcp_infra import _manifest_chunk_rows  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
+    verb = "Would reconcile" if dry_run else "Reconciled"
+
     cat = _get_catalog()
     entries = [e for e in cat.all_documents(limit=0) if e.chunk_count > 0]
     if not entries:
-        click.echo("Reconciled 0 document(s); 0 could not be matched to chunks.")
+        click.echo(f"{verb} 0 document(s); 0 could not be matched to chunks.")
         return
 
     manifests = cat.get_manifests([str(e.tumbler) for e in entries])
@@ -807,12 +809,15 @@ def reconcile_cmd(dry_run: bool) -> None:
         if len(manifests.get(str(e.tumbler), [])) < e.chunk_count
     ]
     if not gapped:
-        click.echo("Reconciled 0 document(s); 0 could not be matched to chunks.")
+        click.echo(f"{verb} 0 document(s); 0 could not be matched to chunks.")
         return
 
     t3 = make_t3()
     writer = _get_catalog_writer() if not dry_run else None
     reconciled = 0
+    dup_collapsed = 0
+    dup_old_total = 0
+    dup_new_total = 0
     unmatched: list = []
     try:
         for entry in gapped:
@@ -862,8 +867,25 @@ def reconcile_cmd(dry_run: bool) -> None:
             if not any(c["chash"] for c in chunks):
                 unmatched.append(entry)
                 continue
+            if len(chunks) < entry.chunk_count:
+                # RDR-108: duplicate chunk text collapses to one T3 row by
+                # design, so a rebuilt manifest can legitimately have fewer
+                # rows than the document's stale chunk_count. Not an error —
+                # tracked so the summary reports it instead of hiding it.
+                dup_collapsed += 1
+                dup_old_total += entry.chunk_count
+                dup_new_total += len(chunks)
             if not dry_run:
                 writer.atomic_manifest_replace(str(entry.tumbler), chunks)
+                # atomic_manifest_replace's local-SQLite path re-derives
+                # chunk_count from the post-write row count in the same
+                # transaction, but the HTTP/service-mode path only resyncs
+                # when new_chunk_count= is passed (which this call site
+                # doesn't do) -- so chunk_count stayed stale forever in
+                # service mode and the gap detector re-flagged the same
+                # documents on every run (GH #1371 follow-up). Explicitly
+                # resyncing here is correct and idempotent on both backends.
+                writer.resync_chunk_count_cache(str(entry.tumbler))
             reconciled += 1
     finally:
         if writer is not None:
@@ -871,8 +893,15 @@ def reconcile_cmd(dry_run: bool) -> None:
             if callable(_close):
                 _close()
 
-    verb = "Would reconcile" if dry_run else "Reconciled"
-    click.echo(f"{verb} {reconciled} document(s); {len(unmatched)} could not be matched to chunks.")
+    corrected_note = (
+        f" ({dup_collapsed} with chunk_count corrected {dup_old_total} -> {dup_new_total} "
+        "for duplicate-text collapse)"
+        if dup_collapsed else ""
+    )
+    click.echo(
+        f"{verb} {reconciled} document(s){corrected_note}; "
+        f"{len(unmatched)} could not be matched to chunks."
+    )
     if unmatched:
         for entry in unmatched[:20]:
             click.echo(f"    {entry.tumbler}  {entry.file_path or entry.title}")
