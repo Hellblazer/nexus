@@ -120,10 +120,20 @@ def gc_cmd(dry_run: bool, confirm: bool) -> None:
             f"\n  Restore with: nx catalog undelete {backup_path.name}"
         )
 
-    n_deleted = 0
-    for tumbler_str, title, file_path in orphans:
-        if writer.delete_document(Tumbler.parse(tumbler_str)):
-            n_deleted += 1
+    # nexus-xedhp: batch via delete_many (service mode) instead of one
+    # writer.delete_document() per entry. SQLite/daemon-mode writers don't
+    # expose delete_many (capability check falls back safely, unchanged
+    # behaviour there).
+    _delete_many = getattr(writer, "delete_many", None)
+    if callable(_delete_many):
+        n_deleted = len(_delete_many(
+            [Tumbler.parse(t) for t, _, _ in orphans]
+        ))
+    else:
+        n_deleted = 0
+        for tumbler_str, title, file_path in orphans:
+            if writer.delete_document(Tumbler.parse(tumbler_str)):
+                n_deleted += 1
 
     click.echo(
         f"\nDeleted {n_deleted} orphan "

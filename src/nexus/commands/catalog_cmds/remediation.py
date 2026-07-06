@@ -604,10 +604,18 @@ def prune_stale_cmd(
             f"\n  Restore with: nx catalog undelete {backup_path.name}"
         )
 
-    n_deleted = 0
-    for entry in stale:
-        if writer.delete_document(entry.tumbler):
-            n_deleted += 1
+    # nexus-xedhp: batch via delete_many (service mode) instead of one
+    # writer.delete_document() per entry. SQLite/daemon-mode writers don't
+    # expose delete_many (capability check falls back safely, unchanged
+    # behaviour there).
+    _delete_many = getattr(writer, "delete_many", None)
+    if callable(_delete_many):
+        n_deleted = len(_delete_many([e.tumbler for e in stale]))
+    else:
+        n_deleted = 0
+        for entry in stale:
+            if writer.delete_document(entry.tumbler):
+                n_deleted += 1
 
     click.echo(f"\nDone: deleted {n_deleted} catalog entr"
                f"{'y' if n_deleted == 1 else 'ies'}.")

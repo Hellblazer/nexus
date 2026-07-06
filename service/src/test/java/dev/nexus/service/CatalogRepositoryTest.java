@@ -370,6 +370,101 @@ class CatalogRepositoryTest {
         assertThat(repo.getDocument(TENANT_A, "2.9").get("title")).isEqualTo("Still Guarded");
     }
 
+    @Test @Order(135)
+    void document_updateDocumentsMany_batchesHeterogeneousUpdatesInOneRoundTrip() {
+        // nexus-xedhp: replaces N serial writer.update() calls with one
+        // updateDocumentsMany() batch — each entry may set DIFFERENT fields
+        // (mirrors the indexer catalog hook's real per-file payload shape:
+        // head_hash is repo-wide but physical_collection/meta/source_mtime
+        // vary per file).
+        repo.upsertDocument(TENANT_A, Map.of(
+            "tumbler", "2.20", "title", "Many A", "content_type", "code",
+            "corpus", "code", "physical_collection", "code__nexus__v1"));
+        repo.upsertDocument(TENANT_A, Map.of(
+            "tumbler", "2.21", "title", "Many B", "content_type", "docs",
+            "corpus", "docs", "physical_collection", "docs__nexus__v1",
+            "metadata", Map.of("content_hash", "keepme")));
+
+        List<Integer> results = repo.updateDocumentsMany(TENANT_A, List.of(
+            Map.of("tumbler", "2.20", "head_hash", "abc123", "source_mtime", 111.0),
+            Map.of("tumbler", "2.21", "head_hash", "abc123",
+                   "meta", Map.of("bib_checked", true))
+        ));
+        assertThat(results).containsExactly(1, 1);
+
+        var doc20 = repo.getDocument(TENANT_A, "2.20");
+        assertThat(doc20.get("head_hash")).isEqualTo("abc123");
+
+        var doc21 = repo.getDocument(TENANT_A, "2.21");
+        assertThat(doc21.get("head_hash")).isEqualTo("abc123");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> meta21 = (Map<String, Object>) doc21.get("metadata");
+        assertThat(meta21.get("content_hash")).as("meta merge semantics preserved in batch path").isEqualTo("keepme");
+        assertThat(meta21.get("bib_checked")).isEqualTo(true);
+    }
+
+    @Test @Order(136)
+    void document_updateDocumentsMany_isolatesPerEntryFailures() {
+        // A malformed entry (missing tumbler, non-updatable column) must not
+        // abort the rest of the batch — mirrors register_many's per-doc
+        // failure isolation, which the indexer's catalog hook depends on.
+        repo.upsertDocument(TENANT_A, Map.of(
+            "tumbler", "2.22", "title", "Survivor", "content_type", "code",
+            "corpus", "code"));
+
+        List<Integer> results = repo.updateDocumentsMany(TENANT_A, java.util.Arrays.asList(
+            Map.of("no_tumbler_key", "x"),
+            Map.of("tumbler", "2.22", "head_hash", "def456"),
+            Map.of("tumbler", "2.999-does-not-exist", "head_hash", "def456"),
+            Map.of("tumbler", "2.22", "no_such_column", "y")
+        ));
+        assertThat(results).containsExactly(-1, 1, 0, -1);
+
+        var doc = repo.getDocument(TENANT_A, "2.22");
+        assertThat(doc.get("head_hash")).isEqualTo("def456");
+    }
+
+    @Test @Order(137)
+    void document_updateDocumentsMany_emptyListReturnsEmpty() {
+        assertThat(repo.updateDocumentsMany(TENANT_A, List.of())).isEmpty();
+    }
+
+    @Test @Order(138)
+    void document_deleteDocumentsMany_tombstonesInOneRoundTrip() {
+        // nexus-xedhp: completes the update_many/register_many/delete_many
+        // batch trio — replaces N serial writer.delete_document() calls.
+        repo.upsertDocument(TENANT_A, Map.of(
+            "tumbler", "2.30", "title", "Del A", "content_type", "code", "corpus", "code"));
+        repo.upsertDocument(TENANT_A, Map.of(
+            "tumbler", "2.31", "title", "Del B", "content_type", "code", "corpus", "code"));
+        repo.upsertDocument(TENANT_A, Map.of(
+            "tumbler", "2.32", "title", "Survivor", "content_type", "code", "corpus", "code"));
+
+        Set<String> deleted = repo.deleteDocumentsMany(
+            TENANT_A, List.of("2.30", "2.31", "2.999-does-not-exist"));
+
+        assertThat(deleted).containsExactlyInAnyOrder("2.30", "2.31");
+        assertThat(repo.getDocument(TENANT_A, "2.30")).isNull();
+        assertThat(repo.getDocument(TENANT_A, "2.31")).isNull();
+        assertThat(repo.getDocument(TENANT_A, "2.32")).isNotNull();
+    }
+
+    @Test @Order(139)
+    void document_deleteDocumentsMany_idempotentOnAlreadyTombstoned() {
+        repo.upsertDocument(TENANT_A, Map.of(
+            "tumbler", "2.33", "title", "Once", "content_type", "code", "corpus", "code"));
+        repo.deleteDocument(TENANT_A, "2.33");
+
+        Set<String> deleted = repo.deleteDocumentsMany(TENANT_A, List.of("2.33"));
+
+        assertThat(deleted).as("already-tombstoned tumbler is not re-reported as deleted").isEmpty();
+    }
+
+    @Test @Order(140)
+    void document_deleteDocumentsMany_emptyListReturnsEmpty() {
+        assertThat(repo.deleteDocumentsMany(TENANT_A, List.of())).isEmpty();
+    }
+
     @Test @Order(14)
     void document_delete() {
         repo.upsertDocument(TENANT_A, Map.of(

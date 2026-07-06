@@ -97,7 +97,7 @@ class HttpDocumentHighlightsStore(RawHandleGuardMixin):
             headers=self._headers,
             timeout=30.0,
         )
-        _log.info(
+        _log.debug(
             "http_document_highlights_store.init",
             base_url=self._base_url,
             tenant=tenant,

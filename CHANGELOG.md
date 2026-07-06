@@ -6,6 +6,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.3.4] - 2026-07-06
+
+### Fixed
+
+- **Service-mode T2/catalog client reconstruction** (nexus-53x7s, nexus-2rxzs, nexus-5en9j) — `t2_index_write` and the catalog reader/writer factory were constructing (and immediately closing) a fresh HTTP client per call in service mode, defeating connection-pool reuse and drowning per-run logs in construction noise (measured: 387 `T2Database` + 394 `HttpCatalogClient` reconstructions in one indexing run, inflating hook wall-time to ~13x actual upload time). Both now share one process-lifetime instance, guarded by a lock held for the full call (not just checkout) with reactive eviction on any call failure. Also downgrades the affected clients' `.init` construction logs from INFO to DEBUG.
+- **Catalog write path missing batched update/delete** (nexus-xedhp) — every git commit bumps the repo's `head_hash`, flipping every already-indexed document's stored `head_hash` to "changed" and forcing a warm re-index through one serial per-file catalog update over the network (measured: 175.5s / 1718 files). Adds `update_many`/`delete_many` batch endpoints (completing the trio alongside the existing `register_many`), wired into the indexer's catalog hook and `nx catalog update`/`gc`/`prune-stale`. Requires engine-service-v0.1.28.
+
 ## [6.3.3] - 2026-07-06
 
 ### Added

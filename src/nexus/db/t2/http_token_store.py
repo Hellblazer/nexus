@@ -66,7 +66,7 @@ class HttpTokenStore:
         self._tenant = tenant
         self._auth_token = _token or ""
         self._client = self._build_client()
-        _log.info("http_token_store.init", base_url=self._base_url)
+        _log.debug("http_token_store.init", base_url=self._base_url)
 
     def _build_client(self) -> httpx.Client:
         return httpx.Client(

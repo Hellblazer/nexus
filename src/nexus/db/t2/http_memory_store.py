@@ -114,7 +114,7 @@ class HttpMemoryStore(RawHandleGuardMixin):
             headers=self._headers,
             timeout=30.0,
         )
-        _log.info("http_memory_store.init", base_url=self._base_url, tenant=tenant)
+        _log.debug("http_memory_store.init", base_url=self._base_url, tenant=tenant)
 
     def close(self) -> None:
         """Close the keep-alive connection pool (idempotent)."""

@@ -651,9 +651,18 @@ def update_cmd(
             entries = cat.find(search_query)
         if not entries:
             raise click.ClickException("No entries matched")
+        # nexus-xedhp: batch via update_many (service mode) instead of one
+        # writer.update() per entry — every entry here shares the SAME
+        # *fields* dict, the simplest case update_many was built for.
+        # SQLite/daemon-mode writers don't expose update_many (capability
+        # check falls back safely, unchanged behaviour there).
+        _update_many = getattr(writer, "update_many", None)
         try:
-            for entry in entries:
-                writer.update(entry.tumbler, **fields)
+            if callable(_update_many):
+                _update_many([{"tumbler": str(e.tumbler), **fields} for e in entries])
+            else:
+                for entry in entries:
+                    writer.update(entry.tumbler, **fields)
         except ValueError as exc:
             # nexus-fb6x: source_uri / file_path validation can raise
             # ValueError (unknown scheme, malformed URI, owner-root

@@ -821,6 +821,9 @@ def _catalog_hook(
         # the remaining files to the next idempotent pass. Pass 2 adds a second,
         # per-page yield for the new-doc batch.
         new_batch: list[tuple[Path, dict]] = []
+        # nexus-xedhp: changed-but-existing docs, batched via update_many
+        # (Pass 1b, below) instead of an inline per-file writer.update().
+        changed_batch: list[tuple[Path, dict]] = []
         for abs_path, content_type, collection_name in indexed_files:
             if _batch_producer and await_fair_window(
                 writer.is_interactive_write_pending, on_locked,
@@ -905,13 +908,19 @@ def _catalog_hook(
                         )
                     )
                     if changed:
-                        writer.update(
-                            existing.tumbler,
-                            head_hash=head_hash,
-                            physical_collection=collection_name,
-                            meta={"content_hash": file_hash} if file_hash else None,
-                            source_mtime=source_mtime,
-                        )
+                        # nexus-xedhp: accumulate for the batched update_many
+                        # below instead of an inline per-file writer.update()
+                        # round trip — a HEAD bump (any new git commit) flips
+                        # EVERY indexed doc's stored head_hash to "changed",
+                        # so on a warm re-run this is the whole repo's
+                        # population, not a rare exception.
+                        changed_batch.append((abs_path, {
+                            "tumbler": str(existing.tumbler),
+                            "head_hash": head_hash,
+                            "physical_collection": collection_name,
+                            "meta": {"content_hash": file_hash} if file_hash else None,
+                            "source_mtime": source_mtime,
+                        }))
                     file_to_doc_id[abs_path] = str(existing.tumbler)
             except Exception as exc:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
                 # Per-file failure must NOT abort the rest of the loop.
@@ -926,6 +935,72 @@ def _catalog_hook(
                     error=str(exc),
                     exc_info=True,
                 )
+
+        # Pass 1b: batch-update the CHANGED existing docs (nexus-xedhp,
+        # duoak.11 follow-up). A HEAD bump flips every doc's stored head_hash
+        # to "changed", so on a warm re-run this is the whole repo's
+        # population — the serial per-file writer.update() this replaces was
+        # measured at 175.5s / 1718 files (~102ms/file, all WAN round trips).
+        # ``update_many`` is service-mode-only (nexus_xedhp scope; see
+        # catalog/factory.py's _SERVICE_ONLY_WRITE_OPS) — SQLite/daemon-mode
+        # writers don't expose it, so this capability check safely falls
+        # back to the original per-file loop there, matching the
+        # write_manifest_many precedent in Pass 2's sibling below.
+        if changed_batch:
+            _update_many = getattr(writer, "update_many", None)
+            if callable(_update_many):
+                for _start in range(0, len(changed_batch), _CATALOG_REGISTER_PAGE):
+                    if _batch_producer and await_fair_window(
+                        writer.is_interactive_write_pending, on_locked,
+                    ) == "skip":
+                        _log.info(
+                            "catalog_write_yielded_skipped",
+                            repo=repo_name,
+                            deferred=len(changed_batch) - _start,
+                            reason="interactive_write_pending",
+                        )
+                        break
+                    page = changed_batch[_start : _start + _CATALOG_REGISTER_PAGE]
+                    page_docs = [doc for _, doc in page]
+                    try:
+                        counts = _update_many(page_docs)
+                        if len(counts) != len(page):
+                            raise ValueError(
+                                f"update_many returned {len(counts)} counts "
+                                f"for {len(page)} updates"
+                            )
+                    except Exception:  # noqa: BLE001 — batch unrecoverable; per-file isolation fallback
+                        _log.warning(
+                            "catalog_update_many_failed_falling_back_per_file",
+                            repo=repo_name, page_size=len(page), exc_info=True,
+                        )
+                        for path, doc in page:
+                            try:
+                                writer.update(
+                                    doc["tumbler"],
+                                    **{k: v for k, v in doc.items() if k != "tumbler"},
+                                )
+                            except Exception as exc:  # noqa: BLE001 — ghost-class per-file isolation
+                                skipped_files.append((path, str(exc)))
+                                _log.warning(
+                                    "catalog_hook_update_failed",
+                                    abs_path=str(path), error=str(exc), exc_info=True,
+                                )
+            else:
+                # SQLite/daemon-mode writer: no batched path, unchanged
+                # behaviour (the original per-file inline update() loop).
+                for path, doc in changed_batch:
+                    try:
+                        writer.update(
+                            doc["tumbler"],
+                            **{k: v for k, v in doc.items() if k != "tumbler"},
+                        )
+                    except Exception as exc:  # noqa: BLE001 — ghost-class per-file isolation
+                        skipped_files.append((path, str(exc)))
+                        _log.warning(
+                            "catalog_hook_update_failed",
+                            abs_path=str(path), error=str(exc), exc_info=True,
+                        )
 
         # Pass 2: batch-register the NEW docs. The RDR-146 fairness yield moves
         # from per-file to a per-PAGE check — a page is ONE register_many round-

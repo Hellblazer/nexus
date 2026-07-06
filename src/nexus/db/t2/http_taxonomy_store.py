@@ -141,7 +141,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin):
         # NOT chroma. Constructed lazily from the SAME resolved service config so
         # both stores share one base_url/token/tenant; injectable for tests.
         self._centroid_store = centroid_store
-        _log.info("http_taxonomy_store.init", base_url=self._base_url, tenant=tenant)
+        _log.debug("http_taxonomy_store.init", base_url=self._base_url, tenant=tenant)
 
     @property
     def _centroid(self) -> Any:

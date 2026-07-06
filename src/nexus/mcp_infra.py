@@ -81,6 +81,29 @@ _t3_lock = threading.Lock()
 _collections_cache: tuple[list[str], float] = ([], 0.0)
 _COLLECTIONS_CACHE_TTL = 60.0
 
+# nexus-53x7s: SERVICE-mode t2_index_write cache. Reuses one T2Database (and
+# its 8 pooled httpx.Client connections) across calls instead of building one
+# per write, which was defeating keep-alive pooling and drowning per-run logs
+# in per-store connection-init noise (measured: 387 rebuilds/run, hooks ~13x
+# the actual upload time).
+#
+# Process-lifetime singleton, NOT a TTL cache (review correction, nexus-53x7s
+# stacked review 2026-07-05): each Http*Store bakes its base_url/token in at
+# construction and never re-reads them, so a TTL window doesn't bound
+# staleness against the thing that actually rotates -- the service_registry
+# storage_service lease (15s TTL) -- it just rebuilds on an unrelated clock
+# while still leaving up to that whole window stale. Recovery from a rotated
+# lease is instead reactive: any write_fn failure evicts the cached instance
+# so the NEXT call rebuilds against a freshly-resolved endpoint, mirroring
+# the recover-on-error pattern already used by http_token_store/
+# http_scratch_store (`recover_endpoint_from_lease`).
+#
+# `_service_t2_lock` is held for the full checkout-through-use span (not just
+# the get-or-build decision) so a concurrent caller can never close() the
+# instance while another thread is still inside write_fn(db) against it.
+_service_t2_db: object | None = None
+_service_t2_lock = threading.Lock()
+
 # ── Search trace cache (RDR-061 E2) ──────────────────────────────────────────
 # Session-keyed cache of recent search results. Populated by the search tool,
 # consumed by store_put and catalog_link to correlate agent actions with the
@@ -312,6 +335,35 @@ def _reassert_t2_daemon() -> bool:
     return False
 
 
+def _service_t2_write_locked(write_fn):
+    """Run ``write_fn`` against the process-lifetime service ``T2Database``
+    singleton (nexus-53x7s), building it on first use and evicting it if
+    ``write_fn`` raises (reactive recovery against a rotated
+    ``storage_service`` lease -- see ``_service_t2_db``'s module docstring).
+
+    Callers MUST hold ``_service_t2_lock`` for the full call so a concurrent
+    caller can never ``close()`` the instance out from under an in-flight
+    ``write_fn(db)``.
+    """
+    global _service_t2_db
+    from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid circular import (db.t2)
+
+    if _service_t2_db is None:
+        _service_t2_db = T2Database(default_db_path(), run_migrations=False)  # epsilon-allow: service mode, PG is the arbiter
+    try:
+        return write_fn(_service_t2_db)
+    except Exception:
+        # Reactive invalidation: the failure may be a rotated/expired
+        # storage_service lease baked into this instance's Http*Store
+        # clients at construction time; evict so the NEXT call resolves a
+        # fresh endpoint instead of retrying the same broken connections
+        # for the rest of the process's lifetime.
+        stale_db = _service_t2_db
+        _service_t2_db = None
+        stale_db.close()  # epsilon-allow: error-triggered eviction, not per-call teardown
+        raise
+
+
 def t2_index_write(write_fn):
     """Run one T2 write through the daemon (``T2Client``) if it is
     reachable, else a direct ``T2Database`` (RDR-128 P1, nexus-kg8sj;
@@ -348,10 +400,8 @@ def t2_index_write(write_fn):
     from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import (db.storage_mode)
 
     if storage_backend_for("memory") == StorageBackend.SERVICE:
-        from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid circular import (db.t2)
-
-        with T2Database(default_db_path(), run_migrations=False) as db:  # epsilon-allow: service mode, PG is the arbiter
-            return write_fn(db)
+        with _service_t2_lock:
+            return _service_t2_write_locked(write_fn)
 
     from nexus.daemon.t2_client import (  # noqa: PLC0415 — deferred to avoid circular import (daemon.t2_client)
         T2DaemonNotReachableError,
@@ -1346,13 +1396,23 @@ def reset_singletons():
     instances (see ``nexus.hook_registry``); they are no longer
     module-globals on ``mcp_infra`` and therefore not cleared here.
     """
-    global _t1_instance, _t1_isolated, _t3_instance, _collections_cache
+    global _t1_instance, _t1_isolated, _t3_instance, _collections_cache, _service_t2_db
     _t1_instance = None
     _t1_isolated = False
     _t3_instance = None
     _collections_cache = ([], 0.0)
+    with _service_t2_lock:
+        if _service_t2_db is not None:
+            _service_t2_db.close()
+        _service_t2_db = None
     clear_search_traces()
     reset_plan_cache_for_tests()
+    # nexus-5en9j: also reset the shared SERVICE-mode catalog client singleton
+    try:
+        from nexus.catalog.factory import reset_shared_service_catalog_client_for_tests  # noqa: PLC0415 — deferred to avoid circular import (catalog.factory)
+        reset_shared_service_catalog_client_for_tests()
+    except ImportError:
+        pass
     # RDR-152 Seam B: also reset the http_vector_client singleton
     try:
         from nexus.db.http_vector_client import reset_http_vector_client_for_tests  # noqa: PLC0415 — deferred to avoid circular import (http_vector_client)
