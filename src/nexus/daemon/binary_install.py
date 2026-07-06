@@ -87,7 +87,7 @@ TAG_NAMESPACE_PREFIX = "engine-service-v"
 #: service (RF-161-2). ``None`` until the first real ``engine-service-v*``
 #: release exists; while it is ``None``, ``nx init --service`` cannot
 #: auto-install and instructs the user to pass an explicit tag.
-PINNED_SERVICE_TAG: str | None = "engine-service-v0.1.27"
+PINNED_SERVICE_TAG: str | None = "engine-service-v0.1.28"
 
 #: Env override for the service tag (operator / CI). Takes precedence over the
 #: build-time pin. Still an explicit tag — no "latest" semantics.
