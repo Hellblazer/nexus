@@ -398,6 +398,16 @@ def reindex_cmd(name: str, force: bool) -> None:
         if rdr_files:
             click.echo(f"Re-indexing {len(rdr_files)} RDR documents...")
             try:
+                # nexus-3lswy: this single-collection reindex is intentionally
+                # separate from `nx index repo`'s RDR path (which now routes
+                # through indexer._run_index's 4th run_file_loop category via
+                # _index_prose_file). batch_index_markdowns calls
+                # doc_indexer._catalog_markdown_hook, which registers under a
+                # SEPARATE "curator" catalog owner — safe here because this
+                # command never also runs indexer._catalog_hook's batched
+                # register_many pass for these files. Do not add that pass
+                # here without also dropping this call, or the RDR
+                # double-registration bug nexus-3lswy fixed comes back.
                 batch_index_markdowns(
                     rdr_files, corpus=corpus, collection_name=name, force=True
                 )
