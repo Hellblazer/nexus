@@ -156,6 +156,36 @@ CATALOG_DB_ACCESS_BASELINE: int = 1
 CATALOG_CONSTRUCTION_BASELINE: int = 0
 
 
+#: GH #1373 (nx store export crashed reaching ``T3Database``'s
+#: backend-private ``._client_for(...)`` from ``exporter.py`` /
+#: ``manifest_backfill.py``): ``HttpVectorClient`` -- production's
+#: ``make_t3()`` return value in BOTH local and cloud mode since RDR-155
+#: P4a.2 -- has no ``_client_for`` method at all, so any consumer-side
+#: reach raises ``AttributeError`` at runtime. ``db/`` is the sole
+#: legitimate owner (``t3.py`` itself, plus the db/-internal
+#: ``t3_reidentify.py`` / ``embed_migrate.py`` migration helpers).
+#: Enforced HARD at baseline 0 -- there is no legitimate consumer-side use.
+CLIENT_FOR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
+    "src/nexus/db/",
+)
+
+#: GH #1374 sibling defect class: consumer code reaching ``Catalog``'s
+#: backend-private ``._dir`` attribute (the on-disk catalog directory).
+#: ``HttpCatalogClient`` (the service-mode catalog handle) has no ``._dir``.
+#: NOT yet enforced as a hard violation -- ``commands/catalog_cmds/
+#: backups.py`` still reaches it for deleted-backups directory bookkeeping
+#: pending its own cutover. Counted baseline, mirrors ``catalog_db_accesses``.
+CATALOG_DIR_ACCESS_ALLOWLIST_PREFIXES: tuple[str, ...] = (
+    "src/nexus/catalog/",
+    "src/nexus/daemon/",
+)
+
+#: Seeded at the current unsuppressed count (commands/catalog_cmds/
+#: backups.py:85). Ratchets to 0 when that site routes through the
+#: catalog public API instead of the private ``._dir`` attribute.
+CATALOG_DIR_ACCESS_BASELINE: int = 1
+
+
 #: nexus-9613q.1 (Part 2 of nexus-pyzk7): T2 store handles whose ``.conn`` /
 #: ``._lock`` are raw SQLite-only attributes. In service mode (the 6.0
 #: default) each resolves to an Http*Store with no such attribute, so a
@@ -284,6 +314,12 @@ class LintResult:
     t2_raw_handle_accesses: int = 0
     #: The concrete sites backing ``t2_raw_handle_accesses`` (for diagnostics).
     t2_raw_handle_access_sites: list[Violation] = field(default_factory=list)
+    #: GH #1374 sibling class: ``Catalog._dir`` attribute accesses outside
+    #: catalog/ + daemon/. Counted baseline (NOT in total_violations); the
+    #: acceptance test asserts ``<= CATALOG_DIR_ACCESS_BASELINE``. Unlike
+    #: ``._client_for`` (GH #1373, hard-enforced -- see ``violations``),
+    #: ``._dir`` still has one known unmigrated site.
+    catalog_dir_accesses: int = 0
 
     @property
     def total_violations(self) -> int:
@@ -300,6 +336,7 @@ class LintResult:
             "catalog_constructions": self.catalog_constructions,
             "catalog_db_accesses": self.catalog_db_accesses,
             "t2_raw_handle_accesses": self.t2_raw_handle_accesses,
+            "catalog_dir_accesses": self.catalog_dir_accesses,
         }
 
 
@@ -331,6 +368,16 @@ class FileScan:
     #: this file (un-annotated). Scoped by the raw-handle access-allowlist
     #: (db/ + daemon/) in :func:`scan_repo`.
     t2_raw_handle_accesses: list[Violation] = field(default_factory=list)
+    #: GH #1373: ``._client_for(...)`` calls in this file (backend-private
+    #: T3Database method). Scoped by ``CLIENT_FOR_ALLOWLIST_PREFIXES`` in
+    #: :func:`scan_repo`; always a hard violation (no epsilon-allow escape
+    #: on this one exists in the codebase today, but the token is still
+    #: honored for consistency with every other rule in this module).
+    client_for_calls: list[Violation] = field(default_factory=list)
+    #: GH #1374 sibling class: ``._dir`` attribute accesses in this file
+    #: (Catalog's private on-disk directory). Scoped by
+    #: ``CATALOG_DIR_ACCESS_ALLOWLIST_PREFIXES`` in :func:`scan_repo`.
+    catalog_dir_accesses: list[Violation] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -473,6 +520,14 @@ def _scan_file_full(
                 scan.t2database_constructions_undocumented.append(v)
             continue
 
+        # ── ._client_for(...) calls: GH #1373, backend-private method ──
+        if isinstance(func, ast.Attribute) and func.attr == "_client_for":
+            if not _line_has_allowlist_token(source_lines, line):
+                scan.client_for_calls.append(
+                    Violation(file=_rel(), line=line, symbol="_client_for")
+                )
+            continue
+
         # ── Catalog(...) construction: RDR-146 P0.1 baseline ──
         cat_ctor: str | None = None
         if isinstance(func, ast.Name):
@@ -499,6 +554,22 @@ def _scan_file_full(
             # Only flag outside catalog/ — the allowlist is applied by scan_repo.
             scan.catalog_db_accesses.append(
                 Violation(file=_rel(), line=node.lineno, symbol="catalog._db")
+            )
+
+    # ── GH #1374: Catalog._dir attribute access scan (not Call-scoped) ──
+    # Same shape as the ._db scan above: ``._dir`` is Catalog's private
+    # on-disk directory attribute; HttpCatalogClient (service mode) has no
+    # such attribute. Epsilon-allow on the same line suppresses.
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == "_dir"
+        ):
+            if _line_has_allowlist_token(source_lines, node.lineno):
+                continue
+            # Only flag outside catalog/ + daemon/ — allowlist applied by scan_repo.
+            scan.catalog_dir_accesses.append(
+                Violation(file=_rel(), line=node.lineno, symbol="catalog._dir")
             )
 
     # ── nexus-9613q.1: T2 raw-handle .conn/._lock access scan ──
@@ -576,6 +647,8 @@ def scan_repo(
     catalog_construction_allowlist_prefixes: Iterable[str] | None = None,
     catalog_db_access_allowlist_prefixes: Iterable[str] | None = None,
     t2_raw_handle_access_allowlist_prefixes: Iterable[str] | None = None,
+    client_for_allowlist_prefixes: Iterable[str] | None = None,
+    catalog_dir_access_allowlist_prefixes: Iterable[str] | None = None,
 ) -> LintResult:
     """Scan the repo for banned call sites and the RDR-128 baseline
     populations.
@@ -623,6 +696,14 @@ def scan_repo(
         t2_raw_handle_access_allowlist_prefixes = tuple(
             t2_raw_handle_access_allowlist_prefixes
         )
+    if client_for_allowlist_prefixes is None:
+        client_for_allowlist_prefixes = CLIENT_FOR_ALLOWLIST_PREFIXES
+    else:
+        client_for_allowlist_prefixes = tuple(client_for_allowlist_prefixes)
+    if catalog_dir_access_allowlist_prefixes is None:
+        catalog_dir_access_allowlist_prefixes = CATALOG_DIR_ACCESS_ALLOWLIST_PREFIXES
+    else:
+        catalog_dir_access_allowlist_prefixes = tuple(catalog_dir_access_allowlist_prefixes)
 
     result = LintResult()
 
@@ -664,6 +745,17 @@ def scan_repo(
         if not _is_allowlisted(rel, catalog_db_access_allowlist_prefixes):
             result.catalog_db_accesses += len(scan.catalog_db_accesses)
 
+        # GH #1373: ._client_for(...) calls — HARD violation outside db/
+        # (no legitimate consumer-side use; baseline 0).
+        if not _is_allowlisted(rel, client_for_allowlist_prefixes):
+            result.violations.extend(scan.client_for_calls)
+
+        # GH #1374 sibling class: Catalog._dir accesses — counted baseline
+        # outside catalog/ + daemon/. NOT yet promoted to hard violations
+        # (one known site, commands/catalog_cmds/backups.py).
+        if not _is_allowlisted(rel, catalog_dir_access_allowlist_prefixes):
+            result.catalog_dir_accesses += len(scan.catalog_dir_accesses)
+
         # nexus-9613q.1: T2 raw-handle .conn/._lock accesses — counted
         # baseline outside db/ + daemon/. Ratchets to 0 as .3/.4 land.
         if not _is_allowlisted(rel, t2_raw_handle_access_allowlist_prefixes):
@@ -685,5 +777,7 @@ def scan_repo(
             result.catalog_db_accesses += len(scan.catalog_db_accesses)
             result.t2_raw_handle_accesses += len(scan.t2_raw_handle_accesses)
             result.t2_raw_handle_access_sites.extend(scan.t2_raw_handle_accesses)
+            result.violations.extend(scan.client_for_calls)
+            result.catalog_dir_accesses += len(scan.catalog_dir_accesses)
 
     return result

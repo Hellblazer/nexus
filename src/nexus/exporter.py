@@ -40,6 +40,7 @@ from nexus.errors import (
 from nexus.retry import _chroma_with_retry
 
 if TYPE_CHECKING:
+    from nexus.db.http_vector_client import HttpVectorClient
     from nexus.db.t3 import T3Database
     from nexus.hook_registry import HookRegistry
 
@@ -99,7 +100,7 @@ _CONSTRAINT_HINT_KEYWORDS: tuple[str, ...] = (
 
 
 def _upsert_with_hint(
-    db: "T3Database",
+    db: "T3Database | HttpVectorClient",
     collection_name: str,
     ids: list[str],
     documents: list[str],
@@ -233,7 +234,7 @@ def _fire_store_chains_grouped_by_doc(
 
 
 def export_collection(
-    db: "T3Database",
+    db: "T3Database | HttpVectorClient",
     collection_name: str,
     output_path: Path,
     includes: tuple[str, ...] = (),
@@ -244,7 +245,11 @@ def export_collection(
     Parameters
     ----------
     db:
-        A connected T3Database instance.
+        A connected T3Database or HttpVectorClient instance (GH #1373:
+        production's ``make_t3()`` returns ``HttpVectorClient`` in both
+        local and cloud mode -- this must work against either backend's
+        ``get_collection`` / ``get_embeddings`` surface, never a
+        backend-private attribute).
     collection_name:
         Fully-qualified collection name (e.g. ``code__myrepo``).
     output_path:
@@ -265,8 +270,11 @@ def export_collection(
     """
     t0 = time.monotonic()
 
-    # Access the underlying ChromaDB collection directly to retrieve embeddings.
-    col = db._client_for(collection_name).get_collection(collection_name)
+    # Backend-neutral collection handle (GH #1373): db.get_collection()
+    # resolves to a real chromadb.Collection on T3Database or a
+    # _ServiceCollectionStub on HttpVectorClient -- never reach for the
+    # Chroma-only db._client_for() private method here.
+    col = db.get_collection(collection_name)
     total_count = _chroma_with_retry(col.count)
 
     embedding_model = index_model_for_collection(collection_name)
@@ -312,7 +320,7 @@ def export_collection(
             while True:
                 result = _chroma_with_retry(
                     col.get,
-                    include=["documents", "metadatas", "embeddings"],
+                    include=["documents", "metadatas"],
                     limit=page_size,
                     offset=offset,
                 )
@@ -320,16 +328,36 @@ def export_collection(
                 if not page_ids:
                     break
 
+                # Embeddings are fetched via the backend-neutral
+                # get_embeddings() surface rather than
+                # col.get(include=["embeddings"]): the service-mode
+                # collection stub (_ServiceCollectionStub) never returns
+                # embeddings through its get() envelope regardless of
+                # `include` (GH #1373), so requesting them there would
+                # silently export zero-length vectors on the HttpVectorClient
+                # path. get_embeddings() reorders its response to match
+                # request order on both backends.
+                emb_array = db.get_embeddings(collection_name, page_ids)
+                if emb_array.shape[0] != len(page_ids):
+                    raise NexusError(
+                        f"Export failed: collection {collection_name!r} page "
+                        f"at offset {offset} returned {len(page_ids)} chunk "
+                        f"ids but only {emb_array.shape[0]} stored "
+                        "embeddings -- a chunk without a vector indicates a "
+                        "data-integrity issue; re-index the collection "
+                        "before exporting."
+                    )
+
                 for rec_id, doc, meta, emb in zip(
                     page_ids,
                     result["documents"],
                     result["metadatas"],
-                    result["embeddings"],
+                    emb_array,
                 ):
                     source_path = (meta or {}).get("source_path")
                     if not _apply_filter(source_path, includes, excludes):
                         continue
-                    emb_bytes: bytes = np.array(emb, dtype=np.float32).tobytes()
+                    emb_bytes: bytes = np.asarray(emb, dtype=np.float32).tobytes()
                     if embedding_dim == 0 and emb_bytes:
                         embedding_dim = len(emb_bytes) // 4
                     gz.write(msgpack.packb(
@@ -369,7 +397,7 @@ def export_collection(
 
 
 def import_collection(
-    db: "T3Database",
+    db: "T3Database | HttpVectorClient",
     input_path: Path,
     target_collection: str | None = None,
     remaps: list[tuple[str, str]] | None = None,
@@ -383,7 +411,7 @@ def import_collection(
     Parameters
     ----------
     db:
-        A connected T3Database instance.
+        A connected T3Database or HttpVectorClient instance.
     input_path:
         Path to the ``.nxexp`` file to import.
     target_collection:

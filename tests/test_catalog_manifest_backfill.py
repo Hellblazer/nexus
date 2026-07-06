@@ -684,6 +684,97 @@ class TestBackfillManifestForCollection:
         assert result.docs_processed == 1
 
 
+class TestBackfillManifestServiceMode:
+    """GH #1373 sibling bug: production's ``make_t3()`` returns
+    ``HttpVectorClient`` (RDR-155 P4a.2), which has no ``_client_for``.
+    ``backfill_manifest_for_collection`` crashed the same way
+    ``export_collection`` did. Exercises the fix through the
+    ``nexus.db.http_vector_client._post`` / ``_get`` module-function-patch
+    pattern (mirrors ``tests/test_bridge_address_fields.py`` and
+    ``tests/test_exporter.py::TestServiceModeExport``)."""
+
+    @staticmethod
+    def _make_client():
+        from nexus.db.http_vector_client import HttpVectorClient
+        client = HttpVectorClient.__new__(HttpVectorClient)
+        client._tenant = "test-tenant"
+        return client
+
+    def test_backfill_writes_chunks_via_http_vector_client(self, catalog):
+        """The backfill must read chunk metadata through
+        ``t3.get_collection()`` (backend-neutral) rather than
+        ``t3._client_for(...)``, which HttpVectorClient does not have."""
+        from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+
+        coll = _unique_coll()
+        _insert_doc(catalog, "1.1.1", coll)
+
+        chunk_ids = [f"c1-{coll}", f"c2-{coll}"]
+        metadatas = [
+            {"doc_id": "1.1.1", "chunk_index": 0, "chunk_text_hash": "a" * 32,
+             "line_start": 0, "line_end": 5},
+            {"doc_id": "1.1.1", "chunk_index": 1, "chunk_text_hash": "b" * 32,
+             "line_start": 6, "line_end": 10},
+        ]
+
+        def fake_get(path: str, **_kwargs):
+            if path == "/v1/vectors/stats":
+                return [{"name": coll, "count": len(chunk_ids)}]
+            raise AssertionError(f"unexpected GET {path}")
+
+        def fake_post(path: str, body: dict, **_kwargs):
+            if path == "/v1/vectors/get":
+                assert body["collection"] == coll
+                wanted_doc = (body.get("where") or {}).get("doc_id")
+                matched = [
+                    i for i, m in enumerate(metadatas) if m.get("doc_id") == wanted_doc
+                ]
+                offset = body.get("offset", 0)
+                limit = body.get("limit", len(matched))
+                page = matched[offset : offset + limit]
+                return {
+                    "ids": [chunk_ids[i] for i in page],
+                    "documents": ["" for _ in page],
+                    "metadatas": [metadatas[i] for i in page],
+                }
+            raise AssertionError(f"unexpected POST {path}")
+
+        client = self._make_client()
+        with patch("nexus.db.http_vector_client._get", side_effect=fake_get), \
+             patch("nexus.db.http_vector_client._post", side_effect=fake_post):
+            result = backfill_manifest_for_collection(catalog, client, coll, dry_run=False)
+
+        assert result.docs_processed == 1
+        assert result.chunks_written == 2
+        rows = catalog._db.execute(
+            "SELECT position, chash FROM document_chunks WHERE doc_id = ? "
+            "ORDER BY position",
+            ("1.1.1",),
+        ).fetchall()
+        assert rows == [(0, "a" * 32), (1, "b" * 32)]
+
+    def test_backfill_missing_collection_via_http_vector_client(self, catalog):
+        """Collection absent from the service's stats listing -> counted as
+        docs_skipped_no_t3, not a crash (mirrors the T3Database NotFoundError
+        contract, S-2)."""
+        from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+
+        coll = _unique_coll()
+        _insert_doc(catalog, "1.1.1", coll)
+
+        def fake_get(path: str, **_kwargs):
+            if path == "/v1/vectors/stats":
+                return []  # collection not present
+            raise AssertionError(f"unexpected GET {path}")
+
+        client = self._make_client()
+        with patch("nexus.db.http_vector_client._get", side_effect=fake_get):
+            result = backfill_manifest_for_collection(catalog, client, coll, dry_run=False)
+
+        assert result.docs_processed == 0
+        assert result.docs_skipped_no_t3 == 1
+
+
 class TestBackfillPagination:
     """Verify the backfill paginates T3 at <=300 records per page."""
 
