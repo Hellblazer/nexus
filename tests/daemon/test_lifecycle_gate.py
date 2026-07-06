@@ -174,3 +174,68 @@ def test_gate_doc_exists() -> None:
     text = gate.read_text(encoding="utf-8")
     assert "service_registry.py" in text
     assert "test_rdr149_lifecycle_conformance.py" in text
+
+
+# nexus-w771r / GH #1369: "does my supervisor own the process I'm about to
+# heartbeat" is a shared run-loop invariant (exit_if_process_unowned in the
+# primitive), not a per-tier copy. A tier reimplementing its own
+# "if not X.owns_process: ... return 0" prelude instead of calling the shared
+# helper is exactly the drift class this gate exists to catch.
+_OWNS_PROCESS_CONSUMER_MODULES = frozenset({
+    "daemon/storage_service_daemon.py",
+    "daemon/t3_daemon.py",
+})
+
+
+def test_owns_process_short_circuit_defined_only_in_primitive() -> None:
+    """``exit_if_process_unowned`` -- the shared "don't heartbeat what you
+    don't own" run-loop prelude -- is defined exactly once, in the
+    primitive. A tier defining its own copy is reimplementing it bespoke."""
+    definitions: list[pathlib.Path] = []
+    for path in _py_files():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if (
+                line.lstrip().startswith("def exit_if_process_unowned(")
+                and _ALLOW_TOKEN not in line
+            ):
+                definitions.append(path)
+    assert definitions == [PRIMITIVE], (
+        "RDR-149 lifecycle gate: exit_if_process_unowned must be defined "
+        "ONLY in daemon/service_registry.py (the single substrate). Found: "
+        f"{[str(p.relative_to(REPO_ROOT)) for p in definitions]}"
+    )
+
+
+def test_every_owns_process_consumer_calls_the_shared_helper() -> None:
+    """Every tier that defines an ``owns_process`` property must call the
+    shared ``exit_if_process_unowned`` helper from its run loop, not
+    hand-roll an equivalent ``if not sup.owns_process: ... return 0``
+    prelude (the exact GH #1369 duplication this gate now bans a second
+    instance of)."""
+    offenders: list[str] = []
+    for path in _py_files():
+        if path == PRIMITIVE:
+            continue
+        text = path.read_text(encoding="utf-8")
+        defines_owns_process = "def owns_process(self)" in text
+        calls_shared_helper = "exit_if_process_unowned(" in text
+        if defines_owns_process and not calls_shared_helper:
+            offenders.append(str(path.relative_to(REPO_ROOT)))
+    assert not offenders, (
+        "RDR-149 lifecycle gate: a module defines owns_process but never "
+        "calls the shared exit_if_process_unowned() helper from its run "
+        "loop -- it is reimplementing the short-circuit bespoke instead of "
+        "sharing it. Offenders:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_owns_process_consumer_allowlist_is_non_vacuous() -> None:
+    """Companion sanity check: at least the two tiers this fix touched must
+    actually define owns_process, or the assertion above is vacuously true."""
+    for rel in _OWNS_PROCESS_CONSUMER_MODULES:
+        path = SRC_ROOT / rel
+        text = path.read_text(encoding="utf-8")
+        assert "def owns_process(self)" in text, (
+            f"{rel} was expected to define owns_process; if it no longer "
+            "does, update _OWNS_PROCESS_CONSUMER_MODULES and this test"
+        )

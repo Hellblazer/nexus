@@ -266,6 +266,8 @@ class _FakeStorageSupervisor:
     instances: list["_FakeStorageSupervisor"] = []
     start_raises: Exception | None = None
 
+    owns_process = True  # models the real spawn path, not the lease short-circuit
+
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
         self.started = False
@@ -363,6 +365,7 @@ class TestSupervisorLifecycleLog:
 
 class _FakeT3Supervisor:
     instances: list["_FakeT3Supervisor"] = []
+    owns_process = True  # models the real spawn path, not the lease short-circuit
 
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs

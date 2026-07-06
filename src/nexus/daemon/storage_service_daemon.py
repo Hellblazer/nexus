@@ -75,6 +75,7 @@ from nexus.daemon.service_registry import (
     DEFAULT_HEARTBEAT_INTERVAL,
     ServiceRegistry,
     ServiceSupervisor,
+    exit_if_process_unowned,
     ttl_for_tier,
 )
 
@@ -481,6 +482,19 @@ class StorageServiceSupervisor:
     @property
     def fenced(self) -> bool:
         return self._supervisor is not None and self._supervisor.fenced
+
+    @property
+    def owns_process(self) -> bool:
+        """False when start() short-circuited on an existing lease (another
+        supervisor owns the service) rather than spawning + owning ``self._proc``
+        itself. nexus-nj4ch follow-up (GH #1369): a supervisor that doesn't own
+        a process has nothing for heartbeat_once() to check, so the run loop
+        must not enter the die-non-zero heartbeat loop in that case — doing so
+        made heartbeat_once() immediately return (False, False) (its "process
+        is None" branch, meant for an owned-but-dead process) and exit(3) a
+        perfectly healthy service, causing a launchd respawn loop + port churn.
+        """
+        return self._proc is not None
 
     # -- Internal helpers ---------------------------------------------------
 
@@ -1149,6 +1163,18 @@ def _supervise_until_stopped(
     ``(True, False)`` PG-only arm: PG is restarted directly while the alive JVM
     keeps running (the OS supervises the supervisor process, not PG)."""
     sup.start()
+
+    # GH #1369, shared across tiers (RDR-149 §shared primitive) via
+    # exit_if_process_unowned: start() may have found an existing, healthy
+    # lease and short-circuited without spawning + owning a process of its
+    # own, in which case there is nothing for heartbeat_once() to check (it
+    # would misread self._proc is None as "process died" and force exit(3))
+    # — exit 0 now instead of entering the heartbeat loop.
+    if exit_if_process_unowned(
+        sup, flush_logging,
+        log=_log, event="storage_service_already_running_healthy",
+    ):
+        return 0
 
     exit_code = 0
     while not stop_requested.is_set():

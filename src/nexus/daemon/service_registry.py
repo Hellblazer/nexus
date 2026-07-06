@@ -53,7 +53,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional, Protocol
 
 import structlog
 
@@ -773,3 +773,53 @@ class ServiceSupervisor:
         stop_owner()
         start_owner()
         return True
+
+
+class SupervisedResource(Protocol):
+    """Structural contract a tier's run loop needs from its Supervisor
+    wrapper to use ``exit_if_process_unowned`` (GH #1369). ``owns_process``
+    is tier-specific (each tier's ``_proc`` handle is a different kind of
+    child process — a Java jar, a chroma subprocess, ...), so it stays on
+    each tier's own Supervisor class; only the shared "don't heartbeat what
+    you don't own" run-loop skeleton lives here."""
+
+    @property
+    def owns_process(self) -> bool: ...
+
+    def stop(self) -> None: ...
+
+
+def exit_if_process_unowned(
+    sup: SupervisedResource,
+    flush_logging: Callable[[], None],
+    *,
+    log: Any,
+    event: str,
+) -> bool:
+    """Shared run-loop prelude (RDR-149 §shared primitive, GH #1369): every
+    tier's supervise loop calls this immediately after ``sup.start()``, before
+    entering its heartbeat loop. Returns True when the caller's run loop must
+    exit 0 right away, False when it should proceed to heartbeat as usual.
+
+    Root cause this closes: a tier's ``start()`` can short-circuit on an
+    existing, healthy lease (another supervisor already owns the resource)
+    without ever assigning the tier's own ``_proc``. Every tier's
+    ``heartbeat_once()`` reads "no owned process" as "process died" (it has
+    no other way to detect an owned process's exit) and forces a non-zero
+    exit — under an OS unit with ``KeepAlive``/``Restart=on-failure`` that
+    turns a perfectly healthy coexistence into an unbounded respawn loop,
+    since nothing ever kills the ACTUAL owner to free the lease. Checking
+    ``owns_process`` before the loop even starts avoids ever making that
+    call. ``sup.stop()`` is called before returning True; on the short-circuit
+    path this is a proven no-op in every tier that currently uses this helper
+    (each guards its lease-touching cleanup on ``self._registry``/
+    ``self._supervisor`` being non-``None``, which the short-circuit branch
+    never assigns) — kept for defensive symmetry with the loop's other exit
+    paths, not because it does anything observable here.
+    """
+    if sup.owns_process:
+        return False
+    log.info(event, msg="another supervisor owns the process; exiting cleanly")
+    flush_logging()
+    sup.stop()
+    return True

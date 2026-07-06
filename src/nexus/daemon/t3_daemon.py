@@ -43,6 +43,7 @@ from nexus.daemon.service_registry import (
     DEFAULT_HEARTBEAT_INTERVAL,
     ServiceRegistry,
     ServiceSupervisor,
+    exit_if_process_unowned,
 )
 
 _log = structlog.get_logger(__name__)
@@ -303,6 +304,19 @@ class T3Supervisor:
     def fenced(self) -> bool:
         return self._supervisor is not None and self._supervisor.fenced
 
+    @property
+    def owns_process(self) -> bool:
+        """False when start() short-circuited on an existing lease (another
+        supervisor owns chroma) rather than spawning + owning ``self._proc``
+        itself. Mirrors StorageServiceSupervisor.owns_process (GH #1369): a
+        supervisor that doesn't own a process has nothing for
+        heartbeat_once() to check, so run_t3_supervisor must not enter the
+        die-non-zero heartbeat loop in that case — doing so made
+        heartbeat_once() immediately read "process is None" as "chroma
+        died" and forced exit(3) against a perfectly healthy chroma owned by
+        another supervisor, causing a launchd/systemd respawn loop."""
+        return self._proc is not None
+
     def _spawn_chroma(self) -> tuple[subprocess.Popen[bytes], int]:
         self._local_path.mkdir(parents=True, exist_ok=True)
         chroma = _find_chroma()
@@ -545,6 +559,19 @@ def run_t3_supervisor(*, config_dir: Path, local_path: Path) -> int:
     )
     try:
         sup.start()
+
+        # GH #1369, shared across tiers (RDR-149 §shared primitive) via
+        # exit_if_process_unowned: start() may have found an existing,
+        # healthy lease and short-circuited without spawning + owning a
+        # chroma process of its own, in which case there is nothing for
+        # heartbeat_once() to check (it would misread self._proc is None as
+        # "chroma died" and force exit(3)) — exit 0 now instead of entering
+        # the heartbeat loop.
+        if exit_if_process_unowned(
+            sup, flush_logging,
+            log=_log, event="t3_daemon_already_running_healthy",
+        ):
+            return 0
 
         exit_code = 0
         # A signal during start() -> stop immediately (start already published;
