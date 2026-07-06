@@ -482,6 +482,10 @@ def index_repo_cmd(
         # summary reflects only this run's backoffs.
         from nexus.retry import get_retry_stats, reset_retry_stats  # noqa: PLC0415 — deliberate function-local import (per-run retry accumulator reset)
         reset_retry_stats()
+        # GH #1371: zero the manifest-write-failure collector so the
+        # end-of-run summary reflects only this run's failures.
+        from nexus.mcp_infra import reset_manifest_write_failures  # noqa: PLC0415 — deliberate function-local import (per-run failure collector reset)
+        reset_manifest_write_failures()
 
         bar: tqdm | None = None
         n = 0
@@ -569,6 +573,22 @@ def index_repo_cmd(
                 err=True,
             )
 
+        def _emit_manifest_write_failure_summary() -> None:
+            # GH #1371: a persistent (retries-exhausted or non-retryable)
+            # catalog manifest-write failure previously surfaced only as a
+            # structlog WARNING — invisible without log capture wired up.
+            # Silent on zero failures (the common case).
+            from nexus.mcp_infra import get_manifest_write_failures  # noqa: PLC0415 — deliberate function-local import (rare branch: only on failure)
+            failed = get_manifest_write_failures()
+            if not failed:
+                return
+            click.echo(
+                f"  WARNING: catalog manifest write failed for {len(failed)} "
+                f"document(s) — they will not appear in catalog-aware "
+                f"queries. Run 'nx catalog reconcile' to repair.",
+                err=True,
+            )
+
         # nexus-7niu: per-stage timer collection. The callback appends one
         # StageTimers per file; end-of-run aggregation formats the table.
         timers_collected: list = []  # list[StageTimers]
@@ -598,6 +618,7 @@ def index_repo_cmd(
             if bar:
                 bar.close()
             _emit_retry_summary()
+            _emit_manifest_write_failure_summary()
             _emit_debug_timing()
         if not frecency_only and stats:
             rdr_indexed = stats.get("rdr_indexed", 0)

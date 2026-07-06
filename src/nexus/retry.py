@@ -499,3 +499,86 @@ def _etl_batch_with_breaker(
         else:
             breaker.consecutive_failures = 0
             return result
+
+
+# ── Catalog manifest-write transient-connection retry (GH #1371) ────────────
+#
+# The catalog manifest-write hook (mcp_infra._manifest_write_loop) is
+# best-effort by contract (nexus-zq79): any failure is swallowed into a
+# WARNING log and must never propagate to the indexing caller. Prior to
+# this fix, a transient connection blip to the catalog engine-service
+# (``httpx.ConnectError`` while the service was briefly restarting) was
+# treated identically to a permanent failure — the manifest write was lost
+# with zero retry, silently leaving ``catalog_document_chunks`` empty for
+# that document (17 of 24 audited entries in the reported incident).
+#
+# Deliberately narrower than ``_is_retryable_etl_error``: this classifies
+# CONNECTION-level failures only, never by HTTP status code. A real 4xx
+# from the catalog service (a bad payload, an FK violation) must still fail
+# on the first attempt — that is a genuine data problem, not a transient
+# network blip, and retrying it would only delay the WARNING that makes it
+# discoverable.
+
+#: 1 initial attempt + 3 retries, backing off 0.5s -> 1s -> 2s (~3.5s of
+#: added latency in the worst case). The catalog engine-service is a
+#: local-to-local connection that is usually just slow to start, not down
+#: for minutes — this is a short bounded wait, not the ETL breaker's
+#: sustained-outage pacing.
+_MANIFEST_WRITE_RETRY_DELAYS: tuple[float, ...] = (0.5, 1.0, 2.0)
+
+
+def _is_retryable_manifest_connection_error(exc: BaseException) -> bool:
+    """Return True if *exc* is a transient connection-level failure worth
+    retrying a catalog manifest write.
+
+    Checks ``httpx.TransportError`` (covers ``ConnectError``,
+    ``ConnectTimeout``, ``ReadTimeout``, etc.), the stdlib
+    ``ConnectionError``/``TimeoutError``, and — since the vector/catalog
+    HTTP clients sometimes reframe a transport drop as an application
+    error via ``raise ... from e`` — the chained ``__cause__``/
+    ``__context__``. Does NOT inspect HTTP status codes: an
+    ``httpx.HTTPStatusError`` (a real 4xx/5xx response) is never retried
+    here, unlike the migration-scoped ``_is_retryable_etl_error``.
+    """
+    if isinstance(exc, (httpx.TransportError, ConnectionError, TimeoutError)):
+        return True
+    cause = exc.__cause__ or exc.__context__
+    if isinstance(cause, (httpx.TransportError, ConnectionError, TimeoutError)):
+        return True
+    return False
+
+
+def _manifest_write_with_retry(
+    fn: Callable[..., Any],
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Call *fn* with a short bounded backoff on transient connection errors.
+
+    4 attempts total (1 initial + 3 retries per
+    :data:`_MANIFEST_WRITE_RETRY_DELAYS`). Non-connection errors (a real
+    4xx, an application-level ``ValueError``) raise immediately on the
+    first attempt — this helper only buys time against a flapping
+    connection, never against a genuine data-correctness failure. Every
+    retry emits a WARN structlog line (``manifest_write_transient_error_
+    retry``) so a flapping catalog connection is visible in production
+    logs instead of surfacing only as the hook's swallowed WARNING.
+    """
+    for attempt in range(1, len(_MANIFEST_WRITE_RETRY_DELAYS) + 2):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            if (
+                attempt > len(_MANIFEST_WRITE_RETRY_DELAYS)
+                or not _is_retryable_manifest_connection_error(exc)
+            ):
+                raise
+            delay = _MANIFEST_WRITE_RETRY_DELAYS[attempt - 1]
+            _log.warning(
+                "manifest_write_transient_error_retry",
+                attempt=attempt,
+                delay=delay,
+                error_type=type(exc).__name__,
+                error=str(exc)[:120],
+            )
+            time.sleep(delay)

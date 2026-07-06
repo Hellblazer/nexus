@@ -1002,6 +1002,43 @@ chash_dual_write_batch_hook.batch_grain = "flush"
 # inline paths) still fire it per document exactly as before.
 
 
+# ── Manifest-write failure surfacing (GH #1371) ──────────────────────────────
+#
+# manifest_write_batch_hook is best-effort by contract (nexus-zq79): it must
+# never propagate a failure to the indexing caller. Before this fix the only
+# signal on a persistent failure (a real 4xx, or a connection-class error
+# that outlasted the retry in _manifest_write_with_retry) was a single
+# structlog WARNING — invisible unless an operator had log capture wired up.
+# The reported incident found 17 of 24 audited documents silently missing
+# their catalog_document_chunks manifest linkage this way. This collector
+# lets `nx index`'s end-of-run summary surface the gap directly, with the
+# remediation command (`nx catalog reconcile`).
+_manifest_write_failures_lock = threading.Lock()
+_MANIFEST_WRITE_FAILURES: list[str] = []
+
+
+def get_manifest_write_failures() -> list[str]:
+    """Return the doc_ids whose manifest write failed this process/run.
+
+    Snapshot copy (safe to iterate without holding the lock).
+    """
+    with _manifest_write_failures_lock:
+        return list(_MANIFEST_WRITE_FAILURES)
+
+
+def reset_manifest_write_failures() -> None:
+    """Clear the collector. CLI callers invoke this at the start of an
+    indexing run so the end-of-run summary reflects only that run's
+    failures (mirrors ``nexus.retry.reset_retry_stats``)."""
+    with _manifest_write_failures_lock:
+        _MANIFEST_WRITE_FAILURES.clear()
+
+
+def _record_manifest_write_failure(doc_id: str) -> None:
+    with _manifest_write_failures_lock:
+        _MANIFEST_WRITE_FAILURES.append(doc_id)
+
+
 def manifest_write_batch_hook(
     doc_ids: list[str],
     collection: str,
@@ -1159,20 +1196,41 @@ def _manifest_write_loop(cat, by_doc) -> None:
             )
         wrote_many = False
         if full_docs:
+            from nexus.retry import _manifest_write_with_retry  # noqa: PLC0415 — deferred (leaf module, avoid import cost on the no-op path)
+
             try:
-                failed = cat.write_manifest_many(full_docs)
+                failed = _manifest_write_with_retry(cat.write_manifest_many, full_docs)
                 wrote_many = True
                 if failed:
                     import structlog  # noqa: PLC0415 — deferred (lazy logger)
                     structlog.get_logger().warning(
                         "manifest_write_many_partial", failed_doc_ids=failed,
                     )
-            except Exception as exc:  # noqa: BLE001 — 404-classify; older engine falls back per-doc
+                    for doc_id in failed:
+                        _record_manifest_write_failure(doc_id)
+            except Exception as exc:  # noqa: BLE001 — GH #1371: non-propagating by contract; 404 falls back per-doc, anything else is recorded+swallowed here
                 status = getattr(
                     getattr(exc, "response", None), "status_code", None
                 ) or getattr(exc, "code", None)
-                if status != 404:
-                    raise
+                if status == 404:
+                    pass  # older engine — fall through to the per-doc loop below
+                else:
+                    # A persistent (retries-exhausted or non-retryable) failure.
+                    # Re-attempting these same docs one-by-one below would very
+                    # likely fail again for the same reason (a dead connection
+                    # doesn't heal by switching endpoints) while burning a full
+                    # retry cycle per doc — record the whole batch as failed
+                    # instead, honouring the hook's non-propagation contract.
+                    import structlog  # noqa: PLC0415 — deferred (lazy logger)
+                    structlog.get_logger().warning(
+                        "manifest_write_many_failed",
+                        doc_ids=[doc_id for doc_id, _ in full_docs],
+                        error=str(exc),
+                        exc_info=True,
+                    )
+                    for doc_id, _ in full_docs:
+                        _record_manifest_write_failure(doc_id)
+                    wrote_many = True
         if wrote_many:
             # per-doc loop handles ONLY the continuation remainder (may
             # be empty). Critique Significant: an all-continuation batch
@@ -1181,6 +1239,8 @@ def _manifest_write_loop(cat, by_doc) -> None:
         # else: 404 or nothing eligible — per-doc loop covers everything.
         if not by_doc:
             return
+    from nexus.retry import _manifest_write_with_retry  # noqa: PLC0415 — deferred (leaf module, avoid import cost on the no-op path)
+
     for doc_id, indexed_metas in by_doc.items():
         chunks = _manifest_chunk_rows(indexed_metas)
         if all(not c["chash"] for c in chunks):
@@ -1198,23 +1258,23 @@ def _manifest_write_loop(cat, by_doc) -> None:
             # than the first, so the atomic-replace path is safe for the
             # streaming PDF / doc_indexer paths.
             if any(c["position"] == 0 for c in chunks):
-                cat.atomic_manifest_replace(doc_id, chunks)
+                _manifest_write_with_retry(cat.atomic_manifest_replace, doc_id, chunks)
                 # chunk_count parity (critique Critical): the HTTP
                 # client's replace does NOT touch documents.chunk_count
                 # (only write_many folds it in); the local Catalog does
                 # it in-txn, where this resync is an idempotent no-op.
                 _resync = getattr(cat, "resync_chunk_count_cache", None)
                 if callable(_resync):
-                    _resync(doc_id)
+                    _manifest_write_with_retry(_resync, doc_id)
             else:
-                cat.append_manifest_chunks(doc_id, chunks)
+                _manifest_write_with_retry(cat.append_manifest_chunks, doc_id, chunks)
                 # nexus-zq79: documents.chunk_count is a denormalised cache of
                 # COUNT(*) document_chunks. The catalog-register hook runs BEFORE
                 # per-file indexing (tumbler injection requires it), so chunk_count
                 # is initialised to 0; nothing else updates it for code/prose
                 # indexers post-Phase-3. Routed via Catalog public API to satisfy
                 # the projector-only-writes invariant (RDR-101 Phase 3 ε).
-                cat.resync_chunk_count_cache(doc_id)
+                _manifest_write_with_retry(cat.resync_chunk_count_cache, doc_id)
         except Exception:  # noqa: BLE001 — manifest hook non-propagating by contract; logged at WARNING for discoverability
             # Post-Phase-3 the manifest hook is load-bearing: a failure
             # leaves the catalog manifest empty and chunk_count=0 for
@@ -1222,10 +1282,15 @@ def _manifest_write_loop(cat, by_doc) -> None:
             # requires non-propagation (best-effort hook) but the log
             # severity is WARNING so failures are discoverable in
             # production log streams without DEBUG enabled. nexus-zq79.
+            # GH #1371: also recorded in the process-local failure collector
+            # so the CLI's end-of-run summary can surface it (and point at
+            # `nx catalog reconcile`) instead of it being visible only to an
+            # operator tailing structlog output.
             import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
             structlog.get_logger().warning(
                 "manifest_write_hook_failed", doc_id=doc_id, exc_info=True
             )
+            _record_manifest_write_failure(doc_id)
 
 
 # ── Version compatibility check (RDR-076) ─────────────────────────────────────
