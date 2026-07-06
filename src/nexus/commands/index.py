@@ -833,7 +833,10 @@ def run_collection_postprocessing(
 
     def _say(msg: str) -> None:
         if not quiet:
-            click.echo(msg)
+            try:
+                click.echo(msg)
+            except Exception:  # noqa: BLE001 — progress echo is cosmetic; a broken/closed stdout must not abort the postprocessing chain (nexus-47ubt)
+                _log.debug("postprocessing_echo_failed", exc_info=True)
 
     cfg = _load_cfg()
     import time as _time  # noqa: PLC0415 — phase-timer only (nexus-duoak heatmap attribution)
@@ -842,7 +845,8 @@ def run_collection_postprocessing(
         total_topics = 0
         _tax_t0 = _time.monotonic()
         with T2Database(default_db_path()) as db:  # epsilon-allow: read-only: discover/project compute use a local chroma client; all pure-T2 writes routed via t2_index_write (RDR-151 Phase 3, nexus-uzay8)
-            for col_name in collections:
+            for _tax_i, col_name in enumerate(collections, start=1):
+                _say(f"  [{_tax_i}/{len(collections)}] Taxonomy: discovering {col_name}...")
                 try:
                     n = _discover_taxonomy(col_name, db.taxonomy, t3)
                     total_topics += n
