@@ -630,6 +630,95 @@ class TestHttpCatalogClientRoundTrip:
         assert [str(t) for t in out] == ["1.1.1", "1.1.2", "1.1.3"]
         assert all(isinstance(t, Tumbler) for t in out)
 
+    def test_update_many_pages_and_preserves_order(
+        self, client: HttpCatalogClient
+    ) -> None:
+        # nexus-xedhp: 2500 updates page at 1000 (1000+1000+500); counts come
+        # back aligned 1:1 with updates in input order across the concatenation.
+        updates = [{"tumbler": f"1.1.{i}", "head_hash": "abc"} for i in range(2500)]
+        page_sizes: list[int] = []
+
+        def _fake_post(path: str, body: dict | None = None) -> Any:
+            assert path == "/update_many"
+            page = body["updates"]
+            page_sizes.append(len(page))
+            return {"updated": [1] * len(page)}
+
+        client._post = _fake_post  # type: ignore[method-assign]
+        out = client.update_many(updates)
+
+        assert page_sizes == [1000, 1000, 500]
+        assert len(out) == 2500
+        assert all(c == 1 for c in out)
+
+    def test_update_many_page_failure_falls_back_per_doc(
+        self, client: HttpCatalogClient
+    ) -> None:
+        # nexus-xedhp: a whole-page failure must not sink the run — it falls
+        # back to per-doc update() (POST /update), preserving per-file
+        # isolation, mirroring register_many's precedent.
+        updates = [{"tumbler": f"1.1.{i}", "head_hash": "abc"} for i in range(3)]
+        single_calls: list[str] = []
+
+        def _fake_post(path: str, body: dict | None = None) -> Any:
+            if path == "/update_many":
+                raise RuntimeError("500 batch failed")
+            assert path == "/update"
+            single_calls.append(body["tumbler"])
+            return {"updated": 1}
+
+        client._post = _fake_post  # type: ignore[method-assign]
+        out = client.update_many(updates)
+
+        assert single_calls == ["1.1.0", "1.1.1", "1.1.2"]
+        assert out == [1, 1, 1]
+
+    def test_update_many_empty_returns_empty(self, client: HttpCatalogClient) -> None:
+        assert client.update_many([]) == []
+
+    def test_delete_many_pages_and_returns_deleted_set(
+        self, client: HttpCatalogClient
+    ) -> None:
+        # nexus-xedhp: 2500 tumblers page at 1000 (1000+1000+500).
+        tumblers = [f"1.1.{i}" for i in range(2500)]
+        page_sizes: list[int] = []
+
+        def _fake_post(path: str, body: dict | None = None) -> Any:
+            assert path == "/delete_many"
+            page = body["tumblers"]
+            page_sizes.append(len(page))
+            return {"deleted": page}
+
+        client._post = _fake_post  # type: ignore[method-assign]
+        out = client.delete_many(tumblers)
+
+        assert page_sizes == [1000, 1000, 500]
+        assert out == set(tumblers)
+
+    def test_delete_many_page_failure_falls_back_per_doc(
+        self, client: HttpCatalogClient
+    ) -> None:
+        # nexus-xedhp: a whole-page failure must not sink the run — it falls
+        # back to per-doc delete_document() (POST /delete).
+        tumblers = ["1.1.0", "1.1.1", "1.1.2"]
+        single_calls: list[str] = []
+
+        def _fake_post(path: str, body: dict | None = None) -> Any:
+            if path == "/delete_many":
+                raise RuntimeError("500 batch failed")
+            assert path == "/delete"
+            single_calls.append(body["tumbler"])
+            return {"deleted": 1}
+
+        client._post = _fake_post  # type: ignore[method-assign]
+        out = client.delete_many(tumblers)
+
+        assert single_calls == tumblers
+        assert out == set(tumblers)
+
+    def test_delete_many_empty_returns_empty(self, client: HttpCatalogClient) -> None:
+        assert client.delete_many([]) == set()
+
     def test_register_no_bib_fields(self, client: HttpCatalogClient) -> None:
         """register() must NOT accept bib_year/bib_authors — CatalogEntry has none."""
         import inspect

@@ -126,6 +126,9 @@ _MANIFEST_GET_MANY_PAGE = 1000
 #: cap (nexus-9dvqy). ~24 columns/row keeps a full page under PostgreSQL's
 #: 32767 bind-parameter ceiling.
 _REGISTER_MANY_PAGE = 1000
+#: Page size for update_many POSTs — same MAX_BATCH_DOC_IDS cap as
+#: register_many (nexus-xedhp).
+_UPDATE_MANY_PAGE = 1000
 
 
 def _coerce_legacy_grandfathered(d: dict) -> dict:
@@ -824,9 +827,91 @@ class HttpCatalogClient:
     def update(self, tumbler: Tumbler | str, **fields: Any) -> None:
         self._post("/update", {"tumbler": str(tumbler), **fields})
 
+    def update_many(self, updates: list[dict]) -> list[int]:
+        """Batch-update N documents' fields; returns per-entry update counts
+        aligned 1:1 with *updates* (nexus-xedhp, duoak.11 follow-up).
+
+        Each dict carries a ``"tumbler"`` key plus the same keyword fields
+        as :meth:`update` (``head_hash``, ``physical_collection``, ``meta``,
+        ``source_mtime``, ...). Replaces the per-changed-doc ``update()``
+        loop in the indexer's catalog hook Pass 1 — a HEAD bump (any new git
+        commit) flips every indexed doc's stored ``head_hash`` to "changed",
+        so a warm re-index without this batched path pays one serial WAN
+        round trip per file (measured: 175.5s / 1718 files, ~102ms/file).
+
+        Paged at :data:`_UPDATE_MANY_PAGE` to stay under the server's
+        MAX_BATCH_DOC_IDS cap. A page that fails as a whole falls back to
+        per-doc :meth:`update`, preserving the per-file failure isolation
+        the caller relies on (mirrors :meth:`register_many`).
+        """
+        if not updates:
+            return []
+        out: list[int] = []
+        for start in range(0, len(updates), _UPDATE_MANY_PAGE):
+            page = updates[start : start + _UPDATE_MANY_PAGE]
+            try:
+                result = self._post("/update_many", {"updates": page})
+                counts = (result or {}).get("updated", [])
+                if len(counts) != len(page):
+                    raise ValueError(
+                        f"update_many returned {len(counts)} counts "
+                        f"for {len(page)} updates"
+                    )
+                out.extend(int(c) for c in counts)
+            except Exception:  # noqa: BLE001 — page failed; fall back to resilient per-doc update
+                _log.warning(
+                    "update_many_page_failed_falling_back_per_doc",
+                    page_size=len(page),
+                    exc_info=True,
+                )
+                for d in page:
+                    tumbler = d.get("tumbler", "")
+                    rest = {k: v for k, v in d.items() if k != "tumbler"}
+                    try:
+                        self.update(tumbler, **rest)
+                        out.append(1)
+                    except Exception:  # noqa: BLE001 — per-doc fallback failure isolation (mirrors register_many's per-doc try/except upstream in the indexer)
+                        out.append(0)
+        return out
+
     def delete_document(self, tumbler: Tumbler | str) -> bool:
         result = self._post("/delete", {"tumbler": str(tumbler)})
         return bool(result.get("deleted", 0) > 0 if result else False)
+
+    def delete_many(self, tumblers: list[Tumbler | str]) -> set[str]:
+        """Batch-tombstone N documents; returns the subset of *tumblers*
+        (as strings) that were actually tombstoned (nexus-xedhp: completes
+        the update_many/register_many/delete_many batch trio).
+
+        Already-deleted or non-existent tumblers are silently excluded from
+        the result, same idempotent semantics as :meth:`delete_document`.
+        Paged at :data:`_UPDATE_MANY_PAGE` to stay under the server's
+        MAX_BATCH_DOC_IDS cap. A page that fails as a whole falls back to
+        per-doc :meth:`delete_document`, preserving per-file failure
+        isolation (mirrors :meth:`register_many`).
+        """
+        if not tumblers:
+            return set()
+        out: set[str] = set()
+        str_tumblers = [str(t) for t in tumblers]
+        for start in range(0, len(str_tumblers), _UPDATE_MANY_PAGE):
+            page = str_tumblers[start : start + _UPDATE_MANY_PAGE]
+            try:
+                result = self._post("/delete_many", {"tumblers": page})
+                out.update((result or {}).get("deleted", []))
+            except Exception:  # noqa: BLE001 — page failed; fall back to resilient per-doc delete
+                _log.warning(
+                    "delete_many_page_failed_falling_back_per_doc",
+                    page_size=len(page),
+                    exc_info=True,
+                )
+                for t in page:
+                    try:
+                        if self.delete_document(t):
+                            out.add(t)
+                    except Exception:  # noqa: BLE001 — per-doc fallback failure isolation (mirrors register_many's per-doc try/except upstream)
+                        pass
+        return out
 
     def find(
         self, query: str, *, content_type: str | None = None

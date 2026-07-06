@@ -36,6 +36,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
+import org.jooq.Query;
 import org.jooq.SelectField;
 import org.jooq.Table;
 import org.jooq.UpdateSetMoreStep;
@@ -669,6 +670,102 @@ public final class CatalogRepository {
 
     public int updateDocument(String tenant, String tumbler, Map<String, Object> fields) {
         if (fields.isEmpty()) return 0;
+        return tenantScope.withTenant(tenant, ctx -> {
+            Query query = buildUpdateDocumentQuery(ctx, tenant, tumbler, fields);
+            return query == null ? 0 : query.execute();
+        });
+    }
+
+    /**
+     * Batch-update mutable document fields for N documents in ONE round trip
+     * (nexus-xedhp, duoak.11 follow-up to the register_many fix above).
+     *
+     * <p>{@code writer.update()} per changed doc was the WAN-round-trip sink:
+     * a HEAD bump (any new git commit) flips every indexed doc's stored
+     * {@code head_hash} to "changed", forcing the indexer's catalog hook
+     * through one serial {@code POST /update} per file — 175.5s / 1718 files
+     * (~102ms/file) on this repo's own shakeout. Each entry in *updates*
+     * carries the same shape as {@link #updateDocument}'s {@code fields} map
+     * plus a {@code "tumbler"} key identifying the row.
+     *
+     * <p>Executed as ONE {@code ctx.batch(...)} — i.e. one JDBC
+     * {@code Statement.addBatch()}/{@code executeBatch()} round trip to
+     * Postgres, not N sequential {@code execute()} calls. This is standard
+     * JDBC batching, the same mechanism used for heterogeneous-shape batch
+     * writes throughout the JDBC ecosystem; jOOQ's {@code batch(Query...)}
+     * groups identical-SQL queries into one {@code PreparedStatement} batch
+     * and any remaining distinct-SQL queries into one {@code Statement}
+     * batch, flushing everything via a single {@code executeBatch()} — never
+     * a per-query round trip. (An attempt at a single hand-built
+     * multi-row {@code UPDATE ... FROM (VALUES ...)} statement was tried
+     * here first and reverted: jOOQ's typed {@code DSL.values(RowN...)} API
+     * requires uniform per-column types across all rows, which this
+     * whitelist's heterogeneous optional fields can't satisfy without
+     * fighting Postgres's NULL-parameter type-inference rules; the raw-SQL
+     * {@code DSL.table("(VALUES {0})", ...)} template compiles but its
+     * `.field(...)` accessors don't resolve column metadata at all — verified
+     * against the real Postgres testcontainer suite below, not assumed.)
+     *
+     * <p>Per-doc failure isolation mirrors {@code register_many}: a single
+     * malformed entry (missing tumbler, non-updatable column) is excluded
+     * from the batch and marked {@code -1} in the result rather than
+     * aborting the whole call — the caller's existing per-file try/except
+     * ghost-class-isolation contract depends on partial-batch survivability.
+     *
+     * @return per-index update counts aligned 1:1 with the input list:
+     *         {@code 1} updated, {@code 0} not found/tombstoned/no-op,
+     *         {@code -1} malformed entry (build-time rejection, never sent).
+     */
+    public List<Integer> updateDocumentsMany(String tenant, List<Map<String, Object>> updates) {
+        if (updates.isEmpty()) return List.of();
+        return tenantScope.withTenant(tenant, ctx -> {
+            Integer[] resultSlots = new Integer[updates.size()];
+            var queries = new ArrayList<Query>();
+            var queryIndexes = new ArrayList<Integer>();  // index into `updates` for each entry in `queries`
+
+            for (int i = 0; i < updates.size(); i++) {
+                var upd = updates.get(i);
+                Object tumblerObj = upd.get("tumbler");
+                if (!(tumblerObj instanceof String tumbler) || tumbler.isBlank()) {
+                    resultSlots[i] = -1;
+                    continue;
+                }
+                Map<String, Object> fields = new LinkedHashMap<>(upd);
+                fields.remove("tumbler");
+                Query query;
+                try {
+                    query = buildUpdateDocumentQuery(ctx, tenant, tumbler, fields);
+                } catch (IllegalArgumentException e) {
+                    resultSlots[i] = -1;
+                    continue;
+                }
+                if (query == null) {
+                    resultSlots[i] = 0;
+                    continue;
+                }
+                queryIndexes.add(i);
+                queries.add(query);
+            }
+            if (!queries.isEmpty()) {
+                int[] batchResults = ctx.batch(queries).execute();
+                for (int q = 0; q < queryIndexes.size(); q++) {
+                    resultSlots[queryIndexes.get(q)] = batchResults[q];
+                }
+            }
+            return java.util.Arrays.asList(resultSlots);
+        });
+    }
+
+    /**
+     * Shared SET-clause builder for {@link #updateDocument} and
+     * {@link #updateDocumentsMany} — same column whitelist, same
+     * {@code deleted_at}-strip, same {@code meta} jsonb-merge semantics.
+     * Returns {@code null} when *fields* yields no settable column (mirrors
+     * {@code updateDocument}'s 0-row short-circuit).
+     */
+    private Query buildUpdateDocumentQuery(
+        DSLContext ctx, String tenant, String tumbler, Map<String, Object> fields
+    ) {
         for (String key : fields.keySet()) {
             // deleted_at keeps its documented silent-strip contract (callers must use
             // trash/restore); every OTHER unknown key is a caller error — fail loud.
@@ -678,43 +775,40 @@ public final class CatalogRepository {
                     + "' (allowed: " + UPDATABLE_DOC_COLUMNS + ")");
             }
         }
-        return tenantScope.withTenant(tenant, ctx -> {
-            var step = ctx.update(CATALOG_DOCUMENTS);
-            UpdateSetMoreStep<?> more = null;
-            for (var e : fields.entrySet()) {
-                if (e.getValue() == null) continue;
-                // Strip deleted_at — must not be settable via updateDocument
-                if ("deleted_at".equals(e.getKey())) continue;
-                // metadata is a jsonb column: callers pass it as an object (or JSON
-                // string) under "meta"/"metadata". A bare set() of a Map fails with
-                // "LinkedHashMap is not supported in dialect POSTGRES"; JSON-encode and
-                // bind as jsonb, mirroring upsertDocument (RDR-168 nexus-njrcn.7).
-                // nexus-ke45f: MERGE, not replace — local Catalog.update() does
-                // dict.update (add/overwrite keys, never remove), and every
-                // writer.update(meta=...) caller (enrich write-back, catalog
-                // hook, dt stamp, remediation) is written against that
-                // contract; the bare SET silently dropped pre-existing keys
-                // in service mode. jsonb_concat == the || operator.
-                if ("meta".equals(e.getKey()) || "metadata".equals(e.getKey())) {
-                    Field<String> merged = DSL.function("jsonb_concat", String.class,
-                        DSL.coalesce(F_DOC_META, jsonbVal("{}")),
-                        jsonbVal(jsonOrNull(e.getValue())));
-                    more = (more == null)
-                        ? step.set(F_DOC_META, merged)
-                        : more.set(F_DOC_META, merged);
-                    continue;
-                }
-                @SuppressWarnings("unchecked")
-                Field<Object> f = (Field<Object>) DSL.field(DSL.name("catalog_documents", e.getKey()));
-                more = (more == null) ? step.set(f, e.getValue()) : more.set(f, e.getValue());
+        var step = ctx.update(CATALOG_DOCUMENTS);
+        UpdateSetMoreStep<?> more = null;
+        for (var e : fields.entrySet()) {
+            if (e.getValue() == null) continue;
+            // Strip deleted_at — must not be settable via updateDocument
+            if ("deleted_at".equals(e.getKey())) continue;
+            // metadata is a jsonb column: callers pass it as an object (or JSON
+            // string) under "meta"/"metadata". A bare set() of a Map fails with
+            // "LinkedHashMap is not supported in dialect POSTGRES"; JSON-encode and
+            // bind as jsonb, mirroring upsertDocument (RDR-168 nexus-njrcn.7).
+            // nexus-ke45f: MERGE, not replace — local Catalog.update() does
+            // dict.update (add/overwrite keys, never remove), and every
+            // writer.update(meta=...) caller (enrich write-back, catalog
+            // hook, dt stamp, remediation) is written against that
+            // contract; the bare SET silently dropped pre-existing keys
+            // in service mode. jsonb_concat == the || operator.
+            if ("meta".equals(e.getKey()) || "metadata".equals(e.getKey())) {
+                Field<String> merged = DSL.function("jsonb_concat", String.class,
+                    DSL.coalesce(F_DOC_META, jsonbVal("{}")),
+                    jsonbVal(jsonOrNull(e.getValue())));
+                more = (more == null)
+                    ? step.set(F_DOC_META, merged)
+                    : more.set(F_DOC_META, merged);
+                continue;
             }
-            if (more == null) return 0;
-            // AND deleted_at IS NULL: refuse to update tombstoned documents
-            return more.where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
-                              .and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
-                              .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
-                       .execute();
-        });
+            @SuppressWarnings("unchecked")
+            Field<Object> f = (Field<Object>) DSL.field(DSL.name("catalog_documents", e.getKey()));
+            more = (more == null) ? step.set(f, e.getValue()) : more.set(f, e.getValue());
+        }
+        if (more == null) return null;
+        // AND deleted_at IS NULL: refuse to update tombstoned documents
+        return more.where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                          .and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
+                          .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()));
     }
 
     /**
@@ -731,6 +825,38 @@ public final class CatalogRepository {
                .set(CATALOG_DOCUMENTS.DELETED_AT, DSL.currentOffsetDateTime())
                .where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                .execute()
+        );
+    }
+
+    /**
+     * Batch-tombstone N documents in ONE round trip (nexus-xedhp follow-up:
+     * completes the update_many/register_many/delete_many batch trio).
+     *
+     * <p>Unlike {@link #updateDocumentsMany}, every row shares the identical
+     * {@code SET deleted_at = NOW()} — no per-row heterogeneous values, so a
+     * plain {@code WHERE tumbler = ANY(?)} multi-row match is both simplest
+     * and a genuine single SQL statement (no VALUES-table / batch-API
+     * ambiguity to navigate). {@code RETURNING tumbler} identifies exactly
+     * which of the input tumblers were actually tombstoned (already-deleted
+     * or non-existent tumblers are silently excluded, same as the single-doc
+     * {@link #deleteDocument}'s idempotent 0-return).
+     *
+     * @return the SET of tumblers that were tombstoned by this call (a
+     *         subset of *tumblers*; order not significant — callers map
+     *         membership, not position, unlike updateDocumentsMany's
+     *         positional contract, since there's only one outcome shape
+     *         here: deleted or not).
+     */
+    public Set<String> deleteDocumentsMany(String tenant, List<String> tumblers) {
+        if (tumblers.isEmpty()) return Set.of();
+        return tenantScope.withTenant(tenant, ctx ->
+            new java.util.HashSet<>(ctx.update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.DELETED_AT, DSL.currentOffsetDateTime())
+                .where(CATALOG_DOCUMENTS.TUMBLER.in(tumblers)
+                       .and(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant))
+                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                .returning(CATALOG_DOCUMENTS.TUMBLER)
+                .fetch(CATALOG_DOCUMENTS.TUMBLER))
         );
     }
 

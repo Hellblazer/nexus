@@ -379,21 +379,40 @@ def make_catalog_writer(
     return CatalogWriter(config_dir=config_dir, priority=priority)
 
 
+#: nexus-xedhp: extra ops allowed ONLY on the service-mode writer, layered on
+#: top of CATALOG_WRITE_OPS rather than added to that shared whitelist. The
+#: SQLite/daemon-mode CatalogWriter (below) has no ``update_many`` RPC op in
+#: its dispatch table; adding it to the shared CATALOG_WRITE_OPS would make
+#: ``getattr(writer, "update_many", None)`` return a bound proxy method there
+#: too (CatalogWriter's __getattr__ forwards ANY whitelisted name to a
+#: dynamic RPC proxy without validating the daemon actually implements it),
+#: defeating the ``callable(getattr(cat, "update_many", None))`` capability
+#: check the indexer's catalog hook uses to decide whether to batch — it
+#: would look supported and then fail deep in the per-file loop instead of
+#: safely falling back. Keeping this service-only means the same capability
+#: check is honest for both backends: SQLite mode always falls back to the
+#: existing serial ``update()`` loop (unchanged behaviour); service mode
+#: gets the batched path.
+_SERVICE_ONLY_WRITE_OPS: frozenset[str] = frozenset({"update_many", "delete_many"})
+
+
 class _ServiceCatalogWriter:
     """Write-only proxy backed by :class:`HttpCatalogClient` in service mode.
 
     Enforces the same :data:`CATALOG_WRITE_OPS` whitelist as
-    :class:`CatalogWriter`.  Reads are blocked.
+    :class:`CatalogWriter`, plus :data:`_SERVICE_ONLY_WRITE_OPS`. Reads are
+    blocked.
     """
 
     def __init__(self, client: Any) -> None:
         self._client = client
 
     def __getattr__(self, name: str) -> Any:
-        if name not in CATALOG_WRITE_OPS:
+        if name not in CATALOG_WRITE_OPS and name not in _SERVICE_ONLY_WRITE_OPS:
             raise AttributeError(
                 f"{name!r} is not a catalog write op; _ServiceCatalogWriter "
-                f"exposes only the {len(CATALOG_WRITE_OPS)}-op whitelist. "
+                f"exposes only the {len(CATALOG_WRITE_OPS)}-op whitelist "
+                f"(+ {sorted(_SERVICE_ONLY_WRITE_OPS)}). "
                 f"For reads use make_catalog_reader()."
             )
         return getattr(self._client, name)

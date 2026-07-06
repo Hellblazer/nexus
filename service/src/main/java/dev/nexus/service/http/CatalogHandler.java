@@ -33,6 +33,8 @@ import java.util.*;
  *   GET   /v1/catalog/list               list documents (paginated)
  *   GET   /v1/catalog/search             FTS search
  *   POST  /v1/catalog/update             update document fields
+ *   POST  /v1/catalog/update_many        batch-update fields for N documents (nexus-xedhp)
+ *   POST  /v1/catalog/delete_many        batch-tombstone N documents (nexus-xedhp)
  *   DELETE /v1/catalog/delete            delete document by tumbler
  *   POST  /v1/catalog/link               upsert link
  *   POST  /v1/catalog/unlink             delete link
@@ -118,7 +120,9 @@ public final class CatalogHandler implements HttpHandler {
                 case "/list"                  -> handleList(exchange, tenant, method);
                 case "/search"                -> handleSearch(exchange, tenant, method);
                 case "/update"                -> handleUpdate(exchange, tenant, method);
+                case "/update_many"           -> handleUpdateMany(exchange, tenant, method);
                 case "/delete"                -> handleDelete(exchange, tenant, method);
+                case "/delete_many"           -> handleDeleteMany(exchange, tenant, method);
                 case "/resolve"               -> handleResolve(exchange, tenant, method);
                 case "/stats"                 -> handleStats(exchange, tenant, method);
 
@@ -311,6 +315,64 @@ public final class CatalogHandler implements HttpHandler {
         fields.remove("tumbler");
         int updated = repo.updateDocument(tenant, tumbler, fields);
         HttpUtil.send(exchange, 200, "{\"updated\":" + updated + "}");
+    }
+
+    /**
+     * POST /v1/catalog/update_many — batch-update N documents' mutable fields
+     * in ONE round trip (nexus-xedhp, duoak.11 follow-up).
+     *
+     * <p>Body: {"updates": [{"tumbler": "1.1.3", "head_hash": "...", ...}, ...]}
+     * Response: {"updated": [1, 1, 0, ...]}  (per-entry update count, aligned
+     * 1:1 with the input — 0 means not found / tombstoned / malformed entry;
+     * a malformed or non-updatable-column entry does NOT abort the batch,
+     * mirroring register_many's per-doc failure isolation).
+     *
+     * <p>Capped at {@value #MAX_BATCH_DOC_IDS} rows, same bind-limit rationale
+     * as register_many.
+     */
+    @SuppressWarnings("unchecked")
+    private void handleUpdateMany(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        Object raw = body.get("updates");
+        List<Map<String, Object>> updates = raw instanceof List<?> l
+            ? l.stream().filter(o -> o instanceof Map<?, ?>).map(o -> (Map<String, Object>) o).toList()
+            : List.of();
+        if (updates.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many updates (max "
+                + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
+        var counts = repo.updateDocumentsMany(tenant, updates);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("updated", counts)));
+    }
+
+    /**
+     * POST /v1/catalog/delete_many — batch-tombstone N documents in ONE
+     * round trip (nexus-xedhp: completes the update_many/register_many/
+     * delete_many batch trio).
+     *
+     * <p>Body: {"tumblers": ["1.1.3", "1.1.4", ...]}
+     * Response: {"deleted": ["1.1.3", ...]}  (the subset of input tumblers
+     * that were actually tombstoned — already-deleted or non-existent
+     * tumblers are silently excluded, same idempotent semantics as the
+     * single-doc DELETE).
+     *
+     * <p>Capped at {@value #MAX_BATCH_DOC_IDS} rows, same bind-limit
+     * rationale as register_many / update_many.
+     */
+    private void handleDeleteMany(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        Object raw = body.get("tumblers");
+        List<String> tumblers = raw instanceof List<?> l
+            ? l.stream().filter(o -> o instanceof String).map(o -> (String) o).toList()
+            : List.of();
+        if (tumblers.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many tumblers (max "
+                + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
+        var deleted = repo.deleteDocumentsMany(tenant, tumblers);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("deleted", deleted)));
     }
 
     /** DELETE /v1/catalog/delete?tumbler=X */
