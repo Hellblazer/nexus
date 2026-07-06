@@ -35,6 +35,7 @@ import java.util.Map;
  *   POST /v1/vectors/hybrid-search   pgvector hybrid fusion (tsvector+pg_trgm gate, vector rank) — RDR-155 P3
  *   POST /v1/vectors/store-put       single-chunk put (MCP store_put path)
  *   POST /v1/vectors/get             get chunks by metadata where-filter (incremental-sync staleness check)
+ *   POST /v1/vectors/get-all-metadata  ids+metadata for an ENTIRE collection in one round trip (nexus-duoak)
  *   POST /v1/vectors/store-get       fetch chunks by IDs (MCP store_get/store_get_many)
  *   POST /v1/vectors/store-list      list collection (MCP store_list)
  *   POST /v1/vectors/store-delete    delete by IDs (MCP store_delete)
@@ -125,6 +126,7 @@ public final class VectorHandler implements HttpHandler {
                 case "/search-graph-hop"       -> handleSearchGraphHop(exchange, method);        // RDR-156 P4 (houg9)
                 case "/store-put"     -> handleStorePut(exchange, method);
                 case "/get"           -> handleGet(exchange, method);
+                case "/get-all-metadata" -> handleGetAllMetadata(exchange, method);
                 case "/store-get"     -> handleStoreGet(exchange, method);
                 case "/get-embeddings" -> handleGetEmbeddings(exchange, method);
                 case "/store-list"    -> handleStoreList(exchange, method);
@@ -147,6 +149,14 @@ public final class VectorHandler implements HttpHandler {
         } catch (IllegalArgumentException e) {
             log.debug("event=vector_bad_request op={} error={}", op, e.getMessage());
             HttpUtil.send(exchange, 400, json(Map.of("error", e.getMessage())));
+        } catch (IllegalStateException e) {
+            // get-all-metadata's row-count cap (well-formed request, just too
+            // big for the single-round-trip fast path) — 422 distinguishes
+            // this from a malformed request (400) or a real server error
+            // (500); the Python client falls back to paginated /get on any
+            // non-2xx, so the exact code just needs to be non-2xx and logged.
+            log.debug("event=vector_get_all_metadata_row_cap_exceeded op={} error={}", op, e.getMessage());
+            HttpUtil.send(exchange, 422, json(Map.of("error", e.getMessage())));
         } catch (Exception e) {
             // Shared typed-DB-error ladder: pool-exhaustion 503 + class-23 409
             // (nexus-h8rf6.2 / nexus-7e057) — see HttpUtil.sendTypedDbError.
@@ -484,6 +494,33 @@ public final class VectorHandler implements HttpHandler {
         boolean includeSourceUri       = optBool(body, "include_source_uri", false);
 
         var result = repo.getWhere(tenant, collection, where, limit, offset, includeSourceUri);
+        HttpUtil.send(ex, 200, json(result));
+    }
+
+    /**
+     * POST /v1/vectors/get-all-metadata (nexus-duoak follow-up).
+     *
+     * <p>ids + metadata for EVERY chunk in a collection in ONE round trip —
+     * collapses the ``ceil(chunk_count / 300)`` client round trips the
+     * indexer's staleness-cache-build phase otherwise pays through paginated
+     * {@code /v1/vectors/get} calls. No {@code documents} field (staleness
+     * only needs metadata) and no pagination — see
+     * {@link PgVectorRepository#getAllMetadata}.
+     *
+     * <p>Request: {"collection": "...", "where": {...}}  (where optional)
+     * <p>Response 200: {"ids": [...], "metadatas": [...]}
+     * <p>Response 422: row count exceeds {@link PgVectorRepository#GET_ALL_METADATA_MAX_ROWS}
+     *   — caller falls back to paginated {@code /get}.
+     */
+    private void handleGetAllMetadata(HttpExchange ex, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var repo   = requirePgRepo(ex);
+        var tenant = requireTenant(ex);
+        Map<String, Object> body = readBody(ex);
+        String collection         = requireString(body, "collection");
+        Map<String, Object> where = optMap(body, "where");
+
+        var result = repo.getAllMetadata(tenant, collection, where);
         HttpUtil.send(ex, 200, json(result));
     }
 

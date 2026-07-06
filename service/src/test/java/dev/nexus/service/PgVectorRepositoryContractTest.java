@@ -676,6 +676,79 @@ class PgVectorRepositoryContractTest {
     }
 
     @Test
+    void getAllMetadata_returnsEveryChunkInOneCall_noDocuments() {
+        // nexus-duoak follow-up: collapses the staleness-cache-build phase's
+        // paginated /get loop into one round trip. No "documents" key in the
+        // response -- staleness only needs metadata, keeping the payload lean.
+        String col = "code__getallmeta__voyage-code-3__v1";
+        embedder1024.register("gam a", 1.0f, 0.0f);
+        embedder1024.register("gam b", 0.8f, 0.6f);
+        embedder1024.register("gam c", 0.6f, 0.8f);
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of("gama0000000000000000000000000000", "gamb0000000000000000000000000000",
+                    "gamc0000000000000000000000000000"),
+            List.of("gam a", "gam b", "gam c"),
+            List.of(Map.of("chunk_text_hash", "ha"), Map.of("chunk_text_hash", "hb"),
+                    Map.of("chunk_text_hash", "hc")));
+
+        var result = repo1024.getAllMetadata(TENANT_A, col, null);
+
+        assertThat(result).doesNotContainKey("documents");
+        @SuppressWarnings("unchecked")
+        List<String> ids = (List<String>) result.get("ids");
+        assertThat(ids).containsExactlyInAnyOrder(
+            "gama0000000000000000000000000000", "gamb0000000000000000000000000000",
+            "gamc0000000000000000000000000000");
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> metas = (List<Map<String, Object>>) result.get("metadatas");
+        assertThat(metas).hasSize(3);
+        assertThat(metas).extracting(m -> m.get("chunk_text_hash"))
+            .containsExactlyInAnyOrder("ha", "hb", "hc");
+    }
+
+    @Test
+    void getAllMetadata_withWhere_filtersExactly() {
+        String col = "code__getallmetawhere__voyage-code-3__v1";
+        embedder1024.register("gamw a", 1.0f, 0.0f);
+        embedder1024.register("gamw b", 0.8f, 0.6f);
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of("gawa0000000000000000000000000000", "gawb0000000000000000000000000000"),
+            List.of("gamw a", "gamw b"),
+            List.of(Map.of("kind", "a"), Map.of("kind", "b")));
+
+        @SuppressWarnings("unchecked")
+        List<String> ids = (List<String>) repo1024.getAllMetadata(
+            TENANT_A, col, Map.of("kind", "a")).get("ids");
+
+        assertThat(ids).containsExactly("gawa0000000000000000000000000000");
+    }
+
+    @Test
+    void getAllMetadata_scopedToTenant_noCrossTenantLeak() {
+        String col = "code__getallmetatenant__voyage-code-3__v1";
+        embedder1024.register("gamt a", 1.0f, 0.0f);
+        embedder1024.register("gamt b", 0.8f, 0.6f);
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of("gata0000000000000000000000000000"), List.of("gamt a"), List.of(Map.of()));
+        repo1024.upsertChunks(TENANT_B, col,
+            List.of("gatb0000000000000000000000000000"), List.of("gamt b"), List.of(Map.of()));
+
+        @SuppressWarnings("unchecked")
+        List<String> idsA = (List<String>) repo1024.getAllMetadata(TENANT_A, col, null).get("ids");
+
+        assertThat(idsA).containsExactly("gata0000000000000000000000000000");
+    }
+
+    @Test
+    void getAllMetadata_emptyCollection_returnsEmptyLists() {
+        var result = repo1024.getAllMetadata(
+            TENANT_A, "code__getallmetaempty__voyage-code-3__v1", null);
+
+        assertThat((List<?>) result.get("ids")).isEmpty();
+        assertThat((List<?>) result.get("metadatas")).isEmpty();
+    }
+
+    @Test
     void search_mixedDimCollections_failsLoud() {
         // COL_CODE_1024 dispatches to chunks_1024, COL_BGE_768 to chunks_768: one query
         // vector cannot serve both spaces. Must fail loud, never silently skip or union.

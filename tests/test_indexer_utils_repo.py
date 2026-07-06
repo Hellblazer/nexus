@@ -235,7 +235,7 @@ class TestStalenessCache:
     def test_build_indexes_doc_id_and_source_path(self) -> None:
         """One sweep of the collection populates both the doc_id-keyed
         and source_path-keyed indexes from chunk metadata."""
-        col = MagicMock()
+        col = MagicMock(spec=["get", "name"])
         # Two chunks per file is realistic; both chunks share the same
         # content_hash + embedding_model so they collapse to a single
         # cache entry per (doc_id, source_path) pair.
@@ -282,7 +282,7 @@ class TestStalenessCache:
         win evaporates.
         """
         chash = "a" * 64
-        col = MagicMock()
+        col = MagicMock(spec=["get", "name"])
         col.get.return_value = {
             "ids": ["c1"],
             "metadatas": [{
@@ -313,7 +313,7 @@ class TestStalenessCache:
         metadata, partial backfill) are skipped — the cache only holds
         rows with both load-bearing fields, so a hit always implies a
         real comparison can succeed."""
-        col = MagicMock()
+        col = MagicMock(spec=["get", "name"])
         col.get.return_value = {
             "ids": ["good", "no-hash", "no-model"],
             "metadatas": [
@@ -335,8 +335,42 @@ class TestStalenessCache:
         rather than raising — callers fall through to the per-file
         Chroma path. Failing to populate the cache must never block
         indexing."""
-        col = MagicMock()
+        col = MagicMock(spec=["get", "name"])
         col.get.side_effect = RuntimeError("network glitch")
+
+        cache = build_staleness_cache(col)
+
+        assert cache.by_doc_id == {}
+        assert cache.by_source_path == {}
+
+    def test_build_uses_get_all_metadata_when_available(self) -> None:
+        """nexus-duoak follow-up: a collection exposing get_all_metadata()
+        (service mode) must use it INSTEAD OF the paginated col.get() loop
+        -- collapses the staleness-cache-build phase's ceil(N/300) round
+        trips into one call."""
+        col = MagicMock(spec=["get", "get_all_metadata", "name"])
+        col.get_all_metadata.return_value = {
+            "ids": ["c1"],
+            "metadatas": [{
+                "doc_id": "1.1.1",
+                "content_hash": "hash-a",
+                "embedding_model": "voyage-code-3",
+            }],
+        }
+
+        cache = build_staleness_cache(col)
+
+        assert cache.by_doc_id == {"1.1.1": ("hash-a", "voyage-code-3")}
+        col.get_all_metadata.assert_called_once()
+        col.get.assert_not_called()
+
+    def test_build_falls_back_to_paginated_when_get_all_metadata_fails(self) -> None:
+        """A get_all_metadata failure (e.g. the server's row-count cap, or a
+        transient error) must fall back to the empty-cache/per-file-Chroma
+        path -- same tolerant contract as a paginated-get failure -- NOT
+        propagate and abort indexing."""
+        col = MagicMock(spec=["get", "get_all_metadata", "name"])
+        col.get_all_metadata.side_effect = RuntimeError("422 too many rows")
 
         cache = build_staleness_cache(col)
 
@@ -354,7 +388,7 @@ class TestStalenessCache:
 
         import structlog
 
-        col = MagicMock()
+        col = MagicMock(spec=["get", "name"])
         col.name = "code__sample"
         col.get.side_effect = RuntimeError("chroma offline")
 
@@ -424,7 +458,7 @@ class TestStalenessCache:
         call entirely. Pin it explicitly so a future refactor that
         accidentally falls through to ``col.get`` is caught.
         """
-        col = MagicMock()
+        col = MagicMock(spec=["get", "name"])
         cache = StalenessCache(
             by_doc_id={"1.1.1": ("hash-a", "voyage-code-3")},
         )
@@ -452,7 +486,7 @@ class TestStalenessCache:
         that has not migrated to the cache stays on the original
         path with the same retry/quota semantics.
         """
-        col = MagicMock()
+        col = MagicMock(spec=["get", "name"])
         col.get.return_value = {
             "metadatas": [
                 {

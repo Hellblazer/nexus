@@ -2898,7 +2898,18 @@ def _run_index(
                 force_re_embed=force,
             )
 
-        _hook_seconds = {"file": 0.0, "flush": 0.0}
+        # nexus-duoak follow-up: split "file" into its 3 constituent calls
+        # for diagnosis. manifest_write_batch_hook/taxonomy_assign_batch_hook/
+        # chash_dual_write_batch_hook are ALL flush-grain (nexus-u2kwq) so
+        # fire_batch(grain="file") matches zero registered hooks by default —
+        # the file-grain bucket's cost, if any, is fire_single (no default
+        # consumers) or fire_document (aspect_extraction_enqueue_hook, which
+        # early-returns for collections without an extractor config and does
+        # a real T2 queue INSERT for the ones that have one).
+        _hook_seconds = {
+            "file": 0.0, "flush": 0.0,
+            "file_batch": 0.0, "file_single": 0.0, "file_document": 0.0,
+        }
         _hook_seconds_lock = threading.Lock()
 
         def _fire_deferred_hooks(_path: str, context: object) -> None:
@@ -2913,20 +2924,27 @@ def _run_index(
             # File grain: manifest (needs catalog_doc_id) + any other
             # default-grain consumer. Flush-grain hooks (taxonomy, chash)
             # fire once per upload batch via _fire_flush_grain_hooks.
+            _t_batch = time.monotonic()
             reg.fire_batch(
                 context["ids"], context["collection"], context["documents"],
                 context["embeddings"], context["metadatas"],
                 catalog_doc_id=context["catalog_doc_id"],
                 grain="file",
             )
+            _t_single = time.monotonic()
             for _did, _doc in zip(context["ids"], context["documents"]):
                 reg.fire_single(_did, context["collection"], _doc)
+            _t_document = time.monotonic()
             reg.fire_document(
                 _path, context["collection"], "",
                 doc_id=context["catalog_doc_id"],
             )
+            _t_end = time.monotonic()
             with _hook_seconds_lock:
-                _hook_seconds["file"] += time.monotonic() - _t0
+                _hook_seconds["file"] += _t_end - _t0
+                _hook_seconds["file_batch"] += _t_single - _t_batch
+                _hook_seconds["file_single"] += _t_document - _t_single
+                _hook_seconds["file_document"] += _t_end - _t_document
 
         def _batched_file_failed(_path: str, error: str, _context: object) -> None:
             _log.error("indexed_file_upload_failed", file=_path, error=error)
@@ -3156,12 +3174,18 @@ def _run_index(
             "index_chunk_batch_stats",
             flushes=int(_bstats["flushes"]),
             flush_seconds=round(_bstats["flush_seconds"], 1),
+            file_batch_seconds=round(_hook_seconds["file_batch"], 1),
+            file_single_seconds=round(_hook_seconds["file_single"], 1),
+            file_document_seconds=round(_hook_seconds["file_document"], 1),
         )
         if on_phase is not None and _bstats["flushes"]:
             on_phase(
                 f"Chunk batching: {int(_bstats['flushes'])} upload batches, "
                 f"{_bstats['flush_seconds']:.1f}s upload; hooks "
-                f"{_hook_seconds['file']:.1f}s file-grain + "
+                f"{_hook_seconds['file']:.1f}s file-grain "
+                f"(batch={_hook_seconds['file_batch']:.1f}s "
+                f"single={_hook_seconds['file_single']:.1f}s "
+                f"document={_hook_seconds['file_document']:.1f}s) + "
                 f"{_hook_seconds['flush']:.1f}s flush-grain"
             )
         _batch_failures = _batcher.failed_files

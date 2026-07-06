@@ -181,7 +181,7 @@ class TestBuildStalenessCacheLiveContent:
     def test_nonzero_docs_after_index_like_write(
         self, http_client: HttpCatalogClient,
     ) -> None:
-        col = MagicMock()
+        col = MagicMock(spec=["get", "name"])
         col.get.return_value = {
             "ids": ["chunk-0"],
             "metadatas": [{

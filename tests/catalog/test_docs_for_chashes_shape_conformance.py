@@ -160,7 +160,7 @@ class TestBuildStalenessCacheConsumesRealHttpClient:
         resolved doc_id lands in the cache, which only happens when the
         shape is correct end to end.
         """
-        col = MagicMock()
+        col = MagicMock(spec=["get", "name"])
         col.get.return_value = {
             "ids": ["c1"],
             "metadatas": [{

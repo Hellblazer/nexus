@@ -234,3 +234,61 @@ class TestGetEnvelope:
         assert raw.get("chashes") is None
         assert raw.get("source_uris") is None
         assert raw.get("spans") is None
+
+
+class TestGetAllMetadata:
+    """nexus-duoak follow-up: ids+metadata for a WHOLE collection in one
+    round trip, replacing the indexer's ceil(N/300) paginated /get loop
+    for the staleness-cache-build phase."""
+
+    def test_posts_to_get_all_metadata_endpoint(self):
+        stub = _ServiceCollectionStub("code__test__voyage-code-3__v1", "test-tenant")
+        server_result = {
+            "ids": ["c1", "c2"],
+            "metadatas": [{"chunk_text_hash": "h1"}, {"chunk_text_hash": "h2"}],
+        }
+
+        with patch("nexus.db.http_vector_client._post", return_value=server_result) as mock_post:
+            out = stub.get_all_metadata()
+
+        path, body = mock_post.call_args[0]
+        assert path == "/v1/vectors/get-all-metadata"
+        assert body["collection"] == "code__test__voyage-code-3__v1"
+        assert "where" not in body
+        assert out == {"ids": ["c1", "c2"], "metadatas": [{"chunk_text_hash": "h1"}, {"chunk_text_hash": "h2"}]}
+
+    def test_forwards_where_filter(self):
+        stub = _ServiceCollectionStub("code__test__voyage-code-3__v1", "test-tenant")
+
+        with patch("nexus.db.http_vector_client._post", return_value={"ids": [], "metadatas": []}) as mock_post:
+            stub.get_all_metadata(where={"kind": "a"})
+
+        _, body = mock_post.call_args[0]
+        assert body["where"] == {"kind": "a"}
+
+    def test_does_not_include_documents_key(self):
+        """No 'documents' field in the response shape -- staleness only
+        needs metadata, keeping the payload lean (the whole point of the
+        endpoint versus the general-purpose /get)."""
+        stub = _ServiceCollectionStub("code__test__voyage-code-3__v1", "test-tenant")
+
+        with patch("nexus.db.http_vector_client._post", return_value={"ids": ["c1"], "metadatas": [{}]}):
+            out = stub.get_all_metadata()
+
+        assert "documents" not in out
+
+    def test_raises_on_failure_does_not_degrade_to_empty(self):
+        """Unlike get()/delete(), a failure must propagate -- a silently
+        empty result here is indistinguishable from 'collection has 0
+        chunks' to build_staleness_cache, which would build an empty cache
+        instead of falling back to the paginated path."""
+        from nexus.db.http_vector_client import VectorServiceError
+
+        stub = _ServiceCollectionStub("code__test__voyage-code-3__v1", "test-tenant")
+
+        with patch(
+            "nexus.db.http_vector_client._post",
+            side_effect=VectorServiceError("422 too many rows"),
+        ):
+            with pytest.raises(VectorServiceError):
+                stub.get_all_metadata()

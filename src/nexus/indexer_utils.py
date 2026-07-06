@@ -290,11 +290,16 @@ class StalenessCache:
 def build_staleness_cache(col: object) -> StalenessCache:
     """Walk *col* once and index its chunks for fast staleness lookup.
 
-    Pulls every chunk's ``include=["metadatas"]`` via the standard
-    paginated helper. Calls per pull are ChromaDB Cloud's 300-record
-    cap, so the total round-trip count is ``ceil(N / 300)`` where N is
-    the collection's chunk count, independent of the number of files
-    being indexed.
+    Service-mode collections expose ``get_all_metadata()`` (nexus-duoak
+    follow-up): ids + metadata for the WHOLE collection in one HTTP round
+    trip, collapsing the ``ceil(N / 300)`` paginated ``/get`` calls this
+    function used to pay (measured ~113s of a ~116s phase on this repo's own
+    24k-chunk ``code__`` collection). Falls back to the paginated helper when
+    the collection doesn't expose it (local Chroma mode) or the fast path
+    raises (e.g. the server's row-count cap, or a transient failure) --
+    ``get_all_metadata`` deliberately does NOT catch-and-degrade internally
+    (see its docstring), so a fast-path failure here is a genuine signal to
+    fall back, not silently swallowed.
 
     Errors are tolerated: a build failure returns an empty cache and
     callers fall through to the per-file Chroma path. Failing to
@@ -302,12 +307,16 @@ def build_staleness_cache(col: object) -> StalenessCache:
     """
     cache = StalenessCache()
     try:
-        # Local import to avoid a circular dependency at module-load
-        # time. ``_paginated_get`` lives in nexus.indexer (the
-        # orchestrator), which itself imports from this module.
-        from nexus.indexer import _paginated_get  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+        _get_all_metadata = getattr(col, "get_all_metadata", None)
+        if callable(_get_all_metadata):
+            all_chunks = _get_all_metadata()
+        else:
+            # Local import to avoid a circular dependency at module-load
+            # time. ``_paginated_get`` lives in nexus.indexer (the
+            # orchestrator), which itself imports from this module.
+            from nexus.indexer import _paginated_get  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
-        all_chunks = _paginated_get(col, include=["metadatas"])
+            all_chunks = _paginated_get(col, include=["metadatas"])
     except Exception:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         # nexus-lrhg (RDR-108 audit finding 6): pre-fix this swallowed
         # ``_paginated_get`` failures with a bare ``except: pass`` and
