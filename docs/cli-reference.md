@@ -85,6 +85,8 @@ nx index repo ./my-project
 | `--on-locked {skip,wait}` | Behavior under contention (default: `wait`). Per-repo advisory lock (two `nx index repo` on the same repo): `skip` exits immediately, `wait` blocks. Catalog-write fairness (RDR-146): when a foreground interactive catalog write is pending, `skip` defers this run's catalog writes to the next idempotent pass, `wait` proceeds after a bounded yield. `NX_WRITE_PRIORITY=interactive|batch` overrides the tty-based priority of a run's catalog writes. |
 
 Per-file indexing runs with bounded concurrency (6.3.1, nexus-cfc72): 2 workers by default when both the vectors and catalog backends are the HTTP service, 1 otherwise. `NX_INDEX_CONCURRENCY=N` overrides (a warning is logged when it forces concurrency past the backend gate). Progress callbacks and post-store hook chains are serialized; `--debug-timing` gains a `hooks_s` bucket so hook-serialization wait is visible separately from upload time.
+
+Every `nx index repo` run also writes a per-repo log file at `~/.config/nexus/logs/index-<repo>-<hash8>.log` (6.3.3, nexus-mjc9l) — `tail -f` it to watch progress independent of terminal buffering, or check it after the fact if the terminal session is lost. Each run starts with a fresh file; the previous run's content survives as `.log.1`.
 | `--no-taxonomy` | Skip automatic topic discovery after indexing |
 | `--debug-timing` | Emit an end-of-run per-stage breakdown to stderr (chunking / embed / upload / retry seconds per file, aggregated with percentages). Instruments code, prose, and PDF per-file paths — silent without the flag. Use when investigating "why did indexing take N minutes?" (introduced 4.9.0, nexus-7niu) |
 

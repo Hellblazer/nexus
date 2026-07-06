@@ -6,6 +6,34 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.3.4] - 2026-07-06
+
+### Fixed
+
+- **Service-mode T2/catalog client reconstruction** (nexus-53x7s, nexus-2rxzs, nexus-5en9j) — `t2_index_write` and the catalog reader/writer factory were constructing (and immediately closing) a fresh HTTP client per call in service mode, defeating connection-pool reuse and drowning per-run logs in construction noise (measured: 387 `T2Database` + 394 `HttpCatalogClient` reconstructions in one indexing run, inflating hook wall-time to ~13x actual upload time). Both now share one process-lifetime instance, guarded by a lock held for the full call (not just checkout) with reactive eviction on any call failure. Also downgrades the affected clients' `.init` construction logs from INFO to DEBUG.
+- **Catalog write path missing batched update/delete** (nexus-xedhp) — every git commit bumps the repo's `head_hash`, flipping every already-indexed document's stored `head_hash` to "changed" and forcing a warm re-index through one serial per-file catalog update over the network (measured: 175.5s / 1718 files). Adds `update_many`/`delete_many` batch endpoints (completing the trio alongside the existing `register_many`), wired into the indexer's catalog hook and `nx catalog update`/`gc`/`prune-stale`. Requires engine-service-v0.1.28.
+
+## [6.3.3] - 2026-07-06
+
+### Added
+
+- **Per-run log file for `nx index repo`** (nexus-mjc9l/nexus-47ubt) — every run writes to `~/.config/nexus/logs/index-<repo>-<hash8>.log`, live-tailable independent of terminal buffering, surviving a lost terminal session. Each run starts fresh; the prior run's content is preserved as `.log.1`.
+- **Per-collection and per-file progress lines** (nexus-47ubt) for the taxonomy-discover and RDR-indexing phases of `nx index repo`, so a slow single item is distinguishable from a hang without external process forensics.
+
+### Changed
+
+- **RDR markdown indexing folded into the main file loop** (nexus-3lswy) — `docs/rdr/*.md` now flows through the same batched catalog registration, staleness cache, and chunk-batching machinery as code/prose/PDF files, instead of a separate, slower path that redundantly re-registered each file's catalog entry over the network.
+
+### Fixed
+
+- **Catalog double-registration for RDR files** — RDR documents were being registered under two different catalog owners (once via the batched per-repo pass, once via a separate "curator" owner in the now-retired RDR indexing path), producing two `Document` rows per physical file. Fixed as part of the RDR indexing consolidation above.
+- **RDR orphan-chunk garbage collection gap** — the post-index orphan-chunk sweep never covered the `rdr__` collection, so deleted/superseded RDR chunks were never cleaned up. Found via a deliberate post-fix audit for the same class of bug; fixed in the same change.
+- **Two active documentation errors**: the CLI reference documented store doc IDs as 16-char hex (actually 32-char); `catalog.md` described taxonomy centroids as ChromaDB-backed (they moved to pgvector in RDR-155 P4a.2).
+- **Five undocumented shipped CLI features** backfilled into the CLI reference: `nx index repo --corpus`, `nx memory put --merge`/`--merge-threshold`, three `nx collection` subcommands (`re-embed`, `rewrite-metadata`, `merge-candidates`), `nx taxonomy backfill-source-collection --apply`, and several `nx doctor` diagnostic flags.
+- Assorted documentation redundancy and staleness across `docs/*.md` (inconsistent builtin-plan counts, stale RDR-index links, duplicated explanations across guides) found and fixed via a multi-lens documentation audit.
+
+## [6.3.2] - 2026-07-05
+
 ### Added
 
 - **Server-side embed-skip on re-index (RDR-181).** `PgVectorRepository.upsertChunksInternal` (service mode) now checks which chashes already have a stored vector before embedding — unchanged chunks take a metadata-only UPDATE (position/metadata refreshed, vector untouched) instead of a redundant Voyage call. Live-proof measurement: 89.4% token reduction on a re-index that touched one file among several. Self-heals against a concurrent orphan-GC delete (a 0-row metadata UPDATE reroutes that chash back to embed+insert). A `forceReEmbed` escape (wired from `--force` / the deprecated `NX_UPSERT_SKIP_EXISTING=0`) bypasses the check entirely for model-drift recompute and keeps the first-index path free of the added SELECT.
