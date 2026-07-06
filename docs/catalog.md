@@ -399,6 +399,13 @@ nx collection backfill-hash    # backfill chunk_text_hash on one collection (or 
 
 `backfill-hash` is the targeted version — updates metadata on a single collection without touching embeddings or documents.
 
+```bash
+nx catalog reconcile --dry-run    # preview manifest-gap repairs
+nx catalog reconcile              # rebuild missing document_chunks rows
+```
+
+Repairs `document_chunks` manifest gaps left by a persistently-failed manifest-write hook (e.g. the catalog engine-service was briefly unreachable during indexing): a document with `chunk_count > 0` but fewer manifest rows than that (including zero). Such a document silently drops out of catalog-aware retrieval even though T3 still has its chunks. `reconcile` rebuilds the manifest from the T3 chunks in the document's `physical_collection`, matched by `content_hash` and ordered by character/line span. `nx index repo` also prints an end-of-run `WARNING: catalog manifest write failed for N document(s)` pointing here when a write fails during that run (GH #1371).
+
 ### Bulk operations
 
 ```bash

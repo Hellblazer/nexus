@@ -1017,6 +1017,24 @@ Non-conformant legacy chunk ids (16-char pre-migration ids that fail the
 service backend's `chash` length constraint) are re-hashed to 32-char
 content-derived ids automatically; the CLI reports how many were re-hashed.
 
+**Restoring a pre-migration (Chroma-era) backup:**
+
+```
+nx store import old-backup.nxexp
+# Error: header claims 'voyage-context-3' (1024-dim) but vectors are
+# 768-dim for collection '...' -- the header label is wrong (a known
+# defect of pre-migration exports, GH #1370); re-run with --assume-model.
+nx store import old-backup.nxexp --assume-model bge-base-en-v15-768
+```
+
+```
+nx store import partial-backup.nxexp
+# Error: ... Hint: this looks like a chunk-id constraint conflict --
+# a non-conformant legacy chunk id or a duplicate key. If you're
+# re-running a partial import, retry with --skip-existing.
+nx store import partial-backup.nxexp --skip-existing
+```
+
 ---
 
 ## nx memory
