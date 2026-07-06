@@ -81,6 +81,7 @@ nx index repo ./my-project
 |------|-------------|
 | `--frecency-only` | Update frecency scores only; skip re-embedding (faster, for re-ranking refresh). Mutually exclusive with `--force` |
 | `--force-stale` | Re-index only if collection pipeline version is outdated (smart force — skips current collections) |
+| `--corpus [docs\|knowledge]` | Corpus routing for auto-classified prose/PDF files (default: `docs`). `docs` routes to `docs__` collections; `knowledge` routes to `knowledge__` collections instead |
 | `--on-locked {skip,wait}` | Behavior under contention (default: `wait`). Per-repo advisory lock (two `nx index repo` on the same repo): `skip` exits immediately, `wait` blocks. Catalog-write fairness (RDR-146): when a foreground interactive catalog write is pending, `skip` defers this run's catalog writes to the next idempotent pass, `wait` proceeds after a bounded yield. `NX_WRITE_PRIORITY=interactive|batch` overrides the tty-based priority of a run's catalog writes. |
 | `--no-taxonomy` | Skip automatic topic discovery after indexing |
 | `--debug-timing` | Emit an end-of-run per-stage breakdown to stderr (chunking / embed / upload / retry seconds per file, aggregated with percentages). Instruments code, prose, and PDF per-file paths — silent without the flag. Use when investigating "why did indexing take N minutes?" (introduced 4.9.0, nexus-7niu) |
@@ -855,6 +856,8 @@ nx taxonomy project --backfill --persist        # project all collections
 nx taxonomy hubs --min-collections 5 --max-icf 1.2 --explain  # hub detector (RDR-077)
 nx taxonomy audit --collection code__nexus                    # projection quality audit (RDR-077)
 nx taxonomy validate-refs docs/**/*.md                        # stale-reference validator (RDR-081)
+nx taxonomy backfill-source-collection                        # dry-run: backfill legacy source_collection rows
+nx taxonomy backfill-source-collection --apply                # commit the backfill (irreversible)
 ```
 
 ### `nx taxonomy validate-refs`
@@ -909,6 +912,7 @@ taxonomy:
 | `project SOURCE` | Cross-collection projection: match chunks against other collections' centroids. `--against TARGETS` for explicit targets (default: sibling collections). `--threshold N` (optional; when omitted uses per-corpus defaults: `code__*` 0.70, `knowledge__*` 0.50, `docs__*`/`rdr__*` 0.55 — see [taxonomy-projection-tuning.md](exploration/taxonomy-projection-tuning.md)). `--use-icf` suppresses hub topics via Inverse Collection Frequency weighting (RDR-077). `--persist` to write assignments. `--backfill` to project all collections against each other |
 | `hubs` | List generic-pattern hub topics (RDR-077 Phase 5). `--min-collections N` (default 2), `--max-icf F` filter, `--warn-stale` flags hubs whose latest assignment post-dates the newest `last_discover_at` across contributing source collections, `--explain` shows DF / ICF / matched stopword tokens per row. |
 | `audit --collection NAME` | Per-collection projection-quality report (RDR-077 Phase 6): total assignments, p10/p50/p90 of raw cosine, count below threshold (re-projection candidates), top receiving topics with ICF, pattern-pollution flags. `--threshold F` overrides the per-corpus default; `--top-n N` caps the receiving-topic list. |
+| `backfill-source-collection` | Backfill `topic_assignments.source_collection` for legacy hdbscan/centroid rows (RDR-087 Phase 4.1). Dry-run by default; `--apply` commits the writes (irreversible — review the dry-run output first) |
 
 **Configuration** (in `.nexus.yml`):
 
@@ -933,7 +937,7 @@ echo "# Cache Strategy" | nx store put - --collection knowledge --title "decisio
 | Subcommand | Description |
 |------------|-------------|
 | `put FILE_OR_DASH` | Store document (use `-` for stdin) |
-| `get DOC_ID` | Retrieve entry by 16-char hex ID (from `nx store list`) |
+| `get DOC_ID` | Retrieve entry by 32-char hex ID (from `nx store list`) |
 | `list` | List stored entries |
 | `delete` | Delete a single entry by ID or title |
 | `export [COLLECTION]` | Export a collection to portable `.nxexp` backup |
@@ -964,11 +968,11 @@ echo "# Cache Strategy" | nx store put - --collection knowledge --title "decisio
 | Flag | Description |
 |------|-------------|
 | `-c` / `--collection NAME` | Collection name (required) |
-| `--id ID` | Exact 16-char document ID from `nx store list` |
+| `--id ID` | Exact 32-char document ID from `nx store list` |
 | `--title TITLE` | Exact title metadata match (deletes all matching chunks) |
 | `-y` / `--yes` | Skip confirmation prompt |
 
-Note: IDs shown by `nx store list` are 16 hex chars. `--title` delete is paginated and safe for multi-chunk documents. To delete an entire collection use `nx collection delete`.
+Note: IDs shown by `nx store list` are 32 hex chars (`sha256(text)[:32]`). `--title` delete is paginated and safe for multi-chunk documents. To delete an entire collection use `nx collection delete`.
 
 **`get` flags:**
 
@@ -1014,7 +1018,7 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 | `expire` | Remove expired entries |
 | `promote ID --collection NAME` | Promote entry to T3 by ID |
 
-**`put` flags:** `--tags`, `--ttl` (default: `30d`)
+**`put` flags:** `--tags`, `--ttl` (default: `30d`), `--merge` (canonical-fact merge: fold into an existing high-overlap entry instead of creating a duplicate, non-destructive), `--merge-threshold FLOAT` (word-set Jaccard threshold for `--merge`, default: `0.5`)
 
 **`list` flags:** `--project NAME` (filter by project), `-a` / `--agent NAME` (filter by agent name)
 
@@ -1095,8 +1099,11 @@ nx collection list
 | `reindex NAME` | Delete and re-index a collection from its source documents |
 | `backfill-hash [NAME]` | Add `chunk_text_hash` metadata to chunks missing it (no re-embedding) |
 | `rename OLD NEW` | In-place metadata-only rename in the T3 vector store + T2 + catalog cascade (4.8.0, nexus-1ccq) |
+| `re-embed NAME --to MODEL` | In-place re-embed: preserve chunk ids/text/metadata, swap the embedding model (non-CCE Voyage models only; nexus-bw65) |
+| `rewrite-metadata [NAME]` | Rewrite/repair chunk metadata in place; `--all` for every collection, `--source-path` to scope to one source, `--dry-run` to report counts only |
 | `audit NAME` | Deep-dive per-collection report: distance histogram, top-5 cross-projections, orphan chunks, hub topics, chash coverage (RDR-087 Phase 4) |
 | `health` | Composite per-collection health table — chunk counts (T3-sourced), staleness, hub score, chash coverage (RDR-087 Phase 3.4) |
+| `merge-candidates` | Pair-wise cross-collection overlap ranking — surfaces collection pairs with high shared-topic similarity as merge/bridge candidates (RDR-087 Phase 4.3) |
 | `delete NAME` | Delete collection (irreversible) |
 
 **`verify` flags:**
@@ -1131,6 +1138,34 @@ terminal (auto-disabled on non-TTY CI logs).
 
 Scale reference: a full `--all` on a 278k-chunk / 136-collection corpus
 takes ~25–70 minutes on ChromaDB Cloud. Maintenance-window operation.
+
+**`re-embed` flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--to MODEL` | Target embedding model (required). CCE models like `voyage-context-3` are not supported (nexus-bw65) |
+| `--dry-run` / `--no-dry-run` | Default `--dry-run`; pass `--no-dry-run` to actually write |
+| `--yes` | Skip the destructive-action confirmation prompt |
+
+**`rewrite-metadata` flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--all` | Rewrite metadata in every T3 collection |
+| `--source-path PATH` | Only rewrite chunks whose `source_path` equals this value |
+| `--dry-run` | Report counts without issuing any writes |
+
+**`merge-candidates` flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--min-shared N` | Minimum distinct shared topics between two collections to qualify as a candidate (default: 3) |
+| `--min-similarity F` | Minimum mean similarity across shared topics (default: 0.5) |
+| `--exclude-hubs` | Drop top-N cross-collection hub topics before thresholding (reduces false positives) |
+| `--hub-top-n N` | Hub depth used by `--exclude-hubs` (default: 10) |
+| `--limit N` | Max number of candidate pairs returned (default: 50) |
+| `--format {table,json}` | Output format (default: `table`) |
+| `--create-link` | (deferred) Reports a deferred-workflow advisory instead of writing catalog links — use `nx catalog link` manually |
 
 **`rename` flags:**
 
@@ -1409,6 +1444,25 @@ nx doctor --fix                 # Apply HNSW search_ef=256 to local collections
 nx doctor --fix-paths           # Migrate absolute file_path entries to relative (catalog + T3)
 nx doctor --fix-paths --dry-run # Preview migration without applying
 ```
+
+**Other check flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--check-search` | Run probe 3a — the name-resolution canary from `tests/fixtures/name_canaries.py`. Exits 2 when any surface raises an unexpected exception (RDR-087 Phase 3.2) |
+| `--check-resources` | Probe POSIX semaphore headroom and report orphan multiprocessing-tracker pressure. Exits 2 with `Errno 28` when the namespace is exhausted (MinerU workers / orphan chroma children / trackers re-parented to init after ungraceful MCP shutdowns) |
+| `--check-taxonomy` | Verify the `topic_links` ≡ projection-assignment invariant (GH #252). Exits 1 on drift |
+| `--check-tier-discipline` | Audit tier-write activity for the current session: prints the tier-write summary and warns when a substantive session has no write-back (Phase 1B nexus-a52i) |
+| `--check-tmpdirs` | List orphan `nx_t1_*` tmpdirs that no session record points at and are older than 24h (RDR-094 Phase 3). Read-only; pair with `--reap-tmpdirs` to actually delete them |
+| `--reap-tmpdirs` | With `--check-tmpdirs`, run `sweep_orphan_tmpdirs` and report the count reaped |
+| `--check-mcp-logs` | Scan Claude Code's per-server MCP cache for nx-mcp silent-death signatures (`STDIO connection dropped`, `stdio transport error`). macOS only; skips cleanly elsewhere (RDR-094 Phase H, nexus-50u5) |
+| `--mcp-log-hours N` | Lookback window in hours for `--check-mcp-logs` (default: 24) |
+| `--check-storage-boundary` | RDR-120 P0.A AST-scan for direct `sqlite3.connect` / `chromadb.{PersistentClient,CloudClient,EphemeralClient}` calls outside `src/nexus/db/` (daemon-internal); also allowlists `src/nexus/catalog/`. Per-line override via `# epsilon-allow: <reason>` (reason ≥8 chars) |
+| `--fail-on-violation` | With `--check-storage-boundary`, exit 1 if any violation is found (otherwise the lint is informational) |
+| `--phase ID` | With `--check-storage-boundary`, the RDR-120 phase identifier used to record the `120-phase-<phase>-catalog-allowlist-count` T2 metric |
+| `--check-t1` | Diagnose T1 session-id lease presence + reachability (RDR-149 P4). Exits 1 when a session-id resolves but the lease is missing or unreachable |
+| `--check-mineru` | Verify MinerU is importable — surfaces a corrupt install at doctor-time instead of waiting for the first math-heavy PDF index to fail |
+| `--json` | Emit machine-parseable JSON (used with `--check-search`, `--check-quotas`) |
 
 The `--fix` flag retroactively applies HNSW `search_ef` tuning to all existing local-mode collections. New collections get this automatically. In cloud mode (SPANN), prints a skip message — SPANN defaults are adequate.
 

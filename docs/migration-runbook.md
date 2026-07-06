@@ -202,6 +202,16 @@ memory" when unset, see `src/nexus/db/t2/http_memory_store.py`
 `_resolve_config`). The vectors command needs neither: it resolves
 `{url, token}` from the supervisor's ServiceRegistry lease, env as
 override (nexus-pebfx.1; addr file `~/.config/nexus/storage_service_addr.<uid>`).
+Full env-var reference (including `VOYAGE_API_KEY` and the credential
+resolution chain) lives in
+[`docs/configuration.md` § Daemon environment variables](configuration.md#daemon-environment-variables).
+
+If you are running this migration from inside a dev container (rather
+than directly on the host running the daemon/service), see
+[`docs/container-integration.md`](container-integration.md) first —
+T1/T2/T3 discovery across the container boundary needs one of its
+documented forwarding paths before any of the commands below can reach
+the host-side daemon.
 
 ## 2. The two migrations
 
@@ -357,27 +367,37 @@ RDR-156 P2, bead nexus-70r3c.9), callable directly via psql. Connection
 details come from `~/.config/nexus/pg_credentials`; the port is also shown
 by `nx daemon service status`.
 
+The role behind `<admin>` below is the real, fixed name **`nexus_admin`**
+(schema owner, NOSUPERUSER — see
+[configuration.md § Storage Service (Postgres) Prerequisites](configuration.md#storage-service-postgres-prerequisites)
+for the full provisioning story); `<PG_PORT>` is whatever `nx daemon service
+status` reports for the PG cluster block (§1 above), not a fixed default.
+From here on this doc uses `$ADMIN`/`$PG_PORT` as shell-variable
+placeholders for those two values — export them once
+(`ADMIN=nexus_admin`, `PG_PORT=<value from status>`) and every command
+below is copy-pasteable as written.
+
 Sequence (backfill first: orphan rows with `collection IS NULL` are
 pre-backfill state, not orphans):
 
 ```
-psql -h 127.0.0.1 -p <PG_PORT> -U <admin> -d nexus \
+psql -h 127.0.0.1 -p $PG_PORT -U $ADMIN -d nexus \
   -c "SELECT nexus.manifest_backfill();"
 
-psql -h 127.0.0.1 -p <PG_PORT> -U <admin> -d nexus \
+psql -h 127.0.0.1 -p $PG_PORT -U $ADMIN -d nexus \
   -c "SELECT count(*) FROM nexus.manifest_orphans(384);"
 
-psql -h 127.0.0.1 -p <PG_PORT> -U <admin> -d nexus \
+psql -h 127.0.0.1 -p $PG_PORT -U $ADMIN -d nexus \
   -c "SELECT count(*) FROM nexus.manifest_orphans(768);"
 
-psql -h 127.0.0.1 -p <PG_PORT> -U <admin> -d nexus \
+psql -h 127.0.0.1 -p $PG_PORT -U $ADMIN -d nexus \
   -c "SELECT count(*) FROM nexus.manifest_orphans(1024);"
 ```
 
 Or in a single session (use a transaction to avoid schema-state side effects):
 
 ```
-psql -h 127.0.0.1 -p <PG_PORT> -U <admin> -d nexus <<'SQL'
+psql -h 127.0.0.1 -p $PG_PORT -U $ADMIN -d nexus <<'SQL'
 SELECT nexus.manifest_backfill();
 SELECT count(*) AS orphans_384  FROM nexus.manifest_orphans(384);
 SELECT count(*) AS orphans_768  FROM nexus.manifest_orphans(768);
@@ -402,7 +422,7 @@ source inventory) come from the `nexus.collection_vector_stats` view
 `count(*)` over the three `chunks_<dim>` tables:
 
 ```
-psql -h 127.0.0.1 -p <PG_PORT> -U <admin> -d nexus \
+psql -h 127.0.0.1 -p $PG_PORT -U $ADMIN -d nexus \
   -c "SELECT * FROM nexus.collection_vector_stats ORDER BY tenant_id, collection;"
 ```
 
@@ -420,6 +440,43 @@ Optional check (`verify_taxonomy_consistency`, same module): every
 collection. Production returned 28 unresolved values, all verified as
 pre-existing T2 drift (absent from the Chroma source too, the RDR-108
 string-copy-orphan class), not migration loss.
+
+**Triage recipe for a nonzero orphan count** (either `manifest_orphans(dim)`
+above or an unresolved `source_collection` from `verify_taxonomy_consistency`).
+A nonzero count is not automatically a migration bug — the 2026-06-10
+production run's 28 unresolved rows turned out to be pre-existing drift, not
+loss — but it must be *proven* pre-existing, never assumed:
+
+1. **Pull the offending IDs, not just the count.** Re-run the same query
+   without `count(*)` to get the actual `chash`/`source_collection` values:
+   ```
+   psql -h 127.0.0.1 -p $PG_PORT -U $ADMIN -d nexus \
+     -c "SELECT * FROM nexus.manifest_orphans(<dim>);"
+   ```
+2. **Cross-reference each ID against the pre-migration Chroma source**, the
+   same source the ETL read from and that copy-not-move left untouched
+   (§0.1, §6). Use `nx collection list` / a direct Chroma `get(ids=[...])`
+   against the local (`~/.config/nexus/chroma`) or ChromaCloud collection
+   named in the orphan row:
+   - **Absent from Chroma too** -> the orphan predates this migration
+     entirely (catalog/topic-assignment drift the RDR-108 string-copy-orphan
+     class describes). Expected drift: record it (bead or T2 note) and move
+     on — it is not this run's responsibility to fix, only to not paper over.
+   - **Present in Chroma but missing from the migrated target** -> the
+     vector ETL for that collection actually dropped data. Treat this as a
+     `failed`/`skipped` migration for that collection (§4 table): re-run
+     `nx storage migrate vectors [--cloud] --collections <name>` (§3) rather
+     than clearing the orphan by hand.
+3. **Cross-check against the T2 ladder's own report** for the same run
+   (`nx storage migration-report show <path>`, §4): if the catalog leg
+   logged a `failed`/`skipped` issue for the same collection or document,
+   the orphan is a downstream symptom of that already-flagged failure, not
+   a new problem — fix the root issue and the orphan clears on the next
+   validation pass.
+4. **Never clear an orphan by deleting the manifest row.** The manifest is
+   catalog-owned graph state (RDR-108); the only sanctioned remediation
+   paths are (a) re-running the ETL so the row resolves, or (b) confirming
+   pre-existing drift and leaving it, exactly as production did.
 
 ## 6. Rollback
 

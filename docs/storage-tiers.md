@@ -208,13 +208,19 @@ cluster, `/version` handshake with `embedding_mode`).
 
 Collections are namespaced by corpus type using `__` (double underscore) as separator. Each collection's embedding model is fixed; the service routes by collection name:
 
+Conformant collection names (RDR-103) follow a 4-segment shape:
+`<content_type>__<owner_id>__<embedding_model>__v<n>`.
+
 | Pattern | Contents | Managed-cloud model | Local model |
 |---------|----------|---------------------|-------------|
-| `code__<repo>-<hash>` | Indexed source code | voyage-code-3 | bge-768 |
-| `docs__<repo>-<hash>` | Indexed prose files | voyage-context-3 (CCE) | bge-768 |
-| `rdr__<repo>-<hash>` | Indexed RDR documents | voyage-context-3 (CCE) | bge-768 |
-| `docs__<corpus>` | Indexed PDFs and markdown | voyage-context-3 (CCE) | bge-768 |
-| `knowledge__<topic>` | Stored agent outputs and notes | voyage-context-3 (CCE) | bge-768 |
+| `code__<owner_id>__voyage-code-3__v1` | Indexed source code | voyage-code-3 | bge-768 |
+| `docs__<owner_id>__voyage-context-3__v1` | Indexed prose files | voyage-context-3 (CCE) | bge-768 |
+| `rdr__<owner_id>__voyage-context-3__v1` | Indexed RDR documents | voyage-context-3 (CCE) | bge-768 |
+| `knowledge__<owner_id>__voyage-context-3__v1` | Stored agent outputs and notes | voyage-context-3 (CCE) | bge-768 |
+
+(`<owner_id>` is a stable slug like `nexus-1-1` — see [RDR-103](rdr/rdr-103-catalog-collection-name-authority.md).)
+
+**Legacy shape (fallback, pre-RDR-103)**: 2-segment `<content_type>__<repo>-<hash>`, e.g. `code__myrepo-a1b2c3`. Still present on collections created before the conformance migration; new collections use the 4-segment shape above.
 
 A collection is indexed and queried under the same embedding model — mixing models across one vector space produces near-random similarity scores. The voyage-capability gate (`nx guided-upgrade`) refuses to migrate voyage-model collections onto a bge-only service for exactly this reason.
 

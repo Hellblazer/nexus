@@ -2,6 +2,8 @@
 
 Start with [Getting Started](getting-started.md) for installation. Then explore by topic.
 
+`docs/*.md` is living reference documentation — kept current with the codebase and safe to trust as-is. `docs/rdr/*.md` is a different thing entirely: an append-only historical decision log (186+ files) capturing the reasoning behind past design choices, some since superseded. If you're looking for a how-to or a current design reference, stay in `docs/`; only dig into `docs/rdr/` when you need the "why" behind a decision.
+
 ## Core
 
 - [Getting Started](getting-started.md) — Install, local usage, Claude Code plugin
@@ -50,6 +52,8 @@ Start with [Getting Started](getting-started.md) for installation. Then explore 
 - [`field-reports/`](field-reports/) — Production shakeout reports
 - [`operations/`](operations/) — Operator runbooks
 - [`plans/`](plans/) — Historical implementation plans
+- [`testing/`](testing/) — Plugin surface coverage matrices and testing artifacts
+- [`proposals/`](proposals/) — Standalone application proposals and design write-ups
 
 ## Claude Code Plugins
 

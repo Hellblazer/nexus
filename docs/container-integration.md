@@ -100,12 +100,18 @@ The T2 daemon binds `127.0.0.1:<port>` (always) and a Unix socket at
 TCP loopback is the simplest path; it's the only one that works on
 macOS / Windows Docker Desktop.
 
-### macOS Docker Desktop
+Run this on the host first, before picking your OS-specific block below —
+every path in this section reuses `$PORT` / `$SVC_PORT` / `$TOKEN`:
 
 ```bash
 PORT=$(nx daemon t2 status | grep tcp_port | awk '{print $2}')
 SVC_PORT=$(nx daemon service status --json | python3 -c 'import sys,json;print(json.load(sys.stdin)["port"])')
 TOKEN=$(grep '^NX_SERVICE_TOKEN=' ~/.config/nexus/pg_credentials | cut -d= -f2)
+```
+
+### macOS Docker Desktop
+
+```bash
 docker run --rm \
     -e NX_T2_ADDR=host.docker.internal:$PORT \
     -e NX_SERVICE_URL=http://host.docker.internal:$SVC_PORT \
@@ -187,6 +193,8 @@ can forward the host's loopback port into the container via
 `socat`, `ssh -L`, or a sidecar proxy:
 
 ```bash
+PORT=$(nx daemon t2 status | grep tcp_port | awk '{print $2}')
+
 # socat sidecar listening on a routable address
 socat TCP-LISTEN:9999,fork,bind=172.17.0.1 TCP:127.0.0.1:$PORT
 
