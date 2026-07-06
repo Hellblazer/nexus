@@ -680,3 +680,83 @@ def test_project_cross_collections_single_collection_noop() -> None:
             raise AssertionError("project_against should not run with no others")
 
     assert _project_cross_collections(_FakeTaxonomy(), ["only__one"], None) == 0
+
+
+# ── nx index repo: per-run log file (nexus-mjc9l) ───────────────────────────
+
+
+def _log_path_for(home: Path, repo_dir: Path) -> Path:
+    from nexus.repo_identity import _repo_identity
+    basename, h8 = _repo_identity(repo_dir)
+    return home / ".config" / "nexus" / "logs" / f"index-{basename}-{h8}.log"
+
+
+def test_index_repo_writes_run_log(runner, repo_dir, home, mock_reg):
+    """The wiring test exercises the Phase-1 primitive end-to-end via the
+    real structlog path — a structlog INFO event emitted during indexing
+    must land in the per-run log file (this fails against a handler-only
+    primitive, since cli mode's structlog WARNING filter would drop it)."""
+    import structlog
+
+    def _fake_index(*a, **kw):
+        structlog.get_logger("nexus.test").info("indexing_probe", probe="xyz")
+        return {}
+
+    result, _ = _invoke_repo(runner, [str(repo_dir)], mock_reg, index_side_effect=_fake_index)
+    assert result.exit_code == 0
+
+    log_path = _log_path_for(home, repo_dir)
+    assert log_path.exists()
+    contents = log_path.read_text()
+    assert "indexing_probe" in contents
+
+
+def test_index_repo_run_log_not_leaked_to_stderr(runner, repo_dir, home, mock_reg):
+    """Quiet-contract guard: the INFO probe must land in the file, not the
+    terminal — nx index's existing stdout/stderr output must be unaffected."""
+    import structlog
+
+    def _fake_index(*a, **kw):
+        structlog.get_logger("nexus.test").info("indexing_probe", probe="xyz")
+        return {}
+
+    result, _ = _invoke_repo(runner, [str(repo_dir)], mock_reg, index_side_effect=_fake_index)
+    assert result.exit_code == 0
+    assert "indexing_probe" not in result.output
+
+
+def test_index_repo_no_handler_leak_after_run(runner, repo_dir, home, mock_reg):
+    """No RotatingFileHandler for the run-log path survives after the
+    command returns — success path."""
+    import logging.handlers
+
+    result, _ = _invoke_repo(runner, [str(repo_dir)], mock_reg, index_return={})
+    assert result.exit_code == 0
+
+    log_path = _log_path_for(home, repo_dir)
+    leaked = [
+        h for h in logging.getLogger().handlers
+        if isinstance(h, logging.handlers.RotatingFileHandler)
+        and h.baseFilename == str(log_path)
+    ]
+    assert leaked == []
+
+
+def test_index_repo_no_handler_leak_after_exception(runner, repo_dir, home, mock_reg):
+    """Same guard, but index_repository raises — the handler must still be
+    removed (the context manager's finally, not just the happy path)."""
+    import logging.handlers
+
+    def _fake_index(*a, **kw):
+        raise RuntimeError("boom")
+
+    result, _ = _invoke_repo(runner, [str(repo_dir)], mock_reg, index_side_effect=_fake_index)
+    assert result.exit_code != 0
+
+    log_path = _log_path_for(home, repo_dir)
+    leaked = [
+        h for h in logging.getLogger().handlers
+        if isinstance(h, logging.handlers.RotatingFileHandler)
+        and h.baseFilename == str(log_path)
+    ]
+    assert leaked == []
