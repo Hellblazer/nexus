@@ -1608,7 +1608,23 @@ def _catalog_markdown_hook(
     md_path: Path, collection_name: str, content_type: str, corpus: str, chunk_count: int,
     *, base_path: Path | None = None,
 ) -> None:
-    """Register markdown document in catalog after indexing. Silently skipped if absent."""
+    """Register markdown document in catalog after indexing. Silently skipped if absent.
+
+    nexus-3lswy WARNING: this registers under a SEPARATE "curator" owner
+    (see ``owner_name``/``curator_owner_tumbler_by_name`` below), distinct
+    from the repo owner ``indexer._catalog_hook``'s batched ``register_many``
+    pass uses. Calling both hooks for the SAME file produces two catalog
+    Document rows for one physical file — exactly the bug nexus-3lswy fixed
+    for ``nx index repo``'s RDR path (it now routes RDR files through
+    ``_index_prose_file``, which never calls this function). This function
+    is still correctly reachable from ``nx collection reindex``
+    (commands/collection.py) and the standalone RDR-only index command
+    (commands/index.py) — those are single-collection operations that never
+    also run ``_catalog_hook``'s batched pass, so no double-registration
+    exists today. Do NOT wire ``_catalog_hook``'s batched pass into either
+    of those call sites without ALSO removing their call into this function,
+    or the double-registration bug returns.
+    """
     reader = None
     writer = None
     try:

@@ -430,7 +430,7 @@ the `"all"` wildcard end up agnostic (`scope_tags=""`) in that case.
 - `nx doctor --check-plan-library` (RDR-092 Phase 0c) reports plan
   rows by bucket (authored vs backfilled vs non-dimensional) and
   flags a stale global tier. Run after any plugin install to
-  confirm `nx catalog setup` seeded the 12 builtins.
+  confirm `nx catalog setup` seeded the 15 builtins.
 - `nx plan repair` (RDR-092 Phase 0d) backfills `verb` / `name` /
   `dimensions` on legacy NULL-dimension rows using a 20-rule stem
   dictionary + wh-fallback, and lists `backfill-low-conf` rows for

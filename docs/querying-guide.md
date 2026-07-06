@@ -120,62 +120,15 @@ For questions that require multiple retrieval steps — comparing sources, extra
 
 ### The trunk: plan-match → plan-run → record
 
-`nx_answer` runs this sequence on every call:
-
-1. **`plan_match`** — semantic search against the T2 plan library for an intent-similar plan. T1 cosine cache first, FTS5 fallback. A match with confidence ≥ 0.40 is a hit.
-2. **`plan_run`** — execute the matched plan's steps via the operator dispatcher. Retrieval steps (`search`, `query`, `traverse`, `store_get_many`) dispatch individually as MCP tool calls. Contiguous runs of ≥2 operator steps (`extract`, `rank`, `compare`, `summarize`, `generate`) collapse into a single `claude -p` subprocess via operator bundling (see below). Step outputs thread through as `$stepN.<field>` references.
-3. **Plan-miss path** — if no match clears the threshold, an inline planner (`claude -p`) decomposes the question into a DAG of ≤ `max_steps` steps and `plan_run` executes it.
-4. **Record** — every run logged in `nx_answer_runs` (T2) with duration, step count, cost, matched plan id, and final answer. Library-matched plans bump `use_count` / `success_count` / `failure_count` for plan-health telemetry.
-
-### Operator bundling
-
-When a plan has two or more LLM-operator steps in a row, they dispatch as a single `claude -p` call instead of N isolated subprocesses. Measured latency on real queries:
-
-| Plan shape | Bundled | Isolated | Saved |
-|---|---:|---:|---:|
-| 2-op `extract → summarize` (synthetic) | 15s | 34s | **-55%** |
-| 2-op `extract → rank` (Arcaneum RDRs) | 57s | 80s | **-28%** |
-| 4-op `extract → extract → compare → summarize` (cross-repo) | 54s | 192s | **-72%** |
-
-Bundling is transparent to plan authors — existing YAML doesn't change. Caveats:
-
-- **Retrieval steps stay isolated.** Only LLM operators bundle; retrieval needs real host-side outputs to feed the next step.
-- **Parallel-branch bundles get source attribution.** Two extracts hydrating from different retrieval steps carry their source collection into the composed prompt so cross-corpus compare can attribute claims correctly.
-- **`$stepN.<field>` works across the bundle's output.** Referencing a bundled intermediate (not the bundle's final step) raises a clear error — the intermediate isn't exposed host-side.
-- **Escape hatch**: `plan_run(match, bundle_operators=False)` recovers per-step dispatch for debugging.
-- **Size guard**: composite prompts over 200k chars fall back to per-step dispatch (logged as `bundle_oversized_fallback_to_per_step`).
+`nx_answer` runs `plan_match` → `plan_run` → record on every call, with operator bundling collapsing contiguous LLM-operator steps into a single subprocess and a plan-miss path falling back to an inline planner. See [plan-centric-retrieval.md](plan-centric-retrieval.md) for the full mechanism, including bundling-latency measurements.
 
 ### Builtin scenario plans (RDR-078)
 
-`nx catalog setup` seeds nine YAML plan templates under `conexus/plans/builtin/`:
-
-| Template | Verb | Covers |
-|---|---|---|
-| research-default | research | Design / architecture walks from prose to implementing code |
-| review-default | review | Critique a change set against decision-evolution history |
-| analyze-default | analyze | Cross-corpus synthesis with reference chains |
-| debug-default | debug | Design context + authoring RDRs for a failing path |
-| document-default | document | Documentation coverage audit (prose ∩ code) |
-| plan-author-default | plan-author | Meta-seed: draft a new plan template |
-| plan-inspect-default | plan-inspect | Inspect plan metrics |
-| plan-inspect-dimensions | plan-inspect (variant) | Enumerate dimension registry usage |
-| plan-promote-propose | plan-promote | Rank plans worth promoting to higher scope |
-
-Plans match by **dimensions** (`verb`, `scope`, `strategy`) plus semantic similarity to the description. See [Plan Authoring Guide](plan-authoring-guide.md) for the template schema.
+`nx catalog setup` seeds YAML plan templates under `conexus/plans/builtin/` — see [plan-centric-retrieval.md](plan-centric-retrieval.md) for the current builtin plan catalog.
 
 ### Verb skills
 
-Instead of `/conexus:query "research how X works"`, the verb skills route directly to `plan_match` scoped to the matching verb:
-
-| Skill | Intent shape |
-|---|---|
-| `/conexus:research` | "How does X work?", "Design context for Y" |
-| `/conexus:review` | "Review this change set", "Did the refactor drift from the RDR?" |
-| `/conexus:analyze` | "Compare approaches across corpora", "Rank candidates by criterion" |
-| `/conexus:debug` | "Why is this handler failing?", "Trace the stack of the panic" |
-| `/conexus:document` | "Audit doc coverage", "Find coverage gaps" |
-
-Each scopes `plan_match` with `dimensions={verb: <skill>}` and executes via `plan_run`. Falls through to `/conexus:query` on miss.
+The verb skills (`/conexus:research`, `/conexus:review`, `/conexus:analyze`, `/conexus:debug`, `/conexus:document`) route directly to `plan_match` scoped to the matching verb, falling through to `/conexus:query` on miss. See [plan-centric-retrieval.md](plan-centric-retrieval.md) for the full verb-routing table.
 
 ### Example analytical queries
 

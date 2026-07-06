@@ -169,7 +169,7 @@ The `traverse` MCP tool enforces mutual exclusion: passing both `link_types` and
 
 ## Topic taxonomy
 
-Nexus automatically discovers topic clusters across your indexed documents, labels them with human-readable names, and uses them to improve search quality. Topics live in T2 (SQLite) and centroids in a dedicated ChromaDB collection (`taxonomy__centroids`).
+Nexus automatically discovers topic clusters across your indexed documents, labels them with human-readable names, and uses them to improve search quality. Topics live in T2 (SQLite); centroids are served through pgvector via `nexus-service` (`HttpCentroidStore`, one table per embedding dimension: `taxonomy_centroids_{384,768,1024}`) since RDR-155 P4a.2. Centroid **reads** (ANN assignment) go through pgvector; the discover/rebuild centroid-**write** helpers still use a raw-Chroma client for injected-client / legacy-ETL paths until RDR-155 P4b.
 
 ```bash
 nx taxonomy discover --all        # discover topics for all T3 collections
@@ -252,7 +252,7 @@ After `nx index repo` (or `nx taxonomy discover --all`):
 1. **Fetch embeddings** from each T3 collection
 2. **Cluster** via HDBSCAN density-based clustering (`min_cluster_size=5`)
 3. **Label** each cluster with c-TF-IDF keywords, refined via Claude haiku
-4. **Store** topics in T2 and centroids in a local ChromaDB collection (`taxonomy__centroids`, a centroid-only store independent of the retired T3 Chroma serving path)
+4. **Store** topics in T2 and centroids in pgvector (`taxonomy_centroids_{384,768,1024}`) via `nexus-service` (`HttpCentroidStore`, RDR-155 P4a.2)
 
 From then on, every `store_put` auto-assigns the new document to its nearest topic via centroid lookup, every search call boosts results sharing a topic cluster, and operator-curated labels survive rebuilds via centroid-matching merge (similarity > 0.8 transfers the old label).
 
@@ -284,18 +284,21 @@ The catalog lives in its own git repository at `~/.config/nexus/catalog/`. You n
 ```
 ~/.config/nexus/catalog/
   .git/                  # auto-created, tracks JSONL history
-  owners.jsonl           # registered repos, curators, knowledge sources
-  documents.jsonl        # every indexed document with metadata
-  links.jsonl            # every typed link between documents
-  .catalog.db            # SQLite query cache (gitignored, rebuilt automatically)
+  events.jsonl           # append-only event log — CANONICAL (RDR-101)
+  owners.jsonl           # legacy per-class log — still written, no longer canonical
+  documents.jsonl        # legacy per-class log — still written, no longer canonical
+  links.jsonl            # legacy per-class log — still written, no longer canonical
+  .catalog.db            # SQLite projection of events.jsonl (gitignored, rebuilt automatically)
   .gitignore             # excludes .catalog.db
 ```
 
-**JSONL is the truth.** The three `.jsonl` files are append-only logs. Every registration, update, link creation, and deletion appends a line. SQLite is a disposable query cache — if it disappears, the system rebuilds it from JSONL on the next access.
+**`events.jsonl` is the truth.** Under RDR-101 (event-sourced writes, default on) every catalog mutation — register, update, link, unlink, set_alias, dedupe — appends an event to `events.jsonl` first, then projects it into SQLite. `events.jsonl` is canonical; SQLite (`.catalog.db`) is a deterministic, disposable projection — if it disappears, the system rebuilds it by replaying `events.jsonl` on the next access.
 
-**Git is the history.** `nx catalog sync` commits the current JSONL state. This gives you version history for free — you can always see when a document was registered, when a link was created, or roll back a bad change with standard git tools. If you never call `sync`, the catalog still works — git is the durability layer, not the operational layer.
+The legacy per-class logs (`owners.jsonl`, `documents.jsonl`, `links.jsonl`) are still written during the RDR-101 cutover window for back-compat, but they are **not** the source of truth once `events.jsonl` is present and covers them (checked via a bootstrap guardrail comparing row counts). A catalog with no `events.jsonl`, or one materially sparser than the legacy `documents.jsonl`, falls back to legacy mode until re-bootstrapped (`nx catalog setup` from current T3 state).
 
-**SQLite is the speed.** FTS5 full-text search, indexed link queries, and graph traversal all run against SQLite. It's rebuilt automatically whenever JSONL files change (detected by mtime).
+**Git is the history.** `nx catalog sync` commits the current JSONL state (events log plus legacy logs). This gives you version history for free — you can always see when a document was registered, when a link was created, or roll back a bad change with standard git tools. If you never call `sync`, the catalog still works — git is the durability layer, not the operational layer.
+
+**SQLite is the speed.** FTS5 full-text search, indexed link queries, and graph traversal all run against SQLite. It's rebuilt automatically by replaying `events.jsonl` whenever the log changes (detected by mtime/offset).
 
 ### Tumbler addressing
 
@@ -447,9 +450,9 @@ After upgrading to RDR-060, run `--fix-paths` once to migrate existing absolute 
 
 ### Troubleshooting
 
-**SQLite cache disappeared:** Delete `.catalog.db` (or let it be deleted). The system rebuilds it from JSONL on next access — no data lost.
+**SQLite cache disappeared:** Delete `.catalog.db` (or let it be deleted). The system rebuilds it by replaying `events.jsonl` on next access — no data lost.
 
-**JSONL and SQLite disagree:** Delete `.catalog.db` and let it rebuild. JSONL is always the source of truth.
+**JSONL and SQLite disagree:** Delete `.catalog.db` and let it rebuild. `events.jsonl` is always the source of truth (legacy `owners.jsonl`/`documents.jsonl`/`links.jsonl` are back-compat only).
 
 **Links point to deleted documents:** Run `nx catalog link-audit` to find orphans. Decide whether to keep them (historical record) or delete with `link-bulk-delete`.
 

@@ -20,24 +20,22 @@ per-shell and win when both are set.
 nx config set service_url   https://api.conexus-nexus.com
 nx config set service_token <your-bearer-token>
 
-# …or per-shell environment (takes precedence over config.yml):
+# …or per-shell environment (takes precedence over config.yml). This also
+# selects the service backend, so all three exports belong together:
+export NX_STORAGE_BACKEND=service
 export NX_SERVICE_URL=https://api.conexus-nexus.com
 export NX_SERVICE_TOKEN=<your-bearer-token>
 ```
 
-Resolution order is **env first, then `config.yml`** for both values, so an
-exported `NX_SERVICE_URL` overrides a persisted one. The token is sent as
-`Authorization: Bearer <token>`; treat it as a secret.
-
-Tell `nx` to use the service backend:
-
-```bash
-export NX_STORAGE_BACKEND=service
-```
+Resolution order is **env first, then `config.yml`** for both `NX_SERVICE_URL`
+and `NX_SERVICE_TOKEN`, so an exported `NX_SERVICE_URL` overrides a persisted
+one. The token is sent as `Authorization: Bearer <token>`; treat it as a
+secret.
 
 > The storage-backend selector is env-only today (`config.yml` persistence for
 > it is a tracked follow-up); the endpoint + token above persist via `nx config`.
-> Put the `export` in your shell profile, or run with it set, until that lands.
+> Put the `export NX_STORAGE_BACKEND=service` in your shell profile, or run
+> with it set, until that lands.
 
 ## 2. Verify the endpoint (fail-loud capability probe)
 
@@ -65,7 +63,7 @@ With a healthy probe you are ready. There is no local index to build and no
 migration to run:
 
 ```bash
-nx store "my first managed note" --collection knowledge__<owner>__voyage-context-3__v1
+nx store "my first managed note" --collection knowledge__<owner>__voyage-context-3__v1  # <owner>: your username or project name — any identifier works, it's just a namespace segment
 nx search "first note"
 ```
 

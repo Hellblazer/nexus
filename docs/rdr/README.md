@@ -1,4 +1,4 @@
-**Reading order:** [Overview](../rdr-overview.md) | [Workflow](../rdr-workflow.md) | [Nexus Integration](../rdr-nexus-integration.md) | [Templates](../rdr-templates.md) | RDR Index (this page)
+**Reading order:** [Overview](../rdr.md#rdr-research-design-review) | [Workflow](../rdr.md#workflow) | [Nexus Integration](../rdr.md#nexus-integration) | [Templates](../rdr.md#rdr-template) | RDR Index (this page)
 
 ---
 
@@ -6,16 +6,16 @@
 
 An RDR (Research-Design-Review) is a short document that records a technical decision: the problem, what was found, what was chosen, and what was rejected. They exist so decisions are reproducible, searchable, and useful as agent context. Each RDR is written once and never deleted — closing an RDR means updating its status, not removing it.
 
-**New to RDR?** Start with the [Overview](../rdr-overview.md) — it covers when to write one, how to right-size it, and evidence classification. Then read the [Workflow](../rdr-workflow.md) for the full lifecycle.
+**New to RDR?** Start with the [Overview](../rdr.md#rdr-research-design-review) — it covers when to write one, how to right-size it, and evidence classification. Then read the [Workflow](../rdr.md#workflow) for the full lifecycle.
 
 ## Process Documentation
 
 | Doc | What it covers |
 |-----|---------------|
-| [Overview](../rdr-overview.md) | What RDRs are, when to write one, evidence classification, the iterative pattern |
-| [Workflow](../rdr-workflow.md) | Create → Research → Gate → Accept → Close, with worked example |
-| [Nexus Integration](../rdr-nexus-integration.md) | How storage tiers (T2/T3) and agents amplify RDRs |
-| [Templates](../rdr-templates.md) | Minimal and full RDR examples, post-mortem template, drift taxonomy |
+| [Overview](../rdr.md#rdr-research-design-review) | What RDRs are, when to write one, evidence classification, the iterative pattern |
+| [Workflow](../rdr.md#workflow) | Create → Research → Gate → Accept → Close, with worked example |
+| [Nexus Integration](../rdr.md#nexus-integration) | How storage tiers (T2/T3) and agents amplify RDRs |
+| [Templates](../rdr.md#rdr-template) | Minimal and full RDR examples, post-mortem template, drift taxonomy |
 
 ---
 
@@ -201,4 +201,4 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 
 ---
 
-**Reading order:** [Overview](../rdr-overview.md) | [Workflow](../rdr-workflow.md) | [Nexus Integration](../rdr-nexus-integration.md) | [Templates](../rdr-templates.md) | RDR Index (this page)
+**Reading order:** [Overview](../rdr.md#rdr-research-design-review) | [Workflow](../rdr.md#workflow) | [Nexus Integration](../rdr.md#nexus-integration) | [Templates](../rdr.md#rdr-template) | RDR Index (this page)

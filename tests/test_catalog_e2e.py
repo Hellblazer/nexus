@@ -183,9 +183,17 @@ def test_reindex_preserves_tumblers(
 
 class TestMCP:
     def test_search_returns_indexed_files(self, injected_catalog):
+        """nexus-3lswy: expects 2 matches (ttl.py + the RDR doc), not 3.
+        Pre-fix, the RDR file was registered TWICE — once under the repo
+        owner via the batched _catalog_hook pass, and again under a
+        SEPARATE "curator" owner via doc_indexer's _catalog_markdown_hook
+        (called from the now-retired _discover_and_index_rdrs path) — two
+        Document rows for one physical file, both matching "ttl" (one via
+        file_path, one via frontmatter title). Routing RDR files through
+        _index_prose_file removes the second, redundant registration."""
         from nexus.mcp_server import catalog_search
         results = catalog_search(query="ttl")
-        assert len(results) == 3
+        assert len(results) == 2
         assert any("ttl" in r.get("title", "").lower() or "ttl" in r.get("file_path", "").lower()
                     for r in results)
 
@@ -213,9 +221,11 @@ class TestMCP:
         assert len(result) == 3 and any("__" in n for n in result)
 
     def test_search_then_traverse_links(self, injected_catalog):
+        """nexus-3lswy: 2 matches, not 3 — see test_search_returns_indexed_files
+        for why (removal of the RDR double-registration-under-two-owners bug)."""
         from nexus.mcp_server import catalog_links, catalog_search
         results = catalog_search(query="ttl")
-        assert len(results) == 3
+        assert len(results) == 2
         tumbler = results[0]["tumbler"]
         graph = catalog_links(tumbler=tumbler, depth=1)
         assert "nodes" in graph and "edges" in graph
