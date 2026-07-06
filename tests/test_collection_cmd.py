@@ -508,6 +508,56 @@ def test_run_collection_postprocessing_swallows_t2_t3_errors() -> None:
         )
 
 
+def test_run_collection_postprocessing_echoes_per_collection_progress() -> None:
+    """nexus-47ubt: a slow ``_discover_taxonomy`` on one collection must not
+    leave the operator staring at silence between "Building staleness
+    caches..." and the eventual "discover done" summary — each collection
+    gets its own progress line as it starts."""
+    from unittest.mock import MagicMock, patch
+
+    from nexus.commands.index import run_collection_postprocessing
+
+    with patch("nexus.db.make_t3", return_value=MagicMock()), \
+         patch("nexus.db.t2.T2Database") as mock_t2_cls, \
+         patch("nexus.commands.index._discover_taxonomy", return_value=0) as mock_discover, \
+         patch("click.echo") as mock_echo:
+        mock_t2_cls.return_value.__enter__.return_value = MagicMock(
+            taxonomy=MagicMock(get_unreviewed_topics=lambda: [])
+        )
+        run_collection_postprocessing(
+            ["docs__a", "docs__b"], repo_path=None, quiet=False,
+        )
+
+    assert mock_discover.call_count == 2
+    lines = [c.args[0] for c in mock_echo.call_args_list if c.args]
+    assert any("discovering docs__a" in ln and "1/2" in ln for ln in lines)
+    assert any("discovering docs__b" in ln and "2/2" in ln for ln in lines)
+
+
+def test_run_collection_postprocessing_survives_broken_echo() -> None:
+    """A progress-echo failure (e.g. BrokenPipeError on a closed stdout) must
+    not abort the taxonomy-discover loop for the remaining collections —
+    it's cosmetic, not load-bearing (substantive-critic finding on
+    nexus-47ubt)."""
+    from unittest.mock import MagicMock, patch
+
+    from nexus.commands.index import run_collection_postprocessing
+
+    with patch("nexus.db.make_t3", return_value=MagicMock()), \
+         patch("nexus.db.t2.T2Database") as mock_t2_cls, \
+         patch("nexus.commands.index._discover_taxonomy", return_value=0) as mock_discover, \
+         patch("click.echo", side_effect=BrokenPipeError("stdout closed")):
+        mock_t2_cls.return_value.__enter__.return_value = MagicMock(
+            taxonomy=MagicMock(get_unreviewed_topics=lambda: [])
+        )
+        # Must NOT raise, and both collections must still be processed.
+        run_collection_postprocessing(
+            ["docs__a", "docs__b"], repo_path=None, quiet=False,
+        )
+
+    assert mock_discover.call_count == 2
+
+
 def test_collections_from_registry_info_filters_excluded() -> None:
     """``taxonomy.local_exclude_collections`` patterns hide registry
     collections from the post-processing chain. Empty registry

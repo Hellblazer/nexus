@@ -1808,6 +1808,7 @@ def _discover_and_index_rdrs(
     force: bool = False,
     embed_fn: Callable | None = None,
     hooks: "HookRegistry | None" = None,
+    on_phase: Callable[[str], None] | None = None,
 ) -> tuple[int, int, int]:
     """Find .md files under RDR paths and index them via batch_index_markdowns.
 
@@ -1815,11 +1816,10 @@ def _discover_and_index_rdrs(
 
     Returns (indexed, skipped, failed) counts.
 
-    Note: ``on_file`` progress callbacks are intentionally NOT wired here.
-    RDR files are excluded from the main ``_run_index`` file loop and their
-    count is not known up front (discovered inside this function).  For
-    standalone RDR progress reporting, call ``batch_index_markdowns`` directly
-    with an ``on_file`` callback (Path B in the progress reporting design).
+    *on_phase*, if provided, receives a ``[N/M] filename`` line after each
+    RDR file is processed (mirrors the main file loop's per-file progress —
+    nexus-47ubt). RDR file count is discovered inside this function, so the
+    total is only known once ``md_paths`` is built below.
     """
     from nexus.doc_indexer import batch_index_markdowns  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
@@ -1848,9 +1848,24 @@ def _discover_and_index_rdrs(
     collection = _repo_collection_or_legacy(repo, "rdr")
 
     _log.info("indexing RDR files", count=len(md_paths), collection=collection)
+    total = len(md_paths)
+    _rdr_i = 0
+
+    def _on_file(path: Path, chunks: int, elapsed_s: float) -> None:
+        nonlocal _rdr_i
+        _rdr_i += 1
+        if on_phase is None:
+            return
+        lbl = f"{chunks} chunks" if chunks else "skipped"
+        try:
+            on_phase(f"  [{_rdr_i}/{total}] {path.name} — {lbl} ({elapsed_s:.1f}s)")
+        except Exception:  # noqa: BLE001 — progress echo is cosmetic; must not abort RDR indexing or the outer nx index run (nexus-47ubt)
+            _log.debug("rdr_progress_callback_failed", exc_info=True)
+
     results = batch_index_markdowns(md_paths, corpus=basename, t3=db,
                                     collection_name=collection, force=force,
-                                    embed_fn=embed_fn, hooks=hooks)
+                                    embed_fn=embed_fn, hooks=hooks,
+                                    on_file=_on_file if on_phase is not None else None)
     indexed = sum(1 for s in results.values() if s == "indexed")
     skipped = sum(1 for s in results.values() if s == "skipped")
     failed = sum(1 for s in results.values() if s == "failed")
@@ -3103,7 +3118,7 @@ def _run_index(
         _t = time.monotonic()
         rdr_indexed, rdr_current, rdr_failed = _discover_and_index_rdrs(
             repo, rdr_abs_paths, db, voyage_key, now_iso, force=force,
-            embed_fn=_embed_fn_doc, hooks=hooks,
+            embed_fn=_embed_fn_doc, hooks=hooks, on_phase=on_phase,
         )
         _phase(
             f"RDR indexing done — {rdr_indexed} indexed, {rdr_current} current, "
