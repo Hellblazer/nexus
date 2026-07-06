@@ -703,8 +703,14 @@ public final class CatalogRepository {
      * whitelist's heterogeneous optional fields can't satisfy without
      * fighting Postgres's NULL-parameter type-inference rules; the raw-SQL
      * {@code DSL.table("(VALUES {0})", ...)} template compiles but its
-     * `.field(...)` accessors don't resolve column metadata at all — verified
-     * against the real Postgres testcontainer suite below, not assumed.)
+     * `.field(...)` accessors don't resolve column metadata at all — this
+     * specific failure (a {@code NullPointerException} on the returned
+     * field) was reproduced against the real Postgres testcontainer suite
+     * below. The tests below verify functional correctness, per-entry
+     * failure isolation, and idempotency — NOT round-trip count or
+     * statement count; the "one JDBC round trip" claim for {@code
+     * ctx.batch(...)} on heterogeneous SQL is drawn from jOOQ's documented
+     * {@code batch(Query...)} behavior, not independently measured here.)
      *
      * <p>Per-doc failure isolation mirrors {@code register_many}: a single
      * malformed entry (missing tumbler, non-updatable column) is excluded
