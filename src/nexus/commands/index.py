@@ -392,271 +392,276 @@ def index_repo_cmd(
 
     reg = _registry()
     path = path.resolve()
-    if reg.get(path) is None:
-        # RDR-103 Phase 3a/4: pass the catalog so the registry's
-        # collection-name fields are populated with conformant shapes.
-        # Phase 4 closes the order-of-operations gap by ensuring the
-        # owner row exists BEFORE ``reg.add`` consults the catalog;
-        # otherwise the catalog's owner_for_repo lookup misses on first
-        # index and the registry persists legacy names that Phase 4's
-        # in-pipeline migration then has to clean up. Calling
-        # ``ensure_owner_for_repo`` here is idempotent: existing owners
-        # are returned as-is.
-        cat = _open_catalog_or_none()
-        if cat is not None:
-            try:
-                cat.ensure_owner_for_repo(path)
-            except Exception:  # noqa: BLE001 — best-effort owner pre-registration; indexer's _catalog_hook registers regardless, failure only delays conformant naming
-                # ``ensure_owner_for_repo`` is best-effort here; the
-                # indexer's ``_catalog_hook`` registers the owner on
-                # this run regardless, so a failure at this point only
-                # delays conformant naming to the next index run.
-                pass
-        reg.add(path, cat=cat)
-        click.echo(f"Registered {path}.")
 
-    # GH #451: when the operator opts into ``--corpus knowledge``,
-    # rewrite the registered ``docs_collection`` field to use the
-    # ``knowledge__`` prefix instead of ``docs__``. This single edit
-    # is enough for every downstream layer (index_repository,
-    # _index_prose_file, _index_pdf_file) to route prose at the new
-    # destination, since they all read the field directly from the
-    # registry. Idempotent on re-runs: the rewrite only fires when
-    # the registry currently holds the docs__ default. Code routing
-    # is unaffected (the rewrite touches only the docs_collection
-    # field, never code_collection).
-    if corpus_choice == "knowledge":
-        # RDR-137 Phase 4.2 (nexus-tts0d.16): derive the knowledge
-        # collection name from the existing docs entry when present;
-        # otherwise synthesize from the catalog-known docs collection
-        # for this owner so the rewrite still fires on first-index
-        # runs (where the docs__ default has not yet been registered).
-        info = reg.get(path) or {}
-        existing_docs = info.get("docs_collection", "")
-        new_docs = ""
-        if existing_docs.startswith("docs__"):
-            new_docs = "knowledge__" + existing_docs.removeprefix("docs__")
-        else:
-            # Synthesize from the conformant docs-collection shape.
-            from nexus.repo_identity import _resolve_repo_collection  # noqa: PLC0415 — deliberate function-local import (rare branch: --corpus knowledge first-index synthesis)
-            cat_for_resolve = _open_catalog_or_none()
-            synth = _resolve_repo_collection(
-                path, "docs", cat=cat_for_resolve,
-            )
-            if synth.startswith("docs__"):
-                new_docs = "knowledge__" + synth.removeprefix("docs__")
-        if new_docs:
-            # RDR-137 followup SIG-10 (nexus-43qgm.10): gate the echo
-            # on the adapter's success flag so a failed catalog write
-            # doesn't print a misleading "Routing prose to ..."
-            # success message.
-            ok = reg.update(path, docs_collection=new_docs)
-            if ok:
-                click.echo(
-                    f"Routing prose to {new_docs} (--corpus knowledge)."
-                )
+    from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — deliberate function-local import (matches existing deferred-import convention in this function)
+    from nexus.logging_setup import open_run_log  # noqa: PLC0415 — deliberate function-local import (matches existing deferred-import convention in this function)
+    _log_basename, _log_hash8 = _repo_identity(path)
+    with open_run_log(f"index-{_log_basename}-{_log_hash8}"):
+        if reg.get(path) is None:
+            # RDR-103 Phase 3a/4: pass the catalog so the registry's
+            # collection-name fields are populated with conformant shapes.
+            # Phase 4 closes the order-of-operations gap by ensuring the
+            # owner row exists BEFORE ``reg.add`` consults the catalog;
+            # otherwise the catalog's owner_for_repo lookup misses on first
+            # index and the registry persists legacy names that Phase 4's
+            # in-pipeline migration then has to clean up. Calling
+            # ``ensure_owner_for_repo`` here is idempotent: existing owners
+            # are returned as-is.
+            cat = _open_catalog_or_none()
+            if cat is not None:
+                try:
+                    cat.ensure_owner_for_repo(path)
+                except Exception:  # noqa: BLE001 — best-effort owner pre-registration; indexer's _catalog_hook registers regardless, failure only delays conformant naming
+                    # ``ensure_owner_for_repo`` is best-effort here; the
+                    # indexer's ``_catalog_hook`` registers the owner on
+                    # this run regardless, so a failure at this point only
+                    # delays conformant naming to the next index run.
+                    pass
+            reg.add(path, cat=cat)
+            click.echo(f"Registered {path}.")
+
+        # GH #451: when the operator opts into ``--corpus knowledge``,
+        # rewrite the registered ``docs_collection`` field to use the
+        # ``knowledge__`` prefix instead of ``docs__``. This single edit
+        # is enough for every downstream layer (index_repository,
+        # _index_prose_file, _index_pdf_file) to route prose at the new
+        # destination, since they all read the field directly from the
+        # registry. Idempotent on re-runs: the rewrite only fires when
+        # the registry currently holds the docs__ default. Code routing
+        # is unaffected (the rewrite touches only the docs_collection
+        # field, never code_collection).
+        if corpus_choice == "knowledge":
+            # RDR-137 Phase 4.2 (nexus-tts0d.16): derive the knowledge
+            # collection name from the existing docs entry when present;
+            # otherwise synthesize from the catalog-known docs collection
+            # for this owner so the rewrite still fires on first-index
+            # runs (where the docs__ default has not yet been registered).
+            info = reg.get(path) or {}
+            existing_docs = info.get("docs_collection", "")
+            new_docs = ""
+            if existing_docs.startswith("docs__"):
+                new_docs = "knowledge__" + existing_docs.removeprefix("docs__")
             else:
-                click.echo(
-                    f"WARN: --corpus knowledge requested but the catalog "
-                    f"write for {new_docs} failed; check structured logs "
-                    f"for catalog_registry_adapter_register_failed event.",
-                    err=True,
+                # Synthesize from the conformant docs-collection shape.
+                from nexus.repo_identity import _resolve_repo_collection  # noqa: PLC0415 — deliberate function-local import (rare branch: --corpus knowledge first-index synthesis)
+                cat_for_resolve = _open_catalog_or_none()
+                synth = _resolve_repo_collection(
+                    path, "docs", cat=cat_for_resolve,
                 )
+                if synth.startswith("docs__"):
+                    new_docs = "knowledge__" + synth.removeprefix("docs__")
+            if new_docs:
+                # RDR-137 followup SIG-10 (nexus-43qgm.10): gate the echo
+                # on the adapter's success flag so a failed catalog write
+                # doesn't print a misleading "Routing prose to ..."
+                # success message.
+                ok = reg.update(path, docs_collection=new_docs)
+                if ok:
+                    click.echo(
+                        f"Routing prose to {new_docs} (--corpus knowledge)."
+                    )
+                else:
+                    click.echo(
+                        f"WARN: --corpus knowledge requested but the catalog "
+                        f"write for {new_docs} failed; check structured logs "
+                        f"for catalog_registry_adapter_register_failed event.",
+                        err=True,
+                    )
 
-    if force:
-        label = "Force-indexing"
-    elif force_stale:
-        label = "Force-indexing stale"
-    elif frecency_only:
-        label = "Updating frecency scores"
-    else:
-        label = "Indexing"
-    click.echo(f"{label} {path}…")
-
-    # nexus-vatx Gap 4: zero the retry accumulators so the end-of-run
-    # summary reflects only this run's backoffs.
-    from nexus.retry import get_retry_stats, reset_retry_stats  # noqa: PLC0415 — deliberate function-local import (per-run retry accumulator reset)
-    reset_retry_stats()
-
-    bar: tqdm | None = None
-    n = 0
-    total = 0
-    total_chunks = 0
-    skipped_files = 0
-    eta_ticker = _ETATicker(emit=lambda msg: click.echo(f"  {msg}", err=True))
-
-    def on_start(count: int) -> None:
-        nonlocal bar, total
-        total = count
-        bar = tqdm(total=count, disable=None, desc=path.name, unit="file")
-        # nexus-vatx Gap 3: kick off the stderr ETA ticker once the total is
-        # known. Runs every 60 s regardless of TTY so background / CI runs
-        # see pace even when tqdm suppresses itself.
-        eta_ticker.start(count)
-
-    def on_file(fpath: Path, chunks: int, elapsed: float) -> None:
-        nonlocal n, total_chunks, skipped_files
-        n += 1
-        total_chunks += chunks
-        if not chunks:
-            skipped_files += 1
-        eta_ticker.record(chunks)
-        if bar is not None:
-            bar.update(1)
-            # nexus-6xqk: cumulative chunks + skipped count alongside
-            # current file. Surfaces real work progress even before
-            # the ETA ticker's warm-up sample lands. ``skip`` shows
-            # only when non-zero so healthy runs stay terse.
-            postfix: dict[str, object] = {
-                "now": fpath.name,
-                "chunks": f"{total_chunks:,}",
-            }
-            if skipped_files:
-                postfix["skip"] = skipped_files
-            bar.set_postfix(**postfix)
-        if monitor or not sys.stdout.isatty():
-            lbl = f"{chunks} chunks" if chunks else "skipped"
-            line = f"  [{n}/{total}] {fpath.name} \u2014 {lbl}  ({elapsed:.1f}s)"
-            if bar is not None and sys.stdout.isatty():
-                tqdm.write(line)
-            else:
-                click.echo(line)
-
-    post_pass_started = False
-
-    def on_phase(msg: str) -> None:
-        # nexus-vatx Gap 2: surface post-processing phases so the operator
-        # knows the indexer is still busy after the per-file bar finishes.
-        # Stderr so the line is visible even when stdout is redirected.
-        nonlocal post_pass_started
-        if not post_pass_started:
-            # nexus-6xqk follow-up: file walk is done by the time the
-            # first post-pass phase fires. Stop the ETA ticker so its
-            # 60-second loop doesn't spam the same "done" line on top
-            # of the post-pass output.
-            post_pass_started = True
-            eta_ticker.stop()
-        click.echo(f"  [post] {msg}", err=True)
-
-    def _emit_retry_summary() -> None:
-        # Review remediation (Reviewer A/I-2): emit the retry-time summary
-        # regardless of whether index_repository succeeded. A run that
-        # crashed after repeated rate-limit backoffs is exactly the case
-        # where the summary matters most — it tells the operator "you
-        # weren't slow, you were throttled." Silent on zero retries.
-        retry_stats = get_retry_stats()
-        if not retry_stats["total_count"]:
-            return
-        parts: list[str] = []
-        if retry_stats["voyage_count"]:
-            parts.append(
-                f"voyage {retry_stats['voyage_seconds']:.1f}s over "
-                f"{retry_stats['voyage_count']} retries"
-            )
-        if retry_stats["chroma_count"]:
-            parts.append(
-                f"chroma {retry_stats['chroma_seconds']:.1f}s over "
-                f"{retry_stats['chroma_count']} retries"
-            )
-        click.echo(
-            f"  Transient-error backoff: {retry_stats['total_seconds']:.1f}s total "
-            f"({', '.join(parts)})",
-            err=True,
-        )
-
-    # nexus-7niu: per-stage timer collection. The callback appends one
-    # StageTimers per file; end-of-run aggregation formats the table.
-    timers_collected: list = []  # list[StageTimers]
-    on_stage_timers = None
-    if debug_timing:
-        def on_stage_timers(_file: Path, timers) -> None:  # noqa: E306
-            timers_collected.append(timers)
-
-    def _emit_debug_timing() -> None:
-        if not debug_timing:
-            return
-        from nexus.stage_timers import aggregate, format_report  # noqa: PLC0415 — deliberate function-local import (rare branch: --debug-timing only)
-        click.echo(
-            format_report(aggregate(timers_collected), n_files=len(timers_collected)),
-            err=True,
-        )
-
-    stats: dict = {}
-    try:
-        stats = index_repository(path, reg, frecency_only=frecency_only, force=force,
-                                 force_stale=force_stale,
-                                 on_locked=on_locked, on_start=on_start, on_file=on_file,
-                                 on_phase=on_phase,
-                                 on_stage_timers=on_stage_timers) or {}
-    finally:
-        eta_ticker.stop()
-        if bar:
-            bar.close()
-        _emit_retry_summary()
-        _emit_debug_timing()
-    if not frecency_only and stats:
-        rdr_indexed = stats.get("rdr_indexed", 0)
-        rdr_current = stats.get("rdr_current", 0)
-        rdr_failed = stats.get("rdr_failed", 0)
-        total_rdr = rdr_indexed + rdr_current + rdr_failed
-        if total_rdr:
-            parts = [f"{rdr_indexed} indexed"]
-            if rdr_current:
-                parts.append(f"{rdr_current} up to date")
-            if rdr_failed:
-                parts.append(f"{rdr_failed} failed")
-            click.echo(f"  RDR documents: {', '.join(parts)} (collection rdr__)")
-    # Auto-discover taxonomy topics (RDR-070, nexus-0bg).
-    # GH #369: this chain (taxonomy + project + topic-links + L1) used
-    # to live inline here so reindex_cmd silently skipped it after
-    # bulk re-embeds. Extracted into ``run_collection_postprocessing``
-    # so both ``nx index repo`` and ``nx collection reindex`` walk the
-    # same path.
-    # nexus-qgc4b: skip the expensive post-index passes (taxonomy discover +
-    # kmeans + haiku labeling + cross-collection projection + L1 refresh) when
-    # no file changed this run. The 2026-07-04 all-skip re-index spent 655s
-    # re-clustering 1,461 unchanged chunks. Flush-grain incremental assignment
-    # already covered any deltas on the runs that did write, so a zero-write run
-    # has no new chunks to place — discovery would only rebuild an identical
-    # taxonomy.
-    #
-    # Self-heal guard (substantive-critic): discover_for_collection has no
-    # internal change-detection, so pre-qgc4b every run was an implicit RETRY of
-    # a previously-failed/never-run discover. We must not silently strand a
-    # collection whose taxonomy was never successfully built: if ANY target
-    # collection has zero topics, run the pass even on a no-change run. Once
-    # topics exist, a no-change run skips. Two residuals are tracked separately:
-    # re-discover on small nonzero drift (nexus-ou9uw), and a discover that
-    # fails AFTER a prior success while file churn has stopped (nexus-du6d0) —
-    # the latter needs a signal independent of index runs, not just this gate.
-    if not frecency_only and not no_taxonomy and stats:
-        info = reg.get(path) or {}
-        collections = _collections_from_registry_info(info)
-        files_changed = stats.get("files_changed", 0)
-        if files_changed > 0 or _taxonomy_incomplete(collections):
-            run_collection_postprocessing(collections, repo_path=path)
+        if force:
+            label = "Force-indexing"
+        elif force_stale:
+            label = "Force-indexing stale"
+        elif frecency_only:
+            label = "Updating frecency scores"
         else:
-            click.echo("  Taxonomy: no files changed — skipping discovery")
+            label = "Indexing"
+        click.echo(f"{label} {path}…")
 
-    if not frecency_only:
+        # nexus-vatx Gap 4: zero the retry accumulators so the end-of-run
+        # summary reflects only this run's backoffs.
+        from nexus.retry import get_retry_stats, reset_retry_stats  # noqa: PLC0415 — deliberate function-local import (per-run retry accumulator reset)
+        reset_retry_stats()
+
+        bar: tqdm | None = None
+        n = 0
+        total = 0
+        total_chunks = 0
+        skipped_files = 0
+        eta_ticker = _ETATicker(emit=lambda msg: click.echo(f"  {msg}", err=True))
+
+        def on_start(count: int) -> None:
+            nonlocal bar, total
+            total = count
+            bar = tqdm(total=count, disable=None, desc=path.name, unit="file")
+            # nexus-vatx Gap 3: kick off the stderr ETA ticker once the total is
+            # known. Runs every 60 s regardless of TTY so background / CI runs
+            # see pace even when tqdm suppresses itself.
+            eta_ticker.start(count)
+
+        def on_file(fpath: Path, chunks: int, elapsed: float) -> None:
+            nonlocal n, total_chunks, skipped_files
+            n += 1
+            total_chunks += chunks
+            if not chunks:
+                skipped_files += 1
+            eta_ticker.record(chunks)
+            if bar is not None:
+                bar.update(1)
+                # nexus-6xqk: cumulative chunks + skipped count alongside
+                # current file. Surfaces real work progress even before
+                # the ETA ticker's warm-up sample lands. ``skip`` shows
+                # only when non-zero so healthy runs stay terse.
+                postfix: dict[str, object] = {
+                    "now": fpath.name,
+                    "chunks": f"{total_chunks:,}",
+                }
+                if skipped_files:
+                    postfix["skip"] = skipped_files
+                bar.set_postfix(**postfix)
+            if monitor or not sys.stdout.isatty():
+                lbl = f"{chunks} chunks" if chunks else "skipped"
+                line = f"  [{n}/{total}] {fpath.name} \u2014 {lbl}  ({elapsed:.1f}s)"
+                if bar is not None and sys.stdout.isatty():
+                    tqdm.write(line)
+                else:
+                    click.echo(line)
+
+        post_pass_started = False
+
+        def on_phase(msg: str) -> None:
+            # nexus-vatx Gap 2: surface post-processing phases so the operator
+            # knows the indexer is still busy after the per-file bar finishes.
+            # Stderr so the line is visible even when stdout is redirected.
+            nonlocal post_pass_started
+            if not post_pass_started:
+                # nexus-6xqk follow-up: file walk is done by the time the
+                # first post-pass phase fires. Stop the ETA ticker so its
+                # 60-second loop doesn't spam the same "done" line on top
+                # of the post-pass output.
+                post_pass_started = True
+                eta_ticker.stop()
+            click.echo(f"  [post] {msg}", err=True)
+
+        def _emit_retry_summary() -> None:
+            # Review remediation (Reviewer A/I-2): emit the retry-time summary
+            # regardless of whether index_repository succeeded. A run that
+            # crashed after repeated rate-limit backoffs is exactly the case
+            # where the summary matters most — it tells the operator "you
+            # weren't slow, you were throttled." Silent on zero retries.
+            retry_stats = get_retry_stats()
+            if not retry_stats["total_count"]:
+                return
+            parts: list[str] = []
+            if retry_stats["voyage_count"]:
+                parts.append(
+                    f"voyage {retry_stats['voyage_seconds']:.1f}s over "
+                    f"{retry_stats['voyage_count']} retries"
+                )
+            if retry_stats["chroma_count"]:
+                parts.append(
+                    f"chroma {retry_stats['chroma_seconds']:.1f}s over "
+                    f"{retry_stats['chroma_count']} retries"
+                )
+            click.echo(
+                f"  Transient-error backoff: {retry_stats['total_seconds']:.1f}s total "
+                f"({', '.join(parts)})",
+                err=True,
+            )
+
+        # nexus-7niu: per-stage timer collection. The callback appends one
+        # StageTimers per file; end-of-run aggregation formats the table.
+        timers_collected: list = []  # list[StageTimers]
+        on_stage_timers = None
+        if debug_timing:
+            def on_stage_timers(_file: Path, timers) -> None:  # noqa: E306
+                timers_collected.append(timers)
+
+        def _emit_debug_timing() -> None:
+            if not debug_timing:
+                return
+            from nexus.stage_timers import aggregate, format_report  # noqa: PLC0415 — deliberate function-local import (rare branch: --debug-timing only)
+            click.echo(
+                format_report(aggregate(timers_collected), n_files=len(timers_collected)),
+                err=True,
+            )
+
+        stats: dict = {}
         try:
-            from nexus.commands.hooks import SENTINEL_BEGIN, _effective_hooks_dir  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
-            hdir = _effective_hooks_dir(path)
-            hook_names = ("post-commit", "post-merge", "post-rewrite")
-            any_managed = any(
-                SENTINEL_BEGIN in (hdir / n).read_text()
-                for n in hook_names
-                if (hdir / n).exists()
-            )
-            if not any_managed:
-                click.echo("Tip: run `nx hooks install` to auto-index this repo on every commit.")
-        except Exception as exc:  # noqa: BLE001 — best-effort hook detection must not crash indexing; logged via log.debug
-            _log.debug("hook_detection_failed", error=str(exc))  # Don't let hook detection break indexing
+            stats = index_repository(path, reg, frecency_only=frecency_only, force=force,
+                                     force_stale=force_stale,
+                                     on_locked=on_locked, on_start=on_start, on_file=on_file,
+                                     on_phase=on_phase,
+                                     on_stage_timers=on_stage_timers) or {}
+        finally:
+            eta_ticker.stop()
+            if bar:
+                bar.close()
+            _emit_retry_summary()
+            _emit_debug_timing()
+        if not frecency_only and stats:
+            rdr_indexed = stats.get("rdr_indexed", 0)
+            rdr_current = stats.get("rdr_current", 0)
+            rdr_failed = stats.get("rdr_failed", 0)
+            total_rdr = rdr_indexed + rdr_current + rdr_failed
+            if total_rdr:
+                parts = [f"{rdr_indexed} indexed"]
+                if rdr_current:
+                    parts.append(f"{rdr_current} up to date")
+                if rdr_failed:
+                    parts.append(f"{rdr_failed} failed")
+                click.echo(f"  RDR documents: {', '.join(parts)} (collection rdr__)")
+        # Auto-discover taxonomy topics (RDR-070, nexus-0bg).
+        # GH #369: this chain (taxonomy + project + topic-links + L1) used
+        # to live inline here so reindex_cmd silently skipped it after
+        # bulk re-embeds. Extracted into ``run_collection_postprocessing``
+        # so both ``nx index repo`` and ``nx collection reindex`` walk the
+        # same path.
+        # nexus-qgc4b: skip the expensive post-index passes (taxonomy discover +
+        # kmeans + haiku labeling + cross-collection projection + L1 refresh) when
+        # no file changed this run. The 2026-07-04 all-skip re-index spent 655s
+        # re-clustering 1,461 unchanged chunks. Flush-grain incremental assignment
+        # already covered any deltas on the runs that did write, so a zero-write run
+        # has no new chunks to place — discovery would only rebuild an identical
+        # taxonomy.
+        #
+        # Self-heal guard (substantive-critic): discover_for_collection has no
+        # internal change-detection, so pre-qgc4b every run was an implicit RETRY of
+        # a previously-failed/never-run discover. We must not silently strand a
+        # collection whose taxonomy was never successfully built: if ANY target
+        # collection has zero topics, run the pass even on a no-change run. Once
+        # topics exist, a no-change run skips. Two residuals are tracked separately:
+        # re-discover on small nonzero drift (nexus-ou9uw), and a discover that
+        # fails AFTER a prior success while file churn has stopped (nexus-du6d0) —
+        # the latter needs a signal independent of index runs, not just this gate.
+        if not frecency_only and not no_taxonomy and stats:
+            info = reg.get(path) or {}
+            collections = _collections_from_registry_info(info)
+            files_changed = stats.get("files_changed", 0)
+            if files_changed > 0 or _taxonomy_incomplete(collections):
+                run_collection_postprocessing(collections, repo_path=path)
+            else:
+                click.echo("  Taxonomy: no files changed — skipping discovery")
 
-    # Retry summary now emitted from the `finally` block around
-    # index_repository (see `_emit_retry_summary`) so it fires on both
-    # success and exception paths — Reviewer A/I-2.
-    click.echo("Done.")
+        if not frecency_only:
+            try:
+                from nexus.commands.hooks import SENTINEL_BEGIN, _effective_hooks_dir  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
+                hdir = _effective_hooks_dir(path)
+                hook_names = ("post-commit", "post-merge", "post-rewrite")
+                any_managed = any(
+                    SENTINEL_BEGIN in (hdir / n).read_text()
+                    for n in hook_names
+                    if (hdir / n).exists()
+                )
+                if not any_managed:
+                    click.echo("Tip: run `nx hooks install` to auto-index this repo on every commit.")
+            except Exception as exc:  # noqa: BLE001 — best-effort hook detection must not crash indexing; logged via log.debug
+                _log.debug("hook_detection_failed", error=str(exc))  # Don't let hook detection break indexing
+
+        # Retry summary now emitted from the `finally` block around
+        # index_repository (see `_emit_retry_summary`) so it fires on both
+        # success and exception paths — Reviewer A/I-2.
+        click.echo("Done.")
 
 
 def _taxonomy_incomplete(collections: list[str]) -> bool:

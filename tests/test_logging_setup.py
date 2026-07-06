@@ -518,3 +518,168 @@ class TestDaemonModeStderrPolicy:
             assert len(file_handlers) == 1
         finally:
             self._cleanup_file_handlers()
+
+
+class TestOpenRunLog:
+    """nexus-mjc9l: a per-run log file for long-running CLI commands
+    (nx index repo) that survives independent of terminal buffering.
+
+    In cli mode, TWO filters drop INFO before any handler sees it: the
+    structlog wrapper (make_filtering_bound_logger(WARNING)) and the
+    stdlib root logger level (WARNING). A RotatingFileHandler-only
+    implementation would capture zero structlog INFO events — these
+    tests specifically emit via structlog.get_logger() (never raw
+    stdlib logging) so a naive handler-only implementation fails loud
+    instead of false-greening.
+    """
+
+    def _file_handlers_for(self, path: Path) -> list[logging.handlers.RotatingFileHandler]:
+        return [
+            h for h in logging.getLogger().handlers
+            if isinstance(h, logging.handlers.RotatingFileHandler)
+            and h.baseFilename == str(path)
+        ]
+
+    def test_open_run_log_creates_file_and_handler(self, tmp_path):
+        from nexus.logging_setup import open_run_log
+
+        with open_run_log("index-test-run", config_dir=tmp_path) as log_path:
+            assert log_path == tmp_path / "logs" / "index-test-run.log"
+            assert log_path.exists()
+            assert len(self._file_handlers_for(log_path)) == 1
+
+    def test_open_run_log_captures_structlog_info(self, tmp_path):
+        from nexus.logging_setup import open_run_log
+
+        # Real CLI precondition: WARNING structlog wrapper + WARNING root.
+        configure_logging("cli")
+        with open_run_log("index-test-run", config_dir=tmp_path) as log_path:
+            structlog.get_logger("nexus.test").info(
+                "probe_event", k=1,
+            )
+            for h in self._file_handlers_for(log_path):
+                h.flush()
+            contents = log_path.read_text()
+        assert "probe_event" in contents
+
+    def test_open_run_log_preserves_quiet_stderr(self, tmp_path, capsys):
+        from nexus.logging_setup import open_run_log
+
+        configure_logging("cli")
+        with open_run_log("index-test-run", config_dir=tmp_path) as log_path:
+            structlog.get_logger("nexus.test").info("probe_event", k=1)
+            for h in self._file_handlers_for(log_path):
+                h.flush()
+            contents = log_path.read_text()
+        captured = capsys.readouterr()
+        assert "probe_event" in contents
+        assert "probe_event" not in captured.err
+
+    def test_open_run_log_removes_handler_on_success(self, tmp_path):
+        from nexus.logging_setup import open_run_log
+
+        configure_logging("cli")
+        root = logging.getLogger()
+        pre_level = root.level
+        pre_structlog = structlog.get_config()
+        with open_run_log("index-test-run", config_dir=tmp_path) as log_path:
+            pass
+        assert self._file_handlers_for(log_path) == []
+        assert root.level == pre_level
+        assert structlog.get_config()["wrapper_class"] == pre_structlog["wrapper_class"]
+
+    def test_open_run_log_removes_handler_on_exception(self, tmp_path):
+        from nexus.logging_setup import open_run_log
+
+        configure_logging("cli")
+        root = logging.getLogger()
+        pre_level = root.level
+
+        class _Boom(Exception):
+            pass
+
+        log_path = tmp_path / "logs" / "index-test-run.log"
+        with pytest.raises(_Boom):
+            with open_run_log("index-test-run", config_dir=tmp_path):
+                raise _Boom("boom")
+        assert self._file_handlers_for(log_path) == []
+        assert root.level == pre_level
+
+    def test_open_run_log_no_duplicate_handlers_same_name(self, tmp_path):
+        from nexus.logging_setup import open_run_log
+
+        with open_run_log("index-test-run", config_dir=tmp_path) as log_path:
+            pass
+        with open_run_log("index-test-run", config_dir=tmp_path) as log_path2:
+            assert log_path2 == log_path
+            assert len(self._file_handlers_for(log_path2)) == 1
+
+    def test_open_run_log_setup_failure_does_not_leak_global_state(self, tmp_path, monkeypatch):
+        """code-review-expert (nexus-mjc9l): a RotatingFileHandler
+        construction failure must not permanently reconfigure
+        structlog/root-logger state — the handler (failable I/O) is
+        built BEFORE any global mutation, so a construction failure
+        never reaches the mutation section at all."""
+        from nexus.logging_setup import open_run_log
+
+        configure_logging("cli")
+        root = logging.getLogger()
+        pre_level = root.level
+        pre_structlog = structlog.get_config()
+
+        class _BoomHandler(logging.handlers.RotatingFileHandler):
+            def __init__(self, *a, **kw):
+                raise OSError("permission denied")
+
+        monkeypatch.setattr(logging.handlers, "RotatingFileHandler", _BoomHandler)
+
+        with pytest.raises(OSError):
+            with open_run_log("index-test-run", config_dir=tmp_path):
+                pass  # pragma: no cover — never reached, construction raises on enter
+
+        assert root.level == pre_level
+        assert structlog.get_config()["wrapper_class"] == pre_structlog["wrapper_class"]
+
+    def test_open_run_log_preserves_verbose_debug(self, tmp_path):
+        """substantive-critic (nexus-mjc9l): --verbose / NEXUS_LOG_LEVEL=DEBUG
+        must survive inside the context — the prior hardcoded
+        wrapper_class=INFO silently dropped every DEBUG event for the
+        whole run, defeating an explicit verbosity request, even though
+        the stdlib root level was correctly floor-preserved one line
+        below it."""
+        from nexus.logging_setup import open_run_log
+
+        configure_logging("cli", verbose=True)
+        with open_run_log("index-test-run", config_dir=tmp_path) as log_path:
+            structlog.get_logger("nexus.test").debug("debug_probe", k=1)
+            for h in self._file_handlers_for(log_path):
+                h.flush()
+            contents = log_path.read_text()
+        assert "debug_probe" in contents
+
+    def test_open_run_log_second_run_does_not_carry_over_first_runs_content(self, tmp_path):
+        """substantive-critic (nexus-mjc9l): design doc's approved contract
+        is 'per-repo, latest-run overwrite via rotation' — a second run on
+        the same name must not accumulate the first run's lines into the
+        live file (RotatingFileHandler's default append-forever-until-size
+        behavior would otherwise silently violate this)."""
+        from nexus.logging_setup import open_run_log
+
+        configure_logging("cli")
+        with open_run_log("index-test-run", config_dir=tmp_path) as log_path:
+            structlog.get_logger("nexus.test").info("run_one_event")
+            for h in self._file_handlers_for(log_path):
+                h.flush()
+
+        with open_run_log("index-test-run", config_dir=tmp_path) as log_path2:
+            structlog.get_logger("nexus.test").info("run_two_event")
+            for h in self._file_handlers_for(log_path2):
+                h.flush()
+            contents = log_path2.read_text()
+
+        assert "run_two_event" in contents
+        assert "run_one_event" not in contents
+        # The prior run's content survives as the .1 backup, not silently lost.
+        backup = log_path2.with_name(log_path2.name + ".1")
+        assert backup.exists()
+        assert "run_one_event" in backup.read_text()
