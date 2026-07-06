@@ -548,6 +548,31 @@ class _ServiceCollectionStub:
         )
         return int(result.get("count", 0))
 
+    def get_all_metadata(self, where: dict | None = None) -> dict:
+        """ids + metadata for EVERY chunk in this collection in ONE round trip
+        (nexus-duoak follow-up: collapses the indexer's staleness-cache-build
+        paginated ``/get`` loop -- measured ~113s of a ~116s phase on this
+        repo's own 24k-chunk ``code__`` collection).
+
+        Unlike :meth:`get`/:meth:`delete`, this does NOT catch-and-degrade to
+        an empty result on failure -- a silent empty result here would look
+        identical to "collection has 0 chunks" to the caller, which would
+        build an empty staleness cache instead of falling back to the
+        paginated path (mirrors :meth:`count`'s "caller owns the boundary"
+        contract, not :meth:`get`'s silent-degrade one). Raises
+        :class:`VectorServiceError` on any failure, including the server's
+        422 "too many rows for one call" cap -- callers should catch and
+        fall back to the paginated :meth:`get` loop.
+        """
+        body: dict[str, Any] = {"collection": self._name}
+        if where:
+            body["where"] = where
+        result = _post("/v1/vectors/get-all-metadata", body, tenant=self._tenant)
+        return {
+            "ids": result.get("ids", []),
+            "metadatas": result.get("metadatas", []),
+        }
+
     def delete(self, ids: list[str]) -> None:
         """Delete chunks by ID from the service."""
         if not ids:

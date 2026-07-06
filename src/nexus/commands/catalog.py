@@ -765,6 +765,121 @@ def compact_cmd() -> None:
         click.echo("Run 'nx catalog sync' to commit the compacted files.")
 
 
+@catalog.command("reconcile")
+@click.option(
+    "--dry-run", is_flag=True, default=False,
+    help="Report what would be reconciled without writing.",
+)
+def reconcile_cmd(dry_run: bool) -> None:
+    """Repair document_chunks manifest gaps (GH #1371).
+
+    A persistent manifest-write-hook failure (e.g. the catalog
+    engine-service was briefly unreachable) can leave a document with
+    ``chunk_count > 0`` in ``documents`` but fewer rows — or none at all
+    — in the ``document_chunks`` manifest. Such a document silently drops
+    out of catalog-aware retrieval even though T3 still has its chunks.
+
+    This command finds every document with that gap, rebuilds its manifest
+    from the T3 chunks in its ``physical_collection`` (matched by the
+    whole-file ``content_hash`` recorded on both the document and every
+    one of its chunks, ordered by character/line span — RDR-108 Phase 3
+    dropped ``chunk_index``/``doc_id`` from chunk metadata, so the spans
+    are what is left to reconstruct order), and writes the manifest via
+    the same atomic replace path the indexer uses. Documents whose chunks
+    cannot be found in T3 (no content_hash recorded, or no matching
+    chunks) are reported, not silently skipped.
+
+    ``--dry-run`` reports the same counts without writing.
+    """
+    from nexus.db import make_t3  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.indexer import _paginated_get  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.mcp_infra import _manifest_chunk_rows  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+
+    cat = _get_catalog()
+    entries = [e for e in cat.all_documents(limit=0) if e.chunk_count > 0]
+    if not entries:
+        click.echo("Reconciled 0 document(s); 0 could not be matched to chunks.")
+        return
+
+    manifests = cat.get_manifests([str(e.tumbler) for e in entries])
+    gapped = [
+        e for e in entries
+        if len(manifests.get(str(e.tumbler), [])) < e.chunk_count
+    ]
+    if not gapped:
+        click.echo("Reconciled 0 document(s); 0 could not be matched to chunks.")
+        return
+
+    t3 = make_t3()
+    writer = _get_catalog_writer() if not dry_run else None
+    reconciled = 0
+    unmatched: list = []
+    try:
+        for entry in gapped:
+            content_hash = (entry.meta or {}).get("content_hash", "")
+            if not content_hash or not entry.physical_collection:
+                unmatched.append(entry)
+                continue
+            try:
+                col = t3.get_collection(entry.physical_collection)
+                fetched = _paginated_get(
+                    col, include=["metadatas"],
+                    where={"content_hash": content_hash},
+                )
+            except Exception as exc:  # noqa: BLE001 — boundary catch; a T3 fetch failure for one doc must not abort the whole reconcile pass
+                _log.warning(
+                    "catalog_reconcile_t3_fetch_failed",
+                    tumbler=str(entry.tumbler), error=str(exc),
+                )
+                unmatched.append(entry)
+                continue
+            ids = fetched.get("ids") or []
+            metas = fetched.get("metadatas") or []
+            if not ids:
+                unmatched.append(entry)
+                continue
+            # RDR-108 Phase 3 dropped chunk_index from chunk metadata, so
+            # the char/line span is the only ordering signal left; fall
+            # back to line_start, then to a stable id sort so identically-
+            # spanned rows (both absent) still get a deterministic order.
+            def _order_key(pair: tuple) -> tuple:
+                _cid, m = pair
+                m = m or {}
+                start = m.get("chunk_start_char")
+                if start is None:
+                    start = m.get("line_start")
+                return (0, start, _cid) if start is not None else (1, 0, _cid)
+
+            ordered = sorted(zip(ids, metas), key=_order_key)
+            indexed_metas = []
+            for i, (cid, m) in enumerate(ordered):
+                m = dict(m or {})
+                if not m.get("chunk_text_hash"):
+                    m["chunk_text_hash"] = cid
+                m["chunk_index"] = i
+                indexed_metas.append((i, m))
+            chunks = _manifest_chunk_rows(indexed_metas)
+            if not any(c["chash"] for c in chunks):
+                unmatched.append(entry)
+                continue
+            if not dry_run:
+                writer.atomic_manifest_replace(str(entry.tumbler), chunks)
+            reconciled += 1
+    finally:
+        if writer is not None:
+            _close = getattr(writer, "close", None)
+            if callable(_close):
+                _close()
+
+    verb = "Would reconcile" if dry_run else "Reconciled"
+    click.echo(f"{verb} {reconciled} document(s); {len(unmatched)} could not be matched to chunks.")
+    if unmatched:
+        for entry in unmatched[:20]:
+            click.echo(f"    {entry.tumbler}  {entry.file_path or entry.title}")
+        if len(unmatched) > 20:
+            click.echo(f"    ... and {len(unmatched) - 20} more")
+
+
 # ── Backfill helpers ──────────────────────────────────────────────────────────
 
 

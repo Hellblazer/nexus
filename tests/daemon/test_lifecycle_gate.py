@@ -16,6 +16,7 @@ source of truth.
 """
 from __future__ import annotations
 
+import ast
 import pathlib
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.parent
@@ -174,3 +175,176 @@ def test_gate_doc_exists() -> None:
     text = gate.read_text(encoding="utf-8")
     assert "service_registry.py" in text
     assert "test_rdr149_lifecycle_conformance.py" in text
+
+
+# nexus-w771r / GH #1369: "does my supervisor own the process I'm about to
+# heartbeat" is a shared run-loop invariant (exit_if_process_unowned in the
+# primitive), not a per-tier copy. A tier reimplementing its own
+# "if not X.owns_process: ... return 0" prelude instead of calling the shared
+# helper is exactly the drift class this gate exists to catch.
+_OWNS_PROCESS_CONSUMER_MODULES = frozenset({
+    "daemon/storage_service_daemon.py",
+    "daemon/t3_daemon.py",
+})
+
+
+def _defines_exit_if_process_unowned(tree: ast.AST) -> bool:
+    """AST-based (not substring) check for a top-level ``def
+    exit_if_process_unowned(...)`` / ``async def`` in ``tree``. AST-based so
+    a comment or docstring merely mentioning the name can never count as a
+    definition, and an ``async def`` redefinition is caught the same as a
+    plain ``def`` (a gap a prior substring-based version of this check had)."""
+    return any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "exit_if_process_unowned"
+        for node in ast.walk(tree)
+    )
+
+
+def _defines_owns_process_property(tree: ast.AST) -> bool:
+    """AST-based check for an ``@property def owns_process(self)``."""
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "owns_process":
+            if any(
+                isinstance(d, ast.Name) and d.id == "property"
+                for d in node.decorator_list
+            ):
+                return True
+    return False
+
+
+def _calls_exit_if_process_unowned(tree: ast.AST) -> bool:
+    """AST-based check for a real call to ``exit_if_process_unowned(...)``,
+    as a bare name or an attribute (``module.exit_if_process_unowned(...)``).
+    A comment or docstring mentioning the name is NOT an ``ast.Call`` node,
+    so it can never produce a false match -- unlike the substring check
+    (``"exit_if_process_unowned(" in text``) this replaces, which a stray
+    comment like ``# TODO: call exit_if_process_unowned(sup)`` would have
+    silently satisfied without any real call existing."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and func.id == "exit_if_process_unowned":
+            return True
+        if isinstance(func, ast.Attribute) and func.attr == "exit_if_process_unowned":
+            return True
+    return False
+
+
+def test_owns_process_short_circuit_defined_only_in_primitive() -> None:
+    """``exit_if_process_unowned`` -- the shared "don't heartbeat what you
+    don't own" run-loop prelude -- is defined exactly once, in the
+    primitive. A tier defining its own copy is reimplementing it bespoke."""
+    definitions: list[pathlib.Path] = []
+    for path in _py_files():
+        if _defines_exit_if_process_unowned(ast.parse(path.read_text(encoding="utf-8"))):
+            definitions.append(path)
+    assert definitions == [PRIMITIVE], (
+        "RDR-149 lifecycle gate: exit_if_process_unowned must be defined "
+        "ONLY in daemon/service_registry.py (the single substrate). Found: "
+        f"{[str(p.relative_to(REPO_ROOT)) for p in definitions]}"
+    )
+
+
+def test_every_owns_process_consumer_calls_the_shared_helper() -> None:
+    """Every tier that defines an ``owns_process`` property must call the
+    shared ``exit_if_process_unowned`` helper from its run loop, not
+    hand-roll an equivalent ``if not sup.owns_process: ... return 0``
+    prelude (the exact GH #1369 duplication this gate now bans a second
+    instance of). AST-based: a comment mentioning the helper's name cannot
+    satisfy this check (see test_owns_process_helper_check_is_non_vacuous)."""
+    offenders: list[str] = []
+    for path in _py_files():
+        if path == PRIMITIVE:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        if _defines_owns_process_property(tree) and not _calls_exit_if_process_unowned(tree):
+            offenders.append(str(path.relative_to(REPO_ROOT)))
+    assert not offenders, (
+        "RDR-149 lifecycle gate: a module defines owns_process but never "
+        "calls the shared exit_if_process_unowned() helper from its run "
+        "loop -- it is reimplementing the short-circuit bespoke instead of "
+        "sharing it. Offenders:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_owns_process_consumer_allowlist_is_non_vacuous() -> None:
+    """Companion sanity check: at least the two tiers this fix touched must
+    actually define owns_process, or the assertion above is vacuously true."""
+    for rel in _OWNS_PROCESS_CONSUMER_MODULES:
+        path = SRC_ROOT / rel
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        assert _defines_owns_process_property(tree), (
+            f"{rel} was expected to define owns_process; if it no longer "
+            "does, update _OWNS_PROCESS_CONSUMER_MODULES and this test"
+        )
+
+
+def test_owns_process_helper_check_is_non_vacuous() -> None:
+    """Mirrors test_flock_acquire_allowlist_is_non_vacuous: proves the
+    must-call-the-shared-helper detector actually fires on a synthetic
+    offender (a module defining owns_process, mentioning the helper's name
+    only in a comment, but never calling it) -- not merely passing today
+    because no real offender happens to exist. Also proves a genuinely
+    compliant module (a real ast.Call, bare-name or attribute form) is NOT
+    flagged, so the detector isn't so strict it bans the real call sites."""
+    offender_src = (
+        "class Foo:\n"
+        "    @property\n"
+        "    def owns_process(self) -> bool:\n"
+        "        return self._proc is not None\n"
+        "    def run(self):\n"
+        "        # calls exit_if_process_unowned(self, ...) -- except it doesn't, this is a comment\n"
+        "        if not self.owns_process:\n"
+        "            return 0\n"
+    )
+    tree = ast.parse(offender_src)
+    assert _defines_owns_process_property(tree)
+    assert not _calls_exit_if_process_unowned(tree), (
+        "the detector must not be fooled by a comment mentioning the helper's name"
+    )
+
+    compliant_bare_call_src = (
+        "class Foo:\n"
+        "    @property\n"
+        "    def owns_process(self) -> bool:\n"
+        "        return self._proc is not None\n"
+        "    def run(self, sup, flush_logging):\n"
+        "        if exit_if_process_unowned(sup, flush_logging, log=_log, event='x'):\n"
+        "            return 0\n"
+    )
+    compliant_tree = ast.parse(compliant_bare_call_src)
+    assert _defines_owns_process_property(compliant_tree)
+    assert _calls_exit_if_process_unowned(compliant_tree)
+
+    compliant_attribute_call_src = (
+        "class Foo:\n"
+        "    @property\n"
+        "    def owns_process(self) -> bool:\n"
+        "        return self._proc is not None\n"
+        "    def run(self, sup, flush_logging):\n"
+        "        if service_registry.exit_if_process_unowned(sup, flush_logging):\n"
+        "            return 0\n"
+    )
+    attribute_tree = ast.parse(compliant_attribute_call_src)
+    assert _calls_exit_if_process_unowned(attribute_tree), (
+        "the detector must also recognize module.exit_if_process_unowned(...) form"
+    )
+
+
+def test_owns_process_defined_only_in_primitive_detector_is_non_vacuous() -> None:
+    """Companion non-vacuity check for the sibling detector: proves
+    _defines_exit_if_process_unowned actually fires on a synthetic
+    reimplementation, including the async-def form the old substring-based
+    check (``line.startswith("def exit_if_process_unowned(")``) would have
+    missed entirely."""
+    assert _defines_exit_if_process_unowned(
+        ast.parse("def exit_if_process_unowned(sup):\n    return True\n")
+    )
+    assert _defines_exit_if_process_unowned(
+        ast.parse("async def exit_if_process_unowned(sup):\n    return True\n")
+    )
+    assert not _defines_exit_if_process_unowned(
+        ast.parse("# def exit_if_process_unowned(sup): return True\n")
+    )

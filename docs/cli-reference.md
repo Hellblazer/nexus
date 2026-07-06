@@ -619,6 +619,18 @@ nx catalog pull                  # pull from remote + rebuild SQLite
 
 `sync` is called automatically at session close (via the Stop hook) when JSONL files have changed. Manual use is rarely needed.
 
+### nx catalog reconcile
+
+```
+nx catalog reconcile [--dry-run]
+```
+
+Repairs `document_chunks` manifest gaps left by a persistently-failed manifest-write hook (e.g. the catalog engine-service was briefly unreachable during indexing). A gap is a document with `chunk_count > 0` but fewer manifest rows than that (including zero) — such a document silently drops out of catalog-aware retrieval even though T3 still has its chunks.
+
+For each gapped document, rebuilds its manifest from the T3 chunks in its `physical_collection`, matched by the whole-file `content_hash` recorded on both the document and every one of its chunks, ordered by character/line span. Documents with no `content_hash` recorded, or no matching T3 chunks, are reported as unmatched rather than silently skipped. `--dry-run` reports the same counts without writing.
+
+Also see the end-of-run summary on `nx index repo`: a persistent manifest-write failure during indexing is now surfaced there (`WARNING: catalog manifest write failed for N document(s)`) with a pointer to this command.
+
 ### nx catalog orphans
 
 ```
@@ -1000,6 +1012,30 @@ Note: IDs shown by `nx store list` are 32 hex chars (`sha256(text)[:32]`). `--ti
 |------|-------------|
 | `-c` / `--collection NAME` | Override target collection name (default: from export header) |
 | `--remap OLD:NEW` | Path substitution for `source_path` metadata (repeatable) |
+| `--assume-model MODEL` | Override the export header's declared embedding model. Pre-migration `.nxexp` files can carry a wrong label (GH #1370); use this to supply the true model instead of trusting the header |
+| `--skip-existing` | Skip records whose id already exists in the target collection, instead of overwriting. Useful for resuming a partial import |
+
+Non-conformant legacy chunk ids (16-char pre-migration ids that fail the
+service backend's `chash` length constraint) are re-hashed to 32-char
+content-derived ids automatically; the CLI reports how many were re-hashed.
+
+**Restoring a pre-migration (Chroma-era) backup:**
+
+```
+nx store import old-backup.nxexp
+# Error: header claims 'voyage-context-3' (1024-dim) but vectors are
+# 768-dim for collection '...' -- the header label is wrong (a known
+# defect of pre-migration exports, GH #1370); re-run with --assume-model.
+nx store import old-backup.nxexp --assume-model bge-base-en-v15-768
+```
+
+```
+nx store import partial-backup.nxexp
+# Error: ... Hint: this looks like a chunk-id constraint conflict --
+# a non-conformant legacy chunk id or a duplicate key. If you're
+# re-running a partial import, retry with --skip-existing.
+nx store import partial-backup.nxexp --skip-existing
+```
 
 ---
 

@@ -320,6 +320,68 @@ def test_mcp_store_put_forwards_blank_doc_id_when_catalog_hook_raises(
     )
 
 
+def test_mcp_store_put_ghost_reconciliation_and_manifest_linkage(
+    inject_local_t3: T3Database,
+    catalog_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GH #1370 Defect 4 end-to-end: MCP ``store_put`` against a
+    pre-existing GHOST catalog entry (chunk_count=0, same title) must
+    (a) reuse the ghost's tumbler instead of minting a duplicate
+    document (Defect 4a), and (b) leave that tumbler with real
+    ``document_chunks`` manifest linkage / chunk_count > 0 (Defect 4b).
+
+    Runs the REAL batch hook chain (only ``fire_document`` is stubbed,
+    to keep aspect-extraction enqueue out of scope) so both
+    ``catalog_store_hook``'s title-reconciliation and
+    ``manifest_write_batch_hook`` are actually exercised — not mocked
+    away like the other tests in this module.
+    """
+    from nexus.mcp.core import store_put
+    local_t3 = inject_local_t3
+
+    cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+    owner = cat.register_owner("knowledge", "curator")
+    ghost = cat.register(
+        owner, "ghost-reconcile-e2e", content_type="knowledge",
+        physical_collection="knowledge__stale",
+        meta={"doc_id": "stale-legacy-doc-id"},
+    )
+    assert cat.resolve(ghost).chunk_count == 0, "fixture must be a ghost"
+
+    with patch("nexus.mcp.core._get_t3", return_value=local_t3), \
+         patch("nexus.mcp.core._hooks.fire_document", side_effect=_no_op), \
+         patch("nexus.mcp.core._catalog_auto_link", return_value=0):
+        result = store_put(
+            content="# Real content for the ghost\n\nFinally has a body.",
+            collection="knowledge",
+            title="ghost-reconcile-e2e",
+        )
+    assert "Stored" in result, f"store_put failed: {result}"
+
+    cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
+    rows = cat2._db.execute(
+        "SELECT count(*) FROM documents WHERE title = 'ghost-reconcile-e2e'"
+    ).fetchone()
+    assert rows[0] == 1, "the ghost must be reconciled, not duplicated"
+
+    entry = cat2.resolve(ghost)
+    assert entry is not None
+    assert entry.meta.get("doc_id") != "stale-legacy-doc-id", (
+        "the ghost's doc_id must be repointed at the new content"
+    )
+    assert entry.chunk_count >= 1, (
+        "manifest_write_batch_hook must populate chunk_count on the "
+        "reused tumbler (pre-fix: MCP store_put never wrote manifest "
+        "linkage because metadatas was None)"
+    )
+
+    manifest_rows = cat2.get_manifest(str(ghost))
+    assert manifest_rows, (
+        "expected document_chunks manifest rows for the reused tumbler"
+    )
+
+
 def test_mcp_store_put_doc_id_absent_when_catalog_uninitialized(
     inject_local_t3: T3Database,
     tmp_path: Path,

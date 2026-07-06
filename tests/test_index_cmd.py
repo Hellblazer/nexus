@@ -308,6 +308,25 @@ def test_repo_monitor_nontty_no_cr(runner, repo_dir, mock_reg):
     assert "\r" not in result.output
 
 
+# ── GH #1371: manifest-write-failure summary ────────────────────────────────
+
+def test_manifest_write_failure_summary_silent_on_no_failures(runner, repo_dir, mock_reg):
+    result, _ = _invoke_repo(runner, [str(repo_dir)], mock_reg)
+    assert result.exit_code == 0, result.output
+    assert "catalog manifest write failed" not in result.output
+
+
+def test_manifest_write_failure_summary_surfaces_failures(runner, repo_dir, mock_reg, monkeypatch):
+    monkeypatch.setattr(
+        "nexus.mcp_infra.get_manifest_write_failures",
+        lambda: ["1.9.0", "1.9.1"],
+    )
+    result, _ = _invoke_repo(runner, [str(repo_dir)], mock_reg)
+    assert result.exit_code == 0, result.output
+    assert "WARNING: catalog manifest write failed for 2 document(s)" in result.output
+    assert "nx catalog reconcile" in result.output
+
+
 # ── RDR monitor behaviour ───────────────────────────────────────────────────
 
 def _make_rdr_dir(home: Path, count: int = 1) -> Path:

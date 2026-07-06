@@ -1,16 +1,27 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Batched manifest replace (nexus-u2kwq): write_manifest_many pages at
 1000 docs via /manifest/write_many; _manifest_write_loop uses it for
-multi-doc flush-grain batches with 404 fallback to the per-doc path."""
+multi-doc flush-grain batches with 404 fallback to the per-doc path.
+
+GH #1371: _manifest_write_loop retries transient connection errors and,
+on persistent failure, records the doc_id in the module-level failure
+collector instead of only logging a WARNING (see TestManifestWriteFailureSurfacing).
+"""
 
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import patch
 
+import httpx
 import pytest
 
 from nexus.catalog.http_catalog_client import HttpCatalogClient
-from nexus.mcp_infra import _manifest_write_loop
+from nexus.mcp_infra import (
+    _manifest_write_loop,
+    get_manifest_write_failures,
+    reset_manifest_write_failures,
+)
 
 
 def _client() -> HttpCatalogClient:
@@ -160,3 +171,99 @@ class TestManifestWriteLoopBatching:
         cat = _FakeCat(many=False)
         _manifest_write_loop(cat, _by_doc(2))
         assert sorted(cat.replace_calls) == ["1.9.0", "1.9.1"]
+
+
+class _FlakyThenOkCat:
+    """Fails the first N calls to a given write op with a transient
+    connection error, then succeeds. Used to prove _manifest_write_loop
+    retries transient connection failures instead of losing the write."""
+
+    def __init__(self, fail_times: int) -> None:
+        self.fail_times = fail_times
+        self.calls = 0
+        self.replace_calls: list[str] = []
+        self.resync_calls: list[str] = []
+        self.write_manifest_many = None  # type: ignore[assignment]
+
+    def atomic_manifest_replace(self, doc_id, chunks, **kw):
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise httpx.ConnectError("connection refused")
+        self.replace_calls.append(doc_id)
+
+    def resync_chunk_count_cache(self, doc_id):
+        self.resync_calls.append(doc_id)
+
+
+class _AlwaysDownCat:
+    """Every write raises a persistent (non-connection) error — proves the
+    hook still swallows the failure (contract: never propagate) and
+    records it for the CLI summary."""
+
+    def __init__(self) -> None:
+        self.write_manifest_many = None  # type: ignore[assignment]
+
+    def atomic_manifest_replace(self, doc_id, chunks, **kw):
+        raise ValueError("FK violation: doc_id not found")
+
+    def resync_chunk_count_cache(self, doc_id):
+        pass
+
+
+class _AlwaysDownManyCat:
+    """write_manifest_many always raises a persistent connection error —
+    proves the write_many path does not crash the caller and records
+    every doc in the failed batch."""
+
+    def __init__(self) -> None:
+        self.replace_calls: list[str] = []
+
+    def write_manifest_many(self, docs):
+        raise httpx.ConnectError("connection refused")
+
+    def atomic_manifest_replace(self, doc_id, chunks, **kw):
+        self.replace_calls.append(doc_id)
+
+    def resync_chunk_count_cache(self, doc_id):
+        pass
+
+
+class TestManifestWriteFailureSurfacing:
+    """GH #1371: retry transient connection errors; surface persistent
+    failures via the module-level collector instead of only a log line."""
+
+    def setup_method(self) -> None:
+        reset_manifest_write_failures()
+
+    def teardown_method(self) -> None:
+        reset_manifest_write_failures()
+
+    def test_transient_connect_error_recovers_without_recording_failure(self) -> None:
+        cat = _FlakyThenOkCat(fail_times=2)
+        with patch("nexus.retry.time.sleep"):
+            _manifest_write_loop(cat, _by_doc(1))
+        assert cat.replace_calls == ["1.9.0"]
+        assert get_manifest_write_failures() == []
+
+    def test_persistent_per_doc_failure_is_swallowed_and_recorded(self) -> None:
+        cat = _AlwaysDownCat()
+        with patch("nexus.retry.time.sleep"):
+            # Contract: must never raise out of the hook.
+            _manifest_write_loop(cat, _by_doc(2))
+        assert sorted(get_manifest_write_failures()) == ["1.9.0", "1.9.1"]
+
+    def test_persistent_write_many_failure_is_swallowed_and_recorded(self) -> None:
+        cat = _AlwaysDownManyCat()
+        with patch("nexus.retry.time.sleep"):
+            _manifest_write_loop(cat, _by_doc(2))
+        assert sorted(get_manifest_write_failures()) == ["1.9.0", "1.9.1"]
+        # Not re-attempted per-doc after the batch path exhausted retries.
+        assert cat.replace_calls == []
+
+    def test_reset_clears_prior_run_failures(self) -> None:
+        cat = _AlwaysDownCat()
+        with patch("nexus.retry.time.sleep"):
+            _manifest_write_loop(cat, _by_doc(1))
+        assert get_manifest_write_failures() == ["1.9.0"]
+        reset_manifest_write_failures()
+        assert get_manifest_write_failures() == []

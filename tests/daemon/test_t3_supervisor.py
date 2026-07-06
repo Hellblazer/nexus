@@ -126,6 +126,9 @@ class TestT3SupervisorPublish:
         sup2 = _make(config_dir, clock)
         sup2.start()  # live lease present -> no second spawn
         assert len(fake_spawn) == 1
+        assert not sup2.owns_process, (
+            "the short-circuit branch must never assign self._proc"
+        )
         sup.stop()
 
 
@@ -186,3 +189,78 @@ class TestT3SupervisorStop:
         assert find_t3_daemon(config_dir) is not None
         sup.stop()
         assert find_t3_daemon(config_dir) is None  # record removed
+
+
+class TestT3SupervisorCoexistence:
+    """GH #1369 (T3 analog of the StorageServiceSupervisor fix): a second
+    supervisor started under run_t3_supervisor while another already holds
+    a live lease must exit 0, not enter the heartbeat loop. Before this fix
+    run_t3_supervisor called sup.heartbeat_once() unconditionally after
+    start(); heartbeat_once() reads self._proc is None (never assigned by
+    the short-circuit branch) as "chroma died" and forced exit(3) against a
+    perfectly healthy chroma owned by another supervisor — under launchd
+    KeepAlive / systemd Restart this drove an unbounded respawn loop."""
+
+    def test_second_supervisor_under_live_lease_exits_zero(
+        self,
+        config_dir: Path,
+        fake_spawn: list[_FakeProc],
+        clock: _FakeClock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # First supervisor holds a live lease (models the owning unit/session).
+        first = _make(config_dir, clock)
+        first.start()
+        assert len(fake_spawn) == 1
+
+        # run_t3_supervisor's internal T3Supervisor must short-circuit on the
+        # live lease rather than spawn a second chroma. If it ever tried to
+        # spawn, fake_spawn would grow past 1, which we assert below.
+        monkeypatch.setattr(t3_daemon, "DEFAULT_HEARTBEAT_INTERVAL", 0.0)
+        code = t3_daemon.run_t3_supervisor(
+            config_dir=config_dir, local_path=config_dir / "chroma",
+        )
+
+        assert code == 0, (
+            "a supervisor that finds the lease already held owns no chroma "
+            "process and must exit 0 without entering the heartbeat loop"
+        )
+        assert len(fake_spawn) == 1, "coexisting supervisor must not double-spawn"
+        first.stop()
+
+    def test_not_owning_process_never_calls_heartbeat_once(
+        self, monkeypatch: pytest.MonkeyPatch, config_dir: Path,
+    ) -> None:
+        """Precise-mechanism pin (mirrors the storage-side
+        test_not_owning_process_exits_0_without_entering_heartbeat_loop): a
+        supervisor with owns_process=False must never call heartbeat_once(),
+        not merely happen to exit 0. A scripted double whose heartbeat_once()
+        raises makes an accidental call fail loudly instead of passing by
+        coincidence."""
+
+        class _UnownedDouble:
+            owns_process = False
+
+            def __init__(self, **_kwargs: object) -> None:
+                self.stopped = False
+
+            def start(self) -> None:
+                pass
+
+            def heartbeat_once(self) -> bool:
+                raise AssertionError(
+                    "a supervisor with nothing to own must never call "
+                    "heartbeat_once()"
+                )
+
+            def stop(self) -> None:
+                self.stopped = True
+
+        monkeypatch.setattr(t3_daemon, "T3Supervisor", _UnownedDouble)
+        monkeypatch.setattr(t3_daemon, "DEFAULT_HEARTBEAT_INTERVAL", 0.0)
+
+        code = t3_daemon.run_t3_supervisor(
+            config_dir=config_dir, local_path=config_dir / "chroma",
+        )
+
+        assert code == 0

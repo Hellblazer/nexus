@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.3.5] - 2026-07-06
+
+Plugin version aligned with conexus 6.3.5. No plugin-side changes: this
+release's work (indexing-throughput batching, the storage-service/T3
+supervisor exit-code fix, catalog manifest-write retry + `nx catalog
+reconcile`, and pre-migration backup restore) is entirely in the `nx`
+CLI/engine.
+
 ## [6.3.4] - 2026-07-06
 
 Plugin version aligned with conexus 6.3.4. No plugin-side changes.

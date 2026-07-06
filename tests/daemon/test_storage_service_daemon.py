@@ -1073,16 +1073,20 @@ class _ScriptedSupervisor:
         stop_requested,
         *,
         ensure_pg_raises: Exception | None = None,
+        owns_process: bool = True,
     ) -> None:
         self._beats = list(beats)
         self._stop = stop_requested
         self._ensure_pg_raises = ensure_pg_raises
+        self.owns_process = owns_process
         self.calls: list[str] = []
+        self.heartbeat_calls = 0
 
     def start(self) -> None:
         self.calls.append("start")
 
     def heartbeat_once(self) -> tuple[bool, bool]:
+        self.heartbeat_calls += 1
         if not self._beats:
             # Script exhausted: end the loop instead of inventing beats.
             self._stop.set()
@@ -1174,6 +1178,29 @@ class TestMinimalSuperviseLoop:
         )
         assert code == 0
         assert "ensure_pg" not in sup.calls
+        assert sup.calls == ["start", "stop"]
+
+    def test_not_owning_process_exits_0_without_entering_heartbeat_loop(
+        self,
+    ) -> None:
+        """GH #1369: when start() short-circuits on an existing, healthy lease
+        (another supervisor owns the service), owns_process is False and this
+        supervisor has nothing to heartbeat — it must exit 0 immediately
+        without ever calling heartbeat_once(). Before this fix, the loop
+        called heartbeat_once() regardless; the real (non-scripted)
+        heartbeat_once() reads self._proc is None (never assigned by the
+        short-circuit branch) as "process died" and forced exit(3), causing a
+        launchd respawn loop + port churn against a perfectly healthy service.
+        No beats are scripted here on purpose: any call to heartbeat_once()
+        would raise on the empty-list pop path being exercised incorrectly,
+        making an accidental heartbeat call visible immediately."""
+        sup, code = self._run(
+            lambda stop: _ScriptedSupervisor([], stop, owns_process=False)
+        )
+        assert code == 0, "not owning the process must exit 0, not 3"
+        assert sup.heartbeat_calls == 0, (
+            "a supervisor with nothing to own must never call heartbeat_once()"
+        )
         assert sup.calls == ["start", "stop"]
 
 
@@ -1647,18 +1674,24 @@ class TestRdr175MvvSingleSupervisor:
         assert rec.endpoint.get("port") == 18101
         assert payload["port"] == 18101, "second start must return the live endpoint"
 
-    def test_second_supervisor_under_live_lease_exits_nonzero(
+    def test_second_supervisor_under_live_lease_exits_zero(
         self, config_dir: Path, clock: _FakeClock
     ) -> None:
-        """Coexistence through the FULL run loop (substantive-critic SIG-1): a
-        second supervisor started while another holds a live lease must NOT
-        double-spawn — start() short-circuits on the live lease, _proc stays
-        unset, and the loop exits non-zero (the OS, not an in-process respawn,
-        owns restart decisions). Under the OS unit this re-runs every RestartSec
-        until the foreign lease expires — a bounded crash-loop (RDR-175
-        §Consequences) that RDR-174 P2.4's decide-first ordering (nexus-3pfj0)
-        prevents by never starting a session supervisor under a unit. This PINS
-        the behavior so the requirement on nexus-3pfj0 stays visible."""
+        """Coexistence through the FULL run loop (substantive-critic SIG-1,
+        corrected by GH #1369): a second supervisor started while another
+        holds a live lease must NOT double-spawn — start() short-circuits on
+        the live lease, _proc stays unset, and the loop now exits 0 rather
+        than entering the heartbeat loop. Before the GH #1369 fix this
+        asserted exit 3, matching a real bug: heartbeat_once() reads
+        ``self._proc is None`` (never assigned by the short-circuit branch) as
+        "process died" and forced a non-zero exit — under an OS unit with
+        KeepAlive=true this produced an UNBOUNDED launchd respawn loop (not
+        the bounded "until the foreign lease expires" this test used to
+        claim), churning the service's port out from under cached MCP
+        endpoints on any respawn that raced a real restart. owns_process is
+        now the signal: a supervisor with nothing to own exits cleanly and
+        leaves the OS-level KeepAlive alone until the OWNING supervisor's
+        service actually dies."""
         import threading
 
         from nexus.daemon import storage_service_daemon as ssd
@@ -1682,11 +1715,16 @@ class TestRdr175MvvSingleSupervisor:
              patch.object(ssd, "DEFAULT_HEARTBEAT_INTERVAL", 0.0):
             code = ssd._supervise_until_stopped(second, stop, lambda: None)
 
-        assert code == 3, (
-            "a supervisor that finds the lease already held exits 3 (no "
-            "double-spawn); the OS unit then crash-loops until the foreign "
-            "lease expires — decide-first ordering on nexus-3pfj0 prevents the "
-            "coexistence; see RDR-175 §Consequences"
+        assert code == 0, (
+            "a supervisor that finds the lease already held owns no process "
+            "(owns_process is False) and must exit 0 without entering the "
+            "heartbeat loop — GH #1369: exiting non-zero here caused an "
+            "unbounded launchd respawn loop against a perfectly healthy "
+            "service, occasionally winning a race against a real restart and "
+            "churning the service's port out from under cached MCP endpoints"
+        )
+        assert not second.owns_process, (
+            "the short-circuit branch must never assign self._proc"
         )
 
     def test_pg_only_restart_keeps_same_java_pid(

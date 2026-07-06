@@ -129,7 +129,7 @@ class AspectRepositoryTest {
             // document_aspects doc_ids: "1.2.3" (makeAspect default), "2.4.6", "3.1.4"
             // document_highlights doc_ids: "highlight-1", "by-uri-doc", "list-hl-0", "list-hl-1",
             //   "del-highlight", "import-hl-1", "rls-hl-private", "hl-rename-doc-1", "hl-rename-doc-2", "hl-rls-doc"
-            // aspect_extraction_queue doc_ids: "q-doc-1", "done-doc-id-unique", "etl-q-doc"
+            // aspect_extraction_queue doc_ids: "q-doc-1", "done-doc-id-unique", "etl-q-doc", "many-doc-a"
             // (queue items without doc_id are doc_id=NULL — no FK entry needed)
             for (String tumbler : List.of(
                     "1.2.3", "2.4.6", "3.1.4",
@@ -140,7 +140,9 @@ class AspectRepositoryTest {
                     // nexus-1usso importHighlightsBatch multi-row conversion tests
                     "batch-hl-1", "batch-hl-2",
                     // nexus-nyout doc_id COALESCE-on-NULL tests
-                    "coalesce-doc-1", "coalesce-doc-2")) {
+                    "coalesce-doc-1", "coalesce-doc-2",
+                    // nexus-nj4ch enqueueMany batch tests
+                    "many-doc-a")) {
                 su.createStatement().execute(
                     "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) " +
                     "VALUES ('" + TENANT_A + "', '" + tumbler + "', 'Test fixture: " + tumbler + "') " +
@@ -598,6 +600,72 @@ class AspectRepositoryTest {
         assertThat(row.get("doc_id"))
             .as("fresh blank enqueue reads back as the empty-doc_id sentinel")
             .isEqualTo("");
+    }
+
+    @Test @Order(73)
+    void enqueueMany_batchesHeterogeneousRowsInOneRoundTrip() {
+        // nexus-nj4ch: replaces N serial enqueue() calls with one
+        // enqueueMany() batch — rows may carry DIFFERENT optional fields
+        // (doc_id present or absent), mirroring updateDocumentsMany's
+        // heterogeneous-SET-clause shape.
+        var rowA = new java.util.LinkedHashMap<String, Object>();
+        rowA.put("collection", "enqmany-coll");
+        rowA.put("source_path", "many-a.md");
+        rowA.put("doc_id", "many-doc-a");
+        var rowB = new java.util.LinkedHashMap<String, Object>();
+        rowB.put("collection", "enqmany-coll");
+        rowB.put("source_path", "many-b.md");
+        rowB.put("content", "content for b");
+
+        int n = repo.enqueueMany(TENANT_A, List.of(rowA, rowB));
+
+        assertThat(n).isEqualTo(2);
+        var pending = repo.listPending(TENANT_A, 100);
+        assertThat(pending.stream().map(r -> r.get("source_path")))
+            .contains("many-a.md", "many-b.md");
+        var rowAResult = pending.stream()
+            .filter(r -> "many-a.md".equals(r.get("source_path"))).findFirst().orElseThrow();
+        assertThat(rowAResult.get("doc_id")).isEqualTo("many-doc-a");
+    }
+
+    @Test @Order(74)
+    void enqueueMany_skipsMalformedRowsWithoutAbortingBatch() {
+        // A row missing collection/source_path must not sink the rest of
+        // the batch -- ghost-class isolation, mirroring register_many's
+        // per-doc failure tolerance.
+        var badRow = new java.util.LinkedHashMap<String, Object>();
+        badRow.put("collection", "");
+        badRow.put("source_path", "bad.md");
+        var goodRow = new java.util.LinkedHashMap<String, Object>();
+        goodRow.put("collection", "enqmany-skip-coll");
+        goodRow.put("source_path", "good.md");
+
+        int n = repo.enqueueMany(TENANT_A, List.of(badRow, goodRow));
+
+        assertThat(n).as("only the well-formed row counts").isEqualTo(1);
+        var pending = repo.listPending(TENANT_A, 100);
+        assertThat(pending.stream().map(r -> r.get("source_path"))).contains("good.md");
+    }
+
+    @Test @Order(75)
+    void enqueueMany_reEnqueue_resetsToPending() {
+        // Same ON CONFLICT DO UPDATE semantics as the single-row enqueue()
+        // path -- a batch re-enqueue at an existing key resets to pending.
+        var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("collection", "enqmany-reenq-coll");
+        body.put("source_path", "reenq.md");
+        repo.enqueue(TENANT_A, body);
+        repo.claimNext(TENANT_A);
+
+        repo.enqueueMany(TENANT_A, List.of(body));
+
+        Optional<Map<String, Object>> reclaimed = repo.claimNext(TENANT_A);
+        assertThat(reclaimed).as("batch re-enqueue must be claimable again").isPresent();
+    }
+
+    @Test @Order(76)
+    void enqueueMany_emptyListIsNoop() {
+        assertThat(repo.enqueueMany(TENANT_A, List.of())).isEqualTo(0);
     }
 
     @Test @Order(32)

@@ -2033,14 +2033,20 @@ def store_put(
         # chunk_chroma_id mirrors ``T3Database.put``'s natural-id
         # derivation (chunk_text_hash[:32] per RDR-108 D1 / nexus-kmb6;
         # for single-chunk MCP docs chunk_text == content).
-        import hashlib as _hl  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
-        chunk_chroma_id = _hl.sha256(content.encode()).hexdigest()[:32]
+        # nexus-8g79.10 (V1): catalog_store_hook now lives under
+        # nexus.catalog (lower layer). MCP infra no longer reaches up into
+        # commands/ for this helper. single_chunk_manifest_metadata (GH
+        # #1370 Defect 4b) computes the same natural id AND the chunk
+        # metadata the manifest-write batch hook needs; it must run
+        # unconditionally (not just on the catalog-present path) since
+        # fire_batch below needs real metadatas regardless of catalog_doc_id.
+        from nexus.catalog.store_hook import (  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+            catalog_store_hook,
+            single_chunk_manifest_metadata,
+        )
+        chunk_chroma_id, manifest_metadatas = single_chunk_manifest_metadata(content)
         catalog_doc_id = ""
         try:
-            # nexus-8g79.10 (V1): catalog_store_hook now lives under
-            # nexus.catalog (lower layer). MCP infra no longer reaches
-            # up into commands/ for this helper.
-            from nexus.catalog.store_hook import catalog_store_hook  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
             catalog_doc_id = catalog_store_hook(
                 title=title, doc_id=chunk_chroma_id, collection_name=col_name,
             )
@@ -2094,7 +2100,7 @@ def store_put(
         # batch.
         _hooks.fire_single(doc_id, col_name, content)
         _hooks.fire_batch(
-            [doc_id], col_name, [content], None, None,
+            [doc_id], col_name, [content], None, manifest_metadatas,
             catalog_doc_id=catalog_doc_id,
         )
         # RDR-089 document-grain chain — plain sync call (FastMCP wraps

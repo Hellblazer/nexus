@@ -1458,6 +1458,74 @@ public final class PgVectorRepository {
     }
 
     /**
+     * Upper bound on rows a single {@link #getAllMetadata} call will return.
+     * Above this, the caller (indexer staleness-cache build) falls back to
+     * paginated {@code /v1/vectors/get} rather than the server materializing
+     * an unbounded response in memory.
+     */
+    public static final int GET_ALL_METADATA_MAX_ROWS = 200_000;
+
+    /**
+     * Fetch ids + metadata for EVERY chunk in *collection* in ONE round trip
+     * (nexus-duoak follow-up: staleness-cache-build phase). No {@code
+     * documents} column (staleness only needs metadata: {@code
+     * chunk_text_hash}, spans, {@code doc_id}) and no LIMIT/OFFSET — this
+     * collapses the ``ceil(chunk_count / 300)`` client round trips
+     * {@code build_staleness_cache}'s paginated {@code /v1/vectors/get} loop
+     * pays (measured: ~113s of the phase's ~116s total on this repo's own
+     * 24k-chunk {@code code__} collection) into ONE Postgres query + ONE
+     * HTTP response. Same rationale as the catalog {@code update_many}/
+     * {@code delete_many} batch endpoints: server-to-Postgres round trips
+     * are same-process and cheap; client-to-server round trips pay real
+     * network latency each time.
+     *
+     * <p>Capped at {@value #GET_ALL_METADATA_MAX_ROWS} rows — above that the
+     * caller should fall back to the paginated path rather than have the
+     * server materialize an unbounded result set in memory. Throws {@link
+     * IllegalStateException} when the cap is exceeded (fail loud, not a
+     * silent truncation — a caller silently getting a partial staleness
+     * cache would treat un-fetched rows as "unknown", which the existing
+     * cache-miss contract already treats as safely stale-and-reindex, but
+     * silently truncating without signaling would hide that this fast path
+     * degraded).
+     */
+    public Map<String, Object> getAllMetadata(String tenant, String collection,
+                                              Map<String, Object> where) {
+        int dim = dimForCollection(collection);
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        org.jooq.Condition cond = ch.collection().eq(collection);
+        if (where != null) {
+            for (Map.Entry<String, Object> e : where.entrySet()) {
+                cond = cond.and(metadataCondition(e.getKey(), e.getValue()));
+            }
+        }
+        org.jooq.Condition finalCond = cond;
+        var result = tenantScope.withTenant(tenant, ctx ->
+            ctx.select(ch.chash(), ch.metadata())
+               .from(ch.table())
+               .where(finalCond)
+               .orderBy(ch.chash().asc())
+               .limit(GET_ALL_METADATA_MAX_ROWS + 1)
+               .fetch());
+
+        if (result.size() > GET_ALL_METADATA_MAX_ROWS) {
+            throw new IllegalStateException(
+                "getAllMetadata: collection '" + collection + "' has more than "
+                + GET_ALL_METADATA_MAX_ROWS + " matching rows; caller must fall "
+                + "back to paginated /v1/vectors/get");
+        }
+
+        List<String> outIds = new ArrayList<>(result.size());
+        List<Map<String, Object>> outMetas = new ArrayList<>(result.size());
+        for (var rec : result) {
+            outIds.add(rec.value1());
+            JSONB meta = rec.value2();
+            outMetas.add(fromJson(meta != null ? meta.data() : null));
+        }
+        return new LinkedHashMap<>(Map.of("ids", outIds, "metadatas", outMetas));
+    }
+
+    /**
      * List the collections visible to {@code tenant} (RDR-155 P4a.2,
      * bead nexus-1k8s1).
      *

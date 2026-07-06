@@ -2,18 +2,25 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 from pathlib import Path
 from typing import Generator
 
 import chromadb
+import msgpack
 import numpy as np
 import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
 from nexus.db.http_vector_client import HttpVectorClient
 from nexus.db.t3 import T3Database
-from nexus.errors import EmbeddingModelMismatch, FormatVersionError, NexusError
+from nexus.errors import (
+    EmbeddingDimensionMismatch,
+    EmbeddingModelMismatch,
+    FormatVersionError,
+    NexusError,
+)
 from nexus.exporter import (
     FORMAT_VERSION,
     MAX_SUPPORTED_FORMAT_VERSION,
@@ -63,6 +70,43 @@ def _export_import(db, src_col, tmp_path, target=None, fname="rt.nxexp", **kwarg
     out, export_result = _export(db, src_col, tmp_path, fname)
     import_result = import_collection(db=db, input_path=out, target_collection=target, **kwargs)
     return out, export_result, import_result
+
+
+def _write_nxexp_records(
+    path: Path,
+    collection_name: str,
+    records: list[dict],
+    embedding_model: str = "voyage-code-3",
+    dim: int = 1024,
+    seed: int = 11,
+) -> None:
+    """Hand-craft a ``.nxexp`` file from raw record dicts (id/document/
+    metadata; ``embedding`` auto-filled with random vectors unless the
+    record already supplies one). Used by tests that need to control the
+    source id/model/dims directly rather than going through a real
+    ``export_collection`` round trip (e.g. simulating a legacy
+    pre-migration backup)."""
+    header = {
+        "format_version": FORMAT_VERSION,
+        "collection_name": collection_name,
+        "database_type": collection_name.split("__")[0],
+        "embedding_model": embedding_model,
+        "record_count": len(records),
+        "embedding_dim": dim,
+        "exported_at": "2025-01-01T00:00:00+00:00",
+        "pipeline_version": "nexus-1",
+    }
+    rng = np.random.default_rng(seed=seed)
+    with open(path, "wb") as f:
+        f.write(json.dumps(header).encode() + b"\n")
+        with gzip.GzipFile(fileobj=f, mode="wb") as gz:
+            for r in records:
+                r = dict(r)
+                r.setdefault(
+                    "embedding",
+                    rng.standard_normal(dim).astype(np.float32).tobytes(),
+                )
+                gz.write(msgpack.packb(r, use_bin_type=True))
 
 
 def _seed_collection(db, name, docs, ids, metadatas):
@@ -136,12 +180,20 @@ class TestRoundTrip:
         assert "File 0" in titles and "File 4" in titles
 
     def test_round_trip_preserves_embeddings(self, populated_db: T3Database, tmp_path: Path):
+        # nexus GH #1370 D1: non-conformant (non-32-char) source ids like
+        # "id-000" are re-hashed to content-derived ids on import, so
+        # identity is no longer id-based post-fix -- look up by document
+        # text instead of assuming the id round-trips verbatim.
         orig_col = populated_db._client_for("code__test").get_collection("code__test")
-        orig_emb = orig_col.get(ids=["id-000"], include=["embeddings"])["embeddings"][0]
+        orig_result = orig_col.get(include=["documents", "embeddings"])
+        orig_by_doc = dict(zip(orig_result["documents"], orig_result["embeddings"]))
+        orig_emb = orig_by_doc["document 0"]
 
         _export_import(populated_db, "code__test", tmp_path, target="code__emb_check")
         restored_col = populated_db._client_for("code__emb_check").get_collection("code__emb_check")
-        restored_emb = restored_col.get(ids=["id-000"], include=["embeddings"])["embeddings"][0]
+        restored_result = restored_col.get(include=["documents", "embeddings"])
+        restored_by_doc = dict(zip(restored_result["documents"], restored_result["embeddings"]))
+        restored_emb = restored_by_doc["document 0"]
         np.testing.assert_allclose(orig_emb, restored_emb, rtol=1e-6)
 
     def test_round_trip_preserves_taxonomy_metadata(
@@ -777,3 +829,421 @@ class TestVectorOnlyImport:
         b_doc = got["documents"][got["ids"].index("b")]
         assert a_doc in ("", None)
         assert b_doc == "real text"
+
+
+# ── GH #1370 D1: non-conformant chunk id re-hash ────────────────────────────
+
+
+class TestChashRehash:
+    """Pre-migration ``.nxexp`` exports carry non-32-char chunk ids
+    (Chroma-era ids were 16-char hex). The service backend's
+    ``chunks_<dim>`` tables enforce ``CHECK (length(chash) = 32)``, so
+    importing such a record 409s with an opaque integrity-constraint
+    error. ``import_collection`` now re-derives the id the same way
+    fresh indexing does (``chunk_text_hash[:32]``) whenever the source
+    id isn't already 32 chars, except for bypass-schema collections
+    (``taxonomy__*``) whose ids are intentional programmatic keys, not
+    content hashes.
+    """
+
+    _write_legacy_nxexp = staticmethod(_write_nxexp_records)
+
+    def test_16char_hex_id_rehashed_to_32char_content_hash(
+        self, ephemeral_db: T3Database, tmp_path: Path,
+    ):
+        out = tmp_path / "legacy16.nxexp"
+        legacy_id = "abcdef0123456789"  # 16-char hex: Chroma-era shape
+        doc_text = "legacy chunk content"
+        self._write_legacy_nxexp(out, "code__legacy", [
+            {"id": legacy_id, "document": doc_text,
+             "metadata": {"chunk_text_hash": "0" * 64, "title": "t"}},
+        ])
+
+        result = import_collection(ephemeral_db, out)
+        assert result["imported_count"] == 1
+        assert result["rehashed_count"] == 1
+
+        col = ephemeral_db._client_for("code__legacy").get_collection("code__legacy")
+        got = col.get(include=["documents", "metadatas"])
+        assert len(got["ids"]) == 1
+        new_id = got["ids"][0]
+        expected_id = hashlib.sha256(doc_text.encode()).hexdigest()[:32]
+        assert new_id == expected_id
+        assert len(new_id) == 32
+        assert new_id != legacy_id
+        assert got["documents"][0] == doc_text
+        # chunk_text_hash metadata stays consistent with the new id
+        # (its first 32 chars) rather than the stale pre-rehash value.
+        assert got["metadatas"][0]["chunk_text_hash"] == hashlib.sha256(doc_text.encode()).hexdigest()
+
+    def test_empty_document_rehashes_from_old_id(
+        self, ephemeral_db: T3Database, tmp_path: Path,
+    ):
+        """Vector-only entries (``document=None``/``""``) have no content
+        to hash meaningfully -- the old id is hashed instead, giving a
+        deterministic, stable new id across repeated re-imports."""
+        out = tmp_path / "legacy_empty_doc.nxexp"
+        legacy_id = "vecid-0001"  # non-32-char, non-hex
+        self._write_legacy_nxexp(out, "code__vec_legacy", [
+            {"id": legacy_id, "document": None, "metadata": {}},
+        ])
+
+        result = import_collection(ephemeral_db, out)
+        assert result["imported_count"] == 1
+        assert result["rehashed_count"] == 1
+
+        col = ephemeral_db._client_for("code__vec_legacy").get_collection("code__vec_legacy")
+        got = col.get(include=[])
+        expected_id = hashlib.sha256(legacy_id.encode()).hexdigest()[:32]
+        assert got["ids"] == [expected_id]
+
+    def test_taxonomy_collections_ids_not_rehashed(
+        self, ephemeral_db: T3Database, tmp_path: Path,
+    ):
+        """Bypass-schema (``taxonomy__*``) collections use intentional
+        programmatic ids (e.g. ``topic_id``-keyed) -- rehashing them
+        would break their identity semantics, so they're left alone."""
+        out = tmp_path / "legacy_taxonomy.nxexp"
+        legacy_id = "taxonomy__centroids:1"
+        self._write_legacy_nxexp(out, "taxonomy__legacy", [
+            {"id": legacy_id, "document": "",
+             "metadata": {"topic_id": 1, "label": "x", "collection": "y", "doc_count": 1}},
+        ])
+        ephemeral_db._client.get_or_create_collection(
+            "taxonomy__legacy", embedding_function=None, metadata={"hnsw:space": "cosine"},
+        )
+
+        result = import_collection(ephemeral_db, out)
+        assert result["rehashed_count"] == 0
+
+        col = ephemeral_db._client_for("taxonomy__legacy").get_collection("taxonomy__legacy")
+        got = col.get(include=[])
+        assert got["ids"] == [legacy_id]
+
+    def test_conformant_32char_id_left_unchanged(
+        self, ephemeral_db: T3Database, tmp_path: Path,
+    ):
+        """An id that's already 32 chars (the common case, post-RDR-108
+        exports) is never rehashed -- it round-trips verbatim."""
+        out = tmp_path / "conformant.nxexp"
+        doc_text = "already conformant chunk"
+        conformant_id = hashlib.sha256(doc_text.encode()).hexdigest()[:32]
+        self._write_legacy_nxexp(out, "code__conformant", [
+            {"id": conformant_id, "document": doc_text, "metadata": {}},
+        ])
+
+        result = import_collection(ephemeral_db, out)
+        assert result["rehashed_count"] == 0
+
+        col = ephemeral_db._client_for("code__conformant").get_collection("code__conformant")
+        got = col.get(include=[])
+        assert got["ids"] == [conformant_id]
+
+
+# ── GH #1370 D2: embedding-model mislabel + dims sanity check ───────────────
+
+
+class TestEmbeddingDimensionMismatch:
+    """Pre-migration exports can carry a WRONG ``embedding_model``
+    header label: legacy two-segment collection names route through
+    ``voyage_model_for_collection``'s prefix-based guess, which silently
+    mislabels local-mode (bge/minilm) exports as Voyage models.
+    ``import_collection`` now sanity-checks the declared model's expected
+    dimensionality against the actual vectors, and ``--assume-model``
+    lets the caller correct a wrong label.
+    """
+
+    def _write_nxexp(
+        self, path: Path, collection_name: str, embedding_model: str,
+        dim: int, doc: str = "hello world",
+    ) -> None:
+        header = {
+            "format_version": FORMAT_VERSION,
+            "collection_name": collection_name,
+            "database_type": collection_name.split("__")[0],
+            "embedding_model": embedding_model,
+            "record_count": 1,
+            "embedding_dim": dim,
+            "exported_at": "2025-01-01T00:00:00+00:00",
+            "pipeline_version": "nexus-1",
+        }
+        rng = np.random.default_rng(seed=13)
+        with open(path, "wb") as f:
+            f.write(json.dumps(header).encode() + b"\n")
+            with gzip.GzipFile(fileobj=f, mode="wb") as gz:
+                gz.write(msgpack.packb({
+                    "id": hashlib.sha256(doc.encode()).hexdigest()[:32],
+                    "document": doc,
+                    "metadata": {},
+                    "embedding": rng.standard_normal(dim).astype(np.float32).tobytes(),
+                }, use_bin_type=True))
+
+    def test_dims_mismatch_raises_clear_error(
+        self, ephemeral_db: T3Database, tmp_path: Path,
+    ):
+        out = tmp_path / "mislabeled.nxexp"
+        # Dims check only fires for a conformant (self-declaring) target
+        # name or an explicit --assume-model -- a legacy two-segment
+        # name's "expected model" is just a guess (voyage_model_for_
+        # collection) and is exempt (see enforce_dims_check).
+        target = "code__myrepo__voyage-code-3__v1"
+        # Header claims voyage-code-3 (1024-dim) but vectors are 768-dim
+        # (bge) -- the GH #1370 D2 mislabel defect.
+        self._write_nxexp(out, target, "voyage-code-3", dim=768)
+
+        with pytest.raises(EmbeddingDimensionMismatch) as exc_info:
+            import_collection(ephemeral_db, out)
+        msg = str(exc_info.value)
+        assert "voyage-code-3" in msg
+        assert "1024" in msg
+        assert "768" in msg
+
+    def test_assume_model_corrects_wrong_label(
+        self, ephemeral_db: T3Database, tmp_path: Path,
+    ):
+        out = tmp_path / "mislabeled2.nxexp"
+        self._write_nxexp(out, "code__mislabeled2", "voyage-code-3", dim=768)
+        target = "code__myrepo__bge-base-en-v15-768__v1"
+
+        result = import_collection(
+            ephemeral_db, out, target_collection=target,
+            assume_model="bge-base-en-v15-768",
+        )
+        assert result["imported_count"] == 1
+        assert result["collection_name"] == target
+
+    def test_assume_model_wrong_override_fails_loud(
+        self, ephemeral_db: T3Database, tmp_path: Path,
+    ):
+        """A wrong --assume-model override must still be validated
+        against the actual vector dims -- it corrects a bad label, it
+        doesn't disable the safety check."""
+        out = tmp_path / "mislabeled3.nxexp"
+        self._write_nxexp(out, "code__mislabeled3", "voyage-code-3", dim=768)
+        target = "code__myrepo__minilm-l6-v2-384__v1"
+
+        with pytest.raises(EmbeddingDimensionMismatch) as exc_info:
+            import_collection(
+                ephemeral_db, out, target_collection=target,
+                assume_model="minilm-l6-v2-384",
+            )
+        msg = str(exc_info.value)
+        assert "minilm-l6-v2-384" in msg
+        assert "384" in msg
+        assert "768" in msg
+
+    def test_legacy_two_segment_target_exempt_from_dims_check(
+        self, ephemeral_db: T3Database, tmp_path: Path,
+    ):
+        """A legacy (non-conformant) target name's expected model is only
+        ever a prefix-based guess (``voyage_model_for_collection``) --
+        local-mode installs legitimately restore bge/minilm vectors
+        under such names, so the dims check does not block this
+        pre-existing, unaffected workflow."""
+        out = tmp_path / "legacy_mismatched_dims.nxexp"
+        self._write_nxexp(out, "code__legacy_dims", "voyage-code-3", dim=384)
+
+        result = import_collection(ephemeral_db, out)
+        assert result["imported_count"] == 1
+
+    def test_assume_model_still_enforces_model_mismatch_gate(
+        self, ephemeral_db: T3Database, tmp_path: Path,
+    ):
+        """--assume-model corrects the label used in the mismatch gate;
+        it doesn't bypass the gate for a genuinely incompatible target."""
+        out = tmp_path / "mislabeled4.nxexp"
+        self._write_nxexp(out, "code__mislabeled4", "voyage-code-3", dim=1024)
+
+        with pytest.raises(EmbeddingModelMismatch):
+            import_collection(
+                ephemeral_db, out, target_collection="docs__corpus",
+                assume_model="voyage-code-3",
+            )
+
+
+# ── GH #1370 D3: --skip-existing ────────────────────────────────────────────
+
+
+class TestSkipExisting:
+    """A failing batch previously aborted the entire import with no way
+    to resume. ``skip_existing=True`` drops records whose id already
+    exists in the target collection instead of overwriting them, and
+    reports how many were skipped."""
+
+    def test_skip_existing_skips_already_imported_records(
+        self, populated_db: T3Database, tmp_path: Path,
+    ):
+        out, _, first = _export_import(
+            populated_db, "code__test", tmp_path, target="code__resume",
+        )
+        assert first["imported_count"] == 5
+
+        second = import_collection(
+            db=populated_db, input_path=out, target_collection="code__resume",
+            skip_existing=True,
+        )
+        assert second["skipped_count"] == 5
+        assert second["imported_count"] == 0
+
+        col = populated_db._client_for("code__resume").get_collection("code__resume")
+        assert col.count() == 5
+
+    def test_without_skip_existing_reimport_overwrites_not_errors(
+        self, populated_db: T3Database, tmp_path: Path,
+    ):
+        out, _, first = _export_import(
+            populated_db, "code__test", tmp_path, target="code__reimport",
+        )
+        assert first["imported_count"] == 5
+
+        second = import_collection(
+            db=populated_db, input_path=out, target_collection="code__reimport",
+        )
+        assert second["imported_count"] == 5
+        assert second["skipped_count"] == 0
+
+        col = populated_db._client_for("code__reimport").get_collection("code__reimport")
+        assert col.count() == 5
+
+    def test_skip_existing_partial_overlap(
+        self, ephemeral_db: T3Database, tmp_path: Path,
+    ):
+        """Only the ids that already exist are skipped; new ids in the
+        same file still import.
+
+        Content-derived ids are deterministic (GH #1370 D1): importing
+        the same document text twice always rehashes to the same id, so
+        seeding via a first ``import_collection`` call and re-importing
+        a file containing both that record and a new one exercises the
+        partial-overlap path without needing to hand-craft matching raw
+        ids.
+        """
+        first_file = tmp_path / "partial_first.nxexp"
+        _write_nxexp_records(first_file, "code__partial", [
+            {"id": "legacy-id-0001", "document": "existing text", "metadata": {"title": "existing"}},
+        ])
+        first = import_collection(db=ephemeral_db, input_path=first_file)
+        assert first["imported_count"] == 1
+
+        second_file = tmp_path / "partial_second.nxexp"
+        _write_nxexp_records(second_file, "code__partial", [
+            {"id": "legacy-id-9999", "document": "existing text", "metadata": {"title": "existing"}},
+            {"id": "legacy-id-0002", "document": "brand new text", "metadata": {"title": "new"}},
+        ])
+        result = import_collection(
+            db=ephemeral_db, input_path=second_file, skip_existing=True,
+        )
+        assert result["skipped_count"] == 1
+        assert result["imported_count"] == 1
+
+        col = ephemeral_db._client_for("code__partial").get_collection("code__partial")
+        assert col.count() == 2
+
+
+# ── GH #1370 D3: constraint-violation hint wrapping ─────────────────────────
+
+
+class TestUpsertHintWrapping:
+    """A raw backend integrity-constraint error is opaque (GH #1370 D3
+    cheap-win UX). ``_upsert_with_hint`` wraps errors that look like a
+    chash/duplicate-key conflict with an actionable hint; unrelated
+    errors pass through untouched."""
+
+    def test_constraint_error_gets_hint(self):
+        from unittest.mock import MagicMock
+
+        from nexus.exporter import _upsert_with_hint
+
+        db = MagicMock()
+        db.upsert_chunks_with_embeddings.side_effect = RuntimeError(
+            'duplicate key value violates unique constraint "chunks_1024_pkey"'
+        )
+        with pytest.raises(NexusError) as exc_info:
+            _upsert_with_hint(db, "code__x", ["id1"], ["doc"], [[0.1]], [{}], MagicMock())
+        msg = str(exc_info.value).lower()
+        assert "skip-existing" in msg
+        assert "duplicate key" in msg
+
+    def test_unrelated_error_passes_through_unchanged(self):
+        from unittest.mock import MagicMock
+
+        from nexus.exporter import _upsert_with_hint
+
+        db = MagicMock()
+        db.upsert_chunks_with_embeddings.side_effect = ValueError("network timeout")
+        with pytest.raises(ValueError, match="network timeout"):
+            _upsert_with_hint(db, "code__x", ["id1"], ["doc"], [[0.1]], [{}], MagicMock())
+
+
+# ── GH #1370: CLI flag wiring for --assume-model / --skip-existing ─────────
+
+
+class TestImportFlagsCLI:
+    @pytest.fixture
+    def runner(self):
+        from click.testing import CliRunner
+        return CliRunner()
+
+    @pytest.fixture
+    def env_creds(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("CHROMA_API_KEY", "test-chroma-key")
+        monkeypatch.setenv("VOYAGE_API_KEY", "test-voyage-key")
+        monkeypatch.setenv("CHROMA_TENANT", "test-tenant")
+        monkeypatch.setenv("CHROMA_DATABASE", "test-db")
+
+    def test_skip_existing_flag_reports_skipped_count(
+        self, runner, env_creds, tmp_path, populated_db: T3Database,
+    ):
+        from unittest.mock import patch
+
+        from nexus.cli import main
+        out, _ = _export(populated_db, "code__test", tmp_path)
+        with patch("nexus.commands.store._t3", return_value=populated_db):
+            first = runner.invoke(
+                main, ["store", "import", str(out), "--collection", "code__cli_skip"],
+            )
+            assert first.exit_code == 0
+            second = runner.invoke(
+                main,
+                ["store", "import", str(out), "--collection", "code__cli_skip", "--skip-existing"],
+            )
+        assert second.exit_code == 0
+        assert "Skipped 5" in second.output
+
+    def test_assume_model_flag_wired_through(
+        self, runner, env_creds, tmp_path, ephemeral_db: T3Database,
+    ):
+        from unittest.mock import patch
+
+        from nexus.cli import main
+        out = tmp_path / "mislabeled_cli.nxexp"
+        header = {
+            "format_version": FORMAT_VERSION,
+            "collection_name": "code__cli_mislabeled",
+            "database_type": "code",
+            "embedding_model": "voyage-code-3",
+            "record_count": 1,
+            "embedding_dim": 384,
+            "exported_at": "2025-01-01T00:00:00+00:00",
+            "pipeline_version": "nexus-1",
+        }
+        rng = np.random.default_rng(seed=19)
+        with open(out, "wb") as f:
+            f.write(json.dumps(header).encode() + b"\n")
+            with gzip.GzipFile(fileobj=f, mode="wb") as gz:
+                gz.write(msgpack.packb({
+                    "id": "0" * 32,
+                    "document": "cli test doc",
+                    "metadata": {},
+                    "embedding": rng.standard_normal(384).astype(np.float32).tobytes(),
+                }, use_bin_type=True))
+
+        target = "code__myrepo__minilm-l6-v2-384__v1"
+        with patch("nexus.commands.store._t3", return_value=ephemeral_db):
+            result = runner.invoke(main, [
+                "store", "import", str(out),
+                "--collection", target,
+                "--assume-model", "minilm-l6-v2-384",
+            ])
+        assert result.exit_code == 0
+        assert "Imported 1" in result.output

@@ -345,6 +345,24 @@ leaves the hazard. Hal chose heal-on-next-use.
   `TestRdr175MvvSingleSupervisor.test_second_supervisor_under_live_lease_exits_nonzero`.
   Bounded: resolves on session end / reboot (only the unit starts, lease free).
 
+  > **Addendum (2026-07-06, GH #1369):** this "bounded, resolves on session
+  > end/reboot" framing undersold the real exposure. Observed in production:
+  > the SAME launchd unit's own `KeepAlive` respawn can collide with its own
+  > still-alive, still-owning prior instance — not just a separate session
+  > supervisor — and nothing in that collision ever kills the owning instance
+  > to free the lease, making the loop run indefinitely (13 respawns observed
+  > in one login session, port churn breaking cached MCP endpoints on any
+  > respawn that raced a real restart). Fixed by adding
+  > `StorageServiceSupervisor.owns_process` (`T3Supervisor.owns_process` for
+  > the T3 analog): the run loop now checks it immediately after `start()`
+  > and exits 0 without ever calling `heartbeat_once()` when the supervisor
+  > short-circuited on someone else's live lease, instead of exiting 3. The
+  > test this section names, `test_second_supervisor_under_live_lease_exits_nonzero`,
+  > is renamed `test_second_supervisor_under_live_lease_exits_zero` and now
+  > asserts exit 0. The decide-first ordering on `nexus-3pfj0` remains valuable
+  > (it avoids the coexistence entirely) but is no longer the only thing
+  > standing between this scenario and an unbounded respawn loop.
+
 ### Risks and Mitigations
 
 - **Risk**: Heal-on-next-use returns a dead endpoint for up to the lease TTL after

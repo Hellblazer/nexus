@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import fnmatch
 import gzip
+import hashlib
 import json
 import time
 from datetime import UTC, datetime
@@ -25,9 +26,17 @@ import msgpack
 import numpy as np
 import structlog
 
-from nexus.corpus import index_model_for_collection
+from nexus.corpus import embedding_model_for_collection_name, index_model_for_collection
 from nexus.db.chroma_quotas import QUOTAS
-from nexus.errors import EmbeddingModelMismatch, FormatVersionError
+from nexus.db.local_ef import _MODEL_DIMS as _LOCAL_RAW_MODEL_DIMS
+from nexus.db.local_ef import _MODEL_TOKENS as _LOCAL_MODEL_TOKENS
+from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415 — same cross-module reuse pattern as commands/catalog_cmds/doctor.py
+from nexus.errors import (
+    EmbeddingDimensionMismatch,
+    EmbeddingModelMismatch,
+    FormatVersionError,
+    NexusError,
+)
 from nexus.retry import _chroma_with_retry
 
 if TYPE_CHECKING:
@@ -45,6 +54,90 @@ MAX_SUPPORTED_FORMAT_VERSION: int = 1
 
 #: Pipeline version tag embedded in every export header.
 _PIPELINE_VERSION: str = "nexus-1"
+
+#: Content-addressed chunk id length (``chunk_text_hash[:32]``, RDR-108 D1).
+#: The Postgres ``chunks_<dim>`` tables enforce
+#: ``CHECK (length(chash) = 32)`` -- any export record whose id doesn't
+#: satisfy this on import must be re-derived (GH #1370 D1).
+_CHASH_LEN: int = 32
+
+#: Known embedding-model -> vector-dimension table (GH #1370 D2). Reused
+#: from the local-mode table (``nexus.db.local_ef``) rather than
+#: duplicated, keyed by the RDR-109 collection-name token; Voyage models
+#: aren't in that table (cloud-only) so they're listed explicitly here.
+_MODEL_DIMENSIONS: dict[str, int] = {
+    "voyage-3": 1024,
+    "voyage-code-3": 1024,
+    "voyage-context-3": 1024,
+    **{
+        token: _LOCAL_RAW_MODEL_DIMS[raw]
+        for raw, token in _LOCAL_MODEL_TOKENS.items()
+    },
+}
+
+
+def _rehash_nonconformant_id(rec_id: str, doc: str) -> tuple[str, str]:
+    """Return ``(new_id, full_hash)`` for an export record id that isn't
+    the conformant ``_CHASH_LEN``-char content hash (GH #1370 D1).
+
+    Content-addressed derivation matches production indexing
+    (``chunk_text_hash[:32]``): hash the document text when present.
+    Vector-only entries (``document == ""``) have no meaningful content
+    to hash, so the *old* id is hashed instead -- deterministic and
+    stable across repeated re-imports of the same legacy file.
+    """
+    basis = doc if doc else rec_id
+    full_hash = hashlib.sha256(basis.encode()).hexdigest()
+    return full_hash[:_CHASH_LEN], full_hash
+
+
+#: Substrings that indicate an upsert failure is a chash/constraint
+#: conflict rather than an unrelated error (GH #1370 D3 cheap-win UX).
+_CONSTRAINT_HINT_KEYWORDS: tuple[str, ...] = (
+    "constraint", "integrity", "duplicate", "chash", "length(",
+)
+
+
+def _upsert_with_hint(
+    db: "T3Database",
+    collection_name: str,
+    ids: list[str],
+    documents: list[str],
+    embeddings: list[list[float]],
+    metadatas: list[dict],
+    hooks: "HookRegistry",
+) -> None:
+    """Upsert a batch and fire post-store hook chains, wrapping
+    constraint-violation errors with an actionable hint (chash length /
+    --skip-existing) instead of the raw opaque backend error (GH #1370 D3).
+
+    Hook-firing lives in this function (rather than the caller) so the
+    nexus-9099 drift guard (``test_every_cli_t3_write_function_fires_
+    store_chains``) sees both the T3 write and the hook-chain fire in
+    the same function body.
+    """
+    try:
+        db.upsert_chunks_with_embeddings(
+            collection_name=collection_name,
+            ids=ids,
+            documents=documents,
+            embeddings=embeddings,
+            metadatas=metadatas,
+        )
+    except Exception as exc:
+        msg = str(exc).lower()
+        if any(keyword in msg for keyword in _CONSTRAINT_HINT_KEYWORDS):
+            raise NexusError(
+                f"{exc}\nHint: this looks like a chunk-id constraint "
+                f"conflict in collection {collection_name!r} -- a "
+                "non-conformant legacy chunk id or a duplicate key. If "
+                "you're re-running a partial import, retry with "
+                "--skip-existing."
+            ) from exc
+        raise
+    _fire_store_chains_grouped_by_doc(
+        ids, collection_name, documents, embeddings, metadatas, hooks,
+    )
 
 
 def _now_iso() -> str:
@@ -282,6 +375,8 @@ def import_collection(
     remaps: list[tuple[str, str]] | None = None,
     *,
     hooks: "HookRegistry | None" = None,
+    assume_model: str | None = None,
+    skip_existing: bool = False,
 ) -> dict:
     """Import a ``.nxexp`` file into T3.
 
@@ -297,10 +392,20 @@ def import_collection(
     remaps:
         List of ``(old_prefix, new_prefix)`` pairs applied to the
         ``source_path`` metadata field during import.
+    assume_model:
+        Override the export header's declared ``embedding_model`` for both
+        the model-mismatch gate and the dimension sanity check (GH #1370
+        D2). Pre-migration exports can carry a wrong header label; this
+        lets the caller supply the true model instead of trusting it.
+    skip_existing:
+        If True, records whose id already exists in the target collection
+        are skipped rather than overwritten (GH #1370 D3). Useful for
+        resuming a partially-completed import.
 
     Returns
     -------
-    dict with keys: collection_name, imported_count, elapsed_seconds.
+    dict with keys: collection_name, imported_count, skipped_count,
+    rehashed_count, elapsed_seconds.
 
     Raises
     ------
@@ -309,6 +414,9 @@ def import_collection(
     EmbeddingModelMismatch:
         If the export's embedding_model does not match the target collection's
         expected index model.
+    EmbeddingDimensionMismatch:
+        If the declared model's expected dimensionality doesn't match the
+        actual vectors found in the file (a mislabeled pre-migration export).
     """
     t0 = time.monotonic()
     remaps = remaps or []
@@ -348,9 +456,15 @@ def import_collection(
         )
     expected_model: str = index_model_for_collection(collection_name)
 
-    if export_model != expected_model:
+    # GH #1370 D2: --assume-model overrides the header's (possibly wrong)
+    # declared model for this gate. It corrects a mislabeled export; it does
+    # NOT bypass the safety check for a genuinely incompatible collection.
+    effective_model: str = assume_model if assume_model is not None else export_model
+
+    if effective_model != expected_model:
+        label = "assumed model" if assume_model is not None else "export uses"
         raise EmbeddingModelMismatch(
-            f"Embedding model mismatch — export uses '{export_model}' but "
+            f"Embedding model mismatch — {label} '{effective_model}' but "
             f"target collection '{collection_name}' requires '{expected_model}'. "
             "Import aborted. Re-index from source or export to a compatible "
             "collection prefix."
@@ -361,7 +475,27 @@ def import_collection(
         source_collection=source_collection,
         target_collection=collection_name,
         embedding_model=export_model,
+        assume_model=assume_model,
+        skip_existing=skip_existing,
         input=str(input_path),
+    )
+
+    # GH #1370 D2: the dims sanity check only applies when the declared
+    # model is authoritative -- either the target name is RDR-103
+    # conformant (four-segment names embed the model token directly,
+    # per ``embedding_model_for_collection_name``) or the caller
+    # explicitly opted in via ``--assume-model`` (which must still be
+    # validated, per spec, even for a legacy target). For a legacy
+    # two-segment target, ``expected_model`` is only ever a prefix-based
+    # *guess* (``voyage_model_for_collection``) -- local-mode installs
+    # legitimately write bge/minilm vectors under 2-segment names, and
+    # the guess has never been reliable there. Enforcing the dims check
+    # unconditionally would block that pre-existing, unaffected
+    # workflow; scope it to the cases where GH #1370 D2 actually bites
+    # (migrating into a properly self-declaring conformant collection).
+    enforce_dims_check: bool = (
+        assume_model is not None
+        or embedding_model_for_collection_name(collection_name) is not None
     )
 
     # Stream records from gzip-compressed msgpack body and upsert in batches.
@@ -371,10 +505,19 @@ def import_collection(
     # records in memory (031-I1).
     page_size = QUOTAS.MAX_RECORDS_PER_WRITE
     imported_count = 0
+    skipped_count = 0
+    rehashed_count = 0
     ids: list[str] = []
     documents: list[str] = []
     embeddings: list[list[float]] = []
     metadatas: list[dict] = []
+
+    # GH #1370 D1: legacy (pre-migration) exports carry non-conformant
+    # chunk ids that fail the Postgres ``chash`` length constraint on
+    # import. Bypass-schema collections (``taxonomy__*``) use their own
+    # programmatic id scheme (not content-derived) and must NOT be
+    # rehashed -- that would break their intentional stable identifiers.
+    rehash_ids = not collection_name.startswith(_BYPASS_SCHEMA_PREFIXES)
 
     # CLI review: infer the expected embedding byte-size from the first
     # record and reject any subsequent record whose embedding doesn't
@@ -383,6 +526,28 @@ def import_collection(
     # production uses 1024-dim Voyage). Also sanity-checks that the
     # byte-size is a multiple of 4 (float32).
     expected_emb_bytes: int | None = None
+
+    def _filter_existing(
+        batch_ids: list[str],
+        batch_docs: list[str],
+        batch_embs: list[list[float]],
+        batch_metas: list[dict],
+    ) -> tuple[list[str], list[str], list[list[float]], list[dict], int]:
+        """Drop records whose id already exists in the target collection
+        (GH #1370 D3, ``--skip-existing``). No-op unless requested."""
+        if not skip_existing:
+            return batch_ids, batch_docs, batch_embs, batch_metas, 0
+        existing = db.existing_ids(collection_name, batch_ids)
+        if not existing:
+            return batch_ids, batch_docs, batch_embs, batch_metas, 0
+        keep = [i for i, rid in enumerate(batch_ids) if rid not in existing]
+        return (
+            [batch_ids[i] for i in keep],
+            [batch_docs[i] for i in keep],
+            [batch_embs[i] for i in keep],
+            [batch_metas[i] for i in keep],
+            len(batch_ids) - len(keep),
+        )
 
     with open(input_path, "rb") as f:
         f.readline()  # skip header (already parsed above)
@@ -395,7 +560,7 @@ def import_collection(
                 # write path's byte-length checks don't trip on ``None.encode()``
                 # (nexus-fxc1).
                 doc: str = record["document"] or ""
-                meta: dict = record["metadata"]
+                meta: dict = dict(record["metadata"])
                 emb_bytes: bytes = record["embedding"]
 
                 if expected_emb_bytes is None:
@@ -407,6 +572,23 @@ def import_collection(
                             "(float32). File may be corrupt."
                         )
                     expected_emb_bytes = len(emb_bytes)
+
+                    # GH #1370 D2: sanity-check the declared model's dims
+                    # against the actual first-record vector (scope: see
+                    # ``enforce_dims_check`` above). Unknown models (not
+                    # in _MODEL_DIMENSIONS) skip silently -- can't
+                    # validate what we don't have a table entry for.
+                    if enforce_dims_check:
+                        actual_dims = expected_emb_bytes // 4
+                        declared_dims = _MODEL_DIMENSIONS.get(effective_model)
+                        if declared_dims is not None and declared_dims != actual_dims:
+                            raise EmbeddingDimensionMismatch(
+                                declared_model=effective_model,
+                                declared_dims=declared_dims,
+                                actual_dims=actual_dims,
+                                collection=collection_name,
+                                assumed=assume_model is not None,
+                            )
                 elif len(emb_bytes) != expected_emb_bytes:
                     raise FormatVersionError(
                         f"Export file {input_path!r} contains an embedding "
@@ -415,8 +597,14 @@ def import_collection(
                         "first record). File may be truncated or corrupt."
                     )
 
+                if rehash_ids and len(rec_id) != _CHASH_LEN:
+                    new_id, full_hash = _rehash_nonconformant_id(rec_id, doc)
+                    if "chunk_text_hash" in meta:
+                        meta["chunk_text_hash"] = full_hash
+                    rec_id = new_id
+                    rehashed_count += 1
+
                 if remaps and "source_path" in meta:
-                    meta = dict(meta)
                     meta["source_path"] = _apply_remap(meta["source_path"], remaps)
 
                 emb: list[float] = np.frombuffer(emb_bytes, dtype=np.float32).tolist()
@@ -428,46 +616,50 @@ def import_collection(
 
                 # Flush batch when page_size reached.
                 if len(ids) >= page_size:
-                    db.upsert_chunks_with_embeddings(
-                        collection_name=collection_name,
-                        ids=ids,
-                        documents=documents,
-                        embeddings=embeddings,
-                        metadatas=metadatas,
+                    f_ids, f_docs, f_embs, f_metas, skipped = _filter_existing(
+                        ids, documents, embeddings, metadatas,
                     )
-                    _fire_store_chains_grouped_by_doc(
-                        ids, collection_name, documents,
-                        embeddings, metadatas, hooks,
-                    )
-                    imported_count += len(ids)
-                    _log.debug("import_batch_written", count=len(ids), total_so_far=imported_count)
+                    skipped_count += skipped
+                    if f_ids:
+                        _upsert_with_hint(
+                            db, collection_name, f_ids, f_docs, f_embs, f_metas, hooks,
+                        )
+                    imported_count += len(f_ids)
+                    _log.debug("import_batch_written", count=len(f_ids), total_so_far=imported_count)
                     ids, documents, embeddings, metadatas = [], [], [], []
 
     # Flush remaining records.
     if ids:
-        db.upsert_chunks_with_embeddings(
-            collection_name=collection_name,
-            ids=ids,
-            documents=documents,
-            embeddings=embeddings,
-            metadatas=metadatas,
+        f_ids, f_docs, f_embs, f_metas, skipped = _filter_existing(
+            ids, documents, embeddings, metadatas,
         )
-        _fire_store_chains_grouped_by_doc(
-            ids, collection_name, documents, embeddings, metadatas, hooks,
-        )
-        imported_count += len(ids)
+        skipped_count += skipped
+        if f_ids:
+            _upsert_with_hint(db, collection_name, f_ids, f_docs, f_embs, f_metas, hooks)
+        imported_count += len(f_ids)
 
     elapsed = time.monotonic() - t0
+
+    if rehashed_count:
+        _log.info(
+            "import_rehashed_nonconformant_ids",
+            collection=collection_name,
+            rehashed_count=rehashed_count,
+        )
 
     _log.info(
         "import_complete",
         collection=collection_name,
         imported_count=imported_count,
+        skipped_count=skipped_count,
+        rehashed_count=rehashed_count,
         elapsed_seconds=round(elapsed, 2),
     )
 
     return {
         "collection_name": collection_name,
         "imported_count": imported_count,
+        "skipped_count": skipped_count,
+        "rehashed_count": rehashed_count,
         "elapsed_seconds": round(elapsed, 2),
     }

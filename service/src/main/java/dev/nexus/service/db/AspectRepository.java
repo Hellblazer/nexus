@@ -869,6 +869,61 @@ public final class AspectRepository {
      * Re-enqueue at the same (collection, source_path) resets to pending.
      */
     public void enqueue(String tenant, Map<String, Object> body) {
+        tenantScope.withTenant(tenant, ctx -> {
+            buildEnqueueQuery(ctx, tenant, body).execute();
+            return null;
+        });
+    }
+
+    /**
+     * Batch-enqueue N documents for extraction in ONE round trip
+     * (nexus-nj4ch, nexus-duoak follow-up: the indexer's per-file
+     * ``aspect_extraction_enqueue_hook`` call, fired once per document
+     * boundary under the ChunkBatcher, paid one WAN round trip per
+     * document — measured ~34.7s across ~250 real inserts in this repo's
+     * own shakeout). Same {@code ctx.batch(queries).execute()} pattern as
+     * {@link CatalogRepository#updateDocumentsMany} (heterogeneous
+     * per-row ON CONFLICT DO UPDATE — a single hand-built multi-row
+     * VALUES statement was rejected there for the same reason it would be
+     * here: jOOQ's typed VALUES API needs uniform per-column types, and
+     * Postgres NULL-parameter type inference fights optional per-row
+     * fields like {@code doc_id}).
+     *
+     * <p>Each map has the same shape as {@link #enqueue}'s {@code body}.
+     * A malformed row (missing collection/source_path) is skipped rather
+     * than aborting the whole batch — ghost-class isolation, mirroring
+     * {@code register_many}/{@code update_many}'s per-doc failure
+     * tolerance; the indexer's own {@code select_config(collection) is
+     * None} gate already filters out rows that don't need enqueueing
+     * before this is ever called, so a skip here should be rare (a
+     * genuine caller bug, not a routine collection-type filter).
+     */
+    public int enqueueMany(String tenant, List<Map<String, Object>> rows) {
+        if (rows.isEmpty()) return 0;
+        return tenantScope.withTenant(tenant, ctx -> {
+            var queries = new ArrayList<org.jooq.Query>();
+            for (var row : rows) {
+                String collection = (String) row.get("collection");
+                String sourcePath = (String) row.get("source_path");
+                if (collection == null || collection.isBlank()) continue;
+                if (sourcePath == null || sourcePath.isBlank()) continue;
+                queries.add(buildEnqueueQuery(ctx, tenant, row));
+            }
+            if (!queries.isEmpty()) {
+                ctx.batch(queries).execute();
+            }
+            return queries.size();
+        });
+    }
+
+    /**
+     * Shared query-builder for {@link #enqueue} and {@link #enqueueMany} —
+     * same INSERT ... ON CONFLICT DO UPDATE shape, same
+     * {@code ensureCollectionRegistered} precondition (the caller runs it
+     * before calling this, once per row, since it must happen before the
+     * row's own INSERT within the same transaction).
+     */
+    private org.jooq.Query buildEnqueueQuery(DSLContext ctx, String tenant, Map<String, Object> body) {
         String collection = (String) body.get("collection");
         String sourcePath = (String) body.get("source_path");
         if (collection == null || collection.isBlank()) throw new IllegalArgumentException("collection required");
@@ -877,55 +932,51 @@ public final class AspectRepository {
             OffsetDateTime.now(ZoneOffset.UTC).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME));
         OffsetDateTime enqueuedAtTs = parseTs(enqueuedAt);
 
-        tenantScope.withTenant(tenant, ctx -> {
-            ensureCollectionRegistered(ctx, tenant, collection);
-            ctx.insertInto(ASPECT_EXTRACTION_QUEUE,
-                    ASPECT_EXTRACTION_QUEUE.TENANT_ID,
-                    ASPECT_EXTRACTION_QUEUE.COLLECTION,
-                    ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
-                    ASPECT_EXTRACTION_QUEUE.DOC_ID,
-                    ASPECT_EXTRACTION_QUEUE.CONTENT_HASH,
-                    ASPECT_EXTRACTION_QUEUE.CONTENT,
-                    ASPECT_EXTRACTION_QUEUE.STATUS,
-                    ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,
-                    ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT,
-                    ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT,
-                    ASPECT_EXTRACTION_QUEUE.LAST_ERROR)
-                .values(
-                    tenant, collection, sourcePath,
-                    nullIfBlank((String) body.get("doc_id")),
-                    (String) body.getOrDefault("content_hash", ""),
-                    (String) body.getOrDefault("content", ""),
-                    "pending", 0, enqueuedAtTs, null, null)
-                .onConflict(
-                    ASPECT_EXTRACTION_QUEUE.TENANT_ID,
-                    ASPECT_EXTRACTION_QUEUE.COLLECTION,
-                    ASPECT_EXTRACTION_QUEUE.SOURCE_PATH)
-                .doUpdate()
-                // nexus-nyout: a doc_id-less re-enqueue (blank -> NULL via
-                // nullIfBlank; e.g. collection re-embed) must not erase an
-                // existing correct tumbler — COALESCE keeps the old linkage;
-                // a real incoming tumbler still overwrites. The queue IMPORT
-                // path stays verbatim EXCLUDED.doc_id: fidelity import
-                // reproduces exported rows exactly, including blanks.
-                .set(ASPECT_EXTRACTION_QUEUE.DOC_ID,
-                     coalesce(EX_Q_DOC_ID, ASPECT_EXTRACTION_QUEUE.DOC_ID))
-                .set(ASPECT_EXTRACTION_QUEUE.CONTENT_HASH,    EX_Q_CONTENT_HASH)
-                .set(ASPECT_EXTRACTION_QUEUE.CONTENT,         EX_Q_CONTENT)
-                .set(ASPECT_EXTRACTION_QUEUE.STATUS,          "pending")
-                .set(ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,     0)
-                .set(ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT,     EX_Q_ENQUEUED_AT)
-                .set(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT, (OffsetDateTime) null)
-                .set(ASPECT_EXTRACTION_QUEUE.LAST_ERROR,      (String) null)
-                // RDR-163 P1 (nexus-ztpt6): a re-enqueue is a fresh request — it
-                // resets retry_count to 0, so it must also clear any stale backoff
-                // (next_retry_at) left by a prior mark_retry. Otherwise the claim
-                // gate would silently hold the re-enqueued row until the old
-                // backoff elapses (up to base*2^(cap-1) seconds).
-                .set(ASPECT_EXTRACTION_QUEUE.NEXT_RETRY_AT,   (OffsetDateTime) null)
-                .execute();
-            return null;
-        });
+        ensureCollectionRegistered(ctx, tenant, collection);
+        return ctx.insertInto(ASPECT_EXTRACTION_QUEUE,
+                ASPECT_EXTRACTION_QUEUE.TENANT_ID,
+                ASPECT_EXTRACTION_QUEUE.COLLECTION,
+                ASPECT_EXTRACTION_QUEUE.SOURCE_PATH,
+                ASPECT_EXTRACTION_QUEUE.DOC_ID,
+                ASPECT_EXTRACTION_QUEUE.CONTENT_HASH,
+                ASPECT_EXTRACTION_QUEUE.CONTENT,
+                ASPECT_EXTRACTION_QUEUE.STATUS,
+                ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,
+                ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT,
+                ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT,
+                ASPECT_EXTRACTION_QUEUE.LAST_ERROR)
+            .values(
+                tenant, collection, sourcePath,
+                nullIfBlank((String) body.get("doc_id")),
+                (String) body.getOrDefault("content_hash", ""),
+                (String) body.getOrDefault("content", ""),
+                "pending", 0, enqueuedAtTs, null, null)
+            .onConflict(
+                ASPECT_EXTRACTION_QUEUE.TENANT_ID,
+                ASPECT_EXTRACTION_QUEUE.COLLECTION,
+                ASPECT_EXTRACTION_QUEUE.SOURCE_PATH)
+            .doUpdate()
+            // nexus-nyout: a doc_id-less re-enqueue (blank -> NULL via
+            // nullIfBlank; e.g. collection re-embed) must not erase an
+            // existing correct tumbler — COALESCE keeps the old linkage;
+            // a real incoming tumbler still overwrites. The queue IMPORT
+            // path stays verbatim EXCLUDED.doc_id: fidelity import
+            // reproduces exported rows exactly, including blanks.
+            .set(ASPECT_EXTRACTION_QUEUE.DOC_ID,
+                 coalesce(EX_Q_DOC_ID, ASPECT_EXTRACTION_QUEUE.DOC_ID))
+            .set(ASPECT_EXTRACTION_QUEUE.CONTENT_HASH,    EX_Q_CONTENT_HASH)
+            .set(ASPECT_EXTRACTION_QUEUE.CONTENT,         EX_Q_CONTENT)
+            .set(ASPECT_EXTRACTION_QUEUE.STATUS,          "pending")
+            .set(ASPECT_EXTRACTION_QUEUE.RETRY_COUNT,     0)
+            .set(ASPECT_EXTRACTION_QUEUE.ENQUEUED_AT,     EX_Q_ENQUEUED_AT)
+            .set(ASPECT_EXTRACTION_QUEUE.LAST_ATTEMPT_AT, (OffsetDateTime) null)
+            .set(ASPECT_EXTRACTION_QUEUE.LAST_ERROR,      (String) null)
+            // RDR-163 P1 (nexus-ztpt6): a re-enqueue is a fresh request — it
+            // resets retry_count to 0, so it must also clear any stale backoff
+            // (next_retry_at) left by a prior mark_retry. Otherwise the claim
+            // gate would silently hold the re-enqueued row until the old
+            // backoff elapses (up to base*2^(cap-1) seconds).
+            .set(ASPECT_EXTRACTION_QUEUE.NEXT_RETRY_AT,   (OffsetDateTime) null);
     }
 
     /**
