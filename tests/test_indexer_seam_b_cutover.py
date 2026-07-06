@@ -70,7 +70,6 @@ def _service_mode_patches(db, *, extra=None):
         "nexus.indexer._index_code_file": {"return_value": 0},
         "nexus.indexer._index_prose_file": {"return_value": 0},
         "nexus.indexer._index_pdf_file": {"return_value": 0},
-        "nexus.indexer._discover_and_index_rdrs": {"return_value": (0, 0, 0)},
         "nexus.indexer._prune_misclassified": {},
         "nexus.indexer._prune_deleted_files": {},
         "nexus.indexer._migrate_legacy_collections": {"return_value": {}},

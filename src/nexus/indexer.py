@@ -1798,86 +1798,6 @@ def _index_pdf_file(
     return len(prepared)
 
 
-def _discover_and_index_rdrs(
-    repo: Path,
-    rdr_abs_paths: set[Path],
-    db: object,
-    voyage_key: str,
-    now_iso: str,
-    *,
-    force: bool = False,
-    embed_fn: Callable | None = None,
-    hooks: "HookRegistry | None" = None,
-    on_phase: Callable[[str], None] | None = None,
-) -> tuple[int, int, int]:
-    """Find .md files under RDR paths and index them via batch_index_markdowns.
-
-    M2: passes t3=db to avoid creating a redundant T3 client.
-
-    Returns (indexed, skipped, failed) counts.
-
-    *on_phase*, if provided, receives a ``[N/M] filename`` line after each
-    RDR file is processed (mirrors the main file loop's per-file progress —
-    nexus-47ubt). RDR file count is discovered inside this function, so the
-    total is only known once ``md_paths`` is built below.
-    """
-    from nexus.doc_indexer import batch_index_markdowns  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-
-    if not rdr_abs_paths:
-        _log.debug("RDR indexing skipped — no rdr_paths configured")
-        return 0, 0, 0
-
-    md_paths: list[Path] = []
-    for rdr_dir in rdr_abs_paths:
-        if not rdr_dir.is_dir():
-            continue
-        for path in sorted(rdr_dir.rglob("*.md")):
-            if path.is_file() and not path.is_symlink():
-                md_paths.append(path)
-
-    if not md_paths:
-        _log.debug("no RDR files found", rdr_paths=[str(p) for p in rdr_abs_paths])
-        return 0, 0, 0
-
-    # RDR-103 Phase 3a: ``_repo_collection_or_legacy`` queries the
-    # catalog for a conformant ``rdr__<owner>__voyage-context-3__v<n>``,
-    # falling back to the legacy ``rdr__<basename>-<hash8>`` shape when
-    # the catalog is not initialized or the owner is not yet registered.
-    from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-    basename, _ = _repo_identity(repo)
-    collection = _repo_collection_or_legacy(repo, "rdr")
-
-    _log.info("indexing RDR files", count=len(md_paths), collection=collection)
-    total = len(md_paths)
-    _rdr_i = 0
-
-    def _on_file(path: Path, chunks: int, elapsed_s: float) -> None:
-        nonlocal _rdr_i
-        _rdr_i += 1
-        if on_phase is None:
-            return
-        lbl = f"{chunks} chunks" if chunks else "skipped"
-        try:
-            on_phase(f"  [{_rdr_i}/{total}] {path.name} — {lbl} ({elapsed_s:.1f}s)")
-        except Exception:  # noqa: BLE001 — progress echo is cosmetic; must not abort RDR indexing or the outer nx index run (nexus-47ubt)
-            _log.debug("rdr_progress_callback_failed", exc_info=True)
-
-    results = batch_index_markdowns(md_paths, corpus=basename, t3=db,
-                                    collection_name=collection, force=force,
-                                    embed_fn=embed_fn, hooks=hooks,
-                                    on_file=_on_file if on_phase is not None else None)
-    indexed = sum(1 for s in results.values() if s == "indexed")
-    skipped = sum(1 for s in results.values() if s == "skipped")
-    failed = sum(1 for s in results.values() if s == "failed")
-    log_kwargs: dict = {"indexed": indexed, "current": skipped, "failed": failed}
-    if failed:
-        log_kwargs["failed_paths"] = sorted(
-            p for p, s in results.items() if s == "failed"
-        )
-    _log.info("RDR indexing complete", **log_kwargs)
-    return indexed, skipped, failed
-
-
 _CHROMA_PAGE_SIZE: int = 300
 """ChromaDB Cloud hard cap per get() call — paginate above this."""
 
@@ -2206,6 +2126,7 @@ def _prune_deleted_files(
     db: object,
     *,
     catalog: object | None,
+    rdr_collection: str | None = None,
 ) -> None:
     """Remove orphan T3 chunks via the catalog manifest (RDR-108 Phase 4 /
     nexus-dyxe).
@@ -2258,7 +2179,16 @@ def _prune_deleted_files(
     # (the latter is the leak that fed the doctor's "T3 collections
     # without projection rows" zombie list).
     from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415  — optional/heavy dependency deferred (chromadb)
-    for collection_name in (code_collection, docs_collection):
+    # nexus-3lswy: rdr_collection was missing here even after RDR became a
+    # first-class 4th collection (catalog registration, doc_id_resolver, and
+    # staleness cache all cover it) — this GC pass silently never swept
+    # rdr__ orphans. None when there are no RDR files this run (mirrors
+    # code_collection/docs_collection, which are always non-empty strings
+    # today but would have the same silent-skip contract if empty).
+    _collections = (code_collection, docs_collection) + (
+        (rdr_collection,) if rdr_collection else ()
+    )
+    for collection_name in _collections:
         referenced = catalog.chashes_for_collection(collection_name)
         try:
             col = db.get_collection(collection_name)
@@ -2344,7 +2274,9 @@ def _run_index(
     - Code files → code__ collection (voyage-code-3, AST chunking)
     - Prose files → docs__ collection (voyage-context-3 via CCE)
     - PDF files → docs__ collection (PDF extraction + voyage-context-3)
-    - RDR markdown → rdr__ collection (via batch_index_markdowns)
+    - RDR markdown → rdr__ collection (nexus-3lswy: 4th run_file_loop
+      category via _index_prose_file, same batching/staleness-cache/
+      doc_id_resolver machinery as the prose loop)
 
     Returns a stats dict with ``rdr_indexed``, ``rdr_current``, ``rdr_failed``.
     """
@@ -2400,11 +2332,39 @@ def _run_index(
     # Compute frecency scores in a single git log pass
     frecency_map = batch_frecency(repo, decay_rate=tuning.decay_rate, timeout=tuning.git_log_timeout)
 
-    # Build absolute RDR path set for exclusion
+    # Build absolute RDR path set for exclusion (resolved, so symlink/..
+    # normalization matches the classification loop's ``path.resolve()``
+    # comparison below).
     rdr_abs_paths: set[Path] = set()
     for rdr_rel in rdr_paths:
         rdr_abs = (repo / rdr_rel).resolve()
         rdr_abs_paths.add(rdr_abs)
+
+    # nexus-3lswy: RDR markdown files, scored via the same frecency_map as
+    # code/prose/pdf, so they can flow through the main run_file_loop as a
+    # 4th category instead of the separate, unbatched _discover_and_index_rdrs
+    # path. Symlinks excluded (preserved from the retired function's walk;
+    # the indexed_for_catalog walk below reuses this same list, so the
+    # exclusion now applies there too — a slightly stricter catalog
+    # registration surface than before, intentionally).
+    #
+    # Walk the UNRESOLVED ``repo / rdr_rel`` dirs, not ``rdr_abs_paths``
+    # (resolved) — ``_index_prose_file``/``index_prose_file`` calls
+    # ``file_path.relative_to(ctx.repo_path)`` where ``ctx.repo_path`` is
+    # the caller's raw, unresolved ``repo``. A resolved rdr_dir (e.g. macOS
+    # ``/tmp`` -> ``/private/tmp``) produces md_file paths that no longer
+    # share ``repo``'s prefix, raising ValueError. code/prose/pdf files
+    # don't hit this because ``_git_ls_files``/rglob fallback both build
+    # paths as ``repo / rel`` (unresolved) already.
+    rdr_md_paths: list[tuple[float, Path]] = []
+    for rdr_rel in dict.fromkeys(rdr_paths):  # de-dupe while preserving order
+        rdr_dir = repo / rdr_rel
+        if rdr_dir.is_dir():
+            for md_file in sorted(rdr_dir.rglob("*.md")):
+                if md_file.is_file() and not md_file.is_symlink():
+                    rdr_md_paths.append((frecency_map.get(md_file, 0.0), md_file))
+    rdr_md_paths.sort(key=lambda x: x[0], reverse=True)
+    have_rdr_files = bool(rdr_md_paths)
 
     # Walk repo and classify files into code, prose, and PDF lists
     code_files: list[tuple[float, Path]] = []
@@ -2547,25 +2507,14 @@ def _run_index(
         _local_ef = LocalEmbeddingFunction()
         local_model = _local_ef.model_name
 
-        # Two incompatible EmbedFn shapes live in the codebase:
-        #   1. Code / prose / PDF path (code_indexer.py, prose_indexer.py,
-        #      indexer.py:_index_pdf_file): ``embed_fn(texts) -> embeddings``.
-        #   2. doc_indexer.py (RDR + markdown + large PDF incremental):
-        #      ``EmbedFn = Callable[[list[str], str], tuple[list, str]]``
-        #      returning ``(embeddings, actual_model)``.
-        # LocalEmbeddingFunction implements shape #1 natively. For
-        # shape #2 callers (the RDR discovery path below), wrap with an
-        # adapter that returns the (embeddings, model) tuple. Without
-        # this, local-mode RDR indexing fails with "takes 2 positional
-        # arguments but 3 were given".
-        _embed_fn = _local_ef  # shape #1 for code / prose / PDF
-
-        def _local_embed_fn_tuple(
-            texts: list[str], target_model: str = "",
-        ) -> tuple[list[list[float]], str]:
-            return _local_ef(texts), local_model
-
-        _embed_fn_doc = _local_embed_fn_tuple  # shape #2 for doc_indexer
+        # nexus-3lswy: RDR files now route through _index_prose_file (shape
+        # #1: ``embed_fn(texts) -> embeddings``), the same as code/prose/PDF
+        # — the standalone doc_indexer shape #2 adapter this function used
+        # to build for the RDR-only path (``(texts, model) -> (embeddings,
+        # model)``) is no longer needed here. doc_indexer.py's own shape #2
+        # remains for its OTHER callers (`nx collection reindex`, standalone
+        # RDR-only index), which build their own adapter independently.
+        _embed_fn = _local_ef  # shape #1 for code / prose / PDF / RDR
 
         code_model = local_model
         docs_model = local_model
@@ -2578,7 +2527,6 @@ def _run_index(
                 msg="Using basic embeddings (tier 0). For better code search quality: pip install conexus[local]",
             )
     else:
-        _embed_fn_doc = None
         from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415  — circular-dep avoidance (nexus.db.http_vector_client)
         _service_mode = is_vector_service_mode()  # captured here; reused for T3 routing below
         if _service_mode:
@@ -2591,18 +2539,11 @@ def _run_index(
             voyage_client = None
             code_model = index_model_for_collection(code_collection)
             docs_model = index_model_for_collection(docs_collection)
-            # Service-mode embed_fn shape #1 (code / prose / PDF path):
+            # Service-mode embed_fn (code / prose / PDF / RDR path):
             # returns empty embeddings as a no-op.  HttpVectorClient.
             # upsert_chunks_with_embeddings ignores them and embeds
             # server-side (Seam B contract).
             _embed_fn = lambda texts: [[]] * len(texts)  # noqa: E731
-            # Service-mode embed_fn shape #2 (doc_indexer / RDR path):
-            # returns empty embeddings + the target model.  The
-            # doc_indexer calls db.upsert_chunks_with_embeddings which
-            # routes to HttpVectorClient.upsert_chunks (server-side embed).
-            _embed_fn_doc = lambda texts, model="": (  # noqa: E731
-                [[]] * len(texts), model
-            )
         else:
             voyage_key = get_credential("voyage_api_key")
             chroma_key = get_credential("chroma_api_key")
@@ -2685,10 +2626,19 @@ def _run_index(
     # the missing piece was the gate here.
     have_code_files = bool(code_files)
     have_docs_files = bool(prose_files or pdf_files)
+    # nexus-3lswy: RDR-103 Phase 3a + Phase 4 name resolution, lifted here
+    # (from the indexed_for_catalog block below) so the 4th run_file_loop's
+    # rdr_col can be built alongside code_col/docs_col. None when there are
+    # no RDR files — same zombie-collection avoidance as code/docs.
+    rdr_col_name: str | None = (
+        (_migrated_names.get("rdr") or _repo_collection_or_legacy(repo, "rdr"))
+        if have_rdr_files else None
+    )
     _log.debug(
         "creating collections",
         code=code_collection if have_code_files else "(deferred; no files)",
         docs=docs_collection if have_docs_files else "(deferred; no files)",
+        rdr=rdr_col_name or "(deferred; no files)",
     )
     code_col = (
         db.get_or_create_collection(code_collection)
@@ -2698,6 +2648,10 @@ def _run_index(
         db.get_or_create_collection(docs_collection)
         if have_docs_files else None
     )
+    rdr_col = (
+        db.get_or_create_collection(rdr_col_name)
+        if rdr_col_name is not None else None
+    )
     _log.debug("collections ready")
 
     # Check pipeline version staleness (informational warning only)
@@ -2705,12 +2659,15 @@ def _run_index(
         check_pipeline_staleness(code_col, code_collection)
     if docs_col is not None:
         check_pipeline_staleness(docs_col, docs_collection)
+    if rdr_col is not None:
+        check_pipeline_staleness(rdr_col, rdr_col_name)
 
     # --force-stale: escalate to force if any collection is stale
     if force_stale:
         any_stale = (
             (code_col is not None and get_collection_pipeline_version(code_col) not in (None, PIPELINE_VERSION))
             or (docs_col is not None and get_collection_pipeline_version(docs_col) not in (None, PIPELINE_VERSION))
+            or (rdr_col is not None and get_collection_pipeline_version(rdr_col) not in (None, PIPELINE_VERSION))
         )
         if any_stale:
             _log.info("force_stale_escalating", reason="stale collection detected")
@@ -2741,19 +2698,12 @@ def _run_index(
     # tumbler for PDF chunks too.
     for _, f in pdf_files:
         indexed_for_catalog.append((f, "pdf", docs_collection))
-    if rdr_abs_paths:
-        # RDR-103 Phase 3a + Phase 4: prefer the migrated-name dict
-        # populated above; fall through to the catalog-first resolver
-        # when migration did not run (catalog absent or owner missing).
-        rdr_col_name = (
-            _migrated_names.get("rdr")
-            or _repo_collection_or_legacy(repo, "rdr")
-        )
-        for rdr_dir in rdr_abs_paths:
-            if rdr_dir.is_dir():
-                for md_file in sorted(rdr_dir.rglob("*.md")):
-                    if md_file.is_file():
-                        indexed_for_catalog.append((md_file, "rdr", rdr_col_name))
+    # nexus-3lswy: reuse the shared rdr_md_paths walk (built + resolved to
+    # rdr_col_name above, alongside code_col/docs_col) instead of a second
+    # rglob pass. rdr_col_name is None when there are no RDR files.
+    if rdr_col_name is not None:
+        for _, md_file in rdr_md_paths:
+            indexed_for_catalog.append((md_file, "rdr", rdr_col_name))
 
     if on_phase is not None:
         on_phase(f"Registering {len(indexed_for_catalog)} catalog entries…")
@@ -2801,19 +2751,29 @@ def _run_index(
         build_staleness_cache(docs_col) if docs_col is not None
         else StalenessCache()
     )
+    # nexus-3lswy: distinct cache object from docs_staleness — rdr__ is a
+    # separate physical collection from docs__, so a shared object would
+    # cross-contaminate staleness lookups between the two.
+    rdr_staleness = (
+        build_staleness_cache(rdr_col) if rdr_col is not None
+        else StalenessCache()
+    )
     _log.info(
         "staleness_caches_built",
         code_doc_ids=len(code_staleness.by_doc_id),
         code_source_paths=len(code_staleness.by_source_path),
         docs_doc_ids=len(docs_staleness.by_doc_id),
         docs_source_paths=len(docs_staleness.by_source_path),
+        rdr_doc_ids=len(rdr_staleness.by_doc_id),
+        rdr_source_paths=len(rdr_staleness.by_source_path),
         elapsed_seconds=time.monotonic() - _staleness_t0,
     )
     if on_phase is not None:
         on_phase(
             f"Staleness caches built — "
             f"code: {len(code_staleness.by_doc_id):,} docs, "
-            f"docs: {len(docs_staleness.by_doc_id):,} docs "
+            f"docs: {len(docs_staleness.by_doc_id):,} docs, "
+            f"rdr: {len(rdr_staleness.by_doc_id):,} docs "
             f"({time.monotonic() - _staleness_t0:.1f}s)"
         )
 
@@ -3052,6 +3012,65 @@ def _run_index(
         on_file=on_file, on_stage_timers=on_stage_timers,
     )
 
+    # Index RDR markdown files → rdr__ (nexus-3lswy: 4th run_file_loop
+    # category, same wiring as prose — batched register_many/doc_id
+    # resolution and the staleness cache already ran above; this replaces
+    # the old, unbatched _discover_and_index_rdrs -> doc_indexer.index_markdown
+    # path, which redundantly re-registered each file's catalog entry over
+    # the network despite _catalog_hook having already resolved it.
+    # MUST run before _batcher.drain() below so RDR chunks flush with
+    # everything else instead of being silently dropped.
+    #
+    # Exception-containment note (substantive-critic, nexus-3lswy): the
+    # retired batch_index_markdowns caught ANY per-file exception and
+    # recorded it as "failed", continuing the run — stronger isolation
+    # than prose/pdf ever had. This loop deliberately does NOT restore
+    # that broader catch: it only contains TRANSIENT upsert errors via
+    # _contain_transient_upsert, exactly matching _index_one_prose/
+    # _index_one_pdf below. A genuine non-transient failure now fails
+    # the whole run for RDR too — an accepted, intentional consequence
+    # of "full parity with the main loop", not an oversight. Special-
+    # casing RDR with broader containment would reintroduce the same
+    # inconsistency this fix removes, just inverted.
+    _log.debug("indexing RDR files", count=len(rdr_md_paths))
+    if on_phase is not None:
+        on_phase("Discovering and indexing RDR markdown files…")
+    _rdr_t0 = time.monotonic()
+
+    def _index_one_rdr(file: Path, score: float, timers: object | None) -> int:
+        _log.debug("indexing", file=str(file))
+        return _contain_transient_upsert(lambda: _index_prose_file(
+            file, repo, rdr_col_name, docs_model, rdr_col, db,
+            voyage_key, git_meta, now_iso, score,
+            force=force,
+            timeout=read_timeout_seconds,
+            embed_fn=_embed_fn,
+            stage_timers=timers,
+            doc_id_resolver=_doc_id_resolver,
+            staleness_cache=rdr_staleness,
+            hooks=hooks,
+            batcher=_batcher,
+        ), file)
+
+    _rdr_written = run_file_loop(
+        rdr_md_paths, _index_one_rdr, concurrency=_concurrency,
+        on_file=on_file, on_stage_timers=on_stage_timers,
+    )
+    _files_written += _rdr_written
+    rdr_indexed = _rdr_written
+    rdr_current = len(rdr_md_paths) - _rdr_written
+    # nexus-3lswy: unlike the retired _discover_and_index_rdrs, there is no
+    # distinct "failed" count here — like code/prose/pdf, a failed upload
+    # is contained (batcher.failed_files / _contain_transient_upsert) and
+    # surfaced via logs, not a separate summary bucket. A failing file
+    # simply isn't counted as indexed, folding into rdr_current.
+    rdr_failed = 0
+    if on_phase is not None:
+        on_phase(
+            f"RDR indexing done — {rdr_indexed} indexed, {rdr_current} current, "
+            f"{rdr_failed} failed ({time.monotonic() - _rdr_t0:.1f}s)"
+        )
+
     # duoak 2C: flush remaining staged chunks and surface per-file upload
     # failures (containment: a failed batch fails its contributing files,
     # never the run — nexus-wcs39).
@@ -3093,38 +3112,17 @@ def _run_index(
     # Review remediation (Reviewer A/I-1): wrap the block in try/finally
     # so the closing "Post-processing complete" marker fires even when
     # a post-processing step raises. Without this, an exception inside
-    # _discover_and_index_rdrs, _prune_misclassified, or _catalog_hook
-    # would leave the operator staring at the last `[post] Pruning …`
-    # line — exactly the hung/busy ambiguity Gap 2 was meant to fix.
+    # _prune_misclassified or _catalog_hook would leave the operator
+    # staring at the last `[post] Pruning …` line — exactly the hung/busy
+    # ambiguity Gap 2 was meant to fix.
     post_t0 = time.monotonic()
 
     def _phase(msg: str) -> None:
         if on_phase is not None:
             on_phase(msg)
 
-    rdr_indexed, rdr_current, rdr_failed = 0, 0, 0
     post_error: BaseException | None = None
     try:
-        # Discover and index RDR markdown files → rdr__
-        # Pass the local embed_fn so RDR indexing respects NX_LOCAL mode
-        # (without it, the RDR branch defaulted to Voyage 1024-dim; query
-        # time with local MiniLM 384-dim hit "Collection expecting embedding
-        # with dimension of 1024, got 384").
-        # RDR indexing lives in doc_indexer which expects shape #2
-        # ``(texts, model) -> (embeddings, actual_model)``. In local mode
-        # hand over the tuple-returning adapter; in cloud mode pass None so
-        # doc_indexer falls back to _embed_with_fallback on its own.
-        _phase("Discovering and indexing RDR markdown files…")
-        _t = time.monotonic()
-        rdr_indexed, rdr_current, rdr_failed = _discover_and_index_rdrs(
-            repo, rdr_abs_paths, db, voyage_key, now_iso, force=force,
-            embed_fn=_embed_fn_doc, hooks=hooks, on_phase=on_phase,
-        )
-        _phase(
-            f"RDR indexing done — {rdr_indexed} indexed, {rdr_current} current, "
-            f"{rdr_failed} failed ({time.monotonic() - _t:.1f}s)"
-        )
-
         # Prune misclassified chunks (reclassification cleanup). Kept
         # UNCONDITIONAL: prune safety when a file's classification changes
         # without a content re-write is not airtight, and the only durable
@@ -3155,6 +3153,7 @@ def _run_index(
         _t = time.monotonic()
         _prune_deleted_files(
             code_collection, docs_collection, db, catalog=_cat,
+            rdr_collection=rdr_col_name,
         )
         _phase(f"Pruning deleted files done ({time.monotonic() - _t:.1f}s)")
 
@@ -3171,12 +3170,11 @@ def _run_index(
             stamp_collection_version(code_col)
         if docs_col is not None:
             stamp_collection_version(docs_col)
-        if rdr_indexed > 0:
-            # RDR-103 Phase 3a: catalog-first resolution; legacy
-            # fallback retained for catalog-absent test paths.
-            rdr_col_name = _repo_collection_or_legacy(repo, "rdr")
+        # nexus-3lswy: rdr_col is already the real object built alongside
+        # code_col/docs_col above — no need to recompute the name or
+        # re-fetch the collection here.
+        if rdr_col is not None:
             try:
-                rdr_col = db.get_or_create_collection(rdr_col_name)
                 stamp_collection_version(rdr_col)
             except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
                 _log.debug("rdr_stamp_skipped", collection=rdr_col_name)
@@ -3196,12 +3194,14 @@ def _run_index(
 
     # nexus-qgc4b: files_changed drives the caller's post-index gate. RDR
     # (re)indexing is a content change too, so an RDR-only run still triggers
-    # taxonomy discovery.
+    # taxonomy discovery. nexus-3lswy: RDR files are now folded into
+    # _files_written (4th run_file_loop category) — do NOT also add
+    # rdr_indexed, or an RDR-only re-index would double-count.
     return {
         "rdr_indexed": rdr_indexed,
         "rdr_current": rdr_current,
         "rdr_failed": rdr_failed,
-        "files_changed": _files_written + rdr_indexed,
+        "files_changed": _files_written,
     }
 
 

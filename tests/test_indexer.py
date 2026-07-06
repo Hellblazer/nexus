@@ -90,11 +90,30 @@ def _patches(db, *, cfg=None, extra=None):
 
 
 @contextmanager
-def _cb_patches(db, *, cfg=None, code=1, prose=1, rdr=(0, 0, 0)):
+def _cb_patches(db, *, cfg=None, code=1, prose=1, rdr_written=None):
+    """``rdr_written``, when set, is the NUMBER OF RDR FILES that should
+    count as written this run (run_file_loop counts files with a nonzero
+    return, not summed chunk counts — nexus-3lswy) — the first
+    ``rdr_written`` rdr__ calls return 1, the rest return 0. Distinguishes
+    RDR-collection calls to the now-shared ``_index_prose_file`` (RDR files
+    route through the same 4th-loop wrapper as prose files, targeting
+    ``rdr__`` instead of ``docs__``) from ordinary prose calls, which keep
+    returning ``prose``."""
+    _rdr_call_count = [0]
+
+    def _prose_side_effect(_file, _repo, collection_name, *_a, **_kw):
+        if rdr_written is not None and collection_name.startswith("rdr__"):
+            _rdr_call_count[0] += 1
+            return 1 if _rdr_call_count[0] <= rdr_written else 0
+        return prose
+
+    prose_patch = (
+        {"side_effect": _prose_side_effect} if rdr_written is not None
+        else {"return_value": prose}
+    )
     extra = {
         "nexus.indexer._index_code_file": {"return_value": code},
-        "nexus.indexer._index_prose_file": {"return_value": prose},
-        "nexus.indexer._discover_and_index_rdrs": {"return_value": rdr},
+        "nexus.indexer._index_prose_file": prose_patch,
         "nexus.indexer._prune_misclassified": {},
         "nexus.indexer._prune_deleted_files": {},
     }
@@ -361,14 +380,17 @@ def test_run_index_logs_empty_chunks(tmp_path):
 # ── Content-class routing ───────────────────────────────────────────────────
 
 def test_run_index_excludes_rdr_paths_from_docs(tmp_path):
+    """nexus-3lswy: RDR files route through _index_prose_file into their OWN
+    rdr__ collection (the 4th run_file_loop category), not doc_indexer's
+    batch_index_markdowns — verify by content landing in rdr__ vs docs__,
+    not by asserting a call to the now-retired doc_indexer entry point."""
     from nexus.indexer import _run_index
     repo = tmp_path / "repo"; repo.mkdir()
     (repo / "README.md").write_text("# README\n\nProject description here.\n")
     rdr = repo / "docs" / "rdr"; rdr.mkdir(parents=True)
     (rdr / "ADR-001.md").write_text("# ADR-001\n\nArchitecture decision.\n")
     db, ups, _ = _tracking_db()
-    with _patches(db, extra={"nexus.doc_indexer._embed_with_fallback": {"return_value": ([[0.1]*10], "voyage-context-3")},
-                              "nexus.doc_indexer.batch_index_markdowns": {}}) as mocks:
+    with _patches(db, extra={"nexus.doc_indexer._embed_with_fallback": {"return_value": ([[0.1]*10], "voyage-context-3")}}):
         _run_index(repo, _reg())
     # nexus-5ut2a: _run_index re-routes the non-conformant fake registry
     # name (code__repo/docs__repo) through the conformant synth, so key by
@@ -377,27 +399,40 @@ def test_run_index_excludes_rdr_paths_from_docs(tmp_path):
         m.get("title", "")
         for k, v in ups.items() if k.startswith("docs__") for m in v
     ]
+    rdr_paths_out = [
+        m.get("title", "")
+        for k, v in ups.items() if k.startswith("rdr__") for m in v
+    ]
     assert docs_paths, "no docs collection received chunks"
+    assert rdr_paths_out, "no rdr collection received chunks"
     # RDR-102 D2: source_path is gone; title carries
     # "{relpath}:chunk-{i}" per prose_indexer.py:96.
     assert any("README.md" in p for p in docs_paths) and not any(
         "ADR-001" in p for p in docs_paths
     )
-    mb = mocks["batch_index_markdowns"]; mb.assert_called_once()
-    assert any("ADR-001.md" in str(p) for p in mb.call_args[0][0])
+    assert any("ADR-001.md" in p for p in rdr_paths_out) and not any(
+        "README.md" in p for p in rdr_paths_out
+    )
 
 
 def test_run_index_returns_rdr_stats(tmp_path):
+    """nexus-3lswy: rdr_indexed/rdr_current derive from the 4th run_file_loop's
+    per-file return counts (via _index_prose_file), not doc_indexer's
+    batch_index_markdowns result dict."""
     from nexus.indexer import _run_index
     repo = tmp_path / "repo"; repo.mkdir()
     (repo / "README.md").write_text("# README\n")
     rdr = repo / "docs" / "rdr"; rdr.mkdir(parents=True)
     (rdr / "001.md").write_text("# D\n"); (rdr / "002.md").write_text("# D2\n")
     db, _, _ = _tracking_db()
-    results = {str(rdr / "001.md"): "indexed", str(rdr / "002.md"): "skipped"}
+
+    def _prose_side_effect(file, _repo, collection_name, *_a, **_kw):
+        if not collection_name.startswith("rdr__"):
+            return 1
+        return 1 if file.name == "001.md" else 0
+
     with _patches(db, extra={
-        "nexus.doc_indexer._embed_with_fallback": {"side_effect": lambda c, m, k, **kw: ([[0.1]*4]*len(c), m)},
-        "nexus.doc_indexer.batch_index_markdowns": {"return_value": results},
+        "nexus.indexer._index_prose_file": {"side_effect": _prose_side_effect},
     }):
         stats = _run_index(repo, _reg())
     assert (stats["rdr_indexed"], stats["rdr_current"], stats["rdr_failed"]) == (1, 1, 0)
@@ -1072,6 +1107,57 @@ def test_prune_deleted_files_per_collection_orphan_isolation(tmp_path):
     assert "docs-live-id" not in docs_deleted
 
 
+def test_prune_deleted_files_sweeps_rdr_collection_when_passed(tmp_path):
+    """nexus-3lswy (found by post-fix triage): RDR became a first-class 4th
+    collection (catalog registration, doc_id_resolver, staleness cache all
+    cover it), but this GC pass silently never swept rdr__ orphans — the
+    call site simply never threaded rdr_col_name through. Verify the new
+    optional rdr_collection kwarg actually gets swept when provided, with
+    the same per-collection orphan isolation as code/docs."""
+    from nexus.indexer import _prune_deleted_files
+
+    rdr_live = "e" * 64
+    rdr_orphan = "f" * 64
+    db, cols = _gc_db({
+        "code__repo": [], "docs__repo": [],
+        "rdr__repo": [
+            ("rdr-live-id", rdr_live),
+            ("rdr-orphan-id", rdr_orphan),
+        ],
+    })
+    catalog = _gc_catalog({
+        "code__repo": set(), "docs__repo": set(),
+        "rdr__repo": {rdr_live[:32]},
+    })
+
+    _prune_deleted_files(
+        "code__repo", "docs__repo", db, catalog=catalog,
+        rdr_collection="rdr__repo",
+    )
+
+    rdr_deleted = _deleted_ids(cols["rdr__repo"])
+    assert rdr_deleted == ["rdr-orphan-id"]
+
+
+def test_prune_deleted_files_rdr_collection_none_is_safe(tmp_path):
+    """When there are no RDR files this run, rdr_collection defaults to
+    None and must not be swept (no col to fetch, no-op — mirrors the
+    existing code_col/docs_col is-None contract elsewhere)."""
+    from nexus.indexer import _prune_deleted_files
+    live_chash = "a" * 64
+    col = _gc_col([("live-id", live_chash)])
+    db = MagicMock(); db.get_or_create_collection.return_value = col
+    db.get_collection.return_value = col
+    catalog = _gc_catalog({"code__repo": {live_chash[:32]}, "docs__repo": set()})
+
+    # Must not raise, and must not call chashes_for_collection for a
+    # collection name that was never passed.
+    _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
+    assert "rdr__repo" not in [
+        c.args[0] for c in catalog.chashes_for_collection.call_args_list
+    ]
+
+
 def test_prune_deleted_files_round_trip_with_real_catalog(tmp_path):
     """RDR-108 Phase 4 / nexus-dyxe integration test: exercise the full
     catalog -> T3 round trip with a real SQLite-backed Catalog and a
@@ -1294,17 +1380,25 @@ def test_run_index_passes_force_to_helpers(tmp_path, fname, content, target):
     h = mocks[target.split(".")[-1]]; h.assert_called(); assert h.call_args.kwargs.get("force") is True
 
 
-def test_run_index_passes_force_to_discover_rdrs(tmp_path):
+def test_run_index_passes_force_to_rdr_loop(tmp_path):
+    """nexus-3lswy: RDR files now flow through the 4th run_file_loop call
+    (_index_prose_file targeting rdr__), not a separate _discover_and_index_rdrs
+    call — force must still reach that call."""
     from nexus.indexer import _run_index
-    repo = tmp_path / "repo"; repo.mkdir(); (repo / "README.md").write_text("# R\n")
+    repo = tmp_path / "repo"; repo.mkdir()
+    rdr = repo / "docs" / "rdr"; rdr.mkdir(parents=True)
+    (rdr / "rdr-001.md").write_text("# R\n")
     db, _, _ = _tracking_db()
     with _patches(db, extra={
-        "nexus.doc_indexer._embed_with_fallback": {"side_effect": lambda c, m, k, **kw: ([[0.1]*4]*len(c), m)},
-        "nexus.indexer._discover_and_index_rdrs": {"return_value": (0, 0, 0)},
+        "nexus.indexer._index_prose_file": {"return_value": 1},
     }) as mocks:
         _run_index(repo, _reg(), force=True)
-    mocks["_discover_and_index_rdrs"].assert_called_once()
-    assert mocks["_discover_and_index_rdrs"].call_args.kwargs.get("force") is True
+    rdr_calls = [
+        c for c in mocks["_index_prose_file"].call_args_list
+        if c.args[2].startswith("rdr__")
+    ]
+    assert len(rdr_calls) == 1
+    assert rdr_calls[0].kwargs.get("force") is True
 
 
 def test_discover_and_index_rdrs_on_phase_streams_per_file(tmp_path):
@@ -1476,7 +1570,11 @@ def test_on_start_none_and_on_file_none_safe_defaults(tmp_path):
     db, _ = _mock_db()
     with _cb_patches(db): run(repo, _reg())
 
-def test_rdr_files_do_not_trigger_on_file(tmp_path):
+def test_rdr_files_now_trigger_on_file_via_4th_loop(tmp_path):
+    """nexus-3lswy: RDR files now flow through run_file_loop as a 4th
+    category (same as code/prose/pdf), so they trigger on_file for real
+    per-file progress — this is an intentional behavior change from the old
+    _discover_and_index_rdrs path, which gave no on_file callback at all."""
     from nexus.indexer import _run_index
     repo = tmp_path / "repo"; repo.mkdir()
     rdr = repo / "docs" / "rdr"; rdr.mkdir(parents=True)
@@ -1484,9 +1582,30 @@ def test_rdr_files_do_not_trigger_on_file(tmp_path):
     (rdr / "rdr-001.md").write_text("---\ntitle: t\nstatus: draft\ntype: feature\n---\n# T\n")
     cfg = {**_DEFAULT_CONFIG, "indexing": {**_DEFAULT_CONFIG["indexing"], "rdr_paths": ["docs/rdr"]}}
     db, _ = _mock_db(); calls: list[tuple] = []
-    with _cb_patches(db, cfg=cfg, rdr=(1,0,0)):
+    with _cb_patches(db, cfg=cfg, rdr_written=1):
         _run_index(repo, _reg(), on_file=lambda p,c,e: calls.append((p,c,e)))
-    assert len(calls) == 1 and calls[0][0].name == "code.py"
+    names = {p.name for p, _, _ in calls}
+    assert names == {"code.py", "rdr-001.md"}
+
+
+def test_rdr_symlink_excluded_from_indexing(tmp_path):
+    """nexus-3lswy plan Phase 1 commitment: a symlinked .md under an RDR
+    dir must be excluded from rdr_md_paths (and, as a side effect of the
+    shared walk, from catalog registration too), matching the retired
+    _discover_and_index_rdrs's symlink exclusion."""
+    from nexus.indexer import _run_index
+    repo = tmp_path / "repo"; repo.mkdir()
+    rdr = repo / "docs" / "rdr"; rdr.mkdir(parents=True)
+    real = tmp_path / "outside-rdr-001.md"
+    real.write_text("# Real\n")
+    (rdr / "rdr-001.md").write_text("# Real RDR\n")
+    (rdr / "rdr-002-symlink.md").symlink_to(real)
+    cfg = {**_DEFAULT_CONFIG, "indexing": {**_DEFAULT_CONFIG["indexing"], "rdr_paths": ["docs/rdr"]}}
+    db, _ = _mock_db(); calls: list[tuple] = []
+    with _cb_patches(db, cfg=cfg, rdr_written=1):
+        _run_index(repo, _reg(), on_file=lambda p, c, e: calls.append((p, c, e)))
+    names = {p.name for p, _, _ in calls}
+    assert names == {"rdr-001.md"}
 
 
 # ── on_phase post-processing callbacks (nexus-vatx Gap 2) ───────────────────
@@ -1498,7 +1617,7 @@ def test_on_phase_fires_on_post_processing_phases(tmp_path):
     run, repo = _cb_repo(tmp_path)
     db, _ = _mock_db()
     phases: list[str] = []
-    with _cb_patches(db, rdr=(1, 0, 0)):
+    with _cb_patches(db):
         run(repo, _reg(), on_phase=phases.append)
 
     # The key beats: RDR start/done, prune misclassified, prune deleted,
@@ -1516,17 +1635,26 @@ def test_on_phase_fires_on_post_processing_phases(tmp_path):
 
 
 def test_on_phase_reports_rdr_counts(tmp_path):
-    """The RDR "done" line carries the indexed/current/failed triple so
-    operators see the same summary the final stats would show."""
-    run, repo = _cb_repo(tmp_path)
+    """The RDR "done" line carries indexed/current counts derived from the
+    4th run_file_loop's return, mirroring the summary the old
+    _discover_and_index_rdrs path gave. nexus-3lswy: there is no longer a
+    distinct "failed" count for RDR files — like code/prose/pdf, a failed
+    upload is contained (batcher/_contain_transient_upsert) and surfaced via
+    logs/failed_files, not a separate summary bucket; a failing file simply
+    isn't counted as indexed (folds into "current")."""
+    from nexus.indexer import _run_index
+    repo = tmp_path / "repo"; repo.mkdir()
+    rdr = repo / "docs" / "rdr"; rdr.mkdir(parents=True)
+    for i in range(6):
+        (rdr / f"rdr-{i:03d}.md").write_text(f"# R{i}\n")
     db, _ = _mock_db()
     phases: list[str] = []
-    with _cb_patches(db, rdr=(4, 2, 1)):
-        run(repo, _reg(), on_phase=phases.append)
+    with _cb_patches(db, rdr_written=4):
+        _run_index(repo, _reg(), on_phase=phases.append)
     done = next(p for p in phases if p.startswith("RDR indexing done"))
     assert "4 indexed" in done
     assert "2 current" in done
-    assert "1 failed" in done
+    assert "0 failed" in done
 
 
 def test_on_phase_none_is_safe(tmp_path):
@@ -1648,7 +1776,6 @@ def test_on_stage_timers_fires_per_pdf_file_when_subscribed(tmp_path):
         "nexus.indexer._index_pdf_file": {"return_value": 2},
         "nexus.indexer._index_code_file": {"return_value": 0},
         "nexus.indexer._index_prose_file": {"return_value": 0},
-        "nexus.indexer._discover_and_index_rdrs": {"return_value": (0, 0, 0)},
         "nexus.indexer._prune_misclassified": {},
         "nexus.indexer._prune_deleted_files": {},
     }
