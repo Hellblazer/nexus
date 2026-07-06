@@ -323,9 +323,13 @@ public final class CatalogHandler implements HttpHandler {
      *
      * <p>Body: {"updates": [{"tumbler": "1.1.3", "head_hash": "...", ...}, ...]}
      * Response: {"updated": [1, 1, 0, ...]}  (per-entry update count, aligned
-     * 1:1 with the input — 0 means not found / tombstoned / malformed entry;
-     * a malformed or non-updatable-column entry does NOT abort the batch,
-     * mirroring register_many's per-doc failure isolation).
+     * 1:1 with the input — 0 means not found / tombstoned / no-op; a
+     * non-updatable-column entry is -1 (marked, not dropped) — the entry's
+     * OWN column-whitelist violation does NOT abort the rest of the batch,
+     * mirroring register_many's per-doc failure isolation. A malformed
+     * *shape* (non-list body, non-object element) is a client bug, not a
+     * per-doc data problem, and 400s rather than silently shrinking the
+     * response array — mirrors handleManifestWriteMany's review #2 fix.
      *
      * <p>Capped at {@value #MAX_BATCH_DOC_IDS} rows, same bind-limit rationale
      * as register_many.
@@ -335,9 +339,13 @@ public final class CatalogHandler implements HttpHandler {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
         Object raw = body.get("updates");
-        List<Map<String, Object>> updates = raw instanceof List<?> l
-            ? l.stream().filter(o -> o instanceof Map<?, ?>).map(o -> (Map<String, Object>) o).toList()
-            : List.of();
+        if (!(raw instanceof List<?> l)) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"'updates' must be a list\"}"); return;
+        }
+        if (l.stream().anyMatch(o -> !(o instanceof Map))) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"every 'updates' element must be an object\"}"); return;
+        }
+        List<Map<String, Object>> updates = l.stream().map(o -> (Map<String, Object>) o).toList();
         if (updates.size() > MAX_BATCH_DOC_IDS) {
             HttpUtil.send(exchange, 400, "{\"error\":\"too many updates (max "
                 + MAX_BATCH_DOC_IDS + ")\"}"); return;
@@ -355,7 +363,14 @@ public final class CatalogHandler implements HttpHandler {
      * Response: {"deleted": ["1.1.3", ...]}  (the subset of input tumblers
      * that were actually tombstoned — already-deleted or non-existent
      * tumblers are silently excluded, same idempotent semantics as the
-     * single-doc DELETE).
+     * single-doc DELETE). NOT positionally aligned with the input (unlike
+     * update_many) — a duplicate or already-deleted tumbler collapses to
+     * one membership check; callers needing per-position outcomes should
+     * not assume this response mirrors input order/length.
+     *
+     * <p>A malformed *shape* (non-list body, non-string element) 400s
+     * rather than silently shrinking the input — mirrors
+     * handleManifestWriteMany's review #2 fix and handleUpdateMany above.
      *
      * <p>Capped at {@value #MAX_BATCH_DOC_IDS} rows, same bind-limit
      * rationale as register_many / update_many.
@@ -364,9 +379,13 @@ public final class CatalogHandler implements HttpHandler {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
         Object raw = body.get("tumblers");
-        List<String> tumblers = raw instanceof List<?> l
-            ? l.stream().filter(o -> o instanceof String).map(o -> (String) o).toList()
-            : List.of();
+        if (!(raw instanceof List<?> l)) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"'tumblers' must be a list\"}"); return;
+        }
+        if (l.stream().anyMatch(o -> !(o instanceof String))) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"every 'tumblers' element must be a string\"}"); return;
+        }
+        List<String> tumblers = l.stream().map(o -> (String) o).toList();
         if (tumblers.size() > MAX_BATCH_DOC_IDS) {
             HttpUtil.send(exchange, 400, "{\"error\":\"too many tumblers (max "
                 + MAX_BATCH_DOC_IDS + ")\"}"); return;

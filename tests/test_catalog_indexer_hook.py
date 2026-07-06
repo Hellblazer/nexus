@@ -496,9 +496,11 @@ class TestCatalogHookBatchedServiceMode:
 
         priority = "interactive"
 
-        def __init__(self):
+        def __init__(self, *, update_many_raises: bool = False):
             self.register_calls: list[dict] = []
             self.update_calls: list[dict] = []
+            self.update_many_calls: list[list[dict]] = []
+            self._update_many_raises = update_many_raises
 
         def register(self, *args, **kw):
             from nexus.catalog.tumbler import Tumbler
@@ -516,6 +518,18 @@ class TestCatalogHookBatchedServiceMode:
 
         def update(self, tumbler, **fields):
             self.update_calls.append({"tumbler": str(tumbler), **fields})
+
+        def update_many(self, docs: list[dict]) -> list[int]:
+            # nexus-xedhp / substantive-critic finding: without this method,
+            # _catalog_hook's Pass 1b capability check (`getattr(writer,
+            # "update_many", None)`) always falls back to the per-file
+            # `update()` loop, and the batched branch is never exercised by
+            # any test. Defining it here is what makes
+            # TestCatalogHookBatchedServiceMode a genuine service-mode test.
+            self.update_many_calls.append(docs)
+            if self._update_many_raises:
+                raise RuntimeError("simulated update_many transport failure")
+            return [1 for _ in docs]
 
         def is_interactive_write_pending(self) -> bool:
             return False
@@ -548,12 +562,12 @@ class TestCatalogHookBatchedServiceMode:
         )
         return client, requests
 
-    def _run_hook(self, tmp_path, monkeypatch, docs, head_hash):
+    def _run_hook(self, tmp_path, monkeypatch, docs, head_hash, *, writer=None):
         from nexus.indexer import _catalog_hook
 
         monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "service")
         client, requests = self._http_client_and_log(monkeypatch, docs)
-        writer = self._StubWriter()
+        writer = writer if writer is not None else self._StubWriter()
 
         import nexus.catalog.factory as factory
         monkeypatch.setattr(factory, "make_catalog_reader", lambda **kw: client)
@@ -608,6 +622,11 @@ class TestCatalogHookBatchedServiceMode:
     def test_changed_head_hash_updates_through_json_boundary(
         self, tmp_path, monkeypatch,
     ):
+        # nexus-xedhp / substantive-critic Critical: with a service-mode
+        # writer that actually exposes update_many, Pass 1b must route
+        # through the BATCHED path, not the per-file update() fallback —
+        # this is the branch that was never exercised before _StubWriter
+        # gained update_many.
         f = tmp_path / "a.py"
         f.write_text("stable")
         doc = self._doc_for(f, head_hash="old")
@@ -616,7 +635,30 @@ class TestCatalogHookBatchedServiceMode:
             tmp_path, monkeypatch, [doc], head_hash="new",
         )
 
-        assert len(writer.update_calls) == 1
+        assert len(writer.update_many_calls) == 1, "must route through the batched update_many path"
+        assert writer.update_many_calls[0][0]["head_hash"] == "new"
+        assert writer.update_many_calls[0][0]["tumbler"] == "1.1.1"
+        assert writer.update_calls == [], "per-file update() must NOT fire when update_many succeeds"
+
+    def test_update_many_failure_falls_back_to_per_file_update(
+        self, tmp_path, monkeypatch,
+    ):
+        # nexus-xedhp: a whole-batch update_many failure must not sink the
+        # run — Pass 1b falls back to the per-file update() loop, mirroring
+        # register_many's established per-file failure isolation.
+        f = tmp_path / "a.py"
+        f.write_text("stable")
+        doc = self._doc_for(f, head_hash="old")
+
+        writer = self._StubWriter(update_many_raises=True)
+        result, writer, _ = self._run_hook(
+            tmp_path, monkeypatch, [doc], head_hash="new", writer=writer,
+        )
+
+        assert len(writer.update_many_calls) == 1, "must attempt the batched path first"
+        assert len(writer.update_calls) == 1, "must fall back to per-file update() on batch failure"
+        assert writer.update_calls[0]["head_hash"] == "new"
+        assert set(result) == {f}
         assert writer.update_calls[0]["head_hash"] == "new"
 
 
