@@ -47,6 +47,7 @@ import java.util.Optional;
  *   POST  /v1/aspects/highlights/rename_collection rename collection denorm
 
  *   POST  /v1/aspects/queue/enqueue               enqueue document
+ *   POST  /v1/aspects/queue/enqueue_many          batch-enqueue N documents in ONE round trip (nexus-nj4ch)
  *   POST  /v1/aspects/queue/claim_next            atomically claim one pending row
  *   POST  /v1/aspects/queue/claim_batch           claim up to limit= pending rows
  *   POST  /v1/aspects/queue/mark_done             delete row on success
@@ -122,6 +123,7 @@ public final class AspectHandler implements HttpHandler {
                 case "/highlights/rename_collection"    -> handleHighlightRenameCollection(exchange, tenant, method);
                 // ── aspect_extraction_queue ───────────────────────────────────
                 case "/queue/enqueue"                   -> handleQueueEnqueue(exchange, tenant, method);
+                case "/queue/enqueue_many"               -> handleQueueEnqueueMany(exchange, tenant, method);
                 case "/queue/claim_next"                -> handleQueueClaimNext(exchange, tenant, method);
                 case "/queue/claim_batch"               -> handleQueueClaimBatch(exchange, tenant, method);
                 case "/queue/mark_done"                 -> handleQueueMarkDone(exchange, tenant, method);
@@ -483,6 +485,38 @@ public final class AspectHandler implements HttpHandler {
         if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
         repo.enqueue(tenant, readBody(ex));
         HttpUtil.send(ex, 200, "{\"enqueued\":true}");
+    }
+
+    /**
+     * POST /v1/aspects/queue/enqueue_many (nexus-nj4ch: batches the
+     * indexer's per-document aspect-extraction enqueue into ONE round
+     * trip, mirroring the catalog update_many/delete_many and vectors
+     * get-all-metadata pattern).
+     *
+     * <p>Body: {"rows": [{"collection": "...", "source_path": "...", ...}, ...]}
+     * (each row has the same shape as {@code /queue/enqueue}'s body).
+     * Response 200: {"enqueued": N} (count of rows actually enqueued;
+     * malformed rows -- missing collection/source_path -- are silently
+     * skipped, not counted, mirroring register_many's per-doc isolation).
+     *
+     * <p>A malformed *shape* (non-list body, non-object element) 400s
+     * rather than silently shrinking the input, mirroring
+     * handleManifestWriteMany / handleUpdateMany's validation pattern.
+     */
+    @SuppressWarnings("unchecked")
+    private void handleQueueEnqueueMany(HttpExchange ex, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(ex, 405, "{\"error\":\"POST required\"}"); return; }
+        Map<String, Object> body = readBody(ex);
+        Object raw = body.get("rows");
+        if (!(raw instanceof List<?> l)) {
+            HttpUtil.send(ex, 400, "{\"error\":\"'rows' must be a list\"}"); return;
+        }
+        if (l.stream().anyMatch(o -> !(o instanceof Map))) {
+            HttpUtil.send(ex, 400, "{\"error\":\"every 'rows' element must be an object\"}"); return;
+        }
+        List<Map<String, Object>> rows = l.stream().map(o -> (Map<String, Object>) o).toList();
+        int enqueued = repo.enqueueMany(tenant, rows);
+        HttpUtil.send(ex, 200, "{\"enqueued\":" + enqueued + "}");
     }
 
     private void handleQueueClaimNext(HttpExchange ex, String tenant, String method) throws IOException {

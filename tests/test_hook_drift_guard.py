@@ -256,10 +256,18 @@ def test_every_cli_ingest_site_fires_both_chains() -> None:
 # traverses exactly one of the two).
 # Mirrors CLI_SITE_FILES above plus mcp/core.py:store_put.
 DOCUMENT_HOOK_FIRE_SITES: dict[str, int] = {
-    "src/nexus/indexer.py": 2,             # _index_pdf_file (legacy path) +
-                                           # _fire_deferred_hooks (duoak 2C
-                                           # batched path; a file traverses
-                                           # exactly ONE of the two)
+    "src/nexus/indexer.py": 1,             # _index_pdf_file (legacy path) only.
+                                           # nexus-nj4ch: _fire_deferred_hooks's
+                                           # fire_document call (the duoak 2C
+                                           # ChunkBatcher path) was removed —
+                                           # aspect_extraction_enqueue_hook is
+                                           # the only default document-grain
+                                           # consumer, and its enqueue is now
+                                           # BATCHED once per upload batch in
+                                           # _fire_flush_grain_hooks instead of
+                                           # firing per file here (eliminated
+                                           # ~34.7s across ~250 real T2 inserts
+                                           # in this repo's own shakeout).
     "src/nexus/doc_indexer.py": 3,         # _index_document + index_pdf x2
     "src/nexus/code_indexer.py": 1,        # index_code_file
     "src/nexus/prose_indexer.py": 1,       # index_prose_file
@@ -271,8 +279,9 @@ DOCUMENT_HOOK_FIRE_SITES: dict[str, int] = {
 def test_every_cli_ingest_site_fires_document_hook() -> None:
     """RDR-089 P0.2 wiring invariant: each CLI ingest module + the MCP
     store_put boundary must call ``HookRegistry.fire_document`` exactly
-    the documented number of times. Total: 7 fire-statement instances
-    across 6 modules.
+    the documented number of times. Total: 6 fire-statement instances
+    across 6 modules (nexus-nj4ch dropped indexer.py from 2 to 1 — see
+    DOCUMENT_HOOK_FIRE_SITES comment).
 
     The call counts are pinned per-module so a future contributor who
     drops a fire site (or accidentally double-fires inside a chunk

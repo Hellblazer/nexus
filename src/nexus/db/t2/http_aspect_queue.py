@@ -162,6 +162,64 @@ class HttpAspectQueue(RawHandleGuardMixin):
             "doc_id": doc_id,
         })
 
+    def enqueue_many(self, rows: list[dict]) -> int:
+        """Batch-enqueue N documents in ONE round trip (nexus-nj4ch,
+        nexus-duoak follow-up: replaces the indexer's per-document
+        ``enqueue()`` call under the ChunkBatcher's flush-grain hook,
+        measured at ~34.7s across ~250 real inserts in this repo's own
+        shakeout).
+
+        Each dict carries the same fields as :meth:`enqueue`'s keyword
+        arguments (``collection``, ``source_path``, and optionally
+        ``content_hash``/``content``/``doc_id``). Returns the count of
+        rows actually enqueued (malformed rows are skipped server-side,
+        not counted).
+
+        The whole batch shares ONE Postgres transaction server-side
+        (``ctx.batch(...)`` inside one ``tenantScope.withTenant``), so a
+        single row's constraint violation (e.g. a ``doc_id`` FK to a
+        catalog document that hasn't landed yet) fails the WHOLE batch,
+        not just that row — unlike the per-row isolation
+        ``updateDocumentsMany``/``register_many`` get from their looser
+        constraints. On any batch failure this falls back to per-row
+        :meth:`enqueue` calls, isolating the genuinely bad row from its
+        batch-mates (mirrors :meth:`nexus.catalog.http_catalog_client.
+        HttpCatalogClient.register_many`'s page-failure fallback).
+        """
+        if not rows:
+            return 0
+        try:
+            result = self._post("/enqueue_many", {"rows": rows})
+            return int((result or {}).get("enqueued", 0))
+        except Exception:  # noqa: BLE001 — batch unrecoverable (e.g. one row's constraint violation); per-row isolation fallback
+            _log.warning(
+                "aspect_enqueue_many_failed_falling_back_per_row",
+                row_count=len(rows),
+                exc_info=True,
+            )
+            enqueued = 0
+            for row in rows:
+                collection = row.get("collection", "")
+                source_path = row.get("source_path", "")
+                if not collection or not source_path:
+                    continue
+                try:
+                    self.enqueue(
+                        collection, source_path,
+                        content_hash=row.get("content_hash", ""),
+                        content=row.get("content", ""),
+                        doc_id=row.get("doc_id", ""),
+                    )
+                    enqueued += 1
+                except Exception:  # noqa: BLE001 — per-row fallback failure isolation (mirrors register_many's per-doc try/except upstream)
+                    _log.warning(
+                        "aspect_enqueue_fallback_row_failed",
+                        collection=collection,
+                        source_path=source_path,
+                        exc_info=True,
+                    )
+            return enqueued
+
     def claim_next(self) -> QueueRow | None:
         """Atomically claim the oldest pending row via SELECT ... FOR UPDATE SKIP LOCKED.
 

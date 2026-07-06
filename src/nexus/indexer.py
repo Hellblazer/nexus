@@ -2922,8 +2922,9 @@ def _run_index(
                 reg = HookRegistry()
                 install_default_hooks(reg)
             # File grain: manifest (needs catalog_doc_id) + any other
-            # default-grain consumer. Flush-grain hooks (taxonomy, chash)
-            # fire once per upload batch via _fire_flush_grain_hooks.
+            # default-grain consumer. Flush-grain hooks (taxonomy, chash,
+            # aspect-extraction enqueue) fire once per upload batch via
+            # _fire_flush_grain_hooks.
             _t_batch = time.monotonic()
             reg.fire_batch(
                 context["ids"], context["collection"], context["documents"],
@@ -2935,10 +2936,17 @@ def _run_index(
             for _did, _doc in zip(context["ids"], context["documents"]):
                 reg.fire_single(_did, context["collection"], _doc)
             _t_document = time.monotonic()
-            reg.fire_document(
-                _path, context["collection"], "",
-                doc_id=context["catalog_doc_id"],
-            )
+            # nexus-nj4ch: the document-grain fire_document() call that used
+            # to live here (aspect_extraction_enqueue_hook, the ONLY default
+            # document-hook consumer) is now batched in
+            # _fire_flush_grain_hooks below instead of firing once per file
+            # here — this eliminated ~34.7s across ~250 real per-document T2
+            # queue inserts in this repo's own shakeout. This closure is
+            # local to the ChunkBatcher-driven `nx index repo` path (code/
+            # prose/RDR/PDF files under the batcher); the OTHER
+            # fire_document call sites (doc_indexer.py, pipeline_stages.py,
+            # mcp/core.py's store_put) are untouched and still fire per-call
+            # — they serve separate, non-batcher commands.
             _t_end = time.monotonic()
             with _hook_seconds_lock:
                 _hook_seconds["file"] += _t_end - _t0
@@ -3003,6 +3011,51 @@ def _run_index(
             )
             with _hook_seconds_lock:
                 _hook_seconds["flush"] += time.monotonic() - _t0
+
+            # nexus-nj4ch: batched aspect-extraction enqueue, replacing the
+            # per-file fire_document(...) call this closure's file-grain
+            # sibling (_fire_deferred_hooks) used to make. `collection` is
+            # uniform across the whole upload batch, so the extractor-config
+            # gate (aspect_extraction_enqueue_hook's own early-return) can be
+            # checked ONCE here instead of once per file.
+            from nexus.aspect_extractor import select_config  # noqa: PLC0415 — deferred to avoid circular import (aspect_extractor)
+            if select_config(collection) is None:
+                return  # No extractor for this collection — nothing to enqueue.
+            from nexus.aspect_worker import _canonicalize_source_path  # noqa: PLC0415 — deferred to avoid circular import (aspect_worker)
+            rows: list[dict] = []
+            for _path, _c in _file_contexts:
+                if not isinstance(_c, dict):
+                    continue
+                rows.append({
+                    "collection": collection,
+                    # content="" (CLI ingest scope, matches the per-file
+                    # hook's contract exactly): the worker falls back to a
+                    # disk read for content it needs.
+                    "source_path": _canonicalize_source_path(collection, _path),
+                    "content": "",
+                    "doc_id": _c["catalog_doc_id"],
+                })
+            if not rows:
+                return
+            _t_aspect = time.monotonic()
+            try:
+                from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid circular import (mcp_infra)
+                t2_index_write(lambda t2: t2.aspect_queue.enqueue_many(rows))
+            except Exception:  # noqa: BLE001 — enqueue is best-effort; ingest must never block on it (RDR-089 P0.1)
+                _log.warning(
+                    "aspect_enqueue_many_batch_failed",
+                    collection=collection, count=len(rows), exc_info=True,
+                )
+            else:
+                # Auto-spawn gate (mirrors aspect_extraction_enqueue_hook's own
+                # gate exactly — see its docstring for the unit-suite rationale).
+                if os.environ.get("NX_ASPECT_WORKER_AUTOSTART", "1") not in (
+                    "0", "false", "False", "no", "",
+                ):
+                    from nexus.aspect_worker import _ensure_aspect_worker  # noqa: PLC0415 — deferred to avoid circular import (aspect_worker)
+                    _ensure_aspect_worker()
+            with _hook_seconds_lock:
+                _hook_seconds["flush"] += time.monotonic() - _t_aspect
 
         # Shared with HttpVectorClient's internal upsert paging (nexus-nf3n7) so
         # the batcher flush cap and the client's oversize-fallback page size are
