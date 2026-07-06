@@ -6,6 +6,48 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.3.5] - 2026-07-06
+
+Repo-indexing overhead sharply reduced (two round-trip-collapsing batch
+endpoints), plus reliability fixes for the storage-service supervisor,
+catalog manifest writes, and pre-migration backup restore. Pins
+engine-service-v0.1.30.
+
+### Fixed
+
+- **Indexing throughput**: the staleness-cache build (used by every `nx
+  index repo` re-index to skip unchanged files) now fetches a collection's
+  chunk metadata in one server-side round trip instead of paginating
+  through every 300-row page client-side, measured at ~102-116s down to
+  ~9s on a 1,700-file repo. Aspect-extraction enqueue is now batched once
+  per upload flush instead of once per file. Both require
+  engine-service-v0.1.30 (auto-installed); older engines fall back to the
+  previous per-file behavior.
+- **Storage-service and T3 supervisors no longer exit non-zero when
+  another supervisor already owns the service.** The false "our process
+  died" read drove an unbounded launchd/systemd respawn loop that churned
+  the service's port out from under cached MCP endpoints (GH #1369).
+- **Catalog manifest writes retry transient connection failures** instead
+  of silently dropping the `document_chunks` linkage on one blip; a
+  persistent failure now surfaces as an end-of-run warning from `nx index`
+  instead of only a log line, and the new `nx catalog reconcile [--dry-run]`
+  repairs documents whose chunks were never linked (GH #1371).
+- **`nx store import` can now restore pre-migration (Chroma-era) `.nxexp`
+  backups.** Legacy chunk ids are re-hashed to the current 32-char format
+  automatically, a mislabeled embedding-model header (a known defect in
+  older exports) is caught by a dimension check and correctable with the
+  new `--assume-model` flag, and the new `--skip-existing` flag lets a
+  partial import be safely resumed (GH #1370).
+- **`store_put` reconciles a same-titled ghost catalog entry** instead of
+  minting a duplicate, and now writes the catalog manifest linkage for the
+  note it stores (GH #1370).
+
+### Changed
+
+- Pinned engine advances to engine-service-v0.1.30: the `get-all-metadata`
+  and `enqueue_many` batch endpoints backing the indexing-throughput fixes
+  above.
+
 ## [6.3.4] - 2026-07-06
 
 ### Fixed
@@ -54,48 +96,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Deprecated
 
 - **`NX_UPSERT_SKIP_EXISTING`** — kept for one deprecation cycle as a shim. `=1` (the old "skip probe" behavior) is now a no-op; `=0` now means "force full re-embed" (see Changed, above). New code should use the client's `force_re_embed` parameter directly rather than this env var.
-
-## [6.3.5] - 2026-07-06
-
-Repo-indexing overhead sharply reduced (two round-trip-collapsing batch
-endpoints), plus reliability fixes for the storage-service supervisor,
-catalog manifest writes, and pre-migration backup restore. Pins
-engine-service-v0.1.30.
-
-### Fixed
-
-- **Indexing throughput**: the staleness-cache build (used by every `nx
-  index repo` re-index to skip unchanged files) now fetches a collection's
-  chunk metadata in one server-side round trip instead of paginating
-  through every 300-row page client-side, measured at ~102-116s down to
-  ~9s on a 1,700-file repo. Aspect-extraction enqueue is now batched once
-  per upload flush instead of once per file. Both require
-  engine-service-v0.1.30 (auto-installed); older engines fall back to the
-  previous per-file behavior.
-- **Storage-service and T3 supervisors no longer exit non-zero when
-  another supervisor already owns the service.** The false "our process
-  died" read drove an unbounded launchd/systemd respawn loop that churned
-  the service's port out from under cached MCP endpoints (GH #1369).
-- **Catalog manifest writes retry transient connection failures** instead
-  of silently dropping the `document_chunks` linkage on one blip; a
-  persistent failure now surfaces as an end-of-run warning from `nx index`
-  instead of only a log line, and the new `nx catalog reconcile [--dry-run]`
-  repairs documents whose chunks were never linked (GH #1371).
-- **`nx store import` can now restore pre-migration (Chroma-era) `.nxexp`
-  backups.** Legacy chunk ids are re-hashed to the current 32-char format
-  automatically, a mislabeled embedding-model header (a known defect in
-  older exports) is caught by a dimension check and correctable with the
-  new `--assume-model` flag, and the new `--skip-existing` flag lets a
-  partial import be safely resumed (GH #1370).
-- **`store_put` reconciles a same-titled ghost catalog entry** instead of
-  minting a duplicate, and now writes the catalog manifest linkage for the
-  note it stores (GH #1370).
-
-### Changed
-
-- Pinned engine advances to engine-service-v0.1.30: the `get-all-metadata`
-  and `enqueue_many` batch endpoints backing the indexing-throughput fixes
-  above.
 
 ## [6.3.1] - 2026-07-04
 
