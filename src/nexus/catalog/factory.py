@@ -30,6 +30,7 @@ lint that cannot tell a read-only Catalog from a write-capable one.
 """
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any, Optional
 
@@ -39,6 +40,83 @@ from nexus.catalog.catalog import Catalog
 from nexus.daemon.catalog_write_shim import CATALOG_WRITE_OPS
 
 _log = structlog.get_logger(__name__)
+
+# nexus-53x7s / nexus-5en9j: SERVICE-mode catalog reader/writer share ONE
+# process-lifetime HttpCatalogClient instead of constructing (and
+# immediately closing) one per make_catalog_reader()/make_catalog_writer()
+# call. This was the LARGEST single reconstruction count in the nexus-53x7s
+# shakeout evidence (394x http_catalog_client.init in one run) -- larger
+# than any of the T2Database substores that bead's first fix addressed.
+#
+# The fresh-per-call docstrings on make_catalog_reader/make_catalog_writer
+# are SQLite-mode reasoning (avoid accumulating local WAL read locks / write
+# handles across a long-lived MCP process) that does not apply to
+# HttpCatalogClient -- it owns pooled httpx.Client connections, exactly the
+# same shape as the T2 Http*Store classes _service_t2_write_locked already
+# fixed in mcp_infra.py. Same design here: a process-lifetime singleton,
+# guarded by one lock held for the full call (not just checkout) so a
+# concurrent caller can never close() an instance mid-call, with reactive
+# eviction on any call failure (self-heals against a rotated
+# storage_service lease without polling a TTL clock).
+_service_catalog_lock = threading.Lock()
+_service_catalog_client: Any = None
+
+
+def _get_shared_service_catalog_client() -> Any:
+    global _service_catalog_client
+    if _service_catalog_client is None:
+        from nexus.catalog.http_catalog_client import HttpCatalogClient  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+
+        _service_catalog_client = HttpCatalogClient()
+    return _service_catalog_client
+
+
+def reset_shared_service_catalog_client_for_tests() -> None:
+    """Close and clear the shared SERVICE-mode catalog client (tests only)."""
+    global _service_catalog_client
+    with _service_catalog_lock:
+        if _service_catalog_client is not None:
+            _service_catalog_client.close()
+        _service_catalog_client = None
+
+
+class _SharedServiceCatalogHandle:
+    """Read-facing proxy over the shared SERVICE-mode ``HttpCatalogClient``.
+
+    ``close()`` is deliberately a no-op — callers historically closed a
+    fresh-per-call client; the shared client outlives any single caller and
+    is only torn down via error-triggered eviction or
+    :func:`reset_shared_service_catalog_client_for_tests`. Every attribute
+    access is resolved against the CURRENT shared client under the shared
+    lock (held for the full call, not just checkout) so a concurrent
+    caller's eviction-on-error can never race a call in flight, and a
+    failing call evicts the client so the next call rebuilds against a
+    freshly-resolved endpoint.
+    """
+
+    def __getattr__(self, name: str) -> Any:
+        with _service_catalog_lock:
+            client = _get_shared_service_catalog_client()
+            attr = getattr(client, name)  # may raise (e.g. local-mode-only ._db) — let it propagate untouched
+        if not callable(attr):
+            return attr
+
+        def _call(*args: Any, **kwargs: Any) -> Any:
+            global _service_catalog_client
+            with _service_catalog_lock:
+                current = _get_shared_service_catalog_client()
+                try:
+                    return getattr(current, name)(*args, **kwargs)
+                except Exception:
+                    if _service_catalog_client is current:
+                        current.close()
+                        _service_catalog_client = None
+                    raise
+
+        return _call
+
+    def close(self) -> None:
+        pass  # nexus-5en9j: shared instance outlives any single caller
 
 
 def _is_catalog_service_mode() -> bool:
@@ -73,10 +151,8 @@ def make_catalog_reader(*, config_dir: Optional[Path] = None) -> Optional[Any]:
     read-only.
     """
     if _is_catalog_service_mode():
-        from nexus.catalog.http_catalog_client import HttpCatalogClient  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-
         _log.debug("catalog_reader_service_mode")
-        return HttpCatalogClient()
+        return _SharedServiceCatalogHandle()
 
     from nexus.config import catalog_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
@@ -298,10 +374,8 @@ def make_catalog_writer(
     ``None`` resolves via ``NX_WRITE_PRIORITY`` env then ``isatty()``.
     """
     if _is_catalog_service_mode():
-        from nexus.catalog.http_catalog_client import HttpCatalogClient  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-
         _log.debug("catalog_writer_service_mode")
-        return _ServiceCatalogWriter(HttpCatalogClient())
+        return _ServiceCatalogWriter(_SharedServiceCatalogHandle())
     return CatalogWriter(config_dir=config_dir, priority=priority)
 
 

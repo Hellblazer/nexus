@@ -110,7 +110,7 @@ class HttpAspectQueue(RawHandleGuardMixin):
             headers=self._headers,
             timeout=timeout,
         )
-        _log.info(
+        _log.debug(
             "http_aspect_queue.init",
             base_url=self._base_url,
             tenant=tenant,

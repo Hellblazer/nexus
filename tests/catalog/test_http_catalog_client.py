@@ -1126,18 +1126,45 @@ class TestGuardedMethods:
 # ── Factory seam tests ────────────────────────────────────────────────────────
 
 class TestFactorySeam:
+    @pytest.fixture(autouse=True)
+    def _reset_shared_service_catalog_client(self):
+        """nexus-5en9j: service-mode readers/writers now share ONE
+        process-lifetime HttpCatalogClient (module-global state in
+        catalog/factory.py), not a fresh instance per call. Reset before
+        AND after each test so this test class's real (unmocked)
+        HttpCatalogClient construction never leaks into a sibling test."""
+        from nexus.catalog.factory import reset_shared_service_catalog_client_for_tests
+
+        reset_shared_service_catalog_client_for_tests()
+        yield
+        reset_shared_service_catalog_client_for_tests()
+
     def test_make_catalog_reader_service_mode(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """nexus-5en9j: service-mode readers share a process-lifetime
+        HttpCatalogClient behind a proxy handle, not a fresh instance per
+        call -- so this asserts duck-typed behavior (has the client's
+        read surface, forwards to a real HttpCatalogClient under the
+        hood) rather than isinstance, which the proxy deliberately
+        breaks."""
         monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "service")
         monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
         monkeypatch.setenv("NX_SERVICE_PORT", "9999")
         monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
-        from nexus.catalog.factory import make_catalog_reader
+        from nexus.catalog.factory import (
+            _SharedServiceCatalogHandle,
+            make_catalog_reader,
+            reset_shared_service_catalog_client_for_tests,
+        )
 
         reader = make_catalog_reader()
-        assert isinstance(reader, HttpCatalogClient)
-        reader.close()
+        try:
+            assert isinstance(reader, _SharedServiceCatalogHandle)
+            assert isinstance(reader.catalog_path, type(None))  # forwards to the underlying HttpCatalogClient property
+            reader.close()  # deliberately a no-op; must not raise
+        finally:
+            reset_shared_service_catalog_client_for_tests()
 
     def test_make_catalog_writer_service_mode(
         self, monkeypatch: pytest.MonkeyPatch

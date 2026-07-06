@@ -89,7 +89,7 @@ class HttpCentroidStore:
             timeout=30.0,
             transport=_transport,
         )
-        _log.info("http_centroid_store.init", base_url=self._base_url, tenant=tenant)
+        _log.debug("http_centroid_store.init", base_url=self._base_url, tenant=tenant)
 
     def close(self) -> None:
         """Close the keep-alive connection pool (idempotent)."""
