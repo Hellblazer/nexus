@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-import hashlib
 import sys
 from pathlib import Path
 
@@ -111,7 +110,7 @@ def put_cmd(
     # nexus-kmb6; for single-chunk MCP docs chunk_text == content).
     # The hook returns the catalog tumbler string (or "" when the
     # catalog is absent).
-    chunk_chroma_id = hashlib.sha256(content.encode()).hexdigest()[:32]
+    chunk_chroma_id, manifest_metadatas = _single_chunk_manifest_metadata(content)
     catalog_doc_id = _catalog_store_hook(
         title=title, doc_id=chunk_chroma_id, collection_name=col_name,
     )
@@ -144,6 +143,7 @@ def put_cmd(
     # `nx index repo`).
     hooks.fire_store_chains(
         [doc_id], col_name, [content],
+        metadatas=manifest_metadatas,
         catalog_doc_id=catalog_doc_id,
     )
 
@@ -153,6 +153,9 @@ def put_cmd(
 # without the MCP layer reaching up into this CLI module. Re-exported
 # here under the legacy private name for back-compat.
 from nexus.catalog.store_hook import catalog_store_hook as _catalog_store_hook  # noqa: E402
+# GH #1370 Defect 4b: shared with MCP store_put — see store_hook.py's
+# docstring for why real metadatas (not None) must reach fire_store_chains.
+from nexus.catalog.store_hook import single_chunk_manifest_metadata as _single_chunk_manifest_metadata  # noqa: E402
 
 
 @store.command("list")
@@ -481,24 +484,40 @@ def export_cmd(
               help="Override target collection name (default: from export header).")
 @click.option("--remap", "remaps", multiple=True,
               help="Path substitution: /old/path:/new/path  (repeat for multiple remaps).")
+@click.option("--assume-model", default=None,
+              help="Override the export header's declared embedding model. "
+                   "Pre-migration .nxexp files can carry a wrong label (GH #1370); "
+                   "use this to supply the true model instead of trusting the header.")
+@click.option("--skip-existing", is_flag=True, default=False,
+              help="Skip records whose id already exists in the target collection, "
+                   "instead of overwriting. Useful for resuming a partial import.")
 def import_cmd(
     file: str,
     collection: str | None,
     remaps: tuple[str, ...],
+    assume_model: str | None,
+    skip_existing: bool,
 ) -> None:
     """Import a .nxexp export file into T3.
 
     Embedding model validation is enforced: importing a code__ export into a
     docs__ collection (or vice versa) is rejected to prevent silent corruption
-    of the target collection's vector space.
+    of the target collection's vector space. Non-conformant legacy chunk ids
+    (pre-migration backups) are re-hashed to content-derived ids automatically.
 
     \b
     Examples:
       nx store import myrepo-backup.nxexp
       nx store import myrepo-backup.nxexp --remap "/old/path:/new/path"
       nx store import myrepo-backup.nxexp --collection code__newname
+      nx store import old-backup.nxexp --assume-model bge-base-en-v15-768
+      nx store import partial-backup.nxexp --skip-existing
     """
-    from nexus.errors import EmbeddingModelMismatch, FormatVersionError  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.errors import (  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        EmbeddingDimensionMismatch,
+        EmbeddingModelMismatch,
+        FormatVersionError,
+    )
     from nexus.exporter import import_collection  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     # Parse --remap options (format: old:new).
@@ -525,8 +544,12 @@ def import_cmd(
             input_path=input_path,
             target_collection=collection,
             remaps=parsed_remaps,
+            assume_model=assume_model,
+            skip_existing=skip_existing,
         )
     except FormatVersionError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except EmbeddingDimensionMismatch as exc:
         raise click.ClickException(str(exc)) from exc
     except EmbeddingModelMismatch as exc:
         raise click.ClickException(str(exc)) from exc
@@ -537,3 +560,10 @@ def import_cmd(
         f"Imported {result['imported_count']} records into "
         f"{result['collection_name']}  ({result['elapsed_seconds']:.1f}s)"
     )
+    if result.get("skipped_count"):
+        click.echo(f"  Skipped {result['skipped_count']} existing records (--skip-existing).")
+    if result.get("rehashed_count"):
+        click.echo(
+            f"  Re-hashed {result['rehashed_count']} non-conformant legacy "
+            "chunk ids to 32-char content hashes."
+        )

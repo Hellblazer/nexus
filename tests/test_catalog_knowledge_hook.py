@@ -136,6 +136,125 @@ class TestStorePutHook:
         rows = cat._db.execute("SELECT count(*) FROM documents").fetchone()
         assert rows[0] == 1
 
+    def test_ghost_reconciled_by_title_instead_of_duplicated(
+        self, tmp_path, monkeypatch,
+    ):
+        """GH #1370 Defect 4a: a pre-existing GHOST entry (chunk_count=0,
+        e.g. from a pre-migration catalog or an earlier failed index)
+        sharing the new doc's title must be reused, not duplicated.
+        """
+        from nexus.commands.store import _catalog_store_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        owner = cat.register_owner("knowledge", "curator")
+        ghost = cat.register(
+            owner, "Ghost Doc", content_type="knowledge",
+            physical_collection="knowledge__stale",
+            meta={"doc_id": "stale-legacy-doc-id"},
+        )
+        assert cat.resolve(ghost).chunk_count == 0, "fixture must be a ghost"
+
+        result = _catalog_store_hook(
+            title="Ghost Doc", doc_id="fresh-content-hash",
+            collection_name="knowledge__fresh",
+        )
+        assert result == str(ghost), "must reuse the ghost's tumbler"
+
+        rows = cat._db.execute("SELECT count(*) FROM documents").fetchone()
+        assert rows[0] == 1, "no duplicate document was minted"
+
+        entry = cat.resolve(ghost)
+        assert entry.meta.get("doc_id") == "fresh-content-hash"
+        assert entry.physical_collection == "knowledge__fresh"
+
+    def test_non_ghost_same_title_not_reconciled(self, tmp_path, monkeypatch):
+        """A same-titled entry that already HAS chunks (chunk_count > 0)
+        must not be repointed at unrelated new content — that would
+        orphan its existing document_chunks manifest. Falls through to
+        register() exactly as pre-fix, minting a second entry."""
+        from nexus.commands.store import _catalog_store_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        owner = cat.register_owner("knowledge", "curator")
+        real = cat.register(
+            owner, "Real Doc", content_type="knowledge",
+            physical_collection="knowledge__real",
+            meta={"doc_id": "real-doc-id"},
+        )
+        cat.append_manifest_chunks(str(real), [
+            {"chash": "a" * 64, "position": 0},
+        ])
+        cat.resync_chunk_count_cache(str(real))
+        assert cat.resolve(real).chunk_count == 1, "fixture must not be a ghost"
+
+        result = _catalog_store_hook(
+            title="Real Doc", doc_id="different-content-hash",
+            collection_name="knowledge__new",
+        )
+        assert result != str(real), "must not reuse a populated document's tumbler"
+
+        rows = cat._db.execute("SELECT count(*) FROM documents").fetchone()
+        assert rows[0] == 2, "a new document is registered instead"
+
+        untouched = cat.resolve(real)
+        assert untouched.meta.get("doc_id") == "real-doc-id", "original entry untouched"
+        assert untouched.physical_collection == "knowledge__real"
+
+    def test_empty_title_does_not_reconcile(self, tmp_path, monkeypatch):
+        """An empty title must never dedup against arbitrary same-("")-titled
+        ghosts — always registers a new document."""
+        from nexus.commands.store import _catalog_store_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        owner = cat.register_owner("knowledge", "curator")
+        cat.register(
+            owner, "", content_type="knowledge",
+            physical_collection="knowledge__blank",
+        )
+
+        result = _catalog_store_hook(
+            title="", doc_id="some-hash", collection_name="knowledge__blank2",
+        )
+        rows = cat._db.execute("SELECT count(*) FROM documents").fetchone()
+        assert rows[0] == 2, "empty title must not trigger reconciliation"
+        assert result, "a new tumbler is still registered"
+
+    def test_ghost_reconciliation_scoped_to_knowledge_owner(
+        self, tmp_path, monkeypatch,
+    ):
+        """A same-titled ghost under a DIFFERENT owner (e.g. a repo owner)
+        must not be reconciled — only knowledge-curator-owned ghosts are
+        eligible."""
+        from nexus.commands.store import _catalog_store_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        other_owner = cat.register_owner(
+            "otherproject", "repo", repo_hash="deadbeef",
+        )
+        other_ghost = cat.register(
+            other_owner, "Shared Title", content_type="knowledge",
+            physical_collection="knowledge__other",
+        )
+        assert cat.resolve(other_ghost).chunk_count == 0
+
+        result = _catalog_store_hook(
+            title="Shared Title", doc_id="new-hash",
+            collection_name="knowledge__mine",
+        )
+        assert result != str(other_ghost), (
+            "must not reconcile onto a ghost owned by a different owner"
+        )
+        rows = cat._db.execute("SELECT count(*) FROM documents").fetchone()
+        assert rows[0] == 2
+
     def test_writes_route_through_factory_writer_not_direct_catalog(
         self, tmp_path, monkeypatch
     ):
@@ -156,10 +275,17 @@ class TestStorePutHook:
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
 
         # Reader: dedup miss + no existing curator owner -> the hook takes the
-        # register_owner + register write path.
+        # register_owner + register write path. The owner lookup goes through
+        # the protocol method (curator_owner_tumbler_by_name — the raw
+        # reader._db SQL was removed because it silently no-op'd the whole
+        # hook in service mode, GH #1370 review finding); a bare MagicMock
+        # would auto-vivify it truthy and skip register_owner, so pin None.
         reader = MagicMock()
         reader.by_doc_id.return_value = None
-        reader._db.execute.return_value.fetchone.return_value = None
+        reader.curator_owner_tumbler_by_name.return_value = None
+        # Ghost-reconciliation lookup (GH #1370 Defect 4a) also misses,
+        # so the hook falls through to writer.register as before.
+        reader.find.return_value = []
 
         writer = MagicMock()
         writer.register_owner.return_value = Tumbler.parse("1.1")

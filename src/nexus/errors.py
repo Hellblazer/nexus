@@ -40,6 +40,56 @@ class FormatVersionError(NexusError):
     """
 
 
+class EmbeddingDimensionMismatch(NexusError):
+    """The export's declared embedding model doesn't match the actual
+    vector dimensionality found in the file (GH #1370 D2).
+
+    Pre-migration ``.nxexp`` exports can carry a WRONG ``embedding_model``
+    header label: legacy two-segment collection names route through
+    ``voyage_model_for_collection``'s prefix-based guess, which silently
+    mislabels local-mode (bge/minilm) exports as Voyage models. This
+    check catches the resulting dimension contradiction before it
+    reaches the vector store, instead of failing with an opaque
+    downstream error.
+
+    Attributes:
+        declared_model: The model name that was checked (the export
+            header's value, or the ``--assume-model`` override).
+        declared_dims: Expected dimensionality for ``declared_model``.
+        actual_dims: Dimensionality actually found in the export's vectors.
+        collection: Target collection name.
+        assumed: True if ``declared_model`` came from ``--assume-model``.
+    """
+
+    def __init__(
+        self,
+        *,
+        declared_model: str,
+        declared_dims: int,
+        actual_dims: int,
+        collection: str,
+        assumed: bool = False,
+    ) -> None:
+        self.declared_model = declared_model
+        self.declared_dims = declared_dims
+        self.actual_dims = actual_dims
+        self.collection = collection
+        self.assumed = assumed
+        if assumed:
+            label = f"assumed model {declared_model!r}"
+            hint = "the --assume-model override is wrong -- pick a different model"
+        else:
+            label = f"header claims {declared_model!r}"
+            hint = (
+                "the header label is wrong (a known defect of pre-migration "
+                "exports, GH #1370); re-run with --assume-model <model>"
+            )
+        super().__init__(
+            f"{label} ({declared_dims}-dim) but vectors are {actual_dims}-dim "
+            f"for collection {collection!r} -- {hint}."
+        )
+
+
 class PutOversizedError(NexusError):
     """A ``put``-path write was refused because the document exceeds the
     ChromaDB Cloud per-document byte cap.
