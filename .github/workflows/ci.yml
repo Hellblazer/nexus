@@ -294,8 +294,28 @@ jobs:
         if: steps.gate.outputs.run == 'true'
         run: uv sync --group dev
 
-      - name: Build complete PG + pgvector from source (Strategy B, glibc 2.28)
+      - name: Restore compiled PG bundle cache
+        # 2026-07-06 CI-cost pass: PG + pgvector are pinned and the compiled
+        # bundle is deterministic in (versions, image, build script) — all of
+        # which live in this cache key, byte-identical to the one
+        # pg-bundle-cache-seed.yml seeds on main (default-branch caches are
+        # restorable from every branch/PR) and engine-service-release.yml
+        # consumes at tag time. CA-3 was the one consumer still compiling from
+        # source on every gated run (~10 min per arch); now it compiles only on
+        # a genuine key miss (version bump / build-script change) — exactly
+        # when a fresh from-source proof is meaningful. The bundle restores to
+        # the same $GITHUB_WORKSPACE/bundle prefix it was built at, so
+        # pg_config's compiled-in paths agree with the host, and the
+        # relocation step below still proves extract-to-a-different-dir works.
         if: steps.gate.outputs.run == 'true'
+        id: pg-bundle-cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        with:
+          path: bundle
+          key: pg-bundle-${{ matrix.target.arch }}-${{ matrix.target.runner }}-pg${{ env.PG_VERSION }}-pgvector${{ env.PGVECTOR_VERSION }}-img-${{ matrix.target.image || 'native' }}-${{ hashFiles('scripts/build_pg_bundle.sh') }}
+
+      - name: Build complete PG + pgvector from source (Strategy B, glibc 2.28)
+        if: steps.gate.outputs.run == 'true' && steps.pg-bundle-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           # Single source of truth for the build is scripts/build_pg_bundle.sh
@@ -315,7 +335,18 @@ jobs:
               echo "=== ENTER container ==="; head -2 /etc/os-release; ldd --version | head -1
               bash "'"$GITHUB_WORKSPACE"'/scripts/build_pg_bundle.sh"
             '
-          echo "NEXUS_CA3_BUNDLE=$bundle" >> "$GITHUB_ENV"
+
+      - name: Point CA-3 at the bundle (restored or freshly built)
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          # Guard against a hollow restore/build before the gate trusts it
+          # (mirrors pg-bundle-cache-seed.yml's pre-save sanity check).
+          if [ ! -x "$GITHUB_WORKSPACE/bundle/bin/initdb" ]; then
+            echo "::error::bundle/bin/initdb missing after cache-restore/build — CA-3 cannot run"
+            exit 1
+          fi
+          echo "NEXUS_CA3_BUNDLE=$GITHUB_WORKSPACE/bundle" >> "$GITHUB_ENV"
 
       - name: Run CA-3 live test (asserts it actually ran, not skipped)
         if: steps.gate.outputs.run == 'true'
@@ -469,8 +500,21 @@ jobs:
         if: steps.gate.outputs.run == 'true'
         run: uv sync --group dev
 
-      - name: Build complete PG + pgvector from source (native, deployment-target 13.0)
+      - name: Restore compiled PG bundle cache
+        # 2026-07-06 CI-cost pass: same restore-first wiring as the linux CA-3
+        # job above — key is byte-identical to pg-bundle-cache-seed.yml's
+        # mac-arm64 row (arch/runner/image parts hardcoded since this job has
+        # no matrix). macOS minutes bill at ~10x linux, so skipping the
+        # from-source PG build here is the single biggest per-hit saving.
         if: steps.gate.outputs.run == 'true'
+        id: pg-bundle-cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        with:
+          path: bundle
+          key: pg-bundle-mac-arm64-macos-14-pg${{ env.PG_VERSION }}-pgvector${{ env.PGVECTOR_VERSION }}-img-native-${{ hashFiles('scripts/build_pg_bundle.sh') }}
+
+      - name: Build complete PG + pgvector from source (native, deployment-target 13.0)
+        if: steps.gate.outputs.run == 'true' && steps.pg-bundle-cache.outputs.cache-hit != 'true'
         env:
           BUNDLE_PREFIX: ${{ github.workspace }}/bundle
         run: |
@@ -480,7 +524,16 @@ jobs:
           # brew, applies MACOSX_DEPLOYMENT_TARGET / -mmacosx-version-min, builds
           # PG + pg_trgm + pgvector, and records the build prefix marker.
           bash scripts/build_pg_bundle.sh
-          echo "NEXUS_CA3_BUNDLE=$BUNDLE_PREFIX" >> "$GITHUB_ENV"
+
+      - name: Point CA-3 at the bundle (restored or freshly built)
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          if [ ! -x "$GITHUB_WORKSPACE/bundle/bin/initdb" ]; then
+            echo "::error::bundle/bin/initdb missing after cache-restore/build — CA-3 cannot run"
+            exit 1
+          fi
+          echo "NEXUS_CA3_BUNDLE=$GITHUB_WORKSPACE/bundle" >> "$GITHUB_ENV"
 
       - name: Run CA-3 live test (asserts it actually ran, not skipped)
         if: steps.gate.outputs.run == 'true'
