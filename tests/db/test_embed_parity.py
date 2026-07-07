@@ -451,9 +451,17 @@ def _assert_parity(
             py_f32.view(np.int32).astype(np.int64) - jv_f32.view(np.int32).astype(np.int64)
         )))
         cosine = _cosine_sim(py_f32.tolist(), jv_f64)
+        # Per-leg content hashes: when parity breaks in an environment we can't
+        # probe interactively (CI), these identify WHICH leg moved relative to a
+        # known-good run (nexus-f4wcg: the java leg's byte-different request body
+        # resolved to a numerically different Voyage serving result on linux).
+        import hashlib
+        py_sha = hashlib.sha256(py_f32.tobytes()).hexdigest()[:16]
+        jv_sha = hashlib.sha256(jv_f32.tobytes()).hexdigest()[:16]
         print(
             f"  {label} corpus[{i}]: cosine={cosine:.10f}, "
-            f"float32_bit_exact={bit_exact}, max_ulp_diff={actual_ulp}"
+            f"float32_bit_exact={bit_exact}, max_ulp_diff={actual_ulp}, "
+            f"py_sha={py_sha}, java_sha={jv_sha}"
         )
         # Primary gate: float64 cosine catches real embedding-space drift
         assert 1.0 - cosine < cosine_threshold, (
@@ -536,10 +544,16 @@ class TestEmbedParity:
         api_key=key) with default input_type=None (omitted from request), truncation=True,
         returns np.float32.
 
-        Java path: VoyageEmbedder with no input_type field, truncation=True —
-        exact same API parameters as production.
+        Java path: VoyageEmbedder with a request body BYTE-identical to the
+        Python SDK's wire format (locked by VoyageEmbedderBodyTest against
+        captured python output).
 
-        Assert float32 bit-exact (production storage precision) AND cosine >= 1-1e-9.
+        Assert cosine within the API's cross-session noise floor. Bit-exactness
+        is NOT assertable over the network: the standard endpoint joined CCE in
+        server-side non-determinism (nexus-f4wcg 2026-07-07 — the PYTHON leg
+        alone, called twice back-to-back with the identical batch, returned two
+        variants 4.19e-05 cosine apart; the "linux gate failure" was the two
+        legs coin-flipping between the same two variants).
         """
         import chromadb.utils.embedding_functions as cef
 
@@ -555,10 +569,20 @@ class TestEmbedParity:
         java_vecs = _java_embed(base_url, token, _VOYAGE_COLLECTION, CORPUS)
 
         print(f"\nVOYAGE standard parity ({len(CORPUS)} texts):")
-        # encoding_format=base64: both Python (voyageai SDK default) and Java decode
-        # the same float32 binary representation → bit-exact (0 ULPs).
-        _assert_parity("VOYAGE-standard", python_f32, java_vecs, max_ulp_threshold=0)
-        print("VOYAGE standard: PASS")
+        # The standard endpoint is NON-DETERMINISTIC across serving replicas, same
+        # as CCE below (nexus-f4wcg 2026-07-07: two live variants 4.19e-05 cosine
+        # apart for the identical request — the python leg alone flapped between
+        # them on back-to-back calls, so bit-exact/ULP gating is a coin flip, not
+        # a contract). DROP the ULP gate; cosine tolerance clears the inter-variant
+        # noise (4.2e-5) with margin while still catching gross wiring drift
+        # (input_type mismatch ≈0.95, wrong model, shuffled index ordering).
+        # Fine-grained request drift (truncation flag, omitted-vs-null params,
+        # separators) is BELOW the noise floor and is verified structurally
+        # instead: VoyageEmbedderBodyTest locks the Java wire body byte-identical
+        # to captured python SDK output.
+        _assert_parity("VOYAGE-standard", python_f32, java_vecs,
+                       max_ulp_threshold=None, cosine_threshold=1e-3)
+        print("VOYAGE standard: PASS (cosine within API non-determinism floor)")
 
     # ── Path 3: CLOUD CCE (voyage-context-3) ──────────────────────────────────
 
