@@ -38,7 +38,7 @@ from nexus.db.chroma_quotas import QUOTAS
 _log = structlog.get_logger(__name__)
 
 
-def open_local_read_client(local_path: str | Path) -> Any:
+def open_local_read_client(local_path: str | Path | None = None) -> Any:
     """Open the LOCAL read leg: a ``chromadb.PersistentClient`` on *local_path*.
 
     The on-disk store the retired T3 daemon used to serve. The caller owns
@@ -46,12 +46,25 @@ def open_local_read_client(local_path: str | Path) -> Any:
     PersistentClients open the same store concurrently, so the ETL must be
     the only opener (the serving path no longer opens it — that is the
     point of Phase 4a).
+
+    A ``None`` *local_path* resolves via
+    :func:`nexus.migration.detection.resolve_default_local_leg` — the
+    product's own env-aware local-Chroma default (nexus-id750, GH #1381).
+    This is the DEEP chokepoint of the default: pre-fix, a bare
+    ``nx guided-upgrade`` threaded an un-defaulted ``None`` from the CLI all
+    the way down to this constructor, crashing on ``Path(None)`` at the ETL
+    copy step — AFTER provisioning a service (critique CRITICAL).
     """
+    if local_path is None:
+        from nexus.migration.detection import resolve_default_local_leg  # noqa: PLC0415 — circular-dep avoidance (detection imports this module deferred)
+
+        local_path = resolve_default_local_leg()
     p = Path(local_path)
     if not p.is_dir():
         raise FileNotFoundError(
             f"local Chroma store not found at {p} — nothing to migrate, or the "
-            "path is wrong (default: ~/.config/nexus/chroma)"
+            "path is wrong (default: $NX_LOCAL_CHROMA_PATH -> "
+            "$XDG_DATA_HOME/nexus/chroma -> ~/.local/share/nexus/chroma)"
         )
     import chromadb  # noqa: PLC0415  — optional/heavy dependency deferred (chromadb)
 

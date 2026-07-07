@@ -65,15 +65,80 @@ def _not_ready(reason: str) -> ServiceReadiness:
 
 
 class TestGuidedUpgradeCmd:
-    def test_fresh_user_noops_without_provisioning(self) -> None:
+    def test_fresh_user_noops_without_provisioning(self, tmp_path) -> None:
+        # nexus-ltix8: the fresh-user no-op requires BOTH legs clean — pin the
+        # T2 SQLite path at a nonexistent location explicitly so the test does
+        # not depend on the ambient config dir.
         with patch(f"{_MOD}.detect_pending_migration",
                    return_value=_preflight(False)) as det, \
              patch(f"{_MOD}.establish_verified_service") as est:
-            result = CliRunner().invoke(guided_upgrade_cmd, [])
+            result = CliRunner().invoke(
+                guided_upgrade_cmd, ["--db", str(tmp_path / "absent" / "memory.db")])
         assert result.exit_code == 0, result.output
         assert "nothing to migrate" in result.output
         det.assert_called_once()
         est.assert_not_called()  # NEVER provision for an empty footprint
+
+    def test_empty_chroma_with_t2_sqlite_proceeds_to_migration(self, tmp_path) -> None:
+        """nexus-ltix8 (GH #1381): an empty Chroma footprint must NOT no-op
+        when a local T2 SQLite store exists — pre-fix the command printed
+        'you are already on the service stack' and stranded the T2 data on an
+        unprovisioned service backend. With a present memory.db the command
+        must proceed (provision + migrate; the T3 leg no-ops naturally)."""
+        t2 = tmp_path / "memory.db"
+        t2.write_bytes(b"stub")  # existence is the gate; content never read pre-provision
+        from nexus.migration.guided_upgrade import (
+            AlreadyMigratedPlan,
+            StoreMigrationStatus,
+        )
+
+        plan = AlreadyMigratedPlan(statuses=(
+            StoreMigrationStatus("memory", False, "memory: no covering report"),
+        ))
+        with patch(f"{_MOD}.detect_pending_migration",
+                   return_value=_preflight(False)), \
+             patch(f"{_MOD}.detect_already_migrated", return_value=plan), \
+             patch(f"{_MOD}.establish_verified_service",
+                   return_value=_ready()) as est, \
+             patch("nexus.db.pg_provision.load_service_credentials_into_env",
+                   return_value=True), \
+             patch("nexus.commands.migrate_cmd._run_migration") as mig:
+            result = CliRunner().invoke(
+                guided_upgrade_cmd, ["--yes", "--db", str(t2)])
+        assert result.exit_code == 0, result.output
+        assert "T2 migration leg" in result.output
+        est.assert_called_once()   # service IS provisioned for the T2 leg
+        mig.assert_called_once()   # and the migration actually runs
+
+    def test_fully_migrated_install_reaches_clean_noop(self, tmp_path) -> None:
+        """nexus-ltix8 (critique M3): ordinary service-mode operation leaves a
+        memory.db on disk (mcp_infra degraded-write backstop), so a fully-
+        migrated install re-running bare guided-upgrade must reach a clean
+        no-op — no re-prompt, no provisioning — when every evaluated T2 store
+        is covered and there is no Chroma footprint."""
+        from nexus.migration.guided_upgrade import (
+            AlreadyMigratedPlan,
+            StoreMigrationStatus,
+        )
+
+        t2 = tmp_path / "memory.db"
+        t2.write_bytes(b"stub")
+        plan = AlreadyMigratedPlan(statuses=(
+            StoreMigrationStatus("memory", True, "memory: covered by report"),
+            StoreMigrationStatus("catalog", True, "catalog: covered by report"),
+        ))
+        assert plan.all_skipped
+        with patch(f"{_MOD}.detect_pending_migration",
+                   return_value=_preflight(False)), \
+             patch(f"{_MOD}.detect_already_migrated", return_value=plan), \
+             patch(f"{_MOD}.establish_verified_service") as est, \
+             patch("nexus.commands.migrate_cmd._run_migration") as mig:
+            result = CliRunner().invoke(
+                guided_upgrade_cmd, ["--db", str(t2)])
+        assert result.exit_code == 0, result.output
+        assert "nothing to do" in result.output
+        est.assert_not_called()
+        mig.assert_not_called()
 
     def test_not_ready_service_hard_fails_without_migrating(self) -> None:
         with patch(f"{_MOD}.detect_pending_migration",

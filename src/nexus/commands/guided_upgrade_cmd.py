@@ -34,6 +34,7 @@ this wiring.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from urllib.parse import urlparse, urlsplit
 
 import click
@@ -119,13 +120,31 @@ def guided_upgrade_cmd(
     """Stand up the service stack and migrate Chroma → pgvector in one command."""
     # 1. PRE-FLIGHT — is there anything to migrate? A fresh user no-ops here,
     #    WITHOUT provisioning a service for an empty footprint.
+    #
+    #    nexus-ltix8 (GH #1381): the no-op requires BOTH legs clean. The
+    #    Chroma probe alone answers "any vectors to move?" — it says nothing
+    #    about the T2 SQLite stores (memory/catalog/plans/...), which the
+    #    RDR-152 default flip strands on an unprovisioned service backend if
+    #    this command no-ops. A present T2 SQLite file means an existing
+    #    install: proceed (the T3 ETL leg no-ops naturally over an empty
+    #    footprint; `_run_migration` ships T2 unconditionally).
+    from nexus.commands.migrate_cmd import _resolve_db_path  # noqa: PLC0415  — command-local import (nexus.commands.migrate_cmd)
+
     pre = detect_pending_migration(local_path=local_path)
+    t2_sqlite = Path(_resolve_db_path(db_path))
     if not pre.needs_migration:
+        if not t2_sqlite.exists():
+            click.echo(
+                "No pre-RDR-160 Chroma footprint and no local T2 SQLite "
+                "store detected — nothing to migrate; you are already on "
+                "the service stack."
+            )
+            return
         click.echo(
-            "No pre-RDR-160 Chroma footprint detected — nothing to migrate; "
-            "you are already on the service stack."
+            "No Chroma vector footprint to migrate, but a local T2 SQLite "
+            f"store exists ({t2_sqlite}) — proceeding with the T2 "
+            "migration leg."
         )
-        return
 
     # 1a. ALREADY-MIGRATED DETECTION (RDR-178 Gap 7, nexus-1sx01) — cheap,
     #     local-only: consults the newest <config>/migration-reports/
@@ -135,11 +154,24 @@ def guided_upgrade_cmd(
     #     reporting data present — the migrate-leg already-migrated detection
     #     is nexus-s3dd4, Wave 2, and out of scope here); it only spares the
     #     T2 stores this pre-flight can positively confirm are covered.
-    from nexus.commands.migrate_cmd import _resolve_db_path  # noqa: PLC0415  — command-local import (nexus.commands.migrate_cmd)
-
     already = detect_already_migrated(
-        sqlite_path=_resolve_db_path(db_path), force=force,
+        sqlite_path=t2_sqlite, force=force,
     )
+    # nexus-ltix8 (critique M3): a FULLY-covered install reaches a clean no-op
+    # here instead of re-prompting/re-provisioning forever. Ordinary service-
+    # mode operation leaves a memory.db on disk (the mcp_infra degraded-write
+    # backstop), so "T2 file exists" alone must not mean "work to do" once
+    # every evaluated store is covered by a clean report with no newer local
+    # writes. Chroma-footprint-present still proceeds (the T3 leg has no
+    # already-migrated detection yet — nexus-s3dd4); --force bypasses via
+    # detect_already_migrated marking every store run.
+    if not pre.needs_migration and already.all_skipped:
+        click.echo(
+            "\nEvery T2 store is already covered by a clean migration report "
+            "with no newer local writes, and there is no Chroma footprint to "
+            "move — nothing to do. (--force re-migrates unconditionally.)"
+        )
+        return
     if already.skip_stores:
         click.echo(
             f"\nT2 stores: {len(already.skip_stores)} of "
@@ -149,11 +181,12 @@ def guided_upgrade_cmd(
         for line in already.summary_lines():
             click.echo(f"  {line}")
 
-    click.echo(
-        f"\nDetected {pre.data_bearing_count} data-bearing Chroma collection(s) "
-        f"to migrate ({pre.classified_unsupported_count} classified unsupported "
-        "— legacy-model collections are auto-remapped, not blocked)."
-    )
+    if pre.needs_migration:
+        click.echo(
+            f"\nDetected {pre.data_bearing_count} data-bearing Chroma collection(s) "
+            f"to migrate ({pre.classified_unsupported_count} classified unsupported "
+            "— legacy-model collections are auto-remapped, not blocked)."
+        )
     if not assume_yes and not click.confirm(
         "Provision the service stack and migrate now?"
     ):
@@ -311,6 +344,17 @@ def guided_upgrade_cmd(
                 os.environ[_var] = _prev
 
     # 4. ADVISORY post-step — verify the migrated stack end-to-end.
+    # GH #1381: users surviving the pre-fix gate bug on the sqlite opt-out
+    # would otherwise complete the migration and silently keep reading the
+    # OLD local SQLite via the still-exported env var.
+    if os.environ.get("NX_STORAGE_BACKEND", "").strip().lower() == "sqlite":
+        click.echo("")
+        click.echo(
+            "NOTE: NX_STORAGE_BACKEND=sqlite is set in your environment — "
+            "your T2 reads will keep routing to the OLD local SQLite until "
+            "you unset it (remove it from your shell profile, then restart "
+            "your shell/session)."
+        )
     click.echo("")
     click.echo("Advisory: verify the migrated stack:")
     click.echo("  nx doctor")

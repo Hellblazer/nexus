@@ -1343,9 +1343,11 @@ def migrate_vectors_cmd(
     collections = [c.strip() for c in collections_csv.split(",") if c.strip()] or None
 
     if local_path is None:
-        from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+        from nexus.migration.detection import resolve_default_local_leg  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
-        local_path = nexus_config_dir() / "chroma"
+        # nexus-id750 (GH #1381): resolve the product's env-aware local-Chroma
+        # default; <config>/chroma was never a write location.
+        local_path = resolve_default_local_leg()
 
     from nexus.migration.vector_etl import (  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         migrate_cloud,
