@@ -104,6 +104,30 @@ def recover_endpoint_from_lease(current_base_url: str) -> tuple[str, str | None]
     return None
 
 
+def env_host_port_url() -> str | None:
+    """``http://{host}:{port}`` from the NX_SERVICE_HOST/PORT env halves, or None.
+
+    nexus-edwlp: the T3 vector client historically honored only
+    ``NX_SERVICE_URL`` or the lease, while every T2 store also read the
+    host/port halves via :func:`resolve_service_config` — so a box with
+    HOST/PORT/TOKEN exported (the local-service gate, docs' documented env
+    leg) served T2 fine and failed loud on T3. This helper is the shared
+    env-halves-to-base-url leg both resolvers agree on. Local-supervisor
+    semantics: always ``http``, host defaults to ``127.0.0.1``.
+    """
+    port_str = os.environ.get("NX_SERVICE_PORT", "").strip()
+    if not port_str:
+        return None
+    try:
+        port = int(port_str)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"NX_SERVICE_PORT must be an integer, got: {port_str!r}"
+        ) from exc
+    host = os.environ.get("NX_SERVICE_HOST", "").strip() or "127.0.0.1"
+    return f"http://{host}:{port}"
+
+
 def resolve_service_config() -> tuple[str, int, str]:
     """``(host, port, token)`` — env halves, then the lease, then fail loud.
 

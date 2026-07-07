@@ -33,23 +33,27 @@ tests/e2e/local-service-gate.sh      # integration incl. the local-service funct
 
 Both must pass. Integration is excluded from CI and is the last line of defense before tag-push.
 
-**Local-mode functional gate — know its honest coverage** (2026-07-06,
-v6.3.6 lesson): the local-service round-trip family (~370 tests — the
-functional test of local mode) skip-gates on a reachable local service and
-deliberately never resolves the managed cloud. Historically it only ran when
-a dev-box service HAPPENED to be alive against a lived-in install — an
-ambient, irreproducible gate that silently degraded to 74/516 tests the day
-the ambient service died. `tests/e2e/local-service-gate.sh` self-provisions
-a throwaway PG + service (scratch NEXUS_CONFIG_DIR, isolated from
-~/.config/nexus and prod; needs the dev jar or NEXUS_SERVICE_BIN) but
-currently only unlocks part of the family — many tests re-isolate their own
-config dirs and lose the env-leg service, and the analytics fixtures need
-seeded corpora. Making the FULL family hermetic is tracked as
-**nexus-edwlp** (P1). Until it lands: run the script, expect partial
-coverage, and treat a skip-count explosion or any new hard failure as
-signal — compensate with live validation of the release's changed paths
-(the v6.3.5/v6.3.6 pattern: exercise the advertised claims against the
-real deployment).
+**Local-mode functional gate — self-provisioning** (2026-07-06 v6.3.6
+lesson; nexus-edwlp, 2026-07-07): the local-service round-trip family
+(the functional test of local mode) skip-gates on a reachable local
+service and deliberately never resolves the managed cloud.
+Historically it only ran when a dev-box service HAPPENED to be alive
+against a lived-in install — an ambient, irreproducible gate that
+silently degraded to 74/516 tests the day the ambient service died.
+`tests/e2e/local-service-gate.sh` self-provisions a throwaway PG +
+service (scratch NEXUS_CONFIG_DIR, isolated from ~/.config/nexus and
+prod), auto-rebuilds a stale dev jar, and pins the whole family at the
+throwaway service via the shared HOST/PORT env leg (the T3 vector
+resolver honors it since nexus-edwlp). Infra is hermetic; credentials
+are not — the voyage/CCE subset needs a real `VOYAGE_API_KEY`, sourced
+explicitly from repo-root `.env` before the service spawns. The
+`lived_in` marker excludes the handful of tests that dispatch real
+`claude -p` or need seeded lived-in corpora (carve-out size asserted
+exactly), and a vacuity guard asserts pinned passed/skipped
+FLOOR/BUDGET at the end of the run. A guard trip or any new hard
+failure is real signal — compensate with live validation of the
+release's changed paths (the v6.3.5/v6.3.6 pattern: exercise the
+advertised claims against the real deployment).
 
 If unit-suite Py3.13 surfaces a known nexus-9eaz-family flake (`test_migration_guard_*`, `test_concurrent_apply_pending_*`, `test_concurrent_bootstrap`, `test_concurrent_t2database_construction`, `test_stop_claiming_on_running_worker_causes_exit`): these are marked with `@_skip_on_gha_flake` on main, so they shouldn't fire here. If they DO fire locally, that's signal: investigate before proceeding.
 

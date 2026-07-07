@@ -187,6 +187,41 @@ def _make_t2(path: Path, *, assignments: tuple[str, ...] = ()) -> Path:
     return path
 
 
+def _make_full_t2(path: Path, *, assignments: tuple[str, ...] = ()) -> Path:
+    """A REAL full-schema T2 (all domain-store tables) for the MVV test.
+
+    The hermetic scenarios above mock ``run_sequenced_migration`` and only need
+    the single ``topic_assignments`` table (:func:`_make_t2`). The MVV runs the
+    REAL sequencer, whose T2 ``migrate all`` reads every domain store from this
+    sqlite — the minimal fixture made 6 stores fail on missing source tables
+    and ``sequencer_t2_dirty_blocks_t3`` blocked the run (nexus-edwlp,
+    2026-07-07, first run ever under the hermetic local-service gate).
+    ``T2Database`` construction runs the schema migrations; the fixture then
+    seeds ``topic_assignments.source_collection`` exactly like :func:`_make_t2`.
+    """
+    from nexus.db.t2 import T2Database
+
+    db = T2Database(path)
+    db.close()
+    conn = sqlite3.connect(path)
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(topic_assignments)")}
+        if "source_collection" not in cols:
+            conn.execute(
+                "ALTER TABLE topic_assignments ADD COLUMN source_collection TEXT"
+            )
+        conn.executemany(
+            "INSERT INTO topic_assignments"
+            "(doc_id, topic_id, assigned_by, source_collection)"
+            " VALUES (?, 0, 'test', ?)",
+            [(f"oracle-doc-{i}", a) for i, a in enumerate(assignments)],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return path
+
+
 @pytest.fixture(autouse=True)
 def _isolate_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """The migration sentinel writes under the config dir — isolate it so a
@@ -198,12 +233,20 @@ def _isolate_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return cfg
 
 
-def _seed_local_store(path: Path, collections: dict[str, int]) -> dict[str, list[str]]:
-    """Seed a real on-disk PersistentClient store; return chash ids per collection."""
+def _seed_local_store(
+    path: Path, collections: dict[str, int], *, dims: int = 2
+) -> dict[str, list[str]]:
+    """Seed a real on-disk PersistentClient store; return chash ids per collection.
+
+    ``dims``: fixtures whose collections take the SAME-MODEL passthrough
+    (stored vectors copied verbatim to pgvector) must seed real-width vectors
+    — the service enforces per-vector dimensions (768 for bge). The mocked-ETL
+    scenarios keep the deliberately-nonsensical 2-dim default.
+    """
     client = chromadb.PersistentClient(path=str(path))
     ids: dict[str, list[str]] = {}
     for name, n in collections.items():
-        ids[name] = _seed_source(client, name, n)
+        ids[name] = _seed_source(client, name, n, dims=dims)
     return ids
 
 
@@ -624,7 +667,9 @@ class TestServedOnPgvectorMVV:
     service actually serves the migrated vectors on pgvector.
     """
 
-    def test_served_on_pgvector_end_to_end(self, tmp_path: Path) -> None:
+    def test_served_on_pgvector_end_to_end(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Drive the REAL guided upgrade end to end against a live service:
         seed a local ONNX store, run ``run_guided_upgrade`` with the real
         ``HttpVectorClient`` + catalog client (the exact wiring
@@ -633,6 +678,16 @@ class TestServedOnPgvectorMVV:
         the body is reachable the moment a credentialed service is present, so
         the obligation is genuinely deferred, not permanently inert."""
         import os
+
+        # This MVV is the LOCAL leg only. With real Chroma-Cloud creds in env
+        # (a keys-present dev box / the local-service gate sourcing .env),
+        # open_read_legs also opens the cloud leg and detection classifies the
+        # REAL ChromaCloud tenant — 100+ ambient collections block the model
+        # gate and the assertion fails on machine state, not code
+        # (nexus-edwlp, 2026-07-07). Scrub the creds so only the seeded
+        # tmp_path store is in scope.
+        for var in ("CHROMA_API_KEY", "CHROMA_TENANT", "CHROMA_DATABASE"):
+            monkeypatch.delenv(var, raising=False)
 
         token = os.environ.get("NX_SERVICE_TOKEN")
         if not token:
@@ -652,11 +707,48 @@ class TestServedOnPgvectorMVV:
 
         store = tmp_path / "chroma"
         name = _coll("oracle-integration", model=_MODEL_ONNX)
-        ids = _seed_local_store(store, {name: 5})
-        t2 = _make_t2(tmp_path / "t2.db", assignments=(name,))
+        # bge-768 into bge-768 takes the same-model PASSTHROUGH — stored
+        # vectors are copied verbatim, so they must be real-width (768).
+        ids = _seed_local_store(store, {name: 5}, dims=768)
+        t2 = _make_full_t2(tmp_path / "t2.db", assignments=(name,))
+        # A REAL catalog schema WITH a seeded document + manifest: the
+        # aspects/aspects_queue ETLs join against the catalog's ``documents``
+        # table (store-level crash without it), and the post-migration
+        # manifest-orphan validation REFUSES an empty migrated catalog as
+        # vacuous — both found on this MVV's first-ever run, under the
+        # hermetic gate (nexus-edwlp).
+        from nexus.db.t2.catalog import CatalogStore
+
+        catalog_db = tmp_path / ".catalog.db"
+        CatalogStore(catalog_db).close()
+        conn = sqlite3.connect(catalog_db)
+        try:
+            conn.execute(
+                "INSERT INTO owners(tumbler_prefix, name, owner_type)"
+                " VALUES ('1', 'oracle-owner', 'curator')"
+            )
+            conn.execute(
+                "INSERT INTO documents"
+                "(tumbler, title, content_type, physical_collection, chunk_count)"
+                f" VALUES ('1.1', 'oracle doc', 'knowledge', '{name}', 5)"
+            )
+            conn.execute(
+                "INSERT INTO collections(name, content_type, owner_id,"
+                " embedding_model, model_version) VALUES"
+                f" ('{name}', 'knowledge', 'oracle-integration',"
+                f" '{_MODEL_ONNX}', 'v1')"
+            )
+            conn.executemany(
+                "INSERT INTO document_chunks(doc_id, position, chash)"
+                " VALUES ('1.1', ?, ?)",
+                list(enumerate(ids[name])),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
         result = driver.run_guided_upgrade(
-            sources=EtlSources(sqlite_path=t2, catalog_db_path=t2),
+            sources=EtlSources(sqlite_path=t2, catalog_db_path=catalog_db),
             vector_client=HttpVectorClient(),
             catalog_client=make_catalog_client_for_migration(token=token),
             t2_db_path=t2,

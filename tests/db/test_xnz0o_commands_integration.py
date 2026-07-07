@@ -232,10 +232,19 @@ def cat(java_service):
     """HttpCatalogClient against the real Java service (no ._db / no SQLite)."""
     from nexus.catalog.http_catalog_client import HttpCatalogClient
     base_url, token, _ = java_service
+    _saved_token = os.environ.get("NX_SERVICE_TOKEN")
     os.environ["NX_SERVICE_TOKEN"] = token
     c = HttpCatalogClient(base_url=base_url, tenant=_TENANT, _token=token)
     yield c
     c.close()
+    # Restore: leaking this module's token past its service's lifetime poisons
+    # later modules that resolve the endpoint/token from env (nexus-edwlp:
+    # this exact leak 401'd every T3 round-trip after this module under the
+    # local-service gate).
+    if _saved_token is None:
+        os.environ.pop("NX_SERVICE_TOKEN", None)
+    else:
+        os.environ["NX_SERVICE_TOKEN"] = _saved_token
 
 
 @pytest.fixture(scope="module")

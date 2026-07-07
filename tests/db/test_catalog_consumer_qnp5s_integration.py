@@ -240,10 +240,16 @@ def cat(java_service):
     """
     from nexus.catalog.http_catalog_client import HttpCatalogClient
     base_url, token, _ = java_service
+    _saved_token = os.environ.get("NX_SERVICE_TOKEN")
     os.environ["NX_SERVICE_TOKEN"] = token
     c = HttpCatalogClient(base_url=base_url, tenant=_TENANT, _token=token)
     yield c
     c.close()
+    # Restore: a leaked module token poisons later env-resolving modules (nexus-edwlp).
+    if _saved_token is None:
+        os.environ.pop("NX_SERVICE_TOKEN", None)
+    else:
+        os.environ["NX_SERVICE_TOKEN"] = _saved_token
 
 
 @pytest.fixture(scope="module")

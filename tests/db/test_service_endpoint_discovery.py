@@ -63,9 +63,17 @@ def _publish_lease(*, host: str = "127.0.0.1", port: int, token: str) -> None:
 
 @pytest.fixture(autouse=True)
 def _clean_endpoint_state(monkeypatch):
-    """Each test starts with no env override and a cold resolver cache."""
+    """Each test starts with no env override and a cold resolver cache.
+
+    NX_SERVICE_HOST/PORT are scrubbed too (nexus-edwlp): the resolver now
+    honors the host/port env halves, and the local-service gate exports
+    them for the whole integration run — without the scrub, the lease and
+    fail-loud tests below would resolve the gate's service instead.
+    """
     monkeypatch.delenv("NX_SERVICE_URL", raising=False)
     monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+    monkeypatch.delenv("NX_SERVICE_HOST", raising=False)
+    monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
     from nexus.db import http_vector_client as hvc
 
     hvc._invalidate_endpoint()
@@ -146,6 +154,55 @@ class TestResolutionOrder:
 
         url, token = _resolve_endpoint()
         assert url == "http://127.0.0.1:4242"
+        assert token == "env-token"
+
+    def test_env_host_port_resolve_without_url(self, monkeypatch):
+        """nexus-edwlp: the T3 resolver honors the NX_SERVICE_HOST/PORT env
+        halves (T2-parity — resolve_service_config has always read them).
+        Before this, a box with HOST/PORT/TOKEN exported but no NX_SERVICE_URL
+        and no visible lease failed loud on the vector path while every T2
+        store resolved fine — the exact split behind the local-service gate's
+        9 T3 round-trip failures."""
+        monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+        monkeypatch.setenv("NX_SERVICE_PORT", "7171")
+        monkeypatch.setenv("NX_SERVICE_TOKEN", "env-token")
+        from nexus.db.http_vector_client import _resolve_endpoint
+
+        url, token = _resolve_endpoint()
+        assert url == "http://127.0.0.1:7171"
+        assert token == "env-token"
+
+    def test_env_port_only_defaults_host(self, monkeypatch):
+        """Host defaults to 127.0.0.1, mirroring resolve_service_config."""
+        monkeypatch.setenv("NX_SERVICE_PORT", "7172")
+        monkeypatch.setenv("NX_SERVICE_TOKEN", "env-token")
+        from nexus.db.http_vector_client import _resolve_endpoint
+
+        url, _ = _resolve_endpoint()
+        assert url == "http://127.0.0.1:7172"
+
+    def test_env_url_outranks_host_port(self, monkeypatch):
+        """NX_SERVICE_URL stays the authoritative full endpoint."""
+        monkeypatch.setenv("NX_SERVICE_URL", "http://127.0.0.1:7777")
+        monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+        monkeypatch.setenv("NX_SERVICE_PORT", "7171")
+        monkeypatch.setenv("NX_SERVICE_TOKEN", "env-token")
+        from nexus.db.http_vector_client import _resolve_endpoint
+
+        url, _ = _resolve_endpoint()
+        assert url == "http://127.0.0.1:7777"
+
+    def test_env_host_port_outranks_lease(self, monkeypatch):
+        """Env halves win over the lease — the documented T2 trade-off
+        (service_endpoint.py module doc: env is read first; a stale env
+        beats a fresh lease and the 401/refused retry is the corrective)."""
+        monkeypatch.setenv("NX_SERVICE_PORT", "7173")
+        monkeypatch.setenv("NX_SERVICE_TOKEN", "env-token")
+        _publish_lease(port=4242, token="lease-token")
+        from nexus.db.http_vector_client import _resolve_endpoint
+
+        url, token = _resolve_endpoint()
+        assert url == "http://127.0.0.1:7173"
         assert token == "env-token"
 
     def test_fail_loud_when_neither_no_8080_fallback(self):

@@ -44,7 +44,7 @@ from typing import Any
 import pytest
 import pytest_asyncio
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.lived_in]
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────

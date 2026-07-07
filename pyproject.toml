@@ -187,6 +187,7 @@ markers = [
     "slow: expensive benchmarks (deselect with '-m not slow')",
     "stress: RDR-120 stress harness scenarios (run with 'pytest -m stress')",
     "no_service_jar: integration test that drives PostgreSQL directly and is exempt from the service-jar freshness gate",
+    "lived_in: integration test that dispatches real claude -p or requires seeded lived-in corpora (deselect with '-m \"integration and not lived_in\"')",
 ]
 
 [dependency-groups]
