@@ -6,6 +6,42 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.3.6] - 2026-07-06
+
+Service-mode CLI repair patch: three commands that crashed (or silently
+failed to converge) on every service-backed install, found by the v6.3.5
+post-release shakeout. No engine change (still pins engine-service-v0.1.30).
+
+### Fixed
+
+- **`nx store export` works in service mode again** (GH #1373). It reached a
+  Chroma-backend-private method that the service client never had, so every
+  export on a service-backed install failed since the pgvector cutover,
+  meaning no new `.nxexp` backups could be created. Export now reads through
+  the backend-neutral collection surface, fetching stored vectors per page
+  (never re-embedding), and fails loud if a chunk is missing its vector.
+- **`nx catalog delete` / `list-backups` / `vacuum-backups` no longer crash
+  in service mode** (GH #1374). The RDR-106 backup-before-delete step read
+  the local catalog's private directory handle and raw SQL; all three paths
+  now resolve the backup directory from config and read through the public
+  catalog API on both backends.
+- **`nx catalog reconcile` now converges** (GH #1371 follow-up). The 6.3.5
+  command rebuilt gapped manifests but never resynced the stale
+  `chunk_count` cache in service mode, so the same documents were
+  "reconciled" again on every run. Repair now corrects `chunk_count` to the
+  rebuilt row count (duplicate chunk text collapses to one stored row by
+  design), the summary reports those corrections, and a second run reports
+  zero. Dry-run wording on the nothing-to-do paths fixed as well.
+
+### Internal
+
+- The defect class behind #1358/#1373/#1374 (CLI code reaching
+  backend-private attributes absent on service-mode clients) is now closed
+  mechanically by the storage-boundary lint.
+- CI: duplicate runs eliminated (no push-CI on main, no tag-time re-test)
+  and the CA-3 gate restores the pre-compiled PG bundle instead of
+  rebuilding it per run.
+
 ## [6.3.5] - 2026-07-06
 
 Repo-indexing overhead sharply reduced (two round-trip-collapsing batch
