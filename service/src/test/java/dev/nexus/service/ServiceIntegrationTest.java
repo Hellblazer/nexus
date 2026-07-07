@@ -293,7 +293,10 @@ class ServiceIntegrationTest {
                 "CREATE TABLE IF NOT EXISTS nexus.service_tokens ("
                 + "  token_hash TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, label TEXT,"
                 + "  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
-                + "  expires_at TIMESTAMPTZ, revoked_at TIMESTAMPTZ)");
+                + "  expires_at TIMESTAMPTZ, revoked_at TIMESTAMPTZ,"
+                // nexus-868dq: TokenStore now SELECTs scope on every lookup; a
+                // scope-less table aborts auth mid-request. Mirrors service-tokens-003.
+                + "  scope TEXT NOT NULL DEFAULT 'tenant')");
             conn.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO svc_test");
             conn.createStatement().execute(
                 "GRANT SELECT ON nexus.service_tokens TO svc_test");

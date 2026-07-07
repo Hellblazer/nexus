@@ -30,8 +30,9 @@ class _FakeStore:
     def __exit__(self, *exc: object) -> None:
         pass
 
-    def issue_token(self, tenant: str, label: str | None = None, ttl_seconds: int | None = None) -> dict[str, Any]:
-        _FakeStore.calls.append(("issue_token", (tenant, label, ttl_seconds)))
+    def issue_token(self, tenant: str, label: str | None = None, ttl_seconds: int | None = None,
+                    scope: str | None = None) -> dict[str, Any]:
+        _FakeStore.calls.append(("issue_token", (tenant, label, ttl_seconds, scope)))
         return {"tenant": tenant, "token": "RAW-ISSUE-xyz", "token_hash": "h1"}
 
     def rotate_token(self, tenant: str, grace_seconds: int | None = None) -> dict[str, Any]:
@@ -62,8 +63,35 @@ def _run(args: list[str]):
 def test_issue_passes_args_and_shows_token_once() -> None:
     result = _run(["token", "issue", "--tenant", "t-a", "--label", "ci", "--ttl", "3600"])
     assert result.exit_code == 0, result.output
-    assert _FakeStore.calls == [("issue_token", ("t-a", "ci", 3600))]
+    assert _FakeStore.calls == [("issue_token", ("t-a", "ci", 3600, None))]
     assert result.output.count("RAW-ISSUE-xyz") == 1
+
+
+def test_issue_passes_scope_flag() -> None:
+    # nexus-868dq: issuing the conexus-edge mint credential (operator-only server-side).
+    result = _run(["token", "issue", "--tenant", "conexus-edge", "--scope", "mint"])
+    assert result.exit_code == 0, result.output
+    assert _FakeStore.calls == [("issue_token", ("conexus-edge", None, None, "mint"))]
+
+
+def test_issue_omits_scope_by_default() -> None:
+    result = _run(["token", "issue", "--tenant", "t-a"])
+    assert result.exit_code == 0, result.output
+    assert _FakeStore.calls == [("issue_token", ("t-a", None, None, None))]
+
+
+def test_issue_explicit_tenant_scope_passes_through() -> None:
+    result = _run(["token", "issue", "--tenant", "t-a", "--scope", "tenant"])
+    assert result.exit_code == 0, result.output
+    assert _FakeStore.calls == [("issue_token", ("t-a", None, None, "tenant"))]
+
+
+def test_issue_rejects_non_issuable_scope() -> None:
+    # 'data' tokens are minted only by /v1/data-tokens/mint; 'root' never. The
+    # CLI refuses locally (click.Choice) rather than round-tripping a 400.
+    assert _run(["token", "issue", "--tenant", "t-a", "--scope", "data"]).exit_code != 0
+    assert _run(["token", "issue", "--tenant", "t-a", "--scope", "root"]).exit_code != 0
+    assert _FakeStore.calls == []
 
 
 def test_issue_requires_tenant() -> None:

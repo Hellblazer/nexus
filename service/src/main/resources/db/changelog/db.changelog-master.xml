@@ -55,6 +55,9 @@
     <include file="db/changelog/service-tokens-001-baseline.xml"/>
     <!-- nexus-e4130: at-most-one-root-token partial unique index (operator invariant). -->
     <include file="db/changelog/service-tokens-002-single-root-index.xml"/>
+    <!-- nexus-868dq: server-assigned scope column (root|tenant|mint|data) — the
+         mint-scoped edge credential + short-TTL data tokens (conexus RDR-005 A1). -->
+    <include file="db/changelog/service-tokens-003-scope-column.xml"/>
 
     <!-- Store 10: pgvector chunks tables + manifest collection column (bead nexus-mf447) -->
     <include file="db/changelog/vectors-001-baseline.xml"/>

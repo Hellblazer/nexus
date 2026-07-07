@@ -46,14 +46,38 @@ public final class TokenStore {
         this.clock = clock;
     }
 
+    // ── Scope vocabulary (nexus-868dq, conexus RDR-005 A1) ────────────────────
+    //
+    // Server-assigned; NEVER derived from the client-supplied label (a label-
+    // derived privilege would let any /v1/service-tokens/issue caller
+    // self-escalate by crafting a label). The DB CHECK constraint mirrors this
+    // set (service-tokens-003).
+
+    /** The single operator credential (bootstrap). Cross-tenant admin. */
+    public static final String SCOPE_ROOT = "root";
+    /** Ordinary per-tenant bearer — the default; every pre-868dq row is this. */
+    public static final String SCOPE_TENANT = "tenant";
+    /** Mint-only credential (conexus edge): may ONLY call POST /v1/data-tokens/mint. */
+    public static final String SCOPE_MINT = "mint";
+    /** Short-TTL per-tenant data token minted by a mint credential. */
+    public static final String SCOPE_DATA = "data";
+
+    private static final java.util.Set<String> VALID_SCOPES =
+        java.util.Set.of(SCOPE_ROOT, SCOPE_TENANT, SCOPE_MINT, SCOPE_DATA);
+
     /**
      * A live (non-revoked) service token: its tenant, optional expiry instant, and
-     * whether it is the persistent root token (the operator/admin credential, marked by
-     * {@link #ROOT_TOKEN_LABEL}). {@code isRoot} carries the operator privilege up to the
-     * {@link dev.nexus.service.http.AuthFilter} so the admin surface (nexus-e4130) can
-     * scope cross-tenant operations to the root token alone.
+     * its server-assigned {@code scope}. {@code isRoot} — the operator privilege the
+     * {@link dev.nexus.service.http.AuthFilter} threads to the admin surface
+     * (nexus-e4130) — now derives from {@code scope == 'root'}, NOT from the label:
+     * labels are client-supplied on issue, scope is server-assigned only
+     * (nexus-868dq). The root row keeps its {@link #ROOT_TOKEN_LABEL} marker solely
+     * for the single-root unique index and the lifecycle protections keyed on it.
      */
-    public record ServiceToken(String tenantId, Instant expiresAt, boolean isRoot) {
+    public record ServiceToken(String tenantId, Instant expiresAt, String scope) {
+        public boolean isRoot() {
+            return SCOPE_ROOT.equals(scope);
+        }
     }
 
     private DSLContext dsl() {
@@ -73,7 +97,7 @@ public final class TokenStore {
             return Optional.empty();
         }
         var rec = dsl()
-            .select(SERVICE_TOKENS.TENANT_ID, SERVICE_TOKENS.EXPIRES_AT, SERVICE_TOKENS.LABEL)
+            .select(SERVICE_TOKENS.TENANT_ID, SERVICE_TOKENS.EXPIRES_AT, SERVICE_TOKENS.SCOPE)
             .from(SERVICE_TOKENS)
             .where(SERVICE_TOKENS.TOKEN_HASH.eq(tokenHash))
             .and(SERVICE_TOKENS.REVOKED_AT.isNull())
@@ -82,11 +106,10 @@ public final class TokenStore {
             return Optional.empty();
         }
         OffsetDateTime exp = rec.get(SERVICE_TOKENS.EXPIRES_AT);
-        boolean isRoot = ROOT_TOKEN_LABEL.equals(rec.get(SERVICE_TOKENS.LABEL));
         return Optional.of(new ServiceToken(
             rec.get(SERVICE_TOKENS.TENANT_ID),
             exp == null ? null : exp.toInstant(),
-            isRoot));
+            rec.get(SERVICE_TOKENS.SCOPE)));
     }
 
     /**
@@ -143,10 +166,13 @@ public final class TokenStore {
             return;
         }
         String hash = TokenHashing.sha256Hex(rawToken);
+        // Scope set explicitly (not via the column default): root provisioning must
+        // never silently change if the default ever does (nexus-868dq).
         int inserted = dsl()
             .insertInto(SERVICE_TOKENS)
-            .columns(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID, SERVICE_TOKENS.LABEL)
-            .values(hash, tenantId, ROOT_TOKEN_LABEL)
+            .columns(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID,
+                     SERVICE_TOKENS.LABEL, SERVICE_TOKENS.SCOPE)
+            .values(hash, tenantId, ROOT_TOKEN_LABEL, SCOPE_ROOT)
             .onConflict(SERVICE_TOKENS.TOKEN_HASH)
             .doNothing()
             .execute();
@@ -166,8 +192,8 @@ public final class TokenStore {
 
     /** A token registry row for listing (never carries the raw secret). */
     public record TokenInfo(String tokenHash, String tenantId, String label,
-                            OffsetDateTime createdAt, OffsetDateTime expiresAt,
-                            OffsetDateTime revokedAt) {
+                            String scope, OffsetDateTime createdAt,
+                            OffsetDateTime expiresAt, OffsetDateTime revokedAt) {
         /** active | revoked | expired, evaluated against {@code now}. */
         public String status(Instant now) {
             if (revokedAt != null) {
@@ -220,8 +246,45 @@ public final class TokenStore {
      * @return the issued token: raw secret (show once) + stored hash
      */
     public IssuedToken issueToken(String tenant, String label, Long ttlSeconds) {
+        return issueToken(tenant, label, ttlSeconds, SCOPE_TENANT);
+    }
+
+    /**
+     * Issue a new bound token for {@code tenant} with an explicit server-assigned
+     * {@code scope} (nexus-868dq). Scope is validated against the vocabulary the
+     * DB CHECK also enforces; callers decide WHO may request which scope (e.g.
+     * {@code TokenAdminHandler} restricts {@code mint} issuance to the operator,
+     * and only the data-token mint endpoint issues {@code data}).
+     */
+    public IssuedToken issueToken(String tenant, String label, Long ttlSeconds, String scope) {
         rejectWildcard(tenant);
         rejectRootLabel(label);
+        if (!VALID_SCOPES.contains(scope)) {
+            throw new IllegalArgumentException(
+                "scope must be one of " + VALID_SCOPES + ", got: " + scope);
+        }
+        // Gate-A review (nexus-868dq): the single-root DB invariant
+        // (idx_service_tokens_single_root, service-tokens-002) keys on the LABEL,
+        // but the PRIVILEGE now keys on scope — issuing scope='root' under an
+        // ordinary label would mint a SECOND operator credential that evades
+        // every label-keyed lockout (revocable, enumerable, rotate-swept root).
+        // Root is seeded exclusively by ensureBootstrapToken; mirror
+        // rejectRootLabel at this class boundary, not just in the one handler.
+        if (SCOPE_ROOT.equals(scope)) {
+            throw new IllegalArgumentException(
+                "scope 'root' may not be issued via issueToken; the root credential "
+                + "is seeded exclusively by ensureBootstrapToken");
+        }
+        // Gate-A critique (nexus-868dq): RDR-005 pin iii defers per-tenant bulk
+        // revoke on the premise that EVERY data token drains by TTL. A scope='data'
+        // row with no expiry would be a permanent full-data-authority credential —
+        // silently invalidating that deferral's justification. Enforced here, not
+        // just in DataTokenHandler, so no future caller can recreate the hole.
+        if (SCOPE_DATA.equals(scope) && ttlSeconds == null) {
+            throw new IllegalArgumentException(
+                "scope 'data' requires a ttl_seconds: data tokens must drain by TTL "
+                + "(RDR-005 pin iii — the bulk-revoke deferral rests on it)");
+        }
         if (ttlSeconds != null && ttlSeconds <= 0) {
             throw new IllegalArgumentException("ttl_seconds must be positive");
         }
@@ -232,10 +295,11 @@ public final class TokenStore {
             : OffsetDateTime.ofInstant(clock.instant().plusSeconds(ttlSeconds), ZoneOffset.UTC);
         dsl().insertInto(SERVICE_TOKENS)
             .columns(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID,
-                     SERVICE_TOKENS.LABEL, SERVICE_TOKENS.EXPIRES_AT)
-            .values(hash, tenant, label, expiresAt)
+                     SERVICE_TOKENS.LABEL, SERVICE_TOKENS.EXPIRES_AT, SERVICE_TOKENS.SCOPE)
+            .values(hash, tenant, label, expiresAt, scope)
             .execute();
-        log.info("event=service_token_issued tenant={} label={} ttl={}", tenant, label, ttlSeconds);
+        log.info("event=service_token_issued tenant={} label={} ttl={} scope={}",
+                 tenant, label, ttlSeconds, scope);
         return new IssuedToken(raw, hash);
     }
 
@@ -270,27 +334,51 @@ public final class TokenStore {
             OffsetDateTime.ofInstant(clock.instant().plusSeconds(graceSeconds), ZoneOffset.UTC);
         return dsl().transactionResult(cfg -> {
             DSLContext tx = DSL.using(cfg);
-            List<String> expired = tx.select(SERVICE_TOKENS.TOKEN_HASH)
+            var liveRows = tx.select(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.SCOPE)
                 .from(SERVICE_TOKENS)
                 .where(SERVICE_TOKENS.TENANT_ID.eq(tenant))
                 .and(SERVICE_TOKENS.REVOKED_AT.isNull())
                 .and(SERVICE_TOKENS.LABEL.isDistinctFrom(ROOT_TOKEN_LABEL))
                 .and(SERVICE_TOKENS.EXPIRES_AT.isNull().or(SERVICE_TOKENS.EXPIRES_AT.gt(graceDeadline)))
-                .fetch(SERVICE_TOKENS.TOKEN_HASH);
+                // Gate-A review: deterministic scope carry — oldest row first (the
+                // tenant's original credential). Without an ORDER BY the replacement
+                // row's scope under a MIXED-scope live set would be arbitrary.
+                // token_hash tiebreak (Gate-B M2): created_at can tie under
+                // concurrent issuance and Postgres guarantees nothing for ties.
+                .orderBy(SERVICE_TOKENS.CREATED_AT, SERVICE_TOKENS.TOKEN_HASH)
+                .fetch();
+            List<String> expired = liveRows.map(r -> r.get(SERVICE_TOKENS.TOKEN_HASH));
             if (!expired.isEmpty()) {
                 tx.update(SERVICE_TOKENS)
                     .set(SERVICE_TOKENS.EXPIRES_AT, graceDeadline)
                     .where(SERVICE_TOKENS.TOKEN_HASH.in(expired))
                     .execute();
             }
+            // Scope-preserving (nexus-868dq Task 2.5): without this, rotating a
+            // mint-scoped credential would issue a replacement with the schema
+            // default 'tenant' — silently stripping the mint privilege. The carry is
+            // the OLDEST live row's scope (deterministic via the ORDER BY above);
+            // rotating a deliberately mixed-scope tenant collapses to that scope and
+            // logs it loudly below — one scope per tenant's credential set is the
+            // intended usage. No live rows → the pre-scope default.
+            String scope = liveRows.isEmpty()
+                ? SCOPE_TENANT
+                : liveRows.get(0).get(SERVICE_TOKENS.SCOPE);
+            long distinctScopes = liveRows.stream()
+                .map(r -> r.get(SERVICE_TOKENS.SCOPE)).distinct().count();
+            if (distinctScopes > 1) {
+                log.warn("event=service_token_rotate_mixed_scopes tenant={} scopes={} carried={}",
+                         tenant, distinctScopes, scope);
+            }
             String raw = newRawToken();
             String hash = TokenHashing.sha256Hex(raw);
             tx.insertInto(SERVICE_TOKENS)
-                .columns(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID, SERVICE_TOKENS.LABEL)
-                .values(hash, tenant, "rotated")
+                .columns(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID,
+                         SERVICE_TOKENS.LABEL, SERVICE_TOKENS.SCOPE)
+                .values(hash, tenant, "rotated", scope)
                 .execute();
-            log.info("event=service_token_rotated tenant={} expiring_old={} grace_s={}",
-                     tenant, expired.size(), graceSeconds);
+            log.info("event=service_token_rotated tenant={} expiring_old={} grace_s={} scope={}",
+                     tenant, expired.size(), graceSeconds, scope);
             return new RotationResult(new IssuedToken(raw, hash), expired);
         });
     }
@@ -377,7 +465,8 @@ public final class TokenStore {
         // off the retired wildcard sentinel onto ROOT_TOKEN_LABEL in Phase E).
         var base = dsl()
             .select(SERVICE_TOKENS.TOKEN_HASH, SERVICE_TOKENS.TENANT_ID, SERVICE_TOKENS.LABEL,
-                    SERVICE_TOKENS.CREATED_AT, SERVICE_TOKENS.EXPIRES_AT, SERVICE_TOKENS.REVOKED_AT)
+                    SERVICE_TOKENS.SCOPE, SERVICE_TOKENS.CREATED_AT, SERVICE_TOKENS.EXPIRES_AT,
+                    SERVICE_TOKENS.REVOKED_AT)
             .from(SERVICE_TOKENS)
             .where(SERVICE_TOKENS.LABEL.isDistinctFrom(ROOT_TOKEN_LABEL));
         var filtered = (tenant == null || tenant.isBlank())
@@ -387,6 +476,7 @@ public final class TokenStore {
             r.get(SERVICE_TOKENS.TOKEN_HASH),
             r.get(SERVICE_TOKENS.TENANT_ID),
             r.get(SERVICE_TOKENS.LABEL),
+            r.get(SERVICE_TOKENS.SCOPE),
             r.get(SERVICE_TOKENS.CREATED_AT),
             r.get(SERVICE_TOKENS.EXPIRES_AT),
             r.get(SERVICE_TOKENS.REVOKED_AT)));
