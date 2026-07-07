@@ -81,6 +81,15 @@ jobs:
           restore-keys: |
             chromadb-onnx-${{ runner.os }}-
 
+      - name: Set up JDK 25 (dev-jar build)
+        # The gate rebuilds the dev jar; the runner's default JDK 17 cannot run
+        # the jOOQ codegen (class-file 65 = Java 21+). Same toolchain as ci.yml's
+        # write-seam job / service-ci.
+        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f  # v1
+        with:
+          java-version: "25.0.3"
+          distribution: "graalvm"
+
       - name: Cache Maven local repo (dev-jar build)
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
         with:
