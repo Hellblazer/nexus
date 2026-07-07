@@ -210,15 +210,12 @@ Do NOT run `uv publish` or `twine upload` manually: the Release workflow handles
 gh run watch                                   # wait for Release workflow green
 ```
 
-Three jobs must complete: `pytest (Python 3.12)`, `pytest (Python 3.13)`, `Build and publish to PyPI`.
-
-If `pytest (Python 3.13)` fails on the known flake set (see Step 1), the failure is GHA-runner pressure (`nexus-9eaz` family). Re-run the failed job:
-
-```bash
-gh run rerun <run_id> --failed
-```
-
-A second consecutive failure on a non-flake test is real; investigate before retrying.
+One job must complete: `Build and publish to PyPI`. (2026-07-06 CI-cost
+pass, PR #1375: the tag-time pytest matrix was removed — the tag points at a
+main merge commit whose identical tree just passed the release PR's required
+checks, so the re-run was the same tree's fourth test pass and made publish
+hostage to the nexus-9eaz GHA-flake family. The publish job still verifies
+tag == pyproject version before building.)
 
 ### 11. Verify release landed
 
