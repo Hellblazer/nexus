@@ -100,6 +100,41 @@ public final class TaxonomyRepository {
            .execute();
     }
 
+    /**
+     * Serialize taxonomy persist operations per (tenant, collection) within the
+     * CURRENT transaction (nexus-n2ls1).
+     *
+     * <p>The persist paths' existing-topics guard is a plain unlocked SELECT
+     * COUNT: two concurrent persists for the same (tenant, collection) both
+     * counted 0 under READ COMMITTED, both inserted the same root label, and
+     * the loser hit the taxonomy-004 partial unique index (SQLSTATE 23505 →
+     * HTTP 409, observed live 2026-07-07). {@code pg_advisory_xact_lock}
+     * blocks the second persist until the first commits, so the loser then
+     * sees the winner's committed rows and takes the guard-skip (discover) or
+     * a fresh replace (rebuild). Released automatically at commit/rollback.
+     * A {@code hashtext} collision between two different keys merely
+     * over-serializes — never a correctness issue.
+     */
+    private static void lockTaxonomyCollection(DSLContext ctx, String tenant, String collection) {
+        // Bounded wait FIRST (critique, nexus-n2ls1): without a lock_timeout a
+        // stuck holder turns the fast retryable 409 this fix removes into an
+        // indefinite in-transaction wait surfacing as an edge 504 — worse
+        // observability than the original bug. set_config(..., true) is
+        // SET LOCAL (txn-scoped, auto-reverts at commit/rollback); a timed-out
+        // acquire raises SQLSTATE 55P03, a clean retryable error. The timeout
+        // also bounds this txn's subsequent row-lock waits — acceptable, these
+        // persist txns are short writes.
+        ctx.select(function("set_config", String.class,
+                   val("lock_timeout"), val("5000"), val(true)))
+           .fetch();
+        // Typed-DSL function composition (house rule: no raw string-SQL —
+        // RawSqlGateTest): SELECT pg_advisory_xact_lock(hashtext(:key)).
+        // hashtext returns int4, implicitly widened to the bigint overload.
+        ctx.select(function("pg_advisory_xact_lock", Object.class,
+                   function("hashtext", Integer.class, val(tenant + "/" + collection))))
+           .fetch();
+    }
+
     // ⚠ DRIFT RISK (RDR-164 review S4): several ON CONFLICT DO UPDATE sites below
     // (mergeTopics, assignTopic, recordDiscoverCount, importAssignment, importTaxonomyMeta,
     // computeIcfRows) use inline field("...GREATEST/COALESCE/CASE/EXCLUDED...", Type.class)
@@ -1495,6 +1530,11 @@ public final class TaxonomyRepository {
                                     String collectionName,
                                     List<Map<String, Object>> childSpecs) {
         return tenantScope.withTenant(tenant, ctx -> {
+            // nexus-n2ls1: split shares the guardless delete-then-insert shape;
+            // children escape the taxonomy-004 partial index (parent_id NOT
+            // NULL) so a race here duplicates children rather than 409ing —
+            // the same per-collection lock closes both.
+            lockTaxonomyCollection(ctx, tenant, collectionName);
             ensureCollectionRegistered(ctx, tenant, collectionName);
             // Delete parent assignments
             ctx.deleteFrom(TOPIC_ASSIGNMENTS)
@@ -1601,6 +1641,9 @@ public final class TaxonomyRepository {
         List<Map<String, Object>> safeSpecs = specs == null ? List.of() : specs;
         Map<String, Object> transfers = manualTransfers == null ? Map.of() : manualTransfers;
         return tenantScope.withTenant(tenant, ctx -> {
+            // nexus-n2ls1: same guard-then-write shape as persistDiscoveredTopics
+            // (delete-then-insert here) — serialize per-collection first.
+            lockTaxonomyCollection(ctx, tenant, collection);
             ensureCollectionRegistered(ctx, tenant, collection);
             // REPLACE semantics — clear old rows even when there are no new specs.
             ctx.deleteFrom(TOPIC_ASSIGNMENTS)
@@ -1619,13 +1662,39 @@ public final class TaxonomyRepository {
                 String assignedBy   = (String) spec.getOrDefault("assigned_by", "hdbscan");
                 List<String> docIds = (List<String>) spec.getOrDefault("doc_ids", List.of());
 
-                long topicId = ctx.insertInto(TOPICS,
+                // nexus-n2ls1 (critique M2): same in-request belt as
+                // persistDiscoveredTopics — rebuild's inserts are root topics
+                // (parent_id NULL → taxonomy-004 partial unique), the preceding
+                // DELETE clears the collection, so a conflict here can only be
+                // an in-batch duplicate label from a raw (non-nexus) client.
+                // First spec wins the row (label identity + terms); the losing
+                // spec's doc_ids union onto the shared topic via the
+                // DO-NOTHING assignments insert — matching the nexus-slcn7
+                // client-side union-merge. The losing spec's terms/
+                // review_status are deliberately dropped (display aids, first
+                // wins — same as the client dedup).
+                Long topicId = ctx.insertInto(TOPICS,
                         TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION,
                         TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.TERMS, TOPICS.REVIEW_STATUS)
                     .values(tenant, label, collection, docCount, now, terms, reviewStatus)
+                    .onConflict(TOPICS.TENANT_ID, TOPICS.COLLECTION, TOPICS.LABEL)
+                    .where(TOPICS.PARENT_ID.isNull())
+                    .doNothing()
                     .returningResult(TOPICS.ID)
-                    .fetchOne()
-                    .get(TOPICS.ID);
+                    .fetchOne(TOPICS.ID);
+                if (topicId == null) {
+                    topicId = ctx.select(TOPICS.ID).from(TOPICS)
+                        .where(TOPICS.TENANT_ID.eq(tenant),
+                               TOPICS.COLLECTION.eq(collection),
+                               TOPICS.LABEL.eq(label),
+                               TOPICS.PARENT_ID.isNull())
+                        .fetchOne(TOPICS.ID);
+                    if (topicId == null) {
+                        throw new IllegalStateException(
+                            "persist_rebuild conflict-skip found no existing root topic for label '"
+                            + label + "' in " + collection);
+                    }
+                }
                 topicIds.add(topicId);
 
                 batchInsertAssignments(ctx, tenant, topicId, docIds, assignedBy);
@@ -1676,6 +1745,10 @@ public final class TaxonomyRepository {
                                                List<Map<String, Object>> specs) {
         if (specs == null || specs.isEmpty()) return List.of();
         return tenantScope.withTenant(tenant, ctx -> {
+            // nexus-n2ls1: serialize per-collection BEFORE the guard — the guard
+            // alone is a TOCTOU race under concurrent discovery (both count 0,
+            // both insert, loser 23505 → 409).
+            lockTaxonomyCollection(ctx, tenant, collection);
             ensureCollectionRegistered(ctx, tenant, collection);
             int existing = ctx.selectCount()
                 .from(TOPICS)
@@ -1695,13 +1768,43 @@ public final class TaxonomyRepository {
                 String assignedBy   = (String) spec.getOrDefault("assigned_by", "hdbscan");
                 List<String> docIds = (List<String>) spec.getOrDefault("doc_ids", List.of());
 
-                long topicId = ctx.insertInto(TOPICS,
+                // nexus-n2ls1 defense-in-depth: DO NOTHING on the taxonomy-004
+                // partial unique target. The advisory lock above already
+                // serializes cross-request races; this belt absorbs the
+                // remaining in-request shape — a raw (non-nexus-client) caller
+                // sending two specs with the SAME label (the nexus client
+                // dedups, the server must not 500/409 on it). A skipped insert
+                // reuses the existing root topic's id so topic_ids stays
+                // aligned with specs order. First spec wins the row: the losing
+                // spec's doc_ids union onto the shared topic (DO-NOTHING
+                // assignments insert, matching the nexus-slcn7 client-side
+                // union-merge); its terms are deliberately dropped (display
+                // aid, first wins — same as the client dedup).
+                Long topicId = ctx.insertInto(TOPICS,
                         TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION,
                         TOPICS.DOC_COUNT, TOPICS.CREATED_AT, TOPICS.TERMS)
                     .values(tenant, label, collection, docCount, now, terms)
+                    .onConflict(TOPICS.TENANT_ID, TOPICS.COLLECTION, TOPICS.LABEL)
+                    .where(TOPICS.PARENT_ID.isNull())
+                    .doNothing()
                     .returningResult(TOPICS.ID)
-                    .fetchOne()
-                    .get(TOPICS.ID);
+                    .fetchOne(TOPICS.ID);
+                if (topicId == null) {
+                    topicId = ctx.select(TOPICS.ID).from(TOPICS)
+                        .where(TOPICS.TENANT_ID.eq(tenant),
+                               TOPICS.COLLECTION.eq(collection),
+                               TOPICS.LABEL.eq(label),
+                               TOPICS.PARENT_ID.isNull())
+                        .fetchOne(TOPICS.ID);
+                    if (topicId == null) {
+                        // Conflict-skipped yet no visible row — cannot happen
+                        // under the advisory lock (same-txn rows are visible);
+                        // fail loud rather than desync the specs alignment.
+                        throw new IllegalStateException(
+                            "persist_discovered conflict-skip found no existing root topic for label '"
+                            + label + "' in " + collection);
+                    }
+                }
                 topicIds.add(topicId);
 
                 batchInsertAssignments(ctx, tenant, topicId, docIds, assignedBy);

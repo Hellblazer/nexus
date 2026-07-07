@@ -685,6 +685,103 @@ class TaxonomyRepositoryTest {
             .containsExactlyInAnyOrder("disc-doc-1", "disc-doc-2");
     }
 
+    @Test @Order(315)
+    void persistDiscoveredTopics_concurrentSameCollection_oneWinsOtherSkips() throws Exception {
+        // nexus-n2ls1 regression: the existing-topics guard is a plain SELECT
+        // COUNT — pre-fix, two concurrent persists for the same collection both
+        // counted 0, both inserted the same root label, and the loser hit the
+        // taxonomy-004 partial unique index (23505 → HTTP 409, observed live
+        // 2026-07-07). The per-collection pg_advisory_xact_lock serializes them:
+        // the loser waits, then guard-skips cleanly. Barrier-start both threads
+        // for maximal overlap; assert NO exception, exactly one winner, and
+        // exactly the winner's rows in the DB.
+        final String col = "docs__disc_race__bge-base-en-v15-768__v1";
+        var specs = List.of(
+            m("label", "race-topic-a", "doc_count", 1, "terms", "[\"r\"]",
+              "assigned_by", "hdbscan", "doc_ids", List.of("race-doc-1")),
+            m("label", "race-topic-b", "doc_count", 0, "terms", "[\"s\"]",
+              "assigned_by", "hdbscan", "doc_ids", List.of()));
+
+        var barrier = new java.util.concurrent.CyclicBarrier(2);
+        var results = new java.util.concurrent.ConcurrentHashMap<String, List<Long>>();
+        var failures = new java.util.concurrent.CopyOnWriteArrayList<Throwable>();
+        Runnable persist = () -> {
+            try {
+                barrier.await(10, java.util.concurrent.TimeUnit.SECONDS);
+                results.put(Thread.currentThread().getName(),
+                            repo.persistDiscoveredTopics(TENANT_A, col, specs));
+            } catch (Throwable t) {
+                failures.add(t);
+            }
+        };
+        Thread t1 = new Thread(persist, "race-1");
+        Thread t2 = new Thread(persist, "race-2");
+        t1.start(); t2.start();
+        t1.join(30_000); t2.join(30_000);
+
+        assertThat(failures)
+            .withFailMessage("concurrent persist_discovered raised: %s", failures)
+            .isEmpty();
+        var sizes = results.values().stream().map(List::size).sorted().toList();
+        // One thread inserted both specs; the other guard-skipped after waiting
+        // on the advisory lock.
+        assertThat(sizes).containsExactly(0, 2);
+        assertThat(repo.getAllTopics(TENANT_A, col)).hasSize(2);
+    }
+
+    @Test @Order(316)
+    void persistDiscoveredTopics_inBatchDuplicateLabelReusesTopicId() {
+        // nexus-n2ls1 defense-in-depth: the nexus client dedups labels before
+        // POSTing, but the server must not 23505→409 when a raw client sends
+        // two specs with the same label. The ON CONFLICT DO NOTHING belt skips
+        // the second insert and reuses the first topic's id, keeping topic_ids
+        // aligned with specs order; assignments union onto the shared topic.
+        final String col = "docs__disc_duplabel__bge-base-en-v15-768__v1";
+        var specs = List.of(
+            m("label", "dup-topic", "doc_count", 1, "terms", "[\"t\"]",
+              "assigned_by", "hdbscan", "doc_ids", List.of("dup-doc-1")),
+            m("label", "dup-topic", "doc_count", 1, "terms", "[\"u\"]",
+              "assigned_by", "hdbscan", "doc_ids", List.of("dup-doc-2")));
+
+        List<Long> ids = repo.persistDiscoveredTopics(TENANT_A, col, specs);
+
+        assertThat(ids).hasSize(2);
+        assertThat(ids.get(0)).isEqualTo(ids.get(1));
+        var topics = repo.getAllTopics(TENANT_A, col);
+        assertThat(topics).hasSize(1);
+        // First spec wins the row — the losing spec's terms are deliberately
+        // dropped (documented behavior, matches the client-side dedup).
+        assertThat(topics.get(0).get("terms")).isEqualTo("[\"t\"]");
+        assertThat(repo.getTopicDocIds(TENANT_A, ids.get(0), 0))
+            .containsExactlyInAnyOrder("dup-doc-1", "dup-doc-2");
+    }
+
+    @Test @Order(317)
+    void persistRebuildTopics_inBatchDuplicateLabelReusesTopicId() {
+        // nexus-n2ls1 critique M2: rebuild inserts root topics behind the same
+        // taxonomy-004 partial unique index; a raw client sending duplicate
+        // labels in one rebuild plan must merge (first wins, doc_ids union),
+        // not 23505 → 409.
+        final String col = "docs__rb_duplabel__bge-base-en-v15-768__v1";
+        var specs = List.of(
+            m("label", "rb-dup", "doc_count", 1, "terms", "[\"a\"]",
+              "review_status", "pending", "assigned_by", "hdbscan",
+              "doc_ids", List.of("rb-dup-doc-1")),
+            m("label", "rb-dup", "doc_count", 1, "terms", "[\"b\"]",
+              "review_status", "pending", "assigned_by", "hdbscan",
+              "doc_ids", List.of("rb-dup-doc-2")));
+
+        List<Long> ids = repo.persistRebuildTopics(TENANT_A, col, specs, Map.of());
+
+        assertThat(ids).hasSize(2);
+        assertThat(ids.get(0)).isEqualTo(ids.get(1));
+        var topics = repo.getAllTopics(TENANT_A, col);
+        assertThat(topics).hasSize(1);
+        assertThat(topics.get(0).get("terms")).isEqualTo("[\"a\"]");
+        assertThat(repo.getTopicDocIds(TENANT_A, ids.get(0), 0))
+            .containsExactlyInAnyOrder("rb-dup-doc-1", "rb-dup-doc-2");
+    }
+
     @Test @Order(32)
     void persistDiscoveredTopics_existingTopicsGuardReturnsNoOp() {
         // COL_DISC already holds the 2 topics from Order(31); add 1 pre-existing here = 3.
