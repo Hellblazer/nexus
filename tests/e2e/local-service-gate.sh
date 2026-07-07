@@ -227,8 +227,11 @@ set -e
 # carries a small allowance below the observed 446 for platform variation;
 # BUDGET a small allowance above the observed 31. New legitimately-
 # conditional tests must bump these consciously, in the same change.
-FLOOR=440
-BUDGET=40
+# NX_GATE_FLOOR / NX_GATE_BUDGET: env overrides so CI (different platform,
+# CA-3 bundle present => different counts) can pin its own numbers without
+# editing this script.
+FLOOR="${NX_GATE_FLOOR:-440}"
+BUDGET="${NX_GATE_BUDGET:-40}"
 
 SUMMARY_LINE="$(select_summary_line "$SCRATCH/pytest.out")"
 PASSED_COUNT="$(parse_summary_count passed "$SUMMARY_LINE")"
