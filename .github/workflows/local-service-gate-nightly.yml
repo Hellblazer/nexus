@@ -1,0 +1,162 @@
+name: Local-service functional gate (nightly)
+
+# nexus-edwlp follow-on (2026-07-07): the hermetic local-service functional
+# gate (tests/e2e/local-service-gate.sh) on a nightly cadence. The gate
+# self-provisions a throwaway PG + Java service and drives the whole
+# `-m "integration and not lived_in"` family (~450 tests) with a vacuity
+# guard, so a silent coverage collapse (the 74-vs-442 class) or a real
+# integration regression surfaces within a day instead of at release time.
+#
+# CI-cost discipline: NIGHTLY only (never per-push — the family takes
+# ~15 min end to end and its inputs change many times a day), ubuntu only,
+# every deterministic artifact cached (PG bundle, ONNX models, Maven repo,
+# uv wheels). One run per day + manual dispatch.
+#
+# SECRETS REQUIRED (repo settings): VOYAGE_API_KEY, CHROMA_API_KEY,
+# CHROMA_TENANT, CHROMA_DATABASE — same four as .env.example. The gate is
+# infra-hermetic but NOT credential-independent: the voyage/CCE subset
+# hard-fails (by design, fail-loud) without a real VOYAGE_API_KEY. The
+# CHROMA_* trio drives cloud-mode detection plus one idempotent
+# ensure-databases probe against the real ChromaCloud tenant.
+#
+# Guard bounds: the script's built-in FLOOR/BUDGET were pinned on macOS
+# (446 passed / 31 skipped). This runner differs (CA-3 bundle present
+# unlocks ~24 more tests; linux/macOS platform-conditional tests flip),
+# so the env overrides below pin CI's own bounds. Tighten them from the
+# observed counts once a few nightly runs establish the linux baseline.
+
+on:
+  schedule:
+    - cron: "17 9 * * *"   # 09:17 UTC daily (~2:17am PT), off the release-hour paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: local-service-gate-nightly
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: local-service gate (hermetic, throwaway PG + service)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Pinned for determinism — MUST match ci.yml's CA-3 job so the cache
+      # key resolves the bundle pg-bundle-cache-seed.yml seeds on main.
+      PG_VERSION: "17.5"
+      PGVECTOR_VERSION: "v0.8.2"
+      MANYLINUX_IMAGE: "quay.io/pypa/manylinux_2_28_x86_64"
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+        with:
+          # Scheduled workflows execute from the DEFAULT branch (main), but the
+          # tree worth gating nightly is develop — the integration branch where
+          # regressions land daily (main only moves at releases, where the
+          # release checklist runs this gate by hand anyway). Manual dispatch
+          # also gets develop; dispatch from a feature ref if you need a
+          # different tree.
+          ref: develop
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Cache uv wheel cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        with:
+          path: ${{ runner.temp }}/setup-uv-cache
+          key: uv-${{ runner.os }}-3.12-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-3.12-
+
+      - name: Cache ChromaDB ONNX model
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        with:
+          path: ~/.cache/chroma
+          key: chromadb-onnx-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            chromadb-onnx-${{ runner.os }}-
+
+      - name: Cache Maven local repo (dev-jar build)
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        with:
+          path: ~/.m2/repository
+          key: maven-${{ runner.os }}-${{ hashFiles('service/pom.xml') }}
+          restore-keys: |
+            maven-${{ runner.os }}-
+
+      - name: Install ripgrep
+        # test_doctor_runs_and_reports asserts rg presence.
+        run: sudo apt-get install -y ripgrep
+
+      - name: Install project + dev deps
+        run: uv sync --group dev
+
+      - name: Restore compiled PG bundle cache
+        # Same key as ci.yml's CA-3 job / pg-bundle-cache-seed.yml (main-seeded
+        # caches are restorable from every branch). The bundle provides
+        # PG17 + pgvector for the throwaway cluster AND unlocks the CA-3
+        # bundle test family inside the gate run.
+        id: pg-bundle-cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        with:
+          path: bundle
+          key: pg-bundle-linux-amd64-ubuntu-latest-pg${{ env.PG_VERSION }}-pgvector${{ env.PGVECTOR_VERSION }}-img-${{ env.MANYLINUX_IMAGE }}-${{ hashFiles('scripts/build_pg_bundle.sh') }}
+
+      - name: Build PG + pgvector bundle from source (cache miss only)
+        if: steps.pg-bundle-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          bundle="$GITHUB_WORKSPACE/bundle"
+          mkdir -p "$bundle"
+          docker run --rm \
+            -e PG_VERSION -e PGVECTOR_VERSION -e BUNDLE_PREFIX="$bundle" \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+            "$MANYLINUX_IMAGE" /bin/bash -c '
+              set -eux
+              bash "'"$GITHUB_WORKSPACE"'/scripts/build_pg_bundle.sh"
+            '
+
+      - name: Point provisioning + CA-3 tests at the bundle
+        run: |
+          set -euo pipefail
+          if [ ! -x "$GITHUB_WORKSPACE/bundle/bin/initdb" ]; then
+            echo "::error::bundle/bin/initdb missing after cache-restore/build"
+            exit 1
+          fi
+          # NEXUS_PG_BIN: `nx init --service` provisions the throwaway cluster
+          # from the bundle (pgvector included — the runner's system PG lacks it).
+          echo "NEXUS_PG_BIN=$GITHUB_WORKSPACE/bundle/bin" >> "$GITHUB_ENV"
+          # The bundle's binaries carry no RPATH (nexus-iytd3); linux honors
+          # LD_LIBRARY_PATH, so point it at the bundle's libs.
+          echo "LD_LIBRARY_PATH=$GITHUB_WORKSPACE/bundle/lib" >> "$GITHUB_ENV"
+          # NEXUS_CA3_BUNDLE: unlocks the CA-3 bundle test family in the run.
+          echo "NEXUS_CA3_BUNDLE=$GITHUB_WORKSPACE/bundle" >> "$GITHUB_ENV"
+
+      - name: Prime bge-768 ONNX (cache or self-hosted asset)
+        # The dev jar boots its local ONNX embedder (RDR-160 bge-768) at
+        # startup; without the model the service never binds its port.
+        uses: ./.github/actions/prime-bge-onnx
+
+      - name: Run the local-service functional gate
+        env:
+          VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+          CHROMA_API_KEY: ${{ secrets.CHROMA_API_KEY }}
+          CHROMA_TENANT: ${{ secrets.CHROMA_TENANT }}
+          CHROMA_DATABASE: ${{ secrets.CHROMA_DATABASE }}
+          # Linux + CA-3-bundle counts differ from the script's macOS-pinned
+          # defaults; start from the same bounds and tighten once a few
+          # nightlies establish the linux baseline.
+          NX_GATE_FLOOR: "440"
+          NX_GATE_BUDGET: "40"
+        run: |
+          set -euo pipefail
+          if [ -z "$VOYAGE_API_KEY" ]; then
+            echo "::error::VOYAGE_API_KEY secret is not configured — the gate would fail on every voyage/CCE test. Add the four .env secrets to the repo."
+            exit 1
+          fi
+          tests/e2e/local-service-gate.sh
