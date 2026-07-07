@@ -2,7 +2,7 @@
 """Integration test for HttpCatalogClient against the real Java catalog service.
 
 Requires (darwin/aarch64 with JDK/GraalVM):
-  - /opt/homebrew/opt/postgresql@16/bin/{initdb,pg_ctl,psql,createdb} present
+  - PostgreSQL binaries discoverable (NEXUS_PG_BIN / Homebrew / system dirs / PATH)
   - service/target/nexus-service-1.0-SNAPSHOT.jar built
       (cd service && mvn package -DskipTests)
   - Java on PATH (or JAVA_HOME env set)
@@ -34,7 +34,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from tests.db._service_fixture import SERVICE_ROLES_SQL, create_tenant_token
+from tests.db._service_fixture import SERVICE_ROLES_SQL, create_tenant_token, pg_bin_dir
 
 import pytest
 
@@ -42,7 +42,7 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _JAR       = _REPO_ROOT / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"
-_PG_BIN    = Path("/opt/homebrew/opt/postgresql@16/bin")
+_PG_BIN    = pg_bin_dir()
 
 _INITDB   = _PG_BIN / "initdb"
 _PG_CTL   = _PG_BIN / "pg_ctl"
@@ -70,8 +70,8 @@ pytestmark = [
     pytest.mark.skipif(
         not _ALL_PREREQS,
         reason=(
-            "skipped: missing jar or pg16 binaries "
-            f"(jar={_JAR.exists()}, pg16={_PG_CTL.exists()}, java={_JAVA})"
+            "skipped: missing jar or PG binaries "
+            f"(jar={_JAR.exists()}, pg={_PG_CTL.exists()}, java={_JAVA})"
         ),
     ),
 ]

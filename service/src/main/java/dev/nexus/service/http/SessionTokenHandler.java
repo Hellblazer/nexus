@@ -95,7 +95,26 @@ public final class SessionTokenHandler implements HttpHandler {
     private void handleStart(HttpExchange ex, String tenant) throws IOException {
         Map<String, Object> body = readBody(ex);
         String sessionId = requireString(body, "session_id");
-        long ttl = optLong(body, "ttl_seconds", DEFAULT_TTL_SECONDS);
+        // nexus-t8abd (Gate-B critique): a DATA-scoped bearer is designed to be
+        // "one tenant, one TTL window" (<= the data-token ceiling), but this
+        // endpoint's 24h default + uncapped ttl_seconds would let it mint a
+        // session-tenant binding that outlives that story. For data-scoped
+        // callers only: default the session TTL to the data ceiling and REJECT
+        // an explicit request above it (400, never a silent clamp). Ordinary
+        // tenant/root bearers keep the exact prior behavior. The broader
+        // session-TTL policy question is relayed to conexus on the bus; this is
+        // the conservative default until they confirm.
+        boolean dataScoped = TokenStore.SCOPE_DATA.equals(RequestContext.scope());
+        long dataCeiling = dataScoped ? DataTokenHandler.ttlCeilingFromEnv() : 0L;
+        long ttl = optLong(body, "ttl_seconds", dataScoped
+            ? Math.min(DEFAULT_TTL_SECONDS, dataCeiling)
+            : DEFAULT_TTL_SECONDS);
+        if (dataScoped && ttl > dataCeiling) {
+            HttpUtil.send(ex, 400, json(Map.of("error",
+                "ttl_seconds " + ttl + " exceeds the data-token ceiling of " + dataCeiling
+                + " — a data-scoped bearer may not mint a session that outlives its own window")));
+            return;
+        }
         TokenStore.IssuedToken issued = store.issueSessionToken(tenant, sessionId, ttl);
         HttpUtil.send(ex, 200, json(new LinkedHashMap<>(Map.of(
             "session_token", issued.rawToken(),

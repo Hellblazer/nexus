@@ -142,7 +142,7 @@ class TaxonomyHandlerAssignFkTest {
     // ── helpers ──────────────────────────────────────────────────────────────
 
     private void handleWithTenant(CapturingExchange ex) throws Exception {
-        RequestContext.set(new RequestContext.Principal(TENANT, null, false, false));
+        RequestContext.set(new RequestContext.Principal(TENANT, null, false, false, "tenant", "test-credential-hash"));
         try {
             handler.handle(ex);
         } finally {

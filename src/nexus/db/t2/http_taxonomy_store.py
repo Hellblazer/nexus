@@ -703,11 +703,46 @@ class HttpTaxonomyStore(RawHandleGuardMixin):
         the generated topic_ids aligned to ``specs`` order (``[]`` when the guard
         fires or specs is empty). The per-spec ``centroid`` is ignored here — the
         orchestrator upserts centroids through the port from the returned ids.
+
+        A UNIQUE-violation 409 is treated as a benign skip (``[]``), same as
+        the guard firing: pre-fix engines (< the nexus-n2ls1 advisory-lock
+        cut) map a concurrent guard-then-insert race to SQLSTATE 23505 → HTTP
+        409 — the topics were persisted by the concurrent winner, so there is
+        nothing to retry and nothing was lost. The skip is SQLSTATE-scoped
+        (critique HIGH): the engine's typed error ladder maps EVERY class-23
+        integrity violation to 409 with the sqlstate in the body, and a
+        23502/23503/23514 here would be a real defect that must propagate. A
+        409 body WITHOUT a readable sqlstate is treated as the race (older
+        engines predating the typed ladder — the only known 409 producer on
+        this endpoint there). Fixed engines never return 409 here.
+        Deliberately scoped to THIS endpoint only: rebuild/split are
+        REPLACE-semantics, where a conflict would mean a genuinely lost
+        write — those must keep propagating.
         """
-        r = self._post(
-            "/topics/persist_discovered",
-            {"collection": collection_name, "specs": specs},
-        )
+        try:
+            r = self._post(
+                "/topics/persist_discovered",
+                {"collection": collection_name, "specs": specs},
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 409:
+                try:
+                    sqlstate = exc.response.json().get("sqlstate")
+                except Exception:  # noqa: BLE001 — body may be empty/non-JSON on older engines; absent sqlstate handled below
+                    sqlstate = None
+                if sqlstate in (None, "23505"):
+                    _log.info(
+                        "persist_discovered_conflict_benign_skip",
+                        collection=collection_name,
+                        sqlstate=sqlstate,
+                        hint=(
+                            "a concurrent discovery already persisted this "
+                            "collection's topics (pre-n2ls1 engine race shape); "
+                            "nothing to retry"
+                        ),
+                    )
+                    return []
+            raise
         return r.get("topic_ids", [])
 
     def persist_rebuild_topics(

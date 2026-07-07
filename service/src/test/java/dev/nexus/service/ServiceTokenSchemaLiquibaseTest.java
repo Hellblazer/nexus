@@ -58,7 +58,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ServiceTokenSchemaLiquibaseTest {
 
     private static final Set<String> SERVICE_TOKEN_COLUMNS = Set.of(
-        "token_hash", "tenant_id", "label", "created_at", "expires_at", "revoked_at"
+        "token_hash", "tenant_id", "label", "created_at", "expires_at", "revoked_at",
+        "scope"
     );
 
     private static final Set<String> SESSION_TOKEN_COLUMNS = Set.of(
@@ -267,6 +268,72 @@ class ServiceTokenSchemaLiquibaseTest {
             su.createStatement().execute(
                 "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) VALUES "
                 + "('ord-1', 'tenant-a', 'worker'), ('ord-2', 'tenant-a', 'worker')");
+        }
+    }
+
+    // ── Test 10: scope column CHECK constraint (nexus-868dq) ─────────────────
+
+    @Test
+    void serviceTokens_scopeCheckConstraint() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute("TRUNCATE nexus.service_tokens");
+            // Every member of the scope vocabulary inserts fine.
+            int i = 0;
+            for (String scope : new String[] {"root", "tenant", "mint", "data"}) {
+                su.createStatement().execute(
+                    "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label, scope) "
+                    + "VALUES ('scope-hash-" + (i++) + "', 'tenant-a', 'lbl', '" + scope + "')");
+            }
+            // Anything outside the vocabulary violates the CHECK.
+            boolean rejected = false;
+            try {
+                su.createStatement().execute(
+                    "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label, scope) "
+                    + "VALUES ('scope-hash-bogus', 'tenant-a', 'lbl', 'bogus')");
+            } catch (java.sql.SQLException expected) {
+                rejected = true;
+            }
+            assertThat(rejected)
+                .as("scope outside {root,tenant,mint,data} must violate the CHECK constraint")
+                .isTrue();
+        }
+    }
+
+    // ── Test 11: scope defaults to 'tenant' (pre-scope INSERTs unchanged) ────
+
+    @Test
+    void serviceTokens_scopeDefaultsToTenant() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute("TRUNCATE nexus.service_tokens");
+            su.createStatement().execute(
+                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) "
+                + "VALUES ('default-scope-hash', 'tenant-a', 'lbl')");
+            ResultSet rs = su.createStatement().executeQuery(
+                "SELECT scope FROM nexus.service_tokens WHERE token_hash = 'default-scope-hash'");
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getString("scope"))
+                .as("a scope-less INSERT (every pre-868dq caller) must default to 'tenant'")
+                .isEqualTo("tenant");
+        }
+    }
+
+    // ── Test 12: changelog idempotent — a second full update() is a no-op ────
+
+    @Test
+    void changelog_idempotentSecondRun() throws Exception {
+        // Scope honesty: Liquibase skips executed changesets, so this proves the
+        // CHAIN re-run is safe (executed-changeset bookkeeping + the runAlways
+        // grants changeset both tolerate a second pass — the service-restart
+        // path). It does NOT re-execute 003's raw SQL; per-statement idempotence
+        // is not claimed.
+        try (Connection su = pg.createConnection("")) {
+            Database db = DatabaseFactory.getInstance()
+                .findCorrectDatabaseImplementation(new JdbcConnection(su));
+            new Liquibase("db/changelog/db.changelog-master.xml",
+                new ClassLoaderResourceAccessor(), db)
+                .update(new Contexts());
         }
     }
 

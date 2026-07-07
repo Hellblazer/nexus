@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-868dq — scoped service tokens (conexus RDR-005 A1).
+
+    Adds a server-assigned `scope` column to nexus.service_tokens:
+
+      root   — the single operator credential (bootstrap). Cross-tenant admin.
+      tenant — ordinary per-tenant bearer (the pre-868dq default; every
+               existing row and every scope-less INSERT lands here).
+      mint   — the conexus-edge credential: may ONLY call
+               POST /v1/data-tokens/mint; rejected on every admin route and
+               carries no data-path tenant authority.
+      data   — a short-TTL per-tenant data token minted by a `mint` credential;
+               full data-path authority for its tenant, rejected on the admin
+               surface and on the mint endpoint itself.
+
+    WHY A COLUMN AND NOT THE LABEL MARKER (the nexus-e4130 root idiom): labels
+    are CLIENT-SUPPLIED on /v1/service-tokens/issue — deriving privilege from
+    them would let any issue caller self-escalate by crafting a label. Scope is
+    assigned server-side by the issuing endpoint only. The root row keeps its
+    label marker for the single-root unique index; its PRIVILEGE now reads from
+    scope (backfilled below; ensureBootstrapToken stamps scope='root' at seed).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="service-tokens-003-1" author="nexus-868dq">
+        <comment>
+            Add server-assigned scope to service_tokens (root|tenant|mint|data),
+            default 'tenant' so every pre-868dq row and scope-less INSERT keeps
+            its exact prior authority; backfill the single root-labelled row.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.service_tokens ADD COLUMN scope TEXT NOT NULL DEFAULT 'tenant';
+ALTER TABLE nexus.service_tokens ADD CONSTRAINT chk_service_tokens_scope
+    CHECK (scope IN ('root','tenant','mint','data'));
+UPDATE nexus.service_tokens SET scope = 'root' WHERE label = 'bootstrap-legacy-token';
+        </sql>
+        <rollback>
+ALTER TABLE nexus.service_tokens DROP CONSTRAINT IF EXISTS chk_service_tokens_scope;
+ALTER TABLE nexus.service_tokens DROP COLUMN IF EXISTS scope;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

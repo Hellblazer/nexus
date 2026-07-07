@@ -88,9 +88,11 @@ def _warn_skip_existing_deprecated() -> None:
 #
 #   1. ``NX_SERVICE_URL`` / ``NX_SERVICE_TOKEN`` env — each half overrides
 #      independently (operator/test override; read fresh on every call).
-#   2. The ServiceRegistry lease (cached; invalidated on 401 / connection
+#   2. ``NX_SERVICE_HOST`` / ``NX_SERVICE_PORT`` env halves (nexus-edwlp:
+#      T2 parity via service_endpoint.env_host_port_url — always http).
+#   3. The ServiceRegistry lease (cached; invalidated on 401 / connection
 #      refused so clients ride through supervisor auto-restarts).
-#   3. FAIL LOUD. The legacy hardcoded localhost default is retired — a
+#   4. FAIL LOUD. The legacy hardcoded localhost default is retired — a
 #      silent wrong-port fallback is a correctness hazard.
 
 _endpoint_lock = threading.Lock()
@@ -128,6 +130,16 @@ def _resolve_endpoint() -> tuple[str, str]:
     env_url = (get_credential("service_url") or "").strip().rstrip("/") or None
     env_token = (get_credential("service_token") or "").strip() or None
     url, token = env_url, env_token
+    if url is None:
+        # nexus-edwlp: honor the NX_SERVICE_HOST/PORT env halves (T2 parity —
+        # resolve_service_config has always read them; the vector path
+        # previously skipped straight to the lease and failed loud on a box
+        # with only host/port/token exported). Env wins over the lease, the
+        # documented T2 trade-off; the 401/refused single retry corrects a
+        # stale env against a restarted supervisor.
+        from nexus.db.service_endpoint import env_host_port_url  # noqa: PLC0415 — deferred to avoid circular import
+
+        url = env_host_port_url()
     if url is None or token is None:
         with _endpoint_lock:
             if _lease_cache is None:

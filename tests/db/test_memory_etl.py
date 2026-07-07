@@ -36,7 +36,7 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
-from tests.db._service_fixture import SERVICE_ROLES_SQL
+from tests.db._service_fixture import SERVICE_ROLES_SQL, pg_bin_dir
 
 # ── Unit tests: row transform logic ──────────────────────────────────────────
 
@@ -374,7 +374,7 @@ class TestMigrateMemoryMocked:
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _JAR       = _REPO_ROOT / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"
-_PG_BIN    = Path("/opt/homebrew/opt/postgresql@16/bin")
+_PG_BIN    = pg_bin_dir()
 _INITDB    = _PG_BIN / "initdb"
 _PG_CTL    = _PG_BIN / "pg_ctl"
 _PSQL      = _PG_BIN / "psql"
@@ -395,8 +395,8 @@ _ALL_PREREQS = (
 _SKIP_INTEGRATION = pytest.mark.skipif(
     not _ALL_PREREQS,
     reason=(
-        "skipped: missing jar or pg16 binaries "
-        f"(jar={_JAR.exists()}, pg16={_PG_CTL.exists()}, java={_JAVA})"
+        "skipped: missing jar or PG binaries "
+        f"(jar={_JAR.exists()}, pg={_PG_CTL.exists()}, java={_JAVA})"
     ),
 )
 
@@ -466,7 +466,7 @@ def _make_source_db(rows: list[dict]) -> Path:
 def etl_pg_instance():
     """Hermetic Postgres 16 instance for ETL integration tests."""
     if not _ALL_PREREQS:
-        pytest.skip("missing jar or pg16 binaries")
+        pytest.skip("missing jar or PG binaries")
     pgdata = tempfile.mkdtemp(prefix="nexus_etl_inttest_pg_")
     pg_port = _free_port()
     pglog = os.path.join(pgdata, "pg.log")
@@ -577,10 +577,16 @@ def etl_store(etl_service):
     """HttpMemoryStore connected to the real ETL test service."""
     from nexus.db.t2.http_memory_store import HttpMemoryStore
     base_url, token, _ = etl_service
+    _saved_token = os.environ.get("NX_SERVICE_TOKEN")
     os.environ["NX_SERVICE_TOKEN"] = token
     s = HttpMemoryStore(base_url=base_url, tenant="default")
     yield s
     s.close()
+    # Restore: a leaked module token poisons later env-resolving modules (nexus-edwlp).
+    if _saved_token is None:
+        os.environ.pop("NX_SERVICE_TOKEN", None)
+    else:
+        os.environ["NX_SERVICE_TOKEN"] = _saved_token
 
 
 @pytest.mark.integration

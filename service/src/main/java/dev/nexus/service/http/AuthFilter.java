@@ -99,14 +99,35 @@ public final class AuthFilter extends Filter {
         // 2. Resolve the token's tenant_id SERVER-SIDE (Decision 1). The resolution also
         // carries the root/operator flag (nexus-e4130) so the admin surface can scope
         // cross-tenant operations to the root token without a second lookup.
+        String credentialHash = TokenHashing.sha256Hex(rawToken);
         Optional<dev.nexus.service.db.TokenCache.Resolved> resolved =
-            tokenCache.resolve(TokenHashing.sha256Hex(rawToken));
+            tokenCache.resolve(credentialHash);
         if (resolved.isEmpty()) {
             reject(exchange, "unresolved_token");  // missing / revoked / expired
             return;
         }
         String tokenTenant = resolved.get().tenantId();
         boolean isOperator = resolved.get().isRoot();
+        String scope = resolved.get().scope();
+
+        // nexus-868dq (choke point, mirrors the nexus-45ykb pattern): a MINT-scoped
+        // credential exists to call POST /v1/data-tokens/mint and nothing else — it
+        // carries no data-path tenant authority and is rejected on every admin route
+        // (RDR-005 pin: "rejected on ALL admin routes"). Enforced here so every
+        // handler behind this filter is covered without per-handler opt-in; the
+        // admin handler's own scope guard is defense-in-depth layer 2. Exact
+        // segment match ("/v1/data-tokens" or "/v1/data-tokens/..."), not a raw
+        // prefix — "/v1/data-tokens-evil" must not slip through.
+        if (dev.nexus.service.db.TokenStore.SCOPE_MINT.equals(scope)) {
+            String path = exchange.getRequestURI().getPath();
+            boolean mintSurface = path.equals("/v1/data-tokens")
+                || path.startsWith("/v1/data-tokens/");
+            if (!mintSurface) {
+                log.debug("event=auth_rejected path={} reason=mint_scope_data_path_forbidden", path);
+                sendError(exchange, 403, "forbidden");
+                return;
+            }
+        }
 
         // nexus-45ykb (defense in depth): deny any token that resolves to the wildcard
         // sentinel tenant. '*' is a reserved name that token minting, `nx tenant create`,
@@ -160,7 +181,8 @@ public final class AuthFilter extends Filter {
         }
 
         // 4. Publish the principal thread-confined; clear after dispatch.
-        RequestContext.set(new RequestContext.Principal(tenant, sessionId, mintedSession, isOperator));
+        RequestContext.set(new RequestContext.Principal(
+            tenant, sessionId, mintedSession, isOperator, scope, credentialHash));
         try {
             chain.doFilter(exchange);
         } finally {

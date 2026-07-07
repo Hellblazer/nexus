@@ -291,7 +291,9 @@ def test_voyage_code3_index_and_query():
 
     voyage_key = get_credential("voyage_api_key")
     uid = uuid.uuid4().hex[:8]
-    collection = f"code__int-crossmodel-{uid}"
+    # RDR-103 strict naming: the direct upsert API (unlike the CLI store-put
+    # path) does no name synthesis — the service 400s non-conformant names.
+    collection = f"code__int-crossmodel-{uid}__voyage-code-3__v1"
     assert index_model_for_collection(collection) == "voyage-code-3"
 
     code = (
@@ -305,10 +307,14 @@ def test_voyage_code3_index_and_query():
     voyage = voyageai.Client(api_key=voyage_key)
     embeddings = voyage.embed(texts=[code], model="voyage-code-3", input_type="document").embeddings
 
+    # RDR-108: chunk ids are content hashes — the service CHECKs length == 32
+    # (sqlstate 23514 on anything else).
+    from nexus.chunk_identity import chunk_id
+
     db = make_t3()
     try:
         db.upsert_chunks_with_embeddings(
-            collection_name=collection, ids=[f"chunk-{uid}"], documents=[code],
+            collection_name=collection, ids=[chunk_id(code)], documents=[code],
             embeddings=embeddings,
             metadatas=[{"title": f"auth_{uid}.py:1-6", "tags": "py", "category": "code",
                         "embedding_model": "voyage-code-3", "expires_at": "", "ttl_days": 0}],
@@ -372,7 +378,9 @@ def test_t3_put_embedding_model_in_search_metadata():
     from nexus.db import make_t3
 
     uid = uuid.uuid4().hex[:8]
-    collection = f"knowledge__int-prov-{uid}"
+    # RDR-103 strict naming: db.put does no name synthesis (the CLI path does);
+    # the service 400s non-conformant names.
+    collection = f"knowledge__int-prov-{uid}__voyage-context-3__v1"
     db = make_t3()
     try:
         doc_id = db.put(collection=collection,

@@ -365,17 +365,89 @@ class TestStalenessCache:
         col.get.assert_not_called()
 
     def test_build_falls_back_to_paginated_when_get_all_metadata_fails(self) -> None:
-        """A get_all_metadata failure (e.g. the server's row-count cap, or a
-        transient error) must fall back to the empty-cache/per-file-Chroma
-        path -- same tolerant contract as a paginated-get failure -- NOT
-        propagate and abort indexing."""
+        """nexus-441p5: a fast-path failure (a 404 from a pre-v0.1.30 engine,
+        the server's row-count cap on a large collection, a transient error)
+        must fall back to the PAGINATED col.get() sweep — the contract the
+        function's own docstring always promised. Pre-fix this arm returned an
+        EMPTY cache, silently degrading every subsequent index run to a full
+        re-process (observed live 2026-07-07: wheel v6.3.6 calling
+        get-all-metadata against an install-era engine → 404 → staleness
+        cache 0 docs → incremental indexing dark)."""
+        from nexus.db.http_vector_client import VectorServiceError
+
+        col = MagicMock(spec=["get", "get_all_metadata", "name"])
+        col.name = "code__x__voyage-code-3__v1"
+        col.get_all_metadata.side_effect = VectorServiceError(
+            "POST /v1/vectors/get-all-metadata → HTTP 404: not found", code=404
+        )
+        col.get.return_value = {
+            "ids": ["c1"],
+            "metadatas": [{
+                "doc_id": "1.1.1",
+                "content_hash": "hash-a",
+                "embedding_model": "voyage-code-3",
+            }],
+        }
+
+        cache = build_staleness_cache(col)
+
+        assert cache.by_doc_id == {"1.1.1": ("hash-a", "voyage-code-3")}
+        col.get_all_metadata.assert_called_once()
+        col.get.assert_called()
+
+    def test_build_returns_empty_cache_when_both_paths_fail(self) -> None:
+        """nexus-441p5: only when the fast path AND the paginated sweep both
+        fail does the build degrade to the empty cache (per-file fallback),
+        and it must not propagate — failing to populate the cache never
+        blocks indexing."""
         col = MagicMock(spec=["get", "get_all_metadata", "name"])
         col.get_all_metadata.side_effect = RuntimeError("422 too many rows")
+        col.get.side_effect = RuntimeError("chroma offline")
 
         cache = build_staleness_cache(col)
 
         assert cache.by_doc_id == {}
         assert cache.by_source_path == {}
+
+    def test_build_warns_when_fallback_silently_empty_after_fast_path_failure(
+        self, caplog
+    ) -> None:
+        """nexus-441p5 critique (HIGH): the REAL service-mode fallback client
+        (HttpVectorClient.get) swallows VectorServiceError to an EMPTY page —
+        it never raises to _paginated_get. So 'both paths fail' can manifest
+        as fast-path-raises + fallback-returns-empty, which pre-fix produced
+        an empty cache with ZERO signal at this layer (indistinguishable from
+        a genuinely empty collection). Lock in the loud warning for that
+        suspicious shape."""
+        import logging
+
+        import structlog
+
+        from nexus.db.http_vector_client import VectorServiceError
+
+        col = MagicMock(spec=["get", "get_all_metadata", "name"])
+        col.name = "code__x__voyage-code-3__v1"
+        col.get_all_metadata.side_effect = VectorServiceError(
+            "POST /v1/vectors/get-all-metadata → HTTP 404: not found", code=404
+        )
+        # Mimic HttpVectorClient.get()'s swallow-to-empty contract exactly.
+        col.get.return_value = {"ids": [], "documents": [], "metadatas": []}
+
+        structlog.configure(
+            processors=[structlog.stdlib.render_to_log_kwargs],
+            wrapper_class=structlog.stdlib.BoundLogger,
+            logger_factory=structlog.stdlib.LoggerFactory(),
+        )
+        with caplog.at_level(logging.WARNING, logger="nexus.indexer_utils"):
+            cache = build_staleness_cache(col)
+
+        assert cache.by_doc_id == {}
+        assert cache.by_source_path == {}
+        events = [r.msg.get("event") if isinstance(r.msg, dict) else r.getMessage() for r in caplog.records]
+        assert any(
+            "build_staleness_cache_fallback_empty_after_fast_path_failure" in str(e)
+            for e in events
+        ), f"expected the suspicious-empty warning, got events: {events}"
 
     def test_build_logs_warning_on_paginated_get_failure(self, caplog) -> None:
         """nexus-lrhg (RDR-108 audit finding 6): pre-fix the bare

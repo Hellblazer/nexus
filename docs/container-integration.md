@@ -260,6 +260,14 @@ CLI from the shell.
 | `NX_SERVICE_TOKEN` | bearer token for the nexus-service (required) | discovery lease, or `~/.config/nexus/pg_credentials` |
 | `NX_T3_ADDR` | *(legacy)* TCP host:port for the retired ChromaDB T3 daemon | discovery file |
 | `NX_PYTEST_DAEMON_MODE` | (tests only) skip the conftest direct-mode pin | unset |
+| `NX_DATA_TOKEN_TTL_CEILING_SECONDS` | max `ttl_seconds` a `POST /v1/data-tokens/mint` caller may request (over-ceiling = HTTP 400, never clamped); also bounds a data-scoped bearer's session-mint TTL | `3600` |
+| `NX_MINT_RATE_TENANT_BURST` | data-token mint rate limit: per-(mint-credential, tenant) bucket capacity | `5` |
+| `NX_MINT_RATE_TENANT_SUSTAINED_PER_MINUTE` | data-token mint rate limit: per-(mint-credential, tenant) sustained refill | `1` |
+| `NX_MINT_RATE_GLOBAL_SUSTAINED_PER_MINUTE` | data-token mint rate limit: per-mint-credential GLOBAL bound (the anti-tenant-sweep backstop) | `10` |
+
+The four `NX_DATA_TOKEN_*` / `NX_MINT_RATE_*` variables are read by the
+**engine service** process (nexus-868dq / nexus-x1h07, conexus RDR-005 pin ii:
+conexus retunes them without an engine release — re-tune trigger >~50 tenants).
 
 `NX_T2_ADDR` and `NX_T2_SOCK` are mutually exclusive — set one or
 the other. When both env vars are unset, the T2 client falls back

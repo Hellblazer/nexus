@@ -68,11 +68,14 @@ class TokenAdminHandlerTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             try (var ps = su.prepareStatement(
-                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label) VALUES (?, ?, ?) "
+                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label, scope) VALUES (?, ?, ?, ?) "
                 + "ON CONFLICT (token_hash) DO NOTHING")) {
                 ps.setString(1, TokenHashing.sha256Hex(BOOT));
                 ps.setString(2, TenantConstants.DEFAULT_TENANT);
                 ps.setString(3, dev.nexus.service.db.TokenStore.ROOT_TOKEN_LABEL);
+                // nexus-868dq: operator privilege reads from scope, not label — a raw
+                // seed must stamp it like ensureBootstrapToken does.
+                ps.setString(4, dev.nexus.service.db.TokenStore.SCOPE_ROOT);
                 ps.executeUpdate();
             }
         }
@@ -437,7 +440,111 @@ class TokenAdminHandlerTest {
         assertThat(status("/v1/service-tokens/rotate", "{\"tenant\":\"e4130-op-target\"}")).isEqualTo(200);
     }
 
+    // ── nexus-868dq: scoped issuance + cross-scope lockout ────────────────────
+
+    @Test
+    void issueScope_mint_isOperatorOnly() throws Exception {
+        // Operator issues a mint-scoped credential -> 200, row scope='mint'.
+        JsonNode r = postJson("/v1/service-tokens/issue",
+            "{\"tenant\":\"edge-868dq\",\"label\":\"edge-cred\",\"scope\":\"mint\"}");
+        assertThat(scopeOf(r.get("token_hash").asText())).isEqualTo("mint");
+
+        // A non-operator (ordinary tenant token) asking for scope=mint -> 403,
+        // even for its OWN tenant (mint issuance is privilege escalation).
+        String tokA = postJson("/v1/tenants/create", "{\"name\":\"scope-esc-a\"}").get("token").asText();
+        var resp = sendAs(tokA, "/v1/service-tokens/issue",
+            "{\"tenant\":\"scope-esc-a\",\"scope\":\"mint\"}");
+        assertThat(resp.statusCode())
+            .as("non-operator mint-scope issuance must be 403: %s", resp.body())
+            .isEqualTo(403);
+    }
+
+    @Test
+    void issueScope_defaultAndTenant_unchanged() throws Exception {
+        // No scope field -> the pre-868dq default.
+        JsonNode noScope = postJson("/v1/service-tokens/issue", "{\"tenant\":\"scope-default\"}");
+        assertThat(scopeOf(noScope.get("token_hash").asText())).isEqualTo("tenant");
+        // Explicit scope=tenant works for a non-operator on its own tenant.
+        String tokA = postJson("/v1/tenants/create", "{\"name\":\"scope-plain-a\"}").get("token").asText();
+        var resp = sendAs(tokA, "/v1/service-tokens/issue",
+            "{\"tenant\":\"scope-plain-a\",\"scope\":\"tenant\"}");
+        assertThat(resp.statusCode()).isEqualTo(200);
+    }
+
+    @Test
+    void issueScope_dataAndRoot_rejected400() throws Exception {
+        // data tokens are minted ONLY by /v1/data-tokens/mint; root is never issuable.
+        assertThat(status("/v1/service-tokens/issue",
+            "{\"tenant\":\"scope-bad\",\"scope\":\"data\"}")).isEqualTo(400);
+        assertThat(status("/v1/service-tokens/issue",
+            "{\"tenant\":\"scope-bad\",\"scope\":\"root\"}")).isEqualTo(400);
+        assertThat(status("/v1/service-tokens/issue",
+            "{\"tenant\":\"scope-bad\",\"scope\":\"bogus\"}")).isEqualTo(400);
+    }
+
+    @Test
+    void mintScopedBearer_rejectedOnEveryAdminRoute() throws Exception {
+        JsonNode r = postJson("/v1/service-tokens/issue",
+            "{\"tenant\":\"edge-lockout\",\"scope\":\"mint\"}");
+        String mintRaw = r.get("token").asText();
+        // RDR-005 pin: the mint credential is rejected on ALL admin routes
+        // (the AuthFilter choke point fires first; the handler guard is layer 2).
+        for (String route : new String[] {"/v1/tenants/create", "/v1/service-tokens/issue",
+                                          "/v1/service-tokens/rotate", "/v1/service-tokens/revoke",
+                                          "/v1/service-tokens/list"}) {
+            var resp = sendAs(mintRaw, route, "{}");
+            assertThat(resp.statusCode())
+                .as("mint-scoped bearer on %s must be 403: %s", route, resp.body())
+                .isEqualTo(403);
+        }
+    }
+
+    @Test
+    void dataScopedBearer_rejectedOnAdminSurface() throws Exception {
+        // Seed a data-scoped bearer directly (production mints these via
+        // /v1/data-tokens/mint). The AuthFilter does NOT path-restrict data scope
+        // (it has real data-path authority), so this 403 exercises the HANDLER's
+        // own guard — a leaked data token must not rotate/revoke its tenant's
+        // credentials (blast radius stays "one tenant's data, one TTL window").
+        String dataRaw = "raw-data-scope-admin-probe";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label, scope) "
+                + "VALUES ('" + TokenHashing.sha256Hex(dataRaw)
+                + "', 'edge-lockout', 'data-probe', 'data') ON CONFLICT (token_hash) DO NOTHING");
+        }
+        assertThat(whoami(dataRaw, null)).as("data token authenticates normally").isEqualTo(200);
+        for (String route : new String[] {"/v1/service-tokens/issue", "/v1/service-tokens/rotate",
+                                          "/v1/service-tokens/revoke", "/v1/service-tokens/list",
+                                          "/v1/tenants/create"}) {
+            var resp = sendAs(dataRaw, route, "{}");
+            assertThat(resp.statusCode())
+                .as("data-scoped bearer on %s must be 403: %s", route, resp.body())
+                .isEqualTo(403);
+        }
+    }
+
+    @Test
+    void list_carriesScopeColumn() throws Exception {
+        postJson("/v1/service-tokens/issue",
+            "{\"tenant\":\"scope-list-t\",\"label\":\"m\",\"scope\":\"mint\"}");
+        var resp = postJson("/v1/service-tokens/list", "{\"tenant\":\"scope-list-t\"}");
+        JsonNode rows = resp.get("tokens");
+        assertThat(rows).isNotEmpty();
+        assertThat(rows.get(0).get("scope").asText()).isEqualTo("mint");
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
+
+    private String scopeOf(String hash) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            ResultSet rs = su.createStatement().executeQuery(
+                "SELECT scope FROM nexus.service_tokens WHERE token_hash = '" + hash + "'");
+            assertThat(rs.next()).isTrue();
+            return rs.getString("scope");
+        }
+    }
 
     /** POST as an arbitrary bearer (no X-Nexus-Tenant: the token's bound tenant is authoritative). */
     private HttpResponse<String> sendAs(String bearer, String path, String body) throws Exception {

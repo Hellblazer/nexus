@@ -93,6 +93,21 @@ public final class TokenAdminHandler implements HttpHandler {
             HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}");
             return;
         }
+        // nexus-868dq: mint- and data-scoped bearers are rejected on the ENTIRE
+        // admin surface (RDR-005 pin). For mint the AuthFilter choke point fires
+        // first; this handler-level guard is defense-in-depth layer 2 AND the
+        // primary enforcement for data tokens (which legitimately pass the filter
+        // for data routes but must never administer credentials — a leaked data
+        // token stays "one tenant's data, one TTL window").
+        String callerScope = RequestContext.scope();
+        if (TokenStore.SCOPE_MINT.equals(callerScope) || TokenStore.SCOPE_DATA.equals(callerScope)) {
+            log.debug("event=token_admin_denied reason=scope_forbidden_on_admin_surface scope={}",
+                      callerScope);
+            HttpUtil.send(exchange, 403, json(Map.of(
+                "error", "forbidden: a '" + callerScope
+                    + "'-scoped credential may not use the token admin surface")));
+            return;
+        }
         try {
             switch (path) {
                 case "/v1/tenants/create"        -> handleTenantCreate(exchange);
@@ -137,7 +152,23 @@ public final class TokenAdminHandler implements HttpHandler {
         }
         String label = optString(body, "label");
         Long ttl = optLong(body, "ttl_seconds");
-        TokenStore.IssuedToken issued = store.issueToken(tenant, label, ttl);
+        // nexus-868dq: optional scope. Only 'tenant' (the default) and 'mint' are
+        // issuable here — 'data' tokens are minted exclusively by
+        // /v1/data-tokens/mint and 'root' is never issuable. Mint issuance is
+        // privilege escalation (the credential can mint data tokens for ANY
+        // tenant), so it is OPERATOR-ONLY even for the caller's own tenant.
+        String scope = optString(body, "scope");
+        if (scope == null || scope.isBlank()) {
+            scope = TokenStore.SCOPE_TENANT;
+        }
+        if (!TokenStore.SCOPE_TENANT.equals(scope) && !TokenStore.SCOPE_MINT.equals(scope)) {
+            throw new IllegalArgumentException(
+                "invalid scope for issue: '" + scope + "' (only 'tenant' and 'mint' are issuable)");
+        }
+        if (TokenStore.SCOPE_MINT.equals(scope) && !requireOperator(ex)) {
+            return;
+        }
+        TokenStore.IssuedToken issued = store.issueToken(tenant, label, ttl, scope);
         HttpUtil.send(ex, 200, json(new LinkedHashMap<>(Map.of(
             "tenant", tenant, "token", issued.rawToken(), "token_hash", issued.tokenHash()))));
     }
@@ -189,6 +220,7 @@ public final class TokenAdminHandler implements HttpHandler {
             row.put("token_hash", t.tokenHash());
             row.put("tenant", t.tenantId());
             row.put("label", t.label());
+            row.put("scope", t.scope());
             row.put("created_at", t.createdAt());
             row.put("expires_at", t.expiresAt());
             row.put("revoked_at", t.revokedAt());

@@ -295,6 +295,15 @@ public final class NexusService {
         var sessionsCtx = server.createContext("/v1/sessions", new SessionTokenHandler(tokenStore));
         sessionsCtx.getFilters().addAll(authFilter);
 
+        // /v1/data-tokens/* — short-TTL per-tenant DATA tokens minted JIT by a
+        // scope=mint credential (nexus-x1h07, conexus RDR-005 A1). Rate-limited
+        // + TTL-ceilinged from env; the AuthFilter confines mint credentials to
+        // exactly this surface.
+        var dataTokensCtx = server.createContext("/v1/data-tokens",
+                dev.nexus.service.http.DataTokenHandler.fromEnv(
+                    tokenStore, java.time.Clock.systemUTC()));
+        dataTokensCtx.getFilters().addAll(authFilter);
+
         // /v1/vectors/* — vector endpoints (bead nexus-gmiaf.20; hybrid: RDR-155 P3.2;
         // pgvector serving cutover: RDR-155 P4a.2, bead nexus-1k8s1). Always registered:
         // the handler answers an explicit 503 per route when its backend (pgvector

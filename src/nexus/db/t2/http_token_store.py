@@ -133,14 +133,22 @@ class HttpTokenStore:
         return self._post("/v1/tenants/create", {"name": name})
 
     def issue_token(
-        self, tenant: str, label: str | None = None, ttl_seconds: int | None = None
+        self, tenant: str, label: str | None = None, ttl_seconds: int | None = None,
+        scope: str | None = None,
     ) -> dict[str, Any]:
-        """Issue a bound token. Returns {tenant, token, token_hash}."""
+        """Issue a bound token. Returns {tenant, token, token_hash}.
+
+        ``scope`` (nexus-868dq): ``None`` preserves the server default
+        (``tenant``); ``"mint"`` issues the data-token mint credential
+        (operator-only server-side — the conexus-edge provisioning surface).
+        """
         body: dict[str, Any] = {"tenant": tenant}
         if label is not None:
             body["label"] = label
         if ttl_seconds is not None:
             body["ttl_seconds"] = ttl_seconds
+        if scope is not None:
+            body["scope"] = scope
         return self._post("/v1/service-tokens/issue", body)
 
     def rotate_token(self, tenant: str, grace_seconds: int | None = None) -> dict[str, Any]:

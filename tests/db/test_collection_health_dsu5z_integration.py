@@ -6,7 +6,7 @@ collection_health._default_catalog_stats_fn work correctly via the real Java
 service + real PostgreSQL.
 
 Requires (darwin with JDK/GraalVM):
-  - /opt/homebrew/opt/postgresql@16/bin/{initdb,pg_ctl,psql,createdb} present
+  - PostgreSQL binaries discoverable (NEXUS_PG_BIN / Homebrew / system dirs / PATH)
   - service/target/nexus-service-1.0-SNAPSHOT.jar built
       (cd service && mvn package -DskipTests)
   - Java on PATH (or JAVA_HOME env set)
@@ -44,13 +44,13 @@ from unittest.mock import patch
 
 import pytest
 
-from tests.db._service_fixture import SERVICE_ROLES_SQL
+from tests.db._service_fixture import SERVICE_ROLES_SQL, pg_bin_dir
 
 # ── Prerequisite paths ─────────────────────────────────────────────────────────
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _JAR       = _REPO_ROOT / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"
-_PG_BIN    = Path("/opt/homebrew/opt/postgresql@16/bin")
+_PG_BIN    = pg_bin_dir()
 
 _INITDB   = _PG_BIN / "initdb"
 _PG_CTL   = _PG_BIN / "pg_ctl"
@@ -78,8 +78,8 @@ pytestmark = [
     pytest.mark.skipif(
         not _ALL_PREREQS,
         reason=(
-            "skipped: missing jar or pg16 binaries "
-            f"(jar={_JAR.exists()}, pg16={_PG_CTL.exists()}, java={_JAVA})"
+            "skipped: missing jar or PG binaries "
+            f"(jar={_JAR.exists()}, pg={_PG_CTL.exists()}, java={_JAVA})"
         ),
     ),
 ]
@@ -224,10 +224,16 @@ def cat(java_service):
     """HttpCatalogClient against the real Java service."""
     from nexus.catalog.http_catalog_client import HttpCatalogClient
     base_url, token, _ = java_service
+    _saved_token = os.environ.get("NX_SERVICE_TOKEN")
     os.environ["NX_SERVICE_TOKEN"] = token
     c = HttpCatalogClient(base_url=base_url, tenant=_TENANT, _token=token)
     yield c
     c.close()
+    # Restore: a leaked module token poisons later env-resolving modules (nexus-edwlp).
+    if _saved_token is None:
+        os.environ.pop("NX_SERVICE_TOKEN", None)
+    else:
+        os.environ["NX_SERVICE_TOKEN"] = _saved_token
 
 
 @pytest.fixture(scope="module")

@@ -30,11 +30,18 @@ public final class RequestContext {
      * @param isOperator    true iff the bearer is the persistent root token (nexus-e4130).
      *                      The root token is the cross-tenant admin credential; every other
      *                      token is confined to its own tenant on the admin surface
-     *                      ({@code TokenAdminHandler}). Resolved server-side from
-     *                      {@code ROOT_TOKEN_LABEL}; never client-asserted.
+     *                      ({@code TokenAdminHandler}). Resolved server-side from the
+     *                      token's {@code scope == 'root'}; never client-asserted.
+     * @param scope         the bearer's server-assigned scope (nexus-868dq):
+     *                      {@code root|tenant|mint|data}. Carries the mint/data route
+     *                      restrictions (a mint credential may only call the data-token
+     *                      mint endpoint; mint/data are rejected on the admin surface).
+     * @param credentialHash {@code sha256Hex} of the presented bearer — the rate-limit
+     *                      key for the data-token mint endpoint (nexus-x1h07). Never the
+     *                      raw secret.
      */
     public record Principal(String tenant, String session, boolean mintedSession,
-                            boolean isOperator) {
+                            boolean isOperator, String scope, String credentialHash) {
     }
 
     private static final ThreadLocal<Principal> CURRENT = new ThreadLocal<>();
@@ -80,5 +87,23 @@ public final class RequestContext {
     public static boolean isOperator() {
         Principal p = CURRENT.get();
         return p != null && p.isOperator();
+    }
+
+    /**
+     * @return the current bearer's server-assigned scope (nexus-868dq:
+     *         {@code root|tenant|mint|data}), or null outside a filtered request.
+     */
+    public static String scope() {
+        Principal p = CURRENT.get();
+        return p == null ? null : p.scope();
+    }
+
+    /**
+     * @return {@code sha256Hex} of the current bearer (the mint rate-limit key,
+     *         nexus-x1h07), or null outside a filtered request.
+     */
+    public static String credentialHash() {
+        Principal p = CURRENT.get();
+        return p == null ? null : p.credentialHash();
     }
 }

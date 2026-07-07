@@ -16,7 +16,6 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -37,9 +36,15 @@ import java.util.Map;
  *
  * <ul>
  *   <li>{@code encoding_format: "base64"} — matches Python SDK default, gives exact float32</li>
- *   <li>No {@code input_type} field — production sends None (omit from request body)</li>
- *   <li>No {@code output_dtype} field — production does not set it</li>
+ *   <li>{@code input_type: null}, {@code output_dtype: null}, {@code output_dimension: null}
+ *       — sent EXPLICITLY: the Python SDK serializes the unset params as JSON nulls, it
+ *       does NOT omit them (captured wire body, voyageai 0.3.7, nexus-f4wcg 2026-07-07)</li>
  *   <li>{@code truncation: true} — LOAD-BEARING: omitting gives cosine ≈ 0.99995 drift</li>
+ *   <li>Request body is BYTE-faithful to the Python SDK's (key order, {@code ", "}/{@code ": "}
+ *       separators, ensure_ascii escaping): Voyage serves per-request stable results that can
+ *       differ across byte-different-but-semantically-equal bodies by ~4e-5 cosine
+ *       (region-dependent; broke the linux parity gate while macOS stayed bit-exact,
+ *       nexus-f4wcg). Byte identity keeps both legs on the same serving identity.</li>
  *   <li>Sort response {@code data[]} by {@code index} (API may return out-of-order)</li>
  *   <li>Retry on 429 / 5xx with exponential backoff (max 3 attempts)</li>
  * </ul>
@@ -56,6 +61,7 @@ public final class VoyageEmbedder implements Embedder {
     private static final String VOYAGE_URL = "https://api.voyageai.com/v1/embeddings";
     private static final int    MAX_RETRIES = 3;
     private static final long   RETRY_BASE_MS = 500L;
+
 
     private final String     apiKey;
     private final String     model;
@@ -141,22 +147,57 @@ public final class VoyageEmbedder implements Embedder {
 
     // ── Request / response helpers ────────────────────────────────────────────
 
-    private String buildJson(List<String> texts) {
-        // Mirror chromadb VoyageAIEmbeddingFunction / voyageai.Embedding.create exactly:
-        // - encoding_format="base64" (Python SDK default — gives exact float32 binary)
-        // - no input_type field (production sends input_type=None → omitted)
-        // - no output_dtype field (production does not set it)
-        // - truncation=True (LOAD-BEARING: omit → cosine 0.99995 drift on >256-token texts)
-        Map<String, Object> body = new HashMap<>();
-        body.put("model",           model);
-        body.put("input",           texts);
-        body.put("truncation",      true);
-        body.put("encoding_format", "base64");
-        try {
-            return mapper.writeValueAsString(body);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to serialize Voyage request", e);
+    String buildJson(List<String> texts) {  // package-private: byte contract locked by VoyageEmbedderBodyTest
+        // BYTE-faithful mirror of the production wire body (voyageai SDK 0.3.7 via
+        // chromadb VoyageAIEmbeddingFunction; captured 2026-07-07, nexus-f4wcg):
+        //   {"input": [...], "model": "...", "input_type": null, "truncation": true,
+        //    "output_dtype": null, "output_dimension": null, "encoding_format": "base64"}
+        // Python json.dumps defaults: insertion key order, ", "/" : " separators,
+        // ensure_ascii (non-ASCII as backslash-u escapes). Byte identity is load-bearing, not
+        // cosmetic: Voyage serves per-request stable results that can differ across
+        // byte-different-but-equal bodies by ~4e-5 cosine (nexus-f4wcg linux gate).
+        StringBuilder sb = new StringBuilder(128 + texts.size() * 64);
+        sb.append("{\"input\": [");
+        for (int i = 0; i < texts.size(); i++) {
+            if (i > 0) sb.append(", ");
+            sb.append(jsonString(texts.get(i)));
         }
+        sb.append("], \"model\": ").append(jsonString(model))
+          .append(", \"input_type\": null, \"truncation\": true, \"output_dtype\": null")
+          .append(", \"output_dimension\": null, \"encoding_format\": \"base64\"}");
+        return sb.toString();
+    }
+
+    /**
+     * JSON string literal byte-identical to python json.dumps ensure_ascii output:
+     * shorthand escapes for backslash/quote/b/f/n/r/t, LOWERCASE hex unicode escapes
+     * for other controls (&lt;0x20) and everything above 0x7e (Jackson's
+     * ESCAPE_NON_ASCII emits uppercase hex, which byte-diverges). UTF-16 code units
+     * escape individually, so astral chars become surrogate pairs — same as python.
+     */
+    static String jsonString(String s) {
+        StringBuilder sb = new StringBuilder(s.length() + 8);
+        sb.append('"');
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '"'  -> sb.append("\\\"");
+                case '\\' -> sb.append("\\\\");
+                case '\b' -> sb.append("\\b");
+                case '\f' -> sb.append("\\f");
+                case '\n' -> sb.append("\\n");
+                case '\r' -> sb.append("\\r");
+                case '\t' -> sb.append("\\t");
+                default -> {
+                    if (c < 0x20 || c > 0x7e) {
+                        sb.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        sb.append(c);
+                    }
+                }
+            }
+        }
+        return sb.append('"').toString();
     }
 
     // nexus-ehc4q billing note: on transient-error retries, usage.total_tokens is

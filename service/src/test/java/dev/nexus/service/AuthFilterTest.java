@@ -70,6 +70,8 @@ class AuthFilterTest {
     private static final String SESS_A1     = "raw-session-a1";
     private static final String SESS_EXPIRED = "raw-session-expired";
     private static final String TOK_WILDCARD = "raw-token-bootstrap-wildcard";
+    private static final String TOK_MINT     = "raw-token-mint-scope";
+    private static final String TOK_DATA     = "raw-token-data-scope";
 
     PostgreSQLContainer<?> pg;
     HikariDataSource ds;
@@ -128,6 +130,15 @@ class AuthFilterTest {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         var ctx = server.createContext("/v1/echo", new EchoHandler());
         ctx.getFilters().add(new AuthFilter(cache, store));
+        // nexus-868dq: the mint-scope path restriction allows ONLY /v1/data-tokens/*
+        // through the filter — a second echo context proves pass-through there,
+        // and a third at the adversarial near-miss path ("/v1/data-tokens-evil",
+        // shares the string prefix but is NOT the mint surface) proves the check
+        // is segment-exact, not a raw startsWith.
+        var mintCtx = server.createContext("/v1/data-tokens", new EchoHandler());
+        mintCtx.getFilters().add(new AuthFilter(cache, store));
+        var evilCtx = server.createContext("/v1/data-tokens-evil", new EchoHandler());
+        evilCtx.getFilters().add(new AuthFilter(cache, store));
         server.start();
         port = server.getAddress().getPort();
     }
@@ -154,6 +165,22 @@ class AuthFilterTest {
             insertServiceToken(su, TOK_WILDCARD, AuthFilter.BOOTSTRAP_ANY_TENANT, null, null);
             insertSessionToken(su, SESS_A1, "tenant-a", "session-a1", OffsetDateTime.ofInstant(T0.plusSeconds(3600), ZoneOffset.UTC));
             insertSessionToken(su, SESS_EXPIRED, "tenant-a", "session-old", OffsetDateTime.ofInstant(T0.minusSeconds(60), ZoneOffset.UTC));
+            // nexus-868dq scoped credentials.
+            insertScopedToken(su, TOK_MINT, "edge-tenant", "mint");
+            insertScopedToken(su, TOK_DATA, "tenant-a", "data");
+        }
+    }
+
+    private void insertScopedToken(Connection su, String raw, String tenant, String scope)
+            throws Exception {
+        try (var ps = su.prepareStatement(
+            "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label, scope) "
+            + "VALUES (?, ?, ?, ?) ON CONFLICT (token_hash) DO NOTHING")) {
+            ps.setString(1, TokenHashing.sha256Hex(raw));
+            ps.setString(2, tenant);
+            ps.setString(3, "test-scoped");
+            ps.setString(4, scope);
+            ps.executeUpdate();
         }
     }
 
@@ -190,7 +217,7 @@ class AuthFilterTest {
     void validToken_resolvesTenant() throws Exception {
         HttpResponse<String> r = call(TOK_A, null, null);
         assertThat(r.statusCode()).isEqualTo(200);
-        assertThat(r.body()).isEqualTo("tenant=tenant-a;session=");
+        assertThat(r.body()).isEqualTo("tenant=tenant-a;session=;scope=tenant");
     }
 
     @Test
@@ -198,7 +225,7 @@ class AuthFilterTest {
         // Token resolves tenant-a; client lies "tenant-b" — must be ignored.
         HttpResponse<String> r = call(TOK_A, "tenant-b", null);
         assertThat(r.statusCode()).isEqualTo(200);
-        assertThat(r.body()).isEqualTo("tenant=tenant-a;session=");
+        assertThat(r.body()).isEqualTo("tenant=tenant-a;session=;scope=tenant");
     }
 
     @Test
@@ -228,7 +255,7 @@ class AuthFilterTest {
         HttpResponse<String> r = call(TOK_A, null, SESS_A1);
         assertThat(r.statusCode()).isEqualTo(200);
         // Server-resolved session_id, NOT the presented token string.
-        assertThat(r.body()).isEqualTo("tenant=tenant-a;session=session-a1");
+        assertThat(r.body()).isEqualTo("tenant=tenant-a;session=session-a1;scope=tenant");
     }
 
     @Test
@@ -257,7 +284,7 @@ class AuthFilterTest {
         // tenant-scoped (session-scoped handlers simply are not exercised).
         HttpResponse<String> r = call(TOK_A, null, null);
         assertThat(r.statusCode()).isEqualTo(200);
-        assertThat(r.body()).isEqualTo("tenant=tenant-a;session=");
+        assertThat(r.body()).isEqualTo("tenant=tenant-a;session=;scope=tenant");
     }
 
     @Test
@@ -374,6 +401,49 @@ class AuthFilterTest {
         }
     }
 
+    // ── nexus-868dq: scope threading + mint-scope path restriction ────────────
+
+    @Test
+    void dataScope_threadsThroughToRequestContext() throws Exception {
+        HttpResponse<String> r = call(TOK_DATA, null, null);
+        assertThat(r.statusCode()).isEqualTo(200);
+        assertThat(r.body()).isEqualTo("tenant=tenant-a;session=;scope=data");
+    }
+
+    @Test
+    void mintScope_onOrdinaryRoute_is403() throws Exception {
+        // A mint credential exists to call /v1/data-tokens/* and nothing else
+        // (RDR-005 pin: rejected on ALL admin routes; no data-path authority).
+        HttpResponse<String> r = call(TOK_MINT, null, null);
+        assertThat(r.statusCode()).isEqualTo(403);
+    }
+
+    @Test
+    void mintScope_onDataTokensPath_passesFilter() throws Exception {
+        HttpRequest req = HttpRequest.newBuilder(URI.create(base() + "/v1/data-tokens/mint"))
+            .header("Authorization", "Bearer " + TOK_MINT).GET().build();
+        HttpResponse<String> r = http.send(req, HttpResponse.BodyHandlers.ofString());
+        assertThat(r.statusCode()).isEqualTo(200);
+        assertThat(r.body()).isEqualTo("tenant=edge-tenant;session=;scope=mint");
+    }
+
+    @Test
+    void mintScope_craftedPathPrefix_is403() throws Exception {
+        // The TRUE adversarial near-miss: "/v1/data-tokens-evil" shares the raw
+        // string prefix with the mint surface. A context IS bound there (see
+        // startAll) so the FILTER decides — the segment-exact check must 403 it.
+        HttpRequest evil = HttpRequest.newBuilder(URI.create(base() + "/v1/data-tokens-evil"))
+            .header("Authorization", "Bearer " + TOK_MINT).GET().build();
+        assertThat(http.send(evil, HttpResponse.BodyHandlers.ofString()).statusCode())
+            .as("raw-prefix near-miss path must be outside the mint surface")
+            .isEqualTo(403);
+        // And an ordinary unrelated path is 403 too.
+        HttpRequest echo = HttpRequest.newBuilder(URI.create(base() + "/v1/echo/data-tokens"))
+            .header("Authorization", "Bearer " + TOK_MINT).GET().build();
+        assertThat(http.send(echo, HttpResponse.BodyHandlers.ofString()).statusCode())
+            .isEqualTo(403);
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private String base() {
@@ -388,14 +458,16 @@ class AuthFilterTest {
         return http.send(b.build(), HttpResponse.BodyHandlers.ofString());
     }
 
-    /** Echoes the AuthFilter-stamped (thread-confined) tenant + session principal. */
+    /** Echoes the AuthFilter-stamped (thread-confined) tenant + session + scope principal. */
     static final class EchoHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange ex) throws IOException {
             String tenant = RequestContext.tenant();
             String session = RequestContext.session();
+            String scope = RequestContext.scope();
             String body = "tenant=" + (tenant == null ? "" : tenant)
-                + ";session=" + (session == null ? "" : session);
+                + ";session=" + (session == null ? "" : session)
+                + ";scope=" + (scope == null ? "" : scope);
             byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
             ex.sendResponseHeaders(200, bytes.length);
             try (OutputStream os = ex.getResponseBody()) {

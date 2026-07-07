@@ -2118,10 +2118,12 @@ Record `TAG` (`engine-service-vX.Y.Z`, `vX.Y.Z`, or `X.Y.Z`) as the cloud-deploy
 ### nx service token issue
 
 ```
-nx service token issue --tenant TENANT [--label LABEL] [--ttl SECONDS]
+nx service token issue --tenant TENANT [--label LABEL] [--ttl SECONDS] [--scope tenant|mint]
 ```
 
 Issue a new bearer token bound to `TENANT`. Printed once; only the hash is stored. `--ttl` sets an optional lifetime in seconds (default: no expiry). A token bound to a tenant ignores the client `X-Nexus-Tenant` header; the tenant comes from the token.
+
+`--scope` (nexus-868dq / conexus RDR-005): default `tenant` (ordinary bearer). `mint` issues a **data-token mint credential** — it may ONLY call `POST /v1/data-tokens/mint` (minting short-TTL per-tenant data tokens, cross-tenant allowed, rate-limited) and is rejected on every admin and data route. Issuing `--scope mint` requires the operator (root) bearer. `data` tokens are never issued here — only minted by the endpoint; `root` is never issuable. Revoking a mint credential (`nx service token revoke`) stops its mints immediately; outstanding data tokens drain on their own TTL (≤ 3600s ceiling, `NX_DATA_TOKEN_TTL_CEILING_SECONDS`).
 
 ### nx service token rotate
 

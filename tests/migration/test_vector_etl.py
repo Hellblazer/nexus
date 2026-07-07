@@ -233,14 +233,18 @@ class FailingUpsertClient(FakeVectorClient):
 
 def _seed_source(
     client, name: str, n: int, *, text_prefix: str = "chunk text",
-    embedding_model: str | None = None,
+    embedding_model: str | None = None, dims: int = 2,
 ) -> list[str]:
     """Seed *n* chunks into a Chroma collection; returns the chash ids.
 
     Ids follow the chash convention (sha256(text)[:32]) so the migrated
     pgvector ``chash`` column round-trips the natural ID verbatim. Explicit
-    tiny embeddings: the SOURCE vectors are never read by the ETL
-    (decision (a)), so their dimension is deliberately nonsensical (2).
+    tiny embeddings: on the RE-EMBED paths the SOURCE vectors are never read
+    by the ETL (decision (a)), so their dimension is deliberately nonsensical
+    (2) by default. ``dims``: the SAME-MODEL passthrough (nexus-hxry2) DOES
+    carry the stored vectors verbatim and the service enforces per-vector
+    dimensions — a fixture exercising that path must seed real-width vectors
+    (e.g. 768 for bge; the oracle MVV, nexus-edwlp).
 
     ``embedding_model`` (nexus-bfdri): when set, stamps each chunk's metadata
     with the producing model id — the provenance the same-model passthrough
@@ -260,7 +264,7 @@ def _seed_source(
             ids=ids,
             documents=texts,
             metadatas=meta,
-            embeddings=[[float(i), 1.0] for i in range(n)],
+            embeddings=[[float(i), 1.0] + [0.0] * (dims - 2) for i in range(n)],
         )
     else:
         client.get_or_create_collection(name)
@@ -1970,11 +1974,11 @@ class TestEmbedderModeParityJava:
 
 # ══ Integration: real Java service + hermetic Postgres 16 ════════════════════
 
-from tests.db._service_fixture import SERVICE_ROLES_SQL  # noqa: E402
+from tests.db._service_fixture import SERVICE_ROLES_SQL, pg_bin_dir  # noqa: E402
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _JAR       = _REPO_ROOT / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"
-_PG_BIN    = Path("/opt/homebrew/opt/postgresql@16/bin")
+_PG_BIN    = pg_bin_dir()
 _INITDB    = _PG_BIN / "initdb"
 _PG_CTL    = _PG_BIN / "pg_ctl"
 _PSQL      = _PG_BIN / "psql"
@@ -1994,8 +1998,8 @@ _ALL_PREREQS = (
 _SKIP_INTEGRATION = pytest.mark.skipif(
     not _ALL_PREREQS,
     reason=(
-        "skipped: missing jar or pg16 binaries "
-        f"(jar={_JAR.exists()}, pg16={_PG_CTL.exists()}, java={_JAVA})"
+        "skipped: missing jar or PG binaries "
+        f"(jar={_JAR.exists()}, pg={_PG_CTL.exists()}, java={_JAVA})"
     ),
 )
 
@@ -2052,7 +2056,7 @@ def vec_etl_pg_instance():
     no schema pre-application — the JAR's Liquibase run owns DDL; only the
     nexus_svc role must pre-exist (grants-nexus-svc.xml runAlways)."""
     if not _ALL_PREREQS:
-        pytest.skip("missing jar or pg16 binaries")
+        pytest.skip("missing jar or PG binaries")
 
     pgdata = tempfile.mkdtemp(prefix="nexus_vec_etl_pg_")
     pg_port = _free_port()

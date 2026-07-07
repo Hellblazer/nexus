@@ -208,12 +208,18 @@ class TestHttpCatalogClientCollectionHealthMeta:
     def client(self):
         srv, base_url = _start_server()
         import os
+        _saved_token = os.environ.get("NX_SERVICE_TOKEN")
         os.environ["NX_SERVICE_TOKEN"] = "test-token"
         from nexus.catalog.http_catalog_client import HttpCatalogClient
         c = HttpCatalogClient(base_url=base_url, tenant="test", _token="test-token")
         yield c
         c.close()
         srv.shutdown()
+        # Restore: a leaked token poisons later env-resolving modules (nexus-edwlp).
+        if _saved_token is None:
+            os.environ.pop("NX_SERVICE_TOKEN", None)
+        else:
+            os.environ["NX_SERVICE_TOKEN"] = _saved_token
 
     def test_routes_to_collections_health_endpoint(self, client) -> None:
         """collection_health_meta hits GET /v1/catalog/collections/health."""

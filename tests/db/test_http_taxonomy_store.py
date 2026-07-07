@@ -1434,6 +1434,91 @@ class TestPersist:
         # empty specs -> []
         assert client.persist_discovered_topics("c2", []) == []
 
+    def test_persist_discovered_409_is_benign_skip(self, client, monkeypatch) -> None:
+        """nexus-n2ls1: pre-advisory-lock engines map a concurrent guard-then-
+        insert discovery race to SQLSTATE 23505 → HTTP 409. The topics were
+        persisted by the concurrent winner, so the client treats 409 exactly
+        like the guard firing (benign ``[]``) instead of surfacing an
+        HTTPStatusError with a misleading 'retry' hint."""
+        import httpx
+
+        req = httpx.Request("POST", "http://svc/v1/taxonomy/topics/persist_discovered")
+        resp = httpx.Response(409, request=req, text='{"error":"conflict"}')
+
+        def _post_409(path, body):
+            raise httpx.HTTPStatusError("409 Conflict", request=req, response=resp)
+
+        monkeypatch.setattr(client, "_post", _post_409)
+        out = client.persist_discovered_topics(
+            "c-race",
+            [{"label": "x", "doc_count": 0, "terms": "[]",
+              "assigned_by": "hdbscan", "doc_ids": []}],
+        )
+        assert out == []
+
+    def test_persist_discovered_409_with_23505_sqlstate_is_benign(self, client, monkeypatch) -> None:
+        """nexus-n2ls1 critique HIGH: typed-ladder engines put the sqlstate in
+        the 409 body — 23505 (the race's unique violation) is benign."""
+        import httpx
+
+        req = httpx.Request("POST", "http://svc/v1/taxonomy/topics/persist_discovered")
+        resp = httpx.Response(
+            409, request=req,
+            text='{"error":"integrity constraint violation","sqlstate":"23505"}',
+        )
+
+        def _post_409(path, body):
+            raise httpx.HTTPStatusError("409 Conflict", request=req, response=resp)
+
+        monkeypatch.setattr(client, "_post", _post_409)
+        assert client.persist_discovered_topics(
+            "c-race-23505",
+            [{"label": "x", "doc_count": 0, "terms": "[]",
+              "assigned_by": "hdbscan", "doc_ids": []}],
+        ) == []
+
+    def test_persist_discovered_409_with_non_unique_sqlstate_propagates(self, client, monkeypatch) -> None:
+        """nexus-n2ls1 critique HIGH: the engine maps EVERY class-23 violation
+        to 409 — a 23503 (FK) here is a real defect, NOT the discovery race,
+        and must propagate instead of being swallowed as a benign skip."""
+        import httpx
+
+        req = httpx.Request("POST", "http://svc/v1/taxonomy/topics/persist_discovered")
+        resp = httpx.Response(
+            409, request=req,
+            text='{"error":"integrity constraint violation","sqlstate":"23503"}',
+        )
+
+        def _post_409(path, body):
+            raise httpx.HTTPStatusError("409 Conflict", request=req, response=resp)
+
+        monkeypatch.setattr(client, "_post", _post_409)
+        with pytest.raises(httpx.HTTPStatusError):
+            client.persist_discovered_topics(
+                "c-fk-violation",
+                [{"label": "x", "doc_count": 0, "terms": "[]",
+                  "assigned_by": "hdbscan", "doc_ids": []}],
+            )
+
+    def test_persist_discovered_non_409_http_error_propagates(self, client, monkeypatch) -> None:
+        """nexus-n2ls1: ONLY 409 is benign — a 500/422/anything-else must still
+        propagate loudly (no new silent-swallow class)."""
+        import httpx
+
+        req = httpx.Request("POST", "http://svc/v1/taxonomy/topics/persist_discovered")
+        resp = httpx.Response(500, request=req, text='{"error":"boom"}')
+
+        def _post_500(path, body):
+            raise httpx.HTTPStatusError("500 Internal", request=req, response=resp)
+
+        monkeypatch.setattr(client, "_post", _post_500)
+        with pytest.raises(httpx.HTTPStatusError):
+            client.persist_discovered_topics(
+                "c-err",
+                [{"label": "x", "doc_count": 0, "terms": "[]",
+                  "assigned_by": "hdbscan", "doc_ids": []}],
+            )
+
     def test_persist_rebuild_replace_and_manual_transfer(self, client) -> None:
         # Seed an old topic + assignment to be cleared.
         ids0 = client.persist_discovered_topics(

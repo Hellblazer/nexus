@@ -306,34 +306,84 @@ def build_staleness_cache(col: object) -> StalenessCache:
     populate the cache must never block indexing; it just costs latency.
     """
     cache = StalenessCache()
-    try:
-        _get_all_metadata = getattr(col, "get_all_metadata", None)
-        if callable(_get_all_metadata):
+    all_chunks: dict | None = None
+    _fast_path_failed = False
+    _get_all_metadata = getattr(col, "get_all_metadata", None)
+    if callable(_get_all_metadata):
+        try:
             all_chunks = _get_all_metadata()
-        else:
+        except Exception as exc:  # noqa: BLE001 — fast-path failure is a fallback signal, never fatal
+            # nexus-441p5: a fast-path failure must FALL BACK to the paginated
+            # sweep, not degrade to an empty cache. Pre-fix, this exception
+            # landed in the outer handler and returned an empty cache — every
+            # subsequent index run treated all files stale (full re-process;
+            # observed live 2026-07-07: wheel v6.3.6 calling get-all-metadata
+            # against an install-era engine → 404 → 0-doc cache). The same
+            # hole fires on current engines when a large collection trips the
+            # server's get-all-metadata row-count cap.
+            import structlog  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+
+            hint = (
+                "engine lacks POST /v1/vectors/get-all-metadata (pre-v0.1.30) — "
+                "upgrade the engine this install is pointed at"
+                if getattr(exc, "code", None) == 404
+                else "falling back to the paginated sweep"
+            )
+            structlog.get_logger(__name__).warning(
+                "build_staleness_cache_fast_path_failed_falling_back",
+                collection=getattr(col, "name", "<unknown>"),
+                hint=hint,
+                exc_info=True,
+            )
+            _fast_path_failed = True
+    if all_chunks is None:
+        try:
             # Local import to avoid a circular dependency at module-load
             # time. ``_paginated_get`` lives in nexus.indexer (the
             # orchestrator), which itself imports from this module.
             from nexus.indexer import _paginated_get  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
             all_chunks = _paginated_get(col, include=["metadatas"])
-    except Exception:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
-        # nexus-lrhg (RDR-108 audit finding 6): pre-fix this swallowed
-        # ``_paginated_get`` failures with a bare ``except: pass`` and
-        # returned an empty cache. The caller fell back to the per-file
-        # Chroma probe, which on a Phase-3 corpus means re-embedding
-        # every chunk because the per-file cache misses are
-        # indistinguishable from genuine stale rows. WARNING log with
-        # the collection identity so a recurring outage (network blip,
-        # cloud throttle) surfaces in production logs instead of
-        # silently melting the embedder budget.
+        except Exception:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
+            # nexus-lrhg (RDR-108 audit finding 6): pre-fix this swallowed
+            # ``_paginated_get`` failures with a bare ``except: pass`` and
+            # returned an empty cache. The caller fell back to the per-file
+            # Chroma probe, which on a Phase-3 corpus means re-embedding
+            # every chunk because the per-file cache misses are
+            # indistinguishable from genuine stale rows. WARNING log with
+            # the collection identity so a recurring outage (network blip,
+            # cloud throttle) surfaces in production logs instead of
+            # silently melting the embedder budget.
+            import structlog  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+            structlog.get_logger(__name__).warning(
+                "build_staleness_cache_paginated_get_failed",
+                collection=getattr(col, "name", "<unknown>"),
+                exc_info=True,
+            )
+            return cache
+
+    # nexus-441p5 critique (HIGH): in service mode the fallback rides
+    # ``HttpVectorClient.get()``, which swallows ``VectorServiceError`` to an
+    # EMPTY page (logging only ``service_collection_get_failed``) — so a
+    # degraded fallback is indistinguishable here from a genuinely empty
+    # collection and the except arm above never fires. We cannot tell the two
+    # apart at this layer, but "fast path failed AND the fallback saw zero
+    # chunks" is exactly the suspicious shape: warn loudly so an operator can
+    # correlate with the client-layer log line instead of silently losing
+    # incremental indexing (a spuriously empty cache re-processes every file).
+    if _fast_path_failed and not (all_chunks.get("ids") or []):
         import structlog  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+
         structlog.get_logger(__name__).warning(
-            "build_staleness_cache_paginated_get_failed",
+            "build_staleness_cache_fallback_empty_after_fast_path_failure",
             collection=getattr(col, "name", "<unknown>"),
-            exc_info=True,
+            hint=(
+                "either the collection is genuinely empty, or the paginated "
+                "fallback ALSO degraded (see any preceding "
+                "service_collection_get_failed log line) — staleness cache is "
+                "empty, so this run will re-process every file"
+            ),
         )
-        return cache
 
     # nexus-0ocy (RDR-108 Phase 4 review D-M4): when chunk metadata
     # lacks ``doc_id`` (Phase-3 chunks) but carries ``chunk_text_hash``,

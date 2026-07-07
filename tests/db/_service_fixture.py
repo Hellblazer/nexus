@@ -36,6 +36,7 @@ CONTRACT:
 from __future__ import annotations
 
 import json as _json
+import os
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -63,6 +64,42 @@ def _rel(p: Path) -> str:
         return str(p.relative_to(_REPO_ROOT))
     except ValueError:
         return str(p)
+
+
+def pg_bin_dir() -> Path:
+    """PostgreSQL bin dir for the self-provisioning integration fixtures.
+
+    nexus-f4wcg: ~20 tests/db fixtures hardcoded the macOS Homebrew PG16
+    path (``/opt/homebrew/opt/postgresql@16/bin``), so on any other
+    platform — the nightly linux gate in particular — the whole family
+    silently skipped. Resolve through the product's own discovery instead:
+    ``NEXUS_PG_BIN`` override first (the nightly gate points this at the
+    CA-3 PG+pgvector bundle), then config-dir bundle / Homebrew / system
+    dirs / PATH, exactly as ``nx init`` would. Called at module import
+    (collection) time, so the bundle leg resolves against the AMBIENT
+    config dir, not a per-test isolated one — fine: these are stateless
+    CLI binaries, same class of fixed non-isolated location as the old
+    hardcoded Homebrew path.
+
+    Returns a nonexistent sentinel path when no PG is discoverable so the
+    per-module ``.exists()`` prereq checks skip cleanly, same as before.
+    A SET-but-broken ``NEXUS_PG_BIN`` re-raises at import/collection time
+    (product policy: a misconfigured explicit override is a user error —
+    fail loud, never mass-skip). Known footgun accepted with that policy:
+    the raise aborts collection of all 22 importing modules, so a stale
+    ``NEXUS_PG_BIN`` export lingering in a dev shell breaks even a plain
+    ``uv run pytest`` — deliberately, with the fix in the error message
+    ("Fix NEXUS_PG_BIN or unset it"), rather than silently skipping the
+    family the way the hardcoded path used to.
+    """
+    from nexus.db.pg_provision import PgBinaryNotFoundError, discover_pg_binaries
+
+    try:
+        return discover_pg_binaries().initdb.parent
+    except PgBinaryNotFoundError:
+        if os.environ.get("NEXUS_PG_BIN", "").strip():
+            raise
+        return Path("/nexus-pg-binaries-not-found")
 
 
 def jar_freshness_skip_reason(jar: Path = _SERVICE_JAR) -> str | None:
