@@ -4,6 +4,7 @@ id: RDR-181
 type: Technical Debt
 status: closed
 closed_date: 2026-07-07
+postmortem_waiver: "Clean single-phase arc, no divergences to learn from: accepted and fully implemented same-day (2026-07-05, epic nexus-f0r8p 13/13), phase-review-gate clean, shipped engine-service-v0.1.27 cloud-gated GREEN, live MVV proof 89.4% Voyage token reduction (T2 nexus/rdr181-mvv-live-proof-2026-07-05). Implementation matched the accepted design exactly."
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
