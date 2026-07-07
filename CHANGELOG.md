@@ -6,6 +6,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.3.8] - 2026-07-07
+
+### Fixed
+
+- **`nx guided-upgrade` now finds real installs (GH #1381).** Two stacked pre-flight defects made the one-command upgrade a silent no-op for real 5.x users: the migration detector probed `~/.config/nexus/chroma` — a directory the product has never written local Chroma to (the real store: `$NX_LOCAL_CHROMA_PATH` → `$XDG_DATA_HOME/nexus/chroma` → `~/.local/share/nexus/chroma`) — and the "already on the service stack" early-exit never consulted the T2 SQLite stores at all, stranding them across the 6.x backend default flip. The detector now resolves the product's own path (config-dir kept as a secondary probe), the no-op requires both legs clean, a present T2 store proceeds to provision + migrate, fully-migrated installs reach a clean "nothing to do", and the success path warns when `NX_STORAGE_BACKEND=sqlite` is still exported. The same wrong default was fixed in `nx storage migrate vectors`, and the None-path was fixed at the ETL chokepoint (pre-fix, the bare invocation would have provisioned a service then crashed on `Path(None)`). The guided-upgrade rehearsal now seeds the product default path and invokes the command bare, so the real user journey is exercised going forward.
+
 ## [6.3.7] - 2026-07-07
 
 ### Added

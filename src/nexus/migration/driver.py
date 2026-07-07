@@ -121,10 +121,10 @@ def _default_reopen_leg(leg: str, local_path: str | Path | None) -> Any:
 
     if leg == "cloud":
         return open_cloud_read_client()
-    from nexus.config import nexus_config_dir  # noqa: PLC0415  — command-local import (nexus.config)
-
-    path = Path(local_path) if local_path else nexus_config_dir() / "chroma"
-    return open_local_read_client(path)
+    # nexus-id750: a None local_path resolves via the product's env-aware
+    # default inside open_local_read_client (this fallback used to hardcode
+    # the never-written <config>/chroma).
+    return open_local_read_client(local_path)
 
 
 def run_guided_upgrade(

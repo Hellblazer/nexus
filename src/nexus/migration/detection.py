@@ -340,25 +340,55 @@ def voyage_key_available() -> bool:
     return bool(get_credential("voyage_api_key").strip())
 
 
+def resolve_default_local_leg() -> Path:
+    """Resolve the default local-Chroma path for the migration read leg.
+
+    nexus-id750 (GH #1381): this detector historically defaulted to
+    ``<config>/chroma`` (``~/.config/nexus/chroma``) — a directory the
+    PRODUCT has never written local Chroma to. The real store has always
+    lived at :func:`nexus.config._default_local_path`
+    (``NX_LOCAL_CHROMA_PATH`` → ``$XDG_DATA_HOME/nexus/chroma`` →
+    ``~/.local/share/nexus/chroma``; identical as far back as v5.4.5). So a
+    bare ``nx guided-upgrade`` opened an empty directory, saw no footprint,
+    and no-opped with "you are already on the service stack" while the
+    user's real vectors sat at the XDG path.
+
+    Resolution: the product path wins when it exists; the old config-dir
+    location is retained as a secondary probe (defensive — nothing is known
+    to write there, but any manually-placed data should not become invisible
+    the other way); when neither exists, return the product path so the
+    fresh-user no-op message points at the honest default.
+    """
+    from nexus.config import _default_local_path, nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
+
+    product = _default_local_path()
+    if product.exists():
+        return product
+    legacy = nexus_config_dir() / "chroma"
+    if legacy.exists():
+        return legacy
+    return product
+
+
 def open_read_legs(
     local_path: str | Path | None = None,
 ) -> tuple[Any | None, Any | None]:
     """Open whichever Chroma read legs are present, returning ``(local, cloud)``.
 
-    A missing local store (default ``~/.config/nexus/chroma``) or an
+    A missing local store (default: :func:`resolve_default_local_leg` — the
+    product's own env-aware local-Chroma path, nexus-id750) or an
     unconfigured cloud leg yields ``None`` for that leg — a fresh user with
     neither leg gets ``(None, None)``, which :func:`classify_collections`
     treats as a clean no-op. Only the "absent leg" sentinels
     (``FileNotFoundError`` / the cloud half-configured ``RuntimeError``) are
     swallowed; any other failure (a corrupt store) propagates loud.
     """
-    from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
     from nexus.migration.chroma_read import (  # noqa: PLC0415 — circular-dep avoidance (nexus.migration.chroma_read)
         open_cloud_read_client,
         open_local_read_client,
     )
 
-    path = Path(local_path) if local_path else nexus_config_dir() / "chroma"
+    path = Path(local_path) if local_path else resolve_default_local_leg()
     local: Any | None
     try:
         local = open_local_read_client(path)

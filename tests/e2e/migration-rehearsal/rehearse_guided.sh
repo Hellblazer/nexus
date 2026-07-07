@@ -16,7 +16,13 @@
 # fail-closes (which is NOT what this success-path MVV exercises).
 set -uo pipefail
 
-CHROMA_LOCAL="${CHROMA_LOCAL:-/home/nexus/legacy-chroma}"
+# nexus-id750 (GH #1381): seed the legacy Chroma at the PRODUCT's default
+# location ($XDG_DATA_HOME -> ~/.local/share/nexus/chroma) and invoke
+# guided-upgrade BARE — no --local-path. The MVV must exercise the exact
+# command a real installed user runs; passing --local-path here masked a
+# wrong-default-path bug for four releases (the detector probed
+# <config>/chroma, which no install ever wrote).
+CHROMA_LOCAL="${CHROMA_LOCAL:-/home/nexus/.local/share/nexus/chroma}"
 SEED_N="${SEED_N:-12}"
 FAILS=0
 
@@ -64,7 +70,7 @@ fi
 # ── The ONE command: nx guided-upgrade ───────────────────────────────────────
 say "nx guided-upgrade — detect → provision → health-gate → version-pin → migrate"
 note "release_version pin: the binary was built with a stamped release.properties"
-GU_OUT="$(nx guided-upgrade --local-path "$CHROMA_LOCAL" --timeout 180 --yes 2>&1)"
+GU_OUT="$(nx guided-upgrade --timeout 180 --yes 2>&1)"   # BARE: default-path resolution under test (nexus-id750)
 GU_RC=$?
 printf '%s\n' "$GU_OUT" | sed 's/^/       /'
 

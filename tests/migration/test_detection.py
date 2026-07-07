@@ -906,3 +906,72 @@ class TestCrossModelRemappable:
         c = self._cls(ONNX_384, "minilm-l6-v2-384", support="unsupported",
                       has_data=False)
         assert cross_model_remappable(c) is False
+
+
+class TestResolveDefaultLocalLeg:
+    """nexus-id750 (GH #1381): the detector's default local-Chroma path must
+    match where the PRODUCT writes (nexus.config._default_local_path — env-
+    aware XDG), not the never-written <config>/chroma it historically probed.
+    A bare `nx guided-upgrade` on a real 5.x install opened an empty config-
+    dir path, saw no footprint, and no-opped with 'you are already on the
+    service stack' while the user's vectors sat at the XDG path."""
+
+    def test_product_path_wins_when_present(self, tmp_path, monkeypatch) -> None:
+        from nexus.migration.detection import resolve_default_local_leg
+
+        product = tmp_path / "xdg-data" / "nexus" / "chroma"
+        product.mkdir(parents=True)
+        legacy = tmp_path / ".config" / "nexus" / "chroma"
+        legacy.mkdir(parents=True)
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+        monkeypatch.delenv("NX_LOCAL_CHROMA_PATH", raising=False)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / ".config" / "nexus"))
+
+        assert resolve_default_local_leg() == product
+
+    def test_legacy_config_dir_probed_when_product_absent(self, tmp_path, monkeypatch) -> None:
+        from nexus.migration.detection import resolve_default_local_leg
+
+        legacy = tmp_path / ".config" / "nexus" / "chroma"
+        legacy.mkdir(parents=True)
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))  # absent
+        monkeypatch.delenv("NX_LOCAL_CHROMA_PATH", raising=False)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / ".config" / "nexus"))
+
+        assert resolve_default_local_leg() == legacy
+
+    def test_neither_present_returns_product_path(self, tmp_path, monkeypatch) -> None:
+        from nexus.migration.detection import resolve_default_local_leg
+
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+        monkeypatch.delenv("NX_LOCAL_CHROMA_PATH", raising=False)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / ".config" / "nexus"))
+
+        assert resolve_default_local_leg() == tmp_path / "xdg-data" / "nexus" / "chroma"
+
+    def test_env_override_wins_over_everything(self, tmp_path, monkeypatch) -> None:
+        from nexus.migration.detection import resolve_default_local_leg
+
+        override = tmp_path / "custom-chroma"
+        override.mkdir()
+        monkeypatch.setenv("NX_LOCAL_CHROMA_PATH", str(override))
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / ".config" / "nexus"))
+
+        assert resolve_default_local_leg() == override
+
+    def test_open_local_read_client_none_resolves_product_default(self, tmp_path, monkeypatch) -> None:
+        """nexus-id750 critique CRITICAL: a None local_path used to reach
+        Path(None) -> TypeError at the ETL copy step (after provisioning!).
+        The deep chokepoint now resolves the product default; with nothing
+        on disk that is a clean FileNotFoundError naming the real default."""
+        import pytest as _pytest
+
+        from nexus.migration.chroma_read import open_local_read_client
+
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+        monkeypatch.delenv("NX_LOCAL_CHROMA_PATH", raising=False)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / ".config" / "nexus"))
+
+        with _pytest.raises(FileNotFoundError) as exc:
+            open_local_read_client(None)
+        assert "xdg-data" in str(exc.value)  # resolved product path, not Path(None) TypeError
