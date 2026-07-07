@@ -22,8 +22,8 @@ name: Local-service functional gate (nightly)
 # Guard bounds: the script's built-in FLOOR/BUDGET were pinned on macOS
 # (446 passed / 31 skipped). This runner differs (CA-3 bundle present
 # unlocks ~24 more tests; linux/macOS platform-conditional tests flip),
-# so the env overrides below pin CI's own bounds. Tighten them from the
-# observed counts once a few nightly runs establish the linux baseline.
+# so the env overrides below pin CI's own bounds, from the first green
+# baseline (nexus-f4wcg, run 28875352534: 459 passed / 19 skipped).
 
 on:
   schedule:
@@ -157,11 +157,14 @@ jobs:
           CHROMA_API_KEY: ${{ secrets.CHROMA_API_KEY }}
           CHROMA_TENANT: ${{ secrets.CHROMA_TENANT }}
           CHROMA_DATABASE: ${{ secrets.CHROMA_DATABASE }}
-          # Linux + CA-3-bundle counts differ from the script's macOS-pinned
-          # defaults; start from the same bounds and tighten once a few
-          # nightlies establish the linux baseline.
-          NX_GATE_FLOOR: "440"
-          NX_GATE_BUDGET: "40"
+          # Pinned from the first green linux baseline (nexus-f4wcg, run
+          # 28875352534: 459 passed / 19 skipped). Same allowance style as
+          # the script's macOS pins: floor slightly under observed for
+          # platform variation, budget slightly over. New legitimately-
+          # conditional tests must bump these consciously, in the same
+          # change that adds them.
+          NX_GATE_FLOOR: "455"
+          NX_GATE_BUDGET: "25"
         run: |
           set -euo pipefail
           if [ -z "$VOYAGE_API_KEY" ]; then
