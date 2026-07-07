@@ -2,7 +2,8 @@
 title: "Server-Side Embed-Skip on Re-Index: Stop Re-Embedding Chunks Whose Vector the Store Already Holds"
 id: RDR-181
 type: Technical Debt
-status: accepted
+status: closed
+closed_date: 2026-07-07
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
