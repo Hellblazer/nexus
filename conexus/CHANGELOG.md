@@ -6,9 +6,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed
+## [6.3.6] - 2026-07-06
 
-- **Plan-library NULL-verb pollution.** The `plan_save` MCP tool now requires a `verb` parameter and refuses a verb-less save (pointing implementation/pipeline plans to beads + T2 instead). Removed the "plan_save your pipeline outcome" post-flight instruction from all 10 agents and corrected 2 skill references — these were the source of 79% NULL-verb pollution (57/72 plans) in the live cloud plan library, where they could false-match unrelated `nx_answer` questions via FTS.
+Plugin version aligned with conexus 6.3.6. No plugin-side changes: this
+release's work (service-mode export/delete/backup repairs and reconcile
+convergence) is entirely in the `nx` CLI.
 
 ## [6.3.5] - 2026-07-06
 
@@ -17,6 +19,20 @@ release's work (indexing-throughput batching, the storage-service/T3
 supervisor exit-code fix, catalog manifest-write retry + `nx catalog
 reconcile`, and pre-migration backup restore) is entirely in the `nx`
 CLI/engine.
+
+## [6.3.4] - 2026-07-06
+
+Plugin version aligned with conexus 6.3.4. No plugin-side changes.
+
+## [6.3.3] - 2026-07-06
+
+Plugin version aligned with conexus 6.3.3. No plugin-side changes.
+
+## [6.3.2] - 2026-07-05
+
+### Fixed
+
+- **Plan-library NULL-verb pollution.** The `plan_save` MCP tool now requires a `verb` parameter and refuses a verb-less save (pointing implementation/pipeline plans to beads + T2 instead). Removed the "plan_save your pipeline outcome" post-flight instruction from all 10 agents and corrected 2 skill references — these were the source of 79% NULL-verb pollution (57/72 plans) in the live cloud plan library, where they could false-match unrelated `nx_answer` questions via FTS.
 
 ## [6.3.1] - 2026-07-04
 
