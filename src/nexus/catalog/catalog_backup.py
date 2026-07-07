@@ -51,9 +51,29 @@ _BACKUP_DIRNAME: str = ".deleted-backups"
 _DEFAULT_RETENTION_DAYS: int = 30
 
 
+def _backup_root() -> Path:
+    """Local, per-machine backup directory root.
+
+    Resolved from process config (``nexus.config.catalog_path()``), never
+    from the catalog object's own ``._dir`` — that attribute only exists on
+    the local-mode :class:`Catalog`. In service mode ``catalog`` is an
+    ``HttpCatalogClient`` with no local directory of its own, but the
+    RDR-106 backup mechanism is deliberately backend-independent: it is a
+    local recovery net for whichever process ran the destructive command,
+    regardless of where the catalog data itself lives.
+    """
+    from nexus.config import catalog_path  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    return catalog_path()
+
+
 def _backup_dir(catalog: "Catalog") -> Path:
-    """Return the backup dir path; create it on demand."""
-    d = catalog._dir / _BACKUP_DIRNAME
+    """Return the backup dir path; create it on demand.
+
+    ``catalog`` is accepted for call-site stability but unused — see
+    :func:`_backup_root`.
+    """
+    del catalog
+    d = _backup_root() / _BACKUP_DIRNAME
     d.mkdir(parents=True, exist_ok=True, mode=0o700)
     return d
 
@@ -113,45 +133,55 @@ def snapshot_documents(
     Captures the full document row, plus its inbound and outbound
     links, so an ``undelete`` can fully reconstruct the document
     AND its position in the link graph.
+
+    Reads exclusively through the public catalog API (``resolve`` /
+    ``links_from`` / ``links_to``) rather than raw SQL, so this works
+    identically against a local-mode :class:`Catalog` and a service-mode
+    ``HttpCatalogClient`` (nexus-xedhp / GH #1374 — the raw-SQL form
+    reached into ``catalog._db``, which only exists locally).
     """
+    from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+
     tumbler_list = list(tumblers)
     if not tumbler_list:
+        return None
+
+    entries = []
+    links_by_tumbler: dict[str, list[dict]] = {}
+    for t in tumbler_list:
+        parsed = Tumbler.parse(t)
+        entry = catalog.resolve(parsed)
+        if entry is None:
+            continue
+        entries.append(entry)
+
+        # Inbound + outbound links per tumbler so undelete can recreate
+        # the link graph. Dedup by (from, to, type): a self-link (from
+        # == to == t) would otherwise appear in both directions.
+        combined: dict[tuple[str, str, str], object] = {}
+        for link in (*catalog.links_from(parsed), *catalog.links_to(parsed)):
+            key = (str(link.from_tumbler), str(link.to_tumbler), link.link_type)
+            combined[key] = link
+        links_by_tumbler[t] = [
+            {
+                "from": str(link.from_tumbler),
+                "to": str(link.to_tumbler),
+                "link_type": link.link_type,
+                "from_span": link.from_span or "",
+                "to_span": link.to_span or "",
+                "created_by": link.created_by,
+                "created_at": link.created_at or "",
+                "meta": link.meta or {},
+            }
+            for link in combined.values()
+        ]
+
+    if not entries:
         return None
 
     backup_dir = _backup_dir(catalog)
     fname = f"catalog-{verb}-{_timestamp()}-{_short_id()}.jsonl"
     path = backup_dir / fname
-
-    placeholders = ",".join("?" * len(tumbler_list))
-    rows = catalog._db.execute(
-        f"SELECT tumbler, title, author, year, content_type, file_path, "
-        f"corpus, physical_collection, chunk_count, head_hash, "
-        f"indexed_at, metadata, source_mtime, alias_of, source_uri "
-        f"FROM documents WHERE tumbler IN ({placeholders})",
-        tumbler_list,
-    ).fetchall()
-    if not rows:
-        return None
-
-    # Inbound + outbound links per tumbler so undelete can recreate
-    # the link graph.
-    links_by_tumbler: dict[str, list[dict]] = {}
-    for t in tumbler_list:
-        from_rows = catalog._db.execute(
-            "SELECT from_tumbler, to_tumbler, link_type, from_span, "
-            "to_span, created_by, created_at, metadata FROM links "
-            "WHERE from_tumbler = ? OR to_tumbler = ?",
-            (t, t),
-        ).fetchall()
-        links_by_tumbler[t] = [
-            {
-                "from": fr[0], "to": fr[1], "link_type": fr[2],
-                "from_span": fr[3] or "", "to_span": fr[4] or "",
-                "created_by": fr[5], "created_at": fr[6] or "",
-                "meta": json.loads(fr[7]) if fr[7] else {},
-            }
-            for fr in from_rows
-        ]
 
     with path.open("w") as f:
         # Header.
@@ -161,34 +191,29 @@ def snapshot_documents(
             "timestamp": datetime.now(UTC).isoformat(),
             "reason": reason,
             "args": args or {},
-            "rows_count": len(rows),
+            "rows_count": len(entries),
         }
         f.write(json.dumps(header) + "\n")
         # Rows.
-        for row in rows:
-            (tumbler, title, author, year, content_type, file_path,
-             corpus, physical_collection, chunk_count, head_hash,
-             indexed_at, metadata_json, source_mtime, alias_of,
-             source_uri) = row
+        for entry in entries:
+            tumbler = str(entry.tumbler)
             rec = {
                 "kind": "document",
                 "tumbler": tumbler,
-                "title": title or "",
-                "author": author or "",
-                "year": year or 0,
-                "content_type": content_type or "",
-                "file_path": file_path or "",
-                "corpus": corpus or "",
-                "physical_collection": physical_collection or "",
-                "chunk_count": chunk_count or 0,
-                "head_hash": head_hash or "",
-                "indexed_at": indexed_at or "",
-                "metadata": (
-                    json.loads(metadata_json) if metadata_json else {}
-                ),
-                "source_mtime": source_mtime or 0.0,
-                "alias_of": alias_of or "",
-                "source_uri": source_uri or "",
+                "title": entry.title or "",
+                "author": entry.author or "",
+                "year": entry.year or 0,
+                "content_type": entry.content_type or "",
+                "file_path": entry.file_path or "",
+                "corpus": entry.corpus or "",
+                "physical_collection": entry.physical_collection or "",
+                "chunk_count": entry.chunk_count or 0,
+                "head_hash": entry.head_hash or "",
+                "indexed_at": entry.indexed_at or "",
+                "metadata": entry.meta or {},
+                "source_mtime": entry.source_mtime or 0.0,
+                "alias_of": entry.alias_of or "",
+                "source_uri": entry.source_uri or "",
                 "links": links_by_tumbler.get(tumbler, []),
             }
             f.write(json.dumps(rec) + "\n")
@@ -199,7 +224,7 @@ def snapshot_documents(
         "catalog_backup_written",
         verb=verb,
         path=str(path),
-        rows=len(rows),
+        rows=len(entries),
     )
     return path
 
@@ -250,7 +275,8 @@ def snapshot_links(
 
 def list_backups(catalog: "Catalog") -> list[BackupRecord]:
     """All backups, newest first."""
-    d = catalog._dir / _BACKUP_DIRNAME
+    del catalog
+    d = _backup_root() / _BACKUP_DIRNAME
     if not d.exists():
         return []
     files = [
@@ -413,7 +439,8 @@ def vacuum_old_backups(
     Returns ``(removed_count, kept_count)``. With ``dry_run=True``
     nothing is removed; the counts are what WOULD happen.
     """
-    d = catalog._dir / _BACKUP_DIRNAME
+    del catalog
+    d = _backup_root() / _BACKUP_DIRNAME
     if not d.exists():
         return (0, 0)
     cutoff = time.time() - (older_than_days * 86400)

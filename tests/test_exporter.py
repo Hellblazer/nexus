@@ -416,6 +416,136 @@ class TestPagination:
         assert dst.count() == n
 
 
+# ── Unit: service-mode export (GH #1373) ─────────────────────────────────────
+
+
+class TestServiceModeExport:
+    """GH #1373: ``make_t3()`` returns ``HttpVectorClient`` in production
+    (both local and cloud mode, RDR-155 P4a.2) -- ``export_collection``
+    crashed reaching for the Chroma-only ``db._client_for()`` private
+    method. These tests exercise the fix through the same
+    ``nexus.db.http_vector_client._post`` / ``_get`` module-function-patch
+    pattern used by ``tests/test_bridge_address_fields.py`` (no real HTTP
+    transport, no httpx.MockTransport needed -- the client's networking
+    funnels through those two module functions)."""
+
+    @staticmethod
+    def _make_client() -> HttpVectorClient:
+        client = HttpVectorClient.__new__(HttpVectorClient)
+        client._tenant = "test-tenant"
+        return client
+
+    def _fake_service(
+        self, collection_name: str, ids: list[str],
+        documents: list[str], metadatas: list[dict], embeddings: np.ndarray,
+    ):
+        """Return (fake_get, fake_post) closures backing a single collection
+        with *ids*/*documents*/*metadatas*/*embeddings* (all same length),
+        routing on the endpoint paths export_collection actually calls."""
+
+        def fake_get(path: str, **_kwargs):
+            if path == "/v1/vectors/stats":
+                return [{"name": collection_name, "count": len(ids)}]
+            if path.startswith("/v1/vectors/count"):
+                return {"count": len(ids)}
+            raise AssertionError(f"unexpected GET {path}")
+
+        def fake_post(path: str, body: dict, **_kwargs):
+            if path == "/v1/vectors/get":
+                assert body["collection"] == collection_name
+                offset = body.get("offset", 0)
+                limit = body.get("limit", len(ids))
+                page = slice(offset, offset + limit)
+                return {
+                    "ids": ids[page],
+                    "documents": documents[page],
+                    "metadatas": metadatas[page],
+                }
+            if path == "/v1/vectors/get-embeddings":
+                assert body["collection"] == collection_name
+                by_id = dict(zip(ids, embeddings))
+                return {"embeddings": [by_id[i].tolist() for i in body["ids"]]}
+            raise AssertionError(f"unexpected POST {path}")
+
+        return fake_get, fake_post
+
+    def test_export_via_http_vector_client_builds_valid_file(self, tmp_path: Path):
+        from unittest.mock import patch
+        collection_name = "code__svc__voyage-code-3__v1"
+        ids = [f"{i:032x}" for i in range(3)]
+        documents = [f"document {i}" for i in range(3)]
+        metadatas = [{"source_path": f"/repo/file_{i}.py"} for i in range(3)]
+        rng = np.random.default_rng(seed=7)
+        embeddings = rng.standard_normal((3, 1024)).astype(np.float32)
+
+        fake_get, fake_post = self._fake_service(
+            collection_name, ids, documents, metadatas, embeddings,
+        )
+        client = self._make_client()
+        out_path = tmp_path / "svc.nxexp"
+
+        with patch("nexus.db.http_vector_client._get", side_effect=fake_get), \
+             patch("nexus.db.http_vector_client._post", side_effect=fake_post):
+            result = export_collection(
+                db=client, collection_name=collection_name, output_path=out_path,
+            )
+
+        assert result["exported_count"] == 3
+        assert out_path.exists()
+
+        with open(out_path, "rb") as f:
+            header = json.loads(f.readline().decode())
+            with gzip.GzipFile(fileobj=f) as gz:
+                records = list(msgpack.Unpacker(gz, raw=False))
+
+        assert header["collection_name"] == collection_name
+        assert header["embedding_model"] == "voyage-code-3"
+        assert len(records) == 3
+        assert {r["id"] for r in records} == set(ids)
+        by_id_meta = {r["id"]: r["metadata"] for r in records}
+        for i, doc_id in enumerate(ids):
+            assert by_id_meta[doc_id]["source_path"] == f"/repo/file_{i}.py"
+        by_id_emb = {r["id"]: r["embedding"] for r in records}
+        for i, doc_id in enumerate(ids):
+            got = np.frombuffer(by_id_emb[doc_id], dtype=np.float32)
+            np.testing.assert_allclose(got, embeddings[i])
+
+    def test_export_via_http_vector_client_round_trips_into_local_import(
+        self, tmp_path: Path, ephemeral_db: T3Database,
+    ):
+        """The .nxexp a service-mode export produces is byte-compatible
+        with the local-mode import path -- proves the file shape doesn't
+        silently diverge between backends."""
+        from unittest.mock import patch
+        collection_name = "code__svc__voyage-code-3__v1"
+        ids = [f"{i:032x}" for i in range(2)]
+        documents = [f"document {i}" for i in range(2)]
+        metadatas = [{"source_path": f"/repo/file_{i}.py"} for i in range(2)]
+        rng = np.random.default_rng(seed=11)
+        embeddings = rng.standard_normal((2, 1024)).astype(np.float32)
+
+        fake_get, fake_post = self._fake_service(
+            collection_name, ids, documents, metadatas, embeddings,
+        )
+        client = self._make_client()
+        out_path = tmp_path / "svc.nxexp"
+
+        with patch("nexus.db.http_vector_client._get", side_effect=fake_get), \
+             patch("nexus.db.http_vector_client._post", side_effect=fake_post):
+            export_collection(db=client, collection_name=collection_name, output_path=out_path)
+
+        import_result = import_collection(db=ephemeral_db, input_path=out_path)
+        assert import_result["imported_count"] == 2
+
+        dst = ephemeral_db.get_collection(collection_name)
+        assert dst.count() == 2
+        stored = dst.get(ids=ids, include=["documents", "metadatas", "embeddings"])
+        assert set(stored["ids"]) == set(ids)
+        by_id_doc = dict(zip(stored["ids"], stored["documents"]))
+        for i, doc_id in enumerate(ids):
+            assert by_id_doc[doc_id] == documents[i]
+
+
 # ── Unit: path remapping ─────────────────────────────────────────────────────
 
 

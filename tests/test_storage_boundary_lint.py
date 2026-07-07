@@ -1128,3 +1128,190 @@ def test_t2_raw_handle_aliased_access_is_a_documented_blind_spot(tmp_path):
     )
     result = _raw_handle_check(extra_files=[target])
     assert result.t2_raw_handle_accesses == base
+
+
+# ---------------------------------------------------------------------------
+# GH #1373: ._client_for(...) backend-private method reach.
+#
+# T3Database's ._client_for(collection_name) is a backend-internal helper
+# that returns the raw ChromaDB client. HttpVectorClient — production's
+# make_t3() return value in both local and cloud mode since RDR-155 P4a.2 —
+# has no such method at all, so any consumer-side reach raises
+# AttributeError at runtime (the exporter.py / manifest_backfill.py bug).
+# Enforced HARD at baseline 0: db/ is the only legitimate owner.
+# ---------------------------------------------------------------------------
+
+
+def _client_for_check(extra_files=None, client_for_allowlist_prefixes=None):
+    from nexus.storage_boundary_lint import scan_repo
+
+    return scan_repo(
+        repo_root=REPO_ROOT,
+        extra_files=extra_files,
+        client_for_allowlist_prefixes=client_for_allowlist_prefixes,
+    )
+
+
+def test_client_for_call_outside_db_is_violation(tmp_path):
+    """A consumer-side ``db._client_for(name)`` call is a hard violation."""
+    target = tmp_path / "client_for_offender.py"
+    target.write_text(
+        "def bad(db, name):\n"
+        "    return db._client_for(name).get_collection(name)\n"
+    )
+    result = _client_for_check(extra_files=[target])
+    matched = [
+        v for v in result.violations
+        if v.file == str(target) and v.symbol == "_client_for"
+    ]
+    assert len(matched) == 1
+    assert matched[0].line == 2
+
+
+def test_client_for_epsilon_allow_suppresses(tmp_path):
+    """A line tagged ``# epsilon-allow: <reason>`` (>= 8 chars) is skipped,
+    for consistency with every other rule in this module."""
+    target = tmp_path / "client_for_allowed.py"
+    target.write_text(
+        "def ok(db, name):\n"
+        "    return db._client_for(name)  # epsilon-allow: documented exception here\n"
+    )
+    result = _client_for_check(extra_files=[target])
+    matched = [v for v in result.violations if v.file == str(target)]
+    assert matched == []
+
+
+def test_client_for_allowed_in_db_directory(tmp_path):
+    """A ``._client_for(...)`` call inside a file under ``src/nexus/db/`` is
+    NOT a violation — db/ is the substrate that legitimately owns it."""
+    from nexus.storage_boundary_lint import scan_repo
+
+    db_dir = tmp_path / "src" / "nexus" / "db"
+    db_dir.mkdir(parents=True)
+    target = db_dir / "internal.py"
+    target.write_text(
+        "def _ok(self, name):\n"
+        "    return self._client_for(name).get_collection(name)\n"
+    )
+    result = scan_repo(
+        repo_root=tmp_path,
+        allowlist_prefixes=(),
+        client_for_allowlist_prefixes=("src/nexus/db/",),
+    )
+    assert result.total_violations == 0
+
+
+def test_client_for_baseline_is_zero_in_repo():
+    """The live repo has zero un-annotated ``._client_for(...)`` reaches
+    outside ``db/`` (GH #1373 fixed both call sites: exporter.py and
+    manifest_backfill.py now route through ``get_collection()``)."""
+    result = _client_for_check()
+    client_for_violations = [
+        v for v in result.violations if v.symbol == "_client_for"
+    ]
+    assert client_for_violations == [], (
+        f"un-annotated ._client_for(...) reach outside db/: "
+        f"{[(v.file, v.line) for v in client_for_violations]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# GH #1374 sibling class: Catalog._dir backend-private attribute reach.
+#
+# Catalog's ._dir is the on-disk catalog directory; HttpCatalogClient (the
+# service-mode catalog handle) has no such attribute. NOT yet enforced as a
+# hard violation — one known site remains (commands/catalog_cmds/backups.py)
+# pending its own cutover. Counted baseline, mirrors catalog_db_accesses.
+# ---------------------------------------------------------------------------
+
+
+def _catalog_dir_check(extra_files=None, catalog_dir_access_allowlist_prefixes=None):
+    from nexus.storage_boundary_lint import scan_repo
+
+    return scan_repo(
+        repo_root=REPO_ROOT,
+        extra_files=extra_files,
+        catalog_dir_access_allowlist_prefixes=catalog_dir_access_allowlist_prefixes,
+    )
+
+
+def test_catalog_dir_access_in_consumer_is_counted(tmp_path):
+    """A ``cat._dir`` access in consumer code (outside catalog/ + daemon/)
+    is counted into the baseline population."""
+    base = _catalog_dir_check().catalog_dir_accesses
+    target = tmp_path / "dir_consumer.py"
+    target.write_text(
+        "def bad(cat):\n"
+        "    return cat._dir / 'backups'\n"
+    )
+    result = _catalog_dir_check(extra_files=[target])
+    assert result.catalog_dir_accesses == base + 1
+
+
+def test_catalog_dir_access_epsilon_allow_suppresses(tmp_path):
+    """A ``._dir`` access annotated with epsilon-allow is NOT counted."""
+    base = _catalog_dir_check().catalog_dir_accesses
+    target = tmp_path / "dir_guarded_consumer.py"
+    target.write_text(
+        "def ok(cat):\n"
+        "    return cat._dir  # epsilon-allow: documented deleted-backups path\n"
+    )
+    result = _catalog_dir_check(extra_files=[target])
+    assert result.catalog_dir_accesses == base
+
+
+def test_catalog_dir_access_in_catalog_module_not_counted(tmp_path):
+    """``._dir`` accesses inside ``src/nexus/catalog/`` are allowlisted
+    (the Catalog class itself owns and defines the attribute)."""
+    from nexus.storage_boundary_lint import scan_repo
+
+    cat_dir = tmp_path / "src" / "nexus" / "catalog"
+    cat_dir.mkdir(parents=True)
+    target = cat_dir / "internal.py"
+    target.write_text(
+        "def _ok(self):\n"
+        "    return self._dir / 'owners.jsonl'\n"
+    )
+    result = scan_repo(
+        repo_root=tmp_path,
+        allowlist_prefixes=(),
+        catalog_dir_access_allowlist_prefixes=("src/nexus/catalog/",),
+    )
+    assert result.catalog_dir_accesses == 0
+
+
+def test_catalog_dir_access_db_and_daemon_allowlisted(tmp_path):
+    """catalog/ AND daemon/ are allowlisted by default; narrowing the
+    allowlist to catalog/-only must count strictly more (daemon/'s own
+    unrelated ``self._dir`` — e.g. ServiceRegistry's lease directory —
+    stops being excluded)."""
+    wide = _catalog_dir_check(
+        catalog_dir_access_allowlist_prefixes=("src/nexus/catalog/",)
+    ).catalog_dir_accesses
+    narrow = _catalog_dir_check().catalog_dir_accesses
+    assert wide > narrow, (
+        "daemon/'s own self._dir sites (e.g. ServiceRegistry) should be "
+        "exempt by default"
+    )
+
+
+def test_catalog_dir_access_never_exceeds_baseline():
+    """The live ._dir access count outside catalog/ + daemon/ must not
+    exceed the seeded baseline (one known site,
+    commands/catalog_cmds/backups.py, pending its own cutover)."""
+    from nexus.storage_boundary_lint import CATALOG_DIR_ACCESS_BASELINE
+
+    result = _catalog_dir_check()
+    assert result.catalog_dir_accesses <= CATALOG_DIR_ACCESS_BASELINE, (
+        f"catalog._dir accesses ({result.catalog_dir_accesses}) exceed "
+        f"baseline ({CATALOG_DIR_ACCESS_BASELINE})"
+    )
+
+
+def test_catalog_dir_access_metric_dict_includes_field():
+    """``as_metric_dict`` must surface ``catalog_dir_accesses`` for T2
+    telemetry storage."""
+    from nexus.storage_boundary_lint import LintResult
+
+    r = LintResult(catalog_dir_accesses=3)
+    assert r.as_metric_dict()["catalog_dir_accesses"] == 3

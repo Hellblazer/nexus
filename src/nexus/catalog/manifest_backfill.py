@@ -31,7 +31,10 @@ from chromadb.errors import NotFoundError as _ChromaNotFoundError
 from nexus.db.chroma_quotas import QUOTAS
 
 if TYPE_CHECKING:
+    import chromadb
+
     from nexus.catalog.catalog import Catalog
+    from nexus.db.http_vector_client import HttpVectorClient, _ServiceCollectionStub
     from nexus.db.t3 import T3Database
 
 _log = structlog.get_logger(__name__)
@@ -103,7 +106,7 @@ class BackfillResult:
 
 
 def _iter_chunks_for_doc(
-    col: "chromadb.Collection",
+    col: "chromadb.Collection | _ServiceCollectionStub",
     doc_id: str,
     collection: str,
 ) -> list[dict]:
@@ -114,8 +117,6 @@ def _iter_chunks_for_doc(
 
     Raises MissingChunkHashError if any chunk lacks chunk_text_hash.
     """
-    from chromadb import Collection  # noqa: PLC0415 — defer heavy import
-
     chunks: list[dict] = []
     chunk_index_seen = 0
     offset = 0
@@ -162,7 +163,7 @@ def _iter_chunks_for_doc(
 
 def backfill_manifest_for_collection(
     catalog: "Catalog",
-    t3: "T3Database",
+    t3: "T3Database | HttpVectorClient",
     collection_name: str,
     *,
     dry_run: bool = True,
@@ -177,7 +178,9 @@ def backfill_manifest_for_collection(
 
     Args:
         catalog: The Catalog instance (SQLite + JSONL).
-        t3: T3Database instance for ChromaDB access.
+        t3: T3Database or HttpVectorClient instance for T3 access
+            (GH #1373 sibling bug: production's ``make_t3()`` returns
+            ``HttpVectorClient``, which has no ``_client_for``).
         collection_name: Name of the T3 collection to backfill.
         dry_run: If True, compute but do not write manifest rows.
         limit: If > 0, process at most this many documents.
@@ -204,7 +207,7 @@ def backfill_manifest_for_collection(
     # so the operator sees the real cause instead of a silent empty manifest).
     col = None
     try:
-        col = t3._client_for(collection_name).get_collection(collection_name)
+        col = t3.get_collection(collection_name)
     except _ChromaNotFoundError:
         # Collection doesn't exist in T3 — all docs will be counted as skipped.
         col = None
