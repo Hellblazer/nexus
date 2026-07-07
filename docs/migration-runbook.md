@@ -254,7 +254,7 @@ Note: `aspects` has no standalone command; it runs only via `migrate all`.
 
 ```
 nx storage migrate vectors --dry-run            # local leg, count only (no service needed)
-nx storage migrate vectors                      # local leg (~/.config/nexus/chroma)
+nx storage migrate vectors                      # local leg (product default: ~/.local/share/nexus/chroma)
 nx storage migrate vectors --cloud --dry-run    # cloud leg, count only
 nx storage migrate vectors --cloud              # ChromaCloud leg
 ```
@@ -456,7 +456,7 @@ loss — but it must be *proven* pre-existing, never assumed:
 2. **Cross-reference each ID against the pre-migration Chroma source**, the
    same source the ETL read from and that copy-not-move left untouched
    (§0.1, §6). Use `nx collection list` / a direct Chroma `get(ids=[...])`
-   against the local (`~/.config/nexus/chroma`) or ChromaCloud collection
+   against the local (default `~/.local/share/nexus/chroma`) or ChromaCloud collection
    named in the orphan row:
    - **Absent from Chroma too** -> the orphan predates this migration
      entirely (catalog/topic-assignment drift the RDR-108 string-copy-orphan
