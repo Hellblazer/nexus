@@ -62,10 +62,13 @@ parse_summary_count() {
 # Select pytest's counts line from captured output. ANCHORED as a counts line
 # ("N <category>[, ...] in 12.34s"): a failing test's error repr can contain
 # " in 0.53s" and print AFTER the real summary; an unanchored last-match then
-# parses passed=0 (observed live, 2026-07-07). Empty on no match (`|| true`
+# parses passed=0 (observed live, 2026-07-07). Without -q (e.g. a -v
+# pass-through run) pytest decorates the line ("==== N passed in 7.75s ===="),
+# which false-tripped the no-summary guard (observed live, 2026-07-07) — the
+# optional =-decoration prefix covers that form. Empty on no match (`|| true`
 # keeps set -e/pipefail from aborting before the failure is reported).
 select_summary_line() {
-  grep -E '^[0-9]+ (failed|passed|skipped|deselected|error|xfailed|xpassed|warning)[a-z]*(,.*)? in [0-9.]+s' "$1" | tail -1 || true
+  grep -E '^(=+ )?[0-9]+ (failed|passed|skipped|deselected|error|xfailed|xpassed|warning)[a-z]*(,.*)? in [0-9.]+s' "$1" | tail -1 || true
 }
 
 # ── Self-test (NX_GATE_SELFTEST=1): exercise the parser against synthetic
@@ -87,6 +90,23 @@ if [ "${NX_GATE_SELFTEST:-0}" = "1" ]; then
   check_parse "passed+skipped" "77 passed, 430 skipped in 812.34s" 77 430
   check_parse "passed only, zero skipped omitted" "512 passed in 45.01s" 512 0
   check_parse "failed+passed+skipped" "2 failed, 505 passed, 24 skipped in 900.12s" 505 24
+  check_parse "non-quiet =-decorated summary" "=========== 7 passed, 75 deselected in 7.75s ===========" 7 0
+
+  # Non-quiet (-v pass-through) runs decorate the summary line with = signs;
+  # selection must still find it (false no-summary trip observed 2026-07-07).
+  selftest_fixture_v="$(mktemp)"
+  printf '%s\n' \
+    "tests/test_mcp_server.py::test_mcp_server_round_trip PASSED" \
+    "======================= 7 passed, 75 deselected in 7.75s =======================" \
+    > "$selftest_fixture_v"
+  selected_v="$(select_summary_line "$selftest_fixture_v")"
+  rm -f "$selftest_fixture_v"
+  if [ "$selected_v" = "======================= 7 passed, 75 deselected in 7.75s =======================" ]; then
+    echo "[gate-selftest] ok (=-decorated summary line selected)"
+  else
+    echo "[gate-selftest] FAIL (=-decorated selection): got '$selected_v'" >&2
+    selftest_failed=1
+  fi
 
   # Line SELECTION: a post-summary decoy containing " in 0.53s" must not win.
   selftest_fixture="$(mktemp)"

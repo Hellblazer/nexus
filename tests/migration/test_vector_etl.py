@@ -1974,11 +1974,11 @@ class TestEmbedderModeParityJava:
 
 # ══ Integration: real Java service + hermetic Postgres 16 ════════════════════
 
-from tests.db._service_fixture import SERVICE_ROLES_SQL  # noqa: E402
+from tests.db._service_fixture import SERVICE_ROLES_SQL, pg_bin_dir  # noqa: E402
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _JAR       = _REPO_ROOT / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"
-_PG_BIN    = Path("/opt/homebrew/opt/postgresql@16/bin")
+_PG_BIN    = pg_bin_dir()
 _INITDB    = _PG_BIN / "initdb"
 _PG_CTL    = _PG_BIN / "pg_ctl"
 _PSQL      = _PG_BIN / "psql"
@@ -1998,8 +1998,8 @@ _ALL_PREREQS = (
 _SKIP_INTEGRATION = pytest.mark.skipif(
     not _ALL_PREREQS,
     reason=(
-        "skipped: missing jar or pg16 binaries "
-        f"(jar={_JAR.exists()}, pg16={_PG_CTL.exists()}, java={_JAVA})"
+        "skipped: missing jar or PG binaries "
+        f"(jar={_JAR.exists()}, pg={_PG_CTL.exists()}, java={_JAVA})"
     ),
 )
 
@@ -2056,7 +2056,7 @@ def vec_etl_pg_instance():
     no schema pre-application — the JAR's Liquibase run owns DDL; only the
     nexus_svc role must pre-exist (grants-nexus-svc.xml runAlways)."""
     if not _ALL_PREREQS:
-        pytest.skip("missing jar or pg16 binaries")
+        pytest.skip("missing jar or PG binaries")
 
     pgdata = tempfile.mkdtemp(prefix="nexus_vec_etl_pg_")
     pg_port = _free_port()

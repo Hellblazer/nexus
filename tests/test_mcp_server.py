@@ -912,13 +912,50 @@ def test_t1_session_isolation():
 )
 async def test_mcp_server_round_trip():
     from mcp import ClientSession
-    from mcp.client.stdio import StdioServerParameters, stdio_client
+    from mcp.client.stdio import StdioServerParameters, get_default_environment, stdio_client
 
     nx_mcp = Path(sys.executable).parent / "nx-mcp"
     if not nx_mcp.exists():
         pytest.skip("nx-mcp entry point not found; run 'uv sync' first")
 
-    server_params = StdioServerParameters(command=str(nx_mcp), args=[])
+    # Resolve the endpoint inside the ISOLATED test env (the autouse fixture
+    # points NEXUS_CONFIG_DIR at a per-test tmp dir): the module skipif ran at
+    # collection time against the ambient config dir, so it can be reachable
+    # there yet unresolvable here. Skip rather than false-fail in that case —
+    # this test must never round-trip against the live install's endpoint.
+    from nexus.db.service_endpoint import resolve_service_config
+    try:
+        host, port, token = resolve_service_config()
+    except RuntimeError:
+        pytest.skip(
+            "no service endpoint resolvable in the isolated test env "
+            "(export NX_SERVICE_PORT/NX_SERVICE_TOKEN or run via "
+            "tests/e2e/local-service-gate.sh)"
+        )
+
+    # nexus-f4wcg: StdioServerParameters(env=None) does NOT inherit os.environ
+    # — the MCP SDK strips the child env to a 6-var safe set (HOME, PATH, ...).
+    # The spawned nx-mcp therefore resolved the REAL ~/.config/nexus: on a dev
+    # box with config.yml service_url set it round-tripped against the
+    # production service; in CI (empty runner config) it failed loud. Build the
+    # child env explicitly: forward the nexus/test isolation vars, then pin the
+    # endpoint this test just resolved (NX_SERVICE_URL is dropped so the pinned
+    # host/port halves cannot be outranked by a cloud URL leg). The explicit
+    # get_default_environment() base is deliberate — stdio_client happens to
+    # re-merge it internally today, but that's an SDK implementation detail.
+    env = get_default_environment()
+    env.update(
+        {k: v for k, v in os.environ.items()
+         if k.startswith(("NX_", "NEXUS_", "CHROMA_", "VOYAGE_"))}
+    )
+    env.pop("NX_SERVICE_URL", None)
+    env.update({
+        "NX_STORAGE_BACKEND": "service",
+        "NX_SERVICE_HOST": host,
+        "NX_SERVICE_PORT": str(port),
+        "NX_SERVICE_TOKEN": token,
+    })
+    server_params = StdioServerParameters(command=str(nx_mcp), args=[], env=env)
     async with stdio_client(server_params) as (read_stream, write_stream):
         async with ClientSession(read_stream, write_stream) as session:
             await session.initialize()
@@ -962,13 +999,22 @@ async def test_mcp_server_round_trip():
 async def test_mcp_catalog_server_round_trip():
     """Verify nexus-catalog server registers exactly the 10 catalog tools."""
     from mcp import ClientSession
-    from mcp.client.stdio import StdioServerParameters, stdio_client
+    from mcp.client.stdio import StdioServerParameters, get_default_environment, stdio_client
 
     nx_mcp_catalog = Path(sys.executable).parent / "nx-mcp-catalog"
     if not nx_mcp_catalog.exists():
         pytest.skip("nx-mcp-catalog entry point not found; run 'uv sync && scripts/reinstall-tool.sh'")
 
-    server_params = StdioServerParameters(command=str(nx_mcp_catalog), args=[])
+    # Same child-env discipline as test_mcp_server_round_trip: the SDK's
+    # default env strips os.environ, so forward the isolation vars
+    # (NEXUS_CONFIG_DIR / NEXUS_CATALOG_PATH tmp redirects in particular)
+    # instead of letting the child read the real ~/.config/nexus.
+    env = get_default_environment()
+    env.update(
+        {k: v for k, v in os.environ.items()
+         if k.startswith(("NX_", "NEXUS_", "CHROMA_", "VOYAGE_"))}
+    )
+    server_params = StdioServerParameters(command=str(nx_mcp_catalog), args=[], env=env)
     async with stdio_client(server_params) as (read_stream, write_stream):
         async with ClientSession(read_stream, write_stream) as session:
             await session.initialize()

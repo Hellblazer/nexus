@@ -9,7 +9,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from tests.db._service_fixture import jar_freshness_skip_reason
+import pytest
+
+from tests.db._service_fixture import jar_freshness_skip_reason, pg_bin_dir
 
 
 def _touch(path: Path, mtime: float) -> None:
@@ -91,3 +93,50 @@ def test_stale_jar_returns_reason(tmp_path: Path, monkeypatch) -> None:
     assert reason is not None
     assert "STALE" in reason
     assert "NewHandler.java" in reason
+
+
+# ── pg_bin_dir() (nexus-f4wcg) — the shared PG-discovery contract for the ────
+# ── 22 self-provisioning fixture modules; three branches locked in.       ────
+
+_PG_TOOL_NAMES = ("initdb", "pg_ctl", "psql", "createdb")
+
+
+def _fake_pg_bin(tmp_path: Path) -> Path:
+    bin_dir = tmp_path / "pgbin"
+    bin_dir.mkdir()
+    for name in _PG_TOOL_NAMES:
+        (bin_dir / name).write_text("#!/bin/sh\n")
+    return bin_dir
+
+
+def test_pg_bin_dir_honors_nexus_pg_bin_override(tmp_path: Path, monkeypatch) -> None:
+    bin_dir = _fake_pg_bin(tmp_path)
+    monkeypatch.setenv("NEXUS_PG_BIN", str(bin_dir))
+    assert pg_bin_dir() == bin_dir
+
+
+def test_pg_bin_dir_returns_nonexistent_sentinel_when_nothing_found(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Nothing discoverable: no override, no candidate dirs, nothing on PATH
+    # (the autouse config-dir isolation already empties the bundle leg).
+    import nexus.db.pg_provision as pg_provision
+
+    monkeypatch.delenv("NEXUS_PG_BIN", raising=False)
+    monkeypatch.setattr(pg_provision, "_CANDIDATE_DIRS", [])
+    monkeypatch.setattr(pg_provision.shutil, "which", lambda _name: None)
+    result = pg_bin_dir()
+    # The sentinel's whole contract: every per-module prereq check skips.
+    assert not any((result / name).exists() for name in _PG_TOOL_NAMES)
+
+
+def test_pg_bin_dir_raises_on_set_but_broken_nexus_pg_bin(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Fail-loud policy: an explicit override pointing at a dir without the
+    # binaries is a user error — never mass-skip 22 modules silently.
+    from nexus.db.pg_provision import PgBinaryNotFoundError
+
+    monkeypatch.setenv("NEXUS_PG_BIN", str(tmp_path / "nowhere"))
+    with pytest.raises(PgBinaryNotFoundError):
+        pg_bin_dir()

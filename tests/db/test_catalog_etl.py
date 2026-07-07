@@ -36,13 +36,13 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
-from tests.db._service_fixture import SERVICE_ROLES_SQL
+from tests.db._service_fixture import SERVICE_ROLES_SQL, pg_bin_dir
 
 # ── Prerequisite paths ─────────────────────────────────────────────────────────
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _JAR       = _REPO_ROOT / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"
-_PG_BIN    = Path("/opt/homebrew/opt/postgresql@16/bin")
+_PG_BIN    = pg_bin_dir()
 _INITDB    = _PG_BIN / "initdb"
 _PG_CTL    = _PG_BIN / "pg_ctl"
 _PSQL      = _PG_BIN / "psql"
@@ -62,8 +62,8 @@ _ALL_PREREQS = (
 _SKIP_INTEGRATION = pytest.mark.skipif(
     not _ALL_PREREQS,
     reason=(
-        "skipped: missing jar or pg16 binaries "
-        f"(jar={_JAR.exists()}, pg16={_PG_CTL.exists()}, java={_JAVA})"
+        "skipped: missing jar or PG binaries "
+        f"(jar={_JAR.exists()}, pg={_PG_CTL.exists()}, java={_JAVA})"
     ),
 )
 
@@ -885,7 +885,7 @@ def cat_etl_pg_instance():
       SERVICE_ROLES_SQL creates it as a NOSUPERUSER NOBYPASSRLS login role.
     """
     if not _ALL_PREREQS:
-        pytest.skip("missing jar or pg16 binaries")
+        pytest.skip("missing jar or PG binaries")
 
     pgdata = tempfile.mkdtemp(prefix="nexus_cat_etl_pg_")
     pg_port = _free_port()
