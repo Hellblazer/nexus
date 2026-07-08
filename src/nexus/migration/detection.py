@@ -32,10 +32,14 @@ belt-and-suspenders confirmation, not the P0 source of truth.
 
 The classifier takes already-opened read clients (dependency injection — the
 CLI ``--dry-run`` layer wires the real ``chroma_read.open_local_read_client``
-/ ``open_cloud_read_client``). It touches only ``list_collections()`` and
-``Collection.count()``; it moves NO data. A store that cannot be enumerated or
-a collection that cannot be probed is a LOUD error, never a silent skip — a
-dropped collection is a silent half-migration.
+/ ``open_cloud_read_client``). It touches ``list_collections()``,
+``Collection.count()``, and — for name-unsupported data-bearing collections
+only — a best-effort one-vector ``Collection.get(include=["embeddings"])``
+dim probe (nexus-nb7hr); it moves NO data. A store that cannot be enumerated
+or a collection whose COUNT cannot be probed is a LOUD error, never a silent
+skip — a dropped collection is a silent half-migration. The dim probe alone
+is best-effort: its failure degrades that collection to name-based
+classification (the pre-nb7hr behavior), logged, never aborting detection.
 """
 from __future__ import annotations
 
@@ -60,6 +64,38 @@ _log = structlog.get_logger(__name__)
 #: selectable local embedder (a user may still index minilm-384 locally, but the
 #: service cannot serve it — such collections are UNSUPPORTED until re-indexed).
 _ONNX_MODEL: str = "bge-base-en-v15-768"
+#: The local-ONNX embedding dimension — the measured-dim bucket that makes a
+#: name-unsupported collection remappable without credentials (nexus-nb7hr).
+_ONNX_DIM: int = 768
+
+
+def _probe_actual_dim(col: Any) -> int | None:
+    """Measure the stored embedding dimension from ONE real vector.
+
+    ``col.get(limit=1, include=["embeddings"])`` — the same primitive
+    ``collection_audit.sample_live_distances`` uses, with the SAME
+    best-effort error contract (review: both existing users of this call —
+    collection_audit and doctor — catch and degrade; a vector-embedding
+    fetch is heavier and more failure-prone than ``count()``, e.g. a
+    cloud key scoped for list/count but not raw-vector export, or a
+    transient blip). A probe failure returns ``None`` — the name-based
+    classification stands (the pre-nb7hr behavior for that collection) —
+    and logs a warning; it must never abort the whole detection.
+    """
+    try:
+        sample = col.get(limit=1, include=["embeddings"])
+    except Exception as exc:  # noqa: BLE001 — best-effort probe; degrade to name-based classification
+        _log.warning(
+            "migration_dim_probe_failed",
+            collection=getattr(col, "name", "?"),
+            error=str(exc),
+        )
+        return None
+    embeddings = sample.get("embeddings") if isinstance(sample, dict) else None
+    if embeddings is None or len(embeddings) == 0:
+        return None
+    first = embeddings[0]
+    return len(first) if first is not None else None
 
 #: The voyage models (``_VOYAGE_MODELS``) are imported from ``vector_etl`` (single
 #: source) so this module's billing decision and vector_etl's passthrough
@@ -162,7 +198,17 @@ def cross_model_remappable(c: "CollectionClassification") -> bool:
     The decision is policy: the orchestrator builds the ``target_names`` map from
     this predicate and the pre-gate exempts exactly these collections.
     """
-    if not c.has_data or c.model is None:
+    if not c.has_data:
+        return False
+    # nexus-nb7hr measured-dim override: a stored vector PROVED the content
+    # is local bge/ONNX (768-dim), so the name-based exclusions below do not
+    # apply — a voyage-labeled name is a pre-RDR-109 mislabel (re-embedding
+    # bge text into bge is loss-free, unlike genuine voyage content), and a
+    # non-conformant name gets a synthesized conformant target
+    # (cross_model_target_name).
+    if c.support == "unsupported" and c.measured_dim == _ONNX_DIM:
+        return True
+    if c.model is None:
         return False
     if len(c.collection.split("__")) != 4:
         return False
@@ -200,6 +246,26 @@ def cross_model_target_model(source: str, *, voyage_key_present: bool) -> str:
     return _ONNX_MODEL
 
 
+def remap_target_model(
+    c: "CollectionClassification", *, voyage_key_present: bool
+) -> str:
+    """The target model for a remappable classification (nexus-nb7hr).
+
+    A collection whose vectors MEASURED as local bge (768) targets the ONNX
+    model in EVERY mode — re-embedding provably-bge content into a voyage
+    model would bill tokens and contradict the classifier's "no Voyage key
+    needed" diagnostic (bge is wired in both deployment modes per
+    :func:`wired_models`; the deployed engine's /version smoke lists it).
+    Everything else keeps the mode-aware :func:`cross_model_target_model`
+    policy (nexus-gilf2).
+    """
+    if c.measured_dim == _ONNX_DIM:
+        return _ONNX_MODEL
+    return cross_model_target_model(
+        c.collection, voyage_key_present=voyage_key_present
+    )
+
+
 @dataclass(frozen=True)
 class CollectionClassification:
     """Per-collection detection result along both axes (RF-2).
@@ -218,6 +284,11 @@ class CollectionClassification:
     source_count: int
     has_data: bool
     reason: str = ""
+    #: GROUND-TRUTH embedding dimension, measured from one stored vector
+    #: (nexus-nb7hr / GH #1381). ``None`` when the collection is empty or
+    #: was not probed (probing happens only for name-unsupported,
+    #: data-bearing collections — the case where the name lies matters).
+    measured_dim: int | None = None
 
 
 @dataclass(frozen=True)
@@ -267,6 +338,34 @@ def _classify_leg(
         support, reason = classify_model_support(
             model, voyage_key_present=voyage_key_present
         )
+        # nexus-nb7hr (GH #1381, Steve's 5.x install): the name can LIE —
+        # pre-RDR-109 writes mislabeled local-ONNX collections voyage-*, and
+        # pre-RDR-103 names have no model segment at all. Measure ONE stored
+        # vector when the NAME says unsupported and there is data to move;
+        # the measurement, not the label, decides (the read-side twin of the
+        # RDR-109 write-side honest-naming fix). Probe failure propagates
+        # LOUD, same as the count probe above.
+        measured_dim: int | None = None
+        if support == "unsupported" and source_count > 0:
+            measured_dim = _probe_actual_dim(col)
+            if measured_dim == _ONNX_DIM:
+                # The vectors ARE local bge/ONNX regardless of the name.
+                # Keep support "unsupported" (the name still cannot be
+                # served verbatim) but the measured dim makes it
+                # cross-model REMAPPABLE (see cross_model_remappable):
+                # migrated by re-embedding stored text under a corrected
+                # conformant name — in local mode via the free local ONNX
+                # embedder, no credentials, no Voyage cost.
+                name_issue = (
+                    f"name claims voyage model '{model}'" if model in _VOYAGE_MODELS
+                    else "name is not four-segment conformant"
+                )
+                reason = (
+                    f"{name_issue}, but a stored vector measures "
+                    f"{measured_dim}-dim (local bge/ONNX) — auto-remapped at "
+                    "migration to a corrected conformant name; no Voyage key "
+                    "or re-index needed (nexus-nb7hr)"
+                )
         out.append(
             CollectionClassification(
                 collection=name,
@@ -277,6 +376,7 @@ def _classify_leg(
                 source_count=source_count,
                 has_data=source_count > 0,
                 reason=reason,
+                measured_dim=measured_dim,
             )
         )
     return out
@@ -528,8 +628,8 @@ def build_dry_run_preview(report: DetectionReport) -> DryRunPreview:
     def _cross_target(c: CollectionClassification) -> str | None:
         if not cross_model_remappable(c):
             return None
-        return cross_model_target_model(
-            c.collection, voyage_key_present=report.voyage_key_present
+        return remap_target_model(
+            c, voyage_key_present=report.voyage_key_present
         )
 
     buckets: dict[

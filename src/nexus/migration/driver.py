@@ -38,7 +38,7 @@ from nexus.migration.detection import (
     classify_collections,
     close_read_client,
     cross_model_remappable,
-    cross_model_target_model,
+    remap_target_model,
     open_read_legs,
     voyage_key_available,
 )
@@ -195,7 +195,9 @@ def run_guided_upgrade(
     target_names = {
         c.collection: cross_model_target_name(
             c.collection,
-            cross_model_target_model(c.collection, voyage_key_present=key_present),
+            # nexus-nb7hr: measured-768 collections target ONNX in every
+            # mode (provably-bge content must not bill a voyage re-embed).
+            remap_target_model(c, voyage_key_present=key_present),
         )
         for c in detection.classifications
         if cross_model_remappable(c)

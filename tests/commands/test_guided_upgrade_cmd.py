@@ -321,6 +321,10 @@ class TestGuidedUpgradeCmd:
              patch("nexus.commands.migrate_cmd._run_migration", side_effect=_block):
             result = CliRunner().invoke(guided_upgrade_cmd, ["--yes"])
         assert result.exit_code == 1
+        # nexus-nb7hr secondary finding 2: a blocked guided run must print
+        # the sentinel-recovery step (previously only migrate-to-service's
+        # own failure text mentioned it).
+        assert "nx migration --clear-state" in result.output
         assert "nx storage migrate vectors --rollback" in result.output
         assert "FAILED validation" in result.output
 

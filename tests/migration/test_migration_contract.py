@@ -105,6 +105,7 @@ def test_detection_surface():
         "source_count",
         "has_data",
         "reason",
+        "measured_dim",  # nexus-nb7hr: ground-truth probe result
     }
 
 

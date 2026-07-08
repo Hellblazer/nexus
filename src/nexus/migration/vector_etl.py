@@ -314,10 +314,16 @@ def cross_model_target_name(source: str, target_model: str) -> str:
     accepts the upsert (its name now matches the wired embedder; RDR-109 /
     nexus-pebfx.2 guard satisfied without weakening it).
 
-    Raises ``ValueError`` on a non-conformant source (the caller must only remap
-    four-segment names; a non-conformant source is ``skipped`` upstream).
+    nexus-nb7hr: a TWO-segment pre-RDR-103 source (``content__owner``) gets a
+    conformant name SYNTHESIZED by appending the model + ``v1`` segments —
+    the measured-dim override makes such collections remappable, and the
+    target must dim-dispatch, so it needs a model segment. Other segment
+    counts still raise (three-segment names are not a known legacy shape;
+    inventing semantics for them would mask genuine corruption).
     """
     segments = source.split("__")
+    if len(segments) == 2:
+        return f"{source}__{target_model}__v1"
     if len(segments) != 4:
         raise ValueError(
             f"cannot remap non-conformant collection name '{source}' "

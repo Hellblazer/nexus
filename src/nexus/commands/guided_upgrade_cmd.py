@@ -185,7 +185,11 @@ def guided_upgrade_cmd(
         click.echo(
             f"\nDetected {pre.data_bearing_count} data-bearing Chroma collection(s) "
             f"to migrate ({pre.classified_unsupported_count} classified unsupported "
-            "— legacy-model collections are auto-remapped, not blocked)."
+            "— auto-remappable ones migrate: measured-bge collections "
+            "(mislabeled/non-conformant names, nexus-nb7hr) always re-embed "
+            "locally at no cost; other legacy models re-embed via the "
+            "mode-appropriate target (billed on a Voyage deployment). "
+            "Genuinely blocked ones stop the run with per-collection reasons)."
         )
     if not assume_yes and not click.confirm(
         "Provision the service stack and migrate now?"
@@ -332,6 +336,20 @@ def guided_upgrade_cmd(
             local_path, db_path, catalog_db_path, readiness.service_url,
             **_extra_kwargs,
         )
+    except SystemExit as _exc:
+        # nexus-nb7hr secondary finding: a blocked/failed migration leaves the
+        # migrated-failed sentinel (reads degrade LOUD) and the recovery step
+        # was only ever printed by migrate-to-service's own failure text —
+        # users driving guided-upgrade alone had no pointer to it.
+        if _exc.code not in (0, None):
+            click.echo("")
+            click.echo(
+                "Recovery: after fixing the blockers above, clear the "
+                "migration sentinel and re-run:"
+            )
+            click.echo("  nx migration --clear-state")
+            click.echo("  nx guided-upgrade")
+        raise
     finally:
         for _var, _prev in (
             ("NX_SERVICE_URL", _prev_url),
