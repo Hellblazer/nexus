@@ -1310,7 +1310,7 @@ nx init --service             # DEPRECATED — plain `nx init` now does this by 
 | `--embedder [bge-768\|minilm-384]` | Select the embedder non-interactively (skips the prompt) |
 | `--yes` / `-y` | Accept the service-autostart registration non-interactively (local mode). The autostart unit is installed as the **sole** starter; `nx init` waits for it to come up rather than also starting a session supervisor. |
 | `--no-autostart` | Do not register the autostart unit; start a session supervisor only (local mode). Takes precedence over `--yes`. |
-| `--service` | **DEPRECATED** (RDR-174 P3.1) — plain `nx init` now provisions the local service backend by default; the flag still works (and prints a deprecation notice) but will be removed in a future release. Provisions the local Postgres + pgvector cluster the RDR-152 service backend uses, locks the embedder to bge-768, acquires + verifies the native service binary, fetches the bge-768 ONNX, and starts the service. Idempotent. Acquire the binary + PG bundle first with `nx daemon service install-binary <engine-service-vX.Y.Z>`. |
+| `--service` | **DEPRECATED** (RDR-174 P3.1) — plain `nx init` now provisions the local service backend by default; the flag still works (and prints a deprecation notice) but will be removed in a future release. Provisions the local Postgres + pgvector cluster the RDR-152 service backend uses, locks the embedder to bge-768, acquires + verifies the native service binary, fetches the bge-768 ONNX, and starts the service. Idempotent. The binary + PG bundle are acquired automatically from the wheel's pinned engine tag (override: `NEXUS_SERVICE_TAG` env or a prior `nx daemon service install-binary`). |
 
 **Service autostart (RDR-174 P2.4, decide-first):** in local mode `nx init`
 decides autostart *before* starting any supervisor. Interactive runs prompt
@@ -1632,10 +1632,14 @@ For a brand-new install the recommended setup is the collapsed flow
 (RDR-174 — one provisioning command, no separate T2-daemon step):
 
 ```
-uv tool install conexus                                    # the nx CLI
-nx daemon service install-binary <engine-service-vX.Y.Z>   # acquire the signed native service binary + PG bundle
-nx init                                                     # provision Postgres+pgvector, fetch bge-768, start the service, offer autostart
+uv tool install conexus    # the nx CLI
+nx init                    # acquire the pinned signed engine + PG bundle, provision Postgres+pgvector, fetch bge-768, start the service, offer autostart
 ```
+
+No engine tag to choose: each conexus release is pinned to the exact
+`engine-service` release it was tested against and `nx init` acquires it
+automatically (cosign-verified). `nx daemon service install-binary` remains
+available as an advanced pre-stage/override (below).
 
 `nx init` provisions and starts the service backend and offers to register the
 OS autostart unit (prompt, default yes; `--yes` accepts, `--no-autostart`
@@ -1916,9 +1920,12 @@ nx daemon service install-binary <engine-service-vX.Y.Z>
 nx daemon service install-binary <engine-service-vX.Y.Z> --no-pg-bundle
 ```
 
-Download, verify, and install the signed native nexus-service binary (and,
-by default, the relocatable PostgreSQL bundle) from a GitHub release to the
-well-known location (`~/.config/nexus/service/`) with a provenance sidecar
+**Advanced / normally unnecessary** — a bare `nx init` acquires the wheel's
+pinned engine automatically; use this command only to pre-stage a binary
+(air-gapped installs) or to install a DIFFERENT engine tag than the pin
+(engine testing). Downloads, verifies, and installs the signed native
+nexus-service binary (and, by default, the relocatable PostgreSQL bundle)
+from a GitHub release to the well-known location (`~/.config/nexus/service/`) with a provenance sidecar
 (version, tag, sha256, install metadata). Supervisor discovery and
 `nx init` use this location.
 

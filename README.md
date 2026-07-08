@@ -54,15 +54,14 @@ For the full deployment story across all three surfaces (install, daemon lifecyc
 ## CLI quick-start
 
 ```bash
-uv tool install conexus                                   # install the nx CLI
-nx daemon service install-binary <engine-service-vX.Y.Z>  # acquire the signed native service binary + PG bundle
-nx init                                                    # provision Postgres+pgvector + bge-768, start the service, offer autostart
-nx doctor                                                 # verify the stack
-nx index repo .                                            # index your repo + discover topics
-nx search "how does retry work"                            # semantic search, fully local
+uv tool install conexus        # install the nx CLI
+nx init                        # acquires the signed engine + Postgres bundle, provisions pgvector + bge-768, starts the service, offers autostart
+nx doctor                      # verify the stack
+nx index repo .                # index your repo + discover topics
+nx search "how does retry work"   # semantic search, fully local
 ```
 
-Pick `<engine-service-vX.Y.Z>` from the [engine-service releases](https://github.com/Hellblazer/nexus/releases) (the newest `engine-service-v*` tag) — there is no `latest` resolution, the tag is explicit. You can instead export `NEXUS_SERVICE_TAG=engine-service-vX.Y.Z`, in which case `nx init` acquires the binary itself and the explicit `install-binary` step is optional.
+You never choose an engine version: every conexus release is built pinned to the exact `engine-service` release it was tested against, and `nx init` acquires that signed binary + Postgres bundle automatically (cosign-verified). Advanced: export `NEXUS_SERVICE_TAG=engine-service-vX.Y.Z` to override the pin, or pre-stage a specific build with `nx daemon service install-binary <tag>` (air-gapped installs, engine testing).
 
 `nx init` provisions the bundled Postgres 17 + pgvector cluster, fetches the bge-768 ONNX model the service embeds with, starts the persistent service, and offers to register the OS autostart unit so it restarts at login/boot (prompt defaults to yes; `--yes` accepts non-interactively, `--no-autostart` starts a session supervisor only). There is **no** separate `nx daemon t2 install` step — T2 (notes/plans) is served by the same service in the default config. The permanent vector store (T3) serves through this native service; the bundled binary + Postgres are cosign-verified and acquired automatically. `nx init` is idempotent — safe to re-run. (The older `nx init --service` flag still works but is deprecated — plain `nx init` is the path now.) **First run only:** this downloads a few hundred MB (the signed ~134 MB service binary, the relocatable Postgres bundle, and the ~140 MB bge-768 model) and takes a few minutes; subsequent starts are fast.
 
