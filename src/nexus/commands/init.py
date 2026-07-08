@@ -417,6 +417,66 @@ def _select_bundled_pg(
     return bin_dir
 
 
+def _acquire_pg_bundle_step(config_dir: Path) -> Path | None:
+    """Download + verify + select the signed PG bundle from the pinned tag.
+
+    GH #1381 / nexus-yv5m4: on a machine with no usable PostgreSQL (none
+    installed, or a host install without pgvector — e.g. Homebrew
+    ``postgresql@17``, whose pgvector formula targets the default major),
+    bare ``nx init`` / ``nx guided-upgrade`` previously dead-ended at brew /
+    build-from-source hints even though every engine release ships a
+    self-contained ``nexus-pg-<platform>.txz`` with pgvector baked in. This
+    step pulls that bundle through the same verified seam as
+    ``nx daemon service install-binary`` (sha256 + keyless Sigstore), then
+    extracts + selects it via :func:`_select_bundled_pg`.
+
+    Returns the selected ``bin/`` dir, or ``None`` when no tag is pinned or
+    the download/verification/extraction fails — the caller then falls
+    through to the original host-PG error path (dev boxes without a pin are
+    unchanged).
+    """
+    from importlib.metadata import PackageNotFoundError, version as _pkg_version  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    from nexus.daemon.binary_install import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        BinaryVerificationError,
+        install_pg_bundle,
+        resolve_service_tag,
+    )
+
+    tag = resolve_service_tag()
+    if not tag:
+        return None
+    try:
+        _nx_version = _pkg_version("conexus")
+    except PackageNotFoundError:
+        _nx_version = "unknown"
+
+    click.echo(f"  Fetching the bundled PostgreSQL ({tag}) …")
+    try:
+        install_pg_bundle(tag, config_dir, installed_by=f"conexus {_nx_version}")
+    except BinaryVerificationError as exc:
+        _log.warning("pg_bundle_acquire_failed", tag=tag, error=str(exc))
+        click.echo(
+            f"  PG bundle download failed: {exc}\n"
+            "  Falling back to host PostgreSQL discovery.",
+            err=True,
+        )
+        return None
+    try:
+        return _select_bundled_pg(config_dir)
+    except Exception as exc:  # noqa: BLE001 — user-facing, must stay actionable
+        # A verified download that fails to EXTRACT (disk full, permissions,
+        # corrupt-on-disk) must not escape as a traceback; fall through to the
+        # host-PG error path with the cause visible (code-review High).
+        _log.error("pg_bundle_extract_failed", tag=tag, error=str(exc))
+        click.echo(
+            f"  Downloaded PG bundle could not be extracted: {exc}\n"
+            "  Falling back to host PostgreSQL discovery.",
+            err=True,
+        )
+        return None
+
+
 def _provision_postgres_step() -> None:
     """Provision (or verify) the nx-managed local Postgres cluster.
 
@@ -435,12 +495,32 @@ def _provision_postgres_step() -> None:
     # First-run local distribution: extract + select the ship-alongside PG bundle
     # (no-op when none is shipped — host PG is then discovered as before).
     try:
-        if _select_bundled_pg(config_dir) is not None:
-            click.echo("  Using bundled PostgreSQL (extracted on first run).")
+        bundle_bin = _select_bundled_pg(config_dir)
     except Exception as exc:  # noqa: BLE001 — user-facing, must stay actionable
         _log.error("pg_bundle_extract_failed", error=str(exc))
         click.echo(f"\nBundled PostgreSQL extraction failed: {exc}", err=True)
         raise SystemExit(1)
+
+    if bundle_bin is not None:
+        click.echo("  Using bundled PostgreSQL (extracted on first run).")
+    elif not os.environ.get("NEXUS_PG_BIN", "").strip():
+        # GH #1381 / nexus-yv5m4: no bundle on disk, no operator override. If
+        # host discovery cannot produce a pgvector-capable PostgreSQL, acquire
+        # the signed PG bundle from the pinned tag instead of sending the user
+        # to Homebrew (whose pgvector formula does not target the versioned
+        # postgresql@17). An explicit NEXUS_PG_BIN is never downloaded over —
+        # a deliberate (even broken) override must surface, not be papered.
+        from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred import — heavy/optional dep loaded only when provisioning runs
+            PgVectorNotInstalledError,
+            check_pgvector_available,
+            discover_pg_binaries,
+        )
+
+        try:
+            check_pgvector_available(discover_pg_binaries())
+        except (PgBinaryNotFoundError, PgVectorNotInstalledError):
+            if _acquire_pg_bundle_step(config_dir) is not None:
+                click.echo("  Using bundled PostgreSQL (downloaded + verified).")
 
     try:
         result = provision(config_dir)
