@@ -383,6 +383,19 @@ public final class PgVectorRepository {
                                         List<String> documents,
                                         List<float[]> embeddings,
                                         List<Map<String, Object>> metadatas) {
+        // nexus-e0hd2 review F2: this is the server-to-server ingest path
+        // (MigrationHandler /ingest-cloud) — ids arrive from an EXTERNAL
+        // ChromaCloud response with no HTTP-boundary validation. Validate
+        // here so a malformed id fails loud with its index BEFORE the batch
+        // transaction, not reason-poor at the chunks CHECK. Length-only
+        // (the vector-id contract); NO truncation — unlike chash_index,
+        // 64-char ids on THIS path have always hard-failed, and the
+        // completed production migration proves conformant sources.
+        if (ids != null) {
+            for (int i = 0; i < ids.size(); i++) {
+                dev.nexus.service.db.Chash.requireLength32(ids.get(i), "ids[" + i + "]");
+            }
+        }
         if (embeddings == null || embeddings.size() != ids.size()) {
             throw new IllegalArgumentException(
                 "upsertChunksWithVectors requires one embedding per id: ids="

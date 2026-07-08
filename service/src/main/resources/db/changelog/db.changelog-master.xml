@@ -160,6 +160,11 @@
          7-arg functions; must come after catalog-007. -->
     <include file="db/changelog/catalog-012-graph-hop-where.xml"/>
 
+    <!-- nexus-e0hd2: VALIDATE the four NOT-VALID chash length CHECKs
+         (A-1 residue 0) + ADD the missing fifth on chash_index. Must come
+         after catalog-002 (the four constraints) and chash-001 (the table). -->
+    <include file="db/changelog/catalog-013-chash-checks-validate.xml"/>
+
     <!-- pgvector taxonomy centroids (bead nexus-t1hnc.1, RDR-156):
          taxonomy_centroids_384/768/1024 — moves the taxonomy__centroids ChromaDB
          collection into Postgres so service-mode taxonomy compute is chroma-free.

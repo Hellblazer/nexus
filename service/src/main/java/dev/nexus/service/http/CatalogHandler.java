@@ -1094,7 +1094,10 @@ public final class CatalogHandler implements HttpHandler {
         if (docId == null || docId.isBlank()) {
             HttpUtil.send(exchange, 400, "{\"error\":\"'doc_id' required\"}"); return;
         }
-        List<Map<String, Object>> rows = castRows(body.get("rows"));
+        // nexus-e0hd2 (critique seam): same table + same bare-chash extraction
+        // as the manifest writes — same boundary treatment.
+        List<Map<String, Object>> rows = strictRows(body.get("rows"));
+        requireCanonicalChashes(rows);
         repo.importChunksBatch(tenant, docId, rows);
         HttpUtil.send(exchange, 200, "{\"imported\":" + rows.size() + "}");
     }
@@ -1480,11 +1483,8 @@ public final class CatalogHandler implements HttpHandler {
                 throw new IllegalArgumentException(
                     "rows[" + i + "]: 'chash' required (string)");
             }
-            try {
-                rows.get(i).put("chash", dev.nexus.service.db.Chash.fromHex(s).toHex());
-            } catch (IllegalArgumentException e) {
-                throw new IllegalArgumentException("rows[" + i + "]: " + e.getMessage());
-            }
+            rows.get(i).put("chash",
+                dev.nexus.service.db.Chash.requireCanonical(s, "rows[" + i + "]"));
         }
     }
 

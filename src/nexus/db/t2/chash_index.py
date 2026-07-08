@@ -414,8 +414,14 @@ def dual_write_chash_index(
     """
     if chash_index is None or not ids or not metadatas:
         return
+    # nexus-e0hd2 (critic finding): chunk_text_hash metadata is the FULL
+    # 64-char sha256; the chash_index key is its [:32] chunk-id form
+    # (RDR-108 D1 — what registeredChashesForCollection has always
+    # substr'd down to on read). Truncate at the producer so the row is
+    # BORN canonical; catalog-013 adds the DB CHECK(length=32) that a
+    # verbatim 64-char write would now trip.
     chashes = [
-        meta.get("chunk_text_hash", "")
+        meta.get("chunk_text_hash", "")[:32]
         for meta in metadatas
         if isinstance(meta, dict)
     ]

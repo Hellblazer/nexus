@@ -115,6 +115,41 @@ public final class Chash {
         }
     }
 
+    /**
+     * Boundary convenience (nexus-e0hd2): parse-don't-validate *value* and
+     * return its canonical hex, prefixing *label* into the rejection message
+     * so a 400 names the offending field/position. The Chash type stays the
+     * sole enforcement point; handlers call this instead of hand-rolling.
+     */
+    public static String requireCanonical(String value, String label) {
+        try {
+            return fromHex(value).toHex();
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException(label + ": " + e.getMessage());
+        }
+    }
+
+    /**
+     * Length-only boundary guard (nexus-e0hd2) for the seams whose enforced
+     * contract is the DB's CHECK(length=32) — vector chunk ids and their
+     * chash_index mirror — where ids are chashes BY CONVENTION but non-hex
+     * 32-char ids are contract-legal (PgVectorServingContractTest upserts
+     * them). Carries the same self-diagnosing full-64 hint as
+     * {@link #fromHex}. Use {@link #requireCanonical} only where sha256
+     * provenance IS the contract (catalog_document_chunks writers).
+     */
+    public static String requireLength32(String value, String label) {
+        if (value == null || value.length() != 32) {
+            String hint = (value != null && value.length() == 64)
+                ? " — a full sha256 hex? the canonical chash is its [:32] prefix"
+                : "";
+            throw new IllegalArgumentException(
+                label + ": expected a 32-char chash, got "
+                + (value == null ? "null" : value.length() + " chars") + hint);
+        }
+        return value;
+    }
+
     /** Canonical 32-char lowercase hex rendering (the wire/storage form). */
     @JsonValue
     public String toHex() {

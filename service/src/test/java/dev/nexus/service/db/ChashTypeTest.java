@@ -74,6 +74,29 @@ class ChashTypeTest {
     }
 
     @Test
+    void requireCanonical_prefixesLabel() {
+        assertThatThrownBy(() -> Chash.requireCanonical("a".repeat(64), "rows[3].chash"))
+            .hasMessageStartingWith("rows[3].chash: ")
+            .hasMessageContaining("got 64 chars");
+        assertThat(Chash.requireCanonical(VALID, "x")).isEqualTo(VALID);
+    }
+
+    @Test
+    void requireLength32_lengthOnly_allowsNonHex() {
+        // The vector/chash_index seams' contract is the DB CHECK (length=32),
+        // NOT sha256-hex — the serving contract test upserts non-hex ids.
+        String nonHex = "p4a-c100000000000000000000000000";
+        assertThat(nonHex).hasSize(32);
+        assertThat(Chash.requireLength32(nonHex, "ids[0]")).isEqualTo(nonHex);
+        assertThatThrownBy(() -> Chash.requireLength32("a".repeat(64), "ids[1]"))
+            .hasMessageStartingWith("ids[1]: ")
+            .hasMessageContaining("got 64 chars")
+            .hasMessageContaining("full sha256");
+        assertThatThrownBy(() -> Chash.requireLength32(null, "ids[2]"))
+            .hasMessageContaining("got null");
+    }
+
+    @Test
     void equality_isOverContents() {
         assertThat(Chash.fromHex(VALID)).isEqualTo(Chash.fromHex(VALID));
         assertThat(Chash.fromHex(VALID).hashCode()).isEqualTo(Chash.fromHex(VALID).hashCode());
