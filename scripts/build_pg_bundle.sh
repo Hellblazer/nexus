@@ -211,10 +211,11 @@ fixup_linux_relocatability() {
         patchelf --set-rpath '$ORIGIN/../lib' "$f" 2>/dev/null || true
     done
     while IFS= read -r -d '' f; do
-        # lib-to-lib deps (libecpg -> libpq) resolve within the same dir.
-        # ($ORIGIN/.. is belt-and-suspenders for any nested layout; on this
-        # from-source build pkglibdir == libdir so vector.so sits directly
-        # in lib/ and $ORIGIN alone suffices — review note.)
+        # lib-to-lib deps (libecpg -> libpq) resolve within the same dir
+        # via $ORIGIN; $ORIGIN/.. additionally covers a nested pkglibdir
+        # (lib/postgresql/vector.so climbing back to lib/). The two review
+        # passes disagreed on which layout this build produces — the dual
+        # entry is deliberately layout-agnostic so it is correct either way.
         patchelf --set-rpath '$ORIGIN:$ORIGIN/..' "$f" 2>/dev/null || true
     done < <(find "${BUNDLE_PREFIX}/lib" -type f -name "*.so*" -print0 2>/dev/null)
 

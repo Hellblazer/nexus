@@ -93,6 +93,25 @@ def test_resolve_env_override_strips_trailing_slash(monkeypatch):
     assert token == "tok"
 
 
+def test_resolve_config_yml_only_no_env(monkeypatch, tmp_path):
+    # nexus-coq1z (critique gap): the Desktop .mcpb is an env-less GUI
+    # subprocess — THIS resolver must fall back to config.yml alone. The
+    # sibling resolver (service_endpoint) had this test; this one did not,
+    # so the desktop-deployment.md claim was inspection-verified only.
+    from nexus.config import set_credential
+
+    # Write via the PUBLIC surface (what `nx config set` does) — this is the
+    # path the doc instructs Desktop users to take. The autouse fixture
+    # already cleared all NX_SERVICE_* env vars; the suite-level config-dir
+    # isolation applies (same mechanics as the sibling
+    # test_shared_service_endpoint::TestConfigYmlFallback).
+    set_credential("service_url", "https://desktop.example.com/")
+    set_credential("service_token", "cfg-only-token")
+    base, token = resolve_managed_endpoint()
+    assert base == "https://desktop.example.com"
+    assert token == "cfg-only-token"
+
+
 def test_resolve_missing_token_fails_loud(monkeypatch):
     with pytest.raises(ManagedServiceIncompatible) as exc:
         resolve_managed_endpoint()
