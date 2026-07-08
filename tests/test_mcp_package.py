@@ -31,7 +31,7 @@ def test_core_registered_tools():
         "search", "query", "store_put", "store_get", "store_list", "store_get_many",
         "memory_put", "memory_get", "memory_delete", "memory_search", "memory_consolidate",
         "scratch", "scratch_manage", "collection_list",
-        "plan_save", "plan_search",
+        "plan_save", "plan_search", "plan_delete",
         "traverse",
         "operator_extract", "operator_rank", "operator_compare",
         "operator_summarize", "operator_generate",

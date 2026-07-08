@@ -153,8 +153,14 @@ def test_run_index_batch_flush_forwards_force_re_embed(tmp_path, monkeypatch):
         def add(self, *_a, **_kw):
             return False  # never staged — the per-file indexers are stubbed anyway
 
-        def drain(self) -> None:
-            pass
+        def drain(self, on_progress=None) -> int:
+            # nexus-uizok: drain grew an on_progress callback + flush count.
+            return 0
+
+        @property
+        def pending_summary(self) -> dict:
+            # nexus-uizok drain-phase contract: nothing staged, nothing in flight.
+            return {"chunks": 0, "collections": 0, "in_flight": 0}
 
         @property
         def failed_files(self) -> dict:
@@ -209,8 +215,14 @@ def test_run_index_batch_flush_force_false_omits_force_re_embed(tmp_path, monkey
         def add(self, *_a, **_kw):
             return False
 
-        def drain(self) -> None:
-            pass
+        def drain(self, on_progress=None) -> int:
+            # nexus-uizok: drain grew an on_progress callback + flush count.
+            return 0
+
+        @property
+        def pending_summary(self) -> dict:
+            # nexus-uizok drain-phase contract: nothing staged, nothing in flight.
+            return {"chunks": 0, "collections": 0, "in_flight": 0}
 
         @property
         def failed_files(self) -> dict:
