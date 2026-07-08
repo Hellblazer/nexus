@@ -116,6 +116,10 @@ _step "2/10 uv tool install conexus==$FROM_VERSION (the OLD version)"
 # Use a sandbox-local UV_TOOL_DIR so this install does not clobber the dev
 # tool install. The UV_TOOL_BIN_DIR puts the resulting `nx` on PATH for
 # this script's subsequent commands.
+# nexus-0rwwv: pin the substrate-migration bridge probe off — this harness
+# runs real `nx doctor`/`nx upgrade`; today it is incidentally safe (SERVICE
+# hard default gates the probe) but that safety should be deliberate.
+export NX_MIGRATION_NOTICE=0
 export UV_TOOL_DIR="$SANDBOX/uv_tools"
 export UV_TOOL_BIN_DIR="$SANDBOX/uv_bin"
 export PATH="$UV_TOOL_BIN_DIR:$PATH"

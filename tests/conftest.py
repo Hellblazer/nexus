@@ -171,6 +171,21 @@ def pytest_sessionfinish(session, exitstatus):
 
 
 @pytest.fixture(autouse=True)
+def _disable_migration_notice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """nexus-0rwwv: pin the substrate-migration bridge probe OFF for the
+    whole suite. ``pending_migration_notice`` (called by interactive
+    ``nx upgrade`` and default ``nx doctor``) opens the local Chroma read
+    leg — and on a lived-in box the isolated test config reads as SQLITE
+    mode while the XDG chroma default resolves to the REAL store (the
+    immutable post-migration rollback source), which unit tests must never
+    open. Tests of the notice itself opt back in with
+    ``monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")`` plus a patched
+    ``detect_pending_migration``.
+    """
+    monkeypatch.setenv("NX_MIGRATION_NOTICE", "0")
+
+
+@pytest.fixture(autouse=True)
 def _restore_structlog_after_test():
     """Save and restore structlog config around every test so any test
     that calls ``structlog.configure(...)`` (directly or via

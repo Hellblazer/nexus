@@ -163,6 +163,14 @@ def _resolve_endpoint() -> tuple[str, str]:
                 "vector_endpoint_mixed_source", url_source="lease", token_source="credential"
             )
     if url is None or token is None:
+        # nexus-0rwwv: this is the EXACT wall an un-migrated 5.x→6.x user
+        # hits on their first `nx search` — their vector data sits in the
+        # retired local Chroma store and the stock remedy ("start the
+        # supervisor") is wrong for them. Append the migration pointer.
+        from nexus.migration.guided_upgrade import (  # noqa: PLC0415 — deferred import — the bridge dies with the migration module at RDR-155 P4b
+            endpoint_failure_migration_hint,
+        )
+
         raise RuntimeError(
             "nexus-service endpoint is not resolvable: T3 vector serving "
             "routes through the nexus-service HTTP API (RDR-155 Phase 4a — "
@@ -171,6 +179,7 @@ def _resolve_endpoint() -> tuple[str, str]:
             "endpoint lease this client auto-discovers), set the managed "
             "endpoint with 'nx config set service_url/service_token', or export "
             "NX_SERVICE_URL / NX_SERVICE_TOKEN explicitly."
+            + endpoint_failure_migration_hint()
         )
     return url, token
 

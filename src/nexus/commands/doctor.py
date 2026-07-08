@@ -1665,6 +1665,19 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
     output, failed = format_health_for_cli(results, local_mode=is_local)
     click.echo(output)
 
+    # nexus-0rwwv: substrate-migration bridge — a local-mode install with a
+    # pending Chroma→pgvector cutover gets a pointer to nx guided-upgrade.
+    # Best-effort (returns None on service mode / fresh installs / probe
+    # failure); printed before the failed-exit so it shows either way.
+    from nexus.migration.guided_upgrade import (  # noqa: PLC0415 — deferred import — the bridge dies with the migration module at RDR-155 P4b
+        pending_migration_notice,
+    )
+
+    notice = pending_migration_notice()
+    if notice:
+        click.echo("")
+        click.echo(notice)
+
     if failed:
         raise click.exceptions.Exit(1)
 

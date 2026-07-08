@@ -169,12 +169,18 @@ def resolve_service_config() -> tuple[str, int, str]:
     host = host or "127.0.0.1"
 
     if port is None or not token:
+        # nexus-0rwwv: an un-migrated 5.x→6.x install hits this wall with a
+        # stock remedy that is WRONG for it — append the migration pointer.
+        from nexus.migration.guided_upgrade import (  # noqa: PLC0415 — deferred import — the bridge dies with the migration module at RDR-155 P4b
+            endpoint_failure_migration_hint,
+        )
+
         raise RuntimeError(
             "nexus-service endpoint is not resolvable (NX_STORAGE_BACKEND="
             "service): start the supervisor with 'nx daemon service start' "
             "(publishes the endpoint lease this client auto-discovers), or "
             "export NX_SERVICE_PORT / NX_SERVICE_TOKEN (and optionally "
-            "NX_SERVICE_HOST) explicitly."
+            "NX_SERVICE_HOST) explicitly." + endpoint_failure_migration_hint()
         )
     return host, port, token
 

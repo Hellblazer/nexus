@@ -1022,3 +1022,46 @@ class TestCheckT1:
             result = runner.invoke(main, ["doctor", "--check-t1"])
         assert result.exit_code == 0, result.output
         assert "chroma reachable" in result.output
+
+# ── nexus-0rwwv: substrate-migration bridge on the default health path ──────
+
+
+def test_doctor_default_prints_migration_pointer(runner, monkeypatch):
+    monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
+    with (
+        patch("nexus.health.run_health_checks", return_value=([], True)),
+        patch("nexus.health.format_health_for_cli", return_value=("all green", [])),
+        patch("nexus.migration.guided_upgrade.pending_migration_notice",
+              return_value="A one-time storage migration is pending: run nx guided-upgrade"),
+    ):
+        result = runner.invoke(main, ["doctor"])
+    assert result.exit_code == 0
+    assert "nx guided-upgrade" in result.output
+
+
+def test_doctor_default_pointer_survives_failed_checks(runner, monkeypatch):
+    # The notice prints BEFORE the failed-exit, so a red doctor still points.
+    monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
+    with (
+        patch("nexus.health.run_health_checks", return_value=([], True)),
+        patch("nexus.health.format_health_for_cli",
+              return_value=("something failed", ["something"])),
+        patch("nexus.migration.guided_upgrade.pending_migration_notice",
+              return_value="A one-time storage migration is pending: run nx guided-upgrade"),
+    ):
+        result = runner.invoke(main, ["doctor"])
+    assert result.exit_code == 1
+    assert "nx guided-upgrade" in result.output
+
+
+def test_doctor_default_silent_without_pending(runner, monkeypatch):
+    monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
+    with (
+        patch("nexus.health.run_health_checks", return_value=([], True)),
+        patch("nexus.health.format_health_for_cli", return_value=("all green", [])),
+        patch("nexus.migration.guided_upgrade.pending_migration_notice",
+              return_value=None),
+    ):
+        result = runner.invoke(main, ["doctor"])
+    assert result.exit_code == 0
+    assert "guided-upgrade" not in result.output
