@@ -565,9 +565,11 @@ class TestCheckQuotas:
         ):
             result = runner.invoke(main, ["doctor", "--check-quotas"])
         assert result.exit_code == 0, result.output
-        # ChromaDB section + a representative limit
-        assert "ChromaDB Cloud" in result.output
-        assert "cloud tenant reachable" in result.output
+        # Vector-store section (nexus-d01js relabel: T3 is pgvector since
+        # 6.0.0; the limits table stays as the Chroma-era reference) + a
+        # representative limit
+        assert "T3 vector store" in result.output
+        assert "T3 backend reachable" in result.output
         assert "max_records_per_write" in result.output
         assert "300" in result.output  # MAX_RECORDS_PER_WRITE / MAX_QUERY_RESULTS
         # Voyage section

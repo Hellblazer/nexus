@@ -852,6 +852,14 @@ public final class CatalogRepository {
      * the purge age clock.
      * Returns 1 if tombstoned, 0 if not found or already tombstoned.
      */
+    // ⚠ TRIPWIRE (nexus-7n553, RDR-164 P4 open gap): deleteDocument /
+    // deleteDocumentsMany are SOFT tombstones by design. If you ever add a
+    // per-document HARD delete (trash-empty, GC), fk-001 cascades only the
+    // four FK children — topic_assignments has NO document-rooted FK (its
+    // doc_id is a chunk chash, not a tumbler) and WILL orphan silently. A
+    // hard path must explicitly purge that doc's assignments by its
+    // manifest chashes (deleteCollection does the collection-scoped
+    // equivalent at line ~1917). Pinned by CatalogDocumentCascadeTest.
     public int deleteDocument(String tenant, String tumbler) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.update(CATALOG_DOCUMENTS)
@@ -1914,6 +1922,11 @@ public final class CatalogRepository {
             counts.put("aspect_extraction_queue", ctx.deleteFrom(ASPECT_EXTRACTION_QUEUE).where(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(name)).execute());
             // 6. catalog documents for this physical collection; fk-001 cascades any
             //    doc-rooted aspect/highlight/queue/manifest rows still present.
+            // The ONLY production HARD delete of document rows. fk-001 cascades
+            // the four FK children; topic_assignments (no doc-rooted FK) is
+            // cleaned explicitly by this method's collection-scoped taxonomy
+            // delete — a per-DOC hard path would have to do its own purge
+            // (nexus-7n553 tripwire at deleteDocument).
             counts.put("catalog_documents", ctx.deleteFrom(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(name)).execute());
             // 7. registry row LAST (RESTRICT children are now gone).
             counts.put("catalog_collections", ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name)).execute());

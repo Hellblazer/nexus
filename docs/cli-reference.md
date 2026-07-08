@@ -1569,7 +1569,7 @@ nx doctor --trim-telemetry --days 7     # Aggressive retention (minimum 1 day)
 The `--trim-telemetry` flag caps `search_telemetry` disk use. The table accrues one row per (query, collection) pair on every `nx search` and MCP search call when `telemetry.search_enabled` is true. Run periodically from cron or a CI job; the default 30-day window keeps an analytical signal long enough to detect slow-burn silent-threshold-drop patterns.
 
 ```
-nx doctor --check-quotas            # Report ChromaDB Cloud + Voyage AI free-tier caps + retry headroom
+nx doctor --check-quotas            # Vector-store limits + embedder caps + reranker + retry headroom
 nx doctor --check-quotas --json     # Structured output for dashboards / CI gates
 ```
 
