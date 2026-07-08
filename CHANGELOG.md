@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.4.0] - 2026-07-07
+
 ### Removed
 
 - **`nx-mcp-devonthink` (the RDR-139 Layer A' proxy server).** Every tool it exposed was a curated forward to DEVONthink's own built-in MCP server — connect your MCP client to DEVONthink's server directly (DT 4 Settings). One tool name differs: the proxy's `resolve_google_books_metadata` maps to the official `resolve_book_metadata` (a superset: Google Books first, Open Library fallback). The one nexus-specific capability, the `dt_incorporate` composite (DT-derived `relates` edges + nexus identity stamped back onto the DT record), lives on as the new `nx dt incorporate <uuid>` CLI verb. Plugin surface change: ships as a MINOR version bump.

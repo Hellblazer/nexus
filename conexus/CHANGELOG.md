@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.4.0] - 2026-07-07
+
 ### Removed
 
 - The `devonthink` MCP server (`nx-mcp-devonthink` proxy) is no longer shipped by the plugin. Its tools forwarded to DEVONthink's own built-in MCP server — configure that server in your client directly. `nx dt incorporate <uuid>` replaces the `dt_incorporate` composite tool; note the official server names the books-metadata tool `resolve_book_metadata` (the proxy called it `resolve_google_books_metadata`).
