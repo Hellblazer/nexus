@@ -2848,6 +2848,49 @@ class CatalogRepositoryTest {
         assertThat(next).isEqualTo(prefix + ".4");
     }
 
+    @Test @Order(307)
+    void registerDocumentMany_fullPage_profileBaseline() {
+        // nexus-oub13: local SQL baseline for the live ~38s/page observation.
+        // Registers a real 1000-doc page into a catalog pre-seeded with 5,000
+        // rows (STORED fts tsvector + GIN + 5 btree indexes all pay per row).
+        // NO wall-clock assertion (shared-runner flake class, nexus-77fqp) —
+        // the register_many_timing log line this exercises IS the deliverable;
+        // correctness asserts only. Local reference on a dev box: the full
+        // page lands in the low hundreds of ms, ~100x under the live number,
+        // which localizes the live sink OFF the SQL path (WAN/pooler/client
+        // stages — see the bead).
+        final String prefix = "rm-profile";
+        for (int page = 0; page < 5; page++) {
+            java.util.List<Map<String, Object>> seed = new java.util.ArrayList<>();
+            for (int i = 0; i < 1000; i++) {
+                int n = page * 1000 + i;
+                seed.add(regDoc("seed doc " + n + " with a realistic title string",
+                                "src/pkg" + (n % 40) + "/mod" + n + ".py"));
+            }
+            var got = repo.registerDocumentMany(TENANT_A, prefix, seed);
+            assertThat(got).hasSize(1000);
+        }
+        // The measured page: 1000 fresh docs against 5k existing rows.
+        java.util.List<Map<String, Object>> pageDocs = new java.util.ArrayList<>();
+        for (int i = 0; i < 1000; i++) {
+            pageDocs.add(regDoc("measured doc " + i,
+                                "src/measured/m" + i + ".py"));
+        }
+        long t0 = System.nanoTime();
+        var tumblers = repo.registerDocumentMany(TENANT_A, prefix, pageDocs);
+        long ms = (System.nanoTime() - t0) / 1_000_000;
+        assertThat(tumblers).hasSize(1000);
+        assertThat(tumblers.get(0)).isEqualTo(prefix + ".5001");
+        assertThat(tumblers.get(999)).isEqualTo(prefix + ".6000");
+        // Idempotent re-send of the same page: no new seq consumed, same tumblers.
+        var again = repo.registerDocumentMany(TENANT_A, prefix, pageDocs);
+        assertThat(again).isEqualTo(tumblers);
+        // The measured wall lands in register_many_timing's total_ms log line
+        // (structured logging convention); `ms` is asserted only for sanity of
+        // the timer plumbing, never as a perf bound (nexus-77fqp flake class).
+        assertThat(ms).isNotNegative();
+    }
+
     @Test @Order(301)
     void registerDocumentMany_mixedNewAndExisting_preservesOrderAndSkipsSeqForExisting() {
         final String prefix = "rm-mixed";

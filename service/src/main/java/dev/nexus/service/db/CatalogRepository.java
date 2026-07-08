@@ -480,6 +480,11 @@ public final class CatalogRepository {
             return java.util.List.of();
         }
         return tenantScope.withTenant(tenant, ctx -> {
+            // nexus-oub13: per-step wall timing — the live duoak.11 re-gate
+            // measured ~38s/page client-side with no way to tell which step
+            // (or whether the server at all) was the sink. One structured
+            // line per page; negligible overhead at page granularity.
+            long tStart = System.nanoTime();
             // Ensure owner row exists (idempotent upsert, minimal fields) — once.
             ctx.insertInto(CATALOG_OWNERS, CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE,
                            CATALOG_OWNERS.REPO_HASH, CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH, CATALOG_OWNERS.NEXT_SEQ)
@@ -490,6 +495,7 @@ public final class CatalogRepository {
                .onConflict(CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX)
                .doNothing()
                .execute();
+            long tOwner = System.nanoTime();
 
             // Batch idempotency: fetch existing LIVE docs for every source_uri and
             // file_path in the batch in ONE query per direction, then join locally.
@@ -523,7 +529,11 @@ public final class CatalogRepository {
                    .forEach(r -> tumblerByFilePath.putIfAbsent(r.value1(), r.value2()));
             }
 
+            long tLookup = System.nanoTime();
+
             // Resolve each doc to an existing tumbler or mark it NEW (input order).
+            // (In-memory joins; timed into resolve_ms so the warm-rerun case
+            // doesn't mislabel this as seq-update time — review M-1.)
             String[] out = new String[docs.size()];
             java.util.List<Integer> newIdx = new java.util.ArrayList<>();
             for (int i = 0; i < docs.size(); i++) {
@@ -540,12 +550,16 @@ public final class CatalogRepository {
                 }
             }
 
+            long tResolve = System.nanoTime();
+            long tClaim = tResolve;
+            long tInsert = tResolve;
             if (!newIdx.isEmpty()) {
                 // Claim a contiguous seq block under ONE FOR UPDATE lock.
                 long seq = ctx.select(CATALOG_OWNERS.NEXT_SEQ).from(CATALOG_OWNERS)
                               .where(CATALOG_OWNERS.TENANT_ID.eq(tenant).and(CATALOG_OWNERS.TUMBLER_PREFIX.eq(ownerPrefix)))
                               .forUpdate()
                               .fetchOne(CATALOG_OWNERS.NEXT_SEQ);
+                tClaim = System.nanoTime();
                 long cursor = seq;
 
                 var insert = ctx.insertInto(CATALOG_DOCUMENTS,
@@ -585,6 +599,7 @@ public final class CatalogRepository {
                             nne(s(fields, "bib_enriched_at", "")));
                 }
                 insert.execute();
+                tInsert = System.nanoTime();
 
                 // Advance next_seq by exactly the number of new docs claimed.
                 ctx.update(CATALOG_OWNERS)
@@ -592,6 +607,18 @@ public final class CatalogRepository {
                    .where(CATALOG_OWNERS.TENANT_ID.eq(tenant).and(CATALOG_OWNERS.TUMBLER_PREFIX.eq(ownerPrefix)))
                    .execute();
             }
+            long tEnd = System.nanoTime();
+            log.info("event=register_many_timing tenant={} owner={} docs={} new={} "
+                    + "owner_upsert_ms={} lookup_ms={} resolve_ms={} claim_ms={} "
+                    + "insert_ms={} seq_update_ms={} total_ms={}",
+                tenant, ownerPrefix, docs.size(), newIdx.size(),
+                (tOwner - tStart) / 1_000_000,
+                (tLookup - tOwner) / 1_000_000,
+                (tResolve - tLookup) / 1_000_000,
+                (tClaim - tResolve) / 1_000_000,
+                (tInsert - tClaim) / 1_000_000,
+                (tEnd - tInsert) / 1_000_000,
+                (tEnd - tStart) / 1_000_000);
 
             return java.util.Arrays.asList(out);
         });
