@@ -1412,6 +1412,7 @@ public final class CatalogRepository {
         int okDocs = 0;
         int totalRows = 0;
         List<String> failed = new ArrayList<>();
+        List<Map<String, Object>> failedDetail = new ArrayList<>();
         if (docs != null) {
             for (Map<String, Object> d : docs) {
                 String docId = s(d, "doc_id");
@@ -1435,17 +1436,76 @@ public final class CatalogRepository {
                     okDocs++;
                     totalRows += rows.size();
                 } catch (Exception e) {
-                    log.debug("event=write_manifest_many_doc_failed tenant={} doc_id={} error={}",
-                              tenant, docId, e.getMessage());
+                    // nexus-fhhwf: the per-doc swallow used to discard the
+                    // CAUSE — a chash CHECK violation surfaced as a bare id
+                    // in failed_doc_ids and took 3 deploy-gate iterations to
+                    // diagnose. Classify and return a structured reason.
+                    Map<String, Object> detail = failureDetail(docId, e);
+                    log.debug("event=write_manifest_many_doc_failed tenant={} doc_id={} reason={} sqlstate={}",
+                              tenant, docId, detail.get("reason"), detail.get("sqlstate"));
                     failed.add(docId);
+                    failedDetail.add(detail);
                 }
             }
+        }
+        if (!failedDetail.isEmpty()) {
+            // One aggregate WARN per request (review: a systemic failure
+            // across a 1000-doc batch must not emit 1000 WARN lines); the
+            // full per-doc detail rides the RESPONSE + per-doc debug above.
+            log.warn("event=write_manifest_many_failures tenant={} failed={} of={} sample={}",
+                     tenant, failedDetail.size(), docs == null ? 0 : docs.size(),
+                     failedDetail.subList(0, Math.min(3, failedDetail.size())));
         }
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("docs", okDocs);
         result.put("rows", totalRows);
-        result.put("failed_doc_ids", failed);
+        result.put("failed_doc_ids", failed);   // back-compat
+        result.put("failed", failedDetail);     // nexus-fhhwf: the diagnosable form
         return result;
+    }
+
+    /**
+     * Compact, client-safe failure classification for the write_many per-doc
+     * catch (nexus-fhhwf). SQLState + PostgreSQL constraint NAME are schema
+     * metadata (safe to return); the raw driver message stays server-side.
+     * Non-DB failures (our own IllegalArgumentException validation) return
+     * their message verbatim — those strings are ours.
+     */
+    private static Map<String, Object> failureDetail(String docId, Throwable e) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("doc_id", docId == null ? "" : docId);
+        Throwable c = e;
+        for (int depth = 0; c != null && depth < 32; depth++, c = c.getCause()) {
+            if (c instanceof java.sql.SQLException se && se.getSQLState() != null) {
+                String state = se.getSQLState();
+                String constraint = null;
+                if (c instanceof org.postgresql.util.PSQLException pse
+                        && pse.getServerErrorMessage() != null) {
+                    constraint = pse.getServerErrorMessage().getConstraint();
+                }
+                String base = switch (state) {
+                    case "23503" -> "foreign key violation (doc_id not registered?)";
+                    case "23514" -> "check constraint violation";
+                    case "23505" -> "unique violation";
+                    case "23502" -> "not-null violation";
+                    default -> "database error";
+                };
+                out.put("reason", constraint != null ? base + " [" + constraint + "]" : base);
+                out.put("sqlstate", state);
+                return out;
+            }
+        }
+        // Non-SQL failure. ALLOWLIST, not exclusion (review M-a): verbatim
+        // messages only for our own validation exceptions — an arbitrary
+        // runtime exception's message can carry internal state (e.g. the
+        // TenantScope admission-queue message wraps a null-SQLState
+        // SQLTransientConnectionException and would fall through here).
+        if (e instanceof IllegalArgumentException && e.getMessage() != null) {
+            out.put("reason", e.getMessage());
+        } else {
+            out.put("reason", "internal error (" + e.getClass().getSimpleName() + ")");
+        }
+        return out;
     }
 
     /** Append manifest rows (upsert by position). */

@@ -2848,6 +2848,33 @@ class CatalogRepositoryTest {
         assertThat(next).isEqualTo(prefix + ".4");
     }
 
+    @Test @Order(310)
+    void writeManifestMany_chashCheckViolation_reasonNamesConstraint() {
+        // nexus-fhhwf acceptance: a doc violating the chash CHECK gets a
+        // structured reason naming the constraint + sqlstate 23514, not a
+        // bare id. Repo-level deliberately: the HTTP boundary now 400s a
+        // 64-char chash before any txn (nexus-z4skl), so the DB CHECK is
+        // the belt for writers that bypass the handler.
+        String prefix = "fhhwf-check";
+        var tumblers = repo.registerDocumentMany(TENANT_A, prefix, List.of(
+            regDoc("ok doc", "ok.py"), regDoc("bad doc", "bad.py")));
+        var result = repo.writeManifestMany(TENANT_A, List.of(
+            Map.of("doc_id", tumblers.get(0), "rows", List.of(
+                Map.of("position", 0, "chash", "a".repeat(32)))),
+            Map.of("doc_id", tumblers.get(1), "rows", List.of(
+                Map.of("position", 0, "chash", "b".repeat(64))))));
+        assertThat(result.get("docs")).isEqualTo(1);
+        assertThat(result.get("failed_doc_ids")).isEqualTo(List.of(tumblers.get(1)));
+        @SuppressWarnings("unchecked")
+        var failed = (List<Map<String, Object>>) result.get("failed");
+        assertThat(failed).hasSize(1);
+        assertThat(failed.get(0).get("doc_id")).isEqualTo(tumblers.get(1));
+        assertThat((String) failed.get(0).get("reason"))
+            .contains("check constraint violation")
+            .contains("chash");   // constraint name names the column/length rule
+        assertThat(failed.get(0).get("sqlstate")).isEqualTo("23514");
+    }
+
     @Test @Order(307)
     void registerDocumentMany_fullPage_profileBaseline() {
         // nexus-oub13: local SQL baseline for the live ~38s/page observation.

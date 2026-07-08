@@ -70,6 +70,51 @@ class TestWriteManifestMany:
         failed = c.write_manifest_many([("1.9.7", [{"chash": "a" * 64, "position": 0}])])
         assert failed == ["1.9.7"]
 
+    def test_failed_reasons_logged(self, monkeypatch) -> None:
+        # nexus-fhhwf: engine v0.1.33+ returns {failed:[{doc_id, reason,
+        # sqlstate}]} alongside the bare id list — the client must surface
+        # the reason in its log so a failed doc is diagnosable without
+        # server access (the v0.1.24 three-iteration lesson).
+        import structlog.testing
+
+        c = _client()
+        monkeypatch.setattr(
+            c, "_post",
+            lambda path, body: {
+                "docs": 0, "rows": 0,
+                "failed_doc_ids": ["1.9.8"],
+                "failed": [{
+                    "doc_id": "1.9.8",
+                    "reason": "check constraint violation [catalog_document_chunks_chash_len_check]",
+                    "sqlstate": "23514",
+                }],
+            },
+            raising=False,
+        )
+        with structlog.testing.capture_logs() as logs:
+            failed = c.write_manifest_many(
+                [("1.9.8", [{"chash": "a" * 64, "position": 0}])]
+            )
+        assert failed == ["1.9.8"]
+        events = [l for l in logs if l["event"] == "manifest_write_many_doc_failed"]
+        assert len(events) == 1
+        assert events[0]["doc_id"] == "1.9.8"
+        assert "chash_len_check" in events[0]["reason"]
+        assert events[0]["sqlstate"] == "23514"
+
+    def test_pre_reason_engine_response_still_works(self, monkeypatch) -> None:
+        # Back-compat: an older engine without the "failed" field must not
+        # break the client (no KeyError, ids still returned).
+        c = _client()
+        monkeypatch.setattr(
+            c, "_post",
+            lambda path, body: {"docs": 0, "rows": 0, "failed_doc_ids": ["1.9.9"]},
+            raising=False,
+        )
+        assert c.write_manifest_many(
+            [("1.9.9", [{"chash": "a" * 64, "position": 0}])]
+        ) == ["1.9.9"]
+
 
 class _FakeCat:
     """Catalog test double capturing which write path the loop takes."""

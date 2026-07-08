@@ -223,6 +223,49 @@ class CatalogHandlerManifestFkTest {
         assertThat(ex.bodyString()).contains("'chash' required");
     }
 
+    // ── per-doc failure reasons (nexus-fhhwf) ────────────────────────────────
+
+    @Test
+    void manifestWriteMany_unregisteredDoc_failedCarriesReasonAndSqlstate() throws Exception {
+        // nexus-fhhwf: the per-doc catch used to swallow the CAUSE — a
+        // constraint violation surfaced as a bare id in failed_doc_ids
+        // (3 deploy-gate iterations on the v0.1.24 probe). The response
+        // now carries {failed:[{doc_id, reason, sqlstate}]} alongside.
+        CapturingExchange ex = post("/v1/catalog/manifest/write_many",
+            "{\"docs\":[{\"doc_id\":\"never-registered-zz\",\"rows\":[{\"position\":0,"
+            + "\"chash\":\"ffffffffffffffffffffffffffffffff\"}]}]}");
+        handleWithTenant(ex);
+        assertThat(ex.status).isEqualTo(200);
+        String body = ex.bodyString();
+        assertThat(body).contains("\"failed_doc_ids\":[\"never-registered-zz\"]");  // back-compat
+        assertThat(body)
+            .contains("\"reason\":\"foreign key violation")
+            .contains("\"sqlstate\":\"23503\"")
+            .contains("fk_catalog_chunks_catalog_doc");
+    }
+
+    @Test
+    void manifestWriteMany_negativePosition_failedCarriesCheckReason() throws Exception {
+        // Critique: the chash CHECK is dead-via-HTTP post-z4skl, but the
+        // position CHECK (position >= 0, catalog-002) is NOT boundary-
+        // validated — the one still-HTTP-reachable 23514. Prove the
+        // failureDetail classification handles it end-to-end.
+        repo.upsertDocument(TENANT, java.util.Map.of(
+            "tumbler", "5.4", "title", "pos check doc", "content_type", "paper",
+            "corpus", "knowledge", "physical_collection", "knowledge__fk__v1"));
+        CapturingExchange ex = post("/v1/catalog/manifest/write_many",
+            "{\"docs\":[{\"doc_id\":\"5.4\",\"rows\":[{\"position\":-1,"
+            + "\"chash\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}]}]}");
+        handleWithTenant(ex);
+        assertThat(ex.status).isEqualTo(200);
+        String body = ex.bodyString();
+        assertThat(body).contains("\"failed_doc_ids\":[\"5.4\"]");
+        assertThat(body)
+            .contains("\"reason\":\"check constraint violation")
+            .contains("position")
+            .contains("\"sqlstate\":\"23514\"");
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
 
     private void handleWithTenant(CapturingExchange ex) throws Exception {
