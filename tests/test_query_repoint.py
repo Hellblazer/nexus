@@ -44,10 +44,10 @@ class _FakeServiceT3:
 
     def search_graph_hop(
         self, query, seeds, collection_names, *, link_type=None,
-        depth=1, direction="both", n_results=10,
+        depth=1, direction="both", where=None, n_results=10,
     ):
         self.graph_calls.append(
-            (query, list(seeds), list(collection_names), link_type, depth, direction, n_results)
+            (query, list(seeds), list(collection_names), link_type, depth, direction, where, n_results)
         )
         return self.graph_rows
 
@@ -480,11 +480,12 @@ class TestQueryRepointGraphHop:
         assert t3.graph_calls == []
         assert t3.meta_calls  # metadata_scoped still called
 
-    def test_follow_links_where_falls_back_to_dance(self, monkeypatch):
-        """HIGH: follow_links + where → service branch skipped; dance (search_cross_corpus) called.
+    def test_follow_links_where_routes_through_graph_hop(self, monkeypatch):
+        """H2 RESOLVED (nexus-7ndh3): follow_links + where stays on the service branch.
 
-        search_graph_hop has no `where` param. When both are set, we fall back to the
-        dance path so the caller's where filter is honored, not silently dropped.
+        search_graph_hop carries `where` since catalog-012, so the old dance
+        fallback (the _skip_service arm) is gone — the caller's where filter is
+        pushed into the combined-query call, not honored via the app-side dance.
         """
         import nexus.search_engine as se
 
@@ -494,21 +495,46 @@ class TestQueryRepointGraphHop:
             cross_called.append(True)
             return []
 
-        t3 = _FakeServiceT3()
-        # Empty catalog entries: cat.find(question) returns [] so catalog_collections
-        # stays None in the dance path, which falls through to broad search
-        # (resolve_corpus("c1", ["c1"]) exact-matches → search_cross_corpus).
-        cat = _FakeCatalog(entries=[])
+        rows = _make_graph_rows(("1.2.3", "a" * 32))
+        t3 = _FakeServiceT3(graph_rows=rows)
+        # A catalog entry so cat.find(question) resolves a seed tumbler.
+        cat = _FakeCatalog(entries=[_FakeCatalogEntry("1.2.3", "T")])
         _wire(monkeypatch, t3, ["c1"], cat, service=True)
-        # Override after _wire so it isn't overridden
         monkeypatch.setattr(se, "search_cross_corpus", _fake_cross)
 
-        # corpus="c1" so resolve_corpus exact-matches the broad_target ["c1"]
-        core.query("q", follow_links="cites", where="lang=python", corpus="c1")
+        result = core.query("q", follow_links="cites", where="lang=python",
+                            corpus="c1", structured=True)
 
-        assert cross_called, "dance must be used when follow_links AND where both set"
-        assert not t3.graph_calls, "search_graph_hop must NOT be called"
-        assert not t3.meta_calls, "search_metadata_scoped must NOT be called"
+        assert not cross_called, "the dance must NOT be used (H2 arm removed)"
+        assert t3.graph_calls, "search_graph_hop must be called"
+        # The where filter reaches the combined-query call (position -2 = where).
+        assert t3.graph_calls[0][-2] == {"lang": "python"}
+        assert isinstance(result, dict)
+        assert result["ids"] == ["1.2.3"]
+
+    def test_follow_links_operator_where_still_dances(self, monkeypatch):
+        """nexus-7ndh3 critique CRITICAL-1: operator-shaped where cannot be
+        expressed as JSONB containment — it must keep the dance path (whose
+        search_cross_corpus leg translates operators to SQL), NOT silently
+        containment-fail through search_graph_hop."""
+        import nexus.search_engine as se
+
+        cross_called = []
+
+        def _fake_cross(*a, **kw):
+            cross_called.append(True)
+            return []
+
+        t3 = _FakeServiceT3()
+        cat = _FakeCatalog(entries=[])
+        _wire(monkeypatch, t3, ["c1"], cat, service=True)
+        monkeypatch.setattr(se, "search_cross_corpus", _fake_cross)
+
+        core.query("q", follow_links="cites", where="bib_year>=2020", corpus="c1")
+
+        assert cross_called, "operator where must take the dance"
+        assert not t3.graph_calls, "search_graph_hop must NOT receive an operator where"
+        assert not t3.meta_calls, "search_metadata_scoped must NOT receive an operator where"
 
     def test_follow_links_subtree_service_mode(self, monkeypatch):
         """L1: follow_links + subtree in service mode: seeds come from cat.descendants()."""

@@ -403,8 +403,10 @@ public final class VectorHandler implements HttpHandler {
      * <p>The combined graph-hop query that retires the {@code query} tool's
      * {@code follow_links} app-side BFS dance. Request:
      * {@code {"query": "...", "seeds": [...], "collections": [...], "link_type": "cites",
-     * "depth": 1, "direction": "both", "n_results": 10}} — link_type may be omitted
-     * (follow all edge types); direction defaults to "both"; depth defaults to 1.
+     * "depth": 1, "direction": "both", "where": {...}, "n_results": 10}} — link_type may
+     * be omitted (follow all edge types); direction defaults to "both"; depth defaults
+     * to 1; where (bead nexus-7ndh3) is an optional chunk-metadata equality map applied
+     * as JSONB containment, same shape as {@code /search-metadata-scoped}'s.
      * Document-level rows, each carrying the matched chunk's {@code chash}.
      */
     private void handleSearchGraphHop(HttpExchange ex, String method) throws IOException {
@@ -419,10 +421,11 @@ public final class VectorHandler implements HttpHandler {
         int depth                = optInt(body, "depth", 1);
         String direction         = optString(body, "direction");
         if (direction == null) direction = "both";
+        Map<String, Object> where = optMap(body, "where");
         int nResults             = optInt(body, "n_results", 10);
 
         var graphResult = repo.searchGraphHopWithTokens(
-            tenant, queryText, seeds, collections, linkType, depth, direction, nResults);
+            tenant, queryText, seeds, collections, linkType, depth, direction, where, nResults);
         // Emit token count from the query-embedding call (bead nexus-ehc4q).
         emitTokenUsage(ex, graphResult.tokens());
         HttpUtil.send(ex, 200, json(graphResult.value()));

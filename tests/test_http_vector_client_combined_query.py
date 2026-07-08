@@ -151,6 +151,25 @@ class TestSearchGraphHop:
             "n_results": 5,
         }
 
+    def test_where_carried_in_body(self, monkeypatch):
+        # nexus-7ndh3: the where equality map rides the wire; omitted when falsy.
+        calls = _patch_post(monkeypatch, lambda p, b: [])
+
+        HttpVectorClient().search_graph_hop(
+            "q", ["1.1"], ["rdr__a__model-x__v1"], where={"lang": "python"})
+
+        _, body = calls[0]
+        assert body["where"] == {"lang": "python"}
+
+    def test_empty_where_omitted_from_body(self, monkeypatch):
+        calls = _patch_post(monkeypatch, lambda p, b: [])
+
+        HttpVectorClient().search_graph_hop(
+            "q", ["1.1"], ["rdr__a__model-x__v1"], where={})
+
+        _, body = calls[0]
+        assert "where" not in body
+
     def test_omits_none_link_type_and_defaults(self, monkeypatch):
         calls = _patch_post(monkeypatch, lambda p, b: [])
 

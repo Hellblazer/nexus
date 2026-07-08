@@ -22,6 +22,15 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_1024;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_384;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_768;
 import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_VECTOR_STATS;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_1024;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_384;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_768;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_METADATA_SCOPED_1024;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_METADATA_SCOPED_384;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_METADATA_SCOPED_768;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SCOPED_1024;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SCOPED_384;
+import static dev.nexus.service.jooq.nexus.Tables.SEARCH_TOPIC_SCOPED_768;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -1622,25 +1631,20 @@ public final class PgVectorRepository {
         }
         int dim = requireHomogeneousDim(collectionNames);
         EmbedResult embed = embedQuery(collectionNames.get(0), queryText, dim);
-        float[] queryVec = embed.embeddings().get(0);
-        String whereJson = (where == null || where.isEmpty()) ? null : toJson(where);
+        Vector queryVec = Vector.of(embed.embeddings().get(0));
+        JSONB whereJsonb = (where == null || where.isEmpty()) ? null : JSONB.jsonb(toJson(where));
+        String[] colls = collectionNames.toArray(String[]::new);
 
-        String sql = "SELECT id, content, collection, distance, chash"
-                   + " FROM nexus.search_metadata_scoped_" + dim
-                   + "(?::vector, ARRAY[" + placeholders(collectionNames.size()) + "]::text[],"
-                   + " ?::text, ?::text, ?::int, ?::text, ?::text, ?::jsonb, ?)";
-        List<Object> binds = new ArrayList<>();
-        binds.add(vectorLiteral(queryVec));
-        binds.addAll(collectionNames);
-        binds.add(contentType);
-        binds.add(author);
-        binds.add(year);
-        binds.add(corpus);
-        binds.add(subtree);
-        binds.add(whereJson);
-        binds.add(nResults);
-
-        return new Tokened<>(runCombinedQueryWithChash(tenant, sql, binds), embed.tokens());
+        org.jooq.Table<?> fn = switch (dim) {
+            case 384  -> SEARCH_METADATA_SCOPED_384.call(
+                queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, nResults);
+            case 768  -> SEARCH_METADATA_SCOPED_768.call(
+                queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, nResults);
+            case 1024 -> SEARCH_METADATA_SCOPED_1024.call(
+                queryVec, colls, contentType, author, year, corpus, subtree, whereJsonb, nResults);
+            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+        };
+        return new Tokened<>(runCombinedQueryWithChash(tenant, fn), embed.tokens());
     }
 
     /**
@@ -1672,18 +1676,15 @@ public final class PgVectorRepository {
         }
         int dim = dimForCollection(collection);
         EmbedResult embed = embedQuery(collection, queryText, dim);
-        float[] queryVec = embed.embeddings().get(0);
+        Vector queryVec = Vector.of(embed.embeddings().get(0));
 
-        String sql = "SELECT id, content, collection, distance"
-                   + " FROM nexus.search_topic_scoped_" + dim
-                   + "(?::vector, ?::text, ?::text, ?)";
-        List<Object> binds = new ArrayList<>();
-        binds.add(vectorLiteral(queryVec));
-        binds.add(topicLabel);
-        binds.add(collection);
-        binds.add(nResults);
-
-        return new Tokened<>(runCombinedQuery(tenant, sql, binds), embed.tokens());
+        org.jooq.Table<?> fn = switch (dim) {
+            case 384  -> SEARCH_TOPIC_SCOPED_384.call(queryVec, topicLabel, collection, nResults);
+            case 768  -> SEARCH_TOPIC_SCOPED_768.call(queryVec, topicLabel, collection, nResults);
+            case 1024 -> SEARCH_TOPIC_SCOPED_1024.call(queryVec, topicLabel, collection, nResults);
+            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+        };
+        return new Tokened<>(runCombinedQuery(tenant, fn), embed.tokens());
     }
 
     /**
@@ -1715,16 +1716,39 @@ public final class PgVectorRepository {
     public List<Map<String, Object>> searchGraphHop(
             String tenant, String queryText, List<String> seeds, List<String> collectionNames,
             String linkType, int depth, String direction, int nResults) {
+        return searchGraphHop(
+            tenant, queryText, seeds, collectionNames, linkType, depth, direction, null, nResults);
+    }
+
+    /** Where-filtered variant (bead nexus-7ndh3); discards the token count. */
+    public List<Map<String, Object>> searchGraphHop(
+            String tenant, String queryText, List<String> seeds, List<String> collectionNames,
+            String linkType, int depth, String direction, Map<String, Object> where, int nResults) {
         return searchGraphHopWithTokens(
-            tenant, queryText, seeds, collectionNames, linkType, depth, direction, nResults).value();
+            tenant, queryText, seeds, collectionNames, linkType, depth, direction, where, nResults)
+            .value();
+    }
+
+    /** No-where compatibility overload of {@link #searchGraphHopWithTokens}. */
+    public Tokened<List<Map<String, Object>>> searchGraphHopWithTokens(
+            String tenant, String queryText, List<String> seeds, List<String> collectionNames,
+            String linkType, int depth, String direction, int nResults) {
+        return searchGraphHopWithTokens(
+            tenant, queryText, seeds, collectionNames, linkType, depth, direction, null, nResults);
     }
 
     /**
      * Token-aware sibling of {@link #searchGraphHop} (bead nexus-ehc4q).
+     *
+     * <p>{@code where} (bead nexus-7ndh3, RDR-156 H2 residual) is a chunk-metadata
+     * equality map applied as JSONB containment ({@code c.metadata @> p_where}) in the
+     * post-BFS rank — byte-for-byte the {@link #searchMetadataScoped} semantics. Null or
+     * empty means no filter. This retires the {@code query} tool's follow_links+where
+     * app-side fallback (the {@code _skip_service} arm).
      */
     public Tokened<List<Map<String, Object>>> searchGraphHopWithTokens(
             String tenant, String queryText, List<String> seeds, List<String> collectionNames,
-            String linkType, int depth, String direction, int nResults) {
+            String linkType, int depth, String direction, Map<String, Object> where, int nResults) {
         if (seeds == null || seeds.isEmpty()
                 || collectionNames == null || collectionNames.isEmpty()) {
             return new Tokened<>(List.of(), 0L);
@@ -1740,23 +1764,21 @@ public final class PgVectorRepository {
         int clampedDepth = Math.min(Math.max(depth, 1), 3);  // mirror graphBFS bound
         int dim = requireHomogeneousDim(collectionNames);
         EmbedResult embed = embedQuery(collectionNames.get(0), queryText, dim);
-        float[] queryVec = embed.embeddings().get(0);
+        Vector queryVec = Vector.of(embed.embeddings().get(0));
+        JSONB whereJsonb = (where == null || where.isEmpty()) ? null : JSONB.jsonb(toJson(where));
+        String[] seedArr = seeds.toArray(String[]::new);
+        String[] colls = collectionNames.toArray(String[]::new);
 
-        String sql = "SELECT id, content, collection, distance, chash"
-                   + " FROM nexus.search_graph_hop_" + dim
-                   + "(?::vector, ARRAY[" + placeholders(seeds.size()) + "]::text[],"
-                   + " ARRAY[" + placeholders(collectionNames.size()) + "]::text[],"
-                   + " ?::text, ?::int, ?::text, ?)";
-        List<Object> binds = new ArrayList<>();
-        binds.add(vectorLiteral(queryVec));
-        binds.addAll(seeds);
-        binds.addAll(collectionNames);
-        binds.add(linkType);
-        binds.add(clampedDepth);
-        binds.add(dir);
-        binds.add(nResults);
-
-        return new Tokened<>(runCombinedQueryWithChash(tenant, sql, binds), embed.tokens());
+        org.jooq.Table<?> fn = switch (dim) {
+            case 384  -> SEARCH_GRAPH_HOP_384.call(
+                queryVec, seedArr, colls, linkType, clampedDepth, dir, whereJsonb, nResults);
+            case 768  -> SEARCH_GRAPH_HOP_768.call(
+                queryVec, seedArr, colls, linkType, clampedDepth, dir, whereJsonb, nResults);
+            case 1024 -> SEARCH_GRAPH_HOP_1024.call(
+                queryVec, seedArr, colls, linkType, clampedDepth, dir, whereJsonb, nResults);
+            default   -> throw new IllegalArgumentException("unsupported dim " + dim);
+        };
+        return new Tokened<>(runCombinedQueryWithChash(tenant, fn), embed.tokens());
     }
 
     /**
@@ -1800,22 +1822,18 @@ public final class PgVectorRepository {
      * filtered-ANN session setting, and map the (id, content, collection, distance)
      * rows to the flat search() envelope.
      *
-     * <p>SANCTIONED RAW (nexus-mzuj9): {@code sql} is caller-built (one per combined-query
-     * family: metadata-scoped, graph-hop, topic-scoped) calling a per-dim stored function
-     * ({@code nexus.search_<kind>_scoped_<dim>(...)}). jOOQ codegen DOES emit typed
-     * table-valued-function wrappers for these (e.g. {@code SearchMetadataScoped_1024}) —
-     * unlike the {@link #hybridSearch}/{@link #searchWithTokens} case this is NOT a hard
-     * DSL-expressiveness wall, but converting it requires a dim-keyed dispatch map (mirroring
-     * {@link DimTables}) across 3 function families × 3 dims with parameter shapes
-     * (ARRAY[...]::text[] collection lists, ::jsonb where-maps) re-verified call-by-call
-     * against each caller. Flagged as a good follow-up mechanical conversion, deferred here
-     * for risk/effort — registered in {@code RawSqlGateTest}'s sanctioned method allowlist.
+     * <p>{@code fn} is a jOOQ generated table-valued-function reference
+     * ({@code SEARCH_<KIND>_SCOPED_<dim>.call(...)} / {@code SEARCH_GRAPH_HOP_<dim>
+     * .call(...)}) built by the caller's dim-dispatch switch — the typed-DSL
+     * conversion of the former caller-built SQL strings (nexus-7ndh3; retired the
+     * {@code runCombinedQuery*} entries from {@code RawSqlGateTest}'s sanctioned
+     * allowlist).
      */
     private List<Map<String, Object>> runCombinedQuery(
-            String tenant, String sql, List<Object> binds) {
-        Result<Record> result = tenantScope.withTenant(tenant, ctx -> {
+            String tenant, org.jooq.Table<?> fn) {
+        Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
             PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
-            return ctx.fetch(sql, binds.toArray());
+            return ctx.selectFrom(fn).fetch();
         });
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
         for (Record rec : result) {
@@ -1831,17 +1849,14 @@ public final class PgVectorRepository {
 
     /**
      * Like {@link #runCombinedQuery} but also maps the matched chunk's {@code chash}
-     * column (graph-hop, bead nexus-houg9). Kept separate because the metadata/topic
-     * functions do not expose chash — {@code rec.get("chash", ...)} would throw there.
-     *
-     * <p>SANCTIONED RAW (nexus-mzuj9): same rationale as {@link #runCombinedQuery} — see
-     * that method's javadoc.
+     * column (graph-hop + metadata-scoped, bead nexus-houg9). Kept separate because the
+     * topic function does not expose chash — {@code rec.get("chash", ...)} would throw.
      */
     private List<Map<String, Object>> runCombinedQueryWithChash(
-            String tenant, String sql, List<Object> binds) {
-        Result<Record> result = tenantScope.withTenant(tenant, ctx -> {
+            String tenant, org.jooq.Table<?> fn) {
+        Result<? extends Record> result = tenantScope.withTenant(tenant, ctx -> {
             PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
-            return ctx.fetch(sql, binds.toArray());
+            return ctx.selectFrom(fn).fetch();
         });
         List<Map<String, Object>> rows = new ArrayList<>(result.size());
         for (Record rec : result) {

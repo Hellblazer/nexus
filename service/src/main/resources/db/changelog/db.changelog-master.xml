@@ -154,6 +154,12 @@
     <!-- nexus-agsq7: append index-age stale_source_ratio to collection_health_meta. -->
     <include file="db/changelog/catalog-011-collection-health-stale-age.xml"/>
 
+    <!-- RDR-156 H2 residual (bead nexus-7ndh3): search_graph_hop_<dim> gains a
+         where(jsonb) chunk-metadata containment filter — retires the query
+         tool's follow_links+where app-side fallback. Replaces the catalog-007
+         7-arg functions; must come after catalog-007. -->
+    <include file="db/changelog/catalog-012-graph-hop-where.xml"/>
+
     <!-- pgvector taxonomy centroids (bead nexus-t1hnc.1, RDR-156):
          taxonomy_centroids_384/768/1024 — moves the taxonomy__centroids ChromaDB
          collection into Postgres so service-mode taxonomy compute is chroma-free.

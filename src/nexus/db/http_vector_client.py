@@ -1016,20 +1016,24 @@ class HttpVectorClient:
         link_type: str | None = None,
         depth: int = 1,
         direction: str = "both",
+        where: dict | None = None,
         n_results: int = 10,
     ) -> list[dict]:
         """Graph-hop combined search (RDR-156 P4 follow-on, Decision 5, bead nexus-houg9).
 
         Routes to ``POST /v1/vectors/search-graph-hop`` —
-        ``nexus.search_graph_hop_<dim>`` (catalog-007): a ``WITH RECURSIVE`` BFS over
-        ``catalog_links`` from ``seeds`` to ``depth`` hops collects the reachable
-        document set, joins ``chunks_<dim>``, and vector-ranks. The single-statement
-        unification of the ``query`` tool's ``follow_links`` app-side graphBFS dance.
-        ``link_type=None`` follows all edge types; ``direction`` is ``"out"``/``"in"``/
-        ``"both"`` (default ``"both"``, matching ``Catalog.graph``); ``depth`` is clamped
-        to [1,3] service-side. Returns the flat ``{id, content, distance, collection,
-        chash}`` row list; ``id`` is the document tumbler, ``chash`` the MATCHED chunk's
-        content hash (the repoint populates the RDR-086 ``chunk_text_hash`` from it).
+        ``nexus.search_graph_hop_<dim>`` (catalog-007, where-extended by catalog-012): a
+        ``WITH RECURSIVE`` BFS over ``catalog_links`` from ``seeds`` to ``depth`` hops
+        collects the reachable document set, joins ``chunks_<dim>``, and vector-ranks.
+        The single-statement unification of the ``query`` tool's ``follow_links``
+        app-side graphBFS dance. ``link_type=None`` follows all edge types;
+        ``direction`` is ``"out"``/``"in"``/``"both"`` (default ``"both"``, matching
+        ``Catalog.graph``); ``depth`` is clamped to [1,3] service-side. ``where``
+        (nexus-7ndh3) is a chunk-metadata equality map applied as JSONB containment in
+        the post-BFS rank — the same semantics as ``search_metadata_scoped``'s
+        ``where``. Returns the flat ``{id, content, distance, collection, chash}`` row
+        list; ``id`` is the document tumbler, ``chash`` the MATCHED chunk's content
+        hash (the repoint populates the RDR-086 ``chunk_text_hash`` from it).
         """
         body: dict[str, Any] = {
             "query": query,
@@ -1041,6 +1045,8 @@ class HttpVectorClient:
         }
         if link_type is not None:
             body["link_type"] = link_type
+        if where:
+            body["where"] = where
         return _post("/v1/vectors/search-graph-hop", body, tenant=self._tenant)
 
     def get_by_id(self, collection: str, doc_id: str) -> dict | None:

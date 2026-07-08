@@ -40,9 +40,9 @@ class _FakeServiceT3:
         return self.topic_rows_by_col.get(collection, [])
 
     def search_graph_hop(self, query, seeds, collection_names, *, link_type=None,
-                         depth=1, direction="both", n_results=10):
+                         depth=1, direction="both", where=None, n_results=10):
         self.graph_calls.append((query, list(seeds), list(collection_names),
-                                 link_type, depth, direction, n_results))
+                                 link_type, depth, direction, where, n_results))
         return self.graph_rows
 
 
@@ -164,6 +164,27 @@ class TestSearchTopicScopedTool:
 class TestSearchGraphHopTool:
     """nexus-houg9: graph-hop tool — doc-level dedup + chash in the structured shape."""
 
+    def test_operator_where_rejected_loudly(self, monkeypatch):
+        # nexus-7ndh3 critique CRITICAL-1: JSONB containment is equality-only;
+        # an operator where must error, never silently containment-fail to zero.
+        t3 = _FakeServiceT3(graph_rows=[])
+        _wire(monkeypatch, t3, ["c1"])
+
+        out = core.search_graph_hop("q", "1.2.0", corpus="rdr", where="bib_year>=2020")
+
+        assert "equality-only" in out
+        assert not t3.graph_calls, "the combined-query call must NOT be made"
+
+    def test_where_string_parsed_and_passed(self, monkeypatch):
+        # nexus-7ndh3: the KEY=VALUE where string reaches the client as a dict.
+        t3 = _FakeServiceT3(graph_rows=[])
+        _wire(monkeypatch, t3, ["c1"])
+
+        core.search_graph_hop("q", "1.2.0", corpus="rdr", where="lang=python")
+
+        assert t3.graph_calls, "graph-hop must be called"
+        assert t3.graph_calls[0][-2] == {"lang": "python"}
+
     def test_structured_doc_level_with_chashes(self, monkeypatch):
         rows = [
             {"id": "1.2.3", "content": "a", "distance": 0.1, "collection": "c1",
@@ -186,13 +207,13 @@ class TestSearchGraphHopTool:
             "contents": ["a", "b"],
             "chashes": ["a" * 32, "b" * 32],
         }
-        assert t3.graph_calls == [("q", ["1.2.0"], ["c1"], "cites", 2, "out", 5)]
+        assert t3.graph_calls == [("q", ["1.2.0"], ["c1"], "cites", 2, "out", None, 5)]
 
     def test_single_string_seed_accepted(self, monkeypatch):
         t3 = _FakeServiceT3(graph_rows=[])
         _wire(monkeypatch, t3, ["c1"])
         core.search_graph_hop("q", "1.2.0", corpus="rdr", structured=True)
-        assert t3.graph_calls == [("q", ["1.2.0"], ["c1"], None, 1, "both", 10)]
+        assert t3.graph_calls == [("q", ["1.2.0"], ["c1"], None, 1, "both", None, 10)]
 
     def test_empty_seeds_short_circuit(self, monkeypatch):
         t3 = _FakeServiceT3(graph_rows=[])

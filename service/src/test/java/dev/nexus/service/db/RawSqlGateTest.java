@@ -82,13 +82,11 @@ class RawSqlGateTest {
             // dynamic-arity metadata WHERE and (hybridSearch) a selectivity-dependent plan
             // choice between structurally different queries — the single execution
             // chokepoint for search()/hybridSearch().
-            "rawVectorFetch",
-            // nexus.search_<kind>_scoped_<dim>(...) combined-query stored-function calls
-            // (metadata-scoped / graph-hop / topic-scoped); per-dim generated table-valued-
-            // function wrappers exist but a full dispatch-map conversion is deferred
-            // (risk/effort, not a hard DSL wall — see the method javadoc).
-            "runCombinedQuery",
-            "runCombinedQueryWithChash"),
+            // (The combined-query stored-function calls — runCombinedQuery /
+            // runCombinedQueryWithChash — were converted to the generated
+            // table-valued-function DSL and REMOVED from this allowlist,
+            // nexus-7ndh3.)
+            "rawVectorFetch"),
         "TaxonomyCentroidRepository.java", java.util.Set.of(
             // Same pgvector `<=>` category as PgVectorRepository.rawVectorFetch.
             "annQuery"),

@@ -9,6 +9,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - **`plan_delete` MCP tool** — destructive counterpart to `plan_save`: remove a throwaway or incorrect plan-library entry by id without direct DB access (nexus-v92zj).
+- **Graph-hop search honors `where`** (nexus-7ndh3, RDR-156 H2 residual). `nexus.search_graph_hop_<dim>` gains a `p_where jsonb` chunk-metadata containment filter (catalog-012, same semantics as `search_metadata_scoped`), exposed through the engine route, `HttpVectorClient`, and the `search_graph_hop` MCP tool (equality-only; operator syntax is rejected loudly, mirroring `search_metadata_scoped`'s nexus-889ff guard). The `query` tool's `follow_links`+`where` calls now stay on the combined-query path for equality filters; operator-shaped filters (`>=`, `!=`, …) still take the app-side dance, whose SQL leg genuinely translates them — the old blanket H2 skip is narrowed, not just deleted. ⚠️ **Release gate**: the next PyPI release must pin an engine tag carrying catalog-012 and bump `REQUIRED_RELEASE_VERSION` accordingly — a pre-catalog-012 engine silently ignores the `where` body key on this route (unfiltered results, the exact H2 failure class as version skew). The standing release-checklist engine-freshness gate catches this (`git log <pinned-tag>..HEAD -- service/`), recorded here so it cannot be missed.
+
+### Changed
+
+- **Combined-query calls converted to the jOOQ generated DSL** (nexus-7ndh3 follow-through). `PgVectorRepository`'s metadata-scoped / topic-scoped / graph-hop stored-function calls now go through the codegen'd table-valued-function wrappers (`SEARCH_*_SCOPED_<dim>.call(...)`) instead of caller-built SQL strings; the `runCombinedQuery`/`runCombinedQueryWithChash` entries are retired from `RawSqlGateTest`'s sanctioned allowlist.
 
 ### Fixed
 

@@ -260,6 +260,7 @@ class GraphHopParityTest {
                 .contains("p_link_type text")
                 .contains("p_depth integer")
                 .contains("p_direction text")
+                .contains("p_where jsonb")
                 .contains("p_n integer");
             assertThat(rs.getString("result"))
                 .as("audit HIGH: result table MUST carry the matched chunk's chash so the "
@@ -361,7 +362,7 @@ class GraphHopParityTest {
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT id, chash FROM nexus.search_graph_hop_1024(" +
                 queryVecLiteral(1024) + ", ARRAY['g0']::text[], " +
-                "ARRAY['" + COLL_G + "']::text[], 'cites', 1, 'out', 10) ORDER BY distance");
+                "ARRAY['" + COLL_G + "']::text[], 'cites', 1, 'out', NULL::jsonb, 10) ORDER BY distance");
             int seen = 0;
             while (rs.next()) {
                 String id = rs.getString("id");
@@ -372,6 +373,40 @@ class GraphHopParityTest {
                 seen++;
             }
             assertThat(seen).as("expected g0,g1 rows").isEqualTo(2);
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // GROUP 5b — where(jsonb) chunk-metadata containment (catalog-012, nexus-7ndh3)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test @Order(55)
+    void whereFilter_containmentKeepsOnlyMatchingChunks() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            // Stamp metadata on g1's chunk only; g0's stays NULL. Late-order safe:
+            // no earlier test passes p_where or reads chunk metadata.
+            su.createStatement().execute(
+                "UPDATE nexus.chunks_1024 SET metadata = '{\"lang\": \"java\"}'::jsonb " +
+                "WHERE collection = '" + COLL_G + "' AND chash = '" + validChash("g1") + "'");
+
+            // NULL where: unfiltered — the pre-catalog-012 behavior is preserved.
+            assertThat(callGraph(su, 1024, COLL_G, "g0", "cites", 1, "out", null, 10))
+                .as("NULL p_where must not filter anything")
+                .containsExactlyInAnyOrder("g0", "g1");
+
+            // Matching containment: only the stamped chunk survives; g0's NULL
+            // metadata drops (NULL @> x is not true) — same semantics as
+            // search_metadata_scoped's p_where.
+            assertThat(callGraph(su, 1024, COLL_G, "g0", "cites", 1, "out",
+                                 "{\"lang\": \"java\"}", 10))
+                .as("containment keeps only the chunk whose metadata contains the pair")
+                .containsExactly("g1");
+
+            // Non-matching containment: empty, not an error.
+            assertThat(callGraph(su, 1024, COLL_G, "g0", "cites", 1, "out",
+                                 "{\"lang\": \"python\"}", 10))
+                .as("a non-matching where must yield zero rows")
+                .isEmpty();
         }
     }
 
@@ -521,6 +556,14 @@ class GraphHopParityTest {
     private List<String> callGraph(Connection conn, int dim, String collection, String seed,
                                    String linkType, int depth, String direction, int n)
             throws Exception {
+        return callGraph(conn, dim, collection, seed, linkType, depth, direction, null, n);
+    }
+
+    /** 8-arg form (catalog-012): whereJson is a jsonb literal or null (no filter). */
+    private List<String> callGraph(Connection conn, int dim, String collection, String seed,
+                                   String linkType, int depth, String direction,
+                                   String whereJson, int n)
+            throws Exception {
         String sql =
             "SELECT id FROM nexus.search_graph_hop_" + dim + "(" +
             queryVecLiteral(dim) + ", " +
@@ -529,6 +572,7 @@ class GraphHopParityTest {
             sqlText(linkType) + ", " +
             depth + ", " +
             sqlText(direction) + ", " +
+            (whereJson == null ? "NULL::jsonb" : "'" + whereJson + "'::jsonb") + ", " +
             n + ")";
         return runIds(conn, sql);
     }

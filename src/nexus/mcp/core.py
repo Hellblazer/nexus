@@ -1368,6 +1368,7 @@ def search_graph_hop(
     link_type: str = "",
     depth: int = 1,
     direction: str = "both",
+    where: str = "",
     structured: bool = False,
 ) -> "str | dict":
     """Graph-hop combined search (RDR-156 P4 follow-on, Decision 5, bead nexus-houg9).
@@ -1396,6 +1397,10 @@ def search_graph_hop(
         link_type: Catalog link_type filter ("" = follow all edge types).
         depth: BFS depth (clamped to [1,3]).
         direction: "out" | "in" | "both".
+        where: Chunk-metadata equality filter, ``KEY=VALUE`` comma-separated
+            ("" = no filter). Equality only — applied as JSONB containment on
+            chunk metadata in the post-BFS rank, matching
+            ``search_metadata_scoped``'s ``where`` semantics (nexus-7ndh3).
         structured: Return ``{ids, tumblers, distances, collections, contents, chashes}``.
     """
     try:
@@ -1412,11 +1417,24 @@ def search_graph_hop(
         target = _resolve_corpus_target(corpus, t3)
         if not target:
             return f"No collections match corpus {corpus!r}"
+        # EQUALITY-ONLY, like search_metadata_scoped: the SQL predicate is JSONB
+        # containment, which cannot express comparison operators. Reject LOUDLY
+        # rather than letting an operator dict silently containment-fail to zero
+        # rows (nexus-889ff pattern; nexus-7ndh3 critique).
+        where_dict = _parse_where_str(where)
+        if where_dict and (
+            "$and" in where_dict or "$or" in where_dict
+            or any(isinstance(v, dict) for v in where_dict.values())
+        ):
+            return ("Error: search_graph_hop `where` is equality-only "
+                    "(KEY=VALUE, comma-separated); comparison operators "
+                    "(>=, <=, >, <, !=) are not supported in service mode")
         rows = t3.search_graph_hop(
             query, seed_list, target,
             link_type=(link_type or None),
             depth=depth,
             direction=direction,
+            where=(where_dict or None),
             n_results=limit,
         )
         # Document-level: collapse to one row per tumbler, keeping the best (nearest)
@@ -1550,18 +1568,29 @@ def query(
             # (CatalogRepository.docRowFromRecord), surfaced onto CatalogEntry.
             from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
             _where_dict = _parse_where_str(where)
-            # H2: follow_links + where — search_graph_hop has no `where` param.
-            # Fall back to the dance path so the caller's where filter is
-            # honored instead of being silently dropped.
-            _skip_service = follow_links and bool(_where_dict)
-            if is_service_backed(t3) and not _skip_service:
+            # H2 NARROWED (nexus-7ndh3): search_graph_hop carries `where`
+            # since catalog-012, so follow_links + EQUALITY where routes
+            # through the combined-query path like everything else. But the
+            # SQL predicate is JSONB containment (equality-only) on BOTH the
+            # metadata-scoped and graph-hop functions — an operator-shaped
+            # where ({"k": {"$gte": ...}}, $and/$or) would silently
+            # containment-fail to zero rows. Operator wheres therefore still
+            # take the dance below, whose search_cross_corpus leg translates
+            # operators to real SQL. The dance's remaining consumers: that
+            # operator arm, and non-service (Chroma) mode — see nexus-2bqpn
+            # for the deletion gates.
+            _operator_where = bool(_where_dict) and (
+                "$and" in _where_dict or "$or" in _where_dict
+                or any(isinstance(v, dict) for v in _where_dict.values())
+            )
+            if is_service_backed(t3) and not _operator_where:
                 # Broad corpus target: the SQL functions filter by catalog
                 # metadata internally, so pass the full corpus set.
                 target = _resolve_corpus_target(corpus, t3)
                 if not target:
                     return f"No collections match corpus {corpus!r}"
 
-                where_dict = _where_dict
+                where_dict = _where_dict  # equality-only here: the _operator_where gate above routed operator shapes to the dance
                 fetch_n = limit * 10
 
                 _no_docs_msg = (
@@ -1609,6 +1638,7 @@ def query(
                             question, seed_tumblers, target,
                             link_type=(follow_links or None),
                             depth=depth,
+                            where=(where_dict or None),
                             n_results=fetch_n,
                         )
                 else:
