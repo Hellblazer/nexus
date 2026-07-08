@@ -19,7 +19,7 @@ say "Phase A — install + provision + serve"
 SVC_NATIVE_DIR="/opt/nexus-service-native"; SVC_WELL_KNOWN_DIR="$HOME/.config/nexus/service"
 nx --version >/dev/null 2>&1 && ok "nx installed ($(nx --version 2>&1))" || bad "nx --version failed"
 claude --version >/dev/null 2>&1 && ok "claude CLI installed ($(claude --version 2>&1 | head -1))" || bad "claude CLI missing"
-command -v initdb >/dev/null 2>&1 && ok "PG16 on PATH" || bad "initdb not found"
+command -v initdb >/dev/null 2>&1 && bad "system PostgreSQL present — bare-machine posture violated (nexus-5qefg)" || ok "no system PostgreSQL (bundle must provide it)"
 test -x "$SVC_NATIVE_DIR/nexus-service" && ok "native service binary present" || bad "native binary missing"
 mkdir -p "$SVC_WELL_KNOWN_DIR" && cp "$SVC_NATIVE_DIR"/* "$SVC_WELL_KNOWN_DIR/" && chmod +x "$SVC_WELL_KNOWN_DIR/nexus-service" \
   && ok "native binary positioned" || bad "could not position native binary"
@@ -43,7 +43,11 @@ hostport="$(printf '%s' "$ADMIN" | sed -E 's#^jdbc:postgresql://##; s#/.*$##')"
 export PGHOST="${hostport%%:*}" PGPORT="${hostport##*:}"
 export PGDATABASE="$(printf '%s' "$ADMIN" | sed -E 's#^[^/]*//[^/]+/##; s#\?.*$##')"
 export PGUSER="${NX_DB_ADMIN_USER:-}" PGPASSWORD="${NX_DB_ADMIN_PASS:-}"
-q() { psql -tAqc "set nexus.tenant='default'; $1" 2>/dev/null | tr -d '[:space:]'; }
+# nexus-5qefg: the image ships NO system PostgreSQL — resolve psql from the
+# signed bundle `nx init` extracted (<config>/pg-bundle/**/bin/psql).
+PSQL="$(find "$HOME/.config/nexus/pg-bundle" -type f -name psql 2>/dev/null | head -1)"
+[ -n "$PSQL" ] || PSQL=psql # host-PG dev-box fallback
+q() { "$PSQL" -tAqc "set nexus.tenant='default'; $1" 2>/dev/null | tr -d '[:space:]'; }
 
 # ── Phase F: full-stack MCP-driven enqueue + worker drain + real extraction ──
 say "Phase F — MCP-driven workload + queue enqueue + worker drain (real claude)"

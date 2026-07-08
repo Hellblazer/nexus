@@ -35,7 +35,7 @@ SVC_NATIVE_DIR="/opt/nexus-service-native"
 SVC_WELL_KNOWN_DIR="$HOME/.config/nexus/service"
 
 nx --version >/dev/null 2>&1 && ok "nx installed ($(nx --version 2>&1))" || bad "nx --version failed"
-command -v initdb >/dev/null 2>&1 && ok "PG16 binaries on PATH ($(initdb --version))" || bad "initdb not found"
+command -v initdb >/dev/null 2>&1 && bad "system PostgreSQL present — bare-machine posture violated (nexus-5qefg)" || ok "no system PostgreSQL (bundle must provide it)"
 test -x "$SVC_NATIVE_DIR/nexus-service" && ok "native service binary present ($(du -h "$SVC_NATIVE_DIR/nexus-service" | cut -f1))" || bad "native binary missing at $SVC_NATIVE_DIR"
 
 note "positioning the native binary + libs at the well-known location…"
@@ -209,7 +209,11 @@ STUB_EOF
   export PGUSER="${NX_DB_ADMIN_USER:-}" PGPASSWORD="${NX_DB_ADMIN_PASS:-}"
   # The queue policy is tenant_id = current_setting('nexus.tenant', true); set that
   # GUC (session-level) so reads/writes are tenant-scoped to 'default'.
-  q() { psql -tAqc "set nexus.tenant='default'; $1" 2>>"$errlog" | tr -d '[:space:]'; }
+  # nexus-5qefg: the image ships NO system PostgreSQL — resolve psql from the
+  # signed bundle `nx init` extracted (<config>/pg-bundle/**/bin/psql).
+  PSQL="$(find "$HOME/.config/nexus/pg-bundle" -type f -name psql 2>/dev/null | head -1)"
+  [ -n "$PSQL" ] || PSQL=psql   # host-PG dev-box fallback
+  q() { "$PSQL" -tAqc "set nexus.tenant='default'; $1" 2>>"$errlog" | tr -d '[:space:]'; }
   if [ "$(q 'select 1')" = "1" ]; then ok "psql admin reachable (queue introspection)"; else bad "psql admin not reachable"; _why 2>/dev/null || note "$(tail -2 "$errlog")"; fi
 
   # ── Tandem storm: NW concurrent workers x OPS mixed ops + a burst spike ──────
@@ -245,7 +249,7 @@ STUB_EOF
   if [ -n "$seedcoll" ]; then
     # 300-row insert (FK→catalog_collections) WHILE a concurrent write race runs.
     ( b=1; while [ "$b" -le 40 ]; do printf 'race %s\n' "$b" | nx store put - -t "qr$b" >>"$errlog" 2>&1 || true; b=$((b+1)); done ) & racepid=$!
-    seedout="$(psql -tAc "set nexus.tenant='default'; insert into nexus.aspect_extraction_queue (tenant_id,collection,source_path,content,status,enqueued_at) select 'default','${seedcoll}','stress/'||g,'stress content '||g,'pending',now() from generate_series(1,300) g; select count(*) from nexus.aspect_extraction_queue where status='pending'" 2>&1)"
+    seedout="$("$PSQL" -tAc "set nexus.tenant='default'; insert into nexus.aspect_extraction_queue (tenant_id,collection,source_path,content,status,enqueued_at) select 'default','${seedcoll}','stress/'||g,'stress content '||g,'pending',now() from generate_series(1,300) g; select count(*) from nexus.aspect_extraction_queue where status='pending'" 2>&1)"
     wait "$racepid" 2>/dev/null || true
     seeded="$(printf '%s' "$seedout" | grep -oE '^[0-9]+$' | tail -1)"
     if [ "${seeded:-0}" -ge 300 ] 2>/dev/null; then ok "aspect queue accepted 300 writes under concurrent load (RDR-156 FK enforced, no loss; got ${seeded})"

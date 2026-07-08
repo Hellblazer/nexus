@@ -1,9 +1,10 @@
 # syntax=docker/dockerfile:1
 # Full-stack isolated shakeout box (nexus-* harness).
 #
-# The REAL deployment topology in one ephemeral container: PG16 + pgvector + the
-# native nexus-service (T2+T3) + the conexus wheel (nx + nx-mcp) + the linux
-# `claude` CLI. rehearse_fullstack.sh then drives the surfaces THROUGH the nexus
+# The REAL deployment topology in one ephemeral container: the native
+# nexus-service (T2+T3) + the conexus wheel (nx + nx-mcp) + the linux
+# `claude` CLI (NO system PostgreSQL — nx provisions from the signed PG
+# bundle, nexus-5qefg). rehearse_fullstack.sh then drives the surfaces THROUGH the nexus
 # MCP via `claude -p`, so the post-store hooks ENQUEUE aspects and the MCP-hosted
 # worker DRAINS them with REAL extraction — the path the bare-CLI box could not
 # exercise (no MCP, no claude).
@@ -21,18 +22,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg lsb-release \
         python3 python3-venv python3-pip \
         git \
-    && install -d /etc/apt/keyrings /usr/share/postgresql-common/pgdg \
-    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-        -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
-    && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
-http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
-        > /etc/apt/sources.list.d/pgdg.list \
-    && apt-get update && apt-get install -y --no-install-recommends \
-        postgresql-16 postgresql-16-pgvector \
     && rm -rf /var/lib/apt/lists/*
+# nexus-5qefg: NO system PostgreSQL in this image. The always-install policy
+# (nexus-yv5m4, GH #1381) makes nx provision from the signed PG bundle
+# unconditionally; a baked-in host PG would mask the bundle-acquisition path
+# this journey exists to exercise (the reason the yv5m4 bug survived the
+# gate's maiden run). The cold images (Dockerfile.cold) established the
+# bare-box posture; this brings the guided/shakeout images in line.
 
 RUN useradd -m -s /bin/bash nexus
-ENV PATH="/home/nexus/.local/bin:/home/nexus/nxenv/bin:/usr/lib/postgresql/16/bin:${PATH}"
+ENV PATH="/home/nexus/.local/bin:/home/nexus/nxenv/bin:${PATH}"
 RUN pip3 install --no-cache-dir --break-system-packages uv
 
 USER nexus
