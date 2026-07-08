@@ -575,7 +575,8 @@ public final class CatalogHandler implements HttpHandler {
         if (docId == null || docId.isBlank()) {
             HttpUtil.send(exchange, 400, "{\"error\":\"'doc_id' required\"}"); return;
         }
-        List<Map<String, Object>> rows = castRows(body.get("rows"));
+        List<Map<String, Object>> rows = strictRows(body.get("rows"));
+        requireCanonicalChashes(rows);
         repo.writeManifest(tenant, docId, rows);
         HttpUtil.send(exchange, 200, "{\"ok\":true,\"count\":" + rows.size() + "}");
     }
@@ -588,7 +589,8 @@ public final class CatalogHandler implements HttpHandler {
         if (docId == null || docId.isBlank()) {
             HttpUtil.send(exchange, 400, "{\"error\":\"'doc_id' required\"}"); return;
         }
-        List<Map<String, Object>> rows = castRows(body.get("rows"));
+        List<Map<String, Object>> rows = strictRows(body.get("rows"));
+        requireCanonicalChashes(rows);
         repo.appendManifestChunks(tenant, docId, rows);
         HttpUtil.send(exchange, 200, "{\"ok\":true,\"count\":" + rows.size() + "}");
     }
@@ -622,6 +624,19 @@ public final class CatalogHandler implements HttpHandler {
         if (docs.size() > MAX_BATCH_DOC_IDS) {
             HttpUtil.send(exchange, 400, "{\"error\":\"too many docs (max "
                 + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
+        // Validate every doc's rows up front — the whole batch 400s before
+        // ANY per-doc transaction runs (nexus-z4skl: no more reason-less
+        // failed_doc_ids for a malformed chash).
+        for (int d = 0; d < docs.size(); d++) {
+            try {
+                // strictRows (not castRows): the repo re-extracts the ORIGINAL
+                // rows list, so a silently-filtered junk element here would
+                // reappear mid-transaction — reject the shape up front.
+                requireCanonicalChashes(strictRows(docs.get(d).get("rows")));
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException("docs[" + d + "]." + e.getMessage());
+            }
         }
         var result = repo.writeManifestMany(tenant, docs);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
@@ -1415,6 +1430,62 @@ public final class CatalogHandler implements HttpHandler {
         String v = queryParam(exchange, key);
         if (v == null || v.isBlank()) return def;
         try { return Integer.parseInt(v); } catch (NumberFormatException e) { return def; }
+    }
+
+    /**
+     * Strict variant of {@link #castRows} for the manifest WRITE paths
+     * (nexus-z4skl review M-1): {@code castRows} silently FILTERS non-Map
+     * elements, but {@code writeManifestMany} re-extracts the ORIGINAL list
+     * repo-side — so a junk element (null, bare string) validated-away here
+     * would reappear mid-transaction and die reason-less into
+     * failed_doc_ids, the exact failure mode this bead kills. Rejecting the
+     * shape up front also keeps 400 row indices aligned with the caller's
+     * actual JSON array (review L-1).
+     */
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> strictRows(Object raw) {
+        if (raw == null) {
+            return List.of();
+        }
+        if (!(raw instanceof List<?> l)) {
+            throw new IllegalArgumentException("'rows' must be a list");
+        }
+        for (int i = 0; i < l.size(); i++) {
+            if (!(l.get(i) instanceof Map)) {
+                throw new IllegalArgumentException(
+                    "rows[" + i + "]: every row must be an object, got "
+                    + (l.get(i) == null ? "null" : l.get(i).getClass().getSimpleName()));
+            }
+        }
+        return l.stream().map(o -> (Map<String, Object>) o).toList();
+    }
+
+    /**
+     * Parse-don't-validate every row's {@code chash} at the HTTP boundary
+     * (nexus-z4skl). A malformed chash — classically the FULL 64-char sha256
+     * hex instead of the canonical [:32] form — previously sailed through the
+     * handlers and only tripped the DB CHECK deep inside a per-row
+     * transaction, where batch writers swallowed it reason-less into
+     * failed_doc_ids (3 deploy-gate iterations on the v0.1.24 probe). Now it
+     * is a uniform 400 carrying the offending length, BEFORE any transaction.
+     * The parsed value is written back canonically; repositories downstream
+     * see only validated chashes.
+     *
+     * @throws IllegalArgumentException mapped to 400 by the dispatch catch.
+     */
+    private static void requireCanonicalChashes(List<Map<String, Object>> rows) {
+        for (int i = 0; i < rows.size(); i++) {
+            Object v = rows.get(i).get("chash");
+            if (!(v instanceof String s)) {
+                throw new IllegalArgumentException(
+                    "rows[" + i + "]: 'chash' required (string)");
+            }
+            try {
+                rows.get(i).put("chash", dev.nexus.service.db.Chash.fromHex(s).toHex());
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException("rows[" + i + "]: " + e.getMessage());
+            }
+        }
     }
 
     @SuppressWarnings("unchecked")

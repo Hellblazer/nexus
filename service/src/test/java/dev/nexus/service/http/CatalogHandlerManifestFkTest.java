@@ -149,6 +149,80 @@ class CatalogHandlerManifestFkTest {
         assertThat(ex.status).as("registered doc_id: manifest write succeeds").isEqualTo(200);
     }
 
+    // ── chash boundary validation (nexus-z4skl) ─────────────────────────────
+
+    @Test
+    void manifestWrite_full64Chash_returns400_withOffendingLength() throws Exception {
+        // The classic mistake: a FULL sha256 hex. Pre-fix this passed the
+        // handler and died reason-less at the DB CHECK inside the txn (3
+        // deploy-gate iterations on the v0.1.24 probe). Now: uniform 400 at
+        // the boundary carrying the actual length.
+        String full64 = "a".repeat(64);
+        CapturingExchange ex = post("/v1/catalog/manifest/write",
+            "{\"doc_id\":\"5.1\",\"rows\":[{\"position\":0,"
+            + "\"chash\":\"" + full64 + "\"}]}");
+        handleWithTenant(ex);
+        assertThat(ex.status).isEqualTo(400);
+        assertThat(ex.bodyString())
+            .contains("got 64 chars")
+            .contains("rows[0]");
+    }
+
+    @Test
+    void manifestAppend_uppercaseChash_returns400() throws Exception {
+        CapturingExchange ex = post("/v1/catalog/manifest/append",
+            "{\"doc_id\":\"5.1\",\"rows\":[{\"position\":0,"
+            + "\"chash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}]}");
+        handleWithTenant(ex);
+        assertThat(ex.status).isEqualTo(400);
+        assertThat(ex.bodyString()).contains("LOWERCASE");
+    }
+
+    @Test
+    void manifestWriteMany_badChashInSecondDoc_wholeBatch400_beforeAnyTxn() throws Exception {
+        // Both docs must be validated BEFORE any per-doc transaction: doc 0
+        // is valid but must NOT be written when doc 1 carries a bad chash.
+        repo.upsertDocument(TENANT, java.util.Map.of(
+            "tumbler", "5.2", "title", "batch doc a", "content_type", "paper",
+            "corpus", "knowledge", "physical_collection", "knowledge__fk__v1"));
+        repo.upsertDocument(TENANT, java.util.Map.of(
+            "tumbler", "5.3", "title", "batch doc b", "content_type", "paper",
+            "corpus", "knowledge", "physical_collection", "knowledge__fk__v1"));
+        CapturingExchange ex = post("/v1/catalog/manifest/write_many",
+            "{\"docs\":[{\"doc_id\":\"5.2\",\"rows\":[{\"position\":0,"
+            + "\"chash\":\"dddddddddddddddddddddddddddddddd\"}]},"
+            + "{\"doc_id\":\"5.3\",\"rows\":[{\"position\":0,"
+            + "\"chash\":\"" + "e".repeat(64) + "\"}]}]}");
+        handleWithTenant(ex);
+        assertThat(ex.status).isEqualTo(400);
+        assertThat(ex.bodyString()).contains("docs[1]").contains("got 64 chars");
+        // Doc 0's manifest must be untouched (validation ran before ANY txn).
+        assertThat(repo.getManifest(TENANT, "5.2")).isEmpty();
+    }
+
+    @Test
+    void manifestWriteMany_nonMapRow_returns400_notSilentlyFiltered() throws Exception {
+        // Review M-1: castRows silently FILTERED junk elements while the repo
+        // re-extracted the ORIGINAL list — a null row validated-away at the
+        // boundary reappeared mid-transaction and died reason-less into
+        // failed_doc_ids. strictRows rejects the shape up front.
+        CapturingExchange ex = post("/v1/catalog/manifest/write_many",
+            "{\"docs\":[{\"doc_id\":\"5.1\",\"rows\":[null,"
+            + "{\"position\":0,\"chash\":\"cccccccccccccccccccccccccccccccc\"}]}]}");
+        handleWithTenant(ex);
+        assertThat(ex.status).isEqualTo(400);
+        assertThat(ex.bodyString()).contains("rows[0]").contains("must be an object");
+    }
+
+    @Test
+    void manifestWrite_missingChash_returns400() throws Exception {
+        CapturingExchange ex = post("/v1/catalog/manifest/write",
+            "{\"doc_id\":\"5.1\",\"rows\":[{\"position\":0}]}");
+        handleWithTenant(ex);
+        assertThat(ex.status).isEqualTo(400);
+        assertThat(ex.bodyString()).contains("'chash' required");
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
 
     private void handleWithTenant(CapturingExchange ex) throws Exception {
