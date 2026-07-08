@@ -10,7 +10,6 @@ For **when to use which retrieval interface**, see [Querying Guide](querying-gui
 |---|---|---|---|
 | `nexus` | `nx-mcp` | 35 | Storage tiers, retrieval, operators, orchestration |
 | `nexus-catalog` | `nx-mcp-catalog` | 10 | Document catalog, link graph, tumbler resolution |
-| `devonthink` | `nx-mcp-devonthink` | ~17 (DT present) / 1 (DT absent) | DEVONthink agent surface: AI/content/bib/capture tools + the `dt_incorporate` composite (RDR-139 Layer A') |
 
 The `nexus` and `nexus-catalog` servers register automatically when you install the plugin (`/plugin install conexus@nexus-plugins`) or the `.mcpb` extension. No separate install.
 
@@ -104,35 +103,21 @@ Full tool names follow `mcp__plugin_conexus_nexus-catalog__<tool>`. No redundant
 | `resolve` | Resolve a file path, title, or tumbler to a catalog entry |
 | `stats` | Summary stats — total entries, link counts by type, orphan counts |
 
-## `devonthink` — DEVONthink agent surface (RDR-139 Layer A')
+## DEVONthink (retired proxy — use DEVONthink's own MCP server)
 
-Full tool names follow `mcp__plugin_conexus_devonthink__<tool>`. This server is
-the agent-facing face of the DEVONthink integration: a nexus-owned MCP server
-that proxies a curated slice of DEVONthink's built-in MCP plus nexus composites.
-
-It **always spawns** and gates internally on `available()`. When DEVONthink is
-reachable it advertises the curated surface below; when DEVONthink is absent it
-advertises only `devonthink_status` (zero DT tools), still exits 0, and never
-errors a DT-less consumer. The `conexus/.mcp.json` entry carries
-`alwaysLoad:false` purely as a tool-search startup optimization — the internal
-gate is the optionality mechanism, not the `.mcp.json` flag.
-
-The agent's DEVONthink entry point is a record UUID obtained from a **nexus**
-search (DT's own selectors stay on the `nx dt` CLI, out of scope here), after
-which it uses these tools and the `dt_incorporate` composite.
-
-| Tool | Purpose |
-|---|---|
-| `devonthink_status` | Whether DT is reachable + open-database count (the always-present stub) |
-| `find_similar_records` | DT AI "See Also" neighbours of a record |
-| `classify_record` | DT AI suggested groups for a record |
-| `extract_record_content` | AI-optimised text of a record |
-| `extract_record_highlights` / `extract_record_mentions` | Markdown summary of a record's highlights / mentions |
-| `get_record_text` / `get_record_annotation` | A record's body / annotation note |
-| `get_record_links` / `get_databases` | A record's item links / the open databases |
-| `resolve_doi_metadata` / `search_crossref` / `resolve_google_books_metadata` | Bibliographic resolution (CrossRef / Google Books) |
-| `capture_web_page` / `download_pdf_from_doi` / `import_file` | Capture a URL / DOI PDF / loose file into DT |
-| `dt_incorporate` | Composite: for an already-indexed record, create DT-derived `relates` edges (Layer B) and stamp the nexus identity back onto the DT record (Layer F), in one agent call |
+The `nx-mcp-devonthink` proxy server (RDR-139 Layer A') was removed
+(nexus-goypg, 2026-07-07): every tool it exposed was a curated forward to
+DEVONthink's built-in MCP server, which clients now connect to directly —
+configure DEVONthink's own server in your MCP client for record/AI/bib/capture
+tools (every proxied tool has an exact-name official counterpart EXCEPT
+`resolve_google_books_metadata`, whose official superset is
+`resolve_book_metadata` — Google Books first, Open Library fallback). The one nexus-specific capability the proxy carried, the
+`dt_incorporate` composite (DT-derived `relates` edges + nexus identity
+stamped back onto the DT record), lives on as the `nx dt incorporate <uuid>`
+CLI verb. The `nx dt` CLI (`index`, `capture`, `highlights`, `open`,
+`incorporate`, `install-scripts`) is unchanged otherwise, and nexus still
+consumes DT's MCP server internally for link generation
+(`nexus.mcp_client.devonthink`).
 
 ## CLI-only operations
 

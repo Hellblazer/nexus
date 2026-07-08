@@ -74,14 +74,20 @@ def body(payload: dict[str, Any]) -> None:
     if not command:
         _lib.allow()
 
+    # nexus-mzvwa.8: match FIRST, escape SECOND. Pre-fix the escape check ran
+    # before the matcher, so ANY '# routing-allow:'-annotated Bash command
+    # logged a phantom escape against this rule (6,130 over the RDR-121 soak
+    # window, zero of which contained a git-add wildcard) — destroying the
+    # esc% telemetry. An escape event now means exactly "this command WOULD
+    # have been denied and the operator overrode it".
+    if not _scan_command(command):
+        _lib.allow()
+
     if _lib.should_skip_for_reason(command):
         _lib.log_routing_event(
             rule=RULE_NAME, outcome="escape", tool_name="Bash",
             command_fragment=command,
         )
-        _lib.allow()
-
-    if not _scan_command(command):
         _lib.allow()
 
     _lib.log_routing_event(

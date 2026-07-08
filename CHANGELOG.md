@@ -6,6 +6,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.4.0] - 2026-07-07
+
+### Removed
+
+- **`nx-mcp-devonthink` (the RDR-139 Layer A' proxy server).** Every tool it exposed was a curated forward to DEVONthink's own built-in MCP server — connect your MCP client to DEVONthink's server directly (DT 4 Settings). One tool name differs: the proxy's `resolve_google_books_metadata` maps to the official `resolve_book_metadata` (a superset: Google Books first, Open Library fallback). The one nexus-specific capability, the `dt_incorporate` composite (DT-derived `relates` edges + nexus identity stamped back onto the DT record), lives on as the new `nx dt incorporate <uuid>` CLI verb. Plugin surface change: ships as a MINOR version bump.
+
+### Fixed
+
+- **`nx init` / `nx guided-upgrade` now ALWAYS provision from the signed PostgreSQL bundle** (GH #1381, round 3). Previously nothing on the bare path ever downloaded the bundle: provisioning fell back to host-PostgreSQL discovery and dead-ended at brew / build-pgvector-from-source hints (Homebrew's pgvector formula does not target `postgresql@17`), even though every engine release ships a self-contained `nexus-pg-<platform>.txz` with pgvector baked in. The bundle is now downloaded unconditionally through the same verified seam as `nx daemon service install-binary` (sha256 + Sigstore) and selected before provisioning — host PostgreSQL is never probed or silently used, so behavior no longer depends on what happens to be installed. Two exceptions only: an explicit `NEXUS_PG_BIN` override is honoured as-is, and an existing cluster data directory (serving or stopped) is left untouched — an established install keeps whatever PostgreSQL created it. Acquisition failure (offline, no pinned tag) fails loud with the remedy instead of falling back.
+
 ## [6.3.8] - 2026-07-07
 
 ### Fixed

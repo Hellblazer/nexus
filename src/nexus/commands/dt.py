@@ -935,6 +935,66 @@ def open_cmd(tumbler_or_uuid: str) -> None:
     subprocess.run(["open", uri], check=True)  # noqa: S603,S607
 
 
+@dt.command("incorporate")
+@click.argument("uuid")
+def incorporate_cmd(uuid: str) -> None:
+    """Incorporate an already-indexed DT record into the nexus graph.
+
+    Layer B + F composite (nexus-goypg: relocated verbatim from the retired
+    nx-mcp-devonthink proxy's ``dt_incorporate`` tool — the one capability
+    the proxy had that DEVONthink's own MCP server cannot provide): resolves
+    the record's tumbler (it must already be indexed — run ``nx dt index``
+    or capture first), generates DT-derived ``relates`` edges to its
+    similarity + explicit-link neighbours that are also indexed in nexus
+    (Layer B), and stamps the nexus identity back onto the DT record
+    (Layer F: nx-indexed / nx-tumbler tags + tumbler backlink annotation).
+    """
+    if not _is_darwin():
+        raise click.ClickException("DEVONthink integration is macOS-only")
+    if not _UUID_RE.match(uuid):
+        raise click.ClickException(
+            "argument must be a DEVONthink record UUID "
+            "(e.g. 8EDC855D-213F-40AD-A9CF-9543CC76476B)."
+        )
+
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — command-local import (nexus.catalog.catalog)
+    from nexus.catalog.dt_link_generator import generate_dt_links  # noqa: PLC0415 — command-local import (nexus.catalog.dt_link_generator)
+    from nexus.catalog.factory import (  # noqa: PLC0415 — command-local import (nexus.catalog.factory)
+        make_catalog_reader,
+        make_catalog_writer,
+    )
+    from nexus.config import catalog_path  # noqa: PLC0415 — command-local import (nexus.config)
+    from nexus.dt_writeback import writeback_record  # noqa: PLC0415 — command-local import (nexus.dt_writeback)
+
+    if not Catalog.is_initialized(catalog_path()):
+        raise click.ClickException("nexus catalog is not initialized")
+    cat = None
+    writer = None
+    try:
+        cat = make_catalog_reader()
+        entry = cat.by_source_uri(f"x-devonthink-item://{uuid}")
+        if entry is None:
+            raise click.ClickException(
+                "record is not indexed in nexus; run "
+                "`nx dt index --uuid <uuid>` (or capture) first"
+            )
+        tumbler = entry.tumbler
+        # RDR-146 P1.2: generate_dt_links reads via the reader, writes
+        # (link_if_absent) via the write-only daemon proxy. Foreground,
+        # user-initiated: interactive priority (the #1046 starvation).
+        writer = make_catalog_writer(priority="interactive")
+        links = generate_dt_links(cat, tumbler, uuid, writer=writer)
+        writeback = writeback_record(uuid, str(tumbler))
+        click.echo(f"tumbler:   {tumbler}")
+        click.echo(f"links:     {links}")
+        click.echo(f"writeback: {writeback}")
+    finally:
+        if writer is not None:
+            writer.close()
+        if cat is not None:
+            cat.close()  # nexus-qnp5s: HttpCatalogClient.close() is safe
+
+
 @dt.command("highlights")
 @click.argument("tumbler_or_uuid")
 def highlights_cmd(tumbler_or_uuid: str) -> None:

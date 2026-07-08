@@ -392,8 +392,10 @@ def _select_bundled_pg(
     locatable (``NEXUS_PG_BUNDLE`` or next to the binary), extract it once under the
     config dir and point ``NEXUS_PG_BIN`` at it so ``provision`` discovers the
     bundle's PostgreSQL ahead of any host install. Returns the selected ``bin/`` dir,
-    or ``None`` when no bundle is present (dev / host-PG mode) — in which case
-    discovery proceeds unchanged.
+    or ``None`` when no bundle archive is on disk — the caller
+    (:func:`_provision_postgres_step`) then downloads it from the pinned tag
+    via :func:`_acquire_pg_bundle_step` (GH #1381: always-install, no host-PG
+    fallback).
 
     An explicit pre-existing ``NEXUS_PG_BIN`` wins (operator override / tests): the
     bundle is not consulted, so a deliberately pointed PG is never overridden.
@@ -417,6 +419,76 @@ def _select_bundled_pg(
     return bin_dir
 
 
+def _acquire_pg_bundle_step(config_dir: Path) -> Path:
+    """Download + verify + select the signed PG bundle from the pinned tag.
+
+    GH #1381 / nexus-yv5m4: nexus ALWAYS provisions from its own signed,
+    self-contained ``nexus-pg-<platform>.txz`` (pgvector baked in) — host
+    PostgreSQL is never probed or silently used, so there is no Homebrew /
+    build-pgvector-from-source dead end and no environment-dependent
+    behavior. The bundle comes through the same verified seam as
+    ``nx daemon service install-binary`` (sha256 + keyless Sigstore). The
+    only override is an explicit ``NEXUS_PG_BIN`` (checked by the caller).
+
+    Returns the selected ``bin/`` dir. Fails LOUD (``SystemExit``) when no
+    tag is pinned or the download/verification/extraction fails — there is
+    deliberately no fallback.
+    """
+    from importlib.metadata import PackageNotFoundError, version as _pkg_version  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    from nexus.daemon.binary_install import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        BinaryVerificationError,
+        install_pg_bundle,
+        resolve_service_tag,
+    )
+
+    tag = resolve_service_tag()
+    if not tag:
+        click.echo(
+            "\nNo engine-service tag is pinned for this build, so the bundled "
+            "PostgreSQL cannot be acquired.\n"
+            "Either set NEXUS_SERVICE_TAG=engine-service-vX.Y.Z, pre-stage the "
+            "bundle with `nx daemon service install-binary <tag>`, or point "
+            "NEXUS_PG_BIN at a pgvector-capable PostgreSQL bin/ directory.",
+            err=True,
+        )
+        raise SystemExit(1)
+    try:
+        _nx_version = _pkg_version("conexus")
+    except PackageNotFoundError:
+        _nx_version = "unknown"
+
+    click.echo(f"  Fetching the bundled PostgreSQL ({tag}) …")
+    try:
+        install_pg_bundle(tag, config_dir, installed_by=f"conexus {_nx_version}")
+    except BinaryVerificationError as exc:
+        _log.error("pg_bundle_acquire_failed", tag=tag, error=str(exc))
+        click.echo(
+            f"\nPG bundle download failed: {exc}\n"
+            "Check connectivity and re-run, or pre-stage it with "
+            f"`nx daemon service install-binary {tag}`.",
+            err=True,
+        )
+        raise SystemExit(1)
+    try:
+        bin_dir = _select_bundled_pg(config_dir)
+    except Exception as exc:  # noqa: BLE001 — user-facing, must stay actionable
+        # A verified download that fails to EXTRACT (disk full, permissions,
+        # corrupt-on-disk) must not escape as a traceback (code-review High).
+        _log.error("pg_bundle_extract_failed", tag=tag, error=str(exc))
+        click.echo(f"\nDownloaded PG bundle could not be extracted: {exc}", err=True)
+        raise SystemExit(1)
+    if bin_dir is None:  # defensive: archive just placed, selection must resolve
+        click.echo(
+            "\nPG bundle was downloaded but could not be located for "
+            "extraction — re-run `nx init`, or pre-stage it with "
+            f"`nx daemon service install-binary {tag}`.",
+            err=True,
+        )
+        raise SystemExit(1)
+    return bin_dir
+
+
 def _provision_postgres_step() -> None:
     """Provision (or verify) the nx-managed local Postgres cluster.
 
@@ -432,15 +504,30 @@ def _provision_postgres_step() -> None:
     config_dir = _config.nexus_config_dir()
     click.echo("\nProvisioning local Postgres cluster for the service backend …")
 
-    # First-run local distribution: extract + select the ship-alongside PG bundle
-    # (no-op when none is shipped — host PG is then discovered as before).
+    # nexus always provisions from its own signed PG bundle (GH #1381 /
+    # nexus-yv5m4): extract one already on disk, otherwise download it from
+    # the pinned tag. Host PostgreSQL is never probed or silently used — the
+    # only override is an explicit NEXUS_PG_BIN (a deliberate, even broken,
+    # override must surface, never be downloaded over). One exception keeps
+    # existing installs untouched: a cluster data directory that already
+    # exists (serving OR stopped) skips acquisition entirely — it keeps
+    # whatever PostgreSQL created it (never pg_ctl-start an existing pgdata
+    # with freshly downloaded, possibly different-major binaries).
     try:
-        if _select_bundled_pg(config_dir) is not None:
-            click.echo("  Using bundled PostgreSQL (extracted on first run).")
+        bundle_bin = _select_bundled_pg(config_dir)
     except Exception as exc:  # noqa: BLE001 — user-facing, must stay actionable
         _log.error("pg_bundle_extract_failed", error=str(exc))
         click.echo(f"\nBundled PostgreSQL extraction failed: {exc}", err=True)
         raise SystemExit(1)
+
+    if bundle_bin is not None:
+        click.echo("  Using bundled PostgreSQL (extracted on first run).")
+    elif not os.environ.get("NEXUS_PG_BIN", "").strip():
+        from nexus.db.pg_provision import existing_cluster_present  # noqa: PLC0415 — deferred import — heavy/optional dep loaded only when provisioning runs
+
+        if not existing_cluster_present(config_dir):
+            _acquire_pg_bundle_step(config_dir)  # fails LOUD; no fallback
+            click.echo("  Using bundled PostgreSQL (downloaded + verified).")
 
     try:
         result = provision(config_dir)

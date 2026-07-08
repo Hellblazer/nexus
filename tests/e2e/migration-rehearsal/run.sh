@@ -231,7 +231,12 @@ if [ -f "$DCFG" ] && grep -q '"credsStore"' "$DCFG"; then
   echo "      (temporarily stripped credsStore from ~/.docker/config.json — restored on exit)"
 fi
 
-docker build -q -f "$STAGE/Dockerfile" -t "$IMAGE" "$STAGE" >/dev/null
+# nexus-myk4e: CI points the image's bge fetch at the self-hosted release
+# asset (NEXUS_BGE_MODEL_URL/NEXUS_BGE_TOKENIZER_URL); unset = HF defaults.
+BUILD_ARGS=()
+[ -n "${NEXUS_BGE_MODEL_URL:-}" ] && BUILD_ARGS+=(--build-arg "BGE_MODEL_URL=$NEXUS_BGE_MODEL_URL")
+[ -n "${NEXUS_BGE_TOKENIZER_URL:-}" ] && BUILD_ARGS+=(--build-arg "BGE_TOKENIZER_URL=$NEXUS_BGE_TOKENIZER_URL")
+docker build -q ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} -f "$STAGE/Dockerfile" -t "$IMAGE" "$STAGE" >/dev/null
 
 run_env=(-e "WITH_CLOUD=$WITH_CLOUD" -e "COMPREHENSIVE=$COMPREHENSIVE" -e "STRESS=$STRESS")
 if [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ]; then

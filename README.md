@@ -54,19 +54,18 @@ For the full deployment story across all three surfaces (install, daemon lifecyc
 ## CLI quick-start
 
 ```bash
-uv tool install conexus                                   # install the nx CLI
-nx daemon service install-binary <engine-service-vX.Y.Z>  # acquire the signed native service binary + PG bundle
-nx init                                                    # provision Postgres+pgvector + bge-768, start the service, offer autostart
-nx doctor                                                 # verify the stack
-nx index repo .                                            # index your repo + discover topics
-nx search "how does retry work"                            # semantic search, fully local
+uv tool install conexus        # install the nx CLI
+nx init                        # acquires the signed engine + Postgres bundle, provisions pgvector + bge-768, starts the service, offers autostart
+nx doctor                      # verify the stack
+nx index repo .                # index your repo + discover topics
+nx search "how does retry work"   # semantic search, fully local
 ```
 
-Pick `<engine-service-vX.Y.Z>` from the [engine-service releases](https://github.com/Hellblazer/nexus/releases) (the newest `engine-service-v*` tag) — there is no `latest` resolution, the tag is explicit. **Keep the `install-binary` step**: it is what installs the self-contained Postgres bundle (pgvector already compiled in), so you do not need PostgreSQL installed at all. Exporting `NEXUS_SERVICE_TAG=engine-service-vX.Y.Z` instead lets `nx init` acquire the service *binary* itself, but on 6.3.x and earlier it does **not** fetch the Postgres bundle — skipping `install-binary` then requires a pgvector-capable PostgreSQL already on the machine (note: Homebrew's `pgvector` formula does not cover `postgresql@17`).
+You never choose an engine version: every conexus release is built pinned to the exact `engine-service` release it was tested against, and `nx init` acquires that signed binary + Postgres bundle automatically (cosign-verified). You do **not** need PostgreSQL installed — nexus always provisions from its own self-contained Postgres bundle (pgvector already compiled in) and never touches a PostgreSQL you may already have. Advanced: export `NEXUS_SERVICE_TAG=engine-service-vX.Y.Z` to override the pin (air-gapped installs, engine testing).
 
 `nx init` provisions the bundled Postgres 17 + pgvector cluster, fetches the bge-768 ONNX model the service embeds with, starts the persistent service, and offers to register the OS autostart unit so it restarts at login/boot (prompt defaults to yes; `--yes` accepts non-interactively, `--no-autostart` starts a session supervisor only). There is **no** separate `nx daemon t2 install` step — T2 (notes/plans) is served by the same service in the default config. The permanent vector store (T3) serves through this native service; the bundled binary + Postgres are cosign-verified and acquired automatically. `nx init` is idempotent — safe to re-run. (The older `nx init --service` flag still works but is deprecated — plain `nx init` is the path now.) **First run only:** this downloads a few hundred MB (the signed ~134 MB service binary, the relocatable Postgres bundle, and the ~140 MB bge-768 model) and takes a few minutes; subsequent starts are fast.
 
-> **Upgrading from a pre-6.0 install?** 6.0 moves the permanent vector store from ChromaDB to the Postgres + pgvector service. After `uv tool upgrade conexus`, run `nx daemon service install-binary <engine-service-vX.Y.Z>` (installs the self-contained Postgres bundle, pgvector included — no Homebrew/apt PostgreSQL needed), then **`nx guided-upgrade`** — one command detects your existing store, provisions and version-pins the service, and migrates your data with validation and copy-not-move rollback safety. Your ChromaDB data is left intact as the migration source. If the upgrade reports missing Postgres binaries or a missing pgvector extension, the `install-binary` step was skipped — run it and re-run `nx guided-upgrade`.
+> **Upgrading from a pre-6.0 install?** 6.0 moves the permanent vector store from ChromaDB to the Postgres + pgvector service. After `uv tool upgrade conexus`, run **`nx guided-upgrade`** — one command detects your existing store, provisions and version-pins the service (installing the self-contained Postgres bundle — no Homebrew/apt PostgreSQL needed), and migrates your data with validation and copy-not-move rollback safety. Your ChromaDB data is left intact as the migration source.
 
 The `nx` CLI provides direct access to all storage tiers, indexing, search, the catalog, and taxonomy. See [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) for a walkthrough, [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md) for every command and flag.
 
