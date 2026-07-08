@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed
+
+- The `devonthink` MCP server (`nx-mcp-devonthink` proxy) is no longer shipped by the plugin. Its tools forwarded to DEVONthink's own built-in MCP server — configure that server in your client directly. `nx dt incorporate <uuid>` replaces the `dt_incorporate` composite tool; note the official server names the books-metadata tool `resolve_book_metadata` (the proxy called it `resolve_google_books_metadata`).
+
 ### Fixed
 
 - **Plan-library NULL-verb pollution.** The `plan_save` MCP tool now requires a `verb` parameter and refuses a verb-less save (pointing implementation/pipeline plans to beads + T2 instead). Removed the "plan_save your pipeline outcome" post-flight instruction from all 10 agents and corrected 2 skill references — these were the source of 79% NULL-verb pollution (57/72 plans) in the live cloud plan library, where they could false-match unrelated `nx_answer` questions via FTS.

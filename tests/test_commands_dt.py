@@ -1248,3 +1248,73 @@ class TestEnrichWiring:
         result = runner.invoke(main, ["dt", "index", "--selection"])
         assert result.exit_code == 0, result.output
         assert calls == []
+
+
+class TestIncorporateCmd:
+    """nexus-goypg: `nx dt incorporate` is the relocated dt_incorporate
+    composite from the retired nx-mcp-devonthink proxy — the one capability
+    DEVONthink's own MCP server cannot provide."""
+
+    def test_help_registered(self, runner):
+        from nexus.commands.dt import dt
+
+        result = runner.invoke(dt, ["incorporate", "--help"])
+        assert result.exit_code == 0
+        assert "already-indexed DT record" in result.output
+
+    def test_rejects_non_uuid_argument(self, runner, monkeypatch):
+        import nexus.commands.dt as dt_cmd_mod
+
+        monkeypatch.setattr(dt_cmd_mod, "_is_darwin", lambda: True)
+        result = runner.invoke(dt_cmd_mod.dt, ["incorporate", "not-a-uuid"])
+        assert result.exit_code != 0
+        assert "UUID" in result.output
+
+    def test_not_indexed_record_errors_with_remedy(self, runner, monkeypatch, tmp_path):
+        import nexus.commands.dt as dt_cmd_mod
+        from nexus.catalog.catalog import Catalog
+
+        monkeypatch.setattr(dt_cmd_mod, "_is_darwin", lambda: True)
+        monkeypatch.setattr("nexus.config.catalog_path", lambda: tmp_path / "cat")
+        monkeypatch.setattr(Catalog, "is_initialized", staticmethod(lambda p: True))
+        fake_cat = MagicMock()
+        fake_cat.by_source_uri.return_value = None
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: fake_cat)
+
+        uuid = "8EDC855D-213F-40AD-A9CF-9543CC76476B"
+        result = runner.invoke(dt_cmd_mod.dt, ["incorporate", uuid])
+        assert result.exit_code != 0
+        assert "nx dt index" in result.output
+        fake_cat.by_source_uri.assert_called_once_with(f"x-devonthink-item://{uuid}")
+        fake_cat.close.assert_called_once()
+
+    def test_happy_path_links_and_writeback(self, runner, monkeypatch, tmp_path):
+        import nexus.commands.dt as dt_cmd_mod
+        from nexus.catalog.catalog import Catalog
+
+        monkeypatch.setattr(dt_cmd_mod, "_is_darwin", lambda: True)
+        monkeypatch.setattr("nexus.config.catalog_path", lambda: tmp_path / "cat")
+        monkeypatch.setattr(Catalog, "is_initialized", staticmethod(lambda p: True))
+        entry = MagicMock()
+        entry.tumbler = "1.2.3"
+        fake_cat = MagicMock()
+        fake_cat.by_source_uri.return_value = entry
+        fake_writer = MagicMock()
+        fake_links = MagicMock(return_value={"relates": 2})
+        fake_writeback = MagicMock(return_value={"tags": True})
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: fake_cat)
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_writer",
+            lambda priority: fake_writer,
+        )
+        monkeypatch.setattr("nexus.catalog.dt_link_generator.generate_dt_links", fake_links)
+        monkeypatch.setattr("nexus.dt_writeback.writeback_record", fake_writeback)
+
+        uuid = "8EDC855D-213F-40AD-A9CF-9543CC76476B"
+        result = runner.invoke(dt_cmd_mod.dt, ["incorporate", uuid])
+        assert result.exit_code == 0, result.output
+        assert "1.2.3" in result.output
+        fake_links.assert_called_once_with(fake_cat, "1.2.3", uuid, writer=fake_writer)
+        fake_writeback.assert_called_once_with(uuid, "1.2.3")
+        fake_writer.close.assert_called_once()
+        fake_cat.close.assert_called_once()

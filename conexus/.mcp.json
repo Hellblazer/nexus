@@ -1,7 +1,10 @@
 {
   "sequential-thinking": {
     "command": "npx",
-    "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+    "args": [
+      "-y",
+      "@modelcontextprotocol/server-sequential-thinking"
+    ],
     "alwaysLoad": true
   },
   "nexus": {
@@ -19,13 +22,5 @@
       "CLAUDE_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}"
     },
     "alwaysLoad": true
-  },
-  "devonthink": {
-    "command": "nx-mcp-devonthink",
-    "args": [],
-    "env": {
-      "CLAUDE_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}"
-    },
-    "alwaysLoad": false
   }
 }

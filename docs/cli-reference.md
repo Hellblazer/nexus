@@ -335,6 +335,14 @@ Exit codes:
 - `1`: tumbler not found, no DT URI on the entry, malformed argument,
   or non-darwin platform.
 
+### nx dt incorporate
+
+```
+nx dt incorporate UUID
+```
+
+Incorporate an already-indexed DEVONthink record into the nexus graph (macOS-only; relocated from the retired `nx-mcp-devonthink` proxy's `dt_incorporate` tool, nexus-goypg). Resolves the record's tumbler (the record must already be indexed — run `nx dt index` or `nx dt capture` first), generates DT-derived `relates` edges to its DEVONthink similarity and explicit-link neighbours that are also indexed in nexus (Layer B), and stamps the nexus identity back onto the DT record (Layer F: `nx-indexed`/`nx-tumbler` tags plus a tumbler backlink annotation). Prints the tumbler, link counts, and writeback summary.
+
 ### nx dt install-scripts
 
 Install (or remove) DT-side AppleScripts that wrap `nx dt index` so
