@@ -159,3 +159,35 @@ def test_hooks_json_registers():
         for h in entry.get("hooks", [])
     )
     assert found
+
+
+# nexus-mzvwa.8: escape must be logged AFTER matching, not before — pre-fix,
+# ANY '# routing-allow:'-annotated Bash command logged a phantom escape here
+# (6,130 over the RDR-121 soak window, 0 of which contained a git-add
+# wildcard), destroying the esc% telemetry the soak review depends on.
+
+def test_escape_on_nonmatching_command_logs_nothing(tmp_path, monkeypatch):
+    log = tmp_path / "log.jsonl"
+    monkeypatch.setenv("NX_ROUTING_LOG_PATH", str(log))
+    d = _decision(_run(
+        _bash("bd close nexus-xyz --reason done  # routing-allow: gate satisfied"),
+        env_extra={"NX_ROUTING_LOG_PATH": str(log)},
+    ))
+    assert d["permissionDecision"] == "allow"
+    assert not log.exists() or log.read_text().strip() == "", (
+        "non-matching annotated command must log NOTHING (phantom escape)"
+    )
+
+
+def test_escape_on_matching_command_logs_true_escape(tmp_path, monkeypatch):
+    log = tmp_path / "log.jsonl"
+    monkeypatch.setenv("NX_ROUTING_LOG_PATH", str(log))
+    d = _decision(_run(
+        _bash("git add -A  # routing-allow: scripted bootstrap of fresh repo"),
+        env_extra={"NX_ROUTING_LOG_PATH": str(log)},
+    ))
+    assert d["permissionDecision"] == "allow"
+    events = [json.loads(l) for l in log.read_text().splitlines() if l.strip()]
+    assert len(events) == 1
+    assert events[0]["outcome"] == "escape"
+    assert events[0]["rule"] == "git_add_all_redirects_to_explicit_paths"
