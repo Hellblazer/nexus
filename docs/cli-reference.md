@@ -2000,6 +2000,8 @@ nx upgrade --auto                 # Quiet mode for hook invocation (T2 only, exi
 
 **Auto-upgrade**: `nx upgrade --auto` runs as the first SessionStart hook in the Claude Code plugin. T2 migrations apply silently on every session start. T3 upgrade steps (e.g., cross-collection projection backfill) run only via explicit `nx upgrade`.
 
+**Substrate-migration bridge (nexus-0rwwv)**: interactive `nx upgrade` (never `--auto`) also detects a pending one-time Chroma→PostgreSQL cutover and prints a banner pointing at `nx guided-upgrade`; on a real terminal it offers to chain straight into the guided migration (default No — guided keeps its own cost preview and consent prompt). Default `nx doctor` prints the same pointer, and the "endpoint is not resolvable" errors carry it too. Detection is evidence-based (legacy store present AND no configured `service_url`, no `NX_SERVICE_HOST`/`PORT`, no `pg_credentials`, no live lease); set `NX_MIGRATION_NOTICE=0` to disable.
+
 **Adding new migrations**: Append a `Migration("x.y.z", "description", fn)` entry to the `MIGRATIONS` list in `src/nexus/db/migrations.py`. For T3 operations, use `T3UpgradeStep`.
 
 ---

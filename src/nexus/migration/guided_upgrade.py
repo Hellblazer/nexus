@@ -568,7 +568,7 @@ class VersionPinOutcome:
 #: keeps its own floor (``managed_endpoint.MIN_MANAGED_RELEASE_VERSION``); this
 #: constant is the native-binary floor enforced by ``verify_service_version``
 #: and the 3rq00 parity test.
-REQUIRED_RELEASE_VERSION: tuple[int, int, int] = (0, 1, 8)
+REQUIRED_RELEASE_VERSION: tuple[int, int, int] = (0, 1, 34)
 
 
 def _parse_semver(raw: str | None) -> tuple[int, int, int] | None:

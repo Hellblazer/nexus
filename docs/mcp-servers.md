@@ -25,6 +25,9 @@ Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 |---|---|
 | `search` | Semantic chunk search over T3 collections. Supports `topic` for topic-scoped search, `cluster_by="semantic"` for topic grouping, automatic same-topic distance boost |
 | `query` | Document-level catalog-aware retrieval (scope by `author`, `content_type`, `subtree`, `follow_links`, `depth`). Link-aware + topic-aware ranking |
+| `search_metadata_scoped` | Combined-query (service mode): catalog-metadata-scoped vector search in one SQL statement (`content_type`, `author`, `year`, `subtree`, chunk-metadata `where`) |
+| `search_graph_hop` | Combined-query (service mode): BFS over `catalog_links` from seed tumblers + vector rank in one statement (`link_type`, `depth` ≤ 3, `direction`); `where` chunk-metadata equality filter applied post-BFS (catalog-012, equality-only — operator syntax rejected loudly) |
+| `search_topic_scoped` | Combined-query (service mode): topic-label-scoped chunk search via `topic_assignments` join |
 | `store_put` | Write a document into a T3 collection. Fires post-store hooks: batch chain auto-assigns to nearest topic; document-grain chain enqueues aspect extraction on `knowledge__*` (RDR-089) |
 | `store_get` | Retrieve a document by id from a T3 collection |
 | `store_get_many` | Batch hydration: given N ids, return N contents (with `missing` for not-found). Handles 300+ ids beyond the per-request 300-record limit |
