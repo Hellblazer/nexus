@@ -28,9 +28,68 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Bounded backoff retry** on transient gateway 502/503/504 during vector upsert, instead of failing the whole batch on one blip.
 - **Retrieval-plan library NULL-verb pollution** — the plan-save MCP boundary now refuses verb-less plan writes; implementation/pipeline plans go to beads + T2, not the shared plan library (was 79% NULL-verb pollution in the live cloud library before the fix).
 
-### Deprecated
+## [6.3.8] - 2026-07-07
 
-- **`NX_UPSERT_SKIP_EXISTING`** — kept for one deprecation cycle as a shim. `=1` (the old "skip probe" behavior) is now a no-op; `=0` now means "force full re-embed" (see Changed, above). New code should use the client's `force_re_embed` parameter directly rather than this env var.
+### Fixed
+
+- **`nx guided-upgrade` now finds real installs (GH #1381).** Two stacked pre-flight defects made the one-command upgrade a silent no-op for real 5.x users: the migration detector probed `~/.config/nexus/chroma` — a directory the product has never written local Chroma to (the real store: `$NX_LOCAL_CHROMA_PATH` → `$XDG_DATA_HOME/nexus/chroma` → `~/.local/share/nexus/chroma`) — and the "already on the service stack" early-exit never consulted the T2 SQLite stores at all, stranding them across the 6.x backend default flip. The detector now resolves the product's own path (config-dir kept as a secondary probe), the no-op requires both legs clean, a present T2 store proceeds to provision + migrate, fully-migrated installs reach a clean "nothing to do", and the success path warns when `NX_STORAGE_BACKEND=sqlite` is still exported. The same wrong default was fixed in `nx storage migrate vectors`, and the None-path was fixed at the ETL chokepoint (pre-fix, the bare invocation would have provisioned a service then crashed on `Path(None)`). The guided-upgrade rehearsal now seeds the product default path and invokes the command bare, so the real user journey is exercised going forward.
+
+## [6.3.7] - 2026-07-07
+
+### Added
+
+- **Scoped service tokens + JIT data-token mint (conexus RDR-005 A1, engine-service-v0.1.31).** `nx service token issue --scope tenant|mint`: `mint` issues a data-token mint credential confined to `POST /v1/data-tokens/mint` (short-TTL per-tenant data tokens, cross-tenant, rate-limited 5/min per credential + 10/min global, env-tunable), rejected on every admin and data route. Scope is server-assigned; `root` is never issuable and `data` tokens exist only via the mint endpoint. Revoking a mint credential stops its mints immediately; outstanding data tokens drain on their own TTL.
+
+### Fixed
+
+- **Staleness-cache fast-path failure no longer darkens incremental indexing.** `build_staleness_cache` now genuinely falls back to the paginated sweep when the `get-all-metadata` fast path raises (a 404 from a pre-v0.1.30 engine, or the server's row-count cap on large collections) — pre-fix it returned an empty cache, silently re-processing every file on each run. A distinct loud warning covers the fallback-silently-empty shape, with an engine-upgrade hint on 404.
+- **Taxonomy discovery no longer 409s under concurrent discovery (engine-service-v0.1.32).** The persist paths' guard-then-insert TOCTOU race is closed server-side with a per-(tenant, collection) advisory transaction lock (bounded by a 5s lock timeout) plus an ON CONFLICT belt on the root-topic inserts; the client additionally treats a unique-violation 409 from pre-fix engines as the benign it's-already-persisted skip instead of failing the index post-pass with a misleading retry hint.
+- **Voyage embed-parity gate restructured for provider replica-nondeterminism.** The standard endpoint serves numerically different variants (~4e-5 cosine) for identical requests across serving replicas; the parity gate now uses a cosine tolerance with the wire-format contract verified structurally — the engine's Voyage request body is byte-locked to the production python SDK format and pinned by a unit test against captured wire bytes.
+
+### Changed
+
+- **Engine pin advanced to engine-service-v0.1.32** (deployed + cloud-gated GREEN 2026-07-07): carries scoped tokens + data-token mint, register_many/update_many/delete_many batch catalog endpoints, the RDR-181 server-side embed-skip, the taxonomy TOCTOU fix, and the byte-locked Voyage wire body. Fresh installs auto-acquire it.
+- **Indexing throughput arc closed (nexus-duoak):** fresh-index full wall 0.803 s/file / file-loop 0.21 s/file on a 2133-file corpus against the cloud engine — 4.4x over the 3.5 s/file serial baseline — via cross-file chunk batching, batched catalog registration/update/prune, and 2-worker default. Residual gap to the aspirational 0.5 s/file full-wall is provider-bound Voyage embedding of fresh chunks (edge-forensics-verified).
+
+### Infrastructure
+
+- **Hermetic local-service functional gate** (`tests/e2e/local-service-gate.sh`): self-provisions a throwaway PG + service, drives the ~450-test integration family with a vacuity guard (passed/skipped floor/budget + exact lived-in carve-out), never touches `~/.config/nexus` or the managed cloud. Wired as a nightly linux CI gate with its own pinned bounds (459 baseline); the 22-file tests/db PG fixture family now discovers PostgreSQL via the product's own discovery (NEXUS_PG_BIN / bundle / Homebrew / PATH) instead of a hardcoded macOS path, and the MCP round-trip test builds its child environment explicitly (the MCP SDK strips spawned-server env to a 6-var safe set — the old test silently round-tripped against the production service on dev boxes).
+
+## [6.3.6] - 2026-07-06
+
+Service-mode CLI repair patch: three commands that crashed (or silently
+failed to converge) on every service-backed install, found by the v6.3.5
+post-release shakeout. No engine change (still pins engine-service-v0.1.30).
+
+### Fixed
+
+- **`nx store export` works in service mode again** (GH #1373). It reached a
+  Chroma-backend-private method that the service client never had, so every
+  export on a service-backed install failed since the pgvector cutover,
+  meaning no new `.nxexp` backups could be created. Export now reads through
+  the backend-neutral collection surface, fetching stored vectors per page
+  (never re-embedding), and fails loud if a chunk is missing its vector.
+- **`nx catalog delete` / `list-backups` / `vacuum-backups` no longer crash
+  in service mode** (GH #1374). The RDR-106 backup-before-delete step read
+  the local catalog's private directory handle and raw SQL; all three paths
+  now resolve the backup directory from config and read through the public
+  catalog API on both backends.
+- **`nx catalog reconcile` now converges** (GH #1371 follow-up). The 6.3.5
+  command rebuilt gapped manifests but never resynced the stale
+  `chunk_count` cache in service mode, so the same documents were
+  "reconciled" again on every run. Repair now corrects `chunk_count` to the
+  rebuilt row count (duplicate chunk text collapses to one stored row by
+  design), the summary reports those corrections, and a second run reports
+  zero. Dry-run wording on the nothing-to-do paths fixed as well.
+
+### Internal
+
+- The defect class behind #1358/#1373/#1374 (CLI code reaching
+  backend-private attributes absent on service-mode clients) is now closed
+  mechanically by the storage-boundary lint.
+- CI: duplicate runs eliminated (no push-CI on main, no tag-time re-test)
+  and the CA-3 gate restores the pre-compiled PG bundle instead of
+  rebuilding it per run.
 
 ## [6.3.5] - 2026-07-06
 
@@ -73,6 +132,55 @@ engine-service-v0.1.30.
 - Pinned engine advances to engine-service-v0.1.30: the `get-all-metadata`
   and `enqueue_many` batch endpoints backing the indexing-throughput fixes
   above.
+
+## [6.3.4] - 2026-07-06
+
+### Fixed
+
+- **Service-mode T2/catalog client reconstruction** (nexus-53x7s, nexus-2rxzs, nexus-5en9j) — `t2_index_write` and the catalog reader/writer factory were constructing (and immediately closing) a fresh HTTP client per call in service mode, defeating connection-pool reuse and drowning per-run logs in construction noise (measured: 387 `T2Database` + 394 `HttpCatalogClient` reconstructions in one indexing run, inflating hook wall-time to ~13x actual upload time). Both now share one process-lifetime instance, guarded by a lock held for the full call (not just checkout) with reactive eviction on any call failure. Also downgrades the affected clients' `.init` construction logs from INFO to DEBUG.
+- **Catalog write path missing batched update/delete** (nexus-xedhp) — every git commit bumps the repo's `head_hash`, flipping every already-indexed document's stored `head_hash` to "changed" and forcing a warm re-index through one serial per-file catalog update over the network (measured: 175.5s / 1718 files). Adds `update_many`/`delete_many` batch endpoints (completing the trio alongside the existing `register_many`), wired into the indexer's catalog hook and `nx catalog update`/`gc`/`prune-stale`. Requires engine-service-v0.1.28.
+
+## [6.3.3] - 2026-07-06
+
+### Added
+
+- **Per-run log file for `nx index repo`** (nexus-mjc9l/nexus-47ubt) — every run writes to `~/.config/nexus/logs/index-<repo>-<hash8>.log`, live-tailable independent of terminal buffering, surviving a lost terminal session. Each run starts fresh; the prior run's content is preserved as `.log.1`.
+- **Per-collection and per-file progress lines** (nexus-47ubt) for the taxonomy-discover and RDR-indexing phases of `nx index repo`, so a slow single item is distinguishable from a hang without external process forensics.
+
+### Changed
+
+- **RDR markdown indexing folded into the main file loop** (nexus-3lswy) — `docs/rdr/*.md` now flows through the same batched catalog registration, staleness cache, and chunk-batching machinery as code/prose/PDF files, instead of a separate, slower path that redundantly re-registered each file's catalog entry over the network.
+
+### Fixed
+
+- **Catalog double-registration for RDR files** — RDR documents were being registered under two different catalog owners (once via the batched per-repo pass, once via a separate "curator" owner in the now-retired RDR indexing path), producing two `Document` rows per physical file. Fixed as part of the RDR indexing consolidation above.
+- **RDR orphan-chunk garbage collection gap** — the post-index orphan-chunk sweep never covered the `rdr__` collection, so deleted/superseded RDR chunks were never cleaned up. Found via a deliberate post-fix audit for the same class of bug; fixed in the same change.
+- **Two active documentation errors**: the CLI reference documented store doc IDs as 16-char hex (actually 32-char); `catalog.md` described taxonomy centroids as ChromaDB-backed (they moved to pgvector in RDR-155 P4a.2).
+- **Five undocumented shipped CLI features** backfilled into the CLI reference: `nx index repo --corpus`, `nx memory put --merge`/`--merge-threshold`, three `nx collection` subcommands (`re-embed`, `rewrite-metadata`, `merge-candidates`), `nx taxonomy backfill-source-collection --apply`, and several `nx doctor` diagnostic flags.
+- Assorted documentation redundancy and staleness across `docs/*.md` (inconsistent builtin-plan counts, stale RDR-index links, duplicated explanations across guides) found and fixed via a multi-lens documentation audit.
+
+## [6.3.2] - 2026-07-05
+
+### Added
+
+- **Server-side embed-skip on re-index (RDR-181).** `PgVectorRepository.upsertChunksInternal` (service mode) now checks which chashes already have a stored vector before embedding — unchanged chunks take a metadata-only UPDATE (position/metadata refreshed, vector untouched) instead of a redundant Voyage call. Live-proof measurement: 89.4% token reduction on a re-index that touched one file among several. Self-heals against a concurrent orphan-GC delete (a 0-row metadata UPDATE reroutes that chash back to embed+insert). A `forceReEmbed` escape (wired from `--force` / the deprecated `NX_UPSERT_SKIP_EXISTING=0`) bypasses the check entirely for model-drift recompute and keeps the first-index path free of the added SELECT.
+- **`nx service record-deploy`** — guarded-write engine-version tracker: GETs the deployed service's `/version`, asserts it matches the tag being recorded, and only then writes the `deployed-engine-version` T2 record. Closes the class of bug where a stale tracker silently disagreed with what the cloud was actually running.
+
+### Changed
+
+- **`skip_existing` client-side probe demoted to a deprecation shim.** `HttpVectorClient.upsert_chunks`'s `skip_existing` (and `NX_UPSERT_SKIP_EXISTING=1`) no longer prunes the outgoing batch — the server's existence-partition check now does this losslessly, including the metadata refresh the old client-side probe dropped. Setting either flag now only emits a one-time deprecation log; the full batch is always sent. `NX_UPSERT_SKIP_EXISTING=0` is repurposed as the `force_re_embed` escape hatch (see above) — its meaning has changed from "disable the client probe" to "force the server to re-embed everything."
+
+### Fixed
+
+- **Indexing throughput**: batched several serial per-file round-trips that dominated large re-index wall-clock — catalog `register_many` (kills a 333s serial-register sink), batched prune-misclassified manifest fetch (226s → one batched call), taxonomy/manifest batch endpoints (`assign_many`, `write_many`), deferred Claude-haiku topic labeling to a detached background process (no longer blocks the indexing wall), and skipped the taxonomy discover/label/project pass entirely on all-unchanged re-index runs.
+- **pgvector upsert deadlock** — a global chash lock order plus 40P01 retry belt closes a deadlock window between concurrent upsert batches touching overlapping chashes in different arrival orders.
+- **Chash dedup** in `ChashRepository.upsertMany` and catalog doc_id batch upserts — in-batch duplicate chashes no longer double-write within one statement.
+- **Bounded backoff retry** on transient gateway 502/503/504 during vector upsert, instead of failing the whole batch on one blip.
+- **Retrieval-plan library NULL-verb pollution** — the plan-save MCP boundary now refuses verb-less plan writes; implementation/pipeline plans go to beads + T2, not the shared plan library (was 79% NULL-verb pollution in the live cloud library before the fix).
+
+### Deprecated
+
+- **`NX_UPSERT_SKIP_EXISTING`** — kept for one deprecation cycle as a shim. `=1` (the old "skip probe" behavior) is now a no-op; `=0` now means "force full re-embed" (see Changed, above). New code should use the client's `force_re_embed` parameter directly rather than this env var.
 
 ## [6.3.1] - 2026-07-04
 
