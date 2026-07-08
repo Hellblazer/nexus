@@ -848,6 +848,21 @@ def load_service_credentials_into_env(config_dir: Path | None = None) -> bool:
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 
+def existing_cluster_present(config_dir: Path) -> bool:
+    """True when an nx-managed cluster data directory already exists — serving
+    OR stopped (``initdb``'s ``PG_VERSION`` marker under ``<config>/postgres``).
+
+    Used by ``nx init``'s bundle-acquisition step (GH #1381): an established
+    cluster keeps whatever PostgreSQL created it, so the always-install policy
+    applies only to machines with no cluster yet. Gating on "serving" alone
+    would download a (possibly different-major) bundle for a merely STOPPED
+    cluster and then ``pg_ctl start`` the existing pgdata with it — the
+    "database files are incompatible with server" trap (code-review High,
+    2026-07-07).
+    """
+    return (config_dir / "postgres" / _PG_VERSION_MARKER).exists()
+
+
 def provision(
     config_dir: Path | None = None,
     *,

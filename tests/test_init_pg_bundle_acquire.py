@@ -1,26 +1,32 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""GH #1381 / nexus-yv5m4: bare ``nx init`` / ``nx guided-upgrade`` auto-acquire
-the signed PG bundle when no usable host PostgreSQL exists.
+"""GH #1381 / nexus-yv5m4: bare ``nx init`` / ``nx guided-upgrade`` ALWAYS
+provision from the signed PG bundle — no host-PostgreSQL probing, no fallback.
 
-Tests :func:`nexus.commands.init._acquire_pg_bundle_step` in isolation plus its
-wiring inside :func:`nexus.commands.init._provision_postgres_step` — throwaway
-``config_dir`` (``tmp_path``), ``install_pg_bundle`` monkeypatched so no network
-call and no live daemon/state is touched (mem:
+Policy (locked 2026-07-07): nexus installs its own self-contained PostgreSQL
+bundle (pgvector baked in) unconditionally. Host PostgreSQL is never probed or
+silently used; there is no Homebrew / build-pgvector-from-source path. The
+only override is an explicit ``NEXUS_PG_BIN``; the only skip is a cluster that
+is already provisioned and serving (existing installs keep whatever
+PostgreSQL created them).
+
+Tests :func:`nexus.commands.init._acquire_pg_bundle_step` in isolation plus
+its wiring inside :func:`nexus.commands.init._provision_postgres_step` —
+throwaway ``config_dir`` (``tmp_path``), ``install_pg_bundle`` monkeypatched
+so no network call and no live daemon/state is touched (mem:
 feedback_dont_break_live_nexus_install). The synthetic bundle archive is REAL
 (``make_pg_bundle_txz``): extraction + selection run the genuine
 ``ensure_pg_bundle`` path, only the download is faked.
 
-Contract (nexus-yv5m4):
-- no pinned/env tag → no download attempt, step returns None (dev boxes keep
-  host-PG discovery unchanged);
-- pinned tag + no usable host PG → download via the verified seam, extract,
-  select (``NEXUS_PG_BIN`` exported) BEFORE ``provision`` runs;
-- a usable host PG (binaries + pgvector) → never downloads;
+Contract:
+- pinned tag + no bundle on disk → download via the verified seam, extract,
+  select (``NEXUS_PG_BIN`` exported) BEFORE ``provision`` runs — regardless
+  of any host PostgreSQL;
 - an explicit ``NEXUS_PG_BIN`` override → never downloads (a deliberate, even
   broken, override is surfaced, not silently papered over);
-- host PG present but pgvector missing (the GH #1381 Homebrew postgresql@17
-  case) → downloads the bundle instead of dead-ending at build-from-source;
-- download failure → falls back to the original host-PG error path.
+- an existing cluster data directory (serving OR stopped) → never downloads —
+  established installs keep whatever PostgreSQL created them;
+- no pinned/env tag → SystemExit with the explicit remedies (no host probe);
+- download failure / extraction failure → SystemExit, no fallback.
 
 ``nx guided-upgrade`` coverage is structural, by construction: it routes
 through the SAME function object (``guided_upgrade.provision_and_serve`` →
@@ -74,9 +80,14 @@ def _fake_install_pg_factory(make_pg_bundle_txz, stage_dir: Path, calls: dict):
 # ── _acquire_pg_bundle_step in isolation ─────────────────────────────────────
 
 
-def test_no_pin_no_download(tmp_path, monkeypatch):
+def test_no_pin_fails_loud_with_remedies(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(binary_install, "install_pg_bundle", _boom_install_pg)
-    assert init_mod._acquire_pg_bundle_step(tmp_path) is None
+    with pytest.raises(SystemExit):
+        init_mod._acquire_pg_bundle_step(tmp_path)
+    err = capsys.readouterr().err
+    assert "NEXUS_SERVICE_TAG" in err
+    assert "install-binary" in err
+    assert "NEXUS_PG_BIN" in err
 
 
 def test_pinned_tag_downloads_extracts_selects(tmp_path, monkeypatch, make_pg_bundle_txz):
@@ -90,7 +101,6 @@ def test_pinned_tag_downloads_extracts_selects(tmp_path, monkeypatch, make_pg_bu
 
     bin_dir = init_mod._acquire_pg_bundle_step(tmp_path)
 
-    assert bin_dir is not None
     assert (bin_dir / "initdb").is_file()
     assert calls["tag"] == "engine-service-v0.1.32"
     assert calls["config_dir"] == tmp_path
@@ -98,11 +108,26 @@ def test_pinned_tag_downloads_extracts_selects(tmp_path, monkeypatch, make_pg_bu
     assert os.environ["NEXUS_PG_BIN"] == str(bin_dir)
 
 
-def test_downloaded_bundle_extraction_failure_returns_none(
+def test_download_failure_fails_loud_no_fallback(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("NEXUS_SERVICE_TAG", "engine-service-v0.1.32")
+
+    def _fail(tag, config_dir, *, installed_by=""):
+        raise binary_install.BinaryVerificationError("sha256 mismatch")
+
+    monkeypatch.setattr(binary_install, "install_pg_bundle", _fail)
+
+    with pytest.raises(SystemExit):
+        init_mod._acquire_pg_bundle_step(tmp_path)
+    err = capsys.readouterr().err
+    assert "sha256 mismatch" in err
+    assert "install-binary engine-service-v0.1.32" in err
+
+
+def test_downloaded_bundle_extraction_failure_fails_loud(
     tmp_path, monkeypatch, capsys
 ):
     """A verified download that fails to EXTRACT (corrupt archive, disk full)
-    must return None with the cause on stderr — never a raw traceback."""
+    must exit with the cause on stderr — never a raw traceback, no fallback."""
     monkeypatch.setenv("NEXUS_SERVICE_TAG", "engine-service-v0.1.32")
 
     def _fake_corrupt(tag, config_dir, *, installed_by=""):
@@ -113,20 +138,9 @@ def test_downloaded_bundle_extraction_failure_returns_none(
 
     monkeypatch.setattr(binary_install, "install_pg_bundle", _fake_corrupt)
 
-    assert init_mod._acquire_pg_bundle_step(tmp_path) is None
+    with pytest.raises(SystemExit):
+        init_mod._acquire_pg_bundle_step(tmp_path)
     assert "could not be extracted" in capsys.readouterr().err
-
-
-def test_download_failure_returns_none(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("NEXUS_SERVICE_TAG", "engine-service-v0.1.32")
-
-    def _fail(tag, config_dir, *, installed_by=""):
-        raise binary_install.BinaryVerificationError("sha256 mismatch")
-
-    monkeypatch.setattr(binary_install, "install_pg_bundle", _fail)
-
-    assert init_mod._acquire_pg_bundle_step(tmp_path) is None
-    assert "sha256 mismatch" in capsys.readouterr().err
 
 
 # ── wiring inside _provision_postgres_step ───────────────────────────────────
@@ -145,18 +159,18 @@ def _fake_provision_factory(seen: dict):
     return _fake_provision
 
 
-def test_provision_step_acquires_bundle_when_no_host_pg(
+def test_provision_step_always_acquires_bundle(
     tmp_path, monkeypatch, make_pg_bundle_txz
 ):
-    """Fresh machine, pinned tag, zero PostgreSQL anywhere → the bundle is
-    downloaded + selected BEFORE provision() runs (the GH #1381 fix)."""
+    """Fresh machine, pinned tag → the bundle is downloaded + selected BEFORE
+    provision() runs, with NO host-PostgreSQL probing (discovery is a boom)."""
     monkeypatch.setattr(init_mod._config, "nexus_config_dir", lambda: tmp_path)
     monkeypatch.setenv("NEXUS_SERVICE_TAG", "engine-service-v0.1.32")
 
-    def _no_pg():
-        raise pg_provision.PgBinaryNotFoundError("No PostgreSQL binaries found.")
+    def _must_not_probe():
+        raise AssertionError("host PostgreSQL must never be probed")
 
-    monkeypatch.setattr(pg_provision, "discover_pg_binaries", _no_pg)
+    monkeypatch.setattr(pg_provision, "discover_pg_binaries", _must_not_probe)
     calls: dict = {}
     monkeypatch.setattr(
         binary_install,
@@ -173,49 +187,37 @@ def test_provision_step_acquires_bundle_when_no_host_pg(
     assert Path(seen["nexus_pg_bin"]).name == "bin"
 
 
-def test_provision_step_acquires_bundle_when_host_pg_lacks_pgvector(
-    tmp_path, monkeypatch, make_pg_bundle_txz
-):
-    """Steve's exact case: Homebrew postgresql@17 present, pgvector absent →
-    acquire the bundle instead of dead-ending at build-from-source."""
+def test_existing_cluster_present_detects_marker(tmp_path):
+    """Direct unit test: PG_VERSION marker present (serving OR stopped) → True;
+    absent → False. This is the stopped-cluster guard — an existing pgdata is
+    never pg_ctl-started with freshly downloaded, possibly different-major
+    binaries (code-review High)."""
+    assert pg_provision.existing_cluster_present(tmp_path) is False
+    pgdata = tmp_path / "postgres"
+    pgdata.mkdir()
+    assert pg_provision.existing_cluster_present(tmp_path) is False
+    (pgdata / "PG_VERSION").write_text("17\n")
+    assert pg_provision.existing_cluster_present(tmp_path) is True
+
+
+def test_provision_step_skips_download_when_cluster_exists(tmp_path, monkeypatch):
+    """An existing cluster data directory (even STOPPED — no port listening)
+    keeps whatever PostgreSQL created it — re-running nx init must not
+    download a bundle over it. Real marker file, no predicate mocking."""
     monkeypatch.setattr(init_mod._config, "nexus_config_dir", lambda: tmp_path)
     monkeypatch.setenv("NEXUS_SERVICE_TAG", "engine-service-v0.1.32")
 
-    monkeypatch.setattr(pg_provision, "discover_pg_binaries", lambda: object())
+    pgdata = tmp_path / "postgres"
+    pgdata.mkdir()
+    (pgdata / "PG_VERSION").write_text("16\n")  # e.g. a legacy host-PG cluster
 
-    def _no_vector(bins):
-        raise pg_provision.PgVectorNotInstalledError("no vector.control")
-
-    monkeypatch.setattr(pg_provision, "check_pgvector_available", _no_vector)
-    calls: dict = {}
-    monkeypatch.setattr(
-        binary_install,
-        "install_pg_bundle",
-        _fake_install_pg_factory(make_pg_bundle_txz, tmp_path / "dl", calls),
-    )
-    seen: dict = {}
-    monkeypatch.setattr(pg_provision, "provision", _fake_provision_factory(seen))
-
-    init_mod._provision_postgres_step()
-
-    assert calls["tag"] == "engine-service-v0.1.32"
-    assert seen["nexus_pg_bin"], "bundle must be selected before provision()"
-
-
-def test_provision_step_skips_acquire_with_usable_host_pg(tmp_path, monkeypatch):
-    """A pgvector-capable host PG keeps dev boxes download-free."""
-    monkeypatch.setattr(init_mod._config, "nexus_config_dir", lambda: tmp_path)
-    monkeypatch.setenv("NEXUS_SERVICE_TAG", "engine-service-v0.1.32")
-
-    monkeypatch.setattr(pg_provision, "discover_pg_binaries", lambda: object())
-    monkeypatch.setattr(pg_provision, "check_pgvector_available", lambda bins: None)
     monkeypatch.setattr(binary_install, "install_pg_bundle", _boom_install_pg)
     seen: dict = {}
     monkeypatch.setattr(pg_provision, "provision", _fake_provision_factory(seen))
 
     init_mod._provision_postgres_step()
 
-    assert seen["nexus_pg_bin"] is None  # host PG used, no bundle selected
+    assert seen["nexus_pg_bin"] is None  # existing cluster, no bundle selected
 
 
 def test_provision_step_never_downloads_over_explicit_override(
@@ -237,69 +239,39 @@ def test_provision_step_never_downloads_over_explicit_override(
         init_mod._provision_postgres_step()
 
 
-def test_provision_step_pgvector_missing_and_download_fails_stays_actionable(
-    tmp_path, monkeypatch, capsys
+def test_provision_step_reuses_bundle_already_on_disk(
+    tmp_path, monkeypatch, make_pg_bundle_txz
 ):
-    """The original GH #1381 composite: host PG present but pgvector missing,
-    AND the bundle download fails → provisioning still exits with the pgvector
-    remedy visible (the build-from-source hint is inside the exception text),
-    plus the download-failure explanation. Nothing is swallowed silently."""
+    """A bundle archive already at <config>/service/ is extracted + selected
+    with no re-download (idempotent re-run)."""
     monkeypatch.setattr(init_mod._config, "nexus_config_dir", lambda: tmp_path)
     monkeypatch.setenv("NEXUS_SERVICE_TAG", "engine-service-v0.1.32")
 
-    monkeypatch.setattr(pg_provision, "discover_pg_binaries", lambda: object())
+    dest = binary_install.pg_bundle_dest(tmp_path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    archive = make_pg_bundle_txz(tmp_path / "stage", name=dest.name)
+    shutil.copy2(archive, dest)
 
-    def _no_vector(bins):
-        raise pg_provision.PgVectorNotInstalledError(
-            "The pgvector extension is not installed (no vector.control)"
-        )
+    monkeypatch.setattr(binary_install, "install_pg_bundle", _boom_install_pg)
+    seen: dict = {}
+    monkeypatch.setattr(pg_provision, "provision", _fake_provision_factory(seen))
 
-    monkeypatch.setattr(pg_provision, "check_pgvector_available", _no_vector)
+    init_mod._provision_postgres_step()
 
-    def _fail(tag, config_dir, *, installed_by=""):
-        raise binary_install.BinaryVerificationError("download failed")
-
-    monkeypatch.setattr(binary_install, "install_pg_bundle", _fail)
-
-    def _provision_rederives(config_dir):
-        # provision() re-runs the preflight and re-raises the same error.
-        raise pg_provision.PgVectorNotInstalledError(
-            "The pgvector extension is not installed (no vector.control)"
-        )
-
-    monkeypatch.setattr(pg_provision, "provision", _provision_rederives)
-
-    with pytest.raises(SystemExit):
-        init_mod._provision_postgres_step()
-    err = capsys.readouterr().err
-    assert "download failed" in err  # the acquisition attempt is visible
-    assert "pgvector extension is not installed" in err  # remedy not swallowed
+    assert seen["nexus_pg_bin"], "on-disk bundle must be selected"
 
 
-def test_provision_step_surfaces_original_error_when_acquire_fails(
-    tmp_path, monkeypatch, capsys
-):
-    """No host PG + bundle download fails → the actionable host-PG error path
-    still fires (SystemExit with the install hint), no traceback."""
+def test_provision_step_no_pin_fails_loud(tmp_path, monkeypatch, capsys):
+    """No pinned/env tag and nothing on disk → SystemExit with the explicit
+    remedies; host PostgreSQL is not probed."""
     monkeypatch.setattr(init_mod._config, "nexus_config_dir", lambda: tmp_path)
-    monkeypatch.setenv("NEXUS_SERVICE_TAG", "engine-service-v0.1.32")
 
-    def _no_pg():
-        raise pg_provision.PgBinaryNotFoundError("No PostgreSQL binaries found.")
+    def _must_not_probe():
+        raise AssertionError("host PostgreSQL must never be probed")
 
-    monkeypatch.setattr(pg_provision, "discover_pg_binaries", _no_pg)
-
-    def _fail(tag, config_dir, *, installed_by=""):
-        raise binary_install.BinaryVerificationError("download failed")
-
-    monkeypatch.setattr(binary_install, "install_pg_bundle", _fail)
-
-    def _provision_raises(config_dir):
-        raise pg_provision.PgBinaryNotFoundError("No PostgreSQL binaries found.")
-
-    monkeypatch.setattr(pg_provision, "provision", _provision_raises)
+    monkeypatch.setattr(pg_provision, "discover_pg_binaries", _must_not_probe)
+    monkeypatch.setattr(binary_install, "install_pg_bundle", _boom_install_pg)
 
     with pytest.raises(SystemExit):
         init_mod._provision_postgres_step()
-    err = capsys.readouterr().err
-    assert "Postgres binaries not found" in err
+    assert "install-binary" in capsys.readouterr().err
