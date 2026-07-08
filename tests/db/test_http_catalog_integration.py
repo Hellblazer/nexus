@@ -489,6 +489,16 @@ def cat_b(service):
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
+
+def _ch(seed: str) -> str:
+    """Canonical 32-lowercase-hex chash for fixtures. The mzvwa.9 manifest
+    boundary guards require EXACTLY 32 lowercase hex chars (Chash.fromHex) —
+    the old underscore literals now 400 at /v1/catalog/manifest/write."""
+    import hashlib
+
+    return hashlib.sha256(seed.encode()).hexdigest()[:32]
+
+
 class TestCatalogServiceHealth:
     def test_stats_endpoint_reachable(self, cat) -> None:
         s = cat.stats()
@@ -723,9 +733,9 @@ class TestManifest:
             source_uri="file:///manifest/test.md",
         )
         chunks = [
-            {"position": 0, "chash": "chunk_hash_000000000000000000000", "line_start": 1, "line_end": 10},
-            {"position": 1, "chash": "chunk_hash_010000000000000000000", "line_start": 11, "line_end": 20},
-            {"position": 2, "chash": "chunk_hash_020000000000000000000", "line_start": 21, "line_end": 30},
+            {"position": 0, "chash": _ch("chunk_hash_000000000000000000000"), "line_start": 1, "line_end": 10},
+            {"position": 1, "chash": _ch("chunk_hash_010000000000000000000"), "line_start": 11, "line_end": 20},
+            {"position": 2, "chash": _ch("chunk_hash_020000000000000000000"), "line_start": 21, "line_end": 30},
         ]
         cat.write_manifest(str(t), chunks)
         return t, chunks
@@ -735,24 +745,24 @@ class TestManifest:
         rows = cat.get_manifest(str(t))
         assert len(rows) == 3
         chashes = [r.chash for r in rows]
-        assert "chunk_hash_000000000000000000000" in chashes
-        assert "chunk_hash_010000000000000000000" in chashes
-        assert "chunk_hash_020000000000000000000" in chashes
+        assert _ch("chunk_hash_000000000000000000000") in chashes
+        assert _ch("chunk_hash_010000000000000000000") in chashes
+        assert _ch("chunk_hash_020000000000000000000") in chashes
 
     def test_get_chunk_chashes(self, cat, doc_with_manifest) -> None:
         t, expected = doc_with_manifest
         chashes = cat.get_chunk_chashes(str(t))
-        assert "chunk_hash_000000000000000000000" in chashes
+        assert _ch("chunk_hash_000000000000000000000") in chashes
         assert len(chashes) == 3
 
     def test_append_manifest_chunks(self, cat, doc_with_manifest) -> None:
         t, _ = doc_with_manifest
         cat.append_manifest_chunks(str(t), [
-            {"position": 3, "chash": "chunk_hash_030000000000000000000"},
+            {"position": 3, "chash": _ch("chunk_hash_030000000000000000000")},
         ])
         rows = cat.get_manifest(str(t))
         chashes = [r.chash for r in rows]
-        assert "chunk_hash_030000000000000000000" in chashes
+        assert _ch("chunk_hash_030000000000000000000") in chashes
 
     def test_docs_for_chashes_reverse_lookup(self, cat, doc_with_manifest) -> None:
         """docs_for_chashes returns dict[chash, [doc_id, ...]] (nexus-h8rf6.3).
@@ -765,10 +775,10 @@ class TestManifest:
         crashed every ``by_chash.items()`` consumer with AttributeError.
         """
         t, _ = doc_with_manifest
-        result = cat.docs_for_chashes(["chunk_hash_000000000000000000000", "chunk_hash_010000000000000000000"])
+        result = cat.docs_for_chashes([_ch("chunk_hash_000000000000000000000"), _ch("chunk_hash_010000000000000000000")])
         assert isinstance(result, dict)
-        assert "chunk_hash_000000000000000000000" in result
-        assert str(t) in result["chunk_hash_000000000000000000000"]
+        assert _ch("chunk_hash_000000000000000000000") in result
+        assert str(t) in result[_ch("chunk_hash_000000000000000000000")]
 
     def test_docs_for_chashes_resolves_full_64char_chunk_text_hash(
         self, cat, doc_with_manifest,
@@ -794,7 +804,7 @@ class TestManifest:
         wrote, so client-side truncation is a no-op there.
         """
         t, _ = doc_with_manifest
-        stored_chash = "chunk_hash_000000000000000000000"
+        stored_chash = _ch("chunk_hash_000000000000000000000")
         assert len(stored_chash) == 32
         # A full 64-char form whose 32-char prefix matches the stored
         # chash exactly, mirroring real chunk_text_hash -> chash[:32].
@@ -810,7 +820,7 @@ class TestManifest:
             content_type="paper",
             source_uri="file:///manifest/purge.md",
         )
-        cat.write_manifest(str(t), [{"position": 0, "chash": "purge_hash_000000000000000000000"}])
+        cat.write_manifest(str(t), [{"position": 0, "chash": _ch("purge_hash_000000000000000000000")}])
         before = cat.get_manifest(str(t))
         assert len(before) == 1
         cat.purge_manifest_for_doc(str(t))
@@ -825,16 +835,16 @@ class TestManifest:
             content_type="paper",
             source_uri="file:///manifest/atomic.md",
         )
-        cat.write_manifest(str(t), [{"position": 0, "chash": "old_hash000000000000000000000000"}])
+        cat.write_manifest(str(t), [{"position": 0, "chash": _ch("old_hash000000000000000000000000")}])
         cat.atomic_manifest_replace(str(t), [
-            {"position": 0, "chash": "new_hash_00000000000000000000000"},
-            {"position": 1, "chash": "new_hash_01000000000000000000000"},
+            {"position": 0, "chash": _ch("new_hash_00000000000000000000000")},
+            {"position": 1, "chash": _ch("new_hash_01000000000000000000000")},
         ])
         rows = cat.get_manifest(str(t))
         chashes = [r.chash for r in rows]
-        assert "new_hash_00000000000000000000000" in chashes
-        assert "new_hash_01000000000000000000000" in chashes
-        assert "old_hash000000000000000000000000" not in chashes
+        assert _ch("new_hash_00000000000000000000000") in chashes
+        assert _ch("new_hash_01000000000000000000000") in chashes
+        assert _ch("old_hash000000000000000000000000") not in chashes
 
 
 class TestFTSSearch:
@@ -1473,9 +1483,9 @@ class TestResyncChunkCount:
 
         # Write a 3-chunk manifest
         cat.write_manifest(str(tumbler), [
-            {"position": 0, "chash": "resync_chk_aaa000000000000000000", "chunk_index": 0},
-            {"position": 1, "chash": "resync_chk_bbb111000000000000000", "chunk_index": 1},
-            {"position": 2, "chash": "resync_chk_ccc222000000000000000", "chunk_index": 2},
+            {"position": 0, "chash": _ch("resync_chk_aaa000000000000000000"), "chunk_index": 0},
+            {"position": 1, "chash": _ch("resync_chk_bbb111000000000000000"), "chunk_index": 1},
+            {"position": 2, "chash": _ch("resync_chk_ccc222000000000000000"), "chunk_index": 2},
         ])
 
         # Resync: must recompute from catalog_document_chunks and update documents.chunk_count
