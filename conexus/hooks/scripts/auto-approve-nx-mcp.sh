@@ -26,6 +26,7 @@ case "$TOOL_NAME" in
   mcp__plugin_conexus_nexus__collection_list|\
   mcp__plugin_conexus_nexus__plan_save|\
   mcp__plugin_conexus_nexus__plan_search|\
+  mcp__plugin_conexus_nexus__plan_delete|\
   mcp__plugin_conexus_nexus__traverse|\
   mcp__plugin_conexus_nexus__nx_answer|\
   mcp__plugin_conexus_nexus__nx_tidy|\

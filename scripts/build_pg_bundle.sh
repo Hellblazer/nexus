@@ -63,11 +63,16 @@ install_prereqs() {
         Linux)
             # manylinux_2_28 base toolchain lacks these.
             if command -v dnf >/dev/null 2>&1; then
-                dnf -y -q install flex bison perl >/dev/null
+                dnf -y -q install flex bison perl patchelf >/dev/null
             elif command -v apt-get >/dev/null 2>&1; then
-                apt-get -y -q install flex bison perl >/dev/null
+                apt-get -y -q install flex bison perl patchelf >/dev/null
             else
                 echo "WARN: no dnf/apt-get found — assuming flex/bison/perl present" >&2
+            fi
+            # patchelf is required for the $ORIGIN RUNPATH fixup (nexus-iytd3);
+            # fall back to the PyPI wheel when the distro package is absent.
+            if ! command -v patchelf >/dev/null 2>&1; then
+                python3 -m pip install -q patchelf >/dev/null 2>&1 || true
             fi
             ;;
         Darwin)
@@ -126,9 +131,11 @@ fixup_macos_relocatability() {
     # pkglibdir) — it says NOTHING about the dynamic linker's dylib load paths.
     # `configure`/`make install` bakes the literal absolute --prefix build path
     # into every libpq-linked client binary's LC_LOAD_DYLIB (and into
-    # libpq.5.dylib's own LC_ID_DYLIB). Linux gets $ORIGIN-relative RPATH from
-    # PG's own build system by default; macOS does not — this is a well-known
-    # PG/macOS packaging gap. Confirmed 2026-07-01 (GH issue-equivalent: a
+    # libpq.5.dylib's own LC_ID_DYLIB). Linux has the SAME class of gap —
+    # the shipped linux binaries carried the LITERAL build-prefix RUNPATH
+    # (dangling everywhere but the CI runner; the earlier claim here that
+    # "Linux gets $ORIGIN-relative RPATH by default" was wrong — it gets a
+    # literal-path RPATH); see fixup_linux_relocatability below. Confirmed 2026-07-01 (GH issue-equivalent: a
     # released bundle's psql/createdb/pg_dump/... all dyld-abort with "Library
     # not loaded: <literal CI runner build path>/libpq.5.dylib" on ANY machine
     # other than the exact CI runner path — every prior macOS release shipped
@@ -176,6 +183,73 @@ fixup_macos_relocatability() {
     log "macOS relocatability smoke PASSED (psql runs from a distinct copy)"
 }
 
+fixup_linux_relocatability() {
+    # Linux ONLY (nexus-iytd3). PG's find_my_exec relocatability covers its
+    # OWN path resolution, not the dynamic loader: the shipped bundles'
+    # bin/ binaries carried the LITERAL CI build path as RUNPATH
+    # (/home/runner/work/nexus/nexus/bundle/lib — verified on the live
+    # v0.1.32 artifact), dangling on every user machine, so on one without
+    # a system libpq (minimal debian:trixie-slim — the nexus-4mm24
+    # cold-acquire scenario, a real fresh-user machine class) every
+    # libpq-linked client dies with "libpq.so.5: cannot open shared object
+    # file" unless the CONSUMER exports LD_LIBRARY_PATH. nx's provisioner
+    # does exactly that (pg_provision._bundle_lib_env, the ships-now guard),
+    # but that covers only nx-managed invocations — OS autostart, manual
+    # pg_ctl, and crash-restart paths re-exec WITHOUT the env. $ORIGIN
+    # RUNPATH makes the tree self-contained regardless of consumer env.
+    [ "$uname_s" = "Linux" ] || return 0
+    command -v patchelf >/dev/null 2>&1 || {
+        echo "FATAL: patchelf not available — cannot set \$ORIGIN RUNPATH (nexus-iytd3)" >&2
+        exit 1
+    }
+    log "Linux: setting \$ORIGIN-relative RUNPATH on bin/ + lib/"
+    local f
+    for f in "${BUNDLE_PREFIX}/bin/"*; do
+        [ -f "$f" ] && [ -x "$f" ] || continue
+        # Non-ELF entries (shell wrappers) are tolerated; ELF binaries get
+        # bin -> ../lib.
+        patchelf --set-rpath '$ORIGIN/../lib' "$f" 2>/dev/null || true
+    done
+    while IFS= read -r -d '' f; do
+        # lib-to-lib deps (libecpg -> libpq) resolve within the same dir.
+        # ($ORIGIN/.. is belt-and-suspenders for any nested layout; on this
+        # from-source build pkglibdir == libdir so vector.so sits directly
+        # in lib/ and $ORIGIN alone suffices — review note.)
+        patchelf --set-rpath '$ORIGIN:$ORIGIN/..' "$f" 2>/dev/null || true
+    done < <(find "${BUNDLE_PREFIX}/lib" -type f -name "*.so*" -print0 2>/dev/null)
+
+    # Deterministic assertion FIRST (independent of whatever libs the build
+    # host happens to have): every provisioner-critical binary's RUNPATH
+    # must actually carry $ORIGIN — the patchelf loop tolerates per-file
+    # failure, so each one is proven individually (review: a psql-only
+    # check let partial failures ship).
+    local bcheck
+    for bcheck in psql initdb pg_ctl pg_config createdb postgres; do
+        if ! patchelf --print-rpath "${BUNDLE_PREFIX}/bin/${bcheck}" | grep -q '\$ORIGIN'; then
+            echo "FATAL: ${bcheck} RUNPATH does not carry \$ORIGIN after fixup" >&2
+            exit 1
+        fi
+    done
+    # Then the behavioural smoke, mirroring the macOS one: a relocated COPY
+    # must run with LD_LIBRARY_PATH explicitly UNSET (a build host with a
+    # system libpq must not be able to false-pass this).
+    local smoke_dir b; smoke_dir="$(mktemp -d)"
+    cp -R "${BUNDLE_PREFIX}" "${smoke_dir}/relocated"
+    # Smoke EVERY provisioner-critical binary, not just psql — the patchelf
+    # calls above tolerate per-file failure (non-ELF entries), so a partial
+    # fixup must be caught here, binary by binary.
+    for b in psql initdb pg_ctl pg_config createdb postgres; do
+        if ! env -u LD_LIBRARY_PATH "${smoke_dir}/relocated/bin/${b}" --version >/dev/null 2>&1; then
+            echo "FATAL: ${b} not self-contained after \$ORIGIN fixup — aborting build" >&2
+            env -u LD_LIBRARY_PATH "${smoke_dir}/relocated/bin/${b}" --version || true
+            rm -rf "$smoke_dir"
+            exit 1
+        fi
+    done
+    rm -rf "$smoke_dir"
+    log "Linux relocatability smoke PASSED (psql/initdb/pg_ctl/pg_config/createdb run from a distinct copy, no LD_LIBRARY_PATH)"
+}
+
 verify_and_mark() {
     log "verify complete tool set + injected extension"
     local b vector_lib pkglib sharedir
@@ -205,5 +279,6 @@ install_prereqs
 build_pg
 build_pgvector
 fixup_macos_relocatability
+fixup_linux_relocatability
 verify_and_mark
 log "bundle complete: ${BUNDLE_PREFIX}"

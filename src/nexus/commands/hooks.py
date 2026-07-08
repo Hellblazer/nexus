@@ -47,6 +47,11 @@ REPO_TOP="$(git rev-parse --show-toplevel)"
 if pgrep -f "nx index repo $REPO_TOP" > /dev/null 2>&1; then
   exit 0
 fi
+# nexus-q3xrx: one stamped header per hook run — crash tracebacks (Python
+# default excepthook -> stderr -> this redirect) land RAW and undatable
+# without it; the header bounds every entry to a dated run window.
+echo "=== nx index post-commit $REPO_TOP $(date '+%Y-%m-%dT%H:%M:%S%z') ===" \\
+  >> "$HOME/.config/nexus/index.log"
 nx index repo "$REPO_TOP" --on-locked=skip \\
   >> "$HOME/.config/nexus/index.log" 2>&1 &
 disown

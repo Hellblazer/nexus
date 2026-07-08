@@ -194,12 +194,14 @@ The first-run banner + `daemon_uninstall` lifecycle is validated in two halves.
   **not** supply a Voyage key. The legacy `chroma_api_key` / `chroma_tenant` /
   `chroma_database` keys are the retired pre-6.0 ChromaDB-Cloud surface.
 
-  > **Note (managed-cloud Desktop):** `NX_SERVICE_URL` / `NX_SERVICE_TOKEN` are
-  > currently resolved from the process environment. Because the `.mcpb` does not
-  > inherit your shell env, the persistence path for these in a Desktop install
-  > is being finalized — see [Managed-Cloud Credentials](configuration.md#managed-cloud-credentials)
-  > in `docs/configuration.md`. For a **local** install
-  > there is no footgun: `nx init` writes the token to
+  > **Managed-cloud Desktop (the working path):** persist the endpoint + token
+  > to `config.yml` — `nx config set service_url <url>` and
+  > `nx config set service_token <token>` (or `nx config init`). Resolution is
+  > env-first-then-`config.yml` (RDR-166), so the `.mcpb` (which never sees
+  > your shell env) picks the persisted values up on relaunch; a terminal
+  > session with `NX_SERVICE_*` exported still wins there. See
+  > [Managed-Cloud Credentials](configuration.md#managed-cloud-credentials).
+  > For a **local** install there is no footgun: `nx init` writes the token to
   > `~/.config/nexus/pg_credentials` and the service is discovered via its lease.
   Then fully quit + relaunch Claude Desktop so the extension re-spawns and re-reads `config.yml`. **Verify** it took: search for something specific and ask for the top `file:line` results with scores; confirm the cited locations are real (a great-sounding answer is not proof — the model can reconstruct from `store_get`/FTS even when vector search is skipping), and confirm the Conexus log shows no `dimension_mismatch_skipped`. On a fresh machine with no CLI, you only get local mode (bge-768) — fine for content you index locally at 768d, but it will not reach pre-existing cloud-1024 collections until the creds are in `config.yml`.
 
