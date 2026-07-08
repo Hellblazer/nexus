@@ -12,7 +12,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- **Plan-library NULL-verb pollution.** The `plan_save` MCP tool now requires a `verb` parameter and refuses a verb-less save (pointing implementation/pipeline plans to beads + T2 instead). Removed the "plan_save your pipeline outcome" post-flight instruction from all 10 agents and corrected 2 skill references — these were the source of 79% NULL-verb pollution (57/72 plans) in the live cloud plan library, where they could false-match unrelated `nx_answer` questions via FTS.
+- **Routing-hook telemetry: phantom escapes eliminated.** The PreToolUse routing hook logged an `escape` row BEFORE rule matching, so every routed call also counted as an escape — inflating escape counts with exact twins of the routed rows (6,130 phantom escapes in the RDR-121 soak window). The escape row is now written only AFTER no rule matches.
 
 ## [6.3.8] - 2026-07-07
 
