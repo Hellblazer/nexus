@@ -87,6 +87,7 @@ def body(payload: dict[str, Any]) -> None:
         _lib.log_routing_event(
             rule=RULE_NAME, outcome="escape", tool_name="Bash",
             command_fragment=command,
+            escape_reason=_lib.extract_escape_reason(command),
         )
         _lib.allow()
 

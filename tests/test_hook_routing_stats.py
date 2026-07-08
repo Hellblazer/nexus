@@ -148,6 +148,10 @@ def test_cli_routing_stats_json_output(tmp_path, monkeypatch):
         {"ts": "t2", "rule": "r", "outcome": "allow"},
     ])
     monkeypatch.setenv("NX_ROUTING_LOG_PATH", str(log))
+    # Hermetic: without this, registered_rules() probes the REAL
+    # ~/.claude marketplace / repo hooks.json (ambient machine state).
+    import nexus.routing_stats as rs
+    monkeypatch.setattr(rs, "registered_rules", lambda hooks_json=None: None)
 
     from nexus.cli import main
 
@@ -155,8 +159,12 @@ def test_cli_routing_stats_json_output(tmp_path, monkeypatch):
     result = runner.invoke(main, ["hook", "routing-stats", "--json"])
     assert result.exit_code == 0
     parsed = json.loads(result.stdout)
-    assert parsed["r"]["total"] == 2
-    assert parsed["r"]["deny"] == 1
+    # nexus-mzvwa.9: rules nested under "rules"; envelope carries the
+    # self-test exclusion count (0 here) + unregistered cross-check.
+    assert parsed["rules"]["r"]["total"] == 2
+    assert parsed["selftest_excluded"] == 0
+    assert parsed["rules"]["r"]["deny"] == 1
+    assert "unregistered_rules" not in parsed  # cross-check skipped (no hooks.json)
 
 
 def test_cli_routing_stats_custom_path(tmp_path):
@@ -169,3 +177,85 @@ def test_cli_routing_stats_custom_path(tmp_path):
     result = runner.invoke(main, ["hook", "routing-stats", "--log-path", str(log)])
     assert result.exit_code == 0
     assert "r" in result.output
+
+
+# ── nexus-mzvwa.9: self-test exclusion + registration cross-check ────────────
+
+
+def test_selftest_pairs_excluded_with_count(tmp_path):
+    from nexus.routing_stats import aggregate_detailed
+    log = tmp_path / "log.jsonl"
+    _write_log(log, [
+        # historical suite-written fail-ladder pair (pre-fix shape).
+        # NOTE (documented tradeoff, see _is_selftest_record's caveat): a
+        # future hook that omits rule_name AND hits malformed stdin would
+        # be indistinguishable from row t2 and silently excluded — the
+        # invariant is that every production hook passes rule_name.
+        {"ts": "t1", "rule": "test_rule", "outcome": "deny_fail_closed", "tool_name": "Bash"},
+        {"ts": "t2", "rule": "unknown", "outcome": "allow_fail_open"},
+        # labeled post-fix shape
+        {"ts": "t3", "rule": "selftest_fail_open", "outcome": "allow_fail_open"},
+        # real events must survive
+        {"ts": "t4", "rule": "real_rule", "outcome": "deny"},
+        # a REAL fail-open (has tool_name) must NOT be excluded
+        {"ts": "t5", "rule": "unknown", "outcome": "allow_fail_open", "tool_name": "Bash"},
+    ])
+    stats, excluded = aggregate_detailed(log)
+    assert excluded == 3
+    assert set(stats) == {"real_rule", "unknown"}
+    assert stats["unknown"].fail_open == 1
+
+
+def test_registered_rules_parses_hooks_json(tmp_path):
+    from nexus.routing_stats import registered_rules
+    hooks = tmp_path / "hooks.json"
+    hooks.write_text(json.dumps({
+        "hooks": {"PreToolUse": [{"hooks": [
+            {"type": "command", "command": "$ROOT/hooks/scripts/routing/rule_a.py"},
+            {"type": "command", "command": "$ROOT/hooks/scripts/_run_python_hook.sh $ROOT/hooks/scripts/routing/rule_b.py"},
+            {"type": "command", "command": "$ROOT/hooks/scripts/other/not_routing.py"},
+        ]}]}
+    }))
+    assert registered_rules(hooks) == {"rule_a", "rule_b"}
+
+
+def test_registered_rules_none_when_absent(tmp_path):
+    from nexus.routing_stats import registered_rules
+    assert registered_rules(tmp_path / "missing.json") is None
+
+
+def test_cli_marks_unregistered_rules(tmp_path, monkeypatch):
+    from nexus.cli import main
+    log = tmp_path / "log.jsonl"
+    _write_log(log, [{"ts": "t1", "rule": "ghost_rule", "outcome": "deny"}])
+    monkeypatch.setenv("NX_ROUTING_LOG_PATH", str(log))
+    hooks = tmp_path / "hooks.json"
+    hooks.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [
+        {"type": "command", "command": "$R/hooks/scripts/routing/live_rule.py"},
+    ]}]}}))
+    import nexus.routing_stats as rs
+    real = rs.registered_rules
+    monkeypatch.setattr(rs, "registered_rules", lambda hooks_json=None: real(hooks))
+    runner = CliRunner()
+    result = runner.invoke(main, ["hook", "routing-stats"])
+    assert result.exit_code == 0
+    assert "ghost_rule (unregistered)" in result.output
+
+
+def test_cli_escapes_lists_reasons(tmp_path, monkeypatch):
+    from nexus.cli import main
+    log = tmp_path / "log.jsonl"
+    _write_log(log, [
+        {"ts": "t1", "rule": "r1", "outcome": "escape",
+         "escape_reason": "vendored tree, wildcard reviewed"},
+        {"ts": "t2", "rule": "r1", "outcome": "deny"},
+        {"ts": "t3", "rule": "r2", "outcome": "escape"},  # pre-field event
+    ])
+    monkeypatch.setenv("NX_ROUTING_LOG_PATH", str(log))
+    runner = CliRunner()
+    result = runner.invoke(main, ["hook", "routing-stats", "--escapes"])
+    assert result.exit_code == 0
+    assert "vendored tree, wildcard reviewed" in result.output
+    assert "reason not captured" in result.output
+    assert "2 escape event(s)" in result.output
+    assert "deny" not in result.output

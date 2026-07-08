@@ -1285,6 +1285,16 @@ escape-rate per rule.
 |------|-------------|
 | `--log-path PATH` | Read from this path instead of the default |
 | `--json` | Emit aggregated stats as JSON instead of a table |
+| `--escapes` | List escape events with their `# routing-allow:` reasons (the escape-audit surface); combines with `--json` |
+
+JSON output shape (nexus-mzvwa.9): `{"rules": {<rule>: {...}}, "selftest_excluded": N,
+"unregistered_rules": [...]}` — `unregistered_rules` present only when a
+hooks.json registration surface was found. Fail-ladder self-test rows
+(`selftest_*`, plus the historical `test_rule`/`unknown` suite pairs) are
+excluded from the stats and counted in `selftest_excluded`; the table view
+footnotes the same count. Rules present in the log but absent from the
+plugin's hooks.json are marked `(unregistered)` — the log is append-only
+history, so a stats row alone never proves a hook is currently live.
 
 Default log path resolves to `$NX_ROUTING_LOG_PATH`, falling back to
 `~/.config/nexus/routing_log.jsonl`. Used at the 30-day soak review
