@@ -2329,6 +2329,48 @@ def _prune_deleted_files(
 # ── Main indexing pipeline ───────────────────────────────────────────────────
 
 
+def _drain_batcher_with_markers(
+    batcher: "ChunkBatcher",
+    on_phase: Callable[[str], None] | None,
+) -> int:
+    """Drain *batcher* with operator-visible phase markers (nexus-uizok).
+
+    The end-of-run drain previously ran DARK for multiple minutes on big
+    repos (hundreds of upsert round-trips after "RDR indexing done") —
+    indistinguishable from a hang. Emits an opening marker with the
+    pending summary, a heartbeat per completed flush, and a closing
+    marker with drain-scoped flush count + wall. Quiet drains (nothing
+    pending, nothing in flight) stay silent — no phantom markers.
+
+    Returns the drain's flush count (``batcher.drain``'s return).
+    """
+    pend = batcher.pending_summary
+    busy = bool(pend["chunks"] or pend["in_flight"])
+    t0 = time.monotonic()
+    progress = None
+    if on_phase is not None and busy:
+        parts = [
+            f"{pend['chunks']:,} staged chunks across "
+            f"{pend['collections']} collections"
+        ]
+        if pend["in_flight"]:
+            parts.append(f"{pend['in_flight']} in-flight batches")
+        on_phase(f"Flushing {' + '.join(parts)}…")
+
+        def progress(done: int, total: int) -> None:
+            on_phase(
+                f"  flush {done}/{total} complete "
+                f"({time.monotonic() - t0:.1f}s)"
+            )
+    flushed = batcher.drain(on_progress=progress)
+    if on_phase is not None and busy:
+        on_phase(
+            f"Flush drain complete — {flushed} flushes, "
+            f"{time.monotonic() - t0:.1f}s"
+        )
+    return flushed
+
+
 def _run_index(
     repo: Path,
     registry: "object",
@@ -2818,21 +2860,27 @@ def _run_index(
     # ``check_staleness(cache=…)`` falls through to the per-file path,
     # which itself short-circuits on a missing collection.
     from nexus.indexer_utils import StalenessCache  # noqa: PLC0415  — circular-dep avoidance (nexus.indexer_utils)
-    code_staleness = (
-        build_staleness_cache(code_col) if code_col is not None
-        else StalenessCache()
-    )
-    docs_staleness = (
-        build_staleness_cache(docs_col) if docs_col is not None
-        else StalenessCache()
-    )
+
+    # nexus-uizok: per-collection markers so the (up to minutes-long on
+    # the paginated fallback) sweep never goes dark between the opening
+    # line above and the "built" summary below — one heartbeat per
+    # collection with the previous one's wall time.
+    def _build_with_marker(label: str, col: object) -> "StalenessCache":
+        if col is None:
+            return StalenessCache()
+        if on_phase is not None:
+            on_phase(
+                f"  staleness sweep: {label}… "
+                f"({time.monotonic() - _staleness_t0:.1f}s elapsed)"
+            )
+        return build_staleness_cache(col)
+
+    code_staleness = _build_with_marker("code", code_col)
+    docs_staleness = _build_with_marker("docs", docs_col)
     # nexus-3lswy: distinct cache object from docs_staleness — rdr__ is a
     # separate physical collection from docs__, so a shared object would
     # cross-contaminate staleness lookups between the two.
-    rdr_staleness = (
-        build_staleness_cache(rdr_col) if rdr_col is not None
-        else StalenessCache()
-    )
+    rdr_staleness = _build_with_marker("rdr", rdr_col)
     _log.info(
         "staleness_caches_built",
         code_doc_ids=len(code_staleness.by_doc_id),
@@ -3221,7 +3269,7 @@ def _run_index(
     # failures (containment: a failed batch fails its contributing files,
     # never the run — nexus-wcs39).
     if _batcher is not None:
-        _batcher.drain()
+        _drain_batcher_with_markers(_batcher, on_phase)
         _bstats = _batcher.stats
         _log.info(
             "index_chunk_batch_stats",

@@ -397,3 +397,94 @@ class TestConcurrentFlushes:
         b = _batcher(rec, max_chunks=5)
         b.add("a.py", "code__x", *_mk(5, "a"))
         assert len(rec.calls) == 1  # flushed synchronously at cap
+
+
+class TestDrainProgress:
+    """nexus-uizok: drain(on_progress) — the operator heartbeat for the
+    end-of-run flush that previously ran dark for minutes."""
+
+    def test_sync_drain_reports_each_flush(self) -> None:
+        rec = Recorder()
+        b = _batcher(rec, max_chunks=100)
+        b.add("a.py", "code__x", *_mk(3, "a"))
+        b.add("b.py", "docs__x", *_mk(2, "b"))
+        progress: list[tuple[int, int]] = []
+        b.drain(on_progress=lambda done, total: progress.append((done, total)))
+        assert progress == [(1, 2), (2, 2)]
+
+    def test_pooled_drain_reports_every_flush_including_in_flight(self) -> None:
+        # Gate keeps the 3 overflow flushes genuinely outstanding at drain
+        # time (deterministic — settled work is deliberately NOT counted).
+        import threading as _t
+
+        gate = _t.Event()
+
+        def gated_flush(collection, ids, docs, metas):
+            gate.wait(5.0)
+
+        b = ChunkBatcher(flush=gated_flush, max_chunks=5, flush_concurrency=3)
+        # 3 full batches dispatched by add() overflows, all blocked on the
+        # gate (pool has exactly 3 workers) + 1 pending buffer.
+        for i in range(3):
+            b.add(f"f{i}.py", "code__x", *_mk(5, f"f{i}-"))
+        b.add("tail.py", "code__x", *_mk(2, "t"))
+        progress: list[tuple[int, int]] = []
+        _t.Timer(0.05, gate.set).start()
+        b.drain(on_progress=lambda done, total: progress.append((done, total)))
+        total = progress[0][1]
+        assert total == 4, "3 outstanding overflow flushes + 1 drained pending buffer"
+        assert [p[0] for p in progress] == [1, 2, 3, 4]
+        assert all(p[1] == total for p in progress)
+
+    def test_drain_without_callback_unchanged(self) -> None:
+        rec = Recorder()
+        b = _batcher(rec, max_chunks=100)
+        b.add("a.py", "code__x", *_mk(3, "a"))
+        b.drain()
+        assert len(rec.calls) == 1
+
+    def test_in_flight_reflects_outstanding_not_dispatched_total(self) -> None:
+        # nexus-uizok critique HIGH-2: _futures used to accumulate every
+        # pool-dispatched flush for the run, so "in_flight" meant "every
+        # flush ever dispatched". Settled futures are now pruned at
+        # dispatch time and in_flight counts not-done only.
+        import time as _time
+
+        def quick_flush(collection, ids, docs, metas):
+            pass
+
+        b = ChunkBatcher(flush=quick_flush, max_chunks=5, flush_concurrency=3)
+        # Many overflow dispatches, all long-settled by the time we look.
+        for i in range(12):
+            b.add(f"f{i}.py", "code__x", *_mk(5, f"f{i}-"))
+        deadline = _time.monotonic() + 5.0
+        while b.pending_summary["in_flight"] > 1 and _time.monotonic() < deadline:
+            _time.sleep(0.01)
+        s = b.pending_summary
+        assert s["in_flight"] <= 1, (
+            f"in_flight={s['in_flight']} — settled futures not pruned"
+        )
+        # And drain's total reflects real remaining work, not 12.
+        progress: list[tuple[int, int]] = []
+        b.drain(on_progress=lambda done, total: progress.append((done, total)))
+        if progress:
+            assert progress[0][1] <= 3, "drain total must not count settled work"
+
+    def test_drain_returns_flush_count(self) -> None:
+        rec = Recorder()
+        b = _batcher(rec, max_chunks=100)
+        b.add("a.py", "code__x", *_mk(3, "a"))
+        b.add("b.py", "docs__x", *_mk(2, "b"))
+        assert b.drain() == 2
+        assert b.drain() == 0  # idempotent, nothing left
+
+    def test_pending_summary_counts(self) -> None:
+        rec = Recorder()
+        b = _batcher(rec, max_chunks=100)
+        assert b.pending_summary == {"chunks": 0, "collections": 0, "in_flight": 0}
+        b.add("a.py", "code__x", *_mk(3, "a"))
+        b.add("b.py", "docs__x", *_mk(2, "b"))
+        s = b.pending_summary
+        assert s["chunks"] == 5 and s["collections"] == 2 and s["in_flight"] == 0
+        b.drain()
+        assert b.pending_summary == {"chunks": 0, "collections": 0, "in_flight": 0}
