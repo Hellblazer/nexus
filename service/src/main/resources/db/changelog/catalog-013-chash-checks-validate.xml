@@ -75,6 +75,54 @@ ALTER TABLE nexus.chash_index
         <rollback>ALTER TABLE nexus.chash_index DROP CONSTRAINT IF EXISTS chash_index_chash_len_check</rollback>
     </changeSet>
 
+    <changeSet id="catalog-013-1b" author="nexus-1wjmq">
+        <comment>chash_index: RE-RUN the 013-0 normalization with FORCE RLS toggled off — 013-0 silently no-op'd in production (2026-07-08 v0.1.33 deploy incident)</comment>
+        <sql splitStatements="true">
+-- INCIDENT nexus-1wjmq (2026-07-08, conexus-ml1z): the v0.1.33 cloud deploy
+-- failed at 013-2's VALIDATE. Root cause: nexus_admin (the Liquibase role)
+-- is the table OWNER but has NO BYPASSRLS, and chash-001 put
+-- FORCE ROW LEVEL SECURITY on chash_index — so 013-0's DELETE/UPDATE saw
+-- ZERO rows (RLS filtered everything; FORCE applies even to the owner),
+-- while VALIDATE (DDL — never row-filtered) saw the un-normalized legacy
+-- 64-char rows and failed. Tests missed it because Testcontainers runs
+-- Liquibase as the superuser (implicit BYPASSRLS).
+--
+-- Fix: toggle FORCE off for the duration of this changeset (the OWNER then
+-- bypasses policies; the serving role is NOT the owner, so tenant isolation
+-- is unaffected throughout), re-run the exact 013-0 normalization
+-- (idempotent — dedupe classes delete nothing when absent, the UPDATE
+-- matches nothing once normalized), and restore FORCE. 013-0/013-1 are
+-- left untouched (checksum immutability: both are already recorded as
+-- executed on the affected tenants).
+--
+-- Lock strength (critique): the FORCE toggles take ACCESS EXCLUSIVE on
+-- chash_index for this changeset's (brief) transaction — stricter than
+-- 013-0's ROW EXCLUSIVE and 013-2's SHARE UPDATE EXCLUSIVE. Acceptable:
+-- boot-time migration window, residual-legacy-rows workload only.
+ALTER TABLE nexus.chash_index NO FORCE ROW LEVEL SECURITY;
+DELETE FROM nexus.chash_index a
+ WHERE length(a.chash) = 64
+   AND EXISTS (SELECT 1 FROM nexus.chash_index b
+                WHERE b.tenant_id = a.tenant_id
+                  AND b.physical_collection = a.physical_collection
+                  AND b.chash = substr(a.chash, 1, 32));
+DELETE FROM nexus.chash_index a
+ WHERE length(a.chash) = 64
+   AND EXISTS (SELECT 1 FROM nexus.chash_index b
+                WHERE b.tenant_id = a.tenant_id
+                  AND b.physical_collection = a.physical_collection
+                  AND length(b.chash) = 64
+                  AND substr(b.chash, 1, 32) = substr(a.chash, 1, 32)
+                  AND b.ctid &lt; a.ctid);
+UPDATE nexus.chash_index SET chash = substr(chash, 1, 32) WHERE length(chash) = 64;
+ALTER TABLE nexus.chash_index FORCE ROW LEVEL SECURITY;
+        </sql>
+        <!-- Same rollback posture as 013-0: the truncation pre-image is not
+             recoverable and nothing consumes the discarded suffix. The FORCE
+             toggle is restored within the changeset itself. -->
+        <rollback/>
+    </changeSet>
+
     <changeSet id="catalog-013-2" author="nexus-e0hd2">
         <comment>VALIDATE all five chash length CHECKs (chunks tables: A-1 residue 0; chash_index: safe via the 013-0 normalization — A-1 never audited it; SHARE UPDATE EXCLUSIVE only)</comment>
         <sql splitStatements="true">
