@@ -55,11 +55,19 @@ WORKDIR /home/nexus
 # single biggest avoidable cost in the rehearsal legs). Placed BEFORE the wheel
 # COPY so the layer survives wheel rebuilds. fetch_service_bge_onnx() checks
 # ~/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx/{model.onnx,tokenizer.json}.
+# BGE_MODEL_URL/BGE_TOKENIZER_URL (nexus-myk4e): default = HuggingFace
+# (local runs, layer-cached). CI passes the SELF-HOSTED GitHub release asset
+# URLs (ci-assets-bge-768-v1) — anonymous HF downloads 429 chronically on
+# runners (the same flake .github/actions/prime-bge-onnx retired for the
+# host-side jobs; GH runners have no persistent docker layer cache, so this
+# fetch runs EVERY CI build). --retry belts the transient classes either way.
+ARG BGE_MODEL_URL=https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/onnx/model.onnx
+ARG BGE_TOKENIZER_URL=https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/tokenizer.json
 RUN mkdir -p /home/nexus/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx \
- && curl -fsSL -o /home/nexus/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx/model.onnx \
-      https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/onnx/model.onnx \
- && curl -fsSL -o /home/nexus/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx/tokenizer.json \
-      https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/tokenizer.json
+ && curl -fsSL --retry 4 --retry-all-errors -o /home/nexus/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx/model.onnx \
+      "$BGE_MODEL_URL" \
+ && curl -fsSL --retry 4 --retry-all-errors -o /home/nexus/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx/tokenizer.json \
+      "$BGE_TOKENIZER_URL"
 
 # The build context is a STAGING dir assembled by run.sh (the repo .dockerignore
 # excludes dist/, and the wheel + JAR live in different trees). run.sh flattens
