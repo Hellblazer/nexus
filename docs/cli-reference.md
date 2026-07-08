@@ -2192,6 +2192,21 @@ service must be able to serve them — fail loud before migrating) → drive
 - `--force` (RDR-178 Gap 7) skips already-migrated detection and re-migrates
   every T2 store unconditionally.
 
+**PostgreSQL acquisition (6.4.0+, GH #1381):** on a machine with no usable
+host PostgreSQL — none installed, or a host install without pgvector (e.g.
+Homebrew `postgresql@17`, whose pgvector formula targets the default major) —
+the provision step downloads the signed self-contained Postgres bundle
+(pgvector included) from the wheel's pinned engine tag automatically
+(sha256 + Sigstore verified) and provisions from it. A pgvector-capable host
+PostgreSQL or an explicit `NEXUS_PG_BIN` is used as-is, with no download. If
+acquisition is unavailable (offline, no pinned tag, download failure) or you
+are on ≤ 6.3.x, pre-stage the bundle explicitly and re-run:
+
+```
+nx daemon service install-binary <engine-service-vX.Y.Z>   # installs binary + Postgres bundle
+nx guided-upgrade
+```
+
 A not-ready or wrong-version service **hard-fails before any migration**.
 Idempotent and safe to re-run. The **T2 (SQLite) side is a true no-op on
 re-run** (RDR-178 Gap 7): before migrating, the command consults the newest
