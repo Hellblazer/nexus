@@ -3101,6 +3101,36 @@ def plan_search(query: str, project: str = "", limit: int = 5, offset: int = 0) 
         return _mcp_tool_error("plan_search", e)
 
 
+@mcp.tool(
+    title="Delete Query Plan",
+    annotations={"readOnlyHint": False, "destructiveHint": True},
+)
+def plan_delete(plan_id: int) -> str:
+    """Delete a plan-library entry by id (nexus-v92zj).
+
+    The counterpart to ``plan_save``: removes a throwaway or incorrect
+    entry (e.g. a shakeout probe) from the plan library without direct
+    DB access. Get the id from ``plan_search`` output (``[NN]`` prefix)
+    or ``nx plan list``.
+
+    Args:
+        plan_id: Numeric plan id to delete.
+    """
+    try:
+        with _t2_ctx() as db:
+            row = db.plans.get_plan(plan_id)
+            if row is None:
+                return f"Not found: plan id {plan_id}"
+            removed = db.plans.delete_plan(plan_id)
+        if not removed:
+            # get_plan→delete_plan race: another caller deleted it first.
+            return f"Not found: plan id {plan_id} (already deleted)"
+        label = row.get("name") or row.get("query") or "(unnamed)"
+        return f"Deleted plan id={plan_id}: {label[:80]}"
+    except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
+        return _mcp_tool_error("plan_delete", e)
+
+
 # ── Demoted tools (plain functions, no @mcp.tool()) ──────────────────────────
 
 

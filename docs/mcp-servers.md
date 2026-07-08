@@ -54,6 +54,7 @@ Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 | `collection_list` | List all T3 collections visible to the current credentials |
 | `plan_save` | Persist a plan template or ad-hoc plan (TTL-bounded) for later reuse |
 | `plan_search` | Retrieve cached plans by semantic similarity (FTS5) |
+| `plan_delete` | Delete a plan-library entry by id (cleanup counterpart to `plan_save`) |
 | `traverse` | Walk the catalog link graph from seed tumblers with typed link filters or a named purpose. Depth capped at 3. Returns `{tumblers, ids, collections}` for downstream retrieval |
 
 ### Operators (LLM-backed, RDR-079)

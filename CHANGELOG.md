@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`plan_delete` MCP tool** — destructive counterpart to `plan_save`: remove a throwaway or incorrect plan-library entry by id without direct DB access (nexus-v92zj).
+
+### Fixed
+
+- **`nx plan` verbs now route through the storage-backend facade in service mode** (nexus-o02xe, RDR-179 Phase 1). Every subcommand previously hardcoded the local T2 SQLite — in service mode that is the frozen pre-migration snapshot, so `nx plan list/show/delete/disable/enable/set-scope` read (and `reseed` wrote) a dead file while the live library sat in the engine. Raw-SQL verbs (`nx plan repair *`, `reseed --force`) now refuse loudly in service mode instead of silently no-op'ing against the snapshot. The rehearsal shakeout gained a reseed→list round-trip through the real client as a recurrence guard.
+
 ## [6.4.0] - 2026-07-07
 
 ### Removed

@@ -72,7 +72,20 @@ def _open_plans_db():
     """Open memory.db with WAL pragmas. Returns the connection, or
     None when the database does not exist."""
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred import; plans.repair only needed in this subcommand
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred import; plans.repair only needed in this subcommand
 
+    if storage_backend_for("plans") is StorageBackend.SERVICE:
+        # nexus-o02xe / RDR-179 Phase 1: these verbs mutate row content
+        # via raw SQL against the local T2 SQLite. In service mode that
+        # file is the frozen pre-migration snapshot — repairing it is a
+        # silent no-op against the live library (engine-side repairs are
+        # engine work). Refuse loudly instead of writing to the dead file.
+        raise click.ClickException(
+            "plans are served by the storage service; `nx plan repair` "
+            "operates on the local SQLite snapshot only. Set "
+            "NX_STORAGE_BACKEND=sqlite to deliberately repair the local "
+            "file, or repair the live library engine-side."
+        )
     db_path = default_db_path()
     if not db_path.exists():
         click.echo(f"T2 database not found at {db_path}; nothing to do.")
@@ -218,6 +231,41 @@ def repair_all_cmd() -> None:
         _emit(result, indent="  ")
 
 
+def _open_plan_library():
+    """Open the plan library through the storage-backend facade.
+
+    nexus-o02xe / RDR-179 Phase 1: every read/write verb below used to
+    hardcode ``PlanLibrary(path=default_db_path())`` — in service mode
+    that is the frozen pre-migration SQLite snapshot, leaving the CLI
+    dark against the live engine-served library. Route like
+    ``T2Database.plans`` does: service backend -> HttpPlanLibrary,
+    otherwise the local SQLite.
+
+    Returns an opened library, or ``None`` (after echoing) when the
+    local database file does not exist.
+    """
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.storage_mode)
+
+    if storage_backend_for("plans") is StorageBackend.SERVICE:
+        from nexus.db.t2.http_plan_library import HttpPlanLibrary  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.t2.http_plan_library)
+
+        try:
+            return HttpPlanLibrary()
+        except Exception as exc:  # noqa: BLE001 — endpoint-resolution failure surfaced as a clean CLI error, not a traceback
+            raise click.ClickException(
+                f"plans service unavailable: {exc}"
+            ) from exc
+
+    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.commands._helpers)
+    from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.t2.plan_library)
+
+    db_path = default_db_path()
+    if not db_path.exists():
+        click.echo(f"T2 database not found at {db_path}.")
+        return None
+    return PlanLibrary(path=db_path)
+
+
 def _emit(result: dict, *, indent: str = "") -> None:
     """Pretty-print a repair-verb result dict."""
     if not result:
@@ -281,15 +329,9 @@ def list_cmd(
       nx plan list --scope=global --origin=builtin
       nx plan list --name=hybrid
     """
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.commands._helpers)
-    from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.t2.plan_library)
-
-    db_path = default_db_path()
-    if not db_path.exists():
-        click.echo(f"T2 database not found at {db_path}.")
+    lib = _open_plan_library()
+    if lib is None:
         return
-
-    lib = PlanLibrary(path=db_path)
     try:
         # list_plans already filters out TTL-expired rows.
         rows = lib.list_plans(
@@ -375,15 +417,9 @@ def show_cmd(id_or_name: str, as_json: bool) -> None:
     \b
     Argument may be a numeric id or a name substring (first match wins).
     """
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.commands._helpers)
-    from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.t2.plan_library)
-
-    db_path = default_db_path()
-    if not db_path.exists():
-        click.echo(f"T2 database not found at {db_path}.")
+    lib = _open_plan_library()
+    if lib is None:
         return
-
-    lib = PlanLibrary(path=db_path)
     try:
         row = None
         if id_or_name.isdigit():
@@ -444,15 +480,9 @@ def delete_cmd(plan_id: int, yes: bool) -> None:
     destructive and a name-substring lookup is fuzzy. Use ``nx plan
     list`` or ``nx plan show <name>`` to find the id first.
     """
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.commands._helpers)
-    from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.t2.plan_library)
-
-    db_path = default_db_path()
-    if not db_path.exists():
-        click.echo(f"T2 database not found at {db_path}.")
+    lib = _open_plan_library()
+    if lib is None:
         return
-
-    lib = PlanLibrary(path=db_path)
     try:
         row = lib.get_plan(plan_id)
         if row is None:
@@ -493,15 +523,9 @@ def disable_cmd(plan_id: int, reason: str) -> None:
     Both matcher lanes (T1 cosine via list_active_plans, T2 FTS5 via
     search_plans) skip rows with disabled_at set.
     """
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.commands._helpers)
-    from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.t2.plan_library)
-
-    db_path = default_db_path()
-    if not db_path.exists():
-        click.echo(f"T2 database not found at {db_path}.")
+    lib = _open_plan_library()
+    if lib is None:
         raise click.exceptions.Exit(1)
-
-    lib = PlanLibrary(path=db_path)
     try:
         row = lib.get_plan(plan_id)
         if row is None:
@@ -528,15 +552,9 @@ def enable_cmd(plan_id: int) -> None:
     Clears the ``disabled_at`` column. The ``disable-reason:`` tag, if
     present, is preserved as a historical record.
     """
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.commands._helpers)
-    from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.t2.plan_library)
-
-    db_path = default_db_path()
-    if not db_path.exists():
-        click.echo(f"T2 database not found at {db_path}.")
+    lib = _open_plan_library()
+    if lib is None:
         raise click.exceptions.Exit(1)
-
-    lib = PlanLibrary(path=db_path)
     try:
         row = lib.get_plan(plan_id)
         if row is None:
@@ -589,9 +607,6 @@ def set_scope_cmd(plan_id: int, tags: str, from_project: bool) -> None:
       nx plan set-scope 21 --from-project
       nx plan set-scope 43 rdr__arcaneum,knowledge__delos
     """
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.commands._helpers)
-    from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.t2.plan_library)
-
     if from_project and tags:
         raise click.UsageError(
             "--from-project and explicit TAGS are mutually exclusive."
@@ -601,12 +616,9 @@ def set_scope_cmd(plan_id: int, tags: str, from_project: bool) -> None:
             "Provide either TAGS or --from-project."
         )
 
-    db_path = default_db_path()
-    if not db_path.exists():
-        click.echo(f"T2 database not found at {db_path}.")
+    lib = _open_plan_library()
+    if lib is None:
         return
-
-    lib = PlanLibrary(path=db_path)
     try:
         row = lib.get_plan(plan_id)
         if row is None:
@@ -671,16 +683,35 @@ def reseed_cmd(force: bool) -> None:
     dimensions, so a description tweak on an existing dimension is
     invisible to the idempotent path.
     """
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.commands._helpers)
-    from nexus.db.t2.plan_library import PlanLibrary  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.t2.plan_library)
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.db.storage_mode)
 
-    db_path = default_db_path()
-    if not db_path.exists():
-        click.echo(f"T2 database not found at {db_path}.")
-        return
+    _service = storage_backend_for("plans") is StorageBackend.SERVICE
+    if not _service:
+        # Preserve the pre-o02xe sqlite-mode contract: reseed against a
+        # missing local DB is a no-op, not an implicit bootstrap
+        # (_seed_plan_templates' T2Database would create the file+schema).
+        from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.commands._helpers)
+
+        db_path = default_db_path()
+        if not db_path.exists():
+            click.echo(f"T2 database not found at {db_path}.")
+            return
 
     if force:
-        lib = PlanLibrary(path=db_path)
+        if _service:
+            # nexus-o02xe: the --force delete is raw SQL against the local
+            # SQLite. In service mode delete the builtin rows individually
+            # (`nx plan list` + `nx plan delete <id>`) — the idempotent
+            # reseed below still runs against the live library.
+            raise click.ClickException(
+                "--force is unavailable in service mode (raw-SQL delete "
+                "against the local snapshot). Delete builtin rows via "
+                "`nx plan delete <id>`, then rerun `nx plan reseed`."
+            )
+
+        lib = _open_plan_library()
+        if lib is None:
+            return
         try:
             with lib._lock:
                 cursor = lib.conn.execute(
@@ -693,6 +724,9 @@ def reseed_cmd(force: bool) -> None:
             lib.close()
         click.echo(f"--force: removed {removed} builtin row(s).")
 
+    # _seed_plan_templates writes through T2Database.plans, which is
+    # facade-routed (HttpPlanLibrary in service mode) — the seed half of
+    # this verb is backend-correct in both modes.
     from nexus.commands.catalog import _seed_plan_templates  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.commands.catalog)
     seeded = _seed_plan_templates()
     click.echo(f"Seeded {seeded} new builtin row(s).")

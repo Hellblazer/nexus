@@ -12,7 +12,7 @@ from nexus.mcp.core import (  # noqa: F401
     memory_put, memory_get, memory_delete, memory_search, memory_consolidate,
     scratch, scratch_manage,
     collection_list, collection_info, collection_verify,
-    plan_save, plan_search,
+    plan_delete, plan_save, plan_search,
     _store_list_docs,
     main,
 )
