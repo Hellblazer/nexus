@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-x6kdz (6.5.0 live-shakeout finding).
+
+    catalog_document_chunks.collection is the combined-query join key
+    (catalog-006/-008/-012: m.collection = c.collection) — and NO writer ever
+    populated it. The only stamper was nexus.manifest_backfill() (catalog-004),
+    invoked solely from the vector-migration leg; the REPLACE manifest writers
+    then wiped the stamp again on every re-index. Net effect on any live
+    tenant: every manifest row written or rewritten since its last migration
+    run has collection NULL, and every combined query silently returns zero
+    rows for those documents (the app-side query() fallback masked it).
+
+    The writers now stamp collection at write time (CatalogRepository:
+    writeManifestRows / appendManifestChunks / importChunk / importChunksBatch).
+    This changeset repairs the existing rows once, using the same derivation
+    as manifest_backfill(): the owning document's physical_collection.
+
+    RLS DISCIPLINE (nexus-1wjmq, the v0.1.33 incident class): this is
+    migration-time row-DML against a FORCE ROW LEVEL SECURITY table with NO
+    integrity backstop — the exact shape that silently no-ops for the
+    non-BYPASSRLS owner (nexus_admin) and the exact shape nexus-php10's
+    tripwire will flag. FORCE is toggled off for the changeset's transaction
+    (the OWNER then bypasses policies; the serving role is not the owner, so
+    tenant isolation is unaffected; a mid-changeset failure rolls the toggle
+    back too). ACCESS EXCLUSIVE for the (brief) toggle, as with catalog-013-1b.
+
+    Idempotent: only rows with collection IS NULL are touched; ghost docs
+    (physical_collection empty) and tombstoned docs are skipped, matching
+    manifest_backfill()'s semantics. Rollback is a no-op: the stamp is a
+    derived denormalization; un-stamping serves nothing.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="catalog-014-0" author="nexus-x6kdz">
+        <comment>catalog_document_chunks: one-time RLS-proof stamp of collection from the owning doc's physical_collection (the combined-query join key no writer populated)</comment>
+        <sql splitStatements="true">
+-- Delegates to the EXISTING repair function (catalog-004's
+-- nexus.manifest_backfill(), the same one POST /manifest/backfill calls) —
+-- one repair predicate, no drift between two hand-copied UPDATEs (critique
+-- finding 4). Why a boot-time changeset instead of ops calling the route
+-- per tenant: unattended fleet-wide repair — every tenant is stamped the
+-- moment the engine boots, no per-tenant choreography, and Liquibase
+-- records it exactly once. Live-tenant scale: ~22k documents, O(100k)
+-- manifest rows — one set-based UPDATE, seconds, inside the boot window
+-- (single-instance rm-then-run deploy: nothing serves during boot).
+--
+-- BOTH tables need the FORCE toggle: manifest_backfill() is SECURITY
+-- INVOKER and its UPDATE joins catalog_documents, which is ALSO
+-- FORCE-RLS — toggling only the target table leaves the join yielding
+-- zero rows for the non-bypass owner (caught by
+-- ManifestCollectionStampTest's replay-as-restricted-role).
+ALTER TABLE nexus.catalog_document_chunks NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_documents       NO FORCE ROW LEVEL SECURITY;
+SELECT nexus.manifest_backfill();
+ALTER TABLE nexus.catalog_documents       FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_document_chunks FORCE ROW LEVEL SECURITY;
+        </sql>
+        <!-- Derived denormalization: nothing to restore; the write-time stamp
+             and manifest_backfill() both reproduce it. No-op rollback. -->
+        <rollback/>
+    </changeSet>
+
+</databaseChangeLog>

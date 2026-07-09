@@ -174,6 +174,7 @@ public final class CatalogRepository {
 
     private static final Field<String>  EX_META_VAL   = DSL.field("EXCLUDED.value",       String.class);
     private static final Field<String>  EX_CHK_CHASH  = DSL.field("EXCLUDED.chash",       String.class);
+    private static final Field<String>  EX_CHK_COLL   = DSL.field("EXCLUDED.collection",  String.class);
     private static final Field<Integer> EX_CHK_IDX   = DSL.field("EXCLUDED.chunk_index",  Integer.class);
     private static final Field<Integer> EX_CHK_LST   = DSL.field("EXCLUDED.line_start",   Integer.class);
     private static final Field<Integer> EX_CHK_LEN   = DSL.field("EXCLUDED.line_end",     Integer.class);
@@ -1389,15 +1390,38 @@ public final class CatalogRepository {
      * documents.chunk_count — {@code writeManifest}'s public behavior is unchanged;
      * the chunk_count fold-in is {@code writeManifestMany}'s addition.
      */
+    /**
+     * nexus-x6kdz: the doc's physical_collection, stamped onto every manifest
+     * row AT WRITE TIME. The combined-query functions (catalog-006/-008/-012)
+     * join {@code m.collection = c.collection}; before this stamp NO writer
+     * populated the column — only the migration-leg {@code manifest_backfill()}
+     * ever did, and the REPLACE writers wiped it again on re-index, leaving
+     * every post-migration manifest row invisible to the combined queries
+     * (silent-empty, found by the 6.5.0 live shakeout). Returns null when the
+     * doc has no physical_collection (ghost/sourceless docs) — those rows stay
+     * NULL, same as the backfill's own skip semantics.
+     */
+    private static String physicalCollectionOf(DSLContext ctx, String tenant, String docId) {
+        String pc = ctx.select(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+                       .from(CATALOG_DOCUMENTS)
+                       .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant))
+                       .and(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+                       .fetchOne(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION);
+        return (pc == null || pc.isEmpty()) ? null : pc;
+    }
+
     private static void writeManifestRows(DSLContext ctx, String tenant, String docId,
                                           List<Map<String, Object>> rows) {
         ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId)).execute();
+        String coll = physicalCollectionOf(ctx, tenant, docId);
         for (var row : rows) {
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                     CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
-                    CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END)
+                    CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION)
                .values(tenant, docId, i(row,"position"), s(row,"chash"), i(row,"chunk_index"),
-                       i(row,"line_start"), i(row,"line_end"), i(row,"char_start"), i(row,"char_end"))
+                       i(row,"line_start"), i(row,"line_end"), i(row,"char_start"), i(row,"char_end"),
+                       coll)
                .execute();
         }
     }
@@ -1519,15 +1543,19 @@ public final class CatalogRepository {
     /** Append manifest rows (upsert by position). */
     public void appendManifestChunks(String tenant, String docId, List<Map<String, Object>> rows) {
         tenantScope.withTenant(tenant, ctx -> {
+            String coll = physicalCollectionOf(ctx, tenant, docId);
             for (var row : rows) {
                 ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                         CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
-                        CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END)
+                        CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END,
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION)
                    .values(tenant, docId, i(row,"position"), s(row,"chash"), i(row,"chunk_index"),
-                           i(row,"line_start"), i(row,"line_end"), i(row,"char_start"), i(row,"char_end"))
+                           i(row,"line_start"), i(row,"line_end"), i(row,"char_start"), i(row,"char_end"),
+                           coll)
                    .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
                    .doUpdate()
                    .set(CATALOG_DOCUMENT_CHUNKS.CHASH, EX_CHK_CHASH)
+                   .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, EX_CHK_COLL)
                    .execute();
             }
             return null;
@@ -2018,11 +2046,21 @@ public final class CatalogRepository {
                 ctx.selectOne().from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(newName)));
 
             if (targetExists) {
-                // RDR-162 cross-model COPY branch: repoint catalog_documents only; leave
+                // RDR-162 cross-model COPY branch: repoint catalog_documents; leave
                 // both registry rows (renaming the source would collide on the name PK).
                 counts.put("catalog_documents",
                     ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, newName)
                        .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(oldName)).execute());
+                // nexus-x6kdz (critique HIGH): the manifest's denormalized
+                // collection must re-home HERE TOO — cross-model re-embeds
+                // preserve chunk text, hence chashes, so the target
+                // collection's chunk rows carry the same chashes and the
+                // combined-query join stays live under the new name. Leaving
+                // this out was the THIRD door back into the silent-empty
+                // state (docs pointed at the target, manifests at the source).
+                counts.put("catalog_document_chunks",
+                    ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, newName)
+                       .where(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(oldName)).execute());
                 return counts;
             }
 
@@ -2052,6 +2090,12 @@ public final class CatalogRepository {
             counts.put("chunks_1024", ctx.update(CHUNKS_1024).set(CHUNKS_1024.COLLECTION, newName).where(CHUNKS_1024.COLLECTION.eq(oldName)).execute());
             //    chash index (physical_collection; fk-002-4 RESTRICT).
             counts.put("chash_index", ctx.update(CHASH_INDEX).set(CHASH_INDEX.PHYSICAL_COLLECTION, newName).where(CHASH_INDEX.PHYSICAL_COLLECTION.eq(oldName)).execute());
+            // nexus-x6kdz: the manifest's denormalized collection (the
+            // combined-query join key) must re-home too — rename was the
+            // second door back into the silently-empty-join state.
+            counts.put("catalog_document_chunks",
+                ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, newName)
+                   .where(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(oldName)).execute());
             //    taxonomy: assignments (source_collection, fk-002-5 RESTRICT), topics (fk-003 RESTRICT), meta (fk-003-4 RESTRICT).
             counts.put("topic_assignments", ctx.update(TOPIC_ASSIGNMENTS).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, newName).where(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(oldName)).execute());
             counts.put("topics", ctx.update(TOPICS).set(TOPICS.COLLECTION, newName).where(TOPICS.COLLECTION.eq(oldName)).execute());
@@ -2778,15 +2822,21 @@ public final class CatalogRepository {
             for (var row : rows) unique.put(i(row, "position"), row);
             List<Map<String, Object>> deduped = List.copyOf(unique.values());
 
-            final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 9);
+            // nexus-x6kdz: stamp the doc's physical_collection on every row —
+            // the combined-query join key no writer previously populated.
+            String coll = physicalCollectionOf(ctx, tenant, docId);
+
+            final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / 10);
             for (int start = 0; start < deduped.size(); start += chunkSize) {
                 var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
                 var insert = ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                         CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
-                        CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END);
+                        CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END,
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION);
                 for (var row : batch) {
                     insert = insert.values(tenant, docId, i(row,"position"), s(row,"chash"), i(row,"chunk_index"),
-                            i(row,"line_start"), i(row,"line_end"), i(row,"char_start"), i(row,"char_end"));
+                            i(row,"line_start"), i(row,"line_end"), i(row,"char_start"), i(row,"char_end"),
+                            coll);
                 }
                 insert.onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
                       .doUpdate()
@@ -2796,6 +2846,7 @@ public final class CatalogRepository {
                       .set(CATALOG_DOCUMENT_CHUNKS.LINE_END,   EX_CHK_LEN)
                       .set(CATALOG_DOCUMENT_CHUNKS.CHAR_START,   EX_CHK_CST)
                       .set(CATALOG_DOCUMENT_CHUNKS.CHAR_END,   EX_CHK_CEN)
+                      .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION,   EX_CHK_COLL)
                       .execute();
             }
             return rows.size();
@@ -2803,13 +2854,17 @@ public final class CatalogRepository {
     }
 
     private void doImportChunk(DSLContext ctx, String tenant, String docId, Map<String, Object> row) {
+        String coll = physicalCollectionOf(ctx, tenant, docId);
         ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                 CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
-                CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END)
+                CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END,
+                CATALOG_DOCUMENT_CHUNKS.COLLECTION)
            .values(tenant, docId, i(row,"position"), s(row,"chash"), i(row,"chunk_index"),
-                   i(row,"line_start"), i(row,"line_end"), i(row,"char_start"), i(row,"char_end"))
+                   i(row,"line_start"), i(row,"line_end"), i(row,"char_start"), i(row,"char_end"),
+                   coll)
            .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
            .doUpdate()
+           .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, EX_CHK_COLL)
            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, EX_CHK_CHASH)
            .set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,   EX_CHK_IDX)
            .set(CATALOG_DOCUMENT_CHUNKS.LINE_START,   EX_CHK_LST)

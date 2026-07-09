@@ -1084,7 +1084,9 @@ class CatalogRepositoryTest {
         // Pre-RDR-162 this threw a 500 (PK collision on the registry rename). The cross-model
         // COPY branch (target exists) repoints catalog_documents only and returns just that key.
         var counts = repo.renameCollection(TENANT_A, src, tgt);
-        assertThat(counts).as("cross-model branch returns only catalog_documents").containsOnlyKeys("catalog_documents");
+        // nexus-x6kdz: the branch now ALSO re-homes the manifest join key.
+        assertThat(counts).as("cross-model branch re-homes docs and manifests")
+            .containsOnlyKeys("catalog_documents", "catalog_document_chunks");
         assertThat(counts.get("catalog_documents")).isEqualTo(1);
         assertThat(repo.getDocument(TENANT_A, "xmrn.1").get("physical_collection")).isEqualTo(tgt);
         // The pre-registered target row is intact (not collided, not duplicated).
@@ -2310,8 +2312,10 @@ class CatalogRepositoryTest {
 
     @Test @Order(200)
     void migration_manifestBackfill_stamps_null_collection_then_orphans_detected() {
-        // A 384-model doc with ONE manifest row whose collection is NULL
-        // (writeManifest leaves it NULL) and NO chunk row in chunks_384.
+        // A 384-model doc with ONE manifest row whose collection is NULL and
+        // NO chunk row in chunks_384. nexus-x6kdz: writeManifest now stamps
+        // collection AT WRITE TIME, so the legacy NULL shape backfill exists
+        // for must be seeded directly (the pre-fix writer's output).
         repo.upsertDocument(TENANT_MIG, Map.of(
             "tumbler", "mforph.1",
             "title", "Orphan Source",
@@ -2324,6 +2328,21 @@ class CatalogRepositoryTest {
                 "position", 0, "chash", "f00d0000000000000000000000000000",
                 "chunk_index", 0)
         ));
+        // The write-time stamp is the new contract:
+        try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
+            var rs = st.executeQuery(
+                "SELECT collection FROM nexus.catalog_document_chunks "
+                + "WHERE tenant_id = '" + TENANT_MIG + "' AND doc_id = 'mforph.1'");
+            rs.next();
+            assertThat(rs.getString(1))
+                .as("nexus-x6kdz: writer stamps collection at write time")
+                .isEqualTo(MIG_COLLECTION_384);
+            // Reset to the legacy NULL shape so backfill has real work:
+            st.execute("UPDATE nexus.catalog_document_chunks SET collection = NULL "
+                + "WHERE tenant_id = '" + TENANT_MIG + "' AND doc_id = 'mforph.1'");
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
 
         // EXACTLY one NULL-collection row in this tenant → backfill stamps 1.
         long stamped = repo.manifestBackfill(TENANT_MIG);
