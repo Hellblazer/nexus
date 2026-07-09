@@ -1244,10 +1244,11 @@ def _run_check_mineru() -> None:
     "check_quotas",
     is_flag=True,
     default=False,
-    help="Report ChromaDB Cloud free-tier quotas, Voyage AI model "
-         "caps, and any transient-error retries observed this process. "
-         "Exits 1 when the cloud tenant is unreachable in cloud mode "
-         "(nexus-c590).",
+    help="Report vector-store limits (chunking/paging caps + the legacy "
+         "Chroma-era reference table), embedder model caps, reranker "
+         "substrate, and any transient-error retries observed this "
+         "process. Exits 1 when T3 is unreachable in cloud mode "
+         "(nexus-c590; relabeled for the pgvector substrate, nexus-d01js).",
 )
 @click.option(
     "--check-taxonomy",
@@ -1664,6 +1665,19 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
     output, failed = format_health_for_cli(results, local_mode=is_local)
     click.echo(output)
 
+    # nexus-0rwwv: substrate-migration bridge — a local-mode install with a
+    # pending Chroma→pgvector cutover gets a pointer to nx guided-upgrade.
+    # Best-effort (returns None on service mode / fresh installs / probe
+    # failure); printed before the failed-exit so it shows either way.
+    from nexus.migration.guided_upgrade import (  # noqa: PLC0415 — deferred import — the bridge dies with the migration module at RDR-155 P4b
+        pending_migration_notice,
+    )
+
+    notice = pending_migration_notice()
+    if notice:
+        click.echo("")
+        click.echo(notice)
+
     if failed:
         raise click.exceptions.Exit(1)
 
@@ -1923,11 +1937,11 @@ def _collect_quota_report() -> dict:
 
         if is_local_mode():
             t3_reachable = True
-            t3_detail = "local mode — cloud quotas are reference-only"
+            t3_detail = "local mode (pgvector service) — limits table is reference-only"
         else:
             make_t3()
             t3_reachable = True
-            t3_detail = "cloud tenant reachable"
+            t3_detail = "T3 backend reachable (pgvector service / managed endpoint)"
     except Exception as exc:  # noqa: BLE001 — best-effort T3 probe; failure surfaced in detail string
         t3_detail = f"unreachable: {type(exc).__name__}: {str(exc)[:80]}"
 
@@ -2013,11 +2027,19 @@ def _format_quota_report(report: dict) -> str:
     lines.append("Quota headroom report (nexus-c590)")
     lines.append("")
 
-    # ── ChromaDB ─────────────────────────────────────────────────────────
+    # ── Vector store ────────────────────────────────────────────────────
+    # nexus-d01js: T3 serving is PG+pgvector since 6.0.0; the limits table
+    # below is the Chroma-era QUOTAS module, kept because SAFE_CHUNK_BYTES /
+    # MAX_QUERY_RESULTS remain the load-bearing chunking/paging caps (their
+    # pgvector-neutral rehoming is RDR-155 P4b scope). The JSON key stays
+    # "chromadb" for machine-consumer stability until P4b renames it.
     cdb = report["chromadb"]
     status = _CHECK if cdb["reachable"] else _WARN
-    lines.append(f"  {status} ChromaDB Cloud: {cdb['detail']}")
-    lines.append("    free-tier limits (from nexus.db.chroma_quotas.QUOTAS):")
+    lines.append(f"  {status} T3 vector store: {cdb['detail']}")
+    lines.append(
+        "    limits (Chroma-era reference table — chunking/paging caps "
+        "still authoritative; pgvector rehoming = RDR-155 P4b):"
+    )
     for k, v in cdb["limits"].items():
         lines.append(f"      {k:32} {v:,}")
     lines.append("")

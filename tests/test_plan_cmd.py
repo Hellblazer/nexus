@@ -420,3 +420,83 @@ class TestPlanReseed:
         ).fetchone()[0]
         conn.close()
         assert cnt == 1, "non-builtin row must survive --force reseed"
+
+
+# ── nexus-o02xe: service-mode facade routing (RDR-179 Phase 1) ───────────────
+#
+# Every `nx plan` verb used to hardcode PlanLibrary(path=default_db_path()) —
+# in service mode that is the frozen pre-migration SQLite snapshot, so the CLI
+# read (and reseed/repair WROTE) a dead file while the live library sat in the
+# engine. These tests pin the routing: service backend -> HttpPlanLibrary,
+# raw-SQL verbs refuse loudly.
+
+
+class _StubHttpPlanLibrary:
+    """Records calls; stands in for HttpPlanLibrary (no network)."""
+
+    instances: list["_StubHttpPlanLibrary"] = []
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        _StubHttpPlanLibrary.instances.append(self)
+
+    def list_plans(self, limit=20, project="", *, include_disabled=False):
+        self.calls.append("list_plans")
+        return []
+
+    def get_plan(self, plan_id):
+        self.calls.append(f"get_plan:{plan_id}")
+        return {"id": plan_id, "name": "svc-row", "query": "live service row"}
+
+    def delete_plan(self, plan_id):
+        self.calls.append(f"delete_plan:{plan_id}")
+        return 1
+
+    def close(self) -> None:
+        self.calls.append("close")
+
+
+@pytest.fixture()
+def _service_plans(monkeypatch, tmp_path):
+    """Pin plans to the service backend with a stubbed HTTP client, and point
+    the local default DB at a nonexistent path — the pre-fix code would echo
+    'T2 database not found' instead of consulting the service."""
+    monkeypatch.setenv("NX_STORAGE_BACKEND_PLANS", "service")
+    _StubHttpPlanLibrary.instances.clear()
+    monkeypatch.setattr(
+        "nexus.db.t2.http_plan_library.HttpPlanLibrary", _StubHttpPlanLibrary
+    )
+    monkeypatch.setattr(
+        "nexus.commands._helpers.default_db_path",
+        lambda: tmp_path / "nonexistent" / "memory.db",
+    )
+
+
+def test_plan_list_routes_to_service(runner, _service_plans):
+    result = runner.invoke(main, ["plan", "list"])
+    assert result.exit_code == 0, result.output
+    assert "T2 database not found" not in result.output
+    assert _StubHttpPlanLibrary.instances, "HttpPlanLibrary never constructed"
+    assert "list_plans" in _StubHttpPlanLibrary.instances[0].calls
+
+
+def test_plan_delete_routes_to_service(runner, _service_plans):
+    result = runner.invoke(main, ["plan", "delete", "7", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "Removed 1 row(s)." in result.output
+    calls = _StubHttpPlanLibrary.instances[0].calls
+    assert "get_plan:7" in calls and "delete_plan:7" in calls
+
+
+def test_plan_repair_refuses_in_service_mode(runner, monkeypatch):
+    monkeypatch.setenv("NX_STORAGE_BACKEND_PLANS", "service")
+    result = runner.invoke(main, ["plan", "repair", "scope-tags"])
+    assert result.exit_code != 0
+    assert "served by the storage service" in result.output
+
+
+def test_plan_reseed_force_refuses_in_service_mode(runner, monkeypatch):
+    monkeypatch.setenv("NX_STORAGE_BACKEND_PLANS", "service")
+    result = runner.invoke(main, ["plan", "reseed", "--force"])
+    assert result.exit_code != 0
+    assert "--force is unavailable in service mode" in result.output

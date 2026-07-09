@@ -1,8 +1,9 @@
 # syntax=docker/dockerfile:1
 # Soup-to-nuts migration dress-rehearsal box (nexus-* harness).
 #
-# A single ephemeral container that mirrors a fresh user's machine: PG16 +
-# pgvector + the conexus wheel + the native nexus-service binary (RDR-161: the
+# A single ephemeral container that mirrors a fresh user's machine: the
+# conexus wheel + the native nexus-service binary (NO system PostgreSQL —
+# nx provisions from the signed PG bundle, nexus-5qefg) (RDR-161: the
 # sole launch artifact; no JRE). The driver (rehearse.sh) then runs the full
 # operator path:
 # init --service (provision PG) -> service start (migrate + serve) -> seed legacy
@@ -16,32 +17,27 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     PYTHONUNBUFFERED=1
 
-# PG16 (PGDG — bookworm ships PG15) + pgvector for PG16, python + uv for the
-# wheel, and the build basics chromadb's ONNX runtime + tokenizers need at
-# install time. No JRE: the native nexus-service binary is self-contained
-# (RDR-161).
+# python + curl for the wheel, and the build basics chromadb's ONNX runtime +
+# tokenizers need at install time. No JRE: the native nexus-service binary is
+# self-contained (RDR-161).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg lsb-release \
         python3 python3-venv python3-pip \
         git \
-    && install -d /etc/apt/keyrings /usr/share/postgresql-common/pgdg \
-    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-        -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
-    && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
-http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
-        > /etc/apt/sources.list.d/pgdg.list \
-    && apt-get update && apt-get install -y --no-install-recommends \
-        postgresql-16 postgresql-16-pgvector \
     && rm -rf /var/lib/apt/lists/*
+# nexus-5qefg: NO system PostgreSQL in this image. The always-install policy
+# (nexus-yv5m4, GH #1381) makes nx provision from the signed PG bundle
+# unconditionally; a baked-in host PG would mask the bundle-acquisition path
+# this journey exists to exercise (the reason the yv5m4 bug survived the
+# gate's maiden run). The cold images (Dockerfile.cold) established the
+# bare-box posture; this brings the guided/shakeout images in line.
 
 # Non-root user — initdb (run by `nx init --service`) refuses to run as root,
 # and this is the faithful unprivileged-user posture.
 RUN useradd -m -s /bin/bash nexus
-# PG16 client/server binaries on PATH so pg_provision's discovery finds them
-# (it also probes /usr/lib/postgresql/16/bin directly, but PATH is belt+braces).
 # The conexus venv bin gives both `nx` and a `python` with the SAME chromadb the
 # tool uses (so seed_legacy.py writes a byte-compatible legacy store).
-ENV PATH="/home/nexus/nxenv/bin:/usr/lib/postgresql/16/bin:${PATH}"
+ENV PATH="/home/nexus/nxenv/bin:${PATH}"
 
 # uv (the project's package manager) for the wheel install.
 RUN pip3 install --no-cache-dir --break-system-packages uv

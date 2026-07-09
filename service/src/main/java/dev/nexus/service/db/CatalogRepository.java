@@ -480,6 +480,11 @@ public final class CatalogRepository {
             return java.util.List.of();
         }
         return tenantScope.withTenant(tenant, ctx -> {
+            // nexus-oub13: per-step wall timing — the live duoak.11 re-gate
+            // measured ~38s/page client-side with no way to tell which step
+            // (or whether the server at all) was the sink. One structured
+            // line per page; negligible overhead at page granularity.
+            long tStart = System.nanoTime();
             // Ensure owner row exists (idempotent upsert, minimal fields) — once.
             ctx.insertInto(CATALOG_OWNERS, CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE,
                            CATALOG_OWNERS.REPO_HASH, CATALOG_OWNERS.DESCRIPTION, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.HEAD_HASH, CATALOG_OWNERS.NEXT_SEQ)
@@ -490,6 +495,7 @@ public final class CatalogRepository {
                .onConflict(CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX)
                .doNothing()
                .execute();
+            long tOwner = System.nanoTime();
 
             // Batch idempotency: fetch existing LIVE docs for every source_uri and
             // file_path in the batch in ONE query per direction, then join locally.
@@ -523,7 +529,11 @@ public final class CatalogRepository {
                    .forEach(r -> tumblerByFilePath.putIfAbsent(r.value1(), r.value2()));
             }
 
+            long tLookup = System.nanoTime();
+
             // Resolve each doc to an existing tumbler or mark it NEW (input order).
+            // (In-memory joins; timed into resolve_ms so the warm-rerun case
+            // doesn't mislabel this as seq-update time — review M-1.)
             String[] out = new String[docs.size()];
             java.util.List<Integer> newIdx = new java.util.ArrayList<>();
             for (int i = 0; i < docs.size(); i++) {
@@ -540,12 +550,16 @@ public final class CatalogRepository {
                 }
             }
 
+            long tResolve = System.nanoTime();
+            long tClaim = tResolve;
+            long tInsert = tResolve;
             if (!newIdx.isEmpty()) {
                 // Claim a contiguous seq block under ONE FOR UPDATE lock.
                 long seq = ctx.select(CATALOG_OWNERS.NEXT_SEQ).from(CATALOG_OWNERS)
                               .where(CATALOG_OWNERS.TENANT_ID.eq(tenant).and(CATALOG_OWNERS.TUMBLER_PREFIX.eq(ownerPrefix)))
                               .forUpdate()
                               .fetchOne(CATALOG_OWNERS.NEXT_SEQ);
+                tClaim = System.nanoTime();
                 long cursor = seq;
 
                 var insert = ctx.insertInto(CATALOG_DOCUMENTS,
@@ -585,6 +599,7 @@ public final class CatalogRepository {
                             nne(s(fields, "bib_enriched_at", "")));
                 }
                 insert.execute();
+                tInsert = System.nanoTime();
 
                 // Advance next_seq by exactly the number of new docs claimed.
                 ctx.update(CATALOG_OWNERS)
@@ -592,6 +607,18 @@ public final class CatalogRepository {
                    .where(CATALOG_OWNERS.TENANT_ID.eq(tenant).and(CATALOG_OWNERS.TUMBLER_PREFIX.eq(ownerPrefix)))
                    .execute();
             }
+            long tEnd = System.nanoTime();
+            log.info("event=register_many_timing tenant={} owner={} docs={} new={} "
+                    + "owner_upsert_ms={} lookup_ms={} resolve_ms={} claim_ms={} "
+                    + "insert_ms={} seq_update_ms={} total_ms={}",
+                tenant, ownerPrefix, docs.size(), newIdx.size(),
+                (tOwner - tStart) / 1_000_000,
+                (tLookup - tOwner) / 1_000_000,
+                (tResolve - tLookup) / 1_000_000,
+                (tClaim - tResolve) / 1_000_000,
+                (tInsert - tClaim) / 1_000_000,
+                (tEnd - tInsert) / 1_000_000,
+                (tEnd - tStart) / 1_000_000);
 
             return java.util.Arrays.asList(out);
         });
@@ -825,6 +852,14 @@ public final class CatalogRepository {
      * the purge age clock.
      * Returns 1 if tombstoned, 0 if not found or already tombstoned.
      */
+    // ⚠ TRIPWIRE (nexus-7n553, RDR-164 P4 open gap): deleteDocument /
+    // deleteDocumentsMany are SOFT tombstones by design. If you ever add a
+    // per-document HARD delete (trash-empty, GC), fk-001 cascades only the
+    // four FK children — topic_assignments has NO document-rooted FK (its
+    // doc_id is a chunk chash, not a tumbler) and WILL orphan silently. A
+    // hard path must explicitly purge that doc's assignments by its
+    // manifest chashes (deleteCollection does the collection-scoped
+    // equivalent at line ~1917). Pinned by CatalogDocumentCascadeTest.
     public int deleteDocument(String tenant, String tumbler) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.update(CATALOG_DOCUMENTS)
@@ -1385,6 +1420,7 @@ public final class CatalogRepository {
         int okDocs = 0;
         int totalRows = 0;
         List<String> failed = new ArrayList<>();
+        List<Map<String, Object>> failedDetail = new ArrayList<>();
         if (docs != null) {
             for (Map<String, Object> d : docs) {
                 String docId = s(d, "doc_id");
@@ -1408,17 +1444,76 @@ public final class CatalogRepository {
                     okDocs++;
                     totalRows += rows.size();
                 } catch (Exception e) {
-                    log.debug("event=write_manifest_many_doc_failed tenant={} doc_id={} error={}",
-                              tenant, docId, e.getMessage());
+                    // nexus-fhhwf: the per-doc swallow used to discard the
+                    // CAUSE — a chash CHECK violation surfaced as a bare id
+                    // in failed_doc_ids and took 3 deploy-gate iterations to
+                    // diagnose. Classify and return a structured reason.
+                    Map<String, Object> detail = failureDetail(docId, e);
+                    log.debug("event=write_manifest_many_doc_failed tenant={} doc_id={} reason={} sqlstate={}",
+                              tenant, docId, detail.get("reason"), detail.get("sqlstate"));
                     failed.add(docId);
+                    failedDetail.add(detail);
                 }
             }
+        }
+        if (!failedDetail.isEmpty()) {
+            // One aggregate WARN per request (review: a systemic failure
+            // across a 1000-doc batch must not emit 1000 WARN lines); the
+            // full per-doc detail rides the RESPONSE + per-doc debug above.
+            log.warn("event=write_manifest_many_failures tenant={} failed={} of={} sample={}",
+                     tenant, failedDetail.size(), docs == null ? 0 : docs.size(),
+                     failedDetail.subList(0, Math.min(3, failedDetail.size())));
         }
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("docs", okDocs);
         result.put("rows", totalRows);
-        result.put("failed_doc_ids", failed);
+        result.put("failed_doc_ids", failed);   // back-compat
+        result.put("failed", failedDetail);     // nexus-fhhwf: the diagnosable form
         return result;
+    }
+
+    /**
+     * Compact, client-safe failure classification for the write_many per-doc
+     * catch (nexus-fhhwf). SQLState + PostgreSQL constraint NAME are schema
+     * metadata (safe to return); the raw driver message stays server-side.
+     * Non-DB failures (our own IllegalArgumentException validation) return
+     * their message verbatim — those strings are ours.
+     */
+    private static Map<String, Object> failureDetail(String docId, Throwable e) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("doc_id", docId == null ? "" : docId);
+        Throwable c = e;
+        for (int depth = 0; c != null && depth < 32; depth++, c = c.getCause()) {
+            if (c instanceof java.sql.SQLException se && se.getSQLState() != null) {
+                String state = se.getSQLState();
+                String constraint = null;
+                if (c instanceof org.postgresql.util.PSQLException pse
+                        && pse.getServerErrorMessage() != null) {
+                    constraint = pse.getServerErrorMessage().getConstraint();
+                }
+                String base = switch (state) {
+                    case "23503" -> "foreign key violation (doc_id not registered?)";
+                    case "23514" -> "check constraint violation";
+                    case "23505" -> "unique violation";
+                    case "23502" -> "not-null violation";
+                    default -> "database error";
+                };
+                out.put("reason", constraint != null ? base + " [" + constraint + "]" : base);
+                out.put("sqlstate", state);
+                return out;
+            }
+        }
+        // Non-SQL failure. ALLOWLIST, not exclusion (review M-a): verbatim
+        // messages only for our own validation exceptions — an arbitrary
+        // runtime exception's message can carry internal state (e.g. the
+        // TenantScope admission-queue message wraps a null-SQLState
+        // SQLTransientConnectionException and would fall through here).
+        if (e instanceof IllegalArgumentException && e.getMessage() != null) {
+            out.put("reason", e.getMessage());
+        } else {
+            out.put("reason", "internal error (" + e.getClass().getSimpleName() + ")");
+        }
+        return out;
     }
 
     /** Append manifest rows (upsert by position). */
@@ -1827,6 +1922,11 @@ public final class CatalogRepository {
             counts.put("aspect_extraction_queue", ctx.deleteFrom(ASPECT_EXTRACTION_QUEUE).where(ASPECT_EXTRACTION_QUEUE.COLLECTION.eq(name)).execute());
             // 6. catalog documents for this physical collection; fk-001 cascades any
             //    doc-rooted aspect/highlight/queue/manifest rows still present.
+            // The ONLY production HARD delete of document rows. fk-001 cascades
+            // the four FK children; topic_assignments (no doc-rooted FK) is
+            // cleaned explicitly by this method's collection-scoped taxonomy
+            // delete — a per-DOC hard path would have to do its own purge
+            // (nexus-7n553 tripwire at deleteDocument).
             counts.put("catalog_documents", ctx.deleteFrom(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(name)).execute());
             // 7. registry row LAST (RESTRICT children are now gone).
             counts.put("catalog_collections", ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name)).execute());

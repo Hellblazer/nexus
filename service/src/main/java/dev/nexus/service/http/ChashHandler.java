@@ -106,7 +106,18 @@ public final class ChashHandler implements HttpHandler {
     private void handleUpsert(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
-        String chash      = (String) body.get("chash");
+        // nexus-e0hd2: guard at the boundary — a malformed chash previously
+        // rode into the INSERT and PERSISTED (chash_index had NO length
+        // CHECK until catalog-013). The LIVE producer (dual_write_chash_index)
+        // historically sent the FULL 64-char chunk_text_hash; the index keys
+        // on its [:32] form (RDR-108 D1 — what registeredChashesForCollection
+        // substr's on read). NORMALIZE the 64-shape rather than reject it:
+        // clients older than the producer-side truncation fix keep working
+        // through the deploy window (critic finding — a reject here would
+        // have silently stalled chash_index growth for every service-mode
+        // tenant behind two best-effort catches). Any other non-32 length
+        // is genuinely malformed.
+        String chash      = normalizeChash((String) body.get("chash"), "'chash'");
         String collection = (String) body.get("collection");
         repo.upsert(tenant, chash, collection);
         HttpUtil.send(exchange, 200, "{\"ok\":true}");
@@ -124,12 +135,37 @@ public final class ChashHandler implements HttpHandler {
             HttpUtil.send(exchange, 400, "{\"error\":\"'chashes' must be a JSON array\"}");
             return;
         }
+        // nexus-e0hd2: strict, not silent-drop — a non-string element used to
+        // vanish here (the castRows disease), and a malformed chash rode
+        // through to the DB (chash_index had no length CHECK pre-catalog-013).
         List<String> chashes = new ArrayList<>();
-        for (Object item : (List<?>) rawChashes) {
-            if (item instanceof String s) chashes.add(s);
+        List<?> rawList = (List<?>) rawChashes;
+        for (int i = 0; i < rawList.size(); i++) {
+            Object item = rawList.get(i);
+            if (!(item instanceof String s)) {
+                throw new IllegalArgumentException(
+                    "chashes[" + i + "]: must be a string, got "
+                    + (item == null ? "null" : item.getClass().getSimpleName()));
+            }
+            chashes.add(normalizeChash(s, "chashes[" + i + "]"));
         }
         repo.upsertMany(tenant, chashes, collection);
         HttpUtil.send(exchange, 200, "{\"ok\":true,\"count\":" + chashes.size() + "}");
+    }
+
+    /**
+     * Normalize an incoming chash to the [:32] chunk-id key (nexus-e0hd2).
+     * The 64-char full-sha256 shape is the live producer's historical output
+     * and the SQLite-era stored form — truncate it (mirroring
+     * catalog-013-0's one-time DB normalization and the read side's substr);
+     * anything else must already be 32 chars or 400s with the offending
+     * length.
+     */
+    private static String normalizeChash(String value, String label) {
+        if (value != null && value.length() == 64) {
+            value = value.substring(0, 32);
+        }
+        return dev.nexus.service.db.Chash.requireLength32(value, label);
     }
 
     // ── GET /v1/chash/lookup?chash=<hex> ─────────────────────────────────────
@@ -236,10 +272,21 @@ public final class ChashHandler implements HttpHandler {
         // (200 rows ≈ 600 sequential PG round-trips ≈ 0.9s per request — the
         // measured 1-request/s migration throughput ceiling).
         List<ChashRepository.ImportRow> rows = new ArrayList<>(((List<?>) rawRows).size());
-        for (Object item : (List<?>) rawRows) {
+        List<?> rawList = (List<?>) rawRows;
+        for (int rowIdx = 0; rowIdx < rawList.size(); rowIdx++) {
+            Object item = rawList.get(rowIdx);
             if (!(item instanceof Map)) continue;
             Map<String, Object> row = (Map<String, Object>) item;
-            String chash      = (String) row.get("chash");
+            // /import is the MIGRATION route: the SQLite-era chash_index could
+            // hold FULL 64-char chashes (copied verbatim by migrate_chash_rows)
+            // — normalize those to the [:32] chunk-id form here (mirroring
+            // catalog-013-0's one-time DB normalization) instead of rejecting,
+            // or legacy tenants could never re-run their migration. Any other
+            // non-32 length is genuinely malformed and 400s.
+            // Index off the INPUT position, not rows.size() — skipped
+            // elements would shift every later error index (review F1).
+            String chash      = normalizeChash(
+                (String) row.get("chash"), "rows[" + rowIdx + "].chash");
             String collection = (String) row.get("collection");
             String createdAt  = (String) row.get("created_at");
             if (chash == null || chash.isBlank() || collection == null || collection.isBlank()) continue;

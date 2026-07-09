@@ -61,13 +61,17 @@ class TestParseSemver:
 
 
 class TestVerifyServiceVersion:
-    def test_required_floor_is_018(self) -> None:
-        # Bumped (0,1,5)->(0,1,8) for nexus-x2g1z (engine-service-v0.1.8).
-        assert REQUIRED_RELEASE_VERSION == (0, 1, 8)
+    def test_required_floor_is_0134(self) -> None:
+        # (0,1,5)->(0,1,8) for nexus-x2g1z; ->(0,1,34) for 6.5.0: the client
+        # hard-requires catalog-012 (graph-hop `where` — pre-012 engines
+        # silently ignore the key, the H2 version-skew failure class) and
+        # catalog-013-1b (pre-1b engines fail boot VALIDATE on tenants with
+        # legacy 64-char chash rows — the nexus-1wjmq incident).
+        assert REQUIRED_RELEASE_VERSION == (0, 1, 34)
 
     def test_at_floor_passes(self) -> None:
         out = verify_service_version(
-            _URL, http_get=_get_returning(_Resp(200, _version_body("0.1.8")))
+            _URL, http_get=_get_returning(_Resp(200, _version_body("0.1.34")))
         )
         assert isinstance(out, VersionPinOutcome)
         assert out.ok is True
@@ -84,7 +88,7 @@ class TestVerifyServiceVersion:
             _URL, http_get=_get_returning(_Resp(200, _version_body("0.1.5")))
         )
         assert out.ok is False
-        assert "0.1.5" in out.reason and "0.1.8" in out.reason
+        assert "0.1.5" in out.reason and "0.1.34" in out.reason
 
     def test_null_release_version_fails_closed(self) -> None:
         # An engine predating the release_version field reports null → older

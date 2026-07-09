@@ -32,6 +32,12 @@ class _FakeCollection:
     def count(self) -> int:
         return self._count
 
+    def get(self, limit: int = 1, include: list | None = None) -> dict:
+        # nexus-nb7hr: the classifier's ground-truth dim probe. No stored
+        # embeddings modeled here -> measured_dim None -> name-based
+        # classification unchanged (these tests pin the legacy behavior).
+        return {"ids": [], "embeddings": None}
+
 
 class _FakeChromaClient:
     def __init__(self, counts: dict[str, int]) -> None:

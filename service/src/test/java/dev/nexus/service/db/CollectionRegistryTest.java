@@ -64,6 +64,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class CollectionRegistryTest {
 
+    /** Pad to the catalog-013 CHECK(length(chash)=32) contract. */
+    private static String ch(String seed) {
+        return (seed + "0".repeat(32)).substring(0, 32);
+    }
+
+
     private static final String TENANT = "cr-contention-tenant";
 
     PostgreSQLContainer<?> pg;
@@ -200,7 +206,7 @@ class CollectionRegistryTest {
             CountDownLatch started = new CountDownLatch(1);
             CompletableFuture<Void> upsertDone = CompletableFuture.runAsync(() -> {
                 started.countDown();
-                repo.upsert(TENANT, "miss_chash", collection);
+                repo.upsert(TENANT, ch("miss_chash"), collection);
             }, executor);
 
             assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
@@ -232,7 +238,7 @@ class CollectionRegistryTest {
         // Real registration via the actual code path: this both creates the
         // catalog_collections row AND marks CollectionRegistry known post-commit
         // (ChashRepository.upsert's own contract — see CollectionRegistry class doc).
-        repo.upsert(TENANT, "seed_chash", collection);
+        repo.upsert(TENANT, ch("seed_chash"), collection);
         assertThat(CollectionRegistry.isKnown(TENANT, collection))
             .as("upsert() must mark the collection known after a successful commit")
             .isTrue();
@@ -244,14 +250,14 @@ class CollectionRegistryTest {
         // determine the conflict outcome; with the cache, it never issues that
         // INSERT at all.
         try (HeldLock lock = new HeldLock(collection, true)) {
-            assertThat(CompletableFuture.runAsync(() -> repo.upsert(TENANT, "hit_chash", collection)))
+            assertThat(CompletableFuture.runAsync(() -> repo.upsert(TENANT, ch("hit_chash"), collection)))
                 .as("upsert must complete immediately when CollectionRegistry already "
                     + "knows the collection — ensureCollectionRegistered must skip the "
                     + "redundant INSERT entirely, never contending for the held lock")
                 .succeedsWithin(2, TimeUnit.SECONDS);
         }
 
-        var rows = repo.lookup(TENANT, "hit_chash");
+        var rows = repo.lookup(TENANT, ch("hit_chash"));
         assertThat(rows).hasSize(1);
         assertThat(rows.get(0).get("collection")).isEqualTo(collection);
     }
@@ -277,14 +283,14 @@ class CollectionRegistryTest {
     @Test
     void upsert_alsoBlocks_whenLockHeldOnRegisteredRow_andCacheCleared() throws Exception {
         String collection = "code__cr-control__voyage-code-3__v1";
-        repo.upsert(TENANT, "seed_chash2", collection);
+        repo.upsert(TENANT, ch("seed_chash2"), collection);
         // Deliberately clear the cache AFTER seeding, so ensureCollectionRegistered
         // WILL attempt the INSERT again for the next call (pre-fix-equivalent path).
         CollectionRegistry.clearForTests();
         assertThat(CollectionRegistry.isKnown(TENANT, collection)).isFalse();
 
         try (HeldLock lock = new HeldLock(collection, true)) {
-            assertThat(CompletableFuture.runAsync(() -> repo.upsert(TENANT, "control_chash", collection)))
+            assertThat(CompletableFuture.runAsync(() -> repo.upsert(TENANT, ch("control_chash"), collection)))
                 .as("without the cache, a concurrent UPDATE lock on an ALREADY-registered "
                     + "row still blocks the next upsert's redundant ON CONFLICT DO NOTHING — "
                     + "the recurring lock-wait hazard the cache eliminates")

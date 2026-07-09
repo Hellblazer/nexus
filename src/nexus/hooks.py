@@ -82,7 +82,25 @@ def session_start(claude_session_id: str | None = None) -> str:
     # lifespan (RDR-105 P4), which may key its lease on a DIFFERENT session-id
     # (its NX_SESSION_ID) than the one written above. Claiming initialization
     # masked exactly that divergence during the 5.10.x T1-scratch failure.
-    return f"Nexus ready (session: {session_id})."
+    ready = f"Nexus ready (session: {session_id})."
+
+    # nexus-0rwwv: surface a pending substrate migration into the session
+    # context so the AGENT relays it — for plugin users this is the only
+    # surface their normal update route is guaranteed to cross. Cheap gate
+    # only (env + backend + dir existence — never opens the store).
+    try:
+        from nexus.migration.guided_upgrade import legacy_footprint_pending  # noqa: PLC0415 — deferred import — the bridge dies with the migration module at RDR-155 P4b
+
+        if legacy_footprint_pending():
+            ready += (
+                "\n⚠ A ONE-TIME storage migration is pending for this install "
+                "(legacy local store detected): tell the user to run "
+                "`nx guided-upgrade` (interactive; shows a cost preview "
+                "before migrating anything)."
+            )
+    except Exception as exc:  # noqa: BLE001 — best-effort; the hook must never fail on the notice
+        _log.debug("session_start_migration_notice_failed", error=str(exc))
+    return ready
 
 
 # -- SessionEnd ---------------------------------------------------------------

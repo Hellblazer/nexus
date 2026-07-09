@@ -75,6 +75,149 @@ class PreflightDetection:
         return len(self.report.classifications)
 
 
+def legacy_footprint_pending() -> bool:
+    """CHEAP gate for the substrate-migration bridge (nexus-0rwwv):
+    ``NX_MIGRATION_NOTICE!=0`` AND the legacy local-Chroma directory exists
+    AND no REAL service signal is present. File-level checks only — NEVER
+    opens the store (safe on hot paths: endpoint-failure remedies, the
+    SessionStart hook), so it cannot violate the WAL single-opener
+    discipline or the rollback-source immutability.
+
+    "Already migrated" is decided by REAL-SERVICE EVIDENCE, deliberately
+    NOT by ``storage_backend_for()`` (critique CRITICAL, 2026-07-08):
+    SERVICE is the RDR-152 hard ROUTING default for every install — a
+    vanilla 5.x upgrader who never exported ``NX_STORAGE_BACKEND`` reads
+    SERVICE precisely because nothing was ever configured, which is the
+    opposite of "migrated." The signals that are actually true only when
+    a service exists for this install:
+
+    * a configured ``service_url`` credential (env or config.yml — the
+      managed/cloud deployment shape), or
+    * the ``pg_credentials`` provisioning artifact (written once by
+      ``nx init`` / ``nx guided-upgrade`` when the local PG is created), or
+    * a live supervisor lease (``discover_lease``).
+
+    Post-migration the Chroma directory legitimately persists
+    (copy-not-move), which is why the directory check alone cannot carry
+    the verdict. Residual accepted shapes: a mid-migration crash counts as
+    "not pending" here (pg_credentials already exists) — that state owns
+    its own recovery surface (the guided-upgrade failure text +
+    ``nx migration --clear-state``); a deliberate stay-local user keeps
+    seeing the pointer (the ``=sqlite`` opt-out retires at RDR-158 P3); a
+    once-provisioned install whose PG cluster was deleted but whose
+    ``pg_credentials`` file survives reads "not pending" — a
+    repair/troubleshooting shape, not the never-migrated case this
+    targets (critique residual 1, accepted).
+    """
+    import os  # noqa: PLC0415 — stdlib, kept helper-local
+
+    if os.environ.get("NX_MIGRATION_NOTICE") == "0":
+        return False
+
+    try:
+        from nexus.migration.detection import resolve_default_local_leg  # noqa: PLC0415 — deferred import — the bridge dies at RDR-155 P4b
+
+        if not Path(resolve_default_local_leg()).is_dir():
+            return False
+
+        # Real-service evidence, cheapest first. Mirrors ALL THREE tiers
+        # the real endpoint resolvers accept as "configured": the
+        # service_url credential, the explicit HOST/PORT env pair, and
+        # the lease (cre review, Low residual — an operator who exported
+        # NX_SERVICE_HOST/PORT deliberately told nexus where their data
+        # lives and must not be nagged).
+        if os.environ.get("NX_SERVICE_HOST", "").strip() or os.environ.get(
+            "NX_SERVICE_PORT", ""
+        ).strip():
+            return False
+
+        from nexus.config import get_credential, nexus_config_dir  # noqa: PLC0415 — deferred import — keep hot paths cheap
+
+        if (get_credential("service_url") or "").strip():
+            return False
+
+        from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred import — keep hot paths cheap
+
+        if (nexus_config_dir() / CREDENTIALS_FILENAME).exists():
+            return False
+
+        from nexus.db.service_endpoint import discover_lease  # noqa: PLC0415 — deferred import — keep hot paths cheap
+
+        lease_url, _lease_token = discover_lease()
+        if lease_url is not None:
+            return False
+
+        return True
+    except Exception:  # noqa: BLE001 — best-effort gate; never break the caller
+        _log.debug("legacy_footprint_gate_failed", exc_info=True)
+        return False
+
+
+def endpoint_failure_migration_hint() -> str:
+    """One-sentence addendum for endpoint-resolution failures (nexus-0rwwv).
+
+    The exact wall an un-migrated 5.x -> 6.x user hits: T3 serving routes
+    through the service (RDR-155 P4a), the service is not provisioned, and
+    the stock error's remedy ("start the supervisor") is WRONG for them —
+    they need the one-time migration. Cheap gate only; empty string when
+    the install does not look like a pending legacy footprint (fresh
+    installs and already-migrated installs keep the stock message).
+    """
+    if not legacy_footprint_pending():
+        return ""
+    return (
+        " NOTE: this install has a legacy local store awaiting the ONE-TIME "
+        "storage migration — if you recently upgraded from a 5.x install, "
+        "run `nx guided-upgrade` (provisions the service AND migrates your "
+        "data; shows a cost preview first) instead of starting the service "
+        "by hand."
+    )
+
+
+def pending_migration_notice() -> str | None:
+    """Best-effort bridge pointer from the routine commands to the cutover
+    (nexus-0rwwv).
+
+    Two upgrade commands, no bridge: a local-mode user with a pending
+    Chroma -> pgvector cutover ran ``nx upgrade``, saw "migrations
+    complete", and got zero pointer to ``nx guided-upgrade``. This is the
+    shared probe ``nx upgrade`` (interactive mode only) and ``nx doctor``
+    (default health path) append. Auto-DETECT without auto-EXECUTE: the
+    notice points at the cutover, which keeps its own consent gate
+    (``--yes``, cost preview).
+
+    Returns ``None`` — silently — whenever there is nothing to say or it
+    cannot safely find out: installs with real-service evidence (already migrated/provisioned; the
+    probe is skipped entirely, not just suppressed), fresh installs (no
+    legs), empty footprints, any probe failure, or the ``NX_MIGRATION_NOTICE=0``
+    kill switch (the test suite pins it: an isolated-config test box reads
+    as SQLITE mode while the XDG chroma default may resolve to a REAL
+    store — the immutable rollback source — which unit tests must never
+    open).
+
+    Lives in this module deliberately: the whole bridge dies with the
+    migration module at RDR-155 P4b.
+    """
+    if not legacy_footprint_pending():
+        return None
+
+    try:
+        detection = detect_pending_migration()
+    except Exception:  # noqa: BLE001 — best-effort probe; a broken store must not break nx upgrade/doctor
+        _log.debug("pending_migration_notice_probe_failed", exc_info=True)
+        return None
+    if not detection.needs_migration:
+        return None
+
+    n = detection.data_bearing_count
+    return (
+        f"A one-time storage migration is pending: {n} data-bearing Chroma "
+        "collection(s) can move to the PostgreSQL service substrate.\n"
+        "Run: nx guided-upgrade   (interactive; shows a cost preview before "
+        "migrating anything)"
+    )
+
+
 def detect_pending_migration(
     *,
     local_path: str | Path | None = None,
@@ -425,7 +568,7 @@ class VersionPinOutcome:
 #: keeps its own floor (``managed_endpoint.MIN_MANAGED_RELEASE_VERSION``); this
 #: constant is the native-binary floor enforced by ``verify_service_version``
 #: and the 3rq00 parity test.
-REQUIRED_RELEASE_VERSION: tuple[int, int, int] = (0, 1, 8)
+REQUIRED_RELEASE_VERSION: tuple[int, int, int] = (0, 1, 34)
 
 
 def _parse_semver(raw: str | None) -> tuple[int, int, int] | None:

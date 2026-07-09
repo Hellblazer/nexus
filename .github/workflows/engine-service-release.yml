@@ -515,8 +515,10 @@ jobs:
           # a psql/createdb/pg_dump/initdb/... that dyld-aborted ("Library not
           # loaded") on any machine other than the exact CI build path — macOS
           # `configure`/`make install` bakes the literal absolute --prefix into
-          # every libpq-linked binary's LC_LOAD_DYLIB (Linux gets $ORIGIN-relative
-          # RPATH from PG's own build system by default; macOS does not).
+          # every libpq-linked binary's LC_LOAD_DYLIB. Linux has the SAME class
+          # of defect — the literal build-prefix RUNPATH, dangling off-runner
+          # (nexus-iytd3, verified on the live v0.1.32 artifact; the earlier
+          # claim here that Linux gets $ORIGIN by default was wrong).
           # scripts/build_pg_bundle.sh now rewrites this at build time
           # (fixup_macos_relocatability), but NOTHING previously verified the
           # PUBLISHED ARTIFACT ITSELF before it shipped — ci.yml's relocation
@@ -531,23 +533,40 @@ jobs:
           mkdir -p "$reloc"
           tar -xJf "dist/$ASSET.txz" -C "$reloc"
           root="$reloc/$(basename "$GITHUB_WORKSPACE/bundle")"
+          # nexus-iytd3 gate hardening: this step used to run the binaries with
+          # the runner's ambient env — a system libpq (present on ubuntu-latest)
+          # satisfied the loader even when the bundle's own RUNPATH was a
+          # dangling literal build path, which is exactly how the broken linux
+          # bundles false-passed and shipped. Two closures: (a) deterministic —
+          # on Linux, assert every critical binary's RUNPATH carries $ORIGIN;
+          # (b) behavioural — run everything below with LD_LIBRARY_PATH unset.
+          if [ "$(uname -s)" = "Linux" ]; then
+            for b in psql initdb pg_ctl pg_config createdb postgres; do
+              rp="$(readelf -d "$root/bin/$b" | grep -E 'RUNPATH|RPATH' || true)"
+              case "$rp" in
+                *'$ORIGIN'*) : ;;
+                *) echo "::error::relocation gate: $b RUNPATH lacks \$ORIGIN (got: ${rp:-none}) — bundle is not self-contained (nexus-iytd3)"; exit 1 ;;
+              esac
+            done
+            echo "RUNPATH \$ORIGIN assertion passed for all critical binaries"
+          fi
           data="$reloc/pgdata"
           sock="$(mktemp -d /tmp/pgrelocgate.XXXXXX)"
           cleanup() { "$root/bin/pg_ctl" -D "$data" stop -m fast >/dev/null 2>&1 || true; rm -rf "$sock" "$reloc"; }
           trap cleanup EXIT
-          "$root/bin/initdb" --no-locale -D "$data" -U "$(id -un)" >/dev/null
-          "$root/bin/pg_ctl" -D "$data" -o "-p 59987 -k $sock" -l "$reloc/pg.log" start
+          env -u LD_LIBRARY_PATH "$root/bin/initdb" --no-locale -D "$data" -U "$(id -un)" >/dev/null
+          env -u LD_LIBRARY_PATH "$root/bin/pg_ctl" -D "$data" -o "-p 59987 -k $sock" -l "$reloc/pg.log" start
           # Two SEPARATE psql calls, not one semicolon-joined -tAc: psql echoes
           # each statement's own output (a DDL's completion tag AND a SELECT's
           # row) concatenated into one combined -tAc stream, which is NOT the
           # bare "vector" this assertion originally (incorrectly) expected.
-          "$root/bin/psql" -h "$sock" -p 59987 -U "$(id -un)" -d postgres -c \
+          env -u LD_LIBRARY_PATH "$root/bin/psql" -h "$sock" -p 59987 -U "$(id -un)" -d postgres -c \
             "CREATE EXTENSION IF NOT EXISTS vector" >/dev/null
           # nexus-u30zm: pg_trgm must LOAD, not merely exist on disk — the
           # cache-hit path has no other executable proof of the contrib set.
-          "$root/bin/psql" -h "$sock" -p 59987 -U "$(id -un)" -d postgres -c \
+          env -u LD_LIBRARY_PATH "$root/bin/psql" -h "$sock" -p 59987 -U "$(id -un)" -d postgres -c \
             "CREATE EXTENSION IF NOT EXISTS pg_trgm" >/dev/null
-          out="$("$root/bin/psql" -h "$sock" -p 59987 -U "$(id -un)" -d postgres -tAc \
+          out="$(env -u LD_LIBRARY_PATH "$root/bin/psql" -h "$sock" -p 59987 -U "$(id -un)" -d postgres -tAc \
             "SELECT extname FROM pg_extension WHERE extname='vector'")"
           if [ "$out" != "vector" ]; then
             echo "::error::relocation gate FAILED for $ASSET — SELECT extname did not return 'vector' (got: '$out')"

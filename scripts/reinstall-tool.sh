@@ -53,6 +53,52 @@ if [[ "$CYCLE_DAEMONS" == "1" ]]; then
     sleep 1
 fi
 
+# ── Downgrade / divergent-source guard (nexus-q3xrx; also nexus-r024j) ──────
+# Two live incidents (2026-06-11, 2026-06-12): a reinstall from a STALE
+# checkout silently DOWNGRADED the shared installed CLI (nx daemon service
+# vanished, stack unrestartable), and a PyPI-source reinstall wiped 31
+# unreleased modules while keeping the version string. Refuse a reinstall
+# whose source pyproject version is BEHIND the installed nx without --force.
+# PyPI-shape SOURCE (no local pyproject): the SECOND incident's exact vector
+# — a PyPI reinstall over a dev install wiped 31 unreleased modules while
+# keeping the version string. If the CURRENT install came from a directory
+# (dev checkout, per the uv receipt) and this invocation would replace it
+# with a registry package, refuse without --force.
+if [[ ! -f "${SOURCE}/pyproject.toml" && -f "$RECEIPT" && "$FORCE" != "1" ]]; then
+    if grep -q 'directory = ' "$RECEIPT" 2>/dev/null; then
+        echo "REFUSING: the installed conexus came from a DIRECTORY source (dev"
+        echo "  checkout, per ${RECEIPT}), and '${SOURCE}' is a registry package —"
+        echo "  a PyPI reinstall over a dev install wipes unreleased modules while"
+        echo "  keeping the version string (nexus-q3xrx incident #2, 2026-06-12)."
+        echo "  Pass --force to deliberately return to the released package."
+        exit 1
+    fi
+fi
+
+if [[ -f "${SOURCE}/pyproject.toml" ]] && command -v nx >/dev/null 2>&1; then
+    SRC_VERSION="$(sed -n "s/^version *= *[\"']\([^\"']*\)[\"']/\1/p" "${SOURCE}/pyproject.toml" | head -1)"
+    [[ -n "$SRC_VERSION" ]] || echo "warn: could not parse version from ${SOURCE}/pyproject.toml — downgrade guard inactive"
+    INSTALLED_VERSION="$(nx --version 2>/dev/null | sed -n 's/.*version \([0-9][0-9.]*\).*/\1/p' | head -1)"
+    if [[ -n "$SRC_VERSION" && -n "$INSTALLED_VERSION" ]]; then
+        NEWEST="$(printf '%s\n%s\n' "$SRC_VERSION" "$INSTALLED_VERSION" | sort -V | tail -1)"
+        if [[ "$SRC_VERSION" != "$INSTALLED_VERSION" && "$NEWEST" == "$INSTALLED_VERSION" && "$FORCE" != "1" ]]; then
+            echo "REFUSING to reinstall: source checkout is ${SOURCE} at version"
+            echo "  ${SRC_VERSION}, but the installed nx is ${INSTALLED_VERSION} — this is a"
+            echo "  DOWNGRADE (stale checkout? wrong directory?). Two incidents of this"
+            echo "  class silently broke the shared install (nexus-q3xrx)."
+            echo "  Pass --force to downgrade deliberately."
+            exit 1
+        fi
+        if [[ "$SRC_VERSION" == "$INSTALLED_VERSION" ]]; then
+            echo "WARNING: source ${SOURCE} (branch $(git -C "${SOURCE}" branch --show-current 2>/dev/null || echo '?')) is at ${SRC_VERSION} — the SAME"
+            echo "  version as the installed nx (${INSTALLED_VERSION}). Working-tree changes WILL be"
+            echo "  picked up, but the version string won't move (release bumps live on"
+            echo "  main, not develop — nexus-r024j). To install a released build instead:"
+            echo "  scripts/reinstall-tool.sh 'conexus==${INSTALLED_VERSION}'"
+        fi
+    fi
+fi
+
 LIVE="$(live_venv_processes)"
 if [[ -n "$LIVE" && "$FORCE" != "1" ]]; then
     echo "REFUSING to reinstall: live processes hold the conexus venv and a"
@@ -93,7 +139,14 @@ fi
 
 if [[ -n "$EXTRAS" ]]; then
     echo "Preserving extras: [$EXTRAS]"
-    uv tool install --reinstall --from "${SOURCE}[${EXTRAS}]" conexus
+    # PEP 508 (nexus-r024j item b): extras precede a version pin —
+    # "conexus==X[local]" is invalid; build "conexus[local]==X".
+    if [[ "$SOURCE" == *"=="* && "$SOURCE" != *"/"* ]]; then
+        SPEC="${SOURCE%%==*}[${EXTRAS}]==${SOURCE#*==}"
+    else
+        SPEC="${SOURCE}[${EXTRAS}]"
+    fi
+    uv tool install --reinstall --from "${SPEC}" conexus
 else
     uv tool install --reinstall "$SOURCE"
 fi

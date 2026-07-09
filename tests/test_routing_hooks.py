@@ -140,7 +140,13 @@ def test_warn_envelope_is_allow():
 
 
 def _run_stub(body: str, stdin: str = "") -> subprocess.CompletedProcess:
-    """Run a Python stub that imports _lib and exercises a code path."""
+    """Run a Python stub that imports _lib and exercises a code path.
+
+    nexus-mzvwa.9: the stub subprocess MUST NOT inherit the default
+    routing-log path — pre-fix, every suite run deposited a
+    test_rule/unknown fail-ladder pair into the LIVE
+    ~/.config/nexus/routing_log.jsonl (312 pairs over the 48-day soak).
+    """
     stub = textwrap.dedent(
         f"""
         import sys
@@ -149,13 +155,18 @@ def _run_stub(body: str, stdin: str = "") -> subprocess.CompletedProcess:
         {body}
         """
     )
-    return subprocess.run(
-        [sys.executable, "-c", stub],
-        input=stdin,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
+    import os as _os
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as td:
+        env = {**_os.environ, "NX_ROUTING_LOG_PATH": str(pathlib.Path(td) / "routing_log.jsonl")}
+        return subprocess.run(
+            [sys.executable, "-c", stub],
+            input=stdin,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
 
 
 def test_allow_exits_zero_with_json():
@@ -181,7 +192,7 @@ def test_deny_exits_zero_with_json():
 def test_fail_open_on_exception_default():
     """run_hook with fail_closed=False emits allow on exception, exits 0."""
     proc = _run_stub(
-        "_lib.run_hook(lambda stdin: 1/0, fail_closed=False)",
+        "_lib.run_hook(lambda stdin: 1/0, fail_closed=False, rule_name='selftest_fail_open')",
         stdin="{}",
     )
     assert proc.returncode == 0, proc.stderr
@@ -192,7 +203,7 @@ def test_fail_open_on_exception_default():
 def test_fail_closed_on_exception_denies():
     """run_hook with fail_closed=True emits deny on exception, still exits 0."""
     proc = _run_stub(
-        "_lib.run_hook(lambda stdin: 1/0, fail_closed=True, rule_name='test_rule')",
+        "_lib.run_hook(lambda stdin: 1/0, fail_closed=True, rule_name='selftest_fail_closed')",
         stdin="{}",
     )
     assert proc.returncode == 0, proc.stderr

@@ -53,7 +53,7 @@ SERVICE_LOG="$HOME/.config/nexus/logs/storage_service_native.log"
 # ── Phase A: position the candidate binary + provision + serve ───────────────
 say "Phase A — provision + serve the CANDIDATE binary"
 nx --version >/dev/null 2>&1 && ok "nx installed ($(nx --version 2>&1))" || bad "nx --version failed"
-command -v initdb >/dev/null 2>&1 && ok "PG16 binaries on PATH" || bad "initdb not found"
+command -v initdb >/dev/null 2>&1 && bad "system PostgreSQL present — bare-machine posture violated (nexus-5qefg)" || ok "no system PostgreSQL (bundle must provide it)"
 test -x "$SVC_NATIVE_DIR/nexus-service" && ok "candidate native binary present" || { bad "candidate binary missing"; exit 1; }
 
 mkdir -p "$SVC_WELL_KNOWN_DIR"
@@ -142,6 +142,25 @@ else
 fi
 nx search "amaranthine zeppelin quotient" --corpus knowledge -m 1 2>/dev/null | grep -q "shakeout-probe" \
   && bad "deleted note still searchable" || ok "deleted note gone from search"
+
+# Plan library — real-client round-trip against the served candidate
+# (nexus-o02xe recurrence guard: the CLI verbs used to hardcode the local
+# SQLite snapshot, leaving `nx plan` dark in service mode. reseed writes
+# builtins through HttpPlanLibrary; list must read them back from the
+# SAME live library, not echo "T2 database not found" / an empty snapshot.)
+PLAN_SEED_OUT="$(nx plan reseed 2>&1)"
+printf '%s' "$PLAN_SEED_OUT" | grep -qE "Seeded [0-9]+ new builtin row" \
+  && ok "plan reseed writes through the service" \
+  || { bad "plan reseed"; printf '%s\n' "$PLAN_SEED_OUT" | sed 's/^/       | /' | tail -6; }
+PLAN_LIST_OUT="$(nx plan list 2>&1)"
+if printf '%s' "$PLAN_LIST_OUT" | grep -q "T2 database not found"; then
+  bad "plan list fell back to the local snapshot (o02xe regression)"
+elif printf '%s' "$PLAN_LIST_OUT" | grep -qiE "builtin"; then
+  ok "plan list reads seeded builtins back from the service"
+else
+  bad "plan list returned no builtin rows after reseed"
+  printf '%s\n' "$PLAN_LIST_OUT" | sed 's/^/       | /' | tail -6
+fi
 
 # Catalog + collections + taxonomy + doctor surfaces
 nx catalog stats 2>/dev/null | grep -qE "Documents:" && ok "catalog stats" || bad "catalog stats"

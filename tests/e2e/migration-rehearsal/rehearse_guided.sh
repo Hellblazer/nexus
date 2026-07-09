@@ -37,7 +37,7 @@ SVC_NATIVE_DIR="/opt/nexus-service-native"
 SVC_WELL_KNOWN_DIR="$HOME/.config/nexus/service"
 
 nx --version >/dev/null 2>&1 && ok "nx installed ($(nx --version 2>&1))" || bad "nx --version failed"
-command -v initdb >/dev/null 2>&1 && ok "PG16 binaries on PATH ($(initdb --version))" || bad "initdb not found"
+command -v initdb >/dev/null 2>&1 && bad "system PostgreSQL present — bare-machine posture violated (nexus-5qefg: the image must ship NO host PG so the signed-bundle acquisition path is exercised)" || ok "no system PostgreSQL (bundle must provide it)"
 test -x "$SVC_NATIVE_DIR/nexus-service" && ok "native service binary present" || bad "native binary missing at $SVC_NATIVE_DIR"
 
 note "positioning the native binary + libs at the well-known location…"
@@ -86,6 +86,18 @@ else
 fi
 
 # The MVV assertions on the single command's own output.
+# nexus-5qefg acceptance: the bundle-acquisition path MUST have run — a fresh
+# download+verify, not a pre-staged extract. A revert of the always-install
+# wiring (nexus-yv5m4) turns this (and the whole provision) RED on this
+# PG-less image. NOTE: init.py's sibling marker "extracted on first run"
+# (pre-staged bundle found) is deliberately NOT matched — nothing in this
+# image pre-stages a PG bundle, and pre-staging one (e.g. caching it the way
+# bge-768 is baked in) would re-mask exactly the acquire path this gate
+# exists to exercise. If this grep ever fails with the pre-staged marker in
+# GU_OUT, someone added bundle caching to the image — remove it.
+printf '%s' "$GU_OUT" | grep -q "Using bundled PostgreSQL (downloaded + verified)" \
+  && ok "PG bundle acquired (downloaded + verified — the yv5m4 path)" \
+  || bad "PG bundle acquisition marker missing (always-install path not exercised)"
 printf '%s' "$GU_OUT" | grep -q "Service verified" \
   && ok "service was provisioned + verified (healthy + version-pinned)" \
   || bad "no 'Service verified' line — provision/version-pin path did not complete"

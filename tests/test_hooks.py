@@ -221,3 +221,38 @@ def test_infer_repo_git_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     monkeypatch.chdir(tmp_path)
     name = _infer_repo()
     assert name == tmp_path.name
+
+
+# ── nexus-0rwwv: SessionStart surfaces a pending substrate migration ─────────
+
+
+def test_session_start_appends_migration_notice_when_pending(monkeypatch, tmp_path):
+    from unittest.mock import patch as _patch
+
+    monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
+    with _patch("nexus.migration.guided_upgrade.legacy_footprint_pending",
+                return_value=True),          _patch("nexus.hooks.write_claude_session_id"):
+        output = session_start(claude_session_id="s-0rwwv")
+    assert "Nexus ready" in output
+    assert "nx guided-upgrade" in output
+
+
+def test_session_start_silent_without_pending(monkeypatch):
+    from unittest.mock import patch as _patch
+
+    monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
+    with _patch("nexus.migration.guided_upgrade.legacy_footprint_pending",
+                return_value=False),          _patch("nexus.hooks.write_claude_session_id"):
+        output = session_start(claude_session_id="s-0rwwv")
+    assert "Nexus ready" in output
+    assert "guided-upgrade" not in output
+
+
+def test_session_start_notice_failure_never_breaks_hook(monkeypatch):
+    from unittest.mock import patch as _patch
+
+    monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
+    with _patch("nexus.migration.guided_upgrade.legacy_footprint_pending",
+                side_effect=RuntimeError("boom")),          _patch("nexus.hooks.write_claude_session_id"):
+        output = session_start(claude_session_id="s-0rwwv")
+    assert "Nexus ready" in output

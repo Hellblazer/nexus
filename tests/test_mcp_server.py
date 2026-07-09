@@ -35,6 +35,7 @@ from nexus.mcp_server import (
     memory_put,
     memory_search,
     plan_save,
+    plan_delete,
     plan_search,
     query,
     scratch,
@@ -763,6 +764,27 @@ def test_plan_search_empty(t2_path):
     assert "No matching plans" in plan_search(query="nonexistent")
 
 
+def test_plan_delete_round_trip(t2_path):
+    # nexus-v92zj: plan_save's destructive counterpart — a throwaway probe
+    # entry must be removable via MCP without direct DB access.
+    plan_save(
+        query="throwaway shakeout probe entry",
+        plan_json='{"steps": [{"step": 1, "operation": "search"}]}',
+        verb="query",
+        project="testproj", tags="shakeout-probe",
+    )
+    out = plan_search(query="shakeout probe", project="testproj")
+    plan_id = int(out.split("]")[0].lstrip("["))
+    result = plan_delete(plan_id=plan_id)
+    assert f"Deleted plan id={plan_id}" in result
+    assert "throwaway shakeout probe" in result
+    assert "No matching plans" in plan_search(query="shakeout probe", project="testproj")
+
+
+def test_plan_delete_not_found(t2_path):
+    assert "Not found: plan id 999999" in plan_delete(plan_id=999999)
+
+
 # ── _get_catalog error propagation ───────────────────────────────────────────
 
 # ── Query catalog-routing ────────────────────────────────────────────────────
@@ -965,7 +987,7 @@ async def test_mcp_server_round_trip():
                 "search", "query", "store_put", "store_get", "store_list",
                 "memory_put", "memory_get", "memory_delete", "memory_search", "memory_consolidate",
                 "scratch", "scratch_manage", "collection_list",
-                "plan_save", "plan_search",
+                "plan_save", "plan_search", "plan_delete",
             }
             for expected in expected_core_tools:
                 assert expected in tool_names, f"core tool missing: {expected}"

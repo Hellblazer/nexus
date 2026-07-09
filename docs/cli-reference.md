@@ -1285,6 +1285,16 @@ escape-rate per rule.
 |------|-------------|
 | `--log-path PATH` | Read from this path instead of the default |
 | `--json` | Emit aggregated stats as JSON instead of a table |
+| `--escapes` | List escape events with their `# routing-allow:` reasons (the escape-audit surface); combines with `--json` |
+
+JSON output shape (nexus-mzvwa.9): `{"rules": {<rule>: {...}}, "selftest_excluded": N,
+"unregistered_rules": [...]}` — `unregistered_rules` present only when a
+hooks.json registration surface was found. Fail-ladder self-test rows
+(`selftest_*`, plus the historical `test_rule`/`unknown` suite pairs) are
+excluded from the stats and counted in `selftest_excluded`; the table view
+footnotes the same count. Rules present in the log but absent from the
+plugin's hooks.json are marked `(unregistered)` — the log is append-only
+history, so a stats row alone never proves a hook is currently live.
 
 Default log path resolves to `$NX_ROUTING_LOG_PATH`, falling back to
 `~/.config/nexus/routing_log.jsonl`. Used at the 30-day soak review
@@ -1559,7 +1569,7 @@ nx doctor --trim-telemetry --days 7     # Aggressive retention (minimum 1 day)
 The `--trim-telemetry` flag caps `search_telemetry` disk use. The table accrues one row per (query, collection) pair on every `nx search` and MCP search call when `telemetry.search_enabled` is true. Run periodically from cron or a CI job; the default 30-day window keeps an analytical signal long enough to detect slow-burn silent-threshold-drop patterns.
 
 ```
-nx doctor --check-quotas            # Report ChromaDB Cloud + Voyage AI free-tier caps + retry headroom
+nx doctor --check-quotas            # Vector-store limits + embedder caps + reranker + retry headroom
 nx doctor --check-quotas --json     # Structured output for dashboards / CI gates
 ```
 
@@ -1989,6 +1999,8 @@ nx upgrade --auto                 # Quiet mode for hook invocation (T2 only, exi
 **How it works**: The CLI version (`importlib.metadata.version("conexus")`) is compared against the last-seen version stored in T2 (`_nexus_version` table). Migrations tagged with versions between last-seen and current are executed. Each migration is idempotent via `PRAGMA table_info()` / `sqlite_master` guards.
 
 **Auto-upgrade**: `nx upgrade --auto` runs as the first SessionStart hook in the Claude Code plugin. T2 migrations apply silently on every session start. T3 upgrade steps (e.g., cross-collection projection backfill) run only via explicit `nx upgrade`.
+
+**Substrate-migration bridge (nexus-0rwwv)**: interactive `nx upgrade` (never `--auto`) also detects a pending one-time Chroma→PostgreSQL cutover and prints a banner pointing at `nx guided-upgrade`; on a real terminal it offers to chain straight into the guided migration (default No — guided keeps its own cost preview and consent prompt). Default `nx doctor` prints the same pointer, and the "endpoint is not resolvable" errors carry it too. Detection is evidence-based (legacy store present AND no configured `service_url`, no `NX_SERVICE_HOST`/`PORT`, no `pg_credentials`, no live lease); set `NX_MIGRATION_NOTICE=0` to disable.
 
 **Adding new migrations**: Append a `Migration("x.y.z", "description", fn)` entry to the `MIGRATIONS` list in `src/nexus/db/migrations.py`. For T3 operations, use `T3UpgradeStep`.
 

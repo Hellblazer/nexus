@@ -532,6 +532,9 @@ class TestCatalogHookBatchedServiceMode:
             return [1 for _ in docs]
 
         def is_interactive_write_pending(self) -> bool:
+            # Property-style counter: Pass 1b's per-page fairness yield
+            # (await_fair_window) probes this before each update_many page.
+            self.fairness_probes = getattr(self, "fairness_probes", 0) + 1
             return False
 
         def close(self) -> None:
@@ -562,7 +565,7 @@ class TestCatalogHookBatchedServiceMode:
         )
         return client, requests
 
-    def _run_hook(self, tmp_path, monkeypatch, docs, head_hash, *, writer=None):
+    def _run_hook(self, tmp_path, monkeypatch, docs, head_hash, *, writer=None, files=None):
         from nexus.indexer import _catalog_hook
 
         monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "service")
@@ -573,19 +576,20 @@ class TestCatalogHookBatchedServiceMode:
         monkeypatch.setattr(factory, "make_catalog_reader", lambda **kw: client)
         monkeypatch.setattr(factory, "make_catalog_writer", lambda **kw: writer)
 
-        f = tmp_path / "a.py"
+        if files is None:
+            files = [tmp_path / "a.py"]
         result = _catalog_hook(
             repo=tmp_path, repo_name="nexus", repo_hash="571b8edd",
             head_hash=head_hash,
-            indexed_files=[(f, "code", "code__nexus")],
+            indexed_files=[(f, "code", "code__nexus") for f in files],
         )
         return result, writer, requests
 
-    def _doc_for(self, f, *, head_hash) -> dict:
+    def _doc_for(self, f, *, head_hash, tumbler: str = "1.1.1") -> dict:
         import hashlib
 
         return {
-            "tumbler": "1.1.1",
+            "tumbler": tumbler,
             "title": f.name,
             "content_type": "code",
             "file_path": f.name,
@@ -639,6 +643,39 @@ class TestCatalogHookBatchedServiceMode:
         assert writer.update_many_calls[0][0]["head_hash"] == "new"
         assert writer.update_many_calls[0][0]["tumbler"] == "1.1.1"
         assert writer.update_calls == [], "per-file update() must NOT fire when update_many succeeds"
+
+    def test_update_many_pages_at_boundary_with_fairness_per_page(
+        self, tmp_path, monkeypatch,
+    ):
+        # nexus-vxgnh critique: Pass 1b genuinely pages changed_batch at
+        # _CATALOG_REGISTER_PAGE and consults the fairness window PER PAGE
+        # (indexer.py Pass 1b loop) — load-bearing behavior that no test
+        # drove past a single page. Shrink the page size and prove both.
+        monkeypatch.setattr("nexus.indexer._CATALOG_REGISTER_PAGE", 2)
+        writer = self._StubWriter()
+        # The per-page fairness yield only arms for BATCH-priority writers
+        # (interactive writers ARE the interactive party — indexer.py
+        # `_batch_producer = writer.priority == "batch"`).
+        writer.priority = "batch"
+        files, docs = [], []
+        for i in range(5):
+            f = tmp_path / f"f{i}.py"
+            f.write_text("stable")
+            files.append(f)
+            docs.append(self._doc_for(f, head_hash="old", tumbler=f"1.1.{i + 1}"))
+
+        _, writer, _ = self._run_hook(
+            tmp_path, monkeypatch, docs, head_hash="new", files=files,
+            writer=writer,
+        )
+
+        assert [len(c) for c in writer.update_many_calls] == [2, 2, 1], \
+            "5 changed docs at page=2 must batch as 2+2+1"
+        assert writer.update_calls == []
+        # await_fair_window probes is_interactive_write_pending at least
+        # once per page (3 pages) — the RDR-146 fairness contract.
+        assert getattr(writer, "fairness_probes", 0) >= 3, \
+            f"fairness window must be consulted per page, got {getattr(writer, 'fairness_probes', 0)}"
 
     def test_update_many_failure_falls_back_to_per_file_update(
         self, tmp_path, monkeypatch,

@@ -290,7 +290,11 @@ class ChashVectorConcurrencyTest {
         while (Instant.now().isBefore(deadline)) {
             List<String> chashes = new ArrayList<>(CHASH_BATCH);
             for (int i = 0; i < CHASH_BATCH; i++) {
-                chashes.add("cc-t" + threadId + "-i" + iter + "-" + i);
+                // catalog-013 (nexus-e0hd2): chash_index now enforces
+                // length(chash)=32 (and the handler guards it) — pad like
+                // chunkId() does for the vector leg.
+                chashes.add(("cc-t" + threadId + "-i" + iter + "-" + i
+                    + "00000000000000000000000000000000").substring(0, 32));
             }
             iter++;
             try {

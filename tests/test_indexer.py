@@ -2027,3 +2027,49 @@ def _legacy_vector_backend(monkeypatch):
     chroma/local embed pipeline, which is exactly the chroma-injected
     configuration the opt-out exists for."""
     monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "chroma")
+
+
+# ── drain phase markers (nexus-uizok) ────────────────────────────────────────
+
+
+class _StubBatcher:
+    def __init__(self, pend, flushes=2):
+        self._pend = pend
+        self._flushes = flushes
+
+    @property
+    def pending_summary(self):
+        return self._pend
+
+    def drain(self, on_progress=None):
+        for i in range(self._flushes):
+            if on_progress is not None:
+                on_progress(i + 1, self._flushes)
+        return self._flushes
+
+
+def test_drain_markers_busy_emits_open_heartbeat_close():
+    from nexus.indexer import _drain_batcher_with_markers
+    phases: list[str] = []
+    b = _StubBatcher({"chunks": 612, "collections": 3, "in_flight": 2}, flushes=2)
+    flushed = _drain_batcher_with_markers(b, phases.append)
+    assert flushed == 2
+    assert phases[0] == "Flushing 612 staged chunks across 3 collections + 2 in-flight batches…"
+    assert phases[1].startswith("  flush 1/2 complete")
+    assert phases[2].startswith("  flush 2/2 complete")
+    assert phases[3].startswith("Flush drain complete — 2 flushes,")
+
+
+def test_drain_markers_quiet_drain_is_silent():
+    # Nothing pending, nothing in flight → no phantom markers.
+    from nexus.indexer import _drain_batcher_with_markers
+    phases: list[str] = []
+    b = _StubBatcher({"chunks": 0, "collections": 0, "in_flight": 0}, flushes=0)
+    _drain_batcher_with_markers(b, phases.append)
+    assert phases == []
+
+
+def test_drain_markers_on_phase_none_safe():
+    from nexus.indexer import _drain_batcher_with_markers
+    b = _StubBatcher({"chunks": 5, "collections": 1, "in_flight": 0}, flushes=1)
+    assert _drain_batcher_with_markers(b, None) == 1

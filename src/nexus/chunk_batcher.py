@@ -154,6 +154,24 @@ class ChunkBatcher:
                 "flush_seconds": self._flush_seconds,
             }
 
+    @property
+    def pending_summary(self) -> dict[str, int]:
+        """What ``drain()`` would have to do right now (nexus-uizok).
+
+        ``chunks``/``collections`` count the staged-but-unflushed buffers;
+        ``in_flight`` counts pool flushes already dispatched by ``add()``
+        overflows that ``drain()`` must still wait on. Lets the caller emit
+        an honest phase marker before a potentially minutes-long drain.
+        """
+        with self._lock:
+            return {
+                "chunks": sum(len(p.ids) for p in self._pending.values()),
+                "collections": sum(1 for p in self._pending.values() if p.ids),
+                # not-done, not len(_futures): the list can still hold a few
+                # settled entries between prunes (and kept-for-drain raisers).
+                "in_flight": sum(1 for f in self._futures if not f.done()),
+            }
+
     def add(
         self,
         file_path: str,
@@ -227,24 +245,67 @@ class ChunkBatcher:
             self._dispatch_flush(coll, batch)
         return True
 
-    def drain(self) -> None:
-        """Flush every non-empty pending buffer (end-of-run)."""
+    def drain(
+        self,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> int:
+        """Flush every non-empty pending buffer (end-of-run).
+
+        ``on_progress(done, total)`` (nexus-uizok) fires after each flush
+        completes — the operator heartbeat for a drain that can run
+        minutes (one flush per pending collection, plus every genuinely
+        outstanding pool flush from earlier ``add()`` overflows; settled
+        futures are pruned at dispatch time so ``total`` reflects real
+        work). ``total`` is fixed at drain start; runs unlocked. Pooled
+        waiting uses ``as_completed``, so if an exception DOES escape a
+        future (``_flush_batch`` contains its own failures; only a
+        raising completion callback reaches here), which one surfaces
+        first follows completion order, not submission order.
+
+        Returns the number of flushes this drain performed/awaited, so
+        the caller's closing marker can report drain-scoped volume
+        (distinct from the run-wide ``stats["flushes"]``).
+        """
         with self._lock:
             to_flush = [
                 (coll, pend) for coll, pend in self._pending.items() if pend.ids
             ]
             self._pending = {}
+        if self._flush_pool is None:
+            done = 0
+            for coll, batch in to_flush:
+                self._dispatch_flush(coll, batch)
+                done += 1
+                if on_progress is not None:
+                    on_progress(done, len(to_flush))
+            return done
         for coll, batch in to_flush:
             self._dispatch_flush(coll, batch)
-        if self._flush_pool is not None:
-            # Wait for every in-flight flush (including ones dispatched by
-            # earlier add() overflows) so callers see all callbacks fired.
-            with self._lock:
-                futures, self._futures = self._futures, []
-            for f in futures:
+        # Wait for every in-flight flush (including ones dispatched by
+        # earlier add() overflows) so callers see all callbacks fired.
+        with self._lock:
+            futures, self._futures = self._futures, []
+        from concurrent.futures import as_completed  # noqa: PLC0415 — only with concurrency enabled
+
+        # Futures already settled by now finished during the file loop —
+        # surface any retained exception, but don't count them as drain
+        # work (they'd inflate done/total with instant "progress" for
+        # long-finished flushes — nexus-uizok critique HIGH-2).
+        outstanding = []
+        for f in futures:
+            if f.done():
                 f.result()
-            self._flush_pool.shutdown(wait=True)
-            self._flush_pool = None  # post-drain adds fall back to sync
+            else:
+                outstanding.append(f)
+        done = 0
+        for f in as_completed(outstanding):
+            f.result()
+            done += 1
+            if on_progress is not None:
+                on_progress(done, len(outstanding))
+        self._flush_pool.shutdown(wait=True)
+        self._flush_pool = None  # post-drain adds fall back to sync
+        return done
 
     # ── internals ────────────────────────────────────────────────────────
 
@@ -254,6 +315,16 @@ class ChunkBatcher:
             return
         fut = self._flush_pool.submit(self._flush_batch, collection, pend)
         with self._lock:
+            # Prune settled, exception-free futures so ``_futures`` tracks
+            # genuinely outstanding work — unpruned it grew to "every flush
+            # ever dispatched", making pending_summary's in_flight and
+            # drain()'s progress denominator lies on long runs
+            # (nexus-uizok critique HIGH-2). Futures that RAISED are kept
+            # so drain() still surfaces the exception via f.result().
+            self._futures = [
+                f for f in self._futures
+                if not f.done() or f.exception() is not None
+            ]
             self._futures.append(fut)
 
     def _flush_batch(self, collection: str, pend: _Pending) -> None:

@@ -48,6 +48,17 @@ import pytest
 
 from tests.db._service_fixture import SERVICE_ROLES_SQL, create_tenant_token, pg_bin_dir
 
+
+def _ch(seed: str) -> str:
+    """Canonical 32-lowercase-hex chash for fixtures. The z4skl/mzvwa.9/e0hd2
+    boundary guards reject non-canonical ids (manifest seams: exactly 32
+    lowercase hex; chash_index seams: length 32, with legacy 64 normalized) —
+    the old free-form literals now 400 at the HTTP boundary."""
+    import hashlib
+
+    return hashlib.sha256(seed.encode()).hexdigest()[:32]
+
+
 # ── Prerequisite paths ────────────────────────────────────────────────────────
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -259,10 +270,10 @@ class TestChashMVV:
 
     def test_a_upsert_lookup_roundtrip(self, chash_store):
         """a) upsert + lookup: same chash can live in multiple collections."""
-        chash_store.upsert(chash="sha256abc001", collection="col_a")
-        chash_store.upsert(chash="sha256abc001", collection="col_b")
+        chash_store.upsert(chash=_ch("sha256abc001"), collection="col_a")
+        chash_store.upsert(chash=_ch("sha256abc001"), collection="col_b")
 
-        rows = chash_store.lookup("sha256abc001")
+        rows = chash_store.lookup(_ch("sha256abc001"))
         colls = {r["collection"] for r in rows}
         assert colls == {"col_a", "col_b"}, (
             f"lookup must return both collections; got {colls!r}"
@@ -275,16 +286,16 @@ class TestChashMVV:
 
     def test_b_upsert_many_batch(self, chash_store):
         """b) upsert_many round-trip."""
-        chashes = [f"hash{i:04d}" for i in range(5)]
+        chashes = [_ch(f"hash{i:04d}") for i in range(5)]
         chash_store.upsert_many(chashes=chashes, collection="col_batch")
 
         assert chash_store.count_for_collection("col_batch") == 5
 
     def test_c_delete_collection(self, chash_store):
         """c) delete_collection removes all rows for a collection."""
-        chash_store.upsert(chash="c1", collection="col_del")
-        chash_store.upsert(chash="c2", collection="col_del")
-        chash_store.upsert(chash="c3", collection="col_other")
+        chash_store.upsert(chash=_ch("c1"), collection="col_del")
+        chash_store.upsert(chash=_ch("c2"), collection="col_del")
+        chash_store.upsert(chash=_ch("c3"), collection="col_other")
 
         deleted = chash_store.delete_collection("col_del")
         assert deleted == 2
@@ -298,9 +309,9 @@ class TestChashMVV:
 
     def test_d_distinct_collections(self, chash_store):
         """d) distinct_collections returns all unique collection names."""
-        chash_store.upsert(chash="c1", collection="col_x")
-        chash_store.upsert(chash="c2", collection="col_y")
-        chash_store.upsert(chash="c3", collection="col_x")
+        chash_store.upsert(chash=_ch("c1"), collection="col_x")
+        chash_store.upsert(chash=_ch("c2"), collection="col_y")
+        chash_store.upsert(chash=_ch("c3"), collection="col_x")
 
         result = chash_store.distinct_collections()
         assert "col_x" in result
@@ -308,8 +319,8 @@ class TestChashMVV:
 
     def test_e_rename_collection(self, chash_store):
         """e) rename_collection re-points all rows from old -> new."""
-        chash_store.upsert(chash="c1", collection="old_col")
-        chash_store.upsert(chash="c2", collection="old_col")
+        chash_store.upsert(chash=_ch("c1"), collection="old_col")
+        chash_store.upsert(chash=_ch("c2"), collection="old_col")
 
         updated = chash_store.rename_collection(old="old_col", new="new_col")
         assert updated == 2
@@ -319,36 +330,36 @@ class TestChashMVV:
 
     def test_f_delete_stale_specific_pk(self, chash_store):
         """f) delete_stale removes only the specific (chash, collection) row."""
-        chash_store.upsert(chash="c1", collection="col_a")
-        chash_store.upsert(chash="c1", collection="col_b")
+        chash_store.upsert(chash=_ch("c1"), collection="col_a")
+        chash_store.upsert(chash=_ch("c1"), collection="col_b")
 
-        deleted = chash_store.delete_stale(chash="c1", collection="col_a")
+        deleted = chash_store.delete_stale(chash=_ch("c1"), collection="col_a")
         assert deleted == 1
         assert chash_store.count_for_collection("col_a") == 0
         assert chash_store.count_for_collection("col_b") == 1
 
     def test_f2_delete_stale_absent_returns_zero(self, chash_store):
         """f2) delete_stale on absent PK returns 0 (idempotent)."""
-        assert chash_store.delete_stale(chash="ghost", collection="nowhere") == 0
+        assert chash_store.delete_stale(chash=_ch("ghost"), collection="nowhere") == 0
 
     def test_g_is_empty_and_count(self, chash_store):
         """g) is_empty + count_for_collection."""
         assert chash_store.is_empty() is True
 
-        chash_store.upsert(chash="c1", collection="col_g")
+        chash_store.upsert(chash=_ch("c1"), collection="col_g")
         assert chash_store.is_empty() is False
         assert chash_store.count_for_collection("col_g") == 1
 
     def test_h_cross_tenant_rls_negative(self, chash_store, other_chash_store):
         """h) rows inserted by tenant 'default' are invisible to 'other-tenant'."""
-        chash_store.upsert(chash="rls_probe_ch", collection="col_rls")
+        chash_store.upsert(chash=_ch("rls_probe_ch"), collection="col_rls")
 
         # default can see it
-        rows = chash_store.lookup("rls_probe_ch")
+        rows = chash_store.lookup(_ch("rls_probe_ch"))
         assert len(rows) == 1, "default tenant must see its own row"
 
         # other-tenant must NOT see it
-        other_rows = other_chash_store.lookup("rls_probe_ch")
+        other_rows = other_chash_store.lookup(_ch("rls_probe_ch"))
         assert other_rows == [], (
             f"Cross-tenant RLS must filter: 'other-tenant' must not see 'default' "
             f"rows; got {other_rows!r}"
@@ -371,7 +382,7 @@ class TestChashMVV:
         resp = httpx.post(
             f"{base_url}/v1/chash/upsert",
             headers=evil_headers,
-            json={"chash": "evil_ch", "collection": "evil_col"},
+            json={"chash": _ch("evil_ch"), "collection": "evil_col"},
         )
         # The upsert itself should succeed (evil-tenant's RLS allows own writes)
         assert resp.status_code == 200
@@ -379,7 +390,7 @@ class TestChashMVV:
         # But default tenant must NOT see that row
         from nexus.db.t2.http_chash_index import HttpChashIndex
         s = HttpChashIndex(base_url=base_url, _token=token, tenant="default")
-        rows = s.lookup("evil_ch")
+        rows = s.lookup(_ch("evil_ch"))
         assert rows == [], (
             f"RLS must isolate: default tenant must not see evil-tenant row; got {rows!r}"
         )
@@ -397,7 +408,7 @@ class TestChashMVV:
             "CREATE TABLE chash_index "
             "(chash TEXT, physical_collection TEXT, created_at TEXT)"
         )
-        conn.execute(f"INSERT INTO chash_index VALUES ('etl_sha001', 'col_etl', '{ts}')")
+        conn.execute(f"INSERT INTO chash_index VALUES ('{_ch("etl_sha001")}', 'col_etl', '{ts}')")
         conn.commit()
         conn.close()
 
@@ -410,7 +421,7 @@ class TestChashMVV:
         assert result["imported"] == 1
         assert result["errors"]   == 0
 
-        rows = chash_store.lookup("etl_sha001")
+        rows = chash_store.lookup(_ch("etl_sha001"))
         assert len(rows) == 1
         assert rows[0]["created_at"] == ts, (
             f"created_at must be preserved verbatim; got {rows[0]['created_at']!r}"
@@ -427,8 +438,8 @@ class TestChashMVV:
             "CREATE TABLE chash_index "
             "(chash TEXT, physical_collection TEXT, created_at TEXT)"
         )
-        conn.execute("INSERT INTO chash_index VALUES ('idem_sha001', 'col_idem', '2024-01-01T00:00:00Z')")
-        conn.execute("INSERT INTO chash_index VALUES ('idem_sha002', 'col_idem', '2024-01-02T00:00:00Z')")
+        conn.execute(f"INSERT INTO chash_index VALUES ('{_ch("idem_sha001")}', 'col_idem', '2024-01-01T00:00:00Z')")
+        conn.execute(f"INSERT INTO chash_index VALUES ('{_ch("idem_sha002")}', 'col_idem', '2024-01-02T00:00:00Z')")
         conn.commit()
         conn.close()
 
@@ -494,15 +505,15 @@ class TestChashMVV:
         GET /v1/chash/registered_chashes endpoint end-to-end.
         """
         # Insert rows for col_reg
-        chash_store.upsert(chash="reg_chash001", collection="col_reg")
-        chash_store.upsert(chash="reg_chash002", collection="col_reg")
-        chash_store.upsert(chash="other_chash", collection="col_other")
+        chash_store.upsert(chash=_ch("reg_chash001"), collection="col_reg")
+        chash_store.upsert(chash=_ch("reg_chash002"), collection="col_reg")
+        chash_store.upsert(chash=_ch("other_chash"), collection="col_other")
 
         result = chash_store.registered_chashes_for_collection("col_reg")
 
-        assert "reg_chash001" in result, f"reg_chash001 must be in result; got {result!r}"
-        assert "reg_chash002" in result
-        assert "other_chash" not in result, "other_chash must not appear for col_reg"
+        assert _ch("reg_chash001") in result, f"reg_chash001 must be in result; got {result!r}"
+        assert _ch("reg_chash002") in result
+        assert _ch("other_chash") not in result, "other_chash must not appear for col_reg"
 
     def test_m2_registered_chashes_unknown_collection(self, chash_store):
         """m2) registered_chashes_for_collection returns empty for absent collection."""
@@ -511,11 +522,11 @@ class TestChashMVV:
 
     def test_m3_registered_chashes_rls_isolation(self, chash_store, other_chash_store):
         """m3) registered_chashes_for_collection is RLS-isolated per tenant."""
-        chash_store.upsert(chash="rls_reg_chash", collection="col_rls_reg")
+        chash_store.upsert(chash=_ch("rls_reg_chash"), collection="col_rls_reg")
 
         # default tenant sees its own row
         own = chash_store.registered_chashes_for_collection("col_rls_reg")
-        assert "rls_reg_chash" in own
+        assert _ch("rls_reg_chash") in own
 
         # other-tenant gets empty (RLS filter)
         other = other_chash_store.registered_chashes_for_collection("col_rls_reg")

@@ -116,6 +116,10 @@ _step "2/10 uv tool install conexus==$FROM_VERSION (the OLD version)"
 # Use a sandbox-local UV_TOOL_DIR so this install does not clobber the dev
 # tool install. The UV_TOOL_BIN_DIR puts the resulting `nx` on PATH for
 # this script's subsequent commands.
+# nexus-0rwwv: pin the substrate-migration bridge probe off — this harness
+# runs real `nx doctor`/`nx upgrade`; today it is incidentally safe (SERVICE
+# hard default gates the probe) but that safety should be deliberate.
+export NX_MIGRATION_NOTICE=0
 export UV_TOOL_DIR="$SANDBOX/uv_tools"
 export UV_TOOL_BIN_DIR="$SANDBOX/uv_bin"
 export PATH="$UV_TOOL_BIN_DIR:$PATH"
@@ -160,6 +164,12 @@ _pass "upgraded: $(nx --version)"
 
 # ── 6. nx doctor drift report (captured; cross-checked in step 7) ─────────────
 _step "6/12 nx doctor stanza-drift report (captured for cross-check)"
+# (2026-07-08 postmortem correction: an earlier fix attempt re-seeded
+# repos.json here, on the theory that a baseline migration had deleted the
+# step-1 seeding. False — the file survives the whole run; the real defect
+# was list_repos_dual discarding the REGISTRY leg when the service-mode
+# catalog proxy raises, fixed in src/nexus/repos.py. The step-1 seeding is
+# sufficient; nothing extra is needed here.)
 DOCTOR_OUT="$(HOME="$SANDBOX" nx doctor 2>&1 || true)"
 if echo "$DOCTOR_OUT" | grep -qi 'stanza drift'; then
     DRIFT_REPORTED=1

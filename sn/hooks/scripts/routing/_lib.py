@@ -185,6 +185,20 @@ _ESCAPE_RE = re.compile(
 )
 
 
+def extract_escape_reason(command: str) -> str:
+    """Return the ``# routing-allow:`` reason text, or ``""`` when absent.
+
+    nexus-mzvwa.9: the reason trails the command, so the 200-char
+    ``command_fragment`` cap in :func:`log_routing_event` routinely cut
+    it — making escape reasons un-auditable from the log. Callers pass
+    this as the dedicated ``escape_reason`` field instead.
+    """
+    if not command or ESCAPE_TOKEN not in command:
+        return ""
+    match = _ESCAPE_RE.search(command)
+    return match.group("reason").strip() if match else ""
+
+
 def should_skip_for_reason(command: str) -> bool:
     """Return True iff ``command`` carries a valid ``# routing-allow:`` escape.
 
@@ -216,6 +230,7 @@ def log_routing_event(
     *,
     tool_name: str = "",
     command_fragment: str = "",
+    escape_reason: str = "",
 ) -> None:
     """Append one JSON line to the routing log. Never raises."""
     try:
@@ -231,6 +246,10 @@ def log_routing_event(
         if command_fragment:
             # Cap fragment length so the log stays small.
             record["command_fragment"] = command_fragment[:200]
+        if escape_reason:
+            # Dedicated field (nexus-mzvwa.9): the reason trails the command,
+            # so the fragment cap above routinely truncated it away.
+            record["escape_reason"] = escape_reason[:300]
         with path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record) + "\n")
     except Exception:

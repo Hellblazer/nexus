@@ -820,6 +820,14 @@ def _catalog_hook(
         # so this is a large serial write burst, not a rare one). ``skip`` defers
         # the remaining files to the next idempotent pass. Pass 2 adds a second,
         # per-page yield for the new-doc batch.
+        # nexus-oub13: per-stage wall timing. The live "Catalog registration
+        # done (115.5s)" phase wraps FIVE stages (resolve/update, update_many,
+        # register_many pages, link generation, housekeeping) with no way to
+        # tell which owns the wall — the ~38s/page inference attributed the
+        # whole phase to register_many unproven. One summary log per run +
+        # one log per register page.
+        _stage_t0 = time.monotonic()
+        _stage_s: dict[str, float] = {}
         new_batch: list[tuple[Path, dict]] = []
         # nexus-xedhp: changed-but-existing docs, batched via update_many
         # (Pass 1b, below) instead of an inline per-file writer.update().
@@ -936,6 +944,9 @@ def _catalog_hook(
                     exc_info=True,
                 )
 
+        _stage_s["pass1_resolve"] = time.monotonic() - _stage_t0
+        _stage_mark = time.monotonic()
+
         # Pass 1b: batch-update the CHANGED existing docs (nexus-xedhp,
         # duoak.11 follow-up). A HEAD bump flips every doc's stored head_hash
         # to "changed", so on a warm re-run this is the whole repo's
@@ -1002,6 +1013,9 @@ def _catalog_hook(
                             abs_path=str(path), error=str(exc), exc_info=True,
                         )
 
+        _stage_s["pass1b_update_many"] = time.monotonic() - _stage_mark
+        _stage_mark = time.monotonic()
+
         # Pass 2: batch-register the NEW docs. The RDR-146 fairness yield moves
         # from per-file to a per-PAGE check — a page is ONE register_many round-
         # trip (one multi-row INSERT server-side), not 1000 serial writes, so the
@@ -1023,8 +1037,11 @@ def _catalog_hook(
                 break
             page = new_batch[_start : _start + _CATALOG_REGISTER_PAGE]
             page_docs = [doc for _, doc in page]
+            _page_t0 = time.monotonic()
+            _page_ok = False
             try:
                 tumblers = writer.register_many(owner, page_docs)
+                _page_ok = True
                 # register_many is 1:1-or-raise; guard the invariant explicitly so
                 # a short return can never SILENTLY truncate via zip() (the ghost-
                 # doc class). A mismatch routes to the per-file fallback below.
@@ -1055,6 +1072,16 @@ def _catalog_hook(
                             "catalog_hook_register_failed",
                             abs_path=str(path), error=str(exc), exc_info=True,
                         )
+            finally:
+                # Fires on success AND failure — the slow/failing pages are
+                # exactly what this profiler must not miss (review M-2).
+                _log.info(
+                    "catalog_register_page",
+                    page=_start // _CATALOG_REGISTER_PAGE + 1,
+                    docs=len(page),
+                    elapsed_s=round(time.monotonic() - _page_t0, 2),
+                    ok=_page_ok,
+                )
 
         if skipped_files:
             _progress(
@@ -1068,6 +1095,9 @@ def _catalog_hook(
                 f"{len(indexed_files) - len(new_tumblers)} updated\n"
             )
 
+        _stage_s["pass2_register"] = time.monotonic() - _stage_mark
+        _stage_mark = time.monotonic()
+
         # Auto-generate links after registration (incremental: only new entries)
         links_created = 0
         if new_tumblers:
@@ -1078,16 +1108,25 @@ def _catalog_hook(
                 generate_prose_filepath_links,
                 generate_rdr_filepath_links,
             )
+            # nexus-oub13 critique M5: per-generator wall so the "linking"
+            # stage bucket names WHICH generator owns it, not just that
+            # linking in aggregate is slow.
+            _lg_t = time.monotonic()
             fp_count = generate_rdr_filepath_links(cat, writer=writer, new_tumblers=new_tumblers)
+            _stage_s["linking_rdr"] = time.monotonic() - _lg_t
             # nexus-sob9: prose + pdf coverage. Run with the same
             # incremental scope so a single bulk-index pass closes
             # the prose/pdf 0% gap from the 2026-05-08 prod shakeout.
+            _lg_t = time.monotonic()
             prose_count = generate_prose_filepath_links(
                 cat, writer=writer, new_tumblers=new_tumblers,
             )
+            _stage_s["linking_prose"] = time.monotonic() - _lg_t
+            _lg_t = time.monotonic()
             pdf_count = generate_pdf_corpus_links(
                 cat, writer=writer, new_tumblers=new_tumblers,
             )
+            _stage_s["linking_pdf"] = time.monotonic() - _lg_t
             links_created = fp_count + prose_count + pdf_count
             if links_created:
                 _log.info(
@@ -1098,10 +1137,23 @@ def _catalog_hook(
         except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
             _log.debug("catalog_link_generation_failed", exc_info=True)
 
+        _stage_s["linking"] = time.monotonic() - _stage_mark
+        _stage_mark = time.monotonic()
+
         # Housekeeping: detect and evict orphaned catalog entries
         _progress(f"  Catalog: housekeeping…\r")
         indexed_set = _indexed_relpaths(indexed_files, repo)
         _run_housekeeping(cat, owner, indexed_set, writer=writer)
+        _stage_s["housekeeping"] = time.monotonic() - _stage_mark
+        _log.info(
+            "catalog_hook_stage_timing",
+            total_s=round(time.monotonic() - _stage_t0, 1),
+            **{k: round(v, 1) for k, v in _stage_s.items()},
+            files=len(indexed_files),
+            new_docs=len(new_tumblers),
+            changed_docs=len(changed_batch),
+            links=links_created,
+        )
         _progress(f"  Catalog: done ({len(new_tumblers)} new, {links_created} links)\n")
     except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
         _log.debug("catalog_hook_failed", exc_info=True)
@@ -2329,6 +2381,48 @@ def _prune_deleted_files(
 # ── Main indexing pipeline ───────────────────────────────────────────────────
 
 
+def _drain_batcher_with_markers(
+    batcher: "ChunkBatcher",
+    on_phase: Callable[[str], None] | None,
+) -> int:
+    """Drain *batcher* with operator-visible phase markers (nexus-uizok).
+
+    The end-of-run drain previously ran DARK for multiple minutes on big
+    repos (hundreds of upsert round-trips after "RDR indexing done") —
+    indistinguishable from a hang. Emits an opening marker with the
+    pending summary, a heartbeat per completed flush, and a closing
+    marker with drain-scoped flush count + wall. Quiet drains (nothing
+    pending, nothing in flight) stay silent — no phantom markers.
+
+    Returns the drain's flush count (``batcher.drain``'s return).
+    """
+    pend = batcher.pending_summary
+    busy = bool(pend["chunks"] or pend["in_flight"])
+    t0 = time.monotonic()
+    progress = None
+    if on_phase is not None and busy:
+        parts = [
+            f"{pend['chunks']:,} staged chunks across "
+            f"{pend['collections']} collections"
+        ]
+        if pend["in_flight"]:
+            parts.append(f"{pend['in_flight']} in-flight batches")
+        on_phase(f"Flushing {' + '.join(parts)}…")
+
+        def progress(done: int, total: int) -> None:
+            on_phase(
+                f"  flush {done}/{total} complete "
+                f"({time.monotonic() - t0:.1f}s)"
+            )
+    flushed = batcher.drain(on_progress=progress)
+    if on_phase is not None and busy:
+        on_phase(
+            f"Flush drain complete — {flushed} flushes, "
+            f"{time.monotonic() - t0:.1f}s"
+        )
+    return flushed
+
+
 def _run_index(
     repo: Path,
     registry: "object",
@@ -2818,21 +2912,27 @@ def _run_index(
     # ``check_staleness(cache=…)`` falls through to the per-file path,
     # which itself short-circuits on a missing collection.
     from nexus.indexer_utils import StalenessCache  # noqa: PLC0415  — circular-dep avoidance (nexus.indexer_utils)
-    code_staleness = (
-        build_staleness_cache(code_col) if code_col is not None
-        else StalenessCache()
-    )
-    docs_staleness = (
-        build_staleness_cache(docs_col) if docs_col is not None
-        else StalenessCache()
-    )
+
+    # nexus-uizok: per-collection markers so the (up to minutes-long on
+    # the paginated fallback) sweep never goes dark between the opening
+    # line above and the "built" summary below — one heartbeat per
+    # collection with the previous one's wall time.
+    def _build_with_marker(label: str, col: object) -> "StalenessCache":
+        if col is None:
+            return StalenessCache()
+        if on_phase is not None:
+            on_phase(
+                f"  staleness sweep: {label}… "
+                f"({time.monotonic() - _staleness_t0:.1f}s elapsed)"
+            )
+        return build_staleness_cache(col)
+
+    code_staleness = _build_with_marker("code", code_col)
+    docs_staleness = _build_with_marker("docs", docs_col)
     # nexus-3lswy: distinct cache object from docs_staleness — rdr__ is a
     # separate physical collection from docs__, so a shared object would
     # cross-contaminate staleness lookups between the two.
-    rdr_staleness = (
-        build_staleness_cache(rdr_col) if rdr_col is not None
-        else StalenessCache()
-    )
+    rdr_staleness = _build_with_marker("rdr", rdr_col)
     _log.info(
         "staleness_caches_built",
         code_doc_ids=len(code_staleness.by_doc_id),
@@ -3221,7 +3321,7 @@ def _run_index(
     # failures (containment: a failed batch fails its contributing files,
     # never the run — nexus-wcs39).
     if _batcher is not None:
-        _batcher.drain()
+        _drain_batcher_with_markers(_batcher, on_phase)
         _bstats = _batcher.stats
         _log.info(
             "index_chunk_batch_stats",

@@ -67,23 +67,41 @@ NON_CONFORMANT = "legacy_two_segment_name"
 # object with .count(). Deterministic counts, models two legs independently.
 # ---------------------------------------------------------------------------
 class _FakeCollection:
-    def __init__(self, name: str, count: int) -> None:
+    def __init__(self, name: str, count: int, stored_dim: int | None = None) -> None:
         self.name = name
         self._count = count
+        #: nexus-nb7hr: dimension of the (single) stored vector the
+        #: classifier's ground-truth probe sees; None = empty/no embeddings.
+        self._stored_dim = stored_dim
 
     def count(self) -> int:
         return self._count
 
+    def get(self, limit: int = 1, include: list | None = None) -> dict:
+        if self._stored_dim is None:
+            return {"ids": [], "embeddings": None}
+        return {"ids": ["x"], "embeddings": [[0.1] * self._stored_dim]}
+
 
 class _FakeChromaClient:
-    def __init__(self, counts: dict[str, int]) -> None:
+    def __init__(
+        self,
+        counts: dict[str, int],
+        stored_dims: dict[str, int] | None = None,
+    ) -> None:
         self._counts = dict(counts)
+        self._stored_dims = dict(stored_dims or {})
 
     def list_collections(self) -> list[_FakeCollection]:
-        return [_FakeCollection(n, c) for n, c in self._counts.items()]
+        return [
+            _FakeCollection(n, c, self._stored_dims.get(n))
+            for n, c in self._counts.items()
+        ]
 
     def get_collection(self, name: str) -> _FakeCollection:
-        return _FakeCollection(name, self._counts[name])
+        return _FakeCollection(
+            name, self._counts[name], self._stored_dims.get(name)
+        )
 
 
 class _ListExplodingClient:
@@ -975,3 +993,159 @@ class TestResolveDefaultLocalLeg:
         with _pytest.raises(FileNotFoundError) as exc:
             open_local_read_client(None)
         assert "xdg-data" in str(exc.value)  # resolved product path, not Path(None) TypeError
+
+
+class TestMeasuredDimOverride:
+    """nexus-nb7hr (GH #1381): the classifier measures a stored vector when
+    the NAME says unsupported — a mislabeled voyage-* name or a pre-RDR-103
+    two-segment name whose vectors are really local bge-768 must be
+    REMAPPABLE (no Voyage key, no re-index), not blocked."""
+
+    def test_voyage_named_but_768_vectors_becomes_remappable(self):
+        from nexus.migration.detection import (
+            classify_collections,
+            cross_model_remappable,
+        )
+
+        client = _FakeChromaClient(
+            {"code__owner__voyage-code-3__v1": 500},
+            stored_dims={"code__owner__voyage-code-3__v1": 768},
+        )
+        report = classify_collections(
+            local_client=client, voyage_key_present=False
+        )
+        (c,) = report.classifications
+        assert c.support == "unsupported"
+        assert c.measured_dim == 768
+        assert cross_model_remappable(c), "measured 768 must override the voyage-name exclusion"
+        assert "measures 768-dim" in c.reason
+        assert "no Voyage key" in c.reason
+
+    def test_two_segment_name_with_768_vectors_becomes_remappable(self):
+        from nexus.migration.detection import (
+            classify_collections,
+            cross_model_remappable,
+        )
+
+        client = _FakeChromaClient(
+            {"code__owner": 300}, stored_dims={"code__owner": 768}
+        )
+        report = classify_collections(
+            local_client=client, voyage_key_present=False
+        )
+        (c,) = report.classifications
+        assert c.model is None
+        assert c.measured_dim == 768
+        assert cross_model_remappable(c), "measured 768 must override the non-conformant-name exclusion"
+
+    def test_two_segment_target_name_synthesized(self):
+        from nexus.migration.vector_etl import cross_model_target_name
+
+        assert (
+            cross_model_target_name("code__owner", "bge-base-en-v15-768")
+            == "code__owner__bge-base-en-v15-768__v1"
+        )
+
+    def test_three_segment_name_still_raises(self):
+        import pytest as _pytest
+
+        from nexus.migration.vector_etl import cross_model_target_name
+
+        with _pytest.raises(ValueError):
+            cross_model_target_name("a__b__c", "bge-base-en-v15-768")
+
+    def test_measured_768_targets_onnx_even_in_cloud_mode(self):
+        # The reason string promises "no Voyage key needed" — so the remap
+        # target must be ONNX in EVERY mode; re-embedding provably-bge
+        # content into a voyage model would bill tokens. (Note: with a key
+        # PRESENT a voyage-NAMED collection classifies supported and is
+        # never probed — the supported-name-wrong-dim case is a recorded
+        # out-of-scope limitation; this pins the resolver's contract for
+        # any measured-768 classification, e.g. a two-segment name on a
+        # key-present deployment.)
+        from nexus.migration.detection import (
+            classify_collections,
+            remap_target_model,
+        )
+
+        client = _FakeChromaClient(
+            {"docs__owner": 100}, stored_dims={"docs__owner": 768}
+        )
+        report = classify_collections(
+            local_client=client, voyage_key_present=True
+        )
+        (c,) = report.classifications
+        assert c.measured_dim == 768
+        assert (
+            remap_target_model(c, voyage_key_present=True)
+            == "bge-base-en-v15-768"
+        )
+
+    def test_genuine_voyage_1024_without_key_stays_blocked(self):
+        from nexus.migration.detection import (
+            classify_collections,
+            cross_model_remappable,
+        )
+
+        client = _FakeChromaClient(
+            {"code__owner__voyage-code-3__v1": 500},
+            stored_dims={"code__owner__voyage-code-3__v1": 1024},
+        )
+        report = classify_collections(
+            local_client=client, voyage_key_present=False
+        )
+        (c,) = report.classifications
+        assert c.support == "unsupported"
+        assert c.measured_dim == 1024
+        assert not cross_model_remappable(c), "real voyage content stays credential-blocked"
+        assert "NX_VOYAGE_API_KEY" in c.reason
+
+    def test_empty_unsupported_collection_unchanged(self):
+        from nexus.migration.detection import classify_collections
+
+        client = _FakeChromaClient({"code__owner__voyage-code-3__v1": 0})
+        report = classify_collections(
+            local_client=client, voyage_key_present=False
+        )
+        (c,) = report.classifications
+        assert c.measured_dim is None  # nothing stored to measure; not probed
+        assert not c.has_data
+
+    def test_probe_failure_degrades_to_name_classification(self):
+        # Review HIGH: the dim probe is BEST-EFFORT (matching both existing
+        # users of this primitive) — a get() failure must degrade that one
+        # collection to the pre-nb7hr name-based diagnostic, never abort
+        # the whole detection.
+        from nexus.migration.detection import classify_collections
+
+        class _RaisingGetCollection(_FakeCollection):
+            def get(self, limit: int = 1, include: list | None = None) -> dict:
+                raise RuntimeError("cloud key not scoped for vector export")
+
+        class _Client:
+            def list_collections(self):
+                return [_RaisingGetCollection("code__owner__voyage-code-3__v1", 50)]
+
+        report = classify_collections(
+            local_client=_Client(), voyage_key_present=False
+        )
+        (c,) = report.classifications
+        assert c.measured_dim is None
+        assert c.support == "unsupported"
+        assert "NX_VOYAGE_API_KEY" in c.reason  # the pre-nb7hr diagnostic stands
+
+    def test_supported_collections_not_probed(self):
+        from nexus.migration.detection import classify_collections
+
+        # stored_dim deliberately ABSENT: if the classifier probed a
+        # supported collection, _FakeCollection.get would return no
+        # embeddings and measured_dim stays None either way, but the real
+        # pin is: no reclassification, no reason change.
+        client = _FakeChromaClient({"code__owner__bge-base-en-v15-768__v1": 42})
+        report = classify_collections(
+            local_client=client, voyage_key_present=False
+        )
+        (c,) = report.classifications
+        assert c.support == "supported-onnx"
+        assert c.measured_dim is None
+        assert c.reason == ""

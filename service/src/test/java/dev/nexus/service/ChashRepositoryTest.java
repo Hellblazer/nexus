@@ -55,6 +55,13 @@ class ChashRepositoryTest {
     ChashRepository repo;
     com.zaxxer.hikari.HikariDataSource svcDs;
 
+    /** Pad a readable seed to the contract length — catalog-013 added
+     *  CHECK(length(chash)=32) to chash_index, so fixtures must be 32 chars
+     *  (any chars: the contract is length-only, not hex). */
+    private static String ch(String seed) {
+        return (seed + "0".repeat(32)).substring(0, 32);
+    }
+
     @BeforeAll
     void startAll() throws Exception {
         pg = PgContainerHelper.start();
@@ -126,9 +133,9 @@ class ChashRepositoryTest {
     @Test
     @Order(1)
     void upsert_insertsRow() {
-        repo.upsert(TENANT_A, "abc123def456", "code__nexus");
+        repo.upsert(TENANT_A, ch("abc123def456"), "code__nexus");
 
-        var rows = repo.lookup(TENANT_A, "abc123def456");
+        var rows = repo.lookup(TENANT_A, ch("abc123def456"));
         assertThat(rows).hasSize(1);
         assertThat(rows.get(0).get("collection")).isEqualTo("code__nexus");
         assertThat(rows.get(0).get("created_at")).isNotBlank();
@@ -139,15 +146,15 @@ class ChashRepositoryTest {
     @Test
     @Order(2)
     void upsert_refreshesCreatedAt_onReindex() throws InterruptedException {
-        repo.upsert(TENANT_A, "stale_chash_001", "code__foo");
-        var first = repo.lookup(TENANT_A, "stale_chash_001");
+        repo.upsert(TENANT_A, ch("stale_chash_001"), "code__foo");
+        var first = repo.lookup(TENANT_A, ch("stale_chash_001"));
         assertThat(first).hasSize(1);
         String firstTs = first.get(0).get("created_at");
 
         // Small sleep to advance clock
         Thread.sleep(1100);
-        repo.upsert(TENANT_A, "stale_chash_001", "code__foo");
-        var second = repo.lookup(TENANT_A, "stale_chash_001");
+        repo.upsert(TENANT_A, ch("stale_chash_001"), "code__foo");
+        var second = repo.lookup(TENANT_A, ch("stale_chash_001"));
         assertThat(second).hasSize(1);
         String secondTs = second.get(0).get("created_at");
 
@@ -160,11 +167,11 @@ class ChashRepositoryTest {
     @Test
     @Order(3)
     void upsertMany_insertsAllValid_skipsBlank() {
-        repo.upsertMany(TENANT_A, List.of("chash_m1", "chash_m2", "", "  ", "chash_m3"), "code__batch");
+        repo.upsertMany(TENANT_A, List.of(ch("chash_m1"), ch("chash_m2"), "", "  ", ch("chash_m3")), "code__batch");
 
-        var m1 = repo.lookup(TENANT_A, "chash_m1");
-        var m2 = repo.lookup(TENANT_A, "chash_m2");
-        var m3 = repo.lookup(TENANT_A, "chash_m3");
+        var m1 = repo.lookup(TENANT_A, ch("chash_m1"));
+        var m2 = repo.lookup(TENANT_A, ch("chash_m2"));
+        var m3 = repo.lookup(TENANT_A, ch("chash_m3"));
         assertThat(m1).hasSize(1).extracting(r -> r.get("collection")).containsExactly("code__batch");
         assertThat(m2).hasSize(1);
         assertThat(m3).hasSize(1);
@@ -184,12 +191,12 @@ class ChashRepositoryTest {
         // conflict key. Real files emit duplicate chunk text, so a batch
         // like [dup, dup, dup2] must succeed, not 500.
         repo.upsertMany(TENANT_A,
-                List.of("chash_dup_a", "chash_dup_a", "chash_dup_b",
-                        "chash_dup_a", "chash_dup_b"),
+                List.of(ch("chash_dup_a"), ch("chash_dup_a"), ch("chash_dup_b"),
+                        ch("chash_dup_a"), ch("chash_dup_b")),
                 "code__dupbatch");
 
-        var a = repo.lookup(TENANT_A, "chash_dup_a");
-        var b = repo.lookup(TENANT_A, "chash_dup_b");
+        var a = repo.lookup(TENANT_A, ch("chash_dup_a"));
+        var b = repo.lookup(TENANT_A, ch("chash_dup_b"));
         assertThat(a).hasSize(1).extracting(r -> r.get("collection")).containsExactly("code__dupbatch");
         assertThat(b).hasSize(1).extracting(r -> r.get("collection")).containsExactly("code__dupbatch");
     }
@@ -199,7 +206,7 @@ class ChashRepositoryTest {
     @Test
     @Order(4)
     void lookup_returnsAllCollections_forSameChash() {
-        String multiChash = "multi_coll_chash_001";
+        String multiChash = ch("multi_coll_chash_001");
         repo.upsert(TENANT_A, multiChash, "knowledge__delos");
         repo.upsert(TENANT_A, multiChash, "knowledge__delos_docling");
 
@@ -217,18 +224,18 @@ class ChashRepositoryTest {
     @Test
     @Order(5)
     void deleteCollection_removesRows_returnsCount() {
-        repo.upsert(TENANT_A, "del_c1", "del__coll");
-        repo.upsert(TENANT_A, "del_c2", "del__coll");
-        repo.upsert(TENANT_A, "del_c3", "other__coll");
+        repo.upsert(TENANT_A, ch("del_c1"), "del__coll");
+        repo.upsert(TENANT_A, ch("del_c2"), "del__coll");
+        repo.upsert(TENANT_A, ch("del_c3"), "other__coll");
 
         int deleted = repo.deleteCollection(TENANT_A, "del__coll");
         assertThat(deleted).isEqualTo(2);
 
         // del__coll rows gone
-        assertThat(repo.lookup(TENANT_A, "del_c1")).isEmpty();
-        assertThat(repo.lookup(TENANT_A, "del_c2")).isEmpty();
+        assertThat(repo.lookup(TENANT_A, ch("del_c1"))).isEmpty();
+        assertThat(repo.lookup(TENANT_A, ch("del_c2"))).isEmpty();
         // other__coll row untouched
-        assertThat(repo.lookup(TENANT_A, "del_c3")).hasSize(1);
+        assertThat(repo.lookup(TENANT_A, ch("del_c3"))).hasSize(1);
 
         // Idempotent: second call returns 0
         assertThat(repo.deleteCollection(TENANT_A, "del__coll")).isEqualTo(0);
@@ -240,8 +247,8 @@ class ChashRepositoryTest {
     @Order(6)
     void distinctCollections_returnsAll() {
         // Seed some rows
-        repo.upsert(TENANT_A, "dc_chash_1", "distinct__alpha");
-        repo.upsert(TENANT_A, "dc_chash_2", "distinct__beta");
+        repo.upsert(TENANT_A, ch("dc_chash_1"), "distinct__alpha");
+        repo.upsert(TENANT_A, ch("dc_chash_2"), "distinct__beta");
 
         Set<String> colls = repo.distinctCollections(TENANT_A);
         assertThat(colls).contains("distinct__alpha", "distinct__beta");
@@ -252,15 +259,15 @@ class ChashRepositoryTest {
     @Test
     @Order(7)
     void renameCollection_repointsRows() {
-        repo.upsert(TENANT_A, "ren_c1", "rename__old");
-        repo.upsert(TENANT_A, "ren_c2", "rename__old");
+        repo.upsert(TENANT_A, ch("ren_c1"), "rename__old");
+        repo.upsert(TENANT_A, ch("ren_c2"), "rename__old");
 
         int updated = repo.renameCollection(TENANT_A, "rename__old", "rename__new");
         assertThat(updated).isEqualTo(2);
 
-        assertThat(repo.lookup(TENANT_A, "ren_c1"))
+        assertThat(repo.lookup(TENANT_A, ch("ren_c1")))
             .extracting(r -> r.get("collection")).containsExactly("rename__new");
-        assertThat(repo.lookup(TENANT_A, "ren_c2"))
+        assertThat(repo.lookup(TENANT_A, ch("ren_c2")))
             .extracting(r -> r.get("collection")).containsExactly("rename__new");
     }
 
@@ -271,17 +278,17 @@ class ChashRepositoryTest {
     void renameCollection_collisionDefense_dropsPreexistingNewRows() {
         // col_old: ren_coll_c1, ren_coll_c2
         // col_new already has ren_coll_c1 (would collide)
-        repo.upsert(TENANT_A, "ren_coll_c1", "col_old");
-        repo.upsert(TENANT_A, "ren_coll_c2", "col_old");
-        repo.upsert(TENANT_A, "ren_coll_c1", "col_new"); // preexisting collision
+        repo.upsert(TENANT_A, ch("ren_coll_c1"), "col_old");
+        repo.upsert(TENANT_A, ch("ren_coll_c2"), "col_old");
+        repo.upsert(TENANT_A, ch("ren_coll_c1"), "col_new"); // preexisting collision
 
         // Rename should succeed: drops (ren_coll_c1, col_new), then updates all col_old -> col_new
         int updated = repo.renameCollection(TENANT_A, "col_old", "col_new");
         assertThat(updated).isEqualTo(2);
 
-        var c1 = repo.lookup(TENANT_A, "ren_coll_c1");
+        var c1 = repo.lookup(TENANT_A, ch("ren_coll_c1"));
         assertThat(c1).hasSize(1).extracting(r -> r.get("collection")).containsExactly("col_new");
-        var c2 = repo.lookup(TENANT_A, "ren_coll_c2");
+        var c2 = repo.lookup(TENANT_A, ch("ren_coll_c2"));
         assertThat(c2).hasSize(1).extracting(r -> r.get("collection")).containsExactly("col_new");
     }
 
@@ -290,19 +297,19 @@ class ChashRepositoryTest {
     @Test
     @Order(9)
     void deleteStale_removesSpecificRow_idempotent() {
-        repo.upsert(TENANT_A, "stale_abc", "stale__coll1");
-        repo.upsert(TENANT_A, "stale_abc", "stale__coll2"); // same chash, different collection
+        repo.upsert(TENANT_A, ch("stale_abc"), "stale__coll1");
+        repo.upsert(TENANT_A, ch("stale_abc"), "stale__coll2"); // same chash, different collection
 
         // Delete only (stale_abc, stale__coll1)
-        int deleted = repo.deleteStale(TENANT_A, "stale_abc", "stale__coll1");
+        int deleted = repo.deleteStale(TENANT_A, ch("stale_abc"), "stale__coll1");
         assertThat(deleted).isEqualTo(1);
 
         // stale__coll2 still present
-        var remaining = repo.lookup(TENANT_A, "stale_abc");
+        var remaining = repo.lookup(TENANT_A, ch("stale_abc"));
         assertThat(remaining).hasSize(1).extracting(r -> r.get("collection")).containsExactly("stale__coll2");
 
         // Idempotent: deleting again returns 0
-        assertThat(repo.deleteStale(TENANT_A, "stale_abc", "stale__coll1")).isEqualTo(0);
+        assertThat(repo.deleteStale(TENANT_A, ch("stale_abc"), "stale__coll1")).isEqualTo(0);
     }
 
     // ── Test 10: isEmpty / countForCollection ─────────────────────────────────
@@ -314,9 +321,9 @@ class ChashRepositoryTest {
         String freshTenant = "chash-empty-tenant";
 
         assertThat(repo.isEmpty(freshTenant)).isTrue();
-        repo.upsert(freshTenant, "empty_test_c1", "empty__coll");
-        repo.upsert(freshTenant, "empty_test_c2", "empty__coll");
-        repo.upsert(freshTenant, "empty_test_c3", "other__coll");
+        repo.upsert(freshTenant, ch("empty_test_c1"), "empty__coll");
+        repo.upsert(freshTenant, ch("empty_test_c2"), "empty__coll");
+        repo.upsert(freshTenant, ch("empty_test_c3"), "other__coll");
 
         assertThat(repo.isEmpty(freshTenant)).isFalse();
         assertThat(repo.countForCollection(freshTenant, "empty__coll")).isEqualTo(2);
@@ -330,7 +337,7 @@ class ChashRepositoryTest {
     @Order(11)
     void doImport_fidelity_idempotentRerun() {
         String importTenant = "chash-import-tenant";
-        String importChash  = "import_chash_ff00ff";
+        String importChash  = ch("import_chash_ff00ff");
         String importColl   = "knowledge__imported";
         String createdAt    = "2025-03-15T08:00:00Z";
 
@@ -359,14 +366,14 @@ class ChashRepositoryTest {
     void doImportBatch_insertsAll_acrossCollections() {
         String t = "chash-batch-tenant";
         int n = repo.doImportBatch(t, List.of(
-                new ChashRepository.ImportRow("batch_c1", "code__batch_a", "2025-01-01T00:00:00Z"),
-                new ChashRepository.ImportRow("batch_c2", "code__batch_a", "2025-01-02T00:00:00Z"),
-                new ChashRepository.ImportRow("batch_c3", "docs__batch_b", "2025-01-03T00:00:00Z")));
+                new ChashRepository.ImportRow(ch("batch_c1"), "code__batch_a", "2025-01-01T00:00:00Z"),
+                new ChashRepository.ImportRow(ch("batch_c2"), "code__batch_a", "2025-01-02T00:00:00Z"),
+                new ChashRepository.ImportRow(ch("batch_c3"), "docs__batch_b", "2025-01-03T00:00:00Z")));
         assertThat(n).isEqualTo(3);
         assertThat(repo.countForCollection(t, "code__batch_a")).isEqualTo(2);
         assertThat(repo.countForCollection(t, "docs__batch_b")).isEqualTo(1);
         // created_at fidelity preserved (not clobbered to now)
-        assertThat((String) repo.lookup(t, "batch_c1").get(0).get("created_at"))
+        assertThat((String) repo.lookup(t, ch("batch_c1")).get(0).get("created_at"))
                 .contains("2025-01-01");
     }
 
@@ -375,7 +382,7 @@ class ChashRepositoryTest {
     void doImportBatch_idempotentRerun_noDuplicates() {
         String t = "chash-batch-tenant2";
         var rows = List.of(new ChashRepository.ImportRow(
-                "bat2_c1", "code__batch2", "2025-02-01T00:00:00Z"));
+                ch("bat2_c1"), "code__batch2", "2025-02-01T00:00:00Z"));
         repo.doImportBatch(t, rows);
         repo.doImportBatch(t, rows);
         assertThat(repo.countForCollection(t, "code__batch2")).isEqualTo(1);
@@ -389,10 +396,10 @@ class ChashRepositoryTest {
         // within the batch, last occurrence winning.
         String t = "chash-batch-tenant3";
         int n = repo.doImportBatch(t, List.of(
-                new ChashRepository.ImportRow("dup_c", "code__dup", "2025-03-01T00:00:00Z"),
-                new ChashRepository.ImportRow("dup_c", "code__dup", "2025-03-09T00:00:00Z")));
+                new ChashRepository.ImportRow(ch("dup_c"), "code__dup", "2025-03-01T00:00:00Z"),
+                new ChashRepository.ImportRow(ch("dup_c"), "code__dup", "2025-03-09T00:00:00Z")));
         assertThat(n).isEqualTo(1);
-        var got = repo.lookup(t, "dup_c");
+        var got = repo.lookup(t, ch("dup_c"));
         assertThat(got).hasSize(1);
         assertThat((String) got.get(0).get("created_at")).contains("2025-03-09");
     }
@@ -402,9 +409,9 @@ class ChashRepositoryTest {
     void doImportBatch_badCreatedAt_fallsBackToNow_rowStillLands() {
         String t = "chash-batch-tenant4";
         int n = repo.doImportBatch(t, List.of(
-                new ChashRepository.ImportRow("badts_c", "code__badts", "not-a-timestamp")));
+                new ChashRepository.ImportRow(ch("badts_c"), "code__badts", "not-a-timestamp")));
         assertThat(n).isEqualTo(1);
-        assertThat(repo.lookup(t, "badts_c")).hasSize(1);
+        assertThat(repo.lookup(t, ch("badts_c"))).hasSize(1);
     }
 
     @Test
@@ -426,14 +433,14 @@ class ChashRepositoryTest {
         // upsert() is the most direct public entry point that reaches ensureCollectionRegistered;
         // upsert() itself also guards blank collection, so the IAE surfaces from there.
         IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, () ->
-            repo.upsert(TENANT_A, "some_valid_chash", ""));
+            repo.upsert(TENANT_A, ch("some_valid_chash"), ""));
         assertThat(ex.getMessage())
             .as("blank physical_collection must produce a clear IllegalArgumentException")
             .contains("must not be");
 
         // Also verify for whitespace-only value
         IllegalArgumentException exWs = assertThrows(IllegalArgumentException.class, () ->
-            repo.upsert(TENANT_A, "some_valid_chash", "  "));
+            repo.upsert(TENANT_A, ch("some_valid_chash"), "  "));
         assertThat(exWs.getMessage())
             .as("whitespace-only physical_collection must also be rejected")
             .contains("must not be");
@@ -444,7 +451,7 @@ class ChashRepositoryTest {
     @Test
     @Order(12)
     void rls_isolation_tenantAInvisibleToTenantB() {
-        String chashA = "rls_iso_chashA_001";
+        String chashA = ch("rls_iso_chashA_001");
         repo.upsert(TENANT_A, chashA, "rls__collA");
 
         // TENANT_B lookup returns empty
@@ -483,7 +490,7 @@ class ChashRepositoryTest {
     @Order(14)
     void failClosed_unsetGuc_yieldsNoRows() throws Exception {
         // Seed a row under TENANT_A
-        repo.upsert(TENANT_A, "fail_closed_chash", "fail__coll");
+        repo.upsert(TENANT_A, ch("fail_closed_chash"), "fail__coll");
 
         // Connect without setting nexus.tenant GUC
         try (Connection conn = svcDs.getConnection()) {
@@ -504,19 +511,24 @@ class ChashRepositoryTest {
     @Test
     @Order(15)
     void registeredChashesForCollection_returnsPrefixSet() {
-        // 64-char chash — exercises substr(chash, 1, 32) truncation
+        // catalog-013 (nexus-e0hd2): chash_index now carries
+        // CHECK(length(chash)=32) — a 64-char chash can no longer PERSIST
+        // (pre-013 it did, and the read side compensated with a
+        // substr(chash,1,32) truncation that is now vestigial defense).
+        // Assert the belt fires at the repo layer:
         String longChash = "a".repeat(64);
-        repo.upsert(TENANT_A, longChash, "reg__coll");
-        repo.upsert(TENANT_A, "short_ch_001",  "reg__coll");
-        repo.upsert(TENANT_A, "other_ch_001", "other__coll");
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                () -> repo.upsert(TENANT_A, longChash, "reg__coll"))
+            .hasMessageContaining("chash_index_chash_len_check");
+
+        repo.upsert(TENANT_A, ch("short_ch_001"),  "reg__coll");
+        repo.upsert(TENANT_A, ch("other_ch_001"), "other__coll");
 
         Set<String> result = repo.registeredChashesForCollection(TENANT_A, "reg__coll");
-
-        // Long chash is truncated to 32
-        assertThat(result).contains("a".repeat(32));
-        assertThat(result).contains("short_ch_001");
-        // other__coll chash must NOT appear
-        assertThat(result).doesNotContain("other_ch_001");
+        assertThat(result).contains(ch("short_ch_001"));
+        // other__coll chash must NOT appear; neither must the rejected 64-char.
+        assertThat(result).doesNotContain(ch("other_ch_001"));
+        assertThat(result).doesNotContain("a".repeat(32));
     }
 
     @Test
@@ -530,10 +542,10 @@ class ChashRepositoryTest {
     @Order(17)
     void registeredChashesForCollection_rlsIsolated() {
         // Seed under TENANT_A; TENANT_B must see empty
-        repo.upsert(TENANT_A, "rls_reg_chash_001", "rls__reg__coll");
+        repo.upsert(TENANT_A, ch("rls_reg_chash_001"), "rls__reg__coll");
 
         Set<String> resultA = repo.registeredChashesForCollection(TENANT_A, "rls__reg__coll");
-        assertThat(resultA).contains("rls_reg_chash_001");
+        assertThat(resultA).contains(ch("rls_reg_chash_001"));
 
         Set<String> resultB = repo.registeredChashesForCollection(TENANT_B, "rls__reg__coll");
         assertThat(resultB).isEmpty();

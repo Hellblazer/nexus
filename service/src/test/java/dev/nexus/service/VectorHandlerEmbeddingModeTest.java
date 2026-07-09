@@ -142,11 +142,80 @@ class VectorHandlerEmbeddingModeTest {
         return http.send(req, HttpResponse.BodyHandlers.ofString());
     }
 
+    // ── /v1/chash boundary cases (nexus-e0hd2) ───────────────────────────────
+    // Housed here pragmatically: this is the one lightweight harness that
+    // boots the FULL NexusService (all handlers registered), and the chash
+    // routes need exactly that.
+
+    @Test
+    void chashImport_legacy64CharRow_normalizedTo32() throws Exception {
+        // The migration route must NORMALIZE the SQLite-era full-64 shape
+        // ([:32], mirroring catalog-013-0's one-time DB normalization), not
+        // reject it — legacy tenants re-run migrations (guided-upgrade).
+        String full = "e".repeat(64);
+        var resp = post("/v1/chash/import", Map.of(
+            "rows", List.of(Map.of(
+                "chash", full,
+                "collection", "code__legacy64",
+                "created_at", "2025-01-01T00:00:00Z"))));
+        assertThat(resp.statusCode()).isEqualTo(200);
+        // The row must be findable under its TRUNCATED id (GET /v1/chash/lookup).
+        var req = HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + service.getPort()
+                + "/v1/chash/lookup?chash=" + full.substring(0, 32)))
+            .header("Authorization", "Bearer " + TOKEN)
+            .GET().build();
+        var lookup = http.send(req, HttpResponse.BodyHandlers.ofString());
+        assertThat(lookup.statusCode()).isEqualTo(200);
+        assertThat(lookup.body()).contains("code__legacy64");
+    }
+
+    @Test
+    void chashUpsertMany_nonStringElement_400WithIndex() throws Exception {
+        // nexus-e0hd2: the old loop silently DROPPED non-string elements
+        // (the castRows disease) — now a loud 400 naming the index.
+        var resp = post("/v1/chash/upsert_many", Map.of(
+            "chashes", java.util.Arrays.asList("a".repeat(32), 42),
+            "collection", "code__strict"));
+        assertThat(resp.statusCode()).isEqualTo(400);
+        assertThat(resp.body()).contains("chashes[1]").contains("must be a string");
+    }
+
+    @Test
+    void chashUpsert_full64_normalizedTo32_notRejected() throws Exception {
+        // Critic finding: the LIVE producer (dual_write_chash_index)
+        // historically sends the FULL 64-char chunk_text_hash — a reject
+        // here would silently stall chash_index growth for every
+        // service-mode tenant behind two best-effort catches. The upsert
+        // seams NORMALIZE the 64-shape to the [:32] key instead.
+        var resp = post("/v1/chash/upsert", Map.of(
+            "chash", "b".repeat(64), "collection", "code__norm64"));
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var req = HttpRequest.newBuilder()
+            .uri(URI.create("http://127.0.0.1:" + service.getPort()
+                + "/v1/chash/lookup?chash=" + "b".repeat(32)))
+            .header("Authorization", "Bearer " + TOKEN)
+            .GET().build();
+        var lookup = http.send(req, HttpResponse.BodyHandlers.ofString());
+        assertThat(lookup.statusCode()).isEqualTo(200);
+        assertThat(lookup.body()).contains("code__norm64");
+    }
+
+    @Test
+    void chashUpsert_otherBadLength_still400() throws Exception {
+        // Only the known legacy 64-shape normalizes; anything else is
+        // genuinely malformed and 400s with the offending length.
+        var resp = post("/v1/chash/upsert", Map.of(
+            "chash", "c".repeat(40), "collection", "code__strict"));
+        assertThat(resp.statusCode()).isEqualTo(400);
+        assertThat(resp.body()).contains("got 40 chars");
+    }
+
     @Test
     void upsertChunks_voyageCollectionInOnnxMode_is422_withActionableBody() throws Exception {
         var resp = post("/v1/vectors/upsert-chunks", Map.of(
             "collection", "knowledge__nexus__voyage-context-3__v1",
-            "ids",        List.of("pebfx2-c1"),
+            "ids",        List.of("pebfx2-c100000000000000000000000"),
             "documents",  List.of("some text"),
             "metadatas",  List.of(Map.of())));
         assertThat(resp.statusCode())

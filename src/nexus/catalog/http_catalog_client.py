@@ -1922,6 +1922,17 @@ class HttpCatalogClient:
                 ]},
             )
             failed.extend((result or {}).get("failed_doc_ids", []))
+            # nexus-fhhwf: the engine (v0.1.33+) returns a structured
+            # per-doc reason alongside the bare id list — surface it so a
+            # failed doc is diagnosable from the client log instead of
+            # requiring three deploy-gate iterations (the v0.1.24 lesson).
+            for f in (result or {}).get("failed") or []:
+                _log.warning(
+                    "manifest_write_many_doc_failed",
+                    doc_id=f.get("doc_id", ""),
+                    reason=f.get("reason", ""),
+                    sqlstate=f.get("sqlstate", ""),
+                )
         return failed
 
     def resync_chunk_count_cache(self, doc_id: str) -> None:

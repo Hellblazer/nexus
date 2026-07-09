@@ -233,3 +233,32 @@ class TestDiscoverLease:
     def test_present_lease_returns_url_token(self):
         _publish_lease(port=6161, token="dl-token")
         assert discover_lease() == ("http://127.0.0.1:6161", "dl-token")
+
+
+class TestMigrationHintOnFailure:
+    """nexus-0rwwv: the endpoint-resolution failure is the exact wall an
+    un-migrated 5.x→6.x install hits — the error must point at
+    `nx guided-upgrade` when the install looks like a pending legacy
+    footprint, and must NOT for migrated/fresh installs."""
+
+    def test_pending_footprint_appends_guided_upgrade(self, monkeypatch, tmp_path):
+        # THE vanilla-upgrader state (critique CRITICAL): legacy dir present,
+        # NO backend env, NO service evidence — storage-mode left at its real
+        # unpatched SERVICE hard default. The hint must still appear.
+        monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
+        monkeypatch.setattr(
+            "nexus.migration.detection.resolve_default_local_leg",
+            lambda: tmp_path,
+        )
+        with pytest.raises(RuntimeError, match="nx guided-upgrade"):
+            resolve_service_config()
+
+    def test_no_footprint_keeps_stock_message(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
+        monkeypatch.setattr(
+            "nexus.migration.detection.resolve_default_local_leg",
+            lambda: tmp_path / "absent",
+        )
+        with pytest.raises(RuntimeError) as exc:
+            resolve_service_config()
+        assert "guided-upgrade" not in str(exc.value)

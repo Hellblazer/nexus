@@ -360,3 +360,23 @@ class TestShimWarnGraduation:
 # Alias so the TestShimWarnGraduation test can import without trampling on
 # the conftest-level pytest fixture machinery.
 RegistryHelper = RepoRegistry
+
+
+def test_list_repos_dual_survives_raising_catalog_leg(tmp_path):
+    """upgrade-shakeout drift cross-check (2026-07-08): the service-mode lazy
+    catalog proxy raises at first real call when no endpoint is resolvable —
+    the registry leg must survive, or doctor's git-hook drift check goes
+    blind on every install without a reachable service."""
+    import json
+
+    from nexus.repos import list_repos_dual
+
+    registry = tmp_path / "repos.json"
+    registry.write_text(json.dumps({"repos": {"/some/repo": {}}}))
+
+    class _RaisingLazyProxy:
+        def list_owners_by_type(self, _t):
+            raise RuntimeError("nexus-service endpoint is not resolvable")
+
+    repos = list_repos_dual(cat=_RaisingLazyProxy(), registry_path=registry)
+    assert repos == ["/some/repo"]

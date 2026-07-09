@@ -245,6 +245,23 @@ class PgVectorServingContractTest {
 
     @Test
     @Order(2)
+    void upsertChunks_full64Id_returns400WithIndex() throws Exception {
+        // nexus-e0hd2: the classic full-sha256 id now 400s at the boundary
+        // (with its index + the truncate hint) instead of dying reason-poor
+        // at the chunks CHECK inside the transaction. Non-hex 32-char ids
+        // (like this suite's own fixtures) remain contract-legal.
+        var resp = post("/v1/vectors/upsert-chunks", TOKEN_A, Map.of(
+            "collection", COL,
+            "ids",        List.of("a".repeat(64)),
+            "documents",  List.of("doomed")));
+        assertThat(resp.statusCode()).isEqualTo(400);
+        assertThat(resp.body())
+            .contains("ids[0]")
+            .contains("got 64 chars");
+    }
+
+    @Test
+    @Order(2)
     void search_servesRankedRowsFromPgvector() throws Exception {
         var resp = post("/v1/vectors/search", TOKEN_A, Map.of(
             "query", Q, "collections", List.of(COL), "n_results", 10));

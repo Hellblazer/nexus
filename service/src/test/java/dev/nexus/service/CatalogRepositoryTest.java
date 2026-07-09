@@ -2848,6 +2848,76 @@ class CatalogRepositoryTest {
         assertThat(next).isEqualTo(prefix + ".4");
     }
 
+    @Test @Order(310)
+    void writeManifestMany_chashCheckViolation_reasonNamesConstraint() {
+        // nexus-fhhwf acceptance: a doc violating the chash CHECK gets a
+        // structured reason naming the constraint + sqlstate 23514, not a
+        // bare id. Repo-level deliberately: the HTTP boundary now 400s a
+        // 64-char chash before any txn (nexus-z4skl), so the DB CHECK is
+        // the belt for writers that bypass the handler.
+        String prefix = "fhhwf-check";
+        var tumblers = repo.registerDocumentMany(TENANT_A, prefix, List.of(
+            regDoc("ok doc", "ok.py"), regDoc("bad doc", "bad.py")));
+        var result = repo.writeManifestMany(TENANT_A, List.of(
+            Map.of("doc_id", tumblers.get(0), "rows", List.of(
+                Map.of("position", 0, "chash", "a".repeat(32)))),
+            Map.of("doc_id", tumblers.get(1), "rows", List.of(
+                Map.of("position", 0, "chash", "b".repeat(64))))));
+        assertThat(result.get("docs")).isEqualTo(1);
+        assertThat(result.get("failed_doc_ids")).isEqualTo(List.of(tumblers.get(1)));
+        @SuppressWarnings("unchecked")
+        var failed = (List<Map<String, Object>>) result.get("failed");
+        assertThat(failed).hasSize(1);
+        assertThat(failed.get(0).get("doc_id")).isEqualTo(tumblers.get(1));
+        assertThat((String) failed.get(0).get("reason"))
+            .contains("check constraint violation")
+            .contains("chash");   // constraint name names the column/length rule
+        assertThat(failed.get(0).get("sqlstate")).isEqualTo("23514");
+    }
+
+    @Test @Order(307)
+    void registerDocumentMany_fullPage_profileBaseline() {
+        // nexus-oub13: local SQL baseline for the live ~38s/page observation.
+        // Registers a real 1000-doc page into a catalog pre-seeded with 5,000
+        // rows (STORED fts tsvector + GIN + 5 btree indexes all pay per row).
+        // NO wall-clock assertion (shared-runner flake class, nexus-77fqp) —
+        // the register_many_timing log line this exercises IS the deliverable;
+        // correctness asserts only. Local reference on a dev box: the full
+        // page lands in the low hundreds of ms, ~100x under the live number,
+        // which localizes the live sink OFF the SQL path (WAN/pooler/client
+        // stages — see the bead).
+        final String prefix = "rm-profile";
+        for (int page = 0; page < 5; page++) {
+            java.util.List<Map<String, Object>> seed = new java.util.ArrayList<>();
+            for (int i = 0; i < 1000; i++) {
+                int n = page * 1000 + i;
+                seed.add(regDoc("seed doc " + n + " with a realistic title string",
+                                "src/pkg" + (n % 40) + "/mod" + n + ".py"));
+            }
+            var got = repo.registerDocumentMany(TENANT_A, prefix, seed);
+            assertThat(got).hasSize(1000);
+        }
+        // The measured page: 1000 fresh docs against 5k existing rows.
+        java.util.List<Map<String, Object>> pageDocs = new java.util.ArrayList<>();
+        for (int i = 0; i < 1000; i++) {
+            pageDocs.add(regDoc("measured doc " + i,
+                                "src/measured/m" + i + ".py"));
+        }
+        long t0 = System.nanoTime();
+        var tumblers = repo.registerDocumentMany(TENANT_A, prefix, pageDocs);
+        long ms = (System.nanoTime() - t0) / 1_000_000;
+        assertThat(tumblers).hasSize(1000);
+        assertThat(tumblers.get(0)).isEqualTo(prefix + ".5001");
+        assertThat(tumblers.get(999)).isEqualTo(prefix + ".6000");
+        // Idempotent re-send of the same page: no new seq consumed, same tumblers.
+        var again = repo.registerDocumentMany(TENANT_A, prefix, pageDocs);
+        assertThat(again).isEqualTo(tumblers);
+        // The measured wall lands in register_many_timing's total_ms log line
+        // (structured logging convention); `ms` is asserted only for sanity of
+        // the timer plumbing, never as a perf bound (nexus-77fqp flake class).
+        assertThat(ms).isNotNegative();
+    }
+
     @Test @Order(301)
     void registerDocumentMany_mixedNewAndExisting_preservesOrderAndSkipsSeqForExisting() {
         final String prefix = "rm-mixed";

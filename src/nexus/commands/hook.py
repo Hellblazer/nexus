@@ -176,7 +176,15 @@ def session_end_detach_cmd() -> None:
     default=False,
     help="Emit aggregated stats as JSON instead of a human table.",
 )
-def routing_stats_cmd(log_path: str | None, as_json: bool) -> None:
+@click.option(
+    "--escapes",
+    "show_escapes",
+    is_flag=True,
+    default=False,
+    help="List the escape events with their # routing-allow: reasons "
+    "instead of aggregate stats (the audit surface for escape over-use).",
+)
+def routing_stats_cmd(log_path: str | None, as_json: bool, show_escapes: bool) -> None:
     """Aggregate the routing-hook log into per-rule fire / deny / escape stats.
 
     RDR-121 Phase 3. Reads JSONL records produced by the routing hook
@@ -187,27 +195,73 @@ def routing_stats_cmd(log_path: str | None, as_json: bool) -> None:
     """
     import pathlib as _pathlib  # noqa: PLC0415 — stdlib pathlib deferred to subcommand scope
 
-    from nexus.routing_stats import aggregate, default_log_path, stats_to_json  # noqa: PLC0415 — deferred import; routing_stats only needed in this subcommand
+    from nexus.routing_stats import (  # noqa: PLC0415 — deferred import; routing_stats only needed in this subcommand
+        aggregate_detailed,
+        default_log_path,
+        escape_events,
+        registered_rules,
+        stats_to_json,
+    )
 
     path = _pathlib.Path(log_path) if log_path else default_log_path()
-    stats = aggregate(path)
+
+    if show_escapes:
+        events = escape_events(path)
+        if as_json:
+            click.echo(json.dumps(events, indent=2))
+            return
+        if not events:
+            click.echo(f"No escape events recorded at {path}.")
+            return
+        for ev in events:
+            reason = ev["reason"] or "(reason not captured — pre-mzvwa.9 event)"
+            click.echo(f"{ev['ts']}  {ev['rule']}: {reason}")
+        click.echo()
+        click.echo(f"{len(events)} escape event(s). Source: {path}")
+        return
+
+    stats, selftest_excluded = aggregate_detailed(path)
 
     if as_json:
-        click.echo(json.dumps(stats_to_json(stats), indent=2, sort_keys=True))
+        payload = {
+            "rules": stats_to_json(stats),
+            "selftest_excluded": selftest_excluded,
+        }
+        active = registered_rules()
+        if active is not None:
+            payload["unregistered_rules"] = sorted(set(stats) - active)
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
         return
 
     if not stats:
         click.echo(f"No routing-hook events recorded at {path}.")
         return
 
+    # nexus-mzvwa.9: the log is append-only history — rules whose hooks.json
+    # registration has since been removed keep their rows forever. Mark them
+    # so a stats row is never read as "this hook is live" (the mzvwa.7 soak
+    # review's own miss: registry.yaml is documentation, hooks.json is the
+    # registration surface).
+    active = registered_rules()
+
     header = f"{'rule':<48} {'total':>6} {'allow':>6} {'deny':>6} {'escape':>6} {'block%':>7} {'esc%':>6}"
     click.echo(header)
     click.echo("-" * len(header))
     for rule in sorted(stats):
         s = stats[rule]
+        label = rule[:48]
+        if active is not None and rule not in active:
+            label = (rule + " (unregistered)")[:48]
         click.echo(
-            f"{rule[:48]:<48} {s.total:>6d} {s.allow:>6d} {s.deny:>6d} "
+            f"{label:<48} {s.total:>6d} {s.allow:>6d} {s.deny:>6d} "
             f"{s.escape:>6d} {s.block_rate * 100:>6.1f}% {s.escape_rate * 100:>5.1f}%"
         )
     click.echo()
+    if selftest_excluded:
+        click.echo(
+            f"Note: {selftest_excluded} fail-ladder self-test event(s) excluded "
+            "(suite-written test_rule/unknown pairs; see nexus-mzvwa.9)."
+        )
+    if active is None:
+        click.echo("Note: no hooks.json found — registration cross-check skipped.")
     click.echo(f"Source: {path}")
