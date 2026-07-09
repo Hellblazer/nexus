@@ -30,6 +30,8 @@ from typing import Callable
 import httpx
 import structlog
 
+from nexus.engine_version import REQUIRED_ENGINE_VERSION, parse_engine_version
+
 _log = structlog.get_logger(__name__)
 
 #: Where the managed multitenant nexus service lives by default. Overridable per
@@ -38,28 +40,21 @@ _log = structlog.get_logger(__name__)
 #: every client at a staging or self-hosted managed deployment.
 DEFAULT_MANAGED_SERVICE_URL = "https://api.conexus-nexus.com"
 
-#: Minimum managed-service RELEASE this client speaks (nexus-x2g1z, 2026-06-24).
-#:
-#: The gate pins on the dedicated ``release_version`` field of the ``/version``
-#: handshake, NOT ``app_version``. ``app_version`` is the JAR's frozen Maven
-#: coordinate ``1.0-SNAPSHOT`` (parses to ``(1,0,0)``) — pinning on it was a
-#: structural NO-OP (any build cleared it). ``release_version`` is the real
-#: release identity: stamped from the ``engine-service-vX.Y.Z`` git tag at
-#: build time and ``null``/dev/SNAPSHOT on unstamped builds, so it FAILS CLOSED
-#: by construction (mirrors ``guided_upgrade.verify_service_version`` /
-#: RDR-002 for the native binary).
-#:
-#: This is the MANAGED cloud floor, deliberately SEPARATE from the native floor
-#: ``guided_upgrade.REQUIRED_RELEASE_VERSION`` (different topology / deploy
-#: cadence) — both currently ``(0,1,8)`` but free to move independently.
-#:
 #: CROSS-REPO CONTRACT (conexus RDR-001): the managed multitenant service MUST
 #: expose ``GET /version`` UNAUTHENTICATED with ``release_version`` (and
 #: ``app_version``). conexus relay [4566] (2026-06-23) confirmed the managed
 #: ``/version`` now returns ``release_version`` and was trimmed to
 #: ``{app_version, release_version}`` (the embedding-mode / model / schema
 #: disclosure was dropped from the public endpoint).
-MIN_MANAGED_RELEASE_VERSION: tuple[int, int, int] = (0, 1, 8)
+#:
+#: The version floor itself (:data:`nexus.engine_version.REQUIRED_ENGINE_VERSION`)
+#: is the SAME floor the native/local path enforces
+#: (:func:`nexus.migration.guided_upgrade.verify_service_version`) — nexus-b6qlf
+#: unified what used to be two independently-drifting constants (this module's
+#: own ``MIN_MANAGED_RELEASE_VERSION`` was introduced at ``(0,1,8)`` in
+#: nexus-x2g1z, 2026-06-24, and never bumped again while the native floor
+#: moved to ``(0,1,34)`` — exactly the drift a single source of truth
+#: prevents).
 
 #: Probe timeout — short, so an unreachable managed service fails fast and loud
 #: rather than hanging a CLI command.
@@ -132,38 +127,6 @@ def resolve_managed_endpoint(*, require_token: bool = True) -> tuple[str, str | 
     return base, token
 
 
-def _parse_release_version(raw: str | None) -> tuple[int, int, int] | None:
-    """FAIL-CLOSED ``X.Y.Z`` parse for the managed ``release_version`` gate.
-
-    Returns ``None`` (caller refuses) for a blank, ``snapshot``/``dev``-qualified,
-    or otherwise non-clean-release value — a dev/unstamped engine is by
-    definition older than any required release. Trailing qualifiers
-    (``-rc1``, ``+meta``, a 4th segment) are rejected, not silently accepted.
-    Mirrors ``guided_upgrade._parse_semver`` (RDR-002); kept local to avoid a
-    ``db`` -> ``migration`` import.
-    """
-    if not raw:
-        return None
-    s = raw.strip()
-    if not s:
-        return None
-    if s[:1] in ("v", "V"):
-        s = s[1:]
-    lower = s.lower()
-    if "snapshot" in lower or "dev" in lower:
-        return None
-    parts = s.split(".")
-    if len(parts) != 3:
-        return None
-    try:
-        major, minor, patch = (int(p) for p in parts)
-    except ValueError:
-        return None
-    if major < 0 or minor < 0 or patch < 0:
-        return None
-    return (major, minor, patch)
-
-
 def probe_managed_service(
     *,
     base_url: str | None = None,
@@ -175,7 +138,7 @@ def probe_managed_service(
 
     * Unreachable (connect / TLS / DNS / timeout) → :class:`ManagedServiceUnreachable`.
     * Non-200, a missing / null / dev / SNAPSHOT / unparseable ``release_version``,
-      or a ``release_version`` below :data:`MIN_MANAGED_RELEASE_VERSION` →
+      or a ``release_version`` below :data:`nexus.engine_version.REQUIRED_ENGINE_VERSION` →
       :class:`ManagedServiceIncompatible` (the gate FAILS CLOSED). ``app_version``
       is informational only and is not gated (nexus-x2g1z).
     * Otherwise returns the parsed :class:`ManagedCapabilities`.
@@ -231,9 +194,9 @@ def probe_managed_service(
     # means a dev/unstamped engine, which is by definition below the floor.
     release_raw = body.get("release_version")
     release_version = str(release_raw).strip() if isinstance(release_raw, str) else ""
-    parsed = _parse_release_version(release_version)
+    parsed = parse_engine_version(release_version)
     if parsed is None:
-        floor = ".".join(str(p) for p in MIN_MANAGED_RELEASE_VERSION)
+        floor = ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
         raise ManagedServiceIncompatible(
             f"managed nexus service at {base_url} reported no usable "
             f"release_version on /version (got {release_raw!r}) — a "
@@ -241,8 +204,8 @@ def probe_managed_service(
             f"this client supports (v{floor}). Confirm NX_SERVICE_URL points "
             "at a current nexus managed service."
         )
-    if parsed < MIN_MANAGED_RELEASE_VERSION:
-        floor = ".".join(str(p) for p in MIN_MANAGED_RELEASE_VERSION)
+    if parsed < REQUIRED_ENGINE_VERSION:
+        floor = ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
         raise ManagedServiceIncompatible(
             f"managed nexus service at {base_url} is release_version "
             f"{release_version!r}, below the minimum this client supports "

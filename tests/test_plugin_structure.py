@@ -866,11 +866,13 @@ class TestEnginePinParity:
     * ``PINNED_SERVICE_TAG`` (``src/nexus/daemon/binary_install.py``) — the
       ``engine-service-vX.Y.Z`` GitHub release tag this build auto-installs.
       ``None`` by design pre-6.0 (no real engine-service release exists yet).
-    * ``REQUIRED_RELEASE_VERSION`` (``src/nexus/migration/guided_upgrade.py``)
-      — the minimum engine version the guided upgrade hands off to (RDR-002).
+    * ``REQUIRED_ENGINE_VERSION`` (``src/nexus/engine_version.py``) — the
+      minimum engine version any nexus client (native/local guided-upgrade
+      handoff OR the managed-cloud probe) requires (RDR-002; unified single
+      source of truth, nexus-b6qlf).
 
     Without a cross-check, a release could ship a client pinned to an engine
-    tag whose numeric version is BELOW ``REQUIRED_RELEASE_VERSION`` — a client
+    tag whose numeric version is BELOW ``REQUIRED_ENGINE_VERSION`` — a client
     that auto-installs an engine it then refuses as too old. These assertions
     catch that, and gate the "pin must be set" requirement on the 6.0 release
     boundary so the suite stays green pre-6.0 while the pin is legitimately
@@ -878,7 +880,7 @@ class TestEnginePinParity:
     """
 
     def test_pinned_tag_at_or_above_required_release(self) -> None:
-        """If a pin is set, its numeric version must be >= REQUIRED_RELEASE_VERSION.
+        """If a pin is set, its numeric version must be >= REQUIRED_ENGINE_VERSION.
 
         Skipped only while ``PINNED_SERVICE_TAG is None`` (no engine-service
         release pinned yet) — NOT keyed on the major version, so a pin set
@@ -887,10 +889,7 @@ class TestEnginePinParity:
         ``engine-service-vX.Y.Z``, not ``vX.Y.Z``.
         """
         from nexus.daemon.binary_install import PINNED_SERVICE_TAG, TAG_NAMESPACE_PREFIX
-        from nexus.migration.guided_upgrade import (
-            REQUIRED_RELEASE_VERSION,
-            _parse_semver,
-        )
+        from nexus.engine_version import REQUIRED_ENGINE_VERSION, parse_engine_version
 
         if PINNED_SERVICE_TAG is None:
             pytest.skip(
@@ -903,17 +902,17 @@ class TestEnginePinParity:
             f"PINNED_SERVICE_TAG {tag!r} must carry the "
             f"{TAG_NAMESPACE_PREFIX!r} namespace prefix"
         )
-        parsed = _parse_semver(tag[len(TAG_NAMESPACE_PREFIX):])
+        parsed = parse_engine_version(tag[len(TAG_NAMESPACE_PREFIX):])
         assert parsed is not None, (
             f"PINNED_SERVICE_TAG {tag!r} is not a clean release semver "
             f"(blank/SNAPSHOT/dev/pre-release are rejected fail-closed)"
         )
-        assert parsed >= REQUIRED_RELEASE_VERSION, (
+        assert parsed >= REQUIRED_ENGINE_VERSION, (
             f"PINNED_SERVICE_TAG {tag!r} -> {parsed} is BELOW "
-            f"REQUIRED_RELEASE_VERSION {REQUIRED_RELEASE_VERSION}: the client "
+            f"REQUIRED_ENGINE_VERSION {REQUIRED_ENGINE_VERSION}: the client "
             f"would auto-install an engine it then refuses as too old. Bump "
             f"PINNED_SERVICE_TAG to an engine-service release >= "
-            f"v{'.'.join(map(str, REQUIRED_RELEASE_VERSION))}."
+            f"v{'.'.join(map(str, REQUIRED_ENGINE_VERSION))}."
         )
 
     @pytest.mark.xfail(

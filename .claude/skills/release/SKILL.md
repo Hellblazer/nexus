@@ -11,7 +11,7 @@ Follow every step in order. Do not skip or reorder. Authority: CLAUDE.md § Rele
 
 ### 0. Engine-freshness gate (PREREQUISITE — the two-lifecycle check)
 
-The Java **engine-service** is a SEPARATE release artifact from this PyPI release: its own `engine-service-vX.Y.Z` tag fires `engine-service-release.yml`, version is tag-stamped (no manifest bump), and it is **decoupled from the luxe6 / RDR-155-P4a develop release boundary**. This PyPI release PINS one engine tag — `PINNED_SERVICE_TAG` (`src/nexus/daemon/binary_install.py`, Step 3) plus the `REQUIRED_RELEASE_VERSION` floor (`src/nexus/migration/guided_upgrade.py`). Before cutting the PyPI release, verify the pinned engine is cloud-current — do NOT ship on a stale, un-cloud-validated engine:
+The Java **engine-service** is a SEPARATE release artifact from this PyPI release: its own `engine-service-vX.Y.Z` tag fires `engine-service-release.yml`, version is tag-stamped (no manifest bump), and it is **decoupled from the luxe6 / RDR-155-P4a develop release boundary**. This PyPI release PINS one engine tag — `PINNED_SERVICE_TAG` (`src/nexus/daemon/binary_install.py`, Step 3) plus the `REQUIRED_ENGINE_VERSION` floor (`src/nexus/engine_version.py`). Before cutting the PyPI release, verify the pinned engine is cloud-current — do NOT ship on a stale, un-cloud-validated engine:
 
 ```bash
 git tag -l "engine-service-v*" | sort -V | tail -1          # last engine tag
@@ -85,7 +85,7 @@ CI enforces parity. Missing any one of these fails the marketplace-version-match
 
 Optional but recommended: also bump `plugins[].source.sha` to the 40-char SHA of the release commit, for protection against tag force-push. Add post-commit (Step 8a, see below).
 
-**Engine-service pin (conditional 8th target — nexus-3rq00).** The Python/Java boundary rides one more hand-edited constant that sits OUTSIDE the seven-manifest parity gate: `PINNED_SERVICE_TAG` in `src/nexus/daemon/binary_install.py`, the `engine-service-vX.Y.Z` release this build auto-installs. It is NOT bumped every release — only when the compatible engine-service version advances. When this release ships a new engine, bump `PINNED_SERVICE_TAG` in lock-step. Two invariants the `TestEnginePinParity` test enforces: (1) `PINNED_SERVICE_TAG`'s numeric version must be `>= REQUIRED_RELEASE_VERSION` (`src/nexus/migration/guided_upgrade.py`) — never ship a client that auto-installs an engine it then refuses as too old; (2) at the 6.0 release boundary the pin must be non-None (it is intentionally `None` pre-6.0). A release that bumps pyproject to 6.x without setting a real pin trips CI.
+**Engine-service pin (conditional 8th target — nexus-3rq00).** The Python/Java boundary rides one more hand-edited constant that sits OUTSIDE the seven-manifest parity gate: `PINNED_SERVICE_TAG` in `src/nexus/daemon/binary_install.py`, the `engine-service-vX.Y.Z` release this build auto-installs. It is NOT bumped every release — only when the compatible engine-service version advances. When this release ships a new engine, bump `PINNED_SERVICE_TAG` in lock-step. Two invariants the `TestEnginePinParity` test enforces: (1) `PINNED_SERVICE_TAG`'s numeric version must be `>= REQUIRED_ENGINE_VERSION` (`src/nexus/engine_version.py`) — never ship a client that auto-installs an engine it then refuses as too old; (2) at the 6.0 release boundary the pin must be non-None (it is intentionally `None` pre-6.0). A release that bumps pyproject to 6.x without setting a real pin trips CI.
 
 Semver: MAJOR for breaking, MINOR for new features, PATCH for bug fixes.
 

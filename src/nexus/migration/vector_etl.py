@@ -959,7 +959,7 @@ def probe_ingest_cloud_support(
     ``release_version >= floor`` compare — rather than inventing a bespoke
     ingest-cloud capability probe. This is the cheapest reliable signal
     available: ``/version`` is already the established engine-capability
-    handshake in this codebase (``REQUIRED_RELEASE_VERSION``, the
+    handshake in this codebase (``nexus.engine_version.REQUIRED_ENGINE_VERSION``, the
     ``/v1/telemetry/ids/probe`` mixed-fleet precedent in ``orchestrator.py``
     used the target ENDPOINT itself as the 404-tolerant probe, which is not
     available here — ``POST /v1/migration/ingest-cloud`` already existed
