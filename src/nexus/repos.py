@@ -382,10 +382,22 @@ def list_repos_dual(
     if cat is not None:
         # nexus-qnp5s: list_owners_by_type() is implemented on both SQLite
         # Catalog and HttpCatalogClient — no raw _db access.
-        for o in cat.list_owners_by_type("repo"):
-            rr = o.get("repo_root") or ""
-            if rr:
-                cat_paths.add(rr)
+        #
+        # BEST-EFFORT (2026-07-08, found by the upgrade-shakeout drift
+        # cross-check): in service mode the reader factory returns a LAZY
+        # proxy whose first real call resolves the endpoint — on an install
+        # without a reachable service that RAISES here, and a caller-level
+        # except (health.py's git-hook check) used to lose the REGISTRY leg
+        # with it, blinding doctor's stanza-drift check entirely. The union
+        # must degrade to registry-only, not to nothing.
+        try:
+            for o in cat.list_owners_by_type("repo"):
+                rr = o.get("repo_root") or ""
+                if rr:
+                    cat_paths.add(rr)
+        except Exception:  # noqa: BLE001 — catalog leg is best-effort; registry leg must survive
+            _log.debug("repos_list_dual_catalog_leg_failed", exc_info=True)
+            cat_paths = set()
 
     reg_paths: set[str] = set(_read_repos_json(registry_path).keys())
 
