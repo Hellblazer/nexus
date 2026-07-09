@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.5.1] - 2026-07-08
+
 ### Fixed
 
 - **Engine pin advanced to engine-service-v0.1.35** (nexus-x6kdz). v0.1.34's manifest writers never stamped `catalog_document_chunks.collection` — the combined-query join key — so a fresh install indexing new documents reproduced the silently-empty combined-query state locally. v0.1.35 stamps at every write seam and its catalog-014 boot changeset repairs existing rows (delegating to `nexus.manifest_backfill()`). `REQUIRED_RELEASE_VERSION` stays (0,1,34): the client does not require the new engine, it distributes it. Existing local installs can pull the fixed engine directly: `nx daemon service install-binary engine-service-v0.1.35`.
