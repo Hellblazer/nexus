@@ -49,6 +49,11 @@ class TokenAdminHandlerScopeGuardTest {
         assertScopeRejected("data");
     }
 
+    @Test
+    void mintLockedScope_directDispatch_403OnEveryRoute() throws Exception {
+        assertScopeRejected("mint-locked");
+    }
+
     private void assertScopeRejected(String scope) throws Exception {
         var handler = new TokenAdminHandler(null, null, Clock.systemUTC());
         for (String route : ROUTES) {

@@ -100,7 +100,8 @@ public final class TokenAdminHandler implements HttpHandler {
         // for data routes but must never administer credentials — a leaked data
         // token stays "one tenant's data, one TTL window").
         String callerScope = RequestContext.scope();
-        if (TokenStore.SCOPE_MINT.equals(callerScope) || TokenStore.SCOPE_DATA.equals(callerScope)) {
+        if (TokenStore.SCOPE_MINT.equals(callerScope) || TokenStore.SCOPE_MINT_LOCKED.equals(callerScope)
+                || TokenStore.SCOPE_DATA.equals(callerScope)) {
             log.debug("event=token_admin_denied reason=scope_forbidden_on_admin_surface scope={}",
                       callerScope);
             HttpUtil.send(exchange, 403, json(Map.of(
@@ -161,11 +162,14 @@ public final class TokenAdminHandler implements HttpHandler {
         if (scope == null || scope.isBlank()) {
             scope = TokenStore.SCOPE_TENANT;
         }
-        if (!TokenStore.SCOPE_TENANT.equals(scope) && !TokenStore.SCOPE_MINT.equals(scope)) {
+        if (!TokenStore.SCOPE_TENANT.equals(scope) && !TokenStore.SCOPE_MINT.equals(scope)
+                && !TokenStore.SCOPE_MINT_LOCKED.equals(scope)) {
             throw new IllegalArgumentException(
-                "invalid scope for issue: '" + scope + "' (only 'tenant' and 'mint' are issuable)");
+                "invalid scope for issue: '" + scope
+                    + "' (only 'tenant', 'mint', and 'mint-locked' are issuable)");
         }
-        if (TokenStore.SCOPE_MINT.equals(scope) && !requireOperator(ex)) {
+        if ((TokenStore.SCOPE_MINT.equals(scope) || TokenStore.SCOPE_MINT_LOCKED.equals(scope))
+                && !requireOperator(ex)) {
             return;
         }
         TokenStore.IssuedToken issued = store.issueToken(tenant, label, ttl, scope);

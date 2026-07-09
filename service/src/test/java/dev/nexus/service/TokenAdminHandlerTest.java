@@ -460,6 +460,22 @@ class TokenAdminHandlerTest {
     }
 
     @Test
+    void issueScope_mintLocked_isOperatorOnly() throws Exception {
+        // nexus-xidcq (RDR-005 2a): mint-locked issuance mirrors mint's operator-only gate.
+        JsonNode r = postJson("/v1/service-tokens/issue",
+            "{\"tenant\":\"edge-868dq-locked\",\"label\":\"edge-cred-locked\",\"scope\":\"mint-locked\"}");
+        assertThat(scopeOf(r.get("token_hash").asText())).isEqualTo("mint-locked");
+
+        String tokA = postJson("/v1/tenants/create", "{\"name\":\"scope-esc-locked-a\"}")
+            .get("token").asText();
+        var resp = sendAs(tokA, "/v1/service-tokens/issue",
+            "{\"tenant\":\"scope-esc-locked-a\",\"scope\":\"mint-locked\"}");
+        assertThat(resp.statusCode())
+            .as("non-operator mint-locked-scope issuance must be 403: %s", resp.body())
+            .isEqualTo(403);
+    }
+
+    @Test
     void issueScope_defaultAndTenant_unchanged() throws Exception {
         // No scope field -> the pre-868dq default.
         JsonNode noScope = postJson("/v1/service-tokens/issue", "{\"tenant\":\"scope-default\"}");
@@ -495,6 +511,23 @@ class TokenAdminHandlerTest {
             var resp = sendAs(mintRaw, route, "{}");
             assertThat(resp.statusCode())
                 .as("mint-scoped bearer on %s must be 403: %s", route, resp.body())
+                .isEqualTo(403);
+        }
+    }
+
+    @Test
+    void mintLockedScopedBearer_rejectedOnEveryAdminRoute() throws Exception {
+        JsonNode r = postJson("/v1/service-tokens/issue",
+            "{\"tenant\":\"edge-lockout-locked\",\"scope\":\"mint-locked\"}");
+        String mintLockedRaw = r.get("token").asText();
+        // Same reasoning as mintScopedBearer_rejectedOnEveryAdminRoute — mint-locked is
+        // rejected on ALL admin routes (AuthFilter choke point + handler layer 2).
+        for (String route : new String[] {"/v1/tenants/create", "/v1/service-tokens/issue",
+                                          "/v1/service-tokens/rotate", "/v1/service-tokens/revoke",
+                                          "/v1/service-tokens/list"}) {
+            var resp = sendAs(mintLockedRaw, route, "{}");
+            assertThat(resp.statusCode())
+                .as("mint-locked-scoped bearer on %s must be 403: %s", route, resp.body())
                 .isEqualTo(403);
         }
     }

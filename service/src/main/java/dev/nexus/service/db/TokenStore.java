@@ -51,7 +51,7 @@ public final class TokenStore {
     // Server-assigned; NEVER derived from the client-supplied label (a label-
     // derived privilege would let any /v1/service-tokens/issue caller
     // self-escalate by crafting a label). The DB CHECK constraint mirrors this
-    // set (service-tokens-003).
+    // set (service-tokens-003, extended by service-tokens-004 for mint-locked).
 
     /** The single operator credential (bootstrap). Cross-tenant admin. */
     public static final String SCOPE_ROOT = "root";
@@ -59,11 +59,14 @@ public final class TokenStore {
     public static final String SCOPE_TENANT = "tenant";
     /** Mint-only credential (conexus edge): may ONLY call POST /v1/data-tokens/mint. */
     public static final String SCOPE_MINT = "mint";
+    /** Tenant-locked mint credential (RDR-005 2a, nexus-xidcq): like SCOPE_MINT but may
+     *  ONLY mint data tokens for its OWN bound tenant — no cross-tenant mint. */
+    public static final String SCOPE_MINT_LOCKED = "mint-locked";
     /** Short-TTL per-tenant data token minted by a mint credential. */
     public static final String SCOPE_DATA = "data";
 
     private static final java.util.Set<String> VALID_SCOPES =
-        java.util.Set.of(SCOPE_ROOT, SCOPE_TENANT, SCOPE_MINT, SCOPE_DATA);
+        java.util.Set.of(SCOPE_ROOT, SCOPE_TENANT, SCOPE_MINT, SCOPE_MINT_LOCKED, SCOPE_DATA);
 
     /**
      * A live (non-revoked) service token: its tenant, optional expiry instant, and

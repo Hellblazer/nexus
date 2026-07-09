@@ -119,13 +119,13 @@ public final class DataTokenHandler implements HttpHandler {
     }
 
     private void handleMint(HttpExchange ex) throws IOException {
-        // ONLY a mint-scoped credential may mint (plan-author decision 4: root is
-        // deliberately excluded — the operator issues itself a mint credential).
-        if (!TokenStore.SCOPE_MINT.equals(RequestContext.scope())) {
-            log.debug("event=data_token_denied reason=mint_scope_required scope={}",
-                      RequestContext.scope());
+        // ONLY a mint- or mint-locked-scoped credential may mint (plan-author decision 4:
+        // root is deliberately excluded — the operator issues itself a mint credential).
+        String scope = RequestContext.scope();
+        if (!TokenStore.SCOPE_MINT.equals(scope) && !TokenStore.SCOPE_MINT_LOCKED.equals(scope)) {
+            log.debug("event=data_token_denied reason=mint_scope_required scope={}", scope);
             HttpUtil.send(ex, 403, json(Map.of(
-                "error", "forbidden: data-token mint requires a 'mint'-scoped credential")));
+                "error", "forbidden: data-token mint requires a 'mint' or 'mint-locked'-scoped credential")));
             return;
         }
 
@@ -142,6 +142,19 @@ public final class DataTokenHandler implements HttpHandler {
         if (dev.nexus.service.db.TenantConstants.BOOTSTRAP_ANY_TENANT.equals(tenant)) {
             throw new IllegalArgumentException(
                 "tenant '*' is a reserved sentinel and cannot be used");
+        }
+        // nexus-xidcq (RDR-005 2a): a mint-locked credential may ONLY mint data tokens
+        // for its OWN bound tenant — no cross-tenant mint. Enforced as early as tenant
+        // is known (right after wildcard-sentinel validation) and BEFORE the rate-limit
+        // debit (validation-before-debit pin): an invalid cross-tenant request must not
+        // consume the credential's mint budget.
+        if (TokenStore.SCOPE_MINT_LOCKED.equals(scope) && !tenant.equals(RequestContext.tenant())) {
+            log.debug("event=data_token_denied reason=mint_locked_cross_tenant "
+                      + "credential_tenant={} requested_tenant={}", RequestContext.tenant(), tenant);
+            HttpUtil.send(ex, 403, json(Map.of(
+                "error", "forbidden: this mint credential is locked to tenant '" + RequestContext.tenant()
+                    + "' and cannot mint for tenant '" + tenant + "'")));
+            return;
         }
         long ttlSeconds = DEFAULT_TTL_SECONDS;
         Object ttlRaw = body.get("ttl_seconds");

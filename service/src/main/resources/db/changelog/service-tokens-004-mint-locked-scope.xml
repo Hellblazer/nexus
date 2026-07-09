@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-xidcq — tenant-locked mint credential (RDR-005 2a). Adds 'mint-locked' to the
+    scope CHECK constraint service-tokens-003 established (root|tenant|mint|data).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="service-tokens-004-1" author="nexus-xidcq">
+        <comment>
+            Add 'mint-locked' to the service_tokens scope vocabulary — a tenant-bound
+            mint credential (RDR-005 2a) that may only mint data tokens for its own
+            bound tenant, not cross-tenant like plain 'mint'.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.service_tokens DROP CONSTRAINT IF EXISTS chk_service_tokens_scope;
+ALTER TABLE nexus.service_tokens ADD CONSTRAINT chk_service_tokens_scope
+    CHECK (scope IN ('root','tenant','mint','data','mint-locked'));
+        </sql>
+        <rollback>
+ALTER TABLE nexus.service_tokens DROP CONSTRAINT IF EXISTS chk_service_tokens_scope;
+ALTER TABLE nexus.service_tokens ADD CONSTRAINT chk_service_tokens_scope
+    CHECK (scope IN ('root','tenant','mint','data'));
+        </rollback>
+    </changeSet>
+</databaseChangeLog>
