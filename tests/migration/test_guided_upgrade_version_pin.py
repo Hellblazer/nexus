@@ -62,7 +62,7 @@ class TestParseSemver:
 
 class TestVerifyServiceVersion:
     def test_required_floor_is_0134(self) -> None:
-        # (0,1,5)->(0,1,8) for nexus-x2g1z; ->(0,1,34) for 6.4.1: the client
+        # (0,1,5)->(0,1,8) for nexus-x2g1z; ->(0,1,34) for 6.5.0: the client
         # hard-requires catalog-012 (graph-hop `where` — pre-012 engines
         # silently ignore the key, the H2 version-skew failure class) and
         # catalog-013-1b (pre-1b engines fail boot VALIDATE on tenants with
