@@ -222,7 +222,7 @@ Conformant collection names (RDR-103) follow a 4-segment shape:
 
 **Legacy shape (fallback, pre-RDR-103)**: 2-segment `<content_type>__<repo>-<hash>`, e.g. `code__myrepo-a1b2c3`. Still present on collections created before the conformance migration; new collections use the 4-segment shape above.
 
-A collection is indexed and queried under the same embedding model — mixing models across one vector space produces near-random similarity scores. The voyage-capability gate (`nx guided-upgrade`) refuses to migrate voyage-model collections onto a bge-only service for exactly this reason.
+A collection is indexed and queried under the same embedding model — mixing models across one vector space produces near-random similarity scores. The voyage-capability gate (`nx guided-upgrade`) refuses to migrate genuine voyage-model collections onto a bge-only service for exactly this reason. The same principle is enforced at query time: multi-collection combined queries are dispatched per embedding-model group by the MCP layer (a corpus spanning `voyage-code-3` and `voyage-context-3` collections issues one query per model and merges results, nexus-3l6gz), and the service rejects a mixed-model collection list outright (`requireHomogeneousModel`, engine-service ≥ 0.1.36).
 
 **TTL and expiry**: `nx store expire` removes expired entries from `knowledge__*` collections only. Code, docs, and RDR collections are never expired — they are refreshed via re-indexing.
 
