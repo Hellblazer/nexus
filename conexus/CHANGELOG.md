@@ -4,6 +4,10 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.5.0] - 2026-07-08
+
+- Plugin version aligned with conexus 6.5.0. Plugin-side: the SessionStart hook now surfaces a pending Chroma→PostgreSQL substrate migration into the session context (nexus-0rwwv), so the agent points users at `nx guided-upgrade`.
+
 ## [Unreleased]
 
 ## [6.4.0] - 2026-07-07

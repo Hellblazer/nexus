@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.5.0] - 2026-07-08
+
 ### Added
 
 - **A pending storage migration is now pointed at from every surface a 5.x→6.x upgrader actually crosses** (nexus-0rwwv). Two upgrade commands with no bridge confused users: `nx upgrade` (routine in-place schema migrations) reported "complete" while the one-time Chroma→PostgreSQL cutover sat pending — and the user's vector data sat dark behind an endpoint error whose stock remedy ("start the supervisor") was wrong for them. Four layers, auto-DETECT without auto-EXECUTE (the cutover keeps its consent gate and cost preview):
