@@ -6,6 +6,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.5.2] - 2026-07-09
+
+### Fixed
+
+- **`nx guided-upgrade` no longer demands a Voyage key for mislabeled local collections** (nexus-119p9, GH #1381). 6.5.0's measured-dim classifier fix (nexus-nb7hr) taught detection to sample a stored vector, but the voyage-capability gate still keyed on collection *names* and exited before the migration's auto-remap could run — so voyage-*named* collections holding ordinary local bge-768 vectors (the pre-RDR-109 mislabel class) reproduced the identical "cannot serve voyage" dead end on 6.5.x. The gate now honors the measured dimension: measured-bge collections route to the free local remap; genuinely-voyage collections (measured 1024) still gate; unprobeable collections stay fail-closed.
+- **Multi-model corpus combined queries no longer return empty** (nexus-3l6gz, nexus-hg745). `search_metadata_scoped`, `search_graph_hop`, and `query()`'s catalog-routed service branch passed the full resolved collection list — spanning `voyage-code-3` AND `voyage-context-3` — in ONE service call; the service guards only vector *dimension* (both models are 1024-dim), so the query was embedded with whichever model owned the first collection and ranked across incompatible embedding spaces, silently dropping results (e.g. `corpus="code,docs"` returning "No documents found" while `corpus="code"` returned rows). The MCP layer now groups collections by embedding model, issues one call per group, and merges by distance with global dedup/limit. Documented semantics: all-or-nothing on partial group failure; cross-model distances are not rigorously comparable (accepted caveat, matching `search_topic_scoped`).
+- **Engine pin advanced to engine-service-v0.1.36.** Carries two engine-side hardenings: combined-query endpoints now 400 loudly on a mixed-embedding-model collection list instead of silently mis-embedding (`requireHomogeneousModel`, nexus-9y5om), and the new tenant-locked mint-credential scope (below). `REQUIRED_RELEASE_VERSION` stays (0,1,34).
+
+### Added
+
+- **`nx service token issue --scope mint-locked`** (nexus-xidcq, conexus RDR-005 2a; requires engine-service ≥ 0.1.36). Tenant-locked variant of the data-token mint credential: identical surface confinement to `mint`, but it can mint only for its own bound tenant — a cross-tenant mint attempt gets a 403 and consumes no rate-limit budget. Existing `mint` (cross-tenant) credentials are unchanged.
+- **Combined-query end-to-end tripwire** (nexus-4nflf). A new integration gate walks register → chunk upsert → manifest write/append/import through the public HTTP API against a real service and asserts `search_metadata_scoped` / `search_graph_hop` visibility — the test layer whose absence let the x6kdz collection-stamp bug ship invisibly. Wired into the path-gated write-seam CI job with a fail-loud non-vacuity assert.
+- **FORCE-RLS changelog lint** (nexus-php10). A unit test in the required CI suite parses the whole Liquibase chain and fails on migration-time row-DML against a FORCE ROW LEVEL SECURITY table unless it is toggle-wrapped (the catalog-013-1b pattern), backstopped by a same-changeset RLS-bypassing integrity proof, or explicitly grandfathered — the silent-no-op class behind the v0.1.33 deploy incident (nexus-1wjmq) can no longer grow.
+
 ## [6.5.1] - 2026-07-08
 
 ### Fixed
