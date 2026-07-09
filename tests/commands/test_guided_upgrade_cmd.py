@@ -47,6 +47,40 @@ def _preflight_voyage() -> PreflightDetection:
     )
 
 
+def _preflight_mixed_remappable_footprint() -> PreflightDetection:
+    """nexus-119p9 (GH #1381): Steve's exact footprint — 5 voyage-*-NAMED
+    collections whose stored vectors measure 768-dim (local bge/ONNX,
+    pre-RDR-109 mislabel, nexus-nb7hr), 8 non-conformant-named collections
+    ALSO measuring 768-dim, and 5 clean bge-768 collections. Every one of
+    these is ``cross_model_remappable`` — none is genuine voyage data — so
+    against a bge-only target the 2a voyage-capability gate must NOT fire
+    (the auto-remap handles all 18 unsupported-by-name collections locally,
+    at no cost, without ever needing voyage capability)."""
+    classifications = []
+    for i in range(5):
+        classifications.append(CollectionClassification(
+            collection=f"knowledge__o__voyage-context-3__v{i}", leg="local",
+            model="voyage-context-3", dim=None, support="unsupported",
+            source_count=12, has_data=True, measured_dim=768,
+        ))
+    for i in range(8):
+        classifications.append(CollectionClassification(
+            collection=f"legacy_collection_{i}", leg="local",
+            model=None, dim=None, support="unsupported",
+            source_count=12, has_data=True, measured_dim=768,
+        ))
+    for i in range(5):
+        classifications.append(CollectionClassification(
+            collection=f"code__o__bge-base-en-v15-768__v{i}", leg="local",
+            model="bge-base-en-v15-768", dim=768, support="supported-onnx",
+            source_count=12, has_data=True, measured_dim=None,
+        ))
+    return PreflightDetection(
+        report=DetectionReport(classifications=tuple(classifications)),
+        needs_migration=True,
+    )
+
+
 def _ready(url: str = "http://127.0.0.1:8099") -> ServiceReadiness:
     return ServiceReadiness(
         ready=True, service_url=url, reason=None, version_ok=True,
@@ -387,6 +421,23 @@ class TestGuidedUpgradeCmd:
             result = CliRunner().invoke(guided_upgrade_cmd, ["--yes"])
         assert result.exit_code == 0, result.output
         cap.assert_not_called()  # no voyage collections -> no capability probe
+
+    def test_mixed_remappable_footprint_does_not_trigger_capability_gate(self) -> None:
+        # nexus-119p9 regression: a footprint of ONLY measured-bge (remappable)
+        # collections — including 5 voyage-*-NAMED ones — against a bge-only
+        # target must NOT SystemExit at gate 2a; the auto-remap handles them
+        # all locally. Pre-fix, this SystemExit(1)'d before migration ran.
+        with patch(f"{_MOD}.detect_pending_migration",
+                   return_value=_preflight_mixed_remappable_footprint()), \
+             patch(f"{_MOD}.establish_verified_service", return_value=_ready()), \
+             patch(f"{_MOD}.verify_voyage_capability") as cap, \
+             patch("nexus.db.pg_provision.load_service_credentials_into_env",
+                   return_value=True), \
+             patch("nexus.commands.migrate_cmd._run_migration") as mig:
+            result = CliRunner().invoke(guided_upgrade_cmd, ["--yes"])
+        assert result.exit_code == 0, result.output
+        cap.assert_not_called()  # every collection is remappable -> no capability probe
+        mig.assert_called_once()
 
     def test_missing_token_after_provision_fails_before_migrating(self) -> None:
         # The one-command flow self-loads pg_credentials; if no token is available
