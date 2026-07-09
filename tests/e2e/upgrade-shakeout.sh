@@ -164,18 +164,12 @@ _pass "upgraded: $(nx --version)"
 
 # ── 6. nx doctor drift report (captured; cross-checked in step 7) ─────────────
 _step "6/12 nx doctor stanza-drift report (captured for cross-check)"
-# Re-seed the repo registry AFTER the upgrade: the RDR-137 repos.json
-# import-then-delete migration (>=5.4.0, runs under the BASELINE install)
-# removes the step-1 seeding before fakerepo is even a valid git repo, so
-# doctor enumerated zero repos and the drift check silently never ran —
-# exposed by the first real stanza change since (q3xrx, 2026-07-08).
-# list_repos_dual unions the registry at call time, so a live repos.json
-# here makes fakerepo visible to the drift check. (nexus-0rwwv-era fix.)
-python3 -c "
-import json, pathlib
-p = pathlib.Path('$SANDBOX/.config/nexus/repos.json')
-p.write_text(json.dumps({'repos': {'$FAKE_REPO': {}}}))
-"
+# (2026-07-08 postmortem correction: an earlier fix attempt re-seeded
+# repos.json here, on the theory that a baseline migration had deleted the
+# step-1 seeding. False — the file survives the whole run; the real defect
+# was list_repos_dual discarding the REGISTRY leg when the service-mode
+# catalog proxy raises, fixed in src/nexus/repos.py. The step-1 seeding is
+# sufficient; nothing extra is needed here.)
 DOCTOR_OUT="$(HOME="$SANDBOX" nx doctor 2>&1 || true)"
 if echo "$DOCTOR_OUT" | grep -qi 'stanza drift'; then
     DRIFT_REPORTED=1
