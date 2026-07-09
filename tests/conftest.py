@@ -496,6 +496,12 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # response body; the gate is a pure data/HTTP predicate that never embeds, so
     # there is no ambient cloud_mode behavior to assert.
     "test_guided_upgrade_voyage_capability.py",
+    # nexus-3l6gz multi-model combined-query grouping: voyage tokens are
+    # collection-NAME fixtures driving _group_collections_by_model against a
+    # fully-fake model-aware T3 stub — no embedder ever runs (the fake resolves
+    # "embedding" by parsing the collection name), so the tests are
+    # deployment-mode-agnostic; nothing asserts cloud-mode behavior.
+    "test_combined_query_multimodel_bug.py",
     # RDR-001 managed-endpoint probe: voyage tokens appear only as
     # embedding_models inside a FAKE /version response body (injected
     # http_get) — the managed service's reported models, not cloud-mode
