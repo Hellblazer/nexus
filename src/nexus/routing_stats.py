@@ -194,7 +194,7 @@ def registered_rules(hooks_json: pathlib.Path | None = None) -> set[str] | None:
             if not cand.is_file():
                 return None
             data = json.loads(cand.read_text(encoding="utf-8"))
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort hooks.json probe; unreadable/malformed counts as absent
             return None
         rules: set[str] = set()
 
