@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import Any
 
 import structlog
@@ -14,6 +15,7 @@ from mcp.server.fastmcp import FastMCP
 
 from nexus.corpus import (
     embedding_model_for_collection,
+    embedding_model_for_collection_name,
     index_model_for_collection,
     resolve_corpus,
     t3_collection_name,
@@ -1161,6 +1163,118 @@ def _resolve_corpus_target(corpus: str, t3: Any) -> list[str]:
     return list(dict.fromkeys(target))
 
 
+def _group_collections_by_model(target: list[str]) -> list[list[str]]:
+    """Group a resolved collection list by embedding model (nexus-3l6gz).
+
+    A combined-query service call embeds the query string ONCE and ranks
+    every listed collection's chunks against that single query vector; the
+    service's ``requireHomogeneousDim`` guard only checks vector DIMENSION,
+    not embedding MODEL, so a multi-prefix corpus spanning two same-dimension
+    models (e.g. ``voyage-code-3`` + ``voyage-context-3``, both 1024-dim)
+    silently embeds the query with only the first collection's model and
+    mis-ranks/drops every other model's chunks (root cause: nexus-3l6gz).
+
+    Groups collections by :func:`embedding_model_for_collection_name` so
+    each combined-query call is model-homogeneous. A collection whose name
+    is not conformant (the parse returns ``None``) is kept in its OWN
+    singleton group keyed by its raw collection name — never guessed into
+    an inferred model group and never silently dropped.
+
+    Preserves ``target``'s relative ordering both across and within groups.
+    """
+    groups: dict[str, list[str]] = {}
+    for name in target:
+        key = embedding_model_for_collection_name(name) or name
+        groups.setdefault(key, []).append(name)
+    return list(groups.values())
+
+
+def _distance_key(row: dict) -> float:
+    """Sort key for combined-query merge rows: missing OR ``None`` -> 0.0.
+
+    ``row.get("distance", 0.0)`` alone only covers a MISSING key — a row
+    carrying an explicit ``None`` distance (server anomaly) would still
+    reach the sort as ``None`` and raise ``TypeError`` when compared against
+    a ``float``. Centralized here so every merge-sort site (the two
+    model-group merges below, and ``search_topic_scoped``'s pre-existing
+    per-collection merge) hardens uniformly instead of drifting per-site.
+    """
+    d = row.get("distance")
+    return d if d is not None else 0.0
+
+
+def _grouped_combined_query(
+    target: list[str],
+    call: Callable[[list[str]], list[dict]],
+) -> list[dict]:
+    """Run *call* once per embedding-model group in *target*, merge the results.
+
+    nexus-3l6gz / nexus-hg745: a combined-query service call embeds the
+    query string ONCE and ranks every listed collection's chunks against
+    that single query vector, so a call spanning collections from more than
+    one embedding model silently mis-ranks/drops the non-first model's
+    chunks. This splits *target* into model-homogeneous groups via
+    :func:`_group_collections_by_model`, invokes *call* once per group (the
+    single shared shape now used by ``search_metadata_scoped``,
+    ``search_graph_hop``, and ``query()``'s service-mode catalog branch —
+    extracted so the loop-and-merge logic has one hardening point instead of
+    drifting across per-site copies), and concatenates the per-group rows
+    ordered distance-ascending across groups. Each group individually
+    arrives distance-ascending from the service, but the concatenation
+    across groups is NOT itself globally sorted, so callers must NOT rely on
+    ordering until after this merge sort.
+
+    All-or-nothing by design: *call* is invoked synchronously per group with
+    no per-iteration try/except, so a later group's exception propagates
+    immediately and the caller gets NO partial result set from only the
+    groups that happened to succeed first — matching
+    ``search_topic_scoped``'s existing (uncaught) per-collection loop.
+
+    CAVEAT: when *target* spans more than one embedding model, the merge
+    ranks rows by raw cosine distance across DIFFERENT embedding-model
+    vector spaces (e.g. ``voyage-code-3`` vs ``voyage-context-3``).
+    Distance values from different models are not a rigorously comparable
+    metric — the merge order can carry a systematic per-model bias. This is
+    the same class of accepted caveat ``search_topic_scoped`` already
+    documents for its own per-collection merge.
+    """
+    rows: list[dict] = []
+    for group in _group_collections_by_model(target):
+        rows.extend(call(group))
+    rows.sort(key=_distance_key)
+    return rows
+
+
+def _dedup_by_id(rows: list[dict]) -> list[dict]:
+    """Collapse *rows* to one row per ``id``, keeping the best (lowest) distance.
+
+    Assumes *rows* is already globally distance-ascending (e.g. the output
+    of :func:`_grouped_combined_query`) so the FIRST occurrence of an id is
+    its best. Does NOT truncate — callers that need the pre-truncation count
+    (e.g. ``query()``'s "N of M documents" footer) call this directly; callers
+    that only need the final page call :func:`_dedup_by_id_keep_best`.
+    """
+    seen: set[str] = set()
+    deduped: list[dict] = []
+    for r in rows:
+        rid = r.get("id", "")
+        if rid in seen:
+            continue
+        seen.add(rid)
+        deduped.append(r)
+    return deduped
+
+
+def _dedup_by_id_keep_best(rows: list[dict], limit: int) -> list[dict]:
+    """:func:`_dedup_by_id` then truncate to *limit*.
+
+    Truncates AFTER the dedup: each model group may independently
+    contribute up to the caller's fetch size, so the merged/deduped set can
+    exceed *limit* even though no single group did.
+    """
+    return _dedup_by_id(rows)[:limit]
+
+
 @mcp.tool(
     title="Metadata-Scoped Combined Search",
     annotations={"readOnlyHint": True},
@@ -1194,6 +1308,19 @@ def search_metadata_scoped(
     content — use a tumbler-aware hydration path (tracked: nexus-zekpl). The
     ``catalog_documents.corpus`` filter the SQL function supports is NOT exposed
     here (``corpus`` is the collection-routing arg); add it explicitly if needed.
+
+    MULTI-MODEL CORPUS (nexus-3l6gz): when *corpus* resolves to collections
+    spanning more than one embedding model (e.g. ``code`` + ``docs`` ->
+    voyage-code-3 + voyage-context-3), this tool issues one combined-query
+    call PER model group and merges the results — see
+    :func:`_grouped_combined_query`. The merge is ALL-OR-NOTHING: if any
+    group's call raises, the whole tool call fails (via the outer
+    try/except -> ``_mcp_tool_error``) and returns NO partial rows from
+    groups that already succeeded. The merge also ranks rows by raw cosine
+    distance across DIFFERENT embedding-model vector spaces when more than
+    one group contributes — those distances are not rigorously comparable
+    across models, so cross-model ordering can carry a systematic per-model
+    bias (same accepted caveat as ``search_topic_scoped``'s merge).
 
     Args:
         query: Search query string.
@@ -1237,28 +1364,27 @@ def search_metadata_scoped(
                         "(KEY=VALUE, comma-separated); comparison operators "
                         "(>=, <=, >, <, !=) are not supported in service mode")
             where_map = parsed or None
-        rows = t3.search_metadata_scoped(
-            query, target,
+        # nexus-3l6gz / nexus-hg745: one combined-query call per
+        # embedding-model group, ALL-OR-NOTHING (a group's exception
+        # propagates and aborts the whole merge — no silent partial
+        # results). Each group is asked for up to `limit` rows (not
+        # limit/n_groups) so a group's true top-N isn't truncated away
+        # before the merge decides the global top-N. See
+        # _grouped_combined_query for the full contract.
+        rows = _grouped_combined_query(target, lambda group: t3.search_metadata_scoped(
+            query, group,
             content_type=content_type or None,
             author=author or None,
             year=(year or None),
             subtree=(subtree or None),
             where=(where_map or None),
             n_results=limit,
-        )
+        ))
         # Metadata-scoped is document-level: the function returns one row per
         # matching CHUNK, so a multi-chunk document repeats its tumbler. Collapse
-        # to one row per id, keeping the best (nearest) distance. Rows arrive
-        # distance-ascending, so the FIRST occurrence of each id is its best.
-        seen_ids: set[str] = set()
-        deduped: list[dict] = []
-        for r in rows:
-            rid = r.get("id", "")
-            if rid in seen_ids:
-                continue
-            seen_ids.add(rid)
-            deduped.append(r)
-        rows = deduped
+        # to one row per id, keeping the best (nearest) distance, and truncate
+        # to `limit` AFTER the merge (see _dedup_by_id_keep_best).
+        rows = _dedup_by_id_keep_best(rows, limit)
         if structured:
             # id IS the document tumbler for metadata-scoped (document-level).
             ids = [r.get("id", "") for r in rows]
@@ -1332,7 +1458,7 @@ def search_topic_scoped(
         merged: list[dict] = []
         for col in target:
             merged.extend(t3.search_topic_scoped(query, topic, col, n_results=limit))
-        merged.sort(key=lambda r: r.get("distance", 0.0))
+        merged.sort(key=_distance_key)
         merged = merged[:limit]
         if structured:
             # Chunk-level: ids are chunk chashes; no document tumbler.
@@ -1389,6 +1515,19 @@ def search_graph_hop(
     Service-mode only — the combined-query functions live in the pgvector Postgres; in
     local/Chroma mode this returns an error.
 
+    MULTI-MODEL CORPUS (nexus-3l6gz): when *corpus* resolves to collections
+    spanning more than one embedding model (e.g. ``code`` + ``docs`` ->
+    voyage-code-3 + voyage-context-3), this tool issues one combined-query
+    call PER model group and merges the results — see
+    :func:`_grouped_combined_query`. The merge is ALL-OR-NOTHING: if any
+    group's call raises, the whole tool call fails (via the outer
+    try/except -> ``_mcp_tool_error``) and returns NO partial rows from
+    groups that already succeeded. The merge also ranks rows by raw cosine
+    distance across DIFFERENT embedding-model vector spaces when more than
+    one group contributes — those distances are not rigorously comparable
+    across models, so cross-model ordering can carry a systematic per-model
+    bias (same accepted caveat as ``search_topic_scoped``'s merge).
+
     Args:
         query: Search query string.
         seeds: Seed document tumbler(s) to traverse from (list, or a single string).
@@ -1429,25 +1568,25 @@ def search_graph_hop(
             return ("Error: search_graph_hop `where` is equality-only "
                     "(KEY=VALUE, comma-separated); comparison operators "
                     "(>=, <=, >, <, !=) are not supported in service mode")
-        rows = t3.search_graph_hop(
-            query, seed_list, target,
+        # nexus-3l6gz / nexus-hg745: one combined-query call per
+        # embedding-model group, ALL-OR-NOTHING (a group's exception
+        # propagates and aborts the whole merge — no silent partial
+        # results). Each group is asked for up to `limit` rows (not
+        # limit/n_groups) so a group's true top-N isn't truncated away
+        # before the merge decides the global top-N. See
+        # _grouped_combined_query for the full contract.
+        rows = _grouped_combined_query(target, lambda group: t3.search_graph_hop(
+            query, seed_list, group,
             link_type=(link_type or None),
             depth=depth,
             direction=direction,
             where=(where_dict or None),
             n_results=limit,
-        )
-        # Document-level: collapse to one row per tumbler, keeping the best (nearest)
-        # distance. Rows arrive distance-ascending, so the FIRST occurrence is best.
-        seen_ids: set[str] = set()
-        deduped: list[dict] = []
-        for r in rows:
-            rid = r.get("id", "")
-            if rid in seen_ids:
-                continue
-            seen_ids.add(rid)
-            deduped.append(r)
-        rows = deduped
+        ))
+        # Document-level: collapse to one row per tumbler, keeping the best
+        # (nearest) distance, and truncate to `limit` AFTER the merge (see
+        # _dedup_by_id_keep_best).
+        rows = _dedup_by_id_keep_best(rows, limit)
         if structured:
             ids = [r.get("id", "") for r in rows]
             return {
@@ -1509,6 +1648,14 @@ def query(
             are ranked by semantic distance across all collections, not separated by source.
         depth: BFS depth for follow_links traversal (default 1)
         subtree: Tumbler prefix — search only documents in this subtree (e.g. "1.1")
+
+    MULTI-MODEL CORPUS (nexus-3l6gz / nexus-hg745): in service mode, when a
+    catalog param is set AND *corpus* resolves to collections spanning more
+    than one embedding model (e.g. ``corpus="all"`` or ``"code,docs"``),
+    this tool's service-mode branch issues one combined-query call PER
+    model group and merges — see :func:`_grouped_combined_query`. Same
+    ALL-OR-NOTHING semantics and cross-model raw-cosine-distance caveat as
+    ``search_metadata_scoped`` / ``search_graph_hop``.
 
     Args:
         question: Natural-language research question
@@ -1620,48 +1767,55 @@ def query(
                         seed_results_svc = cat.find(question)
                         seed_tumblers = [str(r.tumbler) for r in seed_results_svc[:5] if r.tumbler]
 
+                    # nexus-3l6gz / nexus-hg745: route through
+                    # _grouped_combined_query — a single client call cannot
+                    # rank a corpus spanning more than one embedding model
+                    # against one query vector (this branch is query()'s
+                    # canonical entry point and reproduced the exact
+                    # nexus-3l6gz symptom via corpus="all"/"code,docs" +
+                    # author/content_type/follow_links/subtree before this
+                    # fix). ALL-OR-NOTHING: a group's exception aborts the
+                    # whole merge, matching search_metadata_scoped /
+                    # search_graph_hop above.
                     if not seed_tumblers:
                         # No graph seeds resolved — fall through to
                         # search_metadata_scoped over the broad target
                         # (mirrors the dance path's fallback to broad search
                         # when catalog_collections stays None).
-                        rows = t3.search_metadata_scoped(
-                            question, target,
+                        rows = _grouped_combined_query(
+                            target, lambda group: t3.search_metadata_scoped(
+                                question, group,
+                                content_type=content_type or None,
+                                author=author or None,
+                                subtree=(subtree or None),
+                                where=(where_dict or None),
+                                n_results=fetch_n,
+                            ))
+                    else:
+                        rows = _grouped_combined_query(
+                            target, lambda group: t3.search_graph_hop(
+                                question, seed_tumblers, group,
+                                link_type=(follow_links or None),
+                                depth=depth,
+                                where=(where_dict or None),
+                                n_results=fetch_n,
+                            ))
+                else:
+                    # Metadata-scoped path: catalog filters pushed into SQL.
+                    rows = _grouped_combined_query(
+                        target, lambda group: t3.search_metadata_scoped(
+                            question, group,
                             content_type=content_type or None,
                             author=author or None,
                             subtree=(subtree or None),
                             where=(where_dict or None),
                             n_results=fetch_n,
-                        )
-                    else:
-                        rows = t3.search_graph_hop(
-                            question, seed_tumblers, target,
-                            link_type=(follow_links or None),
-                            depth=depth,
-                            where=(where_dict or None),
-                            n_results=fetch_n,
-                        )
-                else:
-                    # Metadata-scoped path: catalog filters pushed into SQL.
-                    rows = t3.search_metadata_scoped(
-                        question, target,
-                        content_type=content_type or None,
-                        author=author or None,
-                        subtree=(subtree or None),
-                        where=(where_dict or None),
-                        n_results=fetch_n,
-                    )
+                        ))
 
                 # Dedup: one row per tumbler, keeping best (lowest) distance.
-                # Rows arrive distance-ascending so first occurrence is best.
-                seen_svc: set[str] = set()
-                deduped_svc: list[dict] = []
-                for r in rows:
-                    rid = r.get("id", "")
-                    if rid in seen_svc:
-                        continue
-                    seen_svc.add(rid)
-                    deduped_svc.append(r)
+                # deduped_svc (pre-truncation) feeds the "N of M documents"
+                # header/footer below; rows is the truncated display page.
+                deduped_svc = _dedup_by_id(rows)
                 rows = deduped_svc[:limit]
 
                 if not rows:
