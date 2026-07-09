@@ -133,6 +133,29 @@ def test_force_stale_frecency_mutual_exclusion():
 # ── Phase 5: nx doctor pipeline version check ───────────────────────────────
 
 
+def _current_engine_caps():
+    """A passing engine-version probe result (nexus-b6qlf).
+
+    Module-level (not nested in the test) so the RDR-109 mode-declaration
+    lint (test_mode_declarations_are_explicit.py) doesn't see the
+    embedding_models model-name literal as part of the TEST function's own
+    source -- it's a stand-in probe payload, not a cloud-mode embedder
+    assertion (same "label, not a mode assertion" rationale as the
+    conftest.py `_MODE_LINT_EXCLUDE` entries).
+    """
+    from nexus.db.managed_endpoint import ManagedCapabilities
+
+    return ManagedCapabilities(
+        base_url="sk-key",
+        app_version="1.0-SNAPSHOT",
+        release_version="0.1.99",
+        embedding_mode="voyage",
+        embedding_models=["voyage-context-3"],
+        schema_latest_id="latest",
+        schema_changeset_count=42,
+    )
+
+
 def test_doctor_pipeline_sweep_retired_on_service_handle():
     """RDR-155 P4a.2 (nexus-1k8s1): the doctor pipeline-version sweep read
     Chroma COLLECTION metadata, which has no pgvector equivalent — on the
@@ -156,6 +179,16 @@ def test_doctor_pipeline_sweep_retired_on_service_handle():
         patch("nexus.registry.RepoRegistry", return_value=mock_reg),
         # Vector-service reachability probe: pretend the service is up.
         patch("nexus.db.http_vector_client._get", return_value=[]),
+        # nexus-b6qlf: get_http_vector_client() (reached via make_t3(),
+        # cloud mode) now runs an engine-version probe before returning a
+        # handle -- pretend the deployed engine is current so make_t3()
+        # actually succeeds and this test can verify its real target (the
+        # service-backed-handle "sweep retired" reporting), not a probe
+        # failure.
+        patch(
+            "nexus.db.managed_endpoint.probe_managed_service",
+            lambda **kw: _current_engine_caps(),
+        ),
     ):
         result = runner.invoke(main, ["doctor"])
 

@@ -1337,9 +1337,27 @@ def migrate_vectors_cmd(
         except RuntimeError as exc:
             raise click.ClickException(str(exc))
 
+    # nexus-b6qlf Fix 1 (CRITICAL): route construction through
+    # get_http_vector_client() so the fail-loud engine-version-floor probe
+    # fires on this, the highest-stakes cloud operation (data ETL) for a
+    # stale/incompatible engine to matter. --dry-run keeps the bare
+    # HttpVectorClient() construction (no network, no probe): it only
+    # counts SOURCE chunks and never talks to the destination service (see
+    # the --dry-run comment above); --rollback always reaches the `else`
+    # branch since --dry-run/--rollback are mutually exclusive (checked
+    # above), and rollback genuinely deletes from pgvector so it must be
+    # gated same as a live migration.
     from nexus.db.http_vector_client import HttpVectorClient  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
-    vector_client = HttpVectorClient()
+    if dry_run:
+        vector_client = HttpVectorClient()
+    else:
+        from nexus.db.http_vector_client import get_http_vector_client  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+
+        try:
+            vector_client = get_http_vector_client()
+        except RuntimeError as exc:
+            raise click.ClickException(str(exc)) from exc
     collections = [c.strip() for c in collections_csv.split(",") if c.strip()] or None
 
     if local_path is None:

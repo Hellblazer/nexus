@@ -11,7 +11,17 @@ Follow every step in order. Do not skip or reorder. Authority: CLAUDE.md § Rele
 
 ### 0. Engine-freshness gate (PREREQUISITE — the two-lifecycle check)
 
-The Java **engine-service** is a SEPARATE release artifact from this PyPI release: its own `engine-service-vX.Y.Z` tag fires `engine-service-release.yml`, version is tag-stamped (no manifest bump), and it is **decoupled from the luxe6 / RDR-155-P4a develop release boundary**. This PyPI release PINS one engine tag — `PINNED_SERVICE_TAG` (`src/nexus/daemon/binary_install.py`, Step 3) plus the `REQUIRED_ENGINE_VERSION` floor (`src/nexus/engine_version.py`). Before cutting the PyPI release, verify the pinned engine is cloud-current — do NOT ship on a stale, un-cloud-validated engine:
+The Java **engine-service** is a SEPARATE release artifact from this PyPI release: its own `engine-service-vX.Y.Z` tag fires `engine-service-release.yml`, version is tag-stamped (no manifest bump), and it is **decoupled from the luxe6 / RDR-155-P4a develop release boundary**. This PyPI release PINS one engine tag — `PINNED_SERVICE_TAG` (`src/nexus/daemon/binary_install.py`, Step 3) plus the `REQUIRED_ENGINE_VERSION` floor (`src/nexus/engine_version.py`). Before cutting the PyPI release, verify the pinned engine is cloud-current — do NOT ship on a stale, un-cloud-validated engine.
+
+**This is a BLOCKING command, not a prose eyeball-check** (nexus-i5c2u — the prior prose-only version of this step was routinely skipped, letting the cloud engine sit at v0.1.17 for 9+ days across releases while the floor moved to v0.1.34):
+
+```bash
+uv run python scripts/check_engine_release_floor.py
+```
+
+If it exits non-zero, STOP — do not proceed with the PyPI release. Go cut + deploy + cloud-gate a fresh engine first via the `engine-release` skill (see **AGENTS.md § Engine-service release**), then re-run the script until it exits 0.
+
+Supplementary context (useful when deciding whether recent `service/` work is cloud-relevant, but the script above is the actual gate):
 
 ```bash
 git tag -l "engine-service-v*" | sort -V | tail -1          # last engine tag

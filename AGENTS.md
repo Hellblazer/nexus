@@ -121,7 +121,13 @@ The Java **engine-service** binary is a separate release artifact with its own c
 
 ### Cutting a release (version bump + tag-push to PyPI)
 
-**Engine-freshness gate (step 0 — BEFORE the numbered steps).** The PyPI release pins an `engine-service` tag (`REQUIRED_ENGINE_VERSION` floor + the parity test). Before cutting, confirm the pinned engine tag is (a) cloud-deployed + cloud-gated and (b) reasonably current with develop's engine tip. If `git log <pinned-engine-tag>..HEAD -- service/` shows cloud-relevant drift, cut + deploy + cloud-gate a fresh `engine-service` tag FIRST (see "Engine-service release" above), then pin it. Shipping the PyPI release on a stale, un-cloud-validated engine is exactly the gap this gate closes.
+**Engine-freshness gate (step 0 — BEFORE the numbered steps).** The PyPI release pins an `engine-service` tag (`REQUIRED_ENGINE_VERSION` floor + the parity test). This is a BLOCKING command, not a prose eyeball-check (nexus-i5c2u — the eyeball version of this step was routinely skipped, letting the cloud engine sit at v0.1.17 for 9+ days across releases while the floor moved to v0.1.34):
+
+```bash
+uv run python scripts/check_engine_release_floor.py
+```
+
+If it exits non-zero, STOP — do not proceed with the PyPI release; cut + deploy + cloud-gate a fresh `engine-service` tag first via the `engine-release` skill (see "Engine-service release" above), then re-run the script until it exits 0. `git log <pinned-engine-tag>..HEAD -- service/` remains useful supplementary context for judging whether recent `service/` work is cloud-relevant, but the script above — not the eyeball — is the actual gate. Shipping the PyPI release on a stale, un-cloud-validated engine is exactly the gap this gate closes.
 
 
 1. **Run unit + integration suite.** `uv run pytest` and `uv run pytest -m integration`. Both must pass — integration is excluded from CI and is your last line of defense.

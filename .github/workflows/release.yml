@@ -88,6 +88,18 @@ jobs:
       - name: Install project
         run: uv sync
 
+      - name: Verify cloud engine meets required floor (nexus-b6qlf)
+        # Mechanically enforces the release checklist's "Engine-freshness
+        # gate" step, which was previously prose-only and got skipped in
+        # practice: the cloud engine sat at engine-service-v0.1.17 for 9+
+        # days across releases while REQUIRED_ENGINE_VERSION moved to
+        # v0.1.34. Requires network egress to the live managed service
+        # (api.conexus-nexus.com, unauthenticated GET /version, no secrets
+        # needed) -- a transient network blip could block a release
+        # momentarily; accepted tradeoff vs. the alternative of silent
+        # engine drift.
+        run: uv run python scripts/check_engine_release_floor.py
+
       - name: Build wheel and sdist
         run: uv build --sdist --wheel
 

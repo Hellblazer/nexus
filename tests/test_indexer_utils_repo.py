@@ -395,6 +395,121 @@ class TestStalenessCache:
         col.get_all_metadata.assert_called_once()
         col.get.assert_called()
 
+    @staticmethod
+    def _hint_from_caplog(caplog) -> str | None:
+        """Extract the ``hint`` field from the
+        ``build_staleness_cache_fast_path_failed_falling_back`` structlog
+        warning, if one was emitted.
+
+        Under the ``render_to_log_kwargs`` processor, the structlog event
+        name lands as the plain-string ``record.msg`` and the remaining
+        kwargs (e.g. ``hint``, ``collection``) land as direct attributes on
+        the stdlib ``LogRecord`` — NOT nested inside ``record.msg``.
+        """
+        for record in caplog.records:
+            if record.msg == "build_staleness_cache_fast_path_failed_falling_back":
+                return getattr(record, "hint", None)
+        return None
+
+    def test_build_staleness_cache_404_hint_local_mode_keeps_upgrade_message(
+        self, caplog
+    ) -> None:
+        """nexus-5den3: local mode's own version-skew cases (a self-hosted
+        install pointed at a pre-v0.1.30 engine) keep the actionable
+        'upgrade the engine this install is pointed at' hint — in local
+        mode the operator IS the end user, so the instruction is correct."""
+        import logging
+
+        import structlog
+
+        from nexus.db.http_vector_client import VectorServiceError
+
+        col = MagicMock(spec=["get", "get_all_metadata", "name"])
+        col.name = "code__x__voyage-code-3__v1"
+        col.get_all_metadata.side_effect = VectorServiceError(
+            "POST /v1/vectors/get-all-metadata → HTTP 404: not found", code=404
+        )
+        col.get.return_value = {"ids": [], "documents": [], "metadatas": []}
+
+        structlog.configure(
+            processors=[structlog.stdlib.render_to_log_kwargs],
+            wrapper_class=structlog.stdlib.BoundLogger,
+            logger_factory=structlog.stdlib.LoggerFactory(),
+        )
+        with patch("nexus.config.is_local_mode", return_value=True):
+            with caplog.at_level(logging.WARNING, logger="nexus.indexer_utils"):
+                build_staleness_cache(col)
+
+        hint = self._hint_from_caplog(caplog)
+        assert hint is not None, "expected the fast-path-failed warning to fire"
+        assert "upgrade the engine this install is pointed at" in hint
+
+    def test_build_staleness_cache_404_hint_cloud_mode_no_local_upgrade_instruction(
+        self, caplog
+    ) -> None:
+        """nexus-5den3: cloud-mode users cannot upgrade a shared multi-tenant
+        managed engine themselves. The 404 hint must never instruct the end
+        user to act — it must correctly frame this as an operator / hosted-
+        service concern with no local remedy."""
+        import logging
+
+        import structlog
+
+        from nexus.db.http_vector_client import VectorServiceError
+
+        col = MagicMock(spec=["get", "get_all_metadata", "name"])
+        col.name = "code__x__voyage-code-3__v1"
+        col.get_all_metadata.side_effect = VectorServiceError(
+            "POST /v1/vectors/get-all-metadata → HTTP 404: not found", code=404
+        )
+        col.get.return_value = {"ids": [], "documents": [], "metadatas": []}
+
+        structlog.configure(
+            processors=[structlog.stdlib.render_to_log_kwargs],
+            wrapper_class=structlog.stdlib.BoundLogger,
+            logger_factory=structlog.stdlib.LoggerFactory(),
+        )
+        with patch("nexus.config.is_local_mode", return_value=False):
+            with caplog.at_level(logging.WARNING, logger="nexus.indexer_utils"):
+                build_staleness_cache(col)
+
+        hint = self._hint_from_caplog(caplog)
+        assert hint is not None, "expected the fast-path-failed warning to fire"
+        assert "upgrade the engine this install is pointed at" not in hint
+        assert "upgrade" not in hint.lower() or "operator" in hint.lower()
+        assert "operator" in hint.lower() or "no local action" in hint.lower()
+
+    def test_build_staleness_cache_non_404_hint_unaffected_by_mode(
+        self, caplog
+    ) -> None:
+        """The 'falling back to the paginated sweep' hint (row-count cap,
+        transient failure — anything that isn't the pre-v0.1.30 404) must
+        not vary by local/cloud mode; only the 404 branch is mode-gated."""
+        import logging
+
+        import structlog
+
+        for local_mode in (True, False):
+            caplog.clear()
+            col = MagicMock(spec=["get", "get_all_metadata", "name"])
+            col.name = "code__x__voyage-code-3__v1"
+            col.get_all_metadata.side_effect = RuntimeError("422 too many rows")
+            col.get.return_value = {"ids": [], "documents": [], "metadatas": []}
+
+            structlog.configure(
+                processors=[structlog.stdlib.render_to_log_kwargs],
+                wrapper_class=structlog.stdlib.BoundLogger,
+                logger_factory=structlog.stdlib.LoggerFactory(),
+            )
+            with patch("nexus.config.is_local_mode", return_value=local_mode):
+                with caplog.at_level(logging.WARNING, logger="nexus.indexer_utils"):
+                    build_staleness_cache(col)
+
+            hint = self._hint_from_caplog(caplog)
+            assert hint == "falling back to the paginated sweep", (
+                f"local_mode={local_mode} unexpectedly changed the non-404 hint"
+            )
+
     def test_build_returns_empty_cache_when_both_paths_fail(self) -> None:
         """nexus-441p5: only when the fast path AND the paginated sweep both
         fail does the build degrade to the empty cache (per-file fallback),

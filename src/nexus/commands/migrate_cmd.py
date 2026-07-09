@@ -202,7 +202,7 @@ def _run_migration(
     # Pre-flight the service endpoint so an unresolvable service is a clean
     # early error BEFORE the (potentially long) detect+ETL, mirroring
     # `storage migrate vectors`.
-    from nexus.db.http_vector_client import HttpVectorClient, _resolve_endpoint  # noqa: PLC0415 — deferred import; http_vector_client only needed in this branch
+    from nexus.db.http_vector_client import _resolve_endpoint, get_http_vector_client  # noqa: PLC0415 — deferred import; http_vector_client only needed in this branch
 
     try:
         _resolve_endpoint()
@@ -238,7 +238,18 @@ def _run_migration(
 
     from nexus.catalog.factory import make_catalog_client_for_migration  # noqa: PLC0415 — deferred import; catalog factory only needed in this branch
 
-    vector_client = HttpVectorClient()
+    # nexus-b6qlf Fix 1 (CRITICAL): this used to construct a bare
+    # HttpVectorClient() directly, bypassing the fail-loud engine-version-
+    # floor probe entirely -- exactly the highest-stakes cloud operation
+    # (a data migration) for a stale/incompatible engine to matter.
+    # get_http_vector_client() runs the same probe every other cloud-mode
+    # T3 caller goes through (ManagedServiceError is a RuntimeError, so this
+    # reuses the same ClickException-wrapping convention as _resolve_endpoint
+    # above).
+    try:
+        vector_client = get_http_vector_client()
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
     try:
         catalog_client = make_catalog_client_for_migration(
             base_url=service_url, token=token

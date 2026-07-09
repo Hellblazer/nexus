@@ -323,12 +323,27 @@ def build_staleness_cache(col: object) -> StalenessCache:
             # server's get-all-metadata row-count cap.
             import structlog  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
-            hint = (
-                "engine lacks POST /v1/vectors/get-all-metadata (pre-v0.1.30) — "
-                "upgrade the engine this install is pointed at"
-                if getattr(exc, "code", None) == 404
-                else "falling back to the paginated sweep"
-            )
+            if getattr(exc, "code", None) == 404:
+                # nexus-5den3: the pre-v0.1.30 404 hint is only actionable in
+                # local mode, where the operator IS the end user. Cloud-mode
+                # users cannot upgrade a shared multi-tenant managed engine
+                # themselves — post-nexus-jn0nm's fail-loud connection-time
+                # probe, cloud users should rarely even reach this path, but
+                # when they do (or in the local self-hosted version-skew
+                # case) the hint text must match who can actually act on it.
+                from nexus.config import is_local_mode  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+
+                _hint_prefix = "engine lacks POST /v1/vectors/get-all-metadata (pre-v0.1.30) — "
+                hint = _hint_prefix + (
+                    "upgrade the engine this install is pointed at"
+                    if is_local_mode()
+                    else (
+                        "the managed nexus service needs to be upgraded by the "
+                        "operator; no local action is possible"
+                    )
+                )
+            else:
+                hint = "falling back to the paginated sweep"
             structlog.get_logger(__name__).warning(
                 "build_staleness_cache_fast_path_failed_falling_back",
                 collection=getattr(col, "name", "<unknown>"),

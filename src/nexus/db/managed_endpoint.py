@@ -72,7 +72,30 @@ class ManagedServiceUnreachable(ManagedServiceError):
 
 
 class ManagedServiceIncompatible(ManagedServiceError):
-    """The managed service answered but is misconfigured or version-incompatible."""
+    """The managed service answered but is misconfigured or version-incompatible.
+
+    ``deployed_version`` / ``required_version`` are OPTIONAL structured
+    fields (nexus-b6qlf Fix 2) populated only by the below-floor raise site
+    in :func:`probe_managed_service` -- the one case where the message would
+    otherwise embed the client's own "upgrade the managed service, or
+    upgrade/downgrade the nx client to match" remedy verbatim, which
+    self-contradicts a cloud-mode wrapper's "cannot be fixed locally"
+    framing (see :func:`nexus.db.http_vector_client._cloud_probe_failure_message`).
+    Every other raise site in this module (no token, non-200, non-JSON, no
+    usable release_version) constructs this exception with just a message,
+    so both fields default to ``None``.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        deployed_version: str | None = None,
+        required_version: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.deployed_version = deployed_version
+        self.required_version = required_version
 
 
 @dataclass(frozen=True)
@@ -210,7 +233,9 @@ def probe_managed_service(
             f"managed nexus service at {base_url} is release_version "
             f"{release_version!r}, below the minimum this client supports "
             f"(v{floor}). Upgrade the managed service, or upgrade/downgrade "
-            "the nx client to match."
+            "the nx client to match.",
+            deployed_version=release_version,
+            required_version=floor,
         )
 
     models_raw = body.get("embedding_models") or []

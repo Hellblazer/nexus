@@ -164,6 +164,38 @@ def test_t3_collections_census_degrades_when_service_unreachable(
     assert "could not query" in line.detail
 
 
+def test_pipeline_version_check_degrades_on_make_t3_failure(monkeypatch) -> None:
+    """nexus-b6qlf regression: get_http_vector_client() (Phase 2, reached via
+    make_t3()) now runs a cloud-mode engine-version probe before returning a
+    handle. Every OTHER make_t3() call site in this module already degrades
+    gracefully on failure (see test_t3_collections_census_degrades_when_
+    service_unreachable above) -- the pipeline-version sweep's make_t3()
+    call was the one exception, left unguarded, so a probe failure crashed
+    the entire `nx doctor` run instead of reporting a soft-fail line like
+    its siblings."""
+    from nexus.health import _check_t3_cloud
+
+    def _cred(key: str) -> str:
+        # service_url empty -> _check_managed_service_probe() short-circuits
+        # (not under test here); the three credentials below are truthy so
+        # the pipeline-version-check branch is actually entered.
+        return "" if key == "service_url" else "value"
+
+    monkeypatch.setattr("nexus.config.get_credential", _cred)
+    monkeypatch.setattr("nexus.db.http_vector_client._get", lambda *a, **kw: [])
+
+    def _boom(**kw):
+        raise RuntimeError("stale engine — below required floor")
+
+    monkeypatch.setattr("nexus.db.make_t3", _boom)
+
+    results = _check_t3_cloud()  # must not raise
+    line = next((r for r in results if r.label == "pipeline versions"), None)
+    assert line is not None
+    assert line.ok is False
+    assert "stale engine" in line.detail
+
+
 def test_vector_service_probe_unconditional_and_fatal(monkeypatch, tmp_path) -> None:
     """RDR-155 P4a.2 dual-review finding 2 (substantive-critic): the vector
     service probe must fire in BOTH mode branches and without legacy Chroma
