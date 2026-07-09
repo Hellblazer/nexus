@@ -218,10 +218,12 @@ class CatalogRenameCollectionTest {
     }
 
     @Test @Order(50)
-    void renameCollection_crossModelCopyBranch_targetExists_repointsDocsOnly() throws Exception {
+    void renameCollection_crossModelCopyBranch_targetExists_repointsDocsAndManifests() throws Exception {
         // RDR-162 regression: pre-register the TARGET (simulating the bge-768 cross-model
-        // chunk upsert), then rename. Only catalog_documents.physical_collection must repoint;
-        // both registry rows must remain (the source is NOT deleted, the target NOT collided).
+        // chunk upsert), then rename. catalog_documents.physical_collection repoints AND
+        // (nexus-x6kdz critique HIGH) the manifest's denormalized collection re-homes with
+        // it — the old docs-only pin actively green-lit the silent-empty combined-query
+        // state (docs at the target, manifests at the source). Both registry rows remain.
         final String src = "code__ren-xm__minilm-l6-v2-384__v1";
         final String tgt = "code__ren-xm__bge-768__v1";
         try (Connection su = pg.createConnection("")) {
@@ -232,10 +234,18 @@ class CatalogRenameCollectionTest {
                 + "VALUES ('" + TENANT_A + "', 'xm-doc-1', 'XM Doc', '" + src + "')");
             // target registry already exists (cross-model copy registered it)
             su.createStatement().execute("INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT_A + "', '" + tgt + "')");
+            // a manifest row still homed at the SOURCE (the pre-rename state)
+            su.createStatement().execute("ALTER TABLE nexus.catalog_document_chunks NO FORCE ROW LEVEL SECURITY");
+            su.createStatement().execute("INSERT INTO nexus.catalog_document_chunks "
+                + "(tenant_id, doc_id, position, chash, collection) "
+                + "VALUES ('" + TENANT_A + "', 'xm-doc-1', 0, '" + "e".repeat(32) + "', '" + src + "')");
+            su.createStatement().execute("ALTER TABLE nexus.catalog_document_chunks FORCE ROW LEVEL SECURITY");
         }
         Map<String, Integer> c = repo.renameCollection(TENANT_A, src, tgt);
-        assertThat(c).as("cross-model branch returns only catalog_documents").containsOnlyKeys("catalog_documents");
+        assertThat(c).as("cross-model branch re-homes docs AND manifests")
+            .containsOnlyKeys("catalog_documents", "catalog_document_chunks");
         assertThat(c.get("catalog_documents")).as("one doc repointed").isEqualTo(1);
+        assertThat(c.get("catalog_document_chunks")).as("one manifest row re-homed").isEqualTo(1);
         try (Connection su = pg.createConnection("")) {
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_collections WHERE tenant_id='" + TENANT_A
                 + "' AND name='" + src + "'")).as("source registry row KEPT").isEqualTo(1);
@@ -245,6 +255,10 @@ class CatalogRenameCollectionTest {
                 + "' AND physical_collection='" + tgt + "'")).as("doc now under target").isEqualTo(1);
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_documents WHERE tenant_id='" + TENANT_A
                 + "' AND physical_collection='" + src + "'")).as("no doc left under source").isZero();
+            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_document_chunks WHERE tenant_id='" + TENANT_A
+                + "' AND collection='" + tgt + "'")).as("manifest row homed at target").isEqualTo(1);
+            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_document_chunks WHERE tenant_id='" + TENANT_A
+                + "' AND collection='" + src + "'")).as("no manifest row left under source").isZero();
         }
     }
 
