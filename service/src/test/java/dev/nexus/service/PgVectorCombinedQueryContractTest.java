@@ -55,6 +55,8 @@ class PgVectorCombinedQueryContractTest {
     private static final String COLL_T    = "knowledge__cqr-topic__voyage-context-3__v1";   // 1024
     private static final String COLL_MINI = "knowledge__cqr-mini__minilm-l6-v2-384__v1";    // 384
     private static final String COLL_B    = "knowledge__cqr-b__voyage-context-3__v1";       // 1024, tenant B
+    // nexus-9y5om: same-dim (1024), DIFFERENT model than COLL_M — requireHomogeneousModel probe.
+    private static final String COLL_CODE = "code__cqr-code__voyage-code-3__v1";
 
     private static final String TOPIC_VEC = "Vector Search";
     private static final String Q = "combined query probe";
@@ -188,6 +190,41 @@ class PgVectorCombinedQueryContractTest {
         assertThatThrownBy(() ->
             repo.searchMetadataScoped(TENANT_A, Q, List.of(COLL_M, COLL_MINI), null, null, null, null, 10))
             .as("1024 + 384 cannot share one query vector — fail loud")
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void metadataScoped_mixedModelsSameDim_failLoud() {
+        // nexus-9y5om: both 1024-dim but different models — dim guard passes, model
+        // guard must catch it (the silent-mis-embed class, nexus-3l6gz).
+        assertThatThrownBy(() ->
+            repo.searchMetadataScoped(TENANT_A, Q, List.of(COLL_M, COLL_CODE), null, null, null, null, 10))
+            .as("both 1024-dim but different models — dim guard passes, model guard must catch it")
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("voyage-context-3")
+            .hasMessageContaining("voyage-code-3");
+    }
+
+    @Test
+    void graphHop_mixedModelsSameDim_failLoud() {
+        assertThatThrownBy(() ->
+            repo.searchGraphHop(TENANT_A, Q, List.of("1.1"), List.of(COLL_M, COLL_CODE),
+                null, 1, "both", 10))
+            .as("graphHop: same-dim different-model must fail loud before touching seeds/DB")
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("voyage-context-3")
+            .hasMessageContaining("voyage-code-3");
+    }
+
+    @Test
+    void graphHop_mixedDimensions_failLoud() {
+        // Recommended companion (plan Task 3d): graphHop's requireHomogeneousDim had zero
+        // prior test coverage anywhere in the suite. Closes the gap directly adjacent to
+        // the model-guard test above.
+        assertThatThrownBy(() ->
+            repo.searchGraphHop(TENANT_A, Q, List.of("1.1"), List.of(COLL_M, COLL_MINI),
+                null, 1, "both", 10))
+            .as("graphHop: 1024 + 384 cannot share one query vector — fail loud")
             .isInstanceOf(IllegalArgumentException.class);
     }
 
