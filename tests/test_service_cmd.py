@@ -74,6 +74,14 @@ def test_issue_passes_scope_flag() -> None:
     assert _FakeStore.calls == [("issue_token", ("conexus-edge", None, None, "mint"))]
 
 
+def test_issue_passes_mint_locked_scope_flag() -> None:
+    # nexus-xidcq (RDR-005 2a): tenant-locked mint credential — the CLI just forwards
+    # the string verbatim; server-side (TokenAdminHandler) is the security boundary.
+    result = _run(["token", "issue", "--tenant", "conexus-edge-locked", "--scope", "mint-locked"])
+    assert result.exit_code == 0, result.output
+    assert _FakeStore.calls == [("issue_token", ("conexus-edge-locked", None, None, "mint-locked"))]
+
+
 def test_issue_omits_scope_by_default() -> None:
     result = _run(["token", "issue", "--tenant", "t-a"])
     assert result.exit_code == 0, result.output

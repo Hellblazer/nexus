@@ -1643,6 +1643,7 @@ public final class PgVectorRepository {
             throw new IllegalArgumentException("nResults must be >= 1, got " + nResults);
         }
         int dim = requireHomogeneousDim(collectionNames);
+        requireHomogeneousModel(collectionNames);
         EmbedResult embed = embedQuery(collectionNames.get(0), queryText, dim);
         Vector queryVec = Vector.of(embed.embeddings().get(0));
         JSONB whereJsonb = (where == null || where.isEmpty()) ? null : JSONB.jsonb(toJson(where));
@@ -1776,6 +1777,7 @@ public final class PgVectorRepository {
         }
         int clampedDepth = Math.min(Math.max(depth, 1), 3);  // mirror graphBFS bound
         int dim = requireHomogeneousDim(collectionNames);
+        requireHomogeneousModel(collectionNames);
         EmbedResult embed = embedQuery(collectionNames.get(0), queryText, dim);
         Vector queryVec = Vector.of(embed.embeddings().get(0));
         JSONB whereJsonb = (where == null || where.isEmpty()) ? null : JSONB.jsonb(toJson(where));
@@ -1810,6 +1812,37 @@ public final class PgVectorRepository {
             }
         }
         return dim;
+    }
+
+    /**
+     * Validate every collection dispatches to the same embedding MODEL (nexus-9y5om,
+     * nexus-3l6gz): same-DIM, different-MODEL collections pass requireHomogeneousDim but
+     * silently mis-embed — one query vector embedded against the FIRST collection's model
+     * cannot serve a second collection's different embedding space even at equal
+     * dimensionality (voyage-code-3 and voyage-context-3 are both 1024-dim). Parses the same
+     * 3rd '__' segment {@link #dimForCollection} uses.
+     */
+    private static void requireHomogeneousModel(List<String> collectionNames) {
+        String model = modelSegment(collectionNames.get(0));
+        for (String col : collectionNames) {
+            String colModel = modelSegment(col);
+            if (!colModel.equals(model)) {
+                throw new IllegalArgumentException(
+                    "mixed embedding models in one combined-query call: '" + collectionNames.get(0)
+                    + "' uses '" + model + "' but '" + col + "' uses '" + colModel
+                    + "' - one query vector cannot serve two different embedding spaces");
+            }
+        }
+    }
+
+    private static String modelSegment(String collection) {
+        String[] segments = collection.split("__");
+        if (segments.length != 4) {
+            throw new IllegalArgumentException(
+                "collection '" + collection + "' is not four-segment conformant "
+                + "(<content_type>__<owner>__<model>__v<n>)");
+        }
+        return segments[2];
     }
 
     /**

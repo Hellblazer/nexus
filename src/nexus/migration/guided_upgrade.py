@@ -668,7 +668,7 @@ def verify_service_version(
 
 
 def footprint_has_voyage_collections(report: "DetectionReport") -> bool:
-    """True iff the footprint has a data-bearing voyage-model collection.
+    """True iff the footprint has a data-bearing GENUINE-voyage collection.
 
     Voyage collections are NEVER cross-model-remapped to bge (RDR-162:
     re-embedding voyage text into bge silently changes recall), so a voyage
@@ -681,11 +681,29 @@ def footprint_has_voyage_collections(report: "DetectionReport") -> bool:
     ``startswith('voyage')`` prefix: a non-canonical ``voyage-*`` name is an
     unrecognized model (the classifier already gives it the re-index diagnostic),
     not a voyage-capability problem, so it must not mis-fire this gate.
+
+    nexus-119p9 (GH #1381, second bug): a ``voyage-*``-NAMED collection whose
+    stored vector MEASURED as local bge/ONNX (``measured_dim == _ONNX_DIM``,
+    nexus-nb7hr) is a pre-RDR-109 mislabel, not real voyage data — it is
+    ``cross_model_remappable`` (re-embedded locally at no cost, no Voyage key
+    needed) and MUST NOT trip this gate; doing so SystemExits a bge-only
+    target before the migration's auto-remap ever runs. So this predicate
+    excludes any classification :func:`cross_model_remappable` accepts —
+    the same measured-dim ground truth the orchestrator (:mod:`driver`) uses
+    to build ``target_names``. A voyage-named collection with an unprobeable
+    ``measured_dim`` (``None`` — empty or not probed) stays FAIL-CLOSED: it is
+    NOT remappable (``cross_model_remappable`` requires a proven 768-dim
+    measurement), so it still trips the gate — real voyage data would block
+    mid-run otherwise.
     """
-    from nexus.migration.detection import _VOYAGE_MODELS  # noqa: PLC0415 — circular-dep avoidance (nexus.migration.detection)
+    from nexus.migration.detection import (  # noqa: PLC0415 — circular-dep avoidance (nexus.migration.detection)
+        _VOYAGE_MODELS,
+        cross_model_remappable,
+    )
 
     return any(
-        c.has_data and c.model in _VOYAGE_MODELS for c in report.classifications
+        c.has_data and c.model in _VOYAGE_MODELS and not cross_model_remappable(c)
+        for c in report.classifications
     )
 
 

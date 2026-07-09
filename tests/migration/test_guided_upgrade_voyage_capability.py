@@ -25,10 +25,17 @@ from nexus.migration.guided_upgrade import (
 _URL = "http://127.0.0.1:8099"
 
 
-def _cls(collection: str, model: str | None, *, has_data: bool = True) -> CollectionClassification:
+def _cls(
+    collection: str,
+    model: str | None,
+    *,
+    has_data: bool = True,
+    measured_dim: int | None = None,
+) -> CollectionClassification:
     return CollectionClassification(
         collection=collection, leg="local", model=model, dim=None,
         support="unsupported", source_count=12 if has_data else 0, has_data=has_data,
+        measured_dim=measured_dim,
     )
 
 
@@ -92,6 +99,40 @@ class TestFootprintHasVoyage:
         # gives it the re-index diagnostic; this gate must NOT fire on it.
         r = _report(_cls("knowledge__o__voyage-future-9__v1", "voyage-future-9"))
         assert footprint_has_voyage_collections(r) is False
+
+    # nexus-119p9 (GH #1381, second bug): the gate must consult the nb7hr
+    # measured-dim override, not just the name-parsed model. Truth table:
+
+    def test_voyage_named_measured_bge_is_remappable_not_capability_blocked(self) -> None:
+        # Steve's exact footprint: a voyage-*-NAMED collection whose stored
+        # vector measures 768-dim (local bge/ONNX, pre-RDR-109 mislabel) is
+        # cross_model_remappable — it auto-remaps locally at no cost and must
+        # NOT trip the voyage-capability gate. This is the bug: pre-fix, this
+        # asserted True (SystemExit before the auto-remap could run).
+        r = _report(
+            _cls("knowledge__o__voyage-context-3__v1", "voyage-context-3", measured_dim=768)
+        )
+        assert footprint_has_voyage_collections(r) is False
+
+    def test_voyage_named_measured_voyage_dim_is_genuinely_blocked(self) -> None:
+        # A voyage-*-NAMED collection whose stored vector measures 1024-dim
+        # (genuine voyage content) is NOT remappable (re-embedding voyage text
+        # into bge silently changes recall) — the gate must still fire.
+        r = _report(
+            _cls("knowledge__o__voyage-context-3__v1", "voyage-context-3", measured_dim=1024)
+        )
+        assert footprint_has_voyage_collections(r) is True
+
+    def test_voyage_named_unprobed_measured_dim_fails_closed(self) -> None:
+        # measured_dim is None when the collection was never probed (e.g. the
+        # classifier only probes name-unsupported data-bearing collections) or
+        # the probe could not resolve a dim. Un-confirmed means NOT provably
+        # bge, so cross_model_remappable is False and the gate stays FAIL
+        # CLOSED (fires) — real voyage data would otherwise block mid-run.
+        r = _report(
+            _cls("knowledge__o__voyage-context-3__v1", "voyage-context-3", measured_dim=None)
+        )
+        assert footprint_has_voyage_collections(r) is True
 
 
 class TestVerifyVoyageCapability:

@@ -58,6 +58,8 @@
     <!-- nexus-868dq: server-assigned scope column (root|tenant|mint|data) — the
          mint-scoped edge credential + short-TTL data tokens (conexus RDR-005 A1). -->
     <include file="db/changelog/service-tokens-003-scope-column.xml"/>
+    <!-- nexus-xidcq: tenant-locked mint credential scope (RDR-005 2a). -->
+    <include file="db/changelog/service-tokens-004-mint-locked-scope.xml"/>
 
     <!-- Store 10: pgvector chunks tables + manifest collection column (bead nexus-mf447) -->
     <include file="db/changelog/vectors-001-baseline.xml"/>

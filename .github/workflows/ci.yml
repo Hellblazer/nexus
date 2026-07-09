@@ -699,7 +699,19 @@ jobs:
               - 'service/src/main/java/dev/nexus/service/http/VectorHandler.java'
               - 'service/src/main/java/dev/nexus/service/http/AuthFilter.java'
               - 'service/src/main/java/dev/nexus/service/vectors/PgVectorRepository.java'
+              # nexus-4nflf: combined-query end-to-end tripwire (x6kdz). The
+              # bug shipped through the catalog write path (no manifest writer
+              # stamped document_chunks.collection, the combined-query join
+              # key), not the vector write path above — so the catalog Java
+              # handler/repo AND the Liquibase changelog (the combined-query
+              # SQL functions themselves) must gate this job too, not just
+              # PgVectorRepository.
+              - 'service/src/main/java/dev/nexus/service/db/CatalogRepository.java'
+              - 'service/src/main/java/dev/nexus/service/http/CatalogHandler.java'
+              - 'service/src/main/resources/db/changelog/**'
+              - 'src/nexus/catalog/http_catalog_client.py'
               - 'tests/db/test_write_seam_gate_integration.py'
+              - 'tests/db/test_http_combined_query_integration.py'
               - 'scripts/assert_write_seam_ran.py'
               - '.github/workflows/ci.yml'
               # Dep bump can change the Python env or service contract without
@@ -762,7 +774,7 @@ jobs:
         if: steps.changes.outputs.seam == 'true'
         uses: ./.github/actions/prime-bge-onnx
 
-      - name: Run write-seam gate (>300-record, dup-chash, ON CONFLICT, NUL-sanitize)
+      - name: Run write-seam gate (>300-record, dup-chash, ON CONFLICT, NUL-sanitize, combined-query tripwire)
         if: steps.changes.outputs.seam == 'true'
         env:
           # FAIL (not skip) on missing/stale JAR in CI — the conftest.py autouse
@@ -776,8 +788,13 @@ jobs:
           set -euo pipefail
           # -o addopts="" clears the repo default -m 'not integration' so the
           # integration-marked test module is collected (same pattern as CA-3 jobs).
+          # nexus-4nflf: the combined-query tripwire module shares this job's
+          # JAR+Docker-PG+ONNX boot (same cost profile) — one pytest invocation,
+          # one junit-xml, one assert_write_seam_ran.py call for both modules.
           uv run pytest tests/db/test_write_seam_gate_integration.py \
+            tests/db/test_http_combined_query_integration.py \
             -o addopts="" -m integration -q -rs --junit-xml=write-seam.xml
-          # Non-vacuity gate: asserts the dedup-collapse test actually ran+passed
-          # and no prereq-skip vacuously cleared the run.
+          # Non-vacuity gate: asserts the dedup-collapse AND the combined-query
+          # manifest-rewrite-visibility core tests actually ran+passed, and no
+          # prereq-skip vacuously cleared the run.
           uv run python scripts/assert_write_seam_ran.py write-seam.xml

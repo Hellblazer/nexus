@@ -4,6 +4,10 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.5.2] - 2026-07-09
+
+- Plugin version aligned with conexus 6.5.2 (guided-upgrade voyage-gate measured-dim fix, multi-model combined-query grouping, engine pin advanced to v0.1.36). No plugin-side changes.
+
 ## [6.5.1] - 2026-07-08
 
 - Plugin version aligned with conexus 6.5.1 (engine pin advanced to v0.1.35 — the combined-query manifest-stamp fix). No plugin-side changes.

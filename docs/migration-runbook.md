@@ -21,8 +21,11 @@ T2 `nexus_rdr/155-production-migration-complete`).
 nothing to migrate no-ops here, *without* provisioning), **provisions and
 verifies** the service stack (health-gate + version-pin; a not-ready or
 wrong-version service hard-fails with a remedy and NEVER migrates), runs the
-**voyage-capability gate** (refuses to migrate voyage-model collections onto a
-bge-only service, since re-embedding voyage text into bge changes recall),
+**voyage-capability gate** (refuses to migrate GENUINE voyage-model collections
+onto a bge-only service, since re-embedding voyage text into bge changes
+recall; a voyage-*named* collection whose stored vectors MEASURE as local
+bge-768 — the pre-RDR-109 mislabel class — does not trip the gate and is
+auto-remapped locally at no cost, nexus-nb7hr/nexus-119p9),
 self-loads the freshly-provisioned `NX_SERVICE_TOKEN`, then **hands off to
 `nx migrate-to-service`** against the verified URL, and finishes with an
 advisory `nx doctor`. Preview the footprint first; re-running is safe (every

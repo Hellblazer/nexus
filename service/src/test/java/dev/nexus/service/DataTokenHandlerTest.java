@@ -55,6 +55,7 @@ class DataTokenHandlerTest {
     final HttpClient http = HttpClient.newHttpClient();
 
     String mintRaw;   // a scope=mint credential issued by the operator in @BeforeAll
+    String mintLockedRaw;   // a scope=mint-locked credential bound to conexus-edge-locked
 
     @BeforeAll
     void startAll() throws Exception {
@@ -101,6 +102,12 @@ class DataTokenHandlerTest {
             "{\"tenant\":\"conexus-edge\",\"label\":\"edge-mint\",\"scope\":\"mint\"}");
         mintRaw = issued.get("token").asText();
         assertThat(mintRaw).isNotBlank();
+
+        // nexus-xidcq (RDR-005 2a): operator issues a tenant-locked mint credential.
+        JsonNode issuedLocked = postJsonAs(BOOT, "/v1/service-tokens/issue",
+            "{\"tenant\":\"conexus-edge-locked\",\"label\":\"edge-mint-locked\",\"scope\":\"mint-locked\"}");
+        mintLockedRaw = issuedLocked.get("token").asText();
+        assertThat(mintLockedRaw).isNotBlank();
     }
 
     @AfterAll
@@ -199,6 +206,37 @@ class DataTokenHandlerTest {
 
         assertThat(sendAs(BOOT, "/v1/data-tokens/mint",
             "{\"tenant\":\"acme\"}").statusCode()).isEqualTo(403);
+    }
+
+    // ── nexus-xidcq: mint-locked tenant enforcement (RDR-005 2a) ───────────────
+
+    @Test
+    void mintLocked_ownTenant_admitted() throws Exception {
+        var resp = sendAs(mintLockedRaw, "/v1/data-tokens/mint",
+            "{\"tenant\":\"conexus-edge-locked\"}");
+        assertThat(resp.statusCode()).isEqualTo(200);
+        assertThat(tenantOfRaw(MAPPER.readTree(resp.body()).get("data_token").asText()))
+            .isEqualTo("conexus-edge-locked");
+    }
+
+    @Test
+    void mintLocked_otherTenant_403TeachingMessage() throws Exception {
+        var resp = sendAs(mintLockedRaw, "/v1/data-tokens/mint", "{\"tenant\":\"other-tenant\"}");
+        assertThat(resp.statusCode()).isEqualTo(403);
+        assertThat(resp.body())
+            .as("teaching message must name both the credential's bound tenant and the requested tenant")
+            .contains("conexus-edge-locked")
+            .contains("other-tenant");
+    }
+
+    @Test
+    void mint_crossTenant_stillAllowed_byteIdentical() throws Exception {
+        // Regression guard (design's explicit backward-safety requirement): adding the
+        // mint-locked branch must not alter plain scope=mint's cross-tenant behavior.
+        var resp = sendAs(mintRaw, "/v1/data-tokens/mint", "{\"tenant\":\"yet-another-tenant\"}");
+        assertThat(resp.statusCode()).isEqualTo(200);
+        assertThat(tenantOfRaw(MAPPER.readTree(resp.body()).get("data_token").asText()))
+            .isEqualTo("yet-another-tenant");
     }
 
     @Test
@@ -341,6 +379,70 @@ class DataTokenHandlerTest {
             assertThat(mint.getAsInt())
                 .as("the 400s must not have consumed the refilled budget")
                 .isEqualTo(200);
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void mintLocked_crossTenantDenials_doNotConsumeRateLimitBudget() throws Exception {
+        // code-review-expert Important finding (post-implementation review): the
+        // mint-locked cross-tenant 403 branch sits BEFORE the rate-limit debit
+        // (validation-before-debit pin) but was unpinned by any test — a refactor
+        // moving the branch after rateLimiter.tryAcquire would silently regress
+        // "denied requests don't burn budget". Same tiny-limiter harness as
+        // mint_rateLimited_429_thenRefills (burst 2, 1/min).
+        var clock = new MutableClock(Instant.parse("2026-07-07T00:00:00Z"));
+        var store = new dev.nexus.service.db.TokenStore(ds, clock);
+        var cache = new dev.nexus.service.db.TokenCache(store, clock);
+        var limiter = new dev.nexus.service.http.MintRateLimiter(clock, 2, 1, 100);
+        var handler = new dev.nexus.service.http.DataTokenHandler(store, limiter, 3600L);
+        var server = com.sun.net.httpserver.HttpServer.create(
+            new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        var ctx = server.createContext("/v1/data-tokens", handler);
+        ctx.getFilters().add(new dev.nexus.service.http.AuthFilter(cache, store));
+        server.start();
+        int rlPort = server.getAddress().getPort();
+        try {
+            String rlMintLocked = postJsonAs(BOOT, "/v1/service-tokens/issue",
+                "{\"tenant\":\"conexus-edge-locked-rl\",\"label\":\"edge-mint-locked-rl\","
+                + "\"scope\":\"mint-locked\"}")
+                .get("token").asText();
+
+            java.util.function.Function<String, Integer> mintFor = tenant -> {
+                try {
+                    var req = HttpRequest.newBuilder(
+                            URI.create("http://127.0.0.1:" + rlPort + "/v1/data-tokens/mint"))
+                        .header("Authorization", "Bearer " + rlMintLocked)
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(
+                            "{\"tenant\":\"" + tenant + "\"}"))
+                        .build();
+                    return http.send(req, HttpResponse.BodyHandlers.ofString()).statusCode();
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            };
+
+            // Interleave cross-tenant 403 denials with own-tenant mints, up to and past
+            // the burst budget (2). If the 403 branch ever debited budget, the second
+            // own-tenant mint below would come back 429 instead of 200.
+            assertThat(mintFor.apply("other-tenant-rl-1"))
+                .as("cross-tenant #1: denied before the debit").isEqualTo(403);
+            assertThat(mintFor.apply("conexus-edge-locked-rl"))
+                .as("own-tenant mint #1: full burst budget still available").isEqualTo(200);
+            assertThat(mintFor.apply("other-tenant-rl-2"))
+                .as("cross-tenant #2: denied before the debit").isEqualTo(403);
+            assertThat(mintFor.apply("conexus-edge-locked-rl"))
+                .as("own-tenant mint #2: full burst budget still available").isEqualTo(200);
+            assertThat(mintFor.apply("other-tenant-rl-3"))
+                .as("cross-tenant #3: denied before the debit — still not counted").isEqualTo(403);
+            // Burst budget (2) is now genuinely exhausted, but ONLY by the two
+            // legitimate own-tenant mints above — three prior 403s consumed nothing.
+            assertThat(mintFor.apply("conexus-edge-locked-rl"))
+                .as("3rd own-tenant mint within burst window: budget exhausted by "
+                    + "legitimate mints only, not by the interleaved cross-tenant 403s")
+                .isEqualTo(429);
         } finally {
             server.stop(0);
         }

@@ -118,7 +118,8 @@ public final class AuthFilter extends Filter {
         // admin handler's own scope guard is defense-in-depth layer 2. Exact
         // segment match ("/v1/data-tokens" or "/v1/data-tokens/..."), not a raw
         // prefix — "/v1/data-tokens-evil" must not slip through.
-        if (dev.nexus.service.db.TokenStore.SCOPE_MINT.equals(scope)) {
+        if (dev.nexus.service.db.TokenStore.SCOPE_MINT.equals(scope)
+                || dev.nexus.service.db.TokenStore.SCOPE_MINT_LOCKED.equals(scope)) {
             String path = exchange.getRequestURI().getPath();
             boolean mintSurface = path.equals("/v1/data-tokens")
                 || path.startsWith("/v1/data-tokens/");
