@@ -97,6 +97,44 @@ def _probe_actual_dim(col: Any) -> int | None:
     first = embeddings[0]
     return len(first) if first is not None else None
 
+
+def _probe_legacy_ids(col: Any) -> str | None:
+    """Sample the FIRST page of chunk ids for a legacy non-32-char id.
+
+    GH #1390 root cause (nexus-sot7v): pre-RDR-108-era Chroma stores hold
+    16/18-char chunk ids; the pgvector chash identity is
+    ``sha256(chunk_text)[:32]`` and the migration NEVER rewrites ids
+    (rewriting would sever the catalog-manifest chash join, which carries
+    the same legacy values but no text to recompute from, and would break
+    ``rollback_collections``' source-chash-set matching). Such a collection
+    would otherwise 409 on every upsert MID-ETL — the wall that pushed an
+    autonomous session into dropping the chash constraints. Detecting it at
+    classification time blocks it at the pre-gate with the re-index
+    diagnostic instead: before any write, remediation on screen.
+
+    First-page sampling (quota-compliant 300) can miss bad ids on later
+    pages; the ETL carries a per-batch hard guard
+    (:func:`vector_etl._nonconformant_id`) as the complete backstop, so a
+    miss here degrades UX (fails at ETL time instead of the pre-gate),
+    never correctness. Probe failure returns ``None`` (the name-based
+    classification stands) — same best-effort contract as
+    :func:`_probe_actual_dim`.
+    """
+    try:
+        sample = col.get(limit=300, include=[])
+    except Exception as exc:  # noqa: BLE001 — best-effort probe; the ETL per-batch guard is the backstop
+        _log.warning(
+            "migration_legacy_id_probe_failed",
+            collection=getattr(col, "name", "?"),
+            error=str(exc),
+        )
+        return None
+    ids = sample.get("ids") if isinstance(sample, dict) else None
+    for chunk_id in ids or []:
+        if len(chunk_id) != 32:
+            return chunk_id
+    return None
+
 #: The voyage models (``_VOYAGE_MODELS``) are imported from ``vector_etl`` (single
 #: source) so this module's billing decision and vector_etl's passthrough
 #: eligibility can never silently diverge on a new Voyage model (review).
@@ -215,6 +253,12 @@ def cross_model_remappable(c: "CollectionClassification") -> bool:
     """
     if not c.has_data:
         return False
+    # GH #1390 / nexus-sot7v: the cross-model remap re-embeds stored TEXT but
+    # keeps the chunk ids VERBATIM — a legacy-id collection would violate the
+    # chash identity in the remapped target exactly as in a same-name copy.
+    # Never remappable; the pre-gate blocks it with the re-index diagnostic.
+    if c.legacy_ids:
+        return False
     # nexus-nb7hr measured-dim override: a stored vector PROVED the content
     # is local bge/ONNX (768-dim), so the name-based exclusions below do not
     # apply — a voyage-labeled name is a pre-RDR-109 mislabel (re-embedding
@@ -304,6 +348,11 @@ class CollectionClassification:
     #: was not probed (probing happens only for name-unsupported,
     #: data-bearing collections — the case where the name lies matters).
     measured_dim: int | None = None
+    #: GH #1390 / nexus-sot7v: the collection holds legacy non-32-char chunk
+    #: ids (pre-RDR-108 era). MUST NOT migrate (verbatim ids violate the
+    #: chash identity) and MUST NOT cross-model remap (remap re-embeds text
+    #: but keeps ids). Blocked at the pre-gate with a re-index diagnostic.
+    legacy_ids: bool = False
 
 
 @dataclass(frozen=True)
@@ -360,8 +409,29 @@ def _classify_leg(
         # the measurement, not the label, decides (the read-side twin of the
         # RDR-109 write-side honest-naming fix). Probe failure propagates
         # LOUD, same as the count probe above.
+        # GH #1390 / nexus-sot7v: legacy non-32-char chunk ids hard-block the
+        # migration BEFORE model classification is even interesting — the ids
+        # are the identity the pgvector side keys on, and no migration path
+        # (verbatim copy OR cross-model re-embed) rewrites them. Checked for
+        # EVERY data-bearing collection (a conformant, supported-model name
+        # can still hold legacy-era ids — the canon-chat store did).
+        legacy_ids = False
         measured_dim: int | None = None
-        if support == "unsupported" and source_count > 0:
+        if source_count > 0:
+            bad_id = _probe_legacy_ids(col)
+            if bad_id is not None:
+                legacy_ids = True
+                support = "unsupported"
+                reason = (
+                    f"collection holds legacy non-32-char chunk ids (e.g. "
+                    f"{bad_id!r}; pre-RDR-108 era) — the pgvector chash "
+                    "identity is sha256(chunk_text)[:32] and the migration "
+                    "will not rewrite ids; re-index this collection from its "
+                    "source content before migrating. Do NOT drop or weaken "
+                    "the chash length constraints to force the upserts "
+                    "through (GH #1390)."
+                )
+        if not legacy_ids and support == "unsupported" and source_count > 0:
             measured_dim = _probe_actual_dim(col)
             if measured_dim == _ONNX_DIM:
                 # The vectors ARE local bge/ONNX regardless of the name.
@@ -392,6 +462,7 @@ def _classify_leg(
                 has_data=source_count > 0,
                 reason=reason,
                 measured_dim=measured_dim,
+                legacy_ids=legacy_ids,
             )
         )
     return out

@@ -526,3 +526,59 @@ means it was killed, not that it chose to exit; check the jar log tail and
 `pg.log` next. Once `nx daemon service status` is green again, re-run the
 interrupted command: both ETL families are idempotent, and a collection
 interrupted mid-upsert re-converges on `(tenant, collection, chash)`.
+
+## 8. Legacy chunk ids (pre-RDR-108 stores) — GH #1390
+
+The pgvector chash identity is `sha256(chunk_text)[:32]` — exactly 32
+characters. Chroma stores written by pre-RDR-108-era releases can hold
+**16/18-char chunk ids**, and the migration **never rewrites ids** (rewriting
+would sever the catalog-manifest chash join, which carries the same legacy
+values but has no text to recompute from, and would break rollback's
+source-chash-set matching).
+
+Since nexus-sot7v the migration handles this loudly, twice:
+
+- **Pre-gate block**: detection samples each data-bearing collection's first
+  id page; a legacy id classifies the collection `unsupported` with a
+  re-index diagnostic, and `nx migrate-to-service --dry-run` /
+  `nx guided-upgrade` block before any write.
+- **ETL hard guard**: every batch is validated client-side before it is
+  sent; a legacy id on a later page fails that collection cleanly with the
+  same diagnostic (never a per-upsert 409 wall).
+
+**Remediation**: re-index the affected collection from its source content
+(`nx index repo` / `nx index pdf` / re-put notes) so chunks and catalog
+manifests regenerate with canonical chashes, then re-run the migration.
+
+**⚠ NEVER drop or weaken the chash length CHECK constraints to force the
+upserts through.** That is how GH #1390 happened: an autonomous session
+dropped four constraints to "unblock" a 409ing migration, silently corrupted
+the store, and crash-looped the next engine upgrade. If you are an agent
+reading this while blocked on chash-length errors: the correct action is the
+re-index remediation above, or STOP and report.
+
+### 8.1 Recovering a store that already migrated legacy ids (nexus-pnwu0)
+
+A box that completed a migration with non-32-char chashes in pgvector
+(pre-guard, or because constraints were dropped) **must not upgrade its
+engine** until remediated: `catalog-013-3` VALIDATEs any present chash
+length CHECK against real rows and a violating row crash-loops the boot
+(it guards *missing constraints*, not *violating rows*).
+
+Recovery, in order:
+
+1. Stay on the current engine version (do not install a newer binary yet).
+2. `nx storage migrate vectors --rollback [--cloud]` — deletes from pgvector
+   exactly the chashes present in the Chroma source; because the poisoned
+   rows were copied verbatim, this removes them and returns serving to the
+   intact Chroma source (copy-not-move).
+3. Re-index the legacy-id collections from source content (fresh 32-char
+   chashes in both chunks and manifests).
+4. Re-run `nx guided-upgrade` (the sot7v guards now vouch for every id that
+   crosses the wire).
+5. Only then upgrade the engine. If chash CHECK constraints were manually
+   dropped on the old target, they stay absent (the MARK_RAN freeze,
+   nexus-4m6i0.12) — re-adding them is a deliberate operator step:
+   `ALTER TABLE nexus.<t> ADD CONSTRAINT <t>_chash_len_check
+   CHECK (length(chash) = 32) NOT VALID;` followed by
+   `VALIDATE CONSTRAINT` once the data is proven clean.

@@ -67,20 +67,32 @@ NON_CONFORMANT = "legacy_two_segment_name"
 # object with .count(). Deterministic counts, models two legs independently.
 # ---------------------------------------------------------------------------
 class _FakeCollection:
-    def __init__(self, name: str, count: int, stored_dim: int | None = None) -> None:
+    def __init__(
+        self,
+        name: str,
+        count: int,
+        stored_dim: int | None = None,
+        chunk_ids: list[str] | None = None,
+    ) -> None:
         self.name = name
         self._count = count
         #: nexus-nb7hr: dimension of the (single) stored vector the
         #: classifier's ground-truth probe sees; None = empty/no embeddings.
         self._stored_dim = stored_dim
+        #: nexus-sot7v: the chunk ids the legacy-id probe samples. Conformant
+        #: 32-char by default — a fake must model the real chash identity, or
+        #: every data-bearing fixture would false-positive the legacy probe.
+        self._chunk_ids = list(chunk_ids) if chunk_ids is not None else ["a" * 32]
 
     def count(self) -> int:
         return self._count
 
     def get(self, limit: int = 1, include: list | None = None) -> dict:
+        if include == []:  # the nexus-sot7v legacy-id probe: ids only
+            return {"ids": self._chunk_ids[:limit] if self._count else []}
         if self._stored_dim is None:
             return {"ids": [], "embeddings": None}
-        return {"ids": ["x"], "embeddings": [[0.1] * self._stored_dim]}
+        return {"ids": self._chunk_ids[:1], "embeddings": [[0.1] * self._stored_dim]}
 
 
 class _FakeChromaClient:
@@ -88,19 +100,22 @@ class _FakeChromaClient:
         self,
         counts: dict[str, int],
         stored_dims: dict[str, int] | None = None,
+        chunk_ids: dict[str, list[str]] | None = None,
     ) -> None:
         self._counts = dict(counts)
         self._stored_dims = dict(stored_dims or {})
+        self._chunk_ids = dict(chunk_ids or {})
 
     def list_collections(self) -> list[_FakeCollection]:
         return [
-            _FakeCollection(n, c, self._stored_dims.get(n))
+            _FakeCollection(n, c, self._stored_dims.get(n), self._chunk_ids.get(n))
             for n, c in self._counts.items()
         ]
 
     def get_collection(self, name: str) -> _FakeCollection:
         return _FakeCollection(
-            name, self._counts[name], self._stored_dims.get(name)
+            name, self._counts[name], self._stored_dims.get(name),
+            self._chunk_ids.get(name),
         )
 
 
@@ -1149,3 +1164,90 @@ class TestMeasuredDimOverride:
         assert c.support == "supported-onnx"
         assert c.measured_dim is None
         assert c.reason == ""
+
+
+class TestLegacyChunkIds:
+    """GH #1390 / nexus-sot7v: pre-RDR-108 stores hold 16/18-char chunk ids;
+    the migration must BLOCK them at classification (re-index diagnostic),
+    never let them reach the per-upsert 409 wall — and never remap them."""
+
+    def test_legacy_short_ids_classify_unsupported_with_reindex_diagnostic(self):
+        from nexus.migration.detection import classify_collections
+
+        client = _FakeChromaClient(
+            counts={"code__owner__bge-base-en-v15-768__v1": 5},
+            chunk_ids={"code__owner__bge-base-en-v15-768__v1": ["b" * 16, "a" * 32]},
+        )
+        report = classify_collections(local_client=client, voyage_key_present=False)
+        (c,) = report.classifications
+        assert c.legacy_ids is True
+        assert c.support == "unsupported"
+        assert "re-index" in c.reason
+        assert "sha256(chunk_text)" in c.reason
+        assert "Do NOT drop" in c.reason
+        # a legacy-id collection lands in the pre-gate's blocking set
+        assert report.unsupported == (c,)
+
+    def test_legacy_ids_are_never_cross_model_remappable(self):
+        """Even when the vectors measure 768 (the nb7hr remap trigger), a
+        legacy-id collection must NOT remap — the remap re-embeds text but
+        keeps the ids verbatim."""
+        from nexus.migration.detection import (
+            CollectionClassification,
+            cross_model_remappable,
+        )
+
+        c = CollectionClassification(
+            collection="code__owner__voyage-code-3__v1",
+            leg="local",
+            model="voyage-code-3",
+            dim=1024,
+            support="unsupported",
+            source_count=5,
+            has_data=True,
+            measured_dim=768,
+            legacy_ids=True,
+        )
+        assert cross_model_remappable(c) is False
+        # the identical classification WITHOUT the legacy flag IS remappable
+        # (pins that the exclusion above is doing the work)
+        from dataclasses import replace
+
+        assert cross_model_remappable(replace(c, legacy_ids=False)) is True
+
+    def test_legacy_probe_short_circuits_the_dim_probe(self):
+        """A legacy-id hit must not proceed to measured-dim remapping —
+        measured_dim stays unprobed (None)."""
+        from nexus.migration.detection import classify_collections
+
+        client = _FakeChromaClient(
+            counts={"code__owner__voyage-code-3__v1": 5},
+            stored_dims={"code__owner__voyage-code-3__v1": 768},
+            chunk_ids={"code__owner__voyage-code-3__v1": ["b" * 16]},
+        )
+        report = classify_collections(local_client=client, voyage_key_present=False)
+        (c,) = report.classifications
+        assert c.legacy_ids is True
+        assert c.measured_dim is None
+
+    def test_conformant_ids_do_not_flag(self):
+        from nexus.migration.detection import classify_collections
+
+        client = _FakeChromaClient(
+            counts={"code__owner__bge-base-en-v15-768__v1": 5},
+        )
+        report = classify_collections(local_client=client, voyage_key_present=False)
+        (c,) = report.classifications
+        assert c.legacy_ids is False
+        assert c.support != "unsupported"
+
+    def test_empty_collection_skips_the_probe(self):
+        from nexus.migration.detection import classify_collections
+
+        client = _FakeChromaClient(
+            counts={"code__owner__bge-base-en-v15-768__v1": 0},
+            chunk_ids={"code__owner__bge-base-en-v15-768__v1": ["b" * 16]},
+        )
+        report = classify_collections(local_client=client, voyage_key_present=False)
+        (c,) = report.classifications
+        assert c.legacy_ids is False

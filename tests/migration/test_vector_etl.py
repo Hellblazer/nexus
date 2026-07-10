@@ -2811,3 +2811,91 @@ class TestCrossModelMigrate:
         r = report.results[0]
         assert r.target_collection is None
         assert set(fake.store[src].keys())  # landed under the source name
+
+
+class TestLegacyChunkIdGuard:
+    """GH #1390 / nexus-sot7v: pre-RDR-108 stores hold 16/18-char chunk ids.
+    The per-batch hard guard must fail the collection CLIENT-SIDE with the
+    re-index + do-NOT-drop-constraints diagnostic before a single upsert is
+    sent — never the per-upsert 409 wall that pushed an autonomous session
+    into dropping the chash constraints."""
+
+    def test_legacy_short_id_fails_cleanly_before_any_write(self, source_client) -> None:
+        from nexus.migration.vector_etl import _migrate_one
+
+        name = _coll("etlunit-legacyid", model=_MODEL_768)
+        col = source_client.get_or_create_collection(name)
+        col.add(
+            ids=["b" * 16],
+            documents=["legacy-era chunk"],
+            metadatas=[{"position": 0, "embedding_model": _MODEL_768}],
+            embeddings=[[0.1, 1.0]],
+        )
+        fake = FakeVectorClient()
+
+        result = _migrate_one(
+            source_client, fake, name, dry_run=False, page=100, target_name=name
+        )
+
+        assert result.status == "failed"
+        assert "'" + "b" * 16 + "'" in result.reason
+        assert "Re-index" in result.reason
+        assert "Do NOT drop" in result.reason
+        assert fake.upsert_calls == []  # nothing crossed the wire
+
+    def test_mixed_batch_with_one_legacy_id_fails_whole_batch(self, source_client) -> None:
+        """One bad id in a batch fails the collection before that batch is
+        sent — the conformant siblings in the same batch must not be written
+        either (a partial batch would complicate rollback accounting)."""
+        from nexus.migration.vector_etl import _migrate_one
+
+        name = _coll("etlunit-legacymix", model=_MODEL_768)
+        _seed_source(source_client, name, 2, embedding_model=_MODEL_768)
+        col = source_client.get_or_create_collection(name)
+        col.add(
+            ids=["c" * 18],
+            documents=["another legacy chunk"],
+            metadatas=[{"position": 9, "embedding_model": _MODEL_768}],
+            embeddings=[[0.2, 1.0]],
+        )
+        fake = FakeVectorClient()
+
+        result = _migrate_one(
+            source_client, fake, name, dry_run=False, page=100, target_name=name
+        )
+
+        assert result.status == "failed"
+        assert fake.upsert_calls == []
+
+    def test_conformant_ids_still_migrate(self, source_client) -> None:
+        """Regression pin: the guard must not reject the honest 32-char path."""
+        from nexus.migration.vector_etl import _migrate_one
+
+        name = _coll("etlunit-legacyok", model=_MODEL_768)
+        _seed_source(source_client, name, 3, embedding_model=_MODEL_768)
+        fake = FakeVectorClient()
+
+        result = _migrate_one(
+            source_client, fake, name, dry_run=False, page=100, target_name=name
+        )
+        assert result.status == "migrated"
+        assert len(fake.upsert_calls) == 1
+
+    def test_verify_fill_legacy_short_id_fails_cleanly(self, source_client) -> None:
+        from nexus.migration.vector_etl import _verify_fill_one
+
+        name = _coll("etlunit-legacyvf", model=_MODEL_768)
+        col = source_client.get_or_create_collection(name)
+        col.add(
+            ids=["d" * 16],
+            documents=["legacy-era chunk"],
+            metadatas=[{"position": 0, "embedding_model": _MODEL_768}],
+            embeddings=[[0.3, 1.0]],
+        )
+        fake = FakeVectorClient()
+
+        result = _verify_fill_one(source_client, fake, name, page=100, target_name=name)
+
+        assert result.status == "failed"
+        assert "Do NOT drop" in result.reason
+        assert fake.upsert_calls == []

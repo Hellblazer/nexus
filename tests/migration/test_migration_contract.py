@@ -106,6 +106,7 @@ def test_detection_surface():
         "has_data",
         "reason",
         "measured_dim",  # nexus-nb7hr: ground-truth probe result
+        "legacy_ids",  # nexus-sot7v / GH #1390: pre-RDR-108 short-id block
     }
 
 

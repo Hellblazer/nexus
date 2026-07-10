@@ -333,6 +333,32 @@ def cross_model_target_name(source: str, target_model: str) -> str:
     return "__".join(segments)
 
 
+def _nonconformant_id(ids: list[str]) -> str | None:
+    """First id violating the 32-char chash identity, else ``None``.
+
+    GH #1390 / nexus-sot7v: pre-RDR-108-era Chroma stores hold 16/18-char
+    chunk ids. The pgvector side keys on ``sha256(chunk_text)[:32]`` and the
+    server never recomputes chash from text, so a verbatim copy of such ids
+    409s on the chash length CHECK per upsert — the wall that pushed an
+    autonomous session into dropping the constraints. This guard fails the
+    collection CLEANLY, client-side, before the batch is ever sent.
+    """
+    return next((i for i in ids if len(i) != 32), None)
+
+
+def _legacy_id_failure_reason(collection: str, example: str) -> str:
+    """The actionable (and agent-facing) failure text for a legacy-id hit."""
+    return (
+        f"legacy non-32-char chunk id {example!r} in {collection!r} "
+        "(pre-RDR-108 era) — the pgvector chash identity is "
+        "sha256(chunk_text)[:32] and the migration will NOT rewrite ids. "
+        "Re-index this collection from its source content, then re-run the "
+        "migration. Do NOT drop or weaken the chash length constraints to "
+        "force the upserts through: that silently corrupts the store and "
+        "crash-loops a later engine upgrade (GH #1390)."
+    )
+
+
 def _iter_id_pages(
     read_client: Any, collection: str, page: int, *, include_embeddings: bool = False
 ) -> Iterator[list[dict[str, Any]]]:
@@ -600,6 +626,24 @@ def _migrate_one(
     try:
         for batch in _iter_id_pages(read_client, name, page, include_embeddings=passthrough):
             source_count += len(batch)
+            batch_ids = [c["id"] for c in batch]
+            # GH #1390 / nexus-sot7v hard guard: never send a legacy-id batch
+            # (fail cleanly BEFORE the write; the classification-time probe is
+            # first-page-only, this is the complete per-batch backstop).
+            bad_id = _nonconformant_id(batch_ids)
+            if bad_id is not None:
+                reason = _legacy_id_failure_reason(name, bad_id)
+                _log.error(
+                    "vector_etl_legacy_chunk_id",
+                    collection=name,
+                    target=target,
+                    example_id=bad_id,
+                    written=written,
+                )
+                return CollectionResult(
+                    name, source_count, written, "failed", reason,
+                    target_collection=target if is_cross_model else None,
+                )
             # Read from the SOURCE (*name*); upsert into the TARGET (model-remapped
             # for cross-model). For the re-embed path the server embeds the stored
             # text with the target's model; for passthrough it stores the supplied
@@ -642,7 +686,7 @@ def _migrate_one(
             _etl_batch_with_breaker(
                 vector_client.upsert_chunks,
                 target,
-                [c["id"] for c in batch],
+                batch_ids,
                 [c["document"] for c in batch],
                 [c["metadata"] for c in batch],
                 breaker=breaker,
@@ -788,6 +832,21 @@ def _verify_fill_one(
         for batch in _iter_id_pages(read_client, name, page, include_embeddings=passthrough):
             source_count += len(batch)
             ids = [c["id"] for c in batch]
+            # GH #1390 / nexus-sot7v: same hard guard as _migrate_one — a
+            # verify-fill must never re-send legacy-id chunks either.
+            bad_id = _nonconformant_id(ids)
+            if bad_id is not None:
+                reason = _legacy_id_failure_reason(name, bad_id)
+                _log.error(
+                    "vector_etl_verify_fill_legacy_chunk_id",
+                    collection=name,
+                    target=target,
+                    example_id=bad_id,
+                )
+                return CollectionResult(
+                    name, source_count, filled_count, "failed", reason,
+                    target_collection=target if is_cross_model else None,
+                )
             present = vector_client.existing_ids(target, ids)
             missing_idx = [i for i, _id in enumerate(ids) if _id not in present]
             if not missing_idx:
