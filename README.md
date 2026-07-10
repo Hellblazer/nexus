@@ -97,4 +97,7 @@ When you update the **Claude Code plugin** (`/plugin update`), upgrade the CLI t
 
 ## License
 
-AGPL-3.0-or-later. See [LICENSE](https://github.com/Hellblazer/nexus/blob/main/LICENSE).
+Dual-licensed. Open source under AGPL-3.0-or-later
+([LICENSE](https://github.com/Hellblazer/nexus/blob/main/LICENSE)); commercial
+licenses are available for organizations that need non-AGPL terms — see
+[LICENSING.md](https://github.com/Hellblazer/nexus/blob/main/LICENSING.md).
