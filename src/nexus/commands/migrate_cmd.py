@@ -292,6 +292,23 @@ def _run_migration(
             on_leg_result=_on_leg_result,
             run_t2=run_t2,
         )
+    # nexus-5b9v0 Fix 1 (+ Fix B round-2): TargetNameCollisionBlocked used to
+    # propagate raw out of this bare try/finally (no except clause existed) —
+    # a real collision dumped an unhandled Python traceback at the operator
+    # instead of the clean actionable message every sibling pre-flight
+    # failure at this call site gets (mirrors the _resolve_endpoint /
+    # get_http_vector_client ClickException-wrapping convention above).
+    # Widened from `except TargetNameCollisionBlocked` (which polished only
+    # ONE exception type) to `except RuntimeError` to match the sibling
+    # call-site convention literally: `TargetNameCollisionBlocked` IS a
+    # RuntimeError subclass, and run_guided_upgrade has a SEPARATE raw
+    # re-raise (driver.py's validation-setup-failure path, `mark_failed`
+    # then bare `raise`) ~90 lines below the collision guard that would
+    # otherwise still dump a raw traceback for a different failure in the
+    # SAME call. Catching the base class closes both gaps with one clause,
+    # exactly like the three sibling call sites above.
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
     finally:
         _close_quietly(catalog_client)
         _close_quietly(vector_client)

@@ -489,7 +489,458 @@ def test_reopen_leg_raises_marks_failed_not_stranded(monkeypatch, _sources):
     assert marked and "validation could not be performed" in marked[0]
 
 
+def test_reopen_leg_filenotfound_wrapped_as_runtimeerror(monkeypatch, _sources):
+    """nexus-5b9v0 round-3 Fix D (bead nexus-rndvq, CRITICAL): the validation-
+    setup except-block used to bare `raise`, re-propagating whatever exception
+    type the reopen actually raised. In production this is a FileNotFoundError
+    — exactly what ``chroma_read.open_local_read_client`` raises (line 64) when
+    the local Chroma store vanished between the ETL write and the validation
+    reopen, the scenario this except-block's own comment names as motivating.
+    FileNotFoundError is NOT a RuntimeError subclass, so
+    ``migrate_cmd.py``'s ``except RuntimeError`` guard could never catch it —
+    the operator still got a raw traceback for this exact failure mode. The
+    fix wraps at the origin: `raise RuntimeError(reason) from exc` so ANY
+    RuntimeError-catching caller (present or future) gets this covered,
+    while `__cause__` still carries the original FileNotFoundError for a
+    caller that wants to recover it."""
+    order: list[str] = []
+    closables: list[str] = []
+    marked: list[str] = []
+    _patch_engine(
+        monkeypatch,
+        detection=_detection(_cls("code__o__m__v1", "local")),
+        sequence=_sequence(ok=True, phase="migrated"),
+        closables=closables,
+        order=order,
+        validation=_validation(unlocked=True),
+    )
+    monkeypatch.setattr(driver, "mark_failed", lambda reason: marked.append(reason))
+
+    original = FileNotFoundError(
+        "local Chroma store not found at /tmp/gone — nothing to migrate"
+    )
+
+    def _reopen_vanished(leg: str):
+        raise original
+
+    with pytest.raises(RuntimeError) as exc_info:
+        driver.run_guided_upgrade(
+            sources=_sources,
+            vector_client=object(),
+            catalog_client=object(),
+            t2_db_path=_sources.sqlite_path,
+            reopen_leg=_reopen_vanished,
+        )
+    # The re-raised exception must be a RuntimeError (catchable by
+    # migrate_cmd.py's `except RuntimeError`), NOT the original
+    # FileNotFoundError propagating raw.
+    assert type(exc_info.value) is RuntimeError
+    assert not isinstance(exc_info.value, FileNotFoundError)
+    # The original exception must still be recoverable via __cause__.
+    assert exc_info.value.__cause__ is original
+    assert "local Chroma store not found" in str(exc_info.value)
+    assert "validate" not in order
+    assert marked and "local Chroma store not found" in marked[0]
+
+
 def test_composite_read_client_unknown_collection_raises():
     composite = driver._CompositeReadClient({})
     with pytest.raises(RuntimeError, match="no source read leg"):
         composite.get_collection("missing__o__m__v1")
+
+
+def _misnamed_voyage_cls(collection: str, leg: str) -> CollectionClassification:
+    """nexus-5b9v0: a pre-RDR-109 collection misnamed with a voyage-model token
+    (nexus-59vl / GH#667) — indexed pre-v4.32.0 in local mode, so its vectors are
+    actually 768-dim ONNX despite the name carrying a voyage token. The
+    measured-dim override makes this cross-model-remappable onto ``bge-768``
+    (its ACTUAL content's model), same as a genuinely-unsupported collection."""
+    return CollectionClassification(
+        collection=collection,
+        leg=leg,  # type: ignore[arg-type]
+        model="voyage-code-3",
+        dim=1024,
+        support="unsupported",
+        source_count=10,
+        has_data=True,
+        reason=(
+            f"collection uses voyage model 'voyage-code-3' but no "
+            "NX_VOYAGE_API_KEY is configured"
+        ),
+        measured_dim=768,
+    )
+
+
+def test_target_name_collision_blocked_before_sequence(monkeypatch, _sources):
+    """nexus-5b9v0 (Steve's real failure): a pre-RDR-109 misnamed-voyage
+    collection measures as bge-768 and cross-model-remaps onto the EXACT same
+    target name as its honest, non-remapped bge sibling. Both would write into
+    one pgvector target under one name — the guard must block this BEFORE any
+    ETL, naming both colliding source collections and the shared target."""
+    order: list[str] = []
+    closables: list[str] = []
+    detection = _detection(
+        _misnamed_voyage_cls("code__1-3__voyage-code-3__v1", "local"),
+        _cls("code__1-3__bge-base-en-v15-768__v1", "local", model=_ONNX, dim=768),
+    )
+    _patch_engine(
+        monkeypatch,
+        detection=detection,
+        sequence=_sequence(ok=True, phase="migrated"),
+        closables=closables,
+        order=order,
+        voyage_key=False,
+    )
+    with pytest.raises(driver.TargetNameCollisionBlocked) as exc_info:
+        driver.run_guided_upgrade(
+            sources=_sources,
+            vector_client=object(),
+            catalog_client=object(),
+            t2_db_path=_sources.sqlite_path,
+        )
+    message = str(exc_info.value)
+    assert "code__1-3__voyage-code-3__v1" in message
+    assert "code__1-3__bge-base-en-v15-768__v1" in message
+    # The exception's structured payload names the collision precisely — and
+    # (nexus-5b9v0 Fix 3) carries the FULL classification per source, not just
+    # the bare name, so an operator can tell which one is the stale mislabel.
+    collisions = exc_info.value.collisions
+    assert set(collisions.keys()) == {"code__1-3__bge-base-en-v15-768__v1"}
+    sources = collisions["code__1-3__bge-base-en-v15-768__v1"]
+    assert {c.collection for c in sources} == {
+        "code__1-3__voyage-code-3__v1",
+        "code__1-3__bge-base-en-v15-768__v1",
+    }
+    # The guard runs BEFORE the sequencer is ever invoked — classification ran
+    # (it needs the classifications), but no sequence/ETL work began.
+    assert order == ["classify"]
+    assert "sequence" not in order
+
+
+def test_target_name_collision_between_two_remapped_collections(monkeypatch, _sources):
+    """Two DIFFERENT mislabeled collections that both measure/remap to the same
+    target — neither is a non-remapped 'honest' collection. Confirms the guard
+    catches remapped-vs-remapped collisions, not just remapped-vs-honest."""
+    order: list[str] = []
+    closables: list[str] = []
+    detection = _detection(
+        _misnamed_voyage_cls("code__1-3__voyage-code-3__v1", "local"),
+        _cross_model_cls("code__1-3__minilm-l6-v2-384__v1", "local"),
+    )
+    _patch_engine(
+        monkeypatch,
+        detection=detection,
+        sequence=_sequence(ok=True, phase="migrated"),
+        closables=closables,
+        order=order,
+        voyage_key=False,
+    )
+    with pytest.raises(driver.TargetNameCollisionBlocked) as exc_info:
+        driver.run_guided_upgrade(
+            sources=_sources,
+            vector_client=object(),
+            catalog_client=object(),
+            t2_db_path=_sources.sqlite_path,
+        )
+    message = str(exc_info.value)
+    assert "code__1-3__voyage-code-3__v1" in message
+    assert "code__1-3__minilm-l6-v2-384__v1" in message
+    assert "code__1-3__bge-base-en-v15-768__v1" in message  # the shared target
+    assert order == ["classify"]
+
+
+def test_target_name_no_collision_when_targets_distinct(monkeypatch, _sources):
+    """No false positive: distinct remap/same-name targets across collections
+    must NOT trip the guard — migration proceeds through sequence+validate."""
+    order: list[str] = []
+    closables: list[str] = []
+    detection = _detection(
+        _cls("code__o__bge-base-en-v15-768__v1", "local", model=_ONNX, dim=768),
+        _cls("docs__o__voyage-context-3__v1", "cloud", model=_VOYAGE, dim=1024),
+    )
+    _patch_engine(
+        monkeypatch,
+        detection=detection,
+        sequence=_sequence(ok=True, phase="migrated"),
+        closables=closables,
+        order=order,
+        validation=_validation(unlocked=True),
+    )
+    result = driver.run_guided_upgrade(
+        sources=_sources,
+        vector_client=object(),
+        catalog_client=object(),
+        t2_db_path=_sources.sqlite_path,
+        reopen_leg=lambda leg: _FakeClient(f"reopen-{leg}", closables=closables),
+    )
+    assert result.ok is True
+    assert order == ["classify", "sequence", "validate"]
+
+
+def test_target_name_collision_across_different_legs(monkeypatch, _sources):
+    """The grouping is leg-agnostic (previously untested): two honest,
+    non-remapped, IDENTICALLY-named collections on DIFFERENT legs (local +
+    cloud) are two genuinely distinct data sources landing on one pgvector
+    target — this must collide, same as two same-leg sources."""
+    order: list[str] = []
+    closables: list[str] = []
+    detection = _detection(
+        _cls("code__o__bge-base-en-v15-768__v1", "local", model=_ONNX, dim=768),
+        _cls("code__o__bge-base-en-v15-768__v1", "cloud", model=_ONNX, dim=768),
+    )
+    _patch_engine(
+        monkeypatch,
+        detection=detection,
+        sequence=_sequence(ok=True, phase="migrated"),
+        closables=closables,
+        order=order,
+        voyage_key=False,
+    )
+    with pytest.raises(driver.TargetNameCollisionBlocked) as exc_info:
+        driver.run_guided_upgrade(
+            sources=_sources,
+            vector_client=object(),
+            catalog_client=object(),
+            t2_db_path=_sources.sqlite_path,
+        )
+    collisions = exc_info.value.collisions
+    assert set(collisions.keys()) == {"code__o__bge-base-en-v15-768__v1"}
+    legs = {c.leg for c in collisions["code__o__bge-base-en-v15-768__v1"]}
+    assert legs == {"local", "cloud"}
+    assert order == ["classify"]
+
+
+def test_target_name_collision_three_way(monkeypatch, _sources):
+    """The guard is provably N-way generic (`len(sources) > 1`), not just
+    pairwise — regression firming this up for N=3 (previously untested)."""
+    order: list[str] = []
+    closables: list[str] = []
+    detection = _detection(
+        _misnamed_voyage_cls("code__1-3__voyage-code-3__v1", "local"),
+        _cross_model_cls("code__1-3__minilm-l6-v2-384__v1", "local"),
+        _cls("code__1-3__bge-base-en-v15-768__v1", "local", model=_ONNX, dim=768),
+    )
+    _patch_engine(
+        monkeypatch,
+        detection=detection,
+        sequence=_sequence(ok=True, phase="migrated"),
+        closables=closables,
+        order=order,
+        voyage_key=False,
+    )
+    with pytest.raises(driver.TargetNameCollisionBlocked) as exc_info:
+        driver.run_guided_upgrade(
+            sources=_sources,
+            vector_client=object(),
+            catalog_client=object(),
+            t2_db_path=_sources.sqlite_path,
+        )
+    collisions = exc_info.value.collisions
+    sources = collisions["code__1-3__bge-base-en-v15-768__v1"]
+    assert {c.collection for c in sources} == {
+        "code__1-3__voyage-code-3__v1",
+        "code__1-3__minilm-l6-v2-384__v1",
+        "code__1-3__bge-base-en-v15-768__v1",
+    }
+    assert order == ["classify"]
+
+
+def test_target_name_collision_message_carries_classification_metadata(
+    monkeypatch, _sources
+):
+    """nexus-5b9v0 Fix 3: the exception's structured `.collisions` and its
+    rendered message must surface per-source model/measured_dim/reason, so an
+    operator can tell WHICH colliding source is the stale pre-RDR-109 mislabel
+    versus the honest sibling, without re-deriving the classification by
+    hand."""
+    order: list[str] = []
+    closables: list[str] = []
+    detection = _detection(
+        _misnamed_voyage_cls("code__1-3__voyage-code-3__v1", "local"),
+        _cls("code__1-3__bge-base-en-v15-768__v1", "local", model=_ONNX, dim=768),
+    )
+    _patch_engine(
+        monkeypatch,
+        detection=detection,
+        sequence=_sequence(ok=True, phase="migrated"),
+        closables=closables,
+        order=order,
+        voyage_key=False,
+    )
+    with pytest.raises(driver.TargetNameCollisionBlocked) as exc_info:
+        driver.run_guided_upgrade(
+            sources=_sources,
+            vector_client=object(),
+            catalog_client=object(),
+            t2_db_path=_sources.sqlite_path,
+        )
+    sources = exc_info.value.collisions["code__1-3__bge-base-en-v15-768__v1"]
+    by_name = {c.collection: c for c in sources}
+    mislabeled = by_name["code__1-3__voyage-code-3__v1"]
+    assert mislabeled.measured_dim == 768
+    assert mislabeled.model == "voyage-code-3"
+    assert "NX_VOYAGE_API_KEY" in mislabeled.reason
+    honest = by_name["code__1-3__bge-base-en-v15-768__v1"]
+    assert honest.model == "bge-base-en-v15-768"
+
+    message = str(exc_info.value)
+    assert "768-dim" in message
+    assert "voyage-code-3" in message
+    assert "NX_VOYAGE_API_KEY" in message
+
+
+def _derived_cls(leg: str) -> CollectionClassification:
+    """A non-remappable, two-segment DERIVED collection (RDR-178 Gap 6) —
+    present on this leg WITH data, but the ETL disposes of it as
+    'skipped-derived' (regenerable from T2 taxonomy), never writing it
+    anywhere. `cross_model_remappable` is False for it (model is None), so
+    `target_names` never maps it — it resolves to its own literal name."""
+    return CollectionClassification(
+        collection="taxonomy__centroids",
+        leg=leg,  # type: ignore[arg-type]
+        model=None,
+        dim=None,
+        support="unsupported",
+        source_count=447,
+        has_data=True,
+        reason=(
+            "collection name is not four-segment conformant "
+            "(<content_type>__<owner>__<model>__v<n>) — cannot resolve an "
+            "embedding model; re-index under a conformant name"
+        ),
+    )
+
+
+def test_target_name_collision_false_positive_derived_collection_excluded(
+    monkeypatch, _sources
+):
+    """nexus-5b9v0 Fix 2: a non-remappable, two-segment DERIVED collection
+    (`taxonomy__centroids`) present with data on BOTH legs maps to its own
+    literal name on each leg — a naive grouping would see 2 distinct sources
+    claiming one target and BLOCK. But the ETL disposes of it as
+    'skipped-derived' on every leg (`vector_etl.is_derived_skip`) and never
+    actually writes either copy — this must NOT collide."""
+    order: list[str] = []
+    closables: list[str] = []
+    detection = _detection(
+        _derived_cls("local"),
+        _derived_cls("cloud"),
+    )
+    _patch_engine(
+        monkeypatch,
+        detection=detection,
+        sequence=_sequence(ok=True, phase="migrated"),
+        closables=closables,
+        order=order,
+        validation=_validation(unlocked=True),
+    )
+    result = driver.run_guided_upgrade(
+        sources=_sources,
+        vector_client=object(),
+        catalog_client=object(),
+        t2_db_path=_sources.sqlite_path,
+        reopen_leg=lambda leg: _FakeClient(f"reopen-{leg}", closables=closables),
+    )
+    assert result.ok is True
+    assert order == ["classify", "sequence", "validate"]
+
+
+def _ephemeral_cls(leg: str) -> CollectionClassification:
+    """A non-conformant `tuples__*` session-ephemeral collection (excluded
+    from DEFAULT enumeration by `vector_etl.EPHEMERAL_EXCLUDE_PREFIXES`) —
+    present on this leg WITH data. NOT on the `_DERIVED_COLLECTIONS`
+    allowlist, so `is_derived_skip` alone is False for it; the ETL still
+    never writes it (a completely separate exclusion mechanism, checked
+    inline in `migrate_collections`/`migrate_cloud`'s enumeration loop)."""
+    return CollectionClassification(
+        collection="tuples__hook_events_notification",
+        leg=leg,  # type: ignore[arg-type]
+        model=None,
+        dim=None,
+        support="unsupported",
+        source_count=64,
+        has_data=True,
+        reason=(
+            "collection name is not four-segment conformant "
+            "(<content_type>__<owner>__<model>__v<n>) — cannot resolve an "
+            "embedding model; re-index under a conformant name"
+        ),
+    )
+
+
+def test_target_name_collision_false_positive_ephemeral_collection_excluded(
+    monkeypatch, _sources
+):
+    """nexus-5b9v0 Fix A (round-2): a session-ephemeral `tuples__*` collection
+    present with data on BOTH legs maps to its own literal name on each leg —
+    same false-positive shape as the derived-collection case, but via the
+    STRUCTURALLY DISTINCT `EPHEMERAL_EXCLUDE_PREFIXES` exclusion (not the
+    `_DERIVED_COLLECTIONS` allowlist `is_derived_skip` alone covers). The
+    guard must exempt this too — it is never actually written by the
+    DEFAULT enumeration `run_guided_upgrade` always drives."""
+    order: list[str] = []
+    closables: list[str] = []
+    detection = _detection(
+        _ephemeral_cls("local"),
+        _ephemeral_cls("cloud"),
+    )
+    _patch_engine(
+        monkeypatch,
+        detection=detection,
+        sequence=_sequence(ok=True, phase="migrated"),
+        closables=closables,
+        order=order,
+        validation=_validation(unlocked=True),
+    )
+    result = driver.run_guided_upgrade(
+        sources=_sources,
+        vector_client=object(),
+        catalog_client=object(),
+        t2_db_path=_sources.sqlite_path,
+        reopen_leg=lambda leg: _FakeClient(f"reopen-{leg}", closables=closables),
+    )
+    assert result.ok is True
+    assert order == ["classify", "sequence", "validate"]
+
+
+def test_target_name_collision_message_flags_likely_stale_source(
+    monkeypatch, _sources
+):
+    """nexus-5b9v0 Fix C (round-2): the rendered message must explicitly flag
+    WHICH colliding source is the likely-stale pre-RDR-109 mislabel (a
+    measured-dim override — declared unsupported/voyage but measured as
+    local bge/ONNX), rather than presenting symmetric bullets the operator
+    has to compare by hand."""
+    order: list[str] = []
+    closables: list[str] = []
+    detection = _detection(
+        _misnamed_voyage_cls("code__1-3__voyage-code-3__v1", "local"),
+        _cls("code__1-3__bge-base-en-v15-768__v1", "local", model=_ONNX, dim=768),
+    )
+    _patch_engine(
+        monkeypatch,
+        detection=detection,
+        sequence=_sequence(ok=True, phase="migrated"),
+        closables=closables,
+        order=order,
+        voyage_key=False,
+    )
+    with pytest.raises(driver.TargetNameCollisionBlocked) as exc_info:
+        driver.run_guided_upgrade(
+            sources=_sources,
+            vector_client=object(),
+            catalog_client=object(),
+            t2_db_path=_sources.sqlite_path,
+        )
+    message = str(exc_info.value)
+    stale_line = next(
+        line for line in message.splitlines()
+        if "code__1-3__voyage-code-3__v1" in line
+    )
+    honest_line = next(
+        line for line in message.splitlines()
+        if "code__1-3__bge-base-en-v15-768__v1" in line
+        and "target" not in line  # skip the "target ... would be written" header line
+    )
+    assert "LIKELY STALE" in stale_line
+    assert "LIKELY STALE" not in honest_line

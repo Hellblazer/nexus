@@ -170,6 +170,21 @@ def classify_model_support(
     )
 
 
+def is_measured_dim_override(c: "CollectionClassification") -> bool:
+    """Whether *c* is a stale pre-RDR-109 mislabel (nexus-nb7hr / nexus-5b9v0).
+
+    True iff *c*'s declared name/model says ``unsupported`` but a stored
+    vector MEASURED as local bge/ONNX (768-dim) — i.e. the name lies: the
+    content is provably local bge/ONNX despite carrying a voyage token (or no
+    model segment at all). This is exactly the override condition
+    :func:`cross_model_remappable` checks first; extracted so a caller that
+    needs to know WHICH of several classifications is the likely-stale
+    mislabel (rather than whether the migration would re-embed it) can reuse
+    the identical test instead of re-deriving it and risking drift.
+    """
+    return c.support == "unsupported" and c.measured_dim == _ONNX_DIM
+
+
 def cross_model_remappable(c: "CollectionClassification") -> bool:
     """Whether *c* is a legacy collection the cross-model migrate can re-embed.
 
@@ -206,7 +221,7 @@ def cross_model_remappable(c: "CollectionClassification") -> bool:
     # bge text into bge is loss-free, unlike genuine voyage content), and a
     # non-conformant name gets a synthesized conformant target
     # (cross_model_target_name).
-    if c.support == "unsupported" and c.measured_dim == _ONNX_DIM:
+    if is_measured_dim_override(c):
         return True
     if c.model is None:
         return False

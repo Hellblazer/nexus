@@ -353,6 +353,94 @@ def _iter_id_pages(
         yield batch
 
 
+def is_derived_skip(name: str, target: str) -> bool:
+    """Whether *name* would be dispositioned ``skipped-derived`` for *target*.
+
+    True iff *target* cannot dim-dispatch (non-conformant name / unknown
+    model segment) AND *name* is on the explicit :data:`_DERIVED_COLLECTIONS`
+    allowlist — exactly the condition :func:`_skip_result_for_nonconformant`
+    uses to route to the ``skipped-derived`` terminal state (RDR-178 Gap 6).
+
+    This predicate is UNCONDITIONAL — it applies regardless of
+    default-vs-explicit enumeration (an explicitly-named derived collection
+    is still recomputable, so it is still skipped-derived). Contrast
+    :func:`is_ephemeral_excluded`, whose exclusion applies ONLY under
+    DEFAULT enumeration (explicit naming overrides it — see
+    ``TestEphemeralExclusion.test_explicit_naming_overrides_exclusion``) and
+    which therefore must NOT be folded into this function or into
+    :func:`_skip_result_for_nonconformant`'s call site — doing so would
+    silently misclassify an explicitly-named ``tuples__*`` collection as
+    derived/regenerable (wrong hint text, wrong semantics) instead of letting
+    the explicit-override contract stand. Use :func:`is_never_written` when a
+    caller (like the migration driver's collision guard, which always runs
+    in a default-enumeration context) needs the broader "will the DEFAULT
+    run ever actually write this" predicate.
+    """
+    if name not in _DERIVED_COLLECTIONS:
+        return False
+    dim, _reason = _dim_for_collection(target)
+    return dim is None
+
+
+def is_ephemeral_excluded(name: str) -> bool:
+    """Whether *name* carries an :data:`EPHEMERAL_EXCLUDE_PREFIXES` prefix
+    (session-ephemeral tuplespace state, e.g. ``tuples__*``) — the same
+    prefix test :func:`migrate_collections` / :func:`migrate_cloud` /
+    :func:`verify_fill_collections` apply in their DEFAULT (non-explicit)
+    enumeration loops. A single named predicate so the three call sites
+    (and :func:`is_never_written`) can never drift on the prefix check
+    itself (nexus-5b9v0 Fix A).
+
+    Callers remain responsible for the ``not explicit`` gate — this
+    function only tests the name, matching the existing enumeration-loop
+    contract where explicit ``--collections`` naming overrides the
+    exclusion (``TestEphemeralExclusion.test_explicit_naming_overrides_exclusion``).
+    """
+    return name.startswith(EPHEMERAL_EXCLUDE_PREFIXES)
+
+
+def is_never_written(name: str, target: str) -> bool:
+    """Whether the ETL's DEFAULT (non-explicit) enumeration will NEVER
+    actually write *name* anywhere, regardless of its source data.
+
+    True iff EITHER *target* cannot dim-dispatch (:func:`_dim_for_collection`
+    returns ``None`` — the exact condition guarding EVERY branch inside
+    :func:`_skip_result_for_nonconformant`'s ``if dim is not None`` early
+    return: ``skipped-derived``, ``skipped-empty``, and the generic
+    ``skipped`` fallback all terminate there without ever reaching an
+    upsert) OR *name* carries an ephemeral-exclusion prefix
+    (:func:`is_ephemeral_excluded` — handled by a wholly separate
+    enumeration-loop branch, never through
+    :func:`_skip_result_for_nonconformant` at all). Used by the migration
+    driver's pre-flight collision guard
+    (``driver._assert_no_target_name_collisions``), which always runs in a
+    default-enumeration context (``run_guided_upgrade`` never passes an
+    explicit ``collections=`` list to ``migrate_local`` / ``migrate_cloud``).
+
+    This is the unifying predicate over EVERY never-written disposition
+    :func:`_skip_result_for_nonconformant` can produce, not an enumerated
+    allowlist of specific classes — nexus-5b9v0 round-3 review found the
+    prior two-class formulation (``is_derived_skip(name, target) or
+    is_ephemeral_excluded(name)``) missed a third: a generic nonconformant
+    collection (not on the :data:`_DERIVED_COLLECTIONS` allowlist, not
+    ephemeral) that HAS data still disposes to a plain ``"skipped"``
+    verdict and is therefore ALSO never written, yet the old formulation
+    returned ``False`` for it. Since ``is_derived_skip(name, target)``
+    implies ``dim is None`` by construction (see its own docstring), the
+    ``dim is None`` disjunct here is a strict superset — folding it in
+    only ever WIDENS the predicate, never narrows it, so no prior
+    never-written case regresses.
+
+    Deliberately NOT substituted at :func:`_skip_result_for_nonconformant`'s
+    own ``is_derived_skip`` call site — that site must preserve the
+    explicit-``--collections``-override nuance for ephemeral collections
+    (see :func:`is_derived_skip`'s docstring), which this guard's
+    always-default-enumeration caller does not need to reproduce.
+    """
+    dim, _reason = _dim_for_collection(target)
+    return dim is None or is_ephemeral_excluded(name)
+
+
 def _skip_result_for_nonconformant(
     read_client: Any, name: str, target: str,
 ) -> tuple[int | None, CollectionResult | None]:
@@ -375,7 +463,7 @@ def _skip_result_for_nonconformant(
     # collection is exempt regardless of row count (its data is not
     # lost, it is recomputed on the target), unlike the generic
     # nonconformant path where only an EMPTY collection is safe.
-    if name in _DERIVED_COLLECTIONS:
+    if is_derived_skip(name, target):
         try:
             derived_count = int(read_client.get_collection(name).count())
         except Exception:  # noqa: BLE001 - best-effort count probe; degrades to -1 sentinel
@@ -861,7 +949,7 @@ def migrate_collections(
     names = collections if explicit else list_collection_names(read_client)
     results: list[CollectionResult] = []
     for name in names:
-        if not explicit and name.startswith(EPHEMERAL_EXCLUDE_PREFIXES):
+        if not explicit and is_ephemeral_excluded(name):
             result = _excluded_ephemeral_result(read_client, name)
             results.append(result)
             if on_result is not None:
@@ -1270,7 +1358,7 @@ def migrate_cloud(
     excluded: list[CollectionResult] = []
     candidates: list[str] = []
     for name in names:
-        if not explicit and name.startswith(EPHEMERAL_EXCLUDE_PREFIXES):
+        if not explicit and is_ephemeral_excluded(name):
             result = _excluded_ephemeral_result(read_client, name)
             excluded.append(result)
             if on_result is not None:
@@ -1348,7 +1436,7 @@ def verify_fill_collections(
     names = collections if explicit else list_collection_names(read_client)
     results: list[CollectionResult] = []
     for name in names:
-        if not explicit and name.startswith(EPHEMERAL_EXCLUDE_PREFIXES):
+        if not explicit and is_ephemeral_excluded(name):
             try:
                 eph_count = int(read_client.get_collection(name).count())
             except Exception:  # noqa: BLE001 — count is informational here

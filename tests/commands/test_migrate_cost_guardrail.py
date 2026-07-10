@@ -231,6 +231,191 @@ class TestRunMigrationEngineFloorGate:
         assert ran == ["billed"]
 
 
+class TestRunMigrationCollisionGuard:
+    """nexus-5b9v0 Fix 1: TargetNameCollisionBlocked used to propagate raw out
+    of `_run_migration`'s bare try/finally (no except clause existed) — a
+    real collision dumped an unhandled Python traceback at the operator.
+    It must now render as a clean click.ClickException, mirroring the
+    _resolve_endpoint / get_http_vector_client wrapping convention already in
+    this same call site."""
+
+    def _wire(self, monkeypatch, *, cost: float = 0.0, tokens: int = 0):
+        import nexus.commands.migrate_cmd as mc
+
+        monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
+        monkeypatch.setattr(mc, "open_read_legs", lambda p: (None, None))
+        monkeypatch.setattr(mc, "classify_collections", lambda **k: object())
+        monkeypatch.setattr(mc, "voyage_key_available", lambda: True)
+        monkeypatch.setattr(
+            mc, "build_dry_run_preview", lambda r: _preview(cost=cost, tokens=tokens)
+        )
+        monkeypatch.setattr(mc, "_close_quietly", lambda c: None)
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._resolve_endpoint",
+            lambda: ("https://api.conexus-nexus.com:443", "tok"),
+        )
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client.HttpVectorClient",
+            lambda **k: object(),
+        )
+        monkeypatch.setattr(
+            "nexus.catalog.factory.make_catalog_client_for_migration",
+            lambda **k: object(),
+        )
+        monkeypatch.setattr(mc, "_resolve_db_path", lambda p: _existing_path())
+        monkeypatch.setattr(mc, "_resolve_catalog_db_path", lambda p: _existing_path())
+        return mc
+
+    def test_target_name_collision_renders_as_click_exception(
+        self, monkeypatch
+    ) -> None:
+        from nexus.migration.detection import CollectionClassification
+        from nexus.migration.driver import TargetNameCollisionBlocked
+
+        mc = self._wire(monkeypatch)
+
+        misnamed = CollectionClassification(
+            collection="code__1-3__voyage-code-3__v1",
+            leg="local",
+            model="voyage-code-3",
+            dim=1024,
+            support="unsupported",
+            source_count=10,
+            has_data=True,
+            reason="no NX_VOYAGE_API_KEY configured",
+            measured_dim=768,
+        )
+        honest = CollectionClassification(
+            collection="code__1-3__bge-base-en-v15-768__v1",
+            leg="local",
+            model="bge-base-en-v15-768",
+            dim=768,
+            support="supported-onnx",
+            source_count=10,
+            has_data=True,
+        )
+
+        def _boom(**_kwargs):
+            raise TargetNameCollisionBlocked(
+                {"code__1-3__bge-base-en-v15-768__v1": [misnamed, honest]}
+            )
+
+        monkeypatch.setattr("nexus.migration.driver.run_guided_upgrade", _boom)
+
+        with pytest.raises(click.ClickException) as exc_info:
+            mc._run_migration(None, None, None, None, assume_yes=True)
+        # Never a raw TargetNameCollisionBlocked / bare traceback reaching
+        # the CLI boundary — always the clean, wrapped exception.
+        assert not isinstance(exc_info.value, TargetNameCollisionBlocked)
+        message = str(exc_info.value)
+        assert "code__1-3__voyage-code-3__v1" in message
+        assert "code__1-3__bge-base-en-v15-768__v1" in message
+
+    def test_other_runtime_error_from_guided_upgrade_also_wrapped(
+        self, monkeypatch
+    ) -> None:
+        """nexus-5b9v0 Fix B (round-2): the except clause was narrowed to
+        `except TargetNameCollisionBlocked` by name — every OTHER RuntimeError
+        `run_guided_upgrade` can raise (e.g. driver.py's validation-setup-
+        failure path: `mark_failed(reason); raise`, ~90 lines below the
+        collision guard) still escaped as a raw, unwrapped exception. Widened
+        to `except RuntimeError` to match the three sibling call sites
+        (`_resolve_endpoint`, `get_http_vector_client`,
+        `make_catalog_client_for_migration`) literally — this generic
+        RuntimeError (standing in for the validation-setup-failure raw
+        re-raise) must ALSO surface as click.ClickException now."""
+        mc = self._wire(monkeypatch)
+
+        def _boom(**_kwargs):
+            raise RuntimeError("validation could not be performed: gate exploded")
+
+        monkeypatch.setattr("nexus.migration.driver.run_guided_upgrade", _boom)
+
+        with pytest.raises(click.ClickException) as exc_info:
+            mc._run_migration(None, None, None, None, assume_yes=True)
+        assert "gate exploded" in str(exc_info.value)
+
+    def test_validation_setup_filenotfound_wrapped_end_to_end(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """nexus-5b9v0 round-3 Fix D (bead nexus-rndvq, CRITICAL). Unlike
+        ``test_other_runtime_error_from_guided_upgrade_also_wrapped`` above
+        (which monkeypatches ``run_guided_upgrade`` itself to raise a
+        synthetic ``RuntimeError``, bypassing the actual ``reopen_leg` ->
+        ``open_local_read_client`` code path entirely — the round-3
+        remediation's test was VACUOUS w.r.t. this claim), this test drives
+        the REAL ``driver.run_guided_upgrade`` all the way to the real
+        validation-setup except-block: only ``open_read_legs``,
+        ``classify_collections``, and ``run_sequenced_migration`` are
+        stubbed (the detect/sequence steps, exactly like
+        ``tests/migration/test_driver.py``'s ``_patch_engine``); the
+        validation-reopen step is left REAL, and ``--local-path`` points at
+        a directory that does not exist, so the real
+        ``chroma_read.open_local_read_client`` raises a genuine
+        ``FileNotFoundError`` — the exact production scenario (the local
+        Chroma store vanishing between the ETL write and the validation
+        reopen). This proves the end-to-end claim that motivated widening
+        the CLI's except clause, which the synthetic-RuntimeError test above
+        could not."""
+        from nexus.migration import driver
+        from nexus.migration.detection import (
+            CollectionClassification,
+            DetectionReport,
+        )
+        from nexus.migration.sequencer import SequenceOutcome
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "config"))
+        mc = self._wire(monkeypatch)
+
+        detection = DetectionReport(
+            classifications=(
+                CollectionClassification(
+                    collection="code__o__bge-base-en-v15-768__v1",
+                    leg="local",
+                    model="bge-base-en-v15-768",
+                    dim=768,
+                    support="supported-onnx",
+                    source_count=10,
+                    has_data=True,
+                    reason="",
+                ),
+            )
+        )
+        sequence = SequenceOutcome(
+            ok=True,
+            phase="migrated",
+            collections_total=1,
+            collections_done=1,
+            t2_total_failed=0,
+            legs_attempted=("local",),
+            legs_ok=("local",),
+            blocked_reason=None,
+            t2_report={"summary": {"total_failed": 0}},
+        )
+
+        monkeypatch.setattr(
+            driver, "open_read_legs", lambda local_path=None: (object(), object())
+        )
+        monkeypatch.setattr(driver, "classify_collections", lambda **_k: detection)
+        monkeypatch.setattr(
+            driver, "run_sequenced_migration", lambda _det, **_k: sequence
+        )
+        monkeypatch.setattr(driver, "voyage_key_available", lambda: True)
+
+        nonexistent_local = tmp_path / "chroma_that_does_not_exist"
+
+        with pytest.raises(click.ClickException) as exc_info:
+            mc._run_migration(
+                str(nonexistent_local), None, None, None, assume_yes=True
+            )
+        # Must never be the raw FileNotFoundError escaping unwrapped.
+        assert not isinstance(exc_info.value, FileNotFoundError)
+        message = str(exc_info.value)
+        assert "local Chroma store not found" in message
+        assert str(nonexistent_local) in message
+
+
 def _stub_result():
     class _Seq:
         phase = "migrated"

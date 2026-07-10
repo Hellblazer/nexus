@@ -77,6 +77,9 @@ from nexus.migration.vector_etl import (
     CollectionResult,
     MigrationReport,
     cross_model_target_name,
+    is_derived_skip,
+    is_ephemeral_excluded,
+    is_never_written,
     manifest_backfill_sql,
     manifest_orphan_sql,
     migrate_cloud,
@@ -2674,6 +2677,68 @@ class TestEphemeralExclusion:
         )
         assert report.results[0].status == "skipped"
         assert report.ok is False
+
+
+class TestIsNeverWritten:
+    """nexus-5b9v0 Fix A (round-2 remediation) + Fix E (round-3 remediation):
+    the migration driver's pre-flight collision guard needs a SINGLE
+    predicate covering EVERY "never actually written by the DEFAULT ETL
+    enumeration" collection disposition -- not an enumerated allowlist of
+    specific classes. The true unifying predicate is "target cannot
+    dim-dispatch" (covers `skipped-derived`, `skipped-empty`, and the
+    generic `skipped` fallback -- every branch inside
+    `_skip_result_for_nonconformant`'s `if dim is not None` early return)
+    OR the ephemeral tuplespace-prefix exclusion (`is_ephemeral_excluded`,
+    handled by a separate enumeration-loop branch entirely) -- so a
+    false-positive collision on any never-written disposition is
+    impossible, not just on the two classes Fix A's initial formulation
+    covered."""
+
+    def test_is_ephemeral_excluded_matches_prefix(self) -> None:
+        assert is_ephemeral_excluded("tuples__hook_events_notification") is True
+        assert is_ephemeral_excluded("knowledge__o__minilm-l6-v2-384__v1") is False
+
+    def test_is_never_written_true_for_ephemeral_prefix(self) -> None:
+        # Non-conformant target (no model segment) — dim_for_collection
+        # cannot dispatch it either way; is_never_written must still be True
+        # via the ephemeral branch even though is_derived_skip alone is False
+        # (the name is not on the _DERIVED_COLLECTIONS allowlist).
+        name = "tuples__hook_events_notification"
+        assert is_derived_skip(name, name) is False
+        assert is_never_written(name, name) is True
+
+    def test_is_never_written_true_for_derived_collection(self) -> None:
+        # taxonomy__centroids is on the derived allowlist and non-conformant
+        # -> is_derived_skip alone already returns True; is_never_written
+        # must agree (composition, not replacement).
+        name = "taxonomy__centroids"
+        assert is_derived_skip(name, name) is True
+        assert is_never_written(name, name) is True
+
+    def test_is_never_written_false_for_honest_conformant_collection(self) -> None:
+        # A normal, dim-dispatchable, non-ephemeral, non-derived collection
+        # is actually written -> is_never_written must be False (no
+        # over-broad exemption swallowing real collisions).
+        name = "knowledge__o__minilm-l6-v2-384__v1"
+        assert is_never_written(name, name) is False
+
+    def test_is_never_written_true_for_generic_nonconformant_with_data(self) -> None:
+        """nexus-5b9v0 round-3 Fix E (bead nexus-5b9v0 review round 3,
+        Significant): a generic nonconformant collection -- NOT on the
+        `_DERIVED_COLLECTIONS` allowlist, NOT `tuples__`-prefixed -- that
+        HAS data disposes to a plain "skipped" verdict in
+        `_skip_result_for_nonconformant`'s fallback branch, which is ALSO
+        never written (the ETL returns the skip result before ever
+        reaching the upsert). Pre-fix, `is_never_written` returned False
+        here (neither `is_derived_skip` nor `is_ephemeral_excluded`
+        matched) even though the collection is unconditionally never
+        written -- a latent false-positive-block risk for any future ad
+        hoc nonconformant collection that happens to share a target name
+        with another source."""
+        name = "legacy__oldstuff"
+        assert is_derived_skip(name, name) is False
+        assert is_ephemeral_excluded(name) is False
+        assert is_never_written(name, name) is True
 
 
 # ── RDR-162: cross-model migrate (stored-text re-embed + target model remap) ──
