@@ -122,6 +122,45 @@ class TestInnerReachable:
         assert outcome == T2EnsureOutcome.REACHABLE
 
 
+class TestInnerServiceModeSkip:
+    """RDR-176 Phase 1 (Gap 2): memory store in SERVICE mode -> no spawn."""
+
+    def test_service_mode_skips_without_spawning(self, tmp_path, monkeypatch) -> None:
+        from nexus.db import storage_mode
+
+        monkeypatch.setattr(
+            storage_mode, "storage_backend_for",
+            lambda store: storage_mode.StorageBackend.SERVICE,
+        )
+        monkeypatch.setattr(
+            subprocess, "Popen",
+            lambda *a, **kw: pytest.fail("must not spawn in service mode"),
+        )
+        outcome = _t2_ensure_running_inner(str(tmp_path), timeout=5.0, quiet=True)
+        assert outcome == T2EnsureOutcome.SERVICE_MODE_SKIP
+
+    def test_service_mode_skip_does_not_touch_crashloop_counter(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """A repeated skip must never accumulate toward the crash-loop guard —
+        that guard exists for genuine spawn failures, not a mode where no
+        spawn is ever attempted."""
+        from nexus.db import storage_mode
+
+        monkeypatch.setattr(
+            storage_mode, "storage_backend_for",
+            lambda store: storage_mode.StorageBackend.SERVICE,
+        )
+        import time as _t
+
+        import nexus.commands.daemon as _daemon
+
+        for _ in range(10):
+            outcome = _t2_ensure_running_inner(str(tmp_path), timeout=5.0, quiet=True)
+            assert outcome == T2EnsureOutcome.SERVICE_MODE_SKIP
+        assert not _daemon._crashloop_tripped(tmp_path, now=_t.time())
+
+
 # ---------------------------------------------------------------------------
 # DEFERRED_WRITE_LOCK path: stale daemon alive, WAL write-lock held
 # ---------------------------------------------------------------------------
