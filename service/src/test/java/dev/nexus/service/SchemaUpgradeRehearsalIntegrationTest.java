@@ -144,7 +144,11 @@ class SchemaUpgradeRehearsalIntegrationTest {
      * For the data leg, also re-verify the tag predates the newest row-DML
      * changeset being exercised (currently catalog-013 / catalog-014) — a tag
      * that already contains them turns that leg's assertions vacuous (the
-     * in-test changesetApplied gates fail loudly if that happens).
+     * in-test changesetApplied gates fail loudly if that happens). Rotation
+     * also requires regenerating the OLD_TAG changeset snapshot
+     * ({@code uv run python scripts/gen_rehearsal_hop_manifest.py}) and
+     * re-deriving the data leg's seed coverage — the Python seed-coverage
+     * lint (nexus-gm38i) fails loudly until both are done.
      */
     private static final String OLD_TAG = "engine-service-v0.1.17";
 
@@ -264,7 +268,13 @@ class SchemaUpgradeRehearsalIntegrationTest {
      * {@code tests/test_changelog_rls_lint.py} (nexus-php10); this leg is the
      * dynamic proof that the discipline actually WORKS on the real hop, and
      * the template to extend when a future hop gains a new row-DML changeset
-     * (seed its input shape, assert its effect).
+     * (seed its input shape, assert its effect). That extension is
+     * mechanically enforced, not conventional (nexus-gm38i):
+     * {@code tests/test_rehearsal_seed_coverage_lint.py} derives the hop's
+     * FORCE-RLS row-DML changeset set from the HEAD changelog minus the
+     * OLD_TAG snapshot ({@code tests/data/rehearsal_old_tag_changesets.json})
+     * and fails Python CI whenever this leg's declared seed coverage drifts
+     * from it.
      */
     @Test
     void oldEngineChangelogTree_withLegacySeededRows_dataChangesetsActuallyExecute() throws Exception {
@@ -293,7 +303,18 @@ class SchemaUpgradeRehearsalIntegrationTest {
 
                 // ── SEED, as superuser (implicit BYPASSRLS): models rows written
                 // by old clients through the service role WITH a tenant GUC set —
-                // exactly the population a real aged box carries into an upgrade. ─
+                // exactly the population a real aged box carries into an upgrade.
+                //
+                // SEED-COVERAGE-BEGIN (nexus-gm38i contract — parsed by
+                // tests/test_rehearsal_seed_coverage_lint.py; every hop
+                // changeset whose row-DML this leg seeds inputs for and
+                // effect-asserts, as "<id> <author>" lines; the lint fails if
+                // this block, its Python declaration, and the derived hop set
+                // ever disagree):
+                //   catalog-013-0 nexus-e0hd2
+                //   catalog-013-1b nexus-1wjmq
+                //   catalog-014-0 nexus-x6kdz
+                // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
                     // FK parents (fk-002/fk-003's NOT VALID FKs, applied by the
