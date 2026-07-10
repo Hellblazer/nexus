@@ -565,6 +565,12 @@ engine** until remediated: `catalog-013-3` VALIDATEs any present chash
 length CHECK against real rows and a violating row crash-loops the boot
 (it guards *missing constraints*, not *violating rows*).
 
+`nx doctor` detects this proactively — it counts non-32-char chash rows
+across the chunk tables and emits a `Chunk chash conformance` **warning**
+(never fatal; the current engine serves fine) with a pointer back here. Run
+it before any engine upgrade on a box whose store predates RDR-108 or ever
+had its chash constraints touched.
+
 Recovery, in order:
 
 1. Stay on the current engine version (do not install a newer binary yet).

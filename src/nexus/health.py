@@ -2113,14 +2113,74 @@ def _check_migration_state(
             fatal=True,
         )]
 
-    return [HealthResult(
+    # Query 4 (nexus-pnwu0 / GH #1390): non-32-char chash rows across the
+    # chunk tables. A box that migrated legacy short ids pre-guard (or had
+    # its chash CHECK constraints dropped out-of-band — the GH #1390 shape)
+    # runs FINE on its current engine, but catalog-013-3's VALIDATE
+    # CONSTRAINT will FAIL on any violating row on the NEXT engine upgrade
+    # and crash-loop the boot (013-3 guards MISSING constraints, not
+    # VIOLATING rows). Surface it as a WARNING before that upgrade, never a
+    # fatal on the current box. A psql failure here (e.g. a schema variant
+    # missing a baseline table) degrades to a warn, never a false alarm.
+    chash_sql = (
+        "SELECT "
+        "(SELECT count(*) FROM nexus.chunks_384 WHERE length(chash)<>32) + "
+        "(SELECT count(*) FROM nexus.chunks_768 WHERE length(chash)<>32) + "
+        "(SELECT count(*) FROM nexus.chunks_1024 WHERE length(chash)<>32) + "
+        "(SELECT count(*) FROM nexus.chash_index WHERE length(chash)<>32) + "
+        "(SELECT count(*) FROM nexus.catalog_document_chunks "
+        "WHERE length(chash)<>32);"
+    )
+    proc4 = _run_psql(
+        psql_bin, host, port, dbname, user, password, chash_sql,
+        psql_runner=psql_runner,
+    )
+    results: list[HealthResult] = []
+    if proc4.returncode != 0:
+        results.append(HealthResult(
+            label="Chunk chash conformance",
+            ok=False,
+            detail=(
+                "could not probe chash length across chunk tables (psql exit "
+                f"{proc4.returncode}) — skipping the pre-upgrade poison check"
+            ),
+            warn=True,
+        ))
+    else:
+        try:
+            nonconforming = int(proc4.stdout.strip())
+        except ValueError:
+            nonconforming = -1
+        if nonconforming > 0:
+            results.append(HealthResult(
+                label="Chunk chash conformance",
+                ok=False,
+                detail=(
+                    f"{nonconforming} chunk row(s) have a non-32-char chash "
+                    "(legacy pre-RDR-108 ids, or chash CHECK constraints were "
+                    "dropped out-of-band). The current engine serves fine, but "
+                    "an engine UPGRADE will crash-loop on catalog-013-3's "
+                    "VALIDATE CONSTRAINT (GH #1390 / nexus-pnwu0)."
+                ),
+                fix_suggestions=[
+                    "Do NOT upgrade the engine binary until remediated.",
+                    "Do NOT drop the chash length constraints to 'unblock' "
+                    "anything — that is what caused GH #1390.",
+                    "Recovery playbook: docs/migration-runbook.md §8.1 "
+                    "(rollback -> re-index legacy collections -> re-migrate).",
+                ],
+                warn=True,
+            ))
+
+    results.append(HealthResult(
         label="Schema migrations",
         ok=True,
         detail=(
             f"Schema migrations: {total} applied (0 FAILED, checksums present)"
             f"{reran_note}"
         ),
-    )]
+    ))
+    return results
 
 
 def _check_rls_present(
