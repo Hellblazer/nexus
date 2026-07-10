@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -423,6 +424,100 @@ def _check_service_bge_model() -> list[HealthResult]:
     )]
 
 
+#: Bounded tail size read by :func:`_last_boot_failure_detail` (nexus-4m6i0.7).
+#: The service can crash-loop BEFORE it answers any HTTP request, so the
+#: only evidence of *why* is in its own log file — never the whole file,
+#: just the most recent bytes, to keep this diagnostic O(1)-ish and never a
+#: meaningful drag on `nx doctor`.
+_BOOT_FAILURE_TAIL_BYTES: int = 64 * 1024
+
+#: Liquibase's failure marker, verbatim across both the wrapped GH #1390
+#: report and the raw stack trace: "Migration failed for changeset
+#: <changelog-path>::<changeset-id>::<author>".
+_LIQUIBASE_CHANGESET_RE = re.compile(
+    r"Migration failed for changeset\s+(?P<path>\S+?)::(?P<id>[^:\s]+)::(?P<author>\S+)"
+)
+#: The SQL error one-liner Liquibase's PSQLException wrapper emits, usually
+#: a few lines after the changeset marker (e.g. "Caused by: ...PSQLException:
+#: \n  ERROR: constraint ... does not exist").
+_ERROR_LINE_RE = re.compile(r"^[ \t]*(ERROR:.*)$", re.MULTILINE)
+#: Cap on the surfaced error one-liner so a doctor line never becomes an
+#: unbounded stack-trace dump.
+_ERROR_LINE_MAX_CHARS: int = 200
+#: How far past the changeset marker the ERROR-line association may reach.
+#: The real Liquibase trace (GH #1390 verbatim) places the PSQLException's
+#: ERROR line within ~300 chars of the marker; a match beyond this window
+#: is presumed to be an unrelated later error and is NOT attributed to the
+#: changeset (the id-only form is returned instead).
+_ERROR_SEARCH_WINDOW_CHARS: int = 1000
+
+
+def _last_boot_failure_detail(log_path: Path) -> str | None:
+    """Best-effort tail-parse for the most recent Liquibase boot failure.
+
+    RDR (nexus-4m6i0.7): during a Liquibase-VALIDATE crash-loop (GH #1390 /
+    ms57z) the service dies before it can answer any HTTP request, so the
+    root cause has to come from its own log file, not a live probe. Reads at
+    most the last :data:`_BOOT_FAILURE_TAIL_BYTES` of *log_path* and looks
+    for the LAST ``Migration failed for changeset <path>::<id>::<author>``
+    marker plus, if present nearby, the SQL error one-liner that follows it.
+
+    Returns ``None`` on ANY failure — missing file, not a regular file,
+    unreadable, no marker found — this is diagnostic sugar layered on top of
+    the hard "unreachable" signal, never load-bearing, and must never raise.
+    """
+    try:
+        if not log_path.is_file():
+            return None
+        size = log_path.stat().st_size
+        with log_path.open("rb") as f:
+            if size > _BOOT_FAILURE_TAIL_BYTES:
+                f.seek(size - _BOOT_FAILURE_TAIL_BYTES)
+            tail = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+
+    matches = list(_LIQUIBASE_CHANGESET_RE.finditer(tail))
+    if not matches:
+        return None
+    last = matches[-1]
+    changeset_id = last.group("id")
+
+    # Best-effort: scan forward from the marker for the nearest ERROR: line
+    # (Liquibase wraps the underlying PSQLException a few lines below).
+    # BOUNDED window (nexus-4m6i0.7 critique): an unbounded forward search
+    # could glue a DISTANT, UNRELATED error (e.g. a later "disk quota
+    # exceeded") onto this changeset marker — fabricating a causal pairing
+    # that actively misdirects the operator, strictly worse than showing
+    # the changeset id alone. The real Liquibase trace puts the
+    # PSQLException within a few lines of the marker; anything farther
+    # away is presumed unrelated and we degrade to the id-only form.
+    remainder = tail[last.end() : last.end() + _ERROR_SEARCH_WINDOW_CHARS]
+    error_match = _ERROR_LINE_RE.search(remainder)
+    if error_match:
+        error_line = error_match.group(1).strip()[:_ERROR_LINE_MAX_CHARS]
+        return f"Liquibase changeset {changeset_id}: {error_line}"
+    return f"Liquibase changeset {changeset_id}"
+
+
+def _boot_failure_advisory() -> str | None:
+    """Soft wrapper: resolve the local service log path and tail-parse it.
+
+    Guards cloud-mode / no-local-service installs (no log path exists) and
+    any resolution failure — degrades to ``None`` silently, never raises.
+    """
+    try:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+
+        log_path = nexus_config_dir() / "logs" / "storage_service_native.log"
+        detail = _last_boot_failure_detail(log_path)
+    except Exception:  # noqa: BLE001 — best-effort: must never crash the reachability probe
+        return None
+    if detail is None:
+        return None
+    return f"last recorded boot failure: {detail}"
+
+
 def _check_vector_service() -> HealthResult:
     """Reachability probe for the pgvector-backed vector serving surface.
 
@@ -442,10 +537,20 @@ def _check_vector_service() -> HealthResult:
         )
     except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
         _log.debug("vector_service_not_reachable", error=str(exc))
+        # nexus-4m6i0.7: the service can crash-loop before answering any
+        # request (a Liquibase VALIDATE failure on boot, GH #1390) — surface
+        # the root cause from the local service log when one is available,
+        # instead of leaving the operator to spelunk storage_service_native.log
+        # by hand. Strictly best-effort/soft: any failure here degrades
+        # silently back to the bare "not reachable" message.
+        detail = "not reachable"
+        boot_advisory = _boot_failure_advisory()
+        if boot_advisory:
+            detail = f"not reachable — {boot_advisory}"
         return HealthResult(
             label="Vector service (/v1/vectors)",
             ok=False,
-            detail="not reachable",
+            detail=detail,
             fix_suggestions=[
                 "Start the nexus-service (pgvector backend) and export "
                 "NX_SERVICE_URL / NX_SERVICE_TOKEN.",
