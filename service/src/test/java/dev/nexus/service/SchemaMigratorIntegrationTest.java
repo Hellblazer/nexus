@@ -1,15 +1,25 @@
 package dev.nexus.service;
 
 import dev.nexus.service.db.SchemaMigrator;
+import liquibase.Contexts;
+import liquibase.LabelExpression;
+import liquibase.Liquibase;
+import liquibase.changelog.ChangeSet;
+import liquibase.database.Database;
+import liquibase.database.DatabaseFactory;
+import liquibase.database.jvm.JdbcConnection;
+import liquibase.resource.ClassLoaderResourceAccessor;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.junit.jupiter.api.*;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 
 /**
  * RDR-152 bead nexus-net63 — SchemaMigrator end-to-end integration test.
@@ -371,6 +381,303 @@ class SchemaMigratorIntegrationTest {
         }
     }
 
+    // ── Test 5: aged/divergent box — missing chash-length CHECK must not crash-loop ──
+
+    /**
+     * RDR nexus-4m6i0.1 (ms57z / GH#1390, engine-service v0.1.36 production incident).
+     *
+     * <p>Reproduces the real-world "aged box" scenario: a chash-length CHECK constraint
+     * ({@code chunks_384_chash_len_check}) is missing when the migration reaches
+     * {@code catalog-013-2}'s VALIDATE step. Before the fix, {@code catalog-013-2}'s bare
+     * {@code ALTER TABLE ... VALIDATE CONSTRAINT ...} raises a hard Postgres ERROR that
+     * {@link SchemaMigrator#migrate} rethrows as a fatal {@link SchemaMigrator.MigrationException}
+     * — since the changeset never commits, EVERY subsequent boot retries the identical
+     * failing statement (the crash loop). After the fix ({@code catalog-013-2} guarded by a
+     * whole-changeset {@code <preConditions onFail="MARK_RAN">} counting all five
+     * constraints, plus the new per-table-guarded {@code catalog-013-3}), migration must
+     * complete cleanly: the precondition sees only 4 of 5 constraints, marks {@code
+     * catalog-013-2} ran (once, no retry), and {@code catalog-013-3} independently
+     * validates the four constraints that DO exist while leaving the missing one alone.
+     *
+     * <p>Uses a dedicated container (not the shared {@link #pg}/{@link #adminDs} from
+     * {@code bootstrap()}) because the divergence must be injected BEFORE {@code
+     * catalog-013-2} first executes; the shared fixture has already migrated cleanly by
+     * {@code @Order(1)}, and Liquibase never re-runs an already-succeeded changeset.
+     */
+    @Test
+    @Order(5)
+    void agedBoxWithMissingChashConstraint_migrationDoesNotCrashLoop() throws Exception {
+        PostgreSQLContainer<?> agedPg = PgContainerHelper.start();
+        try {
+            final String role = "nexus_admin_aged_test";
+            final String pass = "nexus_admin_aged_test_pass";
+
+            // Phase A: minimal DBA-equivalent bootstrap (mirrors bootstrap() above),
+            // scoped to a throwaway admin role for this dedicated container. Also
+            // pre-creates nexus_svc as superuser (same as bootstrap()'s SVC_ROLE) so
+            // role-001-1's "IF NOT EXISTS" CREATE ROLE branch is skipped — otherwise
+            // the migration role would need CREATEROLE just to no-op past it.
+            try (Connection su = agedPg.createConnection("")) {
+                su.setAutoCommit(true);
+                su.createStatement().execute(
+                    "CREATE ROLE " + role + " LOGIN PASSWORD '" + pass
+                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
+                su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO " + role);
+                su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + role);
+                su.createStatement().execute(
+                    "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
+                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
+                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
+                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+            }
+
+            var cfg = new com.zaxxer.hikari.HikariConfig();
+            cfg.setJdbcUrl(agedPg.getJdbcUrl());
+            cfg.setUsername(role);
+            cfg.setPassword(pass);
+            cfg.setMaximumPoolSize(2);
+            cfg.setPoolName("nexus-admin-aged-test");
+
+            try (var agedDs = new com.zaxxer.hikari.HikariDataSource(cfg)) {
+
+                // Phase B: migrate only up through catalog-002-2-chash-checks (the
+                // last changeset that ADDS the five chash-length CHECK constraints),
+                // via Liquibase's changeSetCount-limited update — so the divergence
+                // can be injected BEFORE catalog-013-2 gets a chance to run.
+                int changesetsThroughCatalog002;
+                try (Connection conn = agedDs.getConnection()) {
+                    Database database = DatabaseFactory.getInstance()
+                        .findCorrectDatabaseImplementation(new JdbcConnection(conn));
+                    try (Liquibase liquibase = new Liquibase(
+                            // SchemaMigrator.MASTER_CHANGELOG is package-private to
+                            // dev.nexus.service.db; this test lives in dev.nexus.service,
+                            // so the classpath-relative path is duplicated here verbatim.
+                            "db/changelog/db.changelog-master.xml",
+                            new ClassLoaderResourceAccessor(),
+                            database)) {
+                        List<ChangeSet> unrun = liquibase.listUnrunChangeSets(
+                            new Contexts(), new LabelExpression());
+                        int idx = -1;
+                        for (int i = 0; i < unrun.size(); i++) {
+                            if ("catalog-002-2-chash-checks".equals(unrun.get(i).getId())) {
+                                idx = i;
+                                break;
+                            }
+                        }
+                        assertThat(idx)
+                            .as("catalog-002-2-chash-checks must be present in the master changelog")
+                            .isGreaterThanOrEqualTo(0);
+                        changesetsThroughCatalog002 = idx + 1;
+
+                        liquibase.update(changesetsThroughCatalog002, new Contexts(), new LabelExpression());
+                    }
+                }
+
+                // Phase C: simulate the real-world divergence — drop chunks_384's
+                // chash-length CHECK. (Root cause of the real divergence is out of
+                // scope here — investigated and closed as a dead end; see
+                // catalog-013-3's inline comment. The fix must be defensive
+                // regardless of how the divergence arose.)
+                try (Connection conn = agedDs.getConnection()) {
+                    conn.createStatement().execute(
+                        "ALTER TABLE nexus.chunks_384 DROP CONSTRAINT chunks_384_chash_len_check");
+                }
+
+                // Phase D: resume the rest of the migration chain (catalog-003
+                // onward, including catalog-013-2's guarded precondition and the
+                // catalog-013-3 defensive re-validate). This is the RED/GREEN
+                // hinge: before the fix, this throws MigrationException wrapping
+                // the Postgres "constraint ... does not exist" error; after the
+                // fix, it completes cleanly.
+                assertThatCode(() -> SchemaMigrator.migrate(agedDs))
+                    .as("migration must not crash-loop when a chash-length CHECK is missing on an aged box")
+                    .doesNotThrowAnyException();
+
+                // Phase E: the four constraints that DO exist must end up
+                // VALIDATED; the missing one must simply stay absent (never
+                // silently re-added, never fatal).
+                try (Connection conn = agedDs.getConnection()) {
+                    assertThat(constraintValidated(conn, "chunks_768_chash_len_check"))
+                        .as("chunks_768_chash_len_check must be validated despite chunks_384's divergence")
+                        .isTrue();
+                    assertThat(constraintValidated(conn, "chunks_1024_chash_len_check"))
+                        .as("chunks_1024_chash_len_check must be validated despite chunks_384's divergence")
+                        .isTrue();
+                    assertThat(constraintValidated(conn, "catalog_document_chunks_chash_len_check"))
+                        .as("catalog_document_chunks_chash_len_check must be validated despite chunks_384's divergence")
+                        .isTrue();
+                    assertThat(constraintValidated(conn, "chash_index_chash_len_check"))
+                        .as("chash_index_chash_len_check must be validated despite chunks_384's divergence")
+                        .isTrue();
+                    assertThat(constraintExists(conn, "chunks_384_chash_len_check"))
+                        .as("the dropped chunks_384_chash_len_check must remain absent, not silently re-added")
+                        .isFalse();
+
+                    // Phase F (nexus-boz39 round-2 gap): prove catalog-013-2 was
+                    // MARK_RAN, not soft-failed-and-still-pending -- the property
+                    // that actually distinguishes this fix from the superseded
+                    // failOnError="false" approach, which "doesNotThrowAnyException"
+                    // alone cannot tell apart.
+                    assertThat(changesetExecType(conn, "catalog-013-2", "nexus-e0hd2",
+                            "db/changelog/catalog-013-chash-checks-validate.xml"))
+                        .as("catalog-013-2 must be recorded as MARK_RAN (skipped-and-marked, never retried) "
+                            + "-- not FAILED (which Liquibase never marks, causing an every-boot re-attempt)")
+                        .isEqualTo("MARK_RAN");
+                }
+            }
+        } finally {
+            agedPg.stop();
+        }
+    }
+
+    // ── Test 6: aged/divergent box — missing chash_index constraint must not crash-loop ──
+
+    /**
+     * nexus-boz39 (substantive-critic follow-up to nexus-4m6i0.1). Test 5 above only
+     * exercises the {@code chunks_384_chash_len_check} case — the real ms57z incident,
+     * and one of the four constraints added in {@code catalog-002-hygiene.xml}.
+     * {@code chash_index_chash_len_check} is structurally different: it is added later,
+     * in {@code catalog-013-1} (this same changelog file), not in
+     * {@code catalog-002-hygiene.xml} — a genuinely distinct migration code path, not
+     * just a copy-paste of the same scenario. This test drops {@code
+     * chash_index_chash_len_check} instead and asserts the migration still completes
+     * cleanly, with the other four constraints validated and the dropped one left absent.
+     *
+     * <p>Uses a dedicated container for the same reason as test 5: the divergence must be
+     * injected BEFORE {@code catalog-013-2} first executes, and the shared {@link #pg}/
+     * {@link #adminDs} fixture has already migrated cleanly by {@code @Order(1)}.
+     */
+    @Test
+    @Order(6)
+    void agedBoxWithMissingChashIndexConstraint_migrationDoesNotCrashLoop() throws Exception {
+        PostgreSQLContainer<?> agedPg = PgContainerHelper.start();
+        try {
+            final String role = "nexus_admin_aged_ci_test";
+            final String pass = "nexus_admin_aged_ci_test_pass";
+
+            // Phase A: same minimal DBA-equivalent bootstrap as test 5.
+            try (Connection su = agedPg.createConnection("")) {
+                su.setAutoCommit(true);
+                su.createStatement().execute(
+                    "CREATE ROLE " + role + " LOGIN PASSWORD '" + pass
+                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
+                su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO " + role);
+                su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + role);
+                su.createStatement().execute(
+                    "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
+                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
+                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
+                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+            }
+
+            var cfg = new com.zaxxer.hikari.HikariConfig();
+            cfg.setJdbcUrl(agedPg.getJdbcUrl());
+            cfg.setUsername(role);
+            cfg.setPassword(pass);
+            cfg.setMaximumPoolSize(2);
+            cfg.setPoolName("nexus-admin-aged-ci-test");
+
+            try (var agedDs = new com.zaxxer.hikari.HikariDataSource(cfg)) {
+
+                // Phase B: migrate only up through catalog-013-1 — the changeset that
+                // ADDS chash_index_chash_len_check (unlike the other four, added in
+                // catalog-002-hygiene.xml) — so the divergence can be injected BEFORE
+                // catalog-013-2 gets a chance to run.
+                int changesetsThroughCatalog0131;
+                try (Connection conn = agedDs.getConnection()) {
+                    Database database = DatabaseFactory.getInstance()
+                        .findCorrectDatabaseImplementation(new JdbcConnection(conn));
+                    try (Liquibase liquibase = new Liquibase(
+                            "db/changelog/db.changelog-master.xml",
+                            new ClassLoaderResourceAccessor(),
+                            database)) {
+                        List<ChangeSet> unrun = liquibase.listUnrunChangeSets(
+                            new Contexts(), new LabelExpression());
+                        int idx = -1;
+                        for (int i = 0; i < unrun.size(); i++) {
+                            if ("catalog-013-1".equals(unrun.get(i).getId())) {
+                                idx = i;
+                                break;
+                            }
+                        }
+                        assertThat(idx)
+                            .as("catalog-013-1 must be present in the master changelog")
+                            .isGreaterThanOrEqualTo(0);
+                        changesetsThroughCatalog0131 = idx + 1;
+
+                        liquibase.update(changesetsThroughCatalog0131, new Contexts(), new LabelExpression());
+                    }
+                }
+
+                // Phase C: simulate the divergence — drop chash_index's chash-length
+                // CHECK right after it was added.
+                try (Connection conn = agedDs.getConnection()) {
+                    conn.createStatement().execute(
+                        "ALTER TABLE nexus.chash_index DROP CONSTRAINT chash_index_chash_len_check");
+                }
+
+                // Phase D: resume the rest of the migration chain (catalog-013-1b
+                // onward, including catalog-013-2's guarded precondition and the
+                // catalog-013-3 defensive re-validate). Must not throw.
+                assertThatCode(() -> SchemaMigrator.migrate(agedDs))
+                    .as("migration must not crash-loop when chash_index_chash_len_check is missing on an aged box")
+                    .doesNotThrowAnyException();
+
+                // Phase E: the four constraints that DO exist must end up VALIDATED;
+                // the missing one must simply stay absent (never silently re-added).
+                try (Connection conn = agedDs.getConnection()) {
+                    assertThat(constraintValidated(conn, "chunks_384_chash_len_check"))
+                        .as("chunks_384_chash_len_check must be validated despite chash_index's divergence")
+                        .isTrue();
+                    assertThat(constraintValidated(conn, "chunks_768_chash_len_check"))
+                        .as("chunks_768_chash_len_check must be validated despite chash_index's divergence")
+                        .isTrue();
+                    assertThat(constraintValidated(conn, "chunks_1024_chash_len_check"))
+                        .as("chunks_1024_chash_len_check must be validated despite chash_index's divergence")
+                        .isTrue();
+                    assertThat(constraintValidated(conn, "catalog_document_chunks_chash_len_check"))
+                        .as("catalog_document_chunks_chash_len_check must be validated despite chash_index's divergence")
+                        .isTrue();
+                    assertThat(constraintExists(conn, "chash_index_chash_len_check"))
+                        .as("the dropped chash_index_chash_len_check must remain absent, not silently re-added")
+                        .isFalse();
+
+                    // Phase F (nexus-boz39 round-2 gap): same MARK_RAN proof as test 5.
+                    assertThat(changesetExecType(conn, "catalog-013-2", "nexus-e0hd2",
+                            "db/changelog/catalog-013-chash-checks-validate.xml"))
+                        .as("catalog-013-2 must be recorded as MARK_RAN (skipped-and-marked, never retried) "
+                            + "-- not FAILED (which Liquibase never marks, causing an every-boot re-attempt)")
+                        .isEqualTo("MARK_RAN");
+                }
+            }
+        } finally {
+            agedPg.stop();
+        }
+    }
+
+    // ── Test 7: happy path — fresh box validates all five chash constraints ──
+
+    /**
+     * Verification gate 3 (nexus-4m6i0.1): the defensive re-validate in
+     * {@code catalog-013-3} must not change happy-path behavior. On a fresh box
+     * where all five constraints exist (the {@link #adminDs} fixture, already
+     * migrated end-to-end by {@code @Order(1)}), every constraint must end up
+     * {@code convalidated = true}.
+     */
+    @Test
+    @Order(7)
+    void freshBox_allFiveChashConstraints_endUpValidated() throws Exception {
+        SchemaMigrator.migrate(adminDs); // defensive re-migrate; idempotent
+
+        try (Connection conn = adminDs.getConnection()) {
+            assertThat(constraintValidated(conn, "chunks_384_chash_len_check")).isTrue();
+            assertThat(constraintValidated(conn, "chunks_768_chash_len_check")).isTrue();
+            assertThat(constraintValidated(conn, "chunks_1024_chash_len_check")).isTrue();
+            assertThat(constraintValidated(conn, "catalog_document_chunks_chash_len_check")).isTrue();
+            assertThat(constraintValidated(conn, "chash_index_chash_len_check")).isTrue();
+        }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private Set<String> tablesInSchema(Connection conn, String schema) throws Exception {
@@ -381,5 +688,46 @@ class SchemaMigratorIntegrationTest {
             names.add(rs.getString("TABLE_NAME").toLowerCase());
         }
         return names;
+    }
+
+    /** True iff a constraint with this name exists anywhere in the database. */
+    private boolean constraintExists(Connection conn, String conname) throws Exception {
+        try (var ps = conn.prepareStatement(
+                "SELECT 1 FROM pg_constraint WHERE conname = ?")) {
+            ps.setString(1, conname);
+            ResultSet rs = ps.executeQuery();
+            return rs.next();
+        }
+    }
+
+    /** True iff a constraint with this name exists AND is validated (convalidated). */
+    private boolean constraintValidated(Connection conn, String conname) throws Exception {
+        try (var ps = conn.prepareStatement(
+                "SELECT convalidated FROM pg_constraint WHERE conname = ?")) {
+            ps.setString(1, conname);
+            ResultSet rs = ps.executeQuery();
+            return rs.next() && rs.getBoolean("convalidated");
+        }
+    }
+
+    /**
+     * DATABASECHANGELOG's EXECTYPE for a changeset (or {@code null} if it has no row
+     * yet). nexus-boz39 round-2 review: {@code assertThatCode(...).doesNotThrowAnyException()}
+     * alone does not distinguish the current {@code <preConditions onFail="MARK_RAN">}
+     * fix from the superseded {@code failOnError="false"} approach — both leave a single
+     * {@code migrate()} call non-throwing. Only a direct EXECTYPE='MARK_RAN' check proves
+     * the changeset was skipped-and-marked (never retried) rather than soft-failed
+     * (silently re-attempted, and SEVERE-logged, on every future boot).
+     */
+    private String changesetExecType(Connection conn, String id, String author, String filename)
+            throws Exception {
+        try (var ps = conn.prepareStatement(
+                "SELECT exectype FROM databasechangelog WHERE id = ? AND author = ? AND filename = ?")) {
+            ps.setString(1, id);
+            ps.setString(2, author);
+            ps.setString(3, filename);
+            ResultSet rs = ps.executeQuery();
+            return rs.next() ? rs.getString("exectype") : null;
+        }
     }
 }

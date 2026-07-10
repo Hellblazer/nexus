@@ -123,8 +123,52 @@ ALTER TABLE nexus.chash_index FORCE ROW LEVEL SECURITY;
         <rollback/>
     </changeSet>
 
+    <!-- nexus-4m6i0.1 (ms57z / GH#1390, 2026-07-09): catalog-013-2 crash-looped the
+         whole engine service on an aged/divergent box (confirmed real-world case:
+         chunks_384_chash_len_check absent on an empty/never-populated bge-768-only
+         box — the constraint existed only on chunks_768 there). VALIDATE CONSTRAINT
+         on a non-existent constraint is a hard Postgres ERROR; since a bare-SQL
+         changeset failure never commits a DATABASECHANGELOG row, every subsequent
+         boot re-ran the identical failing statement (the crash loop).
+
+         nexus-boz39 follow-up (substantive-critic, 2026-07-10): an earlier revision
+         of this fix added failOnError="false" here instead of what follows now.
+         Verified against liquibase-core 4.29.0 source that failOnError="false" alone
+         is INSUFFICIENT: a soft failure sets execType=FAILED, and
+         MarkChangeSetRanGenerator.generateSql explicitly refuses to write a
+         DATABASECHANGELOG row for FAILED/SKIPPED execTypes ("don't mark") — so on a
+         persistently-divergent box the changeset would NEVER be recorded as ran, and
+         Liquibase would re-attempt the identical failing VALIDATE statements (and log
+         a SEVERE stack trace) on EVERY subsequent boot, forever. That downgrades a
+         fatal crash-loop to a permanent noisy-but-non-fatal log-spam loop, not full
+         resolution.
+
+         Fix: a whole-changeset <preConditions onFail="MARK_RAN"> guards the body
+         instead. It counts the five chash-length CHECK constraints in pg_constraint;
+         if fewer than 5 exist the precondition FAILS (not errors) and
+         onFail="MARK_RAN" writes a ONE-TIME DATABASECHANGELOG row (execType=MARK_RAN,
+         a single INFO-level "marking changeset as ran" log line) and never retries
+         again — verified against source: MarkChangeSetRanGenerator's FAILED/SKIPPED
+         exclusion does NOT include MARK_RAN. If the sqlCheck query itself cannot even
+         run (e.g. a transient connection error), PreconditionContainer's onError
+         defaults to HALT (left unset here) — a genuine infrastructure failure still
+         halts the migration loudly, exactly as before; only a clean, successful
+         count-mismatch (constraints genuinely, persistently missing) is treated as
+         "this changeset doesn't apply on this box."
+
+         <preConditions> (like failOnError before it) is excluded from
+         ChangeSet.generateCheckSum() — verified against source: generateCheckSum()
+         hashes only the <sql>/<changes> body and SqlVisitors — so this swap is
+         checksum-neutral and safe on already-succeeded fleet boxes
+         (engine-service-v0.1.33 through v0.1.36); the <sql> body itself remains
+         byte-for-byte unchanged. catalog-013-3 below remains the per-table defensive
+         fix, independently re-validating each of the five constraints regardless of
+         what 013-2 achieves. -->
     <changeSet id="catalog-013-2" author="nexus-e0hd2">
-        <comment>VALIDATE all five chash length CHECKs (chunks tables: A-1 residue 0; chash_index: safe via the 013-0 normalization — A-1 never audited it; SHARE UPDATE EXCLUSIVE only)</comment>
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="5">SELECT COUNT(*) FROM pg_constraint WHERE conname IN ('chunks_384_chash_len_check', 'chunks_768_chash_len_check', 'chunks_1024_chash_len_check', 'catalog_document_chunks_chash_len_check', 'chash_index_chash_len_check')</sqlCheck>
+        </preConditions>
+        <comment>VALIDATE all five chash length CHECKs (chunks tables: A-1 residue 0; chash_index: safe via the 013-0 normalization — A-1 never audited it; SHARE UPDATE EXCLUSIVE only). Guarded by a whole-changeset precondition (nexus-boz39): skips (marks ran, once) instead of retrying forever when any constraint is genuinely, persistently missing.</comment>
         <sql splitStatements="true">
 ALTER TABLE nexus.chunks_384             VALIDATE CONSTRAINT chunks_384_chash_len_check;
 ALTER TABLE nexus.chunks_768             VALIDATE CONSTRAINT chunks_768_chash_len_check;
@@ -134,6 +178,69 @@ ALTER TABLE nexus.chash_index            VALIDATE CONSTRAINT chash_index_chash_l
         </sql>
         <!-- VALIDATE has no state to roll back: the constraints simply return
              to enforced-but-unproven. No-op rollback. -->
+        <rollback/>
+    </changeSet>
+
+    <changeSet id="catalog-013-3" author="nexus-4m6i0.1">
+        <comment>Defensive per-table re-VALIDATE of the five chash length CHECKs — tolerates any subset missing (ms57z / GH#1390)</comment>
+        <sql splitStatements="false" stripComments="false">
+-- INCIDENT nexus-4m6i0.1 (2026-07-09, ms57z / GH#1390): engine-service v0.1.36
+-- crash-looped on boot. Root cause: catalog-013-2's five bare VALIDATE CONSTRAINT
+-- statements run as one atomic changeset; on an aged/divergent box where ANY one
+-- of the five constraints is missing (confirmed: chunks_384_chash_len_check absent
+-- on an empty/never-populated bge-768-only box), Postgres raises a hard ERROR and
+-- the whole migration aborts, over and over, every restart.
+--
+-- Investigated and CLOSED as a dead end: "ADD CONSTRAINT was conditional/skipped
+-- for empty dim tables" is FALSE — catalog-002-hygiene.xml's catalog-002-2-chash-
+-- checks changeset adds all five unconditionally (verified against commit
+-- 34c23773 / tag engine-service-v0.1.29). However the divergence actually arose
+-- on the real box, it is out-of-band and not chased further here (tracked
+-- separately, non-blocking); this changeset is defensive regardless of cause.
+--
+-- Each guard below is INDEPENDENT: any subset of the five constraints may be
+-- missing on a given box and every OTHER constraint still gets validated. This
+-- changeset does not edit catalog-013-2's checksummed SQL body in place (already
+-- shipped in engine-service-v0.1.33 through v0.1.36) — it is a NEW changeset
+-- that re-does 013-2's validation defensively, following the same precedent as
+-- catalog-013-1b (new changeset id + new author, original changesets untouched).
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chunks_384_chash_len_check') THEN
+        ALTER TABLE nexus.chunks_384 VALIDATE CONSTRAINT chunks_384_chash_len_check;
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chunks_768_chash_len_check') THEN
+        ALTER TABLE nexus.chunks_768 VALIDATE CONSTRAINT chunks_768_chash_len_check;
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chunks_1024_chash_len_check') THEN
+        ALTER TABLE nexus.chunks_1024 VALIDATE CONSTRAINT chunks_1024_chash_len_check;
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'catalog_document_chunks_chash_len_check') THEN
+        ALTER TABLE nexus.catalog_document_chunks VALIDATE CONSTRAINT catalog_document_chunks_chash_len_check;
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chash_index_chash_len_check') THEN
+        ALTER TABLE nexus.chash_index VALIDATE CONSTRAINT chash_index_chash_len_check;
+    END IF;
+END $$;
+        </sql>
+        <!-- VALIDATE (guarded or skipped) has no state to roll back — same
+             no-op posture as 013-2. -->
         <rollback/>
     </changeSet>
 
