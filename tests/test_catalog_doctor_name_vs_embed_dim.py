@@ -62,7 +62,43 @@ def _fake_t3(client, names: list[str]):
 
         def list_collections(self):
             return [{"name": n} for n in names]
+
+        def get_collection(self, name):
+            return client.get_collection(name)
+
+        def get_embeddings(self, collection_name, ids):
+            import numpy as np
+            col = client.get_collection(collection_name)
+            result = col.get(ids=ids, include=["embeddings"])
+            by_id = dict(zip(result["ids"], result["embeddings"]))
+            return np.array(
+                [by_id[i] for i in ids if i in by_id], dtype=np.float32,
+            )
     return _FakeT3()
+
+
+def _fake_t3_service_like(client, names: list[str]):
+    """Simulates HttpVectorClient's public surface only — no ``_client``
+    attribute. Regression guard for nexus-pyv0e: the doctor check must not
+    reach into Chroma internals, only the dual-mode-safe public methods
+    (``get_collection`` / ``get_embeddings``) both T3Database and
+    HttpVectorClient expose."""
+    class _FakeServiceT3:
+        def list_collections(self):
+            return [{"name": n} for n in names]
+
+        def get_collection(self, name):
+            return client.get_collection(name)
+
+        def get_embeddings(self, collection_name, ids):
+            import numpy as np
+            col = client.get_collection(collection_name)
+            result = col.get(ids=ids, include=["embeddings"])
+            by_id = dict(zip(result["ids"], result["embeddings"]))
+            return np.array(
+                [by_id[i] for i in ids if i in by_id], dtype=np.float32,
+            )
+    return _FakeServiceT3()
 
 
 class TestNameVsEmbedDim:
@@ -183,6 +219,50 @@ class TestNameVsEmbedDim:
         assert payload["pass"] is True
         assert payload["checked"] == 0
         assert name in payload["empty"]
+
+    def test_service_mode_no_client_attribute_does_not_crash(
+        self, runner, chroma_client, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Regression (nexus-pyv0e): HttpVectorClient has no ``_client``
+        attribute — reaching into it raised an unhandled AttributeError in
+        service/cloud mode. A T3 handle exposing only the public
+        get_collection/get_embeddings surface must work identically."""
+        name = "code__myproj__minilm-l6-v2-384__v1"
+        _seed(chroma_client, name)
+        monkeypatch.setattr(
+            "nexus.db.make_t3",
+            lambda: _fake_t3_service_like(chroma_client, [name]),
+        )
+        result = runner.invoke(
+            doctor_cmd, ["--name-vs-embed-dim", "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)["name_vs_embed_dim"]
+        assert payload["pass"] is True
+        assert payload["mismatches"] == []
+        assert payload["checked"] == 1
+
+    def test_service_mode_mismatch_still_detected(
+        self, runner, chroma_client, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Same mismatch-detection guarantee holds on the service-like
+        (no ``_client``) path, not just the local-Chroma path."""
+        name = "code__myproj__voyage-code-3__v1"
+        _seed(chroma_client, name)
+        monkeypatch.setattr(
+            "nexus.db.make_t3",
+            lambda: _fake_t3_service_like(chroma_client, [name]),
+        )
+        result = runner.invoke(
+            doctor_cmd, ["--name-vs-embed-dim", "--json"],
+        )
+        assert result.exit_code == 1, result.output
+        payload = json.loads(result.stdout)["name_vs_embed_dim"]
+        assert payload["pass"] is False
+        m = payload["mismatches"][0]
+        assert m["collection"] == name
+        assert m["expected_dim"] == 1024
+        assert m["actual_dim"] == 384
 
     def test_text_output_includes_remediation_hint(
         self, runner, chroma_client, monkeypatch: pytest.MonkeyPatch,

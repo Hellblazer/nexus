@@ -1055,7 +1055,6 @@ def _run_name_vs_embed_dim() -> dict:
             "error": f"Failed to list T3 collections: {exc}",
         }
 
-    client = t3_db._client  # type: ignore[attr-defined]
     for name in cols:
         if not is_conformant_collection_name(name):
             skipped_non_conformant += 1
@@ -1067,14 +1066,22 @@ def _run_name_vs_embed_dim() -> dict:
             unknown_token.append({"collection": name, "token": token})
             continue
         try:
-            coll = client.get_collection(name)
-            sample = coll.get(limit=1, include=["embeddings"])
+            # nexus-pyv0e: sample via the dual-mode-safe public surface
+            # (get_collection + get_embeddings), not client._client — the
+            # service-mode HttpVectorClient has no ._client attribute, only
+            # local T3Database's raw chromadb client does.
+            coll = t3_db.get_collection(name)
+            sample = coll.get(limit=1)
+            ids = sample.get("ids") or []
+            if not ids:
+                empty.append(name)
+                continue
+            embs = t3_db.get_embeddings(name, ids[:1])
         except Exception as exc:  # noqa: BLE001 — boundary catch; third-party raises undocumented types, handled gracefully
             unknown_token.append(
                 {"collection": name, "token": token, "error": str(exc)}
             )
             continue
-        embs = sample.get("embeddings")
         if embs is None or len(embs) == 0:
             empty.append(name)
             continue

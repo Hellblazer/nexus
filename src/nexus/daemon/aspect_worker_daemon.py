@@ -226,10 +226,32 @@ class AspectWorkerDaemon:
         """One reclaim sweep (the loop body; also the main-thread test seam).
         Emits a structured signal when rows are reset (RDR-173 P5 observability,
         nexus-xv5fl) so self-healing is observable, and logs a failure without
-        killing the loop."""
+        killing the loop.
+
+        nexus-64np7: rebuilds ``self._reclaim_queue`` on demand (here, not
+        just once at a failure site) so a rotated/expired credential baked
+        into the handle at construction time self-heals within one interval
+        instead of retrying the same broken client forever — this daemon is
+        long-lived and previously held ONE handle for its whole lifetime,
+        unlike the claim_batch path (mcp_infra._service_t2_write_locked)
+        which already evicts-and-rebuilds on any exception. The
+        2026-07-10 incident (401 every 30s for 23+ hours) had no recovery
+        short of a manual daemon restart before this fix. Retrying the
+        rebuild every call (rather than once at eviction time) also covers
+        a rebuild that itself transiently fails (e.g. the service is briefly
+        unreachable) — it gets another chance next interval instead of
+        going permanently silent.
+        """
+        if self._reclaim_queue is None:
+            try:
+                self._reclaim_queue = self._queue_factory()
+            except Exception as rebuild_exc:  # noqa: BLE001 - rebuild is best-effort; next interval retries
+                _log.warning(
+                    "aspect_worker_daemon.reclaim_queue_rebuild_failed",
+                    tenant=self._tenant, error=str(rebuild_exc),
+                )
+                return
         queue = self._reclaim_queue
-        if queue is None:
-            return
         try:
             n = queue.reclaim_stale(self._stale_timeout)
             if n:
@@ -242,6 +264,14 @@ class AspectWorkerDaemon:
                 "aspect_worker_daemon.reclaim_failed",
                 tenant=self._tenant, error=str(exc),
             )
+            self._reclaim_queue = None
+            try:
+                queue.close()
+            except Exception as close_exc:  # noqa: BLE001 - best-effort teardown of an already-broken client
+                _log.warning(
+                    "aspect_worker_daemon.reclaim_queue_close_failed",
+                    tenant=self._tenant, error=str(close_exc),
+                )
 
     def heartbeat_once(self) -> None:
         """Run a single heartbeat tick (test seam + the loop body)."""
