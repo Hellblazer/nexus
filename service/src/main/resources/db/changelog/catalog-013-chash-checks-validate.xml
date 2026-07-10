@@ -163,7 +163,33 @@ ALTER TABLE nexus.chash_index FORCE ROW LEVEL SECURITY;
          (engine-service-v0.1.33 through v0.1.36); the <sql> body itself remains
          byte-for-byte unchanged. catalog-013-3 below remains the per-table defensive
          fix, independently re-validating each of the five constraints regardless of
-         what 013-2 achieves. -->
+         what 013-2 achieves.
+
+         nexus-4m6i0.12 (substantive-critic round 2, 2026-07-10): MARK_RAN FREEZES
+         THIS CHANGESET FOREVER — a deliberate, documented residual, not a bug to
+         fix. Verified against the pinned liquibase-core 4.29.0 sources: the
+         DATABASECHANGELOG row MARK_RAN writes is permanent;
+         StandardChangeLogHistoryService.getRanChangeSets() applies no EXECTYPE
+         filter, and ShouldRunChangeSetFilter.accepts() treats ANY existing row as
+         "already ran" for a changeset without runAlways/runOnChange (neither is
+         set here, intentionally). So the precondition is NOT re-checked quietly on
+         later boots — it is never invoked again. A box that took the MARK_RAN path
+         will never have these five constraints VALIDATEd by Liquibase, even if the
+         missing constraint is later restored out-of-band (the same out-of-band
+         divergence pattern that caused ms57z in the first place): the constraint
+         sits enforced-but-unproven, silently. That trade is deliberate — the
+         rejected alternative (failOnError="false", round 1 of this fix) re-attempted
+         the failing VALIDATE with a SEVERE stack trace on every boot forever — and
+         the residual risk is the same "unproven old rows" class the file header
+         above already accepts as tolerable.
+
+         CONVENTION (nexus-4m6i0.12): recovery on a MARK_RAN'd (or otherwise
+         divergence-frozen) box is a NEW changeset id — catalog-013-4 style,
+         following the 013-1b / 013-3 new-id precedent — never an in-place edit of
+         a shipped changeset (checksum-locked) and never an expectation that
+         Liquibase will re-notice on its own. The same freeze semantics apply to
+         every other MARK_RAN-guarded VALIDATE in this chain (fk-002-7..11,
+         fk-003-7..11) and to catalog-013-3 below once its own row is recorded. -->
     <changeSet id="catalog-013-2" author="nexus-e0hd2">
         <preConditions onFail="MARK_RAN">
             <sqlCheck expectedResult="5">SELECT COUNT(*) FROM pg_constraint WHERE conname IN ('chunks_384_chash_len_check', 'chunks_768_chash_len_check', 'chunks_1024_chash_len_check', 'catalog_document_chunks_chash_len_check', 'chash_index_chash_len_check')</sqlCheck>
@@ -181,6 +207,12 @@ ALTER TABLE nexus.chash_index            VALIDATE CONSTRAINT chash_index_chash_l
         <rollback/>
     </changeSet>
 
+    <!-- Freeze note (nexus-4m6i0.12): this changeset's guards make it always
+         SUCCEED (each DO block skips a missing constraint), so its row records
+         EXECUTED on first boot and — same Liquibase semantics as 013-2's
+         MARK_RAN, see the block above — it never runs again. A constraint
+         restored out-of-band AFTER this ran stays unvalidated until a NEW
+         catalog-013-4-style changeset re-validates it. -->
     <changeSet id="catalog-013-3" author="nexus-4m6i0.1">
         <comment>Defensive per-table re-VALIDATE of the five chash length CHECKs — tolerates any subset missing (ms57z / GH#1390)</comment>
         <sql splitStatements="false" stripComments="false">

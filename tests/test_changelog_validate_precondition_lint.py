@@ -75,6 +75,27 @@ Two approved-safe shapes (nexus-4m6i0.1, already shipped in
    any subset of the five constraints may be missing on a given box and
    every OTHER constraint still gets validated).
 
+MARK_RAN freeze semantics — the accepted residual of Shape 1
+(nexus-4m6i0.12, verified against the pinned liquibase-core 4.29.0
+sources): ``onFail="MARK_RAN"`` writes a PERMANENT DATABASECHANGELOG row
+on the first boot where the precondition fails.
+``StandardChangeLogHistoryService.getRanChangeSets()`` applies no EXECTYPE
+filter and ``ShouldRunChangeSetFilter.accepts()`` treats ANY existing row
+as "already ran" for a changeset without ``runAlways``/``runOnChange`` —
+so the precondition is never re-evaluated on later boots. A box that
+skipped a VALIDATE this way will NOT self-heal if the missing constraint
+is later restored out-of-band: the constraint sits enforced-but-unproven
+with no further Liquibase attempt, silently. This trade is deliberate (the
+rejected round-1 alternative, ``failOnError="false"``, re-attempted the
+failing VALIDATE with SEVERE log spam on every boot forever, because a
+FAILED execType is never recorded). CONVENTION: recovery from such a
+frozen divergence is a NEW changeset id (the catalog-013-1b /
+catalog-013-3 precedent) — never an in-place edit of a shipped changeset
+(checksum-locked) and never an expectation that Liquibase re-notices on
+its own. The authoritative comment block lives in
+``catalog-013-chash-checks-validate.xml`` (nexus-4m6i0.12), with pointer
+notes in ``fk-002-validate.xml`` / ``fk-003-validate.xml``.
+
 A **bare** ``VALIDATE CONSTRAINT`` — neither inside a preConditions-guarded
 changeset nor inside a DO-block with a preceding, matching ``IF EXISTS``
 check — is a violation. Order matters (mirrors the RLS lint's

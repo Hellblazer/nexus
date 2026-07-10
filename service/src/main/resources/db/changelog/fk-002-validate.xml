@@ -153,7 +153,16 @@ ON CONFLICT (tenant_id, name) DO NOTHING;
          PostgreSQL skips validation when pg_constraint.convalidated is already true;
          see the ALTER TABLE docs' VALIDATE CONSTRAINT clause / ATExecValidateConstraint
          in src/backend/commands/tablecmds.c — but "harmless" is not a reason to ship
-         an inert changeset with a misleading rationale.) -->
+         an inert changeset with a misleading rationale.)
+
+         Freeze note (nexus-4m6i0.12): each guard's MARK_RAN row is PERMANENT —
+         Liquibase never re-evaluates a recorded changeset without
+         runAlways/runOnChange (verified against liquibase-core 4.29.0;
+         ShouldRunChangeSetFilter accepts any existing row, any EXECTYPE). A box
+         that skipped one of these VALIDATEs will NOT self-heal if the missing FK
+         is later restored out-of-band; recovery is a NEW changeset id. Full
+         verified semantics + convention: catalog-013-chash-checks-validate.xml's
+         nexus-4m6i0.12 block. -->
 
     <!-- ── Changeset fk-002-7: VALIDATE chunks_384_collection_fk ────────────────── -->
     <changeSet id="fk-002-7" author="nexus-70r3c.3">
