@@ -55,6 +55,7 @@ from nexus.commands.init import init_cmd
 from nexus.commands.memory import memory
 from nexus.commands.guided_upgrade_cmd import guided_upgrade_cmd
 from nexus.commands.migrate_cmd import migrate_to_service_cmd
+from nexus.commands.migration_audit_cmd import migration_audit_cmd
 from nexus.commands.migration_cmd import migration_cmd
 from nexus.commands.mineru import mineru_group
 from nexus.commands.plan import plan as plan_group
@@ -113,6 +114,7 @@ main.add_command(guided_upgrade_cmd, name="guided-upgrade")
 main.add_command(init_cmd, name="init")
 main.add_command(memory)
 main.add_command(migrate_to_service_cmd, name="migrate-to-service")
+main.add_command(migration_audit_cmd, name="migration-audit")
 main.add_command(migration_cmd, name="migration")
 main.add_command(mineru_group, name="mineru")
 main.add_command(plan_group, name="plan")

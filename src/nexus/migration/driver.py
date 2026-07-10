@@ -158,6 +158,57 @@ class TargetNameCollisionBlocked(RuntimeError):
         )
 
 
+def build_cross_model_target_names(
+    detection: "DetectionReport", *, voyage_key_present: bool
+) -> dict[str, str]:
+    """The source→target remap map exactly as the guided upgrade builds it.
+
+    Extracted from :func:`run_guided_upgrade` (nexus-p9vqa) so the
+    retroactive collision audit (:mod:`nexus.migration.collision_audit`)
+    reconstructs the historical target-name map with the SAME policy chain
+    (``cross_model_remappable`` → ``remap_target_model`` →
+    ``cross_model_target_name``) the migration itself uses — a drifted
+    reimplementation would audit a map no run ever produced.
+    """
+    return {
+        c.collection: cross_model_target_name(
+            c.collection,
+            # nexus-nb7hr: measured-768 collections target ONNX in every
+            # mode (provably-bge content must not bill a voyage re-embed).
+            remap_target_model(c, voyage_key_present=voyage_key_present),
+        )
+        for c in detection.classifications
+        if cross_model_remappable(c)
+    }
+
+
+def group_colliding_targets(
+    classifications: tuple[CollectionClassification, ...],
+    target_names: dict[str, str],
+) -> dict[str, list[CollectionClassification]]:
+    """Group data-bearing, actually-written sources by their final target,
+    keeping only targets claimed by two or more distinct sources.
+
+    The predicate chain (``has_data`` → remap-else-own-name →
+    :func:`vector_etl.is_never_written`) is the guard's own — extracted
+    (nexus-p9vqa) so :func:`_assert_no_target_name_collisions` (the
+    pre-flight that BLOCKS a fresh run) and the retroactive audit (which
+    REPORTS on an already-migrated store) share one grouping and can never
+    drift on "would these sources have collided".
+    """
+    by_target: dict[str, list[CollectionClassification]] = {}
+    for c in classifications:
+        if not c.has_data:
+            continue
+        target = target_names.get(c.collection, c.collection)
+        if is_never_written(c.collection, target):
+            continue
+        by_target.setdefault(target, []).append(c)
+    return {
+        target: sources for target, sources in by_target.items() if len(sources) > 1
+    }
+
+
 def _assert_no_target_name_collisions(
     classifications: tuple[CollectionClassification, ...],
     target_names: dict[str, str],
@@ -197,17 +248,7 @@ def _assert_no_target_name_collisions(
     invoked so a collision is caught before any write, never discovered
     mid-ETL or after.
     """
-    by_target: dict[str, list[CollectionClassification]] = {}
-    for c in classifications:
-        if not c.has_data:
-            continue
-        target = target_names.get(c.collection, c.collection)
-        if is_never_written(c.collection, target):
-            continue
-        by_target.setdefault(target, []).append(c)
-    collisions = {
-        target: sources for target, sources in by_target.items() if len(sources) > 1
-    }
+    collisions = group_colliding_targets(classifications, target_names)
     if collisions:
         raise TargetNameCollisionBlocked(collisions)
 
@@ -320,16 +361,9 @@ def run_guided_upgrade(
     # in cloud mode, bge-768 in local) so the MIXED migrant (ran local, migrates
     # onto a voyage-mode service) re-embeds into a WIRED model instead of hitting
     # the pebfx.2 fail-loud guard.
-    target_names = {
-        c.collection: cross_model_target_name(
-            c.collection,
-            # nexus-nb7hr: measured-768 collections target ONNX in every
-            # mode (provably-bge content must not bill a voyage re-embed).
-            remap_target_model(c, voyage_key_present=key_present),
-        )
-        for c in detection.classifications
-        if cross_model_remappable(c)
-    }
+    target_names = build_cross_model_target_names(
+        detection, voyage_key_present=key_present
+    )
     if target_names:
         _log.info("guided_upgrade_cross_model_targets", targets=target_names)
 
