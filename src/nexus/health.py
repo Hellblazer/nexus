@@ -599,7 +599,22 @@ def _check_t3_cloud() -> list[HealthResult]:
         from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid circular import
         from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred to avoid circular import
 
-        t3_handle = make_t3()
+        # nexus-b6qlf regression: make_t3() (via get_http_vector_client())
+        # now runs a cloud-mode engine-version probe -- every OTHER make_t3()
+        # call site in this module already degrades gracefully on failure
+        # (_check_t3_local's "T3 collections" census, _check_managed_service_
+        # probe); this was the one unguarded call, so a probe failure used to
+        # crash the entire `nx doctor` run instead of reporting a soft-fail
+        # line like its siblings.
+        try:
+            t3_handle = make_t3()
+        except Exception as exc:  # noqa: BLE001 — diagnostic: report unavailability, never crash doctor
+            _log.debug("doctor_pipeline_version_t3_unavailable", error=str(exc))
+            results.append(HealthResult(
+                label="pipeline versions", ok=False, warn=True,
+                detail=f"T3 unavailable ({exc}) — see the Managed/remote service check above.",
+            ))
+            return results
         if is_service_backed(t3_handle):
             results.append(HealthResult(
                 label="pipeline versions", ok=True,

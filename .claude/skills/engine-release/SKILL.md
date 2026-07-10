@@ -118,7 +118,7 @@ The post-deploy `--with-cloud` rehearsal (`run.sh --with-cloud`, the cloud → c
 ### 7. After conexus confirms deployed + cloud-gated green, bump downstream refs
 
 - `tests/e2e/migration-rehearsal/run.sh` `COLD_TAG` default → the new published tag (or override via `NEXUS_SERVICE_TAG`).
-- When the **next PyPI release** pins this engine: `PINNED_SERVICE_TAG` (`src/nexus/daemon/binary_install.py`) and — ONLY if the release hard-requires the new engine's features — `REQUIRED_RELEASE_VERSION` (`src/nexus/migration/guided_upgrade.py`; the floor is a minimum, not "latest"). These are the `release` skill's job, not this one.
+- When the **next PyPI release** pins this engine: `PINNED_SERVICE_TAG` (`src/nexus/daemon/binary_install.py`) and — ONLY if the release hard-requires the new engine's features — `REQUIRED_ENGINE_VERSION` (`src/nexus/engine_version.py`; the floor is a minimum, not "latest"). These are the `release` skill's job, not this one.
 
 ### 8. Record state (T2) — guarded by a live /version read (DO NOT SKIP)
 

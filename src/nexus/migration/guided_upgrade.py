@@ -25,6 +25,7 @@ from typing import Any, Callable
 
 import structlog
 
+from nexus.engine_version import REQUIRED_ENGINE_VERSION, parse_engine_version
 from nexus.migration.detection import (
     DetectionReport,
     classify_collections,
@@ -561,50 +562,10 @@ class VersionPinOutcome:
     reason: str | None
 
 
-#: Minimum engine-service release the guided upgrade will hand off to (RDR-002).
-#: Bumped (0,1,5)->(0,1,8) for nexus-x2g1z (2026-06-24): engine-service-v0.1.8
-#: is the current managed/native release; conexus relay [4566] confirmed the
-#: managed service reports release_version on /version. The managed cloud gate
-#: keeps its own floor (``managed_endpoint.MIN_MANAGED_RELEASE_VERSION``); this
-#: constant is the native-binary floor enforced by ``verify_service_version``
-#: and the 3rq00 parity test.
-REQUIRED_RELEASE_VERSION: tuple[int, int, int] = (0, 1, 34)
-
-
-def _parse_semver(raw: str | None) -> tuple[int, int, int] | None:
-    """Parse ``X.Y.Z`` (optional leading ``v``) to a tuple, else ``None``.
-
-    Fail-closed by construction: a blank, ``SNAPSHOT``/``dev``-qualified, or
-    unparseable value returns ``None`` so the caller refuses. Trailing
-    pre-release/build qualifiers (``-rc1``, ``+meta``) are rejected rather than
-    silently accepted — a dev build is not a release.
-    """
-    if not raw:
-        return None
-    s = raw.strip()
-    if not s:
-        return None
-    if s[:1] in ("v", "V"):
-        s = s[1:]
-    lower = s.lower()
-    if "snapshot" in lower or "dev" in lower:
-        return None
-    parts = s.split(".")
-    if len(parts) != 3:
-        return None
-    try:
-        major, minor, patch = (int(p) for p in parts)
-    except ValueError:
-        return None
-    if major < 0 or minor < 0 or patch < 0:
-        return None
-    return (major, minor, patch)
-
-
 def verify_service_version(
     service_url: str,
     *,
-    required: tuple[int, int, int] = REQUIRED_RELEASE_VERSION,
+    required: tuple[int, int, int] = REQUIRED_ENGINE_VERSION,
     http_get: Callable[[str, float], Any] | None = None,
     timeout_s: float = 5.0,
 ) -> VersionPinOutcome:
@@ -645,7 +606,7 @@ def verify_service_version(
     except Exception:  # noqa: BLE001 — non-JSON body cannot confirm a version
         body = {}
     raw = body.get("release_version")
-    parsed = _parse_semver(raw if isinstance(raw, str) else None)
+    parsed = parse_engine_version(raw if isinstance(raw, str) else None)
     if parsed is None:
         return VersionPinOutcome(
             ok=False,

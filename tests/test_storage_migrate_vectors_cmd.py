@@ -14,6 +14,8 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.commands.storage_cmd import migrate_vectors_cmd
+from nexus.db.http_vector_client import reset_http_vector_client_for_tests
+from nexus.db.managed_endpoint import ManagedCapabilities, ManagedServiceIncompatible
 from nexus.migration.vector_etl import CollectionResult, MigrationReport
 
 _COLL = "knowledge__cli__minilm-l6-v2-384__v1"
@@ -23,6 +25,32 @@ def _report(leg: str, *results: CollectionResult) -> MigrationReport:
     return MigrationReport(leg=leg, results=tuple(results))
 
 
+def _caps() -> ManagedCapabilities:
+    return ManagedCapabilities(
+        base_url="https://api.conexus-nexus.com",
+        app_version="1.0-SNAPSHOT",
+        release_version="0.1.99",
+        embedding_mode="voyage",
+        embedding_models=["voyage-context-3"],
+        schema_latest_id="latest",
+        schema_changeset_count=42,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _reset_vector_client_singleton():
+    """nexus-b6qlf Fix 1: migrate_vectors_cmd's non-dry-run path now routes
+    construction through get_http_vector_client(), a process-local
+    singleton + probe cache. Reset it around EVERY test in this file
+    (including the two that build a bare CliRunner() directly, in case a
+    prior test elsewhere in the suite left a real instance cached) so no
+    state leaks across tests (chromadb-ephemeral-shared-state class of
+    bug)."""
+    reset_http_vector_client_for_tests()
+    yield
+    reset_http_vector_client_for_tests()
+
+
 @pytest.fixture()
 def runner(monkeypatch) -> CliRunner:
     monkeypatch.setenv("NX_SERVICE_TOKEN", "cli-test-token")
@@ -30,6 +58,14 @@ def runner(monkeypatch) -> CliRunner:
     # env > ServiceRegistry lease > fail loud), so tests must pin BOTH halves.
     # The engine functions are monkeypatched below; no HTTP ever happens.
     monkeypatch.setenv("NX_SERVICE_URL", "http://127.0.0.1:1")
+    # nexus-b6qlf Fix 1: NX_SERVICE_URL set above means is_local_mode() is
+    # False here, so get_http_vector_client() probes engine-version
+    # compatibility. Stub the probe to succeed so these CLI-wiring tests
+    # exercise routing/flags, not the floor gate itself (TestEngineFloorGate
+    # below covers the gate).
+    monkeypatch.setattr(
+        "nexus.db.managed_endpoint.probe_managed_service", lambda: _caps()
+    )
     return CliRunner()
 
 
@@ -133,6 +169,97 @@ class TestMigrateVectorsCmd:
         assert opened == [tmp_path]
         assert "7 chunk(s) removed" in result.output
         assert "source untouched" in result.output
+
+
+class TestEngineFloorGate:
+    """nexus-b6qlf Fix 1 (CRITICAL): migrate_vectors_cmd previously
+    constructed a bare HttpVectorClient() directly, bypassing the fail-loud
+    engine-version-floor probe entirely -- exactly the highest-stakes cloud
+    operation (data ETL into/out of pgvector) for a stale engine to matter.
+    Must now route through get_http_vector_client() and fail loud BEFORE
+    any ETL function runs."""
+
+    def test_incompatible_engine_fails_loud_before_any_etl(
+        self, runner, monkeypatch, tmp_path
+    ) -> None:
+        monkeypatch.setattr(
+            "nexus.db.managed_endpoint.probe_managed_service",
+            lambda: (_ for _ in ()).throw(
+                ManagedServiceIncompatible(
+                    "managed nexus service at https://api.conexus-nexus.com is "
+                    "release_version '0.1.8', below the minimum this client "
+                    "supports (v0.1.34).",
+                    deployed_version="0.1.8",
+                    required_version="0.1.34",
+                )
+            ),
+        )
+        etl_calls: list[str] = []
+        monkeypatch.setattr(
+            "nexus.migration.vector_etl.migrate_local",
+            lambda *a, **k: etl_calls.append("local") or _report("local"),
+        )
+        result = runner.invoke(
+            migrate_vectors_cmd, ["--local-path", str(tmp_path)],
+        )
+        assert result.exit_code != 0
+        assert "0.1.8" in result.output
+        assert "0.1.34" in result.output
+        assert etl_calls == []  # the ETL must never run against a bad engine
+
+    def test_incompatible_engine_fails_loud_on_rollback_too(
+        self, runner, monkeypatch, tmp_path
+    ) -> None:
+        """Rollback deletes from pgvector -- it must be gated identically to
+        a live migration, never just --dry-run's bare-constructor carve-out."""
+        monkeypatch.setattr(
+            "nexus.db.managed_endpoint.probe_managed_service",
+            lambda: (_ for _ in ()).throw(
+                ManagedServiceIncompatible("stale engine", deployed_version="0.1.1",
+                                            required_version="0.1.34")
+            ),
+        )
+        rollback_calls: list[str] = []
+        monkeypatch.setattr(
+            "nexus.migration.chroma_read.open_local_read_client",
+            lambda path: object(),
+        )
+        monkeypatch.setattr(
+            "nexus.migration.vector_etl.rollback_collections",
+            lambda *a, **k: rollback_calls.append("rollback") or {},
+        )
+        result = runner.invoke(
+            migrate_vectors_cmd, ["--rollback", "--local-path", str(tmp_path)],
+        )
+        assert result.exit_code != 0
+        assert rollback_calls == []
+
+    def test_dry_run_still_needs_no_probe_or_token_or_lease(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """--dry-run must remain untouched by the floor gate -- it never
+        talks to the destination service at all (counts SOURCE chunks
+        only), so it must not require a reachable/compatible engine."""
+        monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+        monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+        monkeypatch.setattr(
+            "nexus.db.managed_endpoint.probe_managed_service",
+            lambda: (_ for _ in ()).throw(
+                AssertionError("probe must never be called for --dry-run")
+            ),
+        )
+
+        def fake_migrate_local(local_path, vector_client, **kw):
+            return _report("local", CollectionResult(_COLL, 7, 0, "dry-run"))
+
+        monkeypatch.setattr(
+            "nexus.migration.vector_etl.migrate_local", fake_migrate_local
+        )
+        result = CliRunner().invoke(
+            migrate_vectors_cmd, ["--local-path", str(tmp_path), "--dry-run"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "dry-run" in result.output
 
 
 class TestEtlOperability:

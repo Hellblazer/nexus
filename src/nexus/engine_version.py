@@ -1,0 +1,79 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+"""Single source of truth for the engine-service version floor (nexus-b6qlf).
+
+Prior to this module the minimum engine-service release a client would accept
+was hand-maintained as TWO independent constants that could silently drift
+apart: ``guided_upgrade.REQUIRED_RELEASE_VERSION`` (the native/local floor,
+actively bumped alongside RDR work) and ``managed_endpoint.MIN_MANAGED_
+RELEASE_VERSION`` (the managed-cloud floor, introduced 2026-06-24 at
+``(0, 1, 8)`` and never bumped again). Both currently gate the identical
+``release_version`` field on the same ``GET /version`` handshake — there was
+never a topology reason for two numbers, only an accident of two modules
+independently owning "their" constant. This module unifies both into one
+pinned floor plus one parser; bumping it once raises the floor everywhere.
+
+**Leaf module contract**: this file MUST NOT import anything from the
+``nexus`` package (stdlib only). Both ``nexus.db.managed_endpoint`` and
+``nexus.migration.guided_upgrade`` import from here, and those two packages
+have no dependency relationship with each other — a leaf module is what lets
+both import the shared floor without introducing a ``db`` <-> ``migration``
+circular-import risk. Enforced by ``tests/test_engine_version.py::
+test_module_is_stdlib_only_leaf`` (AST-walks this file's imports) and by the
+release-checklist grep gate over this file for any intra-package import
+statement, which must report nothing.
+"""
+from __future__ import annotations
+
+#: Minimum engine-service release ANY nexus client (native/local or managed
+#: cloud) requires, pinned on the dedicated ``release_version`` field of the
+#: unauthenticated ``GET /version`` handshake (RDR-002 contract; conexus PR
+#: #78). NOT ``app_version`` — that field is the JAR's frozen Maven coordinate
+#: ``1.0-SNAPSHOT`` and is a structural no-op to gate on (any build clears it).
+#:
+#: History: (0,1,5) -> (0,1,8) for nexus-x2g1z (2026-06-24, the managed-cloud
+#: probe's introduction). -> (0,1,34) for 6.5.0: the client hard-requires
+#: catalog-012 (graph-hop `where` — pre-012 engines silently ignore the key,
+#: the H2 version-skew failure class) and catalog-013-1b (pre-1b engines fail
+#: boot VALIDATE on tenants with legacy 64-char chash rows — the nexus-1wjmq
+#: incident). Bump this ONE constant to raise the floor for every client path
+#: (native guided-upgrade handoff AND the managed-cloud probe) — there is no
+#: second knob to remember.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 34)
+
+
+def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:
+    """Parse ``X.Y.Z`` (optional leading ``v``/``V``) to a tuple, else ``None``.
+
+    Fail-closed by construction: a blank, ``SNAPSHOT``/``dev``-qualified, or
+    otherwise unparseable value returns ``None`` so the caller refuses. Trailing
+    pre-release/build qualifiers (``-rc1``, ``+meta``) and a non-3-segment
+    version (``0.1``, ``1.2.3.4``) are rejected rather than silently accepted
+    — a dev/malformed identity is by definition not a comparable release.
+
+    This is the union of the two previously-duplicated parsers
+    (``guided_upgrade._parse_semver`` and ``managed_endpoint.
+    _parse_release_version``) — read side by side, their bodies were
+    byte-for-byte identical, so no behavior merge was needed beyond picking
+    one canonical home.
+    """
+    if not raw:
+        return None
+    s = raw.strip()
+    if not s:
+        return None
+    if s[:1] in ("v", "V"):
+        s = s[1:]
+    lower = s.lower()
+    if "snapshot" in lower or "dev" in lower:
+        return None
+    parts = s.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        major, minor, patch = (int(p) for p in parts)
+    except ValueError:
+        return None
+    if major < 0 or minor < 0 or patch < 0:
+        return None
+    return (major, minor, patch)

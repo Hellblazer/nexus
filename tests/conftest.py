@@ -723,6 +723,23 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # correctly on the flush call, not any cloud-mode embedder behavior.
     "tests/test_indexer_seam_b_cutover.py::test_run_index_batch_flush_forwards_force_re_embed",
     "tests/test_indexer_seam_b_cutover.py::test_run_index_batch_flush_force_false_omits_force_re_embed",
+    #
+    # nexus-5b9v0: the target-name collision guard tests build
+    # CollectionClassification/message fixtures naming real conformant
+    # collections (code__1-3__voyage-code-3__v1 etc.) to assert the pre-flight
+    # collision detector fires and its message names the colliding sources
+    # correctly. The voyage tokens are collection-NAME/model-label DATA the
+    # guard reasons about structurally (classify_collections is fully mocked);
+    # no embedder runs and no mode-dependent path executes
+    # ("string-literal-as-name" class, same rationale as test_driver.py's
+    # existing exclusions above).
+    "tests/migration/test_driver.py::test_target_name_collision_blocked_before_sequence",
+    "tests/migration/test_driver.py::test_target_name_collision_between_two_remapped_collections",
+    "tests/migration/test_driver.py::test_target_name_no_collision_when_targets_distinct",
+    "tests/migration/test_driver.py::test_target_name_collision_three_way",
+    "tests/migration/test_driver.py::test_target_name_collision_message_carries_classification_metadata",
+    "tests/migration/test_driver.py::test_target_name_collision_message_flags_likely_stale_source",
+    "tests/commands/test_migrate_cost_guardrail.py::TestRunMigrationCollisionGuard::test_target_name_collision_renders_as_click_exception",
 })
 
 
