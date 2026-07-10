@@ -51,7 +51,7 @@ def _resp(status_code: int, body: dict) -> httpx.Response:
 def _version_body(
     app_version: str = "1.0-SNAPSHOT",
     mode: str = "voyage",
-    release_version: str | None = "0.1.8",
+    release_version: str | None = "0.1.34",
 ) -> dict:
     # nexus-x2g1z: the gate pins on release_version. app_version is the frozen
     # 1.0-SNAPSHOT dev coordinate (informational only). The managed public
@@ -70,7 +70,7 @@ def _version_body(
     return body
 
 
-def _trimmed_version_body(release_version: str = "0.1.8") -> dict:
+def _trimmed_version_body(release_version: str = "0.1.34") -> dict:
     """The trimmed managed public /version payload (relay [4566])."""
     return {"app_version": "1.0-SNAPSHOT", "release_version": release_version}
 
@@ -217,18 +217,47 @@ def test_probe_below_release_floor_is_incompatible():
     with pytest.raises(ManagedServiceIncompatible) as exc:
         probe_managed_service(base_url="https://x", http_get=fake_get)
     # remedy names the offending version and the floor
-    assert "0.1.5" in str(exc.value) and "0.1.8" in str(exc.value)
+    assert "0.1.5" in str(exc.value) and "0.1.34" in str(exc.value)
+
+
+def test_probe_below_release_floor_exception_carries_structured_versions():
+    """nexus-b6qlf Fix 2: the below-floor raise must expose the deployed and
+    required versions as STRUCTURED attributes, not only baked into the
+    message string -- so a caller (e.g. the cloud-mode error wrapper in
+    http_vector_client.py) can build its own message without string-parsing
+    or re-embedding the underlying remedy clause verbatim (which previously
+    told a cloud user to "upgrade/downgrade the nx client", directly
+    contradicting the "cannot be fixed locally" framing wrapped around it)."""
+
+    def fake_get(url: str, timeout: float) -> httpx.Response:
+        return _resp(200, _version_body(release_version="0.1.5"))
+
+    with pytest.raises(ManagedServiceIncompatible) as exc:
+        probe_managed_service(base_url="https://x", http_get=fake_get)
+    assert exc.value.deployed_version == "0.1.5"
+    assert exc.value.required_version == "0.1.34"
+
+
+def test_managed_service_incompatible_fields_default_to_none():
+    """Every other raise site (no token, non-200, non-JSON, no usable
+    release_version) constructs ManagedServiceIncompatible with just a
+    message -- the new fields must default to None rather than requiring
+    every call site to pass them."""
+    exc = ManagedServiceIncompatible("plain message, no structured fields")
+    assert exc.deployed_version is None
+    assert exc.required_version is None
+    assert str(exc) == "plain message, no structured fields"
 
 
 def test_probe_snapshot_app_version_is_not_gated():
     # app_version=1.0-SNAPSHOT is the frozen dev coordinate and must NOT fail
     # the gate as long as release_version clears the floor (nexus-x2g1z).
     def fake_get(url: str, timeout: float) -> httpx.Response:
-        return _resp(200, _version_body(app_version="1.0-SNAPSHOT", release_version="0.1.8"))
+        return _resp(200, _version_body(app_version="1.0-SNAPSHOT", release_version="0.1.34"))
 
     caps = probe_managed_service(base_url="https://x", http_get=fake_get)
     assert caps.app_version == "1.0-SNAPSHOT"
-    assert caps.release_version == "0.1.8"
+    assert caps.release_version == "0.1.34"
 
 
 # ── probe: compatible ────────────────────────────────────────────────────────
@@ -246,7 +275,7 @@ def test_probe_compatible_returns_capabilities():
     # probes the unauthenticated /version handshake
     assert seen["url"] == "https://api.conexus-nexus.com/version"
     assert caps.app_version == "1.0-SNAPSHOT"
-    assert caps.release_version == "0.1.8"
+    assert caps.release_version == "0.1.34"
     assert caps.embedding_mode == "voyage"
     assert caps.embedding_models == ["voyage-context-3", "voyage-code-3"]
     assert caps.schema_latest_id == "vectors-002"
@@ -256,10 +285,10 @@ def test_probe_compatible_returns_capabilities():
 
 def test_probe_at_release_floor_passes():
     def fake_get(url: str, timeout: float) -> httpx.Response:
-        return _resp(200, _version_body(release_version="0.1.8"))
+        return _resp(200, _version_body(release_version="0.1.34"))
 
     caps = probe_managed_service(base_url="https://x", http_get=fake_get)
-    assert caps.release_version == "0.1.8"
+    assert caps.release_version == "0.1.34"
 
 
 def test_probe_above_release_floor_passes():
@@ -284,10 +313,10 @@ def test_probe_trimmed_payload_passes_and_defaults_optional_fields():
     # {app_version, release_version}; the optional embedding/schema fields are
     # absent and must default gracefully — not fail the probe.
     def fake_get(url: str, timeout: float) -> httpx.Response:
-        return _resp(200, _trimmed_version_body(release_version="0.1.8"))
+        return _resp(200, _trimmed_version_body(release_version="0.1.34"))
 
     caps = probe_managed_service(base_url="https://x", http_get=fake_get)
-    assert caps.release_version == "0.1.8"
+    assert caps.release_version == "0.1.34"
     assert caps.app_version == "1.0-SNAPSHOT"
     assert caps.embedding_mode == "unknown"
     assert caps.embedding_models == []
@@ -307,26 +336,24 @@ def test_probe_defaults_base_url_to_managed(monkeypatch):
     assert seen["url"] == f"{DEFAULT_MANAGED_SERVICE_URL}/version"
 
 
-# ── fail-closed parser: drift guard + type-confusion ─────────────────────────
+# ── fail-closed parser: unified single source of truth + type-confusion ─────
 
 
-def test_release_parser_matches_guided_upgrade_semver():
-    """The local _parse_release_version MUST stay behaviourally identical to
-    guided_upgrade._parse_semver (it is a deliberate local copy to avoid a
-    db->migration import). Mechanically enforce the "mirrors" claim so the two
-    security gates cannot silently diverge (nexus-x2g1z review)."""
-    from nexus.db.managed_endpoint import _parse_release_version
-    from nexus.migration.guided_upgrade import _parse_semver
+def test_probe_uses_the_canonical_engine_version_floor():
+    """managed_endpoint no longer owns a local parser/floor (nexus-b6qlf
+    unification) — it imports nexus.engine_version.REQUIRED_ENGINE_VERSION /
+    parse_engine_version directly, so drift between the managed-cloud gate and
+    the native/local gate (guided_upgrade.verify_service_version) is no longer
+    possible by construction (previously a hand-maintained local copy, caught
+    diverging in nexus-x2g1z review). Confirm the module actually imports the
+    canonical names rather than redefining its own."""
+    from nexus.db import managed_endpoint
+    from nexus.engine_version import REQUIRED_ENGINE_VERSION, parse_engine_version
 
-    fixtures = [
-        None, "", "   ", "0.1.8", "v0.1.8", "0.2.0", "0.1.5",
-        "0.1.9-SNAPSHOT", "0.1.8-dev", "0.1.8-rc1", "1.2.3.4", "x.y.z",
-        "unknown", "1.0-SNAPSHOT", "0.1", "v0.2.0", "-1.0.0",
-    ]
-    for raw in fixtures:
-        assert _parse_release_version(raw) == _parse_semver(raw), (
-            f"parser divergence on {raw!r}"
-        )
+    assert managed_endpoint.REQUIRED_ENGINE_VERSION is REQUIRED_ENGINE_VERSION
+    assert managed_endpoint.parse_engine_version is parse_engine_version
+    assert not hasattr(managed_endpoint, "MIN_MANAGED_RELEASE_VERSION")
+    assert not hasattr(managed_endpoint, "_parse_release_version")
 
 
 @pytest.mark.parametrize("bad", [True, False, 1, 0, 1.5, [], {}, None])

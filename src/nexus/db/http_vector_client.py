@@ -34,7 +34,7 @@ import threading
 import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NoReturn
 
 import structlog
 
@@ -1849,22 +1849,172 @@ class HttpVectorClient:
 _vector_client_lock = threading.Lock()
 _vector_client_instance: HttpVectorClient | None = None
 
+#: Cloud-mode version-compatibility probe cache (nexus-jn0nm). ``None`` means
+#: "not yet probed this process". A cached exception means the probe already
+#: failed once -- every subsequent call re-raises a FRESH instance built from
+#: the same type + message (nexus-b6qlf Fix 3: re-raising the SAME instance
+#: across call frames makes CPython prepend a new frame to its
+#: ``__traceback__`` every time, growing unboundedly in a long-running
+#: process) rather than re-probing (no repeated HTTP round-trips for a state
+#: we already know). The fast-path reads of these two globals (the check at
+#: the top of :func:`get_http_vector_client`, before the lock) are
+#: INTENTIONALLY unguarded -- a standard double-checked-locking pattern,
+#: safe under the GIL for a read of a bool/reference. Only the WRITE path
+#: (a probe result being cached) holds :data:`_vector_client_lock`. Cleared
+#: by :func:`reset_http_vector_client_for_tests`.
+_version_probe_done: bool = False
+_version_probe_error: Exception | None = None
+
+
+def _reraise_cached_probe_error(cached: Exception) -> NoReturn:
+    """Raise a FRESH instance of *cached*'s type/message (nexus-b6qlf Fix 3).
+
+    Assumes every :class:`~nexus.db.managed_endpoint.ManagedServiceError`
+    subclass accepts a single positional string-message constructor arg
+    (true today for both :class:`~nexus.db.managed_endpoint.
+    ManagedServiceUnreachable` and :class:`~nexus.db.managed_endpoint.
+    ManagedServiceIncompatible` -- the latter's ``deployed_version`` /
+    ``required_version`` fields are keyword-only with defaults, see
+    ``managed_endpoint.py``). A future field addition to either subclass
+    that becomes a REQUIRED positional/keyword arg would break this
+    reconstruction -- keep it optional if that ever changes.
+
+    Chains ``__cause__`` to *cached* so the original failure remains
+    inspectable, but each raised object is a distinct instance: reusing the
+    same instance across repeated calls is exactly what accumulates
+    traceback frames without bound.
+    """
+    raise type(cached)(str(cached)) from cached
+
+
+def _cloud_probe_failure_message(exc: Exception) -> str:
+    """Reword a probe failure for a cloud-mode audience (nexus-b6qlf).
+
+    A cloud-mode client cannot fix an incompatible managed engine itself --
+    there is no local install to upgrade, only a shared multitenant service
+    the maintainer/operator controls. The prior (pre-unification) warning
+    told users to "upgrade the engine this install is pointed at", which is
+    actively wrong advice in cloud mode. :class:`ManagedServiceUnreachable`
+    keeps its own message unchanged -- connectivity (``NX_SERVICE_URL``,
+    network) genuinely IS something the caller can act on locally.
+
+    nexus-b6qlf Fix 2: the below-floor :class:`ManagedServiceIncompatible`
+    carries structured ``deployed_version`` / ``required_version`` fields
+    (see ``managed_endpoint.py``) precisely so this function never has to
+    embed the underlying exception's own remedy text verbatim -- that text
+    ends "...Upgrade the managed service, or upgrade/downgrade the nx
+    client to match.", which directly contradicts the "cannot be fixed
+    locally" framing below when a cloud user reads it. When those
+    structured fields are present we state just the two version numbers
+    (deployed vs. required) for diagnostic value; when absent (every other
+    ManagedServiceIncompatible shape: no token, non-200, non-JSON, no
+    usable release_version -- none of which carry that contradictory
+    remedy clause) we fall back to embedding the message as before.
+    """
+    from nexus.db.managed_endpoint import ManagedServiceIncompatible  # noqa: PLC0415 -- deferred, see module docstring
+
+    if not isinstance(exc, ManagedServiceIncompatible):
+        return str(exc)
+
+    deployed = exc.deployed_version
+    required = exc.required_version
+    if deployed and required:
+        detail = (
+            f"The deployed engine reports version {deployed}; this client "
+            f"requires at least {required}."
+        )
+    else:
+        detail = f"Underlying probe failure: {exc}"
+    return (
+        "The managed nexus service is running an engine older than this "
+        "client requires. This cannot be fixed locally -- it is a "
+        "hosted-service issue that will be resolved when the service "
+        "operator deploys a compatible engine, not by any local action "
+        f"you can take. {detail}"
+    )
+
 
 def get_http_vector_client() -> HttpVectorClient:
-    """Return the process-local HttpVectorClient singleton."""
-    global _vector_client_instance
-    if _vector_client_instance is None:
-        with _vector_client_lock:
-            if _vector_client_instance is None:
-                _vector_client_instance = HttpVectorClient()
+    """Return the process-local HttpVectorClient singleton.
+
+    Cloud mode (``not is_local_mode()``) runs a one-time-per-process
+    compatibility probe (:func:`nexus.db.managed_endpoint.probe_managed_service`)
+    before the singleton is usable -- nexus-b6qlf: previously
+    ``probe_managed_service`` was only ever invoked from ``nx init`` /
+    ``nx doctor`` / ``nx service probe``, never from this, the actual
+    connection path every cloud-mode T3 operation goes through. A too-old
+    managed engine used to degrade silently (a missing endpoint 404s deep
+    inside some workflow, with only a buried log warning); this is a
+    deliberate HARD FAIL instead.
+
+    * Probe passes: cached forever, never re-probed again this process --
+      every later cloud-mode call returns the singleton with zero extra
+      HTTP round-trips.
+    * Probe fails: the (reworded, cloud-specific) error is cached and
+      RAISED immediately, blocking construction. Every subsequent call
+      this process re-raises a FRESH instance of the same cached error
+      (type + message, chained via ``__cause__``) rather than re-probing a
+      state we already know -- re-raising the SAME instance across call
+      frames would make CPython prepend a new traceback frame every time,
+      growing unboundedly in a long-running process (nexus-b6qlf Fix 3).
+    * Local mode: the probe is skipped entirely. Local mode's own floor
+      enforcement (the native ``guided_upgrade`` / ``nx upgrade`` flow) is
+      untouched by this gate.
+    """
+    global _vector_client_instance, _version_probe_done, _version_probe_error
+    from nexus.config import is_local_mode  # noqa: PLC0415 -- deferred for test patchability
+
+    cloud_mode = not is_local_mode()
+
+    if cloud_mode and _version_probe_error is not None:
+        _reraise_cached_probe_error(_version_probe_error)
+
+    if _vector_client_instance is not None and (not cloud_mode or _version_probe_done):
+        return _vector_client_instance
+
+    with _vector_client_lock:
+        if cloud_mode:
+            if _version_probe_error is not None:
+                _reraise_cached_probe_error(_version_probe_error)
+            if not _version_probe_done:
+                from nexus.db.managed_endpoint import (  # noqa: PLC0415 -- deferred, see module docstring
+                    ManagedServiceError,
+                    probe_managed_service,
+                )
+
+                try:
+                    probe_managed_service()
+                except ManagedServiceError as exc:
+                    wrapped = type(exc)(_cloud_probe_failure_message(exc))
+                    _version_probe_error = wrapped
+                    # nexus-dizod: log the REWRITTEN (cloud-correct) message,
+                    # never str(exc) -- the raw ManagedServiceIncompatible
+                    # text ends "...upgrade/downgrade the nx client to
+                    # match", and at the CLI's default WARNING level this
+                    # ERROR line prints to the user's real stderr directly
+                    # above the click-rendered "cannot be fixed locally"
+                    # error, recreating the exact b6qlf Fix-2
+                    # self-contradiction across two adjacent lines.
+                    _log.error(
+                        "cloud_engine_version_probe_failed",
+                        error_type=type(exc).__name__,
+                        error=str(wrapped),
+                    )
+                    raise wrapped from exc
+                _version_probe_done = True
+                _log.debug("cloud_engine_version_probe_ok")
+        if _vector_client_instance is None:
+            _vector_client_instance = HttpVectorClient()
     return _vector_client_instance
 
 
 def reset_http_vector_client_for_tests() -> None:
-    """Test helper: reset the singleton."""
-    global _vector_client_instance
+    """Test helper: reset the singleton and the cloud version-probe cache."""
+    global _vector_client_instance, _version_probe_done, _version_probe_error
     with _vector_client_lock:
         _vector_client_instance = None
+        _version_probe_done = False
+        _version_probe_error = None
 
 
 def is_vector_service_mode() -> bool:

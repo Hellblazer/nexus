@@ -336,6 +336,14 @@ def guided_upgrade_cmd(
             local_path, db_path, catalog_db_path, readiness.service_url,
             **_extra_kwargs,
         )
+    except click.ClickException:
+        # Deliberately NOT wrapped in the sentinel-recovery text below
+        # (360-sweep Dimension A, 2026-07-10): ClickException here means a
+        # PRE-WRITE block (e.g. TargetNameCollisionBlocked wrapped by
+        # migrate_cmd) — no sentinel was set, so "nx migration --clear-state"
+        # would be wrong advice. The exception's own message carries the
+        # remediation; let click render it.
+        raise
     except SystemExit as _exc:
         # nexus-nb7hr secondary finding: a blocked/failed migration leaves the
         # migrated-failed sentinel (reads degrade LOUD) and the recovery step

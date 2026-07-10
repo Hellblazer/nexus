@@ -77,6 +77,9 @@ from nexus.migration.vector_etl import (
     CollectionResult,
     MigrationReport,
     cross_model_target_name,
+    is_derived_skip,
+    is_ephemeral_excluded,
+    is_never_written,
     manifest_backfill_sql,
     manifest_orphan_sql,
     migrate_cloud,
@@ -1367,6 +1370,42 @@ class TestRollbackUnit:
         assert deleted == {name: 7}
         assert fake.count(name) == 0
         assert source_client.get_collection(name).count() == 7
+
+    def test_rollback_removes_legacy_id_rows(self, source_client) -> None:
+        """nexus-pnwu0 / GH #1390 §8.1 step 2: rollback is the load-bearing
+        recovery step for a legacy-id-POISONED target. The migration guard
+        (nexus-sot7v) blocks such a target from being CREATED, but a box that
+        was poisoned pre-guard must still roll back cleanly — rollback reads
+        the source id set verbatim and deletes matching target rows, so it is
+        (and must stay) unaffected by the legacy-id guard. Pins that the
+        §8.1 playbook actually works, not just that the code reads that way."""
+        name = _coll("etlrb-legacy", model=_MODEL_768)
+        # Source holds a mix of legacy 16/18-char ids and a conformant 32-char
+        # id (a partially-poisoned real collection).
+        legacy_a = "a" * 16
+        legacy_b = "b" * 18
+        conformant = "c" * 32
+        col = source_client.get_or_create_collection(name)
+        col.add(
+            ids=[legacy_a, legacy_b, conformant],
+            documents=["x", "y", "z"],
+            metadatas=[{"position": 0}, {"position": 1}, {"position": 2}],
+            embeddings=[[0.1, 1.0], [0.2, 1.0], [0.3, 1.0]],
+        )
+        # Pre-seed the target as if a pre-guard run had copied all three
+        # verbatim (the poisoned state) — bypassing the guarded upsert path.
+        fake = FakeVectorClient()
+        fake.store[name] = {
+            legacy_a: ("x", {}), legacy_b: ("y", {}), conformant: ("z", {}),
+        }
+        assert fake.count(name) == 3
+
+        deleted = rollback_collections(source_client, fake, collections=[name])
+
+        assert deleted == {name: 3}  # all three removed, legacy ids included
+        assert fake.count(name) == 0
+        # source untouched (the immutable rollback manifest)
+        assert source_client.get_collection(name).count() == 3
 
     def test_rollback_leaves_other_collections(self, source_client) -> None:
         keep = _coll("etlrb-keep")
@@ -2676,6 +2715,68 @@ class TestEphemeralExclusion:
         assert report.ok is False
 
 
+class TestIsNeverWritten:
+    """nexus-5b9v0 Fix A (round-2 remediation) + Fix E (round-3 remediation):
+    the migration driver's pre-flight collision guard needs a SINGLE
+    predicate covering EVERY "never actually written by the DEFAULT ETL
+    enumeration" collection disposition -- not an enumerated allowlist of
+    specific classes. The true unifying predicate is "target cannot
+    dim-dispatch" (covers `skipped-derived`, `skipped-empty`, and the
+    generic `skipped` fallback -- every branch inside
+    `_skip_result_for_nonconformant`'s `if dim is not None` early return)
+    OR the ephemeral tuplespace-prefix exclusion (`is_ephemeral_excluded`,
+    handled by a separate enumeration-loop branch entirely) -- so a
+    false-positive collision on any never-written disposition is
+    impossible, not just on the two classes Fix A's initial formulation
+    covered."""
+
+    def test_is_ephemeral_excluded_matches_prefix(self) -> None:
+        assert is_ephemeral_excluded("tuples__hook_events_notification") is True
+        assert is_ephemeral_excluded("knowledge__o__minilm-l6-v2-384__v1") is False
+
+    def test_is_never_written_true_for_ephemeral_prefix(self) -> None:
+        # Non-conformant target (no model segment) — dim_for_collection
+        # cannot dispatch it either way; is_never_written must still be True
+        # via the ephemeral branch even though is_derived_skip alone is False
+        # (the name is not on the _DERIVED_COLLECTIONS allowlist).
+        name = "tuples__hook_events_notification"
+        assert is_derived_skip(name, name) is False
+        assert is_never_written(name, name) is True
+
+    def test_is_never_written_true_for_derived_collection(self) -> None:
+        # taxonomy__centroids is on the derived allowlist and non-conformant
+        # -> is_derived_skip alone already returns True; is_never_written
+        # must agree (composition, not replacement).
+        name = "taxonomy__centroids"
+        assert is_derived_skip(name, name) is True
+        assert is_never_written(name, name) is True
+
+    def test_is_never_written_false_for_honest_conformant_collection(self) -> None:
+        # A normal, dim-dispatchable, non-ephemeral, non-derived collection
+        # is actually written -> is_never_written must be False (no
+        # over-broad exemption swallowing real collisions).
+        name = "knowledge__o__minilm-l6-v2-384__v1"
+        assert is_never_written(name, name) is False
+
+    def test_is_never_written_true_for_generic_nonconformant_with_data(self) -> None:
+        """nexus-5b9v0 round-3 Fix E (bead nexus-5b9v0 review round 3,
+        Significant): a generic nonconformant collection -- NOT on the
+        `_DERIVED_COLLECTIONS` allowlist, NOT `tuples__`-prefixed -- that
+        HAS data disposes to a plain "skipped" verdict in
+        `_skip_result_for_nonconformant`'s fallback branch, which is ALSO
+        never written (the ETL returns the skip result before ever
+        reaching the upsert). Pre-fix, `is_never_written` returned False
+        here (neither `is_derived_skip` nor `is_ephemeral_excluded`
+        matched) even though the collection is unconditionally never
+        written -- a latent false-positive-block risk for any future ad
+        hoc nonconformant collection that happens to share a target name
+        with another source."""
+        name = "legacy__oldstuff"
+        assert is_derived_skip(name, name) is False
+        assert is_ephemeral_excluded(name) is False
+        assert is_never_written(name, name) is True
+
+
 # ── RDR-162: cross-model migrate (stored-text re-embed + target model remap) ──
 
 
@@ -2746,3 +2847,91 @@ class TestCrossModelMigrate:
         r = report.results[0]
         assert r.target_collection is None
         assert set(fake.store[src].keys())  # landed under the source name
+
+
+class TestLegacyChunkIdGuard:
+    """GH #1390 / nexus-sot7v: pre-RDR-108 stores hold 16/18-char chunk ids.
+    The per-batch hard guard must fail the collection CLIENT-SIDE with the
+    re-index + do-NOT-drop-constraints diagnostic before a single upsert is
+    sent — never the per-upsert 409 wall that pushed an autonomous session
+    into dropping the chash constraints."""
+
+    def test_legacy_short_id_fails_cleanly_before_any_write(self, source_client) -> None:
+        from nexus.migration.vector_etl import _migrate_one
+
+        name = _coll("etlunit-legacyid", model=_MODEL_768)
+        col = source_client.get_or_create_collection(name)
+        col.add(
+            ids=["b" * 16],
+            documents=["legacy-era chunk"],
+            metadatas=[{"position": 0, "embedding_model": _MODEL_768}],
+            embeddings=[[0.1, 1.0]],
+        )
+        fake = FakeVectorClient()
+
+        result = _migrate_one(
+            source_client, fake, name, dry_run=False, page=100, target_name=name
+        )
+
+        assert result.status == "failed"
+        assert "'" + "b" * 16 + "'" in result.reason
+        assert "Re-index" in result.reason
+        assert "Do NOT drop" in result.reason
+        assert fake.upsert_calls == []  # nothing crossed the wire
+
+    def test_mixed_batch_with_one_legacy_id_fails_whole_batch(self, source_client) -> None:
+        """One bad id in a batch fails the collection before that batch is
+        sent — the conformant siblings in the same batch must not be written
+        either (a partial batch would complicate rollback accounting)."""
+        from nexus.migration.vector_etl import _migrate_one
+
+        name = _coll("etlunit-legacymix", model=_MODEL_768)
+        _seed_source(source_client, name, 2, embedding_model=_MODEL_768)
+        col = source_client.get_or_create_collection(name)
+        col.add(
+            ids=["c" * 18],
+            documents=["another legacy chunk"],
+            metadatas=[{"position": 9, "embedding_model": _MODEL_768}],
+            embeddings=[[0.2, 1.0]],
+        )
+        fake = FakeVectorClient()
+
+        result = _migrate_one(
+            source_client, fake, name, dry_run=False, page=100, target_name=name
+        )
+
+        assert result.status == "failed"
+        assert fake.upsert_calls == []
+
+    def test_conformant_ids_still_migrate(self, source_client) -> None:
+        """Regression pin: the guard must not reject the honest 32-char path."""
+        from nexus.migration.vector_etl import _migrate_one
+
+        name = _coll("etlunit-legacyok", model=_MODEL_768)
+        _seed_source(source_client, name, 3, embedding_model=_MODEL_768)
+        fake = FakeVectorClient()
+
+        result = _migrate_one(
+            source_client, fake, name, dry_run=False, page=100, target_name=name
+        )
+        assert result.status == "migrated"
+        assert len(fake.upsert_calls) == 1
+
+    def test_verify_fill_legacy_short_id_fails_cleanly(self, source_client) -> None:
+        from nexus.migration.vector_etl import _verify_fill_one
+
+        name = _coll("etlunit-legacyvf", model=_MODEL_768)
+        col = source_client.get_or_create_collection(name)
+        col.add(
+            ids=["d" * 16],
+            documents=["legacy-era chunk"],
+            metadatas=[{"position": 0, "embedding_model": _MODEL_768}],
+            embeddings=[[0.3, 1.0]],
+        )
+        fake = FakeVectorClient()
+
+        result = _verify_fill_one(source_client, fake, name, page=100, target_name=name)
+
+        assert result.status == "failed"
+        assert "Do NOT drop" in result.reason
+        assert fake.upsert_calls == []

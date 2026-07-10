@@ -34,10 +34,12 @@ from typing import Any, Callable
 import structlog
 
 from nexus.migration.detection import (
+    CollectionClassification,
     DetectionReport,
     classify_collections,
     close_read_client,
     cross_model_remappable,
+    is_measured_dim_override,
     remap_target_model,
     open_read_legs,
     voyage_key_available,
@@ -54,6 +56,7 @@ from nexus.migration.vector_etl import (
     MigrationReport,
     _dim_for_collection,
     cross_model_target_name,
+    is_never_written,
     migrate_cloud,
     migrate_local,
 )
@@ -82,6 +85,175 @@ class GuidedUpgradeResult:
         """Whether a rollback is offered (a validated block left a pgvector copy
         the user can undo to return to the immutable Chroma source)."""
         return self.validation is not None and self.validation.rollback_available
+
+
+def _describe_colliding_source(c: CollectionClassification) -> str:
+    """Render one colliding source's classification for the operator
+    (nexus-5b9v0 Fix 3) — leg, model, measured dim, and the diagnostic
+    ``reason`` already computed at classify-time — so the exception message
+    is a menu ("here is which one to remove/re-index"), not a puzzle the
+    operator has to re-derive by hand from a throwaway repro.
+
+    nexus-5b9v0 Fix C: a classification that is a measured-dim override
+    (:func:`~nexus.migration.detection.is_measured_dim_override` — the
+    declared name/model says unsupported, but a stored vector measured as
+    local bge/ONNX) is explicitly flagged ``LIKELY STALE`` — this is
+    precisely the pre-RDR-109 mislabel case the guard exists for, so the
+    operator does not have to compare bullets by hand to find it; the
+    honest, non-remapped sibling gets no such flag.
+    """
+    bits = [f"leg={c.leg}", f"model={c.model or 'unknown'}"]
+    if c.measured_dim is not None:
+        bits.append(f"measured {c.measured_dim}-dim")
+    detail = ", ".join(bits)
+    reason = f" — {c.reason}" if c.reason else ""
+    flag = " — LIKELY STALE (name/model mismatch)" if is_measured_dim_override(c) else ""
+    return f"{c.collection} ({detail}){reason}{flag}"
+
+
+class TargetNameCollisionBlocked(RuntimeError):
+    """Raised before any ETL when two or more distinct source collections would
+    resolve to the same final migration target name.
+
+    nexus-5b9v0: a pre-RDR-109 collection misnamed with a voyage-model token
+    (nexus-59vl / GH#667) but holding MEASURED bge-768 vectors is correctly
+    cross-model-remapped onto ``bge-base-en-v15-768`` — but that can be the
+    EXACT target name of an honest, non-remapped sibling collection already
+    migrating under its own name (or of a second remapped collection that
+    measures to the same target independently). Both would write into the same
+    pgvector target under one name: depending on whether their chashes
+    overlap, this either double-counts the post-write verification (a loud but
+    confusing ``vector_etl_count_mismatch``) or silently merges the two
+    collections' content with no error at all — strictly worse. This gate
+    fails BEFORE any collection is opened for write, while the fix (drop or
+    re-index the stale/duplicate collection) is still cheap and safe.
+
+    ``.collisions`` maps each colliding target name to the list of distinct
+    :class:`~nexus.migration.detection.CollectionClassification` objects that
+    would write into it (len >= 2 per entry) — the FULL classification, not
+    just the bare collection name (nexus-5b9v0 Fix 3), so a caller (or the
+    rendered message below) can tell which colliding source is the stale
+    pre-RDR-109 mislabel versus the honest sibling without re-deriving the
+    classification by hand.
+    """
+
+    def __init__(self, collisions: dict[str, list[CollectionClassification]]) -> None:
+        self.collisions = collisions
+        lines = "\n".join(
+            f"  - target {target!r} would be written by {len(sources)} "
+            "distinct source collections:\n"
+            + "\n".join(
+                f"      * {_describe_colliding_source(c)}" for c in sources
+            )
+            for target, sources in collisions.items()
+        )
+        super().__init__(
+            "migration blocked: target-name collision detected across "
+            f"{len(collisions)} target collection(s) (no data has been "
+            "touched) — this is typically a nexus-59vl-era misnamed "
+            "collection colliding with an honest sibling (or two mislabeled "
+            "collections measuring to the same target); resolve by removing "
+            "or re-indexing the stale/duplicate collection before "
+            f"migrating:\n{lines}\n"
+            "Run 'nx migration-audit' for the full retroactive report "
+            "(whether an EARLIER run already merged these, and per-source "
+            "presence in the live target)."
+        )
+
+
+def build_cross_model_target_names(
+    detection: "DetectionReport", *, voyage_key_present: bool
+) -> dict[str, str]:
+    """The source→target remap map exactly as the guided upgrade builds it.
+
+    Extracted from :func:`run_guided_upgrade` (nexus-p9vqa) so the
+    retroactive collision audit (:mod:`nexus.migration.collision_audit`)
+    reconstructs the historical target-name map with the SAME policy chain
+    (``cross_model_remappable`` → ``remap_target_model`` →
+    ``cross_model_target_name``) the migration itself uses — a drifted
+    reimplementation would audit a map no run ever produced.
+    """
+    return {
+        c.collection: cross_model_target_name(
+            c.collection,
+            # nexus-nb7hr: measured-768 collections target ONNX in every
+            # mode (provably-bge content must not bill a voyage re-embed).
+            remap_target_model(c, voyage_key_present=voyage_key_present),
+        )
+        for c in detection.classifications
+        if cross_model_remappable(c)
+    }
+
+
+def group_colliding_targets(
+    classifications: tuple[CollectionClassification, ...],
+    target_names: dict[str, str],
+) -> dict[str, list[CollectionClassification]]:
+    """Group data-bearing, actually-written sources by their final target,
+    keeping only targets claimed by two or more distinct sources.
+
+    The predicate chain (``has_data`` → remap-else-own-name →
+    :func:`vector_etl.is_never_written`) is the guard's own — extracted
+    (nexus-p9vqa) so :func:`_assert_no_target_name_collisions` (the
+    pre-flight that BLOCKS a fresh run) and the retroactive audit (which
+    REPORTS on an already-migrated store) share one grouping and can never
+    drift on "would these sources have collided".
+    """
+    by_target: dict[str, list[CollectionClassification]] = {}
+    for c in classifications:
+        if not c.has_data:
+            continue
+        target = target_names.get(c.collection, c.collection)
+        if is_never_written(c.collection, target):
+            continue
+        by_target.setdefault(target, []).append(c)
+    return {
+        target: sources for target, sources in by_target.items() if len(sources) > 1
+    }
+
+
+def _assert_no_target_name_collisions(
+    classifications: tuple[CollectionClassification, ...],
+    target_names: dict[str, str],
+) -> None:
+    """Pre-flight (nexus-5b9v0): fail before any ETL if two or more distinct
+    data-bearing source collections would write into the same final target.
+
+    The final target for a classification is its remap ``target_names`` entry
+    when it is cross-model-remappable, else its own collection name (a
+    same-name migration). Empty collections are excluded — they write
+    nothing, so they cannot collide. A collection the ETL's DEFAULT
+    enumeration would itself never actually write
+    (:func:`vector_etl.is_never_written`, nexus-5b9v0 Fix A, broadened in
+    round-3 remediation) is ALSO excluded. ``is_never_written`` is the
+    unifying predicate over every never-written disposition
+    ``_skip_result_for_nonconformant`` can produce (target cannot
+    dim-dispatch — ``skipped-derived``, ``skipped-empty``, and the generic
+    ``skipped`` fallback all land there), plus the ``excluded`` / ephemeral
+    (:func:`vector_etl.is_ephemeral_excluded`) case handled by a wholly
+    separate enumeration-loop branch. Example: a non-remappable, two-segment
+    ``taxonomy__centroids`` present with data on both legs maps to its own
+    literal name on each leg — a naive grouping would see two distinct
+    sources claiming one target and block a migration that would otherwise
+    succeed cleanly (the ETL silently skips both and writes neither).
+
+    ``is_never_written`` is the ONE shared predicate this guard calls, so it
+    can never drift from ``vector_etl``'s own disposition logic on "will
+    this collection actually be written". It is deliberately NOT the same
+    predicate ``vector_etl``'s own ``_skip_result_for_nonconformant`` uses at
+    its ``is_derived_skip`` call site — that site must preserve the
+    explicit-``--collections``-override nuance for ephemeral collections
+    (see ``is_derived_skip``'s docstring), which does not apply here since
+    this guard always runs in a default-enumeration context.
+
+    This is a pure read-only check over already-computed classification +
+    remap-target data; it MUST run before ``_run_leg``/the sequencer is ever
+    invoked so a collision is caught before any write, never discovered
+    mid-ETL or after.
+    """
+    collisions = group_colliding_targets(classifications, target_names)
+    if collisions:
+        raise TargetNameCollisionBlocked(collisions)
 
 
 class _CompositeReadClient:
@@ -192,18 +364,18 @@ def run_guided_upgrade(
     # in cloud mode, bge-768 in local) so the MIXED migrant (ran local, migrates
     # onto a voyage-mode service) re-embeds into a WIRED model instead of hitting
     # the pebfx.2 fail-loud guard.
-    target_names = {
-        c.collection: cross_model_target_name(
-            c.collection,
-            # nexus-nb7hr: measured-768 collections target ONNX in every
-            # mode (provably-bge content must not bill a voyage re-embed).
-            remap_target_model(c, voyage_key_present=key_present),
-        )
-        for c in detection.classifications
-        if cross_model_remappable(c)
-    }
+    target_names = build_cross_model_target_names(
+        detection, voyage_key_present=key_present
+    )
     if target_names:
         _log.info("guided_upgrade_cross_model_targets", targets=target_names)
+
+    # nexus-5b9v0 pre-flight: a cross-model remap target can collide with an
+    # honest, non-remapped sibling collection's own name (or with a second
+    # remap target) — BLOCK before any write, never discover it via a
+    # confusing post-write count mismatch (or worse, a silent cross-collection
+    # merge). Must run before `_run_leg` is even defined.
+    _assert_no_target_name_collisions(detection.classifications, target_names)
 
     # 2. SEQUENCE — quiesce → pre-gate → T2 → T3-per-leg. The per-leg ETL opens
     #    + closes its OWN read client internally (we closed ours above).
@@ -301,7 +473,22 @@ def run_guided_upgrade(
             reason = f"validation could not be performed: {exc}"
             _log.error("guided_upgrade_validation_setup_raised", error=str(exc))
             mark_failed(reason)
-            raise
+            # nexus-5b9v0 round-3 Fix D (bead nexus-rndvq, CRITICAL): this used
+            # to be a bare `raise`, re-propagating *exc*'s ORIGINAL type
+            # unchanged. In production the reopen most commonly raises
+            # FileNotFoundError (chroma_read.open_local_read_client, when the
+            # local Chroma store vanished between the ETL write and this
+            # reopen) — NOT a RuntimeError, so migrate_cmd.py's
+            # `except RuntimeError` CLI wrapper could never catch it and a
+            # raw traceback still reached the operator for this exact failure
+            # mode. Wrap at the origin, matching every sibling guard in this
+            # module (ModelPreGateBlocked, MigrationQuiesceBlocked,
+            # EtlPreflightFailed, ValidationCheckVacuous,
+            # TargetNameCollisionBlocked are all RuntimeError subclasses) —
+            # any current or future `except RuntimeError` caller now covers
+            # this path unconditionally. `from exc` preserves the original
+            # exception as `__cause__` for a caller that needs to recover it.
+            raise RuntimeError(reason) from exc
     finally:
         for client in opened.values():
             _close_quietly(client)

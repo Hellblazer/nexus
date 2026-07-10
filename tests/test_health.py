@@ -164,6 +164,38 @@ def test_t3_collections_census_degrades_when_service_unreachable(
     assert "could not query" in line.detail
 
 
+def test_pipeline_version_check_degrades_on_make_t3_failure(monkeypatch) -> None:
+    """nexus-b6qlf regression: get_http_vector_client() (Phase 2, reached via
+    make_t3()) now runs a cloud-mode engine-version probe before returning a
+    handle. Every OTHER make_t3() call site in this module already degrades
+    gracefully on failure (see test_t3_collections_census_degrades_when_
+    service_unreachable above) -- the pipeline-version sweep's make_t3()
+    call was the one exception, left unguarded, so a probe failure crashed
+    the entire `nx doctor` run instead of reporting a soft-fail line like
+    its siblings."""
+    from nexus.health import _check_t3_cloud
+
+    def _cred(key: str) -> str:
+        # service_url empty -> _check_managed_service_probe() short-circuits
+        # (not under test here); the three credentials below are truthy so
+        # the pipeline-version-check branch is actually entered.
+        return "" if key == "service_url" else "value"
+
+    monkeypatch.setattr("nexus.config.get_credential", _cred)
+    monkeypatch.setattr("nexus.db.http_vector_client._get", lambda *a, **kw: [])
+
+    def _boom(**kw):
+        raise RuntimeError("stale engine — below required floor")
+
+    monkeypatch.setattr("nexus.db.make_t3", _boom)
+
+    results = _check_t3_cloud()  # must not raise
+    line = next((r for r in results if r.label == "pipeline versions"), None)
+    assert line is not None
+    assert line.ok is False
+    assert "stale engine" in line.detail
+
+
 def test_vector_service_probe_unconditional_and_fatal(monkeypatch, tmp_path) -> None:
     """RDR-155 P4a.2 dual-review finding 2 (substantive-critic): the vector
     service probe must fire in BOTH mode branches and without legacy Chroma
@@ -201,6 +233,214 @@ def test_vector_service_probe_reachable(monkeypatch) -> None:
     line = _check_vector_service()
     assert line.ok is True
     assert "reachable" in line.detail
+    assert "changeset" not in line.detail.lower()
+
+
+# ── nexus-4m6i0.7: surface the failing Liquibase changeset on boot crash-loop ─
+
+# Verbatim (modulo indentation) tail of storage_service_native.log from the
+# real ms57z incident (GH #1390): engine-service v0.1.36 crash-looping on
+# catalog-013-2's VALIDATE CONSTRAINT because chunks_384 never had the
+# constraint created.
+_REAL_INCIDENT_LOG_TAIL = """\
+2026-07-08T10:22:01.123Z INFO  dev.nexus.service.Main - starting nexus-service v0.1.36
+2026-07-08T10:22:01.456Z INFO  dev.nexus.service.db.SchemaMigrator - applying pending changesets
+dev.nexus.service.db.SchemaMigrator$MigrationException: Liquibase migration failed
+  at dev.nexus.service.db.SchemaMigrator.migrate(SchemaMigrator.java:111)
+  at dev.nexus.service.Main.main(Main.java:83)
+Caused by: liquibase.exception.MigrationFailedException:
+  Migration failed for changeset db/changelog/catalog-013-chash-checks-validate.xml::catalog-013-2::nexus-e0hd2
+Caused by: org.postgresql.util.PSQLException:
+  ERROR: constraint "chunks_384_chash_len_check" of relation "chunks_384" does not exist
+"""
+
+
+def _write_service_log(config_dir, content: str) -> None:
+    logs_dir = config_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    (logs_dir / "storage_service_native.log").write_text(content)
+
+
+def test_last_boot_failure_detail_parses_real_incident_log(tmp_path) -> None:
+    """Unit test of the tail-parser against the verbatim ms57z log shape."""
+    from nexus.health import _last_boot_failure_detail
+
+    log_path = tmp_path / "storage_service_native.log"
+    log_path.write_text(_REAL_INCIDENT_LOG_TAIL)
+
+    detail = _last_boot_failure_detail(log_path)
+    assert detail is not None
+    assert "catalog-013-2" in detail
+    assert 'constraint "chunks_384_chash_len_check"' in detail
+    assert "does not exist" in detail
+
+
+def test_last_boot_failure_detail_missing_file_returns_none(tmp_path) -> None:
+    from nexus.health import _last_boot_failure_detail
+
+    detail = _last_boot_failure_detail(tmp_path / "does_not_exist.log")
+    assert detail is None
+
+
+def test_last_boot_failure_detail_no_marker_returns_none(tmp_path) -> None:
+    from nexus.health import _last_boot_failure_detail
+
+    log_path = tmp_path / "storage_service_native.log"
+    log_path.write_text("2026-07-08T10:22:01.123Z INFO starting up\nready\n")
+
+    detail = _last_boot_failure_detail(log_path)
+    assert detail is None
+
+
+def test_last_boot_failure_detail_directory_path_degrades(tmp_path) -> None:
+    """A path that exists but is not a regular file (e.g. mis-resolved) must
+    degrade to None, never raise."""
+    from nexus.health import _last_boot_failure_detail
+
+    dir_path = tmp_path / "storage_service_native.log"
+    dir_path.mkdir()
+
+    assert _last_boot_failure_detail(dir_path) is None
+
+
+def test_last_boot_failure_detail_distant_unrelated_error_not_attributed(
+    tmp_path,
+) -> None:
+    """nexus-4m6i0.7 critique: the ERROR-line association must be BOUNDED.
+    A marker whose own error scrolled away, followed much later by an
+    UNRELATED error (disk quota, OOM, ...), must NOT be glued into a
+    fabricated 'changeset X: unrelated error' pairing — that actively
+    misdirects the operator, strictly worse than the id-only form."""
+    from nexus.health import _last_boot_failure_detail
+
+    log_path = tmp_path / "storage_service_native.log"
+    padding = "\n".join(f"routine log line {i}" for i in range(80))
+    log_path.write_text(
+        "Migration failed for changeset "
+        "db/changelog/catalog-013-chash-checks-validate.xml::catalog-013-2::nexus-e0hd2\n"
+        + padding
+        + "\nERROR: disk quota exceeded on /var/lib/postgresql/data\n",
+        encoding="utf-8",
+    )
+
+    detail = _last_boot_failure_detail(log_path)
+    assert detail == "Liquibase changeset catalog-013-2", (
+        "a distant, unrelated ERROR line must not be attributed to the "
+        f"changeset marker: {detail!r}"
+    )
+
+
+def test_last_boot_failure_detail_bounded_tail_read(tmp_path) -> None:
+    """The parser only considers a bounded tail WINDOW — a marker outside it
+    (buried under older log) is not found. Note this pins the window's
+    OUTPUT semantics, not the I/O mechanism: a read-all-then-slice
+    implementation would produce identical output and also pass. The
+    seek-from-end boundedness itself is an implementation property verified
+    by reading ``_last_boot_failure_detail``, not regression-tested here."""
+    from nexus.health import _BOOT_FAILURE_TAIL_BYTES, _last_boot_failure_detail
+
+    log_path = tmp_path / "storage_service_native.log"
+    filler = "x" * (_BOOT_FAILURE_TAIL_BYTES + 4096)
+    log_path.write_text(
+        "Migration failed for changeset db/changelog/x.xml::catalog-999-9::someone\n"
+        + filler
+    )
+
+    # The marker was written before the filler, so it falls outside the tail
+    # window once the file exceeds the cap -- degrade to None, don't crash.
+    assert _last_boot_failure_detail(log_path) is None
+
+    # Sanity: the same marker at the END of a large file IS found.
+    log_path.write_text(
+        filler
+        + "\nMigration failed for changeset db/changelog/x.xml::catalog-999-9::someone\n"
+        "Caused by: org.postgresql.util.PSQLException:\n"
+        '  ERROR: relation "x" does not exist\n'
+    )
+    detail = _last_boot_failure_detail(log_path)
+    assert detail is not None
+    assert "catalog-999-9" in detail
+
+
+def test_vector_service_unreachable_surfaces_boot_failure(monkeypatch, tmp_path) -> None:
+    """Core acceptance test (nexus-4m6i0.7): when the vector service is
+    unreachable AND the local service log carries a recent Liquibase
+    VALIDATE failure, the HealthResult detail names the changeset and the
+    SQL error one-liner instead of only 'not reachable'."""
+    from nexus.health import _check_vector_service
+
+    def _down(*a, **kw):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr("nexus.db.http_vector_client._get", _down)
+    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    _write_service_log(tmp_path, _REAL_INCIDENT_LOG_TAIL)
+
+    line = _check_vector_service()
+    assert line.ok is False
+    assert line.fatal is True
+    assert "not reachable" in line.detail
+    assert "catalog-013-2" in line.detail
+    assert 'constraint "chunks_384_chash_len_check"' in line.detail
+
+
+def test_vector_service_unreachable_no_log_degrades_to_bare_message(
+    monkeypatch, tmp_path
+) -> None:
+    """Cloud-mode / no-local-service installs: no service log on disk ->
+    the diagnostic must be a complete no-op, never crash doctor."""
+    from nexus.health import _check_vector_service
+
+    def _down(*a, **kw):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr("nexus.db.http_vector_client._get", _down)
+    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    # No logs/ dir created at all.
+
+    line = _check_vector_service()
+    assert line.ok is False
+    assert line.fatal is True
+    assert line.detail == "not reachable"
+
+
+def test_vector_service_unreachable_log_present_no_marker_degrades(
+    monkeypatch, tmp_path
+) -> None:
+    """Service log exists but carries no Liquibase failure marker (e.g. the
+    service crashed for an unrelated reason, or hasn't crashed at all) ->
+    degrade to the bare message."""
+    from nexus.health import _check_vector_service
+
+    def _down(*a, **kw):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr("nexus.db.http_vector_client._get", _down)
+    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    _write_service_log(tmp_path, "2026-07-08T10:22:01.123Z INFO starting up\n")
+
+    line = _check_vector_service()
+    assert line.ok is False
+    assert line.detail == "not reachable"
+
+
+def test_vector_service_reachable_never_surfaces_stale_boot_failure(
+    monkeypatch, tmp_path
+) -> None:
+    """A healthy service must never carry a stale boot-failure line from an
+    old log -- the diagnostic only fires in the unreachable branch."""
+    from nexus.health import _check_vector_service
+
+    monkeypatch.setattr("nexus.db.http_vector_client._get", lambda *a, **kw: [])
+    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    # Stale log from a PRIOR crash still on disk even though the service is
+    # currently reachable.
+    _write_service_log(tmp_path, _REAL_INCIDENT_LOG_TAIL)
+
+    line = _check_vector_service()
+    assert line.ok is True
+    assert line.detail == "reachable"
+    assert "catalog-013-2" not in line.detail
 
 
 def test_check_t3_local_surfaces_state2_degraded_bge(tmp_path, monkeypatch) -> None:

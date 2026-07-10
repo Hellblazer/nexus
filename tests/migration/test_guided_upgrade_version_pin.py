@@ -1,23 +1,28 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """ez5.4 — RDR-002 version-pin for ``nx guided-upgrade``.
 
-Asserts the engine-service is at or above the required release (>= v0.1.8) by
-pinning on the dedicated ``release_version`` field (RDR-002 contract; conexus
-PR #78). FAIL-CLOSED on every uncertain outcome — transport error, non-200,
+Asserts the engine-service is at or above the required release by pinning on
+the dedicated ``release_version`` field (RDR-002 contract; conexus PR #78).
+FAIL-CLOSED on every uncertain outcome — transport error, non-200,
 absent/null/dev/SNAPSHOT release_version (an engine predating the field is
 older than the floor), unparseable, or below the floor.
+
+The floor itself (:data:`nexus.engine_version.REQUIRED_ENGINE_VERSION`) and
+its parser (:func:`nexus.engine_version.parse_engine_version`) are unified
+single-source-of-truth (nexus-b6qlf) — the pinned-value assertion and parser
+unit tests live in ``tests/test_engine_version.py`` ONLY. This file exercises
+``verify_service_version``'s own behavior (HTTP/probe wiring, fail-closed
+branches), not the pin.
 """
 
 from __future__ import annotations
 
-from nexus.migration.guided_upgrade import (
-    REQUIRED_RELEASE_VERSION,
-    VersionPinOutcome,
-    _parse_semver,
-    verify_service_version,
-)
+from nexus.engine_version import REQUIRED_ENGINE_VERSION
+from nexus.migration.guided_upgrade import VersionPinOutcome, verify_service_version
 
 _URL = "http://127.0.0.1:8099"
+_FLOOR = ".".join(str(n) for n in REQUIRED_ENGINE_VERSION)
+_BELOW_FLOOR = "0.1.5"
 
 
 class _Resp:
@@ -50,28 +55,12 @@ def _version_body(release_version, app_version="1.0-SNAPSHOT"):  # noqa: ANN001,
     }
 
 
-class TestParseSemver:
-    def test_parses_plain_and_v_prefixed(self) -> None:
-        assert _parse_semver("0.1.5") == (0, 1, 5)
-        assert _parse_semver("v1.2.3") == (1, 2, 3)
-
-    def test_rejects_dev_snapshot_blank_and_malformed(self) -> None:
-        for bad in (None, "", "  ", "1.0-SNAPSHOT", "0.1.6-dev", "0.1", "1.2.3.4", "x.y.z"):
-            assert _parse_semver(bad) is None
-
-
 class TestVerifyServiceVersion:
-    def test_required_floor_is_0134(self) -> None:
-        # (0,1,5)->(0,1,8) for nexus-x2g1z; ->(0,1,34) for 6.5.0: the client
-        # hard-requires catalog-012 (graph-hop `where` — pre-012 engines
-        # silently ignore the key, the H2 version-skew failure class) and
-        # catalog-013-1b (pre-1b engines fail boot VALIDATE on tenants with
-        # legacy 64-char chash rows — the nexus-1wjmq incident).
-        assert REQUIRED_RELEASE_VERSION == (0, 1, 34)
-
-    def test_at_floor_passes(self) -> None:
+    def test_uses_required_engine_version_as_default_floor(self) -> None:
+        # verify_service_version's default `required` param is wired to the
+        # canonical nexus.engine_version floor — not a local duplicate.
         out = verify_service_version(
-            _URL, http_get=_get_returning(_Resp(200, _version_body("0.1.34")))
+            _URL, http_get=_get_returning(_Resp(200, _version_body(_FLOOR)))
         )
         assert isinstance(out, VersionPinOutcome)
         assert out.ok is True
@@ -79,16 +68,16 @@ class TestVerifyServiceVersion:
 
     def test_above_floor_passes(self) -> None:
         out = verify_service_version(
-            _URL, http_get=_get_returning(_Resp(200, _version_body("0.2.0")))
+            _URL, http_get=_get_returning(_Resp(200, _version_body("99.0.0")))
         )
         assert out.ok is True
 
     def test_below_floor_fails_closed(self) -> None:
         out = verify_service_version(
-            _URL, http_get=_get_returning(_Resp(200, _version_body("0.1.5")))
+            _URL, http_get=_get_returning(_Resp(200, _version_body(_BELOW_FLOOR)))
         )
         assert out.ok is False
-        assert "0.1.5" in out.reason and "0.1.34" in out.reason
+        assert _BELOW_FLOOR in out.reason and _FLOOR in out.reason
 
     def test_null_release_version_fails_closed(self) -> None:
         # An engine predating the release_version field reports null → older
@@ -130,7 +119,7 @@ class TestVerifyServiceVersion:
 
         def _get(url: str, timeout: float):  # noqa: ANN202
             seen.append(url)
-            return _Resp(200, _version_body("0.1.5"))
+            return _Resp(200, _version_body(_BELOW_FLOOR))
 
         verify_service_version(_URL, http_get=_get)
         assert seen == [f"{_URL}/version"]

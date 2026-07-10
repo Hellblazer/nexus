@@ -169,6 +169,8 @@ def _psql_runner_ok(n: int):
     def runner(cmd: list[str], *, capture_output: bool, text: bool,
                check: bool) -> subprocess.CompletedProcess:
         sql = " ".join(cmd)
+        if "length(chash)<>32" in sql:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0\n", stderr="")
         if "FILTER (WHERE exectype='FAILED')" in sql:
             # Drift query: 0 FAILED, 0 RERAN/other = all good
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0|0\n", stderr="")
@@ -205,6 +207,8 @@ def _psql_runner_with_reran_only():
     def runner(cmd: list[str], *, capture_output: bool, text: bool,
                check: bool) -> subprocess.CompletedProcess:
         sql = " ".join(cmd)
+        if "length(chash)<>32" in sql:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0\n", stderr="")
         if "FILTER (WHERE exectype='FAILED')" in sql:
             # Drift query: 0 FAILED, 2 RERAN
             return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0|2\n", stderr="")
@@ -275,6 +279,67 @@ class TestCheckMigrationState:
         r = results[0]
         assert r.ok is True
         assert "7" in r.detail
+
+    def test_legacy_chash_rows_warn_not_fatal(self, tmp_path):
+        """nexus-pnwu0 / GH #1390: non-32-char chash rows -> a WARNING with
+        the do-not-upgrade + runbook remediation, plus the still-ok Schema
+        migrations result. Never fatal (the current engine serves fine)."""
+        creds = _make_creds_file(tmp_path)
+        results = _check_migration_state(
+            creds_path=creds,
+            psql_bin=Path("/fake/psql"),
+            psql_runner=_psql_runner_with_legacy_chash(12),
+        )
+        labels = {r.label for r in results}
+        assert "Chunk chash conformance" in labels
+        chash = next(r for r in results if r.label == "Chunk chash conformance")
+        assert chash.ok is False
+        assert chash.warn is True
+        assert chash.fatal is False
+        assert "12" in chash.detail
+        assert any("Do NOT upgrade" in s for s in chash.fix_suggestions)
+        assert any("§8.1" in s for s in chash.fix_suggestions)
+        # the migration result itself is still healthy (box works now)
+        assert any(r.label == "Schema migrations" and r.ok for r in results)
+
+    def test_chash_unparseable_output_warns_not_silent(self, tmp_path):
+        """code-review Medium: returncode==0 with non-numeric stdout must NOT
+        silently read as clean — it surfaces a non-fatal warn."""
+        creds = _make_creds_file(tmp_path)
+        results = _check_migration_state(
+            creds_path=creds,
+            psql_bin=Path("/fake/psql"),
+            psql_runner=_psql_runner_chash_unparseable(),
+        )
+        chash = next(r for r in results if r.label == "Chunk chash conformance")
+        assert chash.warn is True
+        assert chash.fatal is False
+        assert "not-a-number" in chash.detail
+        assert any(r.label == "Schema migrations" and r.ok for r in results)
+
+    def test_conformant_chash_adds_no_extra_result(self, tmp_path):
+        """0 nonconforming rows -> only the Schema migrations result."""
+        creds = _make_creds_file(tmp_path)
+        results = _check_migration_state(
+            creds_path=creds,
+            psql_bin=Path("/fake/psql"),
+            psql_runner=_psql_runner_with_legacy_chash(0),
+        )
+        assert [r.label for r in results] == ["Schema migrations"]
+
+    def test_chash_probe_failure_degrades_to_warn(self, tmp_path):
+        """A failing chash probe (missing table on a schema variant) is a
+        non-fatal warn, never a false poison alarm."""
+        creds = _make_creds_file(tmp_path)
+        results = _check_migration_state(
+            creds_path=creds,
+            psql_bin=Path("/fake/psql"),
+            psql_runner=_psql_runner_chash_probe_errors(),
+        )
+        chash = next(r for r in results if r.label == "Chunk chash conformance")
+        assert chash.warn is True
+        assert chash.fatal is False
+        assert any(r.label == "Schema migrations" and r.ok for r in results)
 
     def test_zero_rows_returns_fatal(self, tmp_path):
         """Zero rows in databasechangelog -> fatal (not migrated at all)."""
@@ -430,6 +495,52 @@ def _rls_row(schema_table: str, rls_on: str, rls_force: str, policy_count: int) 
     """Format a psql RLS output row: schema|table|relrowsecurity|relforcerowsecurity|policy_count."""
     schema, _, table = schema_table.partition(".")
     return f"{schema}|{table}|{rls_on}|{rls_force}|{policy_count}"
+
+
+def _psql_runner_chash_unparseable():
+    """Healthy migration state, but the chash query returns non-numeric stdout
+    with returncode 0 (garbage output) — must surface a warn, never read clean."""
+    def runner(cmd, *, capture_output, text, check):
+        sql = " ".join(cmd)
+        if "length(chash)<>32" in sql:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="not-a-number\n", stderr="")
+        if "FILTER (WHERE exectype='FAILED')" in sql:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0|0\n", stderr="")
+        if "md5sum IS NULL" in sql:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0\n", stderr="")
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="9\n", stderr="")
+    return runner
+
+
+def _psql_runner_with_legacy_chash(n_nonconforming: int):
+    """Healthy migration state, but N chunk rows carry a non-32-char chash
+    (nexus-pnwu0: legacy short ids or dropped constraints)."""
+    def runner(cmd, *, capture_output, text, check):
+        sql = " ".join(cmd)
+        if "length(chash)<>32" in sql:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=f"{n_nonconforming}\n", stderr="")
+        if "FILTER (WHERE exectype='FAILED')" in sql:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0|0\n", stderr="")
+        if "md5sum IS NULL" in sql:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0\n", stderr="")
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="9\n", stderr="")
+    return runner
+
+
+def _psql_runner_chash_probe_errors():
+    """Healthy migration state, but the chash-conformance probe itself fails
+    (e.g. a schema variant missing a baseline table) — must degrade to a
+    non-fatal warn, never a false poison alarm."""
+    def runner(cmd, *, capture_output, text, check):
+        sql = " ".join(cmd)
+        if "length(chash)<>32" in sql:
+            return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="relation does not exist")
+        if "FILTER (WHERE exectype='FAILED')" in sql:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0|0\n", stderr="")
+        if "md5sum IS NULL" in sql:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0\n", stderr="")
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="9\n", stderr="")
+    return runner
 
 
 def _psql_rls_all_ok():

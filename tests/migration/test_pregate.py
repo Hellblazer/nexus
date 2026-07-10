@@ -353,3 +353,64 @@ def test_wired_model_source_is_a_protocol() -> None:
     # _FixedSource structurally satisfies the protocol without inheritance.
     src: WiredModelSource = _FixedSource(_WIRED_ONNX_ONLY)
     assert src.wired_models() == _WIRED_ONNX_ONLY
+
+
+# --------------------------------------------------------------------------
+# GH #1390 / nexus-sot7v: legacy non-32-char chunk ids block at the pre-gate
+# regardless of model support (a supported-model NAME must not let a
+# legacy-id collection pass — the canon-chat chunks_768 case).
+# --------------------------------------------------------------------------
+
+
+def _legacy_cls(collection: str, model: str) -> CollectionClassification:
+    return CollectionClassification(
+        collection=collection,
+        leg="local",
+        model=model,
+        dim=None,
+        support="unsupported",
+        source_count=5,
+        has_data=True,
+        reason="collection holds legacy non-32-char chunk ids (e.g. 'abc'); "
+        "re-index ... Do NOT drop ... (GH #1390)",
+        legacy_ids=True,
+    )
+
+
+def test_legacy_ids_block_even_with_supported_model_name():
+    """The canon-chat shape: a bge-768 (supported, wired) collection that
+    ALSO holds legacy short ids. The model recomputation would pass it; the
+    legacy_ids flag must block it, with the actionable detection reason."""
+    classifications = [_legacy_cls("code__owner__bge-base-en-v15-768__v1", _ONNX)]
+    with pytest.raises(ModelPreGateBlocked) as exc:
+        assert_models_supported(
+            classifications,
+            voyage_key_present=False,
+            source=_FixedSource(_WIRED_ONNX_ONLY),
+        )
+    msg = str(exc.value)
+    assert "code__owner__bge-base-en-v15-768__v1" in msg
+    assert "Do NOT drop" in msg
+
+
+def test_legacy_ids_block_takes_precedence_over_exempt():
+    """Defense-in-depth: even if a legacy-id collection somehow appears in the
+    cross-model exempt set, it must still block (remap keeps ids verbatim)."""
+    name = "code__owner__bge-base-en-v15-768__v1"
+    with pytest.raises(ModelPreGateBlocked):
+        assert_models_supported(
+            [_legacy_cls(name, _ONNX)],
+            voyage_key_present=False,
+            source=_FixedSource(_WIRED_ONNX_ONLY),
+            exempt=frozenset({name}),
+        )
+
+
+def test_conformant_supported_collection_still_passes():
+    """Regression pin: a supported collection WITHOUT legacy ids is not
+    blocked by the new check."""
+    assert_models_supported(
+        [_cls("code__owner__bge-base-en-v15-768__v1", _ONNX)],
+        voyage_key_present=False,
+        source=_FixedSource(_WIRED_ONNX_ONLY),
+    )

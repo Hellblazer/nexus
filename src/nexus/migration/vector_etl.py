@@ -333,6 +333,32 @@ def cross_model_target_name(source: str, target_model: str) -> str:
     return "__".join(segments)
 
 
+def _nonconformant_id(ids: list[str]) -> str | None:
+    """First id violating the 32-char chash identity, else ``None``.
+
+    GH #1390 / nexus-sot7v: pre-RDR-108-era Chroma stores hold 16/18-char
+    chunk ids. The pgvector side keys on ``sha256(chunk_text)[:32]`` and the
+    server never recomputes chash from text, so a verbatim copy of such ids
+    409s on the chash length CHECK per upsert — the wall that pushed an
+    autonomous session into dropping the constraints. This guard fails the
+    collection CLEANLY, client-side, before the batch is ever sent.
+    """
+    return next((i for i in ids if len(i) != 32), None)
+
+
+def _legacy_id_failure_reason(collection: str, example: str) -> str:
+    """The actionable (and agent-facing) failure text for a legacy-id hit."""
+    return (
+        f"legacy non-32-char chunk id {example!r} in {collection!r} "
+        "(pre-RDR-108 era) — the pgvector chash identity is "
+        "sha256(chunk_text)[:32] and the migration will NOT rewrite ids. "
+        "Re-index this collection from its source content, then re-run the "
+        "migration. Do NOT drop or weaken the chash length constraints to "
+        "force the upserts through: that silently corrupts the store and "
+        "crash-loops a later engine upgrade (GH #1390)."
+    )
+
+
 def _iter_id_pages(
     read_client: Any, collection: str, page: int, *, include_embeddings: bool = False
 ) -> Iterator[list[dict[str, Any]]]:
@@ -351,6 +377,94 @@ def _iter_id_pages(
             batch = []
     if batch:
         yield batch
+
+
+def is_derived_skip(name: str, target: str) -> bool:
+    """Whether *name* would be dispositioned ``skipped-derived`` for *target*.
+
+    True iff *target* cannot dim-dispatch (non-conformant name / unknown
+    model segment) AND *name* is on the explicit :data:`_DERIVED_COLLECTIONS`
+    allowlist — exactly the condition :func:`_skip_result_for_nonconformant`
+    uses to route to the ``skipped-derived`` terminal state (RDR-178 Gap 6).
+
+    This predicate is UNCONDITIONAL — it applies regardless of
+    default-vs-explicit enumeration (an explicitly-named derived collection
+    is still recomputable, so it is still skipped-derived). Contrast
+    :func:`is_ephemeral_excluded`, whose exclusion applies ONLY under
+    DEFAULT enumeration (explicit naming overrides it — see
+    ``TestEphemeralExclusion.test_explicit_naming_overrides_exclusion``) and
+    which therefore must NOT be folded into this function or into
+    :func:`_skip_result_for_nonconformant`'s call site — doing so would
+    silently misclassify an explicitly-named ``tuples__*`` collection as
+    derived/regenerable (wrong hint text, wrong semantics) instead of letting
+    the explicit-override contract stand. Use :func:`is_never_written` when a
+    caller (like the migration driver's collision guard, which always runs
+    in a default-enumeration context) needs the broader "will the DEFAULT
+    run ever actually write this" predicate.
+    """
+    if name not in _DERIVED_COLLECTIONS:
+        return False
+    dim, _reason = _dim_for_collection(target)
+    return dim is None
+
+
+def is_ephemeral_excluded(name: str) -> bool:
+    """Whether *name* carries an :data:`EPHEMERAL_EXCLUDE_PREFIXES` prefix
+    (session-ephemeral tuplespace state, e.g. ``tuples__*``) — the same
+    prefix test :func:`migrate_collections` / :func:`migrate_cloud` /
+    :func:`verify_fill_collections` apply in their DEFAULT (non-explicit)
+    enumeration loops. A single named predicate so the three call sites
+    (and :func:`is_never_written`) can never drift on the prefix check
+    itself (nexus-5b9v0 Fix A).
+
+    Callers remain responsible for the ``not explicit`` gate — this
+    function only tests the name, matching the existing enumeration-loop
+    contract where explicit ``--collections`` naming overrides the
+    exclusion (``TestEphemeralExclusion.test_explicit_naming_overrides_exclusion``).
+    """
+    return name.startswith(EPHEMERAL_EXCLUDE_PREFIXES)
+
+
+def is_never_written(name: str, target: str) -> bool:
+    """Whether the ETL's DEFAULT (non-explicit) enumeration will NEVER
+    actually write *name* anywhere, regardless of its source data.
+
+    True iff EITHER *target* cannot dim-dispatch (:func:`_dim_for_collection`
+    returns ``None`` — the exact condition guarding EVERY branch inside
+    :func:`_skip_result_for_nonconformant`'s ``if dim is not None`` early
+    return: ``skipped-derived``, ``skipped-empty``, and the generic
+    ``skipped`` fallback all terminate there without ever reaching an
+    upsert) OR *name* carries an ephemeral-exclusion prefix
+    (:func:`is_ephemeral_excluded` — handled by a wholly separate
+    enumeration-loop branch, never through
+    :func:`_skip_result_for_nonconformant` at all). Used by the migration
+    driver's pre-flight collision guard
+    (``driver._assert_no_target_name_collisions``), which always runs in a
+    default-enumeration context (``run_guided_upgrade`` never passes an
+    explicit ``collections=`` list to ``migrate_local`` / ``migrate_cloud``).
+
+    This is the unifying predicate over EVERY never-written disposition
+    :func:`_skip_result_for_nonconformant` can produce, not an enumerated
+    allowlist of specific classes — nexus-5b9v0 round-3 review found the
+    prior two-class formulation (``is_derived_skip(name, target) or
+    is_ephemeral_excluded(name)``) missed a third: a generic nonconformant
+    collection (not on the :data:`_DERIVED_COLLECTIONS` allowlist, not
+    ephemeral) that HAS data still disposes to a plain ``"skipped"``
+    verdict and is therefore ALSO never written, yet the old formulation
+    returned ``False`` for it. Since ``is_derived_skip(name, target)``
+    implies ``dim is None`` by construction (see its own docstring), the
+    ``dim is None`` disjunct here is a strict superset — folding it in
+    only ever WIDENS the predicate, never narrows it, so no prior
+    never-written case regresses.
+
+    Deliberately NOT substituted at :func:`_skip_result_for_nonconformant`'s
+    own ``is_derived_skip`` call site — that site must preserve the
+    explicit-``--collections``-override nuance for ephemeral collections
+    (see :func:`is_derived_skip`'s docstring), which this guard's
+    always-default-enumeration caller does not need to reproduce.
+    """
+    dim, _reason = _dim_for_collection(target)
+    return dim is None or is_ephemeral_excluded(name)
 
 
 def _skip_result_for_nonconformant(
@@ -375,7 +489,7 @@ def _skip_result_for_nonconformant(
     # collection is exempt regardless of row count (its data is not
     # lost, it is recomputed on the target), unlike the generic
     # nonconformant path where only an EMPTY collection is safe.
-    if name in _DERIVED_COLLECTIONS:
+    if is_derived_skip(name, target):
         try:
             derived_count = int(read_client.get_collection(name).count())
         except Exception:  # noqa: BLE001 - best-effort count probe; degrades to -1 sentinel
@@ -512,6 +626,24 @@ def _migrate_one(
     try:
         for batch in _iter_id_pages(read_client, name, page, include_embeddings=passthrough):
             source_count += len(batch)
+            batch_ids = [c["id"] for c in batch]
+            # GH #1390 / nexus-sot7v hard guard: never send a legacy-id batch
+            # (fail cleanly BEFORE the write; the classification-time probe is
+            # first-page-only, this is the complete per-batch backstop).
+            bad_id = _nonconformant_id(batch_ids)
+            if bad_id is not None:
+                reason = _legacy_id_failure_reason(name, bad_id)
+                _log.error(
+                    "vector_etl_legacy_chunk_id",
+                    collection=name,
+                    target=target,
+                    example_id=bad_id,
+                    written=written,
+                )
+                return CollectionResult(
+                    name, source_count, written, "failed", reason,
+                    target_collection=target if is_cross_model else None,
+                )
             # Read from the SOURCE (*name*); upsert into the TARGET (model-remapped
             # for cross-model). For the re-embed path the server embeds the stored
             # text with the target's model; for passthrough it stores the supplied
@@ -554,7 +686,7 @@ def _migrate_one(
             _etl_batch_with_breaker(
                 vector_client.upsert_chunks,
                 target,
-                [c["id"] for c in batch],
+                batch_ids,
                 [c["document"] for c in batch],
                 [c["metadata"] for c in batch],
                 breaker=breaker,
@@ -700,6 +832,21 @@ def _verify_fill_one(
         for batch in _iter_id_pages(read_client, name, page, include_embeddings=passthrough):
             source_count += len(batch)
             ids = [c["id"] for c in batch]
+            # GH #1390 / nexus-sot7v: same hard guard as _migrate_one — a
+            # verify-fill must never re-send legacy-id chunks either.
+            bad_id = _nonconformant_id(ids)
+            if bad_id is not None:
+                reason = _legacy_id_failure_reason(name, bad_id)
+                _log.error(
+                    "vector_etl_verify_fill_legacy_chunk_id",
+                    collection=name,
+                    target=target,
+                    example_id=bad_id,
+                )
+                return CollectionResult(
+                    name, source_count, filled_count, "failed", reason,
+                    target_collection=target if is_cross_model else None,
+                )
             present = vector_client.existing_ids(target, ids)
             missing_idx = [i for i, _id in enumerate(ids) if _id not in present]
             if not missing_idx:
@@ -861,7 +1008,7 @@ def migrate_collections(
     names = collections if explicit else list_collection_names(read_client)
     results: list[CollectionResult] = []
     for name in names:
-        if not explicit and name.startswith(EPHEMERAL_EXCLUDE_PREFIXES):
+        if not explicit and is_ephemeral_excluded(name):
             result = _excluded_ephemeral_result(read_client, name)
             results.append(result)
             if on_result is not None:
@@ -959,7 +1106,7 @@ def probe_ingest_cloud_support(
     ``release_version >= floor`` compare — rather than inventing a bespoke
     ingest-cloud capability probe. This is the cheapest reliable signal
     available: ``/version`` is already the established engine-capability
-    handshake in this codebase (``REQUIRED_RELEASE_VERSION``, the
+    handshake in this codebase (``nexus.engine_version.REQUIRED_ENGINE_VERSION``, the
     ``/v1/telemetry/ids/probe`` mixed-fleet precedent in ``orchestrator.py``
     used the target ENDPOINT itself as the 404-tolerant probe, which is not
     available here — ``POST /v1/migration/ingest-cloud`` already existed
@@ -1270,7 +1417,7 @@ def migrate_cloud(
     excluded: list[CollectionResult] = []
     candidates: list[str] = []
     for name in names:
-        if not explicit and name.startswith(EPHEMERAL_EXCLUDE_PREFIXES):
+        if not explicit and is_ephemeral_excluded(name):
             result = _excluded_ephemeral_result(read_client, name)
             excluded.append(result)
             if on_result is not None:
@@ -1348,7 +1495,7 @@ def verify_fill_collections(
     names = collections if explicit else list_collection_names(read_client)
     results: list[CollectionResult] = []
     for name in names:
-        if not explicit and name.startswith(EPHEMERAL_EXCLUDE_PREFIXES):
+        if not explicit and is_ephemeral_excluded(name):
             try:
                 eph_count = int(read_client.get_collection(name).count())
             except Exception:  # noqa: BLE001 — count is informational here

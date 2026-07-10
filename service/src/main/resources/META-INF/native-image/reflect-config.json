@@ -56,5 +56,18 @@
     "allDeclaredConstructors": true,
     "allDeclaredMethods": true,
     "allDeclaredFields": true
+  },
+  {
+    "_comment": "Liquibase <preConditions> parsing (nexus-4m6i0.1/.13: the catalog-013-2 + fk-002/fk-003 guards). PreconditionContainer and SqlPrecondition are instantiated by tag name and their properties (onFail, expectedResult, sql) set reflectively via ObjectUtil.setProperty during changelog parsing. The traced reachability metadata (traced/reachability-metadata.json) registers these classes TYPE-ONLY because the trace predates any <preConditions> usage in our changelogs (first-of-kind 2026-07-09) — method-level metadata was absent and the native binary crashed at changelog-parse time on boot. Caught by the pre-tag --guided rehearsal (2026-07-10): JVM tests structurally cannot see this failure class, and ci.yml's -Ob build trip-wire only proves the BUILD succeeds, not runtime reflection during boot.",
+    "name": "liquibase.precondition.core.PreconditionContainer",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "liquibase.precondition.core.SqlPrecondition",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true
   }
 ]

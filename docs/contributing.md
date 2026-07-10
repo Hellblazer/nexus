@@ -209,13 +209,19 @@ https://github.com/Hellblazer/nexus/settings/branches:
 
 ## License
 
-AGPL-3.0-or-later. For Python source files, use the SPDX header:
+AGPL-3.0-or-later, dual-licensed with a commercial option (see
+[LICENSING.md](../LICENSING.md)). For Python source files, use the SPDX header:
 
 ```python
 # SPDX-License-Identifier: AGPL-3.0-or-later
 ```
 
 Agent files, skill files, config files: no header needed — the LICENSE file covers them.
+
+Contributions are accepted under the terms in
+[LICENSING.md § Contributions](../LICENSING.md#contributions): contributed
+code is AGPL-3.0-or-later and may also be included in commercially licensed
+editions. This is what keeps the dual-license offer viable.
 
 ## Release Process
 

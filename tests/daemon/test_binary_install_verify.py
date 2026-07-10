@@ -350,3 +350,80 @@ _REAL_FIXTURE = (
 def test_verify_signature_real_bundle_end_to_end():
     asset = _REAL_FIXTURE.with_suffix("")  # the binary sits beside the bundle
     binstall.verify_signature(asset, _REAL_FIXTURE)  # real sigstore verify, no mock
+
+
+# ── nexus-pnwu0 / GH #1390: chash-poison upgrade gate ───────────────────────
+
+
+def _poison_result():
+    from nexus.health import HealthResult
+    return HealthResult(
+        label="Chunk chash conformance",
+        ok=False,
+        detail="12 chunk row(s) have a non-32-char chash (legacy pre-RDR-108 ids).",
+        warn=True,
+    )
+
+
+def _fake_install_ok(tag, config_dir, *, installed_by=""):
+    return config_dir / "service" / "nexus-service", {
+        "asset": "nexus-service-linux-amd64", "version": "0.1.3",
+        "sha256": "a" * 64, "source_url": "https://example/x",
+    }
+
+
+def test_install_binary_refuses_on_chash_poison(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+    import nexus.health as _health
+    from nexus.commands.daemon import service_install_binary_cmd
+
+    monkeypatch.setattr(binstall, "install_binary", _fake_install_ok)
+    monkeypatch.setattr(_health, "_check_migration_state", lambda **kw: [_poison_result()])
+
+    result = CliRunner().invoke(
+        service_install_binary_cmd,
+        ["engine-service-v0.1.3", "--no-pg-bundle", "--config-dir", str(tmp_path)],
+    )
+    assert result.exit_code == 3, result.output
+    assert "Refusing to install" in result.output
+    # full clickable URL + a paste-to-Claude prompt are both present
+    assert "https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md" in result.output
+    assert "paste this to your Claude" in result.output
+    assert "Do NOT drop the chash length constraints" in result.output
+
+
+def test_install_binary_force_overrides_poison_gate(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+    import nexus.health as _health
+    from nexus.commands.daemon import service_install_binary_cmd
+
+    monkeypatch.setattr(binstall, "install_binary", _fake_install_ok)
+    monkeypatch.setattr(_health, "_check_migration_state", lambda **kw: [_poison_result()])
+
+    result = CliRunner().invoke(
+        service_install_binary_cmd,
+        ["engine-service-v0.1.3", "--no-pg-bundle", "--force", "--config-dir", str(tmp_path)],
+    )
+    assert result.exit_code == 0, result.output
+    assert "--force overrides" in result.output
+    assert "verified" in result.output.lower()  # install proceeded
+
+
+def test_install_binary_gate_skips_on_probe_error(tmp_path, monkeypatch):
+    """A probe that raises must never block a legitimate install."""
+    from click.testing import CliRunner
+    import nexus.health as _health
+    from nexus.commands.daemon import service_install_binary_cmd
+
+    def _boom(**kw):
+        raise RuntimeError("psql unreachable")
+
+    monkeypatch.setattr(binstall, "install_binary", _fake_install_ok)
+    monkeypatch.setattr(_health, "_check_migration_state", _boom)
+
+    result = CliRunner().invoke(
+        service_install_binary_cmd,
+        ["engine-service-v0.1.3", "--no-pg-bundle", "--config-dir", str(tmp_path)],
+    )
+    assert result.exit_code == 0, result.output
+    assert "pre-check skipped" in result.output

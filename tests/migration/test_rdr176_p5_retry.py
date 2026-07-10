@@ -149,7 +149,11 @@ def test_vector_etl_retries_transient_403(monkeypatch) -> None:
     monkeypatch.setattr(
         vetl, "iter_collection_chunks",
         lambda *a, **k: iter([
-            {"id": f"c{i}", "document": f"d{i}", "metadata": {}} for i in range(3)
+            # 32-char ids: the fake must model the chash identity or the
+            # nexus-sot7v legacy-id guard (correctly) fails the collection
+            # before the upsert this test exists to retry.
+            {"id": f"c{i}".ljust(32, "0"), "document": f"d{i}", "metadata": {}}
+            for i in range(3)
         ]),
     )
 

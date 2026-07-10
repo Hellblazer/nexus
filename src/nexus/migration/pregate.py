@@ -168,6 +168,18 @@ def assert_models_supported(
     for c in classifications:
         if not c.has_data:
             continue
+        # GH #1390 / nexus-sot7v: legacy non-32-char chunk ids block BEFORE
+        # the model-support check and REGARDLESS of exempt — the ids are the
+        # identity the pgvector side keys on, no migration path (verbatim copy
+        # OR cross-model re-embed) rewrites them, and the failure is a data
+        # property that the model-support recomputation below cannot see (a
+        # legacy-id collection with a supported-model NAME — e.g. the
+        # canon-chat bge chunks_768 — would otherwise pass here and only fail
+        # mid-ETL). Uses the detection's actionable re-index / do-NOT-drop-
+        # constraints reason, not the model diagnostic.
+        if c.legacy_ids:
+            blocked.append((c.collection, c.reason))
+            continue
         if c.collection in exempt:
             continue
         support, reason = classify_model_support(
