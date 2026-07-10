@@ -2,12 +2,12 @@
 title: "Claude-Assisted Upgrade and Remediation: Opt-In, Consent-Gated Enlistment of the User's Own Agent Across CLI and Claude Desktop, with a Read-Only Diagnostic Trust Boundary"
 id: RDR-182
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-07-10
-accepted_date:
+accepted_date: 2026-07-10
 related_issues: [nexus-ykzbj, nexus-c4143, nexus-pnwu0, nexus-sot7v]
 related: [RDR-126, RDR-159, RDR-162, RDR-166, RDR-174, RDR-178]
 ---
