@@ -51,9 +51,13 @@ class _FakeChromaCollection:
 class _FakeReadClient:
     def __init__(self, collections: dict[str, list[str]]) -> None:
         self._collections = collections
+        self.closed = False
 
     def get_collection(self, name: str) -> _FakeChromaCollection:
         return _FakeChromaCollection(self._collections[name])
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class _FakeVectorClient:
@@ -329,7 +333,7 @@ def test_audit_target_collisions_reuses_guard_grouping(monkeypatch):
         return detection
 
     monkeypatch.setattr(
-        collision_audit, "open_read_legs", lambda local_path: (local_client, None)
+        collision_audit, "_open_audit_legs", lambda local_path, legs: (local_client, None)
     )
     monkeypatch.setattr(collision_audit, "classify_collections", _classify)
     monkeypatch.setattr(
@@ -398,7 +402,7 @@ def test_false_clean_regression_merge_only_visible_in_no_key_world(monkeypatch):
 
     local_client = _FakeReadClient({_HONEST: _HONEST_IDS, _STALE: _STALE_IDS})
     monkeypatch.setattr(
-        collision_audit, "open_read_legs", lambda local_path: (local_client, None)
+        collision_audit, "_open_audit_legs", lambda local_path, legs: (local_client, None)
     )
     monkeypatch.setattr(collision_audit, "classify_collections", _classify)
     monkeypatch.setattr(collision_audit, "close_read_client", lambda c: None)
@@ -430,8 +434,8 @@ def test_explicit_world_override_classifies_once(monkeypatch):
 
     monkeypatch.setattr(
         collision_audit,
-        "open_read_legs",
-        lambda local_path: (_FakeReadClient({_HONEST: _HONEST_IDS}), None),
+        "_open_audit_legs",
+        lambda local_path, legs: (_FakeReadClient({_HONEST: _HONEST_IDS}), None),
     )
     monkeypatch.setattr(collision_audit, "classify_collections", _classify)
     monkeypatch.setattr(collision_audit, "close_read_client", lambda c: None)
@@ -476,7 +480,7 @@ def test_audit_target_collisions_clean_store(monkeypatch):
     local_client = _FakeReadClient({_HONEST: _HONEST_IDS})
     closed: list[str] = []
     monkeypatch.setattr(
-        collision_audit, "open_read_legs", lambda local_path: (local_client, None)
+        collision_audit, "_open_audit_legs", lambda local_path, legs: (local_client, None)
     )
     monkeypatch.setattr(collision_audit, "classify_collections", lambda **kw: detection)
     monkeypatch.setattr(
@@ -495,3 +499,202 @@ def test_audit_target_collisions_clean_store(monkeypatch):
     assert report.clean
     assert report.findings == ()
     assert closed == ["closed"]
+
+
+# ── leg handling (nexus-ovbmb) ───────────────────────────────────────────────
+
+
+def _patch_leg_openers(monkeypatch, *, local=None, cloud=None,
+                       local_raises=None, cloud_raises=None):
+    def _local(path):
+        if local_raises is not None:
+            raise local_raises
+        return local
+
+    def _cloud():
+        if cloud_raises is not None:
+            raise cloud_raises
+        return cloud
+
+    monkeypatch.setattr(
+        "nexus.migration.chroma_read.open_local_read_client", _local
+    )
+    monkeypatch.setattr(
+        "nexus.migration.chroma_read.open_cloud_read_client", _cloud
+    )
+
+
+def test_legs_local_skips_cloud_and_reports_partial_scope(monkeypatch):
+    """--legs local: the cloud opener must never be touched, and the report
+    must be LOUDLY partial-scope even when clean."""
+    local_client = _FakeReadClient({_HONEST: _HONEST_IDS})
+
+    def _cloud_never():
+        raise AssertionError("cloud leg must not be opened under --legs local")
+
+    monkeypatch.setattr(
+        "nexus.migration.chroma_read.open_local_read_client",
+        lambda path: local_client,
+    )
+    monkeypatch.setattr(
+        "nexus.migration.chroma_read.open_cloud_read_client", _cloud_never
+    )
+    monkeypatch.setattr(
+        collision_audit,
+        "classify_collections",
+        lambda **kw: DetectionReport(
+            classifications=(_cls(_HONEST),), voyage_key_present=False
+        ),
+    )
+    monkeypatch.setattr(collision_audit, "close_read_client", lambda c: None)
+
+    report = audit_target_collisions(
+        vector_client=_FakeVectorClient({}), legs="local",
+        voyage_key_present=False,
+    )
+    assert report.clean
+    assert report.requested_legs == "local"
+    assert report.audited_legs == ("local",)
+    assert report.partial_scope
+
+
+def test_cloud_open_failure_wraps_into_actionable_runtime_error(monkeypatch):
+    """The dogfood failure shape: ChromaCloud creds present but rejected —
+    must surface as a clean RuntimeError naming the --legs remedy, never a
+    raw chromadb traceback."""
+    _patch_leg_openers(
+        monkeypatch,
+        local=_FakeReadClient({}),
+        cloud_raises=ValueError("Permission denied."),
+    )
+    with pytest.raises(RuntimeError, match="--legs local"):
+        collision_audit._open_audit_legs(None, "both")
+
+
+def test_local_open_failure_wraps_into_actionable_runtime_error(monkeypatch):
+    _patch_leg_openers(
+        monkeypatch,
+        local_raises=ValueError("corrupt sqlite header"),
+        cloud=_FakeReadClient({}),
+    )
+    with pytest.raises(RuntimeError, match="local Chroma read leg failed"):
+        collision_audit._open_audit_legs(None, "both")
+
+
+def test_zero_open_legs_fails_loud_never_clean(monkeypatch):
+    """A deleted source must never read as 'clean' — zero legs is a hard
+    error (absent-leg sentinels: local FileNotFoundError, cloud RuntimeError)."""
+    _patch_leg_openers(
+        monkeypatch,
+        local_raises=FileNotFoundError("no local store"),
+        cloud_raises=RuntimeError("cloud leg unconfigured"),
+    )
+    with pytest.raises(RuntimeError, match="no Chroma source leg found"):
+        collision_audit._open_audit_legs(None, "both")
+
+
+def test_unknown_legs_selector_rejected(monkeypatch):
+    _patch_leg_openers(monkeypatch, local=_FakeReadClient({}))
+    with pytest.raises(RuntimeError, match="unknown legs selector"):
+        collision_audit._open_audit_legs(None, "everything")
+
+
+def test_cloud_open_failure_closes_the_already_opened_local_leg(monkeypatch):
+    """code-review High (nexus-ovbmb): the local leg opens FIRST; a cloud
+    open failure must close it before raising, or the handle leaks past
+    chroma_read's single-opener discipline on exactly the failure path this
+    function exists to handle."""
+    local_client = _FakeReadClient({})
+    _patch_leg_openers(
+        monkeypatch, local=local_client, cloud_raises=ValueError("Permission denied.")
+    )
+    with pytest.raises(RuntimeError, match="--legs local"):
+        collision_audit._open_audit_legs(None, "both")
+    assert local_client.closed, (
+        "the opened local read client must be closed when the cloud open fails"
+    )
+
+
+def test_legs_cloud_skips_local_and_reports_partial_scope(monkeypatch):
+    """Symmetry pin for --legs cloud (critic Significant 2): the local opener
+    must never be touched."""
+    cloud_client = _FakeReadClient({_HONEST: _HONEST_IDS})
+
+    def _local_never(path):
+        raise AssertionError("local leg must not be opened under --legs cloud")
+
+    monkeypatch.setattr(
+        "nexus.migration.chroma_read.open_local_read_client", _local_never
+    )
+    monkeypatch.setattr(
+        "nexus.migration.chroma_read.open_cloud_read_client", lambda: cloud_client
+    )
+    monkeypatch.setattr(
+        collision_audit,
+        "classify_collections",
+        lambda **kw: DetectionReport(
+            classifications=(_cls(_HONEST, leg="cloud"),), voyage_key_present=False
+        ),
+    )
+    monkeypatch.setattr(collision_audit, "close_read_client", lambda c: None)
+
+    report = audit_target_collisions(
+        vector_client=_FakeVectorClient({}), legs="cloud",
+        voyage_key_present=False,
+    )
+    assert report.clean
+    assert report.audited_legs == ("cloud",)
+    assert report.partial_scope
+
+
+def test_both_legs_open_is_full_scope(monkeypatch):
+    """partial_scope must be False when both legs actually opened — the
+    only case where a bare 'clean' speaks for the whole store."""
+    monkeypatch.setattr(
+        collision_audit,
+        "_open_audit_legs",
+        lambda local_path, legs: (
+            _FakeReadClient({_HONEST: _HONEST_IDS}),
+            _FakeReadClient({}),
+        ),
+    )
+    monkeypatch.setattr(
+        collision_audit,
+        "classify_collections",
+        lambda **kw: DetectionReport(
+            classifications=(_cls(_HONEST),), voyage_key_present=False
+        ),
+    )
+    monkeypatch.setattr(collision_audit, "close_read_client", lambda c: None)
+    report = audit_target_collisions(
+        vector_client=_FakeVectorClient({}), voyage_key_present=False
+    )
+    assert report.clean
+    assert report.audited_legs == ("local", "cloud")
+    assert not report.partial_scope
+
+
+def test_requested_both_but_one_leg_absent_is_partial_scope(monkeypatch):
+    """The realistic production shape (critic observation): --legs both, the
+    cloud leg is naturally absent (unconfigured) — partial_scope must fire
+    WITHOUT the user having narrowed anything."""
+    monkeypatch.setattr(
+        collision_audit,
+        "_open_audit_legs",
+        lambda local_path, legs: (_FakeReadClient({_HONEST: _HONEST_IDS}), None),
+    )
+    monkeypatch.setattr(
+        collision_audit,
+        "classify_collections",
+        lambda **kw: DetectionReport(
+            classifications=(_cls(_HONEST),), voyage_key_present=False
+        ),
+    )
+    monkeypatch.setattr(collision_audit, "close_read_client", lambda c: None)
+    report = audit_target_collisions(
+        vector_client=_FakeVectorClient({}), voyage_key_present=False
+    )
+    assert report.clean
+    assert report.requested_legs == "both"
+    assert report.audited_legs == ("local",)
+    assert report.partial_scope

@@ -158,3 +158,83 @@ def test_engine_floor_failure_is_clean_cli_error(monkeypatch):
     assert result.exit_code != 0
     assert "engine below required floor" in result.output
     assert "Traceback" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [([], "both"), (["--legs", "local"], "local"), (["--legs", "cloud"], "cloud")],
+)
+def test_legs_flag_passthrough(monkeypatch, argv, expected):
+    monkeypatch.setattr(
+        "nexus.db.http_vector_client.get_http_vector_client", lambda: object()
+    )
+    captured: dict = {}
+
+    def _audit(**kw):
+        captured.update(kw)
+        return CollisionAuditReport(
+            findings=(), requested_legs=kw["legs"],
+            audited_legs=("local", "cloud") if kw["legs"] == "both" else (kw["legs"],),
+        )
+
+    monkeypatch.setattr(collision_audit, "audit_target_collisions", _audit)
+    result = CliRunner().invoke(migration_audit_cmd, argv)
+    assert result.exit_code == 0, result.output
+    assert captured["legs"] == expected
+
+
+def test_partial_scope_is_rendered_loudly(monkeypatch):
+    """A clean verdict under --legs local must carry the PARTIAL SCOPE banner
+    — 'clean' may only speak for the audited legs (nexus-ovbmb)."""
+    monkeypatch.setattr(
+        "nexus.db.http_vector_client.get_http_vector_client", lambda: object()
+    )
+    monkeypatch.setattr(
+        collision_audit,
+        "audit_target_collisions",
+        lambda **kw: CollisionAuditReport(
+            findings=(), requested_legs="local", audited_legs=("local",)
+        ),
+    )
+    result = CliRunner().invoke(migration_audit_cmd, ["--legs", "local"])
+    assert result.exit_code == 0
+    assert "PARTIAL SCOPE" in result.output
+    assert "within the audited leg scope" in result.output
+
+
+def test_partial_scope_in_json(monkeypatch):
+    monkeypatch.setattr(
+        "nexus.db.http_vector_client.get_http_vector_client", lambda: object()
+    )
+    monkeypatch.setattr(
+        collision_audit,
+        "audit_target_collisions",
+        lambda **kw: CollisionAuditReport(
+            findings=(), requested_legs="local", audited_legs=("local",)
+        ),
+    )
+    result = CliRunner().invoke(migration_audit_cmd, ["--legs", "local", "--json"])
+    payload = json.loads(result.output)
+    assert payload["partial_scope"] is True
+    assert payload["audited_legs"] == ["local"]
+
+
+def test_partial_scope_banner_renders_with_findings_too(monkeypatch):
+    """A narrowed audit that also FINDS collisions must still disclose the
+    partial scope (the banner precedes both render branches)."""
+    monkeypatch.setattr(
+        "nexus.db.http_vector_client.get_http_vector_client", lambda: object()
+    )
+    monkeypatch.setattr(
+        collision_audit,
+        "audit_target_collisions",
+        lambda **kw: CollisionAuditReport(
+            findings=(_finding(MERGED),),
+            requested_legs="local",
+            audited_legs=("local",),
+        ),
+    )
+    result = CliRunner().invoke(migration_audit_cmd, ["--legs", "local"])
+    assert result.exit_code == 1
+    assert "PARTIAL SCOPE" in result.output
+    assert "merged" in result.output

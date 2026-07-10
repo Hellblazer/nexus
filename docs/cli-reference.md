@@ -2276,7 +2276,7 @@ narrative lives in [`docs/migration-runbook.md`](migration-runbook.md).
 ## nx migration-audit
 
 ```
-nx migration-audit [--local-path PATH] [--json] [--assume-voyage-key | --assume-no-voyage-key]
+nx migration-audit [--local-path PATH] [--json] [--legs both|local|cloud] [--assume-voyage-key | --assume-no-voyage-key]
 ```
 
 Retroactive forensic audit for the pre-guard target-name collision class
@@ -2312,13 +2312,23 @@ fabricate a `merged`. Each finding names the world(s) that produced it.
 - `--local-path PATH` overrides the local Chroma path (same as
   `nx guided-upgrade`).
 - `--json` emits the machine-readable report instead of the rendered summary.
+- `--legs both|local|cloud` (default `both`) selects which retained Chroma
+  source legs to audit. Narrow only when a leg is permanently gone (e.g. a
+  retired ChromaCloud account whose credentials are now rejected) — the
+  report and JSON stay loudly partial-scope, and a `clean` verdict speaks
+  only for the audited leg(s). A rejected-credential leg fails with an
+  actionable error rather than being silently skipped, and a store whose
+  source legs are ALL absent is a hard error, never `clean`.
 - `--assume-voyage-key` / `--assume-no-voyage-key` narrows the audit to one
   known migration history (use only when you know whether a Voyage key was
   configured when the store migrated).
 
 Exit codes: `0` no collision groups exist; `1` flagged targets; `2` at least
-one target indeterminate. Requires a reachable nexus-service (targets are
-probed via the same engine-floor-checked client every cloud-mode caller uses).
+one target indeterminate. **Exit `0` does not distinguish full-scope clean
+from partial-scope clean** — automated consumers must inspect the JSON
+report's `partial_scope` / `audited_legs` fields, never the exit code or
+`clean` alone. Requires a reachable nexus-service (targets are probed via
+the same engine-floor-checked client every cloud-mode caller uses).
 
 ## nx migration
 

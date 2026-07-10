@@ -25,6 +25,17 @@ import click
     help="Emit the machine-readable report instead of the rendered summary.",
 )
 @click.option(
+    "--legs",
+    type=click.Choice(["both", "local", "cloud"]),
+    default="both",
+    show_default=True,
+    help=(
+        "Which retained Chroma source legs to audit. Narrow ONLY when a leg "
+        "is permanently gone (e.g. a retired ChromaCloud account) — the "
+        "report and exit stay loudly partial-scope (nexus-ovbmb)."
+    ),
+)
+@click.option(
     "--assume-voyage-key/--assume-no-voyage-key",
     "assume_voyage_key",
     default=None,
@@ -37,7 +48,10 @@ import click
     ),
 )
 def migration_audit_cmd(
-    local_path: str | None, as_json: bool, assume_voyage_key: bool | None
+    local_path: str | None,
+    as_json: bool,
+    legs: str,
+    assume_voyage_key: bool | None,
 ) -> None:
     """Audit already-migrated pgvector targets for pre-guard silent merges.
 
@@ -52,6 +66,11 @@ def migration_audit_cmd(
     Read-only on both stores. Exit codes: 0 = no collision groups exist;
     1 = flagged targets (see verdicts); 2 = at least one target was
     indeterminate (probe anomaly — re-run before trusting any verdict).
+
+    CAVEAT for automated callers: exit 0 does NOT distinguish full-scope
+    clean from partial-scope clean (a leg narrowed via --legs, or naturally
+    absent). Scripts must inspect the JSON report's "partial_scope" /
+    "audited_legs" fields — never gate on the exit code or "clean" alone.
     """
     from nexus.db.http_vector_client import get_http_vector_client  # noqa: PLC0415 — deferred import; http_vector_client only needed at run time
     from nexus.migration.collision_audit import (  # noqa: PLC0415 — command-local import (nexus.migration.collision_audit)
@@ -74,6 +93,7 @@ def migration_audit_cmd(
             vector_client=vector_client,
             local_path=local_path,
             voyage_key_present=assume_voyage_key,
+            legs=legs,
             on_progress=_progress,
         )
     except RuntimeError as exc:
@@ -92,6 +112,9 @@ def migration_audit_cmd(
 def _report_payload(report: Any) -> dict[str, Any]:
     return {
         "clean": report.clean,
+        "requested_legs": report.requested_legs,
+        "audited_legs": list(report.audited_legs),
+        "partial_scope": report.partial_scope,
         "findings": [
             {
                 "target": f.target,
@@ -121,10 +144,17 @@ def _report_payload(report: Any) -> dict[str, Any]:
 
 
 def _render(report: Any) -> None:
+    if report.partial_scope:
+        click.echo(
+            f"⚠ PARTIAL SCOPE: audited leg(s) {list(report.audited_legs)} "
+            f"(requested: {report.requested_legs}) — every verdict below, "
+            "including 'clean', speaks ONLY for the audited leg(s)."
+        )
     if report.clean:
         click.echo(
             "clean: no two source collections resolve to the same pgvector "
-            "target — no pre-guard merge was possible on this store."
+            "target — no pre-guard merge was possible on this store"
+            + (" (within the audited leg scope)." if report.partial_scope else ".")
         )
         return
     click.echo(

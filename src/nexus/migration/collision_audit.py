@@ -91,7 +91,7 @@ granularity as ``vector_etl``'s never-blind-fill check (nexus-r0esi).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -102,7 +102,6 @@ from nexus.migration.detection import (
     CollectionClassification,
     classify_collections,
     close_read_client,
-    open_read_legs,
 )
 from nexus.migration.driver import (
     build_cross_model_target_names,
@@ -168,6 +167,16 @@ class CollisionAuditReport:
     """The full retroactive audit outcome."""
 
     findings: tuple[TargetFinding, ...]
+    #: which legs the caller asked to audit ("both" | "local" | "cloud").
+    requested_legs: str = "both"
+    #: which legs actually opened and were classified — a "clean" verdict
+    #: only speaks for these (nexus-ovbmb: partial scope must be LOUD).
+    audited_legs: tuple[str, ...] = ()
+
+    @property
+    def partial_scope(self) -> bool:
+        """True when the audit did not cover both source legs."""
+        return set(self.audited_legs) != {"local", "cloud"}
 
     @property
     def clean(self) -> bool:
@@ -384,11 +393,78 @@ def audit_collision_groups(
     return report
 
 
+def _open_audit_legs(
+    local_path: str | Path | None, legs: str
+) -> tuple[Any | None, Any | None]:
+    """Open the requested Chroma source legs, wrapping open failures into
+    actionable RuntimeErrors (nexus-ovbmb: the dogfood run hit a rejected
+    ChromaCloud credential surfacing as a raw chromadb traceback).
+
+    Absent-leg sentinels keep :func:`~nexus.migration.detection.open_read_legs`'s
+    semantics (missing local store / unconfigured cloud leg -> ``None``); any
+    OTHER failure — credentials present but rejected, a corrupt store — is a
+    hard, clean error naming the leg and the ``--legs`` remedy. Zero opened
+    legs is a hard error too: a box whose retained source was deleted must
+    never read as "clean" (the audit needs the copy-not-move source).
+    """
+    from nexus.migration.chroma_read import (  # noqa: PLC0415 — circular-dep avoidance (nexus.migration.chroma_read)
+        open_cloud_read_client,
+        open_local_read_client,
+    )
+
+    if legs not in ("both", "local", "cloud"):
+        raise RuntimeError(f"unknown legs selector {legs!r} (both|local|cloud)")
+
+    local: Any | None = None
+    cloud: Any | None = None
+    if legs in ("both", "local"):
+        try:
+            local = open_local_read_client(local_path)
+        except FileNotFoundError:
+            local = None  # absent leg, same sentinel as open_read_legs
+        except Exception as exc:
+            raise RuntimeError(
+                f"local Chroma read leg failed to open: {exc} — the retained "
+                "local source exists but is unreadable; the audit cannot "
+                "proceed against it. To audit only the cloud leg (LOUDLY "
+                "partial): nx migration-audit --legs cloud"
+            ) from exc
+    if legs in ("both", "cloud"):
+        try:
+            cloud = open_cloud_read_client()
+        except RuntimeError:
+            cloud = None  # half-configured / unconfigured = absent
+        except Exception as exc:
+            # The local leg opened first — close it before raising, or the
+            # handle leaks past chroma_read's single-opener discipline on
+            # exactly the failure path this function exists to handle
+            # (code-review High, nexus-ovbmb).
+            close_read_client(local)
+            raise RuntimeError(
+                f"cloud Chroma read leg failed to open: {exc} — credentials "
+                "are configured but were rejected (a retired/rotated "
+                "ChromaCloud account?). If that leg's source is permanently "
+                "gone, audit the surviving leg explicitly (LOUDLY partial): "
+                "nx migration-audit --legs local. Note: a gone cloud leg also "
+                "means it no longer exists as a rollback source, independent "
+                "of the RDR-155 deprecation window."
+            ) from exc
+    if local is None and cloud is None:
+        raise RuntimeError(
+            f"no Chroma source leg found (requested: {legs}) — the audit "
+            "reads the retained copy-not-move migration source; if it was "
+            "deleted, the audit is impossible and NOTHING can be concluded "
+            "(this is deliberately not reported as 'clean')"
+        )
+    return local, cloud
+
+
 def audit_target_collisions(
     *,
     vector_client: Any,
     local_path: str | Path | None = None,
     voyage_key_present: bool | None = None,
+    legs: str = "both",
     on_progress: Callable[[str], None] | None = None,
 ) -> CollisionAuditReport:
     """Classify the retained Chroma source, rebuild the historical
@@ -420,7 +496,11 @@ def audit_target_collisions(
             ),
         )
 
-    local, cloud = open_read_legs(local_path)
+    local, cloud = _open_audit_legs(local_path, legs)
+    audited = tuple(
+        name for name, client in (("local", local), ("cloud", cloud))
+        if client is not None
+    )
     try:
         # Union of every world's collision groups, sources deduped by
         # (collection, leg) — first-seen (no-key world) classification kept.
@@ -458,8 +538,11 @@ def audit_target_collisions(
                 "collision_audit_clean",
                 classified=classified_total,
                 worlds=[tag for _, tag in worlds],
+                legs=audited,
             )
-            return CollisionAuditReport(findings=())
+            return CollisionAuditReport(
+                findings=(), requested_legs=legs, audited_legs=audited
+            )
 
         clients_by_leg: dict[str, Any] = {}
         if local is not None:
@@ -467,7 +550,7 @@ def audit_target_collisions(
         if cloud is not None:
             clients_by_leg["cloud"] = cloud
 
-        return audit_collision_groups(
+        probed = audit_collision_groups(
             collisions,
             vector_client=vector_client,
             clients_by_leg=clients_by_leg,
@@ -476,6 +559,7 @@ def audit_target_collisions(
             },
             on_progress=on_progress,
         )
+        return replace(probed, requested_legs=legs, audited_legs=audited)
     finally:
         for client in (local, cloud):
             close_read_client(client)
