@@ -757,6 +757,30 @@ jobs:
         if: steps.changes.outputs.seam == 'true'
         run: uv sync --group dev
 
+      - name: Stamp release_version into the gate JAR
+        # nexus-h29w1: this gate builds a SOURCE shaded JAR, whose
+        # release.properties release_version is BLANK by design (stamped only at
+        # native-release time from the engine-service tag). Since the fail-loud
+        # cloud version probe landed (3cb14f96), the http_vector_client connection
+        # path fail-closes on an unstamped engine (release_version=None < floor),
+        # which is exactly what the gate's local service reported. Stamp the
+        # PINNED_SERVICE_TAG version (develop-tip is >= the pinned release) so the
+        # gate exercises a CONFORMANT engine and the probe is satisfied
+        # legitimately — no probe bypass, the hardening stays intact. Extracted
+        # from binary_install.py so it never drifts when the pin bumps.
+        if: steps.changes.outputs.seam == 'true'
+        run: |
+          set -euo pipefail
+          ver=$(python -c "import re,pathlib; s=pathlib.Path('src/nexus/daemon/binary_install.py').read_text(); m=re.search(r'PINNED_SERVICE_TAG[^=]*=\s*\"engine-service-v([0-9]+\.[0-9]+\.[0-9]+)\"', s); print(m.group(1))")
+          props="service/src/main/resources/META-INF/nexus/release.properties"
+          test -f "$props" || { echo "release.properties missing at $props"; exit 1; }
+          tmp="$(mktemp)"
+          grep -v '^release_version=' "$props" > "$tmp"
+          printf 'release_version=%s\n' "$ver" >> "$tmp"
+          mv "$tmp" "$props"
+          echo "stamped release_version=$ver"
+          grep '^release_version=' "$props"
+
       - name: Build service JAR (shaded, -DskipTests)
         # Build the JAR that upsert_chunks posts to. Uses the standard Maven
         # shaded package (NOT native) — we need the JVM jar, not a native binary,

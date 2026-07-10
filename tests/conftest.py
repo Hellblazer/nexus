@@ -740,6 +740,16 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     "tests/migration/test_driver.py::test_target_name_collision_message_carries_classification_metadata",
     "tests/migration/test_driver.py::test_target_name_collision_message_flags_likely_stale_source",
     "tests/commands/test_migrate_cost_guardrail.py::TestRunMigrationCollisionGuard::test_target_name_collision_renders_as_click_exception",
+    #
+    # nexus-p9vqa / nexus-772h2 (nx migration-audit + dual-world false-clean
+    # regression): both build CollisionAuditReport / CollectionClassification
+    # fixtures and conformant collection-NAME strings (code__1-3__voyage-code-3__v1)
+    # as the audit's opaque input data. classify_collections / read+vector
+    # clients are fully monkeypatched — no embedder runs and no mode-dependent
+    # path executes ("string-literal-as-name" class, same rationale as the
+    # test_driver.py collision exclusions above).
+    "tests/migration/test_collision_audit.py::test_false_clean_regression_merge_only_visible_in_no_key_world",
+    "tests/test_migration_audit_cmd.py::test_json_output_is_machine_readable",
 })
 
 
