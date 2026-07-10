@@ -29,6 +29,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+        with:
+          # SchemaUpgradeRehearsalIntegrationTest (nexus-4m6i0.6) needs an old
+          # engine-service tag's changelog tree via `git archive <tag>`. Default
+          # checkout (fetch-depth 1) fetches no tags at all; fetch-tags fetches
+          # every tag's commit+tree cheaply (no full history), so the rehearsal
+          # never falls back to its loud-skip path in CI.
+          fetch-tags: true
 
       - name: Set up GraalVM JDK 25
         uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f  # v1
@@ -89,6 +96,17 @@ jobs:
       - name: Run Java test suite
         working-directory: service
         run: ./mvnw -q test
+
+      # nexus-c3rer: the old-to-HEAD upgrade rehearsal skips (JUnit
+      # Assumptions.abort) when the old engine tag is unavailable — a skip
+      # that Maven treats as success and the Actions UI shows green. This
+      # step fails the job if the rehearsal was skipped or never executed,
+      # so a fetch-tags regression can't silently retire the gate
+      # (gates-scripted-not-ambient; mirrors ci.yml's assert_ca3_ran.py).
+      - name: Assert upgrade rehearsal actually ran (not skipped)
+        run: |
+          python3 scripts/assert_rehearsal_ran.py \
+            service/target/surefire-reports/TEST-dev.nexus.service.SchemaUpgradeRehearsalIntegrationTest.xml
 
   # 2026-07-06 CI-cost pass: the native-image-build-and-smoke job that lived
   # here was removed — every service/** push was building the native image
