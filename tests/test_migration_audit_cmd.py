@@ -96,7 +96,7 @@ def test_json_output_is_machine_readable(_wire):
     _wire(CollisionAuditReport(findings=(_finding(MERGED),)))
     result = CliRunner().invoke(migration_audit_cmd, ["--json"])
     assert result.exit_code == 1
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     assert payload["clean"] is False
     assert payload["findings"][0]["target"] == _TARGET
     assert payload["findings"][0]["verdict"] == MERGED
@@ -117,7 +117,7 @@ def test_json_includes_worlds(monkeypatch):
         lambda **kw: CollisionAuditReport(findings=(finding,)),
     )
     result = CliRunner().invoke(migration_audit_cmd, ["--json"])
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     assert payload["findings"][0]["worlds"] == ["no-voyage-key"]
 
 
@@ -214,7 +214,7 @@ def test_partial_scope_in_json(monkeypatch):
         ),
     )
     result = CliRunner().invoke(migration_audit_cmd, ["--legs", "local", "--json"])
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     assert payload["partial_scope"] is True
     assert payload["audited_legs"] == ["local"]
 
