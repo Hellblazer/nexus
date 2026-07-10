@@ -1371,6 +1371,42 @@ class TestRollbackUnit:
         assert fake.count(name) == 0
         assert source_client.get_collection(name).count() == 7
 
+    def test_rollback_removes_legacy_id_rows(self, source_client) -> None:
+        """nexus-pnwu0 / GH #1390 §8.1 step 2: rollback is the load-bearing
+        recovery step for a legacy-id-POISONED target. The migration guard
+        (nexus-sot7v) blocks such a target from being CREATED, but a box that
+        was poisoned pre-guard must still roll back cleanly — rollback reads
+        the source id set verbatim and deletes matching target rows, so it is
+        (and must stay) unaffected by the legacy-id guard. Pins that the
+        §8.1 playbook actually works, not just that the code reads that way."""
+        name = _coll("etlrb-legacy", model=_MODEL_768)
+        # Source holds a mix of legacy 16/18-char ids and a conformant 32-char
+        # id (a partially-poisoned real collection).
+        legacy_a = "a" * 16
+        legacy_b = "b" * 18
+        conformant = "c" * 32
+        col = source_client.get_or_create_collection(name)
+        col.add(
+            ids=[legacy_a, legacy_b, conformant],
+            documents=["x", "y", "z"],
+            metadatas=[{"position": 0}, {"position": 1}, {"position": 2}],
+            embeddings=[[0.1, 1.0], [0.2, 1.0], [0.3, 1.0]],
+        )
+        # Pre-seed the target as if a pre-guard run had copied all three
+        # verbatim (the poisoned state) — bypassing the guarded upsert path.
+        fake = FakeVectorClient()
+        fake.store[name] = {
+            legacy_a: ("x", {}), legacy_b: ("y", {}), conformant: ("z", {}),
+        }
+        assert fake.count(name) == 3
+
+        deleted = rollback_collections(source_client, fake, collections=[name])
+
+        assert deleted == {name: 3}  # all three removed, legacy ids included
+        assert fake.count(name) == 0
+        # source untouched (the immutable rollback manifest)
+        assert source_client.get_collection(name).count() == 3
+
     def test_rollback_leaves_other_collections(self, source_client) -> None:
         keep = _coll("etlrb-keep")
         drop = _coll("etlrb-drop")

@@ -2147,10 +2147,25 @@ def _check_migration_state(
             warn=True,
         ))
     else:
+        raw4 = proc4.stdout.strip()
         try:
-            nonconforming = int(proc4.stdout.strip())
+            nonconforming = int(raw4)
         except ValueError:
+            # returncode==0 but non-numeric stdout — surface it as a warn, the
+            # same posture as a probe failure. Silently dropping it would read
+            # as "clean" on the one check whose whole purpose is catching the
+            # silent-corruption class GH #1390 already caused once (code-review
+            # Medium; the no-silent-fallback directive).
             nonconforming = -1
+            results.append(HealthResult(
+                label="Chunk chash conformance",
+                ok=False,
+                detail=(
+                    "chash-conformance query returned unexpected output "
+                    f"{raw4!r} — the pre-upgrade poison check did not run"
+                ),
+                warn=True,
+            ))
         if nonconforming > 0:
             results.append(HealthResult(
                 label="Chunk chash conformance",
@@ -2163,11 +2178,15 @@ def _check_migration_state(
                     "VALIDATE CONSTRAINT (GH #1390 / nexus-pnwu0)."
                 ),
                 fix_suggestions=[
-                    "Do NOT upgrade the engine binary until remediated.",
+                    "Do NOT upgrade the engine binary until remediated "
+                    "(`nx daemon service install-binary` now refuses without "
+                    "--force on a poisoned store).",
                     "Do NOT drop the chash length constraints to 'unblock' "
                     "anything — that is what caused GH #1390.",
-                    "Recovery playbook: docs/migration-runbook.md §8.1 "
-                    "(rollback -> re-index legacy collections -> re-migrate).",
+                    "Recovery playbook (clickable): "
+                    "https://github.com/Hellblazer/nexus/blob/main/docs/"
+                    "migration-runbook.md §8.1 (rollback -> re-index legacy "
+                    "collections -> re-migrate).",
                 ],
                 warn=True,
             ))

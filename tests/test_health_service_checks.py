@@ -302,6 +302,21 @@ class TestCheckMigrationState:
         # the migration result itself is still healthy (box works now)
         assert any(r.label == "Schema migrations" and r.ok for r in results)
 
+    def test_chash_unparseable_output_warns_not_silent(self, tmp_path):
+        """code-review Medium: returncode==0 with non-numeric stdout must NOT
+        silently read as clean — it surfaces a non-fatal warn."""
+        creds = _make_creds_file(tmp_path)
+        results = _check_migration_state(
+            creds_path=creds,
+            psql_bin=Path("/fake/psql"),
+            psql_runner=_psql_runner_chash_unparseable(),
+        )
+        chash = next(r for r in results if r.label == "Chunk chash conformance")
+        assert chash.warn is True
+        assert chash.fatal is False
+        assert "not-a-number" in chash.detail
+        assert any(r.label == "Schema migrations" and r.ok for r in results)
+
     def test_conformant_chash_adds_no_extra_result(self, tmp_path):
         """0 nonconforming rows -> only the Schema migrations result."""
         creds = _make_creds_file(tmp_path)
@@ -480,6 +495,21 @@ def _rls_row(schema_table: str, rls_on: str, rls_force: str, policy_count: int) 
     """Format a psql RLS output row: schema|table|relrowsecurity|relforcerowsecurity|policy_count."""
     schema, _, table = schema_table.partition(".")
     return f"{schema}|{table}|{rls_on}|{rls_force}|{policy_count}"
+
+
+def _psql_runner_chash_unparseable():
+    """Healthy migration state, but the chash query returns non-numeric stdout
+    with returncode 0 (garbage output) — must surface a warn, never read clean."""
+    def runner(cmd, *, capture_output, text, check):
+        sql = " ".join(cmd)
+        if "length(chash)<>32" in sql:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="not-a-number\n", stderr="")
+        if "FILTER (WHERE exectype='FAILED')" in sql:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0|0\n", stderr="")
+        if "md5sum IS NULL" in sql:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="0\n", stderr="")
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="9\n", stderr="")
+    return runner
 
 
 def _psql_runner_with_legacy_chash(n_nonconforming: int):

@@ -1779,6 +1779,81 @@ def service_start_cmd(
         )
 
 
+# Full, clickable URL to the recovery playbook — surfaced verbatim in the
+# gate below (and worth keeping in one place, nexus-pnwu0). Most terminals
+# autolink an https:// URL; releases promote develop -> main, so an operator
+# on a released build finds §8.1 on main.
+_MIGRATION_RUNBOOK_URL = (
+    "https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md"
+)
+
+
+def _emit_chash_poison_gate(config_dir: Path, *, force: bool) -> None:
+    """nexus-pnwu0 / GH #1390 upgrade gate (see call site).
+
+    Detects non-32-char chash rows in the pgvector store via the SAME probe
+    `nx doctor` uses (:func:`nexus.health._check_migration_state`), and refuses
+    the install unless *force*. Emits a full clickable runbook URL AND a
+    ready-to-paste prompt the operator can hand to their own Claude — the
+    agent-runnable remediation pattern, in-product. A probe that cannot run
+    (PG down, not service mode) never blocks a legitimate install.
+    """
+    try:
+        from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred, circular-dep
+        from nexus.health import _check_migration_state  # noqa: PLC0415 — deferred, CLI startup cost
+
+        creds_path = config_dir / CREDENTIALS_FILENAME
+        poison = [
+            r for r in _check_migration_state(creds_path=creds_path)
+            if r.label == "Chunk chash conformance"
+            and not r.ok and "non-32-char chash" in r.detail
+        ]
+    except Exception as exc:  # noqa: BLE001 — the gate must never block a valid install on an unrelated error
+        click.echo(f"(chash-conformance pre-check skipped: {exc})", err=True)
+        return
+
+    if not poison:
+        return
+
+    detail = poison[0].detail
+    prompt = (
+        "My conexus/nexus store has non-32-char chash rows in pgvector "
+        "(GH #1390 / nexus-pnwu0) and a new engine would crash-loop on boot. "
+        "Walk me through the recovery in "
+        f"{_MIGRATION_RUNBOOK_URL} section 8.1: roll back the poisoned "
+        "pgvector target (nx storage migrate vectors --rollback), re-index the "
+        "affected legacy-id collections from source, re-run nx guided-upgrade, "
+        "and only then let me upgrade the engine. Do NOT drop the chash "
+        "length constraints."
+    )
+    if force:
+        click.echo(
+            "WARNING (nexus-pnwu0): --force overrides the chash-poison gate. "
+            f"{detail} The new engine may crash-loop on boot unless you have "
+            "already remediated. Recovery: " + _MIGRATION_RUNBOOK_URL
+            + " §8.1.",
+            err=True,
+        )
+        return
+
+    click.echo(
+        "\nRefusing to install (nexus-pnwu0 / GH #1390): booting a new engine "
+        "on this store would crash-loop.\n"
+        f"  {detail}\n\n"
+        "Remediate first — full recovery playbook (clickable):\n"
+        f"  {_MIGRATION_RUNBOOK_URL} §8.1\n\n"
+        "Or paste this to your Claude to be walked through it:\n"
+        "  ----------------------------------------------------------------\n"
+        f"  {prompt}\n"
+        "  ----------------------------------------------------------------\n\n"
+        "Do NOT drop the chash length constraints to force it through — that "
+        "is the exact action that caused GH #1390. Re-run with --force ONLY "
+        "after you have remediated.",
+        err=True,
+    )
+    sys.exit(3)
+
+
 @service_group.command("install-binary")
 @click.argument("tag", required=True)
 @click.option(
@@ -1795,8 +1870,16 @@ def service_start_cmd(
          "release (default). --no-pg-bundle installs only the service binary "
          "(e.g. cloud habitat with a managed Postgres).",
 )
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Override the chash-poison pre-check (nexus-pnwu0). Use ONLY after "
+         "remediating per docs/migration-runbook.md §8.1 — a new engine will "
+         "crash-loop on boot if the store still holds non-32-char chash rows.",
+)
 def service_install_binary_cmd(
-    tag: str, config_dir_str: str | None, want_pg_bundle: bool,
+    tag: str, config_dir_str: str | None, want_pg_bundle: bool, force: bool,
 ) -> None:
     """Download, verify, and install the signed native nexus-service binary
     (and, by default, the PostgreSQL bundle) from a release.
@@ -1826,6 +1909,17 @@ def service_install_binary_cmd(
 
     config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
     installed_by = f"conexus {_nx_version}"
+
+    # nexus-pnwu0 / GH #1390 upgrade gate: refuse to install a new engine onto a
+    # store whose pgvector target already holds non-32-char chash rows. Booting
+    # the new binary would crash-loop Liquibase's VALIDATE CONSTRAINT
+    # (catalog-013-3 has no guard against present-but-violating constraints, and
+    # the changelog cannot cleanly add one — the count query runs under FORCE RLS
+    # as the NOBYPASSRLS migration role and sees zero of the very rows VALIDATE
+    # then trips on). This is the actual gate the passive `nx doctor` probe could
+    # not enforce. The probe reuses _check_migration_state's chash query so there
+    # is one source of truth; a probe failure never blocks a legitimate install.
+    _emit_chash_poison_gate(config_dir, force=force)
 
     click.echo(f"Resolving {asset_name()} from release {tag}…")
     try:

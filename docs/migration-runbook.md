@@ -546,9 +546,22 @@ Since nexus-sot7v the migration handles this loudly, twice:
   sent; a legacy id on a later page fails that collection cleanly with the
   same diagnostic (never a per-upsert 409 wall).
 
-**Remediation**: re-index the affected collection from its source content
-(`nx index repo` / `nx index pdf` / re-put notes) so chunks and catalog
-manifests regenerate with canonical chashes, then re-run the migration.
+**Remediation** depends on the collection's source of truth:
+
+- **File-backed collections** (`code__`, `docs__`, `rdr__`, and any
+  `knowledge__` indexed from a PDF/file): re-index from the source file
+  (`nx index repo` / `nx index pdf`). Chunks and catalog manifests
+  regenerate with canonical `sha256(chunk_text)[:32]` chashes.
+- **MCP-note collections** (`knowledge__` written via `store_put` with no
+  `source_uri` — agent findings, notes): the Chroma document text is the
+  ONLY copy. There is no automated re-index (`nx store export`/`import`
+  round-trips the legacy id verbatim — it does NOT recompute the chash).
+  Read each note's text out (`nx store get` / the Chroma `documents`) and
+  `store_put` it again; store_put recomputes the chash from the text, so a
+  re-put clears the block. **Do this before RDR-155 P4b deletes the Chroma
+  read path** — after that, an un-remediated legacy note is unrecoverable.
+
+Then re-run the migration.
 
 **⚠ NEVER drop or weaken the chash length CHECK constraints to force the
 upserts through.** That is how GH #1390 happened: an autonomous session
