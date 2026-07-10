@@ -1987,10 +1987,18 @@ def get_http_vector_client() -> HttpVectorClient:
                 except ManagedServiceError as exc:
                     wrapped = type(exc)(_cloud_probe_failure_message(exc))
                     _version_probe_error = wrapped
+                    # nexus-dizod: log the REWRITTEN (cloud-correct) message,
+                    # never str(exc) -- the raw ManagedServiceIncompatible
+                    # text ends "...upgrade/downgrade the nx client to
+                    # match", and at the CLI's default WARNING level this
+                    # ERROR line prints to the user's real stderr directly
+                    # above the click-rendered "cannot be fixed locally"
+                    # error, recreating the exact b6qlf Fix-2
+                    # self-contradiction across two adjacent lines.
                     _log.error(
                         "cloud_engine_version_probe_failed",
                         error_type=type(exc).__name__,
-                        error=str(exc),
+                        error=str(wrapped),
                     )
                     raise wrapped from exc
                 _version_probe_done = True
