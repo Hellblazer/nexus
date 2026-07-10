@@ -456,11 +456,21 @@ mechanical tests (not estimates).
 
 ### Contradiction Check
 
-TBD.
+No contradictions found between research findings, design, and the related
+RDRs. Cross-checked against RDR-126 (gate Layer 3): RDR-182's claim that the
+MCP tool RETURN STRING is the only reliably-visible Desktop payload channel
+correctly reuses RDR-126's established finding (`instructions` /
+`notifications/message` / a2ui inline UI are not reliably visible on Desktop),
+rather than contradicting it. No conflict with RDR-159/178's upgrade flow.
 
 ### Assumption Verification
 
-The three Critical Assumptions above must be Verified before implementation.
+The FOUR Critical Assumptions above (A1-A4) must be Verified before
+implementation. A1/A2/A3 are Verified (Source Search). A4 (MCP tool-boundary
+opt-in enforcement) is currently Unbuilt and requires the
+tool-boundary-refusal spike (proving the tool refuses when the flag is false)
+before any implementation — it is the load-bearing safety mechanism for the
+first-class Desktop surface.
 
 ### Scope Verification
 
