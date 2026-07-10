@@ -62,7 +62,33 @@ def local_model_token(model_name: str | None = None) -> str:
 LOCAL_EMBEDDING_TOKENS: frozenset[str] = frozenset(_MODEL_TOKENS.values())
 """Set of all valid local-mode embedding-model tokens. Used by
 ``CollectionName.parse`` and the bidirectional name-aware EF dispatch
-in ``T3Database._embedding_fn`` to detect local-token names."""
+in ``T3Database._embedding_fn`` to detect local-token names.
+
+INVARIANT: value-equal to ``nexus.corpus.LOCAL_EMBEDDING_MODELS`` (an
+independently-defined literal — NOT derived from this one; equality is
+enforced by ``tests/test_rdr_109_phase2_dispatch.py::
+test_local_embedding_models_matches_local_ef_tokens``). The t3 dispatch
+gates on the corpus set and then calls :func:`local_model_for_token`,
+whose no-KeyError guarantee holds ONLY while the two sets stay equal —
+edit both literals together (nexus-a4h7b critic observation)."""
+
+
+def local_model_for_token(token: str) -> str:
+    """Inverse of :func:`local_model_token`: the raw model name an RDR-109
+    local token encodes.
+
+    nexus-a4h7b: the EF dispatch must construct the model the collection
+    NAME pins, never whichever local model happens to be active — a stale
+    conformant name written after the local tier changed would otherwise
+    silently store wrong-model vectors under a name claiming the old one
+    (the 59vl/GH-667 class on the intra-local axis). Unknown tokens raise:
+    callers gate on :data:`LOCAL_EMBEDDING_TOKENS` first, so a miss here is
+    a token-map drift bug, never a user input.
+    """
+    for model, t in _MODEL_TOKENS.items():
+        if t == token:
+            return model
+    raise KeyError(f"unknown local embedding-model token: {token!r}")
 
 
 def _fastembed_available() -> bool:

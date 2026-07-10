@@ -189,3 +189,58 @@ def test_dispatch_cloud_mode_legacy_name(t3_cloud) -> None:
     # The Voyage EF stores model_name; both context and code possible per
     # prefix. ``knowledge__`` prefix -> voyage-context-3.
     assert ef.model_name == "voyage-context-3"
+
+
+# ── nexus-a4h7b: the token PINS the local model; the active model must not win ──
+
+
+def test_local_token_pins_named_model_over_active_local_mode(t3_local, monkeypatch) -> None:
+    """nexus-a4h7b: active local model is bge (e.g. fastembed installed /
+    local.embed_model switched) but the collection NAME says minilm — the EF
+    must embed with the NAMED model, else first-write to a stale conformant
+    name stores wrong-model vectors under a name claiming otherwise (the
+    59vl/GH-667 shape on the intra-local axis)."""
+    monkeypatch.setattr(
+        "nexus.db.local_ef._resolve_local_model",
+        lambda *, warn: "BAAI/bge-base-en-v1.5",
+    )
+    ef = t3_local._build_embedding_fn("docs__owner-1__minilm-l6-v2-384__v1")
+    assert ef.model_name == "all-MiniLM-L6-v2"
+    assert ef.dimensions == 384
+
+
+def test_local_token_pins_named_model_over_active_bge_name(t3_local, monkeypatch) -> None:
+    """The converse: name says bge-768, active model resolves minilm (no
+    fastembed extra) — the EF must pin bge (and FAIL LOUD at embed time if
+    fastembed is genuinely missing, never silently embed 384-dim)."""
+    monkeypatch.setattr(
+        "nexus.db.local_ef._resolve_local_model",
+        lambda *, warn: "all-MiniLM-L6-v2",
+    )
+    ef = t3_local._build_embedding_fn("docs__owner-1__bge-base-en-v15-768__v1")
+    assert ef.model_name == "BAAI/bge-base-en-v1.5"
+    assert ef.dimensions == 768
+
+
+def test_local_token_pins_named_model_in_cloud_mode(t3_cloud, monkeypatch) -> None:
+    """Cloud mode reading a legacy local-token collection (the original
+    nexus-59vl hazard): must use the NAMED local model, not whatever local
+    tier happens to be active on this machine."""
+    monkeypatch.setattr(
+        "nexus.db.local_ef._resolve_local_model",
+        lambda *, warn: "BAAI/bge-base-en-v1.5",
+    )
+    ef = t3_cloud._build_embedding_fn("code__owner-1__minilm-l6-v2-384__v1")
+    assert ef.model_name == "all-MiniLM-L6-v2"
+    assert ef.dimensions == 384
+
+
+def test_legacy_name_without_token_still_uses_active_model(t3_local, monkeypatch) -> None:
+    """A pre-RDR-103 name has NO token to pin — the active-model default is
+    the only possible choice (documented fallback, unchanged behavior)."""
+    monkeypatch.setattr(
+        "nexus.db.local_ef._resolve_local_model",
+        lambda *, warn: "BAAI/bge-base-en-v1.5",
+    )
+    ef = t3_local._build_embedding_fn("docs__nexus-abc")
+    assert ef.model_name == "BAAI/bge-base-en-v1.5"

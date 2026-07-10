@@ -398,11 +398,26 @@ class T3Database:
     def _build_embedding_fn(self, collection_name: str):
         """Construct (uncached) the EF for *collection_name*. Bidirectional
         name-aware dispatch — see :meth:`_embedding_fn` docstring."""
-        from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 — command-local import (db.local_ef)
+        from nexus.db.local_ef import (  # noqa: PLC0415 — command-local import (db.local_ef)
+            LocalEmbeddingFunction,
+            local_model_for_token,
+        )
 
         parsed_token = embedding_model_for_collection_name(collection_name)
         is_local_token = parsed_token in LOCAL_EMBEDDING_MODELS
 
+        # nexus-a4h7b: a local TOKEN pins the exact local model — never the
+        # currently-active one. A stale-but-conformant name written after
+        # the local tier changed (fastembed extra added/removed,
+        # local.embed_model switched) would otherwise silently store
+        # wrong-model vectors under a name claiming the old model. A
+        # token-less legacy name has nothing to pin; the active-model
+        # default is the only possible choice there. A collection the
+        # PRE-fix bug already corrupted (wrong-model vectors under a token
+        # name) now fails loud on next use (Chroma dim mismatch) — correct
+        # under the fail-loud doctrine; remediation:
+        # `nx doctor --name-vs-embed-dim` enumerates exactly those
+        # collections for re-index.
         if self._local_mode:
             if parsed_token is not None and not is_local_token:
                 raise IncompatibleCollectionError(
@@ -411,10 +426,16 @@ class T3Database:
                     "re-index the collection in local mode or restore "
                     "credentials before reading it"
                 )
+            if is_local_token:
+                return LocalEmbeddingFunction(
+                    model_name=local_model_for_token(parsed_token)
+                )
             return LocalEmbeddingFunction()
 
         if is_local_token:
-            return LocalEmbeddingFunction()
+            return LocalEmbeddingFunction(
+                model_name=local_model_for_token(parsed_token)
+            )
 
         model = parsed_token or embedding_model_for_collection(collection_name)
         return chromadb.utils.embedding_functions.VoyageAIEmbeddingFunction(

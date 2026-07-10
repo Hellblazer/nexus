@@ -601,6 +601,9 @@ def test_target_name_collision_blocked_before_sequence(monkeypatch, _sources):
     message = str(exc_info.value)
     assert "code__1-3__voyage-code-3__v1" in message
     assert "code__1-3__bge-base-en-v15-768__v1" in message
+    # 360-sweep Dimension A (2026-07-10): the block must point at the
+    # purpose-built forensics command, not leave the operator to find it.
+    assert "nx migration-audit" in message
     # The exception's structured payload names the collision precisely — and
     # (nexus-5b9v0 Fix 3) carries the FULL classification per source, not just
     # the bare name, so an operator can tell which one is the stale mislabel.

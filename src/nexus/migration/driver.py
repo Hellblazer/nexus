@@ -154,7 +154,10 @@ class TargetNameCollisionBlocked(RuntimeError):
             "collection colliding with an honest sibling (or two mislabeled "
             "collections measuring to the same target); resolve by removing "
             "or re-indexing the stale/duplicate collection before "
-            f"migrating:\n{lines}"
+            f"migrating:\n{lines}\n"
+            "Run 'nx migration-audit' for the full retroactive report "
+            "(whether an EARLIER run already merged these, and per-source "
+            "presence in the live target)."
         )
 
 
