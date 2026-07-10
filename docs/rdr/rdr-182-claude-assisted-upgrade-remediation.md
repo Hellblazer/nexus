@@ -71,6 +71,19 @@ the capability is both a privacy hazard and a trust violation. The fix: a
 first-class opt-in (per-invocation and/or a durable preference), with the
 default being *off* — the product surfaces the option, the user chooses it.
 
+**Consent taxonomy (gate Layer 3, reconciling with Gap 2's shipped
+precedent)**: two distinct surfaces with two distinct requirements. (a)
+*Display-only guidance a human must voluntarily act on* — the shipped
+`install-binary` paste-to-Claude prompt, and CLI `nx forensics` printing a
+playbook — needs NO consent gate: printing text the operator chooses to copy
+is itself the consent act, and gating it would be over-friction. (b) *A tool
+an agent can autonomously invoke* — the MCP `forensics`/`remediate` surface —
+MUST be consent-gated (the durable `claude_assisted_remediation.enabled`
+flag, default-off), because there is no human-in-the-loop copy step to serve
+as the consent gesture. This distinction is what keeps `nx forensics` from
+being over-gated relative to what already ships, while closing the
+autonomous-enlistment hole on the MCP surface.
+
 #### Gap 4: No Claude Desktop surface integration
 
 RDR-126 established a Claude Desktop deployment (unified chat/cowork surface).
@@ -194,11 +207,21 @@ Critical Assumptions against source. Full evidence: T2
   **Method**: Source Search. `.mcpb` already installs the servers into Desktop;
   add one `@mcp.tool()`; payload is the return string; core.py has no outbound
   HTTP; the playbook is guidance text built from local diagnostic labels only.
-- [x] Opt-in expressible per-invocation AND durable/revocable without
-  weakening default-off — **Status**: Verified — **Method**: Source Search.
-  `_confirm_voyage_cost` + `config.yml`/`nx config set` +
-  `attention_guided_v1`'s default-False + locked test cover it; a small T2
-  `record_consent()` table is the only net-new piece.
+- [x] Opt-in **CLI-side** expressible per-invocation AND durable/revocable
+  without weakening default-off — **Status**: Verified — **Method**: Source
+  Search. `_confirm_voyage_cost` (interactive-terminal-only) +
+  `config.yml`/`nx config set` + `attention_guided_v1`'s default-False +
+  locked test cover the CLI path; a small T2 `record_consent()` table is
+  net-new. SCOPE (gate Layer 3): this covers the CLI ONLY.
+- [ ] Opt-in **enforceable at the MCP tool boundary** (a config-flag read
+  inside `forensics`/`remediate` that refuses before emitting content) —
+  **Status**: Unverified / UNBUILT — **Method**: Spike. The RDR's own A3
+  research (`nexus/rdr182-assumption3-opt-in-primitives-investigation` §3)
+  states a Desktop/plugin-scoped opt-in has no home today and must be built;
+  `click.confirm` does NOT transfer to an MCP call, and no existing
+  `@mcp.tool()` is config-gated. This is the load-bearing safety mechanism for
+  the surface Gap 4 calls first-class and MUST be verified (a spike proving
+  the tool refuses when the flag is false) before implementation.
 
 ## Proposed Solution
 
@@ -217,9 +240,11 @@ A layered, opt-in capability:
    option at an edge; the user opts in per-invocation or via a durable
    revocable preference. Consent scope is recorded (what was agreed, when).
 4. **Surface layer (new)**: the same emission + consent reachable from the
-   CLI AND Claude Desktop (RDR-126) — the leading candidate is an MCP tool a
-   Desktop-resident agent already holds, so "enlist my agent" is one action,
-   not a copy-paste.
+   CLI AND Claude Desktop (RDR-126) via an MCP tool a Desktop-resident agent
+   already holds. Because that tool is autonomously agent-invocable, it
+   enforces the durable opt-in flag at its own entry (§ Technical Design) —
+   the autonomous surface carries at least as much consent friction as the
+   CLI, never less.
 5. **Trust boundary (locked)**: the product emits guidance; the user's agent
    executes locally with the user's creds. The product never runs the user's
    agent, never receives store content, and diagnostics are read-only by
@@ -239,9 +264,24 @@ Research (2026-07-10) resolved the mechanisms; design is now concrete:
 - **MCP/Desktop surface**: two new `@mcp.tool()` functions in
   `src/nexus/mcp/core.py` beside `daemon_uninstall` — `forensics(topic) ->
   str` (read-only diagnostic playbook) and `remediate(topic, confirm=False)
-  -> str` (describe-then-confirm, mirroring `daemon_uninstall`'s two-phase
-  signature). The RDR-126 `.mcpb` already exposes these to Desktop; the tool
+  -> str`. The RDR-126 `.mcpb` already exposes these to Desktop; the tool
   RETURN STRING is the payload channel (the only reliably-visible one).
+  **OPT-IN ENFORCEMENT AT THE TOOL BOUNDARY (gate Critical, Layer 3)**: unlike
+  a CLI command — which a human must explicitly type (an implicit consent
+  gesture) — an MCP tool is *autonomously agent-invocable*. So the FIRST
+  statement of BOTH tools reads `claude_assisted_remediation.enabled` from
+  config and, when false (the default), returns a refusal string ("capability
+  not enabled — run `nx config set claude_assisted_remediation.enabled true`")
+  BEFORE emitting any diagnostic content. The autonomously-reachable surface
+  gets AT LEAST as much consent friction as the CLI, never less. `remediate`'s
+  five-layer contract is explicit so the opt-in check is never collapsed into
+  the confirm flag: (1) opt-in check → (2) describe (confirm=False) → (3)
+  confirm=True → (4) mutate → (5) audit-record. There is no existing pattern
+  in this codebase for gating an `@mcp.tool()` behind a config flag —
+  `daemon_uninstall` deletes the user's OWN local daemon (no consent stakes)
+  and is a shape template only, NOT evidence that describe-then-confirm alone
+  satisfies Gap 3. This gate — a config read at tool entry — is net-new and
+  is its own Critical Assumption (A4 below).
 - **Read-only-by-construction (diagnostic path)**: a new `nexus_diag`
   SELECT-only Postgres role (Liquibase changeset + grant), used by the
   diagnostic tooling connection, with `SET TRANSACTION READ ONLY` as
@@ -338,24 +378,43 @@ principles; the engine-side analysis (c4143) shows the hard cases need a human
 
 ### Failure Modes
 
-To be enumerated during gate: what an operator sees when they decline consent;
-what happens when the store-state probe cannot run; how a Desktop hand-off
-degrades to the terminal path.
+- **Opt-in not enabled (the default)**: the MCP `forensics`/`remediate` tools
+  return a refusal string naming the exact enable command (`nx config set
+  claude_assisted_remediation.enabled true`) before any content — visible,
+  actionable, no capability leak. The CLI `nx forensics` (display-only) is
+  unaffected (it needs no gate per the consent taxonomy).
+- **Store-state probe cannot run** (PG down, not service mode): degrades to a
+  non-fatal warn and the display-only runbook URL — never a false "clean" and
+  never a hard block on unrelated work (matches the shipped `install-binary`
+  gate's probe-skip posture).
+- **Desktop hand-off unavailable**: degrades to the terminal path (the same
+  clickable URL + paste-to-Claude prompt already shipped) — Desktop is an
+  additive surface, never a hard dependency.
+- **User declines the per-invocation confirm**: the action does not run; the
+  runbook URL remains on screen for manual follow-up.
 
 ## Implementation Plan
 
 ### Prerequisites
 
-- [ ] All Critical Assumptions verified
+- [ ] All Critical Assumptions verified — including A4 (MCP tool-boundary
+  opt-in enforcement), which is Unbuilt and requires a spike proving the tool
+  refuses when the flag is false BEFORE any implementation.
 - [ ] RDR-126 Desktop surface + MCP tool model reviewed
 
 ### Minimum Viable Validation
 
-One end-to-end opt-in flow: a poisoned store, the operator opts in at the
-upgrade edge, `nx remediate chash-poison` (and/or the Desktop MCP tool) hands
-their agent a read-only diagnostic + a consented recovery playbook, the agent
-walks §8.1, and a re-run upgrade succeeds — with an assertion that no
-store-content read or off-box transmission occurred.
+Two proofs, both in scope:
+
+1. **The safety property**: with `claude_assisted_remediation.enabled` false
+   (default), the MCP `forensics`/`remediate` tools return the refusal string
+   and emit ZERO diagnostic content — the autonomous-enlistment hole is
+   closed by construction, asserted mechanically.
+2. **The end-to-end flow**: with the flag enabled, a poisoned store → operator
+   opts in at the upgrade edge → `nx remediate chash-poison` (and/or the
+   Desktop MCP tool) hands the agent a read-only diagnostic + consented
+   recovery playbook → agent walks §8.1 → a re-run upgrade succeeds, with an
+   assertion that no store-CONTENT read occurred (only schema/metadata).
 
 ### Phase 1: Code Implementation
 
@@ -364,7 +423,14 @@ To be decomposed into beads under nexus-ykzbj during `/conexus:create-plan`.
 ## Test Plan
 
 - **Scenario**: default is off — no invocation enlists an agent without an
-  explicit opt-in — **Verify**: parity/behaviour test asserts default-off.
+  explicit opt-in — **Verify**: parity/behaviour test asserts default-off
+  (exact-equality on the config default, `attention_guided_v1` template).
+- **Scenario**: MCP `forensics`/`remediate` invoked with the flag FALSE —
+  **Verify**: returns the refusal string, emits zero diagnostic content (the
+  autonomous-enlistment hole; the gate's Critical, asserted mechanically).
+- **Scenario**: `remediate` five-layer ordering — **Verify**: opt-in check
+  precedes describe; confirm=False never mutates; a consent record is written
+  on the mutate path.
 - **Scenario**: diagnostics are read-only by construction — a remediation
   topic's diagnostic playbook contains no mutating statement — **Verify**:
   allow-list/lint over emitted diagnostics.
@@ -408,8 +474,14 @@ no-exfiltration assertion) is in scope, not deferred.
 - **Incremental adoption**: opt-in, default-off — the whole point.
 - **Secret/credential lifecycle**: the enlisted agent uses the user's own
   local creds; the product mints/stores nothing new — confirm at gate.
-- **Privacy / data residency**: nothing leaves the box; diagnostics read
-  schema/metadata only — LOCKED constraint.
+- **Privacy / data residency**: no store *content* leaves the box —
+  diagnostics read schema/metadata only (counts, constraint names,
+  conformance flags), never row/document/note content. Those schema/metadata
+  labels ARE visible to whichever agent the user chose to enlist, which — for
+  a cloud-hosted Claude — necessarily transits to Anthropic's inference API as
+  ordinary conversational context; that is inherent to "enlist your Claude,"
+  not a leak. LOCKED constraint: content stays local; the product itself
+  transmits nothing.
 - **Security**: read-only-by-construction diagnostics; consented + audited
   remediation; the safe path is the easy path — LOCKED constraint.
 
@@ -439,3 +511,12 @@ add the verified design detail and trim speculation.
   with the read-only-role-binds-tooling-not-agent caveat; A2/A3 clean reuse).
   Technical Design + Infrastructure Audit made concrete. Evidence in T2/T3
   (see Investigation).
+- 2026-07-10: `/conexus:rdr-gate` — Layer 1 (structural) + Layer 2
+  (assumptions Source-Searched) PASSED; Layer 3 critic BLOCKED on 1 Critical
+  (MCP/Desktop tools had no specified opt-in enforcement despite Gap 3;
+  A3 overclaimed Desktop coverage). Remediated: added tool-boundary opt-in
+  enforcement + the 5-layer `remediate` contract to Technical Design;
+  split A3 into CLI-verified (A3) and MCP-unbuilt (A4, spike-required);
+  added the consent taxonomy (display-only vs agent-invocable) reconciling
+  Gap 2's shipped precedent; tightened the privacy line; enumerated Failure
+  Modes; expanded MVV + Test Plan for the refusal property. Re-gate pending.
