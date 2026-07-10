@@ -125,27 +125,21 @@ seam for Desktop (the plugin already ships MCP servers/tools).
 
 ### Investigation
 
-To be completed during `/conexus:rdr-research`. Anchors to investigate:
-
-- The existing in-product precedent: `src/nexus/commands/daemon.py`
-  `_emit_chash_poison_gate` (the paste-to-Claude + clickable-URL pattern) and
-  `src/nexus/health.py` `_check_migration_state` (the read-only probe reused
-  by both `nx doctor` and the gate).
-- The `/tmp` relay prompts authored for GH #1390 (the manual template for a
-  self-contained read-only playbook: context + hard READ-ONLY/do-NOT
-  constraints + steps + structured deliverable + "environment gone" escape).
-- RDR-126's Claude Desktop deployment surface and its MCP tool inventory —
-  what a Desktop-resident agent already has, and where a remediation/forensics
-  tool would live.
-- Consent/opt-in prior art in the codebase (any existing preference or
-  confirm primitives) and the plugin's MCP tool-permission model.
+Three parallel codebase-deep-analyzer passes (2026-07-10) verified the three
+Critical Assumptions against source. Full evidence: T2
+`nexus/rdr182-critical-assumption-1-readonly-by-construction`,
+`nexus/rdr182-assumption3-opt-in-primitives-investigation`, and T3
+`analysis-codebase-rdr182-desktop-mcp-forensics-boundary` (doc
+`08ddba2d27119e2798464102f211227f`, catalog-linked to RDR-126).
 
 #### Dependency Source Verification
 
 | Dependency | Source Searched? | Key Findings |
 | --- | --- | --- |
-| MCP (tool surface for Desktop) | No | TBD in research: how a remediation tool is exposed to a Desktop-resident agent |
-| Claude Desktop (RDR-126 surface) | No | TBD: rendering + tool availability in the Desktop chat/cowork surface |
+| MCP (tool surface for Desktop) | Yes | Two local FastMCP **stdio** servers ship (`nx-mcp` = `src/nexus/mcp/core.py`, `nx-mcp-catalog` = `src/nexus/mcp/catalog.py`); a tool is a `@mcp.tool()` decorator; `daemon_uninstall` (core.py:5661) is the describe-then-confirm template; zero outbound HTTP in core.py. |
+| Claude Desktop (RDR-126 surface) | Yes | RDR-126's `.mcpb` installs BOTH servers into Desktop (live-verified, `tools/list` served). A Desktop agent already reaches any registered tool — no new transport. The ONLY reliably user-visible payload channel is the **tool return value** (`notifications/message`, `instructions`, and a2ui/MCP-Apps rendering are NOT reliably visible on Desktop per RDR-126 A2). |
+| Postgres read-only role | Yes | **Does not exist.** Only `nexus_admin` (DDL owner) and `nexus_svc` (full DML) are provisioned; the diagnostic probes today run as `nexus_admin` — the exact privilege class that made GH #1390's `DROP CONSTRAINT` possible. |
+| Config / consent primitives | Yes | Durable prefs: `config.py:800` `set_config_value` → `config.yml` (atomic, 0600), exposed by `nx config set`. Per-invocation consent: `_confirm_voyage_cost` pattern (`click.confirm` aborts non-interactive). Default-off precedent: `attention_guided_v1` (config.py:695) ships default-False + locked exact-equality test `tests/test_config.py::TestTelemetryConfig`. |
 
 ### Key Discoveries
 
@@ -154,24 +148,57 @@ To be completed during `/conexus:rdr-research`. Anchors to investigate:
   cause with zero writes).
 - **Verified**: an in-product gate can both block a destructive upgrade and
   hand off a paste-to-Claude remediation prompt (nexus-pnwu0, shipped).
+- **Verified (A2)**: Desktop integration is REUSE, not new transport — add a
+  `@mcp.tool()` (`forensics(topic) -> str` / `remediate(topic, confirm=False)
+  -> str`) in `core.py` beside `daemon_uninstall`, returning the playbook as
+  the tool's return string (the proven-visible channel). Extract
+  `_emit_chash_poison_gate`'s prompt-construction into a shared `(topic,
+  store_state) -> Playbook` used by both the CLI gate and the MCP tool.
+- **Verified (A3)**: opt-in is REUSE — `_confirm_voyage_cost` for
+  per-invocation, `config.yml`/`nx config set` for the durable revocable
+  preference (`claude_assisted_remediation.enabled`, zero new plumbing),
+  `attention_guided_v1` + its locked test as the default-off template. Only a
+  small consent-AUDIT table is net-new.
 - **Documented**: the engine-side changelog CANNOT cleanly self-heal a
   present-but-violating constraint (checksum lock + FORCE-RLS count skew) —
   so "fail clean and enlist the operator's agent" is the right posture, not
   "auto-fix in the migration" (nexus-c4143 analysis).
-- **Assumed** (verify): MCP is the seam that makes Desktop integration
-  seamless rather than copy-paste.
+- **Verified + REFINED (A1) — the load-bearing honesty finding**: no probe in
+  this codebase reads row/document content (all are counts/lengths/system-
+  catalog reads), but that norm is enforced by author care, not tooling, and
+  the probes run as the DDL-owner role. A dedicated read-only role
+  (`nexus_diag`, SELECT-only, needs building) is the ONLY mechanism that makes
+  the DB itself refuse a `DROP CONSTRAINT` — BUT it constrains only the
+  connection the product's own tooling opens. It cannot stop the user's
+  enlisted agent from opening its own `psql` as `nexus_admin` and free-typing
+  DDL, because RDR-182's trust boundary is precisely "the agent executes
+  locally with the user's live credentials." Design consequence (below): the
+  read-only guarantee is scoped to the DIAGNOSTIC tooling path; the ultimate
+  defense against the GH #1390 reflex is behavioural — make the safe path the
+  easy path — plus keeping mutation on a separate, consented, audited
+  `remediate` path with the do-NOTs front-and-center. This is why Gap 1
+  (safe-path-is-easy-path) is load-bearing, not cosmetic.
 
 ### Critical Assumptions
 
-- [ ] Read-only diagnostics can be guaranteed by construction (allow-listed
-  read-only SQL/commands), not merely by prompt instruction — **Status**:
-  Unverified — **Method**: Spike
-- [ ] A Desktop-resident agent can be handed a remediation playbook via an
-  MCP tool the plugin ships, without the product transmitting store content —
-  **Status**: Unverified — **Method**: Source Search
-- [ ] Opt-in can be expressed both per-invocation and as a durable, revocable
-  preference without weakening the default-off guarantee — **Status**:
-  Unverified — **Method**: Spike
+- [x] Read-only diagnostics can be guaranteed by construction — **Status**:
+  Verified + REFINED — **Method**: Source Search. A `nexus_diag` SELECT-only
+  role (+ `SET TRANSACTION READ ONLY` defense-in-depth + a pre-emission
+  statement allow-list lint reusing the `_DML_TARGET_RE` pattern) makes the
+  product's diagnostic path read-only by construction. Caveat now locked into
+  the design: this binds the tooling connection, NOT what the user's own agent
+  can type as `nexus_admin` — the behavioural safe-path-is-easy-path principle
+  (Gap 1) and the separate consented `remediate` path carry that.
+- [x] A Desktop-resident agent can be handed a playbook via an MCP tool
+  without the product transmitting store content — **Status**: Verified —
+  **Method**: Source Search. `.mcpb` already installs the servers into Desktop;
+  add one `@mcp.tool()`; payload is the return string; core.py has no outbound
+  HTTP; the playbook is guidance text built from local diagnostic labels only.
+- [x] Opt-in expressible per-invocation AND durable/revocable without
+  weakening default-off — **Status**: Verified — **Method**: Source Search.
+  `_confirm_voyage_cost` + `config.yml`/`nx config set` +
+  `attention_guided_v1`'s default-False + locked test cover it; a small T2
+  `record_consent()` table is the only net-new piece.
 
 ## Proposed Solution
 
@@ -201,25 +228,51 @@ A layered, opt-in capability:
 
 ### Technical Design
 
-To be detailed during research/gate. Design is deliberately not over-specified
-in this draft. Interfaces to define:
+Research (2026-07-10) resolved the mechanisms; design is now concrete:
 
-- A playbook-emitter contract: `(topic, store-state) -> Playbook` where a
-  `Playbook` carries (context, hard constraints, ordered steps, structured
-  deliverable schema, escape clause) and renders to (a) a terminal prompt +
-  clickable URL and (b) an MCP-tool payload for Desktop.
-- A read-only guarantee mechanism (allow-listed statements / a restricted
-  execution contract) — NOT prompt-only.
-- A consent record contract (scope, timestamp, revocation).
+- **Playbook emitter (shared)**: extract `_emit_chash_poison_gate`'s
+  prompt-construction (`src/nexus/commands/daemon.py`) into a shared
+  `(topic, store_state) -> Playbook`, where `Playbook` carries (context, hard
+  READ-ONLY/do-NOT constraints, ordered steps, structured-deliverable schema,
+  clickable https URL pinned to `main`, "environment gone" escape). Renders to
+  (a) a terminal prompt (CLI) and (b) a tool return string (MCP/Desktop).
+- **MCP/Desktop surface**: two new `@mcp.tool()` functions in
+  `src/nexus/mcp/core.py` beside `daemon_uninstall` — `forensics(topic) ->
+  str` (read-only diagnostic playbook) and `remediate(topic, confirm=False)
+  -> str` (describe-then-confirm, mirroring `daemon_uninstall`'s two-phase
+  signature). The RDR-126 `.mcpb` already exposes these to Desktop; the tool
+  RETURN STRING is the payload channel (the only reliably-visible one).
+- **Read-only-by-construction (diagnostic path)**: a new `nexus_diag`
+  SELECT-only Postgres role (Liquibase changeset + grant), used by the
+  diagnostic tooling connection, with `SET TRANSACTION READ ONLY` as
+  defense-in-depth and a pre-emission statement allow-list lint (reusing the
+  `_DML_TARGET_RE` classification pattern from `tests/test_changelog_rls_lint.py`)
+  over any SQL the product emits. LOCKED CAVEAT (research A1): this binds the
+  product's own tooling connection, not what the user's enlisted agent can run
+  as `nexus_admin` — so mutation lives ONLY on the consented `remediate` path
+  and Gap 1's behavioural safe-path-is-easy-path carries the rest.
+- **Opt-in**: default-off via `config.yml`
+  (`claude_assisted_remediation.enabled`, using `set_config_value` /
+  `nx config set`), the `attention_guided_v1` default-False + locked
+  exact-equality test as the template; per-invocation surfacing via the
+  `_confirm_voyage_cost` pattern (`click.confirm` aborts non-interactive).
+- **Consent audit (net-new)**: a small T2 `record_consent(scope, ts)` on the
+  `Telemetry` surface (alongside `record_tier_write` / `record_nx_answer_run`)
+  writing a dedicated `claude_assisted_remediation_consents` table.
 
 ### Existing Infrastructure Audit
 
 | Proposed Component | Existing Module | Decision |
 | --- | --- | --- |
 | Read-only store-state probes | `src/nexus/health.py` `_check_migration_state` | Reuse/Extend: single source of truth for the chash probe already |
-| In-product remediation prompt + URL | `src/nexus/commands/daemon.py` `_emit_chash_poison_gate` | Extend: generalize the one-off gate into the emission layer |
+| Playbook emitter | `src/nexus/commands/daemon.py` `_emit_chash_poison_gate` | Extend: hoist prompt-construction into a shared `(topic, store_state) -> Playbook` |
 | Recovery playbook content | `docs/migration-runbook.md` §8/§8.1 | Reuse: the canonical remediation text the emitter references |
-| Desktop surface | RDR-126 deployment + plugin MCP servers | Extend: add a remediation/forensics MCP tool |
+| Desktop surface | RDR-126 `.mcpb` + `src/nexus/mcp/core.py` | Extend: add `forensics`/`remediate` `@mcp.tool()` beside `daemon_uninstall` (its describe-then-confirm template) |
+| Read-only diagnostic role | `src/nexus/db/pg_provision.py` + `role-001`/`grants-nexus-svc.xml` | Build: new `nexus_diag` SELECT-only role (none exists; `nexus_admin`/`nexus_svc` are both write-capable) |
+| Durable opt-in preference | `src/nexus/config.py` `set_config_value` + `nx config set` | Reuse: `claude_assisted_remediation.enabled`, default-off (`attention_guided_v1` template) |
+| Per-invocation consent | `_confirm_voyage_cost` / `render_cost_confirmation` | Reuse: `click.confirm` aborts non-interactive |
+| Consent audit | `src/nexus/db/t2/telemetry.py` `Telemetry` | Build: `record_consent()` + a dedicated T2 table (net-new, small) |
+| Statement allow-list lint | `tests/test_changelog_rls_lint.py` `_DML_TARGET_RE` | Reuse pattern: pre-emission read-only classification of emitted SQL |
 
 ### Decision Rationale
 
@@ -381,3 +434,8 @@ add the verified design detail and trim speculation.
 
 - 2026-07-10: Draft scaffolded (`/conexus:rdr-create`). Opt-in and Claude
   Desktop integration added as first-class requirements per Hal.
+- 2026-07-10: `/conexus:rdr-research` — 3 parallel source investigations. All
+  three Critical Assumptions VERIFIED against source (A1 verified + refined
+  with the read-only-role-binds-tooling-not-agent caveat; A2/A3 clean reuse).
+  Technical Design + Infrastructure Audit made concrete. Evidence in T2/T3
+  (see Investigation).
