@@ -84,19 +84,29 @@ constraint — a ``DO`` block whose ``IF EXISTS`` checks a DIFFERENT
 constraint name is a decoy, not a guard, and does not excuse the VALIDATE
 inside it.
 
-Known real-corpus violations, grandfathered below (real, currently-
-unmitigated crash-loop risk — NOT false positives): ``fk-002-validate.xml``
-(changesets ``fk-002-7``..``fk-002-11``) and ``fk-003-validate.xml``
-(changesets ``fk-003-7``..``fk-003-11``) together carry 10 bare
+Retrofitted (nexus-4m6i0.13, 2026-07-10): ``fk-002-validate.xml`` (changesets
+``fk-002-7``..``fk-002-11``) and ``fk-003-validate.xml`` (changesets
+``fk-003-7``..``fk-003-11``) together used to carry 10 bare
 ``VALIDATE CONSTRAINT`` statements, one per changeset, each guarding a
 collection-registry FK added ``NOT VALID`` earlier in the SAME file's chain
 (``fk-002-collection-registry.xml`` / ``fk-003-collection-registry-extra.xml``).
-Retrofitting those is tracked as separate follow-up work (bead
-nexus-4m6i0.13 — see the allowlist reasons below), NOT this bead: per
-nexus-4m6i0.1's precedent, Liquibase checksum-immutability means an already-
-executed changeset cannot be edited in place, so the fix needs new
-changesets (mirroring the ``catalog-013-1b`` / ``catalog-013-3`` pattern)
-plus its own TDD Testcontainers verification, out of scope here.
+Per nexus-4m6i0.1's precedent, Liquibase checksum-immutability means an
+already-executed changeset cannot have its ``<sql>`` body edited in place —
+but ``<preConditions>`` IS checksum-neutral (verified against the pinned
+liquibase-core 4.29.0 sources: ``ChangeSet.generateCheckSum()`` hashes only
+the ``<sql>``/``<changes>`` body and SqlVisitors), so each of the 10
+changesets was retrofitted with a whole-changeset ``<preConditions
+onFail="MARK_RAN">`` (Shape 1, single-name form — each changeset validates
+exactly one constraint, unlike ``catalog-013-2``'s five-constraint IN-list
+form). NO ``catalog-013-3``-style defensive re-validate changeset was added:
+that changeset rescues collateral damage from catalog-013-2's MONOLITHIC
+precondition (one missing constraint MARK_RANs all five VALIDATEs at once),
+a coupling the independent fk changesets never had — each skips only its own
+VALIDATE, and the other nine validate through their own guards regardless
+(nexus-4m6i0.13 review finding: an inert mirror changeset with a misleading
+rationale is worse than none). The ALLOWLIST below is now empty — all 10
+formerly-bare statements are covered by Shape 1, verified directly against
+the real changelog rather than allowlisted.
 
 Documented static blind spots (mirroring the RLS lint's own admissions):
 
@@ -493,97 +503,25 @@ class AnalysisResult:
 
 
 # ---------------------------------------------------------------------------
-# Allowlist — the exact grandfathered bare-VALIDATE members (nexus-4m6i0.2
-# ground truth: 10 statements across fk-002-validate.xml / fk-003-
-# validate.xml, one per changeset, verified by grep + direct file read
-# 2026-07-09). Keyed (changeset_id, "schema.table", constraint) — constraint
-# is part of the key (not just changeset+table) so that two DIFFERENT
-# constraints VALIDATEd bare on the SAME table in the SAME changeset are
-# tracked as two independent findings, never collapsed into one (code-review
-# finding on nexus-4m6i0.2: the coarser (changeset, table) key silently
-# swallowed exactly this shape). An UNUSED entry fails the real-changelog
-# test (rot detection) — every entry here must be independently
-# re-derivable from a live analyzer run, never hand-waved.
+# Allowlist — EMPTY (nexus-4m6i0.13, 2026-07-10). The 10 formerly-grandfathered
+# bare-VALIDATE members (fk-002-7..11 in fk-002-validate.xml, fk-003-7..11 in
+# fk-003-validate.xml) were retrofitted with whole-changeset <preConditions>
+# (Shape 1) and are now REFERENCE-accepted, verified directly against the
+# real changelog, exactly like catalog-013-2/catalog-013-3 already were —
+# never allowlisted in the first place. Kept as a typed empty tuple (not
+# deleted) so the analyzer signature and every allowlist-consuming test below
+# keep working unchanged; a future genuinely-unfixable bare VALIDATE would
+# repopulate this. Keyed (changeset_id, "schema.table", constraint) —
+# constraint is part of the key (not just changeset+table) so that two
+# DIFFERENT constraints VALIDATEd bare on the SAME table in the SAME
+# changeset would be tracked as two independent findings, never collapsed
+# into one (code-review finding on nexus-4m6i0.2: the coarser (changeset,
+# table) key silently swallowed exactly this shape). An UNUSED entry fails
+# the real-changelog test (rot detection) — every entry here must be
+# independently re-derivable from a live analyzer run, never hand-waved.
 # ---------------------------------------------------------------------------
 
-ALLOWLIST: tuple[tuple[str, str, str, str], ...] = (
-    (
-        "fk-002-7",
-        "nexus.chunks_384",
-        "chunks_384_collection_fk",
-        "nexus-4m6i0.13 (follow-up, filed 2026-07-09): VALIDATE of "
-        "chunks_384_collection_fk, added NOT VALID unconditionally in the "
-        "same fk-002-collection-registry.xml chain (existence is chain-"
-        "guaranteed; only row data can fail VALIDATE — the intended "
-        "fail-loud outcome for a genuinely orphaned row). Real, currently-"
-        "unmitigated crash-loop risk on a divergent box missing this FK "
-        "(same class as catalog-013-2/ms57z); retrofit tracked separately "
-        "because the changeset is checksum-immutable once executed.",
-    ),
-    (
-        "fk-002-8",
-        "nexus.chunks_768",
-        "chunks_768_collection_fk",
-        "nexus-4m6i0.13: mirrors fk-002-7 exactly (chunks_768_collection_fk).",
-    ),
-    (
-        "fk-002-9",
-        "nexus.chunks_1024",
-        "chunks_1024_collection_fk",
-        "nexus-4m6i0.13: mirrors fk-002-7 exactly (chunks_1024_collection_fk).",
-    ),
-    (
-        "fk-002-10",
-        "nexus.chash_index",
-        "chash_index_collection_fk",
-        "nexus-4m6i0.13: mirrors fk-002-7 exactly (chash_index_collection_fk, "
-        "FK on physical_collection).",
-    ),
-    (
-        "fk-002-11",
-        "nexus.topic_assignments",
-        "topic_assignments_collection_fk",
-        "nexus-4m6i0.13: mirrors fk-002-7 exactly "
-        "(topic_assignments_collection_fk, FK on source_collection, "
-        "nullable, ON UPDATE CASCADE).",
-    ),
-    (
-        "fk-003-7",
-        "nexus.document_aspects",
-        "document_aspects_collection_fk",
-        "nexus-4m6i0.13: fk-003-validate.xml sibling of the fk-002 set "
-        "(document_aspects_collection_fk), same NOT-VALID-then-VALIDATE "
-        "chain-guaranteed-existence shape.",
-    ),
-    (
-        "fk-003-8",
-        "nexus.aspect_extraction_queue",
-        "aspect_extraction_queue_collection_fk",
-        "nexus-4m6i0.13: mirrors fk-003-7 exactly "
-        "(aspect_extraction_queue_collection_fk).",
-    ),
-    (
-        "fk-003-9",
-        "nexus.topics",
-        "topics_collection_fk",
-        "nexus-4m6i0.13: mirrors fk-003-7 exactly (topics_collection_fk).",
-    ),
-    (
-        "fk-003-10",
-        "nexus.taxonomy_meta",
-        "taxonomy_meta_collection_fk",
-        "nexus-4m6i0.13: mirrors fk-003-7 exactly (taxonomy_meta_collection_fk).",
-    ),
-    (
-        "fk-003-11",
-        "nexus.document_highlights",
-        "document_highlights_collection_fk",
-        "nexus-4m6i0.13: mirrors fk-003-7 exactly "
-        "(document_highlights_collection_fk; null-collection rows escape "
-        "via MATCH SIMPLE and are governed by the fk-001 catalog_documents "
-        "cascade instead).",
-    ),
-)
+ALLOWLIST: tuple[tuple[str, str, str, str], ...] = ()
 
 
 def _allowlist_keys(
@@ -1637,12 +1575,14 @@ def test_real_changelog_zero_violations_and_full_allowlist_consumption():
          independently re-derived by a live analyzer run against the real
          changelog, not hand-waved.
 
-    Ground truth (grep + direct file read, 2026-07-09): exactly 10
-    (changeset, table) bare-VALIDATE pairs across fk-002-validate.xml
-    (fk-002-7..11) and fk-003-validate.xml (fk-003-7..11) — catalog-013-2
-    (whole-changeset preConditions) and catalog-013-3 (five per-statement
-    DO/IF-EXISTS guards) are explicitly NOT grandfathered: they are the
-    two REFERENCE shapes this lint recognizes as safe.
+    Ground truth (nexus-4m6i0.13, 2026-07-10): the ALLOWLIST is now EMPTY.
+    The 10 (changeset, table) bare-VALIDATE pairs that used to be
+    grandfathered across fk-002-validate.xml (fk-002-7..11) and
+    fk-003-validate.xml (fk-003-7..11) are retrofitted with whole-changeset
+    preConditions (Shape 1) and are REFERENCE shapes now, same posture as
+    catalog-013-2 (whole-changeset preConditions) and catalog-013-3 (five
+    per-statement DO/IF-EXISTS guards). None of these are allowlisted: they
+    are all verified directly against the real changelog by this analyzer.
     """
     result = analyze_changelog()
     assert result.total_violations == 0, (

@@ -678,6 +678,185 @@ class SchemaMigratorIntegrationTest {
         }
     }
 
+    // ── Test 8: aged/divergent box — missing fk-002 collection FK must not crash-loop ──
+
+    /**
+     * nexus-4m6i0.13 (follow-up to nexus-4m6i0.1 / nexus-4m6i0.2): {@code
+     * fk-002-validate.xml} runs five bare {@code ALTER TABLE ... VALIDATE CONSTRAINT ...}
+     * statements (changesets {@code fk-002-7}..{@code fk-002-11}), the identical crash-loop
+     * risk class as {@code catalog-013-2} (ms57z / GH#1390) — before this fix, a missing
+     * constraint on an aged/divergent box would raise a hard Postgres ERROR and, because a
+     * failed changeset never commits a DATABASECHANGELOG row, crash-loop on every subsequent
+     * boot. The fix retrofits each of the five changesets with a whole-changeset {@code
+     * <preConditions onFail="MARK_RAN">} (single-name form, since each changeset validates
+     * exactly one constraint — unlike {@code catalog-013-2}'s five-constraint IN-list form).
+     * No {@code catalog-013-3}-style defensive re-validate changeset exists here, on
+     * purpose: that changeset rescues collateral damage from catalog-013-2's MONOLITHIC
+     * precondition (one missing constraint MARK_RANs all five VALIDATEs), a coupling the
+     * independent fk-002-7..11 changesets never had — each skips only its own VALIDATE.
+     *
+     * <p>Reproduces the divergence on {@code chunks_384_collection_fk} — added {@code NOT
+     * VALID} by changeset {@code fk-002-1} in {@code fk-002-collection-registry.xml}, then
+     * (normally) VALIDATEd by {@code fk-002-7}. This test migrates only through {@code
+     * fk-002-1}, drops the freshly-added constraint (modeling a box where it went missing
+     * before {@code fk-002-7} could VALIDATE it), then resumes migration and asserts: (a) no
+     * exception, (b) {@code fk-002-7} is recorded {@code MARK_RAN} (not silently re-attempted
+     * forever), (c) the other four fk-002 collection FKs still end up validated — each via
+     * ITS OWN independently-guarded changeset ({@code fk-002-8}..{@code fk-002-11}), and
+     * (d) the dropped constraint stays absent (never silently re-added).
+     *
+     * <p>Uses a dedicated container for the same reason as tests 5/6: the divergence must be
+     * injected BEFORE {@code fk-002-7} first executes, and the shared {@link #pg}/{@link
+     * #adminDs} fixture has already migrated cleanly by {@code @Order(1)}.
+     */
+    @Test
+    @Order(8)
+    void agedBoxWithMissingFk002CollectionFk_migrationDoesNotCrashLoop() throws Exception {
+        PostgreSQLContainer<?> agedPg = PgContainerHelper.start();
+        try {
+            final String role = "nexus_admin_aged_fk002_test";
+            final String pass = "nexus_admin_aged_fk002_test_pass";
+
+            // Phase A: same minimal DBA-equivalent bootstrap as tests 5/6.
+            try (Connection su = agedPg.createConnection("")) {
+                su.setAutoCommit(true);
+                su.createStatement().execute(
+                    "CREATE ROLE " + role + " LOGIN PASSWORD '" + pass
+                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
+                su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO " + role);
+                su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + role);
+                su.createStatement().execute(
+                    "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
+                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
+                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
+                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+            }
+
+            var cfg = new com.zaxxer.hikari.HikariConfig();
+            cfg.setJdbcUrl(agedPg.getJdbcUrl());
+            cfg.setUsername(role);
+            cfg.setPassword(pass);
+            cfg.setMaximumPoolSize(2);
+            cfg.setPoolName("nexus-admin-aged-fk002-test");
+
+            try (var agedDs = new com.zaxxer.hikari.HikariDataSource(cfg)) {
+
+                // Phase B: migrate only up through fk-002-1 — the changeset that ADDS
+                // chunks_384_collection_fk NOT VALID — so the divergence can be injected
+                // BEFORE fk-002-7 gets a chance to run.
+                int changesetsThroughFk0021;
+                try (Connection conn = agedDs.getConnection()) {
+                    Database database = DatabaseFactory.getInstance()
+                        .findCorrectDatabaseImplementation(new JdbcConnection(conn));
+                    try (Liquibase liquibase = new Liquibase(
+                            "db/changelog/db.changelog-master.xml",
+                            new ClassLoaderResourceAccessor(),
+                            database)) {
+                        List<ChangeSet> unrun = liquibase.listUnrunChangeSets(
+                            new Contexts(), new LabelExpression());
+                        int idx = -1;
+                        for (int i = 0; i < unrun.size(); i++) {
+                            if ("fk-002-1".equals(unrun.get(i).getId())) {
+                                idx = i;
+                                break;
+                            }
+                        }
+                        assertThat(idx)
+                            .as("fk-002-1 must be present in the master changelog")
+                            .isGreaterThanOrEqualTo(0);
+                        changesetsThroughFk0021 = idx + 1;
+
+                        liquibase.update(changesetsThroughFk0021, new Contexts(), new LabelExpression());
+                    }
+                }
+
+                // Phase C: simulate the divergence — drop chunks_384_collection_fk right
+                // after fk-002-1 added it NOT VALID.
+                try (Connection conn = agedDs.getConnection()) {
+                    conn.createStatement().execute(
+                        "ALTER TABLE nexus.chunks_384 DROP CONSTRAINT chunks_384_collection_fk");
+                }
+
+                // Phase D: resume the rest of the migration chain (fk-002-2 onward,
+                // including fk-002-7's guarded precondition). This is the RED/GREEN
+                // hinge: before the fix, this throws MigrationException wrapping the
+                // Postgres "constraint ... does not exist" error; after the fix, it
+                // completes cleanly.
+                assertThatCode(() -> SchemaMigrator.migrate(agedDs))
+                    .as("migration must not crash-loop when chunks_384_collection_fk is "
+                        + "missing on an aged box")
+                    .doesNotThrowAnyException();
+
+                // Phase E: the other four fk-002 collection FKs must end up VALIDATED
+                // (each via its OWN independently-guarded changeset, fk-002-8..11);
+                // the dropped one must simply stay absent (never silently re-added,
+                // never fatal).
+                try (Connection conn = agedDs.getConnection()) {
+                    assertThat(constraintValidated(conn, "chunks_768_collection_fk"))
+                        .as("chunks_768_collection_fk must be validated despite "
+                            + "chunks_384's divergence")
+                        .isTrue();
+                    assertThat(constraintValidated(conn, "chunks_1024_collection_fk"))
+                        .as("chunks_1024_collection_fk must be validated despite "
+                            + "chunks_384's divergence")
+                        .isTrue();
+                    assertThat(constraintValidated(conn, "chash_index_collection_fk"))
+                        .as("chash_index_collection_fk must be validated despite "
+                            + "chunks_384's divergence")
+                        .isTrue();
+                    assertThat(constraintValidated(conn, "topic_assignments_collection_fk"))
+                        .as("topic_assignments_collection_fk must be validated despite "
+                            + "chunks_384's divergence")
+                        .isTrue();
+                    assertThat(constraintExists(conn, "chunks_384_collection_fk"))
+                        .as("the dropped chunks_384_collection_fk must remain absent, "
+                            + "not silently re-added")
+                        .isFalse();
+
+                    // Phase F: prove fk-002-7 was MARK_RAN, not soft-failed-and-still-pending
+                    // -- the property that actually distinguishes a genuine fix from a
+                    // regression back to bare/unguarded VALIDATE.
+                    assertThat(changesetExecType(conn, "fk-002-7", "nexus-70r3c.3",
+                            "db/changelog/fk-002-validate.xml"))
+                        .as("fk-002-7 must be recorded as MARK_RAN (skipped-and-marked, "
+                            + "never retried) -- not FAILED (which Liquibase never marks, "
+                            + "causing an every-boot re-attempt)")
+                        .isEqualTo("MARK_RAN");
+                }
+            }
+        } finally {
+            agedPg.stop();
+        }
+    }
+
+    // ── Test 9: happy path — fresh box validates all ten fk-002/fk-003 collection FKs ──
+
+    /**
+     * nexus-4m6i0.13 verification gate: the fk-002-7..11/fk-003-7..11 preConditions
+     * retrofit must not change happy-path behavior. On a fresh box where all ten
+     * collection FK constraints exist (the {@link #adminDs} fixture, already migrated
+     * end-to-end by {@code @Order(1)}), every one must end up {@code
+     * convalidated = true}.
+     */
+    @Test
+    @Order(9)
+    void freshBox_allTenFkCollectionConstraints_endUpValidated() throws Exception {
+        SchemaMigrator.migrate(adminDs); // defensive re-migrate; idempotent
+
+        try (Connection conn = adminDs.getConnection()) {
+            assertThat(constraintValidated(conn, "chunks_384_collection_fk")).isTrue();
+            assertThat(constraintValidated(conn, "chunks_768_collection_fk")).isTrue();
+            assertThat(constraintValidated(conn, "chunks_1024_collection_fk")).isTrue();
+            assertThat(constraintValidated(conn, "chash_index_collection_fk")).isTrue();
+            assertThat(constraintValidated(conn, "topic_assignments_collection_fk")).isTrue();
+            assertThat(constraintValidated(conn, "document_aspects_collection_fk")).isTrue();
+            assertThat(constraintValidated(conn, "aspect_extraction_queue_collection_fk")).isTrue();
+            assertThat(constraintValidated(conn, "topics_collection_fk")).isTrue();
+            assertThat(constraintValidated(conn, "taxonomy_meta_collection_fk")).isTrue();
+            assertThat(constraintValidated(conn, "document_highlights_collection_fk")).isTrue();
+        }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private Set<String> tablesInSchema(Connection conn, String schema) throws Exception {

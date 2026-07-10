@@ -111,11 +111,49 @@ ON CONFLICT (tenant_id, name) DO NOTHING;
         </rollback>
     </changeSet>
 
+    <!-- nexus-4m6i0.13 (2026-07-10): fk-003-7..11 below were shipped without a
+         precondition guard, identically to the ms57z/catalog-013-2 crash-loop class
+         (nexus-4m6i0.1) — a bare VALIDATE CONSTRAINT raises a hard Postgres ERROR on
+         any box where the constraint is missing, and because a failed changeset never
+         commits a DATABASECHANGELOG row, every subsequent boot re-hits the identical
+         failure. Each of these five changesets is checksum-immutable once executed
+         (already shipped), so the <sql> body cannot change; a whole-changeset
+         <preConditions onFail="MARK_RAN"> is added instead — verified checksum-neutral
+         against the pinned liquibase-core 4.29.0 sources (ChangeSet.generateCheckSum()
+         hashes only the <sql>/<changes> body and SqlVisitors, never preConditions), the
+         same fact nexus-4m6i0.1 relied on for catalog-013-2. Unlike catalog-013-2 (one
+         changeset validating five constraints, IN-list form), each fk-003-N changeset
+         here validates exactly ONE constraint, so the single-name
+         expectedResult="1" form is the correct shape. A genuine mismatch marks the
+         changeset ran (once, never retried) instead of hard-failing; a transient
+         connection/query error during the check itself still halts loudly (onError
+         defaults to HALT, left unset), so real infra failures are never mistaken for
+         "constraint missing."
+
+         NO catalog-013-3-style defensive re-validate changeset is needed here, and
+         one deliberately does NOT exist (nexus-4m6i0.13 review): catalog-013-3 is
+         load-bearing only because catalog-013-2 is one MONOLITHIC changeset whose
+         single IN-list precondition MARK_RANs ALL FIVE of its VALIDATEs when any one
+         constraint is missing — collateral damage a follow-up changeset must rescue.
+         fk-003-7..11 have no such coupling: each is its own changeset with its own
+         single-name precondition, so a missing constraint only ever skips ITS OWN
+         VALIDATE and the other four validate independently. (For the record:
+         re-VALIDATE of an already-valid constraint would be a fast no-op anyway —
+         PostgreSQL skips validation when pg_constraint.convalidated is already true;
+         see the ALTER TABLE docs' VALIDATE CONSTRAINT clause / ATExecValidateConstraint
+         in src/backend/commands/tablecmds.c — but "harmless" is not a reason to ship
+         an inert changeset with a misleading rationale.) -->
+
     <!-- ── Changeset fk-003-7: VALIDATE document_aspects_collection_fk ──────────── -->
     <changeSet id="fk-003-7" author="nexus-p9aw6">
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="1">SELECT COUNT(*) FROM pg_constraint WHERE conname = 'document_aspects_collection_fk'</sqlCheck>
+        </preConditions>
         <comment>
             VALIDATE document_aspects_collection_fk — retroactively check pre-existing rows
-            now that the gap-window reconcile has registered their collections.
+            now that the gap-window reconcile has registered their collections. Guarded by a
+            whole-changeset precondition (nexus-4m6i0.13): skips (marks ran, once) instead
+            of retrying forever when the constraint is genuinely, persistently missing.
         </comment>
         <sql splitStatements="true" stripComments="false">
 ALTER TABLE nexus.document_aspects VALIDATE CONSTRAINT document_aspects_collection_fk;
@@ -128,7 +166,10 @@ ALTER TABLE nexus.document_aspects VALIDATE CONSTRAINT document_aspects_collecti
 
     <!-- ── Changeset fk-003-8: VALIDATE aspect_extraction_queue_collection_fk ───── -->
     <changeSet id="fk-003-8" author="nexus-p9aw6">
-        <comment>VALIDATE aspect_extraction_queue_collection_fk.</comment>
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="1">SELECT COUNT(*) FROM pg_constraint WHERE conname = 'aspect_extraction_queue_collection_fk'</sqlCheck>
+        </preConditions>
+        <comment>VALIDATE aspect_extraction_queue_collection_fk. Guarded (nexus-4m6i0.13): see fk-003-7's comment.</comment>
         <sql splitStatements="true" stripComments="false">
 ALTER TABLE nexus.aspect_extraction_queue VALIDATE CONSTRAINT aspect_extraction_queue_collection_fk;
         </sql>
@@ -137,7 +178,10 @@ ALTER TABLE nexus.aspect_extraction_queue VALIDATE CONSTRAINT aspect_extraction_
 
     <!-- ── Changeset fk-003-9: VALIDATE topics_collection_fk ────────────────────── -->
     <changeSet id="fk-003-9" author="nexus-p9aw6">
-        <comment>VALIDATE topics_collection_fk.</comment>
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="1">SELECT COUNT(*) FROM pg_constraint WHERE conname = 'topics_collection_fk'</sqlCheck>
+        </preConditions>
+        <comment>VALIDATE topics_collection_fk. Guarded (nexus-4m6i0.13): see fk-003-7's comment.</comment>
         <sql splitStatements="true" stripComments="false">
 ALTER TABLE nexus.topics VALIDATE CONSTRAINT topics_collection_fk;
         </sql>
@@ -146,7 +190,10 @@ ALTER TABLE nexus.topics VALIDATE CONSTRAINT topics_collection_fk;
 
     <!-- ── Changeset fk-003-10: VALIDATE taxonomy_meta_collection_fk ────────────── -->
     <changeSet id="fk-003-10" author="nexus-p9aw6">
-        <comment>VALIDATE taxonomy_meta_collection_fk.</comment>
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="1">SELECT COUNT(*) FROM pg_constraint WHERE conname = 'taxonomy_meta_collection_fk'</sqlCheck>
+        </preConditions>
+        <comment>VALIDATE taxonomy_meta_collection_fk. Guarded (nexus-4m6i0.13): see fk-003-7's comment.</comment>
         <sql splitStatements="true" stripComments="false">
 ALTER TABLE nexus.taxonomy_meta VALIDATE CONSTRAINT taxonomy_meta_collection_fk;
         </sql>
@@ -155,14 +202,19 @@ ALTER TABLE nexus.taxonomy_meta VALIDATE CONSTRAINT taxonomy_meta_collection_fk;
 
     <!-- ── Changeset fk-003-11: VALIDATE document_highlights_collection_fk ──────── -->
     <changeSet id="fk-003-11" author="nexus-p9aw6">
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="1">SELECT COUNT(*) FROM pg_constraint WHERE conname = 'document_highlights_collection_fk'</sqlCheck>
+        </preConditions>
         <comment>
             VALIDATE document_highlights_collection_fk. Null-collection rows are skipped by
             MATCH SIMPLE and remain governed by the fk-001 catalog_documents cascade.
+            Guarded (nexus-4m6i0.13): see fk-003-7's comment.
         </comment>
         <sql splitStatements="true" stripComments="false">
 ALTER TABLE nexus.document_highlights VALIDATE CONSTRAINT document_highlights_collection_fk;
         </sql>
         <rollback/>
     </changeSet>
+
 
 </databaseChangeLog>
