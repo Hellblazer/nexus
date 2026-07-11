@@ -206,24 +206,30 @@ public final class SchemaMigrator {
                 }
 
                 long violatingCount;
-                boolean toggledForceOff = false;
+                boolean autoCommit = conn.getAutoCommit();
+                conn.setAutoCommit(false);
                 try {
                     try (Statement alter = conn.createStatement()) {
                         alter.execute("ALTER TABLE nexus." + table + " NO FORCE ROW LEVEL SECURITY");
                     }
-                    toggledForceOff = true;
                     try (PreparedStatement ps = conn.prepareStatement(
                             "SELECT COUNT(*) FROM nexus." + table + " WHERE length(chash) != 32");
                          ResultSet rs = ps.executeQuery()) {
                         rs.next();
                         violatingCount = rs.getLong(1);
                     }
-                } finally {
-                    if (toggledForceOff) {
-                        try (Statement alter = conn.createStatement()) {
-                            alter.execute("ALTER TABLE nexus." + table + " FORCE ROW LEVEL SECURITY");
-                        }
+                    try (Statement alter = conn.createStatement()) {
+                        alter.execute("ALTER TABLE nexus." + table + " FORCE ROW LEVEL SECURITY");
                     }
+                    conn.commit();
+                } catch (SQLException e) {
+                    // Postgres DDL is transactional: an uncommitted NO FORCE rolls back
+                    // with everything else, so a mid-block failure leaves FORCE RLS
+                    // exactly as it was found -- no separate restore step needed.
+                    conn.rollback();
+                    throw e;
+                } finally {
+                    conn.setAutoCommit(autoCommit);
                 }
 
                 if (violatingCount > 0) {
@@ -241,7 +247,9 @@ public final class SchemaMigrator {
             throw new MigrationException(
                 "chash-length preflight found present-but-violating constraint(s) — refusing to run "
                 + "Liquibase (would crash-loop on VALIDATE CONSTRAINT): " + String.join("; ", violations)
-                + ". Remediate the violating rows (see catalog-013 runbook) before retrying.",
+                + ". Remediate the violating rows per "
+                + "https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md"
+                + "#81-recovering-a-store-that-already-migrated-legacy-ids-nexus-pnwu0 before retrying.",
                 null);
         }
     }
