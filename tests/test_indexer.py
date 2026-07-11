@@ -441,7 +441,7 @@ def test_run_index_returns_rdr_stats(tmp_path):
 @pytest.mark.parametrize("rdr_indexed,expect", [(1, True), (0, False)])
 def test_index_repo_cmd_rdr_summary(tmp_path, rdr_indexed, expect):
     from click.testing import CliRunner; from nexus.cli import main
-    repo = tmp_path / "repo"; repo.mkdir()
+    repo = tmp_path / "repo"; repo.mkdir(); (repo / ".git").mkdir()
     stats = {"rdr_indexed": rdr_indexed, "rdr_current": 0, "rdr_failed": 0}
     runner = CliRunner()
     with patch("nexus.commands.index._registry_path", return_value=tmp_path / "r.json"), \

@@ -393,6 +393,20 @@ def index_repo_cmd(
     reg = _registry()
     path = path.resolve()
 
+    # nexus-git-guard: refuse a PATH with no .git (file or directory — a
+    # worktree's .git is a file). Without this, indexing the PARENT of many
+    # repos (e.g. ~/git instead of ~/git/myrepo) silently succeeds: git
+    # rev-parse fails, _resolve_main_repo falls back to using the path
+    # as-is, and a bogus owner named after the parent directory (e.g.
+    # "git") gets registered, sweeping in whatever unrelated content lives
+    # underneath it. Real incident 2026-07-10.
+    if not (path / ".git").exists():
+        raise click.ClickException(
+            f"{path} has no .git — this does not look like a repository "
+            "root. If you meant to index a specific repo, pass its path "
+            "directly (e.g. ~/git/myrepo, not ~/git)."
+        )
+
     from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — deliberate function-local import (matches existing deferred-import convention in this function)
     from nexus.logging_setup import open_run_log  # noqa: PLC0415 — deliberate function-local import (matches existing deferred-import convention in this function)
     _log_basename, _log_hash8 = _repo_identity(path)
