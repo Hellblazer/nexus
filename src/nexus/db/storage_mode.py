@@ -11,8 +11,11 @@ T2/T1 domain store.  The two backends are:
 Resolution precedence (narrowest wins):
   1. Per-store env var  ``NX_STORAGE_BACKEND_<STORE>=service|sqlite``
   2. Global env var     ``NX_STORAGE_BACKEND=service|sqlite``
-  3. Hard default       ``'service'`` (T1 scratch is the sole exception — it keeps
-                        its local backend default; see :func:`storage_backend_for`).
+  3. Hard default       ``'service'``; ``=sqlite`` is the opt-out. T1 scratch
+                        follows this same default (nexus-rn3wo.1: the earlier
+                        T1-only carve-out was removed once HttpScratchStore
+                        gained a CLI-dedicated session path — see
+                        :func:`nexus.db.t1.get_t1_database`).
 
 A config-file layer is reserved for Phase 2+ when the service is in broader
 use; it is not wired in this bead (nexus-gmiaf.4) to keep the seam minimal.
@@ -73,8 +76,8 @@ class StorageBackend(str, Enum):
 #:
 #: Matches the *eagerly constructed* attributes on
 #: :class:`nexus.db.t2.T2Database` plus ``catalog`` (lazily constructed via
-#: the ``catalog`` property) and ``t1`` (the T1 scratch tier, which gains
-#: Postgres backing in a later bead but is NOT a T2Database attribute).
+#: the ``catalog`` property) and ``t1`` (the T1 scratch tier, which has
+#: Postgres backing as of nexus-rn3wo.1 but is NOT a T2Database attribute).
 #:
 #: The canonical lower-case store identifier maps to the env var
 #: ``NX_STORAGE_BACKEND_<UPPER>`` (e.g. ``NX_STORAGE_BACKEND_MEMORY``).
@@ -94,7 +97,7 @@ VALID_STORE_NAMES: frozenset[str] = frozenset(
         "document_highlights",
         "aspect_queue",
         "catalog",
-        "t1",  # forward-declared: T1 scratch gains Postgres backing in a later bead
+        "t1",  # T1 scratch: Postgres-backed via HttpScratchStore (nexus-rn3wo.1)
     }
 )
 
@@ -166,17 +169,12 @@ def storage_backend_for(store: str) -> StorageBackend:
         return _parse_backend(global_raw, env_key=_GLOBAL_ENV)
 
     # 3. Hard default (RDR-152 nexus-fjwxh: SERVICE; =sqlite is the opt-out).
-    #    Exception: T1 scratch keeps its LOCAL backend as the hard default. Note
-    #    the StorageBackend.SQLITE enum is a generic "local, non-service" marker:
-    #    for the T2 stores that local backend is SQLite, but for T1 it is the
-    #    Chroma-backed T1Database (ephemeral / per-session chroma) — T1 has no
-    #    SQLite. T1's service backing is forward-declared/incomplete
-    #    (HttpScratchStore needs a minted session the CLI does not provision, so
-    #    service T1 is MCP-context-only). T1 still follows an explicit
-    #    per-store/global env flag above, so the eventual T1 cutover is just
-    #    removing this branch.
-    if canonical == "t1":
-        return StorageBackend.SQLITE  # generic "local" → T1Database (Chroma), not SQLite
+    #    nexus-rn3wo.1: T1 scratch follows the same SERVICE hard default as
+    #    every other store. The earlier T1-only carve-out to
+    #    StorageBackend.SQLITE (T1Database / ChromaDB) is removed now that
+    #    HttpScratchStore has a CLI-dedicated session path (a bare CLI mints
+    #    its own persisted session id; see
+    #    nexus.db.t1.get_t1_database / _cli_dedicated_session_id).
     return StorageBackend.SERVICE
 
 

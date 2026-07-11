@@ -70,6 +70,23 @@ def _build_dispatch_env(
         chroma (lifespan Branch 3). The subprocess gets a
         sealed-from-parent T1 session of its own. Internal Bash tools
         and sub-agents within the subprocess see consistent state.
+
+    nexus-5daww (defense in depth): both ``ephemeral`` and ``owned`` also
+    strip ``NX_T1_SESSION`` / ``NX_T1_SESSION_ID`` -- the SERVICE-backed T1
+    session-token pair minted by the top-level MCP's
+    ``_t1_chroma_lifespan`` Branch 0. Pre-fix, ``base = dict(os.environ)``
+    carried the parent's already-minted, LIVE token straight through to a
+    nested ``nx-mcp`` (spawned by a subsequent tool-granting dispatch, e.g.
+    ``nx_plan_audit`` / ``nx_enrich_beads``), whose own Branch 0 would
+    resolve the SAME session id via the still-passed-through
+    ``NX_SESSION_ID`` and either reuse or re-mint against it. Stripping the
+    token pair here means the child never even sees the parent's secret
+    directly in its env (reduced exposure surface); it is not sufficient
+    on its own to prevent a same-session re-mint since ``NX_SESSION_ID``
+    is deliberately still forwarded below for attribution -- the
+    session-level fix (a lease-file consult before mint) lives in
+    ``mcp.core._t1_chroma_lifespan`` Branch 0 (nexus-5daww) and is the
+    layer that actually prevents rotation.
     """
     if share_t1 and ephemeral:
         raise ValueError(
@@ -101,6 +118,10 @@ def _build_dispatch_env(
         # past this dispatch boundary; the subprocess only sees the
         # canonical NX_T1_ISOLATED.
         base.pop("NEXUS_SKIP_T1", None)
+        # nexus-5daww: never forward the parent's live SERVICE-backed T1
+        # session-token pair to a nested MCP subprocess.
+        base.pop("NX_T1_SESSION", None)
+        base.pop("NX_T1_SESSION_ID", None)
     else:
         # Owned: subprocess spawns its own T1. Strip any parent T1
         # signals so the lifespan's Branch 3 fires.
@@ -108,6 +129,10 @@ def _build_dispatch_env(
         base.pop("NX_T1_PORT", None)
         base.pop("NX_T1_ISOLATED", None)
         base.pop("NEXUS_SKIP_T1", None)
+        # nexus-5daww: never forward the parent's live SERVICE-backed T1
+        # session-token pair to a nested MCP subprocess.
+        base.pop("NX_T1_SESSION", None)
+        base.pop("NX_T1_SESSION_ID", None)
 
     if parent_session_id:
         base["NX_SESSION_ID"] = parent_session_id

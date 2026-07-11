@@ -35,22 +35,22 @@ def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
 # ── default: all stores resolve to 'service' (RDR-152 nexus-fjwxh flip) ───────
 
 
-# RDR-152 nexus-fjwxh: T1 scratch keeps its LOCAL backend as the hard default
-# (StorageBackend.SQLITE is the generic non-service marker — for T1 that local
-# backend is the Chroma-backed T1Database, NOT SQLite; T1's service backing is
-# forward-declared/incomplete). The nine T2 stores default to SERVICE. T1 still
-# follows an explicit per-store/global env flag.
+# nexus-rn3wo.1: T1 scratch no longer carves itself out of the SERVICE hard
+# default. HttpScratchStore gained a CLI-dedicated session path (see
+# nexus.db.t1.get_t1_database), so every VALID_STORE_NAMES entry — T1
+# included — follows the same three-tier resolution (per-store env -> global
+# env -> hard default SERVICE).
 def _expected_hard_default(store: str) -> StorageBackend:
-    return StorageBackend.SQLITE if store == "t1" else StorageBackend.SERVICE
+    return StorageBackend.SERVICE
 
 
 @pytest.mark.parametrize("store", VALID_STORE_NAMES)
 def test_default_is_service_for_every_store(
     store: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # RDR-152 nexus-fjwxh: the hard default flipped SQLITE → SERVICE (T3 parity),
-    # except T1 (forward-declared service backing). _clear_env delenvs the conftest
-    # sqlite-pin too, so this sees the true default.
+    # RDR-152 nexus-fjwxh: the hard default flipped SQLITE → SERVICE (T3 parity).
+    # nexus-rn3wo.1: T1 is no longer an exception. _clear_env delenvs the
+    # conftest sqlite-pin too, so this sees the true default.
     _clear_env(monkeypatch)
     assert storage_backend_for(store) == _expected_hard_default(store)
 

@@ -1,0 +1,981 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""TDD for the CLI-dedicated T1 session path (nexus-rn3wo.1).
+
+LOCKED design: T2 ``nexus/design-t1-service-local-cutover-2026-07-11.md``
+(twice-audited via ``nx_plan_audit``). A bare CLI invocation with no
+inherited live MCP session (``NX_T1_SESSION`` / ``NX_T1_SESSION_ID`` both
+unset) mints its OWN persisted, purpose-built session id — cached under
+``nexus_config_dir()`` — and uses it to mint a T1 session token via
+``HttpTokenStore.start_session``. This id is NEVER derived from
+``resolve_active_session_id()`` / ``NX_SESSION_ID`` / ``current_session``:
+that chain resolves a LIVE Claude session's id, and a bare CLI re-minting
+against it would rotate the live MCP server's token out from under it
+(``HttpTokenStore.start_session`` is ``ON CONFLICT DO UPDATE``).
+
+A second ``nx_plan_audit`` pass flagged a MEDIUM residual: two concurrent
+bare-CLI processes sharing the SAME dedicated id could each re-mint the
+session token, invalidating the other's in-flight token. The fix is a
+self-heal: on a 401 (``SESSION_UNAUTHORIZED_MARKER``) from the
+CLI-dedicated path, re-mint once and retry the failed operation before
+propagating.
+
+Test approach: an in-process fake HTTP server that implements BOTH the
+``/v1/sessions/start`` (token mint) and ``/v1/t1/*`` (scratch CRUD)
+contracts, with token validation on the T1 endpoints so 401 races can be
+simulated deterministically.
+"""
+
+from __future__ import annotations
+
+import json
+import socket
+import threading
+import uuid
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+SERVICE_TOKEN = "fake-cli-dedicated-service-token"
+
+# ── In-process fake service state (module-level, reset per test) ──────────────
+
+_SCRATCH: dict[str, dict[str, Any]] = {}
+_VALID_TOKENS: dict[str, str] = {}  # session_id -> currently-valid minted token
+_ALWAYS_401: set[str] = set()  # session_ids that always 401 on t1 ops (persistent-failure sim)
+_MINT_CALLS: list[str] = []  # session_ids passed to /v1/sessions/start, in call order
+_MINT_FAILS: bool = False  # nexus-c8yvj finding 2: simulate a broken NX_SERVICE_TOKEN (mint 403s)
+
+
+def _reset_fake_service_state() -> None:
+    _SCRATCH.clear()
+    _VALID_TOKENS.clear()
+    _ALWAYS_401.clear()
+    _MINT_CALLS.clear()
+    global _MINT_FAILS
+    _MINT_FAILS = False
+
+
+class _FakeHandler(BaseHTTPRequestHandler):
+    """Faithful-enough stub of the Java session-mint + T1-scratch contract."""
+
+    def log_message(self, fmt, *args):  # noqa: A002 — matches BaseHTTPRequestHandler signature
+        pass  # suppress test noise
+
+    def _send(self, status: int, body: Any) -> None:
+        self.send_response(status)
+        payload = json.dumps(body).encode()
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _read_body(self) -> dict[str, Any]:
+        length = int(self.headers.get("Content-Length", "0"))
+        return json.loads(self.rfile.read(length)) if length else {}
+
+    def _check_bearer(self) -> bool:
+        if self.headers.get("Authorization", "") != f"Bearer {SERVICE_TOKEN}":
+            self._send(401, {"error": "unauthorized"})
+            return False
+        return True
+
+    def do_POST(self):  # noqa: N802
+        path = self.path.split("?")[0]
+        body = self._read_body()
+
+        if path == "/v1/sessions/start":
+            if not self._check_bearer():
+                return
+            session_id = body["session_id"]
+            if _MINT_FAILS:
+                # nexus-c8yvj finding 2: simulate a server-level auth failure
+                # (e.g. a bad NX_SERVICE_TOKEN) -- a NON-bearer-check 403 so
+                # callers see the same httpx.HTTPStatusError shape
+                # raise_for_status() produces on any non-2xx.
+                self._send(403, {"error": "mint forbidden (simulated)"})
+                return
+            _MINT_CALLS.append(session_id)
+            token = f"tok-{session_id}-{uuid.uuid4().hex[:8]}"
+            _VALID_TOKENS[session_id] = token
+            self._send(
+                200,
+                {"session_token": token, "session_id": session_id, "expires_in_seconds": 3600},
+            )
+            return
+
+        if path == "/v1/sessions/close":
+            if not self._check_bearer():
+                return
+            session_id = body.get("session_id", "")
+            _VALID_TOKENS.pop(session_id, None)
+            self._send(200, {"closed": 1})
+            return
+
+        if path.startswith("/v1/t1/"):
+            if not self._check_bearer():
+                return
+            session_id = body.get("session_id", "")
+            session_header = self.headers.get("X-Nexus-T1-Session", "")
+            if session_id in _ALWAYS_401 or _VALID_TOKENS.get(session_id) != session_header:
+                self._send(401, {"error": "unauthorized"})
+                return
+            self._handle_t1(path, body)
+            return
+
+        self._send(404, {"error": "not found"})
+
+    def _handle_t1(self, path: str, body: dict[str, Any]) -> None:
+        if path == "/v1/t1/put":
+            id_ = body["id"]
+            _SCRATCH[id_] = {
+                "id": id_,
+                "content": body["content"],
+                "session_id": body["session_id"],
+                "tags": body.get("tags", ""),
+                "flagged": body.get("flagged", False),
+                "flush_project": body.get("flush_project") or "",
+                "flush_title": body.get("flush_title") or "",
+                "agent": body.get("agent") or "",
+                "access_count": 0,
+                "last_accessed": "",
+                "ts": "2026-07-11T00:00:00Z",
+            }
+            self._send(200, {"id": id_})
+        elif path == "/v1/t1/get":
+            id_ = body.get("id", "")
+            session = body.get("session_id", "")
+            entry = _SCRATCH.get(id_)
+            if entry is None or entry["session_id"] != session:
+                self._send(200, {"found": False})
+            else:
+                entry["access_count"] += 1
+                self._send(200, dict(entry))
+        elif path == "/v1/t1/list":
+            session = body.get("session_id", "")
+            entries = [e for e in _SCRATCH.values() if e["session_id"] == session]
+            self._send(200, {"entries": entries})
+        elif path == "/v1/t1/flagged":
+            session = body.get("session_id", "")
+            entries = [
+                e for e in _SCRATCH.values()
+                if e["session_id"] == session and e.get("flagged")
+            ]
+            self._send(200, {"entries": entries})
+        elif path == "/v1/t1/resolve_prefix":
+            prefix = body.get("prefix", "")
+            session = body.get("session_id", "")
+            matching = [
+                e["id"] for e in _SCRATCH.values()
+                if e["session_id"] == session and e["id"].startswith(prefix)
+            ]
+            self._send(200, {"ids": matching})
+        elif path == "/v1/t1/session/close":
+            session = body.get("session_id", "")
+            to_delete = [k for k, v in _SCRATCH.items() if v["session_id"] == session]
+            for k in to_delete:
+                del _SCRATCH[k]
+            self._send(200, {"deleted": len(to_delete)})
+        else:
+            self._send(404, {"error": "not found"})
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+@pytest.fixture
+def fake_service(monkeypatch: pytest.MonkeyPatch):
+    """Start the fake service; point the SERVICE backend env at it.
+
+    Every env var relevant to CLI-dedicated-path routing is reset here so
+    each test starts from "bare CLI, no inherited session" — the autouse
+    ``_isolate_t1_sessions`` fixture (conftest) sets ``NEXUS_SKIP_T1=1``
+    process-wide; tests in this file always delenv it (Path C otherwise
+    wins ahead of the SERVICE routing this module tests).
+    """
+    _reset_fake_service_state()
+    port = _free_port()
+    server = HTTPServer(("127.0.0.1", port), _FakeHandler)
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+
+    monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
+    monkeypatch.setenv("NX_SERVICE_PORT", str(port))
+    monkeypatch.setenv("NX_SERVICE_TOKEN", SERVICE_TOKEN)
+    monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+    monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+    monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
+    monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+    monkeypatch.delenv("NX_T1_SESSION", raising=False)
+    monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
+
+    yield f"http://127.0.0.1:{port}"
+    server.shutdown()
+
+
+@pytest.fixture
+def config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A fresh, empty config dir for the cache-file tests.
+
+    The conftest ``_isolate_config_dir`` autouse fixture already redirects
+    ``NEXUS_CONFIG_DIR`` per test; this fixture just hands back the resolved
+    path so assertions can inspect the cache file directly.
+    """
+    from nexus.config import nexus_config_dir
+
+    return nexus_config_dir()
+
+
+# ── Cache file: creation, reuse, race-safety ──────────────────────────────────
+
+
+class TestDedicatedIdCacheFile:
+    def test_created_on_first_use(self, fake_service, config_dir) -> None:
+        from nexus.db.t1 import get_t1_database
+
+        cache_path = config_dir / "t1_cli_dedicated_session"
+        assert not cache_path.exists()
+        get_t1_database()
+        assert cache_path.exists()
+        assert cache_path.read_text().strip()  # non-empty
+
+    def test_reused_across_separate_invocations(self, fake_service, config_dir) -> None:
+        """Two SEPARATE get_t1_database() calls (simulating two separate bare-CLI
+        process invocations) must resolve the SAME dedicated session id — this is
+        the continuity assertion the very first draft plan (fresh uuid4 per
+        invocation) lacked."""
+        from nexus.db.t1 import get_t1_database
+
+        store1 = get_t1_database()
+        store2 = get_t1_database()
+        assert store1.session_id == store2.session_id
+
+    def test_two_invocations_see_each_others_writes(self, fake_service, config_dir) -> None:
+        """Real continuity: a write from one get_t1_database() call is visible
+        to a second, independently-constructed get_t1_database() call."""
+        from nexus.db.t1 import get_t1_database
+
+        store1 = get_t1_database()
+        doc_id = store1.put("shared across bare-CLI invocations", tags="continuity")
+
+        store2 = get_t1_database()
+        entry = store2.get(doc_id)
+        assert entry is not None
+        assert entry["content"] == "shared across bare-CLI invocations"
+
+    def test_independent_of_resolve_active_session_id(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """The dedicated id must NEVER equal NX_SESSION_ID / current_session's
+        resolved id -- it is a separate, purpose-built identity namespace."""
+        monkeypatch.setenv("NX_SESSION_ID", "impostor-live-mcp-session")
+        from nexus.db.t1 import get_t1_database
+
+        store = get_t1_database()
+        assert store.session_id != "impostor-live-mcp-session"
+
+        cache_path = config_dir / "t1_cli_dedicated_session"
+        assert cache_path.read_text().strip() != "impostor-live-mcp-session"
+
+    def test_first_creation_race_is_safe(self, fake_service, config_dir) -> None:
+        """Two concurrent threads racing on first-use (no cache file yet) must
+        converge on the SAME id -- the fcntl-election + atomic-publish pattern,
+        not a last-write-wins clobber."""
+        from nexus.db.t1 import _cli_dedicated_session_id
+
+        results: list[str] = []
+        barrier = threading.Barrier(8)
+
+        def _worker() -> None:
+            barrier.wait()
+            results.append(_cli_dedicated_session_id(config_dir))
+
+        threads = [threading.Thread(target=_worker) for _ in range(8)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+
+        assert len(results) == 8
+        assert len(set(results)) == 1, f"race produced divergent ids: {set(results)}"
+
+
+# ── Live-MCP-session-present: unchanged behavior, no cache-file touch ─────────
+
+
+class TestLiveSessionInherited:
+    def test_does_not_touch_dedicated_cache_file(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """When NX_T1_SESSION/NX_T1_SESSION_ID are present (inherited live MCP
+        session), the factory must not read OR write the CLI-dedicated cache
+        file at all."""
+        # Seed a session token the inherited path can use directly.
+        import httpx
+
+        resp = httpx.post(
+            f"{fake_service}/v1/sessions/start",
+            json={"session_id": "live-mcp-session"},
+            headers={
+                "Authorization": f"Bearer {SERVICE_TOKEN}",
+                "X-Nexus-Tenant": "default",
+                "Content-Type": "application/json",
+            },
+        )
+        minted = resp.json()["session_token"]
+
+        monkeypatch.setenv("NX_T1_SESSION", minted)
+        monkeypatch.setenv("NX_T1_SESSION_ID", "live-mcp-session")
+
+        cache_path = config_dir / "t1_cli_dedicated_session"
+        assert not cache_path.exists()
+
+        from nexus.db.http_scratch_store import HttpScratchStore
+        from nexus.db.t1 import get_t1_database
+
+        result = get_t1_database()
+        assert isinstance(result, HttpScratchStore)
+        assert result.session_id == "live-mcp-session"
+        assert not cache_path.exists(), (
+            "inherited-session path must never read/write the CLI-dedicated cache file"
+        )
+
+
+# ── storage_backend_for: no more T1 special case ───────────────────────────────
+
+
+def test_storage_backend_for_t1_no_special_case(monkeypatch: pytest.MonkeyPatch) -> None:
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+
+    monkeypatch.delenv("NX_STORAGE_BACKEND_T1", raising=False)
+    monkeypatch.delenv("NX_STORAGE_BACKEND", raising=False)
+    assert storage_backend_for("t1") == StorageBackend.SERVICE
+
+
+# ── 401 self-heal: exactly one remint + retry ──────────────────────────────────
+
+
+class TestSelfHeal:
+    def test_stale_token_selfheals_and_recovers(self, fake_service, config_dir) -> None:
+        """Simulate a concurrent-CLI-race: after the store's token was minted,
+        a sibling process re-mints (rotating) the SAME dedicated session's
+        token before this store's next operation. The wrapper must re-mint
+        once and retry transparently -- the caller sees success, not a 401."""
+        from nexus.db.t1 import _cli_dedicated_session_id, get_t1_database
+
+        dedicated_id = _cli_dedicated_session_id(config_dir)
+        store = get_t1_database()
+        assert store.session_id == dedicated_id
+
+        # Simulate a racing sibling rotating the token out from under us.
+        rotate_calls_before = len(_MINT_CALLS)
+        import httpx
+
+        httpx.post(
+            f"{fake_service}/v1/sessions/start",
+            json={"session_id": dedicated_id},
+            headers={
+                "Authorization": f"Bearer {SERVICE_TOKEN}",
+                "X-Nexus-Tenant": "default",
+                "Content-Type": "application/json",
+            },
+        )
+        assert len(_MINT_CALLS) == rotate_calls_before + 1
+
+        # This store still holds the OLD (now-invalid) token -- put() must
+        # self-heal (re-mint once) and succeed anyway.
+        doc_id = store.put("selfheal probe content")
+        assert isinstance(doc_id, str)
+        assert store.get(doc_id)["content"] == "selfheal probe content"
+
+    def test_persistent_401_retries_exactly_once_then_raises(
+        self, fake_service, config_dir
+    ) -> None:
+        """A genuinely broken session (server always 401s regardless of token)
+        must fail after exactly one remint retry -- not loop forever."""
+        from nexus.db.http_scratch_store import SESSION_UNAUTHORIZED_MARKER
+        from nexus.db.t1 import _cli_dedicated_session_id, get_t1_database
+
+        dedicated_id = _cli_dedicated_session_id(config_dir)
+        _ALWAYS_401.add(dedicated_id)
+
+        store = get_t1_database()
+        mint_calls_before = len(_MINT_CALLS)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            store.put("this will never succeed")
+        assert SESSION_UNAUTHORIZED_MARKER in str(exc_info.value)
+
+        # Exactly one extra mint (the self-heal remint) -- not an unbounded retry loop.
+        assert len(_MINT_CALLS) == mint_calls_before + 1
+
+
+# ── Live-MCP-session lease (nexus-c8yvj finding 1) ─────────────────────────────
+#
+# A detached process (no NX_T1_SESSION/NX_T1_SESSION_ID inherited) that CAN
+# resolve a live session's id via resolve_active_session_id() (e.g.
+# NX_SESSION_ID env, mirroring the SessionEnd hook grandchild) must reach
+# THAT session's data via a published lease -- never the disjoint
+# CLI-dedicated identity, and never by re-minting (which would rotate the
+# live MCP's token out from under it).
+
+
+def _mint_live_session_token(fake_service: str, session_id: str) -> str:
+    """Mint a token directly against the fake service, simulating what
+    mcp/core.py's _t1_chroma_lifespan Branch 0 does for a live MCP session."""
+    import httpx
+
+    resp = httpx.post(
+        f"{fake_service}/v1/sessions/start",
+        json={"session_id": session_id},
+        headers={
+            "Authorization": f"Bearer {SERVICE_TOKEN}",
+            "X-Nexus-Tenant": "default",
+            "Content-Type": "application/json",
+        },
+    )
+    resp.raise_for_status()
+    return resp.json()["session_token"]
+
+
+class TestLiveSessionLease:
+    def test_publish_read_clear_roundtrip(self, tmp_path: Path) -> None:
+        """Unit-level: the lease helpers round-trip a token and clear cleanly."""
+        from nexus.db.t1 import (
+            clear_t1_session_lease,
+            publish_t1_session_lease,
+            read_t1_session_lease,
+        )
+
+        assert read_t1_session_lease("sess-1", tmp_path) is None
+
+        publish_t1_session_lease("sess-1", "secret-token", tmp_path)
+        assert read_t1_session_lease("sess-1", tmp_path) == "secret-token"
+        # A DIFFERENT session id must not see this lease.
+        assert read_t1_session_lease("sess-2", tmp_path) is None
+
+        clear_t1_session_lease("sess-1", tmp_path)
+        assert read_t1_session_lease("sess-1", tmp_path) is None
+        # Double-clear is a no-op, not an error.
+        clear_t1_session_lease("sess-1", tmp_path)
+
+    def test_lease_file_mode_is_0600(self, tmp_path: Path) -> None:
+        import stat
+
+        from nexus.db.t1 import _t1_session_lease_path, publish_t1_session_lease
+
+        publish_t1_session_lease("sess-perm", "secret-token", tmp_path)
+        path = _t1_session_lease_path("sess-perm", tmp_path)
+        mode = stat.S_IMODE(path.stat().st_mode)
+        assert mode == 0o600, f"expected 0o600, got {oct(mode)}"
+
+    def test_get_t1_database_uses_published_lease_over_cli_dedicated(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """A resolvable session id (NX_SESSION_ID, mirroring the SessionEnd
+        hook's resolve_active_session_id() chain) with a published lease
+        must resolve to THAT session -- not the CLI-dedicated identity --
+        and must NOT touch the CLI-dedicated cache file at all."""
+        from nexus.db.http_scratch_store import HttpScratchStore
+        from nexus.db.t1 import get_t1_database, publish_t1_session_lease
+
+        live_session_id = "live-mcp-session-c8yvj"
+        live_token = _mint_live_session_token(fake_service, live_session_id)
+        publish_t1_session_lease(live_session_id, live_token, config_dir)
+
+        monkeypatch.setenv("NX_SESSION_ID", live_session_id)
+
+        cache_path = config_dir / "t1_cli_dedicated_session"
+        assert not cache_path.exists()
+
+        result = get_t1_database()
+        assert isinstance(result, HttpScratchStore)
+        assert result.session_id == live_session_id
+        assert not cache_path.exists(), (
+            "the lease path must never read/write the CLI-dedicated cache file"
+        )
+
+    def test_hook_process_reads_same_data_live_mcp_wrote(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """End-to-end proof of the fix: a write made under the live MCP
+        session's own directly-constructed store (simulating in-MCP-process
+        writes) is visible to a SEPARATE get_t1_database() call that only
+        has NX_SESSION_ID set (simulating the detached SessionEnd hook
+        grandchild) via the published lease -- not silently empty."""
+        from nexus.db.http_scratch_store import HttpScratchStore
+        from nexus.db.t1 import get_t1_database, publish_t1_session_lease
+
+        live_session_id = "live-mcp-session-writer"
+        live_token = _mint_live_session_token(fake_service, live_session_id)
+        publish_t1_session_lease(live_session_id, live_token, config_dir)
+
+        live_store = HttpScratchStore(session_id=live_session_id, _session_token=live_token)
+        doc_id = live_store.put("written by the live MCP session", tags="c8yvj")
+
+        # Simulate the detached hook process: NX_T1_SESSION/NX_T1_SESSION_ID
+        # unset, only the on-disk-resolvable NX_SESSION_ID present.
+        monkeypatch.delenv("NX_T1_SESSION", raising=False)
+        monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
+        monkeypatch.setenv("NX_SESSION_ID", live_session_id)
+
+        hook_store = get_t1_database()
+        entry = hook_store.get(doc_id)
+        assert entry is not None, (
+            "the hook process must see the live session's data via the lease, "
+            "not silently read an empty, disjoint CLI-dedicated session"
+        )
+        assert entry["content"] == "written by the live MCP session"
+
+    def test_no_lease_falls_through_to_cli_dedicated(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """A resolvable session id with NO published lease (e.g. a stale
+        current_session pointer with no live MCP, or a live MCP that never
+        resolved a session id itself) must fall through to the unchanged
+        CLI-dedicated path -- not raise, not silently do nothing."""
+        from nexus.db.t1 import _CliDedicatedScratchStore, _cli_dedicated_session_id, get_t1_database
+
+        monkeypatch.setenv("NX_SESSION_ID", "resolvable-but-no-lease-published")
+
+        result = get_t1_database()
+        assert isinstance(result, _CliDedicatedScratchStore)
+        assert result.session_id == _cli_dedicated_session_id(config_dir)
+        assert result.session_id != "resolvable-but-no-lease-published"
+
+    def test_stale_lease_after_clear_falls_through(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """After clear_t1_session_lease (MCP teardown), a later process with
+        the same resolvable session id must fall through to CLI-dedicated,
+        not read a removed lease."""
+        from nexus.db.t1 import (
+            _CliDedicatedScratchStore,
+            _cli_dedicated_session_id,
+            clear_t1_session_lease,
+            get_t1_database,
+            publish_t1_session_lease,
+        )
+
+        live_session_id = "live-mcp-session-torn-down"
+        live_token = _mint_live_session_token(fake_service, live_session_id)
+        publish_t1_session_lease(live_session_id, live_token, config_dir)
+        clear_t1_session_lease(live_session_id, config_dir)
+
+        monkeypatch.setenv("NX_SESSION_ID", live_session_id)
+
+        result = get_t1_database()
+        assert isinstance(result, _CliDedicatedScratchStore)
+        assert result.session_id == _cli_dedicated_session_id(config_dir)
+
+    def test_stale_unlinked_lease_degrades_to_clean_runtime_error(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """A lease that outlives its session (live MCP crashed without
+        teardown, e.g. SIGKILL -- the token was never server-side revoked
+        so it is actually still valid here, but simulate the harsher case:
+        the server has since forgotten the token) surfaces as a plain
+        RuntimeError on first use, matching the pre-existing best-effort
+        "T1 unavailable, logged, flush skipped" contract -- not a crash."""
+        from nexus.db.http_scratch_store import SESSION_UNAUTHORIZED_MARKER
+        from nexus.db.t1 import get_t1_database, publish_t1_session_lease
+
+        live_session_id = "live-mcp-session-crashed"
+        publish_t1_session_lease(live_session_id, "no-longer-a-real-token", config_dir)
+        _ALWAYS_401.add(live_session_id)
+
+        monkeypatch.setenv("NX_SESSION_ID", live_session_id)
+
+        store = get_t1_database()
+        with pytest.raises(RuntimeError) as exc_info:
+            store.flagged_entries()
+        assert SESSION_UNAUTHORIZED_MARKER in str(exc_info.value)
+
+
+class TestSessionEndFlushViaLease:
+    """The actual regression this bead fixes: session_end_flush() (the
+    SessionEnd hook) must flush a flagged entry written under the live MCP
+    session, not silently report 0 because it read the disjoint
+    CLI-dedicated identity."""
+
+    def test_flagged_entry_is_flushed_via_published_lease(
+        self, fake_service, config_dir, monkeypatch, tmp_path
+    ) -> None:
+        from nexus.db.http_scratch_store import HttpScratchStore
+        from nexus.db.t1 import publish_t1_session_lease
+        from nexus.hooks import session_end_flush
+
+        # T1 only: keep T2 (memory.db / telemetry / expire) on its normal
+        # test-suite SQLite default -- the fake service in this file only
+        # implements the T1 + session-mint contract, not T2's. The global
+        # override from `fake_service` is per-store-overridable; T1 wins on
+        # the per-store var, T2 falls back to the (conftest-default) global.
+        monkeypatch.setenv("NX_STORAGE_BACKEND_T1", "service")
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
+
+        live_session_id = "live-mcp-session-flush"
+        live_token = _mint_live_session_token(fake_service, live_session_id)
+        publish_t1_session_lease(live_session_id, live_token, config_dir)
+
+        # Simulate the live MCP session's own in-process writes: a
+        # pre-flagged (persist=True) scratch entry, matching how a real
+        # ``nx scratch put --persist`` call flags on insert.
+        live_store = HttpScratchStore(session_id=live_session_id, _session_token=live_token)
+        live_store.put(
+            "flagged content that must reach T2",
+            persist=True,
+            flush_project="c8yvj_test_project",
+            flush_title="c8yvj_test_title",
+        )
+        assert len(live_store.flagged_entries()) == 1
+
+        # The SessionEnd hook: a detached process with NX_T1_SESSION/
+        # NX_T1_SESSION_ID unset, only NX_SESSION_ID resolvable.
+        monkeypatch.delenv("NX_T1_SESSION", raising=False)
+        monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
+        monkeypatch.setenv("NX_SESSION_ID", live_session_id)
+
+        def _no_daemon(**_kwargs):
+            from nexus.daemon.t2_client import T2DaemonNotReachableError
+            raise T2DaemonNotReachableError("no daemon in tests")
+
+        import unittest.mock as mock
+        with mock.patch("nexus.daemon.t2_client.make_t2_client", _no_daemon):
+            output = session_end_flush()
+
+        assert "Flushed 1" in output, (
+            f"expected the flagged entry to be flushed via the published lease, got: {output!r}"
+        )
+
+    def test_flush_still_reports_zero_without_a_lease_or_env(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """Sanity companion: with NO resolvable session id at all (the
+        original pre-rn3wo.1 'nothing to flush' case), the hook still
+        reports 0 without raising -- this asserts the fix is additive, not
+        a change to the no-session baseline."""
+        from nexus.hooks import session_end_flush
+
+        monkeypatch.setenv("NX_STORAGE_BACKEND_T1", "service")
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
+        monkeypatch.delenv("NX_T1_SESSION", raising=False)
+        monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+
+        def _no_daemon(**_kwargs):
+            from nexus.daemon.t2_client import T2DaemonNotReachableError
+            raise T2DaemonNotReachableError("no daemon in tests")
+
+        import unittest.mock as mock
+        with mock.patch("nexus.daemon.t2_client.make_t2_client", _no_daemon):
+            output = session_end_flush()
+
+        assert "Flushed 0" in output
+
+
+# ── Clean-error wrapping for HttpTokenStore.start_session (nexus-c8yvj finding 2) ──
+#
+# HttpTokenStore._post calls resp.raise_for_status(), which raises
+# httpx.HTTPStatusError on a non-2xx -- NOT a RuntimeError. Every downstream
+# handler meant to turn this into a clean click.ClickException
+# (_CliDedicatedScratchStore._call's `except RuntimeError`,
+# commands/scratch.py's _clean_service_errors) only catches RuntimeError, so
+# an unwrapped httpx error would propagate as a raw traceback instead.
+
+
+class TestMintErrorWrapping:
+    def test_construction_time_mint_failure_raises_runtime_error(
+        self, fake_service, config_dir
+    ) -> None:
+        """get_t1_database()'s CLI-dedicated construction-time mint must
+        wrap a non-RuntimeError mint failure (e.g. httpx.HTTPStatusError
+        from a bad NX_SERVICE_TOKEN) as a clean RuntimeError."""
+        import httpx
+
+        from nexus.db.t1 import get_t1_database
+
+        global _MINT_FAILS
+        _MINT_FAILS = True
+        try:
+            with pytest.raises(RuntimeError) as exc_info:
+                get_t1_database()
+            assert not isinstance(exc_info.value, httpx.HTTPStatusError)
+        finally:
+            _MINT_FAILS = False
+
+    def test_remint_failure_raises_runtime_error_not_httpx_error(
+        self, fake_service, config_dir
+    ) -> None:
+        """_CliDedicatedScratchStore._remint()'s re-mint (triggered by a
+        self-heal 401) must ALSO wrap a non-RuntimeError mint failure as a
+        clean RuntimeError, not let it propagate raw past _call's
+        `except RuntimeError`."""
+        import httpx
+
+        from nexus.db.t1 import _cli_dedicated_session_id, get_t1_database
+
+        dedicated_id = _cli_dedicated_session_id(config_dir)
+        store = get_t1_database()
+        assert store.session_id == dedicated_id
+
+        # Force the self-heal path (stale token) AND make the re-mint itself
+        # fail server-side (simulated broken auth discovered mid-session).
+        _ALWAYS_401.add(dedicated_id)
+        global _MINT_FAILS
+        _MINT_FAILS = True
+        try:
+            with pytest.raises(RuntimeError) as exc_info:
+                store.put("this remint must fail cleanly")
+            assert not isinstance(exc_info.value, httpx.HTTPStatusError)
+        finally:
+            _MINT_FAILS = False
+
+
+# ── mcp/core.py Branch 0 wiring: publish-on-mint, clear-on-teardown ────────────
+#
+# The lease helpers and get_t1_database()'s consumption of them are covered
+# above; this class proves the OTHER half -- that _t1_chroma_lifespan's
+# Branch 0 (the live MCP session's own mint path) actually calls
+# publish_t1_session_lease / clear_t1_session_lease at the right times, not
+# just that the helpers work in isolation. code-review-expert previously
+# caught a real wiring gap in this exact function (the NX_T1_ISOLATED HIGH
+# finding on nexus-rn3wo.1's first pass), so the wiring itself -- not only
+# the helper functions -- needs its own regression lock.
+
+
+class TestMcpCoreLeaseWiring:
+    @pytest.fixture(autouse=True)
+    def _reset_branch0_shutdown_state(self):
+        """nexus-5daww: Branch 0's normal post-yield teardown now routes
+        through the SAME ``_t1_chroma_shutdown()`` used by Branch 3 / SIGTERM
+        / atexit, which sets the module-sticky ``_SHUTDOWN_IN_FLIGHT`` flag
+        ("once set, never cleared: shutdown is one-shot per process") and
+        clears ``_OWNED_T1_SESSION``. Without a per-test reset, the FIRST
+        test in this class to exercise a real mint+teardown would leave
+        ``_SHUTDOWN_IN_FLIGHT=True`` for the rest of the test process, and
+        every later test's ``_t1_chroma_shutdown()`` call would silently
+        no-op (lease never cleared, token never closed) -- mirroring the
+        existing save/restore idiom in
+        ``tests/test_t1_discovery.py::test_sigterm_path_cleans_up_via_owned_chroma``.
+        """
+        from nexus.mcp import core as mcp_core
+
+        prev_inflight = mcp_core._SHUTDOWN_IN_FLIGHT
+        prev_owned_session = dict(mcp_core._OWNED_T1_SESSION)
+        mcp_core._SHUTDOWN_IN_FLIGHT = False
+        mcp_core._OWNED_T1_SESSION.clear()
+        try:
+            yield
+        finally:
+            mcp_core._SHUTDOWN_IN_FLIGHT = prev_inflight
+            mcp_core._OWNED_T1_SESSION.clear()
+            mcp_core._OWNED_T1_SESSION.update(prev_owned_session)
+
+    def test_branch0_publishes_lease_on_mint_and_clears_on_teardown(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        import asyncio
+        import os as _os_mod
+
+        from nexus.db.t1 import _t1_session_lease_path, read_t1_session_lease
+        from nexus.mcp import core as mcp_core
+
+        live_session_id = "mcp-branch0-wiring-test"
+        monkeypatch.setattr(
+            "nexus.session.resolve_active_session_id", lambda: live_session_id
+        )
+
+        lease_path = _t1_session_lease_path(live_session_id, config_dir)
+        assert not lease_path.exists()
+
+        seen: dict[str, str | None] = {"lease_token": None, "env_token": None}
+
+        async def _run() -> None:
+            async with mcp_core._t1_chroma_lifespan(None):
+                assert lease_path.exists(), (
+                    "Branch 0 must publish the lease during the live session, "
+                    "before yield"
+                )
+                seen["lease_token"] = read_t1_session_lease(live_session_id, config_dir)
+                seen["env_token"] = _os_mod.environ.get("NX_T1_SESSION")
+
+        asyncio.run(_run())
+
+        assert seen["lease_token"] is not None
+        assert seen["lease_token"] == seen["env_token"], (
+            "the published lease must carry the SAME token the live MCP "
+            "session minted for itself"
+        )
+        assert not lease_path.exists(), (
+            "Branch 0 teardown must clear the lease so a later process never "
+            "reads a stale one"
+        )
+
+    def test_nested_mcp_with_inherited_token_does_not_remint(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """nexus-5daww CRITICAL repro: a nested `nx-mcp` subprocess that
+        inherited an ALREADY-LIVE NX_T1_SESSION/NX_T1_SESSION_ID from its
+        parent (e.g. via operators.dispatch.claude_dispatch's tool-granting
+        env, pre-defense-in-depth-strip) must use that token AS-IS -- never
+        call HttpTokenStore.start_session again for the same session id,
+        which would rotate (ON CONFLICT DO UPDATE) the parent's live token
+        out from under it.
+        """
+        import asyncio
+        import os as _os_mod
+
+        from nexus.mcp import core as mcp_core
+
+        live_session_id = "mcp-nested-inherited-test"
+
+        # Simulate the PARENT having already minted (first Branch 0 pass).
+        import httpx
+
+        resp = httpx.post(
+            f"{fake_service}/v1/sessions/start",
+            json={"session_id": live_session_id},
+            headers={
+                "Authorization": f"Bearer {SERVICE_TOKEN}",
+                "X-Nexus-Tenant": "default",
+                "Content-Type": "application/json",
+            },
+        )
+        parent_token = resp.json()["session_token"]
+        mint_calls_before = len(_MINT_CALLS)
+
+        # Simulate the NESTED subprocess inheriting the parent's env verbatim
+        # (the pre-fix / no-defense-in-depth scenario).
+        monkeypatch.setenv("NX_T1_SESSION", parent_token)
+        monkeypatch.setenv("NX_T1_SESSION_ID", live_session_id)
+        monkeypatch.setattr(
+            "nexus.session.resolve_active_session_id", lambda: live_session_id
+        )
+
+        async def _run() -> None:
+            async with mcp_core._t1_chroma_lifespan(None):
+                # The inherited token must be left untouched, in place.
+                assert _os_mod.environ.get("NX_T1_SESSION") == parent_token
+
+        asyncio.run(_run())
+
+        assert len(_MINT_CALLS) == mint_calls_before, (
+            "a nested MCP inheriting a live token must NEVER call "
+            "HttpTokenStore.start_session again for the same session id"
+        )
+        # The nested process does not own the session -- its exit must not
+        # revoke the parent's still-live token.
+        assert _VALID_TOKENS.get(live_session_id) == parent_token, (
+            "a nested MCP that only borrowed an inherited token must not "
+            "close/revoke it on its own exit -- it does not own the session"
+        )
+
+    def test_resolved_session_with_published_lease_does_not_remint(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """nexus-5daww defense-in-depth: even WITHOUT a directly-inherited
+        NX_T1_SESSION (e.g. operators.dispatch's env-stripping fix removed
+        it), a nested MCP that resolves the SAME session id as a live
+        ancestor must consult the ancestor's PUBLISHED LEASE
+        (nexus-c8yvj's publish_t1_session_lease / read_t1_session_lease)
+        before minting -- and must NOT mint when a live lease is found.
+        """
+        import asyncio
+
+        from nexus.db.t1 import publish_t1_session_lease
+        from nexus.mcp import core as mcp_core
+
+        live_session_id = "mcp-leased-no-inherit-test"
+
+        # Simulate an ancestor's successful mint + lease publish.
+        import httpx
+
+        resp = httpx.post(
+            f"{fake_service}/v1/sessions/start",
+            json={"session_id": live_session_id},
+            headers={
+                "Authorization": f"Bearer {SERVICE_TOKEN}",
+                "X-Nexus-Tenant": "default",
+                "Content-Type": "application/json",
+            },
+        )
+        ancestor_token = resp.json()["session_token"]
+        publish_t1_session_lease(live_session_id, ancestor_token, config_dir)
+        mint_calls_before = len(_MINT_CALLS)
+
+        # NO inherited NX_T1_SESSION / NX_T1_SESSION_ID in env (the
+        # defense-in-depth-stripped scenario) -- only a resolvable session id.
+        monkeypatch.delenv("NX_T1_SESSION", raising=False)
+        monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
+        monkeypatch.setattr(
+            "nexus.session.resolve_active_session_id", lambda: live_session_id
+        )
+
+        seen: dict[str, str | None] = {"env_token": None}
+
+        async def _run() -> None:
+            async with mcp_core._t1_chroma_lifespan(None):
+                import os as _os_mod
+                seen["env_token"] = _os_mod.environ.get("NX_T1_SESSION")
+
+        asyncio.run(_run())
+
+        assert len(_MINT_CALLS) == mint_calls_before, (
+            "a resolvable session id with a LIVE published lease must "
+            "reuse that lease's token, never mint a competing one"
+        )
+        assert seen["env_token"] == ancestor_token
+
+    def test_sigterm_before_normal_exit_revokes_token_and_clears_lease(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """The second nexus-5daww CRITICAL: `_t1_chroma_shutdown()` must
+        close the Branch-0-minted token and clear its lease even when
+        invoked from a SIGTERM / atexit path that never resumes the paused
+        lifespan generator past its `yield` (the documented NORMAL stdio
+        shutdown path -- `_sigterm_handler` calls `os._exit(0)` right after
+        `_t1_chroma_shutdown()`). Simulated here by calling
+        `_t1_chroma_shutdown()` directly from INSIDE the `async with` block,
+        before ever letting the lifespan's own post-yield teardown run.
+        """
+        import asyncio
+
+        from nexus.db.t1 import _t1_session_lease_path, read_t1_session_lease
+        from nexus.mcp import core as mcp_core
+
+        live_session_id = "mcp-sigterm-branch0-test"
+        monkeypatch.setattr(
+            "nexus.session.resolve_active_session_id", lambda: live_session_id
+        )
+
+        lease_path = _t1_session_lease_path(live_session_id, config_dir)
+
+        async def _run() -> None:
+            async with mcp_core._t1_chroma_lifespan(None):
+                assert lease_path.exists()
+                assert _VALID_TOKENS.get(live_session_id) is not None
+
+                # SIGTERM-equivalent: the signal handler / atexit path calls
+                # this directly, WITHOUT the generator ever resuming past
+                # this yield.
+                mcp_core._t1_chroma_shutdown()
+
+                assert not lease_path.exists(), (
+                    "SIGTERM path must clear the lease file, not just the "
+                    "normal async-exit teardown"
+                )
+                assert _VALID_TOKENS.get(live_session_id) is None, (
+                    "SIGTERM path must revoke the minted token server-side, "
+                    "not just the normal async-exit teardown"
+                )
+                assert read_t1_session_lease(live_session_id, config_dir) is None
+
+            # Exiting the `async with` now runs the lifespan's own finally,
+            # which must be idempotent (no error, no double-close) since
+            # `_t1_chroma_shutdown` already ran and cleared its state.
+
+        asyncio.run(_run())

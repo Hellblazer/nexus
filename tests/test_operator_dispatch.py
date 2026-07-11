@@ -468,6 +468,65 @@ class TestSubprocessContract:
         assert result == payload
 
 
+# ── nexus-5daww: _build_dispatch_env must not forward a live T1 session ─────
+#
+# operators.dispatch.claude_dispatch's `ephemeral=True` mode (the default,
+# used by RDR-080 tool grants such as nx_plan_audit / nx_enrich_beads) spawns
+# a nested `nx-mcp`. Pre-fix, `_build_dispatch_env` copied `os.environ`
+# verbatim except for a short explicit-strip list that did NOT include
+# NX_T1_SESSION / NX_T1_SESSION_ID -- so a PARENT nx-mcp's already-minted,
+# LIVE SERVICE-backed T1 session token leaked straight through to the child's
+# env. The child's own `_t1_chroma_lifespan` Branch 0 would then resolve the
+# SAME session id (via the still-forwarded NX_SESSION_ID) and either directly
+# reuse the leaked token to mint a REPLACEMENT (before the mcp/core.py fix)
+# or, worse, invalidate the parent's live token via
+# HttpTokenStore.start_session's ON CONFLICT DO UPDATE rotation. This class
+# locks the defense-in-depth half of the fix: the child must never even see
+# the parent's token pair in its own env, in both `ephemeral` and `owned`
+# dispatch modes.
+
+class TestBuildDispatchEnvStripsT1Session:
+    def test_ephemeral_strips_inherited_t1_session_pair(self, monkeypatch) -> None:
+        from nexus.operators.dispatch import _build_dispatch_env
+
+        monkeypatch.setenv("NX_T1_SESSION", "live-parent-token")
+        monkeypatch.setenv("NX_T1_SESSION_ID", "live-parent-session")
+
+        env = _build_dispatch_env(ephemeral=True, parent_session_id="live-parent-session")
+
+        assert "NX_T1_SESSION" not in env, (
+            "a nested MCP subprocess must never inherit the parent's live "
+            "SERVICE-backed T1 session token"
+        )
+        assert "NX_T1_SESSION_ID" not in env
+
+    def test_owned_strips_inherited_t1_session_pair(self, monkeypatch) -> None:
+        from nexus.operators.dispatch import _build_dispatch_env
+
+        monkeypatch.setenv("NX_T1_SESSION", "live-parent-token")
+        monkeypatch.setenv("NX_T1_SESSION_ID", "live-parent-session")
+
+        env = _build_dispatch_env()  # owned: neither share_t1 nor ephemeral
+
+        assert "NX_T1_SESSION" not in env
+        assert "NX_T1_SESSION_ID" not in env
+
+    def test_ephemeral_still_forwards_nx_session_id_for_attribution(
+        self, monkeypatch
+    ) -> None:
+        """The GENERAL NX_SESSION_ID (distinct from the T1-specific
+        NX_T1_SESSION_ID) is deliberately still forwarded for attribution --
+        only the T1 session-token pair is stripped."""
+        from nexus.operators.dispatch import _build_dispatch_env
+
+        monkeypatch.setenv("NX_T1_SESSION", "live-parent-token")
+        monkeypatch.setenv("NX_T1_SESSION_ID", "live-parent-session")
+
+        env = _build_dispatch_env(ephemeral=True, parent_session_id="live-parent-session")
+
+        assert env.get("NX_SESSION_ID") == "live-parent-session"
+
+
 # ── Error handling ─────────────────────────────────────────────────────────
 
 class TestErrorHandling:

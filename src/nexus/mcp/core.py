@@ -128,6 +128,17 @@ import os as _os
 #: cannot fire.
 _OWNED_CHROMA: dict[str, Any] = {}
 
+#: nexus-5daww: module-scope state for the SERVICE-backed T1 session minted
+#: by the lifespan Branch 0 (Postgres-service path). Populated with
+#: ``{"session_id": ...}`` right after a successful mint, cleared by
+#: :func:`_t1_session_shutdown`. Branch-0 counterpart to ``_OWNED_CHROMA``:
+#: Branch 0 and Branch 3 are mutually exclusive per process, so at most one
+#: of these two dicts is ever non-empty. Exists so the SIGTERM / atexit path
+#: (which cannot resume the paused lifespan generator past its ``yield``)
+#: can still revoke the minted token and clear its lease file instead of
+#: leaking both.
+_OWNED_T1_SESSION: dict[str, Any] = {}
+
 #: Sticky flag set by :func:`_t1_chroma_shutdown` on first entry so a
 #: signal arriving mid-cleanup (the production stdin-EOF + SIGTERM
 #: race that produced spurious ``mcp_server_crashed`` events on every
@@ -376,6 +387,27 @@ async def _t1_chroma_lifespan(_app: Any):
         _svc_log = _structlog.get_logger(__name__)
         _svc_log.info("t1_service_path_active", backend="service")
 
+        # nexus-5daww (round-4 CRITICAL): an inherited, ALREADY-LIVE token in
+        # NX_T1_SESSION -- e.g. a nested `nx-mcp` subprocess spawned by
+        # operators.dispatch.claude_dispatch's tool-granting env
+        # (_build_dispatch_env copies the PARENT's os.environ verbatim except
+        # for a few explicitly-stripped keys; NX_T1_SESSION/NX_T1_SESSION_ID
+        # were not among them) -- must be used AS-IS: never re-minted
+        # (HttpTokenStore.start_session is ON CONFLICT DO UPDATE and rotates,
+        # which would invalidate the owning ancestor's live token out from
+        # under it) and never torn down by this process on exit (it does not
+        # own the session). Mirrors get_t1_database()'s own
+        # has_inherited_session short-circuit (db/t1.py) and sibling Branch 1
+        # (NX_T1_HOST/PORT) below, which already treats "parent owns it" as a
+        # plain yield/return.
+        if _os.environ.get("NX_T1_SESSION", "").strip():
+            _svc_log.info(
+                "t1_session_inherited_no_mint",
+                session_id=_os.environ.get("NX_T1_SESSION_ID", "").strip(),
+            )
+            yield
+            return
+
         # Phase D (bead nexus-gmiaf.32.4): mint a per-session token at session start.
         # Set NX_T1_SESSION to the minted secret (the X-Nexus-T1-Session header value) and
         # NX_T1_SESSION_ID to the session id (body + flush-title). Sub-agents inherit both
@@ -393,20 +425,58 @@ async def _t1_chroma_lifespan(_app: Any):
             or _os.environ.get("NX_T1_SESSION_ID", "").strip()
             or _os.environ.get("NX_T1_SESSION", "").strip()
         )
+
+        # nexus-5daww defense-in-depth: even without a DIRECTLY-inherited
+        # NX_T1_SESSION (e.g. operators.dispatch._build_dispatch_env's
+        # ephemeral/owned modes now strip it -- see dispatch.py), the
+        # resolved session id may already have a LIVE lease published by an
+        # ancestor's Branch 0 mint (nexus-c8yvj's publish_t1_session_lease /
+        # read_t1_session_lease -- the SAME mechanism the SessionEnd hook and
+        # get_t1_database()'s detached-process path already use to reach a
+        # live MCP session without re-minting). Consult it BEFORE minting so
+        # a nested MCP that resolves the SAME session id as a live ancestor
+        # (NX_SESSION_ID is intentionally still passed through dispatch for
+        # attribution) borrows the existing token instead of rotating it out
+        # from under that ancestor.
+        if _t1_session_id and _t1_session_id != "unknown":
+            from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+            from nexus.db.t1 import read_t1_session_lease  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+            _leased_token = read_t1_session_lease(_t1_session_id, nexus_config_dir())
+            if _leased_token:
+                _os.environ["NX_T1_SESSION"] = _leased_token
+                _os.environ["NX_T1_SESSION_ID"] = _t1_session_id
+                _svc_log.info("t1_session_leased_no_mint", session_id=_t1_session_id)
+                yield
+                return
+
         if not _t1_session_id or _t1_session_id == "unknown":
             # No resolvable session id — do NOT mint a shared "unknown" row (concurrent
             # MCPs would collide on the (tenant, session_id) UPSERT, each invalidating
             # the other's token). We leave NX_T1_SESSION untouched: a sub-agent that
             # inherited a LIVE minted token from its parent keeps working (require-minted
-            # is satisfied by the inherited token). With no inherited token, T1 scratch is
-            # unavailable this process — HttpScratchStore raises on first use (fail-loud),
-            # and a stale inherited token gets a server-side 401. There is no degraded
-            # client-side-only isolation path anymore (Phase E retired it).
+            # is satisfied by the inherited token).
+            #
+            # nexus-rn3wo.1 (code-review HIGH finding): with no inherited token, T1
+            # scratch used to be "unavailable this process" because the pre-rn3wo.1
+            # get_t1_database() had no fallback and HttpScratchStore() raised on first
+            # use with neither env var set (fail-loud). Since rn3wo.1, get_t1_database()
+            # treats "both env vars unset" as "bare CLI, mint my own CLI-dedicated
+            # session" — which would silently pull an unresolvable-session MCP process
+            # into the SAME shared CLI-dedicated identity as every bare `nx scratch`
+            # invocation, a session-isolation regression across a boundary this code
+            # explicitly treats as security-relevant. Force NX_T1_ISOLATED=1 instead:
+            # get_t1_database()'s explicit-isolation escape hatch wins over backend
+            # routing (nexus-h8rf6) and returns a private, non-shared, in-process
+            # ephemeral T1Database — strictly safer than either raising (breaks the
+            # MCP session outright) or silently sharing identity with unrelated bare-CLI
+            # callers.
             _t1_session_id = ""
+            _os.environ["NX_T1_ISOLATED"] = "1"
             _svc_log.warning(
                 "t1_session_unresolved", reason="no_resolvable_session",
                 msg="no session id to mint; T1 scratch uses an inherited token if live, "
-                "else is unavailable this process")
+                "else falls back to private in-process ephemeral scratch "
+                "(NX_T1_ISOLATED=1) rather than sharing the CLI-dedicated identity")
         else:
             try:
                 from nexus.db.t2.http_token_store import HttpTokenStore  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
@@ -415,6 +485,11 @@ async def _t1_chroma_lifespan(_app: Any):
                 _os.environ["NX_T1_SESSION"] = _minted["session_token"]
                 _os.environ["NX_T1_SESSION_ID"] = _t1_session_id
                 _svc_log.info("t1_session_isolation_minted", session_id=_t1_session_id)
+                # nexus-5daww: track for `_t1_chroma_shutdown`'s Branch-0
+                # handling so a raw SIGTERM / atexit (which cannot resume
+                # this paused generator past `yield`) still revokes the
+                # token and clears the lease file instead of leaking both.
+                _OWNED_T1_SESSION["session_id"] = _t1_session_id
             except Exception as _exc:
                 # Fail loud (Phase E require-minted): a bare-id fallback would 401 on
                 # every scratch op now that the bootstrap session path is retired, and
@@ -429,25 +504,49 @@ async def _t1_chroma_lifespan(_app: Any):
                     "(Phase E require-minted)."
                 ) from _exc
 
-        yield
-        # Teardown: close the scratch rows AND delete the minted session token.
-        try:
-            from nexus.db.http_scratch_store import HttpScratchStore  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
-            _svc_log.info("t1_service_session_close_start")
-            store = HttpScratchStore()
-            deleted = store.close_session()
-            store.close()
-            _svc_log.info("t1_service_session_close_done", deleted=deleted)
-        except Exception as _exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
-            _svc_log.warning("t1_service_session_close_failed", error=str(_exc))
-        if _t1_session_id:
+            # nexus-c8yvj: publish the just-minted (session_id, session_token)
+            # to a lease file so a DETACHED process with no inherited env --
+            # most notably the SessionEnd hook (nexus.hooks.session_end_flush),
+            # which runs as a separate OS process launched by
+            # nx-session-end-launcher and never sees the mutation above --
+            # can reach this SAME session via nexus.db.t1.read_t1_session_lease
+            # instead of silently falling into the disjoint CLI-dedicated
+            # identity. Best-effort: a publish failure loses the hook's
+            # convenience lease (same "logged, flush skipped" degradation the
+            # hook already tolerates for the pre-existing stdin-EOF race) but
+            # must never fail an already-successful mint / session startup.
             try:
-                from nexus.db.t2.http_token_store import HttpTokenStore  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
-                with HttpTokenStore() as _ts:
-                    _ts.close_session(_t1_session_id)
-                _svc_log.info("t1_session_token_closed", session_id=_t1_session_id)
+                from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+                from nexus.db.t1 import publish_t1_session_lease  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+                publish_t1_session_lease(_t1_session_id, _minted["session_token"], nexus_config_dir())
+            except Exception as _exc:  # noqa: BLE001 — boundary catch; best-effort lease, must not crash an already-successful mint
+                _svc_log.warning("t1_session_lease_publish_failed", session_id=_t1_session_id, error=str(_exc))
+
+        try:
+            yield
+        finally:
+            # Teardown: close the scratch rows (best-effort promptness;
+            # backstopped by the service's 24h TTL sweep), then route the
+            # session-token close + lease clear through the SAME idempotent
+            # `_t1_chroma_shutdown()` used by Branch 3 and the SIGTERM /
+            # atexit paths (nexus-5daww). Before this fix the lease-clear +
+            # token-close lived ONLY here -- inline, reachable solely via a
+            # normal `async with` exit -- so a raw SIGTERM (the documented
+            # NORMAL stdio shutdown path; `_sigterm_handler` calls
+            # `os._exit(0)` right after `_t1_chroma_shutdown()` without ever
+            # resuming this paused generator past `yield`) leaked BOTH an
+            # unrevoked, still-valid server-side session token AND its 0600
+            # lease file on every SIGTERM'd session.
+            try:
+                from nexus.db.http_scratch_store import HttpScratchStore  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+                _svc_log.info("t1_service_session_close_start")
+                store = HttpScratchStore()
+                deleted = store.close_session()
+                store.close()
+                _svc_log.info("t1_service_session_close_done", deleted=deleted)
             except Exception as _exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
-                _svc_log.warning("t1_session_token_close_failed", error=str(_exc))
+                _svc_log.warning("t1_service_session_close_failed", error=str(_exc))
+            _t1_chroma_shutdown()
         return
 
     if _os.environ.get("NX_T1_HOST", "").strip() and _os.environ.get("NX_T1_PORT", "").strip():
@@ -572,14 +671,59 @@ async def _t1_chroma_lifespan(_app: Any):
         _t1_chroma_shutdown()
 
 
+def _t1_session_shutdown() -> None:
+    """Close the SERVICE-backed T1 session token and clear its lease file.
+
+    nexus-5daww: Branch-0 counterpart to the chroma cleanup below. Reads
+    ``_OWNED_T1_SESSION["session_id"]`` (populated by
+    ``_t1_chroma_lifespan``'s Branch 0 right after a successful mint) and,
+    if present, clears the published lease file then revokes the token
+    server-side. Called from :func:`_t1_chroma_shutdown` so SIGTERM / atexit
+    cleanup -- which cannot resume the paused lifespan generator past its
+    ``yield`` -- still runs this instead of leaking an unrevoked token plus
+    its 0600 lease file. Idempotent: clears ``_OWNED_T1_SESSION`` on entry
+    so a second call is a no-op.
+    """
+    session_id = _OWNED_T1_SESSION.get("session_id")
+    if not session_id:
+        return
+    _OWNED_T1_SESSION.clear()
+
+    import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
+    _log = structlog.get_logger(__name__)
+
+    # nexus-c8yvj: remove the published lease FIRST so a stale lease is
+    # never read by a later, unrelated process once this session has
+    # genuinely ended (mirrors the existing t1_addr.<session_id>
+    # cleanup-before-token-close ordering used elsewhere in this module).
+    try:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+        from nexus.db.t1 import clear_t1_session_lease  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+        clear_t1_session_lease(session_id, nexus_config_dir())
+    except Exception as _exc:  # noqa: BLE001 — boundary catch; best-effort cleanup, must not crash teardown
+        _log.warning("t1_session_lease_clear_failed", session_id=session_id, error=str(_exc))
+    try:
+        from nexus.db.t2.http_token_store import HttpTokenStore  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+        with HttpTokenStore() as _ts:
+            _ts.close_session(session_id)
+        _log.info("t1_session_token_closed", session_id=session_id)
+    except Exception as _exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
+        _log.warning("t1_session_token_close_failed", session_id=session_id, error=str(_exc))
+
+
 def _t1_chroma_shutdown() -> None:
-    """Stop chroma, rmtree the chroma tmpdir, unlink the addr file,
-    reset ``_t1_state.T1_ADDR``, and clear ``_OWNED_CHROMA``.
+    """Stop chroma, rmtree the chroma tmpdir, unlink the addr file, reset
+    ``_t1_state.T1_ADDR``, clear ``_OWNED_CHROMA`` (Branch 3), AND close the
+    SERVICE-backed T1 session token + lease (Branch 0, nexus-5daww) via
+    :func:`_t1_session_shutdown`.
 
     Idempotent. Called from three sites (lifespan async finally,
-    :func:`_sigterm_handler`, :mod:`atexit`); whichever fires first
-    does the work, the others find ``_OWNED_CHROMA`` empty and
-    short-circuit.
+    :func:`_sigterm_handler`, :mod:`atexit`); whichever fires first does
+    the work, the others find both ``_OWNED_CHROMA`` and
+    ``_OWNED_T1_SESSION`` empty and short-circuit. Branch 0 and Branch 3
+    are mutually exclusive per process, so at most one of the two dicts is
+    ever populated -- both are checked so this single shutdown path is
+    correct regardless of which branch the process took.
 
     ``_SHUTDOWN_IN_FLIGHT`` prevents re-entry from a signal handler
     that interrupted an in-flight ``stop_t1_server``: once set,
@@ -588,9 +732,15 @@ def _t1_chroma_shutdown() -> None:
     global _SHUTDOWN_IN_FLIGHT
     if _SHUTDOWN_IN_FLIGHT:
         return
-    if not _OWNED_CHROMA:
+    if not _OWNED_CHROMA and not _OWNED_T1_SESSION:
         return
     _SHUTDOWN_IN_FLIGHT = True
+
+    if _OWNED_T1_SESSION:
+        _t1_session_shutdown()
+
+    if not _OWNED_CHROMA:
+        return
 
     import shutil  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
 
