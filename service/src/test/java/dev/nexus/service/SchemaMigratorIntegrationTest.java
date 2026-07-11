@@ -1,6 +1,7 @@
 package dev.nexus.service;
 
 import dev.nexus.service.db.SchemaMigrator;
+import dev.nexus.service.db.SchemaMigrator.MigrationException;
 import liquibase.Contexts;
 import liquibase.LabelExpression;
 import liquibase.Liquibase;
@@ -854,6 +855,206 @@ class SchemaMigratorIntegrationTest {
             assertThat(constraintValidated(conn, "topics_collection_fk")).isTrue();
             assertThat(constraintValidated(conn, "taxonomy_meta_collection_fk")).isTrue();
             assertThat(constraintValidated(conn, "document_highlights_collection_fk")).isTrue();
+        }
+    }
+
+    // ── Test 10: present-but-VIOLATING chash constraint must FAIL CLEAN, not crash-loop ──
+
+    /**
+     * nexus-c4143 (follow-up to nexus-4m6i0.1 / ms57z / GH#1390). Tests 5/6/8 above cover
+     * a constraint that is MISSING when catalog-013-2/fk-002-7 first runs — the defensive
+     * {@code IF EXISTS} guards in {@code catalog-013-3} tolerate that case cleanly. This
+     * test covers the DIFFERENT, opposite condition: the constraint is PRESENT (added
+     * {@code NOT VALID}) but at least one row genuinely VIOLATES it (a chash whose length
+     * is neither 32 nor the legacy 64 that {@code catalog-013-0}/{@code -1b} normalize).
+     * {@code catalog-013-3}'s {@code IF EXISTS} guard does not help here — the constraint
+     * DOES exist, so its bare {@code VALIDATE CONSTRAINT} still runs and still raises a
+     * hard Postgres ERROR on the violating row, which (same crash-loop mechanism as ms57z)
+     * would repeat on every subsequent boot.
+     *
+     * <p>Fix under test: {@link SchemaMigrator#migrate} now runs a preflight BEFORE
+     * invoking Liquibase at all — for each of the five chash-length constraints that
+     * EXISTS but is not yet {@code convalidated}, it counts violating rows on a
+     * temporarily-{@code NO FORCE ROW LEVEL SECURITY} connection (the same RLS-bypass
+     * pattern {@code catalog-013-1b} uses, closing the exact visibility gap that caused
+     * the 2026-07-08 v0.1.33 production incident: a NOBYPASSRLS owner's plain SELECT
+     * silently sees zero rows under FORCE RLS while VALIDATE — a physical scan, RLS-exempt
+     * — still finds and crashes on the true violating rows). If any violations are found,
+     * {@code migrate()} throws a single, clean, informative {@link SchemaMigrator.MigrationException}
+     * — with the violating table/constraint/count named directly, so an operator does not
+     * need to reproduce the RLS-blind diagnostic dead-end the incident hit — WITHOUT ever
+     * invoking Liquibase, so no changeset is left FAILED-and-retried and the exact
+     * remaining-good rows / recorded changesets are untouched, safe to retry after the
+     * violating row is remediated.
+     *
+     * <p>Uses a dedicated container for the same reason as tests 5/6/8: the violation must
+     * be injected BEFORE {@code catalog-013-2} first executes, and the shared {@link #pg}/
+     * {@link #adminDs} fixture has already migrated cleanly by {@code @Order(1)}.
+     */
+    @Test
+    @Order(10)
+    void presentButViolatingChashIndexConstraint_migrationFailsCleanNotCrashLoop() throws Exception {
+        PostgreSQLContainer<?> agedPg = PgContainerHelper.start();
+        try {
+            final String role = "nexus_admin_aged_viol_test";
+            final String pass = "nexus_admin_aged_viol_test_pass";
+
+            // Phase A: same minimal DBA-equivalent bootstrap as tests 5/6/8.
+            try (Connection su = agedPg.createConnection("")) {
+                su.setAutoCommit(true);
+                su.createStatement().execute(
+                    "CREATE ROLE " + role + " LOGIN PASSWORD '" + pass
+                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
+                su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO " + role);
+                su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + role);
+                su.createStatement().execute(
+                    "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
+                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
+                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
+                su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");
+            }
+
+            var cfg = new com.zaxxer.hikari.HikariConfig();
+            cfg.setJdbcUrl(agedPg.getJdbcUrl());
+            cfg.setUsername(role);
+            cfg.setPassword(pass);
+            cfg.setMaximumPoolSize(2);
+            cfg.setPoolName("nexus-admin-aged-viol-test");
+
+            try (var agedDs = new com.zaxxer.hikari.HikariDataSource(cfg)) {
+
+                // Phase B: migrate only up through catalog-013-0 -- the LAST changeset that
+                // runs BEFORE chash_index_chash_len_check is added. The chash_index TABLE
+                // (and its RLS policy) already exist from chash-001-baseline.xml, long
+                // before catalog-013, but no length-CHECK constraint exists yet at this
+                // point, so a plain (RLS-toggled) INSERT of a malformed row still succeeds --
+                // matching the real incident's timeline: the constraint is added NOT VALID in
+                // one release (which does NOT check pre-existing rows), and VALIDATE is only
+                // attempted much later, in a subsequent release.
+                int changesetsThroughCatalog0130;
+                try (Connection conn = agedDs.getConnection()) {
+                    Database database = DatabaseFactory.getInstance()
+                        .findCorrectDatabaseImplementation(new JdbcConnection(conn));
+                    try (Liquibase liquibase = new Liquibase(
+                            "db/changelog/db.changelog-master.xml",
+                            new ClassLoaderResourceAccessor(),
+                            database)) {
+                        List<ChangeSet> unrun = liquibase.listUnrunChangeSets(
+                            new Contexts(), new LabelExpression());
+                        int idx = -1;
+                        for (int i = 0; i < unrun.size(); i++) {
+                            if ("catalog-013-0".equals(unrun.get(i).getId())) {
+                                idx = i;
+                                break;
+                            }
+                        }
+                        assertThat(idx)
+                            .as("catalog-013-0 must be present in the master changelog")
+                            .isGreaterThanOrEqualTo(0);
+                        changesetsThroughCatalog0130 = idx + 1;
+
+                        liquibase.update(changesetsThroughCatalog0130, new Contexts(), new LabelExpression());
+                    }
+                }
+
+                // Phase C: inject a GENUINELY violating row -- length 11, neither 32 (the
+                // enforced width) nor 64 (the legacy width catalog-013-0/-1b normalize) --
+                // via the SAME NO FORCE / FORCE toggle catalog-013-1b uses, since the admin
+                // role is NOT the bypass-RLS superuser and FORCE RLS blocks even the owner's
+                // own DML without a GUC stamp. No length-CHECK constraint exists on
+                // chash_index yet at this point, so the INSERT itself succeeds cleanly.
+                // chash_index_collection_fk (added earlier in the changelog than catalog-013)
+                // requires a matching (tenant_id, name) row in catalog_collections first.
+                try (Connection conn = agedDs.getConnection()) {
+                    conn.setAutoCommit(true);
+                    conn.createStatement().execute(
+                        "ALTER TABLE nexus.catalog_collections NO FORCE ROW LEVEL SECURITY");
+                    try (var ps = conn.prepareStatement(
+                            "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES (?, ?)")) {
+                        ps.setString(1, "c4143-viol-tenant");
+                        ps.setString(2, "c4143-viol-collection");
+                        ps.executeUpdate();
+                    }
+                    conn.createStatement().execute(
+                        "ALTER TABLE nexus.catalog_collections FORCE ROW LEVEL SECURITY");
+
+                    conn.createStatement().execute(
+                        "ALTER TABLE nexus.chash_index NO FORCE ROW LEVEL SECURITY");
+                    try (var ps = conn.prepareStatement(
+                            "INSERT INTO nexus.chash_index (tenant_id, chash, physical_collection, created_at) "
+                            + "VALUES (?, ?, ?, now())")) {
+                        ps.setString(1, "c4143-viol-tenant");
+                        ps.setString(2, "shortchash1"); // length 11 -- genuinely malformed
+                        ps.setString(3, "c4143-viol-collection");
+                        ps.executeUpdate();
+                    }
+                    conn.createStatement().execute(
+                        "ALTER TABLE nexus.chash_index FORCE ROW LEVEL SECURITY");
+                }
+
+                // Phase C2: run catalog-013-1 (ADD CONSTRAINT ... NOT VALID) via Liquibase's
+                // own update -- NOT VALID does not check pre-existing rows at ADD time, so
+                // this succeeds despite the violating row just inserted, leaving the
+                // constraint present-but-unvalidated exactly as it would be on a real box
+                // between the release that adds it and the later release that first attempts
+                // to VALIDATE it.
+                try (Connection conn = agedDs.getConnection()) {
+                    Database database = DatabaseFactory.getInstance()
+                        .findCorrectDatabaseImplementation(new JdbcConnection(conn));
+                    try (Liquibase liquibase = new Liquibase(
+                            "db/changelog/db.changelog-master.xml",
+                            new ClassLoaderResourceAccessor(),
+                            database)) {
+                        liquibase.update(1, new Contexts(), new LabelExpression()); // catalog-013-1 only
+                    }
+                }
+                try (Connection conn = agedDs.getConnection()) {
+                    assertThat(constraintExists(conn, "chash_index_chash_len_check"))
+                        .as("catalog-013-1 must have added the constraint (NOT VALID) despite the "
+                            + "pre-existing violating row")
+                        .isTrue();
+                    assertThat(constraintValidated(conn, "chash_index_chash_len_check"))
+                        .as("the constraint must NOT be validated yet -- only ADDED NOT VALID")
+                        .isFalse();
+                }
+
+                // Phase D: resume the FULL migration. This is the RED/GREEN hinge: before the
+                // Liquibase's bare catalog-013-2 VALIDATE CONSTRAINT crashes raw on the
+                // violating row (a MigrationException wrapping the opaque Postgres error,
+                // with NO row-count/visibility for the operator -- reproducing the incident's
+                // finding-2 RLS-blind dead end); after the fix, the NEW preflight catches it
+                // BEFORE Liquibase runs at all, with a clean, informative message.
+                MigrationException thrown = null;
+                try {
+                    SchemaMigrator.migrate(agedDs);
+                } catch (MigrationException e) {
+                    thrown = e;
+                }
+                assertThat(thrown)
+                    .as("migrate() must throw a clean MigrationException for a present-but-violating "
+                        + "chash constraint, not let Liquibase's bare VALIDATE crash raw")
+                    .isNotNull();
+                assertThat(thrown.getMessage())
+                    .as("the exception must name the violating table/constraint so an operator has "
+                        + "direct visibility without an RLS-blind manual diagnostic query")
+                    .contains("chash_index")
+                    .contains("1"); // the violating row count
+
+                // Phase E: catalog-013-2 must NOT have been reached/recorded at all -- the
+                // preflight runs BEFORE Liquibase, so no changeset past catalog-013-1 (and
+                // its immediate neighbor catalog-013-1b) should show any exectype, FAILED or
+                // otherwise. A clean, un-attempted state is what makes a retry-after-remediate
+                // safe.
+                try (Connection conn = agedDs.getConnection()) {
+                    assertThat(changesetExecType(conn, "catalog-013-2", "nexus-e0hd2",
+                            "db/changelog/catalog-013-chash-checks-validate.xml"))
+                        .as("catalog-013-2 must never be attempted -- the preflight blocks "
+                            + "Liquibase from running at all while a violation is present")
+                        .isNull();
+                }
+            }
+        } finally {
+            agedPg.stop();
         }
     }
 
