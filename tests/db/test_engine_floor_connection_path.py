@@ -162,6 +162,33 @@ class TestMigrateToServiceConnectionPath:
     def _invoke(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("NX_SERVICE_TOKEN", "cli-test-token")
         monkeypatch.setenv("NX_SERVICE_URL", "https://cloud.test.invalid")
+        # The cost guardrail's cloud read leg (open_read_legs -> open_cloud_
+        # read_client) resolves chroma_database/chroma_api_key via
+        # nexus.config.get_credential, which falls back to the REAL
+        # ~/.config/nexus/config.yml when unset in env — on a machine with
+        # real (and here, incidentally invalid) ChromaCloud credentials
+        # configured, this constructs a REAL chromadb.CloudClient and hits
+        # real network auth, raising a raw ChromaError instead of the
+        # deterministic "leg absent" RuntimeError. Force ONLY the chroma_*
+        # credentials empty (delegating everything else to the real
+        # get_credential, which checks env first — service_url/service_token
+        # resolution elsewhere in the command depends on that) so the cloud
+        # leg is deterministically unconfigured, mirroring the local leg's
+        # "provably does not exist" isolation below — this suite tests the
+        # version-floor gate's position on the call graph, not the cost
+        # guardrail's cloud-credential resolution.
+        import nexus.config as _nexus_config
+
+        _real_get_credential = _nexus_config.get_credential
+
+        def _fake_get_credential(name: str) -> str:
+            if name in ("chroma_database", "chroma_api_key", "chroma_tenant"):
+                return ""
+            return _real_get_credential(name)
+
+        monkeypatch.setattr(
+            "nexus.config.get_credential", _fake_get_credential
+        )
         t2_path = tmp_path / "t2.db"
         t2_path.touch()
         catalog_path = tmp_path / "catalog.db"
