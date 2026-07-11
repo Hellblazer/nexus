@@ -105,6 +105,9 @@ class TestChunkSizeDistribution:
         class _FakeT3:
             _client = chroma_client
 
+            def get_collection(self, name):
+                return chroma_client.get_collection(name)
+
             def list_collections(self):
                 return [{"name": "code__ok"}]
 
@@ -139,6 +142,9 @@ class TestChunkSizeDistribution:
         class _FakeT3:
             _client = chroma_client
 
+            def get_collection(self, name):
+                return chroma_client.get_collection(name)
+
             def list_collections(self):
                 return [{"name": "code__micros"}]
 
@@ -171,6 +177,9 @@ class TestChunkSizeDistribution:
         class _FakeT3:
             _client = chroma_client
 
+            def get_collection(self, name):
+                return chroma_client.get_collection(name)
+
             def list_collections(self):
                 return [{"name": "code__big"}]
 
@@ -199,6 +208,9 @@ class TestChunkSizeDistribution:
         class _FakeT3:
             _client = chroma_client
 
+            def get_collection(self, name):
+                return chroma_client.get_collection(name)
+
             def list_collections(self):
                 return [{"name": "taxonomy__centroids"}]
 
@@ -226,6 +238,9 @@ class TestChunkTextDedup:
 
         class _FakeT3:
             _client = chroma_client
+
+            def get_collection(self, name):
+                return chroma_client.get_collection(name)
 
             def list_collections(self):
                 return [{"name": "code__cleanup"}]
@@ -260,6 +275,9 @@ class TestChunkTextDedup:
         class _FakeT3:
             _client = chroma_client
 
+            def get_collection(self, name):
+                return chroma_client.get_collection(name)
+
             def list_collections(self):
                 return [{"name": "code__bug"}]
 
@@ -291,6 +309,9 @@ class TestChunkTextDedup:
 
         class _FakeT3:
             _client = chroma_client
+
+            def get_collection(self, name):
+                return chroma_client.get_collection(name)
 
             def list_collections(self):
                 return [{"name": "code__a"}, {"name": "code__b"}]
@@ -335,6 +356,9 @@ class TestT3VsCatalog:
         class _FakeT3:
             _client = chroma_client
 
+            def get_collection(self, name):
+                return chroma_client.get_collection(name)
+
             def list_collections(self):
                 return [{"name": "docs__clean"}]
 
@@ -365,6 +389,9 @@ class TestT3VsCatalog:
 
         class _FakeT3:
             _client = chroma_client
+
+            def get_collection(self, name):
+                return chroma_client.get_collection(name)
 
             def list_collections(self):
                 return [{"name": "code__orphan"}]
@@ -401,6 +428,9 @@ class TestT3VsCatalog:
 
         class _FakeT3:
             _client = chroma_client
+
+            def get_collection(self, name):
+                return chroma_client.get_collection(name)
 
             def list_collections(self):
                 return []  # no T3 collections at all

@@ -163,3 +163,52 @@ def test_reclaim_failure_does_not_kill_the_loop(tmp_path: Path) -> None:
         assert len(q.reclaim_calls) >= 2   # survived the first failure, ticked again
     finally:
         d.stop()
+
+
+def test_reclaim_failure_evicts_and_rebuilds_queue(tmp_path: Path) -> None:
+    """nexus-64np7: a reclaim failure must evict the stale queue handle and
+    rebuild via queue_factory, so the NEXT sweep re-resolves credentials
+    instead of retrying the same broken client forever. Root cause of a
+    2026-07-10 incident: a rotated bearer token produced a 401 on
+    reclaim_stale every ~30s for 23+ hours with no recovery short of a
+    manual daemon restart, because this handle (unlike claim_batch's,
+    which already evicts via mcp_infra._service_t2_write_locked) was held
+    for the daemon's entire lifetime with no eviction on error."""
+
+    class _OnceFailingQueue(_FakeQueue):
+        def __init__(self, fail: bool) -> None:
+            super().__init__()
+            self._fail = fail
+
+        def reclaim_stale(self, timeout_seconds: int = 300) -> int:
+            self.reclaim_calls.append(timeout_seconds)
+            if self._fail:
+                raise RuntimeError("401 Unauthorized (stale token)")
+            return 0
+
+    created: list[_OnceFailingQueue] = []
+
+    def factory() -> _OnceFailingQueue:
+        q = _OnceFailingQueue(fail=(len(created) == 0))
+        created.append(q)
+        return q
+
+    d = AspectWorkerDaemon(
+        config_dir=tmp_path, tenant="default",
+        worker_factory=_FakeWorker, queue_factory=factory,
+        reclaim_interval=0.03, stale_timeout_seconds=60,
+    )
+    d.start()
+    try:
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and len(created) < 2:
+            time.sleep(0.02)
+        assert len(created) >= 2, "stale queue was never rebuilt after the failure"
+        assert created[0].reclaim_calls == [60]
+        assert created[0].closed == 1          # the stale (failed) handle was released
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and not created[1].reclaim_calls:
+            time.sleep(0.02)
+        assert created[1].reclaim_calls, "the rebuilt handle never got a chance to reclaim"
+    finally:
+        d.stop()

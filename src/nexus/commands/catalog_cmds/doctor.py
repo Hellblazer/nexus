@@ -664,7 +664,7 @@ def _run_chunk_size_distribution() -> dict:
     tables: dict[str, dict] = {}
     for name in collections:
         try:
-            col = t3._client.get_collection(name=name)
+            col = t3.get_collection(name=name)
         except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
             tables[name] = {"error": f"open: {exc}"}
             overall_pass = False
@@ -780,7 +780,7 @@ def _run_chunk_text_dedup() -> dict:
     chash_to_collections: dict[str, set[str]] = {}
     for name in collections:
         try:
-            col = t3._client.get_collection(name=name)
+            col = t3.get_collection(name=name)
         except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
             within_summary[name] = {"error": f"open: {exc}"}
             overall_pass = False
@@ -912,10 +912,16 @@ def _run_t3_vs_catalog() -> dict:
         # Only flag if the T3 collection actually has chunks; an empty
         # T3 collection with no docs is the zombie class below.
         try:
-            col = t3_db._client.get_collection(name=name)
+            col = t3_db.get_collection(name=name)
             count = col.count()
-        except Exception:  # noqa: BLE001 — boundary catch; third-party raises undocumented types, handled gracefully
-            count = 0
+        except Exception as exc:  # noqa: BLE001 — boundary catch; third-party raises undocumented types, handled gracefully
+            # nexus-pyv0e sibling: this used to reach into t3_db._client
+            # (Chroma-only), which raised AttributeError in service mode
+            # and got silently swallowed here into count=0 — a false PASS
+            # with zero detection capability, not a loud error. Record the
+            # failure instead of pretending the collection is empty.
+            t3_orphans.append({"name": name, "error": str(exc)})
+            continue
         if count > 0:
             t3_orphans.append({"name": name, "chunk_count": count})
 
@@ -925,11 +931,16 @@ def _run_t3_vs_catalog() -> dict:
         r["name"] for r in projection if not r.get("superseded_by")
     }
     zombies = []
+    zombie_errors: list[dict] = []
     for name in sorted(projection_names & t3_names):
         try:
-            col = t3_db._client.get_collection(name=name)
+            col = t3_db.get_collection(name=name)
             count = col.count()
-        except Exception:  # noqa: BLE001 — boundary catch; third-party raises undocumented types, handled gracefully
+        except Exception as exc:  # noqa: BLE001 — boundary catch; third-party raises undocumented types, handled gracefully
+            # nexus-pyv0e sibling: `continue`-past-error here previously
+            # meant a failed check for a candidate zombie silently dropped
+            # it from consideration — a false PASS, not a loud error.
+            zombie_errors.append({"name": name, "error": str(exc)})
             continue
         if count == 0:
             zombies.append(name)
@@ -943,11 +954,13 @@ def _run_t3_vs_catalog() -> dict:
 
     overall_pass = (
         not t3_orphans and not zombies and not docs_missing
+        and not zombie_errors
     )
     return {
         "pass": overall_pass,
         "t3_orphans": t3_orphans,
         "zombies": zombies,
+        "zombie_errors": zombie_errors,
         "docs_pointing_at_missing_t3": docs_missing,
     }
 
@@ -964,7 +977,10 @@ def _print_t3_vs_catalog_text(report: dict) -> None:
             f"({len(report['t3_orphans'])}):"
         )
         for o in report["t3_orphans"][:20]:
-            click.echo(f"    {o['name']}  chunks={o['chunk_count']}")
+            if "error" in o:
+                click.echo(f"    {o['name']}  ERROR: {o['error']}")
+            else:
+                click.echo(f"    {o['name']}  chunks={o['chunk_count']}")
     if report["zombies"]:
         click.echo(
             f"  Zombie collections (registered, 0 chunks in T3) "
@@ -975,6 +991,13 @@ def _print_t3_vs_catalog_text(report: dict) -> None:
         click.echo(
             "  Remediate: nx catalog collection-gc --apply"
         )
+    if report.get("zombie_errors"):
+        click.echo(
+            f"  Collections that could not be checked for zombie status "
+            f"({len(report['zombie_errors'])}):"
+        )
+        for e in report["zombie_errors"][:20]:
+            click.echo(f"    {e['name']}  ERROR: {e['error']}")
     if report["docs_pointing_at_missing_t3"]:
         click.echo(
             f"  Catalog documents whose physical_collection is gone "
@@ -1055,7 +1078,6 @@ def _run_name_vs_embed_dim() -> dict:
             "error": f"Failed to list T3 collections: {exc}",
         }
 
-    client = t3_db._client  # type: ignore[attr-defined]
     for name in cols:
         if not is_conformant_collection_name(name):
             skipped_non_conformant += 1
@@ -1067,14 +1089,22 @@ def _run_name_vs_embed_dim() -> dict:
             unknown_token.append({"collection": name, "token": token})
             continue
         try:
-            coll = client.get_collection(name)
-            sample = coll.get(limit=1, include=["embeddings"])
+            # nexus-pyv0e: sample via the dual-mode-safe public surface
+            # (get_collection + get_embeddings), not client._client — the
+            # service-mode HttpVectorClient has no ._client attribute, only
+            # local T3Database's raw chromadb client does.
+            coll = t3_db.get_collection(name)
+            sample = coll.get(limit=1)
+            ids = sample.get("ids") or []
+            if not ids:
+                empty.append(name)
+                continue
+            embs = t3_db.get_embeddings(name, ids[:1])
         except Exception as exc:  # noqa: BLE001 — boundary catch; third-party raises undocumented types, handled gracefully
             unknown_token.append(
                 {"collection": name, "token": token, "error": str(exc)}
             )
             continue
-        embs = sample.get("embeddings")
         if embs is None or len(embs) == 0:
             empty.append(name)
             continue
@@ -1627,7 +1657,7 @@ def _run_t3_doc_id_coverage(
             continue
         _tc = _time.monotonic()
         try:
-            col = t3._client.get_collection(name=coll_name)
+            col = t3.get_collection(name=coll_name)
         except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
             per_coll[coll_name] = {
                 "error": f"open: {exc}",
