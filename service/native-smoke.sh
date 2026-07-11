@@ -69,6 +69,34 @@ assert "plans/search"          200 "${A[@]}" "${J[@]}" -X POST -d '{"query":"q",
 assert "taxonomy/topics"       200 "${A[@]}" "$U/v1/taxonomy/topics?collection=knowledge__x"
 assert "chash/distinct"        200 "${A[@]}" "$U/v1/chash/distinct_collections"
 
+# ── T1 scratch (separate jOOQ schema, nexus-opr9m) ───────────────────────────
+# T1 scratch lives in its OWN generated jOOQ schema (t1, e.g.
+# dev.nexus.service.jooq.t1.T1) — a completely separate schema model from every
+# assertion above (all of which are in the `nexus` schema). JooqRecordReflectionFeature
+# enumerated only Nexus.NEXUS.getTables() and never T1.T1.getTables(), so
+# ScratchRecord's constructor was unreachable via reflection in every native image
+# built since the t1 schema was introduced (nexus-gmiaf.13) — every deployed
+# get/search/list against T1 500'd with MissingReflectionRegistrationError, and
+# this gate (which ran on every native build the whole time) never caught it because
+# nothing above touches /v1/t1/* or /v1/sessions/*. Mint a session first (the real
+# production path — mirrors mcp/core.py's lifespan) then exercise the full T1
+# put/get/search/list surface so a future new generated schema being added without
+# updating JooqRecordReflectionFeature fails HERE, not silently in production.
+echo "T1 scratch runtime path (separate jOOQ schema):"
+SESSION_RESP=$(curl -fsS "${A[@]}" "${J[@]}" -X POST -d '{"session_id":"native-smoke-t1"}' "$U/v1/sessions/start")
+SESSION_TOKEN=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['session_token'])" "$SESSION_RESP" 2>/dev/null)
+if [ -z "$SESSION_TOKEN" ]; then
+  echo "  FAIL t1/session-mint -> could not mint session: $SESSION_RESP"; fail=1
+else
+  echo "  ok   t1/session-mint -> 200"
+  T1=(-H "Authorization: Bearer smoketoken" -H "X-Nexus-T1-Session: ${SESSION_TOKEN}")
+  PUT_RESP=$(curl -fsS "${T1[@]}" "${J[@]}" -X POST -d '{"id":"native-smoke-t1-id","session_id":"native-smoke-t1","content":"t1 native smoke","tags":"","flagged":false}' "$U/v1/t1/put")
+  echo "$PUT_RESP" | grep -q '"id"' && echo "  ok   t1/put (INSERT) -> 200" || { echo "  FAIL t1/put -> $PUT_RESP"; fail=1; }
+  assert "t1/get (SELECT, separate schema)"  200 "${T1[@]}" "${J[@]}" -X POST -d '{"id":"native-smoke-t1-id","session_id":"native-smoke-t1"}' "$U/v1/t1/get"
+  assert "t1/search (FTS, separate schema)"  200 "${T1[@]}" "${J[@]}" -X POST -d '{"query":"native smoke","session_id":"native-smoke-t1","limit":5}' "$U/v1/t1/search"
+  assert "t1/list (separate schema)"         200 "${T1[@]}" "${J[@]}" -X POST -d '{"session_id":"native-smoke-t1"}' "$U/v1/t1/list"
+fi
+
 # ── Local bge-768 EMBED (nexus-pqatt) ────────────────────────────────────────
 # The embed path drives the DJL HuggingFace tokenizers JNI (libtokenizers.so) and
 # the onnxruntime session run — both of which need jniAccessible registrations the
