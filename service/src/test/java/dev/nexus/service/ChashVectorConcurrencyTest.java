@@ -36,6 +36,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -96,6 +97,18 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>Hermetic: Testcontainers pgvector/pgvector:pg17, {@code nexus_svc} role (full
  * DML via {@code grants-nexus-svc.xml}, mirrors {@link PgVectorServingContractTest}),
  * {@link PgVectorRepositoryContractTest.FakeEmbedder}, port 0, PER_CLASS.
+ *
+ * <p><strong>nexus-xqrq0 (2026-07-11).</strong> Under whole-suite load this test was
+ * observed to hit typed 503s ("database connection pool exhausted, retry") — the
+ * service's intended admission-control behavior, not a defect — which the original
+ * zero-5xx assertion did not tolerate. {@link #post} now retries on 503 with capped
+ * backoff (see {@link #postWithRetryOn503}), mirroring a well-behaved production
+ * client. Scope note: that same load also occasionally produced client-side
+ * {@code HttpTimeoutException}s (a possibly-related but distinct symptom — request
+ * processing itself getting slow under whole-suite contention, not merely pool
+ * acquisition); this fix targets the documented, typed 503 case specifically, as
+ * requested. If timeout-driven flakiness persists under heavy load, that is a
+ * separate follow-up, not silently folded into this change.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ChashVectorConcurrencyTest {
@@ -117,6 +130,12 @@ class ChashVectorConcurrencyTest {
     private static final Duration RUN_TIME   = Duration.ofSeconds(10);
     private static final int POOL_SIZE       = 6;
     private static final int CONNECTION_TIMEOUT_MS = 3000;
+
+    // nexus-xqrq0: retry-on-typed-503 with capped exponential backoff, mirroring a
+    // well-behaved production client. See postWithRetryOn503() doc for rationale.
+    private static final int  MAX_503_RETRIES  = 5;
+    private static final long BASE_BACKOFF_MS  = 50;
+    private static final long MAX_BACKOFF_MS   = 500;
 
     PostgreSQLContainer<?> pg;
     HikariDataSource svcDs;
@@ -216,7 +235,36 @@ class ChashVectorConcurrencyTest {
             .timeout(Duration.ofSeconds(20))
             .POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body)))
             .build();
-        return http.send(req, HttpResponse.BodyHandlers.ofString());
+        return postWithRetryOn503(req);
+    }
+
+    /**
+     * Retries on HTTP 503 with capped exponential backoff + jitter (nexus-xqrq0).
+     *
+     * <p>A 503 here is the service's TYPED, deliberate admission-control response
+     * to pool exhaustion (see {@code HttpUtil.sendTypedDbError}) — the whole point
+     * of a typed 503 rather than an opaque 500 is "this is transient, retry me,"
+     * exactly mirroring what a well-behaved production client is expected to do.
+     * This suite's zero-5xx assertion previously treated "admission control fired
+     * as designed under whole-suite Postgres contention" as a test failure, which
+     * is a test-strictness bug, not a service defect (bead nexus-xqrq0). Retrying
+     * here narrows tolerance to EXACTLY that documented, typed case: any other
+     * status code (including a 503 that still persists after
+     * {@link #MAX_503_RETRIES} attempts) returns immediately and still fails the
+     * caller's assertions loudly — this does not paper over genuine bugs, only
+     * the specific transient-by-design admission-control response.
+     *
+     * <p>{@code req} (and its body publisher) is immutable and safe to send more
+     * than once per the {@code java.net.http.HttpClient} contract.
+     */
+    private HttpResponse<String> postWithRetryOn503(HttpRequest req) throws Exception {
+        HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+        for (int attempt = 1; resp.statusCode() == 503 && attempt <= MAX_503_RETRIES; attempt++) {
+            long backoffMs = Math.min(BASE_BACKOFF_MS * (1L << (attempt - 1)), MAX_BACKOFF_MS);
+            Thread.sleep(backoffMs + ThreadLocalRandom.current().nextLong(backoffMs / 2 + 1));
+            resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+        }
+        return resp;
     }
 
     // ---------------------------------------------------------------------------
