@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `nx index repo` refuses a `PATH` with no `.git` (file or directory — git
+  worktrees included), instead of silently registering a bogus owner
+  spanning unrelated content. Real incident: `nx index repo ~/git` was run
+  against the parent of many repos instead of a specific repo subdirectory,
+  discovered via `nx catalog doctor --t3-vs-catalog`.
+
 ## [6.5.2] - 2026-07-09
 
 ### Fixed
