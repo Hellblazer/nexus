@@ -281,3 +281,85 @@ class TestNameVsEmbedDim:
         assert "name-vs-embed-dim: FAIL" in result.output
         assert name in result.output
         assert "rename" in result.output.lower()
+
+
+class TestNameVsEmbedDimRealHttpVectorClient:
+    """nexus-umvh2 doctrine (Wave-review CRITICAL, critic finding on
+    nexus-pyv0e): a hand-rolled duck-typed fake proves the fake's shape
+    doesn't crash, not that the REAL HttpVectorClient's actual
+    get_collection/get_embeddings work through the real doctor command in
+    service mode. Construct the real client; fake only the HTTP transport
+    (``_post``/``_get``) — a missing/renamed method on HttpVectorClient
+    fails HARD here instead of being absorbed by a duck-typed double.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_client(self):
+        from nexus.db.http_vector_client import reset_http_vector_client_for_tests
+        reset_http_vector_client_for_tests()
+        yield
+        reset_http_vector_client_for_tests()
+
+    def test_real_client_pass_when_dim_matches(
+        self, runner, monkeypatch: pytest.MonkeyPatch,
+    ):
+        from nexus.db.http_vector_client import HttpVectorClient
+
+        name = "code__nexus-1-1__voyage-code-3__v1"
+
+        def fake_get(path, **kw):
+            assert path == "/v1/vectors/stats"
+            return [{"name": name, "dim": 1024, "count": 1}]
+
+        def fake_post(path, body, **kw):
+            if path == "/v1/vectors/get":
+                assert body["collection"] == name
+                return {"ids": ["c1"], "documents": ["x"], "metadatas": [{}]}
+            if path == "/v1/vectors/get-embeddings":
+                assert body == {"collection": name, "ids": ["c1"]}
+                return {"embeddings": [[0.1] * 1024]}
+            raise AssertionError(f"unexpected path {path}")
+
+        monkeypatch.setattr("nexus.db.http_vector_client._get", fake_get)
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        monkeypatch.setattr("nexus.db.make_t3", lambda: HttpVectorClient())
+
+        result = runner.invoke(doctor_cmd, ["--name-vs-embed-dim", "--json"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)["name_vs_embed_dim"]
+        assert payload["pass"] is True
+        assert payload["checked"] == 1
+        assert payload["mismatches"] == []
+
+    def test_real_client_fail_when_dim_mismatches(
+        self, runner, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """The 4.28-era bug shape, reproduced through the REAL
+        HttpVectorClient: name claims voyage-code-3 (1024d) but the
+        service actually holds 384-dim vectors."""
+        from nexus.db.http_vector_client import HttpVectorClient
+
+        name = "code__nexus-1-1__voyage-code-3__v1"
+
+        def fake_get(path, **kw):
+            return [{"name": name, "dim": 384, "count": 1}]
+
+        def fake_post(path, body, **kw):
+            if path == "/v1/vectors/get":
+                return {"ids": ["c1"], "documents": ["x"], "metadatas": [{}]}
+            if path == "/v1/vectors/get-embeddings":
+                return {"embeddings": [[0.1] * 384]}
+            raise AssertionError(f"unexpected path {path}")
+
+        monkeypatch.setattr("nexus.db.http_vector_client._get", fake_get)
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        monkeypatch.setattr("nexus.db.make_t3", lambda: HttpVectorClient())
+
+        result = runner.invoke(doctor_cmd, ["--name-vs-embed-dim", "--json"])
+        assert result.exit_code == 1, result.output
+        payload = json.loads(result.stdout)["name_vs_embed_dim"]
+        assert payload["pass"] is False
+        m = payload["mismatches"][0]
+        assert m["collection"] == name
+        assert m["expected_dim"] == 1024
+        assert m["actual_dim"] == 384
