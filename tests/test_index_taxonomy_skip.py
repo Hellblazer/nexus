@@ -48,6 +48,7 @@ def test_all_skip_run_skips_postprocessing(runner: CliRunner, index_home: Path) 
     # 0 files changed AND taxonomy already built (topics exist) → skip.
     repo = index_home / "myrepo"
     repo.mkdir()
+    (repo / ".git").mkdir()
 
     result, post = _run(runner, repo, {"files_changed": 0}, taxonomy_incomplete=False)
 
@@ -61,6 +62,7 @@ def test_all_skip_but_taxonomy_incomplete_still_runs(runner: CliRunner, index_ho
     # (discover never succeeded) → discovery must still run.
     repo = index_home / "myrepo"
     repo.mkdir()
+    (repo / ".git").mkdir()
 
     result, post = _run(runner, repo, {"files_changed": 0}, taxonomy_incomplete=True)
 
@@ -72,6 +74,7 @@ def test_all_skip_but_taxonomy_incomplete_still_runs(runner: CliRunner, index_ho
 def test_changed_run_runs_postprocessing(runner: CliRunner, index_home: Path) -> None:
     repo = index_home / "myrepo"
     repo.mkdir()
+    (repo / ".git").mkdir()
 
     # files_changed > 0 short-circuits — runs even when taxonomy looks complete.
     result, post = _run(runner, repo, {"files_changed": 3}, taxonomy_incomplete=False)
@@ -142,6 +145,7 @@ def test_rdr_only_run_still_runs_postprocessing(runner: CliRunner, index_home: P
     # content change: files_changed folds in rdr_indexed, so discovery runs.
     repo = index_home / "myrepo"
     repo.mkdir()
+    (repo / ".git").mkdir()
 
     result, post = _run(runner, repo, {"files_changed": 2, "rdr_indexed": 2}, taxonomy_incomplete=False)
 

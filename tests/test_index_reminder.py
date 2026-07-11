@@ -24,6 +24,7 @@ def _make_repo(base: Path) -> Path:
     """Create a minimal fake repo directory and return it."""
     repo = base / "myrepo"
     repo.mkdir()
+    (repo / ".git").mkdir()
     return repo
 
 

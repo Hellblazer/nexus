@@ -12,6 +12,7 @@ from nexus.commands.index import index, _discover_taxonomy
 
 def test_index_repo_triggers_taxonomy_discover(tmp_path) -> None:
     """index_repo_cmd calls _discover_taxonomy after indexing."""
+    (tmp_path / ".git").mkdir()
     calls: list[str] = []
 
     def fake_discover(collection_name, taxonomy, chroma_client, *, force=False):
@@ -39,6 +40,7 @@ def test_index_repo_triggers_taxonomy_discover(tmp_path) -> None:
 
 def test_index_repo_no_taxonomy_flag(tmp_path) -> None:
     """--no-taxonomy skips taxonomy discover."""
+    (tmp_path / ".git").mkdir()
     calls: list[str] = []
 
     def fake_discover(collection_name, taxonomy, chroma_client, *, force=False):
@@ -60,6 +62,7 @@ def test_index_repo_no_taxonomy_flag(tmp_path) -> None:
 
 def test_index_repo_frecency_only_skips_taxonomy(tmp_path) -> None:
     """--frecency-only skips taxonomy discover."""
+    (tmp_path / ".git").mkdir()
     calls: list[str] = []
 
     def fake_discover(collection_name, taxonomy, chroma_client, *, force=False):
@@ -81,6 +84,7 @@ def test_index_repo_frecency_only_skips_taxonomy(tmp_path) -> None:
 
 def test_index_repo_taxonomy_failure_nonfatal(tmp_path) -> None:
     """Taxonomy discover failure does not fail indexing."""
+    (tmp_path / ".git").mkdir()
     def bad_discover(*a, **kw):
         raise RuntimeError("taxonomy broke")
 
