@@ -323,7 +323,7 @@ def _run_batched(
     GREATEST) so a re-run lands it.
     """
     breaker = breaker if breaker is not None else EtlCircuitBreaker()
-    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — branch-local; quota constant
+    from nexus.db.limits import QUOTAS  # noqa: PLC0415 — branch-local; quota constant
     bsize = QUOTAS.MAX_RECORDS_PER_WRITE
 
     read_n = written_n = 0

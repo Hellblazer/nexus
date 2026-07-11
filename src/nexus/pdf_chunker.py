@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 import structlog
 
-from nexus.db.chroma_quotas import SAFE_CHUNK_BYTES
+from nexus.db.limits import SAFE_CHUNK_BYTES
 from nexus.md_chunker import classify_section_type
 
 _log = structlog.get_logger()

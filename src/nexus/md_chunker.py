@@ -9,7 +9,7 @@ from typing import Any
 import structlog
 import yaml
 
-from nexus.db.chroma_quotas import SAFE_CHUNK_BYTES
+from nexus.db.limits import SAFE_CHUNK_BYTES
 
 _log = structlog.get_logger()
 

@@ -199,7 +199,7 @@ def migrate_memory_rows(
     # NETWORK is batched. A server-side batch rejection (whole-batch 400) is
     # recorded at batch granularity; the ETL is idempotent (ON CONFLICT DO
     # UPDATE) so a re-run lands the batch.
-    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — branch-local; quota constant
+    from nexus.db.limits import QUOTAS  # noqa: PLC0415 — branch-local; quota constant
     _IMPORT_BATCH_SIZE = QUOTAS.MAX_RECORDS_PER_WRITE
 
     batch: list[dict[str, Any]] = []

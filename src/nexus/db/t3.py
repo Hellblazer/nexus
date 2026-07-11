@@ -34,7 +34,8 @@ from nexus.corpus import (
     embedding_model_for_collection_name,
     index_model_for_collection,
 )
-from nexus.db.chroma_quotas import QUOTAS, QuotaValidator
+from nexus.db.chroma_quotas import QuotaValidator
+from nexus.db.limits import QUOTAS
 from nexus.metadata_schema import CONTENT_TYPES, normalize, validate
 
 _log = structlog.get_logger(__name__)

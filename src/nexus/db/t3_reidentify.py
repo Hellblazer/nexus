@@ -5,7 +5,7 @@ Re-upserts every T3 chunk under a content-derived natural ID
 (``chunk_text_hash[:32]``), reusing the chunk's existing embedding so
 the migration is free of Voyage calls. After all chunks for a
 collection have been re-upserted, the old chunk IDs are batch-deleted
-in groups of 300 (the ChromaDB write quota).
+in groups of 300 (``nexus.db.limits.QUOTAS.MAX_RECORDS_PER_WRITE``).
 
 The implementation uses a two-pass design (divergence from the RDR-108
 RF-6 pseudocode, which prescribed a single loop interleaving
@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING
 import structlog
 from chromadb.errors import NotFoundError as _ChromaNotFoundError
 
-from nexus.db.chroma_quotas import QUOTAS
+from nexus.db.limits import QUOTAS
 from nexus.retry import _chroma_with_retry
 
 if TYPE_CHECKING:
@@ -184,7 +184,7 @@ def reidentify_collection(
     # nexus-zpnq: pipeline pass-2 fetches one batch ahead of the
     # processing+upsert of the prior batch. ChromaDB allows up to 10
     # concurrent reads + 10 concurrent writes per collection
-    # (chroma_quotas.MAX_CONCURRENT_READS/WRITES); a 1-batch
+    # (nexus.db.limits.QUOTAS.MAX_CONCURRENT_READS/WRITES); a 1-batch
     # look-ahead is well within budget. Order is preserved: the main
     # thread still processes batches in cid-list order, and the
     # ``seen_old_ids`` / ``seen_new_ids`` dedupe sets are only ever

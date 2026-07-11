@@ -395,7 +395,7 @@ def resolve_target_service_url(explicit: str | None = None) -> str:
 
 
 def clamp_fill_batch_size(batch_size: int) -> int:
-    """Clamp *batch_size* to the ``chroma_quotas`` ``MAX_RECORDS_PER_WRITE``
+    """Clamp *batch_size* to the ``nexus.db.limits`` ``MAX_RECORDS_PER_WRITE``
     ceiling (300).
 
     R3 review note 2 (2026-07-02): ``fill_missing`` /
@@ -403,7 +403,7 @@ def clamp_fill_batch_size(batch_size: int) -> int:
     with NO internal clamp — P4 owns enforcing the ceiling here so an
     oversized caller-supplied value cannot trip the ``/v1/*/import`` quota.
     """
-    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — deferred; branch-local quota constant
+    from nexus.db.limits import QUOTAS  # noqa: PLC0415 — deferred; branch-local quota constant
 
     return max(1, min(int(batch_size), QUOTAS.MAX_RECORDS_PER_WRITE))
 

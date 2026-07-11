@@ -588,7 +588,7 @@ def search_cross_corpus(
     # diagnostic/telemetry accumulators are independent of completion order.
     from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415 — branch-local; only when fan-out search runs
 
-    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — branch-local search helper import
+    from nexus.db.limits import QUOTAS  # noqa: PLC0415 — branch-local search helper import
 
     def _search_one(col: str) -> dict:
         mult = _overfetch_multiplier(col)

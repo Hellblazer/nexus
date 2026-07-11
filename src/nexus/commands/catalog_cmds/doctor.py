@@ -643,7 +643,7 @@ def _run_chunk_size_distribution() -> dict:
     """
     from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
     from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415  — command-local import (nexus.db.t3)
-    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415  — command-local import (nexus.db.chroma_quotas)
+    from nexus.db.limits import QUOTAS  # noqa: PLC0415  — command-local import (nexus.db.limits)
 
     try:
         t3 = make_t3()
@@ -758,7 +758,7 @@ def _run_chunk_text_dedup() -> dict:
     """
     from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
     from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415  — command-local import (nexus.db.t3)
-    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415  — command-local import (nexus.db.chroma_quotas)
+    from nexus.db.limits import QUOTAS  # noqa: PLC0415  — command-local import (nexus.db.limits)
 
     try:
         t3 = make_t3()

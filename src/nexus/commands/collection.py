@@ -881,7 +881,7 @@ def _reembed_collection(
     (``voyage-context-3``) requires sliding-window context across chunks
     and is intentionally out of scope; the CLI rejects it up front.
     """
-    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.db.limits import QUOTAS  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.retry import _voyage_with_retry  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     try:

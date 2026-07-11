@@ -45,7 +45,7 @@ from typing import Any
 import httpx
 import structlog
 
-from nexus.db.chroma_quotas import QUOTAS
+from nexus.db.limits import QUOTAS
 
 _log = structlog.get_logger(__name__)
 
