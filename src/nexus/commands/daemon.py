@@ -1071,6 +1071,7 @@ class T2EnsureOutcome(Enum):
     DEFERRED_SIGTERM = "deferred_sigterm"        # stale daemon ALIVE; SIGTERM'd but did not exit in window
     CRASHLOOP_SUPPRESSED = "crashloop_suppressed"  # no live incumbent daemon (never existed, or was fully reaped); crash-loop guard refused respawn
     SPAWN_FAILED = "spawn_failed"                # no daemon: cold-spawned process died or never became reachable
+    SERVICE_MODE_SKIP = "service_mode_skip"      # memory store is in SERVICE mode; the SQLite daemon has no role (RDR-176)
 
 
 def _t2_ensure_running_inner(
@@ -1087,6 +1088,27 @@ def _t2_ensure_running_inner(
     import time as _time  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
+
+    # RDR-176 Phase 1 (Gap 2): in SERVICE mode the SQLite T2 tier is a frozen
+    # migration source and the Java service is the live substrate — no client
+    # ever connects to this daemon (``run_t2_daemon`` already no-ops for the
+    # same reason). Without this check every caller (nx-mcp's first-run hook,
+    # ``nx upgrade``) cold-spawns a process that exits immediately by design,
+    # and repeated calls across concurrent MCP sessions trip the crash-loop
+    # guard below with a misleading "crash-loop suppressed" error even though
+    # nothing is actually broken (nexus-daemon-6.6.0-service-mode-skip).
+    from nexus.db.storage_mode import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+        StorageBackend,
+        storage_backend_for,
+    )
+
+    if storage_backend_for("memory") == StorageBackend.SERVICE:
+        if not quiet:
+            click.echo(
+                "T2 daemon not needed: memory store is in service mode "
+                "(Java service is the live substrate)."
+            )
+        return T2EnsureOutcome.SERVICE_MODE_SKIP
 
     def _running_daemon() -> tuple[int, str] | None:
         """Return (pid, daemon_version) of the live daemon, or None.

@@ -4,6 +4,10 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.6.1] - 2026-07-11
+
+- Plugin version aligned with conexus 6.6.1 (bug-fix release: T2 `ensure-running` service-mode crash-loop fix, `nx catalog doctor` service-mode crash sweep across five checks, aspect-worker credential-rotation self-heal). No plugin-side changes.
+
 ## [6.6.0] - 2026-07-10
 
 - Plugin version aligned with conexus 6.6.0 (clean-5.x-upgrade release: `nx migration-audit`, `nx doctor` chash-conformance probe, GH #1390 legacy-id migration guard + install-binary poison gate, T3 local-model-pin fix, engine pin advanced to v0.1.37). No plugin-side changes.

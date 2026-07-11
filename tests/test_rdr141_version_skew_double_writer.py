@@ -206,6 +206,7 @@ def test_reassert_reachable_returns_true_without_warning(monkeypatch) -> None:
         ("DEFERRED_SIGTERM", "t2_index_write_version_skew_cycle_deferred_sigterm"),
         ("CRASHLOOP_SUPPRESSED", "t2_index_write_version_skew_crashloop_down"),
         ("SPAWN_FAILED", "t2_index_write_version_skew_spawn_failed"),
+        ("SERVICE_MODE_SKIP", "t2_index_write_version_skew_service_mode_skip"),
     ],
 )
 def test_reassert_nonreachable_returns_false_with_distinct_event(
@@ -312,6 +313,7 @@ def test_all_nonreachable_outcomes_have_a_distinct_event() -> None:
         T2EnsureOutcome.DEFERRED_SIGTERM,
         T2EnsureOutcome.CRASHLOOP_SUPPRESSED,
         T2EnsureOutcome.SPAWN_FAILED,
+        T2EnsureOutcome.SERVICE_MODE_SKIP,
     }
     non_reachable = set(T2EnsureOutcome) - {T2EnsureOutcome.REACHABLE}
     assert non_reachable == mapped, (

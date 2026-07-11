@@ -27,6 +27,7 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
@@ -400,6 +401,35 @@ class TestCrashLoopRespawnRefusal:
             )
         assert spawns == []
         assert len(errors) == 1, f"must log once across invocations, saw {errors}"
+
+
+class TestEnsureRunningServiceModeSkipCli:
+    """nexus-daemon-6.6.0-service-mode-skip / critic finding on PR #1392:
+    the earlier tests only asserted ``_t2_ensure_running_inner``'s return
+    value directly. Drive the actual Click command so a future change to
+    ``t2_ensure_running_cmd``'s exit-code mapping (e.g. converting the
+    allowlist tuple to an exhaustive-style construct) has a test that
+    would catch SERVICE_MODE_SKIP landing in the failure branch."""
+
+    def test_service_mode_skip_exits_zero_through_cli(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        from nexus.db import storage_mode
+
+        monkeypatch.setattr(
+            storage_mode, "storage_backend_for",
+            lambda store: storage_mode.StorageBackend.SERVICE,
+        )
+        monkeypatch.setattr(
+            subprocess, "Popen",
+            lambda *a, **kw: pytest.fail("must not spawn in service mode"),
+        )
+
+        result = CliRunner().invoke(
+            main, ["daemon", "t2", "ensure-running",
+                   "--config-dir", str(tmp_path)],
+        )
+        assert result.exit_code == 0, result.output
 
 
 class _Unreachable:

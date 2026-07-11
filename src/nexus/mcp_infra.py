@@ -323,6 +323,14 @@ def _reassert_t2_daemon() -> bool:
             "t2_index_write_version_skew_spawn_failed",
             "daemon spawn failed; the direct write below is safe (no live daemon)",
         ),
+        T2EnsureOutcome.SERVICE_MODE_SKIP: (
+            "t2_index_write_version_skew_service_mode_skip",
+            "memory store is in SERVICE mode (RDR-176); the SQLite daemon has no "
+            "role here — this path should not normally be reached (t2_index_write "
+            "already short-circuits to the service-backed writer before ever "
+            "constructing a T2Client), but the direct write below is safe "
+            "regardless (no live SQLite daemon to double-write against)",
+        ),
     }
     event, hint = events.get(
         outcome,
