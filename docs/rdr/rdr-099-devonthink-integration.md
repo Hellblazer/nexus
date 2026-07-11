@@ -12,6 +12,7 @@ accepted_date: 2026-04-29
 related_issues: [nexus-bqda, nexus-srck]
 related_tests: []
 related: [RDR-096]
+postmortem_waiver: "Clean close, no divergences to learn from: the v1 five-selector `nx dt` surface shipped as researched. The two behavioural correctness bugs found (lookup records with tags defaulting to current-database-only; smart-group two-step ignoring search group/exclude subgroups) were caught by the gate's own substantive-critic pass on 2026-04-29, BEFORE shipping, not discovered post-ship -- full detail already recorded in the RDR's own Research Findings section (099-research-1..8 + gate-driven corrections) and T2 nexus_rdr/099. The actual close event was 2026-06-05 (T2-recorded); this 2026-07-11 commit only synced the file frontmatter + README index to match, caught by a bead/RDR staleness sweep -- purely administrative, no new content or outcome to record."
 ---
 
 # RDR-099: DEVONthink Integration — First-Class CLI Verbs for Selection-Based Ingest and Reverse Lookup
