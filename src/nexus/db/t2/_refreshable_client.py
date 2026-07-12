@@ -32,11 +32,15 @@ Design shape:
   and every request builds its own absolute URL.
 - ``_auth_headers()`` builds the ``Authorization`` header fresh on every
   call from the CURRENT value of ``self._token`` — never baked once.
-- ``_post`` / ``_get`` both route through the same ``_send`` retry
-  wrapper: on a retryable error (401, or a connection-refused/reset
+- ``_post`` / ``_get`` / ``_delete`` all route through the same ``_send``
+  retry wrapper: on a retryable error (401, or a connection-refused/reset
   signature — see :func:`_is_retryable_endpoint_error`), invalidate and
   re-resolve the endpoint, then retry EXACTLY ONCE. A second failure
   propagates normally — no retry loops.
+- When ``base_url`` is supplied explicitly but ``_token`` is not, only the
+  token half is resolved (see :func:`_resolve_token_only`) — resolving the
+  full endpoint in that case would wrongly require host/port to ALSO be
+  independently resolvable.
 """
 
 from __future__ import annotations
@@ -46,7 +50,7 @@ from typing import Any
 import httpx
 import structlog
 
-from nexus.db.service_endpoint import resolve_service_endpoint
+from nexus.db.service_endpoint import discover_lease, resolve_service_endpoint
 
 _log = structlog.get_logger(__name__)
 
@@ -110,13 +114,82 @@ def _is_retryable_endpoint_error(exc: Exception) -> bool:
     return isinstance(exc, (ConnectionRefusedError, ConnectionResetError))
 
 
+def _resolve_token_only() -> str:
+    """Resolve just the bearer token, WITHOUT requiring host/port to also
+    be independently resolvable (nexus-bikit.4 adoption finding).
+
+    A caller that supplies ``base_url`` explicitly (e.g. pointing a store
+    at a fake/test server, or a pre-discovered endpoint) but omits
+    ``_token`` should not be forced through the full
+    :func:`resolve_service_endpoint` resolution — that function's
+    local-supervisor leg (:func:`~nexus.db.service_endpoint.resolve_service_config`)
+    unconditionally raises if ``NX_SERVICE_PORT`` is not resolvable via env
+    or a supervisor lease, even though the caller already told us where to
+    connect and only the token is missing. This broke real callers: three
+    integration-test fixtures (``tests/db/test_http_memory_store_integration.py``,
+    ``tests/db/test_mvv_memory_service.py``, ``tests/db/test_memory_etl.py``)
+    construct ``HttpMemoryStore(base_url=<explicit>, tenant=...)`` relying on
+    ``NX_SERVICE_TOKEN`` alone, with no ``NX_SERVICE_PORT`` set in the parent
+    process's environment (only in a subprocess env dict for the JVM child).
+
+    Mirrors :func:`resolve_service_endpoint`'s ``service_url``-configured
+    branch specifically: ``get_credential("service_token")`` (which itself
+    checks ``NX_SERVICE_TOKEN`` env first, then ``config.yml``) then the
+    supervisor lease token. This is NOT a general guarantee of returning
+    the identical token :func:`resolve_service_endpoint` would have handed
+    back in every case (substantive-critic + code-review-expert, both
+    nexus-bikit.4 review round 1): when NO ``service_url`` credential is
+    configured, :func:`resolve_service_endpoint` instead delegates to
+    :func:`~nexus.db.service_endpoint.resolve_service_config`, whose token
+    precedence is narrower (``os.environ["NX_SERVICE_TOKEN"]`` only, no
+    ``config.yml`` fallback, then lease) — this function does NOT detect or
+    branch on which leg would actually apply, so it can return a
+    ``config.yml``-sourced token in a scenario where the full-resolution
+    path would have ignored ``config.yml`` and fallen through to the
+    lease or failed loud instead. Verified narrow in practice: every
+    current call site sets ``NX_SERVICE_TOKEN`` via env, which short-
+    circuits both orderings identically, so this divergence is not live
+    today — but a future caller relying on a persisted ``config.yml``
+    token with no ``NX_SERVICE_TOKEN`` env and no ``service_url``
+    configured could observe a different resolution than going through
+    :func:`resolve_service_endpoint` directly would have produced.
+    """
+    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
+
+    token = (get_credential("service_token") or "").strip()
+    if not token:
+        _, lease_token = discover_lease()
+        token = lease_token or ""
+    if not token:
+        raise RuntimeError(
+            "no service token is resolvable: base_url was supplied "
+            "explicitly but no token was — set NX_SERVICE_TOKEN, run "
+            "'nx config set service_token <bearer>', or start the "
+            "supervisor with 'nx daemon service start' (publishes a "
+            "discoverable lease)."
+        )
+    return token
+
+
 class RefreshableHttpStoreMixin:
     """Shared self-healing HTTP transport for T2 ``Http*Store`` classes.
 
     Subclasses call ``self._post(path, payload)`` / ``self._get(path,
-    params)`` instead of touching ``self._client`` directly — every inline
+    params)`` / ``self._delete(path, params)`` instead of touching
+    ``self._client`` directly — every inline
     ``self._client.get/post/...`` call site is exactly the read-path 401 gap
     this mixin exists to close (see the locked plan's AUDIT REVISION #1).
+
+    TEMPLATE NOTE for the f2qvx adoption sweep (substantive-critic
+    observation, nexus-bikit.4 review): ``HttpMemoryStore``'s
+    store-SPECIFIC status-code handling (``get()``'s 404-as-``None``,
+    ``merge_memories()``'s 409-as-``KeyError``) lives in
+    ``http_memory_store.py``, deliberately NOT in this mixin — those are
+    THAT store's own API contract, not a general one. Do not copy those
+    exact status codes/behaviors onto another store without first checking
+    what ITS OWN pre-adoption code actually did for non-2xx responses; a
+    different store's Java-side contract may use those same codes for
+    something else entirely.
     """
 
     def __init__(
@@ -138,16 +211,26 @@ class RefreshableHttpStoreMixin:
         self._base_url_pinned = base_url is not None
         self._token_pinned = _token is not None
 
-        # Pinned contract (tests/db/test_refreshable_client.py): when either
-        # half is omitted, resolve BOTH via resolve_service_endpoint() —
-        # confirmed stateless (reads NX_SERVICE_HOST/PORT/TOKEN or
-        # NX_SERVICE_URL/TOKEN fresh per call; no caching layer of its own).
-        # An explicitly-supplied half is never overwritten by the resolved
-        # pair.
-        if base_url is None or _token is None:
+        # Pinned contract (tests/db/test_refreshable_client.py): when
+        # base_url is omitted, resolve BOTH halves via
+        # resolve_service_endpoint() — confirmed stateless (reads
+        # NX_SERVICE_HOST/PORT/TOKEN or NX_SERVICE_URL/TOKEN fresh per
+        # call; no caching layer of its own). An explicitly-supplied half
+        # is never overwritten by the resolved pair.
+        #
+        # When base_url IS supplied but _token is not, resolve ONLY the
+        # token (nexus-bikit.4 adoption finding) — routing this case
+        # through resolve_service_endpoint() too would incorrectly demand
+        # that host/port ALSO be independently resolvable (env or a
+        # supervisor lease), even though the caller already told us where
+        # to connect. See _resolve_token_only()'s docstring for the three
+        # real call sites this broke.
+        if base_url is None:
             resolved_url, resolved_token = resolve_service_endpoint()
-            base_url = base_url or resolved_url
+            base_url = resolved_url
             _token = _token or resolved_token
+        elif _token is None:
+            _token = _resolve_token_only()
 
         self._base_url = base_url.rstrip("/")
         self._tenant = tenant
@@ -188,14 +271,30 @@ class RefreshableHttpStoreMixin:
         }
 
     def _invalidate_and_reresolve(self) -> None:
-        """Re-resolve ``(base_url, token)`` and update the NON-PINNED
+        """Re-resolve credential/endpoint state and update the NON-PINNED
         cached field(s) only.
 
-        ``resolve_service_endpoint()`` has no caching of its own, so
-        "invalidate" here just means "discard our stale instance field(s)
-        and re-call it" — updating ``self._base_url`` is what actually
-        fixes the f2qvx connection-refused case (a header-only refresh
-        would still be pointed at a dead port after a supervisor restart).
+        Mirrors ``__init__``'s own 3-way resolution branch EXACTLY
+        (substantive-critic Critical finding, nexus-bikit.4 review round
+        1): the ``base_url``-pinned-but-``token``-not-pinned case must
+        re-resolve via :func:`_resolve_token_only`, NOT the full
+        :func:`resolve_service_endpoint` — the whole reason that helper
+        exists is that full resolution wrongly demands host/port ALSO be
+        independently resolvable. The construction-time fix
+        (``__init__``'s ``elif _token is None: _token =
+        _resolve_token_only()`` branch) was landing in this same review
+        round without a matching update HERE, which would have left this
+        exact retry path broken for exactly the callers the construction
+        fix was meant to unblock: they'd construct successfully, then hit
+        ``RuntimeError: nexus-service endpoint is not resolvable`` on the
+        very first self-heal attempt.
+
+        ``resolve_service_endpoint()``/``_resolve_token_only()`` have no
+        caching of their own, so "invalidate" here just means "discard our
+        stale instance field(s) and re-call the right resolver" — updating
+        ``self._base_url`` (when not pinned) is what actually fixes the
+        f2qvx connection-refused case (a header-only refresh would still
+        be pointed at a dead port after a supervisor restart).
 
         Honors the constructor's own pin contract: a half that was
         EXPLICITLY supplied at ``__init__`` (``self._base_url_pinned`` /
@@ -213,11 +312,16 @@ class RefreshableHttpStoreMixin:
                 "failure against a fully pinned endpoint is not "
                 "recoverable by re-resolving"
             )
-        base_url, token = resolve_service_endpoint()
-        if not self._base_url_pinned:
+        if self._base_url_pinned:
+            # base_url pinned, token not -- mirror __init__'s matching
+            # branch: resolve ONLY the token, never demand host/port also
+            # be independently resolvable.
+            self._token = _resolve_token_only()
+        else:
+            base_url, token = resolve_service_endpoint()
             self._base_url = base_url.rstrip("/")
-        if not self._token_pinned:
-            self._token = token
+            if not self._token_pinned:
+                self._token = token
         _log.info(
             "refreshable_http_store.reresolved",
             store=type(self).__name__,
@@ -233,6 +337,17 @@ class RefreshableHttpStoreMixin:
     def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         """GET *path*; self-heals once on a retryable error."""
         return self._send("GET", path, params=params)
+
+    def _delete(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        """DELETE *path*; self-heals once on a retryable error.
+
+        Mirrors ``_get``'s shape (no request body, query-string params) —
+        added during ``HttpMemoryStore`` adoption (nexus-bikit.4) when its
+        ``delete()`` method was found to still be calling
+        ``self._client.delete(...)`` inline because the mixin had no
+        ``_delete`` convenience method yet.
+        """
+        return self._send("DELETE", path, params=params)
 
     # ── Internal ─────────────────────────────────────────────────────────────
 
@@ -267,10 +382,20 @@ class RefreshableHttpStoreMixin:
             return self._request_once(method, path, **kwargs)
 
     def _request_once(self, method: str, path: str, **kwargs: Any) -> Any:
-        """One HTTP round-trip against the CURRENTLY resolved base_url."""
+        """One HTTP round-trip against the CURRENTLY resolved base_url.
+
+        A successful response with an empty body (e.g. ``204 No Content`` —
+        several T2 endpoints, such as ``HttpMemoryStore.merge_memories``'s
+        ``/v1/memory/merge``, respond this way) returns ``None`` rather than
+        calling ``resp.json()`` on empty content, which would raise
+        ``json.JSONDecodeError`` (found during ``HttpMemoryStore`` adoption,
+        nexus-bikit.4, when ``merge_memories`` was routed through ``_post``).
+        """
         url = self._base_url + path
         resp = self._client.request(method, url, headers=self._auth_headers(), **kwargs)
         self._raise_for_status(resp, path)
+        if not resp.content:
+            return None
         return resp.json()
 
     def _raise_for_status(self, resp: httpx.Response, op: str) -> None:

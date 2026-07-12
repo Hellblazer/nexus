@@ -391,6 +391,53 @@ class TestPinnedEndpointNeverSilentlyRepointed:
         with pytest.raises(RuntimeError, match="cannot self-heal"):
             store.echo_post("this must not silently repoint")
 
+    def test_base_url_pinned_token_omitted_selfheals_via_token_only_resolution(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """substantive-critic Critical finding, nexus-bikit.4 review round 1:
+        __init__'s base_url-pinned-token-omitted branch was fixed to resolve
+        ONLY the token via _resolve_token_only() (not the full
+        resolve_service_endpoint(), which wrongly demands host/port also be
+        independently resolvable) -- but _invalidate_and_reresolve() was NOT
+        updated to match, so the retry path still called full resolution and
+        would have failed the moment a base_url-pinned store needed to
+        self-heal. This proves the RETRY path specifically, not just
+        construction: deletes NX_SERVICE_HOST/NX_SERVICE_PORT from env (so
+        full resolve_service_endpoint() would fail loud on the host/port
+        side) while base_url stays pinned to the fake server and
+        NX_SERVICE_TOKEN stays resolvable -- if _invalidate_and_reresolve()
+        regresses back to calling the full resolver, this test fails with a
+        host/port-unresolvable RuntimeError instead of a successful retry."""
+        from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
+
+        class _EchoStore(RefreshableHttpStoreMixin):
+            def echo_post(self, value: str) -> Any:
+                return self._post("/v1/echo", {"value": value})
+
+        store = _EchoStore(base_url=f"http://127.0.0.1:{fake_service.port}")
+
+        baseline = store.echo_post("before rotation")
+        assert baseline == {"echo": {"value": "before rotation"}}
+
+        # Remove the host/port env the FULL resolver would need -- if the
+        # retry path regresses to calling resolve_service_endpoint() instead
+        # of _resolve_token_only(), this makes that regression fail loudly
+        # rather than silently succeeding for an unrelated reason.
+        monkeypatch.delenv("NX_SERVICE_HOST", raising=False)
+        monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
+
+        global _VALID_BEARER
+        _VALID_BEARER = "rotated-bearer-pinned-base-url"
+        monkeypatch.setenv("NX_SERVICE_TOKEN", _VALID_BEARER)
+
+        result = store.echo_post("after rotation, host/port unresolvable")
+        assert result == {"echo": {"value": "after rotation, host/port unresolvable"}}
+        assert _REQUEST_COUNT["POST /v1/echo"] == 3, (
+            "expected exactly one failed attempt (stale header) followed by "
+            "one successful retry, self-healed via token-only resolution "
+            "despite NX_SERVICE_HOST/PORT being unresolvable"
+        )
+
 
 class TestIsRetryableEndpointErrorClassifier:
     """Direct, deterministic unit tests of ``_is_retryable_endpoint_error``

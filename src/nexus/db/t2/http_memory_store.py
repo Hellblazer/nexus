@@ -36,13 +36,9 @@ Client-composed (pure-Python logic over server-side data):
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import httpx
-import structlog
-
-_log = structlog.get_logger(__name__)
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -62,64 +58,41 @@ _ALL_PAIRS_MAX_ENTRIES = 1000
 # RDR-152 nexus-fjwxh: env-only resolution replaced by the centralized
 # resolver (env halves -> ServiceRegistry lease -> fail loud), so the
 # T2 service-mode default works wherever the supervisor is running.
-from nexus.db.service_endpoint import resolve_service_endpoint as _resolve_endpoint
+# nexus-bikit.4: construction, credential/endpoint refresh-on-401, and the
+# HTTP transport itself (_post/_get/_delete) are now inherited wholesale
+# from RefreshableHttpStoreMixin — HttpMemoryStore no longer bakes a
+# ``self._headers`` dict or a ``httpx.Client(base_url=..., headers=...)``
+# at construction time, which is what let a rotated bearer or a
+# supervisor-restart port change go silently stale for the life of the
+# instance. See ``nx memory get -p nexus -t design-bikit-refreshable-http-store-mixin.md``.
 from nexus.db.t2._raw_handle_guard import RawHandleGuardMixin
+from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 
 
 # ── HttpMemoryStore ────────────────────────────────────────────────────────────
 
 
-class HttpMemoryStore(RawHandleGuardMixin):
+class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     """MemoryStore drop-in that delegates to the RDR-152 Java HTTP service.
 
-    Uses a keep-alive :class:`httpx.Client` connection pool.  Reads
-    ``NX_SERVICE_HOST``, ``NX_SERVICE_PORT``, and ``NX_SERVICE_TOKEN``
-    from the environment at construction time.
+    Uses a keep-alive :class:`httpx.Client` connection pool via
+    :class:`~nexus.db.t2._refreshable_client.RefreshableHttpStoreMixin`,
+    which resolves ``NX_SERVICE_HOST``, ``NX_SERVICE_PORT``, and
+    ``NX_SERVICE_TOKEN`` (or a managed ``service_url``/``service_token``)
+    fresh on construction AND self-heals (re-resolve + retry once) on a
+    401 or a connection-refused/reset — see the mixin's own docstring for
+    the full resolution order. ``__init__`` is inherited unchanged (this
+    class's constructor signature — ``(base_url=None, tenant=DEFAULT_TENANT,
+    *, _token=None)`` — matches the mixin's pinned contract exactly, so no
+    override is needed).
 
     Args:
         base_url: Optional override for the service base URL
-            (``http://<host>:<port>``).  When supplied, ``host``/``port``
-            env-vars are ignored; the token env-var is still required.
+            (``http://<host>:<port>``).  When supplied without ``_token``,
+            only the token half is re-resolved (host/port need not also be
+            independently resolvable).
         tenant:   Tenant to stamp on every request (default: ``DEFAULT_TENANT``).
     """
-
-    def __init__(
-        self,
-        base_url: str | None = None,
-        tenant: str = DEFAULT_TENANT,
-        *,
-        _token: str | None = None,
-    ) -> None:
-        if base_url is not None:
-            if _token is None:
-                _token = os.environ.get("NX_SERVICE_TOKEN", "")
-                if not _token:
-                    raise RuntimeError(
-                        "NX_SERVICE_TOKEN is required when NX_STORAGE_BACKEND=service."
-                    )
-            self._base_url = base_url.rstrip("/")
-        else:
-            self._base_url, token = _resolve_endpoint()
-            _token = token
-
-        self._tenant = tenant
-        self._headers = {
-            "Authorization": f"Bearer {_token}",
-            "X-Nexus-Tenant": tenant,
-            "Content-Type": "application/json",
-        }
-        # Keep-alive connection pool (S0.3 requirement).
-        self._client = httpx.Client(
-            base_url=self._base_url,
-            headers=self._headers,
-            timeout=30.0,
-        )
-        _log.debug("http_memory_store.init", base_url=self._base_url, tenant=tenant)
-
-    def close(self) -> None:
-        """Close the keep-alive connection pool (idempotent)."""
-        self._client.close()
-        _log.debug("http_memory_store.closed")
 
     # ── Write ──────────────────────────────────────────────────────────────────
 
@@ -265,16 +238,25 @@ class HttpMemoryStore(RawHandleGuardMixin):
     ) -> dict[str, Any] | None:
         """Retrieve a single entry by (project, title) or by numeric ID."""
         if id is not None:
-            resp = self._client.get("/v1/memory/get", params={"id": id})
+            params: dict[str, Any] = {"id": id}
         elif project is not None and title is not None:
-            resp = self._client.get("/v1/memory/get", params={"project": project, "title": title})
+            params = {"project": project, "title": title}
         else:
             raise ValueError("Provide either id or both project and title.")
 
-        if resp.status_code == 404:
-            return None
-        self._raise_for_status(resp, "get")
-        return _normalize(resp.json())
+        # The mixin's _get raises httpx.HTTPStatusError on ANY non-2xx
+        # (including 404 — self-heal retry only applies to 401/connection
+        # errors, per _is_retryable_endpoint_error, so a genuine 404
+        # propagates immediately). get()'s contract is "not found -> None",
+        # not an exception, so catch specifically the 404 case here and
+        # re-raise anything else untouched.
+        try:
+            resp = self._get("/v1/memory/get", params=params)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        return _normalize(resp)
 
     def resolve_title(
         self,
@@ -287,9 +269,7 @@ class HttpMemoryStore(RawHandleGuardMixin):
         ``(None, candidates)`` on multiple prefix matches,
         ``(None, [])`` when nothing matches.
         """
-        resp = self._client.get("/v1/memory/resolve", params={"project": project, "title": title})
-        self._raise_for_status(resp, "resolve_title")
-        data = resp.json()
+        data = self._get("/v1/memory/resolve", params={"project": project, "title": title})
         entry = _normalize(data.get("entry")) if data.get("entry") is not None else None
         candidates = [_normalize(c) for c in (data.get("candidates") or [])]
         return entry, candidates
@@ -328,17 +308,14 @@ class HttpMemoryStore(RawHandleGuardMixin):
             params["project"] = project
         if agent:
             params["agent"] = agent
-        resp = self._client.get("/v1/memory/list", params=params)
-        self._raise_for_status(resp, "list_entries")
-        return [_normalize_summary(r) for r in resp.json()]
+        resp = self._get("/v1/memory/list", params=params)
+        return [_normalize_summary(r) for r in resp]
 
     def get_projects_with_prefix(self, prefix: str) -> list[dict[str, Any]]:
         """Return distinct project namespaces starting with *prefix*."""
         if not prefix:
             return []
-        resp = self._client.get("/v1/memory/projects", params={"prefix": prefix})
-        self._raise_for_status(resp, "get_projects_with_prefix")
-        return resp.json()
+        return self._get("/v1/memory/projects", params={"prefix": prefix})
 
     def search_glob(self, query: str, project_glob: str) -> list[dict[str, Any]]:
         """FTS search scoped to projects matching a GLOB pattern."""
@@ -356,9 +333,8 @@ class HttpMemoryStore(RawHandleGuardMixin):
 
     def get_all(self, project: str) -> list[dict[str, Any]]:
         """Return all entries for *project* with full column data."""
-        resp = self._client.get("/v1/memory/all", params={"project": project})
-        self._raise_for_status(resp, "get_all")
-        return [_normalize(r) for r in resp.json()]
+        resp = self._get("/v1/memory/all", params={"project": project})
+        return [_normalize(r) for r in resp]
 
     # ── Delete ─────────────────────────────────────────────────────────────────
 
@@ -375,17 +351,15 @@ class HttpMemoryStore(RawHandleGuardMixin):
             params = {"project": project, "title": title}
         else:
             raise ValueError("Provide either id or both project and title.")
-        resp = self._client.delete("/v1/memory/delete", params=params)
-        self._raise_for_status(resp, "delete")
-        return bool(resp.json().get("deleted", False))
+        resp = self._delete("/v1/memory/delete", params=params)
+        return bool(resp.get("deleted", False))
 
     # ── Housekeeping ───────────────────────────────────────────────────────────
 
     def expire(self) -> list[int]:
         """Delete TTL-expired memory entries. Returns list of deleted row IDs."""
-        resp = self._client.post("/v1/memory/expire", json={})
-        self._raise_for_status(resp, "expire")
-        return [int(i) for i in resp.json().get("deleted_ids", [])]
+        resp = self._post("/v1/memory/expire", {})
+        return [int(i) for i in resp.get("deleted_ids", [])]
 
     # ── Consolidation (RDR-061 E6) ─────────────────────────────────────────────
 
@@ -475,15 +449,21 @@ class HttpMemoryStore(RawHandleGuardMixin):
                 f"keep_id ({keep_id}) must not be in delete_ids — "
                 "would discard the entry meant to be kept"
             )
-        resp = self._client.post(
-            "/v1/memory/merge",
-            json={"keep_id": keep_id, "delete_ids": delete_ids, "merged_content": merged_content},
-        )
-        if resp.status_code == 409:
-            raise KeyError(
-                f"keep_id {keep_id} not found — aborted merge to prevent data loss"
+        # Same shape as get()'s 404-as-None handling above: a 409 here is a
+        # semantic "not found" signal (not retryable per
+        # _is_retryable_endpoint_error), so catch it specifically and
+        # re-raise anything else untouched.
+        try:
+            self._post(
+                "/v1/memory/merge",
+                {"keep_id": keep_id, "delete_ids": delete_ids, "merged_content": merged_content},
             )
-        self._raise_for_status(resp, "merge_memories")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 409:
+                raise KeyError(
+                    f"keep_id {keep_id} not found — aborted merge to prevent data loss"
+                ) from exc
+            raise
 
     def put_or_merge(
         self,
@@ -527,34 +507,11 @@ class HttpMemoryStore(RawHandleGuardMixin):
         idle_days: int = 30,
     ) -> list[dict[str, Any]]:
         """SERVER-SIDE: SQL date comparison on the Java service."""
-        resp = self._client.get(
+        resp = self._get(
             "/v1/memory/flag_stale",
             params={"project": project, "idle_days": str(idle_days)},
         )
-        self._raise_for_status(resp, "flag_stale_memories")
-        return [_normalize(r) for r in resp.json()]
-
-    # ── Internal helpers ───────────────────────────────────────────────────────
-
-    def _post(self, path: str, payload: dict[str, Any]) -> Any:
-        """POST JSON payload, raise on error, return parsed JSON."""
-        resp = self._client.post(path, json=payload)
-        self._raise_for_status(resp, path)
-        return resp.json()
-
-    def _raise_for_status(self, resp: httpx.Response, op: str) -> None:
-        """Raise a descriptive exception on non-2xx responses."""
-        if resp.is_success:
-            return
-        try:
-            detail = resp.json().get("error", resp.text)
-        except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
-            detail = resp.text
-        raise httpx.HTTPStatusError(
-            f"HttpMemoryStore.{op} failed: HTTP {resp.status_code}: {detail}",
-            request=resp.request,
-            response=resp,
-        )
+        return [_normalize(r) for r in resp]
 
 
 # ── Normalisation helpers ──────────────────────────────────────────────────────
