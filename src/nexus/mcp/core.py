@@ -6099,6 +6099,54 @@ def daemon_uninstall(confirm: bool = False, remove_data: bool = False) -> str:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 
+def _resolve_mode_diagnostics() -> dict[str, str | None]:
+    """Best-effort snapshot of resolved T3 mode + embedder + config path (nexus-hixe9).
+
+    Field evidence (Steve, 5.9.2 shakeout): the Desktop-GUI-spawned .mcpb
+    resolves LOCAL mode (bge-768) against cloud (voyage-1024) collections,
+    silently zeroing every vector search via the dimension-mismatch skip --
+    yet a clean CLI simulation with the SAME credentials resolves cloud
+    correctly. The GUI subprocess's runtime context (HOME, NEXUS_CONFIG_DIR,
+    NX_LOCAL, which config.yml it actually reads) must differ from the CLI
+    in a way not yet reproduced headlessly. This function does not fix that
+    divergence -- it captures the fields needed to diagnose it, so a future
+    live Desktop run leaves a durable on-disk trail in mcp.log instead of
+    requiring the divergence to be reproduced first.
+
+    nexus-smd1k (substantive-critic finding): ``is_local_mode()`` has THREE
+    decision branches (explicit ``NX_LOCAL``, ``service_url`` presence,
+    legacy chroma/voyage-key presence) — per the bead's own CLI-vs-GUI
+    divergence evidence, the more likely root cause sits in branch 2 or 3,
+    not branch 1. ``service_url_found``/``chroma_key_found``/
+    ``voyage_key_found`` evidence which credential each branch actually
+    saw, as booleans ONLY — never the credential values themselves.
+
+    Never raises: a diagnostic must not block MCP startup. On resolution
+    failure returns ``{"mode": "unknown", "error": str(exc)}``.
+    """
+    try:
+        from nexus.config import get_credential, is_local_mode, nexus_config_dir  # noqa: PLC0415 — deferred, rare/branch-local path
+
+        local = is_local_mode()
+        local_embedder = None
+        if local:
+            from nexus.db.local_ef import local_model_token  # noqa: PLC0415 — deferred, avoids a config.py<->local_ef.py import cycle
+
+            local_embedder = local_model_token()
+        return {
+            "mode": "local" if local else "cloud",
+            "local_embedder": local_embedder,
+            "config_dir": str(nexus_config_dir()),
+            "home": _os.environ.get("HOME", ""),
+            "nx_local_env": _os.environ.get("NX_LOCAL", ""),
+            "service_url_found": bool(get_credential("service_url")),
+            "chroma_key_found": bool(get_credential("chroma_api_key")),
+            "voyage_key_found": bool(get_credential("voyage_api_key")),
+        }
+    except Exception as exc:  # noqa: BLE001 — diagnostic-only, must never block startup
+        return {"mode": "unknown", "error": str(exc)}
+
+
 def main():
     """Run the core MCP server on stdio transport.
 
@@ -6133,6 +6181,11 @@ def main():
         pid=os.getpid(),
         ppid=os.getppid(),
     )
+    # nexus-hixe9: durable on-disk trail of resolved mode/embedder/config
+    # path for diagnosing runtime-context divergence between a GUI-spawned
+    # .mcpb and a CLI simulation with the same credentials. See
+    # _resolve_mode_diagnostics' docstring for the field evidence.
+    log.info("mcp_server_mode_resolved", **_resolve_mode_diagnostics())
     # RDR-126 P2 (nexus-bsjro): ensure the host T2 daemon's OS-level
     # autostart unit is installed and the daemon is running before
     # serving any tools. Without this, a Claude-Desktop-only user who
