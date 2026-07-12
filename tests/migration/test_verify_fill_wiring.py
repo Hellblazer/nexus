@@ -49,23 +49,18 @@ class _FakeCountSource:
         return {r: self._counts[r] for r in relations if r in self._counts}
 
 
-class _FakeResponse:
-    def raise_for_status(self) -> None:
-        pass
-
-    def json(self) -> dict[str, Any]:
-        return {"imported": 0}
-
-
 class _FakeChashClient:
+    """nexus-f2qvx.3: ``import_rows`` is the public ``HttpChashIndex``
+    wrapper ``_chash_import_fn`` (orchestrator.py) now calls (was a raw
+    ``self._client.post(...)`` reach-through pre-mixin-adoption)."""
+
     def __init__(self, registered: dict[str, set[str]]) -> None:
         self._registered = registered
         self.posts: list[tuple[str, dict]] = []
-        self._client = self
 
-    def post(self, url: str, json: dict[str, Any] | None = None) -> _FakeResponse:  # noqa: A002
-        self.posts.append((url, json))
-        return _FakeResponse()
+    def import_rows(self, rows: list[dict[str, Any]]) -> int:
+        self.posts.append(("/v1/chash/import", {"rows": rows}))
+        return len(rows)
 
     def registered_chashes_for_collection(self, collection: str) -> set[str]:
         return set(self._registered.get(collection, set()))
@@ -101,15 +96,15 @@ class TestVerifyFillChashBreakerRecovery:
         client = _FakeChashClient({"code__x": set()})
 
         call_count = {"n": 0}
-        orig_post = client.post
+        orig_import_rows = client.import_rows
 
-        def _flaky_post(url, json=None):  # noqa: A002
+        def _flaky_import_rows(rows):
             call_count["n"] += 1
             # first batch call always raises a retryable transport error;
             # every OTHER (never happens here, batch_size=200 => one batch)
             raise ConnectionError("simulated sustained outage")
 
-        client.post = _flaky_post
+        client.import_rows = _flaky_import_rows
         collector = IssueCollector()
 
         with patch("nexus.retry.time.sleep", return_value=None):
@@ -127,7 +122,7 @@ class TestVerifyFillChashBreakerRecovery:
         # the failure is recorded (gates total_failed), never silent
         issues = collector.issues_for("chash", "chash_index")
         assert any(i.action == "failed" for i in issues)
-        client.post = orig_post  # restore (unused after this point)
+        client.import_rows = orig_import_rows  # restore (unused after this point)
 
 
 class TestVerifyFillCatalog:

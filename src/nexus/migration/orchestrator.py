@@ -575,10 +575,13 @@ def _read_chash_rows_by_collection(sqlite_path: Path) -> dict[str, list[dict[str
 
 
 def _chash_import_fn(http_chash: Any) -> Callable[[list[dict[str, Any]]], Any]:
+    # nexus-f2qvx.3: previously reached into ``http_chash._client.post(...)``
+    # directly — a pre-mixin-adoption wart. HttpChashIndex.import_rows() is
+    # the public wrapper (routes through RefreshableHttpStoreMixin's
+    # self-healing _post); the raw ``._client`` call would break
+    # post-adoption since the mixin's httpx.Client has no baked base_url.
     def _import(batch: list[dict[str, Any]]) -> Any:
-        resp = http_chash._client.post("/v1/chash/import", json={"rows": batch})
-        resp.raise_for_status()
-        return resp
+        return http_chash.import_rows(batch)
     return _import
 
 

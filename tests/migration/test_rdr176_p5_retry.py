@@ -420,8 +420,9 @@ def test_t2_etl_retries_transient_403(name, seed, run, tmp_path, monkeypatch) ->
 
 
 def test_chash_etl_retries_transient_403(tmp_path, monkeypatch) -> None:
-    """chash_etl posts via the raw client + raise_for_status; the post must be
-    retried on a transient 403."""
+    """chash_etl posts via HttpChashIndex.import_rows() (nexus-f2qvx.3 —
+    was the raw client + raise_for_status pre-mixin-adoption); the call
+    must be retried on a transient 403."""
     monkeypatch.setattr(retry.time, "sleep", lambda _s: None)
     db = _db_with(
         tmp_path,
@@ -429,23 +430,21 @@ def test_chash_etl_retries_transient_403(tmp_path, monkeypatch) -> None:
         ("0" * 64, _COLL, _TS),
     )
 
-    class _FlakyClient:
+    class _FlakyStore:
         def __init__(self) -> None:
             self.attempts = 0
 
-        def post(self, _path, **_kw):
+        def import_rows(self, rows):
             self.attempts += 1
-            req = httpx.Request("POST", "http://svc/v1/chash/import")
-            code = 403 if self.attempts < 3 else 200
-            return httpx.Response(code, request=req, json={"imported": 1})
+            if self.attempts < 3:
+                req = httpx.Request("POST", "http://svc/v1/chash/import")
+                resp = httpx.Response(403, request=req, json={"error": "forbidden"})
+                raise httpx.HTTPStatusError("403 forbidden", request=req, response=resp)
+            return len(rows)
 
-    class _Store:
-        def __init__(self) -> None:
-            self._client = _FlakyClient()
-
-    store = _Store()
+    store = _FlakyStore()
     migrate_chash_rows(db, store)
-    assert store._client.attempts == 3
+    assert store.attempts == 3
 
 
 def test_catalog_import_table_retries_transient_403(monkeypatch) -> None:

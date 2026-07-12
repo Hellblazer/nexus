@@ -121,19 +121,25 @@ def migrate_chash_rows(
                 continue
 
             try:
-                # Use the import endpoint on the underlying HTTP client directly.
                 # RDR-176 Gap 6 + RDR-178 Gap 3: bounded retry (+ circuit
                 # breaker pause on a sustained outage) on a transient edge
                 # 403/429/502/503/504 / drop / read-timeout (idempotent
-                # import). raise_for_status surfaces a classifiable
-                # httpx.HTTPStatusError so the retry classifier can tell a
-                # transient edge blip (retry) from a real 4xx (fail fast).
+                # import). import_rows() routes through
+                # RefreshableHttpStoreMixin's self-healing _post, which
+                # raises a classifiable httpx.HTTPStatusError so the retry
+                # classifier can tell a transient edge blip (retry) from a
+                # real 4xx (fail fast).
+                #
+                # nexus-f2qvx.3: previously called
+                # ``http_chash._client.post("/v1/chash/import", ...)``
+                # directly — a pre-mixin-adoption reach-through into the
+                # store's internal transport. HttpChashIndex.import_rows()
+                # is the public wrapper this now uses; the raw ``._client``
+                # call would break post-adoption (the mixin's httpx.Client
+                # is constructed WITHOUT a baked base_url).
                 def _do_post():  # noqa: B023 — called immediately in this loop iteration, before payload advances
-                    r = http_chash._client.post("/v1/chash/import", json={"rows": payload})
-                    r.raise_for_status()
-                    return r
-                resp = _etl_batch_with_breaker(_do_post, breaker=breaker)
-                batch_imported = resp.json().get("imported", 0)
+                    return http_chash.import_rows(payload)
+                batch_imported = _etl_batch_with_breaker(_do_post, breaker=breaker)
                 imported += batch_imported
                 _log.info(
                     "chash_etl_batch",

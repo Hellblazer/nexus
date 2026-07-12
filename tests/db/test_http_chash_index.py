@@ -313,14 +313,18 @@ class TestUpsertMany:
         """
         post_bodies: list[list[str]] = []
         s = HttpChashIndex(base_url=fake_server, _token=TOKEN)
-        original_post = s._client.post
+        # nexus-f2qvx.3: post-mixin-adoption the store's transport calls
+        # self._client.request(method, url, ...) — never .post(path, ...)
+        # directly (the mixin's httpx.Client has no baked base_url, so
+        # every call builds its own absolute URL). Spy on .request instead.
+        original_request = s._client.request
 
-        def spy_post(path, **kwargs):
-            if path == "/v1/chash/upsert_many":
+        def spy_request(method, url, **kwargs):
+            if method == "POST" and url.endswith("/v1/chash/upsert_many"):
                 post_bodies.append(kwargs["json"]["chashes"])
-            return original_post(path, **kwargs)
+            return original_request(method, url, **kwargs)
 
-        s._client.post = spy_post
+        s._client.request = spy_request
         s.upsert_many(chashes=["a", "a", "b", "a", "c", "b"], collection="col_dup")
         s.close()
 
@@ -344,14 +348,15 @@ class TestUpsertMany:
         before the split, so no batch repeats a chash (nexus-85z0y)."""
         post_bodies: list[list[str]] = []
         s = HttpChashIndex(base_url=fake_server, _token=TOKEN)
-        original_post = s._client.post
+        # nexus-f2qvx.3: spy on .request (see test_upsert_many_dedups_order_preserving).
+        original_request = s._client.request
 
-        def spy_post(path, **kwargs):
-            if path == "/v1/chash/upsert_many":
+        def spy_request(method, url, **kwargs):
+            if method == "POST" and url.endswith("/v1/chash/upsert_many"):
                 post_bodies.append(kwargs["json"]["chashes"])
-            return original_post(path, **kwargs)
+            return original_request(method, url, **kwargs)
 
-        s._client.post = spy_post
+        s._client.request = spy_request
 
         # 250 unique chashes. Without dedup, re-appending "sha0000" and "sha0200"
         # would land copies in different batches (byte-identical straddle) OR
@@ -373,27 +378,19 @@ class TestUpsertMany:
 
     def test_upsert_many_batches_at_200(self, fake_server, monkeypatch):
         """Verify that > _BATCH_SIZE chashes are split into multiple requests."""
-        import nexus.db.t2.http_chash_index as mod
-
-        calls: list[list[str]] = []
-        orig = HttpChashIndex.upsert_many
-
-        def _spy(self, *, chashes, collection):
-            # Capture the effective batch sizes by patching _client.post
-            pass
-
         # Track POST calls to /v1/chash/upsert_many via a counting shim
         post_bodies: list[list[str]] = []
         s = HttpChashIndex(base_url=fake_server, _token=TOKEN)
 
-        original_post = s._client.post
+        # nexus-f2qvx.3: spy on .request (see test_upsert_many_dedups_order_preserving).
+        original_request = s._client.request
 
-        def spy_post(path, **kwargs):
-            if path == "/v1/chash/upsert_many":
+        def spy_request(method, url, **kwargs):
+            if method == "POST" and url.endswith("/v1/chash/upsert_many"):
                 post_bodies.append(kwargs["json"]["chashes"])
-            return original_post(path, **kwargs)
+            return original_request(method, url, **kwargs)
 
-        s._client.post = spy_post
+        s._client.request = spy_request
 
         big_list = [f"sha{i:04d}" for i in range(450)]
         s.upsert_many(chashes=big_list, collection="col_big")
@@ -493,34 +490,64 @@ class TestCountForCollection:
 
 class TestAuth:
     def test_bad_token_raises(self, fake_server):
+        """Wrong token must raise, not silently succeed.
+
+        Post-mixin-adoption (nexus-f2qvx.3): both ``base_url`` and
+        ``_token`` are explicitly pinned here (a test double), so a 401
+        does NOT self-heal-and-retry to a bare ``httpx.HTTPStatusError``
+        — ``RefreshableHttpStoreMixin._invalidate_and_reresolve`` refuses
+        to re-resolve when both halves are pinned (nothing it could
+        change would fix a fully-pinned endpoint) and raises
+        ``RuntimeError`` instead. Either way, the call must not succeed.
+        """
         s = HttpChashIndex(base_url=fake_server, _token="wrong-token")
-        with pytest.raises(RuntimeError, match="401"):
+        with pytest.raises(RuntimeError, match="cannot self-heal"):
             s.upsert(chash="c1", collection="col_a")
         s.close()
 
 
+class TestKeywordOnlyToken:
+    def test_positional_token_now_raises_typeerror(self, fake_server):
+        """nexus-f2qvx.3: HttpChashIndex was the one outlier store whose
+        ``_token`` was accepted POSITIONALLY (no ``*`` before it). Every
+        existing call site already passed it as a keyword or omitted it
+        (verified via grep before this change), so normalizing to
+        keyword-only is safe — but the normalization itself needs direct
+        proof that the ``*`` actually landed, not just "existing tests
+        still pass" (which would be true even without this change)."""
+        with pytest.raises(TypeError):
+            HttpChashIndex(fake_server, DEFAULT_TENANT, "positional-token")
+
+
 class TestImportEndpoint:
     def test_import_fidelity_preserves_created_at(self, fake_server):
-        """Direct /v1/chash/import stores created_at verbatim (ETL fidelity)."""
+        """import_rows() (POST /v1/chash/import) stores created_at verbatim
+        (ETL fidelity).
+
+        nexus-f2qvx.3: previously exercised via a direct
+        ``s._client.post("/v1/chash/import", ...)`` reach-through — no
+        longer possible post-adoption (the mixin's httpx.Client has no
+        baked base_url, so a relative-path call from outside the store
+        fails outright). ``import_rows()`` is the public wrapper this now
+        exercises, mirroring what ``chash_etl.py`` / ``migration/orchestrator.py``
+        call in production.
+        """
         s = HttpChashIndex(base_url=fake_server, _token=TOKEN)
         ts = "2024-01-15T10:30:00Z"
-        resp = s._client.post(
-            "/v1/chash/import",
-            json={"rows": [{"chash": "abc", "collection": "col_a", "created_at": ts}]},
-        )
-        assert resp.is_success
+        imported = s.import_rows([{"chash": "abc", "collection": "col_a", "created_at": ts}])
+        assert imported == 1
         with _STORE_LOCK:
             row = _STORE[("abc", "col_a")]
             assert row["created_at"] == ts
         s.close()
 
     def test_import_idempotent_rerun(self, fake_server):
-        """Running /import twice yields same state (upsert semantics)."""
+        """Running import_rows() twice yields same state (upsert semantics)."""
         s = HttpChashIndex(base_url=fake_server, _token=TOKEN)
         ts = "2024-01-15T10:30:00Z"
-        payload = {"rows": [{"chash": "abc", "collection": "col_a", "created_at": ts}]}
-        s._client.post("/v1/chash/import", json=payload)
-        s._client.post("/v1/chash/import", json=payload)
+        rows = [{"chash": "abc", "collection": "col_a", "created_at": ts}]
+        s.import_rows(rows)
+        s.import_rows(rows)
         with _STORE_LOCK:
             assert len(_STORE) == 1
         s.close()

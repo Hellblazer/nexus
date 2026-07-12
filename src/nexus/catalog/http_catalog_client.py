@@ -51,10 +51,29 @@ Per catalog-git-DECISION OPTION C (2026-06-07): Postgres is the SOLE authority
 on the catalog write path.  Methods like rebuild(), defrag(), compact(), sync(),
 pull() that are SQLite/git-only artifacts raise NotImplementedError (guard+track;
 bead nexus-gmiaf.24 tracks the service-side equivalents).
+
+nexus-f2qvx.3 (mixin-adoption sweep, batch C — one of the two OUTLIERS):
+construction, credential/endpoint refresh-on-401, and the HTTP transport
+itself are now inherited from
+:class:`~nexus.db.t2._refreshable_client.RefreshableHttpStoreMixin` —
+``HttpCatalogClient`` no longer bakes a ``self._headers`` dict or a
+``httpx.Client(base_url=..., headers=...)`` at construction time. Unlike
+every other adopted store, this class already had its OWN internal
+``_get``/``_post`` wrapper methods (used by ~100+ call sites throughout this
+file) with a DIFFERENT public signature than the mixin's (``_get(path,
+**params)`` filtering falsy values + a ``/v1/catalog`` path prefix, vs the
+mixin's ``_get(path, params=None)``). Rather than rename every call site,
+this class's own ``_get``/``_post`` are kept with their existing signature
+and now internally delegate to ``super()._get``/``super()._post`` (the
+mixin's self-healing transport) after prefixing the path — so every one of
+those ~100+ call sites gets self-heal for free with zero changes to the call
+sites themselves. ``HttpCatalogClient`` was NOT on ``RawHandleGuardMixin``
+before this adoption and stays that way (it guards raw-handle access via its
+own ``_db`` property instead) — adding ``RawHandleGuardMixin`` here would be
+new scope, not a mechanical mixin swap.
 """
 from __future__ import annotations
 
-import os
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -66,6 +85,7 @@ from nexus.catalog.catalog import CatalogEntry, CatalogLink, Tumbler
 from nexus.catalog.catalog_spans import parse_chash_span
 from nexus.catalog.catalog_writes import ManifestRow
 from nexus.catalog.collection_name import CollectionName, owner_segment_for_tumbler
+from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 
 _log = structlog.get_logger(__name__)
 
@@ -179,17 +199,26 @@ def _to_entry(d: dict) -> CatalogEntry:
     )
 
 
-class HttpCatalogClient:
+class HttpCatalogClient(RefreshableHttpStoreMixin):
     """Catalog orchestrator drop-in backed by the RDR-152 Java HTTP service.
 
     Implements the full public API of :class:`~nexus.catalog.catalog.Catalog`
     at the ORCHESTRATOR level.  All calls forward to the Java service at
     ``/v1/catalog/*``.
 
+    Construction, credential/endpoint refresh-on-401, and the underlying
+    keep-alive ``httpx.Client`` are inherited from
+    :class:`~nexus.db.t2._refreshable_client.RefreshableHttpStoreMixin`
+    (nexus-f2qvx.3) — see that class's docstring for the full resolution
+    order (env halves -> managed ``service_url``/``service_token`` ->
+    supervisor lease -> fail loud) and self-heal contract (re-resolve +
+    retry once on a 401 or connection-refused/reset).
+
     Args:
         base_url: Optional override (e.g. ``"http://127.0.0.1:8765"``).
         tenant:   Tenant header stamped on every request.
-        _token:   Token override (used with base_url; read from env otherwise).
+        _token:   Token override (used with base_url; resolved config-first
+                  otherwise — see the mixin's ``_resolve_token_only``).
     """
 
     def __init__(
@@ -199,34 +228,7 @@ class HttpCatalogClient:
         *,
         _token: str | None = None,
     ) -> None:
-        if base_url is not None:
-            if _token is None:
-                _token = os.environ.get("NX_SERVICE_TOKEN", "")
-                if not _token:
-                    raise RuntimeError(
-                        "NX_SERVICE_TOKEN is required when an explicit "
-                        "base_url is passed (NX_STORAGE_BACKEND_CATALOG="
-                        "service): with a caller-chosen URL the supervisor "
-                        "lease token may not match — export the token, or "
-                        "omit base_url to auto-discover both halves from "
-                        "the lease ('nx daemon service start')."
-                    )
-            self._base_url = base_url.rstrip("/")
-        else:
-            self._base_url, token = _resolve_endpoint()
-            _token = token
-
-        self._tenant = tenant
-        self._headers = {
-            "Authorization": f"Bearer {_token}",
-            "X-Nexus-Tenant": tenant,
-            "Content-Type": "application/json",
-        }
-        self._client = httpx.Client(
-            base_url=self._base_url,
-            headers=self._headers,
-            timeout=30.0,
-        )
+        super().__init__(base_url=base_url, tenant=tenant, _token=_token)
         _log.debug("http_catalog_client.init", base_url=self._base_url, tenant=tenant)
 
     def close(self) -> None:
@@ -262,23 +264,21 @@ class HttpCatalogClient:
         )
 
     # ── Internal helpers ───────────────────────────────────────────────────────
+    #
+    # These keep THIS class's own established signature (``_get(path,
+    # **params)`` filtering falsy values; ``_post(path, body=None)``), used
+    # unchanged by the ~100+ call sites below — nexus-f2qvx.3 routes the
+    # actual wire request through the inherited
+    # ``RefreshableHttpStoreMixin._get``/``._post`` (self-healing transport)
+    # rather than touching ``self._client`` directly, so every call site
+    # gets self-heal for free with no signature changes.
 
     def _get(self, path: str, **params: Any) -> Any:
         filtered = {k: v for k, v in params.items() if v is not None and v != ""}
-        r = self._client.get(f"/v1/catalog{path}", params=filtered)
-        r.raise_for_status()
-        ct = r.headers.get("content-type", "")
-        if "application/json" in ct and r.content:
-            return r.json()
-        return None
+        return super()._get(f"/v1/catalog{path}", params=filtered)
 
     def _post(self, path: str, body: dict | None = None) -> Any:
-        r = self._client.post(f"/v1/catalog{path}", json=body or {})
-        r.raise_for_status()
-        ct = r.headers.get("content-type", "")
-        if "application/json" in ct and r.content:
-            return r.json()
-        return None
+        return super()._post(f"/v1/catalog{path}", body or {})
 
     def _docs_from(self, result: Any) -> list[CatalogEntry]:
         if not result:

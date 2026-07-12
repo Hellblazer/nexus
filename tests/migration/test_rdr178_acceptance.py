@@ -168,11 +168,19 @@ def _make_chash_transport(
 
 
 class _ChashFakeStore:
-    """Serves BOTH roles chash needs: ``._client.post`` for
+    """Serves BOTH roles chash needs: ``import_rows`` for
     ``migrate_chash_rows`` (pass 1, full ETL) and
     ``registered_chashes_for_collection`` for ``verify_fill_chash`` (pass 2,
     delta) — against the SAME ``registered`` dict the transport handler
-    mutates on a successful POST (non-tautology discipline)."""
+    mutates on a successful POST (non-tautology discipline).
+
+    nexus-f2qvx.3: ``import_rows`` is the public ``HttpChashIndex`` wrapper
+    ``chash_etl.py`` / ``migration/orchestrator.py`` now call (was a raw
+    ``self._client.post(...)`` reach-through pre-mixin-adoption). This fake
+    still drives the request through its own ``httpx.Client`` (backed by
+    the MockTransport fault-injection handler above) internally, so the
+    502-burst fault injection semantics are unchanged.
+    """
 
     def __init__(self, client: httpx.Client, registered: dict[str, set[str]]) -> None:
         self._client = client
@@ -180,6 +188,11 @@ class _ChashFakeStore:
 
     def registered_chashes_for_collection(self, collection: str) -> set[str]:
         return set(self._registered.get(collection, set()))
+
+    def import_rows(self, rows: list[dict[str, Any]]) -> int:
+        resp = self._client.post("/v1/chash/import", json={"rows": rows})
+        resp.raise_for_status()
+        return resp.json().get("imported", 0)
 
     def close(self) -> None:
         pass

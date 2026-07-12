@@ -116,14 +116,6 @@ _N = 200
 _K = 3
 
 
-class _FakeResponse:
-    def raise_for_status(self) -> None:
-        pass
-
-    def json(self) -> dict[str, Any]:
-        return {"imported": 0}
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # 1. chash relational path
 # ═══════════════════════════════════════════════════════════════════════════
@@ -145,25 +137,33 @@ class _StatefulChashTarget:
     """Single stateful object serving THREE roles against the SAME
     ``registered`` dict: the chash identity source
     (``registered_chashes_for_collection``), the import target
-    (``_client.post`` mutates ``registered`` on receipt — mirroring what
+    (``import_rows`` mutates ``registered`` on receipt — mirroring what
     the real service does), and the outer count source (``counts``,
     derived from the same dict). This is the load-bearing design choice
     that makes "second pass is a true no-op" a real assertion instead of a
-    tautology against a static canned snapshot."""
+    tautology against a static canned snapshot.
+
+    nexus-f2qvx.3: ``_chash_import_fn`` (orchestrator.py) used to call
+    ``http_chash._client.post("/v1/chash/import", ...)`` directly — a
+    pre-mixin-adoption reach-through into the store's internal transport
+    that no longer works post-adoption (RefreshableHttpStoreMixin's
+    httpx.Client has no baked base_url). It now calls the public
+    ``HttpChashIndex.import_rows()`` wrapper instead, so this fake exposes
+    ``import_rows`` rather than ``_client.post``.
+    """
 
     def __init__(self, registered: dict[str, set[str]]) -> None:
         self.registered: dict[str, set[str]] = {k: set(v) for k, v in registered.items()}
         self.posts: list[tuple[str, dict[str, Any]]] = []
-        self._client = self  # _chash_import_fn calls http_chash._client.post(...)
 
     def registered_chashes_for_collection(self, collection: str) -> set[str]:
         return set(self.registered.get(collection, set()))
 
-    def post(self, url: str, json: dict[str, Any] | None = None) -> _FakeResponse:  # noqa: A002
-        self.posts.append((url, json or {}))
-        for row in (json or {}).get("rows", []):
+    def import_rows(self, rows: list[dict[str, Any]]) -> int:
+        self.posts.append(("/v1/chash/import", {"rows": rows}))
+        for row in rows:
             self.registered.setdefault(row["collection"], set()).add(row["chash"])
-        return _FakeResponse()
+        return len(rows)
 
     def close(self) -> None:
         pass
@@ -735,34 +735,33 @@ _CLI_N = 50
 _CLI_K = 3
 
 
-class _StatefulCliHttpClient:
-    def __init__(
-        self, posts: list[tuple[str, dict[str, Any]]], registered: dict[str, set[str]],
-    ) -> None:
-        self._posts = posts
-        self._registered = registered
-
-    def post(self, url: str, json: dict[str, Any] | None = None) -> _FakeResponse:  # noqa: A002
-        self._posts.append((url, json or {}))
-        for row in (json or {}).get("rows", []):
-            self._registered.setdefault(row["collection"], set()).add(row["chash"])
-        return _FakeResponse()
-
-
 def _make_stateful_fake_chash_store(
     registered: dict[str, set[str]], posts: list[tuple[str, dict[str, Any]]],
 ):
     """Factory mirroring test_verify_fill_cli.py's ``_make_fake_chash_store``
-    closure pattern, but STATEFUL: ``post`` mutates the same ``registered``
-    dict the identity surface reads from, so a second CLI invocation against
-    the same closures observes genuine post-fill convergence."""
+    closure pattern, but STATEFUL: ``import_rows`` mutates the same
+    ``registered`` dict the identity surface reads from, so a second CLI
+    invocation against the same closures observes genuine post-fill
+    convergence.
+
+    nexus-f2qvx.3: ``_chash_import_fn`` (orchestrator.py) now calls the
+    public ``HttpChashIndex.import_rows()`` wrapper instead of reaching
+    into ``http_chash._client.post(...)`` directly — see
+    ``_StatefulChashTarget``'s docstring above for the full rationale.
+    """
 
     class _FakeChashStore:
         def __init__(self, *args: Any, **kwargs: Any) -> None:
-            self._client = _StatefulCliHttpClient(posts, registered)
+            pass
 
         def registered_chashes_for_collection(self, collection: str) -> set[str]:
             return set(registered.get(collection, set()))
+
+        def import_rows(self, rows: list[dict[str, Any]]) -> int:
+            posts.append(("/v1/chash/import", {"rows": rows}))
+            for row in rows:
+                registered.setdefault(row["collection"], set()).add(row["chash"])
+            return len(rows)
 
         def close(self) -> None:
             pass

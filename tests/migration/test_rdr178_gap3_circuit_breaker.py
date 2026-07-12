@@ -199,8 +199,19 @@ def test_chash_etl_survives_502_burst_zero_permanent_failures(
     client = httpx.Client(transport=transport, base_url="http://svc")
 
     class _Store:
+        """nexus-f2qvx.3: import_rows() is the public HttpChashIndex wrapper
+        chash_etl.py now calls (was a raw ``self._client.post(...)``
+        reach-through pre-mixin-adoption). Drives the request through this
+        fake's own httpx.Client (backed by the MockTransport 502-burst
+        handler above) internally, so the fault-injection is unchanged."""
+
         def __init__(self) -> None:
             self._client = client
+
+        def import_rows(self, rows: list[dict]) -> int:
+            resp = self._client.post("/v1/chash/import", json={"rows": rows})
+            resp.raise_for_status()
+            return resp.json().get("imported", 0)
 
     store = _Store()
     breaker = EtlCircuitBreaker()  # production defaults: trip_threshold=3, pause=30s
