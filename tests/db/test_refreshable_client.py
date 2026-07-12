@@ -354,3 +354,115 @@ class TestRefreshableClientSelfHeal:
             "and exactly one successful retry against the re-resolved new "
             "port afterward"
         )
+
+
+class TestPinnedEndpointNeverSilentlyRepointed:
+    """substantive-critic Significant finding, nexus-bikit.3 review round 1:
+    the constructor's own documented contract ("an explicitly-supplied half
+    is never overwritten") was not honored by _invalidate_and_reresolve,
+    which unconditionally re-resolved both halves on any retryable failure
+    regardless of how the instance was constructed. A fully-pinned instance
+    (both base_url and token supplied explicitly, e.g. a test wiring a
+    store directly against a fake server) now fails FAST with a clear
+    RuntimeError on a retryable failure instead of silently repointing
+    itself to whatever resolve_service_endpoint() finds in the ambient
+    environment -- which could be a completely different, unrelated
+    service the caller never asked for."""
+
+    def test_fully_pinned_instance_raises_clean_error_instead_of_repointing(
+        self, fake_service
+    ) -> None:
+        from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
+
+        class _EchoStore(RefreshableHttpStoreMixin):
+            def echo_post(self, value: str) -> Any:
+                return self._post("/v1/echo", {"value": value})
+
+        # Pin BOTH halves explicitly to a bearer that is already wrong —
+        # simulates a caller that deliberately bypassed env resolution.
+        # Even though the AMBIENT environment (NX_SERVICE_TOKEN, set by the
+        # fake_service fixture) has the actually-valid bearer, a fully
+        # pinned instance must never fall back to it silently.
+        store = _EchoStore(
+            base_url=f"http://127.0.0.1:{fake_service.port}",
+            _token="deliberately-wrong-pinned-bearer",
+        )
+
+        with pytest.raises(RuntimeError, match="cannot self-heal"):
+            store.echo_post("this must not silently repoint")
+
+
+class TestIsRetryableEndpointErrorClassifier:
+    """Direct, deterministic unit tests of ``_is_retryable_endpoint_error``
+    (substantive-critic Critical finding, nexus-bikit.3 review round 1): the
+    classifier initially handled only ``httpx.ConnectError`` and
+    ``httpx.RemoteProtocolError``, silently missing ``httpx.ConnectTimeout``
+    (a ``TimeoutException`` subclass, NOT a ``ConnectError`` subclass) and
+    ``httpx.ReadError`` (a ``NetworkError`` subclass, NOT a
+    ``RemoteProtocolError`` subclass) -- verified via httpx's actual
+    exception MRO, not assumed. A live end-to-end network-timeout
+    reproduction would be slow/environment-dependent and non-deterministic
+    (this project's convention is deterministic tests only), so these test
+    the classifier function directly instead -- fast, exact, and precisely
+    targets the gap the review found without needing a flaky live socket
+    timeout."""
+
+    def test_connect_timeout_is_retryable(self) -> None:
+        import httpx
+
+        from nexus.db.t2._refreshable_client import _is_retryable_endpoint_error
+
+        assert _is_retryable_endpoint_error(httpx.ConnectTimeout("timed out"))
+
+    def test_read_error_is_retryable(self) -> None:
+        import httpx
+
+        from nexus.db.t2._refreshable_client import _is_retryable_endpoint_error
+
+        assert _is_retryable_endpoint_error(httpx.ReadError("reset mid-read"))
+
+    def test_connect_error_is_retryable(self) -> None:
+        import httpx
+
+        from nexus.db.t2._refreshable_client import _is_retryable_endpoint_error
+
+        assert _is_retryable_endpoint_error(httpx.ConnectError("refused"))
+
+    def test_remote_protocol_error_is_retryable(self) -> None:
+        import httpx
+
+        from nexus.db.t2._refreshable_client import _is_retryable_endpoint_error
+
+        assert _is_retryable_endpoint_error(httpx.RemoteProtocolError("reset"))
+
+    def test_401_is_retryable(self) -> None:
+        import httpx
+
+        from nexus.db.t2._refreshable_client import _is_retryable_endpoint_error
+
+        request = httpx.Request("GET", "http://example.invalid/v1/echo")
+        response = httpx.Response(401, request=request)
+        exc = httpx.HTTPStatusError("401", request=request, response=response)
+        assert _is_retryable_endpoint_error(exc)
+
+    def test_404_is_not_retryable(self) -> None:
+        """A genuine client error (not an auth/connection staleness signal)
+        must propagate immediately, not trigger a pointless re-resolve+retry."""
+        import httpx
+
+        from nexus.db.t2._refreshable_client import _is_retryable_endpoint_error
+
+        request = httpx.Request("GET", "http://example.invalid/v1/echo")
+        response = httpx.Response(404, request=request)
+        exc = httpx.HTTPStatusError("404", request=request, response=response)
+        assert not _is_retryable_endpoint_error(exc)
+
+    def test_500_is_not_retryable(self) -> None:
+        import httpx
+
+        from nexus.db.t2._refreshable_client import _is_retryable_endpoint_error
+
+        request = httpx.Request("GET", "http://example.invalid/v1/echo")
+        response = httpx.Response(500, request=request)
+        exc = httpx.HTTPStatusError("500", request=request, response=response)
+        assert not _is_retryable_endpoint_error(exc)
