@@ -64,6 +64,16 @@ class TestSweepOrphanTmpdirsNewRoot:
     """sweep_orphan_tmpdirs with a config_dir argument sweeps <config>/t1/
     AND the legacy OS-temp root for migration cleanup (nexus-ycwec)."""
 
+    @pytest.fixture(autouse=True)
+    def _no_live_t1_paths(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """nexus-oj1hn: sweep_orphan_tmpdirs now consults
+        _live_t1_chromadb_paths() before reaping. Default to no live
+        servers so these mtime-only regression tests are unaffected
+        and deterministic (no real ps subprocess call)."""
+        import nexus.session as session
+
+        monkeypatch.setattr(session, "_live_t1_chromadb_paths", lambda: set())
+
     def test_sweeps_config_t1_root(self, tmp_path: Path) -> None:
         from nexus.session import sweep_orphan_tmpdirs
 
@@ -111,6 +121,149 @@ class TestSweepOrphanTmpdirsNewRoot:
         reaped = sweep_orphan_tmpdirs(config_dir=config_dir)
         assert reaped == 0
         assert recent.exists()
+
+
+class TestSweepOneTmpdirRootLiveness:
+    """nexus-oj1hn / GH #1151: _sweep_one_tmpdir_root must skip any
+    candidate whose path is in live_paths, regardless of mtime."""
+
+    def test_live_path_skipped_non_live_reaped(self, tmp_path: Path) -> None:
+        """Non-vacuity: in ONE call, a live-marked candidate survives
+        despite being past the mtime cutoff, WHILE a second, non-live
+        stale candidate IS reaped -- proves the skip is real, not
+        that the sweep simply reaped nothing."""
+        from nexus.session import _sweep_one_tmpdir_root
+
+        root = tmp_path / "t1"
+        root.mkdir()
+        live = root / "nx_t1_live"
+        live.mkdir()
+        stale = root / "nx_t1_stale"
+        stale.mkdir()
+        old = time.time() - 30 * 3600
+        os.utime(live, (old, old))
+        os.utime(stale, (old, old))
+        cutoff = time.time() - 24 * 3600
+
+        reaped = _sweep_one_tmpdir_root(root, cutoff, live_paths={str(live)})
+
+        assert reaped == 1
+        assert live.exists()
+        assert not stale.exists()
+
+    def test_default_live_paths_none_preserves_prior_behavior(
+        self, tmp_path: Path
+    ) -> None:
+        """No live_paths argument (the pre-fix call signature) must
+        still reap a stale candidate -- backward compatible default."""
+        from nexus.session import _sweep_one_tmpdir_root
+
+        root = tmp_path / "t1"
+        root.mkdir()
+        stale = root / "nx_t1_stale"
+        stale.mkdir()
+        old = time.time() - 30 * 3600
+        os.utime(stale, (old, old))
+        cutoff = time.time() - 24 * 3600
+
+        reaped = _sweep_one_tmpdir_root(root, cutoff)
+
+        assert reaped == 1
+        assert not stale.exists()
+
+    def test_live_path_survives_when_root_is_relative(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """SUBSTANTIVE-CRITIC SIGNIFICANT FINDING (review round 1):
+        tempfile.mkdtemp internally returns os.path.abspath(file), not a
+        naive path join -- so a live path reported via ps is ALWAYS
+        absolute, even if the directory it was created under was
+        reached via a relative `root`. Without normalizing str(d)
+        through os.path.abspath() before the live_paths membership
+        check, a relative root would build relative candidate strings
+        that could never match an always-absolute live_paths entry,
+        silently defeating the whole liveness check and reproducing
+        the reaped-live-dir bug under this precondition."""
+        from nexus.session import _sweep_one_tmpdir_root
+
+        root = tmp_path / "t1"
+        root.mkdir()
+        live = root / "nx_t1_live"
+        live.mkdir()
+        old = time.time() - 30 * 3600
+        os.utime(live, (old, old))
+        cutoff = time.time() - 24 * 3600
+
+        # What a real chroma process's --path argument (and thus a real
+        # _live_t1_chromadb_paths() entry) would contain, regardless of
+        # how _make_t1_store_dir's config_dir was originally specified.
+        live_path_as_ps_would_report_it = os.path.abspath(str(live))
+
+        monkeypatch.chdir(tmp_path)
+        relative_root = Path("t1")
+
+        reaped = _sweep_one_tmpdir_root(
+            relative_root, cutoff, live_paths={live_path_as_ps_would_report_it}
+        )
+
+        assert reaped == 0
+        assert live.exists()
+
+
+class TestSweepOrphanTmpdirsLiveness:
+    """nexus-oj1hn / GH #1151: sweep_orphan_tmpdirs wires
+    _live_t1_chromadb_paths() into both root scans so an idle-but-live
+    session's backing store is never reaped, reproducing the exact
+    reported scenario end-to-end (with the ps subprocess mocked)."""
+
+    def test_live_session_tmpdir_survives_sweep(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import nexus.session as session
+        from nexus.session import sweep_orphan_tmpdirs
+
+        config_dir = tmp_path / "config"
+        t1_root = config_dir / "t1"
+        t1_root.mkdir(parents=True)
+        live = t1_root / "nx_t1_live"
+        live.mkdir()
+        old = time.time() - 30 * 3600
+        os.utime(live, (old, old))
+
+        monkeypatch.setattr(session, "_live_t1_chromadb_paths", lambda: {str(live)})
+
+        reaped = sweep_orphan_tmpdirs(config_dir=config_dir)
+
+        assert reaped == 0
+        assert live.exists()
+
+    def test_non_live_sibling_still_reaped_alongside_live(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-vacuity at the sweep_orphan_tmpdirs level too: the live
+        dir survives while a stale, non-live sibling in the same root
+        is reaped in the same call."""
+        import nexus.session as session
+        from nexus.session import sweep_orphan_tmpdirs
+
+        config_dir = tmp_path / "config"
+        t1_root = config_dir / "t1"
+        t1_root.mkdir(parents=True)
+        live = t1_root / "nx_t1_live"
+        live.mkdir()
+        stale = t1_root / "nx_t1_stale"
+        stale.mkdir()
+        old = time.time() - 30 * 3600
+        os.utime(live, (old, old))
+        os.utime(stale, (old, old))
+
+        monkeypatch.setattr(session, "_live_t1_chromadb_paths", lambda: {str(live)})
+
+        reaped = sweep_orphan_tmpdirs(config_dir=config_dir)
+
+        assert reaped == 1
+        assert live.exists()
+        assert not stale.exists()
 
 
 def test_generate_session_id_is_uuid4() -> None:
@@ -230,6 +383,16 @@ class TestSweepOrphanTmpdirs:
     points at AND are older than max_age_hours. Closes Gap 3 (orphan
     tmpdirs from chroma crashes that the record-based sweep cannot
     see)."""
+
+    @pytest.fixture(autouse=True)
+    def _no_live_t1_paths(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """nexus-oj1hn: sweep_orphan_tmpdirs now consults
+        _live_t1_chromadb_paths() before reaping. Default to no live
+        servers so these mtime-only regression tests are unaffected
+        and deterministic (no real ps subprocess call)."""
+        import nexus.session as session
+
+        monkeypatch.setattr(session, "_live_t1_chromadb_paths", lambda: set())
 
     def test_reaps_old_orphan_with_no_record(self, tmp_path: Path) -> None:
         from nexus.session import sweep_orphan_tmpdirs
