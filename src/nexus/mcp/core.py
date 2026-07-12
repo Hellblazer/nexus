@@ -531,20 +531,89 @@ async def _t1_chroma_lifespan(_app: Any):
         _svc_log = _structlog.get_logger(__name__)
         _svc_log.info("t1_service_path_active", backend="service")
 
-        # nexus-5daww (round-4 CRITICAL): an inherited, ALREADY-LIVE token in
-        # NX_T1_SESSION -- e.g. a nested `nx-mcp` subprocess spawned by
-        # operators.dispatch.claude_dispatch's tool-granting env
-        # (_build_dispatch_env copies the PARENT's os.environ verbatim except
-        # for a few explicitly-stripped keys; NX_T1_SESSION/NX_T1_SESSION_ID
-        # were not among them) -- must be used AS-IS: never re-minted
-        # (HttpTokenStore.start_session is ON CONFLICT DO UPDATE and rotates,
-        # which would invalidate the owning ancestor's live token out from
-        # under it) and never torn down by this process on exit (it does not
-        # own the session). Mirrors get_t1_database()'s own
-        # has_inherited_session short-circuit (db/t1.py) and sibling Branch 1
-        # (NX_T1_HOST/PORT) below, which already treats "parent owns it" as a
-        # plain yield/return.
-        if _os.environ.get("NX_T1_SESSION", "").strip():
+        # nexus-1si7z: tiers 1-2 (inherited-wins, then borrow-a-fresh-lease)
+        # are the SAME decision get_t1_database() makes for the bare-CLI/
+        # detached-process path (db/t1.py) -- both now call the ONE shared
+        # implementation so they cannot silently diverge again. See
+        # resolve_t1_routing_tiers's docstring for the full "why one
+        # function, why not tier 3 too" reasoning.
+        #
+        # nexus-5daww (round-4 CRITICAL, USE_INHERITED case): an inherited,
+        # ALREADY-LIVE token in NX_T1_SESSION -- e.g. a nested `nx-mcp`
+        # subprocess spawned by operators.dispatch.claude_dispatch's
+        # tool-granting env (_build_dispatch_env copies the PARENT's
+        # os.environ verbatim except for a few explicitly-stripped keys;
+        # NX_T1_SESSION/NX_T1_SESSION_ID were not among them) -- must be used
+        # AS-IS: never re-minted (HttpTokenStore.start_session is ON
+        # CONFLICT DO UPDATE and rotates, which would invalidate the owning
+        # ancestor's live token out from under it) and never torn down by
+        # this process on exit (it does not own the session).
+        #
+        # nexus-5daww defense-in-depth (USE_LEASED case): even without a
+        # DIRECTLY-inherited NX_T1_SESSION (e.g.
+        # operators.dispatch._build_dispatch_env's ephemeral/owned modes now
+        # strip it -- see dispatch.py), the resolved session id may already
+        # have a LIVE lease published by an ancestor's Branch 0 mint
+        # (nexus-c8yvj's publish_t1_session_lease/read_t1_session_lease --
+        # the SAME mechanism the SessionEnd hook and get_t1_database()'s
+        # detached-process path already use to reach a live MCP session
+        # without re-minting). Consult it BEFORE minting so a nested MCP
+        # that resolves the SAME session id as a live ancestor (NX_SESSION_ID
+        # is intentionally still passed through dispatch for attribution)
+        # borrows the existing token instead of rotating it out from under
+        # that ancestor.
+        #
+        # nexus-ngcpo Finding 2 (USE_LEASED / MINT split): resolve_t1_routing_
+        # tiers's read_t1_session_lease call refuses to return a STALE lease
+        # (past its stored expiry) -- MINT with a real session_id therefore
+        # means either "no lease was ever published" OR "one was published
+        # but nobody has refreshed it since it went stale" (i.e. its
+        # original owner is presumably no longer alive/refreshing -- see
+        # `_t1_session_refresh_loop`). Either way the mint branch below both
+        # mints a fresh token for THIS process AND takes ownership
+        # (`_OWNED_T1_SESSION`, refresh task, teardown) -- the Finding-3
+        # "orphaned lease" recovery: it happens lazily, on the next BRANCH-0
+        # process that resolves this session id and finds the lease no
+        # longer trustworthy, not via any active monitoring.
+        #
+        # SCOPE OF THIS RECOVERY (do not overstate it): this is the
+        # Branch-0-to-Branch-0 case only. `get_t1_database()`'s CLI/
+        # detached-path tier-3 (its own MINT branch) does NOT retry-mint
+        # against the resolved session id on a stale lease -- it falls
+        # straight through to the disjoint, permanent CLI-dedicated identity
+        # instead (by design -- see resolve_t1_routing_tiers's docstring).
+        # So a detached SessionEnd-hook grandchild that finds a stale lease
+        # does NOT reconnect to the original session's T1 state via this
+        # mechanism; it silently degrades to the SAME best-effort "flush
+        # skipped" outcome `hooks.session_end_flush` already documents as an
+        # accepted, pre-existing race window. Only a fresh Branch-0 MCP
+        # restart for the same session id gets the recovery described here.
+        #
+        # nexus-ngcpo Finding 3 (USE_LEASED specifically): when the lease IS
+        # fresh we deliberately do NOT claim ownership here (no
+        # `_OWNED_T1_SESSION`, no refresh task) -- a fresh lease means its
+        # original owner is presumably still alive and actively refreshing
+        # it (this is what makes it fresh), so this borrowing process
+        # piggybacks on that owner's lifecycle rather than starting a
+        # SECOND, competing refresh loop for the same session id (which
+        # would race the real owner's own re-mint -- see
+        # `_t1_session_refresh_loop`'s docstring). Known residual: a
+        # long-lived borrower's in-process env copy of the token is only
+        # ever read once, here, at startup -- if the true owner refreshes
+        # again later in this borrower's lifetime, the borrower's copy goes
+        # locally stale even though the lease file itself has been updated.
+        # Every borrower observed in practice (a nested `nx-mcp` subprocess,
+        # the detached SessionEnd hook) is short-lived relative to the
+        # refresh cadence (half the token TTL, so >=12h for the server's 24h
+        # default), so this is accepted rather than solved here; a
+        # genuinely long-lived borrower would need to periodically re-READ
+        # (never re-mint) the lease file to pick up the owner's refreshes.
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+        from nexus.db.t1 import T1RoutingAction, resolve_t1_routing_tiers  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+
+        _decision = resolve_t1_routing_tiers(nexus_config_dir())
+
+        if _decision.action == T1RoutingAction.USE_INHERITED:
             _svc_log.info(
                 "t1_session_inherited_no_mint",
                 session_id=_os.environ.get("NX_T1_SESSION_ID", "").strip(),
@@ -552,92 +621,28 @@ async def _t1_chroma_lifespan(_app: Any):
             yield
             return
 
-        # Phase D (bead nexus-gmiaf.32.4): mint a per-session token at session start.
-        # Set NX_T1_SESSION to the minted secret (the X-Nexus-T1-Session header value) and
-        # NX_T1_SESSION_ID to the session id (body + flush-title). Sub-agents inherit both
-        # via os.environ.
-        #
-        # Phase E (bead nexus-gmiaf.32.5): the server now REQUIRES a minted session
-        # token (a present-but-non-live X-Nexus-T1-Session is a 401 — the transitional
-        # bootstrap session path is retired). So a mint failure can no longer degrade to
-        # a bare session id (it would 401 on every scratch op). With a resolvable session
-        # id, mint failure is FATAL: we fail loud rather than ship a broken or silently
-        # session-unscoped T1 (no silent fallback for a security-boundary input).
-        from nexus.session import resolve_active_session_id  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
-        _t1_session_id = (
-            resolve_active_session_id()
-            or _os.environ.get("NX_T1_SESSION_ID", "").strip()
-            or _os.environ.get("NX_T1_SESSION", "").strip()
-        )
+        if _decision.action == T1RoutingAction.USE_LEASED:
+            _os.environ["NX_T1_SESSION"] = _decision.session_token
+            _os.environ["NX_T1_SESSION_ID"] = _decision.session_id
+            _svc_log.info("t1_session_leased_no_mint", session_id=_decision.session_id)
+            yield
+            return
 
-        # nexus-5daww defense-in-depth: even without a DIRECTLY-inherited
-        # NX_T1_SESSION (e.g. operators.dispatch._build_dispatch_env's
-        # ephemeral/owned modes now strip it -- see dispatch.py), the
-        # resolved session id may already have a LIVE lease published by an
-        # ancestor's Branch 0 mint (nexus-c8yvj's publish_t1_session_lease /
-        # read_t1_session_lease -- the SAME mechanism the SessionEnd hook and
-        # get_t1_database()'s detached-process path already use to reach a
-        # live MCP session without re-minting). Consult it BEFORE minting so
-        # a nested MCP that resolves the SAME session id as a live ancestor
-        # (NX_SESSION_ID is intentionally still passed through dispatch for
-        # attribution) borrows the existing token instead of rotating it out
-        # from under that ancestor.
-        if _t1_session_id and _t1_session_id != "unknown":
-            from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
-            from nexus.db.t1 import read_t1_session_lease  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
-            # nexus-ngcpo Finding 2: `read_t1_session_lease` now refuses to
-            # return a STALE lease (past its stored expiry) -- a `None`
-            # here therefore means either "no lease was ever published" OR
-            # "one was published but nobody has refreshed it since it went
-            # stale" (i.e. its original owner is presumably no longer
-            # alive/refreshing -- see `_t1_session_refresh_loop`). Either
-            # way we fall through to the mint branch below, which both
-            # mints a fresh token for THIS process AND takes ownership
-            # (`_OWNED_T1_SESSION`, refresh task, teardown) -- the Finding-3
-            # "orphaned lease" recovery: it happens lazily, on the next
-            # BRANCH-0 process that resolves this session id and finds the
-            # lease no longer trustworthy, not via any active monitoring.
-            #
-            # SCOPE OF THIS RECOVERY (do not overstate it): this is the
-            # Branch-0-to-Branch-0 case only. `get_t1_database()`'s CLI/
-            # detached-path tier-2 borrow (`nexus.db.t1`) does NOT retry-mint
-            # against the resolved session id on a stale lease -- it falls
-            # straight through to the disjoint, permanent CLI-dedicated
-            # identity instead. So a detached SessionEnd-hook grandchild that
-            # finds a stale lease does NOT reconnect to the original
-            # session's T1 state via this mechanism; it silently degrades to
-            # the SAME best-effort "flush skipped" outcome
-            # `hooks.session_end_flush` already documents as an accepted,
-            # pre-existing race window. Only a fresh Branch-0 MCP restart for
-            # the same session id gets the recovery described here.
-            #
-            # nexus-ngcpo Finding 3: conversely, when the lease IS fresh we
-            # deliberately do NOT claim ownership here (no
-            # `_OWNED_T1_SESSION`, no refresh task) -- a fresh lease means
-            # its original owner is presumably still alive and actively
-            # refreshing it (this is what makes it fresh), so this
-            # borrowing process piggybacks on that owner's lifecycle rather
-            # than starting a SECOND, competing refresh loop for the same
-            # session id (which would race the real owner's own re-mint --
-            # see `_t1_session_refresh_loop`'s docstring). Known residual:
-            # a long-lived borrower's in-process env copy of the token is
-            # only ever read once, here, at startup -- if the true owner
-            # refreshes again later in this borrower's lifetime, the
-            # borrower's copy goes locally stale even though the lease file
-            # itself has been updated. Every borrower observed in practice
-            # (a nested `nx-mcp` subprocess, the detached SessionEnd hook)
-            # is short-lived relative to the refresh cadence (half the
-            # token TTL, so >=12h for the server's 24h default), so this is
-            # accepted rather than solved here; a genuinely long-lived
-            # borrower would need to periodically re-READ (never re-mint)
-            # the lease file to pick up the owner's refreshes.
-            _leased_token = read_t1_session_lease(_t1_session_id, nexus_config_dir())
-            if _leased_token:
-                _os.environ["NX_T1_SESSION"] = _leased_token
-                _os.environ["NX_T1_SESSION_ID"] = _t1_session_id
-                _svc_log.info("t1_session_leased_no_mint", session_id=_t1_session_id)
-                yield
-                return
+        # T1RoutingAction.MINT. Phase D (bead nexus-gmiaf.32.4): mint a
+        # per-session token at session start. Set NX_T1_SESSION to the
+        # minted secret (the X-Nexus-T1-Session header value) and
+        # NX_T1_SESSION_ID to the session id (body + flush-title).
+        # Sub-agents inherit both via os.environ.
+        #
+        # Phase E (bead nexus-gmiaf.32.5): the server now REQUIRES a minted
+        # session token (a present-but-non-live X-Nexus-T1-Session is a 401
+        # — the transitional bootstrap session path is retired). So a mint
+        # failure can no longer degrade to a bare session id (it would 401
+        # on every scratch op). With a resolvable session id, mint failure
+        # is FATAL: we fail loud rather than ship a broken or silently
+        # session-unscoped T1 (no silent fallback for a security-boundary
+        # input).
+        _t1_session_id = _decision.session_id or ""
 
         if not _t1_session_id or _t1_session_id == "unknown":
             # No resolvable session id — do NOT mint a shared "unknown" row (concurrent
@@ -668,31 +673,46 @@ async def _t1_chroma_lifespan(_app: Any):
                 "else falls back to private in-process ephemeral scratch "
                 "(NX_T1_ISOLATED=1) rather than sharing the CLI-dedicated identity")
         else:
+            from nexus.db.t1 import mint_t1_session_token  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+
+            # nexus-1si7z follow-up review (code-review-expert): the try below is
+            # scoped to ONLY the mint call, deliberately -- an earlier draft also
+            # wrapped the env-var writes / structlog info call / ownership-dict
+            # update in the same except, so a (highly unlikely) failure in one of
+            # THOSE would still have been mis-reported as a mint failure via the
+            # RuntimeError's "T1 session token mint failed" framing. Narrowing the
+            # try means _exc below is unambiguously mint_t1_session_token's own
+            # RuntimeError, never anything else.
             try:
-                from nexus.db.t2.http_token_store import HttpTokenStore  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
-                with HttpTokenStore() as _ts:
-                    _minted = _ts.start_session(_t1_session_id)
-                _os.environ["NX_T1_SESSION"] = _minted["session_token"]
-                _os.environ["NX_T1_SESSION_ID"] = _t1_session_id
-                _svc_log.info("t1_session_isolation_minted", session_id=_t1_session_id)
-                # nexus-5daww: track for `_t1_chroma_shutdown`'s Branch-0
-                # handling so a raw SIGTERM / atexit (which cannot resume
-                # this paused generator past `yield`) still revokes the
-                # token and clears the lease file instead of leaking both.
-                _OWNED_T1_SESSION["session_id"] = _t1_session_id
+                _minted = mint_t1_session_token(_t1_session_id, context="session token mint")
             except Exception as _exc:
                 # Fail loud (Phase E require-minted): a bare-id fallback would 401 on
                 # every scratch op now that the bootstrap session path is retired, and
                 # silently dropping session scoping is forbidden for a security boundary.
+                # Branch 0 wraps the shared mint_t1_session_token()'s plain RuntimeError
+                # with this extra structlog error event + the Phase-E remedy sentence --
+                # neither is appropriate for the other two (CLI-dedicated) mint call
+                # sites, which is why they stay on the helper's plain message.
                 _svc_log.error(
                     "t1_session_mint_failed", session_id=_t1_session_id, error=str(_exc),
                     msg="could not mint a T1 session token; refusing to start the MCP "
                     "session without server-enforced session isolation")
+                # _exc is already the shared helper's RuntimeError ("T1 session token
+                # mint failed for session ...: <cause>") -- append the remedy sentence
+                # rather than re-stating the same "mint failed" preamble.
                 raise RuntimeError(
-                    f"T1 session token mint failed for session {_t1_session_id!r}: {_exc}. "
-                    "The storage service must be reachable to mint a session token "
-                    "(Phase E require-minted)."
+                    f"{_exc}. The storage service must be reachable to mint a session "
+                    "token (Phase E require-minted)."
                 ) from _exc
+
+            _os.environ["NX_T1_SESSION"] = _minted["session_token"]
+            _os.environ["NX_T1_SESSION_ID"] = _t1_session_id
+            _svc_log.info("t1_session_isolation_minted", session_id=_t1_session_id)
+            # nexus-5daww: track for `_t1_chroma_shutdown`'s Branch-0
+            # handling so a raw SIGTERM / atexit (which cannot resume
+            # this paused generator past `yield`) still revokes the
+            # token and clears the lease file instead of leaking both.
+            _OWNED_T1_SESSION["session_id"] = _t1_session_id
 
             # nexus-c8yvj: publish the just-minted (session_id, session_token)
             # to a lease file so a DETACHED process with no inherited env --

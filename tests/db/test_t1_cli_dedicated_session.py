@@ -825,6 +825,51 @@ class TestMintErrorWrapping:
         finally:
             _MINT_FAILS = False
 
+    def test_branch0_mint_failure_raises_clean_runtime_error_with_remedy_sentence(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """nexus-1si7z follow-up (code-review-expert, round 2): Branch 0's
+        mint-failure path (_t1_chroma_lifespan's `except Exception` around
+        the now-narrowed `mint_t1_session_token(...)` call) had ZERO test
+        coverage before this -- unlike its two CLI-dedicated siblings above,
+        which both exercise `_MINT_FAILS` directly. This closes that gap and
+        pins two things at once: (a) a non-RuntimeError mint failure (e.g.
+        httpx.HTTPStatusError from a bad NX_SERVICE_TOKEN) still comes out
+        as a clean RuntimeError, not a raw traceback; (b) the re-wrap
+        appends the Phase-E remedy sentence onto the shared helper's own
+        message with a real sentence boundary (a prior draft produced a
+        run-on with no period between the two)."""
+        import asyncio
+
+        import httpx
+
+        from nexus.mcp import core as mcp_core
+
+        live_session_id = "mcp-branch0-mint-failure-test"
+        monkeypatch.setattr(
+            "nexus.session.resolve_active_session_id", lambda: live_session_id
+        )
+
+        global _MINT_FAILS
+        _MINT_FAILS = True
+
+        async def _run() -> None:
+            async with mcp_core._t1_chroma_lifespan(None):
+                pass  # pragma: no cover — must never reach yield on mint failure
+
+        try:
+            with pytest.raises(RuntimeError) as exc_info:
+                asyncio.run(_run())
+        finally:
+            _MINT_FAILS = False
+
+        assert not isinstance(exc_info.value, httpx.HTTPStatusError)
+        message = str(exc_info.value)
+        assert "Phase E require-minted" in message
+        # Real sentence boundary between the helper's message and the
+        # appended remedy sentence -- not a run-on ("...cause The storage").
+        assert ". The storage service must be reachable" in message
+
 
 # ── mcp/core.py Branch 0 wiring: publish-on-mint, clear-on-teardown ────────────
 #
@@ -1288,3 +1333,217 @@ class TestBranch0StaleLeaseRecovery:
         # Clean teardown: this new owner's exit clears the lease exactly
         # like any other Branch-0 owner (TestMcpCoreLeaseWiring's roundtrip).
         assert read_t1_session_lease(live_session_id, config_dir) is None
+
+
+class TestResolveT1RoutingTiers:
+    """Unit tests for the shared tier-1/tier-2 decision function
+    (nexus-1si7z). Both get_t1_database() and mcp.core's Branch 0 now call
+    THIS function for "is there an inherited token, or a fresh leased one" --
+    these tests exercise the shared function directly, independent of
+    either caller, so a future change to the decision logic gets a single,
+    fast, unit-level regression signal before either caller's own
+    (much heavier, fake-HTTP-server-backed) test suite would catch it."""
+
+    def test_inherited_nx_t1_session_wins_over_everything(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from nexus.db.t1 import T1RoutingAction, resolve_t1_routing_tiers
+
+        monkeypatch.setenv("NX_T1_SESSION", "some-live-token")
+        monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
+
+        decision = resolve_t1_routing_tiers(tmp_path)
+        assert decision.action == T1RoutingAction.USE_INHERITED
+        assert decision.session_id is None
+        assert decision.session_token is None
+
+    def test_inherited_nx_t1_session_id_alone_does_not_win(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """NX_T1_SESSION_ID alone (no NX_T1_SESSION token) must NOT
+        short-circuit to USE_INHERITED -- there is no live token to use.
+        Stacked review of the nexus-1si7z extraction (code-review-expert +
+        substantive-critic, independently) caught that an earlier draft's
+        `bool(NX_T1_SESSION) or bool(NX_T1_SESSION_ID)` check would yield
+        USE_INHERITED here despite no token existing; the fix narrowed the
+        check to the token alone (see resolve_t1_routing_tiers's own
+        comment), so this id-alone case now falls through to tier 2/3
+        instead. With no NX_SESSION_ID/CLAUDE_CODE_SESSION_ID/flat-file
+        session resolvable either, tier 2 (lease lookup) also misses, so
+        this lands on MINT with session_id=None -- exactly
+        test_unresolvable_session_id_mints_with_none_session_id's case,
+        confirming NX_T1_SESSION_ID is not itself part of the resolution
+        chain resolve_active_session_id() walks."""
+        from nexus.db.t1 import T1RoutingAction, resolve_t1_routing_tiers
+
+        monkeypatch.delenv("NX_T1_SESSION", raising=False)
+        monkeypatch.setenv("NX_T1_SESSION_ID", "some-live-session-id")
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+
+        decision = resolve_t1_routing_tiers(tmp_path)
+        assert decision.action == T1RoutingAction.MINT
+        assert decision.session_id is None
+        assert decision.session_token is None
+
+    def test_fresh_lease_for_resolvable_id_is_used_over_minting(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from nexus.db.t1 import (
+            T1RoutingAction,
+            publish_t1_session_lease,
+            resolve_t1_routing_tiers,
+        )
+
+        monkeypatch.delenv("NX_T1_SESSION", raising=False)
+        monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
+        monkeypatch.setenv("NX_SESSION_ID", "resolvable-session")
+        publish_t1_session_lease("resolvable-session", "leased-secret", tmp_path)
+
+        decision = resolve_t1_routing_tiers(tmp_path)
+        assert decision.action == T1RoutingAction.USE_LEASED
+        assert decision.session_id == "resolvable-session"
+        assert decision.session_token == "leased-secret"
+
+    def test_no_inherited_no_lease_resolvable_id_mints_with_that_id(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from nexus.db.t1 import T1RoutingAction, resolve_t1_routing_tiers
+
+        monkeypatch.delenv("NX_T1_SESSION", raising=False)
+        monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
+        monkeypatch.setenv("NX_SESSION_ID", "resolvable-no-lease")
+        # No lease published for this id.
+
+        decision = resolve_t1_routing_tiers(tmp_path)
+        assert decision.action == T1RoutingAction.MINT
+        assert decision.session_id == "resolvable-no-lease"
+        assert decision.session_token is None
+
+    def test_stale_lease_falls_through_to_mint_not_use_leased(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """nexus-ngcpo: a stale (past-expiry) lease must be treated as
+        absent, not borrowed. Publish one with a negative TTL so it is
+        already expired at read time."""
+        from nexus.db.t1 import (
+            T1RoutingAction,
+            publish_t1_session_lease,
+            resolve_t1_routing_tiers,
+        )
+
+        monkeypatch.delenv("NX_T1_SESSION", raising=False)
+        monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
+        monkeypatch.setenv("NX_SESSION_ID", "resolvable-stale-lease")
+        publish_t1_session_lease(
+            "resolvable-stale-lease", "stale-secret", tmp_path, ttl_seconds=-1.0
+        )
+
+        decision = resolve_t1_routing_tiers(tmp_path)
+        assert decision.action == T1RoutingAction.MINT
+        assert decision.session_id == "resolvable-stale-lease"
+        assert decision.session_token is None
+
+    def test_unresolvable_session_id_mints_with_none_session_id(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """No resolvable session id at all (no env, no flat file) -- MINT
+        action fires with session_id=None. Callers decide independently
+        what that means (Branch 0 forces isolation; get_t1_database()
+        falls to the CLI-dedicated identity regardless)."""
+        from nexus.db.t1 import T1RoutingAction, resolve_t1_routing_tiers
+
+        monkeypatch.delenv("NX_T1_SESSION", raising=False)
+        monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        # No current_session flat file written either (fresh tmp config dir).
+
+        decision = resolve_t1_routing_tiers(tmp_path)
+        assert decision.action == T1RoutingAction.MINT
+        assert decision.session_id is None
+        assert decision.session_token is None
+
+    def test_both_callers_now_route_through_the_shared_function(self) -> None:
+        """Structural regression guard (the bead's own 'at minimum' fallback
+        recommendation, satisfied here as a belt-and-suspenders on top of
+        the full extraction above): if a future edit reverts either caller
+        to a hand-rolled tier-1/tier-2 check instead of calling
+        resolve_t1_routing_tiers, this test catches it via source
+        inspection rather than relying on behavioral tests alone to notice.
+
+        Strengthened per code-review-expert + substantive-critic (nexus-1si7z
+        stacked review, round 2): a bare substring check on the function name
+        is satisfiable by a stray comment or docstring mention with no real
+        call underneath, and would not catch a caller that calls the function
+        but then ignores its `.action` (e.g. always falling through to MINT
+        regardless of what was decided). This version requires (a) an actual
+        assignment-form call (`= resolve_t1_routing_tiers(`), not just the
+        name appearing anywhere, and (b) an explicit dispatch condition for
+        both USE_INHERITED and USE_LEASED (each caller handles them via an
+        early-return `if decision.action == T1RoutingAction.<MEMBER>:`).
+
+        MINT is the implicit fallthrough after both, by construction the
+        only remaining action -- there is no third explicit comparison to
+        check. round 1 of this test checked for the substring "MINT"
+        anywhere in the function source, but BOTH reviewers independently
+        proved empirically (via inspect.getsource + grep against the live
+        code) that every "MINT" occurrence in both functions is inside a
+        `#` comment, so that check was satisfiable by pre-existing prose
+        alone and would NOT catch the exact silent-fallthrough-breakage
+        this test exists to guard against. Fixed here by scoping to the
+        source AFTER the last USE_LEASED dispatch block and requiring an
+        actual call to `mint_t1_session_token(` there -- a real behavioral
+        signal (the fallthrough actually mints) rather than a comment."""
+        import inspect
+
+        from nexus.db import t1 as t1_module
+        from nexus.mcp import core as mcp_core_module
+
+        explicit_actions = ("USE_INHERITED", "USE_LEASED")
+
+        get_t1_database_src = inspect.getsource(t1_module.get_t1_database)
+        assert "= resolve_t1_routing_tiers(" in get_t1_database_src, (
+            "get_t1_database() must actually CALL the shared "
+            "resolve_t1_routing_tiers (not just mention its name) -- a "
+            "hand-rolled tier-1/tier-2 check here can silently diverge "
+            "from mcp.core's Branch 0 again (nexus-1si7z)"
+        )
+        for action in explicit_actions:
+            assert f"T1RoutingAction.{action}" in get_t1_database_src, (
+                f"get_t1_database() must dispatch on T1RoutingAction.{action} "
+                "-- computing the decision but not consuming one of its "
+                "branches is the same silent-divergence risk this test guards "
+                "against (nexus-1si7z)"
+            )
+        get_t1_database_post_dispatch = get_t1_database_src.rsplit(
+            "T1RoutingAction.USE_LEASED", 1
+        )[-1]
+        assert "mint_t1_session_token(" in get_t1_database_post_dispatch, (
+            "get_t1_database()'s fallthrough-to-mint branch must actually "
+            "CALL mint_t1_session_token(...) after the USE_LEASED dispatch "
+            "-- a comment mentioning MINT is not sufficient evidence the "
+            "fallthrough still mints (nexus-1si7z)"
+        )
+
+        lifespan_src = inspect.getsource(mcp_core_module._t1_chroma_lifespan)
+        assert "= resolve_t1_routing_tiers(" in lifespan_src, (
+            "_t1_chroma_lifespan's Branch 0 must actually CALL the shared "
+            "resolve_t1_routing_tiers (not just mention its name) -- a "
+            "hand-rolled tier-1/tier-2 check here can silently diverge "
+            "from get_t1_database() again (nexus-1si7z)"
+        )
+        for action in explicit_actions:
+            assert f"T1RoutingAction.{action}" in lifespan_src, (
+                f"_t1_chroma_lifespan's Branch 0 must dispatch on "
+                f"T1RoutingAction.{action} -- computing the decision but not "
+                "consuming one of its branches is the same silent-divergence "
+                "risk this test guards against (nexus-1si7z)"
+            )
+        lifespan_post_dispatch = lifespan_src.rsplit("T1RoutingAction.USE_LEASED", 1)[-1]
+        assert "mint_t1_session_token(" in lifespan_post_dispatch, (
+            "_t1_chroma_lifespan's Branch 0 fallthrough-to-mint branch must "
+            "actually CALL mint_t1_session_token(...) after the USE_LEASED "
+            "dispatch -- a comment mentioning MINT is not sufficient evidence "
+            "the fallthrough still mints (nexus-1si7z)"
+        )
