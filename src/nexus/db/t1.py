@@ -2,11 +2,13 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 from __future__ import annotations
 
+import enum
 import fcntl
 import json
 import os
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 from uuid import uuid4
@@ -1002,14 +1004,24 @@ def clear_t1_session_lease(session_id: str, config_dir: Path) -> None:
         pass
 
 
-class T1RoutingAction:
-    """The three actions :func:`resolve_t1_routing_tiers` can hand back."""
+class T1RoutingAction(enum.StrEnum):
+    """The three actions :func:`resolve_t1_routing_tiers` can hand back.
+
+    ``StrEnum`` (nexus-1si7z review, code-review-expert non-blocking
+    suggestion): members compare equal to their string value, so every
+    existing ``decision.action == T1RoutingAction.USE_INHERITED``-style
+    comparison and ``T1RoutingDecision(action=T1RoutingAction.MINT)``-style
+    construction keeps working unchanged -- this is a pure modernization
+    (hand-rolled string constants -> the idiomatic Python 3.12+ construct
+    CLAUDE.md favors), not a behavior change.
+    """
 
     USE_INHERITED = "use_inherited"
     USE_LEASED = "use_leased"
     MINT = "mint"
 
 
+@dataclass(frozen=True, slots=True, repr=False)
 class T1RoutingDecision:
     """Result of :func:`resolve_t1_routing_tiers`.
 
@@ -1035,25 +1047,42 @@ class T1RoutingDecision:
     is ``MINT`` -- ``USE_INHERITED`` and ``USE_LEASED`` both mean "a live
     token already exists for a session id we do not necessarily own; use it,
     do not touch it."
+
+    ``@dataclass(frozen=True, slots=True)`` (nexus-1si7z review,
+    code-review-expert non-blocking suggestion): replaces the hand-rolled
+    ``__slots__`` + manual ``__init__`` with the idiomatic Python 3.12+
+    construct; ``repr=False`` keeps the custom ``__repr__`` below (dataclass
+    would otherwise generate one that leaks ``session_token`` verbatim).
+
+    NOTE beyond ``repr``: unlike the old hand-rolled class (identity-based
+    ``__eq__``/``__hash__``, the ``object`` default), ``@dataclass`` also
+    generates VALUE-based ``__eq__``/``__hash__`` here (frozen dataclasses
+    are hashable by default) -- two decisions with the same
+    action/session_id/session_token now compare equal and hash the same,
+    where they did not before. Nothing in this codebase compares, hashes,
+    or set/dict-keys a ``T1RoutingDecision`` today (nexus-1si7z review,
+    substantive-critic: verified via grep across src/ and tests/), so this
+    is a latent, not live, behavior change -- flagged here rather than
+    silently left for a future ``decision == other_decision`` to discover
+    the switch happened.
     """
 
-    __slots__ = ("action", "session_id", "session_token")
-
-    def __init__(
-        self,
-        action: str,
-        session_id: str | None = None,
-        session_token: str | None = None,
-    ) -> None:
-        self.action = action
-        self.session_id = session_id
-        self.session_token = session_token
+    action: T1RoutingAction
+    session_id: str | None = None
+    session_token: str | None = None
 
     def __repr__(self) -> str:
+        # A local variable instead of the ternary inline in the f-string
+        # (nexus-1si7z review, code-review-expert: the prior inline form,
+        # `{'<redacted>' if self.session_token else None!r}`, was CORRECT --
+        # `!r` binds to the whole ternary, not just the trailing `None` --
+        # but subtle enough to misread as leaking the raw token. Spelled out
+        # here so there is nothing to misread.)
+        redacted = "<redacted>" if self.session_token else None
         return (
             f"T1RoutingDecision(action={self.action!r}, "
             f"session_id={self.session_id!r}, "
-            f"session_token={'<redacted>' if self.session_token else None!r})"
+            f"session_token={redacted!r})"
         )
 
 
@@ -1119,6 +1148,20 @@ def resolve_t1_routing_tiers(config_dir: Path) -> T1RoutingDecision:
     # directly (Python attribute patching, not a name-binding patch) --
     # only a fresh per-call `from nexus.session import ...` picks up that
     # patch; a name bound once at THIS module's own import time would not.
+    #
+    # This is NOT inconsistent with the module-level import at the top of
+    # this file (nexus-1si7z review, substantive-critic Minor finding):
+    # T1Database._resolve_session_id uses that module-level binding and is
+    # UNAFFECTED by the split, because the one test that patches this name
+    # at the `nexus.db.t1` level specifically (not `nexus.session`) targets
+    # THAT call site, not this one -- see tests/test_session_resolver.py
+    # (the dual monkeypatch.setattr on both `nexus.session.
+    # resolve_active_session_id` and `nexus.db.t1.resolve_active_session_id`
+    # documents exactly this pre-existing two-import-styles gotcha). Each
+    # call site's import style matches which test-patching convention its
+    # own callers rely on; this function follows the SAME local-import
+    # convention the pre-refactor tier-2 code already used at this exact
+    # call site, unchanged by this extraction.
     from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deliberate: must re-resolve per call for test-patch visibility, see comment above
 
     candidate_id = resolve_active_session_id()

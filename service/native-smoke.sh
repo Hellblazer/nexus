@@ -30,9 +30,31 @@ fi
 SVCPORT=$(python3 -c "import socket;s=socket.socket();s.bind(('',0));print(s.getsockname()[1]);s.close()")
 export NX_SERVICE_PORT=$SVCPORT NX_SERVICE_TOKEN=smoketoken NX_EMBED_MODE=onnx
 
+# nexus-rxqqd review follow-up (substantive-critic): when OWN_PG=1 (default),
+# the whole throwaway docker container is torn down at exit, so the rows the
+# curl assertions / real-Python-client blocks below write are irrelevant.
+# When pointed at an EXTERNAL NX_DB_URL, though, those SAME rows have no
+# cleanup path today and accumulate in whatever real Postgres was passed in.
+# The real-Python-client blocks (which already have delete/close primitives
+# on hand) best-effort clean up their own rows when this is set; the
+# curl-only assertions near the top of this file are lower-priority (no
+# convenient single-call delete without adding new curl plumbing) and are
+# left as a smaller, separately-trackable residual if this ever bites --
+# tracked as nexus-hnh20.
+NATIVE_SMOKE_CLEANUP_ROWS=0
+[ "$OWN_PG" != "1" ] && NATIVE_SMOKE_CLEANUP_ROWS=1
+
 cleanup() {
   [ -n "${SVCPID:-}" ] && kill "$SVCPID" 2>/dev/null
   [ "$OWN_PG" = "1" ] && docker rm -f lp2qo-smoke-pg >/dev/null 2>&1
+  # nexus-rxqqd review follow-up (code-review-expert): the real-Python-client
+  # blocks below create their own mktemp -d NEXUS_CONFIG_DIR isolation dirs
+  # and rm -rf them on their own normal-path exit, but a Ctrl-C (or any other
+  # signal) mid-`uv run` skipped straight past that rm -rf and leaked the
+  # tmpdir on disk. Covering both here too so the EXIT trap is the actual
+  # backstop, not just the happy path.
+  [ -n "${T1_PY_TMPDIR:-}" ] && rm -rf "$T1_PY_TMPDIR"
+  [ -n "${T2_PY_TMPDIR:-}" ] && rm -rf "$T2_PY_TMPDIR"
 }
 trap cleanup EXIT
 
@@ -149,8 +171,10 @@ if command -v uv >/dev/null 2>&1 && [ -f "$REPO_ROOT/pyproject.toml" ]; then
   # smoketoken bearer. Explicitly clearing it here closes that leg too.
   PY_OUT=$(cd "$REPO_ROOT" && NEXUS_CONFIG_DIR="$T1_PY_TMPDIR" NX_SERVICE_URL='' \
     NX_SERVICE_HOST=127.0.0.1 NX_SERVICE_PORT="$SVCPORT" NX_SERVICE_TOKEN=smoketoken \
-    NX_STORAGE_BACKEND=service \
+    NX_STORAGE_BACKEND=service NATIVE_SMOKE_CLEANUP_ROWS="$NATIVE_SMOKE_CLEANUP_ROWS" \
     $TIMEOUT_CMD uv run python -c '
+import os
+
 from nexus.db.t1 import get_t1_database
 
 t1 = get_t1_database()
@@ -166,6 +190,18 @@ assert any(r["id"] == doc_id for r in results), f"search did not find {doc_id}: 
 
 entries = t1.list_entries()
 assert any(e["id"] == doc_id for e in entries), f"list_entries did not find {doc_id}: {entries}"
+
+if os.environ.get("NATIVE_SMOKE_CLEANUP_ROWS") == "1":
+    # Best-effort, deliberately isolated from the assertions above (review
+    # follow-up, substantive-critic): a cleanup-only exception here must
+    # never read as an assertion failure to whoever is debugging a FAIL --
+    # print CLEANUP-WARN and keep going rather than let it propagate past
+    # print("OK"), which would make grep -q "^OK$" fail identically to a
+    # genuine assertion failure despite every real check above having passed.
+    try:
+        t1.delete(doc_id)
+    except Exception as exc:  # noqa: BLE001 — best-effort cleanup, see comment above
+        print(f"CLEANUP-WARN: t1.delete({doc_id!r}) failed: {exc}")
 
 print("OK")
 ' 2>&1)
@@ -216,7 +252,10 @@ if command -v uv >/dev/null 2>&1 && [ -f "$REPO_ROOT/pyproject.toml" ]; then
   # leak applies here and is closed the same way.
   PY_OUT=$(cd "$REPO_ROOT" && NEXUS_CONFIG_DIR="$T2_PY_TMPDIR" NX_SERVICE_URL='' \
     NX_SERVICE_HOST=127.0.0.1 NX_SERVICE_PORT="$SVCPORT" NX_SERVICE_TOKEN=smoketoken \
+    NATIVE_SMOKE_CLEANUP_ROWS="$NATIVE_SMOKE_CLEANUP_ROWS" \
     $TIMEOUT_CMD uv run python -c '
+import os
+
 from nexus.db.t2.http_chash_index import HttpChashIndex
 from nexus.db.t2.http_memory_store import HttpMemoryStore
 from nexus.db.t2.http_plan_library import HttpPlanLibrary
@@ -233,7 +272,7 @@ entries = mem.list_entries(project="native-smoke-py")
 assert any(e.get("title") == "a" for e in entries), f"memory.list_entries did not find title=a: {entries}"
 
 plans = HttpPlanLibrary()
-plans.save_plan(query="native smoke plan query", plan_json="{\"steps\": []}", project="native-smoke-py")
+plan_id = plans.save_plan(query="native smoke plan query", plan_json="{\"steps\": []}", project="native-smoke-py")
 plan_results = plans.search_plans("native smoke plan", project="native-smoke-py")
 assert plan_results, f"plans.search_plans found nothing: {plan_results}"
 
@@ -254,6 +293,30 @@ chash = HttpChashIndex()
 chash.upsert(chash="deadbeef" * 8, collection="native-smoke-py")
 collections = chash.distinct_collections()
 assert "native-smoke-py" in collections, f"chash.distinct_collections missing native-smoke-py: {collections}"
+
+if os.environ.get("NATIVE_SMOKE_CLEANUP_ROWS") == "1":
+    # nexus-rxqqd review follow-up (substantive-critic): best-effort row
+    # cleanup, only when pointed at an external (non-throwaway) NX_DB_URL --
+    # see the NATIVE_SMOKE_CLEANUP_ROWS comment near the top of this file for why.
+    #
+    # Each delete wrapped individually and isolated from the assertions above
+    # (2nd-round review follow-up, substantive-critic): a cleanup-only
+    # exception must never masquerade as an assertion failure to whoever is
+    # debugging a FAIL -- print CLEANUP-WARN and keep going for each surface
+    # independently, rather than let one failure (a) abort the remaining
+    # three deletes and (b) skip print("OK"), making grep -q "^OK$" fail
+    # identically to a genuine assertion failure despite every real check
+    # above having already passed.
+    for _label, _cleanup in (
+        ("memory", lambda: mem.delete(project="native-smoke-py", title="a")),
+        ("plans", lambda: plans.delete_plan(plan_id)),
+        ("taxonomy", lambda: tax.delete_topic(src_id)),
+        ("chash", lambda: chash.delete_collection("native-smoke-py")),
+    ):
+        try:
+            _cleanup()
+        except Exception as exc:  # noqa: BLE001 — best-effort cleanup, see comment above
+            print(f"CLEANUP-WARN: {_label} cleanup failed: {exc}")
 
 print("OK")
 ' 2>&1)

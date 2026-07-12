@@ -644,7 +644,16 @@ async def _t1_chroma_lifespan(_app: Any):
         # input).
         _t1_session_id = _decision.session_id or ""
 
-        if not _t1_session_id or _t1_session_id == "unknown":
+        # nexus-1si7z review (code-review-expert): no `or _t1_session_id ==
+        # "unknown"` leg here -- resolve_t1_routing_tiers's own MINT branch
+        # already collapses a resolved-but-"unknown" candidate_id to None
+        # before returning (see its docstring/body), so `_decision.session_id`
+        # can only ever be a real id or None by the time it reaches here;
+        # checking for the literal string "unknown" again was dead code left
+        # over from before the tiers-1-2 extraction, when this file resolved
+        # the session id itself instead of consuming an already-normalized
+        # T1RoutingDecision.
+        if not _t1_session_id:
             # No resolvable session id — do NOT mint a shared "unknown" row (concurrent
             # MCPs would collide on the (tenant, session_id) UPSERT, each invalidating
             # the other's token). We leave NX_T1_SESSION untouched: a sub-agent that
