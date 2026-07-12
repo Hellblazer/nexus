@@ -46,6 +46,7 @@ _VALID_TOKENS: dict[str, str] = {}  # session_id -> currently-valid minted token
 _ALWAYS_401: set[str] = set()  # session_ids that always 401 on t1 ops (persistent-failure sim)
 _MINT_CALLS: list[str] = []  # session_ids passed to /v1/sessions/start, in call order
 _MINT_FAILS: bool = False  # nexus-c8yvj finding 2: simulate a broken NX_SERVICE_TOKEN (mint 403s)
+_MINT_TTL_SECONDS: float = 3600  # nexus-ngcpo: overridable per-test so refresh-cadence tests don't wait real TTLs
 
 
 def _reset_fake_service_state() -> None:
@@ -53,8 +54,9 @@ def _reset_fake_service_state() -> None:
     _VALID_TOKENS.clear()
     _ALWAYS_401.clear()
     _MINT_CALLS.clear()
-    global _MINT_FAILS
+    global _MINT_FAILS, _MINT_TTL_SECONDS
     _MINT_FAILS = False
+    _MINT_TTL_SECONDS = 3600
 
 
 class _FakeHandler(BaseHTTPRequestHandler):
@@ -101,7 +103,11 @@ class _FakeHandler(BaseHTTPRequestHandler):
             _VALID_TOKENS[session_id] = token
             self._send(
                 200,
-                {"session_token": token, "session_id": session_id, "expires_in_seconds": 3600},
+                {
+                    "session_token": token,
+                    "session_id": session_id,
+                    "expires_in_seconds": _MINT_TTL_SECONDS,
+                },
             )
             return
 
@@ -596,6 +602,91 @@ class TestLiveSessionLease:
         assert SESSION_UNAUTHORIZED_MARKER in str(exc_info.value)
 
 
+# ── Lease freshness / TTL (nexus-ngcpo Finding 2) ──────────────────────────────
+#
+# Pre-ngcpo, read_t1_session_lease was a bare file read with no TTL check at
+# all -- any lease file that happened to exist was trusted forever, including
+# one abandoned by a prior MCP session that exited uncleanly. These tests
+# lock the fix: a lease past its stored expiry (or one that fails to parse as
+# the new JSON format, e.g. a stale pre-ngcpo bare-token file) is treated as
+# absent, while a genuinely fresh lease is still returned exactly as before.
+
+
+class TestLeaseFreshness:
+    def test_fresh_lease_is_returned(self, tmp_path: Path) -> None:
+        from nexus.db.t1 import publish_t1_session_lease, read_t1_session_lease
+
+        publish_t1_session_lease("sess-fresh", "tok-fresh", tmp_path, ttl_seconds=3600)
+        assert read_t1_session_lease("sess-fresh", tmp_path) == "tok-fresh"
+
+    def test_stale_lease_is_not_returned(self, tmp_path: Path) -> None:
+        """A negative ttl_seconds publishes a lease already past its expiry --
+        simulating an owner that stopped refreshing well before this read."""
+        from nexus.db.t1 import publish_t1_session_lease, read_t1_session_lease
+
+        publish_t1_session_lease("sess-stale", "tok-stale", tmp_path, ttl_seconds=-1.0)
+        assert read_t1_session_lease("sess-stale", tmp_path) is None
+
+    def test_lease_at_exact_expiry_boundary_is_stale(self, tmp_path: Path) -> None:
+        """expires_at == now must be treated as stale (>=, not >) -- an exact
+        tie should never be trusted as fresh."""
+        import json
+
+        from nexus.db.t1 import _t1_session_lease_path, read_t1_session_lease
+
+        path = _t1_session_lease_path("sess-boundary", tmp_path)
+        path.write_text(json.dumps({"token": "tok-boundary", "expires_at": 0.0}))
+        assert read_t1_session_lease("sess-boundary", tmp_path) is None
+
+    def test_legacy_bare_token_file_is_treated_as_absent(self, tmp_path: Path) -> None:
+        """A pre-ngcpo lease file (plain token text, not JSON) must not crash
+        the reader and must not be trusted indefinitely -- fail-safe on a
+        format bump, not fail-open."""
+        from nexus.db.t1 import _t1_session_lease_path, read_t1_session_lease
+
+        path = _t1_session_lease_path("sess-legacy", tmp_path)
+        path.write_text("legacy-plain-token-no-json")
+        assert read_t1_session_lease("sess-legacy", tmp_path) is None
+
+    def test_default_ttl_used_when_unspecified(self, tmp_path: Path) -> None:
+        """Existing call sites that omit ttl_seconds (back-compat) must still
+        publish a lease that reads back fresh."""
+        from nexus.db.t1 import publish_t1_session_lease, read_t1_session_lease
+
+        publish_t1_session_lease("sess-default-ttl", "tok-default", tmp_path)
+        assert read_t1_session_lease("sess-default-ttl", tmp_path) == "tok-default"
+
+
+class TestStaleLeaseFallthrough:
+    """Integration: a stale lease must not be borrowed by either consumer --
+    get_t1_database()'s tier-2 borrow path falls through to CLI-dedicated
+    (this class), and mcp.core's Branch-0 self-check mints fresh + takes
+    ownership (TestBranch0StaleLeaseRecovery below)."""
+
+    def test_stale_lease_falls_through_to_cli_dedicated(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        from nexus.db.t1 import (
+            _CliDedicatedScratchStore,
+            _cli_dedicated_session_id,
+            get_t1_database,
+            publish_t1_session_lease,
+        )
+
+        live_session_id = "live-mcp-session-stale-ttl"
+        live_token = _mint_live_session_token(fake_service, live_session_id)
+        # Already expired: nobody has refreshed this lease since it was
+        # published, simulating a dead original owner.
+        publish_t1_session_lease(live_session_id, live_token, config_dir, ttl_seconds=-1.0)
+
+        monkeypatch.setenv("NX_SESSION_ID", live_session_id)
+
+        result = get_t1_database()
+        assert isinstance(result, _CliDedicatedScratchStore)
+        assert result.session_id == _cli_dedicated_session_id(config_dir)
+        assert result.session_id != live_session_id
+
+
 class TestSessionEndFlushViaLease:
     """The actual regression this bead fixes: session_end_flush() (the
     SessionEnd hook) must flush a flagged entry written under the live MCP
@@ -768,12 +859,22 @@ class TestMcpCoreLeaseWiring:
         prev_owned_session = dict(mcp_core._OWNED_T1_SESSION)
         mcp_core._SHUTDOWN_IN_FLIGHT = False
         mcp_core._OWNED_T1_SESSION.clear()
+        # nexus-ngcpo: also guard against a refresh task leaking across
+        # tests -- every test in this class exercises the real lifespan and
+        # its own teardown path cancels the task it started, but a failure
+        # mid-test should not leave a stray task pending for the NEXT test.
+        assert mcp_core._T1_SESSION_REFRESH_TASK is None, (
+            "a prior test in this class leaked a live refresh task"
+        )
         try:
             yield
         finally:
             mcp_core._SHUTDOWN_IN_FLIGHT = prev_inflight
             mcp_core._OWNED_T1_SESSION.clear()
             mcp_core._OWNED_T1_SESSION.update(prev_owned_session)
+            if mcp_core._T1_SESSION_REFRESH_TASK is not None:
+                mcp_core._T1_SESSION_REFRESH_TASK.cancel()
+                mcp_core._T1_SESSION_REFRESH_TASK = None
 
     def test_branch0_publishes_lease_on_mint_and_clears_on_teardown(
         self, fake_service, config_dir, monkeypatch
@@ -979,3 +1080,211 @@ class TestMcpCoreLeaseWiring:
             # `_t1_chroma_shutdown` already ran and cleared its state.
 
         asyncio.run(_run())
+
+
+# ── Refresh task (nexus-ngcpo Finding 1) ───────────────────────────────────────
+#
+# Branch 0 previously minted a session token ONCE at MCP startup and never
+# again. These tests prove the periodic refresh task actually re-mints
+# before the token's TTL would expire -- using a short test TTL (via the
+# fake service's overridable ``_MINT_TTL_SECONDS``) rather than waiting 24h.
+
+
+class TestBranch0RefreshTask:
+    @pytest.fixture(autouse=True)
+    def _reset_branch0_state(self):
+        from nexus.mcp import core as mcp_core
+
+        prev_inflight = mcp_core._SHUTDOWN_IN_FLIGHT
+        prev_owned_session = dict(mcp_core._OWNED_T1_SESSION)
+        mcp_core._SHUTDOWN_IN_FLIGHT = False
+        mcp_core._OWNED_T1_SESSION.clear()
+        try:
+            yield
+        finally:
+            mcp_core._SHUTDOWN_IN_FLIGHT = prev_inflight
+            mcp_core._OWNED_T1_SESSION.clear()
+            mcp_core._OWNED_T1_SESSION.update(prev_owned_session)
+            if mcp_core._T1_SESSION_REFRESH_TASK is not None:
+                mcp_core._T1_SESSION_REFRESH_TASK.cancel()
+                mcp_core._T1_SESSION_REFRESH_TASK = None
+
+    def test_refresh_loop_remints_before_ttl_expiry(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """Unit-level: call `_t1_session_refresh_loop` directly with a tiny
+        interval and observe it re-mint (and republish the lease with a
+        fresh token + expiry) multiple times, without waiting anywhere near
+        a real 24h TTL."""
+        import asyncio
+
+        from nexus.db.t1 import read_t1_session_lease
+        from nexus.mcp.core import _t1_session_refresh_loop
+
+        session_id = "refresh-loop-direct-test"
+        # Seed an initial token/lease as if a mint had already happened.
+        first_token = _mint_live_session_token(fake_service, session_id)
+        from nexus.db.t1 import publish_t1_session_lease
+        publish_t1_session_lease(session_id, first_token, config_dir, ttl_seconds=3600)
+
+        monkeypatch.setenv("NX_T1_SESSION", first_token)
+        mint_calls_before_loop = len(_MINT_CALLS)
+
+        async def _run() -> None:
+            task = asyncio.create_task(_t1_session_refresh_loop(session_id, 0.05))
+            try:
+                await asyncio.sleep(0.23)
+            finally:
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+        asyncio.run(_run())
+
+        # At least a couple of refresh ticks fired in ~0.23s at a 0.05s cadence.
+        assert len(_MINT_CALLS) >= mint_calls_before_loop + 2
+        refreshed_token = read_t1_session_lease(session_id, config_dir)
+        assert refreshed_token is not None
+        assert refreshed_token != first_token, (
+            "the lease must carry a NEWLY minted token after refresh ticks, "
+            "not the original pre-loop token"
+        )
+        import os as _os_mod
+        assert _os_mod.environ.get("NX_T1_SESSION") == refreshed_token, (
+            "the refresh loop must update the process's own NX_T1_SESSION "
+            "env var to the freshly minted token"
+        )
+
+    def test_branch0_wires_refresh_task_and_it_advances_the_token(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """End-to-end: a live Branch-0 session with a short mint TTL sees its
+        OWN env token change to a newer mint within the lifespan's lifetime
+        -- proving the task started by `_t1_chroma_lifespan` is actually
+        live and ticking, not just constructed."""
+        import asyncio
+        import os as _os_mod
+
+        from nexus.mcp import core as mcp_core
+
+        global _MINT_TTL_SECONDS
+        # A tiny (but non-zero -- `_mint_ttl or DEFAULT` in production code
+        # would otherwise substitute the 24h default for a falsy 0) TTL, so
+        # `ttl * fraction` is negligible and the floor below sets the cadence.
+        _MINT_TTL_SECONDS = 0.001
+        # Shrink the floor so the test observes several ticks without a real
+        # multi-second sleep -- the floor, not the (here-negligible) TTL
+        # fraction, drives the cadence in this test.
+        monkeypatch.setattr(mcp_core, "_T1_SESSION_REFRESH_MIN_INTERVAL_S", 0.05)
+
+        live_session_id = "mcp-branch0-refresh-e2e-test"
+        monkeypatch.setattr(
+            "nexus.session.resolve_active_session_id", lambda: live_session_id
+        )
+
+        seen: dict[str, Any] = {}
+
+        async def _run() -> None:
+            async with mcp_core._t1_chroma_lifespan(None):
+                assert mcp_core._T1_SESSION_REFRESH_TASK is not None
+                initial_token = _os_mod.environ.get("NX_T1_SESSION")
+                mint_calls_before = len(_MINT_CALLS)
+                await asyncio.sleep(0.3)
+                seen["initial_token"] = initial_token
+                seen["later_token"] = _os_mod.environ.get("NX_T1_SESSION")
+                seen["mint_calls_after"] = len(_MINT_CALLS)
+                seen["mint_calls_before"] = mint_calls_before
+
+        asyncio.run(_run())
+
+        assert seen["mint_calls_after"] > seen["mint_calls_before"], (
+            "the refresh task must have re-minted at least once"
+        )
+        assert seen["later_token"] != seen["initial_token"], (
+            "the live session's own NX_T1_SESSION must advance to the newly "
+            "refreshed token"
+        )
+
+
+# ── Ownership recovery on a stale lease (nexus-ngcpo Finding 3) ────────────────
+#
+# The subtlest of the three findings: when the ORIGINAL minting owner has
+# died (its lease is stale because nobody has refreshed it since), a fresh
+# Branch-0 process resolving the SAME session id must not borrow the dead
+# lease -- it must mint its own fresh token, republish the lease, and take
+# ownership (participate in refresh + teardown) going forward. A FRESH lease,
+# by contrast, is still just borrowed (TestMcpCoreLeaseWiring's
+# `test_resolved_session_with_published_lease_does_not_remint` locks that
+# unchanged behavior) since the original owner is presumed alive and
+# refreshing it itself.
+
+
+class TestBranch0StaleLeaseRecovery:
+    @pytest.fixture(autouse=True)
+    def _reset_branch0_state(self):
+        from nexus.mcp import core as mcp_core
+
+        prev_inflight = mcp_core._SHUTDOWN_IN_FLIGHT
+        prev_owned_session = dict(mcp_core._OWNED_T1_SESSION)
+        mcp_core._SHUTDOWN_IN_FLIGHT = False
+        mcp_core._OWNED_T1_SESSION.clear()
+        try:
+            yield
+        finally:
+            mcp_core._SHUTDOWN_IN_FLIGHT = prev_inflight
+            mcp_core._OWNED_T1_SESSION.clear()
+            mcp_core._OWNED_T1_SESSION.update(prev_owned_session)
+            if mcp_core._T1_SESSION_REFRESH_TASK is not None:
+                mcp_core._T1_SESSION_REFRESH_TASK.cancel()
+                mcp_core._T1_SESSION_REFRESH_TASK = None
+
+    def test_branch0_mints_fresh_and_takes_ownership_when_lease_stale(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        import asyncio
+        import os as _os_mod
+
+        from nexus.db.t1 import publish_t1_session_lease, read_t1_session_lease
+        from nexus.mcp import core as mcp_core
+
+        live_session_id = "mcp-branch0-stale-recovery-test"
+        monkeypatch.setattr(
+            "nexus.session.resolve_active_session_id", lambda: live_session_id
+        )
+
+        # Simulate an abandoned lease from a since-dead prior owner: published
+        # but already past its expiry (it stopped refreshing when it died).
+        publish_t1_session_lease(
+            live_session_id, "dead-owners-old-token", config_dir, ttl_seconds=-1.0
+        )
+        mint_calls_before = len(_MINT_CALLS)
+
+        seen: dict[str, Any] = {}
+
+        async def _run() -> None:
+            async with mcp_core._t1_chroma_lifespan(None):
+                seen["owned_session_id"] = mcp_core._OWNED_T1_SESSION.get("session_id")
+                seen["refresh_task"] = mcp_core._T1_SESSION_REFRESH_TASK
+                seen["env_token"] = _os_mod.environ.get("NX_T1_SESSION")
+                seen["lease_token"] = read_t1_session_lease(live_session_id, config_dir)
+
+        asyncio.run(_run())
+
+        # Must have minted its OWN fresh token -- exactly once, not borrowed.
+        assert len(_MINT_CALLS) == mint_calls_before + 1
+        assert seen["env_token"] != "dead-owners-old-token"
+        assert seen["owned_session_id"] == live_session_id, (
+            "a process that mints fresh after finding a stale lease must "
+            "take ownership of the session (participate in refresh + "
+            "teardown), unlike the fresh-lease borrow path which does not"
+        )
+        assert seen["refresh_task"] is not None, (
+            "the recovering process must start its own refresh task -- it "
+            "is now the owner keeping this session id alive"
+        )
+        # The republished lease reflects the NEW owner's fresh token.
+        assert seen["lease_token"] == seen["env_token"]
+
+        # Clean teardown: this new owner's exit clears the lease exactly
+        # like any other Branch-0 owner (TestMcpCoreLeaseWiring's roundtrip).
+        assert read_t1_session_lease(live_session_id, config_dir) is None

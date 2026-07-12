@@ -57,6 +57,33 @@ class TestMcpToolError:
             _mcp_tool_error("memory_get", KeyError("k"))
         assert any(e.get("event") == "mcp_memory_get_failed" for e in cap)
 
+    def test_session_unauthorized_returns_reconnect_hint(self) -> None:
+        # nexus-ngcpo Finding/(d): a T1 401 (SESSION_UNAUTHORIZED_MARKER) must
+        # get equivalent "reconnect" guidance to commands/scratch.py's
+        # _clean_service_errors, not a bare error repr.
+        from nexus.db.http_scratch_store import SESSION_UNAUTHORIZED_MARKER
+
+        exc = RuntimeError(f"{SESSION_UNAUTHORIZED_MARKER} on /v1/t1/put: unauthorized")
+        out = _mcp_tool_error("scratch", exc)
+        assert "reconnect" in out.lower()
+        assert "conexus mcp" in out.lower()
+        assert SESSION_UNAUTHORIZED_MARKER in out, "the underlying marker text is still surfaced"
+        assert "nx doctor" not in out, (
+            "a 401 is an auth failure, not a connectivity failure — must not "
+            "get the unrelated daemon-restart hint"
+        )
+
+    def test_session_unauthorized_checked_before_connection_hint(self) -> None:
+        # The two hints are mutually exclusive in practice, but assert the
+        # 401 branch wins if a marker string somehow also matched a
+        # connection-error substring, so the more specific/actionable hint
+        # is never shadowed by the generic one.
+        from nexus.db.http_scratch_store import SESSION_UNAUTHORIZED_MARKER
+
+        exc = RuntimeError(f"{SESSION_UNAUTHORIZED_MARKER}: connection reset by peer")
+        out = _mcp_tool_error("scratch", exc)
+        assert "reconnect the conexus mcp" in out.lower()
+
 
 class TestMdChunkerStructuredWarning:
     def test_fallback_warning_carries_error_field(self) -> None:

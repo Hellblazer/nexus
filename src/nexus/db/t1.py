@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import fcntl
+import json
 import os
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
@@ -882,53 +884,105 @@ def _cli_dedicated_session_id(config_dir: Path) -> str:
 # ever READS a lease the MCP already published; it never mints.
 _T1_SESSION_LEASE_PREFIX = "t1_session_lease."
 
+#: nexus-ngcpo Finding 2: default freshness window stamped into a lease's
+#: ``expires_at`` when the caller does not supply an explicit ``ttl_seconds``
+#: (e.g. a legacy call site, or defensive fallback if a mint response is
+#: somehow missing ``expires_in_seconds``). Mirrors the service's own
+#: ``SessionTokenHandler.DEFAULT_TTL_SECONDS`` (24h) so the on-disk freshness
+#: window matches what the server would apply to an unspecified-TTL mint.
+#: Real call sites should pass the ACTUAL TTL from the mint response
+#: (``HttpTokenStore.start_session``'s ``expires_in_seconds``) so the lease's
+#: freshness window tracks the real server-side expiry, not this fallback.
+_T1_SESSION_LEASE_DEFAULT_TTL_SECONDS: float = 86_400.0
+
 
 def _t1_session_lease_path(session_id: str, config_dir: Path) -> Path:
     return config_dir / f"{_T1_SESSION_LEASE_PREFIX}{session_id}"
 
 
-def publish_t1_session_lease(session_id: str, session_token: str, config_dir: Path) -> None:
+def publish_t1_session_lease(
+    session_id: str,
+    session_token: str,
+    config_dir: Path,
+    *,
+    ttl_seconds: float = _T1_SESSION_LEASE_DEFAULT_TTL_SECONDS,
+) -> None:
     """Publish a live MCP session's minted T1 token to a lease file.
 
     Called by :mod:`nexus.mcp.core`'s ``_t1_chroma_lifespan`` Branch 0
-    immediately after a successful mint. Atomic temp-file + ``os.replace``
-    publish (same pattern as :func:`_cli_dedicated_session_id`'s cache-file
-    write) so a concurrent reader never observes a torn write. Mode
-    ``0o600`` -- the token is a secret. Best-effort by convention at the
+    immediately after a successful mint (and, nexus-ngcpo, again on every
+    periodic refresh -- see ``_t1_session_refresh_loop``). Atomic temp-file +
+    ``os.replace`` publish (same pattern as :func:`_cli_dedicated_session_id`'s
+    cache-file write) so a concurrent reader never observes a torn write.
+    Mode ``0o600`` -- the token is a secret. Best-effort by convention at the
     call site: a failure here is a lost convenience lease for a detached
     hook process, not a correctness-critical failure for the live MCP
     session itself, so callers should log-and-continue rather than fail
     session startup on a publish error.
+
+    nexus-ngcpo Finding 2: the lease file is now a small JSON object
+    ``{"token": ..., "expires_at": <unix ts>}`` rather than the bare-token
+    text the pre-ngcpo format used. ``ttl_seconds`` should be the ACTUAL TTL
+    the token was minted with (the mint response's ``expires_in_seconds``)
+    so the freshness window :func:`read_t1_session_lease` enforces matches
+    reality; the module default is only a defensive fallback. Format-bump
+    compatibility note: a lease written by the pre-ngcpo bare-token format is
+    not valid JSON, so a reader on the new code treats it as absent/stale
+    (fail-safe) rather than fail-open.
     """
     config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = _t1_session_lease_path(session_id, config_dir)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+    payload = json.dumps(
+        {"token": session_token, "expires_at": time.time() + ttl_seconds}
+    ).encode("utf-8")
     fd = os.open(str(tmp), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
     try:
-        os.write(fd, session_token.encode("utf-8"))
+        os.write(fd, payload)
     finally:
         os.close(fd)
     os.replace(str(tmp), str(path))
 
 
 def read_t1_session_lease(session_id: str, config_dir: Path) -> str | None:
-    """Read a published T1 session lease token, or ``None`` if absent/unreadable.
+    """Read a published T1 session lease token IF it is still fresh, else ``None``.
 
-    No liveness probe on the token itself: a stale lease (the live MCP
-    crashed without running its teardown, e.g. SIGKILL/OOM) is caught
-    downstream by the service's own 401 on the now-invalid token, which
-    surfaces as a plain ``RuntimeError`` from ``HttpScratchStore`` -- the
-    SAME best-effort "T1 unavailable, logged, flush skipped" outcome
-    ``hooks.session_end_flush`` already documents and tolerates for the
-    pre-existing narrow stdin-EOF race. This function intentionally adds no
-    orphan sweep / TTL of its own -- it is a plain read.
+    nexus-ngcpo Finding 2: pre-ngcpo this was a bare read with NO liveness/TTL
+    check at all -- any lease file that happened to exist on disk was
+    trusted forever, including one abandoned by a prior MCP session that
+    exited uncleanly (SIGKILL/OOM) or one whose token had long since expired
+    server-side. That directly contradicted this module's own design intent
+    to mirror :func:`nexus.daemon.t1_lease.discover_t1_lease`'s "liveness is
+    lease freshness (TTL), not pid" pattern.
+
+    Now: a lease past its stored ``expires_at`` (see
+    :func:`publish_t1_session_lease`), or one that fails to parse as the new
+    JSON format at all (a stale pre-ngcpo bare-token file, or any other
+    corruption), is treated as ABSENT -- fail-safe, not fail-open. Every
+    existing caller already treats a ``None`` return as "no lease, fall
+    through to minting fresh" (``get_t1_database()``'s tier-2 borrow path,
+    and ``mcp.core._t1_chroma_lifespan`` Branch 0's own self-check), so this
+    tightening requires no new caller-side branching: a stale or corrupt
+    lease is simply never borrowed blind.
     """
     path = _t1_session_lease_path(session_id, config_dir)
     try:
-        token = path.read_text().strip()
+        raw = path.read_text()
     except OSError:
         return None
-    return token or None
+    try:
+        data = json.loads(raw)
+        token = data["token"]
+        expires_at = float(data["expires_at"])
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        # Pre-ngcpo bare-token format (or any other corruption): treat as
+        # absent rather than trust an un-timestamped file indefinitely.
+        return None
+    if not token:
+        return None
+    if time.time() >= expires_at:
+        return None
+    return token
 
 
 def clear_t1_session_lease(session_id: str, config_dir: Path) -> None:

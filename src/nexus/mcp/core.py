@@ -73,9 +73,31 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
     includes ``PermissionError`` / ``FileNotFoundError`` — realistic on a locked
     SQLite file, NOT a daemon-down condition) is deliberately NOT treated as a
     connection failure, to avoid a misleading "restart the daemon" hint.
+
+    nexus-ngcpo Finding/(d): a ``SESSION_UNAUTHORIZED_MARKER`` (a T1 401 --
+    the live MCP session's minted token is stale/revoked) previously fell
+    through to the bare ``f"Error: {e}"`` return with no reconnect guidance,
+    unlike ``commands/scratch.py``'s ``_clean_service_errors``, which already
+    gives the CLI path an actionable "reconnect the conexus MCP/extension"
+    hint for the exact same marker. Checked BEFORE the connection-error
+    branch below since the two are mutually exclusive failure shapes (a 401
+    is not a connection failure) and the marker text is specific enough
+    (contains "unauthorized") that ordering does not matter in practice.
     """
     _log.error(f"mcp_{tool}_failed", error=str(e), exc_info=True)
     text = str(e)
+
+    from nexus.db.http_scratch_store import SESSION_UNAUTHORIZED_MARKER  # noqa: PLC0415 — deferred import; only paid on the (rare) error path
+
+    if SESSION_UNAUTHORIZED_MARKER in text:
+        return (
+            f"Error: {text}\n"
+            "The MCP session's T1 (scratch) session token is no longer valid "
+            "(expired past its TTL, or revoked server-side) — reconnect the "
+            "conexus MCP/extension so a fresh session-scoped token is minted. "
+            "A bare CLI self-heals this automatically on its next invocation; "
+            "a live MCP session cannot re-mint its own token mid-conversation."
+        )
     if isinstance(e, (ConnectionError, TimeoutError)) or any(
         m in text.lower() for m in _CONNECTION_ERROR_MARKERS
     ):
@@ -163,6 +185,128 @@ _T1_HEARTBEAT_TASK: Any = None
 #: next startup. 600 s keeps the ``ps`` cost negligible relative to the leak
 #: timescale (orphans accrue over hours/days, not seconds).
 _PERIODIC_SWEEP_INTERVAL_S: float = 600.0
+
+#: nexus-ngcpo Finding 1: the running Branch-0 (SERVICE-backed) T1 session
+#: TOKEN refresh task -- Branch 0's counterpart to ``_T1_HEARTBEAT_TASK``
+#: above. Created right after a successful mint (never for a
+#: borrowed/inherited session -- see the borrow-path commentary in
+#: ``_t1_chroma_lifespan`` for why only the minting OWNER ever refreshes),
+#: cancelled in Branch 0's own ``finally`` BEFORE the session is closed
+#: (mirrors the RDR-129 early-stop ordering already used for
+#: ``_T1_HEARTBEAT_TASK``). ``None`` when no owned SERVICE session is live.
+_T1_SESSION_REFRESH_TASK: Any = None
+
+#: nexus-ngcpo: fraction of the minted token's ACTUAL TTL (from the mint
+#: response's ``expires_in_seconds``, not an assumed constant) at which
+#: Branch 0 proactively re-mints its own session token. Refreshing at half
+#: the TTL gives a full half-TTL safety margin: even a single missed tick
+#: (a transient service blip) still leaves an entire half-TTL window to
+#: retry before the OLD token would actually expire.
+_T1_SESSION_REFRESH_FRACTION: float = 0.5
+
+#: Floor on the computed refresh interval so a very short token TTL (test
+#: fixtures, or a future low-TTL server config) can never drive a
+#: pathologically tight refresh loop. No ceiling is needed -- even the
+#: server's 24h default TTL only yields a 12h interval.
+_T1_SESSION_REFRESH_MIN_INTERVAL_S: float = 5.0
+
+#: Defensive fallback TTL (seconds) used to size the refresh interval if a
+#: mint response is somehow missing ``expires_in_seconds``. Mirrors the
+#: service's ``SessionTokenHandler.DEFAULT_TTL_SECONDS`` (24h) and
+#: ``nexus.db.t1._T1_SESSION_LEASE_DEFAULT_TTL_SECONDS``.
+_T1_SESSION_DEFAULT_TTL_SECONDS: float = 86_400.0
+
+
+async def _t1_session_refresh_loop(session_id: str, interval: float) -> None:
+    """Periodically re-mint Branch 0's OWN SERVICE-backed T1 session token.
+
+    nexus-ngcpo Finding 1: Branch 0 previously minted a session token ONCE
+    at MCP startup (``HttpTokenStore.start_session``) and never again. The
+    server's default token TTL is 24h (``SessionTokenHandler.
+    DEFAULT_TTL_SECONDS``); any session alive past that wall-clock boundary
+    -- a long dev session, a scheduled/cron agent (the ``schedule`` skill),
+    a laptop-sleep-preserved session -- would have every subsequent T1
+    put/get/search/list start 401ing for the rest of the process, with no
+    self-heal on this path (contrast the CLI-dedicated path's
+    ``_CliDedicatedScratchStore``, which retries once on a 401). This loop
+    is the fix: mirrors Branch 3's ``_t1_heartbeat_loop`` re-assert pattern
+    (RDR-149 P4), adapted to a token mint instead of a lease re-stamp.
+
+    Re-minting is safe here SPECIFICALLY because this loop only ever
+    re-mints the session id THIS process itself minted and recorded into
+    ``_OWNED_T1_SESSION`` (started immediately after that mint, in the
+    caller) -- never a borrowed/inherited session id. Re-minting a session
+    id this process does NOT own would rotate (``HttpTokenStore.
+    start_session`` is ``ON CONFLICT DO UPDATE``) another owner's live
+    token out from under it -- exactly the hazard the nexus-5daww
+    commentary elsewhere in this module documents at length. A borrow-path
+    reader (the lease self-check below) deliberately never starts this
+    loop, both because it does not own the session and because two
+    processes independently re-minting the SAME session id would race each
+    other's mint.
+
+    Also republishes the lease file with the fresh token + a fresh expiry
+    (nexus-ngcpo Finding 2/3) so sibling/detached readers -- the SessionEnd
+    hook, a nested MCP that resolves the same session id -- keep seeing a
+    live, borrowable lease for as long as this owner keeps refreshing. The
+    "recovery" case (Finding 3: a lease nobody is refreshing any more) is
+    therefore only ever reached once refreshing has ACTUALLY stopped, i.e.
+    this owner process has died -- see ``read_t1_session_lease``'s
+    freshness check and the borrow-path commentary below for how a
+    subsequent reader detects that and mints fresh instead of borrowing a
+    lease no one is maintaining.
+
+    A tick that raises (a transient mint failure / network blip) is logged
+    at warning and the loop continues -- one missed refresh still leaves
+    roughly half the TTL as a safety margin before the OLD token actually
+    expires. Only cancellation (clean shutdown, see
+    ``_cancel_t1_session_refresh_task``) stops the loop.
+    """
+    import asyncio  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
+
+    import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
+    _rf_log = structlog.get_logger("nexus.mcp.core")
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            from nexus.db.t2.http_token_store import HttpTokenStore  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+            with HttpTokenStore() as _ts:
+                _minted = _ts.start_session(session_id)
+            _os.environ["NX_T1_SESSION"] = _minted["session_token"]
+            try:
+                from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+                from nexus.db.t1 import publish_t1_session_lease  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+                publish_t1_session_lease(
+                    session_id,
+                    _minted["session_token"],
+                    nexus_config_dir(),
+                    ttl_seconds=float(
+                        _minted.get("expires_in_seconds") or _T1_SESSION_DEFAULT_TTL_SECONDS
+                    ),
+                )
+            except Exception as _exc:  # noqa: BLE001 — boundary catch; best-effort lease republish, must not crash the refresh loop
+                _rf_log.warning(
+                    "t1_session_refresh_lease_publish_failed",
+                    session_id=session_id, error=str(_exc),
+                )
+            _rf_log.info("t1_session_token_refreshed", session_id=session_id)
+        except Exception as exc:  # noqa: BLE001 — never let a transient refresh failure kill the loop
+            _rf_log.warning("t1_session_refresh_failed", session_id=session_id, error=str(exc))
+
+
+async def _cancel_t1_session_refresh_task() -> None:
+    """Cancel and await the T1 session refresh task if one is running. Idempotent."""
+    import asyncio  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
+    import contextlib  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
+
+    global _T1_SESSION_REFRESH_TASK
+    task = _T1_SESSION_REFRESH_TASK
+    _T1_SESSION_REFRESH_TASK = None
+    if task is None:
+        return
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await task
 
 
 async def _t1_heartbeat_loop(publisher: Any, interval: float) -> None:
@@ -441,6 +585,52 @@ async def _t1_chroma_lifespan(_app: Any):
         if _t1_session_id and _t1_session_id != "unknown":
             from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
             from nexus.db.t1 import read_t1_session_lease  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+            # nexus-ngcpo Finding 2: `read_t1_session_lease` now refuses to
+            # return a STALE lease (past its stored expiry) -- a `None`
+            # here therefore means either "no lease was ever published" OR
+            # "one was published but nobody has refreshed it since it went
+            # stale" (i.e. its original owner is presumably no longer
+            # alive/refreshing -- see `_t1_session_refresh_loop`). Either
+            # way we fall through to the mint branch below, which both
+            # mints a fresh token for THIS process AND takes ownership
+            # (`_OWNED_T1_SESSION`, refresh task, teardown) -- the Finding-3
+            # "orphaned lease" recovery: it happens lazily, on the next
+            # BRANCH-0 process that resolves this session id and finds the
+            # lease no longer trustworthy, not via any active monitoring.
+            #
+            # SCOPE OF THIS RECOVERY (do not overstate it): this is the
+            # Branch-0-to-Branch-0 case only. `get_t1_database()`'s CLI/
+            # detached-path tier-2 borrow (`nexus.db.t1`) does NOT retry-mint
+            # against the resolved session id on a stale lease -- it falls
+            # straight through to the disjoint, permanent CLI-dedicated
+            # identity instead. So a detached SessionEnd-hook grandchild that
+            # finds a stale lease does NOT reconnect to the original
+            # session's T1 state via this mechanism; it silently degrades to
+            # the SAME best-effort "flush skipped" outcome
+            # `hooks.session_end_flush` already documents as an accepted,
+            # pre-existing race window. Only a fresh Branch-0 MCP restart for
+            # the same session id gets the recovery described here.
+            #
+            # nexus-ngcpo Finding 3: conversely, when the lease IS fresh we
+            # deliberately do NOT claim ownership here (no
+            # `_OWNED_T1_SESSION`, no refresh task) -- a fresh lease means
+            # its original owner is presumably still alive and actively
+            # refreshing it (this is what makes it fresh), so this
+            # borrowing process piggybacks on that owner's lifecycle rather
+            # than starting a SECOND, competing refresh loop for the same
+            # session id (which would race the real owner's own re-mint --
+            # see `_t1_session_refresh_loop`'s docstring). Known residual:
+            # a long-lived borrower's in-process env copy of the token is
+            # only ever read once, here, at startup -- if the true owner
+            # refreshes again later in this borrower's lifetime, the
+            # borrower's copy goes locally stale even though the lease file
+            # itself has been updated. Every borrower observed in practice
+            # (a nested `nx-mcp` subprocess, the detached SessionEnd hook)
+            # is short-lived relative to the refresh cadence (half the
+            # token TTL, so >=12h for the server's 24h default), so this is
+            # accepted rather than solved here; a genuinely long-lived
+            # borrower would need to periodically re-READ (never re-mint)
+            # the lease file to pick up the owner's refreshes.
             _leased_token = read_t1_session_lease(_t1_session_id, nexus_config_dir())
             if _leased_token:
                 _os.environ["NX_T1_SESSION"] = _leased_token
@@ -515,16 +705,46 @@ async def _t1_chroma_lifespan(_app: Any):
             # convenience lease (same "logged, flush skipped" degradation the
             # hook already tolerates for the pre-existing stdin-EOF race) but
             # must never fail an already-successful mint / session startup.
+            _mint_ttl = float(
+                _minted.get("expires_in_seconds") or _T1_SESSION_DEFAULT_TTL_SECONDS
+            )
             try:
                 from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
                 from nexus.db.t1 import publish_t1_session_lease  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
-                publish_t1_session_lease(_t1_session_id, _minted["session_token"], nexus_config_dir())
+                publish_t1_session_lease(
+                    _t1_session_id, _minted["session_token"], nexus_config_dir(),
+                    ttl_seconds=_mint_ttl,
+                )
             except Exception as _exc:  # noqa: BLE001 — boundary catch; best-effort lease, must not crash an already-successful mint
                 _svc_log.warning("t1_session_lease_publish_failed", session_id=_t1_session_id, error=str(_exc))
+
+            # nexus-ngcpo Finding 1: start the periodic refresh task now that
+            # we own this session id (`_OWNED_T1_SESSION` was set just above,
+            # right after the mint succeeded). Refresh at half the token's
+            # ACTUAL TTL (not an assumed constant) so a missed tick still
+            # leaves a full half-TTL safety margin -- see
+            # `_t1_session_refresh_loop`'s docstring for why re-minting is
+            # safe here specifically (we only ever refresh our OWN id).
+            import asyncio  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
+            _refresh_interval = max(
+                _mint_ttl * _T1_SESSION_REFRESH_FRACTION, _T1_SESSION_REFRESH_MIN_INTERVAL_S
+            )
+            global _T1_SESSION_REFRESH_TASK
+            _T1_SESSION_REFRESH_TASK = asyncio.create_task(
+                _t1_session_refresh_loop(_t1_session_id, _refresh_interval)
+            )
 
         try:
             yield
         finally:
+            # Cancel the refresh task BEFORE closing the session (mirrors
+            # the RDR-129 early-stop ordering already used for
+            # `_T1_HEARTBEAT_TASK` in Branch 3 below) so it cannot race a
+            # re-mint against the session-close call just below. A no-op
+            # when no session was ever minted (borrow path, or the
+            # no-resolvable-session branch) since the task is only created
+            # in the mint branch above.
+            await _cancel_t1_session_refresh_task()
             # Teardown: close the scratch rows (best-effort promptness;
             # backstopped by the service's 24h TTL sweep), then route the
             # session-token close + lease clear through the SAME idempotent
@@ -688,6 +908,18 @@ def _t1_session_shutdown() -> None:
     if not session_id:
         return
     _OWNED_T1_SESSION.clear()
+
+    # nexus-ngcpo review follow-up: the clean async-generator `finally` path
+    # already awaits `_cancel_t1_session_refresh_task()` before reaching
+    # here; this SIGTERM/atexit path previously did not, an asymmetry with
+    # no observed impact (`_sigterm_handler` calls `os._exit(0)` immediately
+    # after, so there is no event-loop turn left for a pending refresh tick
+    # to race this cleanup) but worth closing for parity. `Task.cancel()` is
+    # synchronous and safe to call without awaiting from this non-async path.
+    global _T1_SESSION_REFRESH_TASK
+    if _T1_SESSION_REFRESH_TASK is not None:
+        _T1_SESSION_REFRESH_TASK.cancel()
+        _T1_SESSION_REFRESH_TASK = None
 
     import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
     _log = structlog.get_logger(__name__)
