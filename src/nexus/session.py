@@ -85,9 +85,25 @@ def resolve_active_session_id(arg: str | None = None) -> str | None:
     Resolution chain (highest priority first):
 
     1. Explicit ``arg`` (caller-supplied; non-empty after strip).
-    2. ``NX_SESSION_ID`` env var (non-empty after strip).
-    3. ``~/.config/nexus/current_session`` via ``read_claude_session_id``.
-    4. ``None``.
+    2. ``NX_SESSION_ID`` env var (non-empty after strip). Nexus's own
+       override — stays the highest env-based priority so nested
+       ``claude -p`` dispatch and tests that force a specific session id
+       are never shadowed by tier 3 below.
+    3. ``CLAUDE_CODE_SESSION_ID`` env var (non-empty after strip).
+       Claude Code sets this natively in every subprocess it spawns
+       (Bash tool calls, and Agent-tool-dispatched subagents inherit the
+       IDENTICAL value from their parent top-level session — verified
+       empirically). It is harness-provided per-process, not file-based,
+       so it does not suffer the flat-file's last-writer-wins clobbering
+       when a second top-level Claude Code session starts on the same
+       machine (nexus-36q84).
+    4. ``~/.config/nexus/current_session`` via ``read_claude_session_id``.
+       Machine-wide and unscoped — a second top-level Claude Code session
+       overwrites this file unconditionally on its own SessionStart
+       (``hooks.session_start()``). Now the last-resort fallback for
+       genuinely no-harness contexts (e.g. a bare shell invocation with
+       neither env var set).
+    5. ``None``.
 
     Returns ``None`` when nothing in the chain resolves. Callers choose
     their own fallback at the call site:
@@ -108,6 +124,10 @@ def resolve_active_session_id(arg: str | None = None) -> str | None:
     Issue #594 / nexus-9e9a: this helper is the structural fix for the
     three-site drift class. Any future change to the chain happens here
     once.
+
+    nexus-36q84: added the ``CLAUDE_CODE_SESSION_ID`` tier (3) between
+    ``NX_SESSION_ID`` and the flat file to close a machine-wide session
+    collision — see tier docs above.
     """
     if arg:
         stripped = arg.strip()
@@ -116,6 +136,9 @@ def resolve_active_session_id(arg: str | None = None) -> str | None:
     env = os.environ.get("NX_SESSION_ID", "").strip()
     if env:
         return env
+    claude_code_env = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+    if claude_code_env:
+        return claude_code_env
     file_id = read_claude_session_id()
     if file_id:
         return file_id

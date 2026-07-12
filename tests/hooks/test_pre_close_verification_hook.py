@@ -138,3 +138,111 @@ class TestPreCloseVerificationHook:
     def test_graceful_empty_stdin(self) -> None:
         result = _run_hook("")
         assert _get_decision(json.loads(result.stdout)) == "allow"
+
+
+class TestSessionIdExport:
+    """nexus-36q84: the hook is detached from any live nx-mcp process and
+    cannot rely on env-var inheritance from a parent Claude session. It
+    must extract ``session_id`` from its own stdin JSON payload (present
+    on every hook invocation per the standard hook contract — see
+    ``_make_payload``) and export it as ``NX_SESSION_ID`` before invoking
+    ``nx scratch list``, so the CLI resolves the CORRECT session's T1 data
+    instead of falling through to the machine-wide (and possibly
+    clobbered-by-a-sibling-session) ``current_session`` flat file.
+    """
+
+    @staticmethod
+    def _make_fake_nx(tmp_path: Path) -> Path:
+        """A fake `nx` on PATH that logs the NX_SESSION_ID it observed
+        for every invocation, then emits harmless scratch-list-shaped
+        output so the hook's downstream grep checks don't blow up."""
+        fake_bin = tmp_path / "fakebin"
+        fake_bin.mkdir()
+        nx_script = fake_bin / "nx"
+        nx_script.write_text(
+            "#!/bin/bash\n"
+            'echo "NX_SESSION_ID=${NX_SESSION_ID:-<unset>}" >> "$NX_CALL_LOG"\n'
+            'echo "no scratch entries"\n'
+            "exit 0\n"
+        )
+        nx_script.chmod(0o755)
+        return fake_bin
+
+    def test_exports_session_id_from_stdin_payload_for_review_check(
+        self, tmp_path, mock_config_env
+    ) -> None:
+        fake_bin = self._make_fake_nx(tmp_path)
+        log_file = tmp_path / "nx_calls.log"
+        env = mock_config_env({"on_close": True})
+
+        result = _run_hook(
+            _make_payload(command="bd close nexus-4yit"),
+            env_overrides={
+                "PATH": f"{fake_bin}:{_SAFE_PATH}",
+                "NX_CALL_LOG": str(log_file),
+                **env,
+            },
+        )
+
+        assert result.returncode == 0
+        log_contents = log_file.read_text() if log_file.exists() else ""
+        # _make_payload's default session_id is "test-session".
+        assert "NX_SESSION_ID=test-session" in log_contents, log_contents
+
+    def test_exports_session_id_from_stdin_payload_for_rdr_close_check(
+        self, tmp_path
+    ) -> None:
+        """The `bd create` / rdr-close-active branch also calls
+        `nx scratch list` (to look up the active-close marker) — it must
+        see the same exported NX_SESSION_ID."""
+        fake_bin = self._make_fake_nx(tmp_path)
+        log_file = tmp_path / "nx_calls.log"
+
+        payload = json.dumps({
+            "session_id": "rdr-close-session",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "bd create --title foo --description bar"},
+        })
+
+        result = _run_hook(
+            payload,
+            env_overrides={
+                "PATH": f"{fake_bin}:{_SAFE_PATH}",
+                "NX_CALL_LOG": str(log_file),
+            },
+        )
+
+        assert result.returncode == 0
+        log_contents = log_file.read_text() if log_file.exists() else ""
+        assert "NX_SESSION_ID=rdr-close-session" in log_contents, log_contents
+
+    def test_missing_session_id_in_payload_preserves_ambient_env(
+        self, tmp_path, mock_config_env
+    ) -> None:
+        """Defensive: if the stdin payload has no session_id field, the
+        hook must NOT clobber a legitimate pre-existing NX_SESSION_ID
+        with an empty value."""
+        fake_bin = self._make_fake_nx(tmp_path)
+        log_file = tmp_path / "nx_calls.log"
+        env = mock_config_env({"on_close": True})
+
+        payload = json.dumps({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "bd close nexus-4yit"},
+        })
+
+        result = _run_hook(
+            payload,
+            env_overrides={
+                "PATH": f"{fake_bin}:{_SAFE_PATH}",
+                "NX_CALL_LOG": str(log_file),
+                "NX_SESSION_ID": "pre-existing-ambient-value",
+                **env,
+            },
+        )
+
+        assert result.returncode == 0
+        log_contents = log_file.read_text() if log_file.exists() else ""
+        assert "NX_SESSION_ID=pre-existing-ambient-value" in log_contents, log_contents

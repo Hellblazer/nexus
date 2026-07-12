@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Tests for nexus.session.resolve_active_session_id (issue #594, nexus-9e9a).
+"""Tests for nexus.session.resolve_active_session_id (issue #594, nexus-9e9a;
+extended nexus-36q84 for the CLAUDE_CODE_SESSION_ID tier).
 
-The session_id resolution chain (NX_SESSION_ID env -> read_claude_session_id ->
-fallback) must live in exactly one place and be reused by all three callsites:
+The session_id resolution chain (NX_SESSION_ID env -> CLAUDE_CODE_SESSION_ID env ->
+read_claude_session_id -> fallback) must live in exactly one place and be reused
+by all three callsites:
 
   1. T1Database._init_new_discovery       (every Path A/B/C/client branch)
   2. _record_tier_write (mcp/core.py)     (telemetry insert)
@@ -42,13 +44,15 @@ def _write_current_session(tmp_path: Path, sid: str) -> None:
 
 
 class TestResolveActiveSessionIdChain:
-    """The chain: arg > NX_SESSION_ID env > read_claude_session_id() > None."""
+    """The chain: arg > NX_SESSION_ID env > CLAUDE_CODE_SESSION_ID env >
+    read_claude_session_id() > None."""
 
     def test_explicit_arg_wins_over_env_and_file(self, tmp_path, monkeypatch):
         from nexus.session import resolve_active_session_id
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.setenv("NX_SESSION_ID", "from-env")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "from-claude-code-env")
         _write_current_session(tmp_path, "from-file")
 
         assert resolve_active_session_id("from-arg") == "from-arg"
@@ -58,15 +62,51 @@ class TestResolveActiveSessionIdChain:
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.setenv("NX_SESSION_ID", "from-env")
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
         _write_current_session(tmp_path, "from-file")
 
         assert resolve_active_session_id() == "from-env"
+
+    def test_nx_session_id_wins_over_claude_code_session_id(
+        self, tmp_path, monkeypatch
+    ):
+        """NX_SESSION_ID must stay the highest env-based priority — nested
+        claude -p dispatch and tests that force a specific session id rely
+        on being able to override CLAUDE_CODE_SESSION_ID (which is
+        inherited identically by nested subprocesses/subagents)."""
+        from nexus.session import resolve_active_session_id
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("NX_SESSION_ID", "from-nx-env")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "from-claude-code-env")
+        _write_current_session(tmp_path, "from-file")
+
+        assert resolve_active_session_id() == "from-nx-env"
+
+    def test_claude_code_session_id_wins_over_file_when_nx_unset(
+        self, tmp_path, monkeypatch
+    ):
+        """nexus-36q84: the regression this bead exists to fix. With
+        NX_SESSION_ID unset, CLAUDE_CODE_SESSION_ID must win over the
+        machine-wide current_session flat file — even when the file holds
+        a DIFFERENT (stale/clobbered-by-a-sibling-session) value. This is
+        the assertion that actually proves the collision is closed, not
+        just described."""
+        from nexus.session import resolve_active_session_id
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "session-A-harness-id")
+        _write_current_session(tmp_path, "session-B-clobbered-the-file")
+
+        assert resolve_active_session_id() == "session-A-harness-id"
 
     def test_file_wins_when_env_empty(self, tmp_path, monkeypatch):
         from nexus.session import resolve_active_session_id
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
         _write_current_session(tmp_path, "canonical-uuid")
 
         assert resolve_active_session_id() == "canonical-uuid"
@@ -76,6 +116,7 @@ class TestResolveActiveSessionIdChain:
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
         # No current_session file written.
 
         assert resolve_active_session_id() is None
@@ -87,6 +128,21 @@ class TestResolveActiveSessionIdChain:
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.setenv("NX_SESSION_ID", "   ")
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        _write_current_session(tmp_path, "from-file")
+
+        assert resolve_active_session_id() == "from-file"
+
+    def test_blank_claude_code_session_id_treated_as_unset(
+        self, tmp_path, monkeypatch
+    ):
+        """Whitespace-only CLAUDE_CODE_SESSION_ID falls through to the
+        file, matching the .strip() convention every tier uses."""
+        from nexus.session import resolve_active_session_id
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "   ")
         _write_current_session(tmp_path, "from-file")
 
         assert resolve_active_session_id() == "from-file"
@@ -97,9 +153,47 @@ class TestResolveActiveSessionIdChain:
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.setenv("NX_SESSION_ID", "from-env")
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
         _write_current_session(tmp_path, "from-file")
 
         assert resolve_active_session_id("") == "from-env"
+
+
+class TestSessionCollisionRegression:
+    """nexus-36q84: the actual documented failure scenario.
+
+    hooks.session_start() writes current_session unconditionally whenever
+    NX_SESSION_ID is not already inherited. A SECOND top-level Claude Code
+    session starting on the same machine clobbers the file with its own
+    id. Any Bash-tool subprocess or hook in the FIRST session, invoked
+    after that point, must still resolve to the FIRST session's id via
+    CLAUDE_CODE_SESSION_ID — not silently pick up the second session's id
+    from the now-clobbered file.
+    """
+
+    def test_two_session_starts_race_the_flat_file_first_session_still_wins(
+        self, tmp_path, monkeypatch
+    ):
+        from nexus import hooks
+        from nexus.session import read_claude_session_id, resolve_active_session_id
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+
+        # Session A starts first (its own SessionStart hook invocation).
+        hooks.session_start("session-A-uuid")
+
+        # Session B starts second on the SAME machine/config dir and
+        # clobbers the shared flat file (the documented bug).
+        hooks.session_start("session-B-uuid")
+        assert read_claude_session_id() == "session-B-uuid"
+
+        # A Bash-tool subprocess belonging to session A (CLAUDE_CODE_SESSION_ID
+        # set to A's id by the harness) resolves to A's id, NOT B's —
+        # proving the fix, not just describing it.
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "session-A-uuid")
+        assert resolve_active_session_id() == "session-A-uuid"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

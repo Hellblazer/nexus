@@ -227,6 +227,32 @@ def _pin_storage_mode_direct(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_claude_code_session_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear the ambient ``CLAUDE_CODE_SESSION_ID`` for every test.
+
+    nexus-36q84: :func:`nexus.session.resolve_active_session_id` gained a
+    new tier that reads ``CLAUDE_CODE_SESSION_ID`` (the harness-provided
+    per-process env var Claude Code sets natively) between ``NX_SESSION_ID``
+    and the ``current_session`` flat-file fallback. Because the unit suite
+    itself typically runs *inside* a live Claude Code session (via the Bash
+    tool), the real conversation's ``CLAUDE_CODE_SESSION_ID`` is present in
+    ``os.environ`` for every subprocess/test-process — exactly the ambient
+    pollution class this fixture family exists to close (see
+    ``_pin_storage_mode_direct`` / ``_isolate_t1_sessions`` above). Without
+    this, any test exercising the flat-file or ``None`` fallback tiers of
+    ``resolve_active_session_id`` would silently resolve to the real
+    session id instead of the fixture/file value it asserts against.
+
+    Tests that want to exercise the new tier explicitly
+    ``monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", ...)`` inside the test
+    body, which overrides this fixture's ``delenv`` (later calls on the
+    same ``monkeypatch`` win — same pattern documented on
+    ``_isolate_config_dir``).
+    """
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_t1_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Force tests onto the explicit-isolation T1 path.
 
