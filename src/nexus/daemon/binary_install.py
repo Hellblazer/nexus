@@ -40,6 +40,7 @@ import structlog
 
 from nexus.daemon.binary_lifecycle import well_known_binary_path
 from nexus.db.pg_bundle import current_platform_tag
+from nexus.engine_version import REQUIRED_ENGINE_VERSION
 
 _log = structlog.get_logger(__name__)
 
@@ -81,13 +82,25 @@ CERT_IDENTITY_REGEXP = (
 #: future "latest" helper filters on the same prefix.
 TAG_NAMESPACE_PREFIX = "engine-service-v"
 
-#: The ``engine-service-v*`` tag this conexus build is compatible with. A
-#: BUILD-TIME PIN (bumped per release as the engine-service version advances),
-#: NOT a "latest" lookup — it avoids silent schema drift against the running
-#: service (RF-161-2). ``None`` until the first real ``engine-service-v*``
-#: release exists; while it is ``None``, ``nx init --service`` cannot
-#: auto-install and instructs the user to pass an explicit tag.
-PINNED_SERVICE_TAG: str | None = "engine-service-v0.1.36"
+#: The ``engine-service-v*`` tag this conexus build is compatible with.
+#: DERIVED from :data:`nexus.engine_version.REQUIRED_ENGINE_VERSION` — never
+#: an independent literal. Prior to this, the two were separately hand-typed
+#: constants that could (and did: pinned at v0.1.36 while the floor had
+#: already moved to a verified, cloud-deployed v0.1.39, 2026-07-12) silently
+#: drift apart. There is no topology reason for two numbers here: a fresh
+#: local install has no existing state to preserve, so it should always get
+#: EXACTLY the engine this release verified against — which is precisely
+#: what the floor means the moment it's raised (the floor is only ever
+#: bumped once a real, deployed, live-verified engine tag satisfies it; see
+#: engine_version.py's docstring and the `release` skill's engine-freshness
+#: gate). Bump ONE constant (``REQUIRED_ENGINE_VERSION`` in
+#: ``engine_version.py``) to raise both the compatibility floor AND the
+#: fresh-install pin together — there is no second knob to remember.
+#: NOT a "latest" lookup — RF-161-2 forbids resolving "latest" at install
+#: time (a supply-chain risk; installs must be reproducible/reviewable).
+PINNED_SERVICE_TAG: str | None = (
+    TAG_NAMESPACE_PREFIX + ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
+)
 
 #: Env override for the service tag (operator / CI). Takes precedence over the
 #: build-time pin. Still an explicit tag — no "latest" semantics.

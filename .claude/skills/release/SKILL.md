@@ -11,15 +11,15 @@ Follow every step in order. Do not skip or reorder. Authority: CLAUDE.md § Rele
 
 ### 0. Engine-freshness gate (PREREQUISITE — the two-lifecycle check)
 
-The Java **engine-service** is a SEPARATE release artifact from this PyPI release: its own `engine-service-vX.Y.Z` tag fires `engine-service-release.yml`, version is tag-stamped (no manifest bump), and it is **decoupled from the luxe6 / RDR-155-P4a develop release boundary**. This PyPI release PINS one engine tag — `PINNED_SERVICE_TAG` (`src/nexus/daemon/binary_install.py`, Step 3) plus the `REQUIRED_ENGINE_VERSION` floor (`src/nexus/engine_version.py`). Before cutting the PyPI release, verify the pinned engine is cloud-current — do NOT ship on a stale, un-cloud-validated engine.
+The Java **engine-service** is a SEPARATE release artifact from this PyPI release: its own `engine-service-vX.Y.Z` tag fires `engine-service-release.yml`, version is tag-stamped (no manifest bump), and it is **decoupled from the luxe6 / RDR-155-P4a develop release boundary**. This PyPI release pins ONE engine version, `REQUIRED_ENGINE_VERSION` (`src/nexus/engine_version.py`) — not two. `PINNED_SERVICE_TAG` (`src/nexus/daemon/binary_install.py`, the exact tag a fresh local `nx init --service` install downloads) is DERIVED from it, not an independently hand-typed literal — there is no floor/exact split to reason about, bumping the one constant moves both together, by construction.
 
-**This is a BLOCKING command, not a prose eyeball-check** (nexus-i5c2u — the prior prose-only version of this step was routinely skipped, letting the cloud engine sit at v0.1.17 for 9+ days across releases while the floor moved to v0.1.34):
+**This is a BLOCKING command, not a prose eyeball-check** (nexus-i5c2u — the prior prose-only version of this step was routinely skipped, letting the cloud engine sit at v0.1.17 for 9+ days across releases while the floor moved to v0.1.34; the pin then independently drifted the identical way in 2026-07-12, sitting at v0.1.36 two tags behind a verified, cloud-deployed fix — which is why the pin is no longer a second hand-typed constant at all):
 
 ```bash
 uv run python scripts/check_engine_release_floor.py
 ```
 
-If it exits non-zero, STOP — do not proceed with the PyPI release. Go cut + deploy + cloud-gate a fresh engine first via the `engine-release` skill (see **AGENTS.md § Engine-service release**), then re-run the script until it exits 0.
+If it exits non-zero, STOP — do not proceed with the PyPI release. Cut + deploy + cloud-gate a fresh engine first via the `engine-release` skill (see **AGENTS.md § Engine-service release**), bump `REQUIRED_ENGINE_VERSION` to that tag's version (this alone also moves `PINNED_SERVICE_TAG`), then re-run until it exits 0.
 
 Supplementary context (useful when deciding whether recent `service/` work is cloud-relevant, but the script above is the actual gate):
 
@@ -29,7 +29,7 @@ git log --oneline <last-engine-tag>..HEAD -- service/        # cloud-relevant dr
 ```
 
 1. Confirm the pinned engine tag is (a) cloud-DEPLOYED and (b) cloud-GATED (recall + hybrid parity, xr7.8.9-style) — read the authoritative bead + conexus bus, **not memory** (cross-repo gate state goes stale fast: 2026-06-26 a `luxe6` condition had been cleared a week earlier than memory implied).
-2. If `service/` has drifted with cloud-relevant changes (pooler/RLS, pgvector, catalog conformance, aspect queue, batch endpoints), cut a fresh engine FIRST — see **AGENTS.md § Engine-service release** — have conexus deploy + re-gate it (passive bus: surface an explicit "relay: deploy `engine-service-vX.Y.Z` + re-gate" to Hal), THEN bump `PINNED_SERVICE_TAG` here. The engine cut is NOT luxe6-gated, so refreshing it never blocks on the develop boundary.
+2. If `service/` has drifted with cloud-relevant changes (pooler/RLS, pgvector, catalog conformance, aspect queue, batch endpoints), cut a fresh engine FIRST — see **AGENTS.md § Engine-service release** — have conexus deploy + re-gate it (passive bus: surface an explicit "relay: deploy `engine-service-vX.Y.Z` + re-gate" to Hal), THEN bump `REQUIRED_ENGINE_VERSION` here (this alone also moves `PINNED_SERVICE_TAG` — nothing else to bump) and re-run `scripts/check_engine_release_floor.py` to confirm. The engine cut is NOT luxe6-gated, so refreshing it never blocks on the develop boundary.
 3. The engine cut itself: full `service/` suite green on the tagged commit (confirm the `service/` tree equals a green-`service-ci` commit — the Java CI is advisory and does not block auto-merge, so verify), then the **human** pushes `engine-service-vX.Y.Z`.
 
 This gate exists because the engine silently drifted 22 `service/` commits / 4 days behind the cloud (2026-06-26); the PyPI checklist had no step that would have caught it.

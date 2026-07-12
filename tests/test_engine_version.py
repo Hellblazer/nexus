@@ -16,13 +16,17 @@ from nexus.engine_version import REQUIRED_ENGINE_VERSION, parse_engine_version
 
 
 class TestRequiredEngineVersion:
-    def test_pinned_floor_is_0134(self) -> None:
+    def test_pinned_floor_is_0139(self) -> None:
         # (0,1,5)->(0,1,8) for nexus-x2g1z; ->(0,1,34) for 6.5.0: the client
         # hard-requires catalog-012 (graph-hop `where` — pre-012 engines
         # silently ignore the key, the H2 version-skew failure class) and
         # catalog-013-1b (pre-1b engines fail boot VALIDATE on tenants with
-        # legacy 64-char chash rows — the nexus-1wjmq incident).
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 34)
+        # legacy 64-char chash rows — the nexus-1wjmq incident). ->(0,1,39)
+        # for nexus-rn3wo.1: T1 scratch now defaults to the PG-backed service
+        # with no Chroma fallback, and every engine before v0.1.38 has a
+        # native-image reflection gap that 500s on every T1 get/search/list
+        # (nexus-opr9m).
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 39)
 
 
 class TestParseEngineVersion:
@@ -63,7 +67,7 @@ class TestFloorComparison:
         assert parse_engine_version("0.1.5") < REQUIRED_ENGINE_VERSION
 
     def test_at_floor_compares_equal(self) -> None:
-        assert parse_engine_version("0.1.34") == REQUIRED_ENGINE_VERSION
+        assert parse_engine_version("0.1.39") == REQUIRED_ENGINE_VERSION
 
     def test_above_floor_compares_greater(self) -> None:
         assert parse_engine_version("0.2.0") > REQUIRED_ENGINE_VERSION

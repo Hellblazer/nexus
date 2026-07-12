@@ -36,10 +36,17 @@ from __future__ import annotations
 #: catalog-012 (graph-hop `where` — pre-012 engines silently ignore the key,
 #: the H2 version-skew failure class) and catalog-013-1b (pre-1b engines fail
 #: boot VALIDATE on tenants with legacy 64-char chash rows — the nexus-1wjmq
-#: incident). Bump this ONE constant to raise the floor for every client path
-#: (native guided-upgrade handoff AND the managed-cloud probe) — there is no
-#: second knob to remember.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 34)
+#: incident). -> (0,1,39) for nexus-rn3wo.1 (2026-07-12): T1 scratch now
+#: defaults to the PG-backed service with no Chroma fallback, and every
+#: engine before v0.1.38 has a native-image reflection-registration gap that
+#: 500s on every T1 get/search/list (nexus-opr9m) — an engine below this no
+#: longer degrades, it silently breaks a hard default. Bump this ONE
+#: constant to raise the floor for every client path (native guided-upgrade
+#: handoff, the managed-cloud probe, AND — since 2026-07-12 —
+#: ``nexus.daemon.binary_install.PINNED_SERVICE_TAG``, the exact tag a fresh
+#: local install downloads, which is now DERIVED from this constant rather
+#: than independently hand-typed) — there is no second knob to remember.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 39)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:

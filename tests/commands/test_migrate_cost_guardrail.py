@@ -208,9 +208,9 @@ class TestRunMigrationEngineFloorGate:
                 ManagedServiceIncompatible(
                     "managed nexus service at https://api.conexus-nexus.com is "
                     "release_version '0.1.8', below the minimum this client "
-                    "supports (v0.1.34).",
+                    "supports (v0.1.39).",
                     deployed_version="0.1.8",
-                    required_version="0.1.34",
+                    required_version="0.1.39",
                 )
             ),
         )
@@ -220,7 +220,7 @@ class TestRunMigrationEngineFloorGate:
         assert ran == []
         message = str(exc_info.value)
         assert "0.1.8" in message
-        assert "0.1.34" in message
+        assert "0.1.39" in message
 
     def test_compatible_engine_still_reaches_billed_run(self, monkeypatch) -> None:
         mc, ran = self._wire_cloud(monkeypatch)
