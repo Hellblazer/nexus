@@ -124,11 +124,13 @@ class TestFootprintHasVoyage:
         assert footprint_has_voyage_collections(r) is True
 
     def test_voyage_named_unprobed_measured_dim_fails_closed(self) -> None:
-        # measured_dim is None when the collection was never probed (e.g. the
-        # classifier only probes name-unsupported data-bearing collections) or
-        # the probe could not resolve a dim. Un-confirmed means NOT provably
-        # bge, so cross_model_remappable is False and the gate stays FAIL
-        # CLOSED (fires) — real voyage data would otherwise block mid-run.
+        # measured_dim is None when the collection was never probed (nexus-x7t5y:
+        # the classifier probes name-unsupported collections, AND voyage-named
+        # collections that classify supported only because a local key is
+        # present — but a probe failure still degrades to unprobed) or the
+        # probe could not resolve a dim. Un-confirmed means NOT provably bge,
+        # so cross_model_remappable is False and the gate stays FAIL CLOSED
+        # (fires) — real voyage data would otherwise block mid-run.
         r = _report(
             _cls("knowledge__o__voyage-context-3__v1", "voyage-context-3", measured_dim=None)
         )
