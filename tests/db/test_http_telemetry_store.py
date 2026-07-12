@@ -433,9 +433,18 @@ class TestLogRelevance:
         assert rows[0]["collection"] == "knowledge__nexus"
 
     def test_log_sends_auth_headers(self, fake_server):
-        """Wrong token must raise HTTP 401."""
+        """Wrong token must raise, not silently succeed.
+
+        Post-mixin-adoption (nexus-f2qvx.1): both ``base_url`` and
+        ``_token`` are explicitly pinned here (a test double), so a 401
+        does NOT self-heal-and-retry to a bare ``httpx.HTTPStatusError``
+        — ``RefreshableHttpStoreMixin._invalidate_and_reresolve`` refuses
+        to re-resolve when both halves are pinned (nothing it could
+        change would fix a fully-pinned endpoint) and raises
+        ``RuntimeError`` instead. Either way, the call must not succeed.
+        """
         bad = HttpTelemetryStore(base_url=fake_server, _token="wrong-token")
-        with pytest.raises(Exception, match="401"):
+        with pytest.raises(RuntimeError, match="cannot self-heal"):
             bad.log_relevance("q", "c", "a")
         bad.close()
 

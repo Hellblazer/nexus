@@ -42,7 +42,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 from datetime import UTC, datetime
 from typing import Any
 
@@ -68,8 +67,15 @@ DEFAULT_TENANT: str = "default"
 # RDR-152 nexus-fjwxh: env-only resolution replaced by the centralized
 # resolver (env halves -> ServiceRegistry lease -> fail loud), so the
 # T2 service-mode default works wherever the supervisor is running.
-from nexus.db.service_endpoint import resolve_service_endpoint as _resolve_endpoint
+# nexus-f2qvx.1: construction, credential/endpoint refresh-on-401, and the
+# HTTP transport itself (_post/_get/_delete) are now inherited wholesale
+# from RefreshableHttpStoreMixin — HttpTaxonomyStore no longer bakes a
+# ``self._headers`` dict or a ``httpx.Client(base_url=..., headers=...)``
+# at construction time, which is what let a rotated bearer or a
+# supervisor-restart port change go silently stale for the life of the
+# instance. See ``nx memory get -p nexus -t design-bikit-refreshable-http-store-mixin.md``.
 from nexus.db.t2._raw_handle_guard import RawHandleGuardMixin
+from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 
 
 def _cosine_matrix(a: "np.ndarray", b: "np.ndarray") -> "np.ndarray":
@@ -91,18 +97,26 @@ def _cosine_matrix(a: "np.ndarray", b: "np.ndarray") -> "np.ndarray":
 # ── HttpTaxonomyStore ──────────────────────────────────────────────────────────
 
 
-class HttpTaxonomyStore(RawHandleGuardMixin):
+class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     """CatalogTaxonomy drop-in that delegates to the RDR-152 Java HTTP service.
 
-    Uses a keep-alive :class:`httpx.Client` connection pool.  Reads
-    ``NX_SERVICE_HOST``, ``NX_SERVICE_PORT``, and ``NX_SERVICE_TOKEN``
-    from the environment at construction time.
+    Uses a keep-alive :class:`httpx.Client` connection pool via
+    :class:`~nexus.db.t2._refreshable_client.RefreshableHttpStoreMixin`,
+    which resolves ``NX_SERVICE_HOST``, ``NX_SERVICE_PORT``, and
+    ``NX_SERVICE_TOKEN`` (or a managed ``service_url``/``service_token``)
+    fresh on construction AND self-heals (re-resolve + retry once) on a
+    401 or a connection-refused/reset — see the mixin's own docstring for
+    the full resolution order.
 
     Args:
         base_url: Optional override for the service base URL
-            (``http://<host>:<port>``).  When supplied, the host/port
-            env-vars are ignored; the token env-var is still required.
+            (``http://<host>:<port>``).  When supplied without ``_token``,
+            only the token half is re-resolved (host/port need not also be
+            independently resolvable).
         tenant:   Tenant to stamp on every request (default: ``DEFAULT_TENANT``).
+        centroid_store: Optional pre-constructed centroid port (test seam);
+            when omitted, lazily constructed from this store's own resolved
+            base_url/tenant/token (see :attr:`_centroid`).
     """
 
     def __init__(
@@ -113,35 +127,11 @@ class HttpTaxonomyStore(RawHandleGuardMixin):
         _token: str | None = None,
         centroid_store: Any | None = None,
     ) -> None:
-        if base_url is not None:
-            if _token is None:
-                _token = os.environ.get("NX_SERVICE_TOKEN", "")
-                if not _token:
-                    raise RuntimeError(
-                        "NX_SERVICE_TOKEN is required when NX_STORAGE_BACKEND_TAXONOMY=service."
-                    )
-            self._base_url = base_url.rstrip("/")
-        else:
-            self._base_url, token = _resolve_endpoint()
-            _token = token
-
-        self._tenant = tenant
-        self._token = _token
-        self._headers = {
-            "Authorization": f"Bearer {_token}",
-            "X-Nexus-Tenant": tenant,
-            "Content-Type": "application/json",
-        }
-        self._client = httpx.Client(
-            base_url=self._base_url,
-            headers=self._headers,
-            timeout=30.0,
-        )
+        super().__init__(base_url, tenant, _token=_token)
         # Centroid R/W routes through the pgvector centroid-port (nexus-t1hnc),
         # NOT chroma. Constructed lazily from the SAME resolved service config so
         # both stores share one base_url/token/tenant; injectable for tests.
         self._centroid_store = centroid_store
-        _log.debug("http_taxonomy_store.init", base_url=self._base_url, tenant=tenant)
 
     @property
     def _centroid(self) -> Any:
@@ -156,24 +146,26 @@ class HttpTaxonomyStore(RawHandleGuardMixin):
 
     def close(self) -> None:
         """Close the keep-alive connection pool (idempotent)."""
-        self._client.close()
+        super().close()
         if self._centroid_store is not None:
             self._centroid_store.close()
-        _log.debug("http_taxonomy_store.closed")
 
     # ── Internal helpers ───────────────────────────────────────────────────────
+    #
+    # These stay LOCAL overrides (not a straight inherit) because every method
+    # in this class calls self._post/self._get with a SHORT path suffix
+    # (e.g. "/topics/root") — the "/v1/taxonomy" prefix is store-specific
+    # routing, not part of the mixin's shared contract. Every actual HTTP
+    # round-trip still goes through the inherited, self-healing
+    # super()._post/_get (RefreshableHttpStoreMixin._send), never
+    # self._client directly.
 
     def _post(self, path: str, body: dict[str, Any]) -> Any:
-        resp = self._client.post(f"/v1/taxonomy{path}", content=json.dumps(body))
-        resp.raise_for_status()
-        return resp.json()
+        return super()._post(f"/v1/taxonomy{path}", body)
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
-        resp = self._client.get(f"/v1/taxonomy{path}", params={
-            k: str(v) for k, v in (params or {}).items() if v is not None
-        })
-        resp.raise_for_status()
-        return resp.json()
+        q = {k: str(v) for k, v in (params or {}).items() if v is not None}
+        return super()._get(f"/v1/taxonomy{path}", q)
 
     # ── Topics ─────────────────────────────────────────────────────────────────
 

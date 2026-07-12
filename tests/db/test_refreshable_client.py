@@ -70,6 +70,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
+import httpx
 import pytest
 
 # ── In-process fake service state (module-level, reset per test) ──────────────
@@ -304,6 +305,61 @@ class TestRefreshableClientSelfHeal:
         # Exactly one retry attempt (initial + one re-resolve-and-retry) —
         # not an unbounded retry loop.
         assert _REQUEST_COUNT["POST /v1/echo"] == 2
+
+    def test_persistent_connection_refused_retries_exactly_once_then_raises(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The connection-error sibling of
+        test_persistent_401_retries_exactly_once_then_raises (substantive-critic
+        Significant finding, nexus-f2qvx.1 review round 1): a genuinely,
+        permanently unreachable server -- not a port churn with a live
+        replacement, nothing listening at all -- must fail after exactly one
+        retry attempt, with the connection-class exception propagating to the
+        caller. Endpoint is env-resolved (NOT constructor-pinned), matching the
+        non-pinned re-resolution path this scenario actually exercises in
+        production (a supervisor-restart that never comes back up, e.g. a
+        crash-looping service).
+
+        A connection-refused attempt never reaches ANY server (the OS rejects
+        the SYN before any handler runs), so unlike the 401 case above,
+        _REQUEST_COUNT can't observe the failed attempts server-side. Instead
+        this instruments the store's own _request_once directly to prove
+        "exactly one initial attempt + one retry, not a loop" -- the same
+        non-vacuity bar the 401 test meets via server-side counting.
+
+        The store is constructed AFTER env is repointed at the dead port
+        (not before, then repointed) — the mixin caches self._base_url at
+        construction time, so a store built against the live fake_service
+        port and only repointed via env afterward would keep serving
+        successfully off its already-resolved, still-live cached base_url
+        and never touch the retry path at all.
+        """
+        # Start-then-stop yields a definitely-closed port without touching
+        # fake_service's own live server, whose teardown must not be
+        # double-stopped (see _stop_fake_server's docstring).
+        dead_server, dead_port = _start_fake_server()
+        _stop_fake_server(dead_server)
+        monkeypatch.setenv("NX_SERVICE_PORT", str(dead_port))
+
+        store = _make_echo_store()
+
+        call_count = 0
+        original_request_once = store._request_once
+
+        def _counting_request_once(*args: Any, **kwargs: Any) -> Any:
+            nonlocal call_count
+            call_count += 1
+            return original_request_once(*args, **kwargs)
+
+        store._request_once = _counting_request_once
+
+        with pytest.raises((httpx.ConnectError, ConnectionRefusedError)):
+            store.echo_get()
+
+        assert call_count == 2, (
+            "expected exactly one initial attempt + one retry against the "
+            "re-resolved (still-dead) endpoint, not a retry loop"
+        )
 
     def test_connection_refused_reresolves_baseurl_and_retries_once(
         self, fake_service, monkeypatch: pytest.MonkeyPatch

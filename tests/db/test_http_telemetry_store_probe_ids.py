@@ -32,12 +32,17 @@ TOKEN = "fake-telemetry-token-probe"
 
 
 def _store_with_transport(handler) -> HttpTelemetryStore:
+    """Build a store wired to a MockTransport.
+
+    Post-mixin-adoption (nexus-f2qvx.1), auth headers are built fresh per
+    request by ``RefreshableHttpStoreMixin._auth_headers()`` rather than
+    baked into the ``httpx.Client`` at construction time, and every request
+    URL is absolute (``self._base_url + path``) rather than relying on the
+    client's own ``base_url=``. So swapping in a test transport only needs
+    the transport itself — no ``headers=``/``base_url=`` to replicate.
+    """
     store = HttpTelemetryStore(base_url="http://svc", _token=TOKEN)
-    store._client = httpx.Client(
-        base_url="http://svc",
-        headers=store._headers,
-        transport=httpx.MockTransport(handler),
-    )
+    store._client = httpx.Client(transport=httpx.MockTransport(handler))
     return store
 
 
@@ -102,14 +107,27 @@ def test_probe_ids_pages_transparently_at_quota_cap():
 def test_probe_ids_fail_closed_propagates_transport_error():
     """FAIL-CLOSED (nexus-te885.6): a transport-level failure must raise, not
     silently degrade to an empty/partial result — the opposite polarity of
-    HttpVectorClient.existing_ids, which swallows to set()."""
+    HttpVectorClient.existing_ids, which swallows to set().
+
+    Post-mixin-adoption (nexus-f2qvx.1): ``httpx.ConnectError`` is one of
+    the mixin's retryable-error signatures, so ``_send`` attempts a self-
+    heal re-resolve before re-raising. ``_store_with_transport`` pins both
+    ``base_url`` and ``_token`` explicitly (a test double), and
+    ``RefreshableHttpStoreMixin._invalidate_and_reresolve`` refuses to
+    re-resolve when both halves are pinned — it raises ``RuntimeError``
+    instead of retrying, rather than propagating the original
+    ``ConnectError`` verbatim. Either way this is still fail-closed (an
+    exception, never a silent empty/partial result), so assert broadly
+    rather than pinning the exact exception type to this pinned-endpoint
+    self-heal-refusal detail.
+    """
 
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("connection refused", request=request)
 
     store = _store_with_transport(handler)
 
-    with pytest.raises(httpx.ConnectError):
+    with pytest.raises(Exception):
         store.probe_ids("relevance_log", [["q", "c", "a", "s", "2026-01-01T00:00:00Z"]])
 
 

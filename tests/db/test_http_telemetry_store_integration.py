@@ -390,7 +390,10 @@ class TestTimestampPreservationPerTable:
     def test_tier_writes_timestamp_verbatim_and_idempotent(self, tel_store):
         import httpx
         base_url = tel_store._base_url
-        headers  = dict(tel_store._headers)
+        # Post-mixin-adoption (nexus-f2qvx.1): headers are built fresh per
+        # request via RefreshableHttpStoreMixin._auth_headers(), not baked
+        # into a ``self._headers`` dict at construction time.
+        headers  = tel_store._auth_headers()
 
         kwargs = dict(
             session_id="tw-fid-sess",
@@ -551,17 +554,14 @@ class TestFrecencyGreatestLeast:
         )
         import httpx
         # Read back via /v1/telemetry/frecency/get
-        from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
         base_url = tel_store._base_url
-        token = tel_store._headers["Authorization"].removeprefix("Bearer ")
-        tenant = tel_store._tenant
+        # Post-mixin-adoption (nexus-f2qvx.1): headers are built fresh per
+        # request via RefreshableHttpStoreMixin._auth_headers(), not baked
+        # into a ``self._headers`` dict at construction time.
         resp = httpx.get(
             f"{base_url}/v1/telemetry/frecency/get",
             params={"chunk_id": "chunk-greatest-int"},
-            headers={
-                "Authorization": f"Bearer {token}",
-                "X-Nexus-Tenant": tenant,
-            },
+            headers=tel_store._auth_headers(),
         )
         assert resp.status_code == 200
         row = resp.json()
@@ -576,12 +576,10 @@ class TestFrecencyGreatestLeast:
         """LEAST: re-import with newer embedded_at must NOT replace the older one."""
         import httpx
         base_url = tel_store._base_url
-        token = tel_store._headers["Authorization"].removeprefix("Bearer ")
-        tenant = tel_store._tenant
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "X-Nexus-Tenant": tenant,
-        }
+        # Post-mixin-adoption (nexus-f2qvx.1): headers are built fresh per
+        # request via RefreshableHttpStoreMixin._auth_headers(), not baked
+        # into a ``self._headers`` dict at construction time.
+        headers = tel_store._auth_headers()
 
         # Seed with 2024-01-01
         tel_store.import_frecency_row(

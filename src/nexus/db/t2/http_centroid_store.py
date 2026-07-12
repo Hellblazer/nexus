@@ -30,27 +30,38 @@ ERROR-TRANSLATION CONTRACT (Phase-1 gate O2):
 
 from __future__ import annotations
 
-import json
-import os
 from typing import Any
 
 import httpx
 import structlog
 
-from nexus.db.service_endpoint import resolve_service_endpoint as _resolve_endpoint
+from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 from nexus.db.t2.catalog_taxonomy import AssignResult
 from nexus.db.t2.http_taxonomy_store import DEFAULT_TENANT
 
 _log = structlog.get_logger(__name__)
 
+#: Matches RefreshableHttpStoreMixin's own default (kept local so the
+#: ``_transport`` test-seam rebuild below does not import a private
+#: constant across modules).
+_DEFAULT_TIMEOUT_S = 30.0
 
-class HttpCentroidStore:
+
+class HttpCentroidStore(RefreshableHttpStoreMixin):
     """Service-backed centroid port mirroring the chroma centroid contract.
 
+    Uses a keep-alive :class:`httpx.Client` connection pool via
+    :class:`~nexus.db.t2._refreshable_client.RefreshableHttpStoreMixin`,
+    which resolves ``NX_SERVICE_HOST``, ``NX_SERVICE_PORT``, and
+    ``NX_SERVICE_TOKEN`` (or a managed ``service_url``/``service_token``)
+    fresh on construction AND self-heals (re-resolve + retry once) on a
+    401 or a connection-refused/reset — see the mixin's own docstring for
+    the full resolution order.
+
     Args:
-        base_url: Optional ``http://<host>:<port>`` override. When supplied the
-            host/port env-vars are ignored; the token env-var is still required
-            unless ``_token`` is passed.
+        base_url: Optional ``http://<host>:<port>`` override. When supplied
+            without ``_token``, only the token half is re-resolved
+            (host/port need not also be independently resolvable).
         tenant:   Tenant stamped on every request (default: ``DEFAULT_TENANT``).
         _token:   Optional bearer token (test seam / explicit override).
         _transport: Optional ``httpx`` transport (test seam for ``MockTransport``).
@@ -64,51 +75,29 @@ class HttpCentroidStore:
         _token: str | None = None,
         _transport: httpx.BaseTransport | None = None,
     ) -> None:
-        if base_url is not None:
-            if _token is None:
-                _token = os.environ.get("NX_SERVICE_TOKEN", "")
-                if not _token:
-                    raise RuntimeError(
-                        "NX_SERVICE_TOKEN is required when the taxonomy centroid store "
-                        "runs against the service backend."
-                    )
-            self._base_url = base_url.rstrip("/")
-        else:
-            self._base_url, token = _resolve_endpoint()
-            _token = token
-
-        self._tenant = tenant
-        self._headers = {
-            "Authorization": f"Bearer {_token}",
-            "X-Nexus-Tenant": tenant,
-            "Content-Type": "application/json",
-        }
-        self._client = httpx.Client(
-            base_url=self._base_url,
-            headers=self._headers,
-            timeout=30.0,
-            transport=_transport,
-        )
-        _log.debug("http_centroid_store.init", base_url=self._base_url, tenant=tenant)
-
-    def close(self) -> None:
-        """Close the keep-alive connection pool (idempotent)."""
-        self._client.close()
+        super().__init__(base_url, tenant, _token=_token)
+        if _transport is not None:
+            # Test seam (MockTransport): the mixin's __init__ already built
+            # a plain (transport-less) httpx.Client; swap it for one wired
+            # to the fake transport, keeping the same timeout.
+            self._client.close()
+            self._client = httpx.Client(timeout=_DEFAULT_TIMEOUT_S, transport=_transport)
 
     # ── Internal helpers ────────────────────────────────────────────────────────
+    #
+    # LOCAL overrides (not a straight inherit): every method in this class
+    # calls self._post/self._get with a SHORT path suffix (e.g. "/upsert") —
+    # the "/v1/taxonomy/centroids" prefix is store-specific routing, not
+    # part of the mixin's shared contract. Every actual HTTP round-trip
+    # still goes through the inherited, self-healing super()._post/_get
+    # (RefreshableHttpStoreMixin._send), never self._client directly.
 
     def _post(self, path: str, body: dict[str, Any]) -> Any:
-        resp = self._client.post(f"/v1/taxonomy/centroids{path}", content=json.dumps(body))
-        resp.raise_for_status()
-        return resp.json()
+        return super()._post(f"/v1/taxonomy/centroids{path}", body)
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
-        resp = self._client.get(
-            f"/v1/taxonomy/centroids{path}",
-            params={k: str(v) for k, v in (params or {}).items() if v is not None},
-        )
-        resp.raise_for_status()
-        return resp.json()
+        q = {k: str(v) for k, v in (params or {}).items() if v is not None}
+        return super()._get(f"/v1/taxonomy/centroids{path}", q)
 
     # ── Writes ────────────────────────────────────────────────────────────────────
 

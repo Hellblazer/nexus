@@ -39,10 +39,8 @@ Route mapping (matches TelemetryHandler Java):
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
-import httpx
 import structlog
 
 from nexus.db.limits import QUOTAS
@@ -56,60 +54,37 @@ DEFAULT_TENANT: str = "default"
 # RDR-152 nexus-fjwxh: env-only resolution replaced by the centralized
 # resolver (env halves -> ServiceRegistry lease -> fail loud), so the
 # T2 service-mode default works wherever the supervisor is running.
-from nexus.db.service_endpoint import resolve_service_endpoint as _resolve_endpoint
+# nexus-f2qvx.1: construction, credential/endpoint refresh-on-401, and the
+# HTTP transport itself (_post/_get/_delete) are now inherited wholesale
+# from RefreshableHttpStoreMixin — HttpTelemetryStore no longer bakes a
+# ``self._headers`` dict or a ``httpx.Client(base_url=..., headers=...)``
+# at construction time, which is what let a rotated bearer or a
+# supervisor-restart port change go silently stale for the life of the
+# instance. See ``nx memory get -p nexus -t design-bikit-refreshable-http-store-mixin.md``.
 from nexus.db.t2._raw_handle_guard import RawHandleGuardMixin
+from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 
 
-class HttpTelemetryStore(RawHandleGuardMixin):
+class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     """Telemetry drop-in that delegates to the RDR-152 Java HTTP service.
 
-    Uses a keep-alive :class:`httpx.Client` connection pool. Reads
-    ``NX_SERVICE_HOST``, ``NX_SERVICE_PORT``, and ``NX_SERVICE_TOKEN``
-    from the environment at construction time.
+    Uses a keep-alive :class:`httpx.Client` connection pool via
+    :class:`~nexus.db.t2._refreshable_client.RefreshableHttpStoreMixin`,
+    which resolves ``NX_SERVICE_HOST``, ``NX_SERVICE_PORT``, and
+    ``NX_SERVICE_TOKEN`` (or a managed ``service_url``/``service_token``)
+    fresh on construction AND self-heals (re-resolve + retry once) on a
+    401 or a connection-refused/reset — see the mixin's own docstring for
+    the full resolution order. ``__init__`` is inherited unchanged (this
+    class's constructor signature matches the mixin's pinned contract
+    exactly, so no override is needed).
 
     Args:
         base_url: Optional override for the service base URL
-            (``http://<host>:<port>``). When supplied, ``host``/``port``
-            env-vars are ignored; the token env-var is still required.
+            (``http://<host>:<port>``). When supplied without ``_token``,
+            only the token half is re-resolved (host/port need not also be
+            independently resolvable).
         tenant:   Tenant to stamp on every request (default: ``DEFAULT_TENANT``).
     """
-
-    def __init__(
-        self,
-        base_url: str | None = None,
-        tenant: str = DEFAULT_TENANT,
-        *,
-        _token: str | None = None,
-    ) -> None:
-        if base_url is not None:
-            if _token is None:
-                _token = os.environ.get("NX_SERVICE_TOKEN", "")
-                if not _token:
-                    raise RuntimeError(
-                        "NX_SERVICE_TOKEN is required when NX_STORAGE_BACKEND_TELEMETRY=service."
-                    )
-            self._base_url = base_url.rstrip("/")
-        else:
-            self._base_url, token = _resolve_endpoint()
-            _token = token
-
-        self._tenant = tenant
-        self._headers = {
-            "Authorization": f"Bearer {_token}",
-            "X-Nexus-Tenant": tenant,
-            "Content-Type": "application/json",
-        }
-        self._client = httpx.Client(
-            base_url=self._base_url,
-            headers=self._headers,
-            timeout=30.0,
-        )
-        _log.debug("http_telemetry_store.init", base_url=self._base_url, tenant=tenant)
-
-    def close(self) -> None:
-        """Close the keep-alive connection pool (idempotent)."""
-        self._client.close()
-        _log.debug("http_telemetry_store.closed")
 
     # ── relevance_log ─────────────────────────────────────────────────────────
 
@@ -254,9 +229,7 @@ class HttpTelemetryStore(RawHandleGuardMixin):
             params["action"] = action
         if session_id:
             params["session_id"] = session_id
-        resp = self._client.get("/v1/telemetry/relevance/query", params=params)
-        self._raise_for_status(resp, "get_relevance_log")
-        data = resp.json()
+        data = self._get("/v1/telemetry/relevance/query", params=params)
         return data if isinstance(data, list) else []
 
     def expire_relevance_log(self, days: int = 90) -> int:
@@ -294,12 +267,10 @@ class HttpTelemetryStore(RawHandleGuardMixin):
 
         Calls ``GET /v1/telemetry/search/stats``.
         """
-        resp = self._client.get(
+        return self._get(
             "/v1/telemetry/search/stats",
             params={"collection": collection, "days": days},
         )
-        self._raise_for_status(resp, "query_collection_stats")
-        return resp.json()
 
     def trim_search_telemetry(self, days: int = 30) -> int:
         """Delete ``search_telemetry`` rows older than *days* days.
@@ -581,25 +552,3 @@ class HttpTelemetryStore(RawHandleGuardMixin):
             resp = self._post("/v1/telemetry/ids/probe", {"table": table, "keys": batch})
             present.extend(resp.get("present") or [])
         return present
-
-    # ── Internal helpers ──────────────────────────────────────────────────────
-
-    def _post(self, path: str, payload: dict[str, Any]) -> Any:
-        """POST JSON payload, raise on error, return parsed JSON."""
-        resp = self._client.post(path, json=payload)
-        self._raise_for_status(resp, path)
-        return resp.json()
-
-    def _raise_for_status(self, resp: httpx.Response, op: str) -> None:
-        """Raise a descriptive exception on non-2xx responses."""
-        if resp.is_success:
-            return
-        try:
-            detail = resp.json().get("error", resp.text)
-        except Exception:  # noqa: BLE001 — best-effort detail extraction; falls back to raw response text on any parse failure
-            detail = resp.text
-        raise httpx.HTTPStatusError(
-            f"HttpTelemetryStore.{op} failed: HTTP {resp.status_code}: {detail}",
-            request=resp.request,
-            response=resp,
-        )
