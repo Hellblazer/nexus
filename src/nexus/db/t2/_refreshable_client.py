@@ -57,11 +57,12 @@ _log = structlog.get_logger(__name__)
 #: Default tenant matching TenantConstants.DEFAULT_TENANT in the Java service.
 DEFAULT_TENANT: str = "default"
 
-#: Shared client timeout — matches the ~9 in-scope stores' hardcoded 30.0s
-#: (only ``http_aspect_queue`` exposes a public ``timeout`` kwarg today; that
-#: is NOT part of this mixin's pinned constructor contract, per the locked
-#: plan — a subclass may still override ``self._client`` after ``super().__init__``
-#: if it needs a different timeout).
+#: Shared client timeout — matches the ~9 in-scope stores' hardcoded 30.0s.
+#: ``http_aspect_queue`` is the one in-scope store with a public ``timeout``
+#: kwarg on its own constructor (nexus-f2qvx.2): its ``__init__`` accepts
+#: ``timeout`` and threads it through to ``super().__init__(..., timeout=timeout)``
+#: below, so this default only applies when a caller (or subclass) does not
+#: pass an explicit value.
 _DEFAULT_TIMEOUT_S = 30.0
 
 
@@ -198,6 +199,7 @@ class RefreshableHttpStoreMixin:
         tenant: str = DEFAULT_TENANT,
         *,
         _token: str | None = None,
+        timeout: float = _DEFAULT_TIMEOUT_S,
     ) -> None:
         # Track which halves were EXPLICITLY pinned by the caller (e.g. a
         # test constructing this store against a fake server) BEFORE the
@@ -249,7 +251,14 @@ class RefreshableHttpStoreMixin:
         # rebuild) — only the string field changes, and httpx's connection
         # pool keys per-host internally so a genuine host change simply
         # opens a new pool entry on the next request.
-        self._client = httpx.Client(timeout=_DEFAULT_TIMEOUT_S)
+        #
+        # timeout defaults to _DEFAULT_TIMEOUT_S (nexus-f2qvx.2 additive
+        # change) — every pre-existing caller that does not pass timeout
+        # explicitly gets the exact same 30.0s behavior as before this
+        # kwarg existed. Only http_aspect_queue passes a non-default value
+        # today (its own constructor's public timeout kwarg, threaded
+        # through via super().__init__(..., timeout=timeout)).
+        self._client = httpx.Client(timeout=timeout)
 
     def close(self) -> None:
         """Close the keep-alive connection pool (idempotent)."""

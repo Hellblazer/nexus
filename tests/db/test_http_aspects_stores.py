@@ -82,11 +82,12 @@ class TestHttpDocumentAspectsStore:
     def _store(self, handlers: dict) -> HttpDocumentAspectsStore:
         transport = _make_transport(handlers)
         store = HttpDocumentAspectsStore(base_url="http://test", _token="tok")
-        store._client = httpx.Client(
-            base_url="http://test",
-            headers=store._headers,
-            transport=transport,
-        )
+        # Post-mixin-adoption (nexus-f2qvx.2): RefreshableHttpStoreMixin builds
+        # each request's absolute URL from self._base_url + path and passes
+        # auth headers fresh per-request (see _request_once) — the test double
+        # only needs a transport, not a pinned base_url/headers pair on the
+        # httpx.Client itself (there is no self._headers attribute anymore).
+        store._client = httpx.Client(transport=transport)
         return store
 
     def test_upsert_written(self):
@@ -251,11 +252,9 @@ class TestHttpDocumentHighlightsStore:
     def _store(self, handlers: dict) -> HttpDocumentHighlightsStore:
         transport = _make_transport(handlers)
         store = HttpDocumentHighlightsStore(base_url="http://test", _token="tok")
-        store._client = httpx.Client(
-            base_url="http://test",
-            headers=store._headers,
-            transport=transport,
-        )
+        # Post-mixin-adoption (nexus-f2qvx.2): see the matching comment in
+        # TestHttpDocumentAspectsStore._store above — no self._headers anymore.
+        store._client = httpx.Client(transport=transport)
         return store
 
     def _record(self, **kwargs) -> HighlightRecord:
@@ -354,11 +353,9 @@ class TestHttpAspectQueue:
     def _queue(self, handlers: dict) -> HttpAspectQueue:
         transport = _make_transport(handlers)
         store = HttpAspectQueue(base_url="http://test", _token="tok")
-        store._client = httpx.Client(
-            base_url="http://test",
-            headers=store._headers,
-            transport=transport,
-        )
+        # Post-mixin-adoption (nexus-f2qvx.2): see the matching comment in
+        # TestHttpDocumentAspectsStore._store above — no self._headers anymore.
+        store._client = httpx.Client(transport=transport)
         return store
 
     def test_enqueue_calls_endpoint(self):
@@ -466,10 +463,7 @@ class TestHttpAspectQueue:
             return httpx.Response(200, json={"ok": True})
 
         store = HttpAspectQueue(base_url="http://test", _token="tok")
-        store._client = httpx.Client(
-            base_url="http://test", headers=store._headers,
-            transport=httpx.MockTransport(handle_request),
-        )
+        store._client = httpx.Client(transport=httpx.MockTransport(handle_request))
         store.mark_retry("c", "doc.pdf", interval_seconds=120)
         assert captured["body"]["interval_seconds"] == 120
         assert captured["body"]["collection"] == "c"
@@ -522,10 +516,7 @@ class TestHttpAspectQueue:
             return httpx.Response(200, json=[])
 
         store = HttpAspectQueue(base_url="http://test", _token="tok")
-        store._client = httpx.Client(
-            base_url="http://test", headers=store._headers,
-            transport=httpx.MockTransport(handle_request),
-        )
+        store._client = httpx.Client(transport=httpx.MockTransport(handle_request))
         store.list_failed(collection="knowledge__x")
         assert captured["params"].get("collection") == "knowledge__x"
 
