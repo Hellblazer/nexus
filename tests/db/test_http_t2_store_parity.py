@@ -20,9 +20,14 @@ SQLite store class; it survives P4. A separate, P4-deletable faithfulness guard
 (``test_contract_matches_live_sqlite_oracle``) cross-checks the frozen snapshot
 against the live SQLite classes for as long as they exist.
 
-This is a static signature guard (cheap, no service needed). Return-SHAPE
-parity (dict keys) is exercised behaviourally by the ``-m integration``
-suites in ``tests/db/test_http_*_integration.py`` against the real service.
+This is a static signature guard (cheap, no service needed): method names and
+shared-prefix parameter names, not return-VALUE shape. Return-SHAPE parity
+(dict keys) is NOT currently exercised anywhere -- the ``-m integration``
+suites in ``tests/db/test_http_*_integration.py`` call the real service but
+do not assert on result dict key-sets. A caller that assumes a key present in
+one backend's row shape survives a backend swap (e.g. nexus-c4143-adjacent:
+``search_cmd``'s 2026-07-11 ``r['distance']`` KeyError, ``T1Database.search``
+vs ``HttpScratchStore.search``) is undefended by this file. See nexus-w2q0s.
 """
 from __future__ import annotations
 

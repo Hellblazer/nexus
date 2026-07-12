@@ -74,6 +74,23 @@ def test_scratch_search_no_results(runner: CliRunner, fake_home: Path) -> None:
     assert "No results." in result.output
 
 
+def test_scratch_search_service_backend_result_has_no_distance_key(
+    runner: CliRunner, fake_home: Path
+) -> None:
+    """SERVICE-backend search results carry no 'distance' key (FTS, not cosine
+    similarity — HttpScratchStore/ScratchRepository never populate one). The
+    CLI must not KeyError formatting a result shaped this way."""
+    fake_store = MagicMock()
+    fake_store.search.return_value = [
+        {"id": "abc12345-full-uuid", "tags": "t1-bench", "content": "matched FTS row"},
+    ]
+    with patch("nexus.commands.scratch._t1", return_value=fake_store):
+        result = runner.invoke(main, ["scratch", "search", "matched"])
+
+    assert result.exit_code == 0, result.output
+    assert "matched FTS row" in result.output
+
+
 # ── flag nonexistent ──────────────────────────────────────────────────────────
 
 def test_scratch_flag_nonexistent_raises(runner: CliRunner, fake_home: Path) -> None:

@@ -155,13 +155,21 @@ def get_cmd(entry_id: str) -> None:
 @click.option("--n", default=10, show_default=True, help="Max results")
 @_clean_service_errors
 def search_cmd(query: str, n: int) -> None:
-    """Semantic search over T1 scratch entries."""
+    """Search T1 scratch entries.
+
+    Semantic (cosine distance) on the ChromaDB-backed path; full-text
+    (Postgres tsvector, ranked server-side by ts_rank) on the service-backed
+    path — the service does not expose that rank score to clients, so no
+    score is shown for service-backed results. See ``HttpScratchStore.search``.
+    """
     results = _t1().search(query, n_results=n)
     if not results:
         click.echo("No results.")
         return
     for r in results:
-        click.echo(f"[{r['id'][:8]}] {r['tags'] or '-'}  dist={r['distance']:.4f}")
+        distance = r.get("distance")
+        score = f"  dist={distance:.4f}" if distance is not None else ""
+        click.echo(f"[{r['id'][:8]}] {r['tags'] or '-'}{score}")
         preview = r["content"][:200].replace("\n", " ")
         click.echo(f"  {preview}")
 
