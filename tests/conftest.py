@@ -776,6 +776,15 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # test_driver.py collision exclusions above).
     "tests/migration/test_collision_audit.py::test_false_clean_regression_merge_only_visible_in_no_key_world",
     "tests/test_migration_audit_cmd.py::test_json_output_is_machine_readable",
+    #
+    # nexus-te885.8.1 (pg-source reconcile leg for verify-fill): builds a
+    # mocked /v1/vectors/collections response using conformant collection-
+    # NAME strings (code__nexus-1-1__voyage-code-3__v1,
+    # knowledge__nexus-1-1__voyage-context-3__v1) purely as PgReadClient
+    # list_collections() parsing test data. No embedder runs and no
+    # mode-dependent path executes ("string-literal-as-name" class, same
+    # rationale as the test_driver.py collision exclusions above).
+    "tests/migration/test_pg_read.py::TestListCollections::test_returns_name_objects",
 })
 
 
