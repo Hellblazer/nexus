@@ -190,6 +190,26 @@ jobs:
         # Do NOT `clean`: it would wipe the downloaded target/generated-sources/jooq.
         run: ./mvnw -q -Pnative -Pprebuilt-jooq -DskipTests package
 
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+        if: matrix.target.smoke
+        # nexus-97oz3: native-smoke.sh's T1 section shells `uv run python` to
+        # exercise the REAL nexus.db.t1.get_t1_database() client against the
+        # native binary this job just built -- routing-correctness (Python)
+        # and backend-correctness (the compiled artifact) proven TOGETHER,
+        # closing the seam that let nexus-opr9m (a native-image-only
+        # reflection bug) ship silently through this exact gate. Without
+        # this step `uv` is absent and that section WARN+skips, silently
+        # reverting to curl-only coverage. Gated on matrix.target.smoke
+        # (mac-arm64 never runs the smoke step at all) so the non-smoking
+        # leg doesn't pay for a toolchain it never uses.
+        with:
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Install nexus (for native-smoke.sh's real-client T1 check)
+        if: matrix.target.smoke
+        run: uv sync
+
       - name: Native smoke test (boot against throwaway pgvector)
         if: matrix.target.smoke
         working-directory: service

@@ -97,6 +97,83 @@ else
   assert "t1/list (separate schema)"         200 "${T1[@]}" "${J[@]}" -X POST -d '{"session_id":"native-smoke-t1"}' "$U/v1/t1/list"
 fi
 
+# ── T1 via the REAL Python client (nexus-97oz3) ──────────────────────────────
+# Everything above proves the native binary's /v1/t1/* endpoints work when
+# driven by raw curl. It does NOT prove nexus.db.t1.get_t1_database()'s
+# three-tier session-routing, HttpTokenStore.start_session() minting, or
+# HttpScratchStore's request/response handling actually work against this
+# SAME compiled artifact — nexus-opr9m (the reflection bug this file's T1
+# section above was written to catch) came back clean on the JVM AND would
+# have come back clean here too if this section had bypassed the real client
+# code the way the curl section above does. Routing-correctness (tested
+# elsewhere, against a JVM backend) and backend-correctness (tested above,
+# via curl) have never been proven TOGETHER against the actual production
+# artifact reached through the actual production client code. This closes
+# that seam FOR T1 SPECIFICALLY: mint + put + get + search + list through
+# the real Python nexus.db.t1.get_t1_database() factory (the identical code
+# path a live bare-CLI `nx scratch` invocation takes) against the native
+# binary this script just booted.
+#
+# NOT YET CLOSED for the other jOOQ-backed endpoint families this script
+# already curls above (memory/plans/taxonomy/chash) — each has its own real
+# Python HTTP client (src/nexus/db/t2/http_memory_store.py and siblings)
+# that is equally untested against the compiled artifact. Same gap, same
+# fix shape, different bead (not filed as of this writing — check for one
+# before assuming this comment is stale).
+#
+# ALSO requires `uv` on PATH with the nexus package importable (`uv sync`
+# from the repo root) to actually run — see the CI workflow step this
+# depends on (engine-service-release.yml, gated on matrix.target.smoke).
+# WARN+skip loudly if unavailable rather than silently pass — a run without
+# this dependency present does NOT cover routing+backend together, only
+# backend-via-curl above, regardless of how green the rest of the output is.
+# NOTE (unlike the bge-embed section below, whose model IS provisioned in CI
+# via .github/actions/prime-bge-onnx and only rarely skips): until
+# nexus-l8ybx's companion CI workflow change lands, this WARN is the
+# deterministic 100%-of-runs outcome in CI, not a rare fallback — do not
+# read a green run as proof this section executed.
+echo "T1 via the real Python client (routing + backend together):"
+REPO_ROOT="$(cd .. && pwd)"
+# `timeout` is GNU coreutils -- present on every CI runner (Linux) but not
+# guaranteed on a vanilla local macOS dev machine (only via `brew install
+# coreutils`, and even then often as `gtimeout`). Degrade gracefully rather
+# than break local runs that lack it.
+TIMEOUT_CMD=""
+command -v timeout >/dev/null 2>&1 && TIMEOUT_CMD="timeout 60"
+if command -v uv >/dev/null 2>&1 && [ -f "$REPO_ROOT/pyproject.toml" ]; then
+  T1_PY_TMPDIR=$(mktemp -d)
+  PY_OUT=$(cd "$REPO_ROOT" && NEXUS_CONFIG_DIR="$T1_PY_TMPDIR" \
+    NX_SERVICE_HOST=127.0.0.1 NX_SERVICE_PORT="$SVCPORT" NX_SERVICE_TOKEN=smoketoken \
+    NX_STORAGE_BACKEND=service \
+    $TIMEOUT_CMD uv run python -c '
+from nexus.db.t1 import get_t1_database
+
+t1 = get_t1_database()
+doc_id = t1.put("t1 native smoke via real python client", tags="native-smoke-py")
+assert doc_id, "put returned no id"
+
+got = t1.get(doc_id)
+assert got is not None, "get returned None for a just-put id"
+assert got["content"] == "t1 native smoke via real python client", got
+
+results = t1.search("native smoke via real python", n_results=5)
+assert any(r["id"] == doc_id for r in results), f"search did not find {doc_id}: {results}"
+
+entries = t1.list_entries()
+assert any(e["id"] == doc_id for e in entries), f"list_entries did not find {doc_id}: {entries}"
+
+print("OK")
+' 2>&1)
+  rm -rf "$T1_PY_TMPDIR"
+  if echo "$PY_OUT" | grep -q "^OK$"; then
+    echo "  ok   t1 real-client put/get/search/list (routing + backend together)"
+  else
+    echo "  FAIL t1 real-client check:"; echo "$PY_OUT" | sed 's/^/    /'; fail=1
+  fi
+else
+  echo "  WARN skipping (uv or pyproject.toml not found at $REPO_ROOT) -- this run does NOT cover routing+backend together, only backend-via-curl above"
+fi
+
 # ── Local bge-768 EMBED (nexus-pqatt) ────────────────────────────────────────
 # The embed path drives the DJL HuggingFace tokenizers JNI (libtokenizers.so) and
 # the onnxruntime session run — both of which need jniAccessible registrations the
