@@ -2,17 +2,39 @@
 title: "Claude-Assisted Upgrade and Remediation: Opt-In, Consent-Gated Enlistment of the User's Own Agent Across CLI and Claude Desktop, with a Read-Only Diagnostic Trust Boundary"
 id: RDR-182
 type: Architecture
-status: accepted
+status: closed
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-07-10
 accepted_date: 2026-07-10
+closed_date: 2026-07-13
 related_issues: [nexus-ykzbj, nexus-c4143, nexus-pnwu0, nexus-sot7v]
 related: [RDR-126, RDR-159, RDR-162, RDR-166, RDR-174, RDR-178]
 ---
 
 # RDR-182: Claude-Assisted Upgrade and Remediation
+
+> **CLOSED 2026-07-13.** Implemented across P0-P5 (epic nexus-ykzbj, all 20
+> sub-beads closed). Shipped: the opt-in gate (default-off, global-config-only
+> — A4), the consent audit (grant/revoke, T2), the shared playbook emitter,
+> the pre-emission read-only SQL lint (fail-closed), the `nexus_diag`
+> SELECT-only+BYPASSRLS diagnostic role + single connection choke point, the
+> MCP `forensics`/`remediate` tools, the `nx forensics`/`nx remediate` CLI, and
+> both MVV proofs. Each phase passed a stacked review; the final holistic pass
+> (review-final + critic-final APPROVE, test-validator validated) verified all
+> five Gaps delivered and the taxonomy amendments (A5 + the H1 release gate)
+> consistent across code, docs, and tests. Full suite green (13056).
+>
+> **Open residuals (tracked, prioritized):** nexus-ng2sy (P0 — service-mode
+> record_consent parity; remediate is local-mode-only until it lands),
+> nexus-vounk (P1 — the health.py chash probe still counts 0 under FORCE RLS;
+> rewire onto the new nexus_diag path), nexus-s4a98 (P1 — the enable command
+> the refusals name crashes on a pre-existing flat scalar), nexus-9bufb (P2 —
+> structural content-scoping views for nexus_diag), nexus-wnp3c (P2 — topics
+> for the 3 remaining incident classes; Gap 1 is populated for chash-poison
+> only). Gate shape + carried-forward limitations: T2
+> `nexus/rdr182-a4-spike-gate-shape.md`.
 
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.
