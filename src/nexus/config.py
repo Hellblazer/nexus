@@ -712,6 +712,12 @@ _DEFAULTS: dict[str, Any] = {
     #   nx config set claude_assisted_remediation.enabled true
     # NOTE: that write path stores the STRING "true"; consumers must parse
     # strictly (see nexus.mcp.core._remediation_opt_in), never truthiness.
+    # CONSENT-PROVENANCE EXCEPTION (critic-p3 Critical, 2026-07-12): unlike
+    # every other flag, the gate does NOT honor this key from the merged
+    # load_config() view — a repo-local .nexus.yml (which arrives via git
+    # pull) is not a human consent gesture. _remediation_opt_in reads the
+    # GLOBAL config.yml only; this default exists for documentation and
+    # `nx config list` visibility.
     "claude_assisted_remediation": {
         "enabled": False,
     },

@@ -127,6 +127,37 @@ class Playbook:
             f"Recovery: {self.runbook_url} §{self.runbook_section}."
         )
 
+    def describe(self) -> str:
+        """The PRE-CONSENT rendering (RDR-182 remediate layer 2): states what
+        consent would authorize — context, hard do-NOTs, deliverable, escape,
+        runbook pointer — without rendering the ordered recovery steps (the
+        TOOL's guided, store-state-aware playbook releases only on the
+        consented ``confirm=true`` call, audit-recorded).
+
+        Threat-model honesty (review-p3 H1): this withholds the tool's OWN
+        rendering, not the knowledge — the runbook URL included here is
+        public documentation (Gap 2) containing equivalent recovery steps.
+        The consent layer makes the safe guided path the audited path; it is
+        not an information-access control.
+        """
+        constraint_lines = "\n".join(f"- {c}" for c in self.constraints)
+        return (
+            f"[{self.topic}] {self.context}\n\n"
+            f"Store state: {self.store_detail}\n\n"
+            f"This is the DESCRIBE stage — no consent has been recorded and "
+            f"no recovery guidance has been released.\n\n"
+            f"Consenting authorizes a guided recovery playbook "
+            f"({len(self.steps)} ordered steps) that your agent executes "
+            f"locally with your credentials, bound by these HARD "
+            f"CONSTRAINTS:\n{constraint_lines}\n\n"
+            f"Deliverable you should expect back: {self.deliverable}\n\n"
+            f"If the environment is gone: {self.escape}\n\n"
+            f"Full runbook (clickable): {self.runbook_url} "
+            f"§{self.runbook_section}\n\n"
+            f"To consent and receive the recovery playbook, re-call this "
+            f"tool with confirm=true (the grant is audit-recorded)."
+        )
+
     def tool_return(self) -> str:
         """The MCP/Desktop rendering — the tool RETURN STRING is the payload.
 
@@ -332,3 +363,41 @@ def emit_forensics_playbook(topic: str, store_state: StoreState) -> Playbook:
     :func:`emit_playbook`; a distinct registry because the two verbs carry
     different content for the same subject (diagnose vs recover)."""
     return _emit(_FORENSICS_TOPICS, "forensics", topic, store_state)
+
+
+def forensics_topics() -> tuple[str, ...]:
+    """The registered forensics topic names (membership checks — callers
+    branch on this instead of catching ``KeyError`` from the emitter, which
+    would also swallow a builder bug)."""
+    return tuple(sorted(_FORENSICS_TOPICS))
+
+
+def remediate_topics() -> tuple[str, ...]:
+    """The registered remediate topic names (same membership-check contract
+    as :func:`forensics_topics`)."""
+    return tuple(sorted(_TOPICS))
+
+
+#: The two consent-audited verbs. Locked here (not free strings at call
+#: sites) so audit-scope strings cannot fragment on typos (nexus-ykzbj.15
+#: builder note; first enforced by P3.2).
+_CONSENT_VERBS = ("forensics", "remediate")
+
+
+def consent_scope(verb: str, topic: str) -> str:
+    """The canonical consent-audit scope string: ``<verb>:<topic>``.
+
+    Fail-loud on an unknown verb or unregistered topic — a typo'd scope
+    silently fragmenting the ``claude_assisted_remediation_consents`` audit
+    trail is exactly what a free-form f-string at each call site invites.
+    """
+    if verb not in _CONSENT_VERBS:
+        raise ValueError(
+            f"unknown consent verb {verb!r} — known: {list(_CONSENT_VERBS)}"
+        )
+    known = set(_TOPICS) | set(_FORENSICS_TOPICS)
+    if topic not in known:
+        raise ValueError(
+            f"unknown consent topic {topic!r} — known: {sorted(known)}"
+        )
+    return f"{verb}:{topic}"

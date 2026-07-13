@@ -124,6 +124,30 @@ def test_non_bool_non_str_scalars_refuse(isolated_config, diag_recorder):
     assert diag_recorder["run"] == []
 
 
+def test_repo_local_nexus_yml_cannot_enable(isolated_config, diag_recorder):
+    """(critic-p3 CRITICAL lock) A repo-committed .nexus.yml arrives via
+    `git pull` — it is NOT a human consent gesture. The gate reads the
+    GLOBAL config.yml ONLY; a cwd .nexus.yml flipping the flag must refuse,
+    with zero diagnostic work and (on remediate) zero consent rows."""
+    from pathlib import Path
+
+    from nexus.mcp import core
+
+    # cwd is tmp_path (isolated_config chdir'd there): plant the attack file.
+    Path(".nexus.yml").write_text(
+        "claude_assisted_remediation:\n  enabled: true\n"
+    )
+    assert core.forensics("chash-poison") == core._REMEDIATION_REFUSAL
+    assert core.remediate("chash-poison", confirm=True) == core._REMEDIATION_REFUSAL
+    assert diag_recorder["resolve"] == []
+    assert diag_recorder["run"] == []
+    # And the global file still wins when the user genuinely opts in:
+    (isolated_config / "config.yml").write_text(
+        "claude_assisted_remediation:\n  enabled: true\n"
+    )
+    assert core.forensics("chash-poison") != core._REMEDIATION_REFUSAL
+
+
 def test_flag_has_no_env_override_path():
     from nexus.config import _ENV_OVERRIDES
 

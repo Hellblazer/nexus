@@ -4,14 +4,20 @@ from nexus.remediation.playbook import (
     MIGRATION_RUNBOOK_URL,
     Playbook,
     StoreState,
+    consent_scope,
     emit_forensics_playbook,
     emit_playbook,
+    forensics_topics,
+    remediate_topics,
 )
 
 __all__ = [
     "MIGRATION_RUNBOOK_URL",
     "Playbook",
     "StoreState",
+    "consent_scope",
     "emit_forensics_playbook",
     "emit_playbook",
+    "forensics_topics",
+    "remediate_topics",
 ]

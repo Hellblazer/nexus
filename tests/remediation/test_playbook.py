@@ -107,6 +107,40 @@ def test_tool_return_contains_all_layers_and_no_terminal_chrome(chash_playbook):
     assert "--force" not in text
 
 
+def test_describe_shape_and_step_withholding(chash_playbook):
+    """(review-p3 L2) Direct contract test for the pre-consent rendering:
+    every layer-2 element present, the ordered recovery steps absent (from
+    the TOOL's rendering — the public runbook URL stays, by design), and the
+    step-count wording matches the actual step count."""
+    pb = chash_playbook
+    text = pb.describe()
+    assert f"[{pb.topic}]" in text
+    assert pb.store_detail in text
+    for c in pb.constraints:
+        assert c in text
+    assert pb.deliverable in text
+    assert pb.escape in text
+    assert pb.runbook_url in text
+    assert "confirm=true" in text
+    assert f"({len(pb.steps)} ordered steps)" in text
+    assert "no consent has been recorded" in text.lower()
+    for step in pb.steps:
+        assert step not in text  # the tool's own steps are not rendered
+
+
+def test_consent_scope_builder_contract():
+    """(review-p3 final note) The validated scope builder: happy path plus
+    both fail-loud unhappy paths (unknown verb / unregistered topic)."""
+    from nexus.remediation import consent_scope
+
+    assert consent_scope("remediate", "chash-poison") == "remediate:chash-poison"
+    assert consent_scope("forensics", "chash-poison") == "forensics:chash-poison"
+    with pytest.raises(ValueError, match="unknown consent verb"):
+        consent_scope("execute", "chash-poison")
+    with pytest.raises(ValueError, match="unknown consent topic"):
+        consent_scope("remediate", "typo-topic")
+
+
 def test_unknown_topic_fails_loud():
     from nexus.remediation import StoreState, emit_playbook
 

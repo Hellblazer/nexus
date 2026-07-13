@@ -2,9 +2,9 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """MCP core tools: search, store, memory, scratch, collections, plans.
 
-37 registered tools + 3 demoted (plain functions, no @mcp.tool()); one of the
-37 is the RDR-182 consent-gated ``forensics`` tool (nexus-ykzbj.10, which
-replaced the throwaway A4 spike; ``remediate`` joins it in P3.2).
+38 registered tools + 3 demoted (plain functions, no @mcp.tool()); two of the
+38 are the RDR-182 consent-gated ``forensics``/``remediate`` pair
+(nexus-ykzbj.10/.11, which replaced the throwaway A4 spike).
 """
 from __future__ import annotations
 
@@ -6147,12 +6147,21 @@ _REMEDIATION_REFUSAL = (
 
 
 def _remediation_opt_in() -> bool:
-    """True iff ``claude_assisted_remediation.enabled`` is affirmatively set.
+    """True iff ``claude_assisted_remediation.enabled`` is affirmatively set
+    in the user's GLOBAL ``~/.config/nexus/config.yml`` — and ONLY there.
+
+    GLOBAL-ONLY, deliberately NOT ``load_config()`` (critic-p3 Critical,
+    2026-07-12): the merged view honors a repo-local ``.nexus.yml``, and a
+    consent flag that a ``git pull`` (or one approved PR) can flip is not a
+    human consent gesture — an agent whose cwd is that checkout would clear
+    the gate, receive the mutation-authorizing playbook, AND write a FALSE
+    ``granted=True`` consent-audit row attributed to a user who never acted.
+    The named enable command (``nx config set``) writes exactly the global
+    file, so the remedy and the recognition surface coincide. Env vars are
+    likewise not consulted (a negative test locks ``_ENV_OVERRIDES``).
 
     Read FRESH per invocation (the MCP server is long-lived; an operator
-    enabling the flag mid-session must take effect on the next call) via
-    ``load_config()`` — the same merged view (defaults → config.yml →
-    .nexus.yml → env) every other flag uses.
+    enabling the flag mid-session must take effect on the next call).
 
     STRICT parse, fail-closed: ``nx config set`` stores the raw STRING
     (``set_config_value(dotted_key, value: str)``), so the flag arrives as
@@ -6160,19 +6169,27 @@ def _remediation_opt_in() -> bool:
     truthiness would invert an explicit disable. Only ``True`` and the
     case-insensitive strings ``"true"``/``"1"``/``"yes"`` enable; everything
     else (absent, ``False``, ``"false"``, non-bool/str scalars like YAML
-    int ``1``, garbage) refuses.
-
-    Fail-closed includes SHAPE mismatches (critic-spike High, 2026-07-12): a
-    hand-edited flat scalar (``claude_assisted_remediation: true``) makes
-    ``_deep_merge`` replace the whole default dict with the bare scalar; the
-    section must be isinstance-guarded or the gate CRASHES on ``.get`` —
-    and a crash is not a refusal. Non-dict sections refuse; the refusal's
-    named command then rewrites the canonical nested shape... except it
-    currently does NOT (``set_config_value`` itself crashes walking a
-    dotted key through an existing scalar — tracked separately, see the
-    grooming-session bead filed 2026-07-12).
+    int ``1``, garbage) refuses. Fail-closed includes SHAPE mismatches
+    (critic-spike High): a hand-edited flat scalar
+    (``claude_assisted_remediation: true``) must refuse, not crash — a crash
+    is not a refusal. An unreadable/corrupt global file also refuses.
+    (The refusal's named command still crashes on a pre-existing flat scalar
+    — set_config_value bug, tracked as nexus-s4a98.)
     """
-    section = load_config().get("claude_assisted_remediation", {})
+    import yaml  # noqa: PLC0415 — deferred, startup cost
+
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred, startup cost
+
+    path = nexus_config_dir() / "config.yml"
+    try:
+        if not path.exists():
+            return False
+        data = yaml.safe_load(path.read_text()) or {}
+    except Exception:  # noqa: BLE001 — unreadable/corrupt config = fail closed, never crash the gate
+        return False
+    if not isinstance(data, dict):
+        return False
+    section = data.get("claude_assisted_remediation", {})
     if not isinstance(section, dict):
         return False
     value = section.get("enabled", False)
@@ -6235,28 +6252,160 @@ def forensics(topic: str = "chash-poison") -> str:
     except KeyError as exc:
         return str(exc)
 
+    detail = _live_store_detail(probe.diagnostic_sql)
+    return emit_forensics_playbook(topic, StoreState(detail=detail)).tool_return()
+
+
+def _live_store_detail(diagnostic_sql) -> str:  # noqa: ANN001, ANN202 — shared by forensics/remediate
+    """Run *diagnostic_sql* via the nexus_diag choke point and format the
+    results as a store_detail string; degrade LOUD-IN-BAND (unavailable /
+    failed reads as such, never as clean)."""
     creds = _diag_resolve()
     if creds is None:
-        detail = (
+        return (
             "live diagnostics UNAVAILABLE — no nexus_diag credentials "
             "(pre-P2.1 install or no local service PG). Re-run "
             "`nx init --service` to backfill the diagnostic role, then "
             "re-invoke. Do NOT interpret this as a clean store."
         )
-    else:
-        try:
-            results = _diag_run(probe.diagnostic_sql, creds)
-            detail = "live diagnostic results:\n" + "\n".join(
-                f"  {stmt} = {out}"
-                for stmt, out in zip(probe.diagnostic_sql, results)
-            )
-        except Exception as exc:  # noqa: BLE001 — degrade loud-in-band; the agent must see the failure, not a crash
-            detail = (
-                f"live diagnostics FAILED ({exc}) — treat store state as "
-                "UNKNOWN, not clean."
-            )
+    try:
+        results = _diag_run(diagnostic_sql, creds)
+    except Exception as exc:  # noqa: BLE001 — degrade loud-in-band; the agent must see the failure, not a crash
+        return (
+            f"live diagnostics FAILED ({exc}) — treat store state as "
+            "UNKNOWN, not clean."
+        )
+    return "live diagnostic results:\n" + "\n".join(
+        f"  {stmt} = {out}" for stmt, out in zip(diagnostic_sql, results)
+    )
 
-    return emit_forensics_playbook(topic, StoreState(detail=detail)).tool_return()
+
+@mcp.tool(
+    title="Guided Remediation Playbook (consented, audited)",
+    # No idempotentHint (review-p3 M2): every confirm=True call appends a NEW
+    # consent-audit row by design (append-only trail) — a client retrying a
+    # timed-out call on an idempotency promise would multiply consent rows.
+    annotations={"destructiveHint": True},
+)
+def remediate(topic: str = "chash-poison", confirm: bool = False) -> str:
+    """Consent-gated guided-recovery playbook for an upgrade-edge *topic*
+    (RDR-182 P3.2, nexus-ykzbj.11).
+
+    THE FIVE-LAYER CONTRACT, in order — the opt-in check NEVER collapses
+    into the confirm flag (``daemon_uninstall``'s describe-then-confirm is a
+    shape template only, not a consent model):
+
+    1. OPT-IN GATE (first statement): ``claude_assisted_remediation.enabled``
+       false → refusal naming the enable command, zero work, REGARDLESS of
+       ``confirm``.
+    2. DESCRIBE (``confirm=False``, the default): states what consent would
+       authorize — hard do-NOTs, deliverable, runbook — but WITHHOLDS the
+       ordered recovery steps. Records no consent, mutates nothing (it DOES
+       run the topic's lint-verified read-only diagnostics for live store
+       state, same as ``forensics``).
+    3. CONFIRM (``confirm=True``): the explicit consent gesture.
+    4. MUTATE: the consented release of the full recovery playbook. Per the
+       RDR-182 §5 trust boundary the product itself never runs the mutation —
+       the playbook's steps are executed by the USER'S OWN agent with the
+       user's credentials; this release is the mutation-authorizing event.
+    5. AUDIT-RECORD: ``Telemetry.record_consent(scope="remediate:<topic>")``.
+       Written FAIL-CLOSED, before the release leaves this function: if the
+       consent audit cannot be written (service-mode T2 has no
+       ``record_consent`` until nexus-ng2sy), the release is REFUSED — THIS
+       TOOL never hands out its recovery playbook unaudited.
+
+    THREAT-MODEL HONESTY (review-p3 H1): the consent layer audits the
+    PRODUCT'S guided handoff — it is NOT an information-access control. The
+    recovery knowledge also lives in the public migration runbook (public
+    documentation by design, Gap 2: remediation knowledge in-product and
+    linked), so a network-capable agent could read the same steps without
+    ever consenting here. What this contract guarantees is that the safe,
+    guided, store-state-aware path — the one the product steers agents onto
+    — is consented and audited; it makes the safe path the easy path (Gap 1),
+    it does not make the unsafe path impossible.
+
+    Live store state (the forensics counts) is embedded when the diagnostic
+    path is available, so the recovery playbook reflects the actual store.
+
+    Args:
+        topic: The remediation topic. Currently: ``chash-poison``.
+        confirm: False (default) describes; True consents, audits, and
+            releases the recovery playbook.
+    """
+    if not _remediation_opt_in():
+        return _REMEDIATION_REFUSAL
+
+    from nexus.remediation import (  # noqa: PLC0415 — deferred, startup cost
+        StoreState,
+        consent_scope,
+        emit_forensics_playbook,
+        emit_playbook,
+        forensics_topics,
+        remediate_topics,
+    )
+
+    # Validate the REMEDIATE topic FIRST (review-p3 L1): an unknown topic
+    # must fail loud before any live DB query runs — a forensics-only topic
+    # would otherwise burn a diagnostic round-trip just to be rejected.
+    if topic not in remediate_topics():
+        return (
+            f"unknown remediate playbook topic {topic!r} — known topics: "
+            f"{list(remediate_topics())}"
+        )
+
+    # Live store state: reuse the FORENSICS topic's linted diagnostic SQL
+    # when the subject has one (same degrade semantics as forensics()).
+    # Membership check, NOT try/except KeyError — a KeyError from inside a
+    # builder is a bug that must propagate, not read as "no diagnostics"
+    # (critic-p3 Low).
+    if topic in forensics_topics():
+        diag_probe = emit_forensics_playbook(topic, StoreState(detail=""))
+        detail = _live_store_detail(diag_probe.diagnostic_sql)
+    else:
+        detail = "no live diagnostics defined for this topic"
+
+    playbook = emit_playbook(topic, StoreState(detail=detail))
+
+    if not confirm:
+        return playbook.describe()
+
+    # Consented: audit-record BEFORE the release leaves this function —
+    # fail-closed, so a release without a consent row is impossible. (The
+    # contract's 4→5 numbering describes the operator-visible sequence; the
+    # audit write preceding the return is what makes it unfalsifiable.)
+    # ANY audit failure refuses the release (critic-p3 High: not just the
+    # service-mode AttributeError — a locked SQLite, disk-full, or migration
+    # bug must produce the contract's refusal, never a raw traceback and
+    # never an unaudited release).
+    from datetime import datetime, timezone  # noqa: PLC0415 — deferred, startup cost
+
+    try:
+        with _t2_ctx() as _db:
+            # hasattr pre-check (review-p3 M1), not `except AttributeError`:
+            # an unrelated AttributeError from _t2_ctx/record_consent
+            # internals must NOT be misdiagnosed as the service-mode parity
+            # gap — it falls to the generic fail-closed refusal below.
+            if not hasattr(_db.telemetry, "record_consent"):
+                return (
+                    "Cannot record the consent audit in this deployment "
+                    "(service-mode T2 lacks record_consent until nexus-ng2sy) "
+                    "— REFUSING to release the recovery playbook unaudited. "
+                    "Run the CLI path on the local install, or wait for the "
+                    "engine-side consent-audit parity."
+                )
+            _db.telemetry.record_consent(
+                scope=consent_scope("remediate", topic),
+                ts=datetime.now(timezone.utc).isoformat(),
+                granted=True,
+            )
+    except Exception as exc:  # noqa: BLE001 — fail-closed auditing: no unaudited release, ever
+        return (
+            f"Consent audit write FAILED ({exc}) — REFUSING to release the "
+            "recovery playbook unaudited. Fix the audit store (T2 memory.db) "
+            "and re-invoke with confirm=true."
+        )
+
+    return playbook.tool_return()
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
