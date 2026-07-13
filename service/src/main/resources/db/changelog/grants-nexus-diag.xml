@@ -116,6 +116,8 @@ $$;
         </comment>
         <sql splitStatements="false" stripComments="false">
 DO $$
+DECLARE
+    rel RECORD;
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_diag') THEN
         RAISE NOTICE 'nexus_diag absent — view-era diagnostic grants skipped';
@@ -124,15 +126,33 @@ BEGIN
 
     GRANT USAGE ON SCHEMA nexus TO nexus_diag;
 
-    REVOKE SELECT ON ALL TABLES IN SCHEMA nexus FROM nexus_diag;
-    REVOKE SELECT ON ALL TABLES IN SCHEMA t1    FROM nexus_diag;
+    -- P0 fix (nexus-46yy3, critic 47dcb65e, LIVE-REPRODUCED on PG16): the
+    -- bulk form REVOKE ... ON ALL TABLES IN SCHEMA hard-errors with
+    -- permission-denied on the SUPERUSER-owned diag_chash_conformance view
+    -- (this connection is nexus_admin, NOSUPERUSER), aborting this block and
+    -- crash-looping every engine boot once the view exists. Revoke
+    -- per-relation, restricted to relations THIS role owns (every base table
+    -- — nexus_admin created the schema) so foreign-owned relations are never
+    -- touched. The view keeps the SELECT its OWNER granted (pg_provision /
+    -- the DBA block), which a non-owner could neither grant nor revoke.
+    FOR rel IN
+        SELECT n.nspname, c.relname
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname IN ('nexus', 't1')
+          AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+          AND pg_get_userbyid(c.relowner) = current_user
+    LOOP
+        EXECUTE format(
+            'REVOKE SELECT ON %I.%I FROM nexus_diag', rel.nspname, rel.relname
+        );
+    END LOOP;
     ALTER DEFAULT PRIVILEGES IN SCHEMA nexus REVOKE SELECT ON TABLES FROM nexus_diag;
     ALTER DEFAULT PRIVILEGES IN SCHEMA t1    REVOKE SELECT ON TABLES FROM nexus_diag;
 
-    -- The structural content boundary: counts by construction.
-    GRANT SELECT ON nexus.diag_chash_conformance TO nexus_diag;
-
-    -- The journal reads survive (the /version handshake + migration-state probe).
+    -- The journal reads survive (the /version handshake + migration-state
+    -- probe). NOTE: no GRANT on the view here — only its owner (the
+    -- superuser provisioning path) can grant it, and already has.
     GRANT SELECT ON public.databasechangelog     TO nexus_diag;
     GRANT SELECT ON public.databasechangeloglock TO nexus_diag;
 END

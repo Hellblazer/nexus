@@ -2176,6 +2176,13 @@ def _check_migration_state(
                     chash_conformance_statements(), diag_creds,
                     psql_bin=psql_bin, psql_runner=diag_runner,
                 )
+            except DiagnosticSqlViolation:
+                # A LINT failure is a product defect, never an engine-
+                # generation skew — re-raise to the outer handler (review
+                # 47dcb65e Critical: DiagnosticSqlViolation subclasses
+                # ValueError, so without this it would be silently retried
+                # against the legacy statements and mislabeled as fallback).
+                raise
             except (RuntimeError, ValueError) as view_exc:
                 _log.warning(
                     "chash_probe_view_fallback_legacy",

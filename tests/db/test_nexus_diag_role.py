@@ -19,8 +19,10 @@ NEXUS_PG_BIN fails loud, never mass-skips).
 from __future__ import annotations
 
 import getpass
+import re
 import socket
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -235,3 +237,61 @@ class TestIdempotency:
         )
         assert created.diag_created is False
         assert diag_cluster["diag"]("SELECT 1").returncode == 0
+
+
+class TestViewEraChangesetLive:
+    """RDR-182 Amendment A6 / nexus-46yy3 (live-reproduced P0): the view-era
+    revoke changeset must survive the heterogeneous-ownership topology it is
+    designed for — nexus_admin-owned tables PLUS a SUPERUSER-owned counts
+    view in the same schema. The pre-fix bulk REVOKE ... ON ALL TABLES IN
+    SCHEMA hard-errored on the foreign-owned view (permission denied),
+    aborting the DO block and crash-looping every engine boot. This runs the
+    REAL changeset SQL (parsed from the XML, never a copy) as nexus_admin.
+    """
+
+    def _changeset_2_sql(self) -> str:
+        xml = (
+            Path(__file__).resolve().parents[2]
+            / "service/src/main/resources/db/changelog/grants-nexus-diag.xml"
+        ).read_text()
+        # The second changeset's <sql> body (grants-nexus-diag-2).
+        blocks = re.findall(
+            r"<sql\s[^>]*>(.*?)</sql>", xml, re.DOTALL,
+        )
+        assert len(blocks) == 2, "expected exactly the two era changesets"
+        return blocks[1]
+
+    def test_revoke_changeset_survives_superuser_owned_view(self, diag_cluster):
+        su, diag = diag_cluster["su"], diag_cluster["diag"]
+
+        # The A6 topology: a SUPERUSER-owned counts view (definer semantics
+        # give cross-tenant counts) alongside the admin-owned FORCE-RLS table.
+        # Production topology: schema t1 exists before the grants changesets
+        # run (t1-001 baseline precedes them in the master changelog).
+        su("CREATE SCHEMA IF NOT EXISTS t1 AUTHORIZATION nexus_admin")
+        # ...as does the Liquibase journal (created by the migration
+        # connection, i.e. owned by nexus_admin, before any changeset).
+        su(
+            "SET ROLE nexus_admin; "
+            "CREATE TABLE IF NOT EXISTS public.databasechangelog (id TEXT); "
+            "CREATE TABLE IF NOT EXISTS public.databasechangeloglock (id INT)"
+        )
+        su(
+            "CREATE OR REPLACE VIEW nexus.diag_chash_conformance AS "
+            "SELECT 'nexus.diag_probe' AS table_name, count(*) AS non_conformant "
+            "FROM nexus.diag_probe WHERE length(chash) <> 32"
+        )
+        su("GRANT SELECT ON nexus.diag_chash_conformance TO nexus_diag")
+
+        # THE P0 assertion: the real changeset body, run as nexus_admin
+        # (SET ROLE drops superuser privileges), must NOT error.
+        su("SET ROLE nexus_admin; " + self._changeset_2_sql())
+
+        # The boundary it establishes: counts by construction...
+        r = diag("SELECT non_conformant FROM nexus.diag_chash_conformance")
+        assert r.returncode == 0, r.stderr
+        assert r.stdout.strip() == "1"  # the short-chash row, cross-tenant
+        # ...and NO direct table read.
+        r = diag("SELECT chash FROM nexus.diag_probe")
+        assert r.returncode != 0
+        assert "permission denied" in r.stderr

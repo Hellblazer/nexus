@@ -35,6 +35,10 @@ _ALLOWED_READ_OBJECTS = {
     "nexus.chunks_384", "nexus.chunks_768", "nexus.chunks_1024",
     "nexus.chash_index", "nexus.catalog_document_chunks",
     "pg_constraint",
+    # Amendment A6 (nexus-9bufb): the superuser-owned counts view. Stronger
+    # than the raw tables above — it exposes ONLY (table_name, count), so
+    # content projection is impossible by construction, not just by lint.
+    "nexus.diag_chash_conformance",
 }
 #: Column tokens that would indicate CONTENT projection (must never appear
 #: as a bare projected column in a diagnostic statement).

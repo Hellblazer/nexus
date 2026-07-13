@@ -18,6 +18,9 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
+from nexus.db import chash_tables
+from nexus.db.chash_tables import CHASH_BEARING_TABLES
+
 from nexus.health import (
     HealthResult,
     _check_migration_state,
@@ -993,3 +996,63 @@ class TestServiceBgeModelCheck:
         self._setup(tmp_path, monkeypatch, creds=True, model=True)
         res = _check_service_bge_model()
         assert res[0].ok is True and res[0].fatal is False and res[0].warn is False
+
+
+# ── Amendment A6 fallback (review 47dcb65e Critical) ──────────────────────────
+
+
+class TestChashProbeViewFallback:
+    """The view-era probe falls back to the legacy direct-table statements
+    ONLY on execution failure (pre-A6 engine); a LINT violation is a product
+    defect and must surface as the WARN, never a silent legacy retry."""
+
+    def test_view_failure_falls_back_to_legacy_and_counts(self, tmp_path):
+        n = len(CHASH_BEARING_TABLES)
+        state = {"i": 0}
+
+        def runner(argv, env):
+            i = state["i"]
+            state["i"] += 1
+            if i == 0:
+                # run_diagnostic_sql aborts on the FIRST failing statement,
+                # so exactly one view-era call precedes the fallback.
+                return subprocess.CompletedProcess(
+                    argv, 1, stdout="", stderr="relation does not exist",
+                )
+            return subprocess.CompletedProcess(argv, 0, stdout="2\n", stderr="")
+
+        creds = _make_creds_file(tmp_path)
+        results = _check_migration_state(
+            creds_path=creds,
+            psql_runner=_psql_runner_ok(160),
+            diag_runner=runner,
+        )
+        chash = [r for r in results if "chash" in r.label.lower()]
+        assert chash and chash[0].ok is False and chash[0].warn is True
+        assert "10 chunk row(s)" in chash[0].detail  # 2 per table via LEGACY
+        assert state["i"] == 1 + n  # one failed view call + the full legacy set
+
+    def test_lint_violation_is_never_retried_against_legacy(self, tmp_path, monkeypatch):
+        # A content-reading statement: fails the fail-closed lint pre-DB.
+        monkeypatch.setattr(
+            chash_tables, "chash_conformance_statements",
+            lambda: ("SELECT chash FROM nexus.chash_index",),
+        )
+        calls = {"n": 0}
+
+        def runner(argv, env):
+            calls["n"] += 1
+            return subprocess.CompletedProcess(argv, 0, stdout="0\n", stderr="")
+
+        creds = _make_creds_file(tmp_path)
+        results = _check_migration_state(
+            creds_path=creds,
+            psql_runner=_psql_runner_ok(160),
+            diag_runner=runner,
+        )
+        chash = [r for r in results if "chash" in r.label.lower()]
+        assert chash and chash[0].warn is True  # probe-did-not-run WARN
+        assert calls["n"] == 0, (
+            "a DiagnosticSqlViolation must reach the outer handler without a "
+            "single psql invocation - never a silent legacy retry"
+        )

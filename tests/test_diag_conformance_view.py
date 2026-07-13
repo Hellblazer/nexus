@@ -49,11 +49,17 @@ def test_view_statements_pass_the_diagnostic_lint():
 
 
 def test_provision_embeds_the_generator_not_a_copy():
+    """Review 47dcb65e: ONE helper, called from BOTH provisioning paths
+    (_create_roles and _backfill_diag_role) - a hand-typed copy in either
+    would drift from CHASH_BEARING_TABLES."""
     src = (_REPO / "src/nexus/db/pg_provision.py").read_text()
-    assert "diag_conformance_view_ddl" in src, (
-        "pg_provision must render the view from the generator - a hand-typed "
-        "copy would drift from CHASH_BEARING_TABLES"
-    )
+    assert src.count("def _provision_diag_conformance_view") == 1
+    assert src.count("_provision_diag_conformance_view(bins, port, os_user)") == 2
+    assert "diag_conformance_view_ddl" in src
+    # The existence guard derives from the constant, never hand-typed, and
+    # requires EVERY chash table (the view references all of them).
+    assert "for t in CHASH_BEARING_TABLES" in src
+    assert ") = {len(CHASH_BEARING_TABLES)} THEN " in src
 
 
 def test_docs_rendered_copy_matches_the_generator():
@@ -72,10 +78,19 @@ def test_docs_rendered_copy_matches_the_generator():
 
 def test_grants_changeset_view_era_revokes_tables():
     """The view-era changeset must exist, be view-conditional, and revoke the
-    direct table SELECT that the legacy era granted."""
+    direct table SELECT that the legacy era granted — PER-RELATION and
+    OWNER-RESTRICTED (nexus-46yy3, live-reproduced P0: the bulk
+    ALL-TABLES-IN-SCHEMA form hard-errors on the superuser-owned view from
+    the NOSUPERUSER nexus_admin migration connection, crash-looping every
+    boot once the view exists). The changeset must NOT grant the view either
+    — only the view's owner (the superuser provisioning path) can."""
     xml = (_REPO / "service/src/main/resources/db/changelog/grants-nexus-diag.xml").read_text()
     assert "grants-nexus-diag-2" in xml
-    assert xml.count("diag_chash_conformance") >= 3  # precondition x2 + grant
-    assert "REVOKE SELECT ON ALL TABLES IN SCHEMA nexus FROM nexus_diag" in xml
-    assert "REVOKE SELECT ON ALL TABLES IN SCHEMA t1    FROM nexus_diag" in xml
-    assert "GRANT SELECT ON nexus.diag_chash_conformance TO nexus_diag" in xml
+    assert xml.count("diag_chash_conformance") == 5  # 2x sqlCheck + 3 prose mentions
+    # The P0 shape: per-relation loop, restricted to relations this role owns.
+    assert "pg_get_userbyid(c.relowner) = current_user" in xml
+    assert "REVOKE SELECT ON %I.%I FROM nexus_diag" in xml
+    # The bulk form must never come back.
+    assert "REVOKE SELECT ON ALL TABLES IN SCHEMA" not in xml
+    # No cross-owner grant on the view (a non-owner GRANT hard-errors too).
+    assert "GRANT SELECT ON nexus.diag_chash_conformance" not in xml
