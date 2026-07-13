@@ -101,7 +101,7 @@ class TelemetryRepositoryTest {
             // Grant all telemetry tables
             for (String table : List.of("relevance_log", "search_telemetry", "tier_writes",
                     "nx_answer_runs", "hook_failures", "frecency",
-                    "claude_assisted_remediation_consents")) {
+                    "claude_assisted_remediation_consents", "retention_markers")) {
                 su.createStatement().execute(
                     "GRANT SELECT, INSERT, UPDATE, DELETE ON " + schema + "." + table + " TO " + SVC_ROLE);
             }
@@ -925,5 +925,44 @@ class TelemetryRepositoryTest {
         config.setMaximumPoolSize(4);
         config.addDataSourceProperty("options", "-c search_path=nexus,public");
         return new com.zaxxer.hikari.HikariDataSource(config);
+    }
+    // ── nexus-24p05: retention markers ───────────────────────────────────────
+
+    @Test
+    void expireRelevanceLog_bumpsCumulativeRetentionMarker() {
+        String tenant = "ret-marker-" + System.nanoTime();
+        // Two old rows (past any horizon) + one fresh row.
+        repo.importRelevanceRow(tenant, "q1", "c1", "knowledge__x", "click", "s",
+            "2020-01-01T00:00:00Z");
+        repo.importRelevanceRow(tenant, "q2", "c2", "knowledge__x", "click", "s",
+            "2020-01-02T00:00:00Z");
+        repo.logRelevance(tenant, "q3", "c3", "click", "s", "knowledge__x");
+
+        int deleted = repo.expireRelevanceLog(tenant, 90);
+        org.assertj.core.api.Assertions.assertThat(deleted).isEqualTo(2);
+        var markers = repo.getRetentionMarkers(tenant,
+            List.of("nexus.relevance_log", "nexus.search_telemetry"));
+        org.assertj.core.api.Assertions.assertThat(markers)
+            .containsEntry("nexus.relevance_log", 2L)
+            .doesNotContainKey("nexus.search_telemetry");  // never swept -> absent
+
+        // Second sweep with nothing left to delete: marker UNCHANGED (no bump-on-zero).
+        org.assertj.core.api.Assertions.assertThat(repo.expireRelevanceLog(tenant, 90)).isZero();
+        org.assertj.core.api.Assertions.assertThat(
+            repo.getRetentionMarkers(tenant, List.of("nexus.relevance_log")))
+            .containsEntry("nexus.relevance_log", 2L);
+    }
+
+    @Test
+    void retentionMarkers_areTenantIsolated() {
+        String a = "ret-iso-a-" + System.nanoTime();
+        String b = "ret-iso-b-" + System.nanoTime();
+        repo.importRelevanceRow(a, "q", "c", "knowledge__x", "click", "s",
+            "2020-01-01T00:00:00Z");
+        repo.expireRelevanceLog(a, 90);
+        org.assertj.core.api.Assertions.assertThat(
+            repo.getRetentionMarkers(b, List.of("nexus.relevance_log")))
+            .as("tenant B must not see tenant A's marker (RLS)")
+            .isEmpty();
     }
 }

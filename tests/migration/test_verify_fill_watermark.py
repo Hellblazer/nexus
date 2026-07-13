@@ -7,6 +7,7 @@ roundtrip. The orchestrator-level pass-3 shortcut is covered in
 """
 from __future__ import annotations
 
+from nexus.migration.orchestrator import _VERIFY_TABLES
 from nexus.migration.verify_fill_watermark import (
     WATERMARK_TABLES,
     advance_watermark,
@@ -67,7 +68,59 @@ def test_watermark_tables_disjoint_from_verify_tables():
     """Load-bearing separation: putting these four into _VERIFY_TABLES would
     let the outer loop skip them on an UNSOUND count parity (dup collapse +
     live writes). The watermark is their ONLY gate."""
-    from nexus.migration.orchestrator import _VERIFY_TABLES
-
     mapped_telemetry = {t for (s, t) in _VERIFY_TABLES if s == "telemetry"}
     assert mapped_telemetry.isdisjoint(WATERMARK_TABLES.keys())
+
+
+# ── nexus-24p05: retention-marked tables ──────────────────────────────────────
+
+
+def test_marked_table_distrusts_without_live_marker(tmp_path, monkeypatch):
+    """Old engine (no marker route) or transport failure -> marker None ->
+    full probe, even with a healthy count."""
+    _isolate(tmp_path, monkeypatch)
+    advance_watermark(URL, "relevance_log", max_rowid=300, target_count=100,
+                      retention_marker=0)
+    assert usable_min_rowid(URL, "relevance_log", engine_count=100,
+                            retention_marker=None) == 0
+
+
+def test_marked_table_distrusts_on_marker_reset(tmp_path, monkeypatch):
+    """A live marker BELOW the recorded baseline = fresh schema (rollback) —
+    even when live inserts pushed the count back up past the recorded value
+    (the exact offset scenario that blinds the count-only gate)."""
+    _isolate(tmp_path, monkeypatch)
+    advance_watermark(URL, "relevance_log", max_rowid=300, target_count=100,
+                      retention_marker=7)
+    assert usable_min_rowid(URL, "relevance_log", engine_count=250,
+                            retention_marker=0) == 0
+
+
+def test_marked_table_trusts_when_marker_monotonic(tmp_path, monkeypatch):
+    """Ordinary sweep activity bumps the marker ABOVE the baseline — the
+    sweep's domain (expired rows) is disjoint from the fill's fresh window,
+    so a higher marker never invalidates."""
+    _isolate(tmp_path, monkeypatch)
+    advance_watermark(URL, "relevance_log", max_rowid=300, target_count=100,
+                      retention_marker=7)
+    assert usable_min_rowid(URL, "relevance_log", engine_count=100,
+                            retention_marker=7) == 300
+    assert usable_min_rowid(URL, "relevance_log", engine_count=140,
+                            retention_marker=42) == 300
+
+
+def test_marked_table_never_advances_without_marker(tmp_path, monkeypatch):
+    """No live marker at advance time -> no baseline can be recorded -> no
+    watermark is written at all (rather than one that could never distrust)."""
+    _isolate(tmp_path, monkeypatch)
+    advance_watermark(URL, "relevance_log", max_rowid=300, target_count=100,
+                      retention_marker=None)
+    assert usable_min_rowid(URL, "relevance_log", engine_count=100,
+                            retention_marker=0) == 0
+
+
+def test_unmarked_tables_ignore_the_marker_argument(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    advance_watermark(URL, "tier_writes", max_rowid=500, target_count=480)
+    assert usable_min_rowid(URL, "tier_writes", engine_count=480,
+                            retention_marker=None) == 500

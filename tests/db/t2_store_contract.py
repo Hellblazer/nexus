@@ -69,6 +69,7 @@ T2_STORE_CONTRACT: dict[str, dict[str, list[str]]] = {
     'telemetry': {
         'expire_relevance_log': ['days'],
         'get_relevance_log': ['query', 'chunk_id', 'action', 'session_id', 'limit'],
+        'get_retention_markers': ['relations'],
         'log_relevance': ['query', 'chunk_id', 'action', 'session_id', 'collection'],
         'log_relevance_batch': ['rows'],
         'log_search_batch': ['rows'],

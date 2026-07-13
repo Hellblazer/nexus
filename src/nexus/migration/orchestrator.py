@@ -442,6 +442,30 @@ def dedup_convergence_notes(
     return notes
 
 
+def _fetch_retention_markers(http_telemetry: Any) -> dict[str, int]:
+    """Live retention markers, fail-soft (nexus-24p05): a pre-marker engine
+    404s the route — the watermark then distrusts every retention-marked
+    table (full probe), never crashes the verify-fill run."""
+    from nexus.migration.verify_fill_watermark import WATERMARK_TABLES  # noqa: PLC0415 — import-cycle guard
+
+    getter = getattr(http_telemetry, "get_retention_markers", None)
+    if getter is None:
+        return {}
+    relations = list(WATERMARK_TABLES.values())
+    try:
+        markers = getter(relations) or {}
+    except Exception as exc:  # noqa: BLE001 — old engine 404 / transport failure -> distrust, never crash
+        _log.info(
+            "verify_fill.retention_markers_unavailable", error=str(exc)[:200],
+        )
+        return {}
+    # SUCCESS + absent relation = never swept (or fresh schema) = 0. Distinct
+    # from the failure path above, which returns {} so every marked table
+    # DISTRUSTS (marker None). Normalizing zeros here lets a never-swept
+    # relevance_log advance/trust with baseline 0.
+    return {r: int(markers.get(r, 0)) for r in relations}
+
+
 def _try_fill(
     fn: Callable[[], dict[str, Any]],
     *,
@@ -1048,6 +1072,8 @@ def verify_fill_telemetry(
         read_rows_for_fill,
     )
     from nexus.migration.verify_fill_watermark import (  # noqa: PLC0415 — same import-cycle guard
+        RETENTION_HORIZON_TABLES,
+        RETENTION_MARKED_TABLES,
         WATERMARK_TABLES,
         advance_watermark,
         usable_min_rowid,
@@ -1071,6 +1097,7 @@ def verify_fill_telemetry(
     # watermark table degrades to the full probe (today's behavior).
     service_url = str(getattr(http_telemetry, "base_url", "") or "")
     wm_counts = cs.counts(list(WATERMARK_TABLES.values())) or {}
+    wm_markers = _fetch_retention_markers(http_telemetry)
     wm_max_rowids: dict[str, int] = {}
 
     conn = _open_ro(sqlite_path)
@@ -1085,15 +1112,37 @@ def verify_fill_telemetry(
                 wm_max_rowids[table] = max_source_rowid(conn, table)
                 min_rowid = usable_min_rowid(
                     service_url, table, wm_counts.get(WATERMARK_TABLES[table]),
+                    retention_marker=wm_markers.get(WATERMARK_TABLES[table]),
                 )
                 if min_rowid:
                     _log.info(
                         "verify_fill.watermark_shortcut",
                         table=table, min_rowid=min_rowid,
                     )
-            rows_by_table[table] = read_rows_for_fill(
+            rows = read_rows_for_fill(
                 conn, table, collector=collector, min_rowid=min_rowid,
             )
+            horizon_days = RETENTION_HORIZON_TABLES.get(table)
+            if horizon_days is not None and rows:
+                # nexus-24p05: probe ONLY rows inside the sweep's retention
+                # horizon. Older source rows are the sweep's legitimate
+                # deletion domain — probing them RESURRECTS expired rows
+                # (verify-fill re-imports any target-absent key). Same
+                # ISO-string comparison the sweep itself uses.
+                from datetime import UTC, datetime, timedelta  # noqa: PLC0415 — stdlib, branch-local
+                cutoff_iso = (
+                    datetime.now(UTC) - timedelta(days=horizon_days)
+                ).isoformat()
+                fresh = [r for r in rows if r.get("timestamp", "") >= cutoff_iso]
+                if len(fresh) != len(rows):
+                    _log.info(
+                        "verify_fill.retention_horizon_scope",
+                        table=table, total=len(rows), fresh=len(fresh),
+                        note="expired-side source rows excluded from the "
+                             "probe (sweep domain, never re-imported)",
+                    )
+                rows = fresh
+            rows_by_table[table] = rows
     finally:
         conn.close()
 
@@ -1149,6 +1198,9 @@ def verify_fill_telemetry(
     # POST-fill engine count is available to record as the invalidation
     # baseline (absent on a pre-whitelist engine -> no advance, no harm).
     wm_after = cs.counts(list(WATERMARK_TABLES.values())) or {} if wm_max_rowids else {}
+    wm_markers_after = (
+        _fetch_retention_markers(http_telemetry) if wm_max_rowids else {}
+    )
     # Review c0e4493e finding 1: RefreshableHttpStoreMixin can self-heal
     # _base_url mid-fill (retryable transport failure, unpinned endpoint) — the
     # writes then landed at the NEW target, so advancing under the ENTRY url
@@ -1165,7 +1217,13 @@ def verify_fill_telemetry(
         result = fill_results.get(table) or {}
         post = wm_after.get(WATERMARK_TABLES[table])
         if result.get("status") in ("parity", "filled") and isinstance(post, int):
-            advance_watermark(service_url, table, max_rowid, post)
+            advance_watermark(
+                service_url, table, max_rowid, post,
+                retention_marker=(
+                    wm_markers_after.get(WATERMARK_TABLES[table])
+                    if table in RETENTION_MARKED_TABLES else None
+                ),
+            )
 
     if collector is not None:
         for table, result in fill_results.items():

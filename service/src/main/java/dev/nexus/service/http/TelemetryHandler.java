@@ -36,6 +36,7 @@ import java.util.Map;
  *   POST /v1/telemetry/tier_writes/record      record a tier-write event
  *   POST /v1/telemetry/consents/record         record a consent grant/revoke (RDR-182)
  *   GET  /v1/telemetry/consents/list           list the tenant's consent trail (RDR-182)
+ *   GET  /v1/telemetry/retention/markers       cumulative-deletes retention markers (nexus-24p05)
  *   POST /v1/telemetry/nx_answer_runs/record   record an nx_answer run
  *   POST /v1/telemetry/hook_failures/record    record a hook failure
  *   POST /v1/telemetry/hook_failures/trim      trim old hook-failure entries
@@ -95,6 +96,7 @@ public final class TelemetryHandler implements HttpHandler {
                 case "/tier_writes/record"     -> handleTierWriteRecord(exchange, tenant, method);
                 case "/consents/record"        -> handleConsentRecord(exchange, tenant, method);
                 case "/consents/list"          -> handleConsentList(exchange, tenant, method);
+                case "/retention/markers"      -> handleRetentionMarkers(exchange, tenant, method);
                 case "/nx_answer_runs/record"  -> handleNxAnswerRunRecord(exchange, tenant, method);
                 case "/hook_failures/record"   -> handleHookFailureRecord(exchange, tenant, method);
                 case "/hook_failures/trim"     -> handleHookFailureTrim(exchange, tenant, method);
@@ -234,6 +236,28 @@ public final class TelemetryHandler implements HttpHandler {
     private void handleConsentList(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "GET");
         HttpUtil.send(ex, 200, json(repo.listConsents(tenant)));
+    }
+
+    /**
+     * GET /v1/telemetry/retention/markers?relations=a,b (nexus-24p05): the
+     * verify-fill watermark's rollback detector. Absent relations are simply
+     * omitted (never swept / fresh schema); the client treats absent as 0.
+     */
+    private void handleRetentionMarkers(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "GET");
+        String q = ex.getRequestURI().getQuery();
+        java.util.List<String> relations = java.util.List.of();
+        if (q != null) {
+            for (String pair : q.split("&")) {
+                if (pair.startsWith("relations=")) {
+                    String raw = java.net.URLDecoder.decode(
+                        pair.substring("relations=".length()), java.nio.charset.StandardCharsets.UTF_8);
+                    relations = java.util.Arrays.stream(raw.split(","))
+                        .map(String::trim).filter(sv -> !sv.isEmpty()).toList();
+                }
+            }
+        }
+        HttpUtil.send(ex, 200, json(Map.of("markers", repo.getRetentionMarkers(tenant, relations))));
     }
 
     // ── nx_answer_runs ─────────────────────────────────────────────────────────

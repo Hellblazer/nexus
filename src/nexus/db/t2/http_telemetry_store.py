@@ -167,6 +167,22 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         data = self._get("/v1/telemetry/consents/list")
         return data if isinstance(data, list) else []
 
+    def get_retention_markers(self, relations: list[str]) -> dict[str, int]:
+        """Cumulative-deletes retention markers for *relations* (nexus-24p05)
+        — the verify-fill watermark's rollback detector. Calls
+        ``GET /v1/telemetry/retention/markers``. Relations never swept (or on
+        a fresh post-rollback schema) are absent; callers treat absent as 0.
+        """
+        from urllib.parse import quote  # noqa: PLC0415 — stdlib, branch-local
+
+        data = self._get(
+            "/v1/telemetry/retention/markers?relations=" + quote(",".join(relations))
+        )
+        markers = data.get("markers") if isinstance(data, dict) else None
+        if not isinstance(markers, dict):
+            return {}
+        return {k: int(v) for k, v in markers.items() if isinstance(v, (int, float))}
+
     def record_nx_answer_run(
         self,
         *,

@@ -80,6 +80,14 @@ CREATE INDEX IF NOT EXISTS idx_relevance_log_chunk
 CREATE INDEX IF NOT EXISTS idx_relevance_log_session
     ON relevance_log(session_id);
 
+-- nexus-24p05: cumulative-deletes retention markers (the verify-fill
+-- watermark's rollback detector; local-mode twin of nexus.retention_markers).
+CREATE TABLE IF NOT EXISTS retention_markers (
+    relation      TEXT    PRIMARY KEY,
+    total_deleted INTEGER NOT NULL DEFAULT 0,
+    updated_at    TEXT    NOT NULL
+);
+
 -- RDR-087 Phase 2: per-call threshold-filter telemetry.
 -- Schema duplicated from migrations.migrate_search_telemetry so that
 -- fresh T2Database constructions get the table even before apply_pending
@@ -406,8 +414,35 @@ class Telemetry:
                 "DELETE FROM relevance_log WHERE timestamp < ?",
                 (cutoff,),
             )
+            if cur.rowcount > 0:
+                # nexus-24p05: publish the cumulative-deletes marker (twin of
+                # the engine's expireRelevanceLog bump).
+                self.conn.execute(
+                    "INSERT INTO retention_markers (relation, total_deleted, updated_at) "
+                    "VALUES ('nexus.relevance_log', ?, ?) "
+                    "ON CONFLICT(relation) DO UPDATE SET "
+                    "total_deleted = total_deleted + excluded.total_deleted, "
+                    "updated_at = excluded.updated_at",
+                    (cur.rowcount, datetime.now(UTC).isoformat()),
+                )
             self.conn.commit()
         return cur.rowcount
+
+    def get_retention_markers(self, relations: list[str]) -> dict[str, int]:
+        """Cumulative-deletes retention markers for *relations* (nexus-24p05)
+        — the verify-fill watermark's rollback detector. Relations never
+        swept are absent; callers treat absent as 0.
+        """
+        if not relations:
+            return {}
+        ph = ",".join("?" for _ in relations)
+        with self._lock:
+            rows = self.conn.execute(
+                f"SELECT relation, total_deleted FROM retention_markers "
+                f"WHERE relation IN ({ph})",
+                tuple(relations),
+            ).fetchall()
+        return {r[0]: int(r[1]) for r in rows}
 
     # ── search_telemetry (RDR-087 Phase 2) ────────────────────────────────
 

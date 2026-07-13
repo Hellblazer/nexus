@@ -41,6 +41,7 @@ PAST_TS = "2024-01-15T10:30:00Z"
 _relevance_log: list[dict[str, Any]] = []
 _search_telemetry: list[dict[str, Any]] = []
 _tier_writes: list[dict[str, Any]] = []
+_retention_markers: dict[str, int] = {}
 _consents: list[dict[str, Any]] = []
 _nx_answer_runs: list[dict[str, Any]] = []
 _hook_failures: list[dict[str, Any]] = []
@@ -57,6 +58,7 @@ def _clear_all() -> None:
         _search_telemetry.clear()
         _tier_writes.clear()
         _consents.clear()
+        _retention_markers.clear()
         _nx_answer_runs.clear()
         _hook_failures.clear()
         _frecency.clear()
@@ -361,6 +363,14 @@ class _FakeTelemetryHandler(BaseHTTPRequestHandler):
         elif pp == "/v1/telemetry/consents/list":
             with _STORE_LOCK:
                 self._send(200, list(_consents))
+            return
+
+        elif pp == "/v1/telemetry/retention/markers":
+            relations = [r for r in qs.get("relations", "").split(",") if r]
+            with _STORE_LOCK:
+                markers = {r: _retention_markers[r] for r in relations
+                           if r in _retention_markers}
+            self._send(200, {"markers": markers})
             return
 
         elif pp == "/v1/telemetry/search/stats":
@@ -831,3 +841,16 @@ class TestConfigErrors:
         monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
         with pytest.raises(RuntimeError, match="NX_SERVICE_TOKEN"):
             HttpTelemetryStore(base_url=fake_server)
+
+
+class TestRetentionMarkers:
+    def test_get_retention_markers_roundtrip(self, client):
+        """nexus-24p05: the watermark's rollback-detector read."""
+        _retention_markers["nexus.relevance_log"] = 7
+        got = client.get_retention_markers(
+            ["nexus.relevance_log", "nexus.search_telemetry"]
+        )
+        assert got == {"nexus.relevance_log": 7}  # never-swept relation absent
+
+    def test_get_retention_markers_empty(self, client):
+        assert client.get_retention_markers(["nexus.relevance_log"]) == {}

@@ -85,8 +85,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@link #VECTOR_THREADS} vector-upsert workers, gated on a {@link CountDownLatch}
  * so their first requests fire in the same instant against ONE brand-new collection
  * — the worst-case first-registration burst — then keeps looping for
- * {@link #RUN_TIME} so the (much larger) steady-state portion of the run is
- * exercised too. Chash/chunk IDs are unique per request so the ONLY shared
+ * {@link #ITERATIONS_PER_WORKER} iterations so the (much larger) steady-state
+ * portion of the run is exercised too, at a DETERMINISTIC volume decoupled
+ * from host speed. Chash/chunk IDs are unique per request so the ONLY shared
  * contention point is the {@code catalog_collections} registration row — isolating
  * the mechanism under test from ordinary chash/chunk PK contention. The pool is
  * smaller than production ({@link #POOL_SIZE} vs. {@code NX_POOL_SIZE}'s default 10)
@@ -106,9 +107,17 @@ import static org.assertj.core.api.Assertions.assertThat;
  * client. Scope note: that same load also occasionally produced client-side
  * {@code HttpTimeoutException}s (a possibly-related but distinct symptom — request
  * processing itself getting slow under whole-suite contention, not merely pool
- * acquisition); this fix targets the documented, typed 503 case specifically, as
- * requested. If timeout-driven flakiness persists under heavy load, that is a
- * separate follow-up, not silently folded into this change.
+ * acquisition); that fix targeted the documented, typed 503 case specifically.
+ *
+ * <p><strong>nexus-y92yf (2026-07-13).</strong> The deferred timeout follow-up,
+ * after three isolation-green full-run failures in one day: the 10s wall-clock
+ * tight loop coupled request volume AND pacing to host speed, so a contended
+ * host (parallel full pytest) blew the pool-wait, retry, and client-timeout
+ * budgets — manufacturing the exact 503/timeout signatures the assertion
+ * treats as regressions. Now: a fixed {@link #ITERATIONS_PER_WORKER} budget
+ * (deterministic volume), a 90s client timeout (host slowness slows the test,
+ * never fails it), and a deeper 503 retry backoff. The zero-5xx-after-retry
+ * assertion is unchanged and fully load-bearing.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ChashVectorConcurrencyTest {
@@ -127,15 +136,30 @@ class ChashVectorConcurrencyTest {
     private static final int VECTOR_THREADS  = 6;
     private static final int CHASH_BATCH     = 100;
     private static final int VECTOR_BATCH    = 60;
-    private static final Duration RUN_TIME   = Duration.ofSeconds(10);
+    // DETERMINISTIC volume (flake fix, 2026-07-13): a fixed per-worker
+    // iteration budget replaces the old 10s wall-clock tight loop, which
+    // coupled request volume AND pacing to host speed — on a contended host
+    // (parallel full pytest) server handling slowed until the pool-wait,
+    // retry, and client-timeout budgets all blew, manufacturing the exact
+    // 503/timeout signatures the zero-5xx assertion treats as regressions
+    // (three isolation-green full-run failures on 2026-07-13). 200 x 12
+    // workers = 2400 requests, matching the old run's steady-state volume;
+    // a slow host now just takes longer, it can never fail on pacing.
+    private static final int ITERATIONS_PER_WORKER = 200;
+    private static final Duration WORKER_AWAIT = Duration.ofSeconds(300);
     private static final int POOL_SIZE       = 6;
     private static final int CONNECTION_TIMEOUT_MS = 3000;
 
     // nexus-xqrq0: retry-on-typed-503 with capped exponential backoff, mirroring a
     // well-behaved production client. See postWithRetryOn503() doc for rationale.
-    private static final int  MAX_503_RETRIES  = 5;
+    // Deepened 2026-07-13 (the xqrq0 scope note's deferred timeout follow-up):
+    // 8 tries x <=2s backoff (~15.6s worst-case) outlasts transient host
+    // contention; the typed-503 admission path is still exercised — the
+    // assertion requires every 503 to RESOLVE within the budget, not to
+    // never occur.
+    private static final int  MAX_503_RETRIES  = 8;
     private static final long BASE_BACKOFF_MS  = 50;
-    private static final long MAX_BACKOFF_MS   = 500;
+    private static final long MAX_BACKOFF_MS   = 2000;
 
     PostgreSQLContainer<?> pg;
     HikariDataSource svcDs;
@@ -232,7 +256,10 @@ class ChashVectorConcurrencyTest {
             .uri(URI.create("http://127.0.0.1:" + service.getPort() + path))
             .header("Authorization", "Bearer " + TOKEN)
             .header("Content-Type", "application/json")
-            .timeout(Duration.ofSeconds(20))
+            // 90s: generous so HOST slowness (a busy CI box) can never
+            // manufacture a client-side timeout; a genuine service hang still
+            // fails via WORKER_AWAIT. (flake fix, 2026-07-13)
+            .timeout(Duration.ofSeconds(90))
             .POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body)))
             .build();
         return postWithRetryOn503(req);
@@ -274,7 +301,7 @@ class ChashVectorConcurrencyTest {
     /**
      * {@link #CHASH_THREADS} + {@link #VECTOR_THREADS} workers, gated to fire their
      * first request simultaneously against ONE brand-new collection, then looping
-     * for {@link #RUN_TIME}. Asserts zero 5xx responses across every request issued
+     * for {@link #ITERATIONS_PER_WORKER} iterations. Asserts zero 5xx responses across every request issued
      * by every worker.
      */
     @Test
@@ -307,7 +334,7 @@ class ChashVectorConcurrencyTest {
         startGate.countDown();
 
         pool.shutdown();
-        assertThat(pool.awaitTermination(RUN_TIME.plusSeconds(30).toSeconds(), TimeUnit.SECONDS))
+        assertThat(pool.awaitTermination(WORKER_AWAIT.toSeconds(), TimeUnit.SECONDS))
             .as("all worker threads must finish within the run window + grace period")
             .isTrue();
         // Propagate any uncaught worker exception (fails the test loudly instead of
@@ -333,9 +360,8 @@ class ChashVectorConcurrencyTest {
     private void chashLoop(int threadId, CountDownLatch startGate, AtomicInteger totalRequests,
                            AtomicInteger status5xx, AtomicInteger exceptions, List<String> failures) {
         awaitGate(startGate);
-        Instant deadline = Instant.now().plus(RUN_TIME);
         int iter = 0;
-        while (Instant.now().isBefore(deadline)) {
+        while (iter < ITERATIONS_PER_WORKER) {
             List<String> chashes = new ArrayList<>(CHASH_BATCH);
             for (int i = 0; i < CHASH_BATCH; i++) {
                 // catalog-013 (nexus-e0hd2): chash_index now enforces
@@ -365,9 +391,8 @@ class ChashVectorConcurrencyTest {
     private void vectorLoop(int threadId, CountDownLatch startGate, AtomicInteger totalRequests,
                             AtomicInteger status5xx, AtomicInteger exceptions, List<String> failures) {
         awaitGate(startGate);
-        Instant deadline = Instant.now().plus(RUN_TIME);
         int iter = 0;
-        while (Instant.now().isBefore(deadline)) {
+        while (iter < ITERATIONS_PER_WORKER) {
             List<String> ids = new ArrayList<>(VECTOR_BATCH);
             List<String> docs = new ArrayList<>(VECTOR_BATCH);
             List<Map<String, Object>> metas = new ArrayList<>(VECTOR_BATCH);

@@ -507,6 +507,11 @@ class _StatefulTelemetryTarget:
 
     base_url = "http://corpus-fake-service:0"  # watermark identity key (nexus-te885.10)
 
+    def get_retention_markers(self, relations):
+        """Marker-era engine, never swept: success + absent = baseline 0
+        (nexus-24p05; the orchestrator normalizes absent-on-success to 0)."""
+        return {}
+
     def __init__(self, present_by_table: dict[str, set[tuple[Any, ...]]]) -> None:
         self.present_by_table: dict[str, set[tuple[Any, ...]]] = {
             t: set(s) for t, s in present_by_table.items()

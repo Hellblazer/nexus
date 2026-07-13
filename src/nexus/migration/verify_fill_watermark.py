@@ -54,18 +54,31 @@ _log = structlog.get_logger(__name__)
 #: these there would let the outer loop skip them on an UNSOUND count
 #: parity (see module docstring).
 #:
-#: ``relevance_log`` is EXCLUDED (critique of c0e4493e, nexus-24p05): its
+#: ``relevance_log`` participates via the RETENTION MARKER (nexus-24p05): its
 #: target-side 90-day TTL sweep (``expire_relevance_log``, fired by the
-#: default-on SessionEnd hook via ``T2Database.expire()``) runs concurrently
-#: with continuous live inserts — the delete-N/insert-N steady state keeps the
-#: count non-decreasing, which DEFEATS the count trust gate (a hole below the
-#: floor stays invisible). It keeps today's full probe until a stronger
-#: invalidation signal exists (the sweep publishing a max-deleted marker).
+#: default-on SessionEnd hook via ``T2Database.expire()``) publishes a
+#: monotonic cumulative-deletes counter. The sweep deletes ONLY rows older
+#: than the retention horizon, and the fill probes ONLY rows inside it
+#: (``RETENTION_HORIZON_TABLES``) — provably disjoint domains — so sweep
+#: activity never invalidates fresh-row soundness; the marker's job is
+#: ROLLBACK detection (a fresh schema resets it below the recorded value).
 WATERMARK_TABLES: dict[str, str] = {
+    "relevance_log": "nexus.relevance_log",
     "search_telemetry": "nexus.search_telemetry",
     "tier_writes": "nexus.tier_writes",
     "frecency": "nexus.frecency",
 }
+
+#: Tables whose watermark trust ADDITIONALLY requires the retention marker
+#: (``marker_now >= recorded`` = no rollback). A missing marker read (old
+#: engine, transport failure) distrusts — fail-safe full probe.
+RETENTION_MARKED_TABLES: frozenset[str] = frozenset({"relevance_log"})
+
+#: Days of source rows the fill PROBES for retention-swept tables — matching
+#: the sweep's own horizon (``Telemetry.expire_relevance_log`` default). Rows
+#: older than this are the sweep's legitimate domain: probing them would
+#: RESURRECT expired rows (the pre-existing exposure nexus-24p05 closed).
+RETENTION_HORIZON_TABLES: dict[str, int] = {"relevance_log": 90}
 
 
 def _watermark_file() -> Path:
@@ -90,11 +103,16 @@ def _key(service_url: str, table: str) -> str:
 
 def usable_min_rowid(
     service_url: str, table: str, engine_count: int | None,
+    retention_marker: int | None = None,
 ) -> int:
     """The rowid floor the probe may start ABOVE, or 0 for a full probe.
 
     Returns 0 (no restriction) unless every trust condition holds — see the
-    module docstring. Never raises.
+    module docstring. For ``RETENTION_MARKED_TABLES``, *retention_marker*
+    (the live cumulative-deletes counter) must additionally be >= the value
+    recorded at advance time: a LOWER value means a fresh schema (rollback)
+    — distrust; ordinary sweep bumps (higher) are fine (disjoint domains).
+    Never raises.
     """
     if not service_url or engine_count is None:
         return 0
@@ -105,6 +123,22 @@ def usable_min_rowid(
     max_rowid = mark.get("max_rowid")
     if not isinstance(recorded, int) or not isinstance(max_rowid, int):
         return 0
+    if table in RETENTION_MARKED_TABLES:
+        recorded_marker = mark.get("retention_marker")
+        if (
+            retention_marker is None
+            or not isinstance(recorded_marker, int)
+            or retention_marker < recorded_marker
+        ):
+            _log.warning(
+                "verify_fill.watermark_distrusted_retention_marker",
+                table=table,
+                recorded_marker=mark.get("retention_marker"),
+                live_marker=retention_marker,
+                note="marker absent or below recorded (old engine / rollback) "
+                     "— full probe runs",
+            )
+            return 0
     if engine_count < recorded:
         _log.warning(
             "verify_fill.watermark_invalidated_target_shrank",
@@ -119,6 +153,7 @@ def usable_min_rowid(
 
 def advance_watermark(
     service_url: str, table: str, max_rowid: int, target_count: int,
+    retention_marker: int | None = None,
 ) -> None:
     """Record that every source row up to *max_rowid* is verified present.
 
@@ -140,10 +175,15 @@ def advance_watermark(
         with open(lock_path, "w") as lock_fh:
             fcntl.flock(lock_fh, fcntl.LOCK_EX)
             marks = _load_all()
-            marks[_key(service_url, table)] = {
+            mark: dict[str, Any] = {
                 "max_rowid": max_rowid,
                 "target_count": target_count,
             }
+            if table in RETENTION_MARKED_TABLES:
+                if retention_marker is None:
+                    return  # cannot record a rollback baseline -> no advance
+                mark["retention_marker"] = retention_marker
+            marks[_key(service_url, table)] = mark
             fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".wm_")
             try:
                 with os.fdopen(fd, "w") as fh:

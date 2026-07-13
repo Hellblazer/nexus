@@ -43,10 +43,12 @@ class JooqRecordReflectionFeatureTest {
      * get/search failure vs 0% put failure.
      */
     // 52 -> 53: RDR-182 nexus-ng2sy added nexus.claude_assisted_remediation_consents
+    // 53 -> 54: nexus-24p05 added nexus.retention_markers (verify-fill watermark
+    // rollback detector)
     // (the service-mode consent-audit table), so jOOQ codegen emits one more record
     // type. The feature enumerates via the schema model, so the new record is already
     // registered for native-image reflection; this guard is the deliberate count bump.
-    private static final int EXPECTED_RECORD_TYPES = 53;
+    private static final int EXPECTED_RECORD_TYPES = 54;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

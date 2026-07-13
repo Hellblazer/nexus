@@ -1635,6 +1635,7 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     "nexus.nx_answer_runs",
     "nexus.plans",
     "nexus.relevance_log",
+    "nexus.retention_markers",
     "nexus.search_telemetry",
     "nexus.taxonomy_meta",
     "nexus.tier_writes",
