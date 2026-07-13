@@ -133,14 +133,15 @@ def remediate_cmd(topic: str, show_history: bool) -> None:
     if show_history:
         # The consent-audit READ surface (nexus-ykzbj.15): the trail is
         # inspectable by the operator, not just written. Read-only — safe
-        # in any mode where the store answers; the service-mode parity gap
-        # surfaces the same ng2sy message as the write side.
+        # in any mode where the store answers. Service-mode parity landed
+        # with nexus-ng2sy; the guard remains as defense for an old engine
+        # build without the /consents/list route.
         with t2_handle() as db:
             if not hasattr(db.telemetry, "list_consents"):
                 raise click.ClickException(
                     "Consent-audit history is unavailable in this deployment "
-                    "(service-mode T2 lacks the consent surface until "
-                    "nexus-ng2sy)."
+                    "(this engine build lacks the consent-audit route — "
+                    "upgrade the engine to one with nexus-ng2sy)."
                 )
             rows = db.telemetry.list_consents()
         if not rows:
@@ -199,7 +200,8 @@ def remediate_cmd(topic: str, show_history: bool) -> None:
             if not hasattr(db.telemetry, "record_consent"):
                 raise click.ClickException(
                     "Cannot record the consent audit in this deployment "
-                    "(service-mode T2 lacks record_consent until nexus-ng2sy) "
+                    "(this engine build lacks the consent-audit route — upgrade the "
+                    "engine to one with nexus-ng2sy) "
                     "— refusing to release the recovery playbook unaudited."
                 )
             db.telemetry.record_consent(

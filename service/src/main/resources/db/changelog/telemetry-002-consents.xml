@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-182 P1.2 / nexus-ng2sy — service-mode parity for the consent audit.
+
+    The SQLite Telemetry store (nexus.db.t2.telemetry) has had
+    ``record_consent`` / ``list_consents`` since RDR-182 P1.2, but service
+    mode (the primary deployment) routes db.telemetry to HttpTelemetryStore,
+    which had no such method — so ``nx remediate`` fail-closed-refused the
+    release on every service-mode install (audit could not be written).
+
+    This adds the engine side: the ``claude_assisted_remediation_consents``
+    event-log table + FORCE-RLS tenant isolation, mirroring the tier_writes /
+    nx_answer_runs telemetry tables (telemetry-001). The jOOQ constant is
+    auto-generated from this changeset by the testcontainers-jooq-codegen
+    plugin; TelemetryRepository.recordConsent/listConsents and
+    TelemetryHandler's /consents/record + /consents/list routes consume it.
+
+    Append-only by design (RDR-182): a grant AND a revoke are each their own
+    row (``granted`` distinguishes them), so the durable-flag history and
+    every per-invocation release are reconstructible. No dedup unique index —
+    unlike the ETL event logs, distinct consent events at the same instant
+    are legitimately distinct.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="telemetry-002-1" author="nexus-ng2sy">
+        <comment>Create claude_assisted_remediation_consents table (RDR-182 consent audit)</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.claude_assisted_remediation_consents (
+    id         BIGSERIAL    NOT NULL,
+    tenant_id  TEXT         NOT NULL,
+    scope      TEXT         NOT NULL,
+    ts         TIMESTAMPTZ  NOT NULL,
+    granted    BOOLEAN      NOT NULL,
+    CONSTRAINT claude_consents_pk PRIMARY KEY (id)
+);
+
+-- Insertion-order read within a tenant (the audit trail; nx remediate --history).
+CREATE INDEX idx_claude_consents_tenant
+    ON nexus.claude_assisted_remediation_consents (tenant_id, id);
+CREATE INDEX idx_claude_consents_scope
+    ON nexus.claude_assisted_remediation_consents (tenant_id, scope);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.claude_assisted_remediation_consents CASCADE</rollback>
+    </changeSet>
+
+    <changeSet id="telemetry-002-2" author="nexus-ng2sy">
+        <comment>RLS on claude_assisted_remediation_consents</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.claude_assisted_remediation_consents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.claude_assisted_remediation_consents FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.claude_assisted_remediation_consents
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.claude_assisted_remediation_consents;
+            ALTER TABLE nexus.claude_assisted_remediation_consents NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.claude_assisted_remediation_consents DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

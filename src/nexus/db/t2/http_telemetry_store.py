@@ -136,6 +136,29 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "target_title": target_title,
         })
 
+    def record_consent(self, *, scope: str, ts: str, granted: bool) -> None:
+        """Record a consent grant/revoke. Calls ``POST /v1/telemetry/consents/record``.
+
+        RDR-182 nexus-ng2sy: the service-mode twin of ``Telemetry.record_consent``
+        — the consent audit the ``remediate`` release records at layer 5.
+        Append-only; ``granted`` distinguishes a grant from a revoke.
+        """
+        self._post("/v1/telemetry/consents/record", {
+            "scope":   scope,
+            "ts":      ts,
+            "granted": granted,
+        })
+
+    def list_consents(self) -> list[dict[str, Any]]:
+        """Read the tenant's consent-audit trail (grants and revokes, in
+        insertion order). Calls ``GET /v1/telemetry/consents/list``.
+
+        The service-mode twin of ``Telemetry.list_consents`` — the read
+        surface behind ``nx remediate --history``.
+        """
+        data = self._get("/v1/telemetry/consents/list")
+        return data if isinstance(data, list) else []
+
     def record_nx_answer_run(
         self,
         *,

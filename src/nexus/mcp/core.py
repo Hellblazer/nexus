@@ -6335,7 +6335,8 @@ def remediate(topic: str = "chash-poison", confirm: bool = False) -> str:
             if not hasattr(_db.telemetry, "record_consent"):
                 return (
                     "Cannot record the consent audit in this deployment "
-                    "(service-mode T2 lacks record_consent until nexus-ng2sy) "
+                    "(this engine build lacks the consent-audit route — upgrade the "
+                    "engine to one with nexus-ng2sy) "
                     "— REFUSING to release the recovery playbook unaudited. "
                     "Run the CLI path on the local install, or wait for the "
                     "engine-side consent-audit parity."

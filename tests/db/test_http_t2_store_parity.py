@@ -73,21 +73,11 @@ _STORE_PAIRS = [
 # row — the same fail-loud posture ``record_hook_failure`` closed for
 # tier_writes. Service-mode parity is bead nexus-ng2sy; until it lands,
 # the RDR-182 consent audit only has coverage on local (non-service) T2.
-_EXCLUSIONS: dict[str, dict[str, str]] = {
-    "telemetry": {
-        "record_consent": (
-            "RDR-182 P1.2 (nexus-ykzbj.6): consent audit is scoped to SQLite "
-            "only per the bead; HttpTelemetryStore + engine-side table/endpoint "
-            "parity is the explicit follow-up bead nexus-ng2sy (P1 — blocks the remediate path for service-mode deployments)."
-        ),
-        "list_consents": (
-            "RDR-182 P4 (nexus-ykzbj.15): the consent-audit READ surface, "
-            "SQLite-only for the same reason as record_consent; rides the "
-            "same nexus-ng2sy engine-parity follow-up (remove both entries "
-            "together)."
-        ),
-    },
-}
+# RF-158-1: zero exemptions across all nine pairs. The RDR-182 record_consent/
+# list_consents exclusions were removed 2026-07-13 when nexus-ng2sy landed the
+# engine-side consent table + /consents/{record,list} routes + the
+# HttpTelemetryStore twins — the parity tripwire is strict again.
+_EXCLUSIONS: dict[str, dict[str, str]] = {}
 
 # Per-(store, method) param-drift exemptions: the method exists on both the
 # contract and the HTTP store and is genuinely USED in service mode, but with a

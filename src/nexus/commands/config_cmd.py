@@ -101,7 +101,7 @@ def _record_flag_consent(raw_value: str) -> None:
             if not hasattr(db.telemetry, "record_consent"):
                 click.echo(
                     "WARNING: consent audit not recorded (service-mode T2 "
-                    "lacks record_consent until nexus-ng2sy) — the flag "
+                    "lacks the consent-audit route; upgrade the engine) — the flag "
                     "change itself took effect.",
                     err=True,
                 )

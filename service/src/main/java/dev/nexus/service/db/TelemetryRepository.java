@@ -440,6 +440,48 @@ public final class TelemetryRepository {
     }
 
     /**
+     * Record a consent event (RDR-182 P1.2 / nexus-ng2sy — service-mode
+     * parity for {@code Telemetry.record_consent}). Append-only: a grant AND
+     * a revoke are each their own row ({@code granted} distinguishes them).
+     * {@code tsIso} is caller-supplied (the consent gesture's timestamp).
+     */
+    public void recordConsent(String tenant,
+                              String scope,
+                              String tsIso,
+                              boolean granted) {
+        tenantScope.withTenant(tenant, ctx -> {
+            ctx.insertInto(CLAUDE_ASSISTED_REMEDIATION_CONSENTS)
+                .set(CLAUDE_ASSISTED_REMEDIATION_CONSENTS.TENANT_ID, tenant)
+                .set(CLAUDE_ASSISTED_REMEDIATION_CONSENTS.SCOPE, scope)
+                .set(CLAUDE_ASSISTED_REMEDIATION_CONSENTS.TS,
+                     tsIso != null ? parseTs(tsIso) : OffsetDateTime.now(ZoneOffset.UTC))
+                .set(CLAUDE_ASSISTED_REMEDIATION_CONSENTS.GRANTED, granted)
+                .execute();
+            return null;
+        });
+    }
+
+    /**
+     * Read the consent-audit trail for the tenant, in insertion order
+     * (grants and revokes; the {@code nx remediate --history} read surface).
+     * Returns {@code [{scope, ts, granted}, ...]}.
+     */
+    public List<Map<String, Object>> listConsents(String tenant) {
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.select(
+                CLAUDE_ASSISTED_REMEDIATION_CONSENTS.SCOPE,
+                CLAUDE_ASSISTED_REMEDIATION_CONSENTS.TS,
+                CLAUDE_ASSISTED_REMEDIATION_CONSENTS.GRANTED)
+                .from(CLAUDE_ASSISTED_REMEDIATION_CONSENTS)
+                .orderBy(CLAUDE_ASSISTED_REMEDIATION_CONSENTS.ID.asc())
+                .fetch()
+                .map(r -> Map.<String, Object>of(
+                    "scope",   str(r.value1()),
+                    "ts",      r.value2() != null ? r.value2().toString() : "",
+                    "granted", r.value3() != null && r.value3())));
+    }
+
+    /**
      * Fidelity-preserving import for tier_writes (ETL path).
      * Uses {@link #parseTsStrict} — throws on null/blank/malformed {@code tsIso}.
      * Does NOT delegate to {@code recordTierWrite} because that method uses the

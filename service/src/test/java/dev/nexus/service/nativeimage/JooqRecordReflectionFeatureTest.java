@@ -42,7 +42,11 @@ class JooqRecordReflectionFeatureTest {
      * record-materialization) were unaffected, matching the observed 100%
      * get/search failure vs 0% put failure.
      */
-    private static final int EXPECTED_RECORD_TYPES = 52;
+    // 52 -> 53: RDR-182 nexus-ng2sy added nexus.claude_assisted_remediation_consents
+    // (the service-mode consent-audit table), so jOOQ codegen emits one more record
+    // type. The feature enumerates via the schema model, so the new record is already
+    // registered for native-image reflection; this guard is the deliberate count bump.
+    private static final int EXPECTED_RECORD_TYPES = 53;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

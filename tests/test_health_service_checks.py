@@ -558,6 +558,7 @@ _ALL_TENANT_TABLES = [
     "nexus.catalog_meta",
     "nexus.catalog_owners",
     "nexus.chash_index",
+    "nexus.claude_assisted_remediation_consents",
     "nexus.document_aspects",
     "nexus.document_highlights",
     "nexus.frecency",
