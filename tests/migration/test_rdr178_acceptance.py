@@ -947,3 +947,55 @@ class TestTelemetryUnmappedDriftNotSilentlySkipped:
         sent_table_names = {t for t, _rows in corpus.telemetry_target.import_calls[imports_before:]}
         assert sent_table_names == {"frecency"}
         assert corpus.telemetry_target.present_by_table["frecency"] == present  # hole re-closed
+
+
+class TestWatermarkThirdPassShortcut:
+    """nexus-te885.10 part 2: after a breaker-clean verify-fill pass recorded
+    watermarks for the four count-unmapped tables, the NEXT no-op pass probes
+    only source rows above each watermark — zero rows on an unchanged source —
+    instead of re-probing the entire table contents."""
+
+    def test_third_pass_probes_above_watermark_only(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        corpus = _Corpus(tmp_path, monkeypatch, inject_burst=False)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "wmcfg"))
+
+        report1 = orch.migrate_all(
+            corpus.sources, count_source=corpus.count_source, verify_fill=False,
+        )
+        assert report1["summary"]["total_failed"] == 0
+
+        # Pass 2 (verify-fill): full probe (no watermark yet), breaker-clean,
+        # so it ADVANCES the watermarks for all four unmapped tables.
+        report2 = orch.migrate_all(
+            corpus.sources, count_source=corpus.count_source, verify_fill=True,
+        )
+        assert report2["summary"]["total_failed"] == 0
+
+        # Pass 3: capture the min_rowid every read uses.
+        from nexus.db.t2 import telemetry_etl as etl_mod
+        seen: dict[str, int] = {}
+        real_read = etl_mod.read_rows_for_fill
+
+        def _spy(conn, table, *, collector=None, min_rowid=0):
+            seen[table] = min_rowid
+            return real_read(conn, table, collector=collector, min_rowid=min_rowid)
+
+        monkeypatch.setattr(etl_mod, "read_rows_for_fill", _spy)
+        report3 = orch.migrate_all(
+            corpus.sources, count_source=corpus.count_source, verify_fill=True,
+        )
+        assert report3["summary"]["total_failed"] == 0
+
+        from nexus.migration.verify_fill_watermark import WATERMARK_TABLES
+        for table in WATERMARK_TABLES:
+            assert seen.get(table, 0) > 0, (
+                f"pass 3 must probe {table} above the pass-2 watermark, "
+                f"got min_rowid={seen.get(table)}"
+            )
+        # And the restricted read is genuinely empty on an unchanged source:
+        fill3 = report3["verify_fill"]["results"]["telemetry"]["fill"]
+        for table in WATERMARK_TABLES:
+            assert fill3[table]["status"] == "parity"
+            assert fill3[table]["filled"] == 0

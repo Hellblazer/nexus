@@ -83,6 +83,15 @@ public final class CatalogRepository {
         "nexus.topic_links",
         "nexus.hook_failures",
         "nexus.nx_answer_runs",
+        // nexus-te885.10: the four previously count-unmapped telemetry tables.
+        // Adding them makes the outer count-diff meaningful for observability
+        // AND feeds the verify-fill watermark's target-shrank invalidation
+        // guard (a lower count than the watermark recorded means rows were
+        // deleted, e.g. a rollback -- the watermark must not be trusted).
+        "nexus.relevance_log",
+        "nexus.search_telemetry",
+        "nexus.tier_writes",
+        "nexus.frecency",
         "nexus.chash_index",
         "nexus.catalog_owners",
         "nexus.catalog_documents",

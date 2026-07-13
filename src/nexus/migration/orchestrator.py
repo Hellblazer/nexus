@@ -1043,8 +1043,14 @@ def verify_fill_telemetry(
         _open_ro,
         conflict_key,
         count_source_rows,
+        max_source_rowid,
         migrate_telemetry_rows,
         read_rows_for_fill,
+    )
+    from nexus.migration.verify_fill_watermark import (  # noqa: PLC0415 — same import-cycle guard
+        WATERMARK_TABLES,
+        advance_watermark,
+        usable_min_rowid,
     )
     from nexus.migration.verify_fill import fill_missing, verify_store_counts  # noqa: PLC0415 — R2 import-cycle guard, mirrored from verify_fill.py
     from nexus.retry import EtlCircuitBreaker  # noqa: PLC0415 — deferred to avoid CLI startup cost
@@ -1056,6 +1062,17 @@ def verify_fill_telemetry(
     source_counts = count_source_rows(sqlite_path)
     outer_verdicts = verify_store_counts("telemetry", cs, source_counts)
 
+    # nexus-te885.10: the four count-parity-UNSOUND tables get a rowid
+    # WATERMARK instead (see verify_fill_watermark's soundness conditions).
+    # The engine count feeds ONLY the watermark trust gate — these tables are
+    # deliberately absent from _VERIFY_TABLES, so their outer status stays
+    # indeterminate and the parity-skip below can never fire unsoundly for
+    # them. On a pre-whitelist engine the counts come back absent and every
+    # watermark table degrades to the full probe (today's behavior).
+    service_url = str(getattr(http_telemetry, "base_url", "") or "")
+    wm_counts = cs.counts(list(WATERMARK_TABLES.values())) or {}
+    wm_max_rowids: dict[str, int] = {}
+
     conn = _open_ro(sqlite_path)
     try:
         rows_by_table: dict[str, list[dict[str, Any]]] = {}
@@ -1063,7 +1080,20 @@ def verify_fill_telemetry(
             status = outer_verdicts.get(table, {}).get("status", "indeterminate")
             if status == "parity":
                 continue  # zero-write skip, matches chash/catalog
-            rows_by_table[table] = read_rows_for_fill(conn, table, collector=collector)
+            min_rowid = 0
+            if table in WATERMARK_TABLES:
+                wm_max_rowids[table] = max_source_rowid(conn, table)
+                min_rowid = usable_min_rowid(
+                    service_url, table, wm_counts.get(WATERMARK_TABLES[table]),
+                )
+                if min_rowid:
+                    _log.info(
+                        "verify_fill.watermark_shortcut",
+                        table=table, min_rowid=min_rowid,
+                    )
+            rows_by_table[table] = read_rows_for_fill(
+                conn, table, collector=collector, min_rowid=min_rowid,
+            )
     finally:
         conn.close()
 
@@ -1114,6 +1144,16 @@ def verify_fill_telemetry(
         )
         fill_results[table] = result
         total_filled += result["filled"]
+
+    # Advance the watermarks: only after a breaker-clean pass, and only when a
+    # POST-fill engine count is available to record as the invalidation
+    # baseline (absent on a pre-whitelist engine -> no advance, no harm).
+    wm_after = cs.counts(list(WATERMARK_TABLES.values())) or {} if wm_max_rowids else {}
+    for table, max_rowid in wm_max_rowids.items():
+        result = fill_results.get(table) or {}
+        post = wm_after.get(WATERMARK_TABLES[table])
+        if result.get("status") in ("parity", "filled") and isinstance(post, int):
+            advance_watermark(service_url, table, max_rowid, post)
 
     if collector is not None:
         for table, result in fill_results.items():

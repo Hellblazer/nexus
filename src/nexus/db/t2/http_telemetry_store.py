@@ -136,6 +136,14 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "target_title": target_title,
         })
 
+    @property
+    def base_url(self) -> str:
+        """The resolved service base URL. Public read-only: the verify-fill
+        watermark (nexus-te885.10) keys its per-target state on it, so a
+        different target (fresh service after rollback + re-init) never
+        inherits another target's watermark."""
+        return self._base_url or ""
+
     def record_consent(self, *, scope: str, ts: str, granted: bool) -> None:
         """Record a consent grant/revoke. Calls ``POST /v1/telemetry/consents/record``.
 

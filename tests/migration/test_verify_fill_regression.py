@@ -505,6 +505,8 @@ class _StatefulTelemetryTarget:
     second pass genuinely re-probes post-fill state rather than replaying
     a canned snapshot."""
 
+    base_url = "http://corpus-fake-service:0"  # watermark identity key (nexus-te885.10)
+
     def __init__(self, present_by_table: dict[str, set[tuple[Any, ...]]]) -> None:
         self.present_by_table: dict[str, set[tuple[Any, ...]]] = {
             t: set(s) for t, s in present_by_table.items()

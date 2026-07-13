@@ -1,0 +1,132 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+"""nexus-te885.10 part 2: the verify-fill rowid watermark for the four
+count-parity-UNSOUND telemetry tables.
+
+``relevance_log`` / ``search_telemetry`` / ``tier_writes`` / ``frecency``
+have no sound count-parity gate: ``DO NOTHING`` collapses source duplicates
+(``target < source`` is ambiguous — collapse vs hole) and post-migration
+live writes land target-side directly (``target > source`` proves nothing).
+Their cheap no-op gate is a per-``(service_url, table)`` SOURCE-ROWID
+watermark: after a breaker-clean fill verified every source row up to rowid
+N present, the next run probes only rows with ``rowid > N`` — the frozen
+post-cutover source cannot grow rows below it.
+
+SOUNDNESS CONDITIONS (all load-bearing):
+
+- **Trust gate**: a stored watermark is honoured ONLY when the engine
+  returns a live row count for the table (proves a nexus-te885.10-era
+  engine) AND that count is >= the count recorded when the watermark was
+  written. A LOWER count means target rows were deleted (e.g. a rollback)
+  — the watermark is invalidated and the full probe runs. On a
+  pre-whitelist engine the count is absent, so the watermark is never
+  trusted: fail-safe degradation to today's full-probe behavior.
+- **Advance gate**: written only after a fill pass whose result status is
+  ``parity``/``filled`` (never after a breaker abort), and only when a
+  post-fill engine count is available to record.
+- **Source invariants**: the SQLite source is frozen post-cutover and these
+  tables are delete-free source-side, so rowids are stable and append-only.
+  ``frecency`` mutates content in place, but verify-fill checks identity
+  PRESENCE only, so a rowid watermark stays sound for it.
+- Interaction with the ``telemetry_etl.read_rows_for_fill`` retention
+  INVARIANT: the watermark narrows which SOURCE rows are probed; it cannot
+  resurrect retention-pruned target rows any more than the full probe can.
+"""
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+from pathlib import Path
+from typing import Any
+
+import structlog
+
+_log = structlog.get_logger(__name__)
+
+#: SQLite table -> PG relation, for the watermark's invalidation-count reads
+#: ONLY. Deliberately DISJOINT from ``orchestrator._VERIFY_TABLES`` — putting
+#: these four there would let the outer loop skip them on an UNSOUND count
+#: parity (see module docstring).
+WATERMARK_TABLES: dict[str, str] = {
+    "relevance_log": "nexus.relevance_log",
+    "search_telemetry": "nexus.search_telemetry",
+    "tier_writes": "nexus.tier_writes",
+    "frecency": "nexus.frecency",
+}
+
+
+def _watermark_file() -> Path:
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred, avoids import cycle at module load
+
+    return nexus_config_dir() / "migration" / "verify_fill_watermarks.json"
+
+
+def _load_all() -> dict[str, Any]:
+    try:
+        return json.loads(_watermark_file().read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _key(service_url: str, table: str) -> str:
+    return f"{service_url}|{table}"
+
+
+def usable_min_rowid(
+    service_url: str, table: str, engine_count: int | None,
+) -> int:
+    """The rowid floor the probe may start ABOVE, or 0 for a full probe.
+
+    Returns 0 (no restriction) unless every trust condition holds — see the
+    module docstring. Never raises.
+    """
+    if not service_url or engine_count is None:
+        return 0
+    mark = _load_all().get(_key(service_url, table))
+    if not isinstance(mark, dict):
+        return 0
+    recorded = mark.get("target_count")
+    max_rowid = mark.get("max_rowid")
+    if not isinstance(recorded, int) or not isinstance(max_rowid, int):
+        return 0
+    if engine_count < recorded:
+        _log.warning(
+            "verify_fill.watermark_invalidated_target_shrank",
+            table=table,
+            recorded_count=recorded,
+            engine_count=engine_count,
+            note="target rows were deleted (rollback?) — full probe runs",
+        )
+        return 0
+    return max_rowid
+
+
+def advance_watermark(
+    service_url: str, table: str, max_rowid: int, target_count: int,
+) -> None:
+    """Record that every source row up to *max_rowid* is verified present.
+
+    Atomic write (tmp + rename); best-effort — a persist failure only costs
+    the next run its shortcut, never correctness.
+    """
+    if not service_url:
+        return
+    path = _watermark_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        marks = _load_all()
+        marks[_key(service_url, table)] = {
+            "max_rowid": max_rowid,
+            "target_count": target_count,
+        }
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".wm_")
+        try:
+            with os.fdopen(fd, "w") as fh:
+                json.dump(marks, fh, indent=2)
+            os.replace(tmp, path)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+    except OSError:
+        _log.warning("verify_fill.watermark_persist_failed", table=table, exc_info=True)

@@ -123,6 +123,7 @@ def _iter_rows(
     desired_cols: tuple[str, ...],
     *,
     page_size: int = _READ_PAGE,
+    min_rowid: int = 0,
 ) -> Iterator[dict[str, Any]]:
     """Yield *table*'s rows as projected dicts in LIMIT/OFFSET pages (RDR-176 /
     nexus-lbolo: page the read so peak memory is one page, not the whole table).
@@ -137,9 +138,12 @@ def _iter_rows(
     cols_sql = ", ".join(cols)
     offset = 0
     while True:
+        # min_rowid > 0: the verify-fill watermark (nexus-te885.10) — probe
+        # only source rows the last breaker-clean fill has not yet verified.
         page = conn.execute(
-            f"SELECT {cols_sql} FROM {table} ORDER BY ROWID ASC "
-            f"LIMIT {page_size} OFFSET {offset}"
+            f"SELECT {cols_sql} FROM {table} WHERE ROWID > ? ORDER BY ROWID ASC "
+            f"LIMIT {page_size} OFFSET {offset}",
+            (min_rowid,),
         ).fetchall()
         if not page:
             break
@@ -635,8 +639,19 @@ _SIMPLE_BUILDERS: dict[str, tuple[tuple[str, ...], Any]] = {
 }
 
 
+def max_source_rowid(conn: sqlite3.Connection, table: str) -> int:
+    """Max ROWID in *table* (0 when empty/absent) — the verify-fill
+    watermark's advance value (nexus-te885.10)."""
+    try:
+        row = conn.execute(f"SELECT COALESCE(MAX(ROWID), 0) FROM {table}").fetchone()
+        return int(row[0]) if row else 0
+    except sqlite3.OperationalError:
+        return 0
+
+
 def read_rows_for_fill(
     conn: sqlite3.Connection, table: str, *, collector: Any = None,
+    min_rowid: int = 0,
 ) -> list[dict[str, Any]]:
     """Read + TRANSFORM ALL of *table*'s rows for the verify-fill inner
     loop (P3b) — the SAME per-row ``_build_*`` transform ``_migrate_all``
@@ -681,7 +696,7 @@ def read_rows_for_fill(
         cols, build = _SIMPLE_BUILDERS[table]
 
     rows: list[dict[str, Any]] = []
-    for raw in _iter_rows(conn, table, cols, page_size=_READ_PAGE):
+    for raw in _iter_rows(conn, table, cols, page_size=_READ_PAGE, min_rowid=min_rowid):
         try:
             row_dict, _sample_id = build(raw, collector)
         except _SkipRow as skip:

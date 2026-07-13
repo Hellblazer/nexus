@@ -550,6 +550,25 @@ class CatalogRepositoryTest {
         assertThat(counts).doesNotContainKey("nexus.pg_class");
     }
 
+    /**
+     * nexus-te885.10: the four formerly count-unmapped telemetry tables are
+     * now whitelisted, so verify-fill's outer count-diff (and the watermark
+     * target-shrank invalidation guard) can read them. Empty tables count 0 —
+     * presence in the result proves whitelisting.
+     */
+    @Test @Order(42)
+    void migration_relationCounts_includesTelemetryTables() {
+        var counts = repo.relationCounts(TENANT_A, List.of(
+            "nexus.relevance_log",
+            "nexus.search_telemetry",
+            "nexus.tier_writes",
+            "nexus.frecency"
+        ));
+        assertThat(counts).containsKeys(
+            "nexus.relevance_log", "nexus.search_telemetry",
+            "nexus.tier_writes", "nexus.frecency");
+    }
+
     @Test @Order(41)
     void migration_relationCounts_is_tenant_isolated() {
         // TENANT_B has no catalog_documents; its count is 0, not TENANT_A's.
