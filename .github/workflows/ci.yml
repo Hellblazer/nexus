@@ -767,11 +767,17 @@ jobs:
         # PINNED_SERVICE_TAG version (develop-tip is >= the pinned release) so the
         # gate exercises a CONFORMANT engine and the probe is satisfied
         # legitimately — no probe bypass, the hardening stays intact. Extracted
-        # from binary_install.py so it never drifts when the pin bumps.
+        # from engine_version.py's REQUIRED_ENGINE_VERSION — the ONE floor
+        # constant — so it never drifts when the pin bumps. (Was extracted from
+        # binary_install.py's PINNED_SERVICE_TAG literal until 2026-07-12, when
+        # the nexus-b6qlf-class unification made that constant DERIVED from
+        # REQUIRED_ENGINE_VERSION and the literal this regex matched ceased to
+        # exist — m.group(1) on None broke every seam-gated CI run. Same
+        # extraction run.sh --guided uses; fail-loud, no fallback.)
         if: steps.changes.outputs.seam == 'true'
         run: |
           set -euo pipefail
-          ver=$(python -c "import re,pathlib; s=pathlib.Path('src/nexus/daemon/binary_install.py').read_text(); m=re.search(r'PINNED_SERVICE_TAG[^=]*=\s*\"engine-service-v([0-9]+\.[0-9]+\.[0-9]+)\"', s); print(m.group(1))")
+          ver=$(python -c "import re,pathlib; s=pathlib.Path('src/nexus/engine_version.py').read_text(); m=re.search(r'REQUIRED_ENGINE_VERSION[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)', s); assert m, 'REQUIRED_ENGINE_VERSION not parseable — fix the regex before stamping'; print('.'.join(m.groups()))")
           props="service/src/main/resources/META-INF/nexus/release.properties"
           test -f "$props" || { echo "release.properties missing at $props"; exit 1; }
           tmp="$(mktemp)"
