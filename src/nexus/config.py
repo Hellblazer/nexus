@@ -820,6 +820,13 @@ def set_config_value(dotted_key: str, value: str) -> None:
 
         pdf:
           extractor: mineru
+
+    A non-dict value at an intermediate key (e.g. a hand-written flat
+    ``claude_assisted_remediation: true`` when setting
+    ``claude_assisted_remediation.enabled``) is REPLACED by the nested form —
+    the dotted command expresses explicit intent for the section shape, and the
+    RDR-182 refusal text names this command as the remedy for exactly that flat
+    shape (nexus-s4a98). The replacement is logged with the discarded value.
     """
     path = _global_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -830,8 +837,19 @@ def set_config_value(dotted_key: str, value: str) -> None:
             data = yaml.safe_load(path.read_text()) or {}
         # Build nested dict from dotted path
         node = data
-        for part in parts[:-1]:
-            node = node.setdefault(part, {})
+        for i, part in enumerate(parts[:-1]):
+            existing = node.get(part)
+            if not isinstance(existing, dict):
+                if existing is not None:
+                    _log.warning(
+                        "config_scalar_section_replaced",
+                        key=".".join(parts[: i + 1]),
+                        discarded_value=existing,
+                        dotted_key=dotted_key,
+                    )
+                existing = {}
+                node[part] = existing
+            node = existing
         node[parts[-1]] = value
         content = yaml.dump(data, default_flow_style=False)
         tmp_fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=".config_")
