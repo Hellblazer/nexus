@@ -143,3 +143,23 @@ def test_single_quoted_commands_neutralize_injection(
     assert _argv_after_terminator(r.stdout) == [arg], (
         f"{name} [{shell}]: expected intact literal token, got {_argv_after_terminator(r.stdout)!r}"
     )
+
+
+def test_no_body_prose_splices_arguments_into_a_reinvoke() -> None:
+    """Critique 2026-07-13 (ybvyo follow-through): the argless-preamble fix
+    moved the targeted load to a documented Bash-tool re-invoke. That
+    convention is prose — so guard it statically: no command body may
+    instruct passing raw $ARGUMENTS as a shell argument (the splice shape
+    ``-- $ARGUMENTS``, quoted or not) ANYWHERE, not just on the ``!`` line.
+    Free text reaches re-invokes as parsed literal argv tokens only.
+    """
+    offenders = {}
+    for md in sorted(_CMD_DIR.glob("*.md")):
+        body = md.read_text()
+        for splice in ("-- $ARGUMENTS", "-- '$ARGUMENTS'", '-- "$ARGUMENTS"'):
+            if splice in body:
+                offenders[md.name] = splice
+    assert offenders == {}, (
+        f"command bodies instruct splicing raw $ARGUMENTS into a shell "
+        f"re-invoke: {offenders}"
+    )

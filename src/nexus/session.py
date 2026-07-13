@@ -953,14 +953,31 @@ def find_immediate_claude_pid(start_pid: int | None = None) -> int:
 
 
 
+_LEGACY_SKIP_T1_IGNORED_WARNED: bool = False
+
+
 def _t1_isolated_env() -> bool:
     """Return True when the current env opts into per-process T1 ephemeral.
 
     ``NX_T1_ISOLATED=1`` only. The legacy ``NEXUS_SKIP_T1=1`` alias
-    (4.27 -> 4.28 deprecation cycle, RF-4) was removed at 6.5.2 —
-    a full major version past its promised 5.0 removal.
+    (4.27 -> 4.28 deprecation cycle, RF-4) was removed at 6.5.2 — a full
+    major past its promised 5.0 removal. It is recognized-but-IGNORED with
+    a one-shot warning (critique 2026-07-13: with a live T1 discoverable, a
+    stale alias would otherwise SILENTLY connect the caller to the shared
+    T1 instead of the isolation they asked for — the warning is the only
+    remaining signal).
     """
-    return os.environ.get("NX_T1_ISOLATED", "").strip().lower() in ("1", "true", "yes")
+    global _LEGACY_SKIP_T1_IGNORED_WARNED
+    isolated = os.environ.get("NX_T1_ISOLATED", "").strip().lower() in ("1", "true", "yes")
+    legacy = os.environ.get("NEXUS_SKIP_T1", "").strip().lower() in ("1", "true", "yes")
+    if legacy and not isolated and not _LEGACY_SKIP_T1_IGNORED_WARNED:
+        _LEGACY_SKIP_T1_IGNORED_WARNED = True
+        _log.warning(
+            "nexus_skip_t1_removed_ignored",
+            message="NEXUS_SKIP_T1 was REMOVED at 6.5.2 and is IGNORED — it no "
+                    "longer isolates T1. Set NX_T1_ISOLATED=1.",
+        )
+    return isolated
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────

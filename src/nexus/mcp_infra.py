@@ -718,7 +718,9 @@ def _embedding_is_empty(embedding: object) -> bool:
     return len(embedding) == 0
 
 
-def _record_taxonomy_tripwire(collection: str, doc_ids: list, error: str) -> None:
+def _record_taxonomy_tripwire(
+    collection: str, doc_ids: list, error: str, *, kind: str = "",
+) -> None:
     """nexus-gednd: loudness tripwire for taxonomy assignment (the RDR-172
     aspect-enqueue pattern). The assign hook is best-effort — it swallows its
     own exceptions so fire_batch sees success and hook_registry records NO
@@ -727,10 +729,15 @@ def _record_taxonomy_tripwire(collection: str, doc_ids: list, error: str) -> Non
     failure must never block indexing) and log at warning, not debug.
     """
     import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
+    # ``kind`` suffixes the hook_name so nx taxonomy status can distinguish a
+    # designed SKIP (embed_unavailable — an eventual-consistency race, not a
+    # bug) from a genuine assignment failure (critique 2026-07-13).
+    hook_name = "taxonomy_assign_batch_hook" + (f".{kind}" if kind else "")
     structlog.get_logger().warning(
         "taxonomy_assign_batch_failed",
         collection=collection,
         batch_size=len(doc_ids),
+        kind=kind or "failure",
         error=error[:500],
     )
     try:
@@ -738,7 +745,7 @@ def _record_taxonomy_tripwire(collection: str, doc_ids: list, error: str) -> Non
             lambda t2: t2.telemetry.record_hook_failure(
                 doc_id=(doc_ids[0] if doc_ids else ""),
                 collection=collection,
-                hook_name="taxonomy_assign_batch_hook",
+                hook_name=hook_name,
                 error=error[:2000],
                 chain="batch",
             )
@@ -825,6 +832,7 @@ def taxonomy_assign_batch_hook(
                     f"service embeddings unavailable: want={len(doc_ids)} "
                     f"got={0 if arr is None else len(arr)} — no assignments "
                     f"written for this batch",
+                    kind="embed_unavailable",
                 )
                 return
             svc_embeddings = arr.tolist()

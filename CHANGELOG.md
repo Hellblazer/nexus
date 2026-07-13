@@ -6,6 +6,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed
+
+- The legacy `NEXUS_SKIP_T1=1` env alias (deprecated 4.27, promised removed in
+  5.0) no longer selects T1 isolation. It is recognized-but-ignored with a
+  one-shot warning; set `NX_T1_ISOLATED=1` instead. NOTE: with a live T1
+  discoverable, a stale `NEXUS_SKIP_T1=1` now connects to the discovered T1
+  rather than an isolated ephemeral — the warning is the migration signal.
+- `nexus.taxonomy.cluster_and_persist` / `rebuild_taxonomy` no-op stubs
+  ("Removed in 4.0"), `nexus.config.storage_mode()` / `StorageModeError` /
+  `VALID_STORAGE_MODES` (RDR-120 P6 shim) and the `NX_STORAGE_MODE` env var,
+  and `nexus.db.t3._STORE_TYPES` — all past their deprecation windows, all
+  with zero production callers.
+
 ### Added
 
 - `nx index repo` refuses a `PATH` with no `.git` (file or directory — git
