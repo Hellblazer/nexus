@@ -2137,7 +2137,10 @@ def _check_migration_state(
     # counts see every tenant's rows — what VALIDATE sees. A missing
     # diagnostic role (pre-P2.1 install) or a probe failure degrades to a
     # WARN, never a false "clean".
-    from nexus.db.chash_tables import chash_conformance_statements  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.db.chash_tables import (  # noqa: PLC0415 — deferred to avoid circular import
+        chash_conformance_statements,
+        legacy_chash_conformance_statements,
+    )
     from nexus.db.diag_connection import (  # noqa: PLC0415 — deferred to avoid circular import
         resolve_diag_credentials,
         run_diagnostic_sql,
@@ -2162,10 +2165,28 @@ def _check_migration_state(
         nonconforming = -1
     else:
         try:
-            counts = run_diagnostic_sql(
-                chash_conformance_statements(), diag_creds,
-                psql_bin=psql_bin, psql_runner=diag_runner,
-            )
+            # Amendment A6 (nexus-9bufb): view-era statements first — counts
+            # by construction via nexus.diag_chash_conformance. An engine one
+            # generation behind (no view yet) fails the first set; the legacy
+            # direct-table statements still work there because the legacy
+            # grants era carries full-table SELECT — fall back LOUDLY (log),
+            # never silently.
+            try:
+                counts = run_diagnostic_sql(
+                    chash_conformance_statements(), diag_creds,
+                    psql_bin=psql_bin, psql_runner=diag_runner,
+                )
+            except (RuntimeError, ValueError) as view_exc:
+                _log.warning(
+                    "chash_probe_view_fallback_legacy",
+                    error=str(view_exc)[:200],
+                    note="diag_chash_conformance view absent (pre-A6 engine) "
+                         "— probing tables directly under the legacy grants",
+                )
+                counts = run_diagnostic_sql(
+                    legacy_chash_conformance_statements(), diag_creds,
+                    psql_bin=psql_bin, psql_runner=diag_runner,
+                )
             nonconforming = sum(int(c) for c in counts)
         except (RuntimeError, DiagnosticSqlViolation, ValueError) as exc:
             # Probe failure (schema variant missing a table), lint refusal,

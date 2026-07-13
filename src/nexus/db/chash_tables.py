@@ -27,10 +27,50 @@ CHASH_BEARING_TABLES: tuple[str, ...] = (
 )
 
 
+#: RDR-182 Amendment A6 (nexus-9bufb): the structural content boundary. A
+#: superuser-owned counts view — the diagnostic role reads COUNTS BY
+#: CONSTRUCTION (definer semantics + RLS exemption via the superuser owner),
+#: never row content; the runAlways grants changeset revokes nexus_diag's
+#: direct table SELECT once this view exists.
+DIAG_CONFORMANCE_VIEW: str = "nexus.diag_chash_conformance"
+
+
+def diag_conformance_view_ddl() -> str:
+    """The view's DDL, generated from :data:`CHASH_BEARING_TABLES` so the
+    view and the constant cannot drift (pinned by test). Executed by the
+    SUPERUSER provisioning path (``pg_provision``) — under FORCE RLS a view
+    counts cross-tenant rows only when its OWNER is RLS-exempt, which only
+    the superuser context can arrange (the nexus-vounk lesson, structurally).
+    Managed/DBA deployments get the rendered copy in docs/configuration.md.
+    """
+    union = "\nUNION ALL\n".join(
+        f"SELECT '{t}' AS table_name, count(*) AS non_conformant "
+        f"FROM {t} WHERE length(chash) <> 32"
+        for t in CHASH_BEARING_TABLES
+    )
+    return f"CREATE OR REPLACE VIEW {DIAG_CONFORMANCE_VIEW} AS\n{union}"
+
+
 def chash_conformance_statements() -> tuple[str, ...]:
-    """One aggregate ``count`` statement per chash-bearing table — the
-    read-only, metadata-only shape the ``nexus_diag`` lint accepts and the
-    BYPASSRLS diagnostic role counts across every tenant (nexus-vounk)."""
+    """One aggregate statement per chash-bearing table AGAINST THE COUNTS
+    VIEW (Amendment A6) — same one-number-per-statement output shape as the
+    legacy direct counts (the probe's parser is unchanged), same read-only
+    aggregate-only shape the ``nexus_diag`` lint accepts. The view emits
+    exactly one row per table unconditionally, so ``sum`` never returns
+    NULL."""
+    return tuple(
+        f"SELECT sum(non_conformant) FROM {DIAG_CONFORMANCE_VIEW} "
+        f"WHERE table_name = '{t}'"
+        for t in CHASH_BEARING_TABLES
+    )
+
+
+def legacy_chash_conformance_statements() -> tuple[str, ...]:
+    """The pre-A6 direct-table counts. The health probe FALLS BACK to these
+    when the view is absent (an engine older than the A6 changeset) — the
+    old grants era still carries full-table SELECT, so the fallback works
+    exactly as before; without it the install-binary gate would fail loud on
+    every store one engine-generation behind."""
     return tuple(
         f"SELECT count(*) FROM {t} WHERE length(chash) <> 32"
         for t in CHASH_BEARING_TABLES

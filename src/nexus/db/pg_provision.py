@@ -771,6 +771,35 @@ def _create_roles(
     except Exception as exc:  # noqa: BLE001 — best-effort; the runAlways changeset is authoritative
         _log.warning("pg_diag_grants_best_effort_failed", error=str(exc))
 
+    # RDR-182 Amendment A6 (nexus-9bufb): the structural content boundary —
+    # a SUPERUSER-owned counts view. Under FORCE RLS, a view counts
+    # cross-tenant rows only when its owner is RLS-exempt; this runs in the
+    # superuser provisioning context, so the view is exactly that. Once it
+    # exists, the engine's runAlways grants changeset REVOKES nexus_diag's
+    # direct table SELECT — count-by-construction replaces lint-only
+    # enforcement of the content boundary. Conditional on the chunk tables
+    # existing (fresh provisions create the schema on first engine boot; the
+    # next re-provision or the changeset era completes the swap). Best-effort
+    # like the grants above.
+    try:
+        from nexus.db.chash_tables import diag_conformance_view_ddl  # noqa: PLC0415 — deferred, keeps provision import-light
+
+        _psql(
+            bins, port, NEXUS_DB_NAME, os_user,
+            "DO $do$ BEGIN "
+            "IF EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n "
+            "ON n.oid = c.relnamespace WHERE n.nspname = 'nexus' "
+            "AND c.relname = 'chash_index') THEN "
+            + diag_conformance_view_ddl().replace("\n", " ")
+            + "; "
+            "GRANT SELECT ON nexus.diag_chash_conformance TO nexus_diag; "
+            "END IF; "
+            "END $do$;",
+        )
+        _log.info("pg_diag_conformance_view_provisioned")
+    except Exception as exc:  # noqa: BLE001 — best-effort; absent view = probe falls back to legacy statements
+        _log.warning("pg_diag_view_best_effort_failed", error=str(exc))
+
     # Unconditional password sync: even if roles were created on a previous
     # run that crashed before writing credentials, this ensures DB state
     # matches the passwords we are about to persist.  ALTER ROLE … PASSWORD
@@ -971,6 +1000,35 @@ def _backfill_diag_role(
         )
     except Exception as exc:  # noqa: BLE001 — best-effort; the runAlways changeset is authoritative
         _log.warning("pg_diag_grants_best_effort_failed", error=str(exc))
+
+    # RDR-182 Amendment A6 (nexus-9bufb): the structural content boundary —
+    # a SUPERUSER-owned counts view. Under FORCE RLS, a view counts
+    # cross-tenant rows only when its owner is RLS-exempt; this runs in the
+    # superuser provisioning context, so the view is exactly that. Once it
+    # exists, the engine's runAlways grants changeset REVOKES nexus_diag's
+    # direct table SELECT — count-by-construction replaces lint-only
+    # enforcement of the content boundary. Conditional on the chunk tables
+    # existing (fresh provisions create the schema on first engine boot; the
+    # next re-provision or the changeset era completes the swap). Best-effort
+    # like the grants above.
+    try:
+        from nexus.db.chash_tables import diag_conformance_view_ddl  # noqa: PLC0415 — deferred, keeps provision import-light
+
+        _psql(
+            bins, port, NEXUS_DB_NAME, os_user,
+            "DO $do$ BEGIN "
+            "IF EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n "
+            "ON n.oid = c.relnamespace WHERE n.nspname = 'nexus' "
+            "AND c.relname = 'chash_index') THEN "
+            + diag_conformance_view_ddl().replace("\n", " ")
+            + "; "
+            "GRANT SELECT ON nexus.diag_chash_conformance TO nexus_diag; "
+            "END IF; "
+            "END $do$;",
+        )
+        _log.info("pg_diag_conformance_view_provisioned")
+    except Exception as exc:  # noqa: BLE001 — best-effort; absent view = probe falls back to legacy statements
+        _log.warning("pg_diag_view_best_effort_failed", error=str(exc))
     _persist_diag_credentials(creds_path, diag_pass)
 
 

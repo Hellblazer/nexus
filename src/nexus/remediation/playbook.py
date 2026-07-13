@@ -26,6 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from nexus.db.chash_tables import CHASH_BEARING_TABLES as _CHASH_TABLES
+from nexus.db.chash_tables import chash_conformance_statements as _chash_statements
 
 #: Full clickable https URL, pinned to ``main`` (releases promote develop ->
 #: main, so an operator on a released build finds the sections on main).
@@ -292,10 +293,11 @@ def _chash_poison_forensics(store_state: StoreState) -> Playbook:
             "clean (no action) or proceed to remediate:chash-poison."
         ),
         escape=(
-            "If the Postgres cluster is down or the diagnostic credentials "
-            "are gone (pre-P2.1 install), STOP and report which prerequisite "
-            "is missing — re-running `nx init --service` backfills the "
-            "diagnostic role and credentials."
+            "If the Postgres cluster is down, the diagnostic credentials are "
+            "gone (pre-P2.1 install), or the nexus.diag_chash_conformance "
+            "counts view is absent (pre-A6 engine), STOP and report which "
+            "prerequisite is missing — re-running `nx init --service` "
+            "backfills the diagnostic role, credentials, and view."
         ),
         goal="decide whether remediation is needed",
         incident_ref="nexus-pnwu0",
@@ -309,10 +311,12 @@ def _chash_poison_forensics(store_state: StoreState) -> Playbook:
         force_risk="",
         runbook_section="8.1",
         store_detail=store_state.detail,
-        diagnostic_sql=tuple(
-            f"SELECT count(*) FROM {t} WHERE length(chash) <> 32"
-            for t in _CHASH_TABLES
-        ) + (
+        # Amendment A6 (nexus-9bufb): the counts VIEW, not direct table
+        # counts — the diagnostic role's table SELECT is revoked in the view
+        # era, and the view emits counts by construction. Same emitter the
+        # health probe uses (nexus.db.chash_tables), so the two surfaces
+        # cannot drift.
+        diagnostic_sql=_chash_statements() + (
             "SELECT conname, convalidated FROM pg_constraint "
             "WHERE conname LIKE 'chk_%'",
         ),

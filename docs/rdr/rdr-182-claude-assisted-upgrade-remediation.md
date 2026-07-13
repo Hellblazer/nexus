@@ -434,6 +434,25 @@ principles; the engine-side analysis (c4143) shows the hard cases need a human
   cannot stop the user's own agent from running arbitrary SQL as
   `nexus_admin` — this closes the *product-provisioned diagnostic* path, not
   every conceivable read.
+- **Risk (A6, taxonomy amendment 2026-07-13 / nexus-9bufb, post-close)**: the
+  `nexus_diag` content boundary (§5: count rows, never read content) was
+  enforced only at the product choke point (`diag_connection.run_diagnostic_sql`
+  lint) — the role's DB grants were full-column SELECT + BYPASSRLS, so a
+  session opened OUTSIDE the helper could read cross-tenant content.
+  **Resolution (Hal decision, "amend it")**: structural DB-level scoping — the
+  superuser provisioning path creates the `nexus.diag_chash_conformance`
+  counts view (superuser-owned: under FORCE RLS a view counts cross-tenant
+  rows only when its owner is RLS-exempt — the nexus-vounk lesson applied
+  structurally), and the view-era `grants-nexus-diag-2` runAlways changeset
+  revokes the role's direct table SELECT, leaving the view + Liquibase
+  journal only. Counts-by-construction replaces lint-only enforcement; the
+  choke-point lint stays as defense in depth. The emitted diagnostic SQL
+  (health probe + `forensics` playbook, both from
+  `nexus.db.chash_tables.chash_conformance_statements`) targets the view,
+  with a loud legacy-statement fallback for engines one generation behind
+  (whose legacy grants still carry table SELECT). Drift guards pin the view
+  DDL, the docs' rendered DBA copy, and the changeset's revoke to
+  `CHASH_BEARING_TABLES` (`tests/test_diag_conformance_view.py`).
 - **Risk (H1, extension of A5, 2026-07-13 / critic-final)**: the CLI `nx
   remediate` RELEASE was originally gated only by the interactive
   `click.confirm`, so an automation piping `y` (`echo y | nx remediate`)

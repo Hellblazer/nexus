@@ -109,10 +109,14 @@ def test_forensics_topic_sql_is_lint_clean():
     pb = emit_forensics_playbook("chash-poison", StoreState(detail="x"))
     assert pb.diagnostic_sql, "forensics topic must carry diagnostic SQL"
     # emit_forensics_playbook already ran the lint (it raises on violation);
-    # assert the statements are the aggregate-count shape.
+    # assert the statements are the aggregate shape — Amendment A6
+    # (nexus-9bufb): per-table sums AGAINST THE COUNTS VIEW (structural
+    # content boundary), plus the pg_constraint state read.
     for stmt in pb.diagnostic_sql:
-        assert stmt.upper().startswith(("SELECT COUNT", "SELECT CONNAME")) or \
-            "count(*)" in stmt, stmt
+        assert (
+            stmt.upper().startswith(("SELECT SUM", "SELECT CONNAME"))
+            or "diag_chash_conformance" in stmt
+        ), stmt
 
 
 def test_no_outbound_http_in_the_tool_path(enabled_config, monkeypatch):

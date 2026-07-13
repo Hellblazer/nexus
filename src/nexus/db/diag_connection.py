@@ -10,19 +10,21 @@ it is never laundered again):
   Postgres regardless of what any caller does
   (``tests/db/test_nexus_diag_role.py::TestMutationsRefuse``).
 - The **content** boundary (RDR-182 §5: diagnostics may count store rows,
-  never read row/document/note content) is NOT enforced by the role — the
-  role has full-column SELECT + BYPASSRLS, because integrity probes must see
-  what Liquibase VALIDATE sees (nexus-vounk: FORCE-RLS false-clean,
-  demonstrated 0-vs-9). The content boundary is enforced HERE, at the single
-  product choke point: :func:`run_diagnostic_sql` refuses to execute any
-  statement that fails :func:`nexus.remediation.sql_lint
-  .assert_read_only_diagnostics` — BEFORE any DB contact — and wraps every
-  execution in ``SET TRANSACTION READ ONLY`` as defense-in-depth. Product
-  code MUST NOT open ad-hoc ``nexus_diag`` sessions any other way; a direct
-  psql/psycopg connection as ``nexus_diag`` bypasses the content lint and is
-  a review-blocking defect. (Structural DB-level content scoping — count
-  views instead of table SELECT — is tracked separately as a Phase-3 design
-  question.)
+  never read row/document/note content) has TWO eras (Amendment A6,
+  nexus-9bufb, 2026-07-13). LEGACY era: the role has full-column SELECT +
+  BYPASSRLS (integrity probes must see what Liquibase VALIDATE sees —
+  nexus-vounk: FORCE-RLS false-clean, demonstrated 0-vs-9), and the boundary
+  is enforced ONLY here at the choke point. VIEW era (the superuser
+  provisioning path has created ``nexus.diag_chash_conformance``): the
+  engine's ``grants-nexus-diag-2`` changeset REVOKES the role's direct table
+  SELECT — the boundary becomes COUNT-BY-CONSTRUCTION at the DB level, and
+  this choke point remains as defense in depth. In BOTH eras
+  :func:`run_diagnostic_sql` refuses any statement failing
+  :func:`nexus.remediation.sql_lint.assert_read_only_diagnostics` — BEFORE
+  any DB contact — and wraps execution in ``SET TRANSACTION READ ONLY``.
+  Product code MUST NOT open ad-hoc ``nexus_diag`` sessions any other way; a
+  direct psql/psycopg connection as ``nexus_diag`` bypasses the lint and is
+  a review-blocking defect.
 
 Credentials: ``NX_DB_DIAG_USER`` / ``NX_DB_DIAG_PASS`` in ``pg_credentials``
 are OPTIONAL keys — pre-P2.1 files lack them until the next ``provision()``
