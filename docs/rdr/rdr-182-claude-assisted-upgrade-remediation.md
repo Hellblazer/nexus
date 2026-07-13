@@ -213,15 +213,20 @@ Critical Assumptions against source. Full evidence: T2
   `config.yml`/`nx config set` + `attention_guided_v1`'s default-False +
   locked test cover the CLI path; a small T2 `record_consent()` table is
   net-new. SCOPE (gate Layer 3): this covers the CLI ONLY.
-- [ ] Opt-in **enforceable at the MCP tool boundary** (a config-flag read
+- [x] Opt-in **enforceable at the MCP tool boundary** (a config-flag read
   inside `forensics`/`remediate` that refuses before emitting content) —
-  **Status**: Unverified / UNBUILT — **Method**: Spike. The RDR's own A3
-  research (`nexus/rdr182-assumption3-opt-in-primitives-investigation` §3)
-  states a Desktop/plugin-scoped opt-in has no home today and must be built;
-  `click.confirm` does NOT transfer to an MCP call, and no existing
-  `@mcp.tool()` is config-gated. This is the load-bearing safety mechanism for
-  the surface Gap 4 calls first-class and MUST be verified (a spike proving
-  the tool refuses when the flag is false) before implementation.
+  **Status**: Verified — **Method**: Spike (nexus-ykzbj.1, 2026-07-12). A
+  registered throwaway `@mcp.tool()` (`rdr182_gate_spike`) gated by a
+  first-statement `_remediation_opt_in()` read of
+  `claude_assisted_remediation.enabled` refuses with an exact-remedy string
+  and provably enters zero content path when the flag is false/absent
+  (tests/mcp/test_rdr182_opt_in_gate.py, 8 mechanical tests). Two
+  load-bearing spike findings locked for Phase 3: `nx config set` stores the
+  raw STRING (`"true"`/`"false"`), so the gate parses strictly and
+  fail-closed (naive truthiness would invert an explicit `"false"` disable);
+  and the flag is read fresh per invocation (long-lived MCP server —
+  mid-session enable takes effect on the next call). Exact gate shape +
+  reuse contract: T2 `nexus/rdr182-a4-spike-gate-shape.md`.
 
 ## Proposed Solution
 
@@ -397,9 +402,10 @@ principles; the engine-side analysis (c4143) shows the hard cases need a human
 
 ### Prerequisites
 
-- [ ] All Critical Assumptions verified — including A4 (MCP tool-boundary
-  opt-in enforcement), which is Unbuilt and requires a spike proving the tool
-  refuses when the flag is false BEFORE any implementation.
+- [x] All Critical Assumptions verified — A4 (MCP tool-boundary opt-in
+  enforcement) verified 2026-07-12 by the nexus-ykzbj.1 gating spike (see
+  Critical Assumptions above; gate shape in T2
+  `nexus/rdr182-a4-spike-gate-shape.md`).
 - [ ] RDR-126 Desktop surface + MCP tool model reviewed
 
 ### Minimum Viable Validation

@@ -2,7 +2,9 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """MCP core tools: search, store, memory, scratch, collections, plans.
 
-35 registered tools + 3 demoted (plain functions, no @mcp.tool()).
+37 registered tools + 3 demoted (plain functions, no @mcp.tool()); one of the
+37 is the THROWAWAY RDR-182 A4 gate spike (``rdr182_gate_spike``), removed
+when Phase 3 lands the real ``forensics``/``remediate`` tools.
 """
 from __future__ import annotations
 
@@ -6120,6 +6122,92 @@ def daemon_uninstall(confirm: bool = False, remove_data: bool = False) -> str:
         lines.append("Warnings:")
         lines.extend(f"  - {w}" for w in report.warnings)
     return "\n".join(lines)
+
+
+# ── RDR-182 A4 gating spike (nexus-ykzbj.1) — THROWAWAY, replaced by the real
+# `forensics` / `remediate` tools in Phase 3 (which reuse the gate helper +
+# refusal constant below and then delete the spike tool).
+#
+# Critical Assumption A4: unlike a CLI command (a human typed it — an implicit
+# consent gesture), an @mcp.tool() is autonomously agent-invocable, so the
+# durable opt-in MUST be enforced at the tool boundary itself: the FIRST
+# statement reads the flag and refuses BEFORE any diagnostic content is built.
+# No other @mcp.tool() in this codebase is config-gated; this is the net-new,
+# load-bearing safety mechanism for the RDR-182 Desktop surface.
+
+#: The refusal every RDR-182 tool returns when the capability is disabled.
+#: Names the EXACT enable command (tests lock the coupling). Module-level so
+#: forensics/remediate/tests share one string and cannot drift.
+_REMEDIATION_REFUSAL = (
+    "Claude-assisted remediation is not enabled — this capability is opt-in "
+    "and default-off. To enable it, run:\n"
+    "  nx config set claude_assisted_remediation.enabled true\n"
+    "(durable; revoke with `nx config set claude_assisted_remediation.enabled "
+    "false`). No diagnostic content has been emitted. See RDR-182."
+)
+
+
+def _remediation_opt_in() -> bool:
+    """True iff ``claude_assisted_remediation.enabled`` is affirmatively set.
+
+    Read FRESH per invocation (the MCP server is long-lived; an operator
+    enabling the flag mid-session must take effect on the next call) via
+    ``load_config()`` — the same merged view (defaults → config.yml →
+    .nexus.yml → env) every other flag uses.
+
+    STRICT parse, fail-closed: ``nx config set`` stores the raw STRING
+    (``set_config_value(dotted_key, value: str)``), so the flag arrives as
+    ``"true"``/``"false"``, not a bool — and ``bool("false") is True``, so
+    truthiness would invert an explicit disable. Only ``True`` and the
+    case-insensitive strings ``"true"``/``"1"``/``"yes"`` enable; everything
+    else (absent, ``False``, ``"false"``, non-bool/str scalars like YAML
+    int ``1``, garbage) refuses.
+
+    Fail-closed includes SHAPE mismatches (critic-spike High, 2026-07-12): a
+    hand-edited flat scalar (``claude_assisted_remediation: true``) makes
+    ``_deep_merge`` replace the whole default dict with the bare scalar; the
+    section must be isinstance-guarded or the gate CRASHES on ``.get`` —
+    and a crash is not a refusal. Non-dict sections refuse; the refusal's
+    named command then rewrites the canonical nested shape... except it
+    currently does NOT (``set_config_value`` itself crashes walking a
+    dotted key through an existing scalar — tracked separately, see the
+    grooming-session bead filed 2026-07-12).
+    """
+    section = load_config().get("claude_assisted_remediation", {})
+    if not isinstance(section, dict):
+        return False
+    value = section.get("enabled", False)
+    if value is True:
+        return True
+    return isinstance(value, str) and value.strip().lower() in ("true", "1", "yes")
+
+
+#: Spike instrumentation: the content path appends here, so tests can assert
+#: mechanically that a refused call NEVER entered it (zero emission before
+#: the gate). Throwaway with the spike tool.
+_SPIKE_CONTENT_CALLS: list[str] = []
+
+#: What the spike's content path returns when the gate passes — a stand-in
+#: for the real playbook emission Phase 3 wires in.
+_SPIKE_CONTENT_MARKER = "RDR-182 spike: opt-in verified; diagnostic content path reached."
+
+
+@mcp.tool(
+    title="RDR-182 Gate Spike (throwaway)",
+    annotations={"readOnlyHint": True, "idempotentHint": True},
+)
+def rdr182_gate_spike() -> str:
+    """THROWAWAY spike proving RDR-182's A4 opt-in gate at the MCP boundary.
+
+    Returns a refusal (naming the exact enable command) unless
+    ``claude_assisted_remediation.enabled`` is affirmatively set — the shape
+    the real ``forensics``/``remediate`` tools adopt in Phase 3. Emits no
+    diagnostic content; safe to invoke.
+    """
+    if not _remediation_opt_in():
+        return _REMEDIATION_REFUSAL
+    _SPIKE_CONTENT_CALLS.append("content-built")
+    return _SPIKE_CONTENT_MARKER
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

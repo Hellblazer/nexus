@@ -41,6 +41,9 @@ def test_core_registered_tools():
         "daemon_uninstall",
         # RDR-156 P4 combined-query primitives (nexus-joesk, nexus-houg9)
         "search_metadata_scoped", "search_topic_scoped", "search_graph_hop",
+        # RDR-182 A4 gating spike (nexus-ykzbj.1) — THROWAWAY; Phase 3
+        # replaces it with forensics/remediate and removes this entry.
+        "rdr182_gate_spike",
     }
     assert expected == tool_names, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
 

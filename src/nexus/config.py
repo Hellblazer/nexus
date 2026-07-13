@@ -705,6 +705,16 @@ _DEFAULTS: dict[str, Any] = {
         "enabled": False,
         "weight": 0.025,
     },
+    # RDR-182: Claude-assisted upgrade forensics / remediation. DEFAULT-OFF —
+    # the MCP surface is autonomously agent-invocable, so the durable opt-in
+    # is enforced at the tool boundary itself (the tool refuses before
+    # emitting content when this is false). Enable:
+    #   nx config set claude_assisted_remediation.enabled true
+    # NOTE: that write path stores the STRING "true"; consumers must parse
+    # strictly (see nexus.mcp.core._remediation_opt_in), never truthiness.
+    "claude_assisted_remediation": {
+        "enabled": False,
+    },
     # RDR-087: search-observability opt-outs. Default-on.
     "telemetry": {
         "search_enabled": True,       # Phase 2.2 hot-path INSERT OR IGNORE.
