@@ -343,15 +343,23 @@ def main() -> int:
     # other MAIN-seed collection: this one DOES migrate, so the rename cascade
     # and the post-migration orphan scan are meaningful for it.
     #
-    # Safe for EVERY main-seed caller (rehearse.sh, rehearse_cold.sh,
-    # rehearse_hole_punch.sh, rehearse_guided.sh — yaeex critique): all four
-    # drive the same _run_migration the guided hand-off uses; their parity and
-    # rollback-safety checks iterate this manifest generically (cross.get(name,
-    # name), no hardcoded counts); and the cross_model target is UNCONDITIONAL
-    # bge-768 in both key modes (remap_target_model returns the local ONNX
-    # model for measured-768 regardless of voyage-key presence, so --with-cloud
-    # legs assert the same target). Demonstrated on the guided AND cold legs.
-    chashes[_MISLABEL] = _seed(client, _MISLABEL, n, prefix="mislabel chunk", dim=768)
+    # Safe for the LOCAL-mode main-seed callers (rehearse.sh default leg,
+    # rehearse_cold.sh, rehearse_hole_punch.sh, rehearse_guided.sh — yaeex
+    # critique): they drive the same _run_migration the guided hand-off uses;
+    # their parity and rollback-safety checks iterate this manifest generically
+    # (cross.get(name, name), no hardcoded counts).
+    #
+    # NOT seeded on --with-cloud (first with-cloud run post-itme7, 2026-07-13):
+    # remap_target_model returns the local ONNX model UNCONDITIONALLY for
+    # measured-768 content (measured-ONNX vectors must never bill a voyage
+    # re-embed), so the target is always the bge-768 name — which a voyage-mode
+    # service refuses with HTTP 422 (no bge embedder), failing the whole leg
+    # structurally. The itme7 design scoped the legacy shapes to --guided
+    # (amendment 7); the with-cloud leg keeps its original pre-itme7 manifest.
+    # The mislabel-on-voyage-service PRODUCT behaviour (pregate should block it
+    # up front rather than a mid-flight 422) is tracked separately.
+    if not with_cloud:
+        chashes[_MISLABEL] = _seed(client, _MISLABEL, n, prefix="mislabel chunk", dim=768)
     if with_cloud:
         # 1024-dim source vectors: the voyage same-model passthrough COPIES them
         # (no re-embed) into chunks_1024 (nexus-pi3s3).
@@ -368,14 +376,16 @@ def main() -> int:
     cross_model = {
         _MINILM: _remap_model(_MINILM, _tgt_model),
         _NOTE: _remap_model(_NOTE, _tgt_model),
+    }
+    if not with_cloud:
         # Shape (iii) is NOT mode-aware: remap_target_model returns the local
         # ONNX model UNCONDITIONALLY for measured-768 content (voyage mode
         # included — measured-ONNX vectors must never bill a voyage re-embed),
         # so the target is always the bge-768 name. Distinct owner segment
         # ("rehearsal-mislabel") keeps it collision-free with every other
-        # main-seed target.
-        _MISLABEL: _remap_model(_MISLABEL, _BGE_MODEL),
-    }
+        # main-seed target. Skipped on --with-cloud (see the seeding note
+        # above): a voyage-mode service cannot embed the bge target.
+        cross_model[_MISLABEL] = _remap_model(_MISLABEL, _BGE_MODEL)
     print(json.dumps({"collections": seeded, "cross_model": cross_model, **t2}))
     return 0
 
