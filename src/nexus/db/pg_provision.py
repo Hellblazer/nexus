@@ -832,9 +832,9 @@ def _write_credentials(
         f"NX_SERVICE_TOKEN={service_token}\n"
         # nexus_diag (RDR-182 P2.1): the SELECT-only + BYPASSRLS diagnostic
         # role. OPTIONAL for consumers — pre-P2.1 credential files lack these
-        # keys (the already-running-cluster fast path skips role creation
-        # until the next cold provision), so diagnostic tooling must degrade
-        # cleanly when absent.
+        # keys until the next provision() run (the fast idempotency path
+        # backfills role + keys on already-running clusters), so diagnostic
+        # tooling must degrade cleanly when absent.
         f"NX_DB_DIAG_USER=nexus_diag\n"
         f"NX_DB_DIAG_PASS={diag_pass}\n"
     )
@@ -888,6 +888,90 @@ def _persist_service_token(creds_path: Path, service_token: str) -> None:
             pass
         raise
     _log.info("pg_service_token_backfilled", path=str(creds_path))
+
+
+def _persist_diag_credentials(creds_path: Path, diag_pass: str) -> None:
+    """Append ``NX_DB_DIAG_USER``/``NX_DB_DIAG_PASS`` to an existing 0600
+    credentials file (RDR-182 P2.1 fast-path backfill).
+
+    Mirrors :func:`_persist_service_token`: atomic temp-file + replace,
+    idempotent no-op when the keys are already present, never rewrites the
+    other lines.
+    """
+    if "NX_DB_DIAG_PASS" in _read_credentials(creds_path):
+        _log.info("pg_diag_credentials_backfill_noop", path=str(creds_path))
+        return
+    existing = creds_path.read_text()
+    if not existing.endswith("\n"):
+        existing += "\n"
+    content = (
+        existing
+        + f"NX_DB_DIAG_USER=nexus_diag\nNX_DB_DIAG_PASS={diag_pass}\n"
+    )
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=creds_path.parent, prefix=".pg_creds_")
+    try:
+        os.fchmod(tmp_fd, 0o600)
+        with os.fdopen(tmp_fd, "w") as fh:
+            fh.write(content)
+        os.replace(tmp_path, creds_path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    _log.info("pg_diag_credentials_backfilled", path=str(creds_path))
+
+
+def _backfill_diag_role(
+    bins: PgBinaries, port: int, os_user: str, creds_path: Path
+) -> None:
+    """Create ``nexus_diag`` (+ grants + credentials) on an ALREADY-RUNNING
+    cluster (RDR-182 P2.1; review-foundations High, 2026-07-12).
+
+    The fast idempotency path returns before ``_create_roles``, which is the
+    STEADY STATE for every existing install — exactly the population
+    ``nx guided-upgrade`` targets. Without this backfill the role never
+    exists there, the runAlways grants changeset skips forever, and the
+    diagnostic path is inert everywhere except a from-scratch provision.
+    Same repair philosophy as the pgvector-extension backfill above it:
+    a re-run of ``nx init --service`` is a reliable repair.
+
+    Password: reuse the persisted ``NX_DB_DIAG_PASS`` when present, else mint
+    + persist. ALTER ROLE syncs the DB to the file unconditionally (crash
+    between create and persist heals on the next run).
+    """
+    creds = _read_credentials(creds_path)
+    diag_pass = creds.get("NX_DB_DIAG_PASS") or secrets.token_hex(16)
+    if not _role_exists(bins, port, os_user, "nexus_diag"):
+        _psql(
+            bins, port, NEXUS_DB_NAME, os_user,
+            f"CREATE ROLE nexus_diag "
+            f"NOSUPERUSER NOCREATEDB NOCREATEROLE BYPASSRLS LOGIN "
+            f"PASSWORD '{diag_pass}'",
+        )
+        _log.info("pg_role_created", role="nexus_diag", via="fast_path_backfill")
+    _psql(
+        bins, port, NEXUS_DB_NAME, os_user,
+        f"ALTER ROLE nexus_diag PASSWORD '{diag_pass}'",
+    )
+    try:
+        _psql(
+            bins, port, NEXUS_DB_NAME, os_user,
+            "DO $$ BEGIN "
+            "IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'nexus') THEN "
+            "GRANT USAGE ON SCHEMA nexus TO nexus_diag; "
+            "GRANT SELECT ON ALL TABLES IN SCHEMA nexus TO nexus_diag; "
+            "END IF; "
+            "IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 't1') THEN "
+            "GRANT USAGE ON SCHEMA t1 TO nexus_diag; "
+            "GRANT SELECT ON ALL TABLES IN SCHEMA t1 TO nexus_diag; "
+            "END IF; "
+            "END $$;",
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort; the runAlways changeset is authoritative
+        _log.warning("pg_diag_grants_best_effort_failed", error=str(exc))
+    _persist_diag_credentials(creds_path, diag_pass)
 
 
 def _read_credentials(creds_path: Path) -> dict[str, str]:
@@ -1017,6 +1101,13 @@ def provision(
                     result.vector_extension_created = _create_vector_extension(
                         _bins, stored_port, os_user
                     )
+                    # Backfill nexus_diag for clusters provisioned before
+                    # RDR-182 P2.1 (review-foundations High): the fast path is
+                    # the steady state for every EXISTING install — without
+                    # this, the diagnostic role only ever exists on
+                    # from-scratch provisions and the runAlways grants
+                    # changeset skips forever.
+                    _backfill_diag_role(_bins, stored_port, os_user, creds_path)
                 except PgBinaryNotFoundError:
                     # No binaries to repair with; the running cluster is serving
                     # via some other install. Leave the extension untouched.

@@ -104,3 +104,19 @@ class TestCredentialResolution:
             "PG_PORT=banana\nNX_DB_DIAG_USER=nexus_diag\nNX_DB_DIAG_PASS=x\n"
         )
         assert resolve_diag_credentials(p) is None
+
+    def test_unreadable_file_returns_none(self, tmp_path):
+        """(review-foundations Low) An unreadable credentials file degrades to
+        None like every other resolution failure — never a raised OSError."""
+        import os as _os
+        import pytest as _pytest
+
+        p = tmp_path / "pg_credentials"
+        p.write_text("PG_PORT=5599\nNX_DB_DIAG_USER=nexus_diag\nNX_DB_DIAG_PASS=x\n")
+        p.chmod(0o000)
+        if _os.access(p, _os.R_OK):  # root ignores modes; skip rather than lie
+            _pytest.skip("cannot make file unreadable for this user")
+        try:
+            assert resolve_diag_credentials(p) is None
+        finally:
+            p.chmod(0o600)

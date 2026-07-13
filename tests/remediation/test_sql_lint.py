@@ -138,3 +138,28 @@ def test_emitter_passes_a_clean_diagnostic_playbook(monkeypatch):
     monkeypatch.setitem(pb_mod._TOPICS, "clean-diag", _clean_topic)
     pb = emit_playbook("clean-diag", StoreState(detail="x"))
     assert pb.diagnostic_sql
+
+
+def test_diagnostic_sql_renders_in_tool_return(monkeypatch):
+    """(review-foundations Medium) Linted SQL the agent never SEES is a
+    silent gap: a populated diagnostic_sql must appear verbatim in the MCP
+    rendering — and stay OUT of the CLI/agent-prompt renderings."""
+    from nexus.remediation import StoreState, emit_playbook
+    from nexus.remediation import playbook as pb_mod
+
+    stmt = "SELECT count(*) FROM nexus.chunks_768 WHERE length(chash) <> 32"
+
+    def _clean_topic(store_state):
+        pb = pb_mod._chash_poison(store_state)
+        object.__setattr__(pb, "diagnostic_sql", (stmt,))
+        return pb
+
+    monkeypatch.setitem(pb_mod._TOPICS, "clean-diag", _clean_topic)
+    pb = emit_playbook("clean-diag", StoreState(detail="x"))
+    assert stmt in pb.tool_return()
+    assert "lint-verified" in pb.tool_return()
+    assert stmt not in pb.agent_prompt()
+    assert stmt not in pb.terminal_block()
+    # And the empty-default case renders NO sql block at all.
+    plain = emit_playbook("chash-poison", StoreState(detail="x"))
+    assert "diagnostic SQL" not in plain.tool_return()

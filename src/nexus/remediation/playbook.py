@@ -140,11 +140,22 @@ class Playbook:
         step_lines = "\n".join(
             f"{i}. {s}" for i, s in enumerate(self.steps, start=1)
         )
+        # diagnostic_sql renders ONLY here (review-foundations Medium: linted
+        # SQL the agent never sees is a silent gap) — the MCP surface is the
+        # one an enlisted agent reads; the CLI renderings stay prose-only.
+        sql_block = ""
+        if self.diagnostic_sql:
+            sql_lines = "\n".join(self.diagnostic_sql)
+            sql_block = (
+                "\n\nRead-only diagnostic SQL (lint-verified; run via the "
+                f"nexus_diag path only):\n{sql_lines}"
+            )
         return (
             f"[{self.topic}] {self.context}\n\n"
             f"Store state: {self.store_detail}\n\n"
             f"HARD CONSTRAINTS (read-only posture):\n{constraint_lines}\n\n"
-            f"Recovery steps (in order):\n{step_lines}\n\n"
+            f"Recovery steps (in order):\n{step_lines}"
+            f"{sql_block}\n\n"
             f"Deliverable: {self.deliverable}\n\n"
             f"If the environment is gone: {self.escape}\n\n"
             f"Full runbook (clickable): {self.runbook_url} "

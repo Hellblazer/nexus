@@ -25,10 +25,11 @@ it is never laundered again):
   question.)
 
 Credentials: ``NX_DB_DIAG_USER`` / ``NX_DB_DIAG_PASS`` in ``pg_credentials``
-are OPTIONAL keys (pre-P2.1 files lack them; the already-running-cluster fast
-path skips role creation until the next cold provision), so resolution
-returns ``None`` and callers degrade cleanly — same posture as the probe
-gates that consume this.
+are OPTIONAL keys — pre-P2.1 files lack them until the next ``provision()``
+run (the fast idempotency path backfills the role + keys on already-running
+clusters, so one re-run of ``nx init --service``/``guided-upgrade`` heals
+them) — so resolution returns ``None`` and callers degrade cleanly, same
+posture as the probe gates that consume this.
 """
 from __future__ import annotations
 
@@ -68,10 +69,10 @@ def resolve_diag_credentials(
 ) -> DiagCredentials | None:
     """Read the diag role's credentials from ``pg_credentials``.
 
-    ``None`` when the file is absent, unreadable, or predates P2.1 (no
-    ``NX_DB_DIAG_*`` keys / no port) — the caller degrades cleanly (a probe
-    that cannot run never blocks; it reports itself as skipped, matching the
-    chash-poison gate's posture).
+    ``None`` when the file is absent, unreadable (OSError/decode), or
+    predates P2.1 (no ``NX_DB_DIAG_*`` keys / no port) — the caller degrades
+    cleanly (a probe that cannot run never blocks; it reports itself as
+    skipped, matching the chash-poison gate's posture).
     """
     from nexus.config import nexus_config_dir  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
     from nexus.db.pg_provision import (  # noqa: PLC0415 — circular-dep avoidance (nexus.db.pg_provision)
@@ -83,7 +84,11 @@ def resolve_diag_credentials(
         creds_path = nexus_config_dir() / CREDENTIALS_FILENAME
     if not creds_path.exists():
         return None
-    creds = _read_credentials(creds_path)
+    try:
+        creds = _read_credentials(creds_path)
+    except (OSError, UnicodeDecodeError) as exc:
+        _log.warning("diag_credentials_unreadable", path=str(creds_path), error=str(exc))
+        return None
     user = creds.get("NX_DB_DIAG_USER", "")
     password = creds.get("NX_DB_DIAG_PASS", "")
     try:
