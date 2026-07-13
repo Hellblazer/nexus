@@ -902,6 +902,18 @@ def _t1_session_lease_path(session_id: str, config_dir: Path) -> Path:
     return config_dir / f"{_T1_SESSION_LEASE_PREFIX}{session_id}"
 
 
+def _t1_session_mint_lock_path(session_id: str, config_dir: Path) -> Path:
+    """Per-session lock-file path guarding :func:`_lock_guarded_mint_or_borrow`'s
+    mint-or-borrow critical section (nexus-jwqjm).
+
+    Mirrors :func:`_cli_dedicated_session_id`'s own per-purpose lock-file
+    naming pattern (``config_dir / f"{name}.lock"``) -- a distinct file per
+    ``session_id`` so concurrent recoverers for DIFFERENT sessions never
+    serialize against each other.
+    """
+    return config_dir / f"t1_mint_{session_id}.lock"
+
+
 def publish_t1_session_lease(
     session_id: str,
     session_token: str,
@@ -1240,6 +1252,98 @@ def mint_t1_session_token(session_id: str, *, context: str) -> dict:
         raise RuntimeError(
             f"T1 {context} failed for session {session_id!r}: {exc}"
         ) from exc
+
+
+def _lock_guarded_mint_or_borrow(
+    session_id: str, config_dir: Path
+) -> tuple[str, bool, float | None]:
+    """Flock-guarded double-check-then-mint-or-borrow (nexus-jwqjm).
+
+    Serializes concurrent stale-lease recoverers for the SAME ``session_id``
+    so exactly one racer mints a fresh token while every other racer borrows
+    the winner's published lease instead of independently minting a
+    competing one. Two competing mints for the same session id is not just
+    a one-time race: the server hard-ROTATES the token on every mint (``ON
+    CONFLICT (tenant_id, session_id) DO UPDATE``), so two owners each
+    periodically refreshing keep invalidating each other's token, producing
+    PERSISTENT INTERMITTENT 401 churn for the lifetime of both processes.
+
+    Mirrors :func:`_cli_dedicated_session_id`'s own flock pattern -- a
+    blocking exclusive lock on a per-purpose lock file (see
+    :func:`_t1_session_mint_lock_path`), released in a ``finally`` even on
+    exception. Locked design: T2 ``nexus/design-jwqjm-t1-mint-race-flock.md``.
+
+    Scope of what this closes (substantive-critic finding, round 1 of
+    nexus-jwqjm.3): this closes the reported failure mode -- two processes
+    independently observing a stale lease at STARTUP and both minting. It
+    does NOT extend to :func:`nexus.mcp.core._t1_session_refresh_loop`'s
+    own PERIODIC re-mint, which calls the token store directly, unlocked,
+    on its own schedule. A structurally similar but much narrower race
+    remains there (an owner's very late/delayed refresh colliding with a
+    new recoverer's takeover) -- tracked as an accepted residual, not fixed
+    by this bead. See nexus-ltwu4.
+
+    Args:
+        session_id: the T1 session id to mint or borrow a token for.
+        config_dir: the nexus config directory (both the lock file and the
+            lease file live here).
+
+    Returns:
+        ``(token, minted, ttl_seconds)``. ``minted`` is ``True`` only for
+        the caller that actually performed the mint; every other
+        (borrowing) caller gets ``minted=False``. ``ttl_seconds`` is the
+        SAME value used for the publish call on the minting path (never a
+        post-hoc re-read of the lease file, which could observe a
+        stale/unrelated file if the publish below silently failed --
+        code-review-expert Medium finding, round 1) -- ``None`` on the
+        borrow path, where no caller may use it (a borrower must never
+        start its own refresh task).
+
+    Raises:
+        RuntimeError: propagated UNCHANGED from :func:`mint_t1_session_token`
+            on a mint failure. The lock is always released first (the
+            failure unwinds through this function's own ``finally``).
+    """
+    config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock_path = _t1_session_mint_lock_path(session_id, config_dir)
+
+    lock_fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        # Not a daemon-lifecycle election (RDR-149's ServiceRegistry._elect):
+        # a one-shot "double-check the lease, mint if still stale" mutex for
+        # a single session id, mirroring _cli_dedicated_session_id's own
+        # one-shot idempotent lock above -- not a leased-liveness election.
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)  # lifecycle-gate-allow: one-shot mint-or-borrow mutex serializing concurrent stale-lease recoverers, not a lifecycle election
+        try:
+            leased_token = read_t1_session_lease(session_id, config_dir)
+            if leased_token:
+                # A concurrent recoverer already won the race and published
+                # a fresh lease while we waited for the lock -- borrow it,
+                # do not mint a competing token.
+                return leased_token, False, None
+
+            minted = mint_t1_session_token(
+                session_id, context="stale-lease recovery mint"
+            )
+            mint_ttl = float(
+                minted.get("expires_in_seconds")
+                or _T1_SESSION_LEASE_DEFAULT_TTL_SECONDS
+            )
+            try:
+                publish_t1_session_lease(
+                    session_id, minted["session_token"], config_dir,
+                    ttl_seconds=mint_ttl,
+                )
+            except Exception as exc:  # noqa: BLE001 — best-effort publish; must never fail an already-successful mint (mirrors nexus-c8yvj's Branch-0 publish, moved under this lock)
+                _log.warning(
+                    "t1_session_lease_publish_failed",
+                    session_id=session_id, error=str(exc),
+                )
+            return minted["session_token"], True, mint_ttl
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(lock_fd)
 
 
 class _CliDedicatedScratchStore:

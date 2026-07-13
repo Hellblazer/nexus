@@ -1541,9 +1541,20 @@ class TestResolveT1RoutingTiers:
                 "risk this test guards against (nexus-1si7z)"
             )
         lifespan_post_dispatch = lifespan_src.rsplit("T1RoutingAction.USE_LEASED", 1)[-1]
-        assert "mint_t1_session_token(" in lifespan_post_dispatch, (
+        # nexus-jwqjm: Branch 0's fallthrough-to-mint arm no longer calls
+        # mint_t1_session_token(...) directly -- it routes through
+        # _lock_guarded_mint_or_borrow(...) (src/nexus/db/t1.py), which
+        # flock-serializes the mint-or-borrow critical section so concurrent
+        # stale-lease recoverers for the SAME session_id converge on one real
+        # mint instead of each rotating the other's token. The mint call
+        # itself now lives inside that helper (verified by
+        # tests/db/test_t1_mint_race.py), so the real behavioral signal this
+        # test checks for at THIS call site is that the fallthrough branch
+        # actually invokes the mint-or-borrow helper, not a comment mention.
+        assert "_lock_guarded_mint_or_borrow(" in lifespan_post_dispatch, (
             "_t1_chroma_lifespan's Branch 0 fallthrough-to-mint branch must "
-            "actually CALL mint_t1_session_token(...) after the USE_LEASED "
-            "dispatch -- a comment mentioning MINT is not sufficient evidence "
-            "the fallthrough still mints (nexus-1si7z)"
+            "actually CALL _lock_guarded_mint_or_borrow(...) after the "
+            "USE_LEASED dispatch -- a comment mentioning MINT is not "
+            "sufficient evidence the fallthrough still mints (nexus-1si7z, "
+            "superseded call path per nexus-jwqjm)"
         )

@@ -682,26 +682,43 @@ async def _t1_chroma_lifespan(_app: Any):
                 "else falls back to private in-process ephemeral scratch "
                 "(NX_T1_ISOLATED=1) rather than sharing the CLI-dedicated identity")
         else:
-            from nexus.db.t1 import mint_t1_session_token  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+            from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+            from nexus.db.t1 import _lock_guarded_mint_or_borrow  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+
+            _t1_config_dir = nexus_config_dir()
 
             # nexus-1si7z follow-up review (code-review-expert): the try below is
-            # scoped to ONLY the mint call, deliberately -- an earlier draft also
-            # wrapped the env-var writes / structlog info call / ownership-dict
-            # update in the same except, so a (highly unlikely) failure in one of
-            # THOSE would still have been mis-reported as a mint failure via the
-            # RuntimeError's "T1 session token mint failed" framing. Narrowing the
-            # try means _exc below is unambiguously mint_t1_session_token's own
-            # RuntimeError, never anything else.
+            # scoped to ONLY the mint-or-borrow call, deliberately -- an earlier
+            # draft also wrapped the env-var writes / structlog info call /
+            # ownership-dict update in the same except, so a (highly unlikely)
+            # failure in one of THOSE would still have been mis-reported as a
+            # mint failure via the RuntimeError's "T1 session token mint failed"
+            # framing. Narrowing the try means _exc below is unambiguously
+            # _lock_guarded_mint_or_borrow's own RuntimeError (propagated
+            # unchanged from mint_t1_session_token), never anything else.
+            #
+            # nexus-jwqjm: routes through the flock-guarded mint-or-borrow
+            # helper instead of calling mint_t1_session_token directly -- two
+            # simultaneous stale-lease recoverers for the SAME session_id
+            # previously both minted, each rotating the other's token via the
+            # server's ON CONFLICT DO UPDATE, causing persistent 401 churn.
+            # The helper serializes the mint-or-borrow critical section so
+            # exactly one recoverer mints and every other borrows the
+            # winner's published lease. See T2
+            # nexus/design-jwqjm-t1-mint-race-flock.md.
             try:
-                _minted = mint_t1_session_token(_t1_session_id, context="session token mint")
+                _t1_token, _t1_minted_fresh, _t1_mint_ttl = _lock_guarded_mint_or_borrow(
+                    _t1_session_id, _t1_config_dir
+                )
             except Exception as _exc:
                 # Fail loud (Phase E require-minted): a bare-id fallback would 401 on
                 # every scratch op now that the bootstrap session path is retired, and
                 # silently dropping session scoping is forbidden for a security boundary.
                 # Branch 0 wraps the shared mint_t1_session_token()'s plain RuntimeError
-                # with this extra structlog error event + the Phase-E remedy sentence --
-                # neither is appropriate for the other two (CLI-dedicated) mint call
-                # sites, which is why they stay on the helper's plain message.
+                # (propagated unchanged through _lock_guarded_mint_or_borrow) with this
+                # extra structlog error event + the Phase-E remedy sentence -- neither is
+                # appropriate for the other two (CLI-dedicated) mint call sites, which is
+                # why they stay on the helper's plain message.
                 _svc_log.error(
                     "t1_session_mint_failed", session_id=_t1_session_id, error=str(_exc),
                     msg="could not mint a T1 session token; refusing to start the MCP "
@@ -714,7 +731,20 @@ async def _t1_chroma_lifespan(_app: Any):
                     "token (Phase E require-minted)."
                 ) from _exc
 
-            _os.environ["NX_T1_SESSION"] = _minted["session_token"]
+            if not _t1_minted_fresh:
+                # nexus-jwqjm: a concurrent recoverer already won the mint race
+                # and published a fresh lease while we waited on the lock --
+                # borrow it exactly like the USE_LEASED branch above: no
+                # ownership, no refresh task, no teardown participation.
+                _os.environ["NX_T1_SESSION"] = _t1_token
+                _os.environ["NX_T1_SESSION_ID"] = _t1_session_id
+                _svc_log.info(
+                    "t1_session_leased_after_mint_race", session_id=_t1_session_id
+                )
+                yield
+                return
+
+            _os.environ["NX_T1_SESSION"] = _t1_token
             _os.environ["NX_T1_SESSION_ID"] = _t1_session_id
             _svc_log.info("t1_session_isolation_minted", session_id=_t1_session_id)
             # nexus-5daww: track for `_t1_chroma_shutdown`'s Branch-0
@@ -723,30 +753,15 @@ async def _t1_chroma_lifespan(_app: Any):
             # token and clears the lease file instead of leaking both.
             _OWNED_T1_SESSION["session_id"] = _t1_session_id
 
-            # nexus-c8yvj: publish the just-minted (session_id, session_token)
-            # to a lease file so a DETACHED process with no inherited env --
-            # most notably the SessionEnd hook (nexus.hooks.session_end_flush),
-            # which runs as a separate OS process launched by
-            # nx-session-end-launcher and never sees the mutation above --
-            # can reach this SAME session via nexus.db.t1.read_t1_session_lease
-            # instead of silently falling into the disjoint CLI-dedicated
-            # identity. Best-effort: a publish failure loses the hook's
-            # convenience lease (same "logged, flush skipped" degradation the
-            # hook already tolerates for the pre-existing stdin-EOF race) but
-            # must never fail an already-successful mint / session startup.
-            _mint_ttl = float(
-                _minted.get("expires_in_seconds") or _T1_SESSION_DEFAULT_TTL_SECONDS
-            )
-            try:
-                from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
-                from nexus.db.t1 import publish_t1_session_lease  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
-                publish_t1_session_lease(
-                    _t1_session_id, _minted["session_token"], nexus_config_dir(),
-                    ttl_seconds=_mint_ttl,
-                )
-            except Exception as _exc:  # noqa: BLE001 — boundary catch; best-effort lease, must not crash an already-successful mint
-                _svc_log.warning("t1_session_lease_publish_failed", session_id=_t1_session_id, error=str(_exc))
-
+            # nexus-c8yvj / nexus-jwqjm: the lease publish (so a DETACHED
+            # process with no inherited env -- most notably the SessionEnd
+            # hook, nexus.hooks.session_end_flush -- can reach this SAME
+            # session via nexus.db.t1.read_t1_session_lease instead of
+            # falling into the disjoint CLI-dedicated identity) now happens
+            # INSIDE _lock_guarded_mint_or_borrow, under the same lock that
+            # guards the mint itself -- best-effort there too (a publish
+            # failure never fails an already-successful mint).
+            #
             # nexus-ngcpo Finding 1: start the periodic refresh task now that
             # we own this session id (`_OWNED_T1_SESSION` was set just above,
             # right after the mint succeeded). Refresh at half the token's
@@ -754,6 +769,17 @@ async def _t1_chroma_lifespan(_app: Any):
             # leaves a full half-TTL safety margin -- see
             # `_t1_session_refresh_loop`'s docstring for why re-minting is
             # safe here specifically (we only ever refresh our OWN id).
+            # nexus-jwqjm: `_t1_mint_ttl` is the SAME value
+            # `_lock_guarded_mint_or_borrow` used for its own publish call,
+            # returned directly on the mint path -- never a post-hoc re-read
+            # of the lease file (code-review-expert Medium finding, round 1:
+            # a re-read could observe a stale/unrelated file if the publish
+            # inside the helper silently failed). `_t1_mint_ttl` is only
+            # ``None`` on the borrow path, which returns above before
+            # reaching here, so it is always a float by this point.
+            _mint_ttl = (
+                _t1_mint_ttl if _t1_mint_ttl is not None else _T1_SESSION_DEFAULT_TTL_SECONDS
+            )
             import asyncio  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
             _refresh_interval = max(
                 _mint_ttl * _T1_SESSION_REFRESH_FRACTION, _T1_SESSION_REFRESH_MIN_INTERVAL_S
