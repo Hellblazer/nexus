@@ -91,3 +91,31 @@ def test_module_is_stdlib_only_leaf() -> None:
             for alias in node.names:
                 if alias.name.split(".")[0] == "nexus":
                     raise AssertionError(f"engine_version.py imports nexus: {alias.name}")
+
+
+class TestDownstreamConsumersTrackTheFloor:
+    def test_cold_rehearsal_tag_is_at_least_the_floor(self) -> None:
+        """The migration-rehearsal COLD_TAG default must satisfy the
+        guided-upgrade version pin, or `run.sh --cold` fail-closes at the
+        version gate before migrating anything (demonstrated live
+        2026-07-12: the (0,1,39) floor bump left COLD_TAG at v0.1.37 and
+        the cold MVV died on 'engine-service v0.1.37 < required v0.1.39').
+        Same drift class as the CI stamp-step regex (fixed 975dcd9a) and
+        the original two hand-typed pins nexus-b6qlf unified — every
+        hand-written downstream consumer of the floor gets a tripwire."""
+        import re
+        from pathlib import Path
+
+        run_sh = Path(__file__).parent.parent / (
+            "tests/e2e/migration-rehearsal/run.sh"
+        )
+        m = re.search(
+            r'COLD_TAG="\$\{NEXUS_SERVICE_TAG:-engine-service-v(\d+\.\d+\.\d+)\}"',
+            run_sh.read_text(),
+        )
+        assert m, "COLD_TAG default not found/parseable in run.sh"
+        assert parse_engine_version(m.group(1)) >= REQUIRED_ENGINE_VERSION, (
+            f"COLD_TAG default v{m.group(1)} is below the "
+            f"guided-upgrade floor {REQUIRED_ENGINE_VERSION} — bump it "
+            "with the floor (AGENTS.md § Engine-service release)"
+        )

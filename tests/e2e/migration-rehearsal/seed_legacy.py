@@ -342,6 +342,15 @@ def main() -> int:
     # re-embeds it into the bge-768 target. Registered in T2/catalog like every
     # other MAIN-seed collection: this one DOES migrate, so the rename cascade
     # and the post-migration orphan scan are meaningful for it.
+    #
+    # Safe for EVERY main-seed caller (rehearse.sh, rehearse_cold.sh,
+    # rehearse_hole_punch.sh, rehearse_guided.sh — yaeex critique): all four
+    # drive the same _run_migration the guided hand-off uses; their parity and
+    # rollback-safety checks iterate this manifest generically (cross.get(name,
+    # name), no hardcoded counts); and the cross_model target is UNCONDITIONAL
+    # bge-768 in both key modes (remap_target_model returns the local ONNX
+    # model for measured-768 regardless of voyage-key presence, so --with-cloud
+    # legs assert the same target). Demonstrated on the guided AND cold legs.
     chashes[_MISLABEL] = _seed(client, _MISLABEL, n, prefix="mislabel chunk", dim=768)
     if with_cloud:
         # 1024-dim source vectors: the voyage same-model passthrough COPIES them
