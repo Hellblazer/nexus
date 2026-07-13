@@ -221,3 +221,90 @@ class TestNoBypassOfMixinTransport:
             f"site(s) in http_taxonomy_store.py that bypass "
             f"RefreshableHttpStoreMixin's self-healing transport: {matches}"
         )
+
+
+class TestLazyCentroidChildPinPropagation:
+    """nexus-gcx2r (decision-surface audit, 2026-07-12): the lazy
+    ``_centroid`` property constructed ``HttpCentroidStore`` with EXPLICIT
+    ``base_url=self._base_url, _token=self._token`` -- the mixin marks both
+    halves pinned, and ``_invalidate_and_reresolve`` refuses to self-heal a
+    fully pinned instance. Since that property is the ONLY production
+    construction site of ``HttpCentroidStore``, the mixin's self-heal for
+    centroid ops was dead code in production: any supervisor restart or
+    token rotation turned every centroid-backed operation into a
+    ``RuntimeError: cannot self-heal`` for the life of the instance.
+
+    Contract fixed here: the child must inherit the PARENT's pin state --
+    an unpinned (production) parent yields an unpinned, self-healing child;
+    a deliberately pinned (test/fake-server) parent yields an equally
+    pinned child, preserving the existing pin semantics.
+    """
+
+    def test_unpinned_parent_yields_unpinned_selfhealing_child(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        global _VALID_BEARER
+        store = HttpTaxonomyStore()
+        try:
+            child = store._centroid
+            assert child._base_url_pinned is False
+            assert child._token_pinned is False
+
+            # Prove the child ACTUALLY self-heals, not just that flags are
+            # set: rotate the service token out from under it, re-resolve,
+            # and confirm the child picked up the new credential with no
+            # "cannot self-heal" RuntimeError.
+            _VALID_BEARER = "selfheal-taxonomy-rotated-bearer"
+            monkeypatch.setenv("NX_SERVICE_TOKEN", _VALID_BEARER)
+            child._invalidate_and_reresolve()
+            assert child._token == "selfheal-taxonomy-rotated-bearer"
+        finally:
+            store.close()
+
+    def test_fully_pinned_parent_yields_fully_pinned_child(
+        self, fake_service
+    ) -> None:
+        """A deliberately pinned parent (fake-server test construction) must
+        still yield a pinned child -- the pin contract's refusal to silently
+        repoint is preserved where it was actually intended."""
+        port = fake_service
+        store = HttpTaxonomyStore(
+            base_url=f"http://127.0.0.1:{port}", _token=_VALID_BEARER
+        )
+        try:
+            child = store._centroid
+            assert child._base_url_pinned is True
+            assert child._token_pinned is True
+            with pytest.raises(RuntimeError, match="cannot self-heal"):
+                child._invalidate_and_reresolve()
+        finally:
+            store.close()
+
+    # The two MIXED combinations (substantive-critic, nexus-1ytp6/gcx2r fix
+    # review round 1): the per-half propagation is exactly the novel logic
+    # this fix introduces, so both mixed cases are pinned independently --
+    # a regression to all-or-nothing propagation in either direction trips
+    # one of these.
+
+    def test_base_url_pinned_token_resolved_child_pins_url_half_only(
+        self, fake_service
+    ) -> None:
+        port = fake_service
+        store = HttpTaxonomyStore(base_url=f"http://127.0.0.1:{port}")
+        try:
+            child = store._centroid
+            assert child._base_url_pinned is True
+            assert child._token_pinned is False
+        finally:
+            store.close()
+
+    def test_token_pinned_base_url_resolved_child_pins_token_half_only(
+        self, fake_service
+    ) -> None:
+        store = HttpTaxonomyStore(_token=_VALID_BEARER)
+        try:
+            child = store._centroid
+            assert child._base_url_pinned is False
+            assert child._token_pinned is True
+        finally:
+            store.close()

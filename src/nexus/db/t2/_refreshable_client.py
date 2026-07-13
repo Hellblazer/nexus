@@ -45,11 +45,19 @@ Design shape:
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import httpx
 import structlog
 
+# nexus-1ytp6: the gateway-transient retry axis is IMPORTED from the T3
+# reference implementation, not redefined -- one source of truth for the
+# schedule its production incident (live 504, 2026-07-04) calibrated.
+# tests/db/test_refreshable_client.py::test_gateway_constants_match_reference
+# additionally pins the two modules' values equal against a future
+# local-redefinition drift.
+from nexus.db.http_vector_client import _GATEWAY_RETRY_CODES, _GATEWAY_RETRY_SLEEPS
 from nexus.db.service_endpoint import discover_lease, resolve_service_endpoint
 
 _log = structlog.get_logger(__name__)
@@ -90,6 +98,37 @@ def _is_retryable_endpoint_error(exc: Exception) -> bool:
       error). Same restart-window cause as the reset case below, different
       httpx exception (same review finding as ``ConnectTimeout`` above —
       ``ReadError`` subclasses ``NetworkError``, not ``RemoteProtocolError``).
+    - ``httpx.ReadTimeout`` / ``httpx.WriteTimeout`` / ``httpx.WriteError``
+      (nexus-1ytp6, decision-surface audit 2026-07-12): the read/write-phase
+      siblings of the pairs above, enumerated from httpx's actual exception
+      taxonomy rather than added reactively. A restart-window failure can
+      manifest in the SAME phase as either a reset (``ReadError``/
+      ``WriteError``) or a hang (``ReadTimeout``/``WriteTimeout``) — e.g. a
+      proxy/LB that does not immediately propagate the backend's RST, or
+      the JVM's shutdown drain leaving the socket open without writing.
+      ``ReadTimeout`` is NOT a subclass of ``ReadError`` (they live under
+      ``TimeoutException`` vs ``NetworkError``) — the identical non-subclass
+      relationship that justified adding ``ConnectTimeout`` alongside
+      ``ConnectError`` in the nexus-bikit.3 round.
+    - ``httpx.CloseError`` (nexus-acp20 — found by the critique of the
+      nexus-1ytp6 fix itself, the same sibling-enumeration miss recurring
+      one member over): the FOURTH direct ``NetworkError`` sibling
+      (Connect/Read/Write/Close). A restart-window failure closing the
+      connection gets the same single self-heal retry as every other
+      member of its family.
+    - ``httpx.PoolTimeout`` is deliberately EXCLUDED: it signals LOCAL
+      connection-pool exhaustion (too many concurrent in-flight requests on
+      this client), not endpoint/credential staleness — re-resolving cannot
+      fix it and an immediate retry would pile onto the exhausted pool.
+      Pinned by ``test_pool_timeout_is_not_retryable``.
+    - ``httpx.ProxyError`` is deliberately EXCLUDED: no nexus store
+      topology (local supervisor lease, or direct managed ``service_url``)
+      routes through a proxy, and re-resolving the ENDPOINT cannot fix a
+      broken PROXY. Pinned by ``test_proxy_error_is_not_retryable``.
+      Remaining taxonomy members are out of scope by kind, not omission:
+      ``LocalProtocolError`` / ``UnsupportedProtocol`` (our own bug /
+      config error), ``DecodingError`` / ``TooManyRedirects`` (response
+      handling, not transport staleness).
     - ``httpx.RemoteProtocolError``: the supervisor SIGTERMs the JVM
       process group on restart, so a request IN FLIGHT at restart time can
       see the connection reset rather than refused. Every ``_post``/``_get``
@@ -108,6 +147,10 @@ def _is_retryable_endpoint_error(exc: Exception) -> bool:
             httpx.ConnectError,
             httpx.ConnectTimeout,
             httpx.ReadError,
+            httpx.ReadTimeout,
+            httpx.WriteError,
+            httpx.WriteTimeout,
+            httpx.CloseError,
             httpx.RemoteProtocolError,
         ),
     ):
@@ -363,17 +406,29 @@ class RefreshableHttpStoreMixin:
     def _send(self, method: str, path: str, **kwargs: Any) -> Any:
         """One round-trip, with ONE re-resolve-and-retry on a retryable error.
 
-        Mirrors ``http_vector_client._request``'s shape: a second failure
-        (of ANY kind, including a repeat 401/connection error) propagates
-        untouched — no retry loops.
+        Mirrors ``http_vector_client._request``'s FULL two-axis shape
+        (nexus-1ytp6 — the original port carried only the first axis):
+
+        - Gateway axis (inner): 502/503/504 get a bounded backoff retry
+          (``_GATEWAY_RETRY_CODES`` / ``_GATEWAY_RETRY_SLEEPS``, imported
+          from the reference) on BOTH the initial attempt and the
+          post-re-resolve attempt, exactly as the reference applies
+          ``_once_with_gateway_retry`` on both sides of its invalidate.
+        - Endpoint axis (outer): a retryable auth/connection error
+          invalidates + re-resolves, then retries EXACTLY ONCE. A second
+          failure (of ANY kind) propagates untouched — no retry loops.
         """
         try:
-            return self._request_once(method, path, **kwargs)
+            return self._once_with_gateway_retry(method, path, **kwargs)
         except (
             httpx.HTTPStatusError,
             httpx.ConnectError,
             httpx.ConnectTimeout,
             httpx.ReadError,
+            httpx.ReadTimeout,
+            httpx.WriteError,
+            httpx.WriteTimeout,
+            httpx.CloseError,
             httpx.RemoteProtocolError,
             ConnectionRefusedError,
             ConnectionResetError,
@@ -388,7 +443,49 @@ class RefreshableHttpStoreMixin:
                 reason=type(exc).__name__,
             )
             self._invalidate_and_reresolve()
-            return self._request_once(method, path, **kwargs)
+            return self._once_with_gateway_retry(method, path, **kwargs)
+
+    def _once_with_gateway_retry(self, method: str, path: str, **kwargs: Any) -> Any:
+        """One logical attempt, riding out gateway-transient 502/503/504s.
+
+        Ported from ``http_vector_client._request``'s inner
+        ``_once_with_gateway_retry`` (nexus-1ytp6): T2 and T3 resolve the
+        SAME managed endpoint, so a T2 write during a redeploy window sees
+        the same brief proxy 502/503 the reference's production incident
+        (live 504, 2026-07-04) documented. All other HTTP errors propagate
+        immediately — 4xx/500 are not transient.
+
+        Idempotency caveat (nexus-tjvgf — the reference's "every caller is
+        idempotent" claim does NOT transfer wholesale to this mixin's
+        adopter set): MOST adopted-store operations are natural-id
+        upserts/reads/deletes where a lost-response retry is safe, but
+        ``HttpAspectQueue.claim_next``/``claim_batch`` (SELECT ... FOR
+        UPDATE SKIP LOCKED + mark-in-progress) and ``mark_retry`` (a
+        server-side counter increment) are not — a lost gateway response
+        after a successful server-side apply double-applies on retry
+        (orphaned claim until ``reclaim_stale``; double-incremented retry
+        budget). Accepted for now: the damage is bounded/self-recovering
+        and strictly narrower than the pre-nexus-1ytp6 behavior of failing
+        the whole operation on the first 503. Tracked properly (exclude
+        those ops or add idempotency tokens) in nexus-tjvgf.
+        """
+        for i, delay in enumerate((*_GATEWAY_RETRY_SLEEPS, None)):
+            try:
+                return self._request_once(method, path, **kwargs)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code not in _GATEWAY_RETRY_CODES or delay is None:
+                    raise
+                _log.warning(
+                    "refreshable_http_store.gateway_retry",
+                    store=type(self).__name__,
+                    method=method,
+                    path=path,
+                    code=exc.response.status_code,
+                    attempt=i + 1,
+                    sleep_s=delay,
+                )
+                time.sleep(delay)
+        raise AssertionError("unreachable")  # loop always returns or raises
 
     def _request_once(self, method: str, path: str, **kwargs: Any) -> Any:
         """One HTTP round-trip against the CURRENTLY resolved base_url.

@@ -83,6 +83,11 @@ _ALWAYS_401: bool = False
 #: lets tests assert "retried exactly once" by counting round trips, not by
 #: guessing at internal retry-loop implementation details.
 _REQUEST_COUNT: dict[str, int] = {}
+#: Queue of HTTP status codes to force on successive /v1/echo requests
+#: (nexus-1ytp6 gateway-retry tests): each inbound request pops one code and
+#: responds with it instead of the normal handling; an empty queue means
+#: normal handling. Reset per test.
+_GATEWAY_FAIL_QUEUE: list[int] = []
 
 
 def _reset_fake_service_state() -> None:
@@ -90,6 +95,7 @@ def _reset_fake_service_state() -> None:
     _VALID_BEARER = _INITIAL_BEARER
     _ALWAYS_401 = False
     _REQUEST_COUNT.clear()
+    _GATEWAY_FAIL_QUEUE.clear()
 
 
 class _FakeHandler(BaseHTTPRequestHandler):
@@ -128,6 +134,10 @@ class _FakeHandler(BaseHTTPRequestHandler):
         if path != "/v1/echo":
             self._send(404, {"error": "not found"})
             return
+        if _GATEWAY_FAIL_QUEUE:
+            code = _GATEWAY_FAIL_QUEUE.pop(0)
+            self._send(code, {"error": f"forced {code}"})
+            return
         if not self._check_bearer():
             return
         length = int(self.headers.get("Content-Length", "0"))
@@ -139,6 +149,10 @@ class _FakeHandler(BaseHTTPRequestHandler):
         self._record("GET", path)
         if path != "/v1/echo":
             self._send(404, {"error": "not found"})
+            return
+        if _GATEWAY_FAIL_QUEUE:
+            code = _GATEWAY_FAIL_QUEUE.pop(0)
+            self._send(code, {"error": f"forced {code}"})
             return
         if not self._check_bearer():
             return
@@ -569,3 +583,188 @@ class TestIsRetryableEndpointErrorClassifier:
         response = httpx.Response(500, request=request)
         exc = httpx.HTTPStatusError("500", request=request, response=response)
         assert not _is_retryable_endpoint_error(exc)
+
+    # nexus-1ytp6 (decision-surface audit, 2026-07-12): the read/write-phase
+    # TIMEOUT siblings were missing from the classifier. httpx MRO:
+    # ConnectTimeout / ReadTimeout / WriteTimeout / PoolTimeout are all
+    # direct siblings under TimeoutException; ReadTimeout is NOT a subclass
+    # of ReadError (a NetworkError) -- the identical non-subclass
+    # relationship that justified explicitly adding ConnectTimeout alongside
+    # ConnectError in the nexus-bikit.3 round, applied one level over. A
+    # restart-window hang (proxy/LB not propagating the backend RST, or the
+    # JVM shutdown drain leaving the socket open without writing) manifests
+    # as ReadTimeout/WriteTimeout rather than ReadError/WriteError.
+
+    def test_read_timeout_is_retryable(self) -> None:
+        import httpx
+
+        from nexus.db.t2._refreshable_client import _is_retryable_endpoint_error
+
+        assert _is_retryable_endpoint_error(httpx.ReadTimeout("hang mid-read"))
+
+    def test_write_timeout_is_retryable(self) -> None:
+        import httpx
+
+        from nexus.db.t2._refreshable_client import _is_retryable_endpoint_error
+
+        assert _is_retryable_endpoint_error(httpx.WriteTimeout("hang mid-write"))
+
+    def test_write_error_is_retryable(self) -> None:
+        # Write-phase RST sibling of ReadError -- same restart-window cause
+        # (request body send hits the SIGTERM'd JVM's closed socket).
+        import httpx
+
+        from nexus.db.t2._refreshable_client import _is_retryable_endpoint_error
+
+        assert _is_retryable_endpoint_error(httpx.WriteError("reset mid-write"))
+
+    def test_close_error_is_retryable(self) -> None:
+        # nexus-acp20 (critique of the nexus-1ytp6 fix itself): CloseError is
+        # the fourth direct NetworkError sibling (Connect/Read/Write/Close) --
+        # a restart-window failure closing the connection gets the same
+        # self-heal retry as every other member of its family.
+        import httpx
+
+        from nexus.db.t2._refreshable_client import _is_retryable_endpoint_error
+
+        assert _is_retryable_endpoint_error(httpx.CloseError("failed to close"))
+
+    def test_proxy_error_is_not_retryable(self) -> None:
+        """ProxyError is a proxy-topology failure -- no nexus store topology
+        (local supervisor lease, or direct managed service_url) routes
+        through a proxy, and re-resolving the ENDPOINT cannot fix a broken
+        PROXY. Deliberate exclusion, pinned here (nexus-acp20)."""
+        import httpx
+
+        from nexus.db.t2._refreshable_client import _is_retryable_endpoint_error
+
+        assert not _is_retryable_endpoint_error(httpx.ProxyError("proxy refused"))
+
+    def test_pool_timeout_is_not_retryable(self) -> None:
+        """PoolTimeout is LOCAL connection-pool exhaustion (too many
+        concurrent in-flight requests on this client), not an endpoint/
+        credential staleness signal -- re-resolving the endpoint cannot fix
+        it, and an immediate retry would pile onto the exhausted pool.
+        Deliberate exclusion, asserted so a future blanket
+        isinstance(exc, httpx.TimeoutException) widening trips this test."""
+        import httpx
+
+        from nexus.db.t2._refreshable_client import _is_retryable_endpoint_error
+
+        assert not _is_retryable_endpoint_error(httpx.PoolTimeout("pool exhausted"))
+
+
+class TestGatewayTransientRetry:
+    """nexus-1ytp6 (decision-surface audit, 2026-07-12): the mixin ported
+    http_vector_client's endpoint-invalidate-and-retry-once axis but dropped
+    its SECOND, orthogonal retry axis -- 502/503/504 gateway-transient codes
+    with a bounded backoff (``_GATEWAY_RETRY_CODES`` / ``_GATEWAY_RETRY_SLEEPS``,
+    src/nexus/db/http_vector_client.py:246-347). T2 and T3 resolve the SAME
+    managed endpoint, and the reference's own comment documents a live
+    production 504 on that service (2026-07-04) -- during a redeploy window a
+    T2 write must ride out a brief proxy 502/503 exactly like a T3 write does.
+
+    All tests monkeypatch ``_GATEWAY_RETRY_SLEEPS`` to zeros -- the schedule
+    values themselves are pinned by ``test_gateway_constants_match_reference``,
+    so no test ever actually sleeps.
+    """
+
+    def _zero_sleeps(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from nexus.db.t2 import _refreshable_client as mod
+
+        monkeypatch.setattr(mod, "_GATEWAY_RETRY_SLEEPS", (0.0, 0.0, 0.0))
+
+    def test_503_retried_until_success(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two 503s then success: the caller sees the success, and the
+        request count proves exactly three round trips (initial + 2 retries),
+        not an immediate hard failure."""
+        self._zero_sleeps(monkeypatch)
+        _GATEWAY_FAIL_QUEUE.extend([503, 503])
+        store = _make_echo_store()
+
+        result = store.echo_post("gw")
+
+        assert result == {"echo": {"value": "gw"}}
+        assert _REQUEST_COUNT["POST /v1/echo"] == 3
+
+    def test_502_and_504_also_retried(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._zero_sleeps(monkeypatch)
+        _GATEWAY_FAIL_QUEUE.extend([502, 504])
+        store = _make_echo_store()
+
+        result = store.echo_post("gw2")
+
+        assert result == {"echo": {"value": "gw2"}}
+        assert _REQUEST_COUNT["POST /v1/echo"] == 3
+
+    def test_gateway_retry_exhausted_raises(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Persistent 503: bounded, not infinite -- len(sleeps)+1 attempts
+        total, then the HTTPStatusError propagates. Exactly 4 round trips
+        (project convention: exact assertions, never >=)."""
+        self._zero_sleeps(monkeypatch)
+        _GATEWAY_FAIL_QUEUE.extend([503, 503, 503, 503])
+        store = _make_echo_store()
+
+        with pytest.raises(httpx.HTTPStatusError, match="503"):
+            store.echo_post("gw3")
+
+        assert _REQUEST_COUNT["POST /v1/echo"] == 4
+
+    def test_500_is_not_gateway_retried(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """500 is a genuine server bug, not a gateway-transient -- exactly
+        one round trip, immediate propagation (mirrors the reference's
+        'all other HTTP errors propagate immediately' contract)."""
+        self._zero_sleeps(monkeypatch)
+        _GATEWAY_FAIL_QUEUE.append(500)
+        store = _make_echo_store()
+
+        with pytest.raises(httpx.HTTPStatusError, match="500"):
+            store.echo_post("gw4")
+
+        assert _REQUEST_COUNT["POST /v1/echo"] == 1
+
+    def test_gateway_constants_match_reference(self) -> None:
+        """The mixin's gateway-retry schedule must not silently drift from
+        http_vector_client's (the reference whose production incident --
+        live 504, 2026-07-04 -- calibrated these values)."""
+        from nexus.db import http_vector_client as ref
+        from nexus.db.t2 import _refreshable_client as mixin
+
+        assert mixin._GATEWAY_RETRY_CODES == ref._GATEWAY_RETRY_CODES
+        assert mixin._GATEWAY_RETRY_SLEEPS == ref._GATEWAY_RETRY_SLEEPS
+
+
+class TestReadTimeoutSelfHeal:
+    """nexus-1ytp6: prove the newly classified timeout siblings actually
+    trigger the self-heal path through ``_send`` (the classifier AND the
+    except tuple must both include them -- a classifier-only fix would leave
+    ``_send`` re-raising before ever consulting the classifier)."""
+
+    def test_read_timeout_triggers_selfheal_retry(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = _make_echo_store()
+
+        real_request_once = store._request_once
+        calls: list[str] = []
+
+        def _flaky_request_once(method: str, path: str, **kwargs: Any) -> Any:
+            calls.append(method)
+            if len(calls) == 1:
+                raise httpx.ReadTimeout("hang mid-read")
+            return real_request_once(method, path, **kwargs)
+
+        monkeypatch.setattr(store, "_request_once", _flaky_request_once)
+
+        result = store.echo_post("rt")
+
+        assert result == {"echo": {"value": "rt"}}
+        assert len(calls) == 2

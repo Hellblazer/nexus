@@ -135,12 +135,37 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
     @property
     def _centroid(self) -> Any:
-        """The service-backed centroid port (lazy; shares this store's config)."""
+        """The service-backed centroid port (lazy; shares this store's config).
+
+        nexus-gcx2r (decision-surface audit, 2026-07-12): the child inherits
+        the PARENT's pin state per half, not a hard pin of both. Passing
+        ``base_url=self._base_url, _token=self._token`` unconditionally
+        marked the child fully pinned, and the mixin's
+        ``_invalidate_and_reresolve`` refuses to self-heal a fully pinned
+        instance — since this property is the ONLY production construction
+        site of ``HttpCentroidStore``, every centroid-backed operation lost
+        self-heal entirely: any supervisor restart or token rotation turned
+        the first retryable failure into a permanent
+        ``RuntimeError: cannot self-heal`` for the life of the instance.
+        A half the parent resolved itself (unpinned) is passed as ``None``
+        so the child resolves — and later RE-resolves — that half through
+        the same resolver; a half the caller deliberately pinned on the
+        parent (fake-server tests) stays pinned on the child. Consequence
+        (code-review, non-blocking): an unpinned half is resolved
+        INDEPENDENTLY by the child at first access, not copied from the
+        parent — if the credential rotated between parent construction and
+        the lazy child's first centroid op, the two can transiently hold
+        different (both individually valid) tokens, each self-healing on
+        its own. Deliberate: copying would re-pin and re-create the dead
+        self-heal this fix removes.
+        """
         if self._centroid_store is None:
             from nexus.db.t2.http_centroid_store import HttpCentroidStore  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
             self._centroid_store = HttpCentroidStore(
-                base_url=self._base_url, tenant=self._tenant, _token=self._token,
+                base_url=self._base_url if self._base_url_pinned else None,
+                tenant=self._tenant,
+                _token=self._token if self._token_pinned else None,
             )
         return self._centroid_store
 
