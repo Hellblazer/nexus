@@ -1095,19 +1095,13 @@ def provision(
                 # original failure mode: cluster already up, Liquibase blocked
                 # on a missing 'vector' extension. Discover binaries lazily so
                 # the common already-extension-present case stays cheap.
+                _bins = None
                 try:
                     _bins = discover_pg_binaries()
                     check_pgvector_available(_bins)
                     result.vector_extension_created = _create_vector_extension(
                         _bins, stored_port, os_user
                     )
-                    # Backfill nexus_diag for clusters provisioned before
-                    # RDR-182 P2.1 (review-foundations High): the fast path is
-                    # the steady state for every EXISTING install — without
-                    # this, the diagnostic role only ever exists on
-                    # from-scratch provisions and the runAlways grants
-                    # changeset skips forever.
-                    _backfill_diag_role(_bins, stored_port, os_user, creds_path)
                 except PgBinaryNotFoundError:
                     # No binaries to repair with; the running cluster is serving
                     # via some other install. Leave the extension untouched.
@@ -1122,6 +1116,24 @@ def provision(
                         "pg_vector_extension_backfill_no_pgvector",
                         bin_dir=str(_bins.bin_dir),
                     )
+                # Backfill nexus_diag for clusters provisioned before RDR-182
+                # P2.1 (review-foundations High): the fast path is the steady
+                # state for every EXISTING install — without this, the
+                # diagnostic role only ever exists on from-scratch provisions
+                # and the runAlways grants changeset skips forever.
+                # Deliberately OUTSIDE the pgvector try (review-foundations
+                # round-2 note): role creation has nothing to do with
+                # pgvector, so a pgvector-less host still gets the role. Its
+                # own failure warns and never breaks the idempotent re-run.
+                if _bins is not None:
+                    try:
+                        _backfill_diag_role(
+                            _bins, stored_port, os_user, creds_path
+                        )
+                    except Exception as exc:  # noqa: BLE001 — repair path must never break the no-op re-run
+                        _log.warning(
+                            "pg_diag_role_backfill_failed", error=str(exc)
+                        )
                 _log.info(
                     "pg_provision_no_op",
                     port=stored_port,
