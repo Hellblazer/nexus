@@ -64,9 +64,12 @@ def _watermark_file() -> Path:
 
 def _load_all() -> dict[str, Any]:
     try:
-        return json.loads(_watermark_file().read_text())
+        data = json.loads(_watermark_file().read_text())
     except (OSError, ValueError):
         return {}
+    # "Never raises" contract: syntactically-valid-but-non-dict JSON (manual
+    # edit, format drift) must read as empty, not AttributeError downstream.
+    return data if isinstance(data, dict) else {}
 
 
 def _key(service_url: str, table: str) -> str:
@@ -112,21 +115,30 @@ def advance_watermark(
     """
     if not service_url:
         return
+    import fcntl  # noqa: PLC0415 — POSIX-only (darwin/linux, the supported platforms), deferred
+
     path = _watermark_file()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        marks = _load_all()
-        marks[_key(service_url, table)] = {
-            "max_rowid": max_rowid,
-            "target_count": target_count,
-        }
-        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".wm_")
-        try:
-            with os.fdopen(fd, "w") as fh:
-                json.dump(marks, fh, indent=2)
-            os.replace(tmp, path)
-        except BaseException:
-            Path(tmp).unlink(missing_ok=True)
-            raise
+        # flock around load+write: two concurrent verify-fill runs would
+        # otherwise lose each other's OTHER-table updates (read-modify-write
+        # race; safe — a lost update only costs the next run its shortcut —
+        # but silent, review c0e4493e finding 4).
+        lock_path = path.parent / ".wm.lock"
+        with open(lock_path, "w") as lock_fh:
+            fcntl.flock(lock_fh, fcntl.LOCK_EX)
+            marks = _load_all()
+            marks[_key(service_url, table)] = {
+                "max_rowid": max_rowid,
+                "target_count": target_count,
+            }
+            fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".wm_")
+            try:
+                with os.fdopen(fd, "w") as fh:
+                    json.dump(marks, fh, indent=2)
+                os.replace(tmp, path)
+            except BaseException:
+                Path(tmp).unlink(missing_ok=True)
+                raise
     except OSError:
         _log.warning("verify_fill.watermark_persist_failed", table=table, exc_info=True)

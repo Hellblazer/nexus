@@ -1149,6 +1149,18 @@ def verify_fill_telemetry(
     # POST-fill engine count is available to record as the invalidation
     # baseline (absent on a pre-whitelist engine -> no advance, no harm).
     wm_after = cs.counts(list(WATERMARK_TABLES.values())) or {} if wm_max_rowids else {}
+    # Review c0e4493e finding 1: RefreshableHttpStoreMixin can self-heal
+    # _base_url mid-fill (retryable transport failure, unpinned endpoint) — the
+    # writes then landed at the NEW target, so advancing under the ENTRY url
+    # would claim rows verified against a target this run never verified.
+    # Skip the advance entirely on drift (a lost shortcut, never a lost hole).
+    service_url_now = str(getattr(http_telemetry, "base_url", "") or "")
+    if wm_max_rowids and service_url_now != service_url:
+        _log.warning(
+            "verify_fill.watermark_advance_skipped_url_drift",
+            entry_url=service_url, current_url=service_url_now,
+        )
+        wm_max_rowids = {}
     for table, max_rowid in wm_max_rowids.items():
         result = fill_results.get(table) or {}
         post = wm_after.get(WATERMARK_TABLES[table])

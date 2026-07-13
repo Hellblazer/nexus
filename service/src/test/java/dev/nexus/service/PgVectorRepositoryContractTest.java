@@ -615,6 +615,34 @@ class PgVectorRepositoryContractTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void getWhere_gteNumeric_jooqTwinMatchesAppendWherePredicate() {
+        // Review c0e4493e finding 2: metadataCondition (the jOOQ twin used by
+        // getWhere/getAllMetadata) carries its own range-operator branch —
+        // "the two translators must not drift" needs DB-level proof on BOTH,
+        // not just the search() path.
+        String col = "code__getwheregte__voyage-code-3__v1";
+        embedder1024.register("gw t1", 1.0f, 0.0f);
+        embedder1024.register("gw t2", 0.8f, 0.6f);
+        embedder1024.register("gw t3", 0.0f, 1.0f);
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of("gwy21000000000000000000000000000", "gwy19000000000000000000000000000",
+                    "gwybad00000000000000000000000000"),
+            List.of("gw t1", "gw t2", "gw t3"),
+            List.of(Map.of("bib_year", 2021),
+                    Map.of("bib_year", 2019),
+                    Map.of("bib_year", "not-a-year")));
+
+        Map<String, Object> env = repo1024.getWhere(
+            TENANT_A, col, Map.of("bib_year", Map.of("$gte", 2020)), 10, 0, false);
+
+        assertThat((List<String>) env.get("ids"))
+            .as("jOOQ twin: numeric $gte matches only JSON-number rows >= 2020, "
+                + "excludes 2019 and the non-numeric row, no cast error")
+            .containsExactly("gwy21000000000000000000000000000");
+    }
+
+    @Test
     void search_whereEqOperatorForm_matchesPlainEquality() {
         String col = "code__searcheq__voyage-code-3__v1";
         seedSearchFixture(col);

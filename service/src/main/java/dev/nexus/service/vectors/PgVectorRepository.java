@@ -1425,11 +1425,13 @@ public final class PgVectorRepository {
      * {@code _ServiceCollectionStub.get(where=...)} asks for chunks whose
      * {@code source_key} / {@code content_hash} match. Plain-equality predicates
      * (ANDed) and the common single-field Chroma operator-form
-     * ({@code $eq}/{@code $ne}/{@code $in}/{@code $nin}) are supported via
-     * {@link #appendWherePredicate} — the same subset {@link #search} applies
-     * (nexus-05bfd). Unsupported operator shapes fail loud with 400 rather than
-     * silently matching nothing; compound {@code $and}/{@code $or} and range
-     * operators remain untranslated.
+     * ({@code $eq}/{@code $ne}/{@code $in}/{@code $nin}, plus the
+     * {@code $gte}/{@code $lte}/{@code $gt}/{@code $lt} range operators since
+     * nexus-4l80g) are supported via {@link #metadataCondition} — the jOOQ twin
+     * of {@link #appendWherePredicate}, kept to the same operator subset
+     * {@link #search} applies (nexus-05bfd). Unsupported operator shapes fail
+     * loud with 400 rather than silently matching nothing; compound
+     * {@code $and}/{@code $or} remains untranslated.
      *
      * @param where metadata equality predicates (ANDed); null/empty returns the
      *              collection paginated (the {@code store-get}-without-ids shape)
@@ -2577,6 +2579,18 @@ public final class PgVectorRepository {
      * or an unrecognized operator. Before nexus-05bfd an operator-form value was
      * {@code String.valueOf(map)}-bound and matched no rows with no error.
      */
+    /** NaN/Infinity cannot come from JSON parsing, but a programmatic caller
+     * could pass them — rewrap so the handler's 400 ladder catches it, never
+     * an unhandled NumberFormatException 500 (review c0e4493e finding 6). */
+    private static java.math.BigDecimal toBigDecimalOperand(String operator, String key, Number n) {
+        try {
+            return new java.math.BigDecimal(n.toString());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(
+                operator + " for field '" + key + "' got a non-finite numeric operand: " + n);
+        }
+    }
+
     static void appendWherePredicate(StringBuilder sql, List<Object> binds,
                                      String key, Object value) {
         if (key.startsWith("$")) {
@@ -2653,7 +2667,7 @@ public final class PgVectorRepository {
                        .append(" AND (metadata->>?)::numeric ").append(cmp).append(" ?");
                     binds.add(key);
                     binds.add(key);
-                    binds.add(new java.math.BigDecimal(n.toString()));
+                    binds.add(toBigDecimalOperand(operator, key, n));
                 } else if (operand instanceof String str) {
                     sql.append(" AND metadata->>? ").append(cmp).append(" ?");
                     binds.add(key);
@@ -2728,7 +2742,7 @@ public final class PgVectorRepository {
                     yield DSL.condition(
                         "jsonb_typeof(metadata->{0}) = 'number' AND (metadata->>{0})::numeric "
                         + cmp + " {1}",
-                        DSL.val(key), DSL.val(new java.math.BigDecimal(n.toString())));
+                        DSL.val(key), DSL.val(toBigDecimalOperand(operator, key, n)));
                 } else if (operand instanceof String str) {
                     yield DSL.condition("metadata->>{0} " + cmp + " {1}",
                         DSL.val(key), DSL.val(str));
