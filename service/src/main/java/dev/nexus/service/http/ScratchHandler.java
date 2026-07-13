@@ -324,9 +324,10 @@ public final class ScratchHandler implements HttpHandler {
      * (RLS enforced — the nexus_svc role has FORCE RLS, so rows for other tenants
      * are invisible even without explicit WHERE).
      *
-     * A true cross-tenant sweep (for the superuser "garbage collection" path)
-     * requires a BYPASSRLS connection. That path is deferred to bead nexus-4qq1m
-     * (Phase 5 operational). The per-tenant sweep is sufficient for correctness:
+     * Cross-tenant garbage collection is handled by the internal scheduler
+     * (nexus-4qq1m): it loops this same RLS-scoped per-tenant sweep over every
+     * token-bearing tenant, so no BYPASSRLS connection is needed anywhere.
+     * The per-tenant endpoint remains sufficient for a tenant's own hygiene:
      * each tenant's sweep call cleans its own stale sessions; the session-close
      * endpoint handles normal (non-crash) cleanup promptly.
      */

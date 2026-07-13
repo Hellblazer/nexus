@@ -287,8 +287,9 @@ public final class ScratchRepository {
     /**
      * Per-tenant TTL sweep: delete rows for this tenant where {@code ts < cutoff}.
      * Uses {@link TenantScope} (tenant-scoped, RLS enforced). Called by the
-     * /v1/t1/sweep endpoint for per-tenant cleanup; the cross-tenant superuser sweep
-     * is deferred to bead nexus-4qq1m.
+     * /v1/t1/sweep endpoint for per-tenant cleanup AND by the internal scheduler,
+     * which loops it over every token-bearing tenant (nexus-4qq1m) — the
+     * cross-tenant backstop needs no BYPASSRLS connection this way.
      */
     public int sweepTenant(String tenant, OffsetDateTime cutoff) {
         return tenantScope.withTenant(tenant, T1_TENANT_GUC, dsl -> {

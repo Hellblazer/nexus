@@ -470,7 +470,7 @@ class TestT1ColdStartTransientWindow:
 class TestT1DatabaseFlagOffPreservesLegacyBehaviour:
     """Flag-off: legacy resolver chain runs unchanged."""
 
-    def test_flag_off_with_skip_t1_uses_ephemeral(self, tmp_path, monkeypatch):
+    def test_isolated_env_uses_ephemeral_before_discovery(self, tmp_path, monkeypatch):
         from unittest.mock import MagicMock
 
         fake_chromadb = MagicMock()

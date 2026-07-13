@@ -502,4 +502,38 @@ class DataTokenHandlerTest {
             return rs.getString(column);
         }
     }
+    // ── nexus-4qq1m: cross-tenant sweep enumeration ─────────────────────────
+
+    @Test
+    void listKnownTenants_includesRevokedTenants_forCrossTenantSweep() throws Exception {
+        // Two extra tenants: one live token, one revoked. The cross-tenant TTL
+        // sweep must see BOTH — a revoked tenant's expired scratch rows still
+        // need sweeping.
+        String liveTenant = "sweep-enum-live-" + System.nanoTime();
+        String revokedTenant = "sweep-enum-revoked-" + System.nanoTime();
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            try (var ps = su.prepareStatement(
+                "INSERT INTO nexus.service_tokens (token_hash, tenant_id, label, scope, revoked_at) "
+                + "VALUES (?, ?, ?, ?, ?)")) {
+                ps.setString(1, TokenHashing.sha256Hex("live-" + liveTenant));
+                ps.setString(2, liveTenant);
+                ps.setString(3, "sweep-enum live");
+                ps.setString(4, dev.nexus.service.db.TokenStore.SCOPE_TENANT);
+                ps.setObject(5, null);
+                ps.executeUpdate();
+                ps.setString(1, TokenHashing.sha256Hex("revoked-" + revokedTenant));
+                ps.setString(2, revokedTenant);
+                ps.setString(3, "sweep-enum revoked");
+                ps.setString(4, dev.nexus.service.db.TokenStore.SCOPE_TENANT);
+                ps.setObject(5, java.time.OffsetDateTime.now());
+                ps.executeUpdate();
+            }
+        }
+        var store = new dev.nexus.service.db.TokenStore(ds, java.time.Clock.systemUTC());
+        var tenants = store.listKnownTenants();
+        org.assertj.core.api.Assertions.assertThat(tenants)
+            .as("cross-tenant sweep enumeration must include live AND revoked tenants")
+            .contains(liveTenant, revokedTenant);
+    }
 }

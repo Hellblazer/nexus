@@ -116,6 +116,22 @@ public final class TokenStore {
     }
 
     /**
+     * Every tenant that has EVER held a service token (revoked included —
+     * a revoked tenant's expired T1 scratch rows still need sweeping).
+     * Drives the cross-tenant TTL sweep (nexus-4qq1m): the sweeper loops
+     * these through {@code ScratchRepository.sweepTenant}, staying on the
+     * RLS-scoped per-tenant path — no BYPASSRLS connection required. Any
+     * tenant that wrote scratch necessarily presented a token, so this set
+     * covers every tenant that can have rows.
+     */
+    public java.util.List<String> listKnownTenants() {
+        return dsl()
+            .selectDistinct(SERVICE_TOKENS.TENANT_ID)
+            .from(SERVICE_TOKENS)
+            .fetch(SERVICE_TOKENS.TENANT_ID);
+    }
+
+    /**
      * Resolve a session token hash to its (tenant, session), filtering MISSING and
      * EXPIRED rows. session_tokens has no revoked_at (DELETE-on-close + expiry only).
      *

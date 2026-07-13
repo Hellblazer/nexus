@@ -131,8 +131,7 @@ class T1ServerNotFoundError(RuntimeError):
     Opt-in paths (no exception raised):
       - ``T1Database(client=...)`` for explicit client injection in
         tests and the MCP server lifespan.
-      - ``NX_T1_ISOLATED=1`` (
-        alias) for stateless one-shot subprocesses; constructs an
+      - ``NX_T1_ISOLATED=1`` for stateless one-shot subprocesses; constructs an
         ``EphemeralClient``.
     """
 
@@ -181,8 +180,7 @@ class T1Database:
         Branch order (opt-in outranks discovery):
 
         Path C (operator opt-in, highest priority)
-            ``NX_T1_ISOLATED=1`` (
-            alias) -> ``EphemeralClient``. The only place
+            ``NX_T1_ISOLATED=1`` -> ``EphemeralClient``. The only place
             ``EphemeralClient`` may be constructed in this code path.
             nexus-svpq / GH #593: this branch is consulted FIRST so an
             explicit operator opt-in to ephemeral semantics is not

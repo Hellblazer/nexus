@@ -227,6 +227,14 @@ public final class VoyageEmbedder implements Embedder {
                     Thread.sleep(delay);
                     continue;
                 }
+                if (status == 401 || status == 403) {
+                    // nexus-pmhpc: credentials problem, not an engine defect —
+                    // typed so VectorHandler returns 502-with-detail, not 500.
+                    throw new UpstreamAuthException(
+                            "Voyage AI rejected the service's API key (HTTP " + status
+                            + "): the key is invalid, expired, or lacks scope. Rotate the"
+                            + " service's Voyage key and restart. body=" + resp.body());
+                }
                 throw new RuntimeException(
                         "Voyage AI request failed: HTTP " + status + " body=" + resp.body());
 

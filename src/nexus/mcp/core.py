@@ -496,8 +496,7 @@ async def _t1_chroma_lifespan(_app: Any):
         owns chroma. Yield without spawning.
 
     Branch 2 (isolation)
-        ``NX_T1_ISOLATED=1`` (
-        alias): this MCP is a stateless one-shot. Yield without
+        ``NX_T1_ISOLATED=1``: this MCP is a stateless one-shot. Yield without
         spawning.
 
     Branch 3 (top-level / owned)
