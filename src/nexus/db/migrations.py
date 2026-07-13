@@ -540,7 +540,11 @@ def migrate_claude_assisted_remediation_consents(conn: sqlite3.Connection) -> No
         CREATE INDEX idx_consents_scope ON claude_assisted_remediation_consents(scope);
     """)
     conn.commit()
-    _log.info("Migrated: created claude_assisted_remediation_consents table (nexus-ykzbj.6)")
+    _log.info(
+        "migration_created_consents_table",
+        table="claude_assisted_remediation_consents",
+        bead="nexus-ykzbj.6",
+    )
 
 
 def migrate_nx_answer_runs(conn: sqlite3.Connection) -> None:
