@@ -288,7 +288,7 @@ public final class ScratchRepository {
      * Per-tenant TTL sweep: delete rows for this tenant where {@code ts < cutoff}.
      * Uses {@link TenantScope} (tenant-scoped, RLS enforced). Called by the
      * /v1/t1/sweep endpoint for per-tenant cleanup; the cross-tenant superuser sweep
-     * is deferred to bead .30.
+     * is deferred to bead nexus-4qq1m.
      */
     public int sweepTenant(String tenant, OffsetDateTime cutoff) {
         return tenantScope.withTenant(tenant, T1_TENANT_GUC, dsl -> {

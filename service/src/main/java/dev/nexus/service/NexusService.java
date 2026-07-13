@@ -71,7 +71,7 @@ public final class NexusService {
     /** Age threshold: scratch rows older than this are eligible for TTL sweep. */
     private static final long SWEEP_TTL_HOURS = 24L;
 
-    /** Default tenant used for the internal sweeper. Cross-tenant sweep deferred to bead .30. */
+    /** Default tenant used for the internal sweeper. Cross-tenant sweep deferred to bead nexus-4qq1m. */
     private static final String DEFAULT_TENANT = "default";
 
     private final HttpServer server;
@@ -319,7 +319,7 @@ public final class NexusService {
 
         // TTL sweep: crash-safety backstop for sessions that never called session-close.
         // Runs sweepTenant() for the default tenant every SWEEP_INTERVAL_HOURS.
-        // Cross-tenant superuser sweep (sweepExpired) deferred to bead .30.
+        // Cross-tenant superuser sweep (sweepExpired) deferred to bead nexus-4qq1m.
         this.sweepScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "t1-ttl-sweep");
             t.setDaemon(true);

@@ -1256,7 +1256,8 @@ def _warn_telemetry_drop(table: str, exc: BaseException) -> None:
         table=table,
         error=f"{type(exc).__name__}: {exc}",
         note="telemetry row not persisted (best-effort); subsequent drops for "
-             "this table are suppressed this process (tracked: nexus-pyzk7).",
+             "this table are suppressed this process (per-table suppression "
+             "shipped in nexus-pyzk7).",
     )
 
 
@@ -6257,8 +6258,8 @@ def remediate(topic: str = "chash-poison", confirm: bool = False) -> str:
        user's credentials; this release is the mutation-authorizing event.
     5. AUDIT-RECORD: ``Telemetry.record_consent(scope="remediate:<topic>")``.
        Written FAIL-CLOSED, before the release leaves this function: if the
-       consent audit cannot be written (service-mode T2 has no
-       ``record_consent`` until nexus-ng2sy), the release is REFUSED — THIS
+       consent audit cannot be written (e.g. a pre-nexus-ng2sy engine
+       without the consents route), the release is REFUSED — THIS
        TOOL never hands out its recovery playbook unaudited.
 
     THREAT-MODEL HONESTY (review-p3 H1): the consent layer audits the

@@ -325,7 +325,7 @@ public final class ScratchHandler implements HttpHandler {
      * are invisible even without explicit WHERE).
      *
      * A true cross-tenant sweep (for the superuser "garbage collection" path)
-     * requires a BYPASSRLS connection. That path is deferred to bead .30
+     * requires a BYPASSRLS connection. That path is deferred to bead nexus-4qq1m
      * (Phase 5 operational). The per-tenant sweep is sufficient for correctness:
      * each tenant's sweep call cleans its own stale sessions; the session-close
      * endpoint handles normal (non-crash) cleanup promptly.
