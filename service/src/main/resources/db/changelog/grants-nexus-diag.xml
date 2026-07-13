@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-182 P2.1 (bead nexus-ykzbj.8) — nexus_diag SELECT-only diagnostic-role
+    grants.
+
+    WHO CREATES THE ROLE (deliberately NOT this changelog):
+      nexus_diag is LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE **BYPASSRLS**.
+      CREATE ROLE ... BYPASSRLS requires superuser, and this changelog runs as
+      nexus_admin (NOCREATEROLE, non-superuser) — so creation lives with the
+      cluster superuser: src/nexus/db/pg_provision.py for the local bundle
+      (the service-mode nx init / guided-upgrade re-provision path; note XML
+      comments cannot spell the flag's double-hyphen), the DBA for managed
+      deployments (docs/configuration.md prerequisites pattern).
+
+    WHY BYPASSRLS ON A DIAGNOSTIC ROLE (nexus-vounk):
+      Every nexus.* tenant table is ENABLE+FORCE RLS with the fail-closed
+      tenant_isolation policy — a policy-subject session with no nexus.tenant
+      GUC counts ZERO rows (demonstrated 0-vs-9 on a real store), which made
+      the chash-poison install gate report false-clean on exactly the store
+      it exists to block. Integrity diagnostics must see what Liquibase
+      VALIDATE CONSTRAINT sees: all rows, all tenants.
+
+    BOUNDARY HONESTY (critic-foundations Critical-1, 2026-07-12): these
+      grants DB-enforce the MUTATION boundary only — SELECT and nothing else,
+      so INSERT/UPDATE/DELETE/DDL refuse at Postgres. The CONTENT boundary
+      (RDR-182 s5: diagnostics may count store rows, never read
+      row/document/note content) is NOT enforced here — BYPASSRLS plus
+      full-column SELECT could read cross-tenant content. That boundary is
+      enforced at the single product choke point,
+      src/nexus/db/diag_connection.py run_diagnostic_sql(), which lints every
+      statement (nexus.remediation.sql_lint, aggregate-only over store
+      tables) BEFORE any DB contact and wraps execution in SET TRANSACTION
+      READ ONLY. Product code must never open a nexus_diag session any other
+      way. Structural DB-level content scoping (count views instead of table
+      SELECT) is a tracked Phase-3 design question.
+
+    WHY CONDITIONAL (unlike grants-nexus-svc's fail-loud posture):
+      The service is useless without nexus_svc, so a missing nexus_svc fails
+      the boot loudly. The service runs FINE without nexus_diag (only the
+      client-side diagnostic tooling uses it), and managed deployments get the
+      role on the DBA's schedule — so a missing role here is a clean skip, and
+      runAlways="true" self-heals the grants on the first boot after the role
+      appears. GRANT is naturally idempotent; re-execution is safe.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="grants-nexus-diag-1" author="nexus-ykzbj.8" runAlways="true">
+        <comment>
+            SELECT-only grants for the nexus_diag diagnostic role (RDR-182
+            P2.1). Conditional on the role existing (clean skip otherwise;
+            self-heals every startup via runAlways). ALTER DEFAULT PRIVILEGES
+            runs as this migration connection's role (nexus_admin — the
+            creator of every schema table), so future tables are covered
+            automatically. Read-only by construction: SELECT on tables plus
+            the Liquibase journal; deliberately NO sequence usage, NO DML,
+            NO EXECUTE on the soft-delete functions.
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'nexus_diag') THEN
+        RAISE NOTICE 'nexus_diag absent — diagnostic grants skipped (created by pg_provision/DBA; self-heals next boot)';
+        RETURN;
+    END IF;
+
+    GRANT USAGE  ON SCHEMA nexus TO nexus_diag;
+    GRANT USAGE  ON SCHEMA t1    TO nexus_diag;
+    GRANT SELECT ON ALL TABLES IN SCHEMA nexus TO nexus_diag;
+    GRANT SELECT ON ALL TABLES IN SCHEMA t1    TO nexus_diag;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA nexus GRANT SELECT ON TABLES TO nexus_diag;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA t1    GRANT SELECT ON TABLES TO nexus_diag;
+
+    -- The Liquibase journal (public schema): the /version handshake and the
+    -- client-side migration-state probe read it.
+    GRANT SELECT ON public.databasechangelog     TO nexus_diag;
+    GRANT SELECT ON public.databasechangeloglock TO nexus_diag;
+END
+$$;
+        </sql>
+        <rollback>
+            <!-- Revoke is a DBA operation; not automated. -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

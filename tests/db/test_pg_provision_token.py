@@ -21,18 +21,21 @@ from nexus.db.pg_provision import (
 def test_write_credentials_includes_service_token(tmp_path: Path) -> None:
     creds_path = tmp_path / "pg_credentials"
     _write_credentials(creds_path, tmp_path / "postgres", 15999,
-                       "adminpw", "svcpw", "root-token-deadbeef")
+                       "adminpw", "svcpw", "root-token-deadbeef", "diagpw")
     creds = _read_credentials(creds_path)
     assert creds["NX_SERVICE_TOKEN"] == "root-token-deadbeef"
     # Decoupling: the token is independent of the DB passwords.
     assert creds["NX_DB_PASS"] == "svcpw"
     assert creds["NX_DB_ADMIN_PASS"] == "adminpw"
+    # RDR-182 P2.1: the diagnostic role's credentials ride the same file.
+    assert creds["NX_DB_DIAG_USER"] == "nexus_diag"
+    assert creds["NX_DB_DIAG_PASS"] == "diagpw"
 
 
 def test_write_credentials_is_0600(tmp_path: Path) -> None:
     creds_path = tmp_path / "pg_credentials"
     _write_credentials(creds_path, tmp_path / "postgres", 15999,
-                       "adminpw", "svcpw", "tok")
+                       "adminpw", "svcpw", "tok", "diagpw")
     mode = stat.S_IMODE(creds_path.stat().st_mode)
     assert mode == 0o600
 
@@ -92,7 +95,7 @@ def test_load_service_credentials_into_env(tmp_path: Path, monkeypatch) -> None:
 
     creds_path = tmp_path / "pg_credentials"
     _write_credentials(creds_path, tmp_path / "postgres", 15999,
-                       "adminpw", "svcpw", "root-token-deadbeef")
+                       "adminpw", "svcpw", "root-token-deadbeef", "diagpw")
 
     for k in ("NX_SERVICE_TOKEN", "NX_STORAGE_BACKEND", "NX_DB_USER"):
         monkeypatch.delenv(k, raising=False)
@@ -114,7 +117,7 @@ def test_load_service_credentials_does_not_clobber_existing_token(
 
     creds_path = tmp_path / "pg_credentials"
     _write_credentials(creds_path, tmp_path / "postgres", 15999,
-                       "adminpw", "svcpw", "file-token")
+                       "adminpw", "svcpw", "file-token", "diagpw")
     monkeypatch.setenv("NX_SERVICE_TOKEN", "user-exported-token")
 
     assert load_service_credentials_into_env(tmp_path) is True

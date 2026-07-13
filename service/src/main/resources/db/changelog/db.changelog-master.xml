@@ -211,4 +211,13 @@
     -->
     <include file="db/changelog/grants-nexus-svc.xml"/>
 
+    <!--
+        nexus_diag SELECT-only diagnostic-role grants (RDR-182 P2.1, bead
+        nexus-ykzbj.8) — runAlways, CONDITIONAL on the role existing (created
+        by pg_provision/DBA, never by this changelog: BYPASSRLS needs
+        superuser). Last for the same all-objects-exist reason as
+        grants-nexus-svc.
+    -->
+    <include file="db/changelog/grants-nexus-diag.xml"/>
+
 </databaseChangeLog>
