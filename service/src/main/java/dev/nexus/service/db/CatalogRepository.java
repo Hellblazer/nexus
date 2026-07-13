@@ -83,21 +83,28 @@ public final class CatalogRepository {
         "nexus.topic_links",
         "nexus.hook_failures",
         "nexus.nx_answer_runs",
-        // nexus-te885.10: the four previously count-unmapped telemetry tables.
-        // Adding them makes the outer count-diff meaningful for observability
-        // AND feeds the verify-fill watermark's target-shrank invalidation
-        // guard (a lower count than the watermark recorded means rows were
-        // deleted, e.g. a rollback -- the watermark must not be trusted).
-        "nexus.relevance_log",
-        "nexus.search_telemetry",
-        "nexus.tier_writes",
-        "nexus.frecency",
         "nexus.chash_index",
         "nexus.catalog_owners",
         "nexus.catalog_documents",
         "nexus.catalog_collections",
         "nexus.catalog_document_chunks",
         "nexus.catalog_links"
+    );
+
+    /**
+     * nexus-te885.10 + critique (soundness classes): relations whose counts are
+     * served for OBSERVABILITY and the verify-fill watermark's target-shrank
+     * invalidation guard ONLY — a count match here is NOT a parity signal
+     * (DO-NOTHING dedup collapse + live target-side writes make count equality
+     * ambiguous; relevance_log additionally has a rolling TTL sweep). Callers
+     * treating "count returned" as "safe for parity" for these relations are
+     * WRONG by contract, not just by convention.
+     */
+    private static final Set<String> COUNT_ONLY_RELATIONS = Set.of(
+        "nexus.relevance_log",
+        "nexus.search_telemetry",
+        "nexus.tier_writes",
+        "nexus.frecency"
     );
 
     static final ObjectMapper MAPPER = new ObjectMapper()
@@ -974,7 +981,7 @@ public final class CatalogRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             Map<String, Long> out = new LinkedHashMap<>();
             for (String rel : relations) {
-                if (rel == null || !VERIFY_RELATIONS.contains(rel)) {
+                if (rel == null || !(VERIFY_RELATIONS.contains(rel) || COUNT_ONLY_RELATIONS.contains(rel))) {
                     continue;  // whitelist guard — no arbitrary relation counts
                 }
                 String[] parts = rel.split("\\.", 2);

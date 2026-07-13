@@ -671,14 +671,16 @@ def read_rows_for_fill(
     unparseable timestamp) is SKIPPED and recorded via *collector* — same
     ``_SkipRow`` policy ``_run_batched`` applies, never a crash.
 
-    INVARIANT for future retention/TTL authors (R3b critique, 2026-07-02):
-    verify-fill treats a target-side-absent key as a HOLE and re-imports
-    it. As of today NO retention/pruning mechanism deletes rows from these
-    tables target-side, so that is correct. The moment a retention sweep
-    is added to any telemetry table, verify-fill will silently RESURRECT
-    pruned rows unless the fill path learns to exclude retention-expired
-    source rows (e.g. only probe/fill rows newer than the retention
-    horizon). Do not add retention without updating this path.
+    INVARIANT for retention/TTL authors (R3b critique 2026-07-02; CORRECTED
+    2026-07-13, nexus-24p05): verify-fill treats a target-side-absent key as
+    a HOLE and re-imports it. ``relevance_log`` ALREADY has target-side
+    retention (``expire_relevance_log``, 90-day TTL, fired by the default-on
+    SessionEnd hook via ``T2Database.expire()`` in service mode) — so a
+    verify-fill over a >90-day-old source can RESURRECT expired rows there
+    (pre-existing behavior, tracked in nexus-24p05; the same reason it is
+    excluded from the verify_fill_watermark tables). The other tables have
+    no retention today. Do not add retention to any of them without
+    updating this path AND re-checking the watermark exclusion list.
     """
     if table == "nx_answer_runs":
         cols = _NX_ANSWER_RUNS_COLS

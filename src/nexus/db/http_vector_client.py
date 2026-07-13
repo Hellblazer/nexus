@@ -1717,9 +1717,9 @@ class HttpVectorClient:
 
         nexus-h8rf6.5: was missing entirely — ``nx store expire`` crashed
         with ``AttributeError`` in service mode. T3Database parity, with one
-        translation: the service's where-filter supports ``$eq/$ne/$in/$nin``
-        only (``PgVectorRepository.appendWherePredicate``, no range
-        operators), so T3's ``{"ttl_days": {"$gt": 0}}`` pre-filter becomes
+        translation (historical: range operators landed later, nexus-4l80g, but
+        this equivalent rewrite predates them and stays), T3's
+        ``{"ttl_days": {"$gt": 0}}`` pre-filter becomes
         ``{"ttl_days": {"$ne": 0}}`` — equivalent for its only purpose,
         excluding the permanent ``ttl_days == 0`` sentinel (TTLs are never
         negative). The server's ``$ne`` is NULL-inclusive, so rows with

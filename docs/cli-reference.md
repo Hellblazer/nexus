@@ -21,7 +21,7 @@ nx search "authentication middleware" --corpus code --hybrid --n 20
 | `--corpus NAME` | Collection prefix or full name (repeatable; default: `knowledge`, `code`, `docs`) |
 | `--hybrid` | Augment semantic results with frecency-weighted ranking and ripgrep keyword matches (0.7*vector + 0.3*frecency). Requires ripgrep |
 | `--no-rerank` | Disable cross-corpus reranking (use round-robin instead) |
-| `--where KEY{op}VALUE` | Metadata filter (repeatable; multiple flags are ANDed). Operators: `=`, `>=`, `<=`, `>`, `<`, `!=`. Known numeric fields (`bib_year`, `bib_citation_count`, `page_count`, `chunk_count`) are auto-coerced to int. Example: `--where bib_year>=2024 --where section_type!=references` |
+| `--where KEY{op}VALUE` | Metadata filter (repeatable; multiple flags are ANDed). Operators: `=`, `>=`, `<=`, `>`, `<`, `!=`. Range operators (`>=`, `<=`, `>`, `<`) auto-coerce an unambiguous numeric literal to a number for ANY field (numeric compare; JSON-string metadata values will not match a numeric operand); quote the value (`--where "created>='2026-01-01'"`) to force an ordered-STRING compare (correct for ISO dates; beware `'9' > '10'` lexically). Equality/`!=` coerce only the known numeric fields (`bib_year`, `bib_citation_count`, `page_count`, `chunk_count`). Example: `--where bib_year>=2024 --where section_type!=references` |
 | `--max-file-chunks N` | Exclude chunks from files larger than N chunks (code corpora only; ANDs with `--where`) |
 | `-m` / `--n` / `--max-results NUM` | Max results (default 10) |
 | `-A N` | Show N lines of context after each matching line (within chunk) |

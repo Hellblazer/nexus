@@ -24,6 +24,11 @@ SOUNDNESS CONDITIONS (all load-bearing):
 - **Advance gate**: written only after a fill pass whose result status is
   ``parity``/``filled`` (never after a breaker abort), and only when a
   post-fill engine count is available to record.
+- **Target-delete freedom**: a table qualifies ONLY while nothing deletes
+  its target rows outside a full rollback — a rolling TTL sweep concurrent
+  with live inserts keeps the count non-decreasing and blinds the trust
+  gate. That is why ``relevance_log`` is excluded (see above); re-adding
+  any table requires re-verifying this property FIRST.
 - **Source invariants**: the SQLite source is frozen post-cutover and these
   tables are delete-free source-side, so rowids are stable and append-only.
   ``frecency`` mutates content in place, but verify-fill checks identity
@@ -46,10 +51,17 @@ _log = structlog.get_logger(__name__)
 
 #: SQLite table -> PG relation, for the watermark's invalidation-count reads
 #: ONLY. Deliberately DISJOINT from ``orchestrator._VERIFY_TABLES`` — putting
-#: these four there would let the outer loop skip them on an UNSOUND count
+#: these there would let the outer loop skip them on an UNSOUND count
 #: parity (see module docstring).
+#:
+#: ``relevance_log`` is EXCLUDED (critique of c0e4493e, nexus-24p05): its
+#: target-side 90-day TTL sweep (``expire_relevance_log``, fired by the
+#: default-on SessionEnd hook via ``T2Database.expire()``) runs concurrently
+#: with continuous live inserts — the delete-N/insert-N steady state keeps the
+#: count non-decreasing, which DEFEATS the count trust gate (a hole below the
+#: floor stays invisible). It keeps today's full probe until a stronger
+#: invalidation signal exists (the sweep publishing a max-deleted marker).
 WATERMARK_TABLES: dict[str, str] = {
-    "relevance_log": "nexus.relevance_log",
     "search_telemetry": "nexus.search_telemetry",
     "tier_writes": "nexus.tier_writes",
     "frecency": "nexus.frecency",
