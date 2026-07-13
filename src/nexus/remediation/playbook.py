@@ -90,6 +90,11 @@ class Playbook:
     #: What the probe actually found (dynamic, from StoreState).
     store_detail: str
     runbook_url: str = field(default=MIGRATION_RUNBOOK_URL)
+    #: SQL a DIAGNOSTIC (forensics) topic wants the agent to run. Linted
+    #: read-only + metadata-scoped at emission (RDR-182 P2.2, nexus-ykzbj.9)
+    #: — a mutating diagnostic is impossible-by-construction. Empty for
+    #: topics whose guidance is CLI-command-based (like chash-poison).
+    diagnostic_sql: tuple[str, ...] = ()
 
     def agent_prompt(self) -> str:
         """The ready-to-paste prompt an operator hands their own agent."""
@@ -218,4 +223,12 @@ def emit_playbook(topic: str, store_state: StoreState) -> Playbook:
             f"unknown playbook topic {topic!r} — known topics: "
             f"{sorted(_TOPICS)}"
         ) from None
-    return builder(store_state)
+    playbook = builder(store_state)
+    if playbook.diagnostic_sql:
+        # RDR-182 P2.2 (nexus-ykzbj.9): pre-emission read-only lint — no
+        # playbook carrying mutating or content-reading diagnostic SQL can
+        # ever be emitted, on any surface.
+        from nexus.remediation.sql_lint import assert_read_only_diagnostics  # noqa: PLC0415 — avoid import cycle at module load
+
+        assert_read_only_diagnostics(playbook.diagnostic_sql)
+    return playbook
