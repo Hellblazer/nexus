@@ -69,9 +69,54 @@ def config_set(key_value: str, value: str | None) -> None:
     if "." in key:
         from nexus.config import set_config_value  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         set_config_value(key, value.strip())
+        if key == "claude_assisted_remediation.enabled":
+            _record_flag_consent(value.strip())
     else:
         set_credential(key, value.strip())
     click.echo(f"Set {key}  →  {_global_config_path()}")
+
+
+def _record_flag_consent(raw_value: str) -> None:
+    """Audit a grant OR revoke of the RDR-182 durable consent flag.
+
+    The revocation-write half of the consent audit trail (nexus-ykzbj.15):
+    the migration docstring promises revoke events are retained as
+    first-class rows, so BOTH directions of ``nx config set
+    claude_assisted_remediation.enabled <value>`` write a row —
+    ``granted`` mirrors the gate's own strict parse (anything that would
+    not enable the gate audits as a revoke). BEST-EFFORT by design: this
+    command IS the remedy the refusal names, so an audit-store problem must
+    never block the flag write itself — it warns loudly instead (unlike the
+    release paths, which fail closed; releasing guidance and flipping a
+    flag carry different stakes).
+    """
+    from datetime import datetime, timezone  # noqa: PLC0415 — deliberate function-scoped import
+
+    granted = raw_value.strip().lower() in ("true", "1", "yes")
+    try:
+        from nexus.commands._helpers import t2_handle  # noqa: PLC0415 — deliberate function-scoped import
+        from nexus.remediation import FLAG_CONSENT_SCOPE  # noqa: PLC0415 — deliberate function-scoped import
+
+        with t2_handle() as db:
+            if not hasattr(db.telemetry, "record_consent"):
+                click.echo(
+                    "WARNING: consent audit not recorded (service-mode T2 "
+                    "lacks record_consent until nexus-ng2sy) — the flag "
+                    "change itself took effect.",
+                    err=True,
+                )
+                return
+            db.telemetry.record_consent(
+                scope=FLAG_CONSENT_SCOPE,
+                ts=datetime.now(timezone.utc).isoformat(),
+                granted=granted,
+            )
+    except Exception as exc:  # noqa: BLE001 — best-effort audit; the flag write must not be blocked by audit problems
+        click.echo(
+            f"WARNING: consent audit not recorded ({exc}) — the flag change "
+            "itself took effect.",
+            err=True,
+        )
 
 
 # ── get ───────────────────────────────────────────────────────────────────────

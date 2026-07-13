@@ -73,6 +73,7 @@ T2_STORE_CONTRACT: dict[str, dict[str, list[str]]] = {
         'log_relevance_batch': ['rows'],
         'log_search_batch': ['rows'],
         'query_collection_stats': ['collection', 'days'],
+        'list_consents': [],
         'record_consent': ['scope', 'ts', 'granted'],
         'record_hook_failure': ['doc_id', 'collection', 'hook_name', 'error',
                                 'chain', 'batch_doc_ids', 'is_batch',

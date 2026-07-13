@@ -80,6 +80,12 @@ _EXCLUSIONS: dict[str, dict[str, str]] = {
             "only per the bead; HttpTelemetryStore + engine-side table/endpoint "
             "parity is the explicit follow-up bead nexus-ng2sy (P1 — blocks the remediate path for service-mode deployments)."
         ),
+        "list_consents": (
+            "RDR-182 P4 (nexus-ykzbj.15): the consent-audit READ surface, "
+            "SQLite-only for the same reason as record_consent; rides the "
+            "same nexus-ng2sy engine-parity follow-up (remove both entries "
+            "together)."
+        ),
     },
 }
 

@@ -232,6 +232,26 @@ class Telemetry:
             )
             self.conn.commit()
 
+    def list_consents(self) -> list[dict]:
+        """Read the consent-audit trail (RDR-182 read surface, nexus-ykzbj.15).
+
+        Rows in insertion order — grants AND revokes, append-only, so the
+        history of the durable flag and every per-invocation release is
+        reconstructible. Returns ``[{scope, ts, granted}, ...]``.
+        """
+        from nexus.db.migrations import (  # noqa: PLC0415 — circular-dep avoidance (nexus.db.migrations)
+            migrate_claude_assisted_remediation_consents,
+        )
+        with self._lock:
+            migrate_claude_assisted_remediation_consents(self.conn)
+            rows = self.conn.execute(
+                "SELECT scope, ts, granted "
+                "FROM claude_assisted_remediation_consents ORDER BY id"
+            ).fetchall()
+        return [
+            {"scope": r[0], "ts": r[1], "granted": bool(r[2])} for r in rows
+        ]
+
     def record_nx_answer_run(
         self,
         *,

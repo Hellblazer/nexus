@@ -60,6 +60,7 @@ from nexus.commands.migration_cmd import migration_cmd
 from nexus.commands.mineru import mineru_group
 from nexus.commands.plan import plan as plan_group
 from nexus.commands.rdr import rdr as rdr_group
+from nexus.commands.remediation_cmd import forensics_cmd, remediate_cmd
 from nexus.commands.scratch import scratch
 from nexus.commands.search_cmd import search_cmd
 from nexus.commands.service_cmd import service
@@ -119,6 +120,8 @@ main.add_command(migration_cmd, name="migration")
 main.add_command(mineru_group, name="mineru")
 main.add_command(plan_group, name="plan")
 main.add_command(rdr_group, name="rdr")
+main.add_command(forensics_cmd, name="forensics")
+main.add_command(remediate_cmd, name="remediate")
 main.add_command(scratch)
 main.add_command(search_cmd, name="search")
 main.add_command(service, name="service")

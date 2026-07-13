@@ -127,7 +127,12 @@ class Playbook:
             f"Recovery: {self.runbook_url} §{self.runbook_section}."
         )
 
-    def describe(self) -> str:
+    def describe(
+        self,
+        consent_hint: str = (
+            "re-call this tool with confirm=true (the grant is audit-recorded)"
+        ),
+    ) -> str:
         """The PRE-CONSENT rendering (RDR-182 remediate layer 2): states what
         consent would authorize — context, hard do-NOTs, deliverable, escape,
         runbook pointer — without rendering the ordered recovery steps (the
@@ -154,8 +159,7 @@ class Playbook:
             f"If the environment is gone: {self.escape}\n\n"
             f"Full runbook (clickable): {self.runbook_url} "
             f"§{self.runbook_section}\n\n"
-            f"To consent and receive the recovery playbook, re-call this "
-            f"tool with confirm=true (the grant is audit-recorded)."
+            f"To consent and receive the recovery playbook, {consent_hint}."
         )
 
     def tool_return(self) -> str:
@@ -382,6 +386,12 @@ def remediate_topics() -> tuple[str, ...]:
 #: sites) so audit-scope strings cannot fragment on typos (nexus-ykzbj.15
 #: builder note; first enforced by P3.2).
 _CONSENT_VERBS = ("forensics", "remediate")
+
+#: Audit scope for the DURABLE flag itself (grants AND revokes of
+#: ``claude_assisted_remediation.enabled`` via ``nx config set`` — the
+#: revocation-write obligation, nexus-ykzbj.15). Distinct from the
+#: per-invocation ``<verb>:<topic>`` scopes: the flag is not topic-shaped.
+FLAG_CONSENT_SCOPE = "flag:claude_assisted_remediation"
 
 
 def consent_scope(verb: str, topic: str) -> str:

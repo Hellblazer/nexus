@@ -45,6 +45,7 @@ _log = structlog.get_logger(__name__)
 
 __all__ = [
     "DiagCredentials",
+    "live_store_detail",
     "resolve_diag_credentials",
     "run_diagnostic_sql",
 ]
@@ -163,3 +164,36 @@ def run_diagnostic_sql(
             )
         outputs.append(proc.stdout.strip())
     return outputs
+
+
+def live_store_detail(statements, *, resolve=None, run=None) -> str:
+    """Run *statements* via the choke point and format a store_detail string.
+
+    The canonical live-diagnostics leg shared by the MCP tools and the CLI
+    commands (RDR-182 P3/P4): degrade LOUD-IN-BAND — credentials absent reads
+    as UNAVAILABLE ("do NOT interpret this as a clean store"), a failure
+    reads as UNKNOWN, and only real results render as results. ``resolve`` /
+    ``run`` are injection seams (the MCP layer passes its own monkeypatchable
+    indirections; defaults are the real choke-point functions).
+    """
+    _resolve = resolve if resolve is not None else resolve_diag_credentials
+    _run = run if run is not None else run_diagnostic_sql
+
+    creds = _resolve()
+    if creds is None:
+        return (
+            "live diagnostics UNAVAILABLE — no nexus_diag credentials "
+            "(pre-P2.1 install or no local service PG). Re-run "
+            "`nx init --service` to backfill the diagnostic role, then "
+            "re-invoke. Do NOT interpret this as a clean store."
+        )
+    try:
+        results = _run(statements, creds)
+    except Exception as exc:  # noqa: BLE001 — degrade loud-in-band; callers surface the text, never a crash
+        return (
+            f"live diagnostics FAILED ({exc}) — treat store state as "
+            "UNKNOWN, not clean."
+        )
+    return "live diagnostic results:\n" + "\n".join(
+        f"  {stmt} = {out}" for stmt, out in zip(statements, results)
+    )

@@ -380,14 +380,36 @@ principles; the engine-side analysis (c4143) shows the hard cases need a human
   no-exfiltration constraint; nothing is transmitted by the product.
 - **Risk**: opt-in erodes into default-on for "convenience."
   **Mitigation**: default-off is a locked constraint; parity tests assert it.
+- **Risk (A5, taxonomy amendment 2026-07-13 / critic-p4 Critical)**: the CLI
+  `nx forensics`/`nx remediate` were originally ungated per Gap 3 ("printing
+  text a human chooses to copy is the consent act"), but — unlike the static
+  `install-binary` paste-prompt that precedent was drawn from — they run a
+  live, credentialed, product-provisioned **BYPASSRLS** store probe. A
+  shell-capable agent (the very "enlisted agent" this RDR is about) could
+  reach, ungated, the credentialed read the MCP gate withholds.
+  **Resolution**: the taxonomy is split. The static playbook TEXT stays
+  ungated display on the CLI (the human-typed-command consent act holds for
+  guidance a human reads/copies). The **live-diagnostics leg** honors
+  `claude_assisted_remediation.enabled` on the CLI too — the credentialed
+  probe is the new capability Gap 3 gates, so it is gated on **every**
+  autonomously-reachable surface, not just the MCP transport. Flag-off on the
+  CLI degrades to an explicit "live counts not included; opt in to enable"
+  note. The durable-flag reader is a single shared implementation
+  (`nexus.remediation.consent.remediation_opt_in`, global-config-only) so the
+  CLI and MCP gates cannot drift. Residual (unchanged, A1): the product
+  cannot stop the user's own agent from running arbitrary SQL as
+  `nexus_admin` — this closes the *product-provisioned diagnostic* path, not
+  every conceivable read.
 
 ### Failure Modes
 
 - **Opt-in not enabled (the default)**: the MCP `forensics`/`remediate` tools
   return a refusal string naming the exact enable command (`nx config set
   claude_assisted_remediation.enabled true`) before any content — visible,
-  actionable, no capability leak. The CLI `nx forensics` (display-only) is
-  unaffected (it needs no gate per the consent taxonomy).
+  actionable, no capability leak. The CLI prints its guidance TEXT ungated but
+  omits the live credentialed store counts, with a note naming the same enable
+  command (taxonomy amendment A5 above — the live probe is gated on the CLI
+  too; only the static display is ungated).
 - **Store-state probe cannot run** (PG down, not service mode): degrades to a
   non-fatal warn and the display-only runbook URL — never a false "clean" and
   never a hard block on unrelated work (matches the shipped `install-binary`
@@ -414,8 +436,13 @@ Two proofs, both in scope:
 
 1. **The safety property**: with `claude_assisted_remediation.enabled` false
    (default), the MCP `forensics`/`remediate` tools return the refusal string
-   and emit ZERO diagnostic content — the autonomous-enlistment hole is
-   closed by construction, asserted mechanically.
+   and emit ZERO diagnostic content, AND the CLI's live-diagnostics leg does
+   not run the credentialed probe (it prints ungated guidance text but no
+   live store counts) — the credentialed-probe autonomous-enlistment hole is
+   closed on BOTH the MCP and CLI surfaces (taxonomy amendment A5), asserted
+   mechanically on each. (The static guidance text is public runbook content
+   and is intentionally not gated — this proof is about the credentialed
+   store probe, not about withholding public documentation.)
 2. **The end-to-end flow**: with the flag enabled, a poisoned store → operator
    opts in at the upgrade edge → `nx remediate chash-poison` (and/or the
    Desktop MCP tool) hands the agent a read-only diagnostic + consented

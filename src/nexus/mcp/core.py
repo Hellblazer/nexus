@@ -6147,55 +6147,16 @@ _REMEDIATION_REFUSAL = (
 
 
 def _remediation_opt_in() -> bool:
-    """True iff ``claude_assisted_remediation.enabled`` is affirmatively set
-    in the user's GLOBAL ``~/.config/nexus/config.yml`` — and ONLY there.
+    """The RDR-182 durable opt-in gate — global-config-only, strict, fail-closed.
 
-    GLOBAL-ONLY, deliberately NOT ``load_config()`` (critic-p3 Critical,
-    2026-07-12): the merged view honors a repo-local ``.nexus.yml``, and a
-    consent flag that a ``git pull`` (or one approved PR) can flip is not a
-    human consent gesture — an agent whose cwd is that checkout would clear
-    the gate, receive the mutation-authorizing playbook, AND write a FALSE
-    ``granted=True`` consent-audit row attributed to a user who never acted.
-    The named enable command (``nx config set``) writes exactly the global
-    file, so the remedy and the recognition surface coincide. Env vars are
-    likewise not consulted (a negative test locks ``_ENV_OVERRIDES``).
-
-    Read FRESH per invocation (the MCP server is long-lived; an operator
-    enabling the flag mid-session must take effect on the next call).
-
-    STRICT parse, fail-closed: ``nx config set`` stores the raw STRING
-    (``set_config_value(dotted_key, value: str)``), so the flag arrives as
-    ``"true"``/``"false"``, not a bool — and ``bool("false") is True``, so
-    truthiness would invert an explicit disable. Only ``True`` and the
-    case-insensitive strings ``"true"``/``"1"``/``"yes"`` enable; everything
-    else (absent, ``False``, ``"false"``, non-bool/str scalars like YAML
-    int ``1``, garbage) refuses. Fail-closed includes SHAPE mismatches
-    (critic-spike High): a hand-edited flat scalar
-    (``claude_assisted_remediation: true``) must refuse, not crash — a crash
-    is not a refusal. An unreadable/corrupt global file also refuses.
-    (The refusal's named command still crashes on a pre-existing flat scalar
-    — set_config_value bug, tracked as nexus-s4a98.)
+    Single source of truth in :mod:`nexus.remediation.consent` (shared with
+    the CLI's live-diagnostics leg so the two surfaces cannot drift). Kept as
+    a module-local name so tests that monkeypatch ``core._remediation_opt_in``
+    and the gate-shape record's references still resolve here.
     """
-    import yaml  # noqa: PLC0415 — deferred, startup cost
+    from nexus.remediation.consent import remediation_opt_in  # noqa: PLC0415 — deferred, startup cost
 
-    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred, startup cost
-
-    path = nexus_config_dir() / "config.yml"
-    try:
-        if not path.exists():
-            return False
-        data = yaml.safe_load(path.read_text()) or {}
-    except Exception:  # noqa: BLE001 — unreadable/corrupt config = fail closed, never crash the gate
-        return False
-    if not isinstance(data, dict):
-        return False
-    section = data.get("claude_assisted_remediation", {})
-    if not isinstance(section, dict):
-        return False
-    value = section.get("enabled", False)
-    if value is True:
-        return True
-    return isinstance(value, str) and value.strip().lower() in ("true", "1", "yes")
+    return remediation_opt_in()
 
 
 def _diag_resolve(creds_path=None):  # noqa: ANN001, ANN202 — thin indirection, monkeypatch seam
@@ -6257,27 +6218,13 @@ def forensics(topic: str = "chash-poison") -> str:
 
 
 def _live_store_detail(diagnostic_sql) -> str:  # noqa: ANN001, ANN202 — shared by forensics/remediate
-    """Run *diagnostic_sql* via the nexus_diag choke point and format the
-    results as a store_detail string; degrade LOUD-IN-BAND (unavailable /
-    failed reads as such, never as clean)."""
-    creds = _diag_resolve()
-    if creds is None:
-        return (
-            "live diagnostics UNAVAILABLE — no nexus_diag credentials "
-            "(pre-P2.1 install or no local service PG). Re-run "
-            "`nx init --service` to backfill the diagnostic role, then "
-            "re-invoke. Do NOT interpret this as a clean store."
-        )
-    try:
-        results = _diag_run(diagnostic_sql, creds)
-    except Exception as exc:  # noqa: BLE001 — degrade loud-in-band; the agent must see the failure, not a crash
-        return (
-            f"live diagnostics FAILED ({exc}) — treat store state as "
-            "UNKNOWN, not clean."
-        )
-    return "live diagnostic results:\n" + "\n".join(
-        f"  {stmt} = {out}" for stmt, out in zip(diagnostic_sql, results)
-    )
+    """Delegate to the canonical :func:`nexus.db.diag_connection
+    .live_store_detail`, threading this module's monkeypatchable seams
+    (``_diag_resolve``/``_diag_run``) so the zero-work-on-refusal and
+    degrade-path tests keep their hooks."""
+    from nexus.db.diag_connection import live_store_detail  # noqa: PLC0415 — deferred, startup cost
+
+    return live_store_detail(diagnostic_sql, resolve=_diag_resolve, run=_diag_run)
 
 
 @mcp.tool(
