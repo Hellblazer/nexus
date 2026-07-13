@@ -25,6 +25,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from nexus.db.chash_tables import CHASH_BEARING_TABLES as _CHASH_TABLES
+
 #: Full clickable https URL, pinned to ``main`` (releases promote develop ->
 #: main, so an operator on a released build finds the sections on main).
 #: Hoisted from ``commands/daemon.py`` (nexus-ykzbj.7); daemon.py now imports
@@ -250,15 +252,10 @@ def _chash_poison(store_state: StoreState) -> Playbook:
     )
 
 
-#: The five chash-bearing tables the GH #1390 class can poison — mirrors
-#: health.py's chash_sql set. Counts are aggregate-only (P2.2 lint shape).
-_CHASH_TABLES = (
-    "nexus.chunks_384",
-    "nexus.chunks_768",
-    "nexus.chunks_1024",
-    "nexus.chash_index",
-    "nexus.catalog_document_chunks",
-)
+# The chash-bearing table set (_CHASH_TABLES) is imported at the top from the
+# shared nexus.db.chash_tables — the SINGLE source of truth shared with the
+# nx doctor / install-binary health probe (nexus-vounk), so the operator gate
+# and this agent-facing topic cannot drift to checking different tables.
 
 
 def _chash_poison_forensics(store_state: StoreState) -> Playbook:

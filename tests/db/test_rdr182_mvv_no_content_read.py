@@ -79,6 +79,17 @@ class TestNoContentReadProperty:
 
         assert_read_only_diagnostics(_forensics_sql())  # raises on violation
 
+    def test_health_probe_and_forensics_share_the_chash_table_set(self):
+        """nexus-vounk drift guard: the operator health probe and the
+        agent-facing forensics topic count the SAME tables (one poisoned
+        table must not slip past one surface but not the other)."""
+        from nexus.db.chash_tables import chash_conformance_statements
+
+        shared = chash_conformance_statements()
+        # The forensics topic's diagnostic SQL leads with exactly these
+        # per-table count statements (then adds the constraint-state query).
+        assert _forensics_sql()[:len(shared)] == shared
+
     def test_a_content_read_would_be_rejected_by_the_same_path(self):
         """Non-vacuity: the lint the emitter runs rejects a content SELECT —
         so the property is enforced, not merely true of today's statements."""
@@ -214,6 +225,43 @@ class TestEndToEndPoisonedStore:
                 ["SELECT chash FROM nexus.chunks_768"],
                 creds, psql_bin=Path(pg_bin_dir()) / "psql",
             )
+
+    def test_vounk_admin_counts_zero_but_diag_counts_the_poison(self, poisoned_cluster):
+        """nexus-vounk regression, the exact 0-vs-9 shape on a REAL FORCE-RLS
+        store: nexus_admin with NO tenant GUC counts 0 (the vacuous health
+        probe the fix retires), while the nexus_diag/BYPASSRLS path counts the
+        poisoned row — what Liquibase VALIDATE sees and the pre-upgrade gate
+        MUST see."""
+        import os
+        import subprocess
+        from pathlib import Path
+
+        from nexus.db.diag_connection import DiagCredentials, run_diagnostic_sql
+        from tests.db._service_fixture import pg_bin_dir
+
+        stmt = "SELECT count(*) FROM nexus.chunks_768 WHERE length(chash) <> 32"
+        # (a) nexus_admin (NOSUPERUSER, the health probe's old identity), no
+        # GUC -> FORCE RLS filters everything -> 0 (the vacuous count). Must
+        # NOT be a superuser here — superusers bypass RLS and would see the
+        # row, hiding the very bug this asserts.
+        admin = subprocess.run(
+            [str(Path(pg_bin_dir()) / "psql"), "-h", "127.0.0.1",
+             "-p", str(poisoned_cluster["port"]), "-U", "nexus_admin",
+             "-d", "nexus", "-tAc", stmt],
+            capture_output=True, text=True, timeout=30,
+            env=dict(os.environ, PGPASSWORD="a-pw"),
+        )
+        assert admin.returncode == 0, admin.stderr
+        assert admin.stdout.strip() == "0", (
+            "nexus_admin (no GUC) should count 0 under FORCE RLS — the vacuous "
+            "path the vounk fix retires"
+        )
+        # (b) nexus_diag via the choke point -> sees the poison
+        creds = DiagCredentials(
+            port=poisoned_cluster["port"], user="nexus_diag", password="diag-pw",
+        )
+        diag = run_diagnostic_sql([stmt], creds, psql_bin=Path(pg_bin_dir()) / "psql")
+        assert diag == ["1"], "diag path must see the poisoned row the admin path missed"
 
 
 class TestEndToEndOptInRemediationFlow:
