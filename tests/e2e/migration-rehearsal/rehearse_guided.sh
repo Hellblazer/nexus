@@ -5,7 +5,12 @@
 # Mirrors rehearse.sh but drives the SINGLE `nx guided-upgrade` entry point
 # instead of the manual `nx init --service` + `nx migrate-to-service` sequence:
 #
-#   seed pre-RDR-160 install  (>=1 minilm-384 collection + 1 sourceless note)
+#   seed pre-RDR-160 install  (minilm-384 + sourceless note + voyage-named
+#                              mislabel whose vectors are really 768-dim ONNX)
+#   Phase 0 (nexus-itme7)     two BLOCKED sub-runs layered on the main seed:
+#                              A) 5b9v0 collision pair -> TargetNameCollisionBlocked
+#                              B) nonconformant + legacy-id -> ModelPreGateBlocked,
+#                              then mandatory `nx migration --clear-state`
 #   nx guided-upgrade         (detect -> provision -> health-gate -> version-pin
 #                              -> migrate -> validate -> unlock, all in one shot)
 #   assert "Migration VERIFIED and unlocked" + cross-model parity + Chroma intact
@@ -67,6 +72,126 @@ else
   bad "seed failed"; say "ABORT (seed is the precondition)"; exit 1
 fi
 
+# ── Phase 0 (nexus-itme7): blocked pre-flight — the shipped guards must FIRE ─
+# Two SEPARATE blocked sub-runs: the 5b9v0 collision guard (driver.py) raises
+# BEFORE the sequencer pregate, so one guided-upgrade run emits exactly ONE of
+# {TargetNameCollisionBlocked, ModelPreGateBlocked}. Both sub-runs layer their
+# blocking shapes ON TOP of the main seed above — migrate_cmd's T2/catalog
+# existence pre-check fires before any guard, so a blocking-only footprint
+# (no memory.db yet) would die on the WRONG diagnostic (it5wo demonstration,
+# 2026-07-12). All pinned substrings below are the demonstration's captured
+# rendered bytes, not paraphrases.
+#
+# Sub-run A also owns the PG-bundle ACQUIRE assertion (nexus-5qefg, moved here
+# from the success phase): A is the first guided-upgrade invocation, and the
+# collision fires inside _run_migration (step 3) AFTER provisioning (step 2),
+# so THIS run downloads + verifies the bundle. Later runs find the bundle on
+# disk and print the (deliberately unmatched) "extracted on first run" marker
+# instead — see the nexus-5qefg comment retained below.
+say "Phase 0A — collision pair MUST block (TargetNameCollisionBlocked)"
+# Shape (iv): an honest bge-768 collection plus a stale voyage-NAMED sibling
+# whose stored vectors measure 768-dim — the measured-dim override (nexus-
+# nb7hr) remaps the stale half onto the honest sibling's name = target-name
+# collision. The shipped 5b9v0 guard blocks UNCONDITIONALLY (there is no
+# benign-merge carve-out), so via guided-upgrade the pair is a Phase-0 BLOCK
+# fixture — the design's original "benign merge, union count at the target"
+# outcome is unreachable and deliberately NOT asserted anywhere.
+if BLOCK_A="$(python /home/nexus/seed_legacy.py "$CHROMA_LOCAL" --blocking=collision --n "$SEED_N")"; then
+  ok "seeded collision pair: $(printf '%s\n' "$BLOCK_A" | tail -1)"
+else
+  bad "collision-pair seed failed"; say "ABORT (Phase-0 precondition)"; exit 1
+fi
+GA_OUT="$(nx guided-upgrade --timeout 180 --yes 2>&1)"
+GA_RC=$?
+printf '%s\n' "$GA_OUT" | sed 's/^/       /'
+[ "$GA_RC" -ne 0 ] \
+  && ok "sub-run A exited non-zero ($GA_RC)" \
+  || bad "sub-run A exited 0 — the collision guard did NOT fire (vacuous fixture)"
+printf '%s' "$GA_OUT" | grep -q "target-name collision detected across" \
+  && ok "collision diagnostic rendered" \
+  || bad "collision diagnostic missing ('target-name collision detected across')"
+printf '%s' "$GA_OUT" | grep -q "Run 'nx migration-audit'" \
+  && ok "migration-audit remedy rendered" \
+  || bad "migration-audit remedy missing (\"Run 'nx migration-audit'\")"
+# nexus-5qefg acceptance: the bundle-acquisition path MUST have run — a fresh
+# download+verify, not a pre-staged extract. A revert of the always-install
+# wiring (nexus-yv5m4) turns this (and the whole provision) RED on this
+# PG-less image. NOTE: init.py's sibling marker "extracted on first run"
+# (pre-staged bundle found) is deliberately NOT matched — nothing in this
+# image pre-stages a PG bundle, and pre-staging one (e.g. caching it the way
+# bge-768 is baked in) would re-mask exactly the acquire path this gate
+# exists to exercise. If this grep ever fails with the pre-staged marker in
+# GA_OUT, someone added bundle caching to the image — remove it.
+printf '%s' "$GA_OUT" | grep -q "Using bundled PostgreSQL (downloaded + verified)" \
+  && ok "PG bundle acquired (downloaded + verified — the yv5m4 path)" \
+  || bad "PG bundle acquisition marker missing (always-install path not exercised)"
+# The collision is a PRE-WRITE ClickException (before begin_migration): no
+# sentinel, and the command prints no clear-state recovery advice.
+test ! -f "$HOME/.config/nexus/migration.state" \
+  && ok "no migration sentinel after the collision block (pre-write)" \
+  || bad "collision block left a migration sentinel (expected none — pre-write)"
+REMOVE_A="$(python /home/nexus/seed_legacy.py "$CHROMA_LOCAL" --remove-blocking=collision | tail -1)"
+if printf '%s' "$REMOVE_A" | grep -q "rehearsal-pair__bge-base-en-v15-768" \
+   && printf '%s' "$REMOVE_A" | grep -q "rehearsal-pair__voyage-context-3"; then
+  ok "collision pair removed: $REMOVE_A"
+else
+  bad "collision-pair removal incomplete: $REMOVE_A"
+  say "ABORT (a lingering pair would re-block the success run)"; exit 1
+fi
+
+say "Phase 0B — nonconformant + legacy-id shapes MUST block (ModelPreGateBlocked)"
+# Shapes (i)+(ii): (i) a token-less 2-segment name (32-char ids, dim!=768 so
+# the measured-dim override cannot rescue it); (ii) a supported-model NAME
+# holding pre-RDR-108 16-char chunk ids (the GH #1390 canon-chat shape). The
+# sequencer pregate joins BOTH per-collection reasons under ONE
+# "migration blocked: N collection(s)" message — both greps hit the SAME
+# captured output.
+if BLOCK_B="$(python /home/nexus/seed_legacy.py "$CHROMA_LOCAL" --blocking=pregate --n "$SEED_N")"; then
+  ok "seeded pregate shapes: $(printf '%s\n' "$BLOCK_B" | tail -1)"
+else
+  bad "pregate seed failed"; say "ABORT (Phase-0 precondition)"; exit 1
+fi
+GB_OUT="$(nx guided-upgrade --timeout 180 --yes 2>&1)"
+GB_RC=$?
+printf '%s\n' "$GB_OUT" | sed 's/^/       /'
+[ "$GB_RC" -ne 0 ] \
+  && ok "sub-run B exited non-zero ($GB_RC)" \
+  || bad "sub-run B exited 0 — the model pregate did NOT fire (vacuous fixture)"
+printf '%s' "$GB_OUT" | grep -q "not four-segment conformant" \
+  && ok "shape (i) nonconformant-name diagnostic rendered" \
+  || bad "shape (i) diagnostic missing ('not four-segment conformant')"
+printf '%s' "$GB_OUT" | grep -q "legacy non-32-char chunk ids" \
+  && ok "shape (ii) legacy-id diagnostic rendered" \
+  || bad "shape (ii) diagnostic missing ('legacy non-32-char chunk ids')"
+printf '%s' "$GB_OUT" | grep -q "(GH #1390)" \
+  && ok "shape (ii) GH #1390 pointer rendered" \
+  || bad "shape (ii) GH #1390 pointer missing"
+# The pregate fires AFTER begin_migration (sequencer: begin → quiesce →
+# pregate → T2 → T3), so it DEFINITIVELY leaves the migrated-failed sentinel
+# — and blocks before the T2 leg ships anything.
+test -f "$HOME/.config/nexus/migration.state" \
+  && ok "pregate block left the migrated-failed sentinel" \
+  || bad "no migration sentinel after the pregate block (expected migrated-failed)"
+# MANDATORY remediation: a lingering migrated-failed sentinel poisons every
+# later assertion (reads degrade LOUD; the success run would be judged against
+# a dirty state). Plain clear-state suffices for migrated-failed (no --force);
+# it is filesystem-only (<config>/migration.state), no service env needed.
+CLEAR_OUT="$(nx migration --clear-state 2>&1)"
+if printf '%s' "$CLEAR_OUT" | grep -q "Cleared migration sentinel"; then
+  ok "migration sentinel cleared: $CLEAR_OUT"
+else
+  bad "clear-state did not confirm ('Cleared migration sentinel' missing): $CLEAR_OUT"
+  say "ABORT (a poisoned sentinel makes every later assertion misleading)"; exit 1
+fi
+REMOVE_B="$(python /home/nexus/seed_legacy.py "$CHROMA_LOCAL" --remove-blocking=pregate | tail -1)"
+if printf '%s' "$REMOVE_B" | grep -q "legacybare" \
+   && printf '%s' "$REMOVE_B" | grep -q "rehearsal-shortid"; then
+  ok "pregate shapes removed: $REMOVE_B"
+else
+  bad "pregate-shape removal incomplete: $REMOVE_B"
+  say "ABORT (lingering pregate shapes would re-block the success run)"; exit 1
+fi
+
 # ── The ONE command: nx guided-upgrade ───────────────────────────────────────
 say "nx guided-upgrade — detect → provision → health-gate → version-pin → migrate"
 note "release_version pin: the binary was built with a stamped release.properties"
@@ -86,18 +211,12 @@ else
 fi
 
 # The MVV assertions on the single command's own output.
-# nexus-5qefg acceptance: the bundle-acquisition path MUST have run — a fresh
-# download+verify, not a pre-staged extract. A revert of the always-install
-# wiring (nexus-yv5m4) turns this (and the whole provision) RED on this
-# PG-less image. NOTE: init.py's sibling marker "extracted on first run"
-# (pre-staged bundle found) is deliberately NOT matched — nothing in this
-# image pre-stages a PG bundle, and pre-staging one (e.g. caching it the way
-# bge-768 is baked in) would re-mask exactly the acquire path this gate
-# exists to exercise. If this grep ever fails with the pre-staged marker in
-# GU_OUT, someone added bundle caching to the image — remove it.
-printf '%s' "$GU_OUT" | grep -q "Using bundled PostgreSQL (downloaded + verified)" \
-  && ok "PG bundle acquired (downloaded + verified — the yv5m4 path)" \
-  || bad "PG bundle acquisition marker missing (always-install path not exercised)"
+# nexus-5qefg PG-bundle ACQUIRE marker: asserted in Phase 0A (the first,
+# provisioning run) — NOT here. This already-provisioned rerun finds the
+# bundle on disk and prints "extracted on first run" instead, so matching
+# the acquire marker here would be permanently red (nexus-itme7).
+# "Service verified" DOES reprint unconditionally on a rerun
+# (guided_upgrade_cmd.py) — keep asserting it here.
 printf '%s' "$GU_OUT" | grep -q "Service verified" \
   && ok "service was provisioned + verified (healthy + version-pinned)" \
   || bad "no 'Service verified' line — provision/version-pin path did not complete"
