@@ -235,8 +235,9 @@ if [ -f "$DCFG" ] && grep -q '"credsStore"' "$DCFG"; then
   echo "      (temporarily stripped credsStore from ~/.docker/config.json — restored on exit)"
 fi
 
-# nexus-myk4e: CI points the image's bge fetch at the self-hosted release
-# asset (NEXUS_BGE_MODEL_URL/NEXUS_BGE_TOKENIZER_URL); unset = HF defaults.
+# nexus-myk4e/nexus-5votw: the image's bge fetch defaults to the self-hosted
+# GitHub release asset (ci-assets-bge-768-v1, set in the Dockerfile ARGs);
+# NEXUS_BGE_MODEL_URL/NEXUS_BGE_TOKENIZER_URL override for a re-cut asset tag.
 BUILD_ARGS=()
 [ -n "${NEXUS_BGE_MODEL_URL:-}" ] && BUILD_ARGS+=(--build-arg "BGE_MODEL_URL=$NEXUS_BGE_MODEL_URL")
 [ -n "${NEXUS_BGE_TOKENIZER_URL:-}" ] && BUILD_ARGS+=(--build-arg "BGE_TOKENIZER_URL=$NEXUS_BGE_TOKENIZER_URL")
