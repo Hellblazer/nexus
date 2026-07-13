@@ -1523,6 +1523,8 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
     for collection_name in collection_names:
         try:
             col = db.get_collection(collection_name)
+            if col is None:
+                continue
         except _ChromaNotFoundError:
             continue
         for file, score in frecency_map.items():

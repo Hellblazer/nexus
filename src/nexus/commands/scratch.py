@@ -65,7 +65,7 @@ def _t1():
       :class:`~nexus.db.http_scratch_store.HttpScratchStore` (Postgres
       UNLOGGED, RDR-152 bead nexus-gmiaf.13; CLI cutover completed by
       nexus-rn3wo.1 / nexus-1si7z / nexus-lgnjn).
-    * Explicit ``NX_T1_ISOLATED=1`` / ``NEXUS_SKIP_T1=1`` / ``sqlite``
+    * Explicit ``NX_T1_ISOLATED=1`` / ``sqlite``
       opt-out → :class:`~nexus.db.t1.T1Database` (ChromaDB path, unchanged).
 
     On ``T1ServerNotFoundError`` (Chroma path) or a service-endpoint

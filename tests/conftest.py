@@ -208,25 +208,6 @@ def _restore_structlog_after_test():
 
 
 @pytest.fixture(autouse=True)
-def _pin_storage_mode_direct(monkeypatch: pytest.MonkeyPatch) -> None:
-    """RDR-120 P6 (nexus-qg86h): direct mode decommissioned.
-    ``storage_mode()`` always returns ``"daemon"`` now and the
-    NX_STORAGE_MODE env-var is a deprecation-warning shim. The
-    test conftest no longer pins a mode — any test that previously
-    relied on direct semantics (``make_t3()`` without ``_client``
-    injection getting a ``PersistentClient``) must now inject
-    ``_client=chromadb.EphemeralClient()`` explicitly.
-
-    Kept as a (mostly) no-op autouse fixture so test files that
-    reference the symbol via ``request.getfixturevalue`` still
-    resolve; ``monkeypatch.delenv`` clears any caller-set value so
-    ``storage_mode()`` doesn't fire the deprecation warning during
-    normal pytest runs.
-    """
-    monkeypatch.delenv("NX_STORAGE_MODE", raising=False)
-
-
-@pytest.fixture(autouse=True)
 def _isolate_claude_code_session_id(monkeypatch: pytest.MonkeyPatch) -> None:
     """Clear the ambient ``CLAUDE_CODE_SESSION_ID`` for every test.
 
@@ -238,7 +219,7 @@ def _isolate_claude_code_session_id(monkeypatch: pytest.MonkeyPatch) -> None:
     tool), the real conversation's ``CLAUDE_CODE_SESSION_ID`` is present in
     ``os.environ`` for every subprocess/test-process — exactly the ambient
     pollution class this fixture family exists to close (see
-    ``_pin_storage_mode_direct`` / ``_isolate_t1_sessions`` above). Without
+    ``_isolate_t1_sessions`` above). Without
     this, any test exercising the flat-file or ``None`` fallback tiers of
     ``resolve_active_session_id`` would silently resolve to the real
     session id instead of the fixture/file value it asserts against.
@@ -260,14 +241,13 @@ def _isolate_t1_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     four-branch fail-loud gate. With no env vars and no addr file,
     the constructor raises ``T1ServerNotFoundError``. Tests that
     previously relied on the legacy EphemeralClient fallback opt
-    in via the ``NX_T1_ISOLATED=1`` (or its deprecated
-    ``NEXUS_SKIP_T1=1`` alias) Path C; this autouse fixture sets
-    the alias process-wide so the suite gets a per-test
+    in via ``NX_T1_ISOLATED=1`` Path C; this autouse fixture sets
+    it process-wide so the suite gets a per-test
     EphemeralClient by default. Tests that need a different mode
     (env-passdown, addr file, fail-loud raise) override the env
     inside the test.
     """
-    monkeypatch.setenv("NEXUS_SKIP_T1", "1")
+    monkeypatch.setenv("NX_T1_ISOLATED", "1")
 
 
 @pytest.fixture(autouse=True)

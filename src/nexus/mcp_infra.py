@@ -718,6 +718,38 @@ def _embedding_is_empty(embedding: object) -> bool:
     return len(embedding) == 0
 
 
+def _record_taxonomy_tripwire(collection: str, doc_ids: list, error: str) -> None:
+    """nexus-gednd: loudness tripwire for taxonomy assignment (the RDR-172
+    aspect-enqueue pattern). The assign hook is best-effort — it swallows its
+    own exceptions so fire_batch sees success and hook_registry records NO
+    hook_failures row, making topic-scoped search silently incomplete.
+    Persist a structured row directly (itself best-effort: a telemetry-write
+    failure must never block indexing) and log at warning, not debug.
+    """
+    import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
+    structlog.get_logger().warning(
+        "taxonomy_assign_batch_failed",
+        collection=collection,
+        batch_size=len(doc_ids),
+        error=error[:500],
+    )
+    try:
+        t2_index_write(
+            lambda t2: t2.telemetry.record_hook_failure(
+                doc_id=(doc_ids[0] if doc_ids else ""),
+                collection=collection,
+                hook_name="taxonomy_assign_batch_hook",
+                error=error[:2000],
+                chain="batch",
+            )
+        )
+    except Exception:  # noqa: BLE001 — tripwire persist is best-effort; never block indexing
+        structlog.get_logger().warning(
+            "taxonomy_tripwire_persist_failed", collection=collection, exc_info=True,
+        )
+
+
+
 def taxonomy_assign_batch_hook(
     doc_ids: list[str],
     collection: str,
@@ -788,12 +820,11 @@ def taxonomy_assign_batch_hook(
             # get_embeddings drops ids it cannot resolve; a count skew would
             # mis-pair vectors to docs, so skip rather than assign misaligned.
             if arr is None or len(arr) != len(doc_ids):
-                import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
-                structlog.get_logger().debug(
-                    "taxonomy_assign_service_embed_unavailable",
-                    collection=collection,
-                    want=len(doc_ids),
-                    got=0 if arr is None else len(arr),
+                _record_taxonomy_tripwire(
+                    collection, doc_ids,
+                    f"service embeddings unavailable: want={len(doc_ids)} "
+                    f"got={0 if arr is None else len(arr)} — no assignments "
+                    f"written for this batch",
                 )
                 return
             svc_embeddings = arr.tolist()
@@ -812,10 +843,9 @@ def taxonomy_assign_batch_hook(
                     )
                 )
             )
-        except Exception:  # noqa: BLE001 — taxonomy service path best-effort; logged at debug, returns
-            import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
-            structlog.get_logger().debug(
-                "taxonomy_assign_batch_service_failed", exc_info=True,
+        except Exception as exc:  # noqa: BLE001 — taxonomy service path best-effort; tripwire-recorded, returns
+            _record_taxonomy_tripwire(
+                collection, doc_ids, f"service path: {type(exc).__name__}: {exc}",
             )
         return
 
@@ -857,9 +887,10 @@ def taxonomy_assign_batch_hook(
                 collection=collection,
                 cross_assigned=len(cross),
             )
-    except Exception:  # noqa: BLE001 — taxonomy assign best-effort; logged at debug
-        import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
-        structlog.get_logger().debug("taxonomy_assign_batch_failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — taxonomy assign best-effort; tripwire-recorded
+        _record_taxonomy_tripwire(
+            collection, doc_ids, f"local path: {type(exc).__name__}: {exc}",
+        )
 
 
 def _fetch_or_embed(

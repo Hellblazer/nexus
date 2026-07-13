@@ -128,7 +128,7 @@ _install_default_hooks(_hooks)
 #   Branch 1 (env): NX_T1_HOST + NX_T1_PORT inherited; the parent MCP
 #       owns chroma. Yield without spawning.
 #   Branch 2 (isolation): NX_T1_ISOLATED=1 (or its deprecated
-#       NEXUS_SKIP_T1=1 alias). Stateless one-shot. Yield without spawning.
+#       alias removed at 6.5.2). Stateless one-shot. Yield without spawning.
 #   Branch 3 (top-level / owned): spawn chroma, publish a leased
 #       registry record (~/.config/nexus/t1_addr.<session_id>, RDR-149
 #       P4), populate _t1_state.T1_ADDR, yield, then relinquish the lease
@@ -496,7 +496,7 @@ async def _t1_chroma_lifespan(_app: Any):
         owns chroma. Yield without spawning.
 
     Branch 2 (isolation)
-        ``NX_T1_ISOLATED=1`` (or its deprecated ``NEXUS_SKIP_T1=1``
+        ``NX_T1_ISOLATED=1`` (
         alias): this MCP is a stateless one-shot. Yield without
         spawning.
 

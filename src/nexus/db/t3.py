@@ -234,10 +234,6 @@ def _rewrite_collection_metadata(
     return updated, skipped, total
 
 
-# Deprecated: no internal callers remain after RDR-037. Kept for one release
-# cycle in case external scripts import it. Will be removed in next major version.
-_STORE_TYPES: tuple[str, ...] = ("code", "docs", "rdr", "knowledge")
-
 from nexus.retry import (
     _chroma_with_retry,
     _is_retryable_chroma_error,

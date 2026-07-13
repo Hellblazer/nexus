@@ -131,7 +131,7 @@ class T1ServerNotFoundError(RuntimeError):
     Opt-in paths (no exception raised):
       - ``T1Database(client=...)`` for explicit client injection in
         tests and the MCP server lifespan.
-      - ``NX_T1_ISOLATED=1`` (or its deprecated ``NEXUS_SKIP_T1=1``
+      - ``NX_T1_ISOLATED=1`` (
         alias) for stateless one-shot subprocesses; constructs an
         ``EphemeralClient``.
     """
@@ -181,7 +181,7 @@ class T1Database:
         Branch order (opt-in outranks discovery):
 
         Path C (operator opt-in, highest priority)
-            ``NX_T1_ISOLATED=1`` (or its legacy ``NEXUS_SKIP_T1=1``
+            ``NX_T1_ISOLATED=1`` (
             alias) -> ``EphemeralClient``. The only place
             ``EphemeralClient`` may be constructed in this code path.
             nexus-svpq / GH #593: this branch is consulted FIRST so an
@@ -1455,7 +1455,7 @@ def get_t1_database(
         - No inherited session and no lease → mints a CLI-dedicated,
           persisted session id (see :func:`_cli_dedicated_session_id`) and
           returns a :class:`_CliDedicatedScratchStore` (self-healing wrapper).
-    * Explicit ``sqlite`` opt-out (or ``NX_T1_ISOLATED=1`` / ``NEXUS_SKIP_T1=1``)
+    * Explicit ``sqlite`` opt-out (or ``NX_T1_ISOLATED=1``)
       → :class:`T1Database` (ChromaDB path, unchanged).
 
     The ``session_id`` and ``client`` arguments are forwarded to ``T1Database``
@@ -1477,7 +1477,7 @@ def get_t1_database(
     # honored inside T1Database's Chroma-path constructor, which the SERVICE
     # branch below never reaches — dead code in exactly the installs that
     # need it (a bare CLI in service mode cannot safely mint a session token).
-    if os.environ.get("NX_T1_ISOLATED") == "1" or os.environ.get("NEXUS_SKIP_T1") == "1":
+    if os.environ.get("NX_T1_ISOLATED") == "1":
         return T1Database(session_id=session_id, client=client)
 
     if storage_backend_for("t1") == StorageBackend.SERVICE:

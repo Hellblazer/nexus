@@ -97,10 +97,12 @@ def test_inventory_is_sane() -> None:
     assert len(_LINES) == 25, sorted(_LINES)
     # No command may double-quote $ARGUMENTS (mirrors the static guard).
     assert not [n for n, b in _LINES.items() if '"$ARGUMENTS"' in b]
-    assert len(_DROPPED) >= 18
-    assert set(_SINGLE_QUOTED) == {
-        "rdr-show.md", "rdr-gate.md", "rdr-accept.md", "rdr-research.md", "rdr-audit.md",
-    }, sorted(_SINGLE_QUOTED)
+    assert len(_DROPPED) >= 23
+    # nexus-ybvyo (fixed 2026-07-13): the five single-quoting commands were
+    # converted to the argless-preamble + Bash-tool re-invoke pattern; the
+    # single-quoted class must now stay EMPTY forever — a new entry means a
+    # command reintroduced the apostrophe-crash splice.
+    assert set(_SINGLE_QUOTED) == set(), sorted(_SINGLE_QUOTED)
 
 
 @pytest.mark.skipif(not _SHELLS, reason="no bash/zsh available")

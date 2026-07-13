@@ -95,7 +95,6 @@ def scratch_session(isolated_home, monkeypatch):
     # ``HOME`` is already isolated by ``isolated_home``;
     # ``NEXUS_CONFIG_DIR`` makes that explicit for the lease path.
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
-    monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
     monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
     # Pin the session_id across CLI invocations so all writes/reads
     # see the same metadata filter scope AND resolve the same lease.

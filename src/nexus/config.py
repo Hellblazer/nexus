@@ -528,67 +528,6 @@ def catalog_path() -> Path:
     return nexus_config_dir() / "catalog"
 
 
-#: RDR-120 P0.B → P6 (nexus-qg86h): accepted values for the legacy
-#: ``NX_STORAGE_MODE`` env-var. ``daemon`` is now the only supported
-#: mode (``direct`` was decommissioned at P6); the constant is retained
-#: for one release so external callers reading the public symbol get a
-#: deprecation signal rather than an ``ImportError``.
-VALID_STORAGE_MODES: tuple[str, ...] = ("daemon",)
-
-
-class StorageModeError(click.ClickException):
-    """Raised when ``NX_STORAGE_MODE`` is set to a value other than
-    ``daemon``. Kept for backwards compatibility — see
-    :func:`storage_mode` for the deprecation window."""
-
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
-
-
-def storage_mode() -> str:
-    """Return the storage backend mode.
-
-    **RDR-120 P6 (nexus-qg86h): direct mode decommissioned.** This
-    function always returns ``"daemon"``. The legacy
-    ``NX_STORAGE_MODE`` env-var is retained for one release with the
-    following semantics:
-
-    - unset / empty / whitespace / ``"daemon"`` → ``"daemon"``
-      (no warning).
-    - ``"direct"`` → ``"daemon"`` + ``DeprecationWarning``. Operators
-      who relied on direct mode must now run ``nx daemon t2 start``
-      and ``nx daemon t3 start`` (local mode only; cloud mode is
-      unaffected).
-    - any other value → ``StorageModeError`` (unchanged shape).
-
-    The function itself is also slated for removal in the release
-    following the deprecation cycle; new code should not call it
-    (the storage mode is no longer a meaningful runtime branch).
-    """
-    raw = os.environ.get("NX_STORAGE_MODE", "")
-    normalized = raw.strip().lower()
-    if not normalized or normalized == "daemon":
-        return "daemon"
-    if normalized == "direct":
-        import warnings  # noqa: PLC0415 — branch-local; only on decommissioned-mode path
-
-        warnings.warn(
-            "NX_STORAGE_MODE=direct is decommissioned (RDR-120 P6). "
-            "Direct mode is gone; daemon mode is the only supported "
-            "backend. Start the daemons via `nx daemon t2 start` and "
-            "(in local mode) `nx daemon t3 start`. The env-var itself "
-            "is honoured-as-daemon for this release and will be "
-            "removed in the next.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return "daemon"
-    raise StorageModeError(
-        f"NX_STORAGE_MODE={raw!r} is not a recognized value. "
-        f"Valid values: {', '.join(VALID_STORAGE_MODES)}."
-    )
-
-
 def is_local_mode() -> bool:
     """Return True if nexus should use the local T3 backend.
 

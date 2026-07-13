@@ -199,7 +199,7 @@ def fake_service(monkeypatch: pytest.MonkeyPatch):
 
     Every env var relevant to CLI-dedicated-path routing is reset here so
     each test starts from "bare CLI, no inherited session" — the autouse
-    ``_isolate_t1_sessions`` fixture (conftest) sets ``NEXUS_SKIP_T1=1``
+    ``_isolate_t1_sessions`` fixture (conftest) sets ``NX_T1_ISOLATED=1``
     process-wide; tests in this file always delenv it (Path C otherwise
     wins ahead of the SERVICE routing this module tests).
     """
@@ -215,7 +215,6 @@ def fake_service(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("NX_SERVICE_URL", raising=False)
     monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
     monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
-    monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
     monkeypatch.delenv("NX_T1_SESSION", raising=False)
     monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
 

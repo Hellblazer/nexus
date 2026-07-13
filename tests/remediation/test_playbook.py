@@ -148,3 +148,51 @@ def test_unknown_topic_fails_loud():
         emit_playbook("nope-such-topic", StoreState(detail="x"))
     assert "nope-such-topic" in str(exc.value)
     assert "chash-poison" in str(exc.value)  # names the known topics
+
+
+# ── nexus-4s19o: migration-legacy-ids topic (runbook §8) ─────────────────────
+
+
+def test_legacy_ids_remediate_topic_registered_and_emits():
+    from nexus.remediation.playbook import StoreState, emit_playbook
+
+    pb = emit_playbook(
+        "migration-legacy-ids",
+        StoreState(detail="5 collections pre-gate-blocked (legacy 16-char ids)"),
+    )
+    assert pb.topic == "migration-legacy-ids"
+    # The GH #1390 rule is a HARD constraint, and salvage-before-delete is
+    # load-bearing (note-shaped text has no other copy).
+    joined = " ".join(pb.constraints)
+    assert "NEVER drop or weaken the chash length CHECK constraints" in joined
+    assert "BEFORE any delete" in joined
+    # Ordered runbook-§8 arc: dry-run enumerate -> classify -> salvage ->
+    # remove+migrate -> rebuild.
+    assert len(pb.steps) == 5
+    assert "dry-run" in pb.steps[0]
+    assert "salvage" in pb.steps[2]
+    assert pb.runbook_section == "8"
+    assert pb.diagnostic_sql == ()  # chroma-side classification, no SQL leg
+    # Both renderings carry the store detail verbatim.
+    assert "5 collections pre-gate-blocked" in pb.tool_return()
+    assert "5 collections pre-gate-blocked" in pb.terminal_block()
+
+
+def test_legacy_ids_forensics_topic_is_read_only_shaped():
+    from nexus.remediation.playbook import StoreState, emit_forensics_playbook
+
+    pb = emit_forensics_playbook(
+        "migration-legacy-ids", StoreState(detail="probe detail"),
+    )
+    assert pb.topic == "migration-legacy-ids"
+    assert pb.constraints[0].startswith("READ-ONLY")
+    assert "store_put" in pb.constraints[0]  # mutation examples named
+    assert pb.force_risk == ""  # diagnostic topics carry no force framing
+    assert pb.diagnostic_sql == ()
+
+
+def test_topic_registries_expose_legacy_ids_on_both_verbs():
+    from nexus.remediation.playbook import forensics_topics, remediate_topics
+
+    assert "migration-legacy-ids" in remediate_topics()
+    assert "migration-legacy-ids" in forensics_topics()

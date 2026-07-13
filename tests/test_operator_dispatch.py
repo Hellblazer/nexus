@@ -390,8 +390,8 @@ class TestSubprocessContract:
         assert "NX_SESSION_ID" not in env or not env.get("NX_SESSION_ID")
 
     @pytest.mark.asyncio
-    async def test_sets_skip_t1_env(self) -> None:
-        """claude_dispatch must export NEXUS_SKIP_T1=1 in the subprocess env so
+    async def test_sets_isolated_t1_env(self) -> None:
+        """claude_dispatch must export NX_T1_ISOLATED=1 in the subprocess env so
         the spawned `claude -p`'s nx SessionStart hook does not spin up a chroma
         T1 server. Operator dispatch is stateless — paying the chroma startup
         cost on every call would be pure waste, and the subprocess's T1 client
@@ -412,13 +412,9 @@ class TestSubprocessContract:
         env = captured[0].get("env")
         assert env is not None, "subprocess must be spawned with explicit env (got default inherit)"
         # RDR-105 P4: claude_dispatch defaults to ephemeral=True, which sets
-        # NX_T1_ISOLATED=1 (the canonical name) and strips the deprecated
-        # NEXUS_SKIP_T1 alias.
+        # NX_T1_ISOLATED=1 (the NEXUS_SKIP_T1 alias was removed at 6.5.2).
         assert env.get("NX_T1_ISOLATED") == "1", (
             f"NX_T1_ISOLATED=1 missing from subprocess env; got NX_T1_ISOLATED={env.get('NX_T1_ISOLATED')!r}"
-        )
-        assert "NEXUS_SKIP_T1" not in env, (
-            "deprecated NEXUS_SKIP_T1 should not leak into the subprocess env"
         )
 
     @pytest.mark.asyncio

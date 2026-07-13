@@ -506,7 +506,7 @@ def test_indexer_oversize_guard_skips_huge_files(tmp_path, monkeypatch) -> None:
     cfg_dir = tmp_path / "config"
     cfg_dir.mkdir()
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg_dir))
-    monkeypatch.setenv("NEXUS_SKIP_T1", "1")
+    monkeypatch.setenv("NX_T1_ISOLATED", "1")
     monkeypatch.setenv("NX_LOCAL", "1")  # local mode, no Voyage credentials
 
     reg = RepoRegistry(cfg_dir / "repos.json")

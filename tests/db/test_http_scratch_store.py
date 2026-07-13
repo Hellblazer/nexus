@@ -505,8 +505,7 @@ class TestGetT1DatabaseFactory:
         # fake_server is a URL string like "http://127.0.0.1:<port>"
         port = fake_server.split(":")[-1]
         monkeypatch.setenv("NX_STORAGE_BACKEND_T1", "service")
-        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)  # autouse fixture sets it; isolation wins post-h8rf6
-        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)  # autouse fixture sets it; isolation wins post-h8rf6
         monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
         monkeypatch.setenv("NX_SERVICE_PORT", port)
         monkeypatch.setenv("NX_SERVICE_TOKEN", TOKEN)
@@ -531,7 +530,6 @@ class TestGetT1DatabaseFactory:
         monkeypatch.delenv("NX_STORAGE_BACKEND_T1", raising=False)
         monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
         monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
-        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
 
         from nexus.db.http_scratch_store import HttpScratchStore
         from nexus.db.storage_mode import StorageBackend, storage_backend_for

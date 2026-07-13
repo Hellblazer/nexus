@@ -319,14 +319,152 @@ def _chash_poison_forensics(store_state: StoreState) -> Playbook:
     )
 
 
+def _migration_legacy_ids(store_state: StoreState) -> Playbook:
+    """nexus-4s19o / GH #1390-adjacent (nexus-sot7v): pre-RDR-108 Chroma
+    collections carry 16/18-char chunk ids; the migration pre-gate blocks
+    them LOUDLY before any write. Recovery = runbook §8: re-index
+    file-backed collections from source, re-put note-shaped content so
+    store_put recomputes the canonical chash, then re-run the migration."""
+    return Playbook(
+        topic="migration-legacy-ids",
+        context=(
+            "My conexus/nexus Chroma store has pre-RDR-108 collections with "
+            "legacy 16/18-char chunk ids; nx migrate-to-service pre-gate-"
+            "blocks them (nexus-sot7v / GH #1390 class) and I need to "
+            "remediate so the migration can complete."
+        ),
+        constraints=(
+            "NEVER drop or weaken the chash length CHECK constraints to "
+            "force upserts through — that exact action caused GH #1390 "
+            "(silently corrupted store, crash-looping engine).",
+            "Copy, never move: take a backup of the Chroma source directory "
+            "BEFORE touching any collection, and verify the salvage "
+            "artifact exists and is non-empty BEFORE any delete.",
+            "Note-shaped knowledge__ content (no source file) exists ONLY "
+            "in Chroma — salvage it first; after RDR-155 P4b removes the "
+            "Chroma read path it is unrecoverable.",
+        ),
+        steps=(
+            "back up the Chroma source dir (copy-not-move), then run "
+            "nx migrate-to-service --dry-run and list every collection the "
+            "pre-gate classifies unsupported with the legacy-id diagnostic",
+            "classify each blocked collection: file-backed (code__/docs__/"
+            "rdr__, or knowledge__ indexed from a PDF/file with a "
+            "source_uri) vs note-shaped (knowledge__ written via store_put "
+            "with no source_uri) vs derived (taxonomy centroids — "
+            "regenerated later, nothing to salvage)",
+            "salvage every note-shaped collection NOW: read each note's "
+            "text out (nx store get, or the Chroma documents field via a "
+            "direct chromadb.PersistentClient — CLI verbs route to the "
+            "service in service mode) into a local JSON artifact of "
+            "(documents + metadatas); verify it is non-empty",
+            "remove the blocked collections from the Chroma source (the "
+            "backup from step 1 is the archive), and re-run "
+            "nx migrate-to-service / nx guided-upgrade to completion",
+            "rebuild after the migration VERIFIES: nx index repo (and "
+            "nx index pdf) for the file-backed set, store_put each salvaged "
+            "note (store_put recomputes the canonical 32-char chash from "
+            "the text), then nx taxonomy discover",
+        ),
+        deliverable=(
+            "Report back: the blocked-collection list with its per-"
+            "collection classification, the salvage artifact path and note "
+            "count, the final 'Migration VERIFIED and unlocked' line, and "
+            "the rebuild commands run with their row counts."
+        ),
+        escape=(
+            "If a note-shaped collection's text cannot be read out (Chroma "
+            "dir corrupt or already deleted), STOP before removing anything "
+            "— report which collections are salvageable and which are not; "
+            "runbook §8 covers when rebuild-from-source is the only path."
+        ),
+        goal="clear the pre-gate block and complete the migration",
+        incident_ref="nexus-sot7v",
+        refusal_lead=(
+            "Migration pre-gate block (nexus-sot7v / GH #1390 class): "
+            "legacy 16/18-char chunk ids cannot migrate."
+        ),
+        closing_warning=(
+            "Do NOT drop the chash length constraints to force it through — "
+            "that is the exact action that caused GH #1390. Salvage note-"
+            "shaped content BEFORE any delete."
+        ),
+        force_risk=(
+            "Forcing past the pre-gate migrates nothing for the blocked "
+            "collections and strands their content in Chroma."
+        ),
+        runbook_section="8",
+        store_detail=store_state.detail,
+    )
+
+
+def _migration_legacy_ids_forensics(store_state: StoreState) -> Playbook:
+    """READ-ONLY classification for the legacy-id class: enumerate what is
+    blocked and what kind of content each blocked collection holds, without
+    touching the store — decides whether remediate:migration-legacy-ids is
+    needed and how much salvage work it implies."""
+    return Playbook(
+        topic="migration-legacy-ids",
+        context=(
+            "My conexus/nexus migration may be pre-gate-blocked on pre-"
+            "RDR-108 legacy chunk ids — help me classify the blast radius "
+            "READ-ONLY before deciding on remediation."
+        ),
+        constraints=(
+            "READ-ONLY investigation: run nothing that mutates — no "
+            "collection deletes, no re-index, no store_put.",
+            "Do NOT begin remediation from this playbook; that is the "
+            "separately-consented remediate path.",
+            "Do NOT drop or weaken the chash length constraints.",
+        ),
+        steps=(
+            "run nx migrate-to-service --dry-run and collect every "
+            "collection the pre-gate classifies unsupported with the "
+            "legacy-id diagnostic",
+            "for each, record its name-derived kind (code__/docs__/rdr__ = "
+            "file-backed; knowledge__ = check for source_uri metadata to "
+            "split file-backed from note-shaped; taxonomy centroids = "
+            "derived) and its row count",
+            "interpret: note-shaped rows are the ONLY copy of their text — "
+            "their count is the salvage workload; file-backed rows rebuild "
+            "from source at zero content risk",
+        ),
+        deliverable=(
+            "Report back: the blocked-collection list with classification "
+            "and row counts, the note-shaped salvage workload, and a "
+            "recommendation — clean (nothing blocked) or proceed to "
+            "remediate:migration-legacy-ids."
+        ),
+        escape=(
+            "If the Chroma source directory is gone entirely, STOP — "
+            "nothing is salvageable and the remediate path does not apply; "
+            "report that state."
+        ),
+        goal="decide whether legacy-id remediation is needed",
+        incident_ref="nexus-sot7v",
+        refusal_lead=(
+            "Diagnostic playbook for the legacy-chunk-id class (read-only)."
+        ),
+        closing_warning=(
+            "This playbook diagnoses only — remediation is the separately-"
+            "consented remediate path."
+        ),
+        force_risk="",
+        runbook_section="8",
+        store_detail=store_state.detail,
+    )
+
+
 #: verb-shaped registries (RDR-182: forensics diagnoses, remediate recovers).
 #: The REMEDIATE registry keeps the original name/shape — daemon.py's gate
 #: and emit_playbook()'s public signature predate the split.
 _TOPICS = {
     "chash-poison": _chash_poison,
+    "migration-legacy-ids": _migration_legacy_ids,
 }
 _FORENSICS_TOPICS = {
     "chash-poison": _chash_poison_forensics,
+    "migration-legacy-ids": _migration_legacy_ids_forensics,
 }
 
 
