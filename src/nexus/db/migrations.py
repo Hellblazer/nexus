@@ -503,6 +503,46 @@ def migrate_tier_writes(conn: sqlite3.Connection) -> None:
     _log.info("Migrated: created tier_writes table (nexus-kren)")
 
 
+def migrate_claude_assisted_remediation_consents(conn: sqlite3.Connection) -> None:
+    """Create the ``claude_assisted_remediation_consents`` table (RDR-182 P1.2,
+    nexus-ykzbj.6).
+
+    Consent AUDIT for the opt-in ``claude_assisted_remediation.enabled`` flag
+    (RDR-182 Gap 3 / Technical Design "Consent audit (net-new)"): one row per
+    grant OR revoke event. ``granted`` makes both directions of the toggle
+    first-class rows — the flag is durable but revocable
+    (``nx config set claude_assisted_remediation.enabled false``), so the
+    audit trail must retain the revoke event, not just overwrite the grant.
+    Append-only: a revoke never deletes or updates a prior grant row.
+
+    ``scope`` is the consent surface (e.g. ``"remediate:chash-poison"``);
+    ``ts`` is caller-supplied (no wall-clock read in the store — the caller
+    owns the clock, matching the deterministic-test convention elsewhere in
+    this module).
+
+    Idempotent — no-op if the table already exists. Called lazily from
+    ``Telemetry.record_consent`` so the table is created on first use,
+    mirroring ``migrate_tier_writes`` / ``migrate_nx_answer_runs``.
+    """
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' "
+        "AND name='claude_assisted_remediation_consents'"
+    ).fetchone()
+    if row is not None:
+        return
+    conn.executescript("""
+        CREATE TABLE claude_assisted_remediation_consents (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope   TEXT    NOT NULL,
+            ts      TEXT    NOT NULL,
+            granted INTEGER NOT NULL
+        );
+        CREATE INDEX idx_consents_scope ON claude_assisted_remediation_consents(scope);
+    """)
+    conn.commit()
+    _log.info("Migrated: created claude_assisted_remediation_consents table (nexus-ykzbj.6)")
+
+
 def migrate_nx_answer_runs(conn: sqlite3.Connection) -> None:
     """Create the ``nx_answer_runs`` table for RDR-080 run telemetry.
 
@@ -2568,6 +2608,11 @@ MIGRATIONS: list[Migration] = [
         "5.10.7",
         "nexus-slcn7: merge duplicate root topics + unique (collection,label) index",
         migrate_dedup_root_topics,
+    ),
+    Migration(
+        "6.6.2",
+        "RDR-182 P1.2: add claude_assisted_remediation_consents table (nexus-ykzbj.6)",
+        migrate_claude_assisted_remediation_consents,
     ),
 ]
 

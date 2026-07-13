@@ -61,9 +61,27 @@ _STORE_PAIRS = [
 # RDR-152 nexus-1di3r Phase 6: the taxonomy compute/persist/orchestrator pipeline
 # is now FULLY service-backed on HttpTaxonomyStore (delegate-thin compute statics +
 # centroid-port ANN + Java relational persist), so there are NO taxonomy exclusions
-# left — the tripwire is strict for every taxonomy method. RF-158-1: zero exemptions
-# across all nine pairs. Re-adding any entry here is a documented, auditable act.
-_EXCLUSIONS: dict[str, dict[str, str]] = {}
+# left — the tripwire is strict for every taxonomy method. RF-158-1 established
+# zero exemptions across all nine pairs; re-adding any entry here is a documented,
+# auditable act. RDR-182 P1.2 (nexus-ykzbj.6) is the first re-addition:
+# ``record_consent`` is deliberately SQLite-only per the bead's explicit "raw
+# sqlite3" scope — the Java engine has no
+# ``claude_assisted_remediation_consents`` table nor a
+# ``/v1/telemetry/consents/record`` endpoint yet. In service mode a caller
+# invoking ``db.telemetry.record_consent(...)`` gets a loud ``AttributeError``
+# (HttpTelemetryStore has no such method), never a silently-dropped consent
+# row — the same fail-loud posture ``record_hook_failure`` closed for
+# tier_writes. Service-mode parity is bead nexus-ng2sy; until it lands,
+# the RDR-182 consent audit only has coverage on local (non-service) T2.
+_EXCLUSIONS: dict[str, dict[str, str]] = {
+    "telemetry": {
+        "record_consent": (
+            "RDR-182 P1.2 (nexus-ykzbj.6): consent audit is scoped to SQLite "
+            "only per the bead; HttpTelemetryStore + engine-side table/endpoint "
+            "parity is the explicit follow-up bead nexus-ng2sy (P1 — blocks the remediate path for service-mode deployments)."
+        ),
+    },
+}
 
 # Per-(store, method) param-drift exemptions: the method exists on both the
 # contract and the HTTP store and is genuinely USED in service mode, but with a

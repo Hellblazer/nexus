@@ -204,6 +204,34 @@ class Telemetry:
             )
             self.conn.commit()
 
+    def record_consent(
+        self,
+        *,
+        scope: str,
+        ts: str,
+        granted: bool,
+    ) -> None:
+        """Append one row to ``claude_assisted_remediation_consents`` (RDR-182
+        P1.2, nexus-ykzbj.6).
+
+        Consent AUDIT for the opt-in ``claude_assisted_remediation.enabled``
+        flag: a grant OR a revoke is recorded as its own row (``granted``
+        distinguishes them) so the flag's revocability is reflected in the
+        audit trail, not collapsed by an upsert. ``ts`` is caller-supplied —
+        this method never reads the wall clock.
+        """
+        from nexus.db.migrations import (  # noqa: PLC0415 — circular-dep avoidance (nexus.db.migrations)
+            migrate_claude_assisted_remediation_consents,
+        )
+        with self._lock:
+            migrate_claude_assisted_remediation_consents(self.conn)
+            self.conn.execute(
+                "INSERT INTO claude_assisted_remediation_consents "
+                "(scope, ts, granted) VALUES (?, ?, ?)",
+                (scope, ts, 1 if granted else 0),
+            )
+            self.conn.commit()
+
     def record_nx_answer_run(
         self,
         *,
