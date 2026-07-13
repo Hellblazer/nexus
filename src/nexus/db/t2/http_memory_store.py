@@ -418,7 +418,12 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 continue
             try:
                 candidates = self.search(snippet, project=project, access="silent")
-            except (ValueError, httpx.HTTPError):
+            except (ValueError, httpx.HTTPError, OSError):
+                # OSError: _is_retryable_endpoint_error anticipates a bare
+                # ConnectionRefused/Reset (OSError subclasses, NOT
+                # httpx.HTTPError) leaking through _send's second attempt —
+                # this branch is best-effort, so degrade, don't crash
+                # (nexus-fzgd6).
                 continue
             for e2 in candidates:
                 if e2["id"] == e1["id"]:

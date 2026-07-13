@@ -588,15 +588,14 @@ jobs:
     # (testcontainers codegen, Docker) and run the SAME native build the release
     # does (-Pnative -Pprebuilt-jooq -DskipTests), minus smoke + publish.
     #
-    # NOT a required check — a normal job whose expensive steps are path-gated, so
-    # unrelated PRs see a fast no-op. (A required job MUST always run; this one is
-    # advisory, so gating the whole job's work via step `if:` is fine.)
-    #
-    # ADVISORY, NOT BLOCKING (substantive-critic S2, nexus-a5rj8): because it is not
-    # a required check, a RED result here does not block merge — it converts "zero
-    # build visibility on PRs" into "visible but ignorable". Promoting it to a
-    # required check (paying ~40min native build on every service/** PR) is an open
-    # decision tracked in nexus-a5rj8.
+    # REQUIRED CHECK since 2026-07-13 (nexus-a5rj8, decided by Hal): a RED
+    # result here blocks merge. The job always runs; its expensive steps are
+    # path-gated via step `if:`, so unrelated PRs still see a fast no-op that
+    # reports green (skipped-steps == success — the branch-protection-safe
+    # skip pattern). service/** PRs pay the ~40min native build, which is
+    # exactly the visibility the trip-wire lacked as an advisory job.
+    # NOTE: the check name below is registered verbatim in the develop branch
+    # protection required contexts — renaming the job breaks the gate.
     name: engine-service native build (PR trip-wire)
     runs-on: ubuntu-latest
     timeout-minutes: 40

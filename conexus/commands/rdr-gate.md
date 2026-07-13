@@ -5,11 +5,16 @@ description: Run finalization gate on an RDR — structural, assumption audit, a
 
 # RDR Gate
 
-!`nx rdr preamble rdr-gate -- '$ARGUMENTS'`
+!`nx rdr preamble rdr-gate`
 
 ## RDR to Gate
 
 $ARGUMENTS
+
+**Targeted load**: parse the **numeric ID** (and any `--skip-research` flag)
+from `$ARGUMENTS` and run, via the Bash tool, `nx rdr preamble rdr-gate -- <ID>`
+with literal argv tokens. Never splice raw `$ARGUMENTS` into a shell-quoted
+line — free text with apostrophes/quotes breaks the quoting (nexus-ybvyo).
 
 ## Action
 

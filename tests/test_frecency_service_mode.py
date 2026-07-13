@@ -263,3 +263,32 @@ class TestFrecencyNonServiceMode:
             _run_index_frecency_only(tmp_path, registry)
 
         mock_make_t3.assert_not_called()
+
+
+# ── nexus-e0w01: rdr__ collections included in --frecency-only ────────────────
+
+
+class TestFrecencyRdrCollection:
+    def test_rdr_collection_included_in_frecency_update(self, tmp_path: Path) -> None:
+        """nexus-e0w01 regression: --frecency-only must touch the rdr__
+        collection too — it was a total omission (RDR chunks' frecency_score
+        only ever refreshed by a full index pass)."""
+        rdr_col = "rdr__repo__voyage-context-3__v1"
+        svc = _make_svc_client(collection_exists=True, chunk_ids=[], chunk_metas=[])
+        reg = _make_registry()
+        reg.get.return_value["rdr_collection"] = rdr_col
+        with (
+            patch.dict(os.environ, {"NX_STORAGE_BACKEND_VECTORS": "service"}),
+            patch("nexus.db.make_t3"),
+            patch("nexus.db.http_vector_client.get_http_vector_client", return_value=svc),
+            patch("nexus.frecency.batch_frecency", return_value={tmp_path / "f.py": 0.5}),
+            patch("nexus.indexer._build_frecency_doc_id_map", return_value={}),
+            patch("nexus.catalog.factory.make_catalog_reader", side_effect=Exception("no catalog")),
+        ):
+            from nexus.indexer import _run_index_frecency_only
+            _run_index_frecency_only(tmp_path, reg)
+
+        looked_up = [c.args[0] for c in svc.get_collection.call_args_list]
+        assert rdr_col in looked_up, (
+            f"rdr collection must be part of the frecency update set; got {looked_up}"
+        )
