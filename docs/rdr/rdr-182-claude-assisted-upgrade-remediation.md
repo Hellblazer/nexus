@@ -50,6 +50,18 @@ operator (or agent) does not read. The fix: at each such edge, offer a
 built-in, safe, guided path — and make it the *easy* path, so the destructive
 reflex never fires.
 
+> **Delivery honesty (post-implementation, critic-final M3, 2026-07-13)**:
+> the *automatic edge interception* that actually catches the reflex at the
+> moment of risk with zero consent friction — `_emit_chash_poison_gate` wired
+> to `nx daemon service install-binary` — PRE-DATES this epic (nexus-pnwu0)
+> and RDR-182 deliberately left it ungated (it still prints the full playbook
+> unconditionally and blocks with exit 3). RDR-182's own contribution to
+> Gap 1 is to *generalize* that pattern into a reusable playbook emitter and
+> add the self-serve `forensics`/`remediate` surfaces (CLI + MCP) plus the
+> Gaps 2/3/4/5 machinery around it — not a second automatic edge. Only the
+> `chash-poison` edge has a shipped topic today (see M2 / the remaining
+> incident-class topics tracked as a follow-up).
+
 #### Gap 2: Remediation knowledge is not in-product
 
 The GH #1390 recovery, the legacy-id re-index, the poisoned-target rollback —
@@ -400,6 +412,20 @@ principles; the engine-side analysis (c4143) shows the hard cases need a human
   cannot stop the user's own agent from running arbitrary SQL as
   `nexus_admin` — this closes the *product-provisioned diagnostic* path, not
   every conceivable read.
+- **Risk (H1, extension of A5, 2026-07-13 / critic-final)**: the CLI `nx
+  remediate` RELEASE was originally gated only by the interactive
+  `click.confirm`, so an automation piping `y` (`echo y | nx remediate`)
+  could obtain the guided playbook AND write a `granted=True` consent row —
+  forging a human-looking consent without the durable flag. The released
+  text is public runbook content, so this is an audit-INTEGRITY concern, not
+  a capability leak; but a forgeable "a human consented" row undercuts Gap 5.
+  **Resolution (Hal decision)**: the CLI remediate release now requires the
+  durable `claude_assisted_remediation.enabled` flag IN ADDITION to the
+  confirm — the same durable opt-in the MCP tool needs — so a piped `y`
+  cannot mint a consent row without the flag first being set. The describe
+  stage stays ungated display. Now BOTH surfaces require the durable flag for
+  the mutation-authorizing handoff; the CLI's only remaining ungate is the
+  static guidance text (public documentation).
 
 ### Failure Modes
 

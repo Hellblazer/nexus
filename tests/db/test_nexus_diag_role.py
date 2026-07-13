@@ -26,7 +26,28 @@ import pytest
 
 from tests.db._service_fixture import pg_bin_dir
 
-pytestmark = pytest.mark.integration
+
+def _pg_bins_available() -> bool:
+    from nexus.db.pg_provision import PgBinaryNotFoundError, discover_pg_binaries
+
+    try:
+        discover_pg_binaries()
+        return True
+    except PgBinaryNotFoundError:
+        return False
+
+
+# max-skip guard (testval-182 Low): clean SKIP when no PG, not an ERROR from a
+# fixture calling a nonexistent initdb. Matches the test_pg_provision.py
+# sibling convention.
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(
+        not _pg_bins_available(),
+        reason="skipped: no PostgreSQL binaries found (install postgresql@16 "
+               "or set NEXUS_PG_BIN)",
+    ),
+]
 
 
 def _free_port() -> int:

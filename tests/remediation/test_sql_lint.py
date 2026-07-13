@@ -92,6 +92,42 @@ def test_store_content_reference_fails(stmt):
     assert "content" in reason.lower() or "aggregate" in reason.lower()
 
 
+# ── fail-closed on UNQUALIFIED / unknown targets (critic-final M1) ──────────
+
+_UNQUALIFIED_LEAKS = [
+    # No schema prefix — must NOT slip past just because it lacks 'nexus.'
+    "SELECT content FROM chunks_768",
+    "SELECT * FROM memory",
+    "SELECT chash, document FROM chunks_1024 LIMIT 5",
+    # Unknown/unqualified target with a non-aggregate projection:
+    "SELECT title FROM some_future_table",
+]
+
+
+@pytest.mark.parametrize("stmt", _UNQUALIFIED_LEAKS)
+def test_unqualified_unknown_target_fails_closed(stmt):
+    ok, reason = _lint().is_read_only_diagnostic(stmt)
+    assert ok is False, f"unqualified content read slipped past: {stmt}"
+    assert "content" in reason.lower() or "aggregate" in reason.lower()
+
+
+_UNQUALIFIED_OK = [
+    # Aggregate-only over an unqualified target is still fine (count-safe).
+    "SELECT count(*) FROM chunks_768 WHERE length(chash) <> 32",
+    # Bare catalog objects stay unrestricted.
+    "SELECT conname FROM pg_constraint WHERE conname LIKE 'chk_%'",
+    "SELECT relname FROM pg_class",
+    # CTE name (unqualified) whose body is aggregate-only.
+    "WITH bad AS (SELECT count(*) AS n FROM chunks_768) SELECT n FROM bad",
+]
+
+
+@pytest.mark.parametrize("stmt", _UNQUALIFIED_OK)
+def test_unqualified_but_safe_targets_pass(stmt):
+    ok, reason = _lint().is_read_only_diagnostic(stmt)
+    assert ok is True, reason
+
+
 # ── the batch assertion + emitter wiring ────────────────────────────────────
 
 def test_assert_batch_raises_on_first_violation():

@@ -2511,10 +2511,13 @@ RDR-182. Prints the pre-consent description first (what consenting
 authorizes, the hard do-NOTs, and the clickable runbook URL — all of which
 stay on screen regardless), then asks for a per-invocation interactive
 confirmation. As with `nx forensics`, the embedded live store counts are
-opt-in via `claude_assisted_remediation.enabled`; the guidance text is not. Declining is safe: nothing runs, nothing is recorded. The
-prompt defaults to NO and aborts on EOF, and there is deliberately no `--yes`
-flag — so there is no blind or default consent (an automation must pipe an
-explicit affirmative answer to reach the release path).
+opt-in via `claude_assisted_remediation.enabled`; the guidance text is not.
+Declining is safe: nothing runs, nothing is recorded. The prompt defaults to
+NO and aborts on EOF, and there is deliberately no `--yes` flag. The RELEASE
+of the recovery playbook (and its consent-audit row) ALSO requires the
+durable `claude_assisted_remediation.enabled` opt-in — not just the confirm —
+so an automation piping `y` cannot forge a human-looking consent row without
+the flag being set. The pre-consent description stays ungated display.
 
 An accepted confirmation is recorded to the consent-audit trail
 (`claude_assisted_remediation_consents`, scope `remediate:<topic>`) BEFORE

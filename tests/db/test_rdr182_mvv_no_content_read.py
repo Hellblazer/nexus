@@ -89,14 +89,36 @@ class TestNoContentReadProperty:
 
         with pytest.raises(DiagnosticSqlViolation):
             assert_read_only_diagnostics(["SELECT content FROM nexus.memory"])
+        # And the UNQUALIFIED form is fail-closed too (critic-final M1) — a
+        # future topic author omitting the schema prefix cannot leak content.
+        with pytest.raises(DiagnosticSqlViolation):
+            assert_read_only_diagnostics(["SELECT content FROM chunks_768"])
 
 
 # ── Tier 2: real-PG end-to-end (self-provisioning, max-skip) ────────────────
 
-pytestmark_integration = pytest.mark.integration
+
+def _pg_bins_available() -> bool:
+    from nexus.db.pg_provision import PgBinaryNotFoundError, discover_pg_binaries
+
+    try:
+        discover_pg_binaries()
+        return True
+    except PgBinaryNotFoundError:
+        return False
+
+
+#: Real max-skip guard (testval-182 Low): clean SKIP when no PG binaries,
+#: never an ERROR from a fixture calling a nonexistent initdb.
+_requires_pg = pytest.mark.skipif(
+    not _pg_bins_available(),
+    reason="skipped: no PostgreSQL binaries found (install postgresql@16 "
+           "or set NEXUS_PG_BIN)",
+)
 
 
 @pytest.mark.integration
+@_requires_pg
 class TestEndToEndPoisonedStore:
     @pytest.fixture(scope="class")
     def poisoned_cluster(self, tmp_path_factory):
@@ -192,3 +214,84 @@ class TestEndToEndPoisonedStore:
                 ["SELECT chash FROM nexus.chunks_768"],
                 creds, psql_bin=Path(pg_bin_dir()) / "psql",
             )
+
+
+class TestEndToEndOptInRemediationFlow:
+    """MVV proof #2's REMEDIATE leg (critic-final C1): the forensics-only
+    integration above proves the read-only boundary; this proves the opt-in
+    remediation FLOW — flag on → remediate hands over the playbook AND a
+    granted=True consent row is recorded along the path.
+
+    Scope honesty: the RDR's MVV #2 also names "walk §8.1 → a re-run upgrade
+    succeeds." That live upgrade-to-VERIFIED-and-unlocked is the domain of the
+    guided-upgrade rehearsal E2E (tests/e2e/migration-rehearsal/, a container
+    tier), NOT re-proven here — this asserts the product's half of the
+    contract (consented, audited handoff of the recovery playbook), which is
+    what RDR-182 actually ships. The mutation itself is executed by the user's
+    agent per §5, not by the product.
+    """
+
+    def _remediate(self, monkeypatch, tmp_path, recorder, confirm):
+        from contextlib import contextmanager
+
+        from nexus.mcp import core
+
+        cfg = tmp_path / "config"
+        cfg.mkdir()
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
+        monkeypatch.chdir(tmp_path)
+        (cfg / "config.yml").write_text(
+            "claude_assisted_remediation:\n  enabled: true\n"
+        )
+        # No live PG needed for the flow proof — stub the diag leg.
+        monkeypatch.setattr(core, "_diag_resolve", lambda creds_path=None: None)
+
+        class _Db:
+            telemetry = recorder
+
+        @contextmanager
+        def _ctx():
+            yield _Db()
+
+        monkeypatch.setattr(core, "_t2_ctx", _ctx)
+        return core.remediate("chash-poison", confirm=confirm)
+
+    def test_opt_in_flow_records_consent_and_hands_over_playbook(
+        self, tmp_path, monkeypatch
+    ):
+        from nexus.remediation import StoreState, emit_playbook
+
+        rows: list[dict] = []
+
+        class _Recorder:
+            def record_consent(self, *, scope, ts, granted):
+                rows.append({"scope": scope, "ts": ts, "granted": granted})
+
+        out = self._remediate(monkeypatch, tmp_path, _Recorder(), confirm=True)
+
+        # (1) consent recorded along the path — granted=True, correct scope
+        assert rows == [
+            {"scope": "remediate:chash-poison", "ts": rows[0]["ts"],
+             "granted": True}
+        ]
+        # (2) the recovery playbook was handed over (ordered steps released)
+        steps = emit_playbook("chash-poison", StoreState(detail="x")).steps
+        for step in steps:
+            assert step in out
+
+    def test_describe_stage_hands_over_nothing_and_records_nothing(
+        self, tmp_path, monkeypatch
+    ):
+        from nexus.remediation import StoreState, emit_playbook
+
+        rows: list[dict] = []
+
+        class _Recorder:
+            def record_consent(self, *, scope, ts, granted):
+                rows.append(1)
+
+        out = self._remediate(monkeypatch, tmp_path, _Recorder(), confirm=False)
+        assert rows == []  # no consent at describe stage
+        steps = emit_playbook("chash-poison", StoreState(detail="x")).steps
+        for step in steps:
+            assert step not in out  # steps withheld until consent

@@ -54,6 +54,21 @@ _STARTS_READ_ONLY = re.compile(r"^\s*(SELECT|WITH)\b", re.IGNORECASE)
 #: same nexus/t1 schema scope the changelog lint uses.
 _STORE_TABLE_RE = re.compile(r"\b(nexus|t1)\.(\w+)", re.IGNORECASE)
 
+#: FROM targets that are PROVABLY metadata/catalog (content-free by nature):
+#: the pg_* system catalogs (qualified or bare), information_schema, and the
+#: Liquibase journal. Anything NOT matching this AND not a same-statement CTE
+#: is treated as a potential store table and must be aggregate-only —
+#: fail-closed on "cannot prove it is metadata" (critic-final M1: an
+#: UNQUALIFIED ``SELECT content FROM chunks_768`` must not slip past just
+#: because it lacks a ``nexus.`` prefix).
+_METADATA_TARGET_RE = re.compile(
+    r"^(?:pg_catalog\.pg_\w+|pg_\w+|information_schema\.\w+"
+    r"|(?:public\.)?databasechangelog(?:lock)?)$",
+    re.IGNORECASE,
+)
+#: CTE names defined in the same statement (``WITH x AS (...)``, ``, y AS``).
+_CTE_NAME_RE = re.compile(r"(?:\bWITH\b|,)\s+(\w+)\s+AS\s*\(", re.IGNORECASE)
+
 #: Aggregate-only select list: every top-level select expression must be an
 #: aggregate call. Conservative: COUNT/MIN/MAX/SUM/AVG (optionally nested
 #: expressions inside), nothing else.
@@ -96,22 +111,27 @@ def is_read_only_diagnostic(stmt: str) -> tuple[bool, str]:
     if _ROW_LOCK.search(text):
         return False, "locking read (FOR UPDATE/SHARE) mutates lock state"
 
-    # Content protection: a SELECT whose FROM target is a STORE table
-    # (nexus.* / t1.* — where row/document/note content lives) must have an
-    # aggregate-only select list: diagnostics may COUNT store rows, never
-    # project content. SELECTs over catalog/metadata objects (pg_*,
-    # information_schema, databasechangelog) or CTE names are unrestricted —
-    # the mutating-keyword deny above already covers them, and a CTE name can
-    # only carry store data if the CTE body itself passed this same check.
+    # Content protection, FAIL-CLOSED (critic-final M1): a SELECT's FROM target
+    # must have an aggregate-only select list UNLESS the target is PROVABLY
+    # content-free — a same-statement CTE name (its body is checked as its own
+    # segment) or a metadata/catalog object (pg_*, information_schema, the
+    # Liquibase journal). Everything else — a nexus.*/t1.* store table OR an
+    # UNQUALIFIED bare table name we cannot prove is metadata — must be
+    # aggregate-only. Diagnostics may COUNT rows, never project content, and
+    # an author who omits the schema prefix no longer slips content past.
+    cte_names = {m.lower() for m in _CTE_NAME_RE.findall(text)}
     for select_list, target in _select_segments(text):
-        if not _STORE_TABLE_RE.fullmatch(target.strip().strip('"')):
+        clean = target.strip().strip('"')
+        if clean.lower() in cte_names:
+            continue
+        if _METADATA_TARGET_RE.match(clean):
             continue
         for item in (i.strip() for i in select_list.split(",")):
             if not _AGGREGATE_ITEM.match(item):
                 return False, (
-                    f"store table {target} referenced with a non-aggregate "
-                    f"select item {item!r} — diagnostics may count rows, "
-                    "never read content"
+                    f"table {target} referenced with a non-aggregate select "
+                    f"item {item!r} — diagnostics may count rows, never read "
+                    "content (unqualified/unknown targets are fail-closed)"
                 )
     return True, ""
 

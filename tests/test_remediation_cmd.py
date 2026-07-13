@@ -38,6 +38,16 @@ def isolated_config(tmp_path, monkeypatch):
     return cfg
 
 
+@pytest.fixture()
+def enabled_config(isolated_config):
+    """Isolated config with the durable opt-in flag ON (the release gate,
+    critic-final H1, requires it for nx remediate)."""
+    (isolated_config / "config.yml").write_text(
+        "claude_assisted_remediation:\n  enabled: true\n"
+    )
+    return isolated_config
+
+
 class _ConsentRecorder:
     def __init__(self):
         self.rows: list[dict] = []
@@ -152,7 +162,21 @@ class TestForensicsCmd:
 # ── nx remediate: interactive consent, audited release ──────────────────────
 
 class TestRemediateCmd:
-    def test_declined_confirm_is_safe(self, runner, isolated_config, no_diag, consent_recorder):
+    def test_release_requires_the_durable_flag(
+        self, runner, isolated_config, no_diag, consent_recorder
+    ):
+        """critic-final H1: with the flag OFF, an accepted confirm (even a
+        piped `y`) must NOT release the playbook or write a consent row — the
+        release requires the durable opt-in, not just the confirm gesture."""
+        result = runner.invoke(remediate_cmd, ["chash-poison"], input="y\n")
+        assert result.exit_code != 0
+        assert consent_recorder.rows == []
+        assert "roll back the poisoned pgvector target" not in result.output
+        assert "opt-in" in result.output or "nx config set" in result.output
+        # The describe stage still printed (ungated display):
+        assert _URL in result.output
+
+    def test_declined_confirm_is_safe(self, runner, enabled_config, no_diag, consent_recorder):
         result = runner.invoke(remediate_cmd, ["chash-poison"], input="n\n")
         assert result.exit_code == 0, result.output
         assert "Declined" in result.output
@@ -162,7 +186,7 @@ class TestRemediateCmd:
         assert "roll back the poisoned pgvector target" not in result.output
 
     def test_accepted_confirm_records_consent_and_releases(
-        self, runner, isolated_config, no_diag, consent_recorder
+        self, runner, enabled_config, no_diag, consent_recorder
     ):
         result = runner.invoke(remediate_cmd, ["chash-poison"], input="y\n")
         assert result.exit_code == 0, result.output
@@ -173,7 +197,7 @@ class TestRemediateCmd:
         assert "roll back the poisoned pgvector target" in result.output
 
     def test_non_interactive_aborts_without_consent(
-        self, runner, isolated_config, no_diag, consent_recorder
+        self, runner, enabled_config, no_diag, consent_recorder
     ):
         """A script cannot consent: EOF on stdin aborts before any release."""
         result = runner.invoke(remediate_cmd, ["chash-poison"])  # no input
@@ -182,7 +206,7 @@ class TestRemediateCmd:
         assert "roll back the poisoned pgvector target" not in result.output
 
     def test_audit_unavailable_refuses_release(
-        self, runner, isolated_config, no_diag, monkeypatch
+        self, runner, enabled_config, no_diag, monkeypatch
     ):
         class _NoConsent:
             pass
@@ -209,7 +233,7 @@ class TestRemediateCmd:
         assert consent_recorder.rows == []
 
     def test_generic_audit_failure_refuses_release(
-        self, runner, isolated_config, no_diag, monkeypatch
+        self, runner, enabled_config, no_diag, monkeypatch
     ):
         """(review-p4 Low-1) The CLI's generic except-Exception branch: a
         non-attribute audit failure (disk-full class) refuses the release

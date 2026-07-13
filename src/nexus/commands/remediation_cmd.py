@@ -18,10 +18,14 @@ Consent taxonomy (RDR-182 Gap 3, as amended 2026-07-13 / critic-p4 Critical):
   so the live probe honors the flag on BOTH transports; flag-off degrades to
   the same "opt-in to include live counts" note (the guidance text is
   unaffected).
-- ``nx remediate`` further gates the RELEASE of the recovery playbook behind
-  a PER-INVOCATION ``click.confirm`` (defaults NO, aborts on EOF), and an
-  accepted confirm is audit-recorded via ``Telemetry.record_consent``
-  FAIL-CLOSED before the playbook prints.
+- ``nx remediate`` gates the RELEASE of the recovery playbook behind BOTH
+  the durable opt-in flag AND a PER-INVOCATION ``click.confirm`` (defaults
+  NO, aborts on EOF). The durable-flag requirement on the release (not just
+  the confirm gesture — critic-final H1) means an automation piping ``y``
+  cannot forge a human-looking ``granted=True`` audit row without the flag
+  being set first. An accepted release is audit-recorded via
+  ``Telemetry.record_consent`` FAIL-CLOSED before the playbook prints. The
+  describe stage itself stays ungated display.
 
 The playbook emitter (P1.3), the live-diagnostics choke point (P2.1/P3), and
 the durable-flag reader (``nexus.remediation.consent.remediation_opt_in``,
@@ -154,10 +158,29 @@ def remediate_cmd(topic: str, show_history: bool) -> None:
         )
     playbook = emit_playbook(topic, StoreState(detail=_detail_for(topic)))
     # Pre-consent description: hard do-NOTs front-and-center + the clickable
-    # runbook URL, which REMAINS on screen whatever the answer below.
+    # runbook URL, which REMAINS on screen whatever the answer below. This
+    # DISPLAY stays ungated (public runbook guidance).
     click.echo(playbook.describe(
-        consent_hint="answer the prompt below (the grant is audit-recorded)"
+        consent_hint="opt in, then answer the prompt (the grant is audit-recorded)"
     ))
+
+    # RELEASE GATE (critic-final H1, Hal decision 2026-07-13): the guided
+    # release + its granted=True audit row now ALSO require the durable
+    # opt-in flag — not just the interactive confirm — so an automation
+    # piping `y` cannot forge a human-looking consent row. The describe above
+    # is ungated display; the mutation-authorizing handoff needs the same
+    # durable opt-in the MCP tool needs. Shared reader (no drift).
+    from nexus.remediation.consent import remediation_opt_in  # noqa: PLC0415 — deferred, CLI startup cost
+
+    if not remediation_opt_in():
+        click.echo("")
+        raise click.ClickException(
+            "The guided recovery release is opt-in. Enable it with "
+            "`nx config set claude_assisted_remediation.enabled true`, then "
+            "re-run and confirm. (The guidance above is display-only and "
+            "needs no opt-in; only the audited playbook handoff does.)"
+        )
+
     click.echo("")
     if not click.confirm(
         "Consent to receive the guided recovery playbook "

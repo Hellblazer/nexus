@@ -43,13 +43,18 @@ def remediation_opt_in() -> bool:
     (The refusal's named command still crashes on a pre-existing flat scalar
     — set_config_value bug, tracked as nexus-s4a98.)
 
-    Gates: the MCP ``forensics``/``remediate`` tools ENTIRELY; the CLI's
-    live-credentialed diagnostics leg ONLY (RDR-182 taxonomy amendment,
-    2026-07-13 / critic-p4 Critical) — the CLI's static playbook TEXT stays
-    ungated (a human typing the command is the consent act), but the
-    product-provisioned BYPASSRLS store probe is the new capability Gap 3
-    exists to gate, so it honors the flag on every autonomously-reachable
-    surface, not just the MCP transport.
+    Gates:
+    - the MCP ``forensics``/``remediate`` tools ENTIRELY;
+    - the CLI's live-credentialed diagnostics leg (RDR-182 taxonomy amendment
+      A5, critic-p4 Critical) — the CLI's static playbook TEXT stays ungated
+      (a human typing the command is the consent act), but the
+      product-provisioned BYPASSRLS store probe honors the flag on every
+      autonomously-reachable surface, not just the MCP transport;
+    - the CLI ``nx remediate`` RELEASE (critic-final H1, 2026-07-13) — the
+      guided-recovery handoff + its ``granted=True`` audit row require the
+      flag in addition to the interactive confirm, so an automation piping
+      ``y`` cannot forge a human-looking consent row. The describe stage
+      stays ungated display.
     """
     import yaml  # noqa: PLC0415 — deferred, startup cost
 

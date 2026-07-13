@@ -92,11 +92,13 @@ def test_cli_forensics_runs_no_credentialed_probe_when_flag_off(flag_off, cli_pr
 
 
 def test_cli_remediate_runs_no_credentialed_probe_when_flag_off(flag_off, cli_probe_spy):
-    # EOF stdin: describe stage prints, confirm aborts — either way the probe
-    # must not have run.
-    result = CliRunner().invoke(remediate_cmd, ["chash-poison"])
+    # Even a piped `y`: flag off -> the credentialed probe must not run AND
+    # (critic-final H1) the release gate refuses, so no recovery steps escape.
+    result = CliRunner().invoke(remediate_cmd, ["chash-poison"], input="y\n")
     assert cli_probe_spy == []
     assert "LIVE COUNTS" not in result.output
+    assert result.exit_code != 0                       # release refused
+    assert "roll back the poisoned pgvector target" not in result.output
 
 
 # ── Non-vacuity: the property is enforced by the gate, not the fixtures ─────
