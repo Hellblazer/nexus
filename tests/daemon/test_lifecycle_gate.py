@@ -117,6 +117,12 @@ _FLOCK_ALLOWED_MODULES = frozenset({
     "daemon/t3_daemon.py",               # T3 spawn lock
     "db/migrations.py",                  # migration serialization lock
     "commands/daemon.py",                # daemon CLI single-instance lock
+    # verify-fill watermark file lock (nexus-te885.10, review c0e4493e f4):
+    # serializes read-modify-write of migration/verify_fill_watermarks.json
+    # across concurrent verify-fill runs. NOT daemon-scope election — no
+    # lifecycle, no lease, no heartbeat; a plain critical-section around one
+    # JSON file.
+    "migration/verify_fill_watermark.py",
 })
 
 

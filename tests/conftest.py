@@ -648,6 +648,14 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # labels being compared, not embedder behavior; no embedder runs and
     # no mode-dependent code path is exercised ("canonical-set" class).
     "tests/migration/test_vector_etl.py::TestEmbedderModeParityJava::test_cloud_mode_dispatch_tokens_are_known_models",
+    # nexus-e0w01 / nexus-gednd (2026-07-13): "string-literal-as-name" class —
+    # the voyage token appears only inside RDR-103-conformant collection-NAME
+    # strings; the frecency test pins the service path via
+    # NX_STORAGE_BACKEND_VECTORS + a mocked HttpVectorClient (no embedder
+    # runs), and the tripwire tests mock get_t3/compute_assignments entirely.
+    "tests/test_frecency_service_mode.py::TestFrecencyRdrCollection::test_rdr_collection_included_in_frecency_update",
+    "tests/test_taxonomy_hook_tripwire.py::test_local_path_failure_records_hook_failures_row",
+    "tests/test_taxonomy_hook_tripwire.py::test_tripwire_persist_failure_never_propagates",
     "tests/migration/test_vector_etl.py::TestEmbedderModeParityJava::test_embedder_model_tokens_match_java_overrides",
     #
     # #1060: pure collection-NAME validation (length/charset) — references a
