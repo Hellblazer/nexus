@@ -2395,7 +2395,7 @@ mid-run crash — partial data beats no data). Note: `aspects` has no
 standalone command; it runs only via `migrate all`.
 
 `--verify-fill` (RDR-178 wave-2): a re-run to patch a small hole no
-longer re-sends the whole run. Per store:
+longer re-sends the whole run. Retention-swept tables (`relevance_log`, 90-day TTL) are verified only within the retention window: source rows older than the horizon are the sweep's legitimate deletion domain (re-importing them would resurrect expired data), so once every source row has aged out the table reports `expired_unverifiable` — by design, and never dressed as verified parity. Per store:
 
 - `chash` / `catalog` — the outer count-diff decides parity (zero writes)
   vs. divergent (send ONLY the rows genuinely missing from the target,

@@ -988,14 +988,24 @@ class TestWatermarkThirdPassShortcut:
         )
         assert report3["summary"]["total_failed"] == 0
 
-        from nexus.migration.verify_fill_watermark import WATERMARK_TABLES
+        from nexus.migration.verify_fill_watermark import (
+            RETENTION_HORIZON_TABLES,
+            WATERMARK_TABLES,
+        )
+        fill3 = report3["verify_fill"]["results"]["telemetry"]["fill"]
         for table in WATERMARK_TABLES:
+            if table in RETENTION_HORIZON_TABLES:
+                # The corpus's relevance fixtures are 2024-era — past the
+                # retention horizon. nexus-ots8o: that must read as
+                # EXPIRED_UNVERIFIABLE (no watermark, no probe, and above
+                # all never dressed as verified parity).
+                assert seen.get(table, 0) == 0
+                assert fill3[table]["status"] == "expired_unverifiable"
+                assert fill3[table]["horizon_excluded"] > 0
+                continue
             assert seen.get(table, 0) > 0, (
                 f"pass 3 must probe {table} above the pass-2 watermark, "
                 f"got min_rowid={seen.get(table)}"
             )
-        # And the restricted read is genuinely empty on an unchanged source:
-        fill3 = report3["verify_fill"]["results"]["telemetry"]["fill"]
-        for table in WATERMARK_TABLES:
             assert fill3[table]["status"] == "parity"
             assert fill3[table]["filled"] == 0

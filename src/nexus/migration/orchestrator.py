@@ -1072,6 +1072,7 @@ def verify_fill_telemetry(
         read_rows_for_fill,
     )
     from nexus.migration.verify_fill_watermark import (  # noqa: PLC0415 — same import-cycle guard
+        RETENTION_HORIZON_SAFETY_DAYS,
         RETENTION_HORIZON_TABLES,
         RETENTION_MARKED_TABLES,
         WATERMARK_TABLES,
@@ -1096,9 +1097,11 @@ def verify_fill_telemetry(
     # them. On a pre-whitelist engine the counts come back absent and every
     # watermark table degrades to the full probe (today's behavior).
     service_url = str(getattr(http_telemetry, "base_url", "") or "")
+    wm_tenant = str(getattr(http_telemetry, "tenant", "") or "")
     wm_counts = cs.counts(list(WATERMARK_TABLES.values())) or {}
     wm_markers = _fetch_retention_markers(http_telemetry)
     wm_max_rowids: dict[str, int] = {}
+    horizon_excluded: dict[str, int] = {}
 
     conn = _open_ro(sqlite_path)
     try:
@@ -1111,7 +1114,8 @@ def verify_fill_telemetry(
             if table in WATERMARK_TABLES:
                 wm_max_rowids[table] = max_source_rowid(conn, table)
                 min_rowid = usable_min_rowid(
-                    service_url, table, wm_counts.get(WATERMARK_TABLES[table]),
+                    service_url, wm_tenant, table,
+                    wm_counts.get(WATERMARK_TABLES[table]),
                     retention_marker=wm_markers.get(WATERMARK_TABLES[table]),
                 )
                 if min_rowid:
@@ -1125,13 +1129,17 @@ def verify_fill_telemetry(
             horizon_days = RETENTION_HORIZON_TABLES.get(table)
             if horizon_days is not None and rows:
                 # nexus-24p05: probe ONLY rows inside the sweep's retention
-                # horizon. Older source rows are the sweep's legitimate
-                # deletion domain — probing them RESURRECTS expired rows
-                # (verify-fill re-imports any target-absent key). Same
-                # ISO-string comparison the sweep itself uses.
+                # horizon, minus a clock-skew safety margin (the sweep's
+                # cutoff runs on the ENGINE clock, this one on ours — the
+                # fill window sits STRICTLY inside the sweep window so a
+                # lagging orchestrator clock can never re-probe a row the
+                # engine already legitimately swept). Older source rows are
+                # the sweep's domain — probing them RESURRECTS expired rows.
+                # Same ISO-string comparison the sweep itself uses.
                 from datetime import UTC, datetime, timedelta  # noqa: PLC0415 — stdlib, branch-local
                 cutoff_iso = (
-                    datetime.now(UTC) - timedelta(days=horizon_days)
+                    datetime.now(UTC)
+                    - timedelta(days=horizon_days - RETENTION_HORIZON_SAFETY_DAYS)
                 ).isoformat()
                 fresh = [r for r in rows if r.get("timestamp", "") >= cutoff_iso]
                 if len(fresh) != len(rows):
@@ -1141,6 +1149,7 @@ def verify_fill_telemetry(
                         note="expired-side source rows excluded from the "
                              "probe (sweep domain, never re-imported)",
                     )
+                horizon_excluded[table] = len(rows) - len(fresh)
                 rows = fresh
             rows_by_table[table] = rows
     finally:
@@ -1166,6 +1175,26 @@ def verify_fill_telemetry(
     for table in sorted(rows_by_table):
         rows = rows_by_table[table]
         if not rows:
+            excluded = horizon_excluded.get(table, 0)
+            if excluded:
+                # critique 68509ac8 (nexus-ots8o): EVERY probe-able row has
+                # aged past the retention horizon — the frozen source can
+                # never be verified again for this table, and any hole among
+                # those rows is moot (the sweep would have deleted the row
+                # regardless). That is retention SEMANTICS, but it must
+                # never be dressed as verified parity.
+                _log.warning(
+                    "verify_fill.retention_horizon_fully_expired",
+                    table=table, horizon_excluded=excluded,
+                    note="source rows all past the retention horizon — "
+                         "unverifiable by design, NOT verified-clean",
+                )
+                fill_results[table] = {
+                    "source_count": 0, "target_count": None, "missing": 0,
+                    "filled": 0, "status": "expired_unverifiable",
+                    "horizon_excluded": excluded,
+                }
+                continue
             fill_results[table] = {
                 "source_count": 0, "target_count": None, "missing": 0,
                 "filled": 0, "status": "parity",
@@ -1191,6 +1220,8 @@ def verify_fill_telemetry(
             store="telemetry", table_name=table, collector=collector,
             recovery=lambda: _recover_flat_fill(identity_source, rows, _key_fn),  # noqa: B023
         )
+        if horizon_excluded.get(table):
+            result = {**result, "horizon_excluded": horizon_excluded[table]}
         fill_results[table] = result
         total_filled += result["filled"]
 
@@ -1218,7 +1249,7 @@ def verify_fill_telemetry(
         post = wm_after.get(WATERMARK_TABLES[table])
         if result.get("status") in ("parity", "filled") and isinstance(post, int):
             advance_watermark(
-                service_url, table, max_rowid, post,
+                service_url, wm_tenant, table, max_rowid, post,
                 retention_marker=(
                     wm_markers_after.get(WATERMARK_TABLES[table])
                     if table in RETENTION_MARKED_TABLES else None

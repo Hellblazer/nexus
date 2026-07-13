@@ -126,6 +126,14 @@ _RELEVANCE_LOG_COLUMNS = (
 # ── Telemetry ─────────────────────────────────────────────────────────────────
 
 
+#: The relevance_log retention horizon — THE single source for the sweep's
+#: default AND the verify-fill fresh-window scope
+#: (``verify_fill_watermark.RETENTION_HORIZON_TABLES`` imports this). The
+#: sweep/fill disjointness proof holds ONLY while these are the same number;
+#: ``tests/migration/test_verify_fill_watermark.py`` pins the coupling.
+RELEVANCE_LOG_RETENTION_DAYS: int = 90
+
+
 class Telemetry:
     """Owns the ``relevance_log`` table.
 
@@ -401,7 +409,7 @@ class Telemetry:
             rows = self.conn.execute(sql, params).fetchall()
         return [dict(zip(_RELEVANCE_LOG_COLUMNS, row)) for row in rows]
 
-    def expire_relevance_log(self, days: int = 90) -> int:
+    def expire_relevance_log(self, days: int = RELEVANCE_LOG_RETENTION_DAYS) -> int:
         """Delete relevance_log entries older than *days* days (RDR-061 E2).
 
         The relevance_log accumulates on every store_put/catalog_link.

@@ -143,8 +143,11 @@ class ChashVectorConcurrencyTest {
     // retry, and client-timeout budgets all blew, manufacturing the exact
     // 503/timeout signatures the zero-5xx assertion treats as regressions
     // (three isolation-green full-run failures on 2026-07-13). 200 x 12
-    // workers = 2400 requests, matching the old run's steady-state volume;
-    // a slow host now just takes longer, it can never fail on pacing.
+    // workers = 2400 requests: the gated first-registration burst fires once
+    // (the mechanism under test), then ~2400 steady-state writes keep 12
+    // workers contending a 6-connection pool for the whole run — hundreds of
+    // pool-handoff cycles per worker, which is the coverage that matters; a
+    // slow host now just takes longer, it can never fail on pacing.
     private static final int ITERATIONS_PER_WORKER = 200;
     private static final Duration WORKER_AWAIT = Duration.ofSeconds(300);
     private static final int POOL_SIZE       = 6;
@@ -153,7 +156,8 @@ class ChashVectorConcurrencyTest {
     // nexus-xqrq0: retry-on-typed-503 with capped exponential backoff, mirroring a
     // well-behaved production client. See postWithRetryOn503() doc for rationale.
     // Deepened 2026-07-13 (the xqrq0 scope note's deferred timeout follow-up):
-    // 8 tries x <=2s backoff (~15.6s worst-case) outlasts transient host
+    // 8 tries, exponential from 50ms capped at 2s (~7.2s base, ~10.7s with
+    // jitter, worst-case) outlasts transient host
     // contention; the typed-503 admission path is still exercised — the
     // assertion requires every 503 to RESOLVE within the budget, not to
     // never occur.

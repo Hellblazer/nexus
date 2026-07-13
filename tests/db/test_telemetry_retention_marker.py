@@ -45,3 +45,21 @@ def test_never_swept_relation_is_absent(tmp_path):
         ["nexus.relevance_log", "nexus.search_telemetry"]
     ) == {}
     assert db.telemetry.get_retention_markers([]) == {}
+
+
+def test_relevance_timestamp_format_invariant(tmp_path):
+    """Review 68509ac8 Low: the fresh-window fill compares timestamps
+    LEXICOGRAPHICALLY against a datetime.now(UTC).isoformat() cutoff — sound
+    only while every relevance_log write uses the same +00:00-suffixed
+    isoformat shape. Pin the write path's format so a future Z-suffixed or
+    naive writer fails here instead of silently mis-bucketing rows."""
+    import re
+
+    db = _db(tmp_path)
+    db.telemetry.log_relevance("fmt probe", "cfmt", "click")
+    ts = db.telemetry.conn.execute(
+        "SELECT timestamp FROM relevance_log WHERE chunk_id='cfmt'"
+    ).fetchone()[0]
+    assert re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+\+00:00", ts
+    ), f"relevance_log timestamp format drifted: {ts!r}"

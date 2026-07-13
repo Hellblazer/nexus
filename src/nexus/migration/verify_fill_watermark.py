@@ -24,11 +24,19 @@ SOUNDNESS CONDITIONS (all load-bearing):
 - **Advance gate**: written only after a fill pass whose result status is
   ``parity``/``filled`` (never after a breaker abort), and only when a
   post-fill engine count is available to record.
-- **Target-delete freedom**: a table qualifies ONLY while nothing deletes
-  its target rows outside a full rollback — a rolling TTL sweep concurrent
-  with live inserts keeps the count non-decreasing and blinds the trust
-  gate. That is why ``relevance_log`` is excluded (see above); re-adding
-  any table requires re-verifying this property FIRST.
+- **Target-delete freedom OR a retention marker**: a table qualifies while
+  nothing deletes its target rows outside a full rollback — a rolling TTL
+  sweep concurrent with live inserts keeps the count non-decreasing and
+  blinds the count gate alone. ``relevance_log`` (which HAS such a sweep)
+  therefore participates via ``RETENTION_MARKED_TABLES``: the sweep
+  publishes a monotonic cumulative-deletes marker, and trust additionally
+  requires the live marker >= the recorded baseline. BOOTSTRAP CAVEAT: when
+  the recorded baseline is 0 (advanced before any sweep ever fired), the
+  marker check is vacuous (0 >= 0) — that regime is backstopped by the
+  count check: a rollback to a point before a zero-delete advance
+  necessarily also regresses the row count below the recorded value
+  (no deletes had occurred, so live inserts were the only movement).
+  Pinned by ``test_bootstrap_zero_marker_is_backstopped_by_count``.
 - **Source invariants**: the SQLite source is frozen post-cutover and these
   tables are delete-free source-side, so rowids are stable and append-only.
   ``frecency`` mutates content in place, but verify-fill checks identity
@@ -74,11 +82,24 @@ WATERMARK_TABLES: dict[str, str] = {
 #: engine, transport failure) distrusts — fail-safe full probe.
 RETENTION_MARKED_TABLES: frozenset[str] = frozenset({"relevance_log"})
 
-#: Days of source rows the fill PROBES for retention-swept tables — matching
-#: the sweep's own horizon (``Telemetry.expire_relevance_log`` default). Rows
-#: older than this are the sweep's legitimate domain: probing them would
-#: RESURRECT expired rows (the pre-existing exposure nexus-24p05 closed).
-RETENTION_HORIZON_TABLES: dict[str, int] = {"relevance_log": 90}
+#: Days of source rows the fill PROBES for retention-swept tables — THE SAME
+#: number as the sweep's own horizon, imported from the sweep's home module
+#: so the two cannot drift (review 68509ac8 Medium-3: a tightened sweep with
+#: a stale fill window silently reintroduces the resurrect bug). Rows older
+#: than this are the sweep's legitimate domain.
+from nexus.db.t2.telemetry import RELEVANCE_LOG_RETENTION_DAYS  # noqa: E402 — intentional late import, single-source coupling
+
+RETENTION_HORIZON_TABLES: dict[str, int] = {
+    "relevance_log": RELEVANCE_LOG_RETENTION_DAYS,
+}
+
+#: Clock-skew safety margin (critique 68509ac8): the sweep's cutoff is
+#: computed on the ENGINE host, the fill's on the ORCHESTRATOR host — with
+#: zero margin, an orchestrator clock lagging the engine's lets the fill
+#: probe (and re-import) a row the engine already legitimately swept. The
+#: fill window is therefore one day STRICTLY INSIDE the sweep window; NTP
+#: drift is microseconds-to-seconds, a day is decisive.
+RETENTION_HORIZON_SAFETY_DAYS: int = 1
 
 
 def _watermark_file() -> Path:
@@ -97,12 +118,15 @@ def _load_all() -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _key(service_url: str, table: str) -> str:
-    return f"{service_url}|{table}"
+def _key(service_url: str, tenant: str, table: str) -> str:
+    # tenant in the key (critique 68509ac8): one cloud engine URL serves many
+    # RLS-scoped tenants; every value the trust gate compares (counts,
+    # markers) is tenant-scoped, so the recorded baseline must be too.
+    return f"{service_url}|{tenant}|{table}"
 
 
 def usable_min_rowid(
-    service_url: str, table: str, engine_count: int | None,
+    service_url: str, tenant: str, table: str, engine_count: int | None,
     retention_marker: int | None = None,
 ) -> int:
     """The rowid floor the probe may start ABOVE, or 0 for a full probe.
@@ -116,7 +140,7 @@ def usable_min_rowid(
     """
     if not service_url or engine_count is None:
         return 0
-    mark = _load_all().get(_key(service_url, table))
+    mark = _load_all().get(_key(service_url, tenant, table))
     if not isinstance(mark, dict):
         return 0
     recorded = mark.get("target_count")
@@ -152,8 +176,8 @@ def usable_min_rowid(
 
 
 def advance_watermark(
-    service_url: str, table: str, max_rowid: int, target_count: int,
-    retention_marker: int | None = None,
+    service_url: str, tenant: str, table: str, max_rowid: int,
+    target_count: int, retention_marker: int | None = None,
 ) -> None:
     """Record that every source row up to *max_rowid* is verified present.
 
@@ -183,7 +207,7 @@ def advance_watermark(
                 if retention_marker is None:
                     return  # cannot record a rollback baseline -> no advance
                 mark["retention_marker"] = retention_marker
-            marks[_key(service_url, table)] = mark
+            marks[_key(service_url, tenant, table)] = mark
             fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".wm_")
             try:
                 with os.fdopen(fd, "w") as fh:

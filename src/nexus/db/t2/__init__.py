@@ -1271,7 +1271,7 @@ class T2Database:
 
     # ── Housekeeping ──────────────────────────────────────────────────────────
 
-    def expire(self, relevance_log_days: int = 90) -> int:
+    def expire(self, relevance_log_days: int | None = None) -> int:
         """Delete TTL-expired entries using heat-weighted effective TTL.
 
         effective_ttl = base_ttl * (1 + log(access_count + 1))
@@ -1296,6 +1296,9 @@ class T2Database:
         ``test_expire_complete_includes_error_when_log_purge_fails``'s
         instance-attribute monkeypatch still injects faults correctly.
         """
+        if relevance_log_days is None:
+            from nexus.db.t2.telemetry import RELEVANCE_LOG_RETENTION_DAYS  # noqa: PLC0415 — single-source horizon coupling
+            relevance_log_days = RELEVANCE_LOG_RETENTION_DAYS
         # Purge relevance_log (RDR-061 E2 telemetry retention).
         log_deleted = 0
         log_error: str | None = None

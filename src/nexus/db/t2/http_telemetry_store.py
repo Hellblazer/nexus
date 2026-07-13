@@ -137,6 +137,15 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         })
 
     @property
+    def tenant(self) -> str:
+        """The store's tenant. Public read-only: the verify-fill watermark
+        keys per (service_url, tenant, table) — a shared cloud engine serves
+        many tenants from one URL, and tenant B must never trust a rowid
+        floor recorded against tenant A's counts/markers (critique
+        68509ac8)."""
+        return self._tenant or ""
+
+    @property
     def base_url(self) -> str:
         """The resolved service base URL. Public read-only: the verify-fill
         watermark (nexus-te885.10) keys its per-target state on it, so a
