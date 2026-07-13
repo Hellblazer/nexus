@@ -21,9 +21,15 @@ import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from click.testing import CliRunner
 
+from nexus import mcp_infra
 from nexus.catalog.catalog import Catalog
 from nexus.catalog.tumbler import Tumbler
 from nexus.db.t3 import T3Database
+from nexus.mcp_infra import (
+    get_manifest_identity_drops,
+    manifest_write_batch_hook,
+    reset_manifest_identity_drops,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -90,3 +96,36 @@ def test_cli_store_put_writes_manifest_linkage(
     assert manifest_rows, (
         "expected document_chunks manifest rows for the CLI-stored doc"
     )
+
+
+# ── nexus-94fxl / GH #1397: identity-drop collector ──────────────────────────
+
+
+def test_hook_records_identity_drop_when_no_doc_id():
+    """A batch with metadatas but NO document identity (no catalog_doc_id, no
+    meta doc_id) previously vanished through a zero-log early return — the
+    GH #1397 mechanism-1 signature. It must be recorded for the end-of-run
+    summary and logged, so a clean '0 failed' run can no longer hide it."""
+    reset_manifest_identity_drops()
+    manifest_write_batch_hook(
+        ["id1", "id2"], "rdr__nexus", ["c1", "c2"], None,
+        [{"chunk_text_hash": "h1"}, {"chunk_text_hash": "h2"}],
+    )
+    drops = get_manifest_identity_drops()
+    assert drops == [{"collection": "rdr__nexus", "batch_size": 2}]
+    reset_manifest_identity_drops()
+    assert get_manifest_identity_drops() == []
+
+
+def test_hook_no_identity_drop_when_doc_id_present(tmp_path, monkeypatch):
+    """Sanity inverse: a batch WITH catalog_doc_id records no drop."""
+    reset_manifest_identity_drops()
+    # Stop before any catalog I/O: an uninitialised catalog (gate None) exits
+    # after the identity grouping, which is all this test asserts on.
+    monkeypatch.setattr(mcp_infra, "get_catalog", lambda: None)
+    manifest_write_batch_hook(
+        ["id1"], "rdr__nexus", ["c1"], None,
+        [{"chunk_text_hash": "h1"}],
+        catalog_doc_id="1.3.142",
+    )
+    assert get_manifest_identity_drops() == []

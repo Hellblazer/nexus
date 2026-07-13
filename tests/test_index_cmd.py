@@ -809,3 +809,28 @@ def test_index_repo_no_handler_leak_after_exception(runner, repo_dir, home, mock
         and h.baseFilename == str(log_path)
     ]
     assert leaked == []
+
+
+# ── GH #1397 / nexus-94fxl: identity-drop summary ───────────────────────────
+
+def test_identity_drop_summary_silent_when_none(runner, repo_dir, mock_reg):
+    result, _ = _invoke_repo(runner, [str(repo_dir)], mock_reg)
+    assert result.exit_code == 0, result.output
+    assert "WITHOUT a catalog document identity" not in result.output
+
+
+def test_identity_drop_summary_surfaces_drops(runner, repo_dir, mock_reg, monkeypatch):
+    monkeypatch.setattr(
+        "nexus.mcp_infra.get_manifest_identity_drops",
+        lambda: [
+            {"collection": "rdr__nexus", "batch_size": 23},
+            {"collection": "rdr__nexus", "batch_size": 4},
+        ],
+    )
+    result, _ = _invoke_repo(runner, [str(repo_dir)], mock_reg)
+    assert result.exit_code == 0, result.output
+    assert (
+        "WARNING: 2 chunk batch(es) (27 chunks; collection(s): rdr__nexus) "
+        "were indexed WITHOUT a catalog document identity" in result.output
+    )
+    assert "nx catalog reconcile" in result.output
