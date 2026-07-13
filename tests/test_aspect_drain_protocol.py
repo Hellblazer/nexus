@@ -234,7 +234,7 @@ class TestServiceModeDrain:
         pending), so pending_count() returns 0 while is_drained() is still
         False.  DrainTimeoutError must still be raised (timeout fires
         correctly), and the error message / detail must mention 'in_progress'
-        and 'reclaim-stale' so the operator knows the recovery action.
+        and the stale-reclaim recovery so the operator knows the action.
         """
         from nexus.aspect_worker import DrainTimeoutError, drain_worker
         from nexus.db import storage_mode as smod
@@ -282,7 +282,7 @@ class TestServiceModeDrain:
             f"error message must mention 'in_progress' for the crashed-worker hint; got: {msg!r}"
         )
         assert "reclaim" in msg, (
-            f"error message must mention 'reclaim' (reclaim-stale recovery); got: {msg!r}"
+            f"error message must mention 'reclaim' (stale-reclaim recovery); got: {msg!r}"
         )
 
     def test_drain_poll_loop_exits_when_is_drained_becomes_true(
@@ -375,7 +375,7 @@ class TestServiceModeDrain:
 
     def test_cli_drain_surfaces_detail_hint_on_timeout(self, monkeypatch) -> None:
         """OBS / Medium-1: `nx aspects drain` must surface DrainTimeoutError.detail
-        (the reclaim-stale hint) to the operator — not swallow it behind the
+        (the stale-reclaim hint) to the operator — not swallow it behind the
         generic 'Re-run...' message. The crashed-worker case (stuck_count==0
         with a detail hint) is exactly when the operator needs the hint.
         """
@@ -384,8 +384,8 @@ class TestServiceModeDrain:
         from nexus.commands import aspects as aspects_mod
 
         hint = (
-            "Note (service mode): pending_count is 0 ... Run "
-            "'nx aspects reclaim-stale' to reset them back to pending."
+            "Note (service mode): pending_count is 0 ... a running "
+            "aspect-worker's stale-reclaim loop resets them to pending."
         )
 
         def _raise(*a, **k):
@@ -396,8 +396,8 @@ class TestServiceModeDrain:
 
         result = CliRunner().invoke(aspects_mod.aspects_drain, ["--timeout", "1"])
         assert result.exit_code == 1
-        assert "reclaim-stale" in result.output, (
-            f"CLI must surface the reclaim-stale hint; got: {result.output!r}"
+        assert "stale-reclaim" in result.output, (
+            f"CLI must surface the stale-reclaim hint; got: {result.output!r}"
         )
 
 

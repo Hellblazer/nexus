@@ -106,7 +106,7 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
         return (
             f"Error: {text}\n"
             "The nexus backing service may be unreachable — check the daemon is "
-            "running with `nx doctor` (and `nx daemon status`)."
+            "running with `nx doctor` (and `nx daemon service status`)."
         )
     return f"Error: {text}"
 

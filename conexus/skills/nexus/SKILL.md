@@ -44,7 +44,9 @@ mcp__plugin_conexus_nexus__operator_compare(items=["x","y"], focus="scalability"
 mcp__plugin_conexus_nexus__operator_generate(template="release note", context="..."
 mcp__plugin_conexus_nexus__operator_filter(items='[{"id":"a", ...}, ...]', criterion="peer-reviewed only"
 mcp__plugin_conexus_nexus__operator_check(items='[{"id":"p1"}, ...]', check_instruction="do the papers agree?"
-mcp__plugin_conexus_nexus__operator_verify(claim="X uses attention", evidence="Section 2.1: ..."
+mcp__plugin_conexus_nexus__operator_verify(claim="X uses attention", evidence="Section 2.1: ...
+mcp__plugin_conexus_nexus__operator_groupby(items='[{"id":"a", ...}, ...]', key="dataset used"
+mcp__plugin_conexus_nexus__operator_aggregate(groups='[{"key_value":"...", "items":[...]}]', reducer="count"
 
 # Background hygiene — call and let run (long-lived claude -p subprocesses)
 mcp__plugin_conexus_nexus__nx_tidy()                                     # T2 memory consolidation
