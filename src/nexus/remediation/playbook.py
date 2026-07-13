@@ -215,24 +215,96 @@ def _chash_poison(store_state: StoreState) -> Playbook:
     )
 
 
-#: topic -> builder. Phase 3 adds the remaining upgrade-edge topics here.
+#: The five chash-bearing tables the GH #1390 class can poison — mirrors
+#: health.py's chash_sql set. Counts are aggregate-only (P2.2 lint shape).
+_CHASH_TABLES = (
+    "nexus.chunks_384",
+    "nexus.chunks_768",
+    "nexus.chunks_1024",
+    "nexus.chash_index",
+    "nexus.catalog_document_chunks",
+)
+
+
+def _chash_poison_forensics(store_state: StoreState) -> Playbook:
+    """The FORENSICS (read-only investigation) playbook for the GH #1390
+    class — the first diagnostic-shaped topic (nexus-ykzbj.10): carries
+    lint-verified aggregate SQL, mutates nothing, and exists to decide
+    whether ``remediate:chash-poison`` is needed at all."""
+    return Playbook(
+        topic="chash-poison",
+        context=(
+            "My conexus/nexus store may hold non-32-char chash rows in "
+            "pgvector (the GH #1390 / nexus-pnwu0 class) — help me diagnose "
+            "the blast radius READ-ONLY before deciding on any remediation."
+        ),
+        constraints=(
+            "READ-ONLY investigation: run nothing that mutates — no DML, no "
+            "DDL, no constraint changes.",
+            "Do NOT begin remediation from this playbook; that is the "
+            "separately-consented remediate path.",
+            "Do NOT drop or weaken the chash length constraints.",
+        ),
+        steps=(
+            "run the diagnostic SQL below (each statement is lint-verified "
+            "read-only; the nexus_diag path executes them in a read-only "
+            "session)",
+            "interpret: any non-zero count means poison rows exist in that "
+            "table and a future engine upgrade would crash-loop on VALIDATE",
+            "check constraint state: unvalidated chk_% constraints indicate "
+            "an earlier forced upgrade",
+        ),
+        deliverable=(
+            "Report back: the per-table non-conformant counts, the "
+            "chk_% constraint validation states, and a recommendation — "
+            "clean (no action) or proceed to remediate:chash-poison."
+        ),
+        escape=(
+            "If the Postgres cluster is down or the diagnostic credentials "
+            "are gone (pre-P2.1 install), STOP and report which prerequisite "
+            "is missing — re-running `nx init --service` backfills the "
+            "diagnostic role and credentials."
+        ),
+        goal="decide whether remediation is needed",
+        incident_ref="nexus-pnwu0",
+        refusal_lead=(
+            "Diagnostic playbook for the chash-poison class (read-only)."
+        ),
+        closing_warning=(
+            "This playbook diagnoses only — remediation is the separately-"
+            "consented remediate path."
+        ),
+        force_risk="",
+        runbook_section="8.1",
+        store_detail=store_state.detail,
+        diagnostic_sql=tuple(
+            f"SELECT count(*) FROM {t} WHERE length(chash) <> 32"
+            for t in _CHASH_TABLES
+        ) + (
+            "SELECT conname, convalidated FROM pg_constraint "
+            "WHERE conname LIKE 'chk_%'",
+        ),
+    )
+
+
+#: verb-shaped registries (RDR-182: forensics diagnoses, remediate recovers).
+#: The REMEDIATE registry keeps the original name/shape — daemon.py's gate
+#: and emit_playbook()'s public signature predate the split.
 _TOPICS = {
     "chash-poison": _chash_poison,
 }
+_FORENSICS_TOPICS = {
+    "chash-poison": _chash_poison_forensics,
+}
 
 
-def emit_playbook(topic: str, store_state: StoreState) -> Playbook:
-    """Build the :class:`Playbook` for *topic* against *store_state*.
-
-    Unknown topics fail LOUD with the known-topic list — a typo'd topic
-    silently emitting nothing would defeat the gate it feeds.
-    """
+def _emit(registry: dict, kind: str, topic: str, store_state: StoreState) -> Playbook:
     try:
-        builder = _TOPICS[topic]
+        builder = registry[topic]
     except KeyError:
         raise KeyError(
-            f"unknown playbook topic {topic!r} — known topics: "
-            f"{sorted(_TOPICS)}"
+            f"unknown {kind} playbook topic {topic!r} — known topics: "
+            f"{sorted(registry)}"
         ) from None
     playbook = builder(store_state)
     if playbook.diagnostic_sql:
@@ -243,3 +315,20 @@ def emit_playbook(topic: str, store_state: StoreState) -> Playbook:
 
         assert_read_only_diagnostics(playbook.diagnostic_sql)
     return playbook
+
+
+def emit_playbook(topic: str, store_state: StoreState) -> Playbook:
+    """Build the REMEDIATE :class:`Playbook` for *topic* (recovery guidance).
+
+    Unknown topics fail LOUD with the known-topic list — a typo'd topic
+    silently emitting nothing would defeat the gate it feeds.
+    """
+    return _emit(_TOPICS, "remediate", topic, store_state)
+
+
+def emit_forensics_playbook(topic: str, store_state: StoreState) -> Playbook:
+    """Build the FORENSICS (read-only diagnostic) :class:`Playbook` for
+    *topic*. Same loud-unknown and pre-emission-lint semantics as
+    :func:`emit_playbook`; a distinct registry because the two verbs carry
+    different content for the same subject (diagnose vs recover)."""
+    return _emit(_FORENSICS_TOPICS, "forensics", topic, store_state)

@@ -3,8 +3,8 @@
 """MCP core tools: search, store, memory, scratch, collections, plans.
 
 37 registered tools + 3 demoted (plain functions, no @mcp.tool()); one of the
-37 is the THROWAWAY RDR-182 A4 gate spike (``rdr182_gate_spike``), removed
-when Phase 3 lands the real ``forensics``/``remediate`` tools.
+37 is the RDR-182 consent-gated ``forensics`` tool (nexus-ykzbj.10, which
+replaced the throwaway A4 spike; ``remediate`` joins it in P3.2).
 """
 from __future__ import annotations
 
@@ -6124,16 +6124,15 @@ def daemon_uninstall(confirm: bool = False, remove_data: bool = False) -> str:
     return "\n".join(lines)
 
 
-# ── RDR-182 A4 gating spike (nexus-ykzbj.1) — THROWAWAY, replaced by the real
-# `forensics` / `remediate` tools in Phase 3 (which reuse the gate helper +
-# refusal constant below and then delete the spike tool).
+# ── RDR-182 consent-gated remediation surface (A4 spike nexus-ykzbj.1 →
+# real tools from P3, nexus-ykzbj.10+).
 #
-# Critical Assumption A4: unlike a CLI command (a human typed it — an implicit
-# consent gesture), an @mcp.tool() is autonomously agent-invocable, so the
-# durable opt-in MUST be enforced at the tool boundary itself: the FIRST
-# statement reads the flag and refuses BEFORE any diagnostic content is built.
-# No other @mcp.tool() in this codebase is config-gated; this is the net-new,
-# load-bearing safety mechanism for the RDR-182 Desktop surface.
+# Critical Assumption A4 (verified by the spike, enforced here for real):
+# unlike a CLI command (a human typed it — an implicit consent gesture), an
+# @mcp.tool() is autonomously agent-invocable, so the durable opt-in MUST be
+# enforced at the tool boundary itself: the FIRST statement of every gated
+# tool reads the flag and refuses BEFORE any diagnostic work happens. Gate
+# shape + carried-forward limitations: T2 nexus/rdr182-a4-spike-gate-shape.md.
 
 #: The refusal every RDR-182 tool returns when the capability is disabled.
 #: Names the EXACT enable command (tests lock the coupling). Module-level so
@@ -6182,32 +6181,82 @@ def _remediation_opt_in() -> bool:
     return isinstance(value, str) and value.strip().lower() in ("true", "1", "yes")
 
 
-#: Spike instrumentation: the content path appends here, so tests can assert
-#: mechanically that a refused call NEVER entered it (zero emission before
-#: the gate). Throwaway with the spike tool.
-_SPIKE_CONTENT_CALLS: list[str] = []
+def _diag_resolve(creds_path=None):  # noqa: ANN001, ANN202 — thin indirection, monkeypatch seam
+    """Indirection over :func:`nexus.db.diag_connection.resolve_diag_credentials`
+    so tests can prove mechanically that a REFUSED call never touches the
+    diagnostic path (the P0 spike's zero-emission guarantee, kept on the real
+    tool)."""
+    from nexus.db.diag_connection import resolve_diag_credentials  # noqa: PLC0415 — deferred, startup cost
 
-#: What the spike's content path returns when the gate passes — a stand-in
-#: for the real playbook emission Phase 3 wires in.
-_SPIKE_CONTENT_MARKER = "RDR-182 spike: opt-in verified; diagnostic content path reached."
+    return resolve_diag_credentials(creds_path)
+
+
+def _diag_run(statements, creds, **kwargs):  # noqa: ANN001, ANN202 — thin indirection, monkeypatch seam
+    from nexus.db.diag_connection import run_diagnostic_sql  # noqa: PLC0415 — deferred, startup cost
+
+    return run_diagnostic_sql(statements, creds, **kwargs)
 
 
 @mcp.tool(
-    title="RDR-182 Gate Spike (throwaway)",
+    title="Upgrade Forensics Playbook (read-only, opt-in)",
     annotations={"readOnlyHint": True, "idempotentHint": True},
 )
-def rdr182_gate_spike() -> str:
-    """THROWAWAY spike proving RDR-182's A4 opt-in gate at the MCP boundary.
+def forensics(topic: str = "chash-poison") -> str:
+    """Emit a read-only diagnostic playbook for an upgrade-edge *topic*,
+    with LIVE store state when the diagnostic path is available (RDR-182
+    P3.1, nexus-ykzbj.10).
 
-    Returns a refusal (naming the exact enable command) unless
-    ``claude_assisted_remediation.enabled`` is affirmatively set — the shape
-    the real ``forensics``/``remediate`` tools adopt in Phase 3. Emits no
-    diagnostic content; safe to invoke.
+    OPT-IN GATED: this tool is autonomously agent-invocable, so the first
+    statement enforces the durable consent flag — when
+    ``claude_assisted_remediation.enabled`` is false (the default) it
+    returns a refusal naming the enable command and does ZERO diagnostic
+    work. When enabled: the topic's lint-verified aggregate SQL runs through
+    the sanctioned ``nexus_diag`` choke point (read-only session, BYPASSRLS
+    so integrity counts see every tenant's rows — nexus-vounk) and the
+    results are embedded in the returned playbook. Diagnostics unavailable
+    (pre-P2.1 install, PG down) degrades to an explicit unavailable note —
+    never a silent all-clean, never a crash. No outbound HTTP; the payload
+    is this return string (the RDR-126 Desktop channel).
+
+    Args:
+        topic: The diagnostic topic. Currently: ``chash-poison`` (the
+            GH #1390 poisoned-store class). Unknown topics list the known
+            set.
     """
     if not _remediation_opt_in():
         return _REMEDIATION_REFUSAL
-    _SPIKE_CONTENT_CALLS.append("content-built")
-    return _SPIKE_CONTENT_MARKER
+
+    from nexus.remediation import StoreState, emit_forensics_playbook  # noqa: PLC0415 — deferred, startup cost
+
+    # Build once with a placeholder to resolve the topic (loud on unknown)
+    # and obtain the topic's diagnostic SQL.
+    try:
+        probe = emit_forensics_playbook(topic, StoreState(detail=""))
+    except KeyError as exc:
+        return str(exc)
+
+    creds = _diag_resolve()
+    if creds is None:
+        detail = (
+            "live diagnostics UNAVAILABLE — no nexus_diag credentials "
+            "(pre-P2.1 install or no local service PG). Re-run "
+            "`nx init --service` to backfill the diagnostic role, then "
+            "re-invoke. Do NOT interpret this as a clean store."
+        )
+    else:
+        try:
+            results = _diag_run(probe.diagnostic_sql, creds)
+            detail = "live diagnostic results:\n" + "\n".join(
+                f"  {stmt} = {out}"
+                for stmt, out in zip(probe.diagnostic_sql, results)
+            )
+        except Exception as exc:  # noqa: BLE001 — degrade loud-in-band; the agent must see the failure, not a crash
+            detail = (
+                f"live diagnostics FAILED ({exc}) — treat store state as "
+                "UNKNOWN, not clean."
+            )
+
+    return emit_forensics_playbook(topic, StoreState(detail=detail)).tool_return()
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
