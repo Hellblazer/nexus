@@ -134,7 +134,12 @@ MigrationStatus = Literal[
 
 #: Collection-name prefixes excluded from DEFAULT enumeration (explicit
 #: --collections naming overrides). Session-ephemeral, die-with-Chroma data.
-EPHEMERAL_EXCLUDE_PREFIXES: tuple[str, ...] = ("tuples__",)
+EPHEMERAL_EXCLUDE_PREFIXES: tuple[str, ...] = (
+    "tuples__",
+    # nexus-xukbj: quarantine siblings hold soft-deleted orphans awaiting
+    # expiry — never worth migrating as first-class data.
+    "quarantine-",
+)
 
 #: Nonconformant collection names known to hold DERIVED data — recomputable
 #: from a durable source, so their absence from pgvector is not data loss.

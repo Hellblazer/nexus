@@ -95,6 +95,24 @@ def main(ctx: click.Context, verbose: bool) -> None:
     from nexus.commands._migration_prompt import maybe_emit_bootstrap_prompt  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
     maybe_emit_bootstrap_prompt()
 
+    # nexus-4xgfy: finish-the-upgrade auto-trigger. uv offers no
+    # post-install hook, so the first invocation after a version change
+    # runs the safe finish pass (restart detached stale daemons; name the
+    # session-bound ones) and says so in one line. Same-version runs are a
+    # single stat() — effectively free.
+    try:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import
+        from nexus.upgrade_finish import check_version_transition  # noqa: PLC0415 — deferred import
+
+        _summary = check_version_transition(nexus_config_dir())
+        if _summary:
+            click.echo(f"[upgrade-finish] {_summary}", err=True)
+    except Exception:  # noqa: BLE001 — the trigger must never break CLI startup
+        import structlog  # noqa: PLC0415 — deferred import
+        structlog.get_logger(__name__).warning(
+            "upgrade_finish_trigger_failed", exc_info=True,
+        )
+
 
 main.add_command(catalog)
 main.add_command(collection)

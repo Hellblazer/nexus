@@ -50,6 +50,7 @@ For the full deployment story across all three surfaces (install, daemon lifecyc
 - **Typed document catalog** — Xanadu-inspired addressing with typed links (`cites`, `implements`, `supersedes`). Walk from a design doc to the code that implements it.
 - **RDR: Research-Design-Review** — write a spec before you code. Captures the problem, research, alternatives, and chosen approach. The corpus is searchable, so prior decisions surface during new design work.
 - **Local-first** — runs entirely on your machine: an on-device bge-768 ONNX embedder over a bundled Postgres 17 + pgvector service that `nx init` provisions for you. Voyage AI (server-side embeddings) is opt-in for the managed-cloud deployment.
+- **Claude-assisted diagnostics & recovery** — when an upgrade or store goes sideways, `nx forensics <topic>` hands your agent a read-only, lint-verified diagnostic playbook (live store counts included once you opt in), and `nx remediate <topic>` releases a guided recovery playbook behind an explicit, audit-recorded consent — default-off, revocable, and your agent executes it with your credentials, never the product acting on its own. The same `forensics`/`remediate` tools are exposed over MCP for in-session use.
 
 ## CLI quick-start
 

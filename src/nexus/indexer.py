@@ -2375,6 +2375,17 @@ def _prune_deleted_files(
             col = db.get_collection(collection_name)
         except _ChromaNotFoundError:
             continue
+        # nexus-xukbj: restore BEFORE the empty-collection early-continue —
+        # a fully-quarantined collection (origin emptied) must still be able
+        # to restore when a heal re-references its chashes.
+        from nexus.catalog.chunk_quarantine import restore_rereferenced  # noqa: PLC0415 — deferred import
+        try:
+            restored = restore_rereferenced(db, collection_name, referenced)
+        except Exception:  # noqa: BLE001 — best-effort; failure logged, pass continues
+            _log.warning("gc_restore_pass_failed", collection=collection_name,
+                         exc_info=True)
+            restored = 0
+
         all_chunks = _paginated_get(col, include=["metadatas"])
         if not all_chunks["ids"]:
             continue
@@ -2432,56 +2443,37 @@ def _prune_deleted_files(
                          note=("re-index source or run `nx t3 reidentify` "
                                "to populate chunk_text_hash; until then GC "
                                "cannot decide these chunks safely"))
+        # nexus-xukbj (soft delete, supersedes the per-sweep mr89x floor):
+        # restore first (a heal may have re-referenced quarantined chashes),
+        # then QUARANTINE this pass's orphans (recoverable move — no floor,
+        # no warning: mass supersede churn from a big git pull proceeds
+        # silently), then EXPIRE rows older than the grace window (the
+        # mr89x floor lives THERE — the one still-loud case is a manifest
+        # defect that persisted for weeks).
+        from nexus.catalog.chunk_quarantine import (  # noqa: PLC0415 — deferred import
+            expire_quarantine,
+            quarantine_orphans,
+        )
+
         if orphan_ids:
-            # nexus-mr89x (a): partial-gap safety floor — the sibling of the
-            # manifest-EMPTY guard above for the manifest-PARTIAL case. A
-            # collection-name stamp mismatch (the nexus-x6kdz class) or a
-            # mass manifest drop classifies ~ALL chunks as orphans; deleting
-            # them is unrecoverable data loss (the 2026-07-09 field incident
-            # pruned 6 live RDR docs). Refuse mass deletion: above the floor
-            # the sweep is far more likely a manifest defect than a real
-            # cleanup, and the c21fk self-heal pass has ALREADY run before
-            # this GC — a surviving mass-orphan verdict is deeply suspect.
-            # Legitimate large cleanups stay under the floor or use the
-            # explicit override.
-            # Denominator = DECIDABLE chunks only (review e2423e3b F4): a
-            # collection dominated by undecidable no-chash relics must not
-            # dilute the fraction below the floor while ~all of its
-            # decidable population is condemned.
             decidable = len(all_chunks["ids"]) - unsafe_skipped
             frac = len(orphan_ids) / decidable if decidable else 0.0
-            floor_frac = _gc_floor_fraction()
-            if (
-                len(orphan_ids) >= _GC_FLOOR_MIN_CHUNKS
-                and frac > floor_frac
-                and os.environ.get("NX_GC_FORCE", "") != "1"
-            ):
-                _log.warning(
-                    "gc_safety_floor_refused",
-                    collection=collection_name,
-                    orphans=len(orphan_ids), decidable=decidable,
-                    fraction=round(frac, 3), floor=floor_frac,
-                    note=(
-                        "refusing to prune: orphan fraction exceeds the "
-                        "safety floor — this is the manifest-gap "
-                        "misclassification shape (nexus-mr89x), not a "
-                        "normal cleanup. Verify with `nx catalog doctor "
-                        "--t3-vs-catalog` and `nx catalog reconcile`; "
-                        "override with NX_GC_FORCE=1 only after confirming "
-                        "the chunks are genuinely dead."
-                    ),
-                )
-                continue
-            # nexus-mr89x (b): per-doc visibility. The field incident gave
-            # zero per-doc signal — the operator reverse-engineered the 6
-            # pruned docs from a set difference. The bounded identity sample
-            # was captured inline during classification (review e2423e3b F5).
-            _batched_delete(col, orphan_ids)
+            quarantined = quarantine_orphans(
+                db, col, collection_name, orphan_ids,
+            )
             _log.info("pruned orphan chunks",
-                      collection=collection_name, count=len(orphan_ids),
-                      fraction=round(frac, 3), sample=orphan_sample)
-            _log.debug("pruned_orphan_chunk_ids",
-                       collection=collection_name, ids=orphan_ids)
+                      collection=collection_name, count=quarantined,
+                      fraction=round(frac, 3), restored=restored,
+                      sample=orphan_sample, mode="quarantine")
+        try:
+            expire_quarantine(
+                db, collection_name,
+                floor_fraction=_gc_floor_fraction(),
+                floor_min_chunks=_GC_FLOOR_MIN_CHUNKS,
+            )
+        except Exception:  # noqa: BLE001 — best-effort; failure logged, pass continues
+            _log.warning("gc_expiry_pass_failed", collection=collection_name,
+                         exc_info=True)
 
 
 # ── Main indexing pipeline ───────────────────────────────────────────────────

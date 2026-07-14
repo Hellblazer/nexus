@@ -148,7 +148,13 @@ def _normalize_for_write(metadata: dict, collection_name: str) -> dict:
 # bypass by calling ``coll.upsert()`` directly; this set keeps the
 # T3-public write path symmetric so .nxexp round-trips don't silently
 # strip the collection's metadata at import time.
-_BYPASS_SCHEMA_PREFIXES: tuple[str, ...] = ("taxonomy__",)
+_BYPASS_SCHEMA_PREFIXES: tuple[str, ...] = (
+    "taxonomy__",
+    # nexus-xukbj: quarantine siblings (quarantine-<type>__...) are
+    # system-internal, deliberately non-conformant and catalog-unregistered
+    # — the drift/doctor checks must treat them as expected state.
+    "quarantine-",
+)
 
 
 def _bypass_canonical_schema(collection_name: str) -> bool:

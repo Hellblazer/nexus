@@ -494,18 +494,48 @@ def _gc_col(rows: list[tuple[str, str]]):
     re-enter ``_prune_deleted_files`` (which loops over both code and
     docs collections; each iteration calls ``col.get`` at least once).
     """
-    ids = [r[0] for r in rows]
-    metas = [{"chunk_text_hash": r[1]} for r in rows]
-    state = {"calls": 0}
+    state = {
+        "rows": {r[0]: {"chunk_text_hash": r[1]} for r in rows},
+    }
 
-    def _get(*args, **kwargs):
-        state["calls"] += 1
-        if state["calls"] == 1:
-            return {"ids": list(ids), "metadatas": list(metas)}
-        return {"ids": [], "metadatas": []}
+    def _get(*args, ids=None, **kwargs):
+        if ids is not None:
+            # id-keyed fetch (the quarantine copy path): always answered
+            # from live state, with embeddings/documents so copy-then-
+            # delete round-trips.
+            present = [i for i in ids if i in state["rows"]]
+            return {
+                "ids": present,
+                "metadatas": [dict(state["rows"][i]) for i in present],
+                "documents": [f"doc-{i}" for i in present],
+                "embeddings": [[0.0, 1.0] for _ in present],
+            }
+        # full-collection page (the classification sweep): true
+        # limit/offset pagination over the LIVE state — mirrors
+        # _paginated_get's contract, survives re-scans (restore/expiry
+        # walk the same collection repeatedly), and exercises real page
+        # boundaries when a fixture exceeds the page size.
+        offset = kwargs.get("offset", 0) or 0
+        limit = kwargs.get("limit") or len(state["rows"])
+        keys = list(state["rows"])[offset:offset + limit]
+        return {
+            "ids": keys,
+            "metadatas": [dict(state["rows"][k]) for k in keys],
+        }
+
+    def _delete(*args, ids=None, **kwargs):
+        for i in ids or []:
+            state["rows"].pop(i, None)
+
+    def _upsert(*args, ids=None, metadatas=None, **kwargs):
+        for i, m in zip(ids or [], metadatas or []):
+            state["rows"][i] = dict(m or {})
 
     col = MagicMock()
     col.get.side_effect = _get
+    col.delete.side_effect = _delete
+    col.upsert.side_effect = _upsert
+    col._rows = state["rows"]
     return col
 
 
@@ -526,11 +556,25 @@ def _gc_db(per_collection_rows: dict[str, list[tuple[str, str]]]):
         name: _gc_col(rows) for name, rows in per_collection_rows.items()
     }
     db = MagicMock()
-    db.get_or_create_collection.side_effect = lambda name: cols[name]
-    db.get_collection.side_effect = lambda name: cols[name]
-    # nexus-ks40: read paths now use ``get_collection`` (raises when
-    # absent) so the mock must satisfy both name-resolution surfaces.
-    db.get_collection.side_effect = lambda name: cols[name]
+
+    def _goc(name):
+        # get_or_create: auto-create (the quarantine sibling path).
+        if name not in cols:
+            cols[name] = _gc_col([])
+        return cols[name]
+
+    def _get_only(name):
+        # nexus-ks40: read paths use get_collection (raises when absent).
+        if name not in cols:
+            raise ValueError(f"collection {name!r} not found")
+        return cols[name]
+
+    db.get_or_create_collection.side_effect = _goc
+    db.get_collection.side_effect = _get_only
+    # Local-mode shape: a bare MagicMock's auto-attrs would make the db
+    # look service-mode (truthy upsert_chunks_with_embeddings) and swallow
+    # quarantine writes silently (review 4cb743be H3 — permissive mocks).
+    db.upsert_chunks_with_embeddings = None
     return db, cols
 
 
@@ -559,17 +603,19 @@ def test_prune_deleted_files_orphan_chunk_deleted(tmp_path):
     from nexus.indexer import _prune_deleted_files
     live_chash = "a" * 64
     orphan_chash = "b" * 64
-    col = _gc_col([("live-id-synthetic", live_chash),
-                   ("orphan-id-synthetic", orphan_chash)])
-    db = MagicMock(); db.get_or_create_collection.return_value = col
-    db.get_collection.return_value = col
+    db, cols = _gc_db({
+        "code__repo": [("live-id-synthetic", live_chash),
+                       ("orphan-id-synthetic", orphan_chash)],
+        "docs__repo": [],
+    })
     catalog = _gc_catalog({"code__repo": {live_chash[:32]}, "docs__repo": set()})
 
     _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
 
-    deleted = _deleted_ids(col)
-    assert "orphan-id-synthetic" in deleted
-    assert "live-id-synthetic" not in deleted
+    # nexus-xukbj: the orphan MOVES to quarantine (recoverable), the live
+    # chunk stays in the origin.
+    assert list(cols["code__repo"]._rows) == ["live-id-synthetic"]
+    assert "orphan-id-synthetic" in cols["quarantine-code__repo"]._rows
 
 
 def test_prune_deleted_files_preserves_live_synthetic_id(tmp_path):
@@ -580,14 +626,13 @@ def test_prune_deleted_files_preserves_live_synthetic_id(tmp_path):
     from nexus.indexer import _prune_deleted_files
     chash = "a" * 64
     synthetic_id = "0123456789abcdef" * 2  # 32 hex chars unrelated to chash
-    col = _gc_col([(synthetic_id, chash)])
-    db = MagicMock(); db.get_or_create_collection.return_value = col
-    db.get_collection.return_value = col
+    db, cols = _gc_db({"code__repo": [(synthetic_id, chash)], "docs__repo": []})
     catalog = _gc_catalog({"code__repo": {chash[:32]}, "docs__repo": set()})
 
     _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
 
-    assert col.delete.call_count == 0
+    assert cols["code__repo"].delete.call_count == 0
+    assert synthetic_id in cols["code__repo"]._rows
 
 
 def test_prune_deleted_files_empty_manifest_skips_no_wipe(tmp_path):
@@ -662,17 +707,13 @@ def test_prune_deleted_files_idempotent(tmp_path):
     chash = "a" * 64
     catalog = _gc_catalog({"code__repo": {chash[:32]}, "docs__repo": set()})
 
-    col = _gc_col([("live-id", chash)])
-    db = MagicMock(); db.get_or_create_collection.return_value = col
-    db.get_collection.return_value = col
+    db, cols = _gc_db({"code__repo": [("live-id", chash)], "docs__repo": []})
     _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
-    assert col.delete.call_count == 0
+    assert cols["code__repo"].delete.call_count == 0
 
-    col2 = _gc_col([("live-id", chash)])
-    db2 = MagicMock(); db2.get_or_create_collection.return_value = col2
-    db2.get_collection.return_value = col2
-    _prune_deleted_files("code__repo", "docs__repo", db2, catalog=catalog)
-    assert col2.delete.call_count == 0
+    _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
+    assert cols["code__repo"].delete.call_count == 0
+    assert list(cols["code__repo"]._rows) == ["live-id"]
 
 
 def test_prune_deleted_files_no_catalog_is_noop(tmp_path):
@@ -1712,43 +1753,21 @@ def test_on_stage_timers_none_is_safe(tmp_path):
 
 def test_prune_deleted_files_paginates(tmp_path, monkeypatch):
     """RDR-108 Phase 4 / nexus-dyxe: pagination still walks the whole
-    collection and deletes orphans across page boundaries. (This fixture's
-    110/310 = 35.5% orphan fraction trips the nexus-mr89x safety floor by
-    design; the explicit override applies because pagination, not floor
-    policy, is under test — floor policy has its own TestGcSafetyFloor.)"""
-    monkeypatch.setenv("NX_GC_FORCE", "1")
+    collection across page boundaries (310 rows > _CHROMA_PAGE_SIZE=300).
+    Post-xukbj the orphans MOVE to quarantine rather than hard-delete;
+    lives stay put."""
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
     from nexus.indexer import _prune_deleted_files
     live = [(f"live-{i:03d}", f"a{i:03d}" + "0" * 60) for i in range(200)]
     orphan = [(f"orphan-{i:03d}", f"b{i:03d}" + "0" * 60) for i in range(110)]
-    live_ids = {r[0] for r in live}
-    orphan_ids = {r[0] for r in orphan}
     live_chashes_32 = {r[1][:32] for r in live}
-    # Force pagination by filling page 1 to exactly _CHROMA_PAGE_SIZE=300 rows
-    # so the helper continues to page 2 instead of short-circuiting.
-    p1_rows = live + orphan[:100]
-    p2_rows = orphan[100:]
-    p1 = {"ids": [r[0] for r in p1_rows],
-          "metadatas": [{"chunk_text_hash": r[1]} for r in p1_rows]}
-    p2 = {"ids": [r[0] for r in p2_rows],
-          "metadatas": [{"chunk_text_hash": r[1]} for r in p2_rows]}
-    p3 = {"ids": [], "metadatas": []}
-    mock_cols: list[MagicMock] = []
-    def mc():
-        c = MagicMock(); c.get.side_effect = [p1, p2, p3]; return c
-    db = MagicMock()
-    db.get_or_create_collection.side_effect = lambda _: (mock_cols.append(mc()), mock_cols[-1])[1]
-    db.get_collection.side_effect = lambda _: (mock_cols.append(mc()), mock_cols[-1])[1]
-    db.get_collection.side_effect = lambda _: (mock_cols.append(mc()), mock_cols[-1])[1]
-    catalog = _gc_catalog({"code__repo": live_chashes_32, "docs__repo": live_chashes_32})
+    db, cols = _gc_db({"code__repo": live + orphan, "docs__repo": []})
+    catalog = _gc_catalog({"code__repo": live_chashes_32, "docs__repo": set()})
 
     _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
 
-    for col in mock_cols:
-        d = set()
-        for c in col.delete.call_args_list:
-            d.update(c.kwargs.get("ids") or (c.args[0] if c.args else []))
-        assert orphan_ids.issubset(d)
-        assert not live_ids.intersection(d)
+    assert set(cols["code__repo"]._rows) == {r[0] for r in live}
+    assert set(cols["quarantine-code__repo"]._rows) == {r[0] for r in orphan}
 
 
 def test_frecency_update_paginates(tmp_path):
@@ -2079,149 +2098,161 @@ def test_drain_markers_on_phase_none_safe():
     assert _drain_batcher_with_markers(b, None) == 1
 
 
-class TestGcSafetyFloor:
-    """nexus-mr89x (a): the partial-gap safety floor — the sibling of the
-    manifest-empty guard for the manifest-PARTIAL case. A collection-name
-    stamp mismatch or mass manifest drop classifies ~all chunks as orphans;
-    the 2026-07-09 field incident pruned 6 live RDR docs that way."""
+class TestQuarantineLifecycle:
+    """nexus-xukbj (soft delete): orphans MOVE to the quarantine sibling
+    (never a recurring refusal warning — the mr89x nag this replaced);
+    re-referenced chashes restore; the mr89x safety floor now guards only
+    the EXPIRY hard-delete after the grace window."""
 
     @staticmethod
-    def _mass_orphan_setup(n_total=200, n_live=20):
-        """n_total chunks, only n_live referenced -> 90% orphan verdict."""
+    def _setup(n_total=200, n_live=20, name="code__repo"):
         rows = [(f"id-{i:04d}", f"{i:032d}" + "f" * 32) for i in range(n_total)]
         live = {r[1][:32] for r in rows[:n_live]}
-        col = _gc_col(rows)
-        db = MagicMock()
-        db.get_or_create_collection.return_value = col
-        db.get_collection.return_value = col
-        catalog = _gc_catalog({"code__repo": live, "docs__repo": set()})
-        return col, db, catalog
+        db, cols = _gc_db({name: rows, "docs__repo": []})
+        catalog = _gc_catalog({name: live, "docs__repo": set()})
+        return rows, live, db, cols, catalog
 
-    def test_mass_orphan_verdict_refused(self, monkeypatch):
+    def test_mass_orphan_verdict_quarantines_not_refuses(self, monkeypatch):
+        """The 90%-orphan shape that used to refuse forever now moves to
+        quarantine silently: origin keeps only live chunks, the sibling
+        holds the orphans with quarantined_at + origin stamped."""
         from nexus.indexer import _prune_deleted_files  # noqa: PLC0415 — file pattern: deferred imports
         monkeypatch.delenv("NX_GC_FORCE", raising=False)
-        col, db, catalog = self._mass_orphan_setup()
+        rows, live, db, cols, catalog = self._setup()
         _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
-        assert _deleted_ids(col) == []  # refused: nothing deleted
+        origin = cols["code__repo"]._rows
+        q = cols["quarantine-code__repo"]._rows
+        assert len(origin) == 20 and len(q) == 180
+        sample = next(iter(q.values()))
+        assert sample["origin_collection"] == "code__repo"
+        assert sample["quarantined_at"]
 
-    def test_operator_override_allows_the_sweep(self, monkeypatch):
-        from nexus.indexer import _prune_deleted_files  # noqa: PLC0415 — file pattern: deferred imports
-        monkeypatch.setenv("NX_GC_FORCE", "1")
-        col, db, catalog = self._mass_orphan_setup()
-        _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
-        assert len(_deleted_ids(col)) == 180  # explicit override sweeps
-
-    def test_under_floor_fraction_prunes_normally(self, monkeypatch):
-        from nexus.indexer import _prune_deleted_files  # noqa: PLC0415 — file pattern: deferred imports
-        monkeypatch.delenv("NX_GC_FORCE", raising=False)
-        # 200 chunks, 120 live -> 40% orphans: under the 50% floor.
-        col, db, catalog = self._mass_orphan_setup(n_total=200, n_live=120)
-        _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
-        assert len(_deleted_ids(col)) == 80
-
-    def test_small_collection_exempt_from_floor(self, monkeypatch):
+    def test_field_incident_shape_quarantines(self, monkeypatch):
+        """154/551 = 27.9% (the 2026-07-09 incident): recoverable move,
+        no refusal, no warning."""
         from nexus.indexer import _prune_deleted_files  # noqa: PLC0415 — file pattern: deferred imports
         monkeypatch.delenv("NX_GC_FORCE", raising=False)
-        # ~89% orphan verdict but only 8 orphans (< _GC_FLOOR_MIN_CHUNKS):
-        # plausible real cleanup of a tiny corpus — must still prune.
-        # (n_live=1 keeps the manifest non-empty so the older oqku
-        # empty-manifest guard does not preempt this case.)
-        col, db, catalog = self._mass_orphan_setup(n_total=9, n_live=1)
+        rows, live, db, cols, catalog = self._setup(n_total=551, n_live=397)
         _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
-        assert len(_deleted_ids(col)) == 8
+        assert len(cols["code__repo"]._rows) == 397
+        assert len(cols["quarantine-code__repo"]._rows) == 154
 
-
-class TestGcSafetyFloorReviewHardening:
-    """Review e2423e3b findings: the floor must catch the ACTUAL field
-    incident shape, survive malformed configuration, isolate per
-    collection, and hold at its boundaries."""
-
-    def test_field_incident_shape_is_refused(self, monkeypatch):
-        """Critical-2: the 2026-07-09 incident condemned 154/551 = 27.9% —
-        the original 0.5 default sailed it through. The 0.25 default must
-        refuse exactly this shape."""
+    def test_rereferenced_chashes_restore_from_quarantine(self, monkeypatch):
+        """A heal that re-references quarantined chashes copies them back
+        (and strips the quarantine stamps) before orphan classification —
+        the recoverability the whole design exists for."""
         from nexus.indexer import _prune_deleted_files  # noqa: PLC0415 — file pattern: deferred imports
         monkeypatch.delenv("NX_GC_FORCE", raising=False)
-        monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
-        rows = [(f"id-{i:04d}", f"{i:032d}" + "f" * 32) for i in range(551)]
-        live = {r[1][:32] for r in rows[:397]}  # 154 orphans = 27.9%
-        col = _gc_col(rows)
-        db = MagicMock()
-        db.get_or_create_collection.return_value = col
-        db.get_collection.return_value = col
-        catalog = _gc_catalog({"code__repo": live, "docs__repo": set()})
+        rows, live, db, cols, catalog = self._setup()
         _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
-        assert _deleted_ids(col) == []
+        assert len(cols["quarantine-code__repo"]._rows) == 180
+        # The manifest now references EVERYTHING (heal healed the gap).
+        catalog2 = _gc_catalog({
+            "code__repo": {r[1][:32] for r in rows}, "docs__repo": set(),
+        })
+        _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog2)
+        assert len(cols["code__repo"]._rows) == 200
+        assert len(cols["quarantine-code__repo"]._rows) == 0
+        restored = cols["code__repo"]._rows["id-0150"]
+        assert "quarantined_at" not in restored
+        assert "origin_collection" not in restored
 
-    def test_malformed_floor_env_never_crashes_and_keeps_the_guard(
+    def test_expiry_hard_deletes_past_grace_and_floor_guards_mass(
         self, monkeypatch,
     ):
-        """Critical-1 + F6: a malformed / nan / inf NX_GC_FLOOR_FRACTION
-        must not crash the index run NOR silently neutralize the guard —
-        it falls back to the default (which refuses a 90% verdict)."""
-        from nexus.indexer import _prune_deleted_files  # noqa: PLC0415 — file pattern: deferred imports
+        """Rows older than the grace window hard-delete; a MASS expiry
+        (the persisted-defect shape) is refused by the relocated mr89x
+        floor unless NX_GC_FORCE=1. Also pins the fail-safe env parse."""
+        from nexus.catalog.chunk_quarantine import expire_quarantine  # noqa: PLC0415 — file pattern: deferred imports
         monkeypatch.delenv("NX_GC_FORCE", raising=False)
-        for bad in ("not-a-float", "nan", "inf", "-3", "7"):
-            monkeypatch.setenv("NX_GC_FLOOR_FRACTION", bad)
-            rows = [(f"id-{i:04d}", f"{i:032d}" + "f" * 32) for i in range(200)]
-            live = {r[1][:32] for r in rows[:20]}
-            col = _gc_col(rows)
-            db = MagicMock()
-            db.get_or_create_collection.return_value = col
-            db.get_collection.return_value = col
-            catalog = _gc_catalog({"code__repo": live, "docs__repo": set()})
-            _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
-            assert _deleted_ids(col) == [], f"guard neutralized by {bad!r}"
+        old = "2020-01-01T00:00:00Z"
+        rows = [(f"q-{i:04d}", f"{i:032d}" + "e" * 32) for i in range(150)]
+        db, cols = _gc_db({"quarantine-code__repo": rows})
+        for m in cols["quarantine-code__repo"]._rows.values():
+            m["quarantined_at"] = old
+        # 100% of 150 expiring >= floor -> refused.
+        expired, refused = expire_quarantine(
+            db, "code__repo", floor_fraction=0.25, floor_min_chunks=100,
+        )
+        assert (expired, refused) == (0, 150)
+        assert len(cols["quarantine-code__repo"]._rows) == 150
+        # Explicit override sweeps.
+        monkeypatch.setenv("NX_GC_FORCE", "1")
+        expired, refused = expire_quarantine(
+            db, "code__repo", floor_fraction=0.25, floor_min_chunks=100,
+        )
+        assert (expired, refused) == (150, 0)
+        assert len(cols["quarantine-code__repo"]._rows) == 0
 
-    def test_fraction_gate_isolated_at_scale(self, monkeypatch):
-        """F3b: orphans >= the count gate (125 >= 100) but fraction under
-        the floor (125/625 = 20% < 25%) — must prune. Isolates the
-        fraction gate from the count gate."""
-        from nexus.indexer import _prune_deleted_files  # noqa: PLC0415 — file pattern: deferred imports
+    def test_small_or_fresh_quarantine_expires_normally(self, monkeypatch):
+        """Under the floor's min-chunk gate, expiry proceeds; fresh rows
+        (inside grace) never expire; malformed NX_GC_QUARANTINE_DAYS falls
+        back safely."""
+        from nexus.catalog.chunk_quarantine import expire_quarantine  # noqa: PLC0415 — file pattern: deferred imports
         monkeypatch.delenv("NX_GC_FORCE", raising=False)
-        monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
-        rows = [(f"id-{i:04d}", f"{i:032d}" + "f" * 32) for i in range(625)]
-        live = {r[1][:32] for r in rows[:500]}
-        col = _gc_col(rows)
-        db = MagicMock()
-        db.get_or_create_collection.return_value = col
-        db.get_collection.return_value = col
-        catalog = _gc_catalog({"code__repo": live, "docs__repo": set()})
-        _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
-        assert len(_deleted_ids(col)) == 125
+        monkeypatch.setenv("NX_GC_QUARANTINE_DAYS", "not-a-number")
+        rows = [(f"q-{i:02d}", f"{i:032d}" + "e" * 32) for i in range(10)]
+        db, cols = _gc_db({"quarantine-code__repo": rows})
+        items = list(cols["quarantine-code__repo"]._rows.values())
+        for m in items[:6]:
+            m["quarantined_at"] = "2020-01-01T00:00:00Z"
+        for m in items[6:]:
+            m["quarantined_at"] = "9998-01-01T00:00:00Z"
+        expired, refused = expire_quarantine(
+            db, "code__repo", floor_fraction=0.25, floor_min_chunks=100,
+        )
+        assert (expired, refused) == (6, 0)
+        assert len(cols["quarantine-code__repo"]._rows) == 4
 
-    def test_exact_floor_fraction_is_not_refused(self, monkeypatch):
-        """Boundary: frac == floor is NOT refused (strict >). 150/600 = 25%
-        exactly at the default floor -> prunes."""
+    def test_quarantine_isolated_per_collection(self, monkeypatch):
+        """A mass move in code__ never touches docs__ (the v7mn distinct-
+        collection discipline)."""
         from nexus.indexer import _prune_deleted_files  # noqa: PLC0415 — file pattern: deferred imports
         monkeypatch.delenv("NX_GC_FORCE", raising=False)
-        monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
-        rows = [(f"id-{i:04d}", f"{i:032d}" + "f" * 32) for i in range(600)]
-        live = {r[1][:32] for r in rows[:450]}
-        col = _gc_col(rows)
-        db = MagicMock()
-        db.get_or_create_collection.return_value = col
-        db.get_collection.return_value = col
-        catalog = _gc_catalog({"code__repo": live, "docs__repo": set()})
-        _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
-        assert len(_deleted_ids(col)) == 150
-
-    def test_refused_collection_does_not_block_others(self, monkeypatch):
-        """F3: per-collection isolation through DISTINCT collections (the
-        _gc_db pattern the file's own docstring mandates — the shared-mock
-        shortcut masked this contract). code__repo is a mass-orphan refusal;
-        docs__repo has one genuine orphan that must still prune."""
-        from nexus.indexer import _prune_deleted_files  # noqa: PLC0415 — file pattern: deferred imports
-        monkeypatch.delenv("NX_GC_FORCE", raising=False)
-        monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
-        code_rows = [(f"code-{i:04d}", f"{i:032d}" + "c" * 32) for i in range(200)]
-        code_live = {r[1][:32] for r in code_rows[:20]}  # 90% orphan -> refuse
-        docs_rows = [("docs-live", "a" * 64), ("docs-orphan", "b" * 64)]
+        code_rows = [(f"c-{i:03d}", f"{i:032d}" + "c" * 32) for i in range(150)]
+        docs_rows = [("d-live", "a" * 64), ("d-orphan", "b" * 64)]
         db, cols = _gc_db({"code__repo": code_rows, "docs__repo": docs_rows})
         catalog = _gc_catalog({
-            "code__repo": code_live,
+            "code__repo": {r[1][:32] for r in code_rows[:10]},
             "docs__repo": {("a" * 64)[:32]},
         })
         _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
-        assert _deleted_ids(cols["code__repo"]) == []  # refused
-        assert _deleted_ids(cols["docs__repo"]) == ["docs-orphan"]  # pruned
+        assert len(cols["code__repo"]._rows) == 10
+        # Review 4cb743be C3 fix: each origin owns a DISTINCT sibling —
+        # the code__ mass move and the docs__ single orphan land apart.
+        assert len(cols["quarantine-code__repo"]._rows) == 140
+        assert list(cols["quarantine-docs__repo"]._rows) == ["d-orphan"]
+        assert list(cols["docs__repo"]._rows) == ["d-live"]
+
+
+def test_quarantine_siblings_distinct_for_shared_owner_and_chash(monkeypatch):
+    """Critique 4cb743be Critical-1, realistic shape: docs__ and rdr__ of
+    the SAME repo share owner + embedding model (RDR-103), and identical
+    boilerplate can share a chash across both. Per-type siblings keep the
+    two moves apart, restore stays origin-faithful, and the expiry floor's
+    denominator is never cross-contaminated."""
+    from nexus.catalog.chunk_quarantine import quarantine_collection_name  # noqa: PLC0415 — file pattern: deferred imports
+    from nexus.indexer import _prune_deleted_files  # noqa: PLC0415 — file pattern: deferred imports
+
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    docs = "docs__nexus-1-1__voyage-context-3__v1"
+    rdr = "rdr__nexus-1-1__voyage-context-3__v1"
+    assert quarantine_collection_name(docs) != quarantine_collection_name(rdr)
+
+    shared = "c" * 64  # identical boilerplate chunk in both collections
+    db, cols = _gc_db({docs: [("d-1", shared)], rdr: [("r-1", shared)]})
+    catalog = _gc_catalog({docs: set(), rdr: set()})
+    # Empty-manifest guard would skip; give each a live row + manifest ref.
+    db2, cols2 = _gc_db({
+        docs: [("d-live", "a" * 64), ("d-1", shared)],
+        rdr: [("r-live", "b" * 64), ("r-1", shared)],
+    })
+    catalog2 = _gc_catalog({
+        docs: {("a" * 64)[:32]}, rdr: {("b" * 64)[:32]},
+    })
+    _prune_deleted_files(docs, rdr, db2, catalog=catalog2)
+    qd = cols2[quarantine_collection_name(docs)]._rows
+    qr = cols2[quarantine_collection_name(rdr)]._rows
+    assert list(qd) == ["d-1"] and list(qr) == ["r-1"]
+    assert qd["d-1"]["origin_collection"] == docs
+    assert qr["r-1"]["origin_collection"] == rdr

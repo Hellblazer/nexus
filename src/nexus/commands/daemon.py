@@ -2352,3 +2352,32 @@ def aspect_worker_start_cmd(
         config_dir=config_dir, tenant=tenant,
         stale_timeout_seconds=stale_timeout_seconds,
     )
+
+
+@daemon_group.command("restart-stale")
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Report what would be restarted without touching anything.")
+def restart_stale_cmd(dry_run: bool) -> None:
+    """Finish an upgrade: restart processes still running old code.
+
+    After ``uv tool upgrade conexus`` the disk is new but every long-lived
+    process (MCP hosts, aspect-worker, MinerU) keeps executing the old
+    code from memory (nexus-4xgfy). This verb restarts the classes that
+    are safe to cycle and names the ones only you can close (MCP hosts
+    belong to live Claude sessions). Runs automatically on the first
+    ``nx`` invocation after a version change; this is the manual form.
+    """
+    from nexus.upgrade_finish import (  # noqa: PLC0415 — deferred import
+        detect_stale_processes,
+        install_source,
+        restart_stale,
+    )
+
+    report = detect_stale_processes()
+    click.echo(f"installed: conexus {report.installed_version}  "
+               f"(source: {install_source()})")
+    if not report.stale:
+        click.echo("no stale processes — the machine matches the disk.")
+        return
+    for line in restart_stale(report, dry_run=dry_run):
+        click.echo(f"  {line}")
