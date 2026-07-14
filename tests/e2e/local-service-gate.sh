@@ -274,7 +274,13 @@ if [ "$LIVED_IN_COUNT" -ne "$LIVED_IN_EXPECTED" ]; then
 fi
 
 set +e
+# NEXUS_CONFIG_DIR pinned to the scratch dir (2026-07-13): without it,
+# get_credential()'s config.yml fallback read the OPERATOR's real
+# ~/.config/nexus/config.yml from inside the "fully isolated" gate — a
+# dead voyage credential there hard-failed the voyage subset even with
+# the env key masked, and any credential there can leak into gate runs.
 NX_SERVICE_HOST=127.0.0.1 NX_SERVICE_PORT="$SERVICE_PORT" NX_SERVICE_TOKEN="$SERVICE_TOKEN" \
+  NEXUS_CONFIG_DIR="$SCRATCH" \
   uv run pytest -m "integration and not lived_in" -q "$@" 2>&1 | tee "$SCRATCH/pytest.out"
 STATUS=${PIPESTATUS[0]}
 set -e

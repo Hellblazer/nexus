@@ -110,6 +110,18 @@ def _legacy_vector_backend(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _pin_fake_voyage_key(monkeypatch):
+    # The indexer's embedder ROUTING keys on get_credential("voyage_api_key")
+    # presence (indexer.py) — with no key it silently falls back to local
+    # MiniLM and every voyage-model assertion below fails. These tests mock
+    # voyageai.Client (no real call is ever made), so key PRESENCE is all
+    # routing needs; pin a fake so the suite is independent of the host's
+    # .env / config.yml key state (dead, masked, or absent — the
+    # NEXUS_GATE_NO_VOYAGE gate regime included).
+    monkeypatch.setenv("VOYAGE_API_KEY", "fake-key-for-routing-only")
+
+
+@pytest.fixture(autouse=True)
 def mock_voyage_client():
     ef = DefaultEmbeddingFunction()
     mock_client = MagicMock()
