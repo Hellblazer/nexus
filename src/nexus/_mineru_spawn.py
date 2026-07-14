@@ -25,6 +25,9 @@ import structlog
 
 _log = structlog.get_logger(__name__)
 
+#: Health-poll cadence shared by every wait loop (CLI start, crash-restart).
+_HEALTH_POLL_INTERVAL = 0.5
+
 
 def _mineru_output_root() -> Path:
     """Return the per-user output root for MinerU extraction artifacts.

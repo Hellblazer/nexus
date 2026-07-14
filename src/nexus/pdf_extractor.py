@@ -1078,10 +1078,10 @@ class PDFExtractor:
             read_pid_file,
         )
         from nexus._mineru_spawn import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+            _HEALTH_POLL_INTERVAL,
             _find_free_port,
             spawn_server_process,
         )
-        from nexus.commands.mineru import _HEALTH_POLL_INTERVAL  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         from nexus.config import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
             get_mineru_configured_fixed_port,
             nexus_config_dir,

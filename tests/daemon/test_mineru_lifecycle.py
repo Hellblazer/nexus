@@ -8,6 +8,7 @@ membership under test.
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
 from unittest.mock import MagicMock, patch
@@ -47,7 +48,7 @@ class TestEnsureShortCircuits:
         """Review H1: a stray NX_MINERU_AUTOSTART=false in a shell must
         DISABLE (aspect-worker allow-list precedent), never force-enable
         past an explicit config."""
-        for spelling in ("0", "false", "False", "no", "off"):
+        for spelling in ("0", "false", "False", "FALSE", "no", "No", "off", "OFF"):
             monkeypatch.setenv("NX_MINERU_AUTOSTART", spelling)
             with patch("nexus.config.get_mineru_server_url",
                        return_value="http://127.0.0.1:8010"), \
@@ -183,3 +184,44 @@ class TestEnsureSpawns:
             f"second document re-waited {durations[1]:.1f}s — the warm-up "
             f"stall multiplied across documents"
         )
+
+
+    def test_stale_marker_from_replaced_attempt_never_caps_a_fresh_wait(
+        self, tmp_path, monkeypatch,
+    ):
+        """Review M1 (60ed904e): a warming marker left by a DEAD/replaced
+        attempt must be discarded when the live pid file names a different
+        server (e.g. an operator's manual `nx mineru start`, which stamps
+        no marker) — not shrink that server's wait to an expired budget."""
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("NX_MINERU_AUTOSTART", "1")
+        # Stale marker: pid 1111, stamped far outside any budget.
+        (tmp_path / "mineru_warming.json").write_text(
+            json.dumps({"pid": 1111, "ts": time.time() - 10_000}),
+        )
+        # Live pid file names a DIFFERENT server (9999) that turns healthy
+        # on the second probe — inside the fresh budget, far outside the
+        # stale marker's.
+        probes = {"n": 0}
+
+        def flaky_healthy(url):
+            probes["n"] += 1
+            return probes["n"] >= 2
+
+        with patch("nexus.config.get_mineru_server_url",
+                   return_value="http://127.0.0.1:8010"), \
+                patch("nexus.daemon.mineru_lifecycle._healthy",
+                      side_effect=flaky_healthy), \
+                patch("nexus.daemon.mineru_lifecycle._HEALTH_POLL_S", 0.05), \
+                patch("nexus.config.get_pdf_config",
+                      return_value=_pdf_cfg()), \
+                patch("nexus._mineru_pid.read_pid_file",
+                      return_value={"pid": 9999, "port": 8010}), \
+                patch("nexus._mineru_pid.is_process_alive",
+                      return_value=True), \
+                patch("nexus._mineru_spawn.spawn_server_process") as spawn:
+            result = ensure_mineru_running(wait_healthy_s=5.0)
+        assert result == "http://127.0.0.1:8010"
+        spawn.assert_not_called()  # live pid claimed inside the election
+        # The stale marker was discarded, not honored.
+        assert not (tmp_path / "mineru_warming.json").exists()

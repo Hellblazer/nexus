@@ -25,7 +25,6 @@ import structlog
 _log = structlog.get_logger(__name__)
 
 _HEALTH_TIMEOUT_SECONDS = 30
-_HEALTH_POLL_INTERVAL = 0.5
 _STOP_TIMEOUT_SECONDS = 10
 
 
@@ -51,6 +50,7 @@ from nexus._mineru_pid import (  # noqa: E402
 # under the legacy names so CLI code and existing patch targets keep
 # working unchanged.
 from nexus._mineru_spawn import (  # noqa: E402
+    _HEALTH_POLL_INTERVAL,
     _find_free_port,
     _mineru_output_root,
     _resolve_mineru_api_bin,
@@ -159,6 +159,21 @@ def start(port: int) -> None:
 @mineru_group.command()
 def stop() -> None:
     """Stop the MinerU API server."""
+    # nexus-c7odl (critique 60ed904e): the read-then-kill runs under the
+    # same election as every spawner — otherwise a stop racing a concurrent
+    # ensure()/restart could kill the server that elector JUST spawned and
+    # claimed. The drain wait stays inside the lock deliberately: a spawner
+    # entering mid-drain would see the dying pid as a live claim and skip.
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.daemon.mineru_lifecycle import MINERU_TIER, _SPAWN_SCOPE  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    registry = ServiceRegistry(dir=nexus_config_dir(), tier=MINERU_TIER)
+    with registry.election(_SPAWN_SCOPE):
+        _stop_under_election()
+
+
+def _stop_under_election() -> None:
     info = _read_pid_file()
     pid_path = _pid_file_path()
 

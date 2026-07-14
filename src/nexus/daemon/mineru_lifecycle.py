@@ -67,7 +67,9 @@ _HEALTH_POLL_S = 2.0
 #: NX_MINERU_AUTOSTART values that disable autostart (review H1: mirror the
 #: NX_ASPECT_WORKER_AUTOSTART allow-list so a stray "false" in a shell
 #: disables rather than silently force-enabling past an explicit config).
-_ENV_DISABLE = ("0", "false", "False", "no", "off")
+#: Compared case-insensitively (critique 60ed904e: "FALSE"/"No"/"OFF" must
+#: not force-enable either).
+_ENV_DISABLE = ("0", "false", "no", "off")
 
 
 def _healthy(url: str) -> bool:
@@ -126,7 +128,7 @@ def spawn_policy_allows(url: str | None = None) -> bool:
 
     env_override = os.environ.get("NX_MINERU_AUTOSTART", "").strip()
     if env_override:
-        enabled = env_override not in _ENV_DISABLE
+        enabled = env_override.lower() not in _ENV_DISABLE
     else:
         enabled = get_pdf_config().mineru_autostart
     if not enabled:
