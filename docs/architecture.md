@@ -148,6 +148,13 @@ and scope. Each tier is a thin consumer: T1 via `daemon/t1_lease.py`
 nexus-service supervisor; the retired `daemon/t3_daemon.py` ChromaDB path
 remains only as the migration source). Liveness is **lease freshness (TTL),
 not pid** — a dead owner's lease ages out, giving pid-reuse immunity.
+MinerU (`daemon/mineru_lifecycle.py`, nexus-1qdb9) consumes the substrate's
+public `election()` spawn guard rather than a full lease: the PDF pipeline's
+`ensure_mineru_running()` elects exactly one spawner per config dir across
+concurrent indexing runs (policy-gated by `pdf.mineru_autostart` /
+`NX_MINERU_AUTOSTART`, remote-URL-safe, shared warm-up budget). The external
+mineru-api binary cannot heartbeat its own lease, so full membership
+(publish/heartbeat, conformance TIERS) is tracked as nexus-4yohu.
 
 This collapsed a recurring bug class (the same discovery/single-writer/
 self-heal/version-skew defect kept reappearing in whichever tier had not yet
