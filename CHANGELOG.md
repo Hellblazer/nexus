@@ -6,6 +6,42 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.8.0] - 2026-07-14
+
+Two user-experience arcs, both born from live dogfooding of the 6.7.x
+releases on a real install.
+
+### Added
+
+- **Chunk quarantine (soft delete).** The orphan GC never hard-deletes
+  directly: orphans MOVE to a per-origin sibling collection
+  (`quarantine-<type>__<owner>__<model>__v<n>`, excluded from every search
+  surface by its prefix), embeddings intact. Re-referenced chunks restore
+  automatically; rows older than `NX_GC_QUARANTINE_DAYS` (default 14)
+  hard-delete on a later pass, and only that expiry step is guarded by the
+  safety floor. The recurring "sweep refused" warning on large git pulls is
+  gone — mass supersede churn quarantines silently and expires quietly.
+  Doctor drift checks, migration ETL, and legacy `nx t3 gc` all treat
+  quarantine collections as expected system state. First concrete piece of
+  the RDR-156 soft-delete theme.
+- **Finish-the-upgrade.** `uv tool upgrade conexus` swaps the disk but
+  every long-lived process keeps executing old code from memory. Now: a
+  `last_seen_version` stamp triggers a safe finish pass on the first
+  invocation after a version change (in `nx`, `nx-mcp`, and
+  `nx-mcp-catalog`), restarting detached daemons (aspect-worker with
+  drain-polling; MinerU via its lifecycle verbs) and naming the processes
+  only you can close (MCP hosts belong to live Claude sessions).
+  `nx daemon restart-stale [--dry-run]` is the manual form; `nx doctor`
+  gains a "Process freshness" check; the uv-receipt source (local checkout
+  / pinned / unpinned) is reported so "Nothing to upgrade" is
+  self-explanatory. Dev-checkout invocations never act on production
+  processes (venv-scoped detection).
+
+### Fixed
+
+- README now surfaces the Claude-assisted diagnostics/recovery feature
+  (RDR-182) — it was documented only in the CLI reference.
+
 ## [6.7.1] - 2026-07-14
 
 Bugfix release: every fix below was found by live post-release dogfooding of
