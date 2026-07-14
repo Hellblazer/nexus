@@ -80,6 +80,18 @@ uv tool upgrade conexus                  # upgrade the nx CLI — PRESERVES your
 
 When you update the **Claude Code plugin** (`/plugin update`), upgrade the CLI to the matching version at the same time so the two stay in lockstep.
 
+### Something broken?
+
+[nexus-recovery-runbook](https://gist.github.com/Hellblazer/08f0a615e3d73e47d8062bce4829b611) is a
+diagnose-first recovery procedure meant to be handed to a Claude Code session as its first message —
+the assistant runs it phase by phase, pausing for your explicit go-ahead before anything that upgrades
+or migrates data, and gathers redacted forensics + opens a GitHub issue (or emails a fallback address)
+if it can't resolve things itself. It's a convenience for a broken install, not a substitute for filing
+an issue directly if something looks wrong — and it carries its own guardrails (read-only diagnosis
+first, no destructive commands without confirmation, no secrets ever leave the machine), but you're
+trusting an LLM to run real commands against your install. Review what it does before handing it off,
+especially the first time.
+
 ## Going deeper
 
 | If you want to... | Read |
