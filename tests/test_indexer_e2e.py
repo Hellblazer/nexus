@@ -744,3 +744,142 @@ def test_index_repository_pdf_routing(
     pdf_results = [r for r in results if r.get("content_type") == "pdf"]
     assert pdf_results, f"No PDF chunks; content_types: {[r.get('content_type') for r in results]}"
     assert isinstance(pdf_results[0]["title"], str)
+
+
+def test_reindex_self_heals_missing_manifest(
+    rich_repo: Path, local_t3: T3Database, tmp_path: Path,
+) -> None:
+    """nexus-c21fk (GH #1397 field find): the staleness check keys on T3
+    chunk state only, so a doc whose chunks exist in T3 but whose
+    document_chunks manifest rows are gone was PERMANENTLY skipped as
+    'current' — chunk_count frozen at 0, every catalog-routed surface
+    blind to it, and the documented advice ('re-index repairs it')
+    structurally wrong. The exact bead repro: index, delete a doc's
+    manifest rows + zero its chunk_count, re-index. The self-heal pass
+    must rebuild the manifest from T3 WITHOUT re-embedding."""
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — file pattern: deferred imports
+    from nexus.config import catalog_path  # noqa: PLC0415 — file pattern: deferred imports
+
+    cat_path = catalog_path()
+    Catalog.init(cat_path)
+    reg = RepoRegistry(tmp_path / "repos.json")
+    reg.add(rich_repo)
+
+    # TWO settling passes: the first index creates path-derived collection
+    # names; the second triggers the nexus-7vuw legacy-rename migration,
+    # which re-embeds everything and rewrites manifests — masking exactly
+    # the bug under test.
+    _index(rich_repo, reg, local_t3)
+    _index(rich_repo, reg, local_t3)
+
+    cat = Catalog(cat_path, cat_path / ".catalog.db")
+    row = cat._db.execute(
+        "SELECT tumbler, chunk_count FROM documents WHERE file_path = ?",
+        ("README.md",),
+    ).fetchone()
+    assert row is not None
+    tumbler, count_before = row
+    assert count_before > 0
+    manifest_before = cat.get_manifest(tumbler)
+    assert len(manifest_before) > 0
+
+    # Sabotage: the GH #1397 shape — manifest rows gone, chunk_count zeroed.
+    cat._db.execute("DELETE FROM document_chunks WHERE doc_id = ?", (tumbler,))  # epsilon-allow: deliberate corruption injection — the GH #1397 manifest-drop shape under test
+    cat._db.execute(
+        "UPDATE documents SET chunk_count = 0 WHERE tumbler = ?", (tumbler,),  # epsilon-allow: deliberate corruption injection — the GH #1397 manifest-drop shape under test
+    )
+    cat._db.commit()
+    cat._db.close()
+
+    # Reproduce the FIELD configuration (docs 1.3.142-150, GH #1397): the
+    # stuck population's chunks carry INLINE doc_id metadata (the RDR-101
+    # Phase-4-era write shape), which hits the staleness cache's by_doc_id
+    # index directly — a hit that never consults the manifest, so the doc
+    # is skipped as "current" forever. Without this stamp the fixture's
+    # chunks (no inline doc_id) resolve doc_id THROUGH the manifest
+    # (nexus-0ocy chash fallback), whose absence makes them look stale and
+    # self-heal by re-embedding — masking the bug (verified: this test
+    # passed vacuously before the stamp).
+    info = reg.get(rich_repo)
+    docs_col = local_t3.get_or_create_collection(info["docs_collection"])
+    got = docs_col.get(include=["metadatas"])
+    readme_ids = [
+        cid for cid, m in zip(got["ids"], got["metadatas"])
+        if "README.md" in (m or {}).get("title", "")
+    ]
+    assert readme_ids
+    docs_col.update(
+        ids=readme_ids,
+        metadatas=[{"doc_id": str(tumbler)} for _ in readme_ids],
+    )
+
+    # Snapshot T3 so we can prove the heal never re-embedded anything.
+    ids_before = sorted(docs_col.get()["ids"])
+
+    # README.md is unchanged on disk -> staleness skips it (by_doc_id hit);
+    # only the new self-heal pass can repair the manifest.
+    _index(rich_repo, reg, local_t3)
+
+    cat2 = Catalog(cat_path, cat_path / ".catalog.db")
+    healed = cat2.get_manifest(tumbler)
+    count_after = cat2._db.execute(
+        "SELECT chunk_count FROM documents WHERE tumbler = ?", (tumbler,),
+    ).fetchone()[0]
+    cat2._db.close()
+
+    assert [r.chash for r in healed] == [r.chash for r in manifest_before], (
+        "self-heal must rebuild the exact manifest from T3 chunks"
+    )
+    assert count_after == len(healed) > 0, (
+        "chunk_count must resync from the healed manifest"
+    )
+    assert sorted(docs_col.get()["ids"]) == ids_before, (
+        "the heal must NOT re-embed (T3 chunk set unchanged)"
+    )
+
+
+def test_manifest_self_heal_runs_after_indexing_before_prunes(
+    rich_repo: Path, local_t3: T3Database, tmp_path: Path,
+) -> None:
+    """Critique 4711f521 Critical: the heal's PLACEMENT is load-bearing.
+    It must run AFTER per-file indexing (so gaps created by this run's own
+    manifest-write hook are healed too) and BEFORE the prune passes (so the
+    manifest-keyed GC — the nexus-mr89x hazard — never sees an unhealed
+    gap). Pin the call order."""
+    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — file pattern: deferred imports
+    from nexus.config import catalog_path  # noqa: PLC0415 — file pattern: deferred imports
+
+    import nexus.indexer as indexer_mod  # noqa: PLC0415 — file pattern: deferred imports
+    from nexus.catalog import manifest_heal as heal_mod  # noqa: PLC0415 — file pattern: deferred imports
+
+    Catalog.init(catalog_path())
+    reg = RepoRegistry(tmp_path / "repos.json")
+    reg.add(rich_repo)
+
+    order: list[str] = []
+    real_heal = heal_mod.heal_manifest_gaps
+    real_prune = indexer_mod._prune_deleted_files
+    real_index_prose = indexer_mod._index_prose_file
+
+    def spy_heal(*a, **k):
+        order.append("heal")
+        return real_heal(*a, **k)
+
+    def spy_prune(*a, **k):
+        order.append("prune")
+        return real_prune(*a, **k)
+
+    def spy_prose(*a, **k):
+        if "index" not in order:
+            order.append("index")
+        return real_index_prose(*a, **k)
+
+    with patch.object(heal_mod, "heal_manifest_gaps", side_effect=spy_heal), \
+            patch.object(indexer_mod, "_prune_deleted_files", side_effect=spy_prune), \
+            patch.object(indexer_mod, "_index_prose_file", side_effect=spy_prose):
+        _index(rich_repo, reg, local_t3)
+
+    assert "heal" in order and "prune" in order and "index" in order
+    assert order.index("index") < order.index("heal") < order.index("prune"), (
+        f"self-heal must run after per-file indexing and before the prunes; got {order}"
+    )

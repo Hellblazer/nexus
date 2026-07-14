@@ -295,3 +295,41 @@ class TestCatalogDocIdsForPredicates:
             )
             doc_ids = _catalog_doc_ids_for_predicates(db, {"bib_year": {"$eq": 2024}})
             assert doc_ids == ["doc-a"]
+
+
+class TestServiceModeRaisingSentinel:
+    """6.7.0 post-release shakeout (live find): the service-mode
+    HttpCatalogClient exposes ``_db`` as a RAISING property (the xnz0o
+    sentinel). ``getattr(obj, "_db", None)`` does NOT default on a raising
+    property — it propagates — so the best-effort prefilter killed every
+    MCP search carrying a catalog-mappable where key (page_count,
+    bib_year, ...) in service mode, the shipped default."""
+
+    def test_raising_db_property_falls_through_to_none(self) -> None:
+        from nexus.search_engine import _prefilter_from_catalog  # noqa: PLC0415 — file pattern: deferred imports
+
+        class _ServiceCatalog:
+            @property
+            def _db(self):
+                raise RuntimeError(
+                    "catalog._db is unavailable in service mode "
+                    "(NX_STORAGE_BACKEND_CATALOG=service)."
+                )
+
+        # Mappable predicate — exactly the shape that reached the sentinel.
+        result = _prefilter_from_catalog(
+            {"page_count": {"$gte": 10}}, _ServiceCatalog(),
+        )
+        assert result is None  # prefilter skipped, never raised
+
+    def test_real_http_catalog_client_sentinel_is_survivable(self) -> None:
+        """Pin against the REAL client class, not just a stand-in — if the
+        sentinel's raise type or property shape changes, this catches it."""
+        from nexus.catalog.http_catalog_client import HttpCatalogClient  # noqa: PLC0415 — file pattern: deferred imports
+        from nexus.search_engine import _prefilter_from_catalog  # noqa: PLC0415 — file pattern: deferred imports
+
+        client = HttpCatalogClient.__new__(HttpCatalogClient)  # no network
+        result = _prefilter_from_catalog(
+            {"bib_year": {"$gte": 2023}}, client,
+        )
+        assert result is None

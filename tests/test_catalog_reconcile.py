@@ -109,7 +109,7 @@ def test_reconcile_rebuilds_gapped_manifest(t3_db, catalog, runner):
     with patch_reconcile(t3_db, catalog):
         result = runner.invoke(main, ["catalog", "reconcile"])
     assert result.exit_code == 0, result.output
-    assert "Reconciled 1 document(s); 0 could not be matched" in result.output
+    assert "Reconciled 1 document(s); 0 with chunks LOST" in result.output
 
     rows = catalog.get_manifest("1.1.1")
     assert len(rows) == 3
@@ -127,7 +127,7 @@ def test_reconcile_dry_run_reports_without_writing(t3_db, catalog, runner):
     with patch_reconcile(t3_db, catalog):
         result = runner.invoke(main, ["catalog", "reconcile", "--dry-run"])
     assert result.exit_code == 0, result.output
-    assert "Would reconcile 1 document(s); 0 could not be matched" in result.output
+    assert "Would reconcile 1 document(s); 0 with chunks LOST" in result.output
     assert catalog.get_manifest("1.1.1") == []
 
 
@@ -139,7 +139,7 @@ def test_reconcile_reports_unmatched_when_no_content_hash(t3_db, catalog, runner
     with patch_reconcile(t3_db, catalog):
         result = runner.invoke(main, ["catalog", "reconcile"])
     assert result.exit_code == 0, result.output
-    assert "Reconciled 0 document(s); 1 could not be matched" in result.output
+    assert "Reconciled 0 document(s); 1 with chunks LOST" in result.output
     assert "1.1.1" in result.output
 
 
@@ -153,7 +153,7 @@ def test_reconcile_reports_unmatched_when_no_t3_chunks_found(t3_db, catalog, run
     with patch_reconcile(t3_db, catalog):
         result = runner.invoke(main, ["catalog", "reconcile"])
     assert result.exit_code == 0, result.output
-    assert "Reconciled 0 document(s); 1 could not be matched" in result.output
+    assert "Reconciled 0 document(s); 1 with chunks LOST" in result.output
 
 
 def test_reconcile_skips_documents_already_complete(t3_db, catalog, runner):
@@ -168,14 +168,14 @@ def test_reconcile_skips_documents_already_complete(t3_db, catalog, runner):
     with patch_reconcile(t3_db, catalog):
         result = runner.invoke(main, ["catalog", "reconcile"])
     assert result.exit_code == 0, result.output
-    assert "Reconciled 0 document(s); 0 could not be matched" in result.output
+    assert "Reconciled 0 document(s); 0 with chunks LOST" in result.output
 
 
 def test_reconcile_no_gapped_documents_reports_zero(t3_db, catalog, runner):
     with patch_reconcile(t3_db, catalog):
         result = runner.invoke(main, ["catalog", "reconcile"])
     assert result.exit_code == 0, result.output
-    assert "Reconciled 0 document(s); 0 could not be matched" in result.output
+    assert "Reconciled 0 document(s); 0 with chunks LOST" in result.output
 
 
 def patch_reconcile(t3_db, catalog, *, writer=None):
@@ -259,7 +259,7 @@ def test_reconcile_converges_after_one_pass_service_mode_shaped(t3_db, catalog, 
     assert first.exit_code == 0, first.output
     assert "Reconciled 2 document(s)" in first.output
     assert "chunk_count corrected 3 -> 2" in first.output
-    assert "0 could not be matched" in first.output
+    assert "0 with chunks LOST" in first.output
 
     # Manifests + chunk_count both converged after one pass.
     assert len(catalog.get_manifest("1.1.1")) == 2
@@ -272,12 +272,12 @@ def test_reconcile_converges_after_one_pass_service_mode_shaped(t3_db, catalog, 
     with patch_reconcile(t3_db, catalog, writer=writer):
         second = runner.invoke(main, ["catalog", "reconcile"])
     assert second.exit_code == 0, second.output
-    assert "Reconciled 0 document(s); 0 could not be matched" in second.output
+    assert "Reconciled 0 document(s); 0 with chunks LOST" in second.output
 
     with patch_reconcile(t3_db, catalog, writer=writer):
         third = runner.invoke(main, ["catalog", "reconcile", "--dry-run"])
     assert third.exit_code == 0, third.output
-    assert "Would reconcile 0 document(s); 0 could not be matched" in third.output
+    assert "Would reconcile 0 document(s); 0 with chunks LOST" in third.output
 
 
 # ── nexus-94fxl / GH #1397: chunk_count=0 ghost rows ─────────────────────────
@@ -322,13 +322,17 @@ def test_reconcile_zero_ghost_without_content_hash_is_not_noise(t3_db, catalog, 
     with patch_reconcile(t3_db, catalog):
         result = runner.invoke(main, ["catalog", "reconcile"])
     assert result.exit_code == 0, result.output
-    assert "Reconciled 0 document(s); 0 could not be matched" in result.output
+    assert "Reconciled 0 document(s); 0 with chunks LOST" in result.output
 
 
 def test_reconcile_zero_ghost_with_hash_but_no_t3_chunks_reported(t3_db, catalog, runner):
     """A chunk_count=0 row WITH a content_hash but no matching T3 chunks is
     anomalous (the file was hashed for indexing but its chunks are gone) —
-    reported as unmatched, not silently skipped."""
+    reported, not silently skipped. Critique d470eda1 refined the taxonomy:
+    chunk_count==0 ghosts land in the never-chunked (expected) bucket — the
+    live catalog holds ~8.6k of them (empty __init__.py etc.), and burying a
+    REAL chunks-LOST regression under that noise was the defect. Still
+    visible in the report, listed with the (empty) prefix."""
     _seed_doc(
         catalog, tumbler="1.3.151", collection="rdr__nexus",
         chunk_count=0, content_hash="vanished",
@@ -336,5 +340,173 @@ def test_reconcile_zero_ghost_with_hash_but_no_t3_chunks_reported(t3_db, catalog
     with patch_reconcile(t3_db, catalog):
         result = runner.invoke(main, ["catalog", "reconcile"])
     assert result.exit_code == 0, result.output
-    assert "Reconciled 0 document(s); 1 could not be matched" in result.output
+    assert "0 with chunks LOST (real gap), 1 never-chunked" in result.output
     assert "1.3.151" in result.output
+
+
+def test_reconcile_batches_t3_fetches_per_collection(t3_db, catalog, runner):
+    """nexus-8g0ch: the T3 fetch is batched per collection ($in over content
+    hashes), never per document. The pre-fix shape issued 2-3 HTTP round
+    trips PER gapped doc — 1h42m+ on a real 8.7k-gap service-mode catalog.
+    Three gapped docs sharing one collection must cost exactly ONE
+    _paginated_get call (3 unique hashes < the 64-hash batch size)."""
+    from unittest.mock import patch as _patch  # noqa: PLC0415 — file pattern: deferred imports
+
+    import nexus.indexer as indexer_mod  # noqa: PLC0415 — file pattern: deferred imports
+
+    for i in range(1, 4):
+        _seed_doc(
+            catalog, tumbler=f"1.1.{i}", collection="code__delos",
+            chunk_count=2, content_hash=f"hash{i:03d}",
+        )
+        _seed_chunks(t3_db, "code__delos", f"hash{i:03d}", 2)
+
+    calls: list[dict] = []
+    real = indexer_mod._paginated_get
+
+    def counting(col, **kwargs):
+        calls.append(kwargs.get("where") or {})
+        return real(col, **kwargs)
+
+    with patch_reconcile(t3_db, catalog), \
+            _patch("nexus.indexer._paginated_get", side_effect=counting):
+        result = runner.invoke(main, ["catalog", "reconcile"])
+    assert result.exit_code == 0, result.output
+    assert "Reconciled 3 document(s)" in result.output
+
+    assert len(calls) == 1, f"expected ONE batched fetch, got {len(calls)}: {calls}"
+    in_list = calls[0]["content_hash"]["$in"]
+    assert sorted(in_list) == ["hash001", "hash002", "hash003"]
+    # Progress emission (observability half of nexus-8g0ch): per-collection
+    # line plus the scan header.
+    assert "gapped" in result.output and "code__delos" in result.output
+
+
+def test_reconcile_batch_fetch_failure_marks_batch_unmatched_and_continues(
+    t3_db, catalog, runner,
+):
+    """Review d470eda1 Medium-2: the batch-failure path — a _paginated_get
+    exception marks exactly that batch's docs unmatched (visible in the
+    progress line, not just structlog), and docs in OTHER collections still
+    reconcile. Parity with the old per-doc failure semantics."""
+    from unittest.mock import patch as _patch  # noqa: PLC0415 — file pattern: deferred imports
+
+    import nexus.indexer as indexer_mod  # noqa: PLC0415 — file pattern: deferred imports
+
+    _seed_doc(catalog, tumbler="1.1.1", collection="code__broken",
+              chunk_count=2, content_hash="deadhash")
+    _seed_chunks(t3_db, "code__broken", "deadhash", 2)
+    _seed_doc(catalog, tumbler="1.1.2", collection="code__healthy",
+              chunk_count=2, content_hash="goodhash")
+    _seed_chunks(t3_db, "code__healthy", "goodhash", 2)
+
+    real = indexer_mod._paginated_get
+
+    def failing_for_broken(col, **kwargs):
+        if getattr(col, "name", "") == "code__broken":
+            raise RuntimeError("simulated T3 fetch failure")
+        return real(col, **kwargs)
+
+    with patch_reconcile(t3_db, catalog), \
+            _patch("nexus.indexer._paginated_get", side_effect=failing_for_broken):
+        result = runner.invoke(main, ["catalog", "reconcile"])
+    assert result.exit_code == 0, result.output
+    # The healthy collection reconciled; the broken batch's doc is unmatched.
+    assert "Reconciled 1 document(s); 1 with chunks LOST" in result.output
+    # Medium-1 fix: the failure is VISIBLE in the progress line.
+    assert "1 doc(s) unmatched (fetch error)" in result.output
+    assert catalog.get_manifest("1.1.2") != []
+    assert catalog.get_manifest("1.1.1") == []
+
+
+def test_reconcile_shared_content_hash_resolves_both_docs_from_one_fetch(
+    t3_db, catalog, runner,
+):
+    """Two docs with IDENTICAL content_hash in one collection (the
+    empty-__init__.py shape at scale): both must heal from the shared
+    rows_by_hash bucket, with exactly one $in fetch issued."""
+    from unittest.mock import patch as _patch  # noqa: PLC0415 — file pattern: deferred imports
+
+    import nexus.indexer as indexer_mod  # noqa: PLC0415 — file pattern: deferred imports
+
+    _seed_doc(catalog, tumbler="1.2.1", collection="code__delos",
+              chunk_count=2, content_hash="samehash")
+    _seed_doc(catalog, tumbler="1.2.2", collection="code__delos",
+              chunk_count=2, content_hash="samehash")
+    _seed_chunks(t3_db, "code__delos", "samehash", 2)
+
+    calls: list = []
+    real = indexer_mod._paginated_get
+
+    def counting(col, **kwargs):
+        calls.append(kwargs.get("where") or {})
+        return real(col, **kwargs)
+
+    with patch_reconcile(t3_db, catalog), \
+            _patch("nexus.indexer._paginated_get", side_effect=counting):
+        result = runner.invoke(main, ["catalog", "reconcile"])
+    assert result.exit_code == 0, result.output
+    assert "Reconciled 2 document(s)" in result.output
+    assert len(calls) == 1  # the shared hash dedupes to ONE fetch
+    assert [r.chash for r in catalog.get_manifest("1.2.1")] == \
+        [r.chash for r in catalog.get_manifest("1.2.2")]
+
+
+def test_reconcile_over_64_hashes_pages_the_in_predicate(t3_db, catalog, runner):
+    """The 64-hash $in boundary: 65 unique hashes in one collection must
+    produce exactly TWO batched fetches (64 + 1), never per-doc calls."""
+    from unittest.mock import patch as _patch  # noqa: PLC0415 — file pattern: deferred imports
+
+    import nexus.indexer as indexer_mod  # noqa: PLC0415 — file pattern: deferred imports
+
+    for i in range(65):
+        _seed_doc(catalog, tumbler=f"1.3.{i + 1}", collection="code__delos",
+                  chunk_count=1, content_hash=f"bulk{i:04d}")
+        _seed_chunks(t3_db, "code__delos", f"bulk{i:04d}", 1)
+
+    calls: list = []
+    real = indexer_mod._paginated_get
+
+    def counting(col, **kwargs):
+        calls.append(kwargs.get("where") or {})
+        return real(col, **kwargs)
+
+    with patch_reconcile(t3_db, catalog), \
+            _patch("nexus.indexer._paginated_get", side_effect=counting):
+        result = runner.invoke(main, ["catalog", "reconcile"])
+    assert result.exit_code == 0, result.output
+    assert "Reconciled 65 document(s)" in result.output
+    assert len(calls) == 2
+    assert len(calls[0]["content_hash"]["$in"]) == 64
+    assert len(calls[1]["content_hash"]["$in"]) == 1
+
+
+def test_reconcile_collection_unavailable_reports_and_continues(
+    t3_db, catalog, runner,
+):
+    """get_collection() raising (collection deleted from the service — 14
+    live occurrences on the 2026-07-13 run) emits the UNAVAILABLE progress
+    line, marks that collection's docs unmatched, and the pass continues."""
+    from unittest.mock import patch as _patch  # noqa: PLC0415 — file pattern: deferred imports
+
+    _seed_doc(catalog, tumbler="1.4.1", collection="code__gone",
+              chunk_count=2, content_hash="gonehash")
+    _seed_doc(catalog, tumbler="1.4.2", collection="code__alive",
+              chunk_count=2, content_hash="alivehash")
+    _seed_chunks(t3_db, "code__alive", "alivehash", 2)
+
+    real_get = t3_db.get_collection
+
+    def failing_get(name):
+        if name == "code__gone":
+            raise ValueError(f"collection '{name}' not found in service")
+        return real_get(name)
+
+    with patch_reconcile(t3_db, catalog), \
+            _patch.object(t3_db, "get_collection", side_effect=failing_get):
+        result = runner.invoke(main, ["catalog", "reconcile"])
+    assert result.exit_code == 0, result.output
+    assert "code__gone: UNAVAILABLE — 1 doc(s) unmatched" in result.output
+    assert "Reconciled 1 document(s)" in result.output
+    assert "1 with chunks LOST (real gap)" in result.output
+    assert catalog.get_manifest("1.4.2") != []

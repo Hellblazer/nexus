@@ -635,9 +635,17 @@ nx catalog reconcile [--dry-run]
 
 Repairs `document_chunks` manifest gaps left by a persistently-failed manifest-write hook (e.g. the catalog engine-service was briefly unreachable during indexing). A gap is a document with `chunk_count > 0` but fewer manifest rows than that (including zero) — such a document silently drops out of catalog-aware retrieval even though T3 still has its chunks.
 
-For each gapped document, rebuilds its manifest from the T3 chunks in its `physical_collection`, matched by the whole-file `content_hash` recorded on both the document and every one of its chunks, ordered by character/line span. Documents with no `content_hash` recorded, or no matching T3 chunks, are reported as unmatched rather than silently skipped. `--dry-run` reports the same counts without writing.
+For each gapped document, rebuilds its manifest from the T3 chunks in its `physical_collection`, matched by the whole-file `content_hash` recorded on both the document and every one of its chunks, ordered by character/line span. T3 fetches are batched per collection (a paged `$in` over content hashes), and the pass emits a scan header plus per-collection progress lines — on a 21k-document service-mode catalog a full pass takes minutes, not hours. `--dry-run` reports the same counts without writing.
+
+The summary splits unmatched documents into two classes so real regressions are never buried in expected noise: `N with chunks LOST (real gap)` (the document recorded chunks but T3 no longer has them — investigate) versus `M never-chunked (expected: nothing to rebuild)` (e.g. empty `__init__.py` files that legitimately produced no chunks).
+
+`nx index repo` also runs this heal automatically (owner-scoped) after per-file indexing and before orphan GC, so manifest gaps self-repair on the next index without re-embedding. The manual verb remains useful for catalog-wide passes.
 
 Also see the end-of-run summary on `nx index repo`: a persistent manifest-write failure during indexing is now surfaced there (`WARNING: catalog manifest write failed for N document(s)`) with a pointer to this command.
+
+#### Orphan-GC safety floor (environment knobs)
+
+The `nx index repo` orphan GC refuses a sweep that would delete more than `NX_GC_FLOOR_FRACTION` (default `0.25`) of a collection's decidable chunks when at least 100 chunks are condemned — that shape is almost always a manifest defect (the misclassification class that once deleted 6 live documents), not a real cleanup. The refusal is logged with counts and the verification path (`nx catalog doctor --t3-vs-catalog`, `nx catalog reconcile`). Set `NX_GC_FORCE=1` to override after confirming the chunks are genuinely dead. Every executed prune logs a per-document identity sample.
 
 ### nx catalog orphans
 

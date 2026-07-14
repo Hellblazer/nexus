@@ -6,6 +6,54 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.7.1] - 2026-07-14
+
+Bugfix release: every fix below was found by live post-release dogfooding of
+6.7.0 against a real service-mode install (the shakeout the release deserved).
+
+### Fixed
+
+- **Metadata-filtered search no longer dies in service mode.** The MCP
+  `search` tool's `where=` path (including the 6.7.0 range operators)
+  crashed with "catalog._db is unavailable in service mode" for any
+  catalog-mappable key (`page_count`, `bib_year`, ...): the best-effort
+  catalog prefilter used `getattr(catalog, "_db", None)`, but the
+  service-mode client's `_db` is a deliberately RAISING property, which
+  `getattr` propagates instead of defaulting. The prefilter now falls
+  through to standard post-filtering as its contract always claimed.
+- **`nx catalog reconcile` is usable on real service-mode catalogs.** The
+  walk issued 2-3 HTTP round-trips per gapped document with zero output —
+  1h42m and still running on a 21,835-doc catalog. T3 fetches now batch per
+  collection (paged `$in` over content hashes), the pass emits a scan header
+  and per-collection progress lines, and the same catalog heals in ~4
+  minutes. The summary separates `chunks LOST (real gap)` from
+  `never-chunked (expected)` so a real regression can never hide in
+  thousands of expected empty-file entries.
+- **Re-index actually repairs manifest-less documents (the permanent-skip
+  ghost class).** The staleness check keys on T3 chunk state only, so a
+  document whose chunks survived in T3 but whose manifest rows were dropped
+  was skipped as "current" forever — invisible to every catalog-routed
+  surface, with `--force` (whole-repo re-embed) the only cure. `nx index
+  repo` now runs an owner-scoped manifest self-heal (the shared reconcile
+  core) after per-file indexing and before orphan GC: gaps rebuild from the
+  T3 chunks already stored, with no re-embedding, yielding to foreground
+  interactive writers.
+- **Orphan GC can no longer mass-delete live chunks on a manifest defect.**
+  A partial manifest gap once classified 6 live RDR documents' chunks as
+  orphans and deleted them. The GC now refuses any sweep condemning more
+  than `NX_GC_FLOOR_FRACTION` (default 0.25 — chosen to catch the actual
+  27.9% field incident shape) of a collection's decidable chunks at >= 100
+  chunks, with `NX_GC_FORCE=1` as the explicit override, and logs a
+  per-document identity sample for every executed prune.
+
+### Changed
+
+- The local-service gate is fully self-provisioning: it stamps its dev jar
+  from the engine floor, pins pytest to the scratch config dir (no more
+  reads of the operator's real `~/.config/nexus`), and supports
+  `NEXUS_GATE_NO_VOYAGE=1` to mask an absent Voyage key (skip-with-reason
+  instead of hard failure; a present-but-dead key still fails loud).
+
 ## [6.7.0] - 2026-07-13
 
 ### Added
