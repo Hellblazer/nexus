@@ -21,6 +21,13 @@ from nexus.migration.vector_etl import CollectionResult, MigrationReport
 _COLL = "knowledge__cli__minilm-l6-v2-384__v1"
 
 
+from nexus.engine_version import REQUIRED_ENGINE_VERSION as _FLOOR_TUPLE
+
+#: The current floor as a string — these tests assert the DIAGNOSTIC text
+#: carries the real floor, whatever it is; hard-coding the literal made every
+#: floor bump fail CI here (v6.9.0 release, 2026-07-14).
+_FLOOR_STR = ".".join(str(p) for p in _FLOOR_TUPLE)
+
 def _report(leg: str, *results: CollectionResult) -> MigrationReport:
     return MigrationReport(leg=leg, results=tuple(results))
 
@@ -188,9 +195,9 @@ class TestEngineFloorGate:
                 ManagedServiceIncompatible(
                     "managed nexus service at https://api.conexus-nexus.com is "
                     "release_version '0.1.8', below the minimum this client "
-                    "supports (v0.1.41).",
+                    f"supports (v{_FLOOR_STR}).",
                     deployed_version="0.1.8",
-                    required_version="0.1.41",
+                    required_version=_FLOOR_STR,
                 )
             ),
         )
@@ -204,7 +211,7 @@ class TestEngineFloorGate:
         )
         assert result.exit_code != 0
         assert "0.1.8" in result.output
-        assert "0.1.41" in result.output
+        assert _FLOOR_STR in result.output
         assert etl_calls == []  # the ETL must never run against a bad engine
 
     def test_incompatible_engine_fails_loud_on_rollback_too(
@@ -216,7 +223,7 @@ class TestEngineFloorGate:
             "nexus.db.managed_endpoint.probe_managed_service",
             lambda: (_ for _ in ()).throw(
                 ManagedServiceIncompatible("stale engine", deployed_version="0.1.1",
-                                            required_version="0.1.41")
+                                            required_version=_FLOOR_STR)
             ),
         )
         rollback_calls: list[str] = []
