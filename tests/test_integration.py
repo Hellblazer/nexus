@@ -244,9 +244,15 @@ def test_t3_store_put_and_list_roundtrip(runner):
 def test_t3_store_put_search_roundtrip(runner):
     uid = _uid("search")
     _store_put(runner, uid)
+    # --no-threshold: the uid needle is a random hex suffix, so its
+    # embedding distance wobbles right at the knowledge-corpus threshold
+    # (observed live 2026-07-14: threshold 0.650, top_distance 0.657 —
+    # dropped with the nexus-uro6c diagnostic, flaking the gate). This
+    # test pins the STORE->SEARCH ROUNDTRIP, not default threshold
+    # policy; the where-filter already pins exactness.
     result = runner.invoke(main, [
         "search", uid, "--corpus", _T3_COL, "--n", "5",
-        "--where", f"title={uid}.md",
+        "--where", f"title={uid}.md", "--no-threshold",
     ])
     assert result.exit_code == 0 and uid in result.output
 
