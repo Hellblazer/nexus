@@ -258,7 +258,7 @@ class ServiceRegistry:
 
     # -- publish / heartbeat / discover / relinquish ------------------------
 
-    def election(self, scope_key: str):
+    def election(self, scope_key: str) -> contextlib.AbstractContextManager[None]:
         """PUBLIC spawn-guard election for *scope_key* (nexus-1qdb9).
 
         Exposes the substrate's per-scope election flock as a context

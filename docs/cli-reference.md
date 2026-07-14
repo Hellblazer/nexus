@@ -2114,12 +2114,20 @@ MinerU server lifecycle management for PDF extraction. MinerU is a default depen
 MinerU also **auto-starts on demand** (nexus-1qdb9): when the PDF pipeline
 routes a document to MinerU and no server is running, it spawns one
 automatically — race-free across concurrent indexing runs — and waits up to
-two minutes for it to come healthy (a first-ever start may still be
-downloading models, in which case that one document falls back and the
-warmed server handles the next). Set `pdf.mineru_autostart: false` in
-`config.yml` (or `NX_MINERU_AUTOSTART=0`) if you manage the server
-out-of-band; an explicit non-local `pdf.mineru_server_url` is never
-shadowed by a local spawn.
+two minutes for it to come healthy. A first-ever start may still be
+downloading models (~2-3 GB); in that case the current document falls back
+to the in-process extractor and the warmed server handles later ones — the
+warm-up wait is a shared budget, so a slow first start never stalls each
+document in a batch. If the spawned process dies immediately (for example
+the configured port is already in use), the pipeline falls back right away
+and points you at the `mineru_server` child log. Set
+`pdf.mineru_autostart: false` in `config.yml` — or
+`NX_MINERU_AUTOSTART=0` / `false` / `no` / `off` (any other non-empty
+value force-enables, overriding config) — if you manage the server
+out-of-band; the same switch also disables the automatic crash-restart
+during extraction. An explicit non-local `pdf.mineru_server_url` is never
+shadowed by a local spawn, and `nx mineru start` (the explicit verb) is
+never gated.
 
 ### nx mineru start
 

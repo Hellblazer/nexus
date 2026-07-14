@@ -945,7 +945,18 @@ class PDFExtractor:
         # health. Config-gated (pdf.mineru_autostart) and remote-intent-
         # safe; None = degrade exactly as before.
         try:
-            from nexus.daemon.mineru_lifecycle import ensure_mineru_running  # noqa: PLC0415 — deferred import
+            from nexus.daemon.mineru_lifecycle import (  # noqa: PLC0415 — deferred import
+                ensure_mineru_running,
+                spawn_policy_allows,
+            )
+            if spawn_policy_allows(second_url):
+                # Critique a29348b4: the wait below can run minutes with
+                # only structlog — surface it on the same _progress channel
+                # the fallback warning uses, or the run just looks hung.
+                _progress(
+                    "  MinerU server not responding — autostarting "
+                    "(waits up to 2 min; first-ever start may download models)…"
+                )
             ensured = ensure_mineru_running()
         except Exception:  # noqa: BLE001 — lifecycle must never break extraction
             _log.warning("mineru_ensure_crashed", exc_info=True)
@@ -1033,86 +1044,78 @@ class PDFExtractor:
 
         Returns True if the server was restarted and is healthy.
         Limited to _MINERU_MAX_RESTARTS per PDFExtractor instance.
+
+        nexus-c7odl: this trigger honors the same policy gates and runs
+        under the same RDR-149 election as the on-demand lifecycle — a
+        bare inline spawn here raced ``ensure_mineru_running`` (two live
+        servers, one orphaned) and bypassed ``mineru_autostart: false``.
+        The spawn itself goes through the shared ``spawn_server_process``
+        core (0o600 pid file + output_root + child log — the old inline
+        copy had drifted on all three) and honors a configured fixed port
+        (the 2026-07-01 invisible-server class: a fixed
+        ``pdf.mineru_server_url`` with a restart onto a random port left
+        a live server ``get_mineru_server_url`` would never find).
         """
         if self._mineru_server_restarts >= self._MINERU_MAX_RESTARTS:
             _log.warning("mineru_restart_budget_exhausted",
                          restarts=self._mineru_server_restarts)
             return False
 
+        from nexus.daemon.mineru_lifecycle import spawn_policy_allows  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+        if not spawn_policy_allows():
+            _log.info("mineru_restart_blocked_by_policy")
+            return False
+
         self._mineru_server_restarts += 1
         _log.info("mineru_server_restarting",
                   attempt=self._mineru_server_restarts)
 
-        # nexus-8g79.10 (V4): import process primitives from the
-        # lower-layer module. ``_pid_file_path`` is still in commands/
-        # because ``nx mineru start/stop`` owns the lifecycle; the
-        # library only reads. Path is also available via
-        # ``nexus._mineru_pid._pid_file_path``.
+        import time as _time  # noqa: PLC0415 — deferred import — branch-local
         from nexus._mineru_pid import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
             _pid_file_path,
             is_process_alive,
             read_pid_file,
         )
-
-        # Clean up stale PID file if the server is dead
-        info = read_pid_file()
-        if info is not None and not is_process_alive(info["pid"]):
-            _pid_file_path().unlink(missing_ok=True)
-
-        # Start a new server via the same logic as `nx mineru start`
-        import subprocess as _sp  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
-        import time as _time  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
-        from nexus.commands.mineru import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-            _HEALTH_POLL_INTERVAL,
+        from nexus._mineru_spawn import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
             _find_free_port,
-            _mineru_output_root,
-            _resolve_mineru_api_bin,
-            _server_env,
+            spawn_server_process,
         )
-        # GH #1059: resolve mineru-api from the venv bin first, then PATH.
-        mineru_bin = _resolve_mineru_api_bin()
-        if mineru_bin is None:
-            _log.warning("mineru_restart_failed", reason="mineru-api not found")
-            return False
-        port = _find_free_port()
-        cmd = [mineru_bin, "--host", "127.0.0.1", "--port", str(port)]
-        # nexus-2fyb code-review C-sec-1: previously called _server_env() with
-        # no arguments, but the function signature requires output_root. This
-        # was a TypeError waiting to fire on the first server crash during a
-        # multi-PDF run, AND a security bug — without MINERU_API_OUTPUT_ROOT
-        # set, MinerU falls back to its default world-writable /tmp/mineru-
-        # output instead of the per-user 0o700 directory.
-        output_root = _mineru_output_root()
-        # RDR-148 Gap 4: this respawns the long-lived mineru-api server; like
-        # the `nx mineru start` path, route its output to a rotated child log
-        # so a crash-on-restart leaves evidence instead of dying silently
-        # into DEVNULL (nexus-ovbr7 silent-death class).
-        from nexus.logging_setup import open_child_log_or_devnull  # noqa: PLC0415 — branch-local; only on the restart path
+        from nexus.commands.mineru import _HEALTH_POLL_INTERVAL  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        from nexus.config import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+            get_mineru_configured_fixed_port,
+            nexus_config_dir,
+        )
+        from nexus.daemon.mineru_lifecycle import MINERU_TIER, _SPAWN_SCOPE  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
-        # config_dir=None (global config dir): PDFExtractor is not
-        # config-dir-parameterized (__init__ takes no config_dir) and the
-        # mineru pid/env helpers all resolve the default dir, so None matches
-        # the rest of the subsystem (the daemon self._config_dir precedent
-        # does not apply here).
-        server_log = open_child_log_or_devnull("mineru_server")
         try:
-            proc = _sp.Popen(
-                cmd, env=_server_env(output_root),
-                stdout=server_log, stderr=server_log,
-                start_new_session=True,
-            )
-        except (FileNotFoundError, PermissionError):
-            _log.warning("mineru_restart_failed", reason="mineru-api not found")
+            registry = ServiceRegistry(dir=nexus_config_dir(), tier=MINERU_TIER)
+            proc = None
+            port = None
+            with registry.election(_SPAWN_SCOPE):
+                info = read_pid_file()
+                if info is not None and is_process_alive(info["pid"]):
+                    # A concurrent trigger already restarted — probe it below.
+                    port = info["port"]
+                else:
+                    if info is not None:
+                        _pid_file_path().unlink(missing_ok=True)
+                    port = get_mineru_configured_fixed_port() or _find_free_port()
+                    proc = spawn_server_process(port)
+                    if proc is None:
+                        _log.warning("mineru_restart_failed",
+                                     reason="mineru-api not found")
+                        return False
+        except Exception:  # noqa: BLE001 — restart must never break extraction; the caller falls back
+            _log.warning("mineru_restart_failed", exc_info=True)
             return False
-        finally:
-            if not isinstance(server_log, int):
-                server_log.close()
 
         # Poll health for up to 60s (models already cached in memory by OS)
         url = f"http://127.0.0.1:{port}/health"
         deadline = _time.monotonic() + 60
         while _time.monotonic() < deadline:
-            if proc.poll() is not None:
+            if proc is not None and proc.poll() is not None:
                 _log.warning("mineru_restart_failed", reason="process exited")
                 return False
             try:
@@ -1126,24 +1129,13 @@ class PDFExtractor:
             _log.warning("mineru_restart_failed", reason="health timeout")
             return False
 
-        # Write PID file only (canonical source of truth). nexus-oa7r:
-        # do NOT write the port to persistent config — the PID-file
-        # lookup in ``get_mineru_server_url`` discovers the live port
-        # at every call. Persisting ephemeral ports drifted across
-        # reboots.
-        import json as _json  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
-        from datetime import datetime, timezone  # noqa: PLC0415 — deferred import — optional/heavy dependency, branch-local
-        pid_path = _pid_file_path()
-        pid_path.parent.mkdir(parents=True, exist_ok=True)
-        pid_path.write_text(_json.dumps({
-            "pid": proc.pid, "port": port,
-            "started_at": datetime.now(timezone.utc).isoformat(),
-        }))
-
-        # Reset availability cache
+        # Reset availability cache. The pid file was already written by
+        # spawn_server_process (nexus-oa7r: pid file only, never config —
+        # persisting ephemeral ports drifted across reboots).
         self._mineru_server_checked = True
         self._mineru_server_up = True
-        _log.info("mineru_server_restarted", pid=proc.pid, port=port)
+        _log.info("mineru_server_restarted",
+                  pid=proc.pid if proc is not None else info["pid"], port=port)
         return True
 
     def _mineru_run_isolated(
