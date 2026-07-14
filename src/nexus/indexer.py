@@ -1145,6 +1145,44 @@ def _catalog_hook(
         indexed_set = _indexed_relpaths(indexed_files, repo)
         _run_housekeeping(cat, owner, indexed_set, writer=writer)
         _stage_s["housekeeping"] = time.monotonic() - _stage_mark
+        _stage_mark = time.monotonic()
+
+        # nexus-c21fk: manifest self-heal. The staleness check keys on T3
+        # chunk state only, so a doc whose chunks exist in T3 but whose
+        # document_chunks manifest rows were dropped (interrupted run,
+        # failed hook — the GH #1397 class) is skipped as "current"
+        # forever, and the post-store manifest hooks that skipped files
+        # never trigger can never repair it. This pass rebuilds those
+        # manifests from the T3 chunks already stored — NO re-embedding —
+        # via the shared heal core (owner scope; the reconcile verb runs
+        # the same core catalog-wide). Best-effort: a heal failure must
+        # never fail the index run.
+        try:
+            from nexus.catalog.manifest_heal import heal_manifest_gaps  # noqa: PLC0415 — deferred: keeps indexer import-light
+
+            from nexus.db import make_t3  # noqa: PLC0415 — deferred import
+
+            _progress(f"  Catalog: manifest self-heal…\r")
+            heal = heal_manifest_gaps(
+                cat.by_owner(owner), cat, make_t3(), writer,
+            )
+            if heal.reconciled or heal.lost:
+                _progress(
+                    f"  Catalog: manifest self-heal restored "
+                    f"{heal.reconciled} doc(s)"
+                    + (f", {len(heal.lost)} with chunks LOST (real gap — "
+                       "see structlog)" if heal.lost else "")
+                    + "\n"
+                )
+            _log.info(
+                "catalog_manifest_self_heal",
+                candidates=heal.candidates, gapped=heal.gapped,
+                ghost_gapped=heal.ghost_gapped, reconciled=heal.reconciled,
+                lost=len(heal.lost), never_chunked=len(heal.never_chunked),
+            )
+        except Exception:  # noqa: BLE001 — best-effort self-heal; error surfaced via log, must not crash the index run
+            _log.warning("catalog_manifest_self_heal_failed", exc_info=True)
+        _stage_s["manifest_heal"] = time.monotonic() - _stage_mark
         _log.info(
             "catalog_hook_stage_timing",
             total_s=round(time.monotonic() - _stage_t0, 1),

@@ -798,197 +798,23 @@ def reconcile_cmd(dry_run: bool) -> None:
 
     ``--dry-run`` reports the same counts without writing.
     """
+    from nexus.catalog.manifest_heal import heal_manifest_gaps  # noqa: PLC0415 — deferred import; rare/branch-local path
     from nexus.db import make_t3  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-    from nexus.indexer import _paginated_get  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-    from nexus.mcp_infra import _manifest_chunk_rows  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     verb = "Would reconcile" if dry_run else "Reconciled"
 
     cat = _get_catalog()
-    # Candidates: normal documents (chunk_count > 0) PLUS the GH #1397 ghost
-    # class — chunk_count == 0 rows that DO carry the indexing provenance
-    # (content_hash + physical_collection) needed for a T3 rebuild. Rows with
-    # chunk_count == 0 and no content_hash are register-only ghosts (never
-    # indexed): excluded so they don't spam the unmatched report.
-    entries = [
-        e for e in cat.all_documents(limit=0)
-        if e.chunk_count > 0
-        or ((e.meta or {}).get("content_hash") and e.physical_collection)
-    ]
-    if not entries:
-        click.echo(
-            f"{verb} 0 document(s); 0 with chunks LOST (real gap), "
-            "0 never-chunked (expected: nothing to rebuild)."
-        )
-        return
-
-    manifests = cat.get_manifests([str(e.tumbler) for e in entries])
-    # Gap: fewer manifest rows than chunk_count, OR the ghost shape (zero
-    # count, empty manifest). A ghost heals to chunk_count > 0 via the
-    # post-write resync, so repeated runs converge.
-    gapped = [
-        e for e in entries
-        if len(manifests.get(str(e.tumbler), [])) < e.chunk_count
-        or (e.chunk_count == 0 and not manifests.get(str(e.tumbler)))
-    ]
-    if not gapped:
-        click.echo(
-            f"{verb} 0 document(s); 0 with chunks LOST (real gap), "
-            "0 never-chunked (expected: nothing to rebuild)."
-        )
-        return
-
-    ghost_count = sum(1 for e in gapped if e.chunk_count == 0)
-    click.echo(
-        f"Scanning: {len(entries)} candidate(s), {len(gapped)} gapped "
-        f"({ghost_count} ghost-class chunk_count==0); rebuilding manifests "
-        f"from T3 chunks…"
-    )
-
+    entries = cat.all_documents(limit=0)
     t3 = make_t3()
     writer = _get_catalog_writer() if not dry_run else None
-    reconciled = 0
-    dup_collapsed = 0
-    dup_old_total = 0
-    dup_new_total = 0
-    unmatched: list = []
-
-    # nexus-8g0ch: group by physical_collection and batch-fetch chunk rows
-    # with a paged ``$in`` over content hashes. The prior shape issued 2-3
-    # HTTP round-trips PER gapped document — 1h42m+ on a service-mode
-    # catalog with 8.7k gapped docs — for a walk that is now a few hundred
-    # calls total. Per-collection progress lines keep a long pass legible
-    # (observability doctrine: a silent long walk reads as a hang).
-    from collections import defaultdict  # noqa: PLC0415 — command-local
-
-    by_coll: dict[str, list] = defaultdict(list)
-    for entry in gapped:
-        content_hash = (entry.meta or {}).get("content_hash", "")
-        if not content_hash or not entry.physical_collection:
-            unmatched.append(entry)
-            continue
-        by_coll[entry.physical_collection].append((entry, content_hash))
-
-    # Hashes per $in predicate. One top-level predicate (MAX_WHERE_PREDICATES
-    # bounds predicate COUNT, not $in array size — no named constant bounds
-    # that; 64 verified live against the pgvector engine). Documented
-    # tradeoff (critique d470eda1): a batch-fetch failure marks up to
-    # _IN_BATCH docs unmatched at once, vs 1 under the old per-doc loop —
-    # accepted because _paginated_get already retries transients internally,
-    # so a surviving failure is almost always collection-wide anyway.
-    _IN_BATCH = 64
-
     try:
-        for coll_i, (coll_name, pairs) in enumerate(sorted(by_coll.items()), 1):
-            try:
-                col = t3.get_collection(coll_name)
-            except Exception as exc:  # noqa: BLE001 — boundary catch; one collection's failure must not abort the pass
-                _log.warning(
-                    "catalog_reconcile_collection_unavailable",
-                    collection=coll_name, docs=len(pairs), error=str(exc),
-                )
-                unmatched.extend(e for e, _ in pairs)
-                click.echo(
-                    f"  [{coll_i}/{len(by_coll)}] {coll_name}: "
-                    f"UNAVAILABLE — {len(pairs)} doc(s) unmatched"
-                )
-                continue
-
-            # hash -> (ids, metas), shared across docs with identical content.
-            rows_by_hash: dict[str, tuple[list, list]] = defaultdict(
-                lambda: ([], [])
-            )
-            hashes = sorted({ch for _, ch in pairs})
-            fetched_rows = 0
-            fetch_failed_docs = 0
-            for i in range(0, len(hashes), _IN_BATCH):
-                batch = hashes[i:i + _IN_BATCH]
-                try:
-                    fetched = _paginated_get(
-                        col, include=["metadatas"],
-                        where={"content_hash": {"$in": batch}},
-                    )
-                except Exception as exc:  # noqa: BLE001 — boundary catch; parity with the old per-doc failure semantics
-                    _log.warning(
-                        "catalog_reconcile_t3_fetch_failed",
-                        collection=coll_name, batch_size=len(batch),
-                        error=str(exc),
-                    )
-                    batch_set = set(batch)
-                    dropped = [e for e, ch in pairs if ch in batch_set]
-                    unmatched.extend(dropped)
-                    fetch_failed_docs += len(dropped)
-                    pairs = [(e, ch) for e, ch in pairs if ch not in batch_set]
-                    continue
-                for cid, m in zip(
-                    fetched.get("ids") or [], fetched.get("metadatas") or [],
-                ):
-                    h = (m or {}).get("content_hash", "")
-                    if h:
-                        rows_by_hash[h][0].append(cid)
-                        rows_by_hash[h][1].append(m)
-                        fetched_rows += 1
-            # Review d470eda1 Medium-1: a batch-fetch failure mid-collection
-            # must be VISIBLE in the progress line, not just structlog — the
-            # summary otherwise shows a silently smaller doc count.
-            fetch_note = (
-                f", {fetch_failed_docs} doc(s) unmatched (fetch error)"
-                if fetch_failed_docs else ""
-            )
-            click.echo(
-                f"  [{coll_i}/{len(by_coll)}] {coll_name}: {len(pairs)} doc(s), "
-                f"{fetched_rows} chunk row(s) fetched{fetch_note}"
-            )
-
-            for entry, content_hash in pairs:
-                ids, metas = rows_by_hash.get(content_hash, ([], []))
-                if not ids:
-                    unmatched.append(entry)
-                    continue
-                # RDR-108 Phase 3 dropped chunk_index from chunk metadata, so
-                # the char/line span is the only ordering signal left; fall
-                # back to line_start, then to a stable id sort so identically-
-                # spanned rows (both absent) still get a deterministic order.
-                def _order_key(pair: tuple) -> tuple:
-                    _cid, m = pair
-                    m = m or {}
-                    start = m.get("chunk_start_char")
-                    if start is None:
-                        start = m.get("line_start")
-                    return (0, start, _cid) if start is not None else (1, 0, _cid)
-
-                ordered = sorted(zip(ids, metas), key=_order_key)
-                indexed_metas = []
-                for i, (cid, m) in enumerate(ordered):
-                    m = dict(m or {})
-                    if not m.get("chunk_text_hash"):
-                        m["chunk_text_hash"] = cid
-                    m["chunk_index"] = i
-                    indexed_metas.append((i, m))
-                chunks = _manifest_chunk_rows(indexed_metas)
-                if not any(c["chash"] for c in chunks):
-                    unmatched.append(entry)
-                    continue
-                if len(chunks) < entry.chunk_count:
-                    # RDR-108: duplicate chunk text collapses to one T3 row by
-                    # design, so a rebuilt manifest can legitimately have fewer
-                    # rows than the document's stale chunk_count. Not an error —
-                    # tracked so the summary reports it instead of hiding it.
-                    dup_collapsed += 1
-                    dup_old_total += entry.chunk_count
-                    dup_new_total += len(chunks)
-                if not dry_run:
-                    writer.atomic_manifest_replace(str(entry.tumbler), chunks)
-                    # atomic_manifest_replace's local-SQLite path re-derives
-                    # chunk_count from the post-write row count in the same
-                    # transaction, but the HTTP/service-mode path only resyncs
-                    # when new_chunk_count= is passed (which this call site
-                    # doesn't do) -- so chunk_count stayed stale forever in
-                    # service mode and the gap detector re-flagged the same
-                    # documents on every run (GH #1371 follow-up). Explicitly
-                    # resyncing here is correct and idempotent on both backends.
-                    writer.resync_chunk_count_cache(str(entry.tumbler))
-                reconciled += 1
+        # nexus-c21fk: the heal core is shared with the `nx index repo`
+        # self-heal pass — one implementation, two scopes (whole catalog
+        # here; one owner there). Candidate filtering, gap detection, the
+        # batched $in fetch (8g0ch), and the rebuild all live in the core.
+        result = heal_manifest_gaps(
+            entries, cat, t3, writer, dry_run=dry_run, echo=click.echo,
+        )
     finally:
         if writer is not None:
             _close = getattr(writer, "close", None)
@@ -996,32 +822,29 @@ def reconcile_cmd(dry_run: bool) -> None:
                 _close()
 
     corrected_note = (
-        f" ({dup_collapsed} with chunk_count corrected {dup_old_total} -> {dup_new_total} "
+        f" ({result.dup_collapsed} with chunk_count corrected "
+        f"{result.dup_old_total} -> {result.dup_new_total} "
         "for duplicate-text collapse)"
-        if dup_collapsed else ""
+        if result.dup_collapsed else ""
     )
-    # Critique d470eda1: split the unmatched report so the permanent
-    # ghost-noise (never-chunked files — chunk_count==0 and T3 has nothing,
-    # e.g. thousands of empty __init__.py) cannot bury a REAL regression
-    # (chunk_count>0 with rows missing = chunks actually lost). Live run
-    # 2026-07-13: 8,653 unmatched of which ~8,6xx were the expected class.
-    never_chunked = [e for e in unmatched if e.chunk_count == 0]
-    lost = [e for e in unmatched if e.chunk_count > 0]
+    # Critique d470eda1: the unmatched report splits permanent ghost-noise
+    # (never-chunked files — nothing to rebuild) from REAL regressions
+    # (chunk_count>0 with rows missing = chunks actually lost).
     click.echo(
-        f"{verb} {reconciled} document(s){corrected_note}; "
-        f"{len(lost)} with chunks LOST (real gap), "
-        f"{len(never_chunked)} never-chunked (expected: nothing to rebuild)."
+        f"{verb} {result.reconciled} document(s){corrected_note}; "
+        f"{len(result.lost)} with chunks LOST (real gap), "
+        f"{len(result.never_chunked)} never-chunked (expected: nothing to rebuild)."
     )
-    if lost:
-        for entry in lost[:20]:
+    if result.lost:
+        for entry in result.lost[:20]:
             click.echo(f"    LOST {entry.tumbler}  {entry.file_path or entry.title}")
-        if len(lost) > 20:
-            click.echo(f"    ... and {len(lost) - 20} more")
-    if never_chunked:
-        for entry in never_chunked[:5]:
+        if len(result.lost) > 20:
+            click.echo(f"    ... and {len(result.lost) - 20} more")
+    if result.never_chunked:
+        for entry in result.never_chunked[:5]:
             click.echo(f"    (empty) {entry.tumbler}  {entry.file_path or entry.title}")
-        if len(never_chunked) > 5:
-            click.echo(f"    ... and {len(never_chunked) - 5} more never-chunked")
+        if len(result.never_chunked) > 5:
+            click.echo(f"    ... and {len(result.never_chunked) - 5} more never-chunked")
 
 
 # ── Backfill helpers ──────────────────────────────────────────────────────────
