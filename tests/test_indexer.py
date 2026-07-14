@@ -1710,9 +1710,13 @@ def test_on_stage_timers_none_is_safe(tmp_path):
 
 # ── Pagination tests ────────────────────────────────────────────────────────
 
-def test_prune_deleted_files_paginates(tmp_path):
+def test_prune_deleted_files_paginates(tmp_path, monkeypatch):
     """RDR-108 Phase 4 / nexus-dyxe: pagination still walks the whole
-    collection and deletes orphans across page boundaries."""
+    collection and deletes orphans across page boundaries. (This fixture's
+    110/310 = 35.5% orphan fraction trips the nexus-mr89x safety floor by
+    design; the explicit override applies because pagination, not floor
+    policy, is under test — floor policy has its own TestGcSafetyFloor.)"""
+    monkeypatch.setenv("NX_GC_FORCE", "1")
     from nexus.indexer import _prune_deleted_files
     live = [(f"live-{i:03d}", f"a{i:03d}" + "0" * 60) for i in range(200)]
     orphan = [(f"orphan-{i:03d}", f"b{i:03d}" + "0" * 60) for i in range(110)]
@@ -2125,3 +2129,99 @@ class TestGcSafetyFloor:
         col, db, catalog = self._mass_orphan_setup(n_total=9, n_live=1)
         _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
         assert len(_deleted_ids(col)) == 8
+
+
+class TestGcSafetyFloorReviewHardening:
+    """Review e2423e3b findings: the floor must catch the ACTUAL field
+    incident shape, survive malformed configuration, isolate per
+    collection, and hold at its boundaries."""
+
+    def test_field_incident_shape_is_refused(self, monkeypatch):
+        """Critical-2: the 2026-07-09 incident condemned 154/551 = 27.9% —
+        the original 0.5 default sailed it through. The 0.25 default must
+        refuse exactly this shape."""
+        from nexus.indexer import _prune_deleted_files  # noqa: PLC0415 — file pattern: deferred imports
+        monkeypatch.delenv("NX_GC_FORCE", raising=False)
+        monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
+        rows = [(f"id-{i:04d}", f"{i:032d}" + "f" * 32) for i in range(551)]
+        live = {r[1][:32] for r in rows[:397]}  # 154 orphans = 27.9%
+        col = _gc_col(rows)
+        db = MagicMock()
+        db.get_or_create_collection.return_value = col
+        db.get_collection.return_value = col
+        catalog = _gc_catalog({"code__repo": live, "docs__repo": set()})
+        _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
+        assert _deleted_ids(col) == []
+
+    def test_malformed_floor_env_never_crashes_and_keeps_the_guard(
+        self, monkeypatch,
+    ):
+        """Critical-1 + F6: a malformed / nan / inf NX_GC_FLOOR_FRACTION
+        must not crash the index run NOR silently neutralize the guard —
+        it falls back to the default (which refuses a 90% verdict)."""
+        from nexus.indexer import _prune_deleted_files  # noqa: PLC0415 — file pattern: deferred imports
+        monkeypatch.delenv("NX_GC_FORCE", raising=False)
+        for bad in ("not-a-float", "nan", "inf", "-3", "7"):
+            monkeypatch.setenv("NX_GC_FLOOR_FRACTION", bad)
+            rows = [(f"id-{i:04d}", f"{i:032d}" + "f" * 32) for i in range(200)]
+            live = {r[1][:32] for r in rows[:20]}
+            col = _gc_col(rows)
+            db = MagicMock()
+            db.get_or_create_collection.return_value = col
+            db.get_collection.return_value = col
+            catalog = _gc_catalog({"code__repo": live, "docs__repo": set()})
+            _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
+            assert _deleted_ids(col) == [], f"guard neutralized by {bad!r}"
+
+    def test_fraction_gate_isolated_at_scale(self, monkeypatch):
+        """F3b: orphans >= the count gate (125 >= 100) but fraction under
+        the floor (125/625 = 20% < 25%) — must prune. Isolates the
+        fraction gate from the count gate."""
+        from nexus.indexer import _prune_deleted_files  # noqa: PLC0415 — file pattern: deferred imports
+        monkeypatch.delenv("NX_GC_FORCE", raising=False)
+        monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
+        rows = [(f"id-{i:04d}", f"{i:032d}" + "f" * 32) for i in range(625)]
+        live = {r[1][:32] for r in rows[:500]}
+        col = _gc_col(rows)
+        db = MagicMock()
+        db.get_or_create_collection.return_value = col
+        db.get_collection.return_value = col
+        catalog = _gc_catalog({"code__repo": live, "docs__repo": set()})
+        _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
+        assert len(_deleted_ids(col)) == 125
+
+    def test_exact_floor_fraction_is_not_refused(self, monkeypatch):
+        """Boundary: frac == floor is NOT refused (strict >). 150/600 = 25%
+        exactly at the default floor -> prunes."""
+        from nexus.indexer import _prune_deleted_files  # noqa: PLC0415 — file pattern: deferred imports
+        monkeypatch.delenv("NX_GC_FORCE", raising=False)
+        monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
+        rows = [(f"id-{i:04d}", f"{i:032d}" + "f" * 32) for i in range(600)]
+        live = {r[1][:32] for r in rows[:450]}
+        col = _gc_col(rows)
+        db = MagicMock()
+        db.get_or_create_collection.return_value = col
+        db.get_collection.return_value = col
+        catalog = _gc_catalog({"code__repo": live, "docs__repo": set()})
+        _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
+        assert len(_deleted_ids(col)) == 150
+
+    def test_refused_collection_does_not_block_others(self, monkeypatch):
+        """F3: per-collection isolation through DISTINCT collections (the
+        _gc_db pattern the file's own docstring mandates — the shared-mock
+        shortcut masked this contract). code__repo is a mass-orphan refusal;
+        docs__repo has one genuine orphan that must still prune."""
+        from nexus.indexer import _prune_deleted_files  # noqa: PLC0415 — file pattern: deferred imports
+        monkeypatch.delenv("NX_GC_FORCE", raising=False)
+        monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
+        code_rows = [(f"code-{i:04d}", f"{i:032d}" + "c" * 32) for i in range(200)]
+        code_live = {r[1][:32] for r in code_rows[:20]}  # 90% orphan -> refuse
+        docs_rows = [("docs-live", "a" * 64), ("docs-orphan", "b" * 64)]
+        db, cols = _gc_db({"code__repo": code_rows, "docs__repo": docs_rows})
+        catalog = _gc_catalog({
+            "code__repo": code_live,
+            "docs__repo": {("a" * 64)[:32]},
+        })
+        _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
+        assert _deleted_ids(cols["code__repo"]) == []  # refused
+        assert _deleted_ids(cols["docs__repo"]) == ["docs-orphan"]  # pruned

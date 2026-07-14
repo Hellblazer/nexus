@@ -268,8 +268,43 @@ _CATALOG_REGISTER_PAGE = 1000
 #: plausible real cleanup (tiny collections, test corpora) and refusing
 #: would just nag; at/above it, a >floor-fraction verdict is the
 #: manifest-gap misclassification shape. Pairs with NX_GC_FLOOR_FRACTION
-#: (default 0.5) and the NX_GC_FORCE=1 operator override at the check site.
+#: (default 0.25) and the NX_GC_FORCE=1 operator override at the check site.
 _GC_FLOOR_MIN_CHUNKS = 100
+
+#: Default orphan-fraction floor. 0.25, NOT 0.5 (review e2423e3b Critical-2):
+#: the motivating 2026-07-09 field incident condemned 154/551 chunks = 27.9%
+#: — under a 0.5 floor the exact incident this guard is named for would have
+#: sailed through. The cost asymmetry decides the default: refusing a
+#: legitimate large cleanup defers it behind a loud message + NX_GC_FORCE=1
+#: (recoverable), while allowing a misclassified sweep deletes live data
+#: (not). The c21fk self-heal runs before this GC, so legitimate post-heal
+#: orphan fractions are same-run supersede churn — rarely above a quarter of
+#: a collection.
+_GC_FLOOR_FRACTION_DEFAULT = 0.25
+
+
+def _gc_floor_fraction() -> float:
+    """Parse NX_GC_FLOOR_FRACTION fail-safe (review e2423e3b Critical-1/F6).
+
+    A malformed value must never crash the index run, and nan/inf must not
+    silently neutralize the guard — both fall back to the default with a
+    loud warning. Values are clamped to [0.0, 1.0].
+    """
+    raw = os.environ.get("NX_GC_FLOOR_FRACTION", "")
+    if not raw:
+        return _GC_FLOOR_FRACTION_DEFAULT
+    try:
+        val = float(raw)
+    except ValueError:
+        val = float("nan")
+    if not (0.0 <= val <= 1.0):  # False for nan; excludes inf
+        _log.warning(
+            "gc_floor_fraction_invalid",
+            raw=raw, using=_GC_FLOOR_FRACTION_DEFAULT,
+            note="NX_GC_FLOOR_FRACTION must be a float in [0, 1]",
+        )
+        return _GC_FLOOR_FRACTION_DEFAULT
+    return val
 
 
 def _clear_stale_lock(lock_path: Path) -> None:
@@ -2367,6 +2402,7 @@ def _prune_deleted_files(
             )
             continue
         orphan_ids: list[str] = []
+        orphan_sample: list[dict] = []
         unsafe_skipped = 0
         for chunk_id, meta in zip(all_chunks["ids"], all_chunks["metadatas"]):
             chash = (meta.get("chunk_text_hash") or "")[:32]
@@ -2384,6 +2420,11 @@ def _prune_deleted_files(
                 continue
             if chash not in referenced:
                 orphan_ids.append(chunk_id)
+                if len(orphan_sample) < 20:
+                    orphan_sample.append({
+                        "chash12": chash[:12],
+                        "title": (meta or {}).get("title", ""),
+                    })
         if unsafe_skipped:
             _log.warning("skipped chunks without chunk_text_hash",
                          collection=collection_name,
@@ -2403,9 +2444,13 @@ def _prune_deleted_files(
             # this GC — a surviving mass-orphan verdict is deeply suspect.
             # Legitimate large cleanups stay under the floor or use the
             # explicit override.
-            total = len(all_chunks["ids"])
-            frac = len(orphan_ids) / total
-            floor_frac = float(os.environ.get("NX_GC_FLOOR_FRACTION", "0.5"))
+            # Denominator = DECIDABLE chunks only (review e2423e3b F4): a
+            # collection dominated by undecidable no-chash relics must not
+            # dilute the fraction below the floor while ~all of its
+            # decidable population is condemned.
+            decidable = len(all_chunks["ids"]) - unsafe_skipped
+            frac = len(orphan_ids) / decidable if decidable else 0.0
+            floor_frac = _gc_floor_fraction()
             if (
                 len(orphan_ids) >= _GC_FLOOR_MIN_CHUNKS
                 and frac > floor_frac
@@ -2414,8 +2459,8 @@ def _prune_deleted_files(
                 _log.warning(
                     "gc_safety_floor_refused",
                     collection=collection_name,
-                    orphans=len(orphan_ids), total=total,
-                    fraction=round(frac, 3),
+                    orphans=len(orphan_ids), decidable=decidable,
+                    fraction=round(frac, 3), floor=floor_frac,
                     note=(
                         "refusing to prune: orphan fraction exceeds the "
                         "safety floor — this is the manifest-gap "
@@ -2429,20 +2474,12 @@ def _prune_deleted_files(
                 continue
             # nexus-mr89x (b): per-doc visibility. The field incident gave
             # zero per-doc signal — the operator reverse-engineered the 6
-            # pruned docs from a set difference. Log a bounded identity
-            # sample at INFO; the full id list at DEBUG.
-            _meta_by_id = dict(zip(all_chunks["ids"], all_chunks["metadatas"]))
-            sample = [
-                {
-                    "chash12": ((_meta_by_id.get(cid) or {}).get("chunk_text_hash") or cid)[:12],
-                    "title": (_meta_by_id.get(cid) or {}).get("title", ""),
-                }
-                for cid in orphan_ids[:20]
-            ]
+            # pruned docs from a set difference. The bounded identity sample
+            # was captured inline during classification (review e2423e3b F5).
             _batched_delete(col, orphan_ids)
             _log.info("pruned orphan chunks",
                       collection=collection_name, count=len(orphan_ids),
-                      fraction=round(frac, 3), sample=sample)
+                      fraction=round(frac, 3), sample=orphan_sample)
             _log.debug("pruned orphan chunk ids",
                        collection=collection_name, ids=orphan_ids)
 
