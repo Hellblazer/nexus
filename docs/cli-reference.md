@@ -2111,6 +2111,16 @@ The per-repo cache is stored at `~/.config/nexus/context/<repo>-<hash>.txt`. The
 
 MinerU server lifecycle management for PDF extraction. MinerU is a default dependency since nexus-2fyb.
 
+MinerU also **auto-starts on demand** (nexus-1qdb9): when the PDF pipeline
+routes a document to MinerU and no server is running, it spawns one
+automatically — race-free across concurrent indexing runs — and waits up to
+two minutes for it to come healthy (a first-ever start may still be
+downloading models, in which case that one document falls back and the
+warmed server handles the next). Set `pdf.mineru_autostart: false` in
+`config.yml` (or `NX_MINERU_AUTOSTART=0`) if you manage the server
+out-of-band; an explicit non-local `pdf.mineru_server_url` is never
+shadowed by a local spawn.
+
 ### nx mineru start
 
 ```
