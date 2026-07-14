@@ -278,3 +278,63 @@ def test_reconcile_converges_after_one_pass_service_mode_shaped(t3_db, catalog, 
         third = runner.invoke(main, ["catalog", "reconcile", "--dry-run"])
     assert third.exit_code == 0, third.output
     assert "Would reconcile 0 document(s); 0 could not be matched" in third.output
+
+
+# ── nexus-94fxl / GH #1397: chunk_count=0 ghost rows ─────────────────────────
+
+
+def test_reconcile_heals_chunk_count_zero_ghost(t3_db, catalog, runner):
+    """GH #1397 Run A: a document registered with chunk_count=0 and an empty
+    manifest (the manifest hook dropped the batch for missing doc identity)
+    whose T3 chunks DO exist must be healed — the old chunk_count>0 candidate
+    filter excluded exactly these rows, making reconcile unable to repair the
+    class it was pointed at."""
+    _seed_doc(
+        catalog, tumbler="1.3.142", collection="rdr__nexus",
+        chunk_count=0, content_hash="ghost1",
+    )
+    _seed_chunks(t3_db, "rdr__nexus", "ghost1", 3)
+
+    assert catalog.get_manifest("1.3.142") == []
+
+    with patch_reconcile(t3_db, catalog):
+        result = runner.invoke(main, ["catalog", "reconcile"])
+    assert result.exit_code == 0, result.output
+    assert "Reconciled 1 document(s)" in result.output
+
+    rows = catalog.get_manifest("1.3.142")
+    assert len(rows) == 3
+    assert [r.position for r in rows] == [0, 1, 2]
+    # chunk_count cache resynced from the rebuilt manifest: the ghost is now a
+    # first-class document and search/GC no longer treat it as chunkless.
+    entry = next(e for e in catalog.all_documents(limit=0) if str(e.tumbler) == "1.3.142")
+    assert entry.chunk_count == 3
+
+
+def test_reconcile_zero_ghost_without_content_hash_is_not_noise(t3_db, catalog, runner):
+    """A chunk_count=0 row with NO content_hash is a legitimate ghost/planned
+    entry (register-only, never indexed) — it must stay out of the candidate
+    set entirely, not spam the unmatched report."""
+    _seed_doc(
+        catalog, tumbler="1.3.150", collection="rdr__nexus",
+        chunk_count=0, content_hash="",
+    )
+    with patch_reconcile(t3_db, catalog):
+        result = runner.invoke(main, ["catalog", "reconcile"])
+    assert result.exit_code == 0, result.output
+    assert "Reconciled 0 document(s); 0 could not be matched" in result.output
+
+
+def test_reconcile_zero_ghost_with_hash_but_no_t3_chunks_reported(t3_db, catalog, runner):
+    """A chunk_count=0 row WITH a content_hash but no matching T3 chunks is
+    anomalous (the file was hashed for indexing but its chunks are gone) —
+    reported as unmatched, not silently skipped."""
+    _seed_doc(
+        catalog, tumbler="1.3.151", collection="rdr__nexus",
+        chunk_count=0, content_hash="vanished",
+    )
+    with patch_reconcile(t3_db, catalog):
+        result = runner.invoke(main, ["catalog", "reconcile"])
+    assert result.exit_code == 0, result.output
+    assert "Reconciled 0 document(s); 1 could not be matched" in result.output
+    assert "1.3.151" in result.output

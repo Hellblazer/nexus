@@ -55,7 +55,7 @@ RELEASE_PROPS="service/src/main/resources/META-INF/nexus/release.properties"
 # stale default fail-closes the --cold MVV at the version gate. Kept literal (it
 # names a PUBLISHED release tag, which need not equal the floor) but bumped to
 # track it; override via NEXUS_SERVICE_TAG. (nexus-v0zmv)
-COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.37}"
+COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.41}"
 for a in "$@"; do
   case "$a" in
     --with-cloud) WITH_CLOUD=1 ;;
@@ -140,6 +140,14 @@ elif [ "$DO_BUILD" = 1 ]; then
     # TESTCONTAINERS_HOST_OVERRIDE + the host-gateway alias make the build
     # container reach the sibling pgvector. -Ob = quick-build (correctness gate,
     # not a perf binary). Output: service/target/nexus-service + its *.so siblings.
+    # Builder heap: the pom default (native.image.maxheap=5632m) is sized for
+    # the 7GB CI runner; locally it GC-thrashes (403 GCs / 6.8% of build time
+    # observed on the 8GB-VM default, 2026-07-13). Auto-size to ~70% of the
+    # Docker VM's memory, never below the pom default.
+    vm_mib=$(( $(docker info --format '{{.MemTotal}}') / 1048576 ))
+    NATIVE_MAXHEAP="$(( vm_mib * 70 / 100 ))m"
+    [ "$(( vm_mib * 70 / 100 ))" -lt 5632 ] && NATIVE_MAXHEAP=5632m
+    echo "      (builder heap ${NATIVE_MAXHEAP} — 70% of the ${vm_mib}MiB Docker VM)"
     docker run --rm --entrypoint bash \
       --add-host=host.docker.internal:host-gateway \
       -v "$PWD":/src -w /src/service \
@@ -147,7 +155,7 @@ elif [ "$DO_BUILD" = 1 ]; then
       -e TESTCONTAINERS_RYUK_DISABLED=true \
       -e TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal \
       "$GRAAL_IMAGE" \
-      -c './mvnw -B -Pnative -DskipTests -Dnative.image.opt=-Ob package'
+      -c "./mvnw -B -Pnative -DskipTests -Dnative.image.opt=-Ob -Dnative.image.maxheap=${NATIVE_MAXHEAP} package"
   else
     echo "      (native binary already built — reusing service/target/nexus-service)"
   fi
@@ -235,8 +243,9 @@ if [ -f "$DCFG" ] && grep -q '"credsStore"' "$DCFG"; then
   echo "      (temporarily stripped credsStore from ~/.docker/config.json — restored on exit)"
 fi
 
-# nexus-myk4e: CI points the image's bge fetch at the self-hosted release
-# asset (NEXUS_BGE_MODEL_URL/NEXUS_BGE_TOKENIZER_URL); unset = HF defaults.
+# nexus-myk4e/nexus-5votw: the image's bge fetch defaults to the self-hosted
+# GitHub release asset (ci-assets-bge-768-v1, set in the Dockerfile ARGs);
+# NEXUS_BGE_MODEL_URL/NEXUS_BGE_TOKENIZER_URL override for a re-cut asset tag.
 BUILD_ARGS=()
 [ -n "${NEXUS_BGE_MODEL_URL:-}" ] && BUILD_ARGS+=(--build-arg "BGE_MODEL_URL=$NEXUS_BGE_MODEL_URL")
 [ -n "${NEXUS_BGE_TOKENIZER_URL:-}" ] && BUILD_ARGS+=(--build-arg "BGE_TOKENIZER_URL=$NEXUS_BGE_TOKENIZER_URL")

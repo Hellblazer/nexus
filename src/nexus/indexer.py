@@ -1429,7 +1429,8 @@ def _build_frecency_doc_id_map(
 def _run_index_frecency_only(repo: Path, registry: "object") -> None:
     """Update frecency_score metadata on all indexed chunks without re-embedding.
 
-    Handles both code__ and docs__ collections.
+    Handles the code__, docs__, and rdr__ collections (rdr added by
+    nexus-e0w01 — it was previously a total omission from this mode).
 
     Routing (nexus-enehl, RDR-152):
     - Service mode (NX_STORAGE_BACKEND_VECTORS=service): obtains an
@@ -1456,6 +1457,11 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
     # for a conformant name (Phase 5 drops the legacy branch entirely).
     code_collection = info.get("code_collection", info["collection"])
     docs_collection = info.get("docs_collection") or _repo_collection_or_legacy(repo, "docs")
+    # nexus-e0w01: rdr__ was a total omission here — RDR chunks' frecency_score
+    # was never refreshed by --frecency-only, only by a full index pass. Same
+    # resolution chain the full pass uses; the not-yet-written case is handled
+    # below by the existing NotFound skip (no zombie mint).
+    rdr_collection = info.get("rdr_collection") or _repo_collection_or_legacy(repo, "rdr")
 
     from nexus.db.http_vector_client import is_vector_service_mode as _is_svc  # noqa: PLC0415  — circular-dep avoidance (nexus.db.http_vector_client)
     if _is_svc():
@@ -1488,10 +1494,12 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
     # ``source_path``-keyed filter.
     file_to_doc_id = _build_frecency_doc_id_map(repo, list(frecency_map.keys()))
 
-    # Update frecency in both collections
+    # Update frecency in all three content-type collections (nexus-e0w01).
     collection_names = [code_collection]
     if docs_collection:
         collection_names.append(docs_collection)
+    if rdr_collection:
+        collection_names.append(rdr_collection)
 
     # nexus-ks40: frecency_only is a read-update flow; if the
     # collection has not yet been written, skip rather than mint an
@@ -1515,6 +1523,8 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
     for collection_name in collection_names:
         try:
             col = db.get_collection(collection_name)
+            if col is None:
+                continue
         except _ChromaNotFoundError:
             continue
         for file, score in frecency_map.items():

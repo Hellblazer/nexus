@@ -200,6 +200,36 @@ run:
 2. **Roles.** Create `nexus_admin` (schema owner, NOSUPERUSER) and `nexus_svc`
    (NOSUPERUSER NOBYPASSRLS LOGIN data role). The changelog's grant changesets
    give `nexus_svc` its DML rights automatically during the first run.
+   Optionally create `nexus_diag` (NOSUPERUSER NOCREATEDB NOCREATEROLE
+   BYPASSRLS LOGIN) — the client-side diagnostic role for the pre-upgrade
+   chash-poison probe and `nx forensics`; without it those checks degrade to a
+   loud WARN, never a false clean.
+3. **Diagnostic counts view (RDR-182 Amendment A6).** After the first
+   migration run has created the chunk tables, create the superuser-owned
+   counts view and grant it to `nexus_diag` — under FORCE row-level security a
+   view counts cross-tenant rows only when its owner is RLS-exempt, so this
+   MUST run as the superuser (the local bundle's provisioning does this
+   automatically; bring-your-own-Postgres DBAs run it once):
+
+   ```sql
+   CREATE OR REPLACE VIEW nexus.diag_chash_conformance AS
+   SELECT 'nexus.chunks_384' AS table_name, count(*) AS non_conformant FROM nexus.chunks_384 WHERE length(chash) <> 32
+   UNION ALL
+   SELECT 'nexus.chunks_768' AS table_name, count(*) AS non_conformant FROM nexus.chunks_768 WHERE length(chash) <> 32
+   UNION ALL
+   SELECT 'nexus.chunks_1024' AS table_name, count(*) AS non_conformant FROM nexus.chunks_1024 WHERE length(chash) <> 32
+   UNION ALL
+   SELECT 'nexus.chash_index' AS table_name, count(*) AS non_conformant FROM nexus.chash_index WHERE length(chash) <> 32
+   UNION ALL
+   SELECT 'nexus.catalog_document_chunks' AS table_name, count(*) AS non_conformant FROM nexus.catalog_document_chunks WHERE length(chash) <> 32;
+   GRANT SELECT ON nexus.diag_chash_conformance TO nexus_diag;
+   ```
+
+   Once the view exists, the engine's `grants-nexus-diag-2` changeset revokes
+   `nexus_diag`'s direct table SELECT on its next boot — the diagnostic role
+   then reads counts by construction, never row content. (This SQL is
+   generated from `nexus.db.chash_tables.CHASH_BEARING_TABLES`; a drift test
+   pins this rendered copy to the generator.)
 
 ## Tuning Parameters
 

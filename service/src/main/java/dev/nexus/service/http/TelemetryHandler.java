@@ -34,6 +34,9 @@ import java.util.Map;
  *   POST /v1/telemetry/search/trim             trim old entries
  *   POST /v1/telemetry/rename_collection       rename collection in all tables
  *   POST /v1/telemetry/tier_writes/record      record a tier-write event
+ *   POST /v1/telemetry/consents/record         record a consent grant/revoke (RDR-182)
+ *   GET  /v1/telemetry/consents/list           list the tenant's consent trail (RDR-182)
+ *   GET  /v1/telemetry/retention/markers       cumulative-deletes retention markers (nexus-24p05)
  *   POST /v1/telemetry/nx_answer_runs/record   record an nx_answer run
  *   POST /v1/telemetry/hook_failures/record    record a hook failure
  *   POST /v1/telemetry/hook_failures/trim      trim old hook-failure entries
@@ -91,6 +94,9 @@ public final class TelemetryHandler implements HttpHandler {
                 case "/search/trim"            -> handleSearchTrim(exchange, tenant, method);
                 case "/rename_collection"      -> handleRenameCollection(exchange, tenant, method);
                 case "/tier_writes/record"     -> handleTierWriteRecord(exchange, tenant, method);
+                case "/consents/record"        -> handleConsentRecord(exchange, tenant, method);
+                case "/consents/list"          -> handleConsentList(exchange, tenant, method);
+                case "/retention/markers"      -> handleRetentionMarkers(exchange, tenant, method);
                 case "/nx_answer_runs/record"  -> handleNxAnswerRunRecord(exchange, tenant, method);
                 case "/hook_failures/record"   -> handleHookFailureRecord(exchange, tenant, method);
                 case "/hook_failures/trim"     -> handleHookFailureTrim(exchange, tenant, method);
@@ -213,6 +219,45 @@ public final class TelemetryHandler implements HttpHandler {
         String targetTitle = optStrNull(body, "target_title");
         repo.recordTierWrite(tenant, sessionId, tsIso, tool, tier, agent, project, targetTitle);
         HttpUtil.send(ex, 200, json(Map.of("ok", true)));
+    }
+
+    // ── consents (RDR-182 nexus-ng2sy: service-mode consent-audit parity) ────────
+
+    private void handleConsentRecord(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var body = readBody(ex);
+        String scope = requireString(body, "scope");
+        String tsIso = optStr(body, "ts");
+        boolean granted = requireBool(body, "granted");
+        repo.recordConsent(tenant, scope, tsIso, granted);
+        HttpUtil.send(ex, 200, json(Map.of("ok", true)));
+    }
+
+    private void handleConsentList(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "GET");
+        HttpUtil.send(ex, 200, json(repo.listConsents(tenant)));
+    }
+
+    /**
+     * GET /v1/telemetry/retention/markers?relations=a,b (nexus-24p05): the
+     * verify-fill watermark's rollback detector. Absent relations are simply
+     * omitted (never swept / fresh schema); the client treats absent as 0.
+     */
+    private void handleRetentionMarkers(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "GET");
+        String q = ex.getRequestURI().getQuery();
+        java.util.List<String> relations = java.util.List.of();
+        if (q != null) {
+            for (String pair : q.split("&")) {
+                if (pair.startsWith("relations=")) {
+                    String raw = java.net.URLDecoder.decode(
+                        pair.substring("relations=".length()), java.nio.charset.StandardCharsets.UTF_8);
+                    relations = java.util.Arrays.stream(raw.split(","))
+                        .map(String::trim).filter(sv -> !sv.isEmpty()).toList();
+                }
+            }
+        }
+        HttpUtil.send(ex, 200, json(Map.of("markers", repo.getRetentionMarkers(tenant, relations))));
     }
 
     // ── nx_answer_runs ─────────────────────────────────────────────────────────
@@ -494,6 +539,21 @@ public final class TelemetryHandler implements HttpHandler {
         Object v = body.get(key);
         if (v == null) throw new IllegalArgumentException("Missing required field: " + key);
         return v;
+    }
+
+    /** Strict boolean read (RDR-182 consent audit): a JSON bool, or the
+     *  strings "true"/"false" a lenient client might send. Anything else
+     *  is a 400 — never a silent default (the consent trail must be honest
+     *  about grant vs revoke). */
+    private boolean requireBool(Map<String, Object> body, String key) {
+        Object v = body.get(key);
+        if (v instanceof Boolean b) return b;
+        if (v != null) {
+            String s = v.toString().trim().toLowerCase();
+            if (s.equals("true")) return true;
+            if (s.equals("false")) return false;
+        }
+        throw new IllegalArgumentException("Field must be a boolean: " + key);
     }
 
     private String optStr(Map<String, Object> body, String key) {

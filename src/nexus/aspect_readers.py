@@ -37,7 +37,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import structlog
 
-from nexus.db.chroma_quotas import QUOTAS
+from nexus.db.limits import QUOTAS
 
 _log = structlog.get_logger(__name__)
 

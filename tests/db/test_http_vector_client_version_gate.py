@@ -73,7 +73,7 @@ class TestCloudModeIncompatible:
             side_effect=ManagedServiceIncompatible(
                 "managed nexus service at https://api.conexus-nexus.com is "
                 "release_version '0.1.8', below the minimum this client "
-                "supports (v0.1.34)."
+                "supports (v0.1.41)."
             )
         )
         monkeypatch.setattr("nexus.db.managed_endpoint.probe_managed_service", probe)
@@ -166,7 +166,7 @@ class TestCloudProbeMessageDoesNotSelfContradict:
         message = str(exc_info.value).lower()
         assert "cannot be fixed locally" in message
         assert "0.1.8" in message  # deployed version, for diagnostic value
-        assert "0.1.34" in message  # required floor, for diagnostic value
+        assert "0.1.41" in message  # required floor, for diagnostic value
         assert "downgrade" not in message
         assert "upgrade the nx client" not in message
         assert "or upgrade/downgrade" not in message

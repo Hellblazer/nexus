@@ -1,104 +1,40 @@
 ---
 name: plan-first
-description: Use when starting any retrieval task — you MUST call `mcp__plugin_conexus_nexus__plan_match` first; if a match clears the threshold you MUST execute it via `mcp__plugin_conexus_nexus__plan_run`. Falling through to `/conexus:query` is permitted only on a confirmed miss. Skipping this gate is a defect.
+description: Use when starting any retrieval task — route it through `mcp__plugin_conexus_nexus__nx_answer`, which runs the plan-match-first gate internally (match against the plan library, execute on hit, inline-plan on miss). Optionally `plan_search` first to inspect candidate plans. Raw `search` for keyword lookup only. Skipping nx_answer for a verb-shaped question is a defect.
 effort: low
 ---
 
 # plan-first
 
-**Hard gate.** Every retrieval-shaped task starts here. **You MUST call `plan_match` before decomposing or dispatching anything else.** The plan library exists so agents don't re-derive pipelines that have already been authored; this skill is the enforcement, not a suggestion.
+**Hard gate.** Every retrieval-shaped task routes through
+`mcp__plugin_conexus_nexus__nx_answer`. The plan-match-first logic
+(library match → execute → inline planner on miss → auto-save) lives
+INSIDE `nx_answer` — there are no separately exposed `plan_match` /
+`plan_run` MCP tools. Do not attempt to call them.
 
 ## Rule
 
-Before decomposing any retrieval task, you MUST call `mcp__plugin_conexus_nexus__plan_match` first. If a match clears `min_confidence`, you MUST execute the returned plan via `mcp__plugin_conexus_nexus__plan_run`. Dispatching `/conexus:query` without first checking is a defect.
-
-## Flow
-
-1. **`plan_match(intent, dimensions={...}, min_confidence=0.40, n=1)`**
-   — match the caller's intent against the T1 `plans__session`
-   cache. Pin `verb` when known (via the caller's own verb skill),
-   leave `dimensions={}` when unknown.
-2. **If match returned with `confidence >= 0.40`** (or if the output
-   line shows `confidence=fts5` — the FTS5 fallback sentinel that
-   `plan_match` renders when the in-session cosine cache is
-   unavailable; internally this is `confidence=None` on the `Match`
-   object):
-   - Present the plan's `description` and `dimensions` to the caller
-     as a one-line summary.
-   - Invoke `plan_run(plan_id=<match.id>, bindings='{...}')`.
-   - Return the final step's result to the caller.
-3. **If no match clears the threshold**:
-   - Dispatch `nx_answer(question=<intent>)`. The tool handles
-     decomposition internally; new plans are auto-saved via
-     `plan_save` so the next identical intent is a cache hit.
+1. Optional pre-check: `mcp__plugin_conexus_nexus__plan_search(query=<intent>, limit=3)`
+   to see whether a reusable plan exists (presentational only — `nx_answer`
+   re-matches internally either way).
+2. Dispatch `mcp__plugin_conexus_nexus__nx_answer(question=<intent>,
+   dimensions={verb: "<verb>"} when known)`. On a library hit it executes the
+   matched plan; on a miss it inline-plans and auto-saves the new plan, so the
+   next identical intent is a cache hit.
+3. Raw `search` is for keyword lookup only ("find X in collection Y") — never
+   for analytical / verb-shaped questions.
 
 ## When to pin dimensions
 
-- **From a verb skill** (e.g. `/conexus:research`): pin `dimensions={verb:
-  "research"}`. Narrows the cosine pool to research plans; specificity
-  tiebreaks pick the best strategy variant.
-- **From the top-level agent**: leave dimensions empty. Let the
-  semantic match rank across verbs.
-- **From a specialisation context** (e.g. security review of a
-  change set): pin `dimensions={verb: "review", domain: "security"}`.
-  The curried `strategy:security` variant wins when available; falls
-  back to `strategy:default` otherwise.
-
-## Caller bindings
-
-Every verb scenario template declares `required_bindings`. Pass them
-via `plan_run(match, bindings={...})`:
-
-- `research` — `concept` (required), `limit` (optional)
-- `review` — `changed_paths` (required), `depth` (optional)
-- `analyze` — `area`, `criterion` (required), `limit` (optional)
-- `debug` — `failing_path`, `symptom` (required)
-- `document` — `area` (required), `limit` (optional)
-
-If `plan_run` raises `PlanRunBindingError(missing=[...])`, surface
-the missing bindings to the user rather than guessing defaults.
+- **From a verb skill** (e.g. `/conexus:research`): pass
+  `dimensions={"verb": "research"}` — narrows the match pool to that verb's
+  plans.
+- **From the top-level agent**: omit `dimensions` and let the semantic match
+  rank across verbs.
 
 ## Exit conditions
 
-- **Plan returned** → present the final step's result, log the
-  plan_id for the session trace.
-- **No plan matched** → fall through to `/conexus:query` and save the
-  resulting plan via `plan_save` for future reuse.
-- **`plan_run` raised** → surface the error verbatim; do not retry
-  with heuristic bindings.
-
-## Internal enforcement
-
-`nx_answer` enforces the plan-match-first gate at the MCP tool contract
-level. Every caller — skill, agent, or script — that calls `nx_answer`
-gets the discipline automatically: plan_match is the first step, and
-only on a miss does the tool proceed to decomposition or fallback. This
-means the preamble injection that previously lived in 10 agent files is
-no longer necessary for correctness — `nx_answer` is the single
-enforcement point. The SubagentStart hook injection (`retrieval-agents.txt`)
-now targets only 2 agents (deep-analyst, deep-research-synthesizer) that
-benefit from plan-reuse awareness during exploratory work.
-
-## Anti-patterns
-
-- **Skipping plan_match for "simple" queries.** Description: "Just
-  grep for the config key." No — even simple queries benefit from
-  the plan library's retrieval discipline when a matching plan
-  exists.
-- **Passing an unnamed plan result to a downstream tool.** The
-  `plan_run` result is a `PlanResult` with `steps` and `final`; read
-  `final` into the user-facing summary, not the raw step list.
-- **Ignoring `confidence=fts5`.** The FTS5 fallback sentinel (rendered
-  as `confidence=fts5` in `plan_match` output; `confidence=None` on
-  the Python `Match` object) means "no cosine but keyword match
-  survived" — treat it as a pass, not
-  a miss. Only `confidence < min_confidence` (numeric) is a miss.
-
-## Companion docs
-
-- `docs/plan-authoring-guide.md` — how to write a new plan when
-  nothing matches.
-- `docs/catalog.md#link-types` — the link-type set the `traverse`
-  operator walks.
-- `docs/catalog.md#purposes-link-type-aliases` — purpose aliases for common traversal
-  shapes.
+- `nx_answer` returned → present its answer; the run is recorded and any new
+  plan is auto-saved (no manual `plan_save` needed for retrieval pipelines).
+- `nx_answer` errored → surface the error verbatim; do not retry with a
+  reworded question more than once.

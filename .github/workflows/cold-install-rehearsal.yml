@@ -22,7 +22,7 @@ on:
       service_tag:
         description: "Published engine-service tag to cold-acquire from"
         required: true
-        default: "engine-service-v0.1.6"
+        default: "engine-service-v0.1.40"
 
 permissions:
   contents: read

@@ -33,13 +33,18 @@ belt-and-suspenders confirmation, not the P0 source of truth.
 The classifier takes already-opened read clients (dependency injection — the
 CLI ``--dry-run`` layer wires the real ``chroma_read.open_local_read_client``
 / ``open_cloud_read_client``). It touches ``list_collections()``,
-``Collection.count()``, and — for name-unsupported data-bearing collections
-only — a best-effort one-vector ``Collection.get(include=["embeddings"])``
-dim probe (nexus-nb7hr); it moves NO data. A store that cannot be enumerated
-or a collection whose COUNT cannot be probed is a LOUD error, never a silent
-skip — a dropped collection is a silent half-migration. The dim probe alone
-is best-effort: its failure degrades that collection to name-based
-classification (the pre-nb7hr behavior), logged, never aborting detection.
+``Collection.count()``, and — for data-bearing collections that are EITHER
+name-unsupported OR voyage-named-but-only-supported-because-a-local-key-is-
+present (nexus-x7t5y: the latter closes the case where a pre-RDR-109
+mislabeled bge-768 collection carries a voyage-conformant name and a key is
+configured, so the name alone would otherwise short-circuit past the probe
+and get billed-re-embedded as genuine voyage) — a best-effort one-vector
+``Collection.get(include=["embeddings"])`` dim probe (nexus-nb7hr); it moves
+NO data. A store that cannot be enumerated or a collection whose COUNT
+cannot be probed is a LOUD error, never a silent skip — a dropped collection
+is a silent half-migration. The dim probe alone is best-effort: its failure
+degrades that collection to name-based classification (the pre-nb7hr
+behavior), logged, never aborting detection.
 """
 from __future__ import annotations
 
@@ -431,16 +436,37 @@ def _classify_leg(
                     "the chash length constraints to force the upserts "
                     "through (GH #1390)."
                 )
-        if not legacy_ids and support == "unsupported" and source_count > 0:
+        # nexus-x7t5y (GH follow-on to nb7hr): a voyage-NAMED collection with
+        # a local NX_VOYAGE_API_KEY present short-circuits classify_model_support
+        # to "supported-voyage-1024" BEFORE this point — the plain
+        # support == "unsupported" gate below would never see it, so a
+        # pre-RDR-109 mislabeled bge-768 collection carrying a voyage-
+        # conformant name classified as genuine voyage and would be
+        # billed-re-embedded into a voyage collection of the WRONG
+        # semantics (the stored vectors were never voyage to begin with).
+        # Probe that case too — scoped to voyage-named collections only
+        # (not a blanket enable-for-everything) since that is the one
+        # shape a key's presence can hide.
+        should_probe_dim = not legacy_ids and source_count > 0 and (
+            support == "unsupported"
+            or (support == "supported-voyage-1024" and model in _VOYAGE_MODELS)
+        )
+        if should_probe_dim:
             measured_dim = _probe_actual_dim(col)
             if measured_dim == _ONNX_DIM:
-                # The vectors ARE local bge/ONNX regardless of the name.
-                # Keep support "unsupported" (the name still cannot be
-                # served verbatim) but the measured dim makes it
-                # cross-model REMAPPABLE (see cross_model_remappable):
-                # migrated by re-embedding stored text under a corrected
-                # conformant name — in local mode via the free local ONNX
-                # embedder, no credentials, no Voyage cost.
+                # The vectors ARE local bge/ONNX regardless of the name or
+                # key presence. Force support to "unsupported" — even when
+                # it arrived here as "supported-voyage-1024" — so the
+                # downstream cross_model_remappable / is_measured_dim_override
+                # checks (which both require support == "unsupported")
+                # recognize this as a measured-dim override needing the
+                # free local-ONNX remap, not a genuine (billed) voyage
+                # collection. The measured dim makes it cross-model
+                # REMAPPABLE (see cross_model_remappable): migrated by
+                # re-embedding stored text under a corrected conformant
+                # name — in local mode via the free local ONNX embedder,
+                # no credentials, no Voyage cost.
+                support = "unsupported"
                 name_issue = (
                     f"name claims voyage model '{model}'" if model in _VOYAGE_MODELS
                     else "name is not four-segment conformant"
@@ -449,7 +475,7 @@ def _classify_leg(
                     f"{name_issue}, but a stored vector measures "
                     f"{measured_dim}-dim (local bge/ONNX) — auto-remapped at "
                     "migration to a corrected conformant name; no Voyage key "
-                    "or re-index needed (nexus-nb7hr)"
+                    "or re-index needed (nexus-nb7hr / nexus-x7t5y)"
                 )
         out.append(
             CollectionClassification(

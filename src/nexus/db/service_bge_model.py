@@ -19,10 +19,24 @@ different path.
 The destination MUST match the Java side's ``Bge768Embedder.DEFAULT_MODEL_PATH``
 (``~/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx/{model.onnx,tokenizer.json}``);
 ``tests/db/test_service_bge_model.py`` cross-checks the two so they cannot drift.
+
+Source (nexus-5votw): the SELF-HOSTED GitHub release asset ``ci-assets-bge-768-v1``
+— the same immutable assets CI's ``.github/actions/prime-bge-onnx`` consumes —
+downloaded with retry/backoff and verified against pinned sha256 digests. NOT
+anonymous HuggingFace: HF rate-limits anonymous bulk pulls (HTTP 429), which
+failed user installs the same way it flaked CI. No fallback origin — a failed
+download fails loud (feedback_no_silent_fallbacks_for_correctness).
+
+ACCEPTED RISK: digest verification runs on the download path only. Files already
+on disk are trusted via the size floors (re-hashing 416 MB on every boot is not
+worth it), so a pre-5votw HuggingFace-sourced install or post-install disk
+corruption above the floor is not detected; ``force=True`` re-fetches + re-verifies.
 """
 from __future__ import annotations
 
+import hashlib
 import os
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -30,11 +44,26 @@ import structlog
 
 _log = structlog.get_logger(__name__)
 
-#: Standard (un-fused) transformers.js bge export. NOT fastembed's optimized cache.
+#: Upstream provenance of the hosted export: the standard (un-fused)
+#: transformers.js ``Xenova/bge-base-en-v1.5`` ``onnx/model.onnx`` — NOT
+#: fastembed's optimized cache. Kept for documentation; downloads come from the
+#: self-hosted release asset below, never HuggingFace.
 STANDARD_BGE_REPO = "Xenova/bge-base-en-v1.5"
-_HF_RESOLVE = "https://huggingface.co/{repo}/resolve/main/{path}"
-_MODEL_REPO_PATH = "onnx/model.onnx"
-_TOKENIZER_REPO_PATH = "tokenizer.json"
+
+#: Self-hosted GitHub release tag hosting model.onnx + tokenizer.json
+#: (nexus-5votw). Same tag CI's prime-bge-onnx action consumes; the test suite
+#: cross-checks the two (plus the digests) so they cannot drift. If the model
+#: export is ever re-cut: publish a new asset tag, bump it in BOTH places, and
+#: update the digests.
+BGE_ASSET_TAG = "ci-assets-bge-768-v1"
+#: Same repo releases base the engine binary installs from
+#: (``nexus.daemon.binary_install._RELEASE_DOWNLOAD_BASE``); guarded by test.
+_ASSET_DOWNLOAD_BASE = "https://github.com/Hellblazer/nexus/releases/download"
+
+#: Pinned sha256 of the immutable release assets — the same values the CI
+#: action verifies. A mismatch (tampered/corrupt/truncated download) fails loud.
+_MODEL_SHA256 = "9bc579acdba21c253c62a9bf866891355a63ffa3442b52c8a37d75b2ccb91848"
+_TOKENIZER_SHA256 = "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66"
 
 MODEL_FILENAME = "model.onnx"
 TOKENIZER_FILENAME = "tokenizer.json"
@@ -94,8 +123,15 @@ def service_bge_model_present() -> bool:
     )
 
 
-def _httpx_stream(url: str, dest: Path) -> None:
-    """Stream ``url`` to ``dest`` atomically (``.part`` then rename).
+#: Total attempts for the default downloader, and the sleeps between them.
+_RETRY_ATTEMPTS = 5
+_RETRY_BACKOFF_S: tuple[float, ...] = (2.0, 4.0, 8.0, 16.0)
+#: Injectable for tests — never patch ``time.sleep`` globally.
+_retry_sleep: Callable[[float], None] = time.sleep
+
+
+def _stream_once(url: str, dest: Path) -> None:
+    """Stream ``url`` to ``dest`` atomically (``.part`` then rename), one attempt.
 
     On any failure the ``.part`` file is removed, so a stalled/aborted download
     never accumulates 400 MB of litter and never leaves a partial at ``dest``.
@@ -103,10 +139,11 @@ def _httpx_stream(url: str, dest: Path) -> None:
     import httpx  # noqa: PLC0415 — deferred import — heavy ONNX/model dep loaded lazily
 
     tmp = dest.with_suffix(dest.suffix + ".part")
-    # read=None: no per-chunk read timeout — a 416 MB transfer on a slow link
-    # must not be killed by a 60 s gap between chunks (CDN throttle/backpressure).
-    # A connect guard still fails fast on a genuinely unreachable host.
-    timeout = httpx.Timeout(timeout=None, connect=30.0)
+    # read=300: generous per-chunk gap so a throttled 416 MB transfer survives
+    # CDN backpressure, but a genuinely stalled connection (TCP alive, zero
+    # throughput) surfaces as a retryable ReadTimeout instead of hanging the
+    # install forever — the retry loop above exists precisely to absorb it.
+    timeout = httpx.Timeout(timeout=None, connect=30.0, read=300.0)
     try:
         with httpx.stream("GET", url, follow_redirects=True, timeout=timeout) as resp:
             resp.raise_for_status()
@@ -119,16 +156,68 @@ def _httpx_stream(url: str, dest: Path) -> None:
         raise
 
 
+def _httpx_stream(url: str, dest: Path) -> None:
+    """Default downloader: :func:`_stream_once` with retry/backoff on transient
+    failures (transport errors, HTTP 429/5xx). Non-transient HTTP errors (e.g.
+    404 for a missing asset) raise immediately — retrying cannot fix them.
+    """
+    import httpx  # noqa: PLC0415 — deferred import — heavy ONNX/model dep loaded lazily
+
+    last: Exception | None = None
+    for attempt in range(_RETRY_ATTEMPTS):
+        try:
+            _stream_once(url, dest)
+            return
+        except httpx.HTTPStatusError as exc:
+            code = exc.response.status_code
+            if code != 429 and code < 500:
+                raise
+            last = exc
+        except httpx.TransportError as exc:
+            last = exc
+        if attempt < _RETRY_ATTEMPTS - 1:
+            delay = _RETRY_BACKOFF_S[min(attempt, len(_RETRY_BACKOFF_S) - 1)]
+            _log.warning(
+                "bge_download_retry", url=url, attempt=attempt + 1, delay_s=delay,
+                error=str(last),
+            )
+            _retry_sleep(delay)
+    assert last is not None  # loop ran at least once without returning
+    raise last
+
+
+def _verify_sha256(path: Path, expected: str, label: str) -> None:
+    """Digest-check *path* against *expected*; on mismatch remove it and raise.
+
+    Removing the file matters: a bad artifact left in place would pass the size
+    floors and be served to the Java ONNX load, failing opaquely later.
+    """
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    actual = h.hexdigest()
+    if actual != expected:
+        path.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"sha256 mismatch for {label}: expected {expected}, got {actual} "
+            f"(corrupt or tampered download from {BGE_ASSET_TAG})"
+        )
+
+
 def fetch_service_bge_onnx(
     *, force: bool = False, downloader: Downloader | None = None
 ) -> Path:
     """Fetch the standard bge ONNX + tokenizer to the Java-read path. Fail loud.
 
-    Idempotent: a no-op when both files already exist (unless ``force``). On any
-    network/IO failure raises ``RuntimeError`` with an actionable message — the
-    service cannot embed without this file, so there is no silent fallback
-    (RDR-160). ``downloader`` is injectable for tests; production streams from the
-    HuggingFace CDN via httpx.
+    Idempotent: a no-op when both files already exist (unless ``force``) —
+    presence is judged by the size floors, not a re-digest, so an existing 416 MB
+    install is not re-hashed on every boot; the download path digest-verifies.
+    On any network/IO/digest failure raises ``RuntimeError`` with an actionable
+    message — the service cannot embed without this file, so there is no silent
+    fallback (RDR-160). ``downloader`` is injectable for tests; production
+    streams from the self-hosted GitHub release asset (nexus-5votw) with
+    retry/backoff via httpx.
 
     @return the destination directory.
     """
@@ -148,9 +237,12 @@ def fetch_service_bge_onnx(
     fetch = downloader or _httpx_stream
     dest_dir.mkdir(parents=True, exist_ok=True)
 
+    base = f"{_ASSET_DOWNLOAD_BASE}/{BGE_ASSET_TAG}"
     try:
-        fetch(_HF_RESOLVE.format(repo=STANDARD_BGE_REPO, path=_MODEL_REPO_PATH), model_dest)
-        fetch(_HF_RESOLVE.format(repo=STANDARD_BGE_REPO, path=_TOKENIZER_REPO_PATH), tok_dest)
+        fetch(f"{base}/{MODEL_FILENAME}", model_dest)
+        _verify_sha256(model_dest, _MODEL_SHA256, MODEL_FILENAME)
+        fetch(f"{base}/{TOKENIZER_FILENAME}", tok_dest)
+        _verify_sha256(tok_dest, _TOKENIZER_SHA256, TOKENIZER_FILENAME)
     except Exception as exc:
         # Don't leave a lone model.onnx (model ok, tokenizer failed): the size-
         # floor idempotency would otherwise re-fetch the 416 MB model needlessly,
@@ -159,7 +251,7 @@ def fetch_service_bge_onnx(
             model_dest.unlink(missing_ok=True)
         raise RuntimeError(
             f"failed to provision the standard bge-768 ONNX for the service "
-            f"(offline or download failed): {exc}. The Java service embeds local "
+            f"(download or verification failed): {exc}. The Java service embeds local "
             f"collections with bge-768 and will not boot without "
             f"{model_dest}. Re-run `nx init --service` when back online, or set "
             f"{_ENV_DIR} to a directory holding model.onnx + tokenizer.json "

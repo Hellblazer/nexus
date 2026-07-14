@@ -1625,6 +1625,7 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     "nexus.catalog_meta",
     "nexus.catalog_owners",
     "nexus.chash_index",
+    "nexus.claude_assisted_remediation_consents",
     "nexus.document_aspects",
     "nexus.document_highlights",
     "nexus.frecency",
@@ -1634,6 +1635,7 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     "nexus.nx_answer_runs",
     "nexus.plans",
     "nexus.relevance_log",
+    "nexus.retention_markers",
     "nexus.search_telemetry",
     "nexus.taxonomy_meta",
     "nexus.tier_writes",
@@ -1868,6 +1870,8 @@ def _check_migration_state(
     creds_path: Path | None = None,
     psql_bin: Path | None = None,
     psql_runner=None,  # injectable for unit tests
+    diag_credentials=None,  # injectable: DiagCredentials | None
+    diag_runner=None,  # injectable: run_diagnostic_sql psql_runner seam
 ) -> list[HealthResult]:
     """Verify Liquibase migration state on the nx-managed Postgres.
 
@@ -2120,76 +2124,115 @@ def _check_migration_state(
     # CONSTRAINT will FAIL on any violating row on the NEXT engine upgrade
     # and crash-loop the boot (013-3 guards MISSING constraints, not
     # VIOLATING rows). Surface it as a WARNING before that upgrade, never a
-    # fatal on the current box. A psql failure here (e.g. a schema variant
-    # missing a baseline table) degrades to a warn, never a false alarm.
-    chash_sql = (
-        "SELECT "
-        "(SELECT count(*) FROM nexus.chunks_384 WHERE length(chash)<>32) + "
-        "(SELECT count(*) FROM nexus.chunks_768 WHERE length(chash)<>32) + "
-        "(SELECT count(*) FROM nexus.chunks_1024 WHERE length(chash)<>32) + "
-        "(SELECT count(*) FROM nexus.chash_index WHERE length(chash)<>32) + "
-        "(SELECT count(*) FROM nexus.catalog_document_chunks "
-        "WHERE length(chash)<>32);"
+    # fatal on the current box.
+    #
+    # nexus-vounk: this MUST run on the nexus_diag path, NOT as nexus_admin.
+    # Every chash-bearing table is ENABLE+FORCE RLS with the fail-closed
+    # tenant_isolation policy, so a nexus_admin session with no nexus.tenant
+    # GUC counts ZERO rows (demonstrated 0-vs-9 on a real store) — the probe
+    # would report clean on the exact poisoned store the install-binary gate
+    # exists to block (the nexus-1wjmq asymmetry: Liquibase VALIDATE sees
+    # every row and crash-loops on the next upgrade). run_diagnostic_sql runs
+    # as the SELECT-only BYPASSRLS nexus_diag role (no GUC), so integrity
+    # counts see every tenant's rows — what VALIDATE sees. A missing
+    # diagnostic role (pre-P2.1 install) or a probe failure degrades to a
+    # WARN, never a false "clean".
+    from nexus.db.chash_tables import (  # noqa: PLC0415 — deferred to avoid circular import
+        chash_conformance_statements,
+        legacy_chash_conformance_statements,
     )
-    proc4 = _run_psql(
-        psql_bin, host, port, dbname, user, password, chash_sql,
-        psql_runner=psql_runner,
+    from nexus.db.diag_connection import (  # noqa: PLC0415 — deferred to avoid circular import
+        resolve_diag_credentials,
+        run_diagnostic_sql,
     )
+    from nexus.remediation.sql_lint import DiagnosticSqlViolation  # noqa: PLC0415 — deferred to avoid circular import
+
     results: list[HealthResult] = []
-    if proc4.returncode != 0:
+    diag_creds = diag_credentials if diag_credentials is not None \
+        else resolve_diag_credentials(creds_path)
+    if diag_creds is None:
         results.append(HealthResult(
             label="Chunk chash conformance",
             ok=False,
             detail=(
-                "could not probe chash length across chunk tables (psql exit "
-                f"{proc4.returncode}) — skipping the pre-upgrade poison check"
+                "no nexus_diag diagnostic credentials (pre-P2.1 install) — "
+                "the pre-upgrade poison check could NOT run. Re-run "
+                "`nx init --service` to backfill the diagnostic role. Do NOT "
+                "read this as a clean store."
             ),
             warn=True,
         ))
+        nonconforming = -1
     else:
-        raw4 = proc4.stdout.strip()
         try:
-            nonconforming = int(raw4)
-        except ValueError:
-            # returncode==0 but non-numeric stdout — surface it as a warn, the
-            # same posture as a probe failure. Silently dropping it would read
-            # as "clean" on the one check whose whole purpose is catching the
-            # silent-corruption class GH #1390 already caused once (code-review
-            # Medium; the no-silent-fallback directive).
+            # Amendment A6 (nexus-9bufb): view-era statements first — counts
+            # by construction via nexus.diag_chash_conformance. An engine one
+            # generation behind (no view yet) fails the first set; the legacy
+            # direct-table statements still work there because the legacy
+            # grants era carries full-table SELECT — fall back LOUDLY (log),
+            # never silently.
+            try:
+                counts = run_diagnostic_sql(
+                    chash_conformance_statements(), diag_creds,
+                    psql_bin=psql_bin, psql_runner=diag_runner,
+                )
+            except DiagnosticSqlViolation:
+                # A LINT failure is a product defect, never an engine-
+                # generation skew — re-raise to the outer handler (review
+                # 47dcb65e Critical: DiagnosticSqlViolation subclasses
+                # ValueError, so without this it would be silently retried
+                # against the legacy statements and mislabeled as fallback).
+                raise
+            except (RuntimeError, ValueError) as view_exc:
+                _log.warning(
+                    "chash_probe_view_fallback_legacy",
+                    error=str(view_exc)[:200],
+                    note="diag_chash_conformance view absent (pre-A6 engine) "
+                         "— probing tables directly under the legacy grants",
+                )
+                counts = run_diagnostic_sql(
+                    legacy_chash_conformance_statements(), diag_creds,
+                    psql_bin=psql_bin, psql_runner=diag_runner,
+                )
+            nonconforming = sum(int(c) for c in counts)
+        except (RuntimeError, DiagnosticSqlViolation, ValueError) as exc:
+            # Probe failure (schema variant missing a table), lint refusal,
+            # or non-numeric output — a WARN, never a false poison-clean.
             nonconforming = -1
             results.append(HealthResult(
                 label="Chunk chash conformance",
                 ok=False,
                 detail=(
-                    "chash-conformance query returned unexpected output "
-                    f"{raw4!r} — the pre-upgrade poison check did not run"
+                    "could not probe chash length across chunk tables via the "
+                    f"nexus_diag path ({exc}) — the pre-upgrade poison check "
+                    "did not run"
                 ),
                 warn=True,
             ))
-        if nonconforming > 0:
-            results.append(HealthResult(
-                label="Chunk chash conformance",
-                ok=False,
-                detail=(
-                    f"{nonconforming} chunk row(s) have a non-32-char chash "
-                    "(legacy pre-RDR-108 ids, or chash CHECK constraints were "
-                    "dropped out-of-band). The current engine serves fine, but "
-                    "an engine UPGRADE will crash-loop on catalog-013-3's "
-                    "VALIDATE CONSTRAINT (GH #1390 / nexus-pnwu0)."
-                ),
-                fix_suggestions=[
-                    "Do NOT upgrade the engine binary until remediated "
-                    "(`nx daemon service install-binary` now refuses without "
-                    "--force on a poisoned store).",
-                    "Do NOT drop the chash length constraints to 'unblock' "
-                    "anything — that is what caused GH #1390.",
-                    "Recovery playbook (clickable): "
-                    "https://github.com/Hellblazer/nexus/blob/main/docs/"
-                    "migration-runbook.md §8.1 (rollback -> re-index legacy "
-                    "collections -> re-migrate).",
-                ],
-                warn=True,
-            ))
+    if nonconforming > 0:
+        results.append(HealthResult(
+            label="Chunk chash conformance",
+            ok=False,
+            detail=(
+                f"{nonconforming} chunk row(s) have a non-32-char chash "
+                "(legacy pre-RDR-108 ids, or chash CHECK constraints were "
+                "dropped out-of-band). The current engine serves fine, but "
+                "an engine UPGRADE will crash-loop on catalog-013-3's "
+                "VALIDATE CONSTRAINT (GH #1390 / nexus-pnwu0)."
+            ),
+            fix_suggestions=[
+                "Do NOT upgrade the engine binary until remediated "
+                "(`nx daemon service install-binary` now refuses without "
+                "--force on a poisoned store).",
+                "Do NOT drop the chash length constraints to 'unblock' "
+                "anything — that is what caused GH #1390.",
+                "Recovery playbook (clickable): "
+                "https://github.com/Hellblazer/nexus/blob/main/docs/"
+                "migration-runbook.md §8.1 (rollback -> re-index legacy "
+                "collections -> re-migrate).",
+            ],
+            warn=True,
+        ))
 
     results.append(HealthResult(
         label="Schema migrations",

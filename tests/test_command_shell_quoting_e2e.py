@@ -97,10 +97,12 @@ def test_inventory_is_sane() -> None:
     assert len(_LINES) == 25, sorted(_LINES)
     # No command may double-quote $ARGUMENTS (mirrors the static guard).
     assert not [n for n, b in _LINES.items() if '"$ARGUMENTS"' in b]
-    assert len(_DROPPED) >= 18
-    assert set(_SINGLE_QUOTED) == {
-        "rdr-show.md", "rdr-gate.md", "rdr-accept.md", "rdr-research.md", "rdr-audit.md",
-    }, sorted(_SINGLE_QUOTED)
+    assert len(_DROPPED) >= 23
+    # nexus-ybvyo (fixed 2026-07-13): the five single-quoting commands were
+    # converted to the argless-preamble + Bash-tool re-invoke pattern; the
+    # single-quoted class must now stay EMPTY forever — a new entry means a
+    # command reintroduced the apostrophe-crash splice.
+    assert set(_SINGLE_QUOTED) == set(), sorted(_SINGLE_QUOTED)
 
 
 @pytest.mark.skipif(not _SHELLS, reason="no bash/zsh available")
@@ -140,4 +142,24 @@ def test_single_quoted_commands_neutralize_injection(
     # $(…) all unexpanded) — the definitive proof it was inert.
     assert _argv_after_terminator(r.stdout) == [arg], (
         f"{name} [{shell}]: expected intact literal token, got {_argv_after_terminator(r.stdout)!r}"
+    )
+
+
+def test_no_body_prose_splices_arguments_into_a_reinvoke() -> None:
+    """Critique 2026-07-13 (ybvyo follow-through): the argless-preamble fix
+    moved the targeted load to a documented Bash-tool re-invoke. That
+    convention is prose — so guard it statically: no command body may
+    instruct passing raw $ARGUMENTS as a shell argument (the splice shape
+    ``-- $ARGUMENTS``, quoted or not) ANYWHERE, not just on the ``!`` line.
+    Free text reaches re-invokes as parsed literal argv tokens only.
+    """
+    offenders = {}
+    for md in sorted(_CMD_DIR.glob("*.md")):
+        body = md.read_text()
+        for splice in ("-- $ARGUMENTS", "-- '$ARGUMENTS'", '-- "$ARGUMENTS"'):
+            if splice in body:
+                offenders[md.name] = splice
+    assert offenders == {}, (
+        f"command bodies instruct splicing raw $ARGUMENTS into a shell "
+        f"re-invoke: {offenders}"
     )

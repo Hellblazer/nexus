@@ -622,6 +622,30 @@ class TestFindOverlapping:
         pairs = store.find_overlapping_memories("ov", min_similarity=0.3)
         assert len(pairs) >= 1
 
+    def test_find_overlapping_large_project_degrades_on_bare_oserror(
+        self, store: HttpMemoryStore, monkeypatch,
+    ) -> None:
+        """nexus-fzgd6: the large-project FTS-prefilter branch is best-effort —
+        a bare ConnectionResetError (OSError subclass, NOT httpx.HTTPError)
+        leaking through _send's post-retry attempt must degrade (skip the
+        candidate fetch), never crash the whole overlap scan."""
+        from nexus.db.t2 import http_memory_store as hms
+
+        common = "architecture design patterns system components module interface"
+        store.put("ose", "e1", common + " frontend web", ttl=30)
+        store.put("ose", "e2", common + " backend api", ttl=30)
+        store.put("ose", "e3", common + " data pipeline", ttl=30)
+        # Force the large-project branch, then make every candidate search
+        # raise the bare-OSError shape.
+        monkeypatch.setattr(hms, "_ALL_PAIRS_MAX_ENTRIES", 1)
+
+        def _reset(*a, **k):
+            raise ConnectionResetError("peer reset")
+
+        monkeypatch.setattr(store, "search", _reset)
+        pairs = store.find_overlapping_memories("ose", min_similarity=0.3)
+        assert pairs == []  # degraded, not crashed
+
 
 class TestPutOrMerge:
     def test_put_or_merge_inserts_new(self, store: HttpMemoryStore) -> None:

@@ -14,8 +14,17 @@ TWO-ROLE CONTRACT (net63):
                 DML-only (SELECT/INSERT/UPDATE/DELETE); FORCE RLS applies.
                 Mapped to NX_DB_URL / NX_DB_USER / NX_DB_PASS.
 
-Both roles must be created BEFORE the first service start so the
-grants-nexus-svc.xml changeset (runAlways=true) does NOT fail loud.
+  nexus_diag  — NOSUPERUSER NOCREATEDB NOCREATEROLE BYPASSRLS LOGIN
+                (RDR-182 P2.1). SELECT-only diagnostic role; BYPASSRLS so
+                integrity probes see what Liquibase VALIDATE sees on the
+                FORCE-RLS tenant tables (nexus-vounk false-clean class).
+                Mapped to NX_DB_DIAG_USER / NX_DB_DIAG_PASS (OPTIONAL keys —
+                absent on pre-P2.1 credential files).
+
+nexus_admin and nexus_svc must be created BEFORE the first service start so
+the grants-nexus-svc.xml changeset (runAlways=true) does NOT fail loud;
+nexus_diag's engine-side grants changeset is conditional (clean skip when the
+role is absent, self-heals on the next boot).
 
 IDEMPOTENCY:
   Re-running ``nx init`` on an already-provisioned cluster is a no-op:
@@ -63,6 +72,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
 import structlog
 
@@ -627,14 +637,67 @@ def _create_vector_extension(bins: PgBinaries, port: int, os_user: str) -> bool:
     return True
 
 
+class RolesCreated(NamedTuple):
+    """Which roles :func:`_create_roles` newly created on this run."""
+
+    admin_created: bool
+    svc_created: bool
+    diag_created: bool
+
+
+def _provision_diag_conformance_view(bins: PgBinaries, port: int, os_user: str) -> None:
+    """RDR-182 Amendment A6 (nexus-9bufb): the structural content boundary —
+    a SUPERUSER-owned counts view. Under FORCE RLS, a view counts
+    cross-tenant rows only when its owner is RLS-exempt; this runs in the
+    superuser provisioning context, so the view is exactly that. Once it
+    exists, the engine's runAlways grants changeset REVOKES nexus_diag's
+    direct table SELECT (per-relation, owner-restricted — nexus-46yy3) —
+    count-by-construction replaces lint-only enforcement of the content
+    boundary. Conditional on the chash tables existing (fresh provisions
+    create the schema on first engine boot; the next re-provision or the
+    changeset era completes the swap). Best-effort: absent view = probe
+    falls back to legacy statements. ONE definition, called from both
+    _create_roles and the backfill path (review 47dcb65e: the block was
+    previously duplicated verbatim).
+    """
+    try:
+        from nexus.db.chash_tables import (  # noqa: PLC0415 — deferred, keeps provision import-light
+            CHASH_BEARING_TABLES,
+            diag_conformance_view_ddl,
+        )
+
+        # Existence guard derived from the CONSTANT (review 47dcb65e: a
+        # hand-typed sentinel here could drift from the table set). The view
+        # references EVERY chash table, so require all of them.
+        rel_list = ", ".join(
+            f"'{t.split('.', 1)[1]}'" for t in CHASH_BEARING_TABLES
+        )
+        _psql(
+            bins, port, NEXUS_DB_NAME, os_user,
+            "DO $do$ BEGIN "
+            "IF (SELECT count(*) FROM pg_class c JOIN pg_namespace n "
+            "ON n.oid = c.relnamespace WHERE n.nspname = 'nexus' "
+            f"AND c.relname IN ({rel_list})) = {len(CHASH_BEARING_TABLES)} THEN "
+            + diag_conformance_view_ddl().replace("\n", " ")
+            + "; "
+            "GRANT SELECT ON nexus.diag_chash_conformance TO nexus_diag; "
+            "END IF; "
+            "END $do$;",
+        )
+        _log.info("pg_diag_conformance_view_provisioned")
+    except Exception as exc:  # noqa: BLE001 — best-effort; absent view = probe falls back to legacy statements
+        _log.warning("pg_diag_view_best_effort_failed", error=str(exc))
+
+
 def _create_roles(
     bins: PgBinaries,
     port: int,
     os_user: str,
     admin_pass: str,
     svc_pass: str,
-) -> tuple[bool, bool]:
-    """Create nexus_admin and nexus_svc roles, then synchronise passwords.
+    diag_pass: str,
+) -> RolesCreated:
+    """Create nexus_admin, nexus_svc, and nexus_diag; synchronise passwords.
 
     nexus_admin — NOSUPERUSER NOCREATEDB NOCREATEROLE LOGIN.
                   Has CREATE ON DATABASE nexus (allows creating new schemas).
@@ -647,14 +710,34 @@ def _create_roles(
     nexus_svc   — NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS LOGIN.
                   DML-only; FORCE RLS subjects it to all row-level policies.
 
+    nexus_diag  — NOSUPERUSER NOCREATEDB NOCREATEROLE **BYPASSRLS** LOGIN
+                  (RDR-182 P2.1, nexus-ykzbj.8). The diagnostic role: SELECT
+                  privileges only (granted by the engine's runAlways
+                  grants-nexus-diag changeset, plus a best-effort grant here
+                  when the schema already exists — re-provision of an
+                  existing install). The role DB-enforces the MUTATION
+                  boundary only; the CONTENT boundary (count rows, never read
+                  content) is enforced at the single product choke point,
+                  nexus.db.diag_connection.run_diagnostic_sql (statement lint
+                  before DB contact + SET TRANSACTION READ ONLY) — never open
+                  a nexus_diag session any other way. BYPASSRLS is
+                  LOAD-BEARING, not a convenience: every nexus.* tenant table
+                  is FORCE RLS with the fail-closed tenant policy, so a
+                  policy-subject role counts ZERO rows without the tenant GUC
+                  — the nexus-vounk false-clean (integrity probes must see
+                  what Liquibase VALIDATE sees, cross-tenant). BYPASSRLS
+                  grants visibility, never writes; CREATE ROLE ... BYPASSRLS
+                  requires superuser, which is exactly why creation lives
+                  HERE (the bundle's OS superuser) and not in the Liquibase
+                  changelog (which runs as NOCREATEROLE nexus_admin).
+
     Passwords are synchronised UNCONDITIONALLY after create/skip so that the
     credentials file always matches the DB state, even if a previous run
     created roles but crashed before writing credentials.
-
-    Returns (admin_created, svc_created).
     """
     admin_created = False
     svc_created = False
+    diag_created = False
 
     if not _role_exists(bins, port, os_user, "nexus_admin"):
         _psql(
@@ -696,6 +779,44 @@ def _create_roles(
     else:
         _log.info("pg_role_exists_skip", role="nexus_svc")
 
+    if not _role_exists(bins, port, os_user, "nexus_diag"):
+        _psql(
+            bins, port, NEXUS_DB_NAME, os_user,
+            f"CREATE ROLE nexus_diag "
+            f"NOSUPERUSER NOCREATEDB NOCREATEROLE BYPASSRLS LOGIN "
+            f"PASSWORD '{diag_pass}'",
+        )
+        _log.info("pg_role_created", role="nexus_diag")
+        diag_created = True
+    else:
+        _log.info("pg_role_exists_skip", role="nexus_diag")
+
+    # Best-effort SELECT grants for nexus_diag on an EXISTING install (the
+    # nexus schema only exists after the service's first Liquibase boot; on a
+    # fresh provision this is a clean no-op). The engine's runAlways
+    # grants-nexus-diag changeset is the durable, self-healing grant path —
+    # this just makes the role usable immediately on re-provision without
+    # waiting for an engine restart. Failure here must never abort
+    # provisioning (the changeset will cover it).
+    try:
+        _psql(
+            bins, port, NEXUS_DB_NAME, os_user,
+            "DO $$ BEGIN "
+            "IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'nexus') THEN "
+            "GRANT USAGE ON SCHEMA nexus TO nexus_diag; "
+            "GRANT SELECT ON ALL TABLES IN SCHEMA nexus TO nexus_diag; "
+            "END IF; "
+            "IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 't1') THEN "
+            "GRANT USAGE ON SCHEMA t1 TO nexus_diag; "
+            "GRANT SELECT ON ALL TABLES IN SCHEMA t1 TO nexus_diag; "
+            "END IF; "
+            "END $$;",
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort; the runAlways changeset is authoritative
+        _log.warning("pg_diag_grants_best_effort_failed", error=str(exc))
+
+    _provision_diag_conformance_view(bins, port, os_user)
+
     # Unconditional password sync: even if roles were created on a previous
     # run that crashed before writing credentials, this ensures DB state
     # matches the passwords we are about to persist.  ALTER ROLE … PASSWORD
@@ -708,9 +829,13 @@ def _create_roles(
         bins, port, NEXUS_DB_NAME, os_user,
         f"ALTER ROLE nexus_svc PASSWORD '{svc_pass}'",
     )
+    _psql(
+        bins, port, NEXUS_DB_NAME, os_user,
+        f"ALTER ROLE nexus_diag PASSWORD '{diag_pass}'",
+    )
     _log.debug("pg_role_passwords_synced")
 
-    return admin_created, svc_created
+    return RolesCreated(admin_created, svc_created, diag_created)
 
 
 def _write_credentials(
@@ -720,6 +845,7 @@ def _write_credentials(
     admin_pass: str,
     svc_pass: str,
     service_token: str,
+    diag_pass: str,
 ) -> None:
     """Write the credentials env-file at 0600.
 
@@ -750,6 +876,13 @@ def _write_credentials(
         f"NX_DB_USER=nexus_svc\n"
         f"NX_DB_PASS={svc_pass}\n"
         f"NX_SERVICE_TOKEN={service_token}\n"
+        # nexus_diag (RDR-182 P2.1): the SELECT-only + BYPASSRLS diagnostic
+        # role. OPTIONAL for consumers — pre-P2.1 credential files lack these
+        # keys until the next provision() run (the fast idempotency path
+        # backfills role + keys on already-running clusters), so diagnostic
+        # tooling must degrade cleanly when absent.
+        f"NX_DB_DIAG_USER=nexus_diag\n"
+        f"NX_DB_DIAG_PASS={diag_pass}\n"
     )
     creds_path.parent.mkdir(parents=True, exist_ok=True)
     # Write to a temp file then replace atomically so the file is never
@@ -801,6 +934,92 @@ def _persist_service_token(creds_path: Path, service_token: str) -> None:
             pass
         raise
     _log.info("pg_service_token_backfilled", path=str(creds_path))
+
+
+def _persist_diag_credentials(creds_path: Path, diag_pass: str) -> None:
+    """Append ``NX_DB_DIAG_USER``/``NX_DB_DIAG_PASS`` to an existing 0600
+    credentials file (RDR-182 P2.1 fast-path backfill).
+
+    Mirrors :func:`_persist_service_token`: atomic temp-file + replace,
+    idempotent no-op when the keys are already present, never rewrites the
+    other lines.
+    """
+    if "NX_DB_DIAG_PASS" in _read_credentials(creds_path):
+        _log.info("pg_diag_credentials_backfill_noop", path=str(creds_path))
+        return
+    existing = creds_path.read_text()
+    if not existing.endswith("\n"):
+        existing += "\n"
+    content = (
+        existing
+        + f"NX_DB_DIAG_USER=nexus_diag\nNX_DB_DIAG_PASS={diag_pass}\n"
+    )
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=creds_path.parent, prefix=".pg_creds_")
+    try:
+        os.fchmod(tmp_fd, 0o600)
+        with os.fdopen(tmp_fd, "w") as fh:
+            fh.write(content)
+        os.replace(tmp_path, creds_path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    _log.info("pg_diag_credentials_backfilled", path=str(creds_path))
+
+
+def _backfill_diag_role(
+    bins: PgBinaries, port: int, os_user: str, creds_path: Path
+) -> None:
+    """Create ``nexus_diag`` (+ grants + credentials) on an ALREADY-RUNNING
+    cluster (RDR-182 P2.1; review-foundations High, 2026-07-12).
+
+    The fast idempotency path returns before ``_create_roles``, which is the
+    STEADY STATE for every existing install — exactly the population
+    ``nx guided-upgrade`` targets. Without this backfill the role never
+    exists there, the runAlways grants changeset skips forever, and the
+    diagnostic path is inert everywhere except a from-scratch provision.
+    Same repair philosophy as the pgvector-extension backfill above it:
+    a re-run of ``nx init --service`` is a reliable repair.
+
+    Password: reuse the persisted ``NX_DB_DIAG_PASS`` when present, else mint
+    + persist. ALTER ROLE syncs the DB to the file unconditionally (crash
+    between create and persist heals on the next run).
+    """
+    creds = _read_credentials(creds_path)
+    diag_pass = creds.get("NX_DB_DIAG_PASS") or secrets.token_hex(16)
+    if not _role_exists(bins, port, os_user, "nexus_diag"):
+        _psql(
+            bins, port, NEXUS_DB_NAME, os_user,
+            f"CREATE ROLE nexus_diag "
+            f"NOSUPERUSER NOCREATEDB NOCREATEROLE BYPASSRLS LOGIN "
+            f"PASSWORD '{diag_pass}'",
+        )
+        _log.info("pg_role_created", role="nexus_diag", via="fast_path_backfill")
+    _psql(
+        bins, port, NEXUS_DB_NAME, os_user,
+        f"ALTER ROLE nexus_diag PASSWORD '{diag_pass}'",
+    )
+    try:
+        _psql(
+            bins, port, NEXUS_DB_NAME, os_user,
+            "DO $$ BEGIN "
+            "IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'nexus') THEN "
+            "GRANT USAGE ON SCHEMA nexus TO nexus_diag; "
+            "GRANT SELECT ON ALL TABLES IN SCHEMA nexus TO nexus_diag; "
+            "END IF; "
+            "IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 't1') THEN "
+            "GRANT USAGE ON SCHEMA t1 TO nexus_diag; "
+            "GRANT SELECT ON ALL TABLES IN SCHEMA t1 TO nexus_diag; "
+            "END IF; "
+            "END $$;",
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort; the runAlways changeset is authoritative
+        _log.warning("pg_diag_grants_best_effort_failed", error=str(exc))
+
+    _provision_diag_conformance_view(bins, port, os_user)
+    _persist_diag_credentials(creds_path, diag_pass)
 
 
 def _read_credentials(creds_path: Path) -> dict[str, str]:
@@ -924,6 +1143,7 @@ def provision(
                 # original failure mode: cluster already up, Liquibase blocked
                 # on a missing 'vector' extension. Discover binaries lazily so
                 # the common already-extension-present case stays cheap.
+                _bins = None
                 try:
                     _bins = discover_pg_binaries()
                     check_pgvector_available(_bins)
@@ -944,6 +1164,24 @@ def provision(
                         "pg_vector_extension_backfill_no_pgvector",
                         bin_dir=str(_bins.bin_dir),
                     )
+                # Backfill nexus_diag for clusters provisioned before RDR-182
+                # P2.1 (review-foundations High): the fast path is the steady
+                # state for every EXISTING install — without this, the
+                # diagnostic role only ever exists on from-scratch provisions
+                # and the runAlways grants changeset skips forever.
+                # Deliberately OUTSIDE the pgvector try (review-foundations
+                # round-2 note): role creation has nothing to do with
+                # pgvector, so a pgvector-less host still gets the role. Its
+                # own failure warns and never breaks the idempotent re-run.
+                if _bins is not None:
+                    try:
+                        _backfill_diag_role(
+                            _bins, stored_port, os_user, creds_path
+                        )
+                    except Exception as exc:  # noqa: BLE001 — repair path must never break the no-op re-run
+                        _log.warning(
+                            "pg_diag_role_backfill_failed", error=str(exc)
+                        )
                 _log.info(
                     "pg_provision_no_op",
                     port=stored_port,
@@ -984,10 +1222,13 @@ def provision(
         # Reuse the persisted root token when present so the bearer survives a
         # re-provision; mint a fresh one otherwise (gmiaf.32.5).
         service_token = creds.get("NX_SERVICE_TOKEN") or secrets.token_hex(32)
+        # Pre-P2.1 credential files lack the diag key; mint on first re-provision.
+        diag_pass = creds.get("NX_DB_DIAG_PASS") or secrets.token_hex(16)
     else:
         admin_pass = secrets.token_hex(16)
         svc_pass = secrets.token_hex(16)
         service_token = secrets.token_hex(32)
+        diag_pass = secrets.token_hex(16)
 
     # ── initdb ─────────────────────────────────────────────────────────────────
     result.cluster_created = _init_cluster(bins, pgdata, os_user)
@@ -1013,12 +1254,16 @@ def provision(
     result.vector_extension_created = _create_vector_extension(bins, port, os_user)
 
     # ── Create roles ───────────────────────────────────────────────────────────
-    result.admin_role_created, result.svc_role_created = _create_roles(
-        bins, port, os_user, admin_pass, svc_pass
+    roles = _create_roles(
+        bins, port, os_user, admin_pass, svc_pass, diag_pass
     )
+    result.admin_role_created = roles.admin_created
+    result.svc_role_created = roles.svc_created
 
     # ── Write credentials ──────────────────────────────────────────────────────
-    _write_credentials(creds_path, pgdata, port, admin_pass, svc_pass, service_token)
+    _write_credentials(
+        creds_path, pgdata, port, admin_pass, svc_pass, service_token, diag_pass
+    )
 
     _log.info(
         "pg_provision_complete",

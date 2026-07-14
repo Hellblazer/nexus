@@ -33,6 +33,33 @@ if [[ -z "$STDIN" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Export the harness-provided session_id for every `nx` CLI call this hook
+# makes (nexus-36q84). `nx scratch list` resolves its active session via
+# nexus.session.resolve_active_session_id(), whose lowest-priority fallback
+# is the machine-wide ~/.config/nexus/current_session flat file — clobbered
+# unconditionally by ANY second top-level Claude Code session's SessionStart
+# hook. This hook runs detached from any live nx-mcp process and cannot rely
+# on env-var inheritance from a parent session, so it reads session_id
+# directly out of its own stdin JSON payload (present on every hook
+# invocation per the standard hook contract) and forces NX_SESSION_ID to it
+# — the highest-priority tier in the resolution chain — so `nx scratch list`
+# below always resolves to the session that is actually running this hook,
+# never a sibling session's clobbered pointer.
+# ---------------------------------------------------------------------------
+
+HOOK_SESSION_ID=$(printf '%s' "$STDIN" | python3 -c "
+import json, sys
+try:
+    print(json.load(sys.stdin).get('session_id', ''))
+except Exception:
+    print('')
+" 2>/dev/null || true)
+
+if [[ -n "$HOOK_SESSION_ID" ]]; then
+    export NX_SESSION_ID="$HOOK_SESSION_ID"
+fi
+
+# ---------------------------------------------------------------------------
 # Fast no-op: check tool_name
 # ---------------------------------------------------------------------------
 

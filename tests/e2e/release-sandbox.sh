@@ -4,7 +4,7 @@
 # Combines:
 #   - scripts/reinstall-tool.sh   (wheel-equivalent install via uv tool)
 #   - tests/e2e/sandbox.sh        (isolated $HOME for Claude Code state)
-#   - tests/cc-validation/lib.sh  (tmux primitives, used by tmux mode)
+#   - tests/e2e/lib.sh            (tmux primitives, used by tmux mode)
 #
 # Why this exists: merging to main to "test things out" is dangerous because
 # the wheel-install path (uv tool install) resolves package data and version-

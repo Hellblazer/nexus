@@ -5,11 +5,18 @@ description: Add, track, or verify structured research findings for an active RD
 
 # RDR Research
 
-!`nx rdr preamble rdr-research -- '$ARGUMENTS'`
+!`nx rdr preamble rdr-research`
 
 ## Subcommand and Arguments
 
 $ARGUMENTS
+
+**Targeted load**: parse the subcommand and **numeric ID** from `$ARGUMENTS`
+and run, via the Bash tool, `nx rdr preamble rdr-research -- <subcommand> <ID>`
+with literal argv tokens. Free-text research content (which may contain
+apostrophes, quotes, parens) must be passed as real argv tokens by the Bash
+tool, never spliced into a shell-quoted line (nexus-ybvyo — the apostrophe
+crash class).
 
 ## Action
 

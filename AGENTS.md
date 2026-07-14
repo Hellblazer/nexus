@@ -33,7 +33,7 @@ T1 is the per-MCP-process "working memory" tier. T2 is the cross-process shared 
 - **`claude -p` sub-processes that genuinely need parent-T1 visibility** opt in via `share_t1=True` at dispatch time. Subprocess inherits `NX_T1_HOST` / `NX_T1_PORT` and connects to the parent's chroma via HTTP.
 - **Stateless one-shot operators** (`ephemeral=True`) get an in-process `EphemeralClient` only (no chroma spawn). The operator-dispatch default (`nx_answer`, `nx_tidy`, plan-runner inline planning).
 - **Cross-process findings between sibling sub-processes go to T2** (`memory_put`). T1 is process-local by design; T2 is the shared bus (SQLite + WAL is multi-process-safe).
-- **Deprecated env name:** `NEXUS_SKIP_T1=1` is honoured as an alias for `NX_T1_ISOLATED=1` for the 4.27 -> 4.28 deprecation cycle. Removed in 5.0.
+- **Removed env name:** the legacy `NEXUS_SKIP_T1=1` alias was REMOVED at 6.5.2 (promised gone in 5.0). It is recognized-but-IGNORED with a one-shot warning; use `NX_T1_ISOLATED=1`.
 
 Collection prefixes coexist in one T3 database. Always `__` (double underscore) as separator (colons are invalid in ChromaDB collection names). Conformant collection-name shape (RDR-103) is `<content_type>__<owner_id>__<embedding_model>__v<n>`, e.g. `code__nexus-1-1__voyage-code-3__v1`:
 
@@ -117,17 +117,19 @@ The Java **engine-service** binary is a separate release artifact with its own c
 - **Cut from develop tip; don't let it drift.** Cloud-relevant engine work (pooler/RLS, pgvector, catalog conformance, aspect queue, batch endpoints) lands on develop continuously. Cut + deploy + cloud-gate the engine on its own cadence. Rule of thumb: if `git log <last-engine-tag>..HEAD -- service/` is non-trivial AND cloud-relevant, cut a fresh engine **before** relying on cloud test results or pinning it into a PyPI release.
 - **Prep (AI) vs cut (human).** AI preps: confirm the `service/` tree at the target commit equals a green-`service-ci` commit (the Java CI is advisory — it does not block auto-merge — so verify the full `./mvnw test` + native build actually passed on that exact tree). The human pushes the tag.
 - **Deploy + cloud-gate is conexus-side (passive bus).** After the tag publishes + signs, conexus deploys the signed binary and re-runs the cloud gate (recall + hybrid parity, xr7.8.9-style). Surface an explicit "relay: deploy `engine-service-vX.Y.Z` + re-gate" to Hal — never frame the cross-instance deploy as autonomous.
-- **A new engine bumps these downstream references:** `tests/e2e/migration-rehearsal/run.sh` `COLD_TAG` default; the PyPI release's pinned engine tag (the parity test); and the `REQUIRED_ENGINE_VERSION` floor in `src/nexus/engine_version.py` ONLY if the PyPI release hard-requires the new engine's features (the floor is a minimum, not "latest").
+- **A new engine bumps these downstream references:** `tests/e2e/migration-rehearsal/run.sh` `COLD_TAG` default; and — ONLY if the PyPI release hard-requires the new engine's features — `REQUIRED_ENGINE_VERSION` in `src/nexus/engine_version.py`. That single constant now ALSO drives `PINNED_SERVICE_TAG` (`src/nexus/daemon/binary_install.py` derives it, not an independent literal) — bumping the floor moves the fresh-install pin with it, so there is nothing separate to bump there.
 
 ### Cutting a release (version bump + tag-push to PyPI)
 
-**Engine-freshness gate (step 0 — BEFORE the numbered steps).** The PyPI release pins an `engine-service` tag (`REQUIRED_ENGINE_VERSION` floor + the parity test). This is a BLOCKING command, not a prose eyeball-check (nexus-i5c2u — the eyeball version of this step was routinely skipped, letting the cloud engine sit at v0.1.17 for 9+ days across releases while the floor moved to v0.1.34):
+**Engine-freshness gate (step 0 — BEFORE the numbered steps).** There is ONE engine-version number, `REQUIRED_ENGINE_VERSION` (`src/nexus/engine_version.py`) — not two. `PINNED_SERVICE_TAG` (`src/nexus/daemon/binary_install.py`, the exact tag a fresh local `nx init --service` install downloads) is DERIVED from it, not an independent literal — bumping `REQUIRED_ENGINE_VERSION` moves the compatibility floor AND the fresh-install pin together, by construction. (Prior to 2026-07-12 these were two separately hand-typed constants that silently drifted apart — pinned at v0.1.36 while the floor had already moved to a verified, cloud-deployed v0.1.39 — the identical failure class `nexus-b6qlf` already unified once before for a different pair of constants; see `engine_version.py`'s docstring.)
+
+This is a BLOCKING command, not a prose eyeball-check (nexus-i5c2u — the eyeball version of this step was routinely skipped, letting the cloud engine sit at v0.1.17 for 9+ days across releases while the floor moved to v0.1.34):
 
 ```bash
 uv run python scripts/check_engine_release_floor.py
 ```
 
-If it exits non-zero, STOP — do not proceed with the PyPI release; cut + deploy + cloud-gate a fresh `engine-service` tag first via the `engine-release` skill (see "Engine-service release" above), then re-run the script until it exits 0. `git log <pinned-engine-tag>..HEAD -- service/` remains useful supplementary context for judging whether recent `service/` work is cloud-relevant, but the script above — not the eyeball — is the actual gate. Shipping the PyPI release on a stale, un-cloud-validated engine is exactly the gap this gate closes.
+If it exits non-zero, STOP — do not proceed with the PyPI release; cut + deploy + cloud-gate a fresh `engine-service` tag first via the `engine-release` skill (see "Engine-service release" above), bump `REQUIRED_ENGINE_VERSION` to that tag's version (this alone also moves `PINNED_SERVICE_TAG`), then re-run the script until it exits 0. `git log <pinned-engine-tag>..HEAD -- service/` remains useful supplementary context for judging whether recent `service/` work is cloud-relevant, but the script above — not the eyeball — is the actual gate. Shipping the PyPI release on a stale, un-cloud-validated engine is exactly the gap this gate closes.
 
 
 1. **Run unit + integration suite.** `uv run pytest` and `uv run pytest -m integration`. Both must pass — integration is excluded from CI and is your last line of defense.

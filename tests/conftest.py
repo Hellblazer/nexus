@@ -208,22 +208,29 @@ def _restore_structlog_after_test():
 
 
 @pytest.fixture(autouse=True)
-def _pin_storage_mode_direct(monkeypatch: pytest.MonkeyPatch) -> None:
-    """RDR-120 P6 (nexus-qg86h): direct mode decommissioned.
-    ``storage_mode()`` always returns ``"daemon"`` now and the
-    NX_STORAGE_MODE env-var is a deprecation-warning shim. The
-    test conftest no longer pins a mode — any test that previously
-    relied on direct semantics (``make_t3()`` without ``_client``
-    injection getting a ``PersistentClient``) must now inject
-    ``_client=chromadb.EphemeralClient()`` explicitly.
+def _isolate_claude_code_session_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear the ambient ``CLAUDE_CODE_SESSION_ID`` for every test.
 
-    Kept as a (mostly) no-op autouse fixture so test files that
-    reference the symbol via ``request.getfixturevalue`` still
-    resolve; ``monkeypatch.delenv`` clears any caller-set value so
-    ``storage_mode()`` doesn't fire the deprecation warning during
-    normal pytest runs.
+    nexus-36q84: :func:`nexus.session.resolve_active_session_id` gained a
+    new tier that reads ``CLAUDE_CODE_SESSION_ID`` (the harness-provided
+    per-process env var Claude Code sets natively) between ``NX_SESSION_ID``
+    and the ``current_session`` flat-file fallback. Because the unit suite
+    itself typically runs *inside* a live Claude Code session (via the Bash
+    tool), the real conversation's ``CLAUDE_CODE_SESSION_ID`` is present in
+    ``os.environ`` for every subprocess/test-process — exactly the ambient
+    pollution class this fixture family exists to close (see
+    ``_isolate_t1_sessions`` above). Without
+    this, any test exercising the flat-file or ``None`` fallback tiers of
+    ``resolve_active_session_id`` would silently resolve to the real
+    session id instead of the fixture/file value it asserts against.
+
+    Tests that want to exercise the new tier explicitly
+    ``monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", ...)`` inside the test
+    body, which overrides this fixture's ``delenv`` (later calls on the
+    same ``monkeypatch`` win — same pattern documented on
+    ``_isolate_config_dir``).
     """
-    monkeypatch.delenv("NX_STORAGE_MODE", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -234,14 +241,13 @@ def _isolate_t1_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     four-branch fail-loud gate. With no env vars and no addr file,
     the constructor raises ``T1ServerNotFoundError``. Tests that
     previously relied on the legacy EphemeralClient fallback opt
-    in via the ``NX_T1_ISOLATED=1`` (or its deprecated
-    ``NEXUS_SKIP_T1=1`` alias) Path C; this autouse fixture sets
-    the alias process-wide so the suite gets a per-test
+    in via ``NX_T1_ISOLATED=1`` Path C; this autouse fixture sets
+    it process-wide so the suite gets a per-test
     EphemeralClient by default. Tests that need a different mode
     (env-passdown, addr file, fail-loud raise) override the env
     inside the test.
     """
-    monkeypatch.setenv("NEXUS_SKIP_T1", "1")
+    monkeypatch.setenv("NX_T1_ISOLATED", "1")
 
 
 @pytest.fixture(autouse=True)
@@ -642,6 +648,14 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # labels being compared, not embedder behavior; no embedder runs and
     # no mode-dependent code path is exercised ("canonical-set" class).
     "tests/migration/test_vector_etl.py::TestEmbedderModeParityJava::test_cloud_mode_dispatch_tokens_are_known_models",
+    # nexus-e0w01 / nexus-gednd (2026-07-13): "string-literal-as-name" class —
+    # the voyage token appears only inside RDR-103-conformant collection-NAME
+    # strings; the frecency test pins the service path via
+    # NX_STORAGE_BACKEND_VECTORS + a mocked HttpVectorClient (no embedder
+    # runs), and the tripwire tests mock get_t3/compute_assignments entirely.
+    "tests/test_frecency_service_mode.py::TestFrecencyRdrCollection::test_rdr_collection_included_in_frecency_update",
+    "tests/test_taxonomy_hook_tripwire.py::test_local_path_failure_records_hook_failures_row",
+    "tests/test_taxonomy_hook_tripwire.py::test_tripwire_persist_failure_never_propagates",
     "tests/migration/test_vector_etl.py::TestEmbedderModeParityJava::test_embedder_model_tokens_match_java_overrides",
     #
     # #1060: pure collection-NAME validation (length/charset) — references a
@@ -750,6 +764,15 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # test_driver.py collision exclusions above).
     "tests/migration/test_collision_audit.py::test_false_clean_regression_merge_only_visible_in_no_key_world",
     "tests/test_migration_audit_cmd.py::test_json_output_is_machine_readable",
+    #
+    # nexus-te885.8.1 (pg-source reconcile leg for verify-fill): builds a
+    # mocked /v1/vectors/collections response using conformant collection-
+    # NAME strings (code__nexus-1-1__voyage-code-3__v1,
+    # knowledge__nexus-1-1__voyage-context-3__v1) purely as PgReadClient
+    # list_collections() parsing test data. No embedder runs and no
+    # mode-dependent path executes ("string-literal-as-name" class, same
+    # rationale as the test_driver.py collision exclusions above).
+    "tests/migration/test_pg_read.py::TestListCollections::test_returns_name_objects",
 })
 
 

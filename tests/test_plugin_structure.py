@@ -880,7 +880,18 @@ class TestEnginePinParity:
     """
 
     def test_pinned_tag_at_or_above_required_release(self) -> None:
-        """If a pin is set, its numeric version must be >= REQUIRED_ENGINE_VERSION.
+        """If a pin is set, its numeric version must equal REQUIRED_ENGINE_VERSION
+        EXACTLY, not just be >= it.
+
+        Prior to 2026-07-12 this only checked ``>=``, tolerating a pin that
+        had drifted stale relative to the floor (pinned at v0.1.36 while the
+        floor had already moved to a verified v0.1.39). ``PINNED_SERVICE_TAG``
+        is now DERIVED from ``REQUIRED_ENGINE_VERSION`` in
+        ``binary_install.py`` (one number, not two independently-hand-typed
+        constants), so this assertion is now a regression guard against a
+        FUTURE edit reintroducing an independent literal — it should be
+        impossible to fail by construction, and failing it means someone
+        bypassed the derivation.
 
         Skipped only while ``PINNED_SERVICE_TAG is None`` (no engine-service
         release pinned yet) — NOT keyed on the major version, so a pin set
@@ -907,12 +918,13 @@ class TestEnginePinParity:
             f"PINNED_SERVICE_TAG {tag!r} is not a clean release semver "
             f"(blank/SNAPSHOT/dev/pre-release are rejected fail-closed)"
         )
-        assert parsed >= REQUIRED_ENGINE_VERSION, (
-            f"PINNED_SERVICE_TAG {tag!r} -> {parsed} is BELOW "
-            f"REQUIRED_ENGINE_VERSION {REQUIRED_ENGINE_VERSION}: the client "
-            f"would auto-install an engine it then refuses as too old. Bump "
-            f"PINNED_SERVICE_TAG to an engine-service release >= "
-            f"v{'.'.join(map(str, REQUIRED_ENGINE_VERSION))}."
+        assert parsed == REQUIRED_ENGINE_VERSION, (
+            f"PINNED_SERVICE_TAG {tag!r} -> {parsed} does NOT EXACTLY MATCH "
+            f"REQUIRED_ENGINE_VERSION {REQUIRED_ENGINE_VERSION}. There is only "
+            f"one number now -- PINNED_SERVICE_TAG must be DERIVED from "
+            f"REQUIRED_ENGINE_VERSION in binary_install.py, never an "
+            f"independent literal. If this fired, someone reintroduced a "
+            f"hand-typed PINNED_SERVICE_TAG; fix the derivation, not this test."
         )
 
     @pytest.mark.xfail(

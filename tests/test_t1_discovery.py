@@ -220,7 +220,7 @@ class TestT1DatabaseFlagOnEnvPath:
 
         monkeypatch.setenv("NX_T1_HOST", "127.0.0.1")
         monkeypatch.setenv("NX_T1_PORT", "12345")
-        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
 
         from nexus.db.t1 import T1Database
 
@@ -243,7 +243,7 @@ class TestT1DatabaseFlagOnFilePath:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.delenv("NX_T1_HOST", raising=False)
         monkeypatch.delenv("NX_T1_PORT", raising=False)
-        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
         monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
         # The writer (MCP lifespan) published a session-id lease; the reader
         # resolves the same session-id from NX_SESSION_ID.
@@ -279,7 +279,7 @@ class TestT1ColdStartTransientWindow:
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         for var in ("NX_T1_HOST", "NX_T1_PORT", "NX_T1_ISOLATED",
-                    "NEXUS_SKIP_T1", "NX_SESSION_ID"):
+                    "NX_T1_ISOLATED", "NX_SESSION_ID"):
             monkeypatch.delenv(var, raising=False)
 
         # The writer published a TRANSIENT lease stamped with its immediate
@@ -306,7 +306,7 @@ class TestT1ColdStartTransientWindow:
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         for var in ("NX_T1_HOST", "NX_T1_PORT", "NX_T1_ISOLATED",
-                    "NEXUS_SKIP_T1", "NX_SESSION_ID"):
+                    "NX_T1_ISOLATED", "NX_SESSION_ID"):
             monkeypatch.delenv(var, raising=False)
 
         # A different session's transient lease (its Claude pid is 8080).
@@ -366,7 +366,7 @@ class TestT1ColdStartTransientWindow:
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         for var in ("NX_T1_HOST", "NX_T1_PORT", "NX_T1_ISOLATED",
-                    "NEXUS_SKIP_T1"):
+                    "NX_T1_ISOLATED"):
             monkeypatch.delenv(var, raising=False)
         # Sibling resolves a session-id that does NOT match the lease key.
         monkeypatch.setenv("NX_SESSION_ID", "divergent-sess")
@@ -400,7 +400,7 @@ class TestT1ColdStartTransientWindow:
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         for var in ("NX_T1_HOST", "NX_T1_PORT", "NX_T1_ISOLATED",
-                    "NEXUS_SKIP_T1"):
+                    "NX_T1_ISOLATED"):
             monkeypatch.delenv(var, raising=False)
         monkeypatch.setenv("NX_SESSION_ID", "divergent-sess")
 
@@ -427,7 +427,7 @@ class TestT1ColdStartTransientWindow:
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         for var in ("NX_T1_HOST", "NX_T1_PORT", "NX_T1_ISOLATED",
-                    "NEXUS_SKIP_T1", "NX_SESSION_ID"):
+                    "NX_T1_ISOLATED", "NX_SESSION_ID"):
             monkeypatch.delenv(var, raising=False)
 
         _publish_t1_session_lease(
@@ -455,7 +455,7 @@ class TestT1ColdStartTransientWindow:
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
-        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
         # MCP-dispatched subprocess: it inherited the env breadcrumb (Path A),
         # so it connects even though no session-id resolves yet.
@@ -470,14 +470,14 @@ class TestT1ColdStartTransientWindow:
 class TestT1DatabaseFlagOffPreservesLegacyBehaviour:
     """Flag-off: legacy resolver chain runs unchanged."""
 
-    def test_flag_off_with_skip_t1_uses_ephemeral(self, tmp_path, monkeypatch):
+    def test_isolated_env_uses_ephemeral_before_discovery(self, tmp_path, monkeypatch):
         from unittest.mock import MagicMock
 
         fake_chromadb = MagicMock()
         fake_chromadb.EphemeralClient.return_value = MagicMock()
         monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
 
-        monkeypatch.setenv("NEXUS_SKIP_T1", "1")
+        monkeypatch.setenv("NX_T1_ISOLATED", "1")
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
 
         from nexus.db.t1 import T1Database
@@ -487,8 +487,8 @@ class TestT1DatabaseFlagOffPreservesLegacyBehaviour:
 
 class TestT1DatabaseFlagOnIsolationPath:
     """Path C (RDR-105 P2 / nexus-mj2o): explicit ``NX_T1_ISOLATED=1``
-    or its legacy alias ``NEXUS_SKIP_T1=1`` opts into a per-process
-    ``EphemeralClient``. No HTTP discovery attempted.
+    opts into a per-process ``EphemeralClient``. No HTTP discovery
+    attempted. (The legacy ``NEXUS_SKIP_T1`` alias was removed at 6.5.2.)
     """
 
     def test_nx_t1_isolated_uses_ephemeral(self, tmp_path, monkeypatch):
@@ -501,7 +501,7 @@ class TestT1DatabaseFlagOnIsolationPath:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.delenv("NX_T1_HOST", raising=False)
         monkeypatch.delenv("NX_T1_PORT", raising=False)
-        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
         monkeypatch.setenv("NX_T1_ISOLATED", "1")
 
         from nexus.db.t1 import T1Database
@@ -511,11 +511,12 @@ class TestT1DatabaseFlagOnIsolationPath:
         fake_chromadb.EphemeralClient.assert_called_once()
         assert db.session_id
 
-    def test_legacy_nexus_skip_t1_alias_uses_ephemeral(
+    def test_legacy_nexus_skip_t1_alias_removed(
         self, tmp_path, monkeypatch
     ):
-        """Per RF-4: ``NEXUS_SKIP_T1=1`` honoured for the 4.27 -> 4.28
-        cycle as a deprecated alias for ``NX_T1_ISOLATED=1``."""
+        """The RF-4 alias was removed at 6.5.2 (promised gone in 5.0):
+        ``NEXUS_SKIP_T1=1`` alone no longer selects the ephemeral path —
+        with no other discovery signal the constructor fails loud."""
         from unittest.mock import MagicMock
 
         fake_chromadb = MagicMock()
@@ -528,10 +529,11 @@ class TestT1DatabaseFlagOnIsolationPath:
         monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
         monkeypatch.setenv("NEXUS_SKIP_T1", "1")
 
-        from nexus.db.t1 import T1Database
-        T1Database()
+        from nexus.db.t1 import T1Database, T1ServerNotFoundError
+        with pytest.raises(T1ServerNotFoundError):
+            T1Database()
 
-        fake_chromadb.EphemeralClient.assert_called_once()
+        fake_chromadb.EphemeralClient.assert_not_called()
 
 
 class TestT1DatabaseFlagOnRaisesOnMisconfiguration:
@@ -550,7 +552,7 @@ class TestT1DatabaseFlagOnRaisesOnMisconfiguration:
         monkeypatch.delenv("NX_T1_HOST", raising=False)
         monkeypatch.delenv("NX_T1_PORT", raising=False)
         monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
-        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
         # No session-id resolves, so the session-id lease path (Path B) is
         # skipped and the constructor fails loud (RDR-149 P4).
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
@@ -571,7 +573,7 @@ class TestT1DatabaseFlagOnRaisesOnMisconfiguration:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.setenv("NX_T1_HOST", "127.0.0.1")
         monkeypatch.setenv("NX_T1_PORT", "not-a-port")
-        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
 
         from nexus.db.t1 import T1Database, T1ServerNotFoundError
         with pytest.raises(T1ServerNotFoundError):
@@ -598,7 +600,7 @@ class TestT1DatabaseFlagOnLegacyDeleted:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.setenv("NX_T1_HOST", "127.0.0.1")
         monkeypatch.setenv("NX_T1_PORT", "5555")
-        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
 
         from nexus.db.t1 import T1Database
         T1Database()
@@ -622,7 +624,7 @@ class TestT1DatabaseFlagOnPrecedence:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
         monkeypatch.setenv("NX_T1_HOST", "10.0.0.1")
         monkeypatch.setenv("NX_T1_PORT", "1111")
-        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
 
         # A session-id lease also exists, but env (Path A) outranks the
         # session-id lease path (Path B) (RF-5 precedence).
@@ -656,7 +658,6 @@ class TestT1DatabaseIsolatedOverridesDiscovery:
         monkeypatch.setenv("NX_T1_HOST", "10.0.0.1")
         monkeypatch.setenv("NX_T1_PORT", "1111")
         monkeypatch.setenv("NX_T1_ISOLATED", "1")
-        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
 
         from nexus.db.t1 import T1Database
         T1Database()
@@ -673,7 +674,7 @@ class TestT1DatabaseIsolatedOverridesDiscovery:
         monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        for var in ("NX_T1_HOST", "NX_T1_PORT", "NEXUS_SKIP_T1"):
+        for var in ("NX_T1_HOST", "NX_T1_PORT", "NX_T1_ISOLATED"):
             monkeypatch.delenv(var, raising=False)
         monkeypatch.setenv("NX_T1_ISOLATED", "1")
 
@@ -699,7 +700,6 @@ class TestT1DatabaseIsolatedOverridesDiscovery:
         monkeypatch.setenv("NX_T1_HOST", "10.0.0.1")
         monkeypatch.setenv("NX_T1_PORT", "1111")
         monkeypatch.setenv("NX_T1_ISOLATED", "1")
-        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
 
         # Both an env pair and a session-id lease exist; isolation outranks both.
         _publish_t1_session_lease(tmp_path, "sess-A", "10.0.0.3", 3333)
@@ -711,10 +711,10 @@ class TestT1DatabaseIsolatedOverridesDiscovery:
         fake_chromadb.EphemeralClient.assert_called_once()
         fake_chromadb.HttpClient.assert_not_called()
 
-    def test_legacy_skip_t1_alias_still_overrides_discovery(self, tmp_path, monkeypatch):
-        """``NEXUS_SKIP_T1=1`` is honoured as a deprecated alias for the
-        4.27 -> 4.28 cycle (per CLAUDE.md / RDR-105). The override must
-        apply through the alias path too."""
+    def test_legacy_skip_t1_alias_no_longer_overrides_discovery(self, tmp_path, monkeypatch):
+        """Post-removal (6.5.2): a stale ``NEXUS_SKIP_T1=1`` in the ambient
+        env is INERT — env-passdown discovery (NX_T1_HOST/PORT) proceeds
+        as if the alias were unset."""
         from unittest.mock import MagicMock
 
         fake_chromadb = MagicMock()
@@ -731,8 +731,8 @@ class TestT1DatabaseIsolatedOverridesDiscovery:
         from nexus.db.t1 import T1Database
         T1Database()
 
-        fake_chromadb.EphemeralClient.assert_called_once()
-        fake_chromadb.HttpClient.assert_not_called()
+        fake_chromadb.HttpClient.assert_called_once()
+        fake_chromadb.EphemeralClient.assert_not_called()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -774,7 +774,7 @@ def _setup_path(path_id: str, tmp_path, monkeypatch, fake_chromadb):
     * ``client_injection`` -- early branch with explicit client=.
     """
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-    for var in ("NX_T1_HOST", "NX_T1_PORT", "NX_T1_ISOLATED", "NEXUS_SKIP_T1"):
+    for var in ("NX_T1_HOST", "NX_T1_PORT", "NX_T1_ISOLATED"):
         monkeypatch.delenv(var, raising=False)
 
     if path_id == "env":
@@ -938,13 +938,13 @@ class TestE2ESessionIdSharedAcrossProcesses:
             # in both subprocesses' env -- they must read the file.
             env_overlay = {"NEXUS_CONFIG_DIR": str(tmp_path)}
             for var in ("NX_T1_HOST", "NX_T1_PORT", "NX_SESSION_ID",
-                        "NX_T1_ISOLATED", "NEXUS_SKIP_T1"):
+                        "NX_T1_ISOLATED"):
                 env_overlay[var] = ""  # blank-out below
 
             base_env = {
                 k: v for k, v in os.environ.items()
                 if k not in {"NX_T1_HOST", "NX_T1_PORT", "NX_SESSION_ID",
-                             "NX_T1_ISOLATED", "NEXUS_SKIP_T1"}
+                             "NX_T1_ISOLATED"}
             }
             base_env["NEXUS_CONFIG_DIR"] = str(tmp_path)
 
@@ -1019,7 +1019,7 @@ class TestE2ESessionIdSharedAcrossProcesses:
 class TestDispatcherEnvBuilder:
     """``_build_dispatch_env`` decides whether the subprocess inherits
     ``NX_T1_HOST/PORT`` (share_t1=True + flag-on + parent T1 live) or
-    falls back to the legacy ``NEXUS_SKIP_T1=1`` ephemeral path."""
+    falls back to the ``NX_T1_ISOLATED=1`` ephemeral path."""
 
 
 
@@ -1035,7 +1035,6 @@ class TestDispatcherEnvBuilder:
             _t1_state.T1_ADDR = prev
         assert env.get("NX_T1_HOST") == "127.0.0.1"
         assert env.get("NX_T1_PORT") == "12345"
-        assert "NEXUS_SKIP_T1" not in env
         assert env.get("NX_SESSION_ID") == "parent"
 
     def test_share_t1_raises_when_t1_addr_unset(self, monkeypatch):
@@ -1068,7 +1067,6 @@ class TestDispatcherEphemeralMode:
         assert env.get("NX_T1_ISOLATED") == "1"
         assert "NX_T1_HOST" not in env
         assert "NX_T1_PORT" not in env
-        assert "NEXUS_SKIP_T1" not in env  # don't leak the deprecated alias
         assert env.get("NX_SESSION_ID") == "parent"
 
 
@@ -1091,12 +1089,10 @@ class TestDispatcherOwnedMode:
         monkeypatch.setenv("NX_T1_HOST", "10.0.0.1")
         monkeypatch.setenv("NX_T1_PORT", "5555")
         monkeypatch.setenv("NX_T1_ISOLATED", "1")
-        monkeypatch.setenv("NEXUS_SKIP_T1", "1")
         env = _build_dispatch_env(share_t1=False, ephemeral=False)
         assert "NX_T1_HOST" not in env
         assert "NX_T1_PORT" not in env
         assert "NX_T1_ISOLATED" not in env
-        assert "NEXUS_SKIP_T1" not in env
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1170,7 +1166,7 @@ class TestLifespanNewDiscoveryGenerator:
         monkeypatch.delenv("NX_T1_HOST", raising=False)
         monkeypatch.delenv("NX_T1_PORT", raising=False)
         monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
-        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
 
         prev_addr = _t1_state.T1_ADDR
@@ -1217,7 +1213,7 @@ class TestLifespanNewDiscoveryGenerator:
         monkeypatch.delenv("NX_T1_HOST", raising=False)
         monkeypatch.delenv("NX_T1_PORT", raising=False)
         monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
-        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
 
         # The default structlog wrapper filters at WARNING in test
@@ -1272,7 +1268,7 @@ class TestLifespanNewDiscoveryGenerator:
         monkeypatch.delenv("NX_T1_HOST", raising=False)
         monkeypatch.delenv("NX_T1_PORT", raising=False)
         monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
-        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
         monkeypatch.setenv("NX_SESSION_ID", "sess-warm")
 
         prev_addr = _t1_state.T1_ADDR
@@ -1356,7 +1352,7 @@ class TestLifespanNewDiscoveryGenerator:
         monkeypatch.delenv("NX_T1_HOST", raising=False)
         monkeypatch.delenv("NX_T1_PORT", raising=False)
         monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
-        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
 
         prev_owned = dict(mcp_core._OWNED_CHROMA)
         prev_addr = _t1_state.T1_ADDR
@@ -1408,7 +1404,7 @@ class TestLifespanNewDiscoveryGenerator:
         monkeypatch.delenv("NX_T1_HOST", raising=False)
         monkeypatch.delenv("NX_T1_PORT", raising=False)
         monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
-        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
 
         # A sibling's transient lease (keyed on its own server_pid=100).
@@ -1449,7 +1445,7 @@ class TestLifespanNewDiscoveryGenerator:
         monkeypatch.delenv("NX_T1_HOST", raising=False)
         monkeypatch.delenv("NX_T1_PORT", raising=False)
         monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
-        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
 
         prev_addr = _t1_state.T1_ADDR

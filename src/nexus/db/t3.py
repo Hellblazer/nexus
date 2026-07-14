@@ -34,7 +34,8 @@ from nexus.corpus import (
     embedding_model_for_collection_name,
     index_model_for_collection,
 )
-from nexus.db.chroma_quotas import QUOTAS, QuotaValidator
+from nexus.db.chroma_quotas import QuotaValidator
+from nexus.db.limits import QUOTAS
 from nexus.metadata_schema import CONTENT_TYPES, normalize, validate
 
 _log = structlog.get_logger(__name__)
@@ -232,10 +233,6 @@ def _rewrite_collection_metadata(
 
     return updated, skipped, total
 
-
-# Deprecated: no internal callers remain after RDR-037. Kept for one release
-# cycle in case external scripts import it. Will be removed in next major version.
-_STORE_TYPES: tuple[str, ...] = ("code", "docs", "rdr", "knowledge")
 
 from nexus.retry import (
     _chroma_with_retry,

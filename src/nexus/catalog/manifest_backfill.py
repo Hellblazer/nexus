@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING
 import structlog
 from chromadb.errors import NotFoundError as _ChromaNotFoundError
 
-from nexus.db.chroma_quotas import QUOTAS
+from nexus.db.limits import QUOTAS
 
 if TYPE_CHECKING:
     import chromadb

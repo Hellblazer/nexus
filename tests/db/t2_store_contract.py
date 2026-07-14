@@ -14,8 +14,10 @@ oracles with the same public-only / ``_UNIVERSAL_IGNORE`` filter the tripwire
 applies, using a classmethod-inclusive predicate
 (``inspect.isfunction(x) or inspect.ismethod(x)``) so ``@classmethod`` members
 such as ``CatalogTaxonomy.compute_cross_links`` are captured, not silently
-dropped. RF-158-1: nine strict pairs, ``_EXCLUSIONS={}`` and
-``_PARAM_DRIFT_OK={}`` — zero exemptions.
+dropped. RF-158-1: nine strict pairs, originally ``_EXCLUSIONS={}`` and
+``_PARAM_DRIFT_OK={}`` — zero exemptions. RDR-182 P1.2 (nexus-ykzbj.6) added
+the first documented exclusion (``telemetry.record_consent``, SQLite-only by
+design); see ``test_http_t2_store_parity.py`` for the written reason.
 
 REGENERATE this artifact whenever an ``Http*`` store legitimately gains,
 renames, or re-signatures a public method (re-run the generator against the
@@ -67,10 +69,13 @@ T2_STORE_CONTRACT: dict[str, dict[str, list[str]]] = {
     'telemetry': {
         'expire_relevance_log': ['days'],
         'get_relevance_log': ['query', 'chunk_id', 'action', 'session_id', 'limit'],
+        'get_retention_markers': ['relations'],
         'log_relevance': ['query', 'chunk_id', 'action', 'session_id', 'collection'],
         'log_relevance_batch': ['rows'],
         'log_search_batch': ['rows'],
         'query_collection_stats': ['collection', 'days'],
+        'list_consents': [],
+        'record_consent': ['scope', 'ts', 'granted'],
         'record_hook_failure': ['doc_id', 'collection', 'hook_name', 'error',
                                 'chain', 'batch_doc_ids', 'is_batch',
                                 'occurred_at'],

@@ -2,17 +2,39 @@
 title: "Claude-Assisted Upgrade and Remediation: Opt-In, Consent-Gated Enlistment of the User's Own Agent Across CLI and Claude Desktop, with a Read-Only Diagnostic Trust Boundary"
 id: RDR-182
 type: Architecture
-status: accepted
+status: closed
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
 created: 2026-07-10
 accepted_date: 2026-07-10
+closed_date: 2026-07-13
 related_issues: [nexus-ykzbj, nexus-c4143, nexus-pnwu0, nexus-sot7v]
 related: [RDR-126, RDR-159, RDR-162, RDR-166, RDR-174, RDR-178]
 ---
 
 # RDR-182: Claude-Assisted Upgrade and Remediation
+
+> **CLOSED 2026-07-13.** Implemented across P0-P5 (epic nexus-ykzbj, all 20
+> sub-beads closed). Shipped: the opt-in gate (default-off, global-config-only
+> — A4), the consent audit (grant/revoke, T2), the shared playbook emitter,
+> the pre-emission read-only SQL lint (fail-closed), the `nexus_diag`
+> SELECT-only+BYPASSRLS diagnostic role + single connection choke point, the
+> MCP `forensics`/`remediate` tools, the `nx forensics`/`nx remediate` CLI, and
+> both MVV proofs. Each phase passed a stacked review; the final holistic pass
+> (review-final + critic-final APPROVE, test-validator validated) verified all
+> five Gaps delivered and the taxonomy amendments (A5 + the H1 release gate)
+> consistent across code, docs, and tests. Full suite green (13056).
+>
+> **Open residuals (tracked, prioritized):** nexus-ng2sy (P0 — service-mode
+> record_consent parity; remediate is local-mode-only until it lands),
+> nexus-vounk (P1 — the health.py chash probe still counts 0 under FORCE RLS;
+> rewire onto the new nexus_diag path), nexus-s4a98 (P1 — the enable command
+> the refusals name crashes on a pre-existing flat scalar), nexus-9bufb (P2 —
+> structural content-scoping views for nexus_diag), nexus-wnp3c (P2 — topics
+> for the 3 remaining incident classes; Gap 1 is populated for chash-poison
+> only). Gate shape + carried-forward limitations: T2
+> `nexus/rdr182-a4-spike-gate-shape.md`.
 
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.
@@ -49,6 +71,18 @@ constraints to "unblock" it and silently corrupted the store. The safe path
 operator (or agent) does not read. The fix: at each such edge, offer a
 built-in, safe, guided path — and make it the *easy* path, so the destructive
 reflex never fires.
+
+> **Delivery honesty (post-implementation, critic-final M3, 2026-07-13)**:
+> the *automatic edge interception* that actually catches the reflex at the
+> moment of risk with zero consent friction — `_emit_chash_poison_gate` wired
+> to `nx daemon service install-binary` — PRE-DATES this epic (nexus-pnwu0)
+> and RDR-182 deliberately left it ungated (it still prints the full playbook
+> unconditionally and blocks with exit 3). RDR-182's own contribution to
+> Gap 1 is to *generalize* that pattern into a reusable playbook emitter and
+> add the self-serve `forensics`/`remediate` surfaces (CLI + MCP) plus the
+> Gaps 2/3/4/5 machinery around it — not a second automatic edge. Only the
+> `chash-poison` edge has a shipped topic today (see M2 / the remaining
+> incident-class topics tracked as a follow-up).
 
 #### Gap 2: Remediation knowledge is not in-product
 
@@ -213,15 +247,20 @@ Critical Assumptions against source. Full evidence: T2
   `config.yml`/`nx config set` + `attention_guided_v1`'s default-False +
   locked test cover the CLI path; a small T2 `record_consent()` table is
   net-new. SCOPE (gate Layer 3): this covers the CLI ONLY.
-- [ ] Opt-in **enforceable at the MCP tool boundary** (a config-flag read
+- [x] Opt-in **enforceable at the MCP tool boundary** (a config-flag read
   inside `forensics`/`remediate` that refuses before emitting content) —
-  **Status**: Unverified / UNBUILT — **Method**: Spike. The RDR's own A3
-  research (`nexus/rdr182-assumption3-opt-in-primitives-investigation` §3)
-  states a Desktop/plugin-scoped opt-in has no home today and must be built;
-  `click.confirm` does NOT transfer to an MCP call, and no existing
-  `@mcp.tool()` is config-gated. This is the load-bearing safety mechanism for
-  the surface Gap 4 calls first-class and MUST be verified (a spike proving
-  the tool refuses when the flag is false) before implementation.
+  **Status**: Verified — **Method**: Spike (nexus-ykzbj.1, 2026-07-12). A
+  registered throwaway `@mcp.tool()` (`rdr182_gate_spike`) gated by a
+  first-statement `_remediation_opt_in()` read of
+  `claude_assisted_remediation.enabled` refuses with an exact-remedy string
+  and provably enters zero content path when the flag is false/absent
+  (tests/mcp/test_rdr182_opt_in_gate.py, 8 mechanical tests). Two
+  load-bearing spike findings locked for Phase 3: `nx config set` stores the
+  raw STRING (`"true"`/`"false"`), so the gate parses strictly and
+  fail-closed (naive truthiness would invert an explicit `"false"` disable);
+  and the flag is read fresh per invocation (long-lived MCP server —
+  mid-session enable takes effect on the next call). Exact gate shape +
+  reuse contract: T2 `nexus/rdr182-a4-spike-gate-shape.md`.
 
 ## Proposed Solution
 
@@ -375,14 +414,69 @@ principles; the engine-side analysis (c4143) shows the hard cases need a human
   no-exfiltration constraint; nothing is transmitted by the product.
 - **Risk**: opt-in erodes into default-on for "convenience."
   **Mitigation**: default-off is a locked constraint; parity tests assert it.
+- **Risk (A5, taxonomy amendment 2026-07-13 / critic-p4 Critical)**: the CLI
+  `nx forensics`/`nx remediate` were originally ungated per Gap 3 ("printing
+  text a human chooses to copy is the consent act"), but — unlike the static
+  `install-binary` paste-prompt that precedent was drawn from — they run a
+  live, credentialed, product-provisioned **BYPASSRLS** store probe. A
+  shell-capable agent (the very "enlisted agent" this RDR is about) could
+  reach, ungated, the credentialed read the MCP gate withholds.
+  **Resolution**: the taxonomy is split. The static playbook TEXT stays
+  ungated display on the CLI (the human-typed-command consent act holds for
+  guidance a human reads/copies). The **live-diagnostics leg** honors
+  `claude_assisted_remediation.enabled` on the CLI too — the credentialed
+  probe is the new capability Gap 3 gates, so it is gated on **every**
+  autonomously-reachable surface, not just the MCP transport. Flag-off on the
+  CLI degrades to an explicit "live counts not included; opt in to enable"
+  note. The durable-flag reader is a single shared implementation
+  (`nexus.remediation.consent.remediation_opt_in`, global-config-only) so the
+  CLI and MCP gates cannot drift. Residual (unchanged, A1): the product
+  cannot stop the user's own agent from running arbitrary SQL as
+  `nexus_admin` — this closes the *product-provisioned diagnostic* path, not
+  every conceivable read.
+- **Risk (A6, taxonomy amendment 2026-07-13 / nexus-9bufb, post-close)**: the
+  `nexus_diag` content boundary (§5: count rows, never read content) was
+  enforced only at the product choke point (`diag_connection.run_diagnostic_sql`
+  lint) — the role's DB grants were full-column SELECT + BYPASSRLS, so a
+  session opened OUTSIDE the helper could read cross-tenant content.
+  **Resolution (Hal decision, "amend it")**: structural DB-level scoping — the
+  superuser provisioning path creates the `nexus.diag_chash_conformance`
+  counts view (superuser-owned: under FORCE RLS a view counts cross-tenant
+  rows only when its owner is RLS-exempt — the nexus-vounk lesson applied
+  structurally), and the view-era `grants-nexus-diag-2` runAlways changeset
+  revokes the role's direct table SELECT, leaving the view + Liquibase
+  journal only. Counts-by-construction replaces lint-only enforcement; the
+  choke-point lint stays as defense in depth. The emitted diagnostic SQL
+  (health probe + `forensics` playbook, both from
+  `nexus.db.chash_tables.chash_conformance_statements`) targets the view,
+  with a loud legacy-statement fallback for engines one generation behind
+  (whose legacy grants still carry table SELECT). Drift guards pin the view
+  DDL, the docs' rendered DBA copy, and the changeset's revoke to
+  `CHASH_BEARING_TABLES` (`tests/test_diag_conformance_view.py`).
+- **Risk (H1, extension of A5, 2026-07-13 / critic-final)**: the CLI `nx
+  remediate` RELEASE was originally gated only by the interactive
+  `click.confirm`, so an automation piping `y` (`echo y | nx remediate`)
+  could obtain the guided playbook AND write a `granted=True` consent row —
+  forging a human-looking consent without the durable flag. The released
+  text is public runbook content, so this is an audit-INTEGRITY concern, not
+  a capability leak; but a forgeable "a human consented" row undercuts Gap 5.
+  **Resolution (Hal decision)**: the CLI remediate release now requires the
+  durable `claude_assisted_remediation.enabled` flag IN ADDITION to the
+  confirm — the same durable opt-in the MCP tool needs — so a piped `y`
+  cannot mint a consent row without the flag first being set. The describe
+  stage stays ungated display. Now BOTH surfaces require the durable flag for
+  the mutation-authorizing handoff; the CLI's only remaining ungate is the
+  static guidance text (public documentation).
 
 ### Failure Modes
 
 - **Opt-in not enabled (the default)**: the MCP `forensics`/`remediate` tools
   return a refusal string naming the exact enable command (`nx config set
   claude_assisted_remediation.enabled true`) before any content — visible,
-  actionable, no capability leak. The CLI `nx forensics` (display-only) is
-  unaffected (it needs no gate per the consent taxonomy).
+  actionable, no capability leak. The CLI prints its guidance TEXT ungated but
+  omits the live credentialed store counts, with a note naming the same enable
+  command (taxonomy amendment A5 above — the live probe is gated on the CLI
+  too; only the static display is ungated).
 - **Store-state probe cannot run** (PG down, not service mode): degrades to a
   non-fatal warn and the display-only runbook URL — never a false "clean" and
   never a hard block on unrelated work (matches the shipped `install-binary`
@@ -397,9 +491,10 @@ principles; the engine-side analysis (c4143) shows the hard cases need a human
 
 ### Prerequisites
 
-- [ ] All Critical Assumptions verified — including A4 (MCP tool-boundary
-  opt-in enforcement), which is Unbuilt and requires a spike proving the tool
-  refuses when the flag is false BEFORE any implementation.
+- [x] All Critical Assumptions verified — A4 (MCP tool-boundary opt-in
+  enforcement) verified 2026-07-12 by the nexus-ykzbj.1 gating spike (see
+  Critical Assumptions above; gate shape in T2
+  `nexus/rdr182-a4-spike-gate-shape.md`).
 - [ ] RDR-126 Desktop surface + MCP tool model reviewed
 
 ### Minimum Viable Validation
@@ -408,8 +503,13 @@ Two proofs, both in scope:
 
 1. **The safety property**: with `claude_assisted_remediation.enabled` false
    (default), the MCP `forensics`/`remediate` tools return the refusal string
-   and emit ZERO diagnostic content — the autonomous-enlistment hole is
-   closed by construction, asserted mechanically.
+   and emit ZERO diagnostic content, AND the CLI's live-diagnostics leg does
+   not run the credentialed probe (it prints ungated guidance text but no
+   live store counts) — the credentialed-probe autonomous-enlistment hole is
+   closed on BOTH the MCP and CLI surfaces (taxonomy amendment A5), asserted
+   mechanically on each. (The static guidance text is public runbook content
+   and is intentionally not gated — this proof is about the credentialed
+   store probe, not about withholding public documentation.)
 2. **The end-to-end flow**: with the flag enabled, a poisoned store → operator
    opts in at the upgrade edge → `nx remediate chash-poison` (and/or the
    Desktop MCP tool) hands the agent a read-only diagnostic + consented

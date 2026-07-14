@@ -39,6 +39,22 @@ requires_t3 = pytest.mark.skipif(
     reason="T3 integration requires a reachable nexus-service (start with 'nx daemon service start' or export NX_SERVICE_URL/NX_SERVICE_TOKEN)",
 )
 
+
+def _voyage_key_present() -> bool:
+    from nexus.config import get_credential  # noqa: PLC0415 — deferred so collection doesn't import the config stack
+
+    return bool(get_credential("voyage_api_key"))
+
+
+#: Skip-on-ABSENT-key only (the NEXUS_GATE_NO_VOYAGE masked-gate regime, or a
+#: checkout with no key at all); a PRESENT-but-dead key still runs and fails
+#: loud — a revoked credential is real signal, not a skip. The local-service
+#: gate's skip-budget assert accounts for these consciously.
+requires_voyage_key = pytest.mark.skipif(
+    not _voyage_key_present(),
+    reason="requires a Voyage API key (env VOYAGE_API_KEY/NX_VOYAGE_API_KEY or config.yml credential)",
+)
+
 _T3_COL = "knowledge__nexus-integration-test"
 
 
@@ -95,7 +111,6 @@ def scratch_session(isolated_home, monkeypatch):
     # ``HOME`` is already isolated by ``isolated_home``;
     # ``NEXUS_CONFIG_DIR`` makes that explicit for the lease path.
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
-    monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
     monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
     # Pin the session_id across CLI invocations so all writes/reads
     # see the same metadata filter scope AND resolve the same lease.
@@ -283,6 +298,7 @@ def test_nx_search_knowledge_corpus(runner):
 
 @pytest.mark.integration
 @requires_t3
+@requires_voyage_key
 def test_voyage_code3_index_and_query():
     import voyageai
     from nexus.config import get_credential
@@ -333,6 +349,7 @@ def test_voyage_code3_index_and_query():
 
 @pytest.mark.integration
 @requires_t3
+@requires_voyage_key
 def test_cce_query_retrieves_cce_indexed_markdown():
     import tempfile
     from pathlib import Path
@@ -374,6 +391,7 @@ def test_cce_query_retrieves_cce_indexed_markdown():
 
 @pytest.mark.integration
 @requires_t3
+@requires_voyage_key
 def test_t3_put_embedding_model_in_search_metadata():
     from nexus.db import make_t3
 
@@ -403,6 +421,7 @@ def test_t3_put_embedding_model_in_search_metadata():
 
 @pytest.mark.integration
 @requires_t3
+@requires_voyage_key
 def test_migrate_t3_ensure_databases_is_idempotent(runner):
     import os
     from nexus.commands._provision import ensure_databases, _cloud_admin_client

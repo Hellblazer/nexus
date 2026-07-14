@@ -21,7 +21,7 @@ nx search "authentication middleware" --corpus code --hybrid --n 20
 | `--corpus NAME` | Collection prefix or full name (repeatable; default: `knowledge`, `code`, `docs`) |
 | `--hybrid` | Augment semantic results with frecency-weighted ranking and ripgrep keyword matches (0.7*vector + 0.3*frecency). Requires ripgrep |
 | `--no-rerank` | Disable cross-corpus reranking (use round-robin instead) |
-| `--where KEY{op}VALUE` | Metadata filter (repeatable; multiple flags are ANDed). Operators: `=`, `>=`, `<=`, `>`, `<`, `!=`. Known numeric fields (`bib_year`, `bib_citation_count`, `page_count`, `chunk_count`) are auto-coerced to int. Example: `--where bib_year>=2024 --where section_type!=references` |
+| `--where KEY{op}VALUE` | Metadata filter (repeatable; multiple flags are ANDed). Operators: `=`, `>=`, `<=`, `>`, `<`, `!=`. Range operators (`>=`, `<=`, `>`, `<`) auto-coerce an unambiguous numeric literal to a number for ANY field (numeric compare; JSON-string metadata values will not match a numeric operand); quote the value (`--where "created>='2026-01-01'"`) to force an ordered-STRING compare (correct for ISO dates; beware `'9' > '10'` lexically). Equality/`!=` coerce only the known numeric fields (`bib_year`, `bib_citation_count`, `page_count`, `chunk_count`). Example: `--where bib_year>=2024 --where section_type!=references` |
 | `--max-file-chunks N` | Exclude chunks from files larger than N chunks (code corpora only; ANDs with `--where`) |
 | `-m` / `--n` / `--max-results NUM` | Max results (default 10) |
 | `-A N` | Show N lines of context after each matching line (within chunk) |
@@ -1375,7 +1375,7 @@ nx config init
 | `init` | Interactive managed-service (cloud) credential wizard — collects `service_url` + `service_token`. Local mode uses `nx init` instead. |
 | `list` | Show all config values |
 | `get KEY` | Get single value (masked by default) |
-| `set KEY VALUE` | Set single value; also accepts `KEY=VALUE` form |
+| `set KEY VALUE` | Set single value; also accepts `KEY=VALUE` form. Setting `claude_assisted_remediation.enabled` (RDR-182) also writes a grant/revoke row to the consent-audit trail (best-effort; inspect with `nx remediate --history`). |
 
 **`get` flags:**
 
@@ -2406,7 +2406,7 @@ mid-run crash — partial data beats no data). Note: `aspects` has no
 standalone command; it runs only via `migrate all`.
 
 `--verify-fill` (RDR-178 wave-2): a re-run to patch a small hole no
-longer re-sends the whole run. Per store:
+longer re-sends the whole run. Retention-swept tables (`relevance_log`, 90-day TTL) are verified only within the retention window: source rows older than the horizon are the sweep's legitimate deletion domain (re-importing them would resurrect expired data), so once every source row has aged out the table reports `expired_unverifiable` — by design, and never dressed as verified parity. Per store:
 
 - `chash` / `catalog` — the outer count-diff decides parity (zero writes)
   vs. divergent (send ONLY the rows genuinely missing from the target,
@@ -2484,6 +2484,66 @@ Audit tier-write activity (T1 scratch, T2 memory/plans, T3 store) for a session.
 ## nx command-context
 
 Generates the agent-relay preamble context that the conexus skills consume (RDR-130 P2). Each subcommand mirrors a skill (`analyze-code`, `architecture`, `create-plan`, `implement`, `debug`, `deep-analysis`, `enrich-plan`, `knowledge-tidy`, `pdf-process`, `plan-audit`, and more) and prints the working-directory, project-type, git-branch, and ready-bead context blocks the agent needs. Run `nx command-context --help` for the full subcommand list. Primarily invoked by tooling, not by hand.
+
+---
+
+## nx forensics
+
+```
+nx forensics [TOPIC]
+```
+
+Print the read-only diagnostic playbook for an upgrade-edge TOPIC (default:
+`chash-poison`, the GH #1390 poisoned-store class) — RDR-182. Output includes
+the full clickable recovery-runbook URL.
+
+The guidance TEXT is display-only and ungated: a human typing this command
+and choosing what to copy is the consent act. The LIVE store-diagnostics leg
+(the credentialed, product-provisioned read that embeds actual store counts)
+is opt-in — it runs only when `claude_assisted_remediation.enabled` is set
+in your global config (`nx config set claude_assisted_remediation.enabled
+true`); otherwise the playbook notes that live counts were not included, and
+the guidance is unaffected. This mirrors the MCP tools: the credentialed
+probe is the capability the opt-in gates, on every autonomously-reachable
+surface (a shell-capable agent gets no more than the MCP transport does).
+When enabled, credentials absent or a probe failure render as an explicit
+"unavailable"/"unknown" note, never a silent all-clean.
+
+---
+
+## nx remediate
+
+```
+nx remediate [TOPIC]
+```
+
+Guided recovery for an upgrade-edge TOPIC (default: `chash-poison`) —
+RDR-182. Prints the pre-consent description first (what consenting
+authorizes, the hard do-NOTs, and the clickable runbook URL — all of which
+stay on screen regardless), then asks for a per-invocation interactive
+confirmation. As with `nx forensics`, the embedded live store counts are
+opt-in via `claude_assisted_remediation.enabled`; the guidance text is not.
+Declining is safe: nothing runs, nothing is recorded. The prompt defaults to
+NO and aborts on EOF, and there is deliberately no `--yes` flag. The RELEASE
+of the recovery playbook (and its consent-audit row) ALSO requires the
+durable `claude_assisted_remediation.enabled` opt-in — not just the confirm —
+so an automation piping `y` cannot forge a human-looking consent row without
+the flag being set. The pre-consent description stays ungated display.
+
+An accepted confirmation is recorded to the consent-audit trail
+(`claude_assisted_remediation_consents`, scope `remediate:<topic>`) BEFORE
+the recovery playbook prints; if the audit cannot be written the release is
+refused. The playbook's steps are executed by you (or the agent you paste
+them to) with your credentials — the product itself never mutates the store.
+
+Grants and revocations of the durable MCP-surface flag are also audited:
+`nx config set claude_assisted_remediation.enabled true|false` writes a
+`flag:claude_assisted_remediation` grant/revoke row (best-effort — the flag
+change itself never blocks on audit problems).
+
+`nx remediate --history` prints the consent-audit trail (grants and revokes,
+in insertion order) and exits — the operator read surface for the
+`claude_assisted_remediation_consents` table.
 
 ---
 

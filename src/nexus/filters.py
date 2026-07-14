@@ -17,6 +17,7 @@ _OP_MAP: dict[str, str | None] = {
     ">=": "$gte", "<=": "$lte", "!=": "$ne",
     ">": "$gt", "<": "$lt", "=": None,
 }
+_RANGE_OPS = frozenset({"$gte", "$lte", "$gt", "$lt"})
 
 
 def coerce_value(key: str, value: str, *, strict: bool = False) -> str | int | float:
@@ -37,6 +38,35 @@ def coerce_value(key: str, value: str, *, strict: bool = False) -> str | int | f
                         f"field {key!r} requires a numeric value, got {value!r}"
                     )
     return value
+
+
+def _coerce_range_operand(key: str, raw: str, *, strict: bool) -> str | int | float:
+    """Operand typing for RANGE operators (nexus-gnrow, critique of 4l80g).
+
+    The service bridge is operand-typed: a numeric operand compares
+    numerically (jsonb_typeof-guarded), a string operand compares LEXICALLY
+    ('9' > '10'). With the old 8-field ``NUMERIC_FIELDS``-only coercion, a
+    range query on any OTHER field shipped its numeric-looking value as a
+    string and silently took the lexical path — plausible-looking, silently
+    WRONG results (strictly worse than the pre-4l80g loud 400).
+
+    Rule: a range operator with an unambiguous numeric literal expresses
+    numeric intent for ANY field. Quote the value (``field>='2026-01-01'``)
+    to force the lexical/string compare (correct for ISO dates and other
+    ordered strings). Non-numeric literals stay strings, quoted or not.
+    """
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+        return raw[1:-1]
+    coerced = coerce_value(key, raw, strict=strict)
+    if isinstance(coerced, (int, float)):
+        return coerced
+    try:
+        return int(raw)
+    except ValueError:
+        try:
+            return float(raw)
+        except ValueError:
+            return raw
 
 
 def parse_where(
@@ -68,8 +98,11 @@ def parse_where(
         key, op_str, raw_value = m.group(1), m.group(2), m.group(3)
         if not raw_value:
             raise ValueError(f"empty value in where clause: {pair!r}")
-        value = coerce_value(key, raw_value, strict=strict)
         chroma_op = _OP_MAP[op_str]
+        if chroma_op in _RANGE_OPS:
+            value = _coerce_range_operand(key, raw_value, strict=strict)
+        else:
+            value = coerce_value(key, raw_value, strict=strict)
         if chroma_op is None:
             parts.append({key: value})
         else:

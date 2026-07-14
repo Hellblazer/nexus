@@ -771,13 +771,20 @@ def compact_cmd() -> None:
     help="Report what would be reconciled without writing.",
 )
 def reconcile_cmd(dry_run: bool) -> None:
-    """Repair document_chunks manifest gaps (GH #1371).
+    """Repair document_chunks manifest gaps (GH #1371, GH #1397).
 
     A persistent manifest-write-hook failure (e.g. the catalog
     engine-service was briefly unreachable) can leave a document with
     ``chunk_count > 0`` in ``documents`` but fewer rows — or none at all
     — in the ``document_chunks`` manifest. Such a document silently drops
     out of catalog-aware retrieval even though T3 still has its chunks.
+
+    GH #1397 (nexus-94fxl) added the ghost class: a document registered
+    with ``chunk_count == 0`` and an empty manifest because the manifest
+    hook dropped its batches (missing doc identity). Rows with a recorded
+    ``content_hash`` + ``physical_collection`` are candidates for the same
+    T3 rebuild; register-only ghosts (no content_hash) are deliberately
+    excluded — they were never indexed, so there is nothing to rebuild.
 
     This command finds every document with that gap, rebuilds its manifest
     from the T3 chunks in its ``physical_collection`` (matched by the
@@ -798,15 +805,28 @@ def reconcile_cmd(dry_run: bool) -> None:
     verb = "Would reconcile" if dry_run else "Reconciled"
 
     cat = _get_catalog()
-    entries = [e for e in cat.all_documents(limit=0) if e.chunk_count > 0]
+    # Candidates: normal documents (chunk_count > 0) PLUS the GH #1397 ghost
+    # class — chunk_count == 0 rows that DO carry the indexing provenance
+    # (content_hash + physical_collection) needed for a T3 rebuild. Rows with
+    # chunk_count == 0 and no content_hash are register-only ghosts (never
+    # indexed): excluded so they don't spam the unmatched report.
+    entries = [
+        e for e in cat.all_documents(limit=0)
+        if e.chunk_count > 0
+        or ((e.meta or {}).get("content_hash") and e.physical_collection)
+    ]
     if not entries:
         click.echo(f"{verb} 0 document(s); 0 could not be matched to chunks.")
         return
 
     manifests = cat.get_manifests([str(e.tumbler) for e in entries])
+    # Gap: fewer manifest rows than chunk_count, OR the ghost shape (zero
+    # count, empty manifest). A ghost heals to chunk_count > 0 via the
+    # post-write resync, so repeated runs converge.
     gapped = [
         e for e in entries
         if len(manifests.get(str(e.tumbler), [])) < e.chunk_count
+        or (e.chunk_count == 0 and not manifests.get(str(e.tumbler)))
     ]
     if not gapped:
         click.echo(f"{verb} 0 document(s); 0 could not be matched to chunks.")

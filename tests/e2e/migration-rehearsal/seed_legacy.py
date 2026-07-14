@@ -16,7 +16,10 @@ ETL), metadata = {position, tag}. Two conformant collections:
   knowledge__rehearsal__voyage-context-3__v1   (cloud leg — re-embedded via Voyage)
 
 Usage: seed_legacy.py <chroma_path> [--with-cloud] [--n N]
-Prints one JSON line: {"collections": {name: count, ...}} for the driver to assert.
+       seed_legacy.py <chroma_path> --blocking=collision|pregate [--n N]
+       seed_legacy.py <chroma_path> --remove-blocking[=collision|pregate]
+Prints one JSON line: {"collections": {name: count, ...}} for the driver to assert
+(--blocking prints {"blocking": {...}}; --remove-blocking prints {"removed": [...]}).
 """
 from __future__ import annotations
 
@@ -50,6 +53,51 @@ _VOYAGE = "knowledge__rehearsal__voyage-context-3__v2"
 # case that motivated RDR-162.
 _NOTE = "knowledge__rehearsal-note__minilm-l6-v2-384__v1"
 
+# nexus-itme7 shape (iii): a pre-RDR-109 MISLABELED collection — voyage-NAMED,
+# but its stored vectors are 768-dim local ONNX. Classification measures a
+# stored vector (nexus-nb7hr / nexus-x7t5y) and cross-model-remaps it to the
+# bge-768 target UNCONDITIONALLY — in voyage mode too (remap_target_model
+# returns the local ONNX model for measured-768 content; vectors that were
+# never voyage must never bill a voyage re-embed). Part of the MAIN seed:
+# this shape MIGRATES (success phase), unlike the --blocking shapes below.
+_MISLABEL = "knowledge__rehearsal-mislabel__voyage-context-3__v1"
+
+# nexus-itme7 pre-write BLOCK shapes (GH #667/#1381/#1390 field classes).
+# Seeded ONLY via --blocking=<group>; NEVER entered into the chashes dict, so
+# _seed_t2_and_catalog never sees them (the guards fire at classification /
+# collision-audit time, before any catalog row would matter).
+#   (i)  token-less 2-segment name: dim MUST NOT be 768 (the measured-dim
+#        override would rescue it into a remap) and ids MUST be 32-char
+#        (16-char would mis-attribute the block to legacy_ids).
+#   (ii) SUPPORTED-model name with pre-RDR-108 16-char chunk ids (the
+#        canon-chat shape): the legacy-id probe blocks BEFORE model support.
+#   (iv) collision pair: the stale voyage-named half MUST hold real 768-dim
+#        vectors — the measured-dim override remaps it onto the honest
+#        sibling's name (target-name collision). A non-768 half would instead
+#        trip guided-upgrade's step-2a voyage-capability gate and exit with
+#        the wrong diagnostic.
+_LEGACYBARE = "knowledge__legacybare"
+_SHORTID = "knowledge__rehearsal-shortid__bge-base-en-v15-768__v1"
+_PAIR_HONEST = "knowledge__rehearsal-pair__bge-base-en-v15-768__v1"
+_PAIR_STALE = "knowledge__rehearsal-pair__voyage-context-3__v1"
+
+#: blocking collection -> (seed text prefix, vector dim, chunk-id length)
+_BLOCKING_SPEC: dict[str, tuple[str, int, int]] = {
+    _LEGACYBARE: ("bare legacy chunk", 2, 32),
+    _SHORTID: ("short id chunk", 2, 16),
+    _PAIR_HONEST: ("pair honest chunk", 2, 32),
+    _PAIR_STALE: ("pair stale chunk", 768, 32),
+}
+
+#: --blocking group -> collections. Per-shape granularity (plan-audit F1): the
+#: collision guard fires BEFORE the sequencer pregate, so one guided-upgrade
+#: run can emit only ONE of the two block types — Phase 0 seeds them in
+#: SEPARATE sub-runs.
+_BLOCKING_GROUPS: dict[str, tuple[str, ...]] = {
+    "collision": (_PAIR_HONEST, _PAIR_STALE),
+    "pregate": (_LEGACYBARE, _SHORTID),
+}
+
 # The model the cross-model migrate re-embeds the minilm sources into. This is
 # MODE-AWARE (nexus-pi3s3, mirrors detection.cross_model_target_model): a voyage-
 # mode service (--with-cloud, voyage_key_present) re-embeds knowledge collections
@@ -71,7 +119,9 @@ def _chash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:32]
 
 
-def _seed(client, name: str, n: int, *, prefix: str, dim: int = 2) -> list[str]:
+def _seed(
+    client, name: str, n: int, *, prefix: str, dim: int = 2, id_len: int = 32
+) -> list[str]:
     """Seed a legacy Chroma collection; return the chunk chashes (ids).
 
     ``dim`` (nexus-pi3s3): the CROSS-MODEL re-embed legs (minilm→bge/voyage) never
@@ -82,9 +132,13 @@ def _seed(client, name: str, n: int, *, prefix: str, dim: int = 2) -> list[str]:
     dimension (1024) or the service's RDR-156 schema guard rejects the upsert
     ("embedder produced a 2-dim vector ... dispatches to chunks_1024"). Values are
     irrelevant (parity asserts COUNT, not similarity) — only the dim matters.
+
+    ``id_len`` (nexus-itme7): shape (ii) seeds pre-RDR-108 16-char chunk ids
+    (``sha256[:16]``, the GH #1390 canon-chat era) so the legacy-id pregate
+    block fires. Everything else keeps the 32-char chash identity.
     """
     texts = [f"{prefix} {i:04d}" for i in range(n)]
-    ids = [_chash(t) for t in texts]
+    ids = [_chash(t)[:id_len] for t in texts]
     col = client.get_or_create_collection(name)
     col.add(
         ids=ids,
@@ -197,10 +251,48 @@ def _seed_t2_and_catalog(collections: dict[str, list[str]]) -> dict[str, int]:
     return {"t2_notes": 1, "catalog_docs": docs}
 
 
+def _blocking_group(args: list[str], flag: str) -> tuple[str, ...] | None:
+    """Resolve ``--blocking=<group>`` / ``--remove-blocking[=<group>]`` args.
+
+    Returns the group's collections, or ``None`` when *flag* is absent. A bare
+    ``--remove-blocking`` resolves to ALL blocking collections (cleanup form);
+    a bare ``--blocking`` is refused — seeding both groups in one store would
+    let the collision guard mask the pregate (one run emits exactly ONE block
+    type, plan-audit F1), silently making the pregate assertions vacuous.
+    Unknown groups exit loud (2) for the same reason.
+    """
+    for a in args:
+        if a == flag:
+            if flag == "--blocking":
+                print(
+                    "--blocking requires a group: --blocking=collision|pregate "
+                    "(one guided-upgrade run can emit only ONE block type)",
+                    file=sys.stderr,
+                )
+                raise SystemExit(2)
+            return tuple(_BLOCKING_SPEC)
+        if a.startswith(flag + "="):
+            group = a.split("=", 1)[1]
+            if group not in _BLOCKING_GROUPS:
+                print(
+                    f"unknown {flag} group {group!r} "
+                    f"(choose from {sorted(_BLOCKING_GROUPS)})",
+                    file=sys.stderr,
+                )
+                raise SystemExit(2)
+            return _BLOCKING_GROUPS[group]
+    return None
+
+
 def main() -> int:
     args = sys.argv[1:]
     if not args:
-        print("usage: seed_legacy.py <chroma_path> [--with-cloud] [--n N]", file=sys.stderr)
+        print(
+            "usage: seed_legacy.py <chroma_path> [--with-cloud] [--n N]\n"
+            "       seed_legacy.py <chroma_path> --blocking=collision|pregate [--n N]\n"
+            "       seed_legacy.py <chroma_path> --remove-blocking[=collision|pregate]",
+            file=sys.stderr,
+        )
         return 2
     path = args[0]
     with_cloud = "--with-cloud" in args
@@ -209,9 +301,65 @@ def main() -> int:
         n = int(args[args.index("--n") + 1])
 
     client = chromadb.PersistentClient(path=path)
+
+    # nexus-itme7 blocking modes — early return BEFORE the T2/catalog seeding:
+    # the block shapes must never enter the chashes dict (no catalog document,
+    # no manifest, no T2 note) and these modes make zero config-dir writes, so
+    # they are trivially sanity-runnable outside the container. NOTE: the
+    # blocking shapes alone are NOT a runnable guided-upgrade fixture —
+    # migrate_cmd's T2/catalog existence pre-check fires before any guard, so
+    # Phase 0 layers them ON TOP of the main seed's footprint.
+    blocking = _blocking_group(args, "--blocking")
+    removing = _blocking_group(args, "--remove-blocking")
+    if blocking is not None and removing is not None:
+        print("--blocking and --remove-blocking are mutually exclusive", file=sys.stderr)
+        return 2
+    if blocking is not None:
+        seeded_blocking: dict[str, int] = {}
+        for bname in blocking:
+            prefix, dim, id_len = _BLOCKING_SPEC[bname]
+            seeded_blocking[bname] = len(
+                _seed(client, bname, n, prefix=prefix, dim=dim, id_len=id_len)
+            )
+        print(json.dumps({"blocking": seeded_blocking}))
+        return 0
+    if removing is not None:
+        removed: list[str] = []
+        for bname in removing:
+            try:
+                client.delete_collection(bname)
+            except Exception:  # noqa: BLE001 — absent collection: removal is idempotent
+                continue
+            removed.append(bname)
+        print(json.dumps({"removed": removed}))
+        return 0
+
     chashes: dict[str, list[str]] = {}
     chashes[_MINILM] = _seed(client, _MINILM, n, prefix="onnx chunk")
     chashes[_NOTE] = _seed(client, _NOTE, n, prefix="note chunk")
+    # Shape (iii): voyage-NAMED, but the stored vectors are real 768-dim — the
+    # measured-dim override (nexus-nb7hr/x7t5y) reclassifies it and the migrate
+    # re-embeds it into the bge-768 target. Registered in T2/catalog like every
+    # other MAIN-seed collection: this one DOES migrate, so the rename cascade
+    # and the post-migration orphan scan are meaningful for it.
+    #
+    # Safe for the LOCAL-mode main-seed callers (rehearse.sh default leg,
+    # rehearse_cold.sh, rehearse_hole_punch.sh, rehearse_guided.sh — yaeex
+    # critique): they drive the same _run_migration the guided hand-off uses;
+    # their parity and rollback-safety checks iterate this manifest generically
+    # (cross.get(name, name), no hardcoded counts).
+    #
+    # NOT seeded on --with-cloud (first with-cloud run post-itme7, 2026-07-13):
+    # remap_target_model returns the local ONNX model UNCONDITIONALLY for
+    # measured-768 content (measured-ONNX vectors must never bill a voyage
+    # re-embed), so the target is always the bge-768 name — which a voyage-mode
+    # service refuses with HTTP 422 (no bge embedder), failing the whole leg
+    # structurally. The itme7 design scoped the legacy shapes to --guided
+    # (amendment 7); the with-cloud leg keeps its original pre-itme7 manifest.
+    # The mislabel-on-voyage-service PRODUCT behaviour (pregate should block it
+    # up front rather than a mid-flight 422) is tracked separately.
+    if not with_cloud:
+        chashes[_MISLABEL] = _seed(client, _MISLABEL, n, prefix="mislabel chunk", dim=768)
     if with_cloud:
         # 1024-dim source vectors: the voyage same-model passthrough COPIES them
         # (no re-embed) into chunks_1024 (nexus-pi3s3).
@@ -229,6 +377,15 @@ def main() -> int:
         _MINILM: _remap_model(_MINILM, _tgt_model),
         _NOTE: _remap_model(_NOTE, _tgt_model),
     }
+    if not with_cloud:
+        # Shape (iii) is NOT mode-aware: remap_target_model returns the local
+        # ONNX model UNCONDITIONALLY for measured-768 content (voyage mode
+        # included — measured-ONNX vectors must never bill a voyage re-embed),
+        # so the target is always the bge-768 name. Distinct owner segment
+        # ("rehearsal-mislabel") keeps it collision-free with every other
+        # main-seed target. Skipped on --with-cloud (see the seeding note
+        # above): a voyage-mode service cannot embed the bge target.
+        cross_model[_MISLABEL] = _remap_model(_MISLABEL, _BGE_MODEL)
     print(json.dumps({"collections": seeded, "cross_model": cross_model, **t2}))
     return 0
 

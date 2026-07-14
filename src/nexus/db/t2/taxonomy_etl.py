@@ -524,7 +524,7 @@ def _migrate_table(
     nexus-sa14p).
     """
     breaker = breaker if breaker is not None else EtlCircuitBreaker()
-    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — branch-local; quota constant
+    from nexus.db.limits import QUOTAS  # noqa: PLC0415 — branch-local; quota constant
     bsize = QUOTAS.MAX_RECORDS_PER_WRITE
 
     read_count = 0

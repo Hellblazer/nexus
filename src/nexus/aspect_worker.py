@@ -1066,8 +1066,10 @@ def drain_worker(
                 detail = (
                     "Note (service mode): pending_count is 0, but is_drained() "
                     "is still False — rows may be stuck in in_progress from a "
-                    "crashed worker. Run 'nx aspects reclaim-stale' to reset "
-                    "them back to pending, then retry the drain."
+                    "crashed worker. A running aspect-worker's stale-reclaim "
+                    "loop resets them to pending automatically; ensure one is "
+                    "up ('nx daemon aspect-worker start', or it spawns on the "
+                    "next aspect enqueue), then retry the drain."
                 )
                 stuck_count = 0
             else:

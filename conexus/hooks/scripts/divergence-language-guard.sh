@@ -20,6 +20,21 @@ allow() {
 STDIN=$(cat 2>/dev/null || true)
 [[ -z "$STDIN" ]] && allow
 
+# nexus-7o1zh: export the harness-provided session_id for the `nx scratch
+# put` call below. Same rationale as pre_close_verification_hook.sh
+# (nexus-36q84): this hook cannot rely on env-var inheritance, so it reads
+# session_id directly out of its own stdin JSON payload.
+HOOK_SESSION_ID=$(printf '%s' "$STDIN" | python3 -c "
+import json, sys
+try:
+    print(json.load(sys.stdin).get('session_id', ''))
+except Exception:
+    print('')
+" 2>/dev/null || true)
+if [[ -n "$HOOK_SESSION_ID" ]]; then
+    export NX_SESSION_ID="$HOOK_SESSION_ID"
+fi
+
 # Fast no-op: tool_name must be Write or Edit.
 TOOL_NAME=$(printf '%s' "$STDIN" | python3 -c "
 import json, sys

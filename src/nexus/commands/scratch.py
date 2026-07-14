@@ -14,12 +14,21 @@ def _clean_service_errors(fn):
     ``_t1()`` already converts constructor-time failures; operation calls
     (put/search/...) can still raise ``HttpScratchStore`` RuntimeErrors —
     most importantly the 401 from the require-minted session gate
-    (nexus-h8rf6 T1-401 finding). The 401 is BY DESIGN: service-backed T1
-    needs a MINTED session token (a live ``session_tokens`` row), and
-    re-minting ROTATES the token (``TokenStore.issueSessionToken`` is
-    ``ON CONFLICT DO UPDATE``), so the bare CLI must never self-mint for a
-    session an MCP server may own — the only correct CLI behavior is a
-    crisp explanation of the sanctioned paths.
+    (nexus-h8rf6 T1-401 finding).
+
+    nexus-rn3wo.1: a bare CLI with no inherited live MCP session no longer
+    401s here in the common case — ``get_t1_database()`` mints (and reuses,
+    via a persisted CLI-dedicated session id) its own token, and
+    self-heals a rotated token once on a 401 before this handler ever sees
+    it (see ``nexus.db.t1._CliDedicatedScratchStore``). A 401 that DOES
+    reach this handler means either:
+
+      * the CLI-dedicated self-heal retry also failed (persistent auth
+        breakage — bad ``NX_SERVICE_TOKEN``, or the service is otherwise
+        rejecting the dedicated session), or
+      * a LIVE inherited MCP session's token (``NX_T1_SESSION`` env) went
+        stale — that path is unchanged and does not self-mint (re-minting
+        it would rotate the token out from under the owning MCP server).
     """
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
@@ -32,14 +41,15 @@ def _clean_service_errors(fn):
             if SESSION_UNAUTHORIZED_MARKER in msg:
                 raise click.ClickException(
                     f"{msg}\n\n"
-                    "Service-backed T1 scratch is session-scoped and requires a "
-                    "MINTED session token (the nx-mcp server mints one at session "
-                    "start and exports NX_T1_SESSION). A bare CLI cannot safely "
-                    "self-mint: re-minting rotates the token and would break the "
-                    "session's MCP server.\n\n"
-                    "Sanctioned paths:\n"
-                    "  * run inside a Claude session (inherits the minted token), or\n"
-                    "  * prefix with NX_T1_ISOLATED=1 for in-process ephemeral scratch."
+                    "Service-backed T1 scratch requires a valid minted session "
+                    "token. A bare CLI mints its own CLI-dedicated session "
+                    "automatically (and self-heals once on a rotated-token "
+                    "401), so this failure persisted past that retry:\n\n"
+                    "  * the service auth is broken (check NX_SERVICE_TOKEN), or\n"
+                    "  * a live Claude MCP session's inherited token went stale — "
+                    "reconnect the conexus MCP/extension.\n\n"
+                    "Fallback: prefix with NX_T1_ISOLATED=1 for in-process "
+                    "ephemeral scratch (not shared across invocations)."
                 ) from exc
             raise click.ClickException(msg) from exc
     return wrapper
@@ -51,9 +61,12 @@ def _t1():
     Routes through :func:`~nexus.db.t1.get_t1_database` so the correct
     backend is selected at runtime:
 
-    * ``NX_STORAGE_BACKEND_T1=service`` → :class:`~nexus.db.http_scratch_store.HttpScratchStore`
-      (Postgres UNLOGGED, RDR-152 bead nexus-gmiaf.13).
-    * Default → :class:`~nexus.db.t1.T1Database` (ChromaDB path, unchanged).
+    * Default (hard default, RDR-152 -- see :mod:`nexus.db.storage_mode`) →
+      :class:`~nexus.db.http_scratch_store.HttpScratchStore` (Postgres
+      UNLOGGED, RDR-152 bead nexus-gmiaf.13; CLI cutover completed by
+      nexus-rn3wo.1 / nexus-1si7z / nexus-lgnjn).
+    * Explicit ``NX_T1_ISOLATED=1`` / ``sqlite``
+      opt-out → :class:`~nexus.db.t1.T1Database` (ChromaDB path, unchanged).
 
     On ``T1ServerNotFoundError`` (Chroma path) or a service-endpoint
     ``RuntimeError`` (service path, ``NX_STORAGE_BACKEND=service`` with no
@@ -145,13 +158,21 @@ def get_cmd(entry_id: str) -> None:
 @click.option("--n", default=10, show_default=True, help="Max results")
 @_clean_service_errors
 def search_cmd(query: str, n: int) -> None:
-    """Semantic search over T1 scratch entries."""
+    """Search T1 scratch entries.
+
+    Semantic (cosine distance) on the ChromaDB-backed path; full-text
+    (Postgres tsvector, ranked server-side by ts_rank) on the service-backed
+    path — the service does not expose that rank score to clients, so no
+    score is shown for service-backed results. See ``HttpScratchStore.search``.
+    """
     results = _t1().search(query, n_results=n)
     if not results:
         click.echo("No results.")
         return
     for r in results:
-        click.echo(f"[{r['id'][:8]}] {r['tags'] or '-'}  dist={r['distance']:.4f}")
+        distance = r.get("distance")
+        score = f"  dist={distance:.4f}" if distance is not None else ""
+        click.echo(f"[{r['id'][:8]}] {r['tags'] or '-'}{score}")
         preview = r["content"][:200].replace("\n", " ")
         click.echo(f"  {preview}")
 

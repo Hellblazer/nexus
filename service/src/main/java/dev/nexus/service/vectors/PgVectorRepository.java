@@ -1425,11 +1425,13 @@ public final class PgVectorRepository {
      * {@code _ServiceCollectionStub.get(where=...)} asks for chunks whose
      * {@code source_key} / {@code content_hash} match. Plain-equality predicates
      * (ANDed) and the common single-field Chroma operator-form
-     * ({@code $eq}/{@code $ne}/{@code $in}/{@code $nin}) are supported via
-     * {@link #appendWherePredicate} — the same subset {@link #search} applies
-     * (nexus-05bfd). Unsupported operator shapes fail loud with 400 rather than
-     * silently matching nothing; compound {@code $and}/{@code $or} and range
-     * operators remain untranslated.
+     * ({@code $eq}/{@code $ne}/{@code $in}/{@code $nin}, plus the
+     * {@code $gte}/{@code $lte}/{@code $gt}/{@code $lt} range operators since
+     * nexus-4l80g) are supported via {@link #metadataCondition} — the jOOQ twin
+     * of {@link #appendWherePredicate}, kept to the same operator subset
+     * {@link #search} applies (nexus-05bfd). Unsupported operator shapes fail
+     * loud with 400 rather than silently matching nothing; compound
+     * {@code $and}/{@code $or} remains untranslated.
      *
      * @param where metadata equality predicates (ANDed); null/empty returns the
      *              collection paginated (the {@code store-get}-without-ids shape)
@@ -2552,6 +2554,12 @@ public final class PgVectorRepository {
      *   <li>{@code {"k": {"$ne": "v"}}}   → {@code metadata->>'k' IS DISTINCT FROM 'v'}</li>
      *   <li>{@code {"k": {"$in":  [...]}}} → {@code metadata->>'k' IN (...)}</li>
      *   <li>{@code {"k": {"$nin": [...]}}} → {@code (metadata->>'k' IS NULL OR metadata->>'k' NOT IN (...))}</li>
+     *   <li>{@code {"k": {"$gte"|"$lte"|"$gt"|"$lt": n}}} (numeric operand) →
+     *       {@code jsonb_typeof(metadata->'k') = 'number' AND (metadata->>'k')::numeric ≥ n}
+     *       — operand-typed (nexus-4l80g): only JSON-number metadata values participate;
+     *       non-numeric rows are excluded, never a cast error.</li>
+     *   <li>{@code {"k": {"$gte"|...: "s"}}} (string operand) → lexical text compare
+     *       ({@code '9' > '10'}); pass numbers to compare numerically.</li>
      * </ul>
      *
      * <p>{@code $ne}/{@code $nin} use {@code IS DISTINCT FROM} / {@code IS NULL OR}
@@ -2571,6 +2579,18 @@ public final class PgVectorRepository {
      * or an unrecognized operator. Before nexus-05bfd an operator-form value was
      * {@code String.valueOf(map)}-bound and matched no rows with no error.
      */
+    /** NaN/Infinity cannot come from JSON parsing, but a programmatic caller
+     * could pass them — rewrap so the handler's 400 ladder catches it, never
+     * an unhandled NumberFormatException 500 (review c0e4493e finding 6). */
+    private static java.math.BigDecimal toBigDecimalOperand(String operator, String key, Number n) {
+        try {
+            return new java.math.BigDecimal(n.toString());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(
+                operator + " for field '" + key + "' got a non-finite numeric operand: " + n);
+        }
+    }
+
     static void appendWherePredicate(StringBuilder sql, List<Object> binds,
                                      String key, Object value) {
         if (key.startsWith("$")) {
@@ -2626,9 +2646,42 @@ public final class PgVectorRepository {
                 }
                 for (Object it : items) binds.add(String.valueOf(it));
             }
+            case "$gte", "$lte", "$gt", "$lt" -> {
+                // nexus-4l80g: range operators, operand-TYPED (mirrors Chroma's
+                // client contract). Numeric operand -> numeric compare, guarded
+                // by jsonb_typeof so a non-numeric metadata value on some row
+                // simply doesn't match instead of aborting the whole query on
+                // the ::numeric cast (absent key -> NULL typeof -> no match).
+                // A JSON-string "2020" does NOT match a numeric operand.
+                // String operand -> lexical text compare (the documented
+                // '9' > '10' hazard; callers comparing numbers pass numbers —
+                // the nx CLI parses unquoted numerics into JSON numbers).
+                String cmp = switch (operator) {
+                    case "$gte" -> ">=";
+                    case "$lte" -> "<=";
+                    case "$gt" -> ">";
+                    default -> "<";
+                };
+                if (operand instanceof Number n) {
+                    sql.append(" AND jsonb_typeof(metadata->?) = 'number'")
+                       .append(" AND (metadata->>?)::numeric ").append(cmp).append(" ?");
+                    binds.add(key);
+                    binds.add(key);
+                    binds.add(toBigDecimalOperand(operator, key, n));
+                } else if (operand instanceof String str) {
+                    sql.append(" AND metadata->>? ").append(cmp).append(" ?");
+                    binds.add(key);
+                    binds.add(str);
+                } else {
+                    throw new IllegalArgumentException(
+                        operator + " for field '" + key + "' expects a numeric or string "
+                        + "operand, got "
+                        + (operand == null ? "null" : operand.getClass().getSimpleName()));
+                }
+            }
             default -> throw new IllegalArgumentException(
                 "unsupported where operator '" + operator + "' for field '" + key
-                + "'; supported: $eq, $ne, $in, $nin");
+                + "'; supported: $eq, $ne, $in, $nin, $gte, $lte, $gt, $lt");
         }
     }
 
@@ -2676,9 +2729,33 @@ public final class PgVectorRepository {
                     ? mv.in(strItems)
                     : mv.isNull().or(mv.notIn(strItems));
             }
+            case "$gte", "$lte", "$gt", "$lt" -> {
+                // nexus-4l80g twin of appendWherePredicate's range case — the
+                // two translators must not drift (same operand-typed semantics).
+                String cmp = switch (operator) {
+                    case "$gte" -> ">=";
+                    case "$lte" -> "<=";
+                    case "$gt" -> ">";
+                    default -> "<";
+                };
+                if (operand instanceof Number n) {
+                    yield DSL.condition(
+                        "jsonb_typeof(metadata->{0}) = 'number' AND (metadata->>{0})::numeric "
+                        + cmp + " {1}",
+                        DSL.val(key), DSL.val(toBigDecimalOperand(operator, key, n)));
+                } else if (operand instanceof String str) {
+                    yield DSL.condition("metadata->>{0} " + cmp + " {1}",
+                        DSL.val(key), DSL.val(str));
+                } else {
+                    throw new IllegalArgumentException(
+                        operator + " for field '" + key + "' expects a numeric or string "
+                        + "operand, got "
+                        + (operand == null ? "null" : operand.getClass().getSimpleName()));
+                }
+            }
             default -> throw new IllegalArgumentException(
                 "unsupported where operator '" + operator + "' for field '" + key
-                + "'; supported: $eq, $ne, $in, $nin");
+                + "'; supported: $eq, $ne, $in, $nin, $gte, $lte, $gt, $lt");
         };
     }
 

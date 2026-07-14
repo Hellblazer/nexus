@@ -2,8 +2,14 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 from __future__ import annotations
 
+import enum
+import fcntl
+import json
 import os
+import time
 from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 from uuid import uuid4
 
@@ -125,8 +131,7 @@ class T1ServerNotFoundError(RuntimeError):
     Opt-in paths (no exception raised):
       - ``T1Database(client=...)`` for explicit client injection in
         tests and the MCP server lifespan.
-      - ``NX_T1_ISOLATED=1`` (or its deprecated ``NEXUS_SKIP_T1=1``
-        alias) for stateless one-shot subprocesses; constructs an
+      - ``NX_T1_ISOLATED=1`` for stateless one-shot subprocesses; constructs an
         ``EphemeralClient``.
     """
 
@@ -175,8 +180,7 @@ class T1Database:
         Branch order (opt-in outranks discovery):
 
         Path C (operator opt-in, highest priority)
-            ``NX_T1_ISOLATED=1`` (or its legacy ``NEXUS_SKIP_T1=1``
-            alias) -> ``EphemeralClient``. The only place
+            ``NX_T1_ISOLATED=1`` -> ``EphemeralClient``. The only place
             ``EphemeralClient`` may be constructed in this code path.
             nexus-svpq / GH #593: this branch is consulted FIRST so an
             explicit operator opt-in to ephemeral semantics is not
@@ -762,6 +766,666 @@ class T1Database:
         return self._exec(_do)
 
 
+# ── CLI-dedicated session (nexus-rn3wo.1) ──────────────────────────────────────
+#
+# Design history (LOCKED — see T2 nexus/design-t1-service-local-cutover-
+# 2026-07-11.md for the full decision trail; do not relitigate without new
+# evidence):
+#
+#   1. First draft: mint a FRESH random uuid4() session per bare-CLI
+#      invocation. Safe (never collides) but gives zero cross-invocation
+#      continuity -- every ``nx scratch`` call was its own island.
+#   2. nx_plan_audit flagged this CRITICAL-adjacent and suggested deriving
+#      the session id from resolve_active_session_id() (the same chain the
+#      MCP server uses). Tested empirically and found ACTIVELY DANGEROUS:
+#      resolve_active_session_id() resolves to the SAME id a live MCP
+#      server for that Claude session has already minted a T1 token for.
+#      HttpTokenStore.start_session() is ON CONFLICT DO UPDATE -- it
+#      ROTATES. A bare CLI process deriving from resolve_active_session_id()
+#      would rotate the live MCP's token out from under it.
+#   3. FINAL (this module): a CLI-DEDICATED, PERSISTED session id --
+#      generated once, cached to a local file, reused by every subsequent
+#      bare-CLI invocation. NEVER derived from resolve_active_session_id(),
+#      NX_SESSION_ID, or current_session -- a separate, purpose-built
+#      identity namespace exclusively for bare-CLI T1 access, so it can
+#      never collide with anything an MCP server would independently
+#      compute. Gives real continuity across separate ``nx scratch`` calls
+#      AND is collision-safe.
+#   4. Second nx_plan_audit pass: PASS_WITH_CHANGES, one MEDIUM gap -- the
+#      dedicated-id approach fixes CLI-vs-MCP collision but not CLI-vs-CLI
+#      races (two concurrent bare ``nx scratch`` processes could each
+#      re-mint the same dedicated id, rotating each other's token, causing
+#      the loser's next request to 401). Fix: self-heal -- on a 401 from
+#      HttpScratchStore when using the CLI-dedicated session, re-mint once
+#      and retry the failed operation before propagating the error.
+
+#: Cache-file name for the CLI-dedicated T1 session id. Lives directly under
+#: ``nexus_config_dir()``, alongside the other per-install identity files
+#: (``current_session``, ``t1_addr.<session_id>``). This file is read/written
+#: ONLY by the no-inherited-session branch of :func:`get_t1_database`; the
+#: inherited-live-MCP-session branch never touches it.
+_CLI_DEDICATED_SESSION_FILENAME = "t1_cli_dedicated_session"
+
+
+def _cli_dedicated_session_id(config_dir: Path) -> str:
+    """Return the persisted CLI-dedicated T1 session id, minting one on first use.
+
+    Race-safe first creation: two bare-CLI processes racing to create the
+    cache file for the FIRST time converge on the SAME id rather than each
+    generating a different one and silently picking one. Uses the same
+    ``fcntl.flock`` election + temp-file/``os.replace`` atomic-publish
+    pattern as :mod:`nexus.daemon.service_registry` -- a blocking exclusive
+    lock serializes the read-or-create critical section, and the publish
+    itself can never be observed torn.
+    """
+    config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path = config_dir / _CLI_DEDICATED_SESSION_FILENAME
+    lock_path = config_dir / f"{_CLI_DEDICATED_SESSION_FILENAME}.lock"
+
+    lock_fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        # Not a daemon-lifecycle election (RDR-149's ServiceRegistry._elect):
+        # no TTL, no heartbeat, no owner_token, no generation fencing. This is
+        # a one-shot idempotent "read-or-create a permanent identity file"
+        # mutex; the id, once written, never changes. Routing it through
+        # ServiceRegistry would misuse a leased-liveness primitive for a value
+        # with no liveness concept.
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)  # lifecycle-gate-allow: one-shot idempotent file-create mutex, not a lifecycle election
+        try:
+            try:
+                existing = path.read_text().strip()
+            except OSError:
+                existing = ""
+            if existing:
+                return existing
+
+            new_id = str(uuid4())
+            tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+            fd = os.open(str(tmp), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+            try:
+                os.write(fd, new_id.encode("utf-8"))
+            finally:
+                os.close(fd)
+            os.replace(str(tmp), str(path))
+            return new_id
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(lock_fd)
+
+
+# ── Live-MCP-session lease (nexus-c8yvj) ────────────────────────────────────
+#
+# session_end_flush() (nexus/hooks.py) runs as a SEPARATE OS process from
+# the live nx-mcp server -- a detached grandchild launched by
+# nx-session-end-launcher, not a child of the MCP process -- so it never
+# inherits the MCP's in-process os.environ["NX_T1_SESSION"] /
+# ["NX_T1_SESSION_ID"] mutation (mcp/core.py's _t1_chroma_lifespan Branch
+# 0). Before the CLI-dedicated-session work above, this was harmless: T1
+# defaulted to the Chroma-backed T1Database, whose session_id resolved via
+# resolve_active_session_id() -- the SAME on-disk chain any sibling process
+# (including the hook) could compute, so hook and MCP always agreed on the
+# session partition. Once T1 hard-defaults to SERVICE, a detached process
+# with no inherited env falls into the CLI-dedicated branch below --
+# resolving a PERSISTED id shared by every bare-CLI invocation on the
+# machine, completely disjoint from the live MCP session. flagged_entries()
+# then silently reads the WRONG (always-empty) session: no exception, just
+# "Flushed 0" on every SessionEnd, forever.
+#
+# Fix: the live MCP publishes its minted (session_id, session_token) to a
+# lease file the instant it mints (mirrors the existing
+# t1_addr.<session_id> Chroma-lease pattern) and removes it on teardown.
+# get_t1_database() checks for a live lease BEFORE falling into the
+# CLI-dedicated path -- never by re-deriving/re-minting via
+# resolve_active_session_id() (that chain resolves the SAME id a live MCP
+# already minted a token for; re-minting ROTATES it via
+# HttpTokenStore.start_session's ON CONFLICT DO UPDATE, the exact hazard
+# the CLI-dedicated design above was built to avoid). This mechanism only
+# ever READS a lease the MCP already published; it never mints.
+_T1_SESSION_LEASE_PREFIX = "t1_session_lease."
+
+#: nexus-ngcpo Finding 2: default freshness window stamped into a lease's
+#: ``expires_at`` when the caller does not supply an explicit ``ttl_seconds``
+#: (e.g. a legacy call site, or defensive fallback if a mint response is
+#: somehow missing ``expires_in_seconds``). Mirrors the service's own
+#: ``SessionTokenHandler.DEFAULT_TTL_SECONDS`` (24h) so the on-disk freshness
+#: window matches what the server would apply to an unspecified-TTL mint.
+#: Real call sites should pass the ACTUAL TTL from the mint response
+#: (``HttpTokenStore.start_session``'s ``expires_in_seconds``) so the lease's
+#: freshness window tracks the real server-side expiry, not this fallback.
+_T1_SESSION_LEASE_DEFAULT_TTL_SECONDS: float = 86_400.0
+
+
+def _t1_session_lease_path(session_id: str, config_dir: Path) -> Path:
+    return config_dir / f"{_T1_SESSION_LEASE_PREFIX}{session_id}"
+
+
+def _t1_session_mint_lock_path(session_id: str, config_dir: Path) -> Path:
+    """Per-session lock-file path guarding :func:`_lock_guarded_mint_or_borrow`'s
+    mint-or-borrow critical section (nexus-jwqjm).
+
+    Mirrors :func:`_cli_dedicated_session_id`'s own per-purpose lock-file
+    naming pattern (``config_dir / f"{name}.lock"``) -- a distinct file per
+    ``session_id`` so concurrent recoverers for DIFFERENT sessions never
+    serialize against each other.
+    """
+    return config_dir / f"t1_mint_{session_id}.lock"
+
+
+def publish_t1_session_lease(
+    session_id: str,
+    session_token: str,
+    config_dir: Path,
+    *,
+    ttl_seconds: float = _T1_SESSION_LEASE_DEFAULT_TTL_SECONDS,
+) -> None:
+    """Publish a live MCP session's minted T1 token to a lease file.
+
+    Called by :mod:`nexus.mcp.core`'s ``_t1_chroma_lifespan`` Branch 0
+    immediately after a successful mint (and, nexus-ngcpo, again on every
+    periodic refresh -- see ``_t1_session_refresh_loop``). Atomic temp-file +
+    ``os.replace`` publish (same pattern as :func:`_cli_dedicated_session_id`'s
+    cache-file write) so a concurrent reader never observes a torn write.
+    Mode ``0o600`` -- the token is a secret. Best-effort by convention at the
+    call site: a failure here is a lost convenience lease for a detached
+    hook process, not a correctness-critical failure for the live MCP
+    session itself, so callers should log-and-continue rather than fail
+    session startup on a publish error.
+
+    nexus-ngcpo Finding 2: the lease file is now a small JSON object
+    ``{"token": ..., "expires_at": <unix ts>}`` rather than the bare-token
+    text the pre-ngcpo format used. ``ttl_seconds`` should be the ACTUAL TTL
+    the token was minted with (the mint response's ``expires_in_seconds``)
+    so the freshness window :func:`read_t1_session_lease` enforces matches
+    reality; the module default is only a defensive fallback. Format-bump
+    compatibility note: a lease written by the pre-ngcpo bare-token format is
+    not valid JSON, so a reader on the new code treats it as absent/stale
+    (fail-safe) rather than fail-open.
+    """
+    config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path = _t1_session_lease_path(session_id, config_dir)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+    payload = json.dumps(
+        {"token": session_token, "expires_at": time.time() + ttl_seconds}
+    ).encode("utf-8")
+    fd = os.open(str(tmp), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, payload)
+    finally:
+        os.close(fd)
+    os.replace(str(tmp), str(path))
+
+
+def read_t1_session_lease(session_id: str, config_dir: Path) -> str | None:
+    """Read a published T1 session lease token IF it is still fresh, else ``None``.
+
+    nexus-ngcpo Finding 2: pre-ngcpo this was a bare read with NO liveness/TTL
+    check at all -- any lease file that happened to exist on disk was
+    trusted forever, including one abandoned by a prior MCP session that
+    exited uncleanly (SIGKILL/OOM) or one whose token had long since expired
+    server-side. That directly contradicted this module's own design intent
+    to mirror :func:`nexus.daemon.t1_lease.discover_t1_lease`'s "liveness is
+    lease freshness (TTL), not pid" pattern.
+
+    Now: a lease past its stored ``expires_at`` (see
+    :func:`publish_t1_session_lease`), or one that fails to parse as the new
+    JSON format at all (a stale pre-ngcpo bare-token file, or any other
+    corruption), is treated as ABSENT -- fail-safe, not fail-open. Every
+    existing caller already treats a ``None`` return as "no lease, fall
+    through to minting fresh" (``get_t1_database()``'s tier-2 borrow path,
+    and ``mcp.core._t1_chroma_lifespan`` Branch 0's own self-check), so this
+    tightening requires no new caller-side branching: a stale or corrupt
+    lease is simply never borrowed blind.
+    """
+    path = _t1_session_lease_path(session_id, config_dir)
+    try:
+        raw = path.read_text()
+    except OSError:
+        return None
+    try:
+        data = json.loads(raw)
+        token = data["token"]
+        expires_at = float(data["expires_at"])
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        # Pre-ngcpo bare-token format (or any other corruption): treat as
+        # absent rather than trust an un-timestamped file indefinitely.
+        return None
+    if not token:
+        return None
+    if time.time() >= expires_at:
+        return None
+    return token
+
+
+def clear_t1_session_lease(session_id: str, config_dir: Path) -> None:
+    """Remove a published T1 session lease file (live-MCP teardown cleanup).
+
+    Best-effort / idempotent: a missing file is not an error (double-clear,
+    or a lease that was never published because no resolvable session id
+    existed for this process -- see the ``no_resolvable_session`` branch in
+    ``mcp.core._t1_chroma_lifespan``). Removing the lease promptly on
+    teardown ensures a stale lease is never read by a later, unrelated
+    process once this session has genuinely ended.
+    """
+    path = _t1_session_lease_path(session_id, config_dir)
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+class T1RoutingAction(enum.StrEnum):
+    """The three actions :func:`resolve_t1_routing_tiers` can hand back.
+
+    ``StrEnum`` (nexus-1si7z review, code-review-expert non-blocking
+    suggestion): members compare equal to their string value, so every
+    existing ``decision.action == T1RoutingAction.USE_INHERITED``-style
+    comparison and ``T1RoutingDecision(action=T1RoutingAction.MINT)``-style
+    construction keeps working unchanged -- this is a pure modernization
+    (hand-rolled string constants -> the idiomatic Python 3.12+ construct
+    CLAUDE.md favors), not a behavior change.
+    """
+
+    USE_INHERITED = "use_inherited"
+    USE_LEASED = "use_leased"
+    MINT = "mint"
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class T1RoutingDecision:
+    """Result of :func:`resolve_t1_routing_tiers`.
+
+    ``action`` is one of :class:`T1RoutingAction`'s three values:
+
+    * ``USE_INHERITED`` -- ``NX_T1_SESSION`` (the TOKEN specifically, not
+      ``NX_T1_SESSION_ID`` alone) is already live (a nested subprocess, or a
+      live MCP session's own in-process env). Use it AS-IS. ``session_id``/
+      ``session_token`` are always ``None`` for this action -- the caller
+      reads the env directly. Every current producer sets/strips both env
+      vars together (see the token-check comment in this function's body
+      for why only the token, not "either var", gates this action).
+    * ``USE_LEASED`` -- no inherited env, but ``session_id`` resolved to a
+      real id AND a FRESH published lease exists for it. ``session_token``
+      is the leased token. Bind to it directly; never mint.
+    * ``MINT`` -- no inherited env, no fresh lease. ``session_id`` is
+      whichever id :func:`nexus.session.resolve_active_session_id` resolved
+      (``None`` if nothing resolved) -- callers decide independently what to
+      mint for (a specific session id, a generic CLI-dedicated identity, or
+      neither). ``session_token`` is always ``None`` for this action.
+
+    In EVERY case, minting/rotating a token is never safe unless the action
+    is ``MINT`` -- ``USE_INHERITED`` and ``USE_LEASED`` both mean "a live
+    token already exists for a session id we do not necessarily own; use it,
+    do not touch it."
+
+    ``@dataclass(frozen=True, slots=True)`` (nexus-1si7z review,
+    code-review-expert non-blocking suggestion): replaces the hand-rolled
+    ``__slots__`` + manual ``__init__`` with the idiomatic Python 3.12+
+    construct; ``repr=False`` keeps the custom ``__repr__`` below (dataclass
+    would otherwise generate one that leaks ``session_token`` verbatim).
+
+    NOTE beyond ``repr``: unlike the old hand-rolled class (identity-based
+    ``__eq__``/``__hash__``, the ``object`` default), ``@dataclass`` also
+    generates VALUE-based ``__eq__``/``__hash__`` here (frozen dataclasses
+    are hashable by default) -- two decisions with the same
+    action/session_id/session_token now compare equal and hash the same,
+    where they did not before. Nothing in this codebase compares, hashes,
+    or set/dict-keys a ``T1RoutingDecision`` today (nexus-1si7z review,
+    substantive-critic: verified via grep across src/ and tests/), so this
+    is a latent, not live, behavior change -- flagged here rather than
+    silently left for a future ``decision == other_decision`` to discover
+    the switch happened.
+    """
+
+    action: T1RoutingAction
+    session_id: str | None = None
+    session_token: str | None = None
+
+    def __repr__(self) -> str:
+        # A local variable instead of the ternary inline in the f-string
+        # (nexus-1si7z review, code-review-expert: the prior inline form,
+        # `{'<redacted>' if self.session_token else None!r}`, was CORRECT --
+        # `!r` binds to the whole ternary, not just the trailing `None` --
+        # but subtle enough to misread as leaking the raw token. Spelled out
+        # here so there is nothing to misread.)
+        redacted = "<redacted>" if self.session_token else None
+        return (
+            f"T1RoutingDecision(action={self.action!r}, "
+            f"session_id={self.session_id!r}, "
+            f"session_token={redacted!r})"
+        )
+
+
+def resolve_t1_routing_tiers(config_dir: Path) -> T1RoutingDecision:
+    """The shared tier-1/tier-2 T1 session-routing decision (nexus-1si7z).
+
+    Both :func:`get_t1_database` (the bare-CLI/detached-process path) and
+    :mod:`nexus.mcp.core`'s ``_t1_chroma_lifespan`` Branch 0 (the live MCP
+    server path) previously hand-wrote this SAME two-tier check
+    independently -- "is there an already-inherited live token? if not, is
+    there a fresh published lease for the resolvable session id?" -- kept in
+    sync only by cross-referencing comments and a T2 design doc, not by any
+    shared code or test that would fail if one drifted from the other. A
+    future change to lease semantics (TTL, file format -- see nexus-ngcpo)
+    in one caller was not mechanically forced to reach the other. This
+    function is the fix: one implementation, called by both.
+
+    Deliberately covers ONLY tiers 1-2 (never mint). Tier 3 (actual minting)
+    stays caller-specific on purpose: `get_t1_database()`'s bare-CLI tier 3
+    mints a separate, persisted, SHARED "CLI-dedicated" identity, unrelated
+    to whatever session id resolves (deliberately -- it must never rotate a
+    live MCP session's token it failed to detect a lease for). Branch 0's
+    tier 3 mints FOR THE SPECIFIC RESOLVED SESSION ID and takes ownership
+    (refresh loop, teardown) -- it never touches the CLI-dedicated identity.
+    These are genuinely different actions with different safety properties;
+    unifying tier 3 too would blur that distinction rather than clarify it.
+
+    Args:
+        config_dir: the nexus config directory to resolve the lease file
+            against (``nexus_config_dir()`` in production; a per-test tmp
+            dir in tests -- never hand-wave this, a wrong config_dir reads
+            a lease that was never published, or misses a real one).
+
+    Returns:
+        A :class:`T1RoutingDecision`. See its docstring for the three
+        actions and what each field means per action.
+    """
+    # Require the TOKEN specifically (NX_T1_SESSION), not "either var".
+    # Stacked review of the nexus-1si7z extraction (code-review-expert +
+    # substantive-critic, independently) caught a real widening here: the
+    # pre-extraction Branch 0 check (mcp/core.py) was `NX_T1_SESSION` alone;
+    # an earlier draft of this function used "either var" (matching
+    # get_t1_database()'s own pre-extraction check), which meant Branch 0
+    # would silently short-circuit to USE_INHERITED -- yielding without ever
+    # setting a live token -- if only NX_T1_SESSION_ID were set with no
+    # NX_T1_SESSION. Every current producer (operators/dispatch.py's
+    # _build_dispatch_env, across all three dispatch modes) always sets or
+    # strips both together, so this split state is not reachable today --
+    # but "not reachable by inspection" is not "structurally prevented",
+    # and the id-alone case is objectively BETTER served by falling through
+    # to tier 2/3 (self-correct via lease-borrow or mint) than by returning
+    # USE_INHERITED for a token that does not actually exist. Narrowing to
+    # the token-only check restores Branch 0's original semantics exactly
+    # AND improves get_t1_database()'s CLI path for this same edge case
+    # (previously: constructed a doomed-to-401 HttpScratchStore with the
+    # bare id used as a bogus token; now: self-corrects).
+    if bool(os.environ.get("NX_T1_SESSION", "").strip()):
+        return T1RoutingDecision(action=T1RoutingAction.USE_INHERITED)
+
+    # Deliberate function-local import, shadowing the module-level binding
+    # above: mcp.core's Branch 0 (a caller of this function) has existing
+    # tests that monkeypatch `nexus.session.resolve_active_session_id`
+    # directly (Python attribute patching, not a name-binding patch) --
+    # only a fresh per-call `from nexus.session import ...` picks up that
+    # patch; a name bound once at THIS module's own import time would not.
+    #
+    # This is NOT inconsistent with the module-level import at the top of
+    # this file (nexus-1si7z review, substantive-critic Minor finding):
+    # T1Database._resolve_session_id uses that module-level binding and is
+    # UNAFFECTED by the split, because the one test that patches this name
+    # at the `nexus.db.t1` level specifically (not `nexus.session`) targets
+    # THAT call site, not this one -- see tests/test_session_resolver.py
+    # (the dual monkeypatch.setattr on both `nexus.session.
+    # resolve_active_session_id` and `nexus.db.t1.resolve_active_session_id`
+    # documents exactly this pre-existing two-import-styles gotcha). Each
+    # call site's import style matches which test-patching convention its
+    # own callers rely on; this function follows the SAME local-import
+    # convention the pre-refactor tier-2 code already used at this exact
+    # call site, unchanged by this extraction.
+    from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deliberate: must re-resolve per call for test-patch visibility, see comment above
+
+    candidate_id = resolve_active_session_id()
+    if candidate_id and candidate_id != "unknown":
+        leased_token = read_t1_session_lease(candidate_id, config_dir)
+        if leased_token:
+            return T1RoutingDecision(
+                action=T1RoutingAction.USE_LEASED,
+                session_id=candidate_id,
+                session_token=leased_token,
+            )
+
+    return T1RoutingDecision(
+        action=T1RoutingAction.MINT,
+        session_id=candidate_id if candidate_id and candidate_id != "unknown" else None,
+    )
+
+
+def mint_t1_session_token(session_id: str, *, context: str) -> dict:
+    """Mint a T1 session token, translating any exception into a clean
+    RuntimeError. Shared by all three T1 tier-3 mint call sites --
+    :func:`get_t1_database`'s CLI-dedicated mint, :meth:`_CliDedicatedScratchStore._remint`,
+    and :mod:`nexus.mcp.core`'s Branch 0 session-specific mint (nexus-1si7z
+    follow-up: stacked review of the tiers-1-2 extraction independently
+    caught that this "call HttpTokenStore().start_session(), wrap the
+    exception" mechanic was ALSO duplicated three times, identical modulo
+    message wording -- the same "held together by cross-referencing
+    comments" problem the tiers-1-2 extraction fixed, one layer deeper).
+
+    Deliberately does NOT own lease-publish, ownership-tracking, or the
+    CLI-dedicated-vs-session-specific identity choice -- those stay
+    caller-specific, matching :func:`resolve_t1_routing_tiers`'s own
+    "unify only the genuinely shared mechanic" scoping. A caller that needs
+    extra behavior on failure (Branch 0 additionally logs via structlog and
+    appends a Phase-E-specific remedy sentence) catches this function's
+    RuntimeError and re-wraps it -- see mcp.core's Branch 0 for the pattern.
+
+    Args:
+        session_id: the session id to mint a token for.
+        context: short caller-supplied label folded into the RuntimeError
+            message VERBATIM -- the template does NOT append its own "mint"
+            wording, so ``context`` must already end in the right verb
+            (e.g. ``"CLI-dedicated session mint"``,
+            ``"CLI-dedicated session re-mint"``, ``"session token mint"``)
+            for the message to read the way it did before this extraction.
+            (nexus-1si7z follow-up review, both code-review-expert and
+            substantive-critic independently: an earlier draft's template
+            appended its own trailing " mint failed", which doubled the
+            word for the "...re-mint" context -- "T1 CLI-dedicated session
+            re-mint mint failed...". Folding the verb into ``context``
+            entirely removes that collision class rather than special-casing
+            the one caller whose label happened to end in "-mint".)
+
+    Returns:
+        The mint response dict (``{"session_token": ..., ...}``).
+
+    Raises:
+        RuntimeError: on any mint failure (nexus-c8yvj finding 2:
+            ``HttpTokenStore.start_session`` raises ``httpx.HTTPStatusError``
+            on a non-2xx, e.g. a bad ``NX_SERVICE_TOKEN`` -- NOT a
+            ``RuntimeError``, and would otherwise bypass callers'
+            ``RuntimeError``-specific handling and
+            ``commands/scratch.py``'s ``_clean_service_errors``, surfacing a
+            raw traceback instead of a clean message). Note the deferred
+            ``HttpTokenStore`` import below is OUTSIDE this try/except (an
+            import-time failure -- e.g. a broken install -- propagates
+            untranslated); this matches all three original call sites'
+            pre-extraction behavior and is not a new gap.
+    """
+    from nexus.db.t2.http_token_store import HttpTokenStore  # noqa: PLC0415 — deferred import (rare/branch-local path)
+
+    try:
+        with HttpTokenStore() as token_store:
+            return token_store.start_session(session_id)
+    except Exception as exc:  # noqa: BLE001 — clean-error boundary, see docstring
+        raise RuntimeError(
+            f"T1 {context} failed for session {session_id!r}: {exc}"
+        ) from exc
+
+
+def _lock_guarded_mint_or_borrow(
+    session_id: str, config_dir: Path
+) -> tuple[str, bool, float | None]:
+    """Flock-guarded double-check-then-mint-or-borrow (nexus-jwqjm).
+
+    Serializes concurrent stale-lease recoverers for the SAME ``session_id``
+    so exactly one racer mints a fresh token while every other racer borrows
+    the winner's published lease instead of independently minting a
+    competing one. Two competing mints for the same session id is not just
+    a one-time race: the server hard-ROTATES the token on every mint (``ON
+    CONFLICT (tenant_id, session_id) DO UPDATE``), so two owners each
+    periodically refreshing keep invalidating each other's token, producing
+    PERSISTENT INTERMITTENT 401 churn for the lifetime of both processes.
+
+    Mirrors :func:`_cli_dedicated_session_id`'s own flock pattern -- a
+    blocking exclusive lock on a per-purpose lock file (see
+    :func:`_t1_session_mint_lock_path`), released in a ``finally`` even on
+    exception. Locked design: T2 ``nexus/design-jwqjm-t1-mint-race-flock.md``.
+
+    Scope of what this closes (substantive-critic finding, round 1 of
+    nexus-jwqjm.3): this closes the reported failure mode -- two processes
+    independently observing a stale lease at STARTUP and both minting. It
+    does NOT extend to :func:`nexus.mcp.core._t1_session_refresh_loop`'s
+    own PERIODIC re-mint, which calls the token store directly, unlocked,
+    on its own schedule. A structurally similar but much narrower race
+    remains there (an owner's very late/delayed refresh colliding with a
+    new recoverer's takeover) -- tracked as an accepted residual, not fixed
+    by this bead. See nexus-ltwu4.
+
+    Args:
+        session_id: the T1 session id to mint or borrow a token for.
+        config_dir: the nexus config directory (both the lock file and the
+            lease file live here).
+
+    Returns:
+        ``(token, minted, ttl_seconds)``. ``minted`` is ``True`` only for
+        the caller that actually performed the mint; every other
+        (borrowing) caller gets ``minted=False``. ``ttl_seconds`` is the
+        SAME value used for the publish call on the minting path (never a
+        post-hoc re-read of the lease file, which could observe a
+        stale/unrelated file if the publish below silently failed --
+        code-review-expert Medium finding, round 1) -- ``None`` on the
+        borrow path, where no caller may use it (a borrower must never
+        start its own refresh task).
+
+    Raises:
+        RuntimeError: propagated UNCHANGED from :func:`mint_t1_session_token`
+            on a mint failure. The lock is always released first (the
+            failure unwinds through this function's own ``finally``).
+    """
+    config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    lock_path = _t1_session_mint_lock_path(session_id, config_dir)
+
+    lock_fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        # Not a daemon-lifecycle election (RDR-149's ServiceRegistry._elect):
+        # a one-shot "double-check the lease, mint if still stale" mutex for
+        # a single session id, mirroring _cli_dedicated_session_id's own
+        # one-shot idempotent lock above -- not a leased-liveness election.
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)  # lifecycle-gate-allow: one-shot mint-or-borrow mutex serializing concurrent stale-lease recoverers, not a lifecycle election
+        try:
+            leased_token = read_t1_session_lease(session_id, config_dir)
+            if leased_token:
+                # A concurrent recoverer already won the race and published
+                # a fresh lease while we waited for the lock -- borrow it,
+                # do not mint a competing token.
+                return leased_token, False, None
+
+            minted = mint_t1_session_token(
+                session_id, context="stale-lease recovery mint"
+            )
+            mint_ttl = float(
+                minted.get("expires_in_seconds")
+                or _T1_SESSION_LEASE_DEFAULT_TTL_SECONDS
+            )
+            try:
+                publish_t1_session_lease(
+                    session_id, minted["session_token"], config_dir,
+                    ttl_seconds=mint_ttl,
+                )
+            except Exception as exc:  # noqa: BLE001 — best-effort publish; must never fail an already-successful mint (mirrors nexus-c8yvj's Branch-0 publish, moved under this lock)
+                _log.warning(
+                    "t1_session_lease_publish_failed",
+                    session_id=session_id, error=str(exc),
+                )
+            return minted["session_token"], True, mint_ttl
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(lock_fd)
+
+
+class _CliDedicatedScratchStore:
+    """T1Database-shaped wrapper around ``HttpScratchStore`` for the
+    CLI-dedicated session path.
+
+    Self-heals a stale/rotated token (nx_plan_audit MEDIUM finding, design
+    history item 4 above): on a 401 (``SESSION_UNAUTHORIZED_MARKER``) from
+    the wrapped store, re-mints the dedicated session's token once and
+    retries the failed call before propagating. Exactly one retry -- a
+    second failure on the same call propagates immediately rather than
+    looping.
+    """
+
+    def __init__(self, dedicated_id: str, store) -> None:
+        self._dedicated_id = dedicated_id
+        self._store = store
+
+    def _remint(self) -> None:
+        from nexus.db.http_scratch_store import HttpScratchStore  # noqa: PLC0415 — deferred import (rare/branch-local path)
+
+        minted = mint_t1_session_token(
+            self._dedicated_id, context="CLI-dedicated session re-mint"
+        )
+        self._store = HttpScratchStore(
+            session_id=self._dedicated_id,
+            _session_token=minted["session_token"],
+        )
+
+    def _call(self, name: str, *args, **kwargs):
+        from nexus.db.http_scratch_store import SESSION_UNAUTHORIZED_MARKER  # noqa: PLC0415 — deferred import (rare/branch-local path)
+
+        try:
+            return getattr(self._store, name)(*args, **kwargs)
+        except RuntimeError as exc:
+            if SESSION_UNAUTHORIZED_MARKER not in str(exc):
+                raise
+            _log.warning(
+                "t1_cli_dedicated_session_selfheal",
+                session_id=self._dedicated_id,
+                op=name,
+            )
+            self._remint()
+            # Exactly one retry: a second failure propagates to the caller.
+            return getattr(self._store, name)(*args, **kwargs)
+
+    @property
+    def session_id(self) -> str:
+        return self._store.session_id
+
+    def put(self, *args, **kwargs):
+        return self._call("put", *args, **kwargs)
+
+    def get(self, *args, **kwargs):
+        return self._call("get", *args, **kwargs)
+
+    def search(self, *args, **kwargs):
+        return self._call("search", *args, **kwargs)
+
+    def list_entries(self, *args, **kwargs):
+        return self._call("list_entries", *args, **kwargs)
+
+    def flagged_entries(self, *args, **kwargs):
+        return self._call("flagged_entries", *args, **kwargs)
+
+    def flag(self, *args, **kwargs):
+        return self._call("flag", *args, **kwargs)
+
+    def unflag(self, *args, **kwargs):
+        return self._call("unflag", *args, **kwargs)
+
+    def promote(self, *args, **kwargs):
+        return self._call("promote", *args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        return self._call("delete", *args, **kwargs)
+
+    def clear(self, *args, **kwargs):
+        return self._call("clear", *args, **kwargs)
+
+    def resolve_prefix_candidates(self, *args, **kwargs):
+        return self._call("resolve_prefix_candidates", *args, **kwargs)
+
+
 # ── Factory ───────────────────────────────────────────────────────────────────
 
 
@@ -771,20 +1435,37 @@ def get_t1_database(
 ) -> "T1Database":
     """Return the authoritative T1 scratch store for this process.
 
-    RDR-152 bead nexus-gmiaf.13 routing seam:
+    RDR-152 bead nexus-gmiaf.13 routing seam, extended by nexus-rn3wo.1 and
+    nexus-c8yvj:
 
-    * ``NX_STORAGE_BACKEND_T1=service`` (or global ``NX_STORAGE_BACKEND=service``)
-      → :class:`~nexus.db.http_scratch_store.HttpScratchStore` (Postgres UNLOGGED).
-    * Default → :class:`T1Database` (ChromaDB path, unchanged).
+    * ``NX_STORAGE_BACKEND_T1=service`` (or global ``NX_STORAGE_BACKEND=service``,
+      now the hard default -- see :mod:`nexus.db.storage_mode`):
+        - Inherited live MCP session (``NX_T1_SESSION`` / ``NX_T1_SESSION_ID``
+          set in env) → :class:`~nexus.db.http_scratch_store.HttpScratchStore`
+          directly, unchanged from before.
+        - No inherited session, but ``resolve_active_session_id()`` resolves
+          a real id AND that live MCP session published a lease (nexus-c8yvj:
+          :mod:`nexus.mcp.core`'s ``_t1_chroma_lifespan`` Branch 0 writes one
+          right after its own mint) → :class:`~nexus.db.http_scratch_store.HttpScratchStore`
+          bound to that SAME session/token, read via :func:`read_t1_session_lease`.
+          Never mints/rotates -- this is how a detached process (the
+          SessionEnd hook) reaches the live MCP session's T1 data.
+        - No inherited session and no lease → mints a CLI-dedicated,
+          persisted session id (see :func:`_cli_dedicated_session_id`) and
+          returns a :class:`_CliDedicatedScratchStore` (self-healing wrapper).
+    * Explicit ``sqlite`` opt-out (or ``NX_T1_ISOLATED=1``)
+      → :class:`T1Database` (ChromaDB path, unchanged).
 
     The ``session_id`` and ``client`` arguments are forwarded to ``T1Database``
     on the Chroma path; they are ignored on the service path (session_id is
-    sourced from ``NX_T1_SESSION`` env var in ``HttpScratchStore``).
+    sourced from ``NX_T1_SESSION``/``NX_T1_SESSION_ID`` env, a published
+    lease for a resolvable session id, or the CLI-dedicated cache file, in
+    that order).
 
     Returns a ``T1Database``-shaped object: callers use ``put``, ``get``,
     ``search``, ``list_entries``, ``flagged_entries``, ``flag``, ``unflag``,
     ``promote``, ``delete``, ``clear``, ``resolve_prefix_candidates``, and
-    the ``session_id`` property.  All methods are available on both paths.
+    the ``session_id`` property.  All methods are available on every path.
     """
     from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deliberate function-local import (factory-time backend selection)
 
@@ -794,12 +1475,44 @@ def get_t1_database(
     # honored inside T1Database's Chroma-path constructor, which the SERVICE
     # branch below never reaches — dead code in exactly the installs that
     # need it (a bare CLI in service mode cannot safely mint a session token).
-    if os.environ.get("NX_T1_ISOLATED") == "1" or os.environ.get("NEXUS_SKIP_T1") == "1":
+    if os.environ.get("NX_T1_ISOLATED") == "1":
         return T1Database(session_id=session_id, client=client)
 
     if storage_backend_for("t1") == StorageBackend.SERVICE:
         from nexus.db.http_scratch_store import HttpScratchStore  # noqa: PLC0415 — rare/branch-local import (SERVICE backend path only)
 
-        return HttpScratchStore()  # type: ignore[return-value]
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — rare/branch-local import (CLI-dedicated / lease path only)
+
+        config_dir = nexus_config_dir()
+
+        # nexus-1si7z: tiers 1-2 (inherited-wins, then borrow-a-fresh-lease)
+        # are the SAME decision Branch 0 (mcp.core._t1_chroma_lifespan) makes
+        # -- both now call the ONE shared implementation so they cannot
+        # silently diverge again. See resolve_t1_routing_tiers's docstring
+        # for the full "why one function, why not tier 3 too" reasoning.
+        decision = resolve_t1_routing_tiers(config_dir)
+        if decision.action == T1RoutingAction.USE_INHERITED:
+            return HttpScratchStore()  # type: ignore[return-value]
+        if decision.action == T1RoutingAction.USE_LEASED:
+            return HttpScratchStore(  # type: ignore[return-value]
+                session_id=decision.session_id, _session_token=decision.session_token
+            )
+
+        # nexus-rn3wo.1: bare CLI, no inherited live MCP session, and no
+        # published lease for a resolvable session id either
+        # (decision.action == MINT). Mint (or reuse) the CLI-dedicated
+        # persisted session id and self-heal on a rotated-token 401 from a
+        # racing sibling bare-CLI invocation. Deliberately IGNORES
+        # decision.session_id here -- the CLI-dedicated identity is a
+        # separate, generic, shared-across-bare-invocations identity, never
+        # tied to whatever (if anything) resolve_active_session_id() found;
+        # see resolve_t1_routing_tiers's docstring for why tier 3 stays
+        # caller-specific rather than unified too.
+        dedicated_id = _cli_dedicated_session_id(config_dir)
+        minted = mint_t1_session_token(dedicated_id, context="CLI-dedicated session mint")
+        store = HttpScratchStore(
+            session_id=dedicated_id, _session_token=minted["session_token"]
+        )
+        return _CliDedicatedScratchStore(dedicated_id, store)  # type: ignore[return-value]
 
     return T1Database(session_id=session_id, client=client)

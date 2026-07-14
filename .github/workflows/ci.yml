@@ -588,15 +588,14 @@ jobs:
     # (testcontainers codegen, Docker) and run the SAME native build the release
     # does (-Pnative -Pprebuilt-jooq -DskipTests), minus smoke + publish.
     #
-    # NOT a required check — a normal job whose expensive steps are path-gated, so
-    # unrelated PRs see a fast no-op. (A required job MUST always run; this one is
-    # advisory, so gating the whole job's work via step `if:` is fine.)
-    #
-    # ADVISORY, NOT BLOCKING (substantive-critic S2, nexus-a5rj8): because it is not
-    # a required check, a RED result here does not block merge — it converts "zero
-    # build visibility on PRs" into "visible but ignorable". Promoting it to a
-    # required check (paying ~40min native build on every service/** PR) is an open
-    # decision tracked in nexus-a5rj8.
+    # REQUIRED CHECK since 2026-07-13 (nexus-a5rj8, decided by Hal): a RED
+    # result here blocks merge. The job always runs; its expensive steps are
+    # path-gated via step `if:`, so unrelated PRs still see a fast no-op that
+    # reports green (skipped-steps == success — the branch-protection-safe
+    # skip pattern). service/** PRs pay the ~40min native build, which is
+    # exactly the visibility the trip-wire lacked as an advisory job.
+    # NOTE: the check name below is registered verbatim in the develop branch
+    # protection required contexts — renaming the job breaks the gate.
     name: engine-service native build (PR trip-wire)
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -639,7 +638,11 @@ jobs:
         # guards) — it only skips the optimization passes — so it cuts the build ~half
         # and lowers peak memory while preserving the gate's purpose. The RELEASE build
         # (engine-service-release.yml) keeps the default -O2 full optimization.
-        run: ./mvnw -q -Pnative -Pprebuilt-jooq -DskipTests -Dnative.image.opt=-Ob package
+        # maxheap 11g: ubuntu-latest is a 16GB box by the release-run logs
+        # (run 29258747763: 5632m reported as 31.3% of system memory, 1208
+        # heap-pressure GCs) — the pom's 5632m default is sized for a 7GB
+        # runner this job no longer uses.
+        run: ./mvnw -q -Pnative -Pprebuilt-jooq -DskipTests -Dnative.image.opt=-Ob -Dnative.image.maxheap=11g package
 
   write-seam-gate:
     # nexus-h29w1 — Behavioural cross-boundary write-seam CI gate (F1 closure).
@@ -767,11 +770,17 @@ jobs:
         # PINNED_SERVICE_TAG version (develop-tip is >= the pinned release) so the
         # gate exercises a CONFORMANT engine and the probe is satisfied
         # legitimately — no probe bypass, the hardening stays intact. Extracted
-        # from binary_install.py so it never drifts when the pin bumps.
+        # from engine_version.py's REQUIRED_ENGINE_VERSION — the ONE floor
+        # constant — so it never drifts when the pin bumps. (Was extracted from
+        # binary_install.py's PINNED_SERVICE_TAG literal until 2026-07-12, when
+        # the nexus-b6qlf-class unification made that constant DERIVED from
+        # REQUIRED_ENGINE_VERSION and the literal this regex matched ceased to
+        # exist — m.group(1) on None broke every seam-gated CI run. Same
+        # extraction run.sh --guided uses; fail-loud, no fallback.)
         if: steps.changes.outputs.seam == 'true'
         run: |
           set -euo pipefail
-          ver=$(python -c "import re,pathlib; s=pathlib.Path('src/nexus/daemon/binary_install.py').read_text(); m=re.search(r'PINNED_SERVICE_TAG[^=]*=\s*\"engine-service-v([0-9]+\.[0-9]+\.[0-9]+)\"', s); print(m.group(1))")
+          ver=$(python -c "import re,pathlib; s=pathlib.Path('src/nexus/engine_version.py').read_text(); m=re.search(r'REQUIRED_ENGINE_VERSION[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)', s); assert m, 'REQUIRED_ENGINE_VERSION not parseable — fix the regex before stamping'; print('.'.join(m.groups()))")
           props="service/src/main/resources/META-INF/nexus/release.properties"
           test -f "$props" || { echo "release.properties missing at $props"; exit 1; }
           tmp="$(mktemp)"

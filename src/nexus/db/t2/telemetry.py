@@ -80,6 +80,14 @@ CREATE INDEX IF NOT EXISTS idx_relevance_log_chunk
 CREATE INDEX IF NOT EXISTS idx_relevance_log_session
     ON relevance_log(session_id);
 
+-- nexus-24p05: cumulative-deletes retention markers (the verify-fill
+-- watermark's rollback detector; local-mode twin of nexus.retention_markers).
+CREATE TABLE IF NOT EXISTS retention_markers (
+    relation      TEXT    PRIMARY KEY,
+    total_deleted INTEGER NOT NULL DEFAULT 0,
+    updated_at    TEXT    NOT NULL
+);
+
 -- RDR-087 Phase 2: per-call threshold-filter telemetry.
 -- Schema duplicated from migrations.migrate_search_telemetry so that
 -- fresh T2Database constructions get the table even before apply_pending
@@ -116,6 +124,14 @@ _RELEVANCE_LOG_COLUMNS = (
 
 
 # ── Telemetry ─────────────────────────────────────────────────────────────────
+
+
+#: The relevance_log retention horizon — THE single source for the sweep's
+#: default AND the verify-fill fresh-window scope
+#: (``verify_fill_watermark.RETENTION_HORIZON_TABLES`` imports this). The
+#: sweep/fill disjointness proof holds ONLY while these are the same number;
+#: ``tests/migration/test_verify_fill_watermark.py`` pins the coupling.
+RELEVANCE_LOG_RETENTION_DAYS: int = 90
 
 
 class Telemetry:
@@ -203,6 +219,54 @@ class Telemetry:
                 (session_id, ts, tool, tier, agent, project, target_title),
             )
             self.conn.commit()
+
+    def record_consent(
+        self,
+        *,
+        scope: str,
+        ts: str,
+        granted: bool,
+    ) -> None:
+        """Append one row to ``claude_assisted_remediation_consents`` (RDR-182
+        P1.2, nexus-ykzbj.6).
+
+        Consent AUDIT for the opt-in ``claude_assisted_remediation.enabled``
+        flag: a grant OR a revoke is recorded as its own row (``granted``
+        distinguishes them) so the flag's revocability is reflected in the
+        audit trail, not collapsed by an upsert. ``ts`` is caller-supplied —
+        this method never reads the wall clock.
+        """
+        from nexus.db.migrations import (  # noqa: PLC0415 — circular-dep avoidance (nexus.db.migrations)
+            migrate_claude_assisted_remediation_consents,
+        )
+        with self._lock:
+            migrate_claude_assisted_remediation_consents(self.conn)
+            self.conn.execute(
+                "INSERT INTO claude_assisted_remediation_consents "
+                "(scope, ts, granted) VALUES (?, ?, ?)",
+                (scope, ts, 1 if granted else 0),
+            )
+            self.conn.commit()
+
+    def list_consents(self) -> list[dict]:
+        """Read the consent-audit trail (RDR-182 read surface, nexus-ykzbj.15).
+
+        Rows in insertion order — grants AND revokes, append-only, so the
+        history of the durable flag and every per-invocation release is
+        reconstructible. Returns ``[{scope, ts, granted}, ...]``.
+        """
+        from nexus.db.migrations import (  # noqa: PLC0415 — circular-dep avoidance (nexus.db.migrations)
+            migrate_claude_assisted_remediation_consents,
+        )
+        with self._lock:
+            migrate_claude_assisted_remediation_consents(self.conn)
+            rows = self.conn.execute(
+                "SELECT scope, ts, granted "
+                "FROM claude_assisted_remediation_consents ORDER BY id"
+            ).fetchall()
+        return [
+            {"scope": r[0], "ts": r[1], "granted": bool(r[2])} for r in rows
+        ]
 
     def record_nx_answer_run(
         self,
@@ -345,7 +409,7 @@ class Telemetry:
             rows = self.conn.execute(sql, params).fetchall()
         return [dict(zip(_RELEVANCE_LOG_COLUMNS, row)) for row in rows]
 
-    def expire_relevance_log(self, days: int = 90) -> int:
+    def expire_relevance_log(self, days: int = RELEVANCE_LOG_RETENTION_DAYS) -> int:
         """Delete relevance_log entries older than *days* days (RDR-061 E2).
 
         The relevance_log accumulates on every store_put/catalog_link.
@@ -358,8 +422,35 @@ class Telemetry:
                 "DELETE FROM relevance_log WHERE timestamp < ?",
                 (cutoff,),
             )
+            if cur.rowcount > 0:
+                # nexus-24p05: publish the cumulative-deletes marker (twin of
+                # the engine's expireRelevanceLog bump).
+                self.conn.execute(
+                    "INSERT INTO retention_markers (relation, total_deleted, updated_at) "
+                    "VALUES ('nexus.relevance_log', ?, ?) "
+                    "ON CONFLICT(relation) DO UPDATE SET "
+                    "total_deleted = total_deleted + excluded.total_deleted, "
+                    "updated_at = excluded.updated_at",
+                    (cur.rowcount, datetime.now(UTC).isoformat()),
+                )
             self.conn.commit()
         return cur.rowcount
+
+    def get_retention_markers(self, relations: list[str]) -> dict[str, int]:
+        """Cumulative-deletes retention markers for *relations* (nexus-24p05)
+        — the verify-fill watermark's rollback detector. Relations never
+        swept are absent; callers treat absent as 0.
+        """
+        if not relations:
+            return {}
+        ph = ",".join("?" for _ in relations)
+        with self._lock:
+            rows = self.conn.execute(
+                f"SELECT relation, total_deleted FROM retention_markers "
+                f"WHERE relation IN ({ph})",
+                tuple(relations),
+            ).fetchall()
+        return {r[0]: int(r[1]) for r in rows}
 
     # ── search_telemetry (RDR-087 Phase 2) ────────────────────────────────
 

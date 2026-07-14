@@ -6,9 +6,10 @@ Thin compatibility shim so existing import sites (tests, CLI commands)
 continue to work without modification. Each wrapper accepts a
 :class:`T2Database` and forwards to ``db.taxonomy``.
 
-RDR-070 (nexus-9k5): ``cluster_and_persist`` removed — replaced by
-``discover_topics`` on :class:`CatalogTaxonomy`. ``rebuild_taxonomy``
-signature changed to accept embeddings + ChromaDB client.
+RDR-070 (nexus-9k5): ``cluster_and_persist`` and the old-signature
+``rebuild_taxonomy`` were replaced by ``discover_topics`` /
+``rebuild_taxonomy`` on :class:`CatalogTaxonomy`; their "Removed in 4.0"
+no-op stubs were finally deleted at 6.5.2.
 """
 
 from __future__ import annotations
@@ -53,46 +54,3 @@ def get_topic_tree(
     return db.taxonomy.get_topic_tree(collection, max_depth=max_depth)
 
 
-def cluster_and_persist(
-    db: "T2Database",
-    project: str,
-    *,
-    k: int | None = None,
-) -> int:
-    """Removed in 4.0. Use ``db.taxonomy.discover_topics(...)`` instead.
-
-    The old Ward-based clustering on T2 memory entries has been replaced
-    by HDBSCAN on T3 collection embeddings. Run ``nx taxonomy discover``
-    or ``nx taxonomy discover --all`` to discover topics.
-    """
-    import warnings  # noqa: PLC0415 - branch-local; deferred to call time
-    warnings.warn(
-        "cluster_and_persist() removed in 4.0. "
-        "Use db.taxonomy.discover_topics() or `nx taxonomy discover --all`.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return 0
-
-
-def rebuild_taxonomy(
-    db: "T2Database",
-    project: str,
-    *,
-    k: int | None = None,
-) -> int:
-    """Removed in 4.0. Use ``nx taxonomy rebuild --collection <name>`` instead.
-
-    The old Ward-based rebuild has been replaced by HDBSCAN on T3
-    collection embeddings with a merge strategy that preserves
-    operator-curated labels.
-    """
-    import warnings  # noqa: PLC0415 - branch-local; deferred to call time
-    warnings.warn(
-        "rebuild_taxonomy() signature changed in 4.0. "
-        "Use db.taxonomy.rebuild_taxonomy(collection, doc_ids, embeddings, texts, chroma_client) "
-        "or `nx taxonomy rebuild --collection <name>`.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return 0

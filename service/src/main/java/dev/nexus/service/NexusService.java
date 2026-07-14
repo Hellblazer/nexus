@@ -71,7 +71,7 @@ public final class NexusService {
     /** Age threshold: scratch rows older than this are eligible for TTL sweep. */
     private static final long SWEEP_TTL_HOURS = 24L;
 
-    /** Default tenant used for the internal sweeper. Cross-tenant sweep deferred to bead .30. */
+    /** Always-swept tenant; the sweeper additionally loops every token-bearing tenant (nexus-4qq1m). */
     private static final String DEFAULT_TENANT = "default";
 
     private final HttpServer server;
@@ -318,8 +318,12 @@ public final class NexusService {
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
 
         // TTL sweep: crash-safety backstop for sessions that never called session-close.
-        // Runs sweepTenant() for the default tenant every SWEEP_INTERVAL_HOURS.
-        // Cross-tenant superuser sweep (sweepExpired) deferred to bead .30.
+        // nexus-4qq1m: CROSS-TENANT — loops every tenant that has ever held a
+        // service token (revoked included) through the RLS-scoped per-tenant
+        // sweep, plus the default tenant. Stays on the nexus_svc role; no
+        // BYPASSRLS connection is required because token-bearing tenants are
+        // enumerable from service_tokens (read pre-tenant by design) and any
+        // tenant that wrote scratch necessarily presented a token.
         this.sweepScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "t1-ttl-sweep");
             t.setDaemon(true);
@@ -330,8 +334,23 @@ public final class NexusService {
                 try {
                     OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC)
                         .minusHours(SWEEP_TTL_HOURS);
-                    int deleted = scratchRepo.sweepTenant(DEFAULT_TENANT, cutoff);
-                    log.info("event=t1_scheduled_sweep tenant={} deleted={}", DEFAULT_TENANT, deleted);
+                    var tenants = new java.util.LinkedHashSet<String>();
+                    tenants.add(DEFAULT_TENANT);
+                    tenants.addAll(tokenStore.listKnownTenants());
+                    int total = 0;
+                    for (String tenant : tenants) {
+                        try {
+                            int deleted = scratchRepo.sweepTenant(tenant, cutoff);
+                            total += deleted;
+                            log.info("event=t1_scheduled_sweep tenant={} deleted={}", tenant, deleted);
+                        } catch (Exception ex) {
+                            // One tenant's failure must not starve the rest of the fleet's sweep.
+                            log.warn("event=t1_scheduled_sweep_tenant_failed tenant={} error={}",
+                                tenant, ex.getMessage(), ex);
+                        }
+                    }
+                    log.info("event=t1_scheduled_sweep_complete tenants={} total_deleted={}",
+                        tenants.size(), total);
                 } catch (Exception ex) {
                     log.warn("event=t1_scheduled_sweep_failed error={}", ex.getMessage(), ex);
                 }

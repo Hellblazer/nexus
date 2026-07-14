@@ -245,7 +245,7 @@ def migrate_plan_rows(
     # TRANSFORMED per-row (a corrupt row is recorded individually + excluded);
     # only the NETWORK is batched. Idempotent re-run (ON CONFLICT DO UPDATE)
     # lands a batch the server rejected wholesale.
-    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — branch-local; quota constant
+    from nexus.db.limits import QUOTAS  # noqa: PLC0415 — branch-local; quota constant
     _IMPORT_BATCH_SIZE = QUOTAS.MAX_RECORDS_PER_WRITE
 
     batch: list[dict[str, Any]] = []

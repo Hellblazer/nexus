@@ -55,6 +55,22 @@ try:
 except: print('')
 " "$STDIN" 2>/dev/null)
 
+# nexus-7o1zh: export the harness-provided session_id for `nx scratch list`
+# below (see the "Inject current T1 scratch entries" section). Same
+# rationale as pre_close_verification_hook.sh / post_compact_hook.sh
+# (nexus-36q84): this hook cannot rely on env-var inheritance, so it reads
+# session_id directly out of its own stdin JSON payload.
+HOOK_SESSION_ID=$(python3 -c "
+import json, sys
+try:
+    print(json.loads(sys.argv[1]).get('session_id', ''))
+except Exception:
+    print('')
+" "$STDIN" 2>/dev/null)
+if [[ -n "$HOOK_SESSION_ID" ]]; then
+    export NX_SESSION_ID="$HOOK_SESSION_ID"
+fi
+
 # Classify agent purpose
 SKIP_STORAGE_DOCS=0
 SKIP_T2_SCAN=0

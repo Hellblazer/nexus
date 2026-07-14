@@ -30,9 +30,31 @@ fi
 SVCPORT=$(python3 -c "import socket;s=socket.socket();s.bind(('',0));print(s.getsockname()[1]);s.close()")
 export NX_SERVICE_PORT=$SVCPORT NX_SERVICE_TOKEN=smoketoken NX_EMBED_MODE=onnx
 
+# nexus-rxqqd review follow-up (substantive-critic): when OWN_PG=1 (default),
+# the whole throwaway docker container is torn down at exit, so the rows the
+# curl assertions / real-Python-client blocks below write are irrelevant.
+# When pointed at an EXTERNAL NX_DB_URL, though, those SAME rows have no
+# cleanup path today and accumulate in whatever real Postgres was passed in.
+# The real-Python-client blocks (which already have delete/close primitives
+# on hand) best-effort clean up their own rows when this is set; the
+# curl-only assertions near the top of this file are lower-priority (no
+# convenient single-call delete without adding new curl plumbing) and are
+# left as a smaller, separately-trackable residual if this ever bites --
+# tracked as nexus-hnh20.
+NATIVE_SMOKE_CLEANUP_ROWS=0
+[ "$OWN_PG" != "1" ] && NATIVE_SMOKE_CLEANUP_ROWS=1
+
 cleanup() {
   [ -n "${SVCPID:-}" ] && kill "$SVCPID" 2>/dev/null
   [ "$OWN_PG" = "1" ] && docker rm -f lp2qo-smoke-pg >/dev/null 2>&1
+  # nexus-rxqqd review follow-up (code-review-expert): the real-Python-client
+  # blocks below create their own mktemp -d NEXUS_CONFIG_DIR isolation dirs
+  # and rm -rf them on their own normal-path exit, but a Ctrl-C (or any other
+  # signal) mid-`uv run` skipped straight past that rm -rf and leaked the
+  # tmpdir on disk. Covering both here too so the EXIT trap is the actual
+  # backstop, not just the happy path.
+  [ -n "${T1_PY_TMPDIR:-}" ] && rm -rf "$T1_PY_TMPDIR"
+  [ -n "${T2_PY_TMPDIR:-}" ] && rm -rf "$T2_PY_TMPDIR"
 }
 trap cleanup EXIT
 
@@ -68,6 +90,245 @@ assert "memory/list"           200 "${A[@]}" "$U/v1/memory/list?project=smoke"
 assert "plans/search"          200 "${A[@]}" "${J[@]}" -X POST -d '{"query":"q","project":"smoke"}' "$U/v1/plans/search"
 assert "taxonomy/topics"       200 "${A[@]}" "$U/v1/taxonomy/topics?collection=knowledge__x"
 assert "chash/distinct"        200 "${A[@]}" "$U/v1/chash/distinct_collections"
+
+# ── T1 scratch (separate jOOQ schema, nexus-opr9m) ───────────────────────────
+# T1 scratch lives in its OWN generated jOOQ schema (t1, e.g.
+# dev.nexus.service.jooq.t1.T1) — a completely separate schema model from every
+# assertion above (all of which are in the `nexus` schema). JooqRecordReflectionFeature
+# enumerated only Nexus.NEXUS.getTables() and never T1.T1.getTables(), so
+# ScratchRecord's constructor was unreachable via reflection in every native image
+# built since the t1 schema was introduced (nexus-gmiaf.13) — every deployed
+# get/search/list against T1 500'd with MissingReflectionRegistrationError, and
+# this gate (which ran on every native build the whole time) never caught it because
+# nothing above touches /v1/t1/* or /v1/sessions/*. Mint a session first (the real
+# production path — mirrors mcp/core.py's lifespan) then exercise the full T1
+# put/get/search/list surface so a future new generated schema being added without
+# updating JooqRecordReflectionFeature fails HERE, not silently in production.
+echo "T1 scratch runtime path (separate jOOQ schema):"
+SESSION_RESP=$(curl -fsS "${A[@]}" "${J[@]}" -X POST -d '{"session_id":"native-smoke-t1"}' "$U/v1/sessions/start")
+SESSION_TOKEN=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['session_token'])" "$SESSION_RESP" 2>/dev/null)
+if [ -z "$SESSION_TOKEN" ]; then
+  echo "  FAIL t1/session-mint -> could not mint session: $SESSION_RESP"; fail=1
+else
+  echo "  ok   t1/session-mint -> 200"
+  T1=(-H "Authorization: Bearer smoketoken" -H "X-Nexus-T1-Session: ${SESSION_TOKEN}")
+  PUT_RESP=$(curl -fsS "${T1[@]}" "${J[@]}" -X POST -d '{"id":"native-smoke-t1-id","session_id":"native-smoke-t1","content":"t1 native smoke","tags":"","flagged":false}' "$U/v1/t1/put")
+  echo "$PUT_RESP" | grep -q '"id"' && echo "  ok   t1/put (INSERT) -> 200" || { echo "  FAIL t1/put -> $PUT_RESP"; fail=1; }
+  assert "t1/get (SELECT, separate schema)"  200 "${T1[@]}" "${J[@]}" -X POST -d '{"id":"native-smoke-t1-id","session_id":"native-smoke-t1"}' "$U/v1/t1/get"
+  assert "t1/search (FTS, separate schema)"  200 "${T1[@]}" "${J[@]}" -X POST -d '{"query":"native smoke","session_id":"native-smoke-t1","limit":5}' "$U/v1/t1/search"
+  assert "t1/list (separate schema)"         200 "${T1[@]}" "${J[@]}" -X POST -d '{"session_id":"native-smoke-t1"}' "$U/v1/t1/list"
+fi
+
+# ── T1 via the REAL Python client (nexus-97oz3) ──────────────────────────────
+# Everything above proves the native binary's /v1/t1/* endpoints work when
+# driven by raw curl. It does NOT prove nexus.db.t1.get_t1_database()'s
+# three-tier session-routing, HttpTokenStore.start_session() minting, or
+# HttpScratchStore's request/response handling actually work against this
+# SAME compiled artifact — nexus-opr9m (the reflection bug this file's T1
+# section above was written to catch) came back clean on the JVM AND would
+# have come back clean here too if this section had bypassed the real client
+# code the way the curl section above does. Routing-correctness (tested
+# elsewhere, against a JVM backend) and backend-correctness (tested above,
+# via curl) have never been proven TOGETHER against the actual production
+# artifact reached through the actual production client code. This closes
+# that seam FOR T1 SPECIFICALLY: mint + put + get + search + list through
+# the real Python nexus.db.t1.get_t1_database() factory (the identical code
+# path a live bare-CLI `nx scratch` invocation takes) against the native
+# binary this script just booted.
+#
+# The identical gap for the other jOOQ-backed endpoint families this script
+# already curls above (memory/plans/taxonomy/chash) is now ALSO closed --
+# see the "memory/plans/taxonomy/chash via the real Python client" section
+# below (nexus-rxqqd), same fix shape, same CI wiring.
+#
+# ALSO requires `uv` on PATH with the nexus package importable (`uv sync`
+# from the repo root) to actually run — see the CI workflow step this
+# depends on (engine-service-release.yml, gated on matrix.target.smoke).
+# WARN+skip loudly if unavailable rather than silently pass — a run without
+# this dependency present does NOT cover routing+backend together, only
+# backend-via-curl above, regardless of how green the rest of the output is.
+# NOTE (unlike the bge-embed section below, whose model IS provisioned in CI
+# via .github/actions/prime-bge-onnx and only rarely skips): until
+# nexus-l8ybx's companion CI workflow change lands, this WARN is the
+# deterministic 100%-of-runs outcome in CI, not a rare fallback — do not
+# read a green run as proof this section executed.
+echo "T1 via the real Python client (routing + backend together):"
+REPO_ROOT="$(cd .. && pwd)"
+# `timeout` is GNU coreutils -- present on every CI runner (Linux) but not
+# guaranteed on a vanilla local macOS dev machine (only via `brew install
+# coreutils`, and even then often as `gtimeout`). Degrade gracefully rather
+# than break local runs that lack it.
+TIMEOUT_CMD=""
+command -v timeout >/dev/null 2>&1 && TIMEOUT_CMD="timeout 60"
+if command -v uv >/dev/null 2>&1 && [ -f "$REPO_ROOT/pyproject.toml" ]; then
+  T1_PY_TMPDIR=$(mktemp -d)
+  # NX_SERVICE_URL='' (nexus-rxqqd review): NEXUS_CONFIG_DIR isolation alone is
+  # NOT sufficient. resolve_service_endpoint() -> get_credential("service_url")
+  # checks the NX_SERVICE_URL env var BEFORE falling back to config.yml -- so an
+  # AMBIENT NX_SERVICE_URL already exported in the invoking shell (a real,
+  # documented practice on this project) would pass through unisolated and
+  # target that URL instead of this script's local native binary, bearing the
+  # smoketoken bearer. Explicitly clearing it here closes that leg too.
+  PY_OUT=$(cd "$REPO_ROOT" && NEXUS_CONFIG_DIR="$T1_PY_TMPDIR" NX_SERVICE_URL='' \
+    NX_SERVICE_HOST=127.0.0.1 NX_SERVICE_PORT="$SVCPORT" NX_SERVICE_TOKEN=smoketoken \
+    NX_STORAGE_BACKEND=service NATIVE_SMOKE_CLEANUP_ROWS="$NATIVE_SMOKE_CLEANUP_ROWS" \
+    $TIMEOUT_CMD uv run python -c '
+import os
+
+from nexus.db.t1 import get_t1_database
+
+t1 = get_t1_database()
+doc_id = t1.put("t1 native smoke via real python client", tags="native-smoke-py")
+assert doc_id, "put returned no id"
+
+got = t1.get(doc_id)
+assert got is not None, "get returned None for a just-put id"
+assert got["content"] == "t1 native smoke via real python client", got
+
+results = t1.search("native smoke via real python", n_results=5)
+assert any(r["id"] == doc_id for r in results), f"search did not find {doc_id}: {results}"
+
+entries = t1.list_entries()
+assert any(e["id"] == doc_id for e in entries), f"list_entries did not find {doc_id}: {entries}"
+
+if os.environ.get("NATIVE_SMOKE_CLEANUP_ROWS") == "1":
+    # Best-effort, deliberately isolated from the assertions above (review
+    # follow-up, substantive-critic): a cleanup-only exception here must
+    # never read as an assertion failure to whoever is debugging a FAIL --
+    # print CLEANUP-WARN and keep going rather than let it propagate past
+    # print("OK"), which would make grep -q "^OK$" fail identically to a
+    # genuine assertion failure despite every real check above having passed.
+    try:
+        t1.delete(doc_id)
+    except Exception as exc:  # noqa: BLE001 — best-effort cleanup, see comment above
+        print(f"CLEANUP-WARN: t1.delete({doc_id!r}) failed: {exc}")
+
+print("OK")
+' 2>&1)
+  rm -rf "$T1_PY_TMPDIR"
+  if echo "$PY_OUT" | grep -q "^OK$"; then
+    echo "  ok   t1 real-client put/get/search/list (routing + backend together)"
+  else
+    echo "  FAIL t1 real-client check:"; echo "$PY_OUT" | sed 's/^/    /'; fail=1
+  fi
+else
+  echo "  WARN skipping (uv or pyproject.toml not found at $REPO_ROOT) -- this run does NOT cover routing+backend together, only backend-via-curl above"
+fi
+
+# ── memory/plans/taxonomy/chash via the REAL Python client (nexus-rxqqd) ────
+# nexus-97oz3 closed the routing-correctness x backend-correctness seam for T1
+# specifically (block above). The identical gap remained open for every OTHER
+# jOOQ-backed endpoint family this script already curls near the top of this
+# file (memory/put,get,search,list; plans/search; taxonomy/topics;
+# chash/distinct_collections) -- each has its own real Python HTTP client
+# (src/nexus/db/t2/http_memory_store.py and siblings, structurally identical
+# to http_scratch_store.py) that was equally untested against the compiled
+# native artifact. A future native-image-only reflection gap in any of these
+# OTHER jOOQ schemas would ship exactly the way T1's (nexus-opr9m) did,
+# silently, through this same gate. Unlike get_t1_database(), these four
+# classes take no session-lease routing -- HttpMemoryStore() etc. construct
+# ready to use with zero args, reading the same NX_SERVICE_HOST/PORT/TOKEN
+# env below. Reuses the SAME already-running native-smoke instance and the
+# SAME uv/Python CI wiring nexus-l8ybx already added for the T1 block above
+# -- no new CI plumbing needed. taxonomy/chash's smoke-tested endpoints
+# (topics, distinct_collections) are pure reads that 200 even against empty
+# state, so each seeds one row first (import_topic / upsert) to make the
+# "found" assertion meaningful, mirroring T1's own put-then-find shape.
+#
+# Deliberately a SEPARATE `uv run python -c` subprocess from the T1 block
+# above, not more assertions appended into that SAME block (nexus-rxqqd
+# review, substantive-critic): the T1 block sets NX_STORAGE_BACKEND=service
+# because get_t1_database() branches on it; these four clients take no
+# such env var and construct directly (HttpMemoryStore() etc., zero args),
+# so merging the blocks would either leave NX_STORAGE_BACKEND=service set
+# for no reason here or, worse, invite a future edit to rely on it. If a
+# future endpoint family's client DOES need get_t1_database()-style env
+# branching, put it in the T1-shaped block, not this one.
+echo "memory/plans/taxonomy/chash via the real Python client:"
+if command -v uv >/dev/null 2>&1 && [ -f "$REPO_ROOT/pyproject.toml" ]; then
+  T2_PY_TMPDIR=$(mktemp -d)
+  # NEXUS_CONFIG_DIR isolation alone is NOT sufficient -- see the identical
+  # NX_SERVICE_URL='' comment on the T1 block above; the same ambient-env-var
+  # leak applies here and is closed the same way.
+  PY_OUT=$(cd "$REPO_ROOT" && NEXUS_CONFIG_DIR="$T2_PY_TMPDIR" NX_SERVICE_URL='' \
+    NX_SERVICE_HOST=127.0.0.1 NX_SERVICE_PORT="$SVCPORT" NX_SERVICE_TOKEN=smoketoken \
+    NATIVE_SMOKE_CLEANUP_ROWS="$NATIVE_SMOKE_CLEANUP_ROWS" \
+    $TIMEOUT_CMD uv run python -c '
+import os
+
+from nexus.db.t2.http_chash_index import HttpChashIndex
+from nexus.db.t2.http_memory_store import HttpMemoryStore
+from nexus.db.t2.http_plan_library import HttpPlanLibrary
+from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
+
+mem = HttpMemoryStore()
+mem.put(project="native-smoke-py", title="a", content="memory native smoke", tags="t")
+got = mem.get(project="native-smoke-py", title="a")
+assert got is not None, "memory.get returned None for a just-put entry"
+assert got["content"] == "memory native smoke", got
+results = mem.search("native smoke", project="native-smoke-py")
+assert any(r.get("title") == "a" for r in results), f"memory.search did not find title=a: {results}"
+entries = mem.list_entries(project="native-smoke-py")
+assert any(e.get("title") == "a" for e in entries), f"memory.list_entries did not find title=a: {entries}"
+
+plans = HttpPlanLibrary()
+plan_id = plans.save_plan(query="native smoke plan query", plan_json="{\"steps\": []}", project="native-smoke-py")
+plan_results = plans.search_plans("native smoke plan", project="native-smoke-py")
+assert plan_results, f"plans.search_plans found nothing: {plan_results}"
+
+tax = HttpTaxonomyStore()
+# Fixed, not random (nexus-rxqqd review): deterministic per project convention,
+# and import_topic is an ID-preserving upsert -- reusing the same src_id on a
+# rerun overwrites in place instead of accumulating a fresh row every run.
+src_id = 999_888_777
+tax.import_topic(
+    src_id=src_id, label="native-smoke-topic", parent_id=None,
+    collection="native-smoke-py", centroid_hash=None, doc_count=1,
+    created_at="2026-01-01T00:00:00Z", review_status="approved", terms=None,
+)
+topics = tax.get_all_topics(collection="native-smoke-py")
+assert any(t.get("label") == "native-smoke-topic" for t in topics), f"taxonomy.get_all_topics did not find the seeded topic: {topics}"
+
+chash = HttpChashIndex()
+chash.upsert(chash="deadbeef" * 8, collection="native-smoke-py")
+collections = chash.distinct_collections()
+assert "native-smoke-py" in collections, f"chash.distinct_collections missing native-smoke-py: {collections}"
+
+if os.environ.get("NATIVE_SMOKE_CLEANUP_ROWS") == "1":
+    # nexus-rxqqd review follow-up (substantive-critic): best-effort row
+    # cleanup, only when pointed at an external (non-throwaway) NX_DB_URL --
+    # see the NATIVE_SMOKE_CLEANUP_ROWS comment near the top of this file for why.
+    #
+    # Each delete wrapped individually and isolated from the assertions above
+    # (2nd-round review follow-up, substantive-critic): a cleanup-only
+    # exception must never masquerade as an assertion failure to whoever is
+    # debugging a FAIL -- print CLEANUP-WARN and keep going for each surface
+    # independently, rather than let one failure (a) abort the remaining
+    # three deletes and (b) skip print("OK"), making grep -q "^OK$" fail
+    # identically to a genuine assertion failure despite every real check
+    # above having already passed.
+    for _label, _cleanup in (
+        ("memory", lambda: mem.delete(project="native-smoke-py", title="a")),
+        ("plans", lambda: plans.delete_plan(plan_id)),
+        ("taxonomy", lambda: tax.delete_topic(src_id)),
+        ("chash", lambda: chash.delete_collection("native-smoke-py")),
+    ):
+        try:
+            _cleanup()
+        except Exception as exc:  # noqa: BLE001 — best-effort cleanup, see comment above
+            print(f"CLEANUP-WARN: {_label} cleanup failed: {exc}")
+
+print("OK")
+' 2>&1)
+  rm -rf "$T2_PY_TMPDIR"
+  if echo "$PY_OUT" | grep -q "^OK$"; then
+    echo "  ok   memory/plans/taxonomy/chash real-client put/get/search/list (routing + backend together)"
+  else
+    echo "  FAIL memory/plans/taxonomy/chash real-client check:"; echo "$PY_OUT" | sed 's/^/    /'; fail=1
+  fi
+else
+  echo "  WARN skipping (uv or pyproject.toml not found at $REPO_ROOT) -- this run does NOT cover routing+backend together for memory/plans/taxonomy/chash, only backend-via-curl above"
+fi
 
 # ── Local bge-768 EMBED (nexus-pqatt) ────────────────────────────────────────
 # The embed path drives the DJL HuggingFace tokenizers JNI (libtokenizers.so) and

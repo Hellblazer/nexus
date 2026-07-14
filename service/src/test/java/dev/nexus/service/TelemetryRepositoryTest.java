@@ -100,12 +100,14 @@ class TelemetryRepositoryTest {
             String schema = "nexus";
             // Grant all telemetry tables
             for (String table : List.of("relevance_log", "search_telemetry", "tier_writes",
-                    "nx_answer_runs", "hook_failures", "frecency")) {
+                    "nx_answer_runs", "hook_failures", "frecency",
+                    "claude_assisted_remediation_consents", "retention_markers")) {
                 su.createStatement().execute(
                     "GRANT SELECT, INSERT, UPDATE, DELETE ON " + schema + "." + table + " TO " + SVC_ROLE);
             }
             for (String seq : List.of("relevance_log_id_seq", "tier_writes_id_seq",
-                    "nx_answer_runs_id_seq", "hook_failures_id_seq")) {
+                    "nx_answer_runs_id_seq", "hook_failures_id_seq",
+                    "claude_assisted_remediation_consents_id_seq")) {
                 su.createStatement().execute(
                     "GRANT USAGE ON SEQUENCE " + schema + "." + seq + " TO " + SVC_ROLE);
             }
@@ -339,6 +341,37 @@ class TelemetryRepositoryTest {
         } catch (SQLException e) {
             throw new RuntimeException(e);
         }
+    }
+
+    // ── consents (RDR-182 nexus-ng2sy: service-mode consent-audit parity) ────────
+
+    @Test @Order(32)
+    void recordConsent_grantAndRevoke_areAppendOnlyAndListedInOrder() {
+        // Append-only: a grant AND a revoke are each their own row; listConsents
+        // returns them in insertion order for the tenant.
+        repo.recordConsent(TENANT_A, "flag:claude_assisted_remediation", PAST_TS, true);
+        repo.recordConsent(TENANT_A, "remediate:chash-poison", PAST_TS, true);
+        repo.recordConsent(TENANT_A, "flag:claude_assisted_remediation", PAST_TS, false);
+
+        var rows = repo.listConsents(TENANT_A);
+        assertThat(rows).hasSize(3);
+        assertThat(rows.get(0).get("scope")).isEqualTo("flag:claude_assisted_remediation");
+        assertThat(rows.get(0).get("granted")).isEqualTo(true);
+        assertThat(rows.get(1).get("scope")).isEqualTo("remediate:chash-poison");
+        assertThat(rows.get(2).get("granted")).isEqualTo(false);  // the revoke retained
+    }
+
+    @Test @Order(33)
+    void listConsents_isTenantIsolated() {
+        // Rows written under TENANT_A must not be visible to TENANT_B (FORCE RLS).
+        repo.recordConsent(TENANT_B, "remediate:chash-poison", PAST_TS, true);
+        var aRows = repo.listConsents(TENANT_A);
+        var bRows = repo.listConsents(TENANT_B);
+        // A has the 3 from the prior test; B has exactly its own 1.
+        assertThat(bRows).hasSize(1);
+        assertThat(bRows.get(0).get("scope")).isEqualTo("remediate:chash-poison");
+        assertThat(aRows).noneMatch(r -> "tel-tenant-b".equals(r.get("scope")));
+        assertThat(aRows.size()).isGreaterThanOrEqualTo(3);
     }
 
     @Test @Order(31)
@@ -892,5 +925,44 @@ class TelemetryRepositoryTest {
         config.setMaximumPoolSize(4);
         config.addDataSourceProperty("options", "-c search_path=nexus,public");
         return new com.zaxxer.hikari.HikariDataSource(config);
+    }
+    // ── nexus-24p05: retention markers ───────────────────────────────────────
+
+    @Test
+    void expireRelevanceLog_bumpsCumulativeRetentionMarker() {
+        String tenant = "ret-marker-" + System.nanoTime();
+        // Two old rows (past any horizon) + one fresh row.
+        repo.importRelevanceRow(tenant, "q1", "c1", "knowledge__x", "click", "s",
+            "2020-01-01T00:00:00Z");
+        repo.importRelevanceRow(tenant, "q2", "c2", "knowledge__x", "click", "s",
+            "2020-01-02T00:00:00Z");
+        repo.logRelevance(tenant, "q3", "c3", "click", "s", "knowledge__x");
+
+        int deleted = repo.expireRelevanceLog(tenant, 90);
+        org.assertj.core.api.Assertions.assertThat(deleted).isEqualTo(2);
+        var markers = repo.getRetentionMarkers(tenant,
+            List.of("nexus.relevance_log", "nexus.search_telemetry"));
+        org.assertj.core.api.Assertions.assertThat(markers)
+            .containsEntry("nexus.relevance_log", 2L)
+            .doesNotContainKey("nexus.search_telemetry");  // never swept -> absent
+
+        // Second sweep with nothing left to delete: marker UNCHANGED (no bump-on-zero).
+        org.assertj.core.api.Assertions.assertThat(repo.expireRelevanceLog(tenant, 90)).isZero();
+        org.assertj.core.api.Assertions.assertThat(
+            repo.getRetentionMarkers(tenant, List.of("nexus.relevance_log")))
+            .containsEntry("nexus.relevance_log", 2L);
+    }
+
+    @Test
+    void retentionMarkers_areTenantIsolated() {
+        String a = "ret-iso-a-" + System.nanoTime();
+        String b = "ret-iso-b-" + System.nanoTime();
+        repo.importRelevanceRow(a, "q", "c", "knowledge__x", "click", "s",
+            "2020-01-01T00:00:00Z");
+        repo.expireRelevanceLog(a, 90);
+        org.assertj.core.api.Assertions.assertThat(
+            repo.getRetentionMarkers(b, List.of("nexus.relevance_log")))
+            .as("tenant B must not see tenant A's marker (RLS)")
+            .isEmpty();
     }
 }

@@ -513,12 +513,24 @@
                      optimization passes for ~half the build time and lower peak memory.
                      Never use -Ob for a published engine-service-v* binary. -->
                 <native.image.opt>-O2</native.image.opt>
-                <!-- nexus-9yrus (3) builder max heap: a deliberate explicit cap (~78% of
-                     the 7GB ubuntu-latest) — single tunable knob, replacing native-image's
-                     implicit auto-size. RAISE to match a larger runner when CI moves off
-                     the 7GB box (-Dnative.image.maxheap=24g): that box over-commits (peak
-                     RSS ~7.86GB > 7GB) and GC-thrashes; more RAM is the real fix. -->
+                <!-- nexus-9yrus (3) builder max heap: a deliberate explicit cap — single
+                     tunable knob, replacing native-image's implicit auto-size. This DEFAULT
+                     is the floor, sized for the smallest box that builds (macos-14, ~8GB:
+                     v0.1.40 logs show 5632m = 69.8% of its system memory, peak RSS 4.55GB
+                     under the cap). Larger runners override per-invocation with
+                     -Dnative.image.maxheap: the linux release matrix + the CI trip-wire
+                     pass 11g (ubuntu-latest/-24.04-arm are 16GB boxes per the same logs —
+                     5632m there was 31% of RAM and heap-starved the build at 1208-2519
+                     GCs); the migration-rehearsal auto-sizes to 70% of its Docker VM. -->
                 <native.image.maxheap>5632m</native.image.maxheap>
+                <!-- Runtime GC compiled INTO the produced binary via the gc build
+                     option (NOT the builder JVM's GC, which is the UseParallelGC
+                     flag below). serial = GraalVM default: smallest footprint,
+                     right for local nx-init installs and the only choice on macOS
+                     (G1 is linux-only). Override per-invocation with
+                     -Dnative.image.gc=G1 for throughput experiments / a future
+                     linux-cloud split; A/B harness: tests/e2e/gc-ab/run-ab.sh. -->
+                <native.image.gc>serial</native.image.gc>
             </properties>
             <build>
                 <plugins>
@@ -607,6 +619,7 @@
                                              heap is now a single knob to raise on a larger runner. -->
                                         <buildArg>-J-Xmx${native.image.maxheap}</buildArg>
                                         <buildArg>-J-XX:+UseParallelGC</buildArg>
+                                        <buildArg>--gc=${native.image.gc}</buildArg>
                                         <!-- nexus-9yrus (2) optimization level (see profile properties):
                                              -O2 for release, -Ob (quick-build) for PR/smoke. -->
                                         <buildArg>${native.image.opt}</buildArg>

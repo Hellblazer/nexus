@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from nexus.db.chroma_quotas import QUOTAS
+from nexus.db.limits import QUOTAS
 
 if TYPE_CHECKING:
     from nexus.catalog.catalog import Catalog

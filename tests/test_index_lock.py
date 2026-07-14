@@ -344,6 +344,7 @@ def test_cli_on_locked_default_is_wait(runner: CliRunner, lock_home: Path) -> No
     """nx index repo uses on_locked='wait' by default."""
     repo = lock_home / "myrepo"
     repo.mkdir()
+    (repo / ".git").mkdir()
 
     mock_reg = MagicMock()
     mock_reg.get.return_value = {"collection": "code__myrepo"}
@@ -362,6 +363,7 @@ def test_cli_on_locked_skip(runner: CliRunner, lock_home: Path) -> None:
     """nx index repo --on-locked=skip passes on_locked='skip'."""
     repo = lock_home / "myrepo"
     repo.mkdir()
+    (repo / ".git").mkdir()
 
     mock_reg = MagicMock()
     mock_reg.get.return_value = {"collection": "code__myrepo"}
@@ -380,6 +382,7 @@ def test_cli_on_locked_invalid_value(runner: CliRunner, lock_home: Path) -> None
     """nx index repo --on-locked=bad rejects invalid values."""
     repo = lock_home / "myrepo"
     repo.mkdir()
+    (repo / ".git").mkdir()
 
     with patch("nexus.commands.index._registry", return_value=MagicMock()):
         result = runner.invoke(main, ["index", "repo", str(repo), "--on-locked=bad"])

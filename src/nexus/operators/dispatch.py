@@ -52,8 +52,8 @@ def _build_dispatch_env(
     Shared T1 (``share_t1=True``)
         Subprocess inherits ``NX_T1_HOST`` / ``NX_T1_PORT`` from the
         parent's ``nexus.mcp._t1_state.T1_ADDR`` so its ``T1Database``
-        connects to the parent's chroma. ``NX_T1_ISOLATED`` and
-        ``NEXUS_SKIP_T1`` are stripped. Raises ``RuntimeError`` when
+        connects to the parent's chroma. ``NX_T1_ISOLATED`` is
+        stripped. Raises ``RuntimeError`` when
         the parent's T1 isn't live; a silent fallback would defeat
         the caller's intent.
 
@@ -65,11 +65,28 @@ def _build_dispatch_env(
         the parent. Mutually exclusive with ``share_t1``.
 
     Owned (default, neither flag set)
-        Strips ``NX_T1_HOST`` / ``NX_T1_PORT`` / ``NX_T1_ISOLATED`` /
-        ``NEXUS_SKIP_T1`` so the subprocess MCP spawns its own
+        Strips ``NX_T1_HOST`` / ``NX_T1_PORT`` / ``NX_T1_ISOLATED``
+        so the subprocess MCP spawns its own
         chroma (lifespan Branch 3). The subprocess gets a
         sealed-from-parent T1 session of its own. Internal Bash tools
         and sub-agents within the subprocess see consistent state.
+
+    nexus-5daww (defense in depth): both ``ephemeral`` and ``owned`` also
+    strip ``NX_T1_SESSION`` / ``NX_T1_SESSION_ID`` -- the SERVICE-backed T1
+    session-token pair minted by the top-level MCP's
+    ``_t1_chroma_lifespan`` Branch 0. Pre-fix, ``base = dict(os.environ)``
+    carried the parent's already-minted, LIVE token straight through to a
+    nested ``nx-mcp`` (spawned by a subsequent tool-granting dispatch, e.g.
+    ``nx_plan_audit`` / ``nx_enrich_beads``), whose own Branch 0 would
+    resolve the SAME session id via the still-passed-through
+    ``NX_SESSION_ID`` and either reuse or re-mint against it. Stripping the
+    token pair here means the child never even sees the parent's secret
+    directly in its env (reduced exposure surface); it is not sufficient
+    on its own to prevent a same-session re-mint since ``NX_SESSION_ID``
+    is deliberately still forwarded below for attribution -- the
+    session-level fix (a lease-file consult before mint) lives in
+    ``mcp.core._t1_chroma_lifespan`` Branch 0 (nexus-5daww) and is the
+    layer that actually prevents rotation.
     """
     if share_t1 and ephemeral:
         raise ValueError(
@@ -92,22 +109,24 @@ def _build_dispatch_env(
         base["NX_T1_HOST"] = host
         base["NX_T1_PORT"] = str(port)
         base.pop("NX_T1_ISOLATED", None)
-        base.pop("NEXUS_SKIP_T1", None)
     elif ephemeral:
         base["NX_T1_ISOLATED"] = "1"
         base.pop("NX_T1_HOST", None)
         base.pop("NX_T1_PORT", None)
-        # Drop the deprecated alias so its presence cannot leak
-        # past this dispatch boundary; the subprocess only sees the
-        # canonical NX_T1_ISOLATED.
-        base.pop("NEXUS_SKIP_T1", None)
+        # nexus-5daww: never forward the parent's live SERVICE-backed T1
+        # session-token pair to a nested MCP subprocess.
+        base.pop("NX_T1_SESSION", None)
+        base.pop("NX_T1_SESSION_ID", None)
     else:
         # Owned: subprocess spawns its own T1. Strip any parent T1
         # signals so the lifespan's Branch 3 fires.
         base.pop("NX_T1_HOST", None)
         base.pop("NX_T1_PORT", None)
         base.pop("NX_T1_ISOLATED", None)
-        base.pop("NEXUS_SKIP_T1", None)
+        # nexus-5daww: never forward the parent's live SERVICE-backed T1
+        # session-token pair to a nested MCP subprocess.
+        base.pop("NX_T1_SESSION", None)
+        base.pop("NX_T1_SESSION_ID", None)
 
     if parent_session_id:
         base["NX_SESSION_ID"] = parent_session_id
@@ -224,7 +243,7 @@ async def claude_dispatch(
     # (PR #198). Without this, ``proc.kill()`` on timeout only kills the
     # claude leader and orphans the children.
     #
-    # NEXUS_SKIP_T1=1 tells the subprocess's nx SessionStart hook to NOT
+    # NX_T1_ISOLATED=1 tells the subprocess's nx SessionStart hook to NOT
     # spin up a chroma T1 server, and tells the T1 client to go straight
     # to EphemeralClient. Operator dispatch is stateless — each
     # `claude -p` invocation is a one-shot call that takes its input from
@@ -247,10 +266,9 @@ async def claude_dispatch(
     # RDR-105 P2.5 (nexus-4gby): build the subprocess env via the
     # three-mode helper. The operator-dispatch caller is the
     # canonical stateless one-shot, so default to ``ephemeral=True``.
-    # When the new-discovery flag is off, the helper emits the
-    # historical ``NEXUS_SKIP_T1=1`` shape; when the flag is on, it
-    # uses ``NX_T1_ISOLATED=1`` instead. Both signals are honoured by
-    # the receiving subprocess's constructor and lifespan.
+    # The helper emits ``NX_T1_ISOLATED=1`` (the legacy
+    # ``NEXUS_SKIP_T1`` alias was removed at 6.5.2, a major past its
+    # promised 5.0 removal).
     env = _build_dispatch_env(
         ephemeral=True,
         parent_session_id=parent_session_id,

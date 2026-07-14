@@ -168,11 +168,19 @@ def _make_chash_transport(
 
 
 class _ChashFakeStore:
-    """Serves BOTH roles chash needs: ``._client.post`` for
+    """Serves BOTH roles chash needs: ``import_rows`` for
     ``migrate_chash_rows`` (pass 1, full ETL) and
     ``registered_chashes_for_collection`` for ``verify_fill_chash`` (pass 2,
     delta) — against the SAME ``registered`` dict the transport handler
-    mutates on a successful POST (non-tautology discipline)."""
+    mutates on a successful POST (non-tautology discipline).
+
+    nexus-f2qvx.3: ``import_rows`` is the public ``HttpChashIndex`` wrapper
+    ``chash_etl.py`` / ``migration/orchestrator.py`` now call (was a raw
+    ``self._client.post(...)`` reach-through pre-mixin-adoption). This fake
+    still drives the request through its own ``httpx.Client`` (backed by
+    the MockTransport fault-injection handler above) internally, so the
+    502-burst fault injection semantics are unchanged.
+    """
 
     def __init__(self, client: httpx.Client, registered: dict[str, set[str]]) -> None:
         self._client = client
@@ -180,6 +188,11 @@ class _ChashFakeStore:
 
     def registered_chashes_for_collection(self, collection: str) -> set[str]:
         return set(self._registered.get(collection, set()))
+
+    def import_rows(self, rows: list[dict[str, Any]]) -> int:
+        resp = self._client.post("/v1/chash/import", json={"rows": rows})
+        resp.raise_for_status()
+        return resp.json().get("imported", 0)
 
     def close(self) -> None:
         pass
@@ -934,3 +947,65 @@ class TestTelemetryUnmappedDriftNotSilentlySkipped:
         sent_table_names = {t for t, _rows in corpus.telemetry_target.import_calls[imports_before:]}
         assert sent_table_names == {"frecency"}
         assert corpus.telemetry_target.present_by_table["frecency"] == present  # hole re-closed
+
+
+class TestWatermarkThirdPassShortcut:
+    """nexus-te885.10 part 2: after a breaker-clean verify-fill pass recorded
+    watermarks for the four count-unmapped tables, the NEXT no-op pass probes
+    only source rows above each watermark — zero rows on an unchanged source —
+    instead of re-probing the entire table contents."""
+
+    def test_third_pass_probes_above_watermark_only(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        corpus = _Corpus(tmp_path, monkeypatch, inject_burst=False)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "wmcfg"))
+
+        report1 = orch.migrate_all(
+            corpus.sources, count_source=corpus.count_source, verify_fill=False,
+        )
+        assert report1["summary"]["total_failed"] == 0
+
+        # Pass 2 (verify-fill): full probe (no watermark yet), breaker-clean,
+        # so it ADVANCES the watermarks for all four unmapped tables.
+        report2 = orch.migrate_all(
+            corpus.sources, count_source=corpus.count_source, verify_fill=True,
+        )
+        assert report2["summary"]["total_failed"] == 0
+
+        # Pass 3: capture the min_rowid every read uses.
+        from nexus.db.t2 import telemetry_etl as etl_mod
+        seen: dict[str, int] = {}
+        real_read = etl_mod.read_rows_for_fill
+
+        def _spy(conn, table, *, collector=None, min_rowid=0):
+            seen[table] = min_rowid
+            return real_read(conn, table, collector=collector, min_rowid=min_rowid)
+
+        monkeypatch.setattr(etl_mod, "read_rows_for_fill", _spy)
+        report3 = orch.migrate_all(
+            corpus.sources, count_source=corpus.count_source, verify_fill=True,
+        )
+        assert report3["summary"]["total_failed"] == 0
+
+        from nexus.migration.verify_fill_watermark import (
+            RETENTION_HORIZON_TABLES,
+            WATERMARK_TABLES,
+        )
+        fill3 = report3["verify_fill"]["results"]["telemetry"]["fill"]
+        for table in WATERMARK_TABLES:
+            if table in RETENTION_HORIZON_TABLES:
+                # The corpus's relevance fixtures are 2024-era — past the
+                # retention horizon. nexus-ots8o: that must read as
+                # EXPIRED_UNVERIFIABLE (no watermark, no probe, and above
+                # all never dressed as verified parity).
+                assert seen.get(table, 0) == 0
+                assert fill3[table]["status"] == "expired_unverifiable"
+                assert fill3[table]["horizon_excluded"] > 0
+                continue
+            assert seen.get(table, 0) > 0, (
+                f"pass 3 must probe {table} above the pass-2 watermark, "
+                f"got min_rowid={seen.get(table)}"
+            )
+            assert fill3[table]["status"] == "parity"
+            assert fill3[table]["filled"] == 0

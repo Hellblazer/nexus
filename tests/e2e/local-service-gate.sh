@@ -148,6 +148,16 @@ if [ -f "$REPO_ROOT/.env" ]; then
   source "$REPO_ROOT/.env"
   set +a
 fi
+# NEXUS_GATE_NO_VOYAGE=1: mask the Voyage key AFTER sourcing .env. A DEAD key
+# hard-fails the voyage/CCE subset (the embed 401s surface as typed 502s),
+# whereas an ABSENT key makes the same subset skip with a clear reason — the
+# honest posture when the key is known-rotated/revoked (2026-07-13: the .env
+# key is dead; rotation is operator work). The vacuity guard still enforces
+# the skip BUDGET, so masking cannot silently hollow out the gate.
+if [ -n "${NEXUS_GATE_NO_VOYAGE:-}" ]; then
+  unset VOYAGE_API_KEY NX_VOYAGE_API_KEY
+  echo "[gate] NEXUS_GATE_NO_VOYAGE=1 — voyage/CCE subset will SKIP (key masked)"
+fi
 
 # shellcheck disable=SC2329  # invoked indirectly via the EXIT trap below
 cleanup() {
@@ -161,6 +171,9 @@ cleanup() {
     pg_ctl -D "$SCRATCH/postgres" stop -m fast >/dev/null 2>&1
   fi
   rm -rf "$SCRATCH"
+  # Backstop for a signal mid-jar-build: never leave a stamped
+  # release.properties in the working tree (it bakes into later builds).
+  git checkout -- "service/src/main/resources/META-INF/nexus/release.properties" 2>/dev/null || true
   echo "[gate] cleaned up"
 }
 trap cleanup EXIT
@@ -168,23 +181,51 @@ trap cleanup EXIT
 # 1. Provision the throwaway PG cluster.
 NEXUS_CONFIG_DIR="$SCRATCH" uv run nx init --service
 
-# 2. Rebuild the dev jar if stale or missing (rebuild-on-key-miss only; a
-#    fresh jar re-run is a no-op). Skipped when a native binary is supplied
-#    — the native path never launches the jar, so freshness is moot.
+# 2. Rebuild the dev jar if stale, missing, or WRONG-STAMPED (rebuild-on-
+#    key-miss only; a fresh, correctly-stamped jar re-run is a no-op).
+#    Skipped when a native binary is supplied — the native path never
+#    launches the jar, so freshness is moot.
+#
+#    Stamp discipline (2026-07-13, found by the 0.1.39->0.1.41 floor bump):
+#    the cloud-probe-path tests in this gate require the service to report
+#    release_version >= REQUIRED_ENGINE_VERSION, but a clean dev jar bakes a
+#    BLANK stamp (-> null -> fail-closed), so the gate previously depended on
+#    whatever stamped jar an earlier rehearsal happened to leave in
+#    service/target — ambient machine state, the exact gate defect the
+#    self-provisioning rule forbids. Now: derive the stamp from the floor
+#    constant (same parse as migration-rehearsal/run.sh), treat a jar whose
+#    baked stamp differs as stale, and stamp/restore release.properties
+#    around the build so the jar always carries exactly the floor.
 JAR="$REPO_ROOT/service/target/nexus-service-1.0-SNAPSHOT.jar"
+RELEASE_PROPS="service/src/main/resources/META-INF/nexus/release.properties"
+GATE_STAMP="$(python3 -c '
+import re, pathlib
+src = pathlib.Path("src/nexus/engine_version.py").read_text()
+m = re.search(r"REQUIRED_ENGINE_VERSION[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)", src)
+print(".".join(m.groups()) if m else "")
+')"
+[ -n "$GATE_STAMP" ] || { echo "[gate] FATAL: could not parse REQUIRED_ENGINE_VERSION" >&2; exit 2; }
 if [ -z "${NEXUS_SERVICE_BIN:-}" ]; then
   JAR_SKIP_REASON="$(uv run python3 -c '
 from tests.db._service_fixture import jar_freshness_skip_reason
 print(jar_freshness_skip_reason() or "")
 ')"
-  if [ -n "$JAR_SKIP_REASON" ]; then
-    echo "[gate] $JAR_SKIP_REASON"
-    echo "[gate] rebuilding service jar..."
+  BAKED_STAMP=""
+  [ -f "$JAR" ] && BAKED_STAMP="$(unzip -p "$JAR" META-INF/nexus/release.properties 2>/dev/null | sed -n 's/^release_version=//p')"
+  if [ -n "$JAR_SKIP_REASON" ] || [ "$BAKED_STAMP" != "$GATE_STAMP" ]; then
+    [ -n "$JAR_SKIP_REASON" ] && echo "[gate] $JAR_SKIP_REASON"
+    [ "$BAKED_STAMP" != "$GATE_STAMP" ] && echo "[gate] jar stamp '${BAKED_STAMP:-<none>}' != floor '$GATE_STAMP' — rebuilding stamped"
+    echo "[gate] rebuilding service jar (release_version=$GATE_STAMP)..."
+    _restore_props() { git checkout -- "$RELEASE_PROPS" 2>/dev/null || true; }
+    sed "s/^release_version=.*/release_version=${GATE_STAMP}/" "$RELEASE_PROPS" > "$RELEASE_PROPS.tmp" \
+      && mv "$RELEASE_PROPS.tmp" "$RELEASE_PROPS"
     if ! (cd service && ./mvnw -q package -DskipTests); then
+      _restore_props
       echo "[gate] ERROR: service jar rebuild failed — fix the Maven build and re-run:" >&2
       echo "         cd service && ./mvnw package -DskipTests" >&2
       exit 2
     fi
+    _restore_props
   fi
 fi
 
@@ -233,7 +274,13 @@ if [ "$LIVED_IN_COUNT" -ne "$LIVED_IN_EXPECTED" ]; then
 fi
 
 set +e
+# NEXUS_CONFIG_DIR pinned to the scratch dir (2026-07-13): without it,
+# get_credential()'s config.yml fallback read the OPERATOR's real
+# ~/.config/nexus/config.yml from inside the "fully isolated" gate — a
+# dead voyage credential there hard-failed the voyage subset even with
+# the env key masked, and any credential there can leak into gate runs.
 NX_SERVICE_HOST=127.0.0.1 NX_SERVICE_PORT="$SERVICE_PORT" NX_SERVICE_TOKEN="$SERVICE_TOKEN" \
+  NEXUS_CONFIG_DIR="$SCRATCH" \
   uv run pytest -m "integration and not lived_in" -q "$@" 2>&1 | tee "$SCRATCH/pytest.out"
 STATUS=${PIPESTATUS[0]}
 set -e

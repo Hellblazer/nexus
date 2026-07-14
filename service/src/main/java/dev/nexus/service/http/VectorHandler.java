@@ -140,6 +140,13 @@ public final class VectorHandler implements HttpHandler {
             }
         } catch (SkipHandlerException e) {
             // Response already sent (405 / 503 / 401 guard) — nothing further.
+        } catch (dev.nexus.service.vectors.UpstreamAuthException e) {
+            // nexus-pmhpc: upstream (Voyage) rejected OUR credentials — an
+            // operator/config problem on every embedding-bearing route
+            // (store-put, search, query, hybrid). 502 Bad Gateway with the
+            // actionable detail, never an opaque 500.
+            log.error("event=vector_upstream_auth_failed op={} error={}", op, e.getMessage());
+            HttpUtil.send(exchange, 502, json(Map.of("error", e.getMessage())));
         } catch (EmbeddingModelUnavailableException e) {
             // nexus-pebfx.2: well-formed request, unservable in this embedding
             // mode (e.g. voyage-* collection while the service has no Voyage

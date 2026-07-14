@@ -19,16 +19,16 @@ from nexus.db.t1 import T1Database
 def _allow_t1_record_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
     """GH #567: tests in this file exercise T1Database's record-
     resolution + raise-loud paths directly. The conftest's autouse
-    ``_isolate_t1_sessions`` fixture sets ``NEXUS_SKIP_T1=1`` to keep
+    ``_isolate_t1_sessions`` fixture sets ``NX_T1_ISOLATED=1`` to keep
     other test files using ephemeral fallback semantics; here we
     UNSET it so tests reach the post-fix behaviour:
       - constructor raises ``T1ServerNotFoundError`` when no record
       - finds a record when one is written
       - exercises the resolver-retry loop
-    Tests that explicitly want ``NEXUS_SKIP_T1=1`` opt back in
+    Tests that explicitly want ``NX_T1_ISOLATED=1`` opt back in
     locally via ``monkeypatch.setenv`` inside the test body.
     """
-    monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)
+    monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
 
 
 def _ephemeral_t1(session_id: str | None = None) -> T1Database:

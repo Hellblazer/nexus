@@ -188,9 +188,9 @@ class TestEngineFloorGate:
                 ManagedServiceIncompatible(
                     "managed nexus service at https://api.conexus-nexus.com is "
                     "release_version '0.1.8', below the minimum this client "
-                    "supports (v0.1.34).",
+                    "supports (v0.1.41).",
                     deployed_version="0.1.8",
-                    required_version="0.1.34",
+                    required_version="0.1.41",
                 )
             ),
         )
@@ -204,7 +204,7 @@ class TestEngineFloorGate:
         )
         assert result.exit_code != 0
         assert "0.1.8" in result.output
-        assert "0.1.34" in result.output
+        assert "0.1.41" in result.output
         assert etl_calls == []  # the ETL must never run against a bad engine
 
     def test_incompatible_engine_fails_loud_on_rollback_too(
@@ -216,7 +216,7 @@ class TestEngineFloorGate:
             "nexus.db.managed_endpoint.probe_managed_service",
             lambda: (_ for _ in ()).throw(
                 ManagedServiceIncompatible("stale engine", deployed_version="0.1.1",
-                                            required_version="0.1.34")
+                                            required_version="0.1.41")
             ),
         )
         rollback_calls: list[str] = []

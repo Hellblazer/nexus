@@ -98,7 +98,7 @@ def aspects_drain(timeout: float, poll_interval: float) -> None:
     except DrainTimeoutError as e:
         base = f"Drain timeout: {e.stuck_count} row(s) still active after {timeout}s."
         # Honor the honest service-mode hint (e.g. crashed-worker rows stuck
-        # in_progress -> run reclaim-stale). Falls back to the generic re-run
+        # in_progress -> a running worker's stale-reclaim loop resets them). Falls back to the generic re-run
         # advice when no detail was attached.
         suffix = (
             f" {e.detail}"

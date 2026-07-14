@@ -369,20 +369,31 @@ def test_audit_target_collisions_reuses_guard_grouping(monkeypatch):
 
 def test_false_clean_regression_merge_only_visible_in_no_key_world(monkeypatch):
     """nexus-772h2 (substantive-critic Critical): a store that merged in
-    LOCAL mode (no Voyage key at migration time), audited TODAY with a key
-    configured. Under today's world the misnamed collection classifies
-    'supported' (measured_dim never probed, no remap, no collision); only
-    the no-key world reproduces the historical map. The default audit must
-    still find the merge — a single-world audit pinned to today's env is
-    exactly the false-clean this regression test exists to prevent."""
+    LOCAL mode (no Voyage key at migration time), audited with a key
+    configured. This test hand-builds the classifications via a monkeypatched
+    ``classify_collections`` rather than exercising the real classifier, so
+    its "key-present world" fixture below is now a HISTORICAL (pre-nexus-x7t5y)
+    shape: the real classifier, post-x7t5y, would probe this exact
+    voyage-named+key-present+768-measured collection and correctly reclassify
+    it "unsupported"/remappable in BOTH worlds, closing this specific false
+    clean at the source. The dual-world audit design this test defends
+    (never trust a single classify_collections() call pinned to today's env)
+    still matters generally — e.g. a caller-supplied `wired=` override, or a
+    classification result cached from before a service restart, could still
+    reproduce a stale-vs-live divergence — this fixture is kept as a
+    synthetic stand-in for that broader class, not as a claim about what the
+    real classifier does today.
+    """
     # world False: the historical truth — misnamed collection is unsupported,
     # measured 768, remaps onto the honest sibling's name.
     detection_no_key = DetectionReport(
         classifications=(_misnamed_voyage_cls(_STALE), _cls(_HONEST)),
         voyage_key_present=False,
     )
-    # world True: today's env — the voyage-named collection reads supported,
-    # never probed, never remapped: NO collision exists in this world.
+    # world True: a SYNTHETIC stale-classification world, pre-nexus-x7t5y
+    # shape (the real classifier no longer produces this — see docstring
+    # above) — the voyage-named collection reads supported, never probed,
+    # never remapped: NO collision exists in this (now-historical) world.
     supported_stale = CollectionClassification(
         collection=_STALE,
         leg="local",

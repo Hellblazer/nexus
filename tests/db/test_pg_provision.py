@@ -397,6 +397,49 @@ class TestIdempotency:
             "vector extension not recreated by idempotent repair re-run"
         )
 
+    def test_idempotent_rerun_backfills_missing_diag_role(self, provisioned, bins):
+        """RDR-182 P2.1 (review-foundations High): the fast idempotency path
+        must backfill nexus_diag on an ALREADY-RUNNING cluster — the steady
+        state for every existing install, and exactly what guided-upgrade
+        re-runs hit. Simulate a pre-P2.1 cluster (drop the role, strip the
+        credentials keys), re-run provision(), assert role + credentials are
+        restored via the fast path.
+
+        NOTE: mutates the module-scoped ``provisioned`` cluster; restores the
+        role via the very backfill under test, so sibling order is safe.
+        """
+        result, config_dir = provisioned
+        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        creds_path = result.credentials_path
+
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "DROP ROLE IF EXISTS nexus_diag")
+        assert _query(bins, result.port, NEXUS_DB_NAME, os_user,
+                      "SELECT 1 FROM pg_roles WHERE rolname = 'nexus_diag'") == "", (
+            "role drop precondition failed"
+        )
+        # Strip the diag keys to simulate a pre-P2.1 credentials file.
+        stripped = "\n".join(
+            line for line in creds_path.read_text().splitlines()
+            if not line.startswith("NX_DB_DIAG_")
+        ) + "\n"
+        creds_path.write_text(stripped)
+        creds_path.chmod(0o600)
+
+        result2 = provision(config_dir)
+
+        assert result2.already_provisioned, "repair re-run must hit the fast path"
+        assert _query(
+            bins, result.port, NEXUS_DB_NAME, os_user,
+            "SELECT rolbypassrls FROM pg_roles WHERE rolname = 'nexus_diag'",
+        ) == "t", "nexus_diag not recreated (with BYPASSRLS) by the fast-path backfill"
+        from nexus.db.pg_provision import _read_credentials
+        creds = _read_credentials(creds_path)
+        assert creds.get("NX_DB_DIAG_USER") == "nexus_diag", (
+            "diag credentials not backfilled into pg_credentials on the fast path"
+        )
+        assert creds.get("NX_DB_DIAG_PASS"), "diag password missing after backfill"
+
 
 # ── Test 5: end-to-end provision → migrate DDL → svc DML under RLS ────────────
 

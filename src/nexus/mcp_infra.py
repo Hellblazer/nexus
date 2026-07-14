@@ -718,6 +718,45 @@ def _embedding_is_empty(embedding: object) -> bool:
     return len(embedding) == 0
 
 
+def _record_taxonomy_tripwire(
+    collection: str, doc_ids: list, error: str, *, kind: str = "",
+) -> None:
+    """nexus-gednd: loudness tripwire for taxonomy assignment (the RDR-172
+    aspect-enqueue pattern). The assign hook is best-effort — it swallows its
+    own exceptions so fire_batch sees success and hook_registry records NO
+    hook_failures row, making topic-scoped search silently incomplete.
+    Persist a structured row directly (itself best-effort: a telemetry-write
+    failure must never block indexing) and log at warning, not debug.
+    """
+    import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
+    # ``kind`` suffixes the hook_name so nx taxonomy status can distinguish a
+    # designed SKIP (embed_unavailable — an eventual-consistency race, not a
+    # bug) from a genuine assignment failure (critique 2026-07-13).
+    hook_name = "taxonomy_assign_batch_hook" + (f".{kind}" if kind else "")
+    structlog.get_logger().warning(
+        "taxonomy_assign_batch_failed",
+        collection=collection,
+        batch_size=len(doc_ids),
+        kind=kind or "failure",
+        error=error[:500],
+    )
+    try:
+        t2_index_write(
+            lambda t2: t2.telemetry.record_hook_failure(
+                doc_id=(doc_ids[0] if doc_ids else ""),
+                collection=collection,
+                hook_name=hook_name,
+                error=error[:2000],
+                chain="batch",
+            )
+        )
+    except Exception:  # noqa: BLE001 — tripwire persist is best-effort; never block indexing
+        structlog.get_logger().warning(
+            "taxonomy_tripwire_persist_failed", collection=collection, exc_info=True,
+        )
+
+
+
 def taxonomy_assign_batch_hook(
     doc_ids: list[str],
     collection: str,
@@ -788,12 +827,12 @@ def taxonomy_assign_batch_hook(
             # get_embeddings drops ids it cannot resolve; a count skew would
             # mis-pair vectors to docs, so skip rather than assign misaligned.
             if arr is None or len(arr) != len(doc_ids):
-                import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
-                structlog.get_logger().debug(
-                    "taxonomy_assign_service_embed_unavailable",
-                    collection=collection,
-                    want=len(doc_ids),
-                    got=0 if arr is None else len(arr),
+                _record_taxonomy_tripwire(
+                    collection, doc_ids,
+                    f"service embeddings unavailable: want={len(doc_ids)} "
+                    f"got={0 if arr is None else len(arr)} — no assignments "
+                    f"written for this batch",
+                    kind="embed_unavailable",
                 )
                 return
             svc_embeddings = arr.tolist()
@@ -812,10 +851,9 @@ def taxonomy_assign_batch_hook(
                     )
                 )
             )
-        except Exception:  # noqa: BLE001 — taxonomy service path best-effort; logged at debug, returns
-            import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
-            structlog.get_logger().debug(
-                "taxonomy_assign_batch_service_failed", exc_info=True,
+        except Exception as exc:  # noqa: BLE001 — taxonomy service path best-effort; tripwire-recorded, returns
+            _record_taxonomy_tripwire(
+                collection, doc_ids, f"service path: {type(exc).__name__}: {exc}",
             )
         return
 
@@ -857,9 +895,10 @@ def taxonomy_assign_batch_hook(
                 collection=collection,
                 cross_assigned=len(cross),
             )
-    except Exception:  # noqa: BLE001 — taxonomy assign best-effort; logged at debug
-        import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
-        structlog.get_logger().debug("taxonomy_assign_batch_failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — taxonomy assign best-effort; tripwire-recorded
+        _record_taxonomy_tripwire(
+            collection, doc_ids, f"local path: {type(exc).__name__}: {exc}",
+        )
 
 
 def _fetch_or_embed(
@@ -1047,6 +1086,39 @@ def _record_manifest_write_failure(doc_id: str) -> None:
         _MANIFEST_WRITE_FAILURES.append(doc_id)
 
 
+# GH #1397 / nexus-94fxl: batches the manifest hook DROPPED because no chunk in
+# the batch carried a document identity (no catalog_doc_id from the caller, no
+# legacy meta doc_id). Distinct from _MANIFEST_WRITE_FAILURES (a write that was
+# ATTEMPTED and failed): these batches never reach the write at all, so a clean
+# "0 failed" end-of-run summary said nothing about them — the documents' catalog
+# rows stayed at chunk_count=0 and were invisible to catalog-aware search.
+_manifest_identity_drops_lock = threading.Lock()
+_MANIFEST_IDENTITY_DROPS: list[dict] = []
+
+
+def get_manifest_identity_drops() -> list[dict]:
+    """Batches dropped for missing doc identity this process/run.
+
+    Each entry: ``{"collection": str, "batch_size": int}``. Snapshot copy.
+    """
+    with _manifest_identity_drops_lock:
+        return [dict(d) for d in _MANIFEST_IDENTITY_DROPS]
+
+
+def reset_manifest_identity_drops() -> None:
+    """Clear the collector (CLI callers reset at the start of an indexing run,
+    mirroring ``reset_manifest_write_failures``)."""
+    with _manifest_identity_drops_lock:
+        _MANIFEST_IDENTITY_DROPS.clear()
+
+
+def _record_manifest_identity_drop(collection: str, batch_size: int) -> None:
+    with _manifest_identity_drops_lock:
+        _MANIFEST_IDENTITY_DROPS.append(
+            {"collection": collection, "batch_size": batch_size}
+        )
+
+
 def manifest_write_batch_hook(
     doc_ids: list[str],
     collection: str,
@@ -1102,6 +1174,18 @@ def manifest_write_batch_hook(
         if doc_id:
             by_doc[doc_id].append((i, meta))
     if not by_doc:
+        # GH #1397 / nexus-94fxl: this was a zero-log return — chunks landed
+        # in T3 but the manifest was never written, leaving the document's
+        # catalog row at chunk_count=0 and invisible to catalog-aware search,
+        # with the end-of-run summary reporting a clean "0 failed". Record it
+        # for the run summary and log loud.
+        import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
+        _record_manifest_identity_drop(collection, len(metadatas))
+        structlog.get_logger().warning(
+            "manifest_hook_batch_missing_doc_identity",
+            collection=collection,
+            batch_size=len(metadatas),
+        )
         return
     # RDR-146 P1.2: gate on the read handle (None when the catalog is
     # uninitialised — the old skip), then route the manifest WRITES through
@@ -1117,6 +1201,10 @@ def manifest_write_batch_hook(
         structlog.get_logger().debug("manifest_write_hook_no_catalog", exc_info=True)
         return
     if _gate is None:
+        import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
+        structlog.get_logger().debug(
+            "manifest_write_hook_catalog_uninitialised", collection=collection,
+        )
         return
     # Close the read-only SQLite handle (local mode opens a WAL read lock per call).
     # HttpCatalogClient (service mode) has NO such handle: its ``_db`` property RAISES

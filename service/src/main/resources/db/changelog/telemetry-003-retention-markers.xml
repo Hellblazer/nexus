@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-24p05 — retention markers: the verify-fill watermark's rollback
+    detector for tables with target-side TTL sweeps.
+
+    The verify-fill watermark (nexus-te885.10) trusts a stored source-rowid
+    floor only when the target provably did not lose rows below it. A bare
+    row count cannot prove that for a table with a rolling TTL sweep
+    (relevance_log: expireRelevanceLog fires from the default-on SessionEnd
+    hook) — the delete-N/insert-N steady state keeps the count non-decreasing
+    while rows churn. This table gives the sweep a monotonic, per-tenant
+    CUMULATIVE-DELETES counter: a rollback (fresh schema) resets it to
+    absent/0, so `marker_now >= recorded_marker` is a sound no-rollback
+    signal, while ordinary sweep activity (which only deletes rows OLDER than
+    the retention horizon — provably disjoint from the fill's fresh-window
+    scope) advances it without invalidating anything.
+
+    FORCE-RLS like every tenant table; consumed by
+    TelemetryRepository.bumpRetentionMarker/getRetentionMarkers and the
+    GET /v1/telemetry/retention/markers route.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="telemetry-003-1" author="nexus-24p05">
+        <comment>Create retention_markers table (verify-fill watermark rollback detector)</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.retention_markers (
+    tenant_id     TEXT         NOT NULL,
+    relation      TEXT         NOT NULL,
+    total_deleted BIGINT       NOT NULL DEFAULT 0,
+    updated_at    TIMESTAMPTZ  NOT NULL,
+    CONSTRAINT retention_markers_pk PRIMARY KEY (tenant_id, relation)
+);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.retention_markers CASCADE</rollback>
+    </changeSet>
+
+    <changeSet id="telemetry-003-2" author="nexus-24p05">
+        <comment>RLS on retention_markers</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.retention_markers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.retention_markers FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.retention_markers
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.retention_markers;
+            ALTER TABLE nexus.retention_markers NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.retention_markers DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

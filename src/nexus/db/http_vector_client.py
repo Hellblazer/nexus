@@ -1262,7 +1262,7 @@ class HttpVectorClient:
         """
         if not ids:
             return
-        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
+        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
         # Request-size chunk only (see docstring) — not a backend quota.
         size = QUOTAS.MAX_RECORDS_PER_WRITE
         for start in range(0, len(ids), size):
@@ -1355,7 +1355,7 @@ class HttpVectorClient:
         returns no ids). Param name ``collection_name`` matches the oracle
         (nexus-7zuzz).
         """
-        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
+        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
 
         page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
         ids: list[str] = []
@@ -1408,7 +1408,7 @@ class HttpVectorClient:
         concurrent delete already removed some — in which case the prune-stale
         caller's ``deleted != len(ids)`` WARN correctly fires.
         """
-        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
+        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
 
         ids = self.ids_for_source(collection_name, source_path)
         if not ids:
@@ -1436,7 +1436,7 @@ class HttpVectorClient:
         (``/v1/vectors/get``) at the 300-record quota; T3Database parity
         (``collection`` / ``title`` param names match).
         """
-        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
+        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
 
         page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
         ids: list[str] = []
@@ -1480,7 +1480,7 @@ class HttpVectorClient:
         """
         if not ids:
             return
-        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
+        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
 
         size = QUOTAS.MAX_RECORDS_PER_WRITE
         for start in range(0, len(ids), size):
@@ -1543,7 +1543,7 @@ class HttpVectorClient:
         across all pages BEFORE updating — updating mid-pagination would
         shrink the where-match set and shift offsets.
         """
-        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
+        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
 
         page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
         ids: list[str] = []
@@ -1598,7 +1598,7 @@ class HttpVectorClient:
         """
         if not chunk_ids:
             return 0
-        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
+        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
 
         size = QUOTAS.MAX_RECORDS_PER_WRITE
         deleted = 0
@@ -1631,7 +1631,7 @@ class HttpVectorClient:
         as T3Database. Empty/missing source_path values are skipped (MCP-put
         chunks have no on-disk source by design). Missing collection -> [].
         """
-        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
+        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
 
         page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
         seen: set[str] = set()
@@ -1680,7 +1680,7 @@ class HttpVectorClient:
         ``metadata_subset`` contains only the requested ``fields`` with
         empty strings for missing keys; missing collection yields nothing.
         """
-        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
+        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
 
         page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
         offset = 0
@@ -1717,9 +1717,9 @@ class HttpVectorClient:
 
         nexus-h8rf6.5: was missing entirely — ``nx store expire`` crashed
         with ``AttributeError`` in service mode. T3Database parity, with one
-        translation: the service's where-filter supports ``$eq/$ne/$in/$nin``
-        only (``PgVectorRepository.appendWherePredicate``, no range
-        operators), so T3's ``{"ttl_days": {"$gt": 0}}`` pre-filter becomes
+        translation (historical: range operators landed later, nexus-4l80g, but
+        this equivalent rewrite predates them and stays), T3's
+        ``{"ttl_days": {"$gt": 0}}`` pre-filter becomes
         ``{"ttl_days": {"$ne": 0}}`` — equivalent for its only purpose,
         excluding the permanent ``ttl_days == 0`` sentinel (TTLs are never
         negative). The server's ``$ne`` is NULL-inclusive, so rows with
@@ -1733,7 +1733,7 @@ class HttpVectorClient:
 
         Returns the total number of deleted documents.
         """
-        from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — command-local import (db.chroma_quotas)
+        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
         from nexus.metadata_schema import is_expired  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
 
         now_iso = datetime.now(UTC).isoformat()

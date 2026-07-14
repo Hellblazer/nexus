@@ -25,12 +25,9 @@ all serialization).
 """
 from __future__ import annotations
 
-import json
-import os
 import threading
 from typing import Any
 
-import httpx
 import structlog
 
 from nexus.db.t2.aspect_extraction_queue import QueueRow
@@ -43,8 +40,21 @@ DEFAULT_TENANT: str = "default"
 # RDR-152 nexus-fjwxh: env-only resolution replaced by the centralized
 # resolver (env halves -> ServiceRegistry lease -> fail loud), so the
 # T2 service-mode default works wherever the supervisor is running.
-from nexus.db.service_endpoint import resolve_service_endpoint as _resolve_endpoint
+# nexus-f2qvx.2: construction, credential/endpoint refresh-on-401, and the
+# HTTP transport itself (_post/_get/_delete) are now inherited wholesale
+# from RefreshableHttpStoreMixin — HttpAspectQueue no longer bakes a
+# ``self._headers`` dict or a ``httpx.Client(base_url=..., headers=...)``
+# at construction time, which is what let a rotated bearer or a
+# supervisor-restart port change go silently stale for the life of the
+# instance. See ``nx memory get -p nexus -t design-bikit-refreshable-http-store-mixin.md``.
+# This store is the one with a public ``timeout`` kwarg on its own
+# constructor (the mixin's ``_DEFAULT_TIMEOUT_S`` docstring flags it by
+# name) — threaded through to ``super().__init__(..., timeout=timeout)``
+# below, which required the mixin's own ``__init__`` to grow a matching
+# optional ``timeout`` kwarg (additive; every other adopter keeps the
+# 30.0s default unchanged).
 from nexus.db.t2._raw_handle_guard import RawHandleGuardMixin
+from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 
 
 def _body_to_queue_row(body: dict[str, Any]) -> QueueRow:
@@ -58,19 +68,31 @@ def _body_to_queue_row(body: dict[str, Any]) -> QueueRow:
     )
 
 
-class HttpAspectQueue(RawHandleGuardMixin):
+class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     """AspectExtractionQueue drop-in that delegates to the RDR-152 Java HTTP service.
+
+    Uses a keep-alive :class:`httpx.Client` connection pool via
+    :class:`~nexus.db.t2._refreshable_client.RefreshableHttpStoreMixin`,
+    which resolves ``NX_SERVICE_HOST``, ``NX_SERVICE_PORT``, and
+    ``NX_SERVICE_TOKEN`` (or a managed ``service_url``/``service_token``)
+    fresh on construction AND self-heals (re-resolve + retry once) on a
+    401 or a connection-refused/reset — see the mixin's own docstring for
+    the full resolution order.
 
     The ``rename_lock`` parameter is accepted to match AspectExtractionQueue's
     constructor signature (T2Database injects it). It is ignored — no
     Python-side threading guards are needed when the Java service owns all
-    queue state.
+    queue state. ``timeout`` is this store's own public constructor kwarg
+    (pre-dating the mixin); it is threaded through to the mixin's
+    ``__init__`` unchanged so callers that pin a non-default HTTP timeout
+    keep working identically post-adoption.
 
     Args:
         base_url:    Optional override for the service base URL.
         tenant:      Tenant to stamp on every request (default: ``DEFAULT_TENANT``).
         rename_lock: Accepted for constructor parity with AspectExtractionQueue;
                      NOT used (no-op).
+        timeout:     HTTP client timeout in seconds (default: 30.0).
     """
 
     def __init__(
@@ -82,57 +104,29 @@ class HttpAspectQueue(RawHandleGuardMixin):
         _token: str | None = None,
         timeout: float = 30.0,
     ) -> None:
-        if base_url is not None:
-            if _token is None:
-                _token = os.environ.get("NX_SERVICE_TOKEN", "")
-                if not _token:
-                    raise RuntimeError(
-                        "NX_SERVICE_TOKEN is required when "
-                        "NX_STORAGE_BACKEND_ASPECT_QUEUE=service."
-                    )
-            self._base_url = base_url.rstrip("/")
-        else:
-            self._base_url, token = _resolve_endpoint()
-            _token = token
-
-        self._tenant = tenant
-        # rename_lock accepted for constructor parity but ignored over HTTP.
+        super().__init__(base_url, tenant, _token=_token, timeout=timeout)
+        # rename_lock accepted for constructor parity but ignored over HTTP
+        # (verbatim behavior preserved from the pre-mixin constructor).
         self.rename_lock: threading.RLock = (
             rename_lock if rename_lock is not None else threading.RLock()
         )
-        self._headers = {
-            "Authorization": f"Bearer {_token}",
-            "X-Nexus-Tenant": tenant,
-            "Content-Type": "application/json",
-        }
-        self._client = httpx.Client(
-            base_url=self._base_url,
-            headers=self._headers,
-            timeout=timeout,
-        )
-        _log.debug(
-            "http_aspect_queue.init",
-            base_url=self._base_url,
-            tenant=tenant,
-        )
-
-    def close(self) -> None:
-        """Close the keep-alive connection pool (idempotent)."""
-        self._client.close()
 
     # ── Internal helpers ───────────────────────────────────────────────────────
+    #
+    # These stay LOCAL overrides (not a straight inherit) because every method
+    # in this class calls self._post/self._get with a SHORT path suffix
+    # (e.g. "/enqueue") — the "/v1/aspects/queue" prefix is store-specific
+    # routing, not part of the mixin's shared contract. Every actual HTTP
+    # round-trip still goes through the inherited, self-healing
+    # super()._post/_get (RefreshableHttpStoreMixin._send), never
+    # self._client directly.
 
     def _post(self, path: str, body: dict[str, Any]) -> Any:
-        resp = self._client.post(f"/v1/aspects/queue{path}", content=json.dumps(body))
-        resp.raise_for_status()
-        return resp.json()
+        return super()._post(f"/v1/aspects/queue{path}", body)
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
-        resp = self._client.get(f"/v1/aspects/queue{path}", params={
-            k: str(v) for k, v in (params or {}).items() if v is not None
-        })
-        resp.raise_for_status()
-        return resp.json()
+        q = {k: str(v) for k, v in (params or {}).items() if v is not None}
+        return super()._get(f"/v1/aspects/queue{path}", q)
 
     # ── Public API — mirrors AspectExtractionQueue ────────────────────────────
 

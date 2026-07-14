@@ -31,17 +31,41 @@ Method-by-method parity vs ChashIndex (SQLite):
     count_for_collection(collection) -> int
     registered_chashes_for_collection(collection) -> set[str]
     close() -> None
+
+nexus-f2qvx.3 (mixin-adoption sweep, batch C — one of the two OUTLIERS):
+construction, credential/endpoint refresh-on-401, and the HTTP transport
+itself (``_post``/``_get``) are now inherited wholesale from
+:class:`~nexus.db.t2._refreshable_client.RefreshableHttpStoreMixin` —
+``HttpChashIndex`` no longer bakes a ``self._headers`` dict or a
+``httpx.Client(base_url=..., headers=...)`` at construction time, which is
+what let a rotated bearer or a supervisor-restart port change go silently
+stale for the life of the instance. See
+``nx memory get -p nexus -t design-bikit-refreshable-http-store-mixin.md``.
+
+This was the one store in the whole sweep whose ``__init__`` took ``_token``
+POSITIONALLY (no ``*`` before it) — normalized here to keyword-only
+(``*, _token=None``), matching every other ``Http*Store`` and the mixin's
+own pinned contract. Every call site in the codebase already passed
+``_token`` as a keyword or omitted it, so this is a safe, verified-in-place
+normalization (not a behavior change for any existing caller).
+
+The ``/v1/chash/import`` (ETL fidelity) endpoint gained a public
+:meth:`import_rows` wrapper here — pre-adoption, ``chash_etl.py`` and
+``migration/orchestrator.py`` reached into ``http_chash._client.post(...)``
+directly (there was no store method for it). The mixin's ``httpx.Client`` is
+deliberately constructed WITHOUT a baked ``base_url=`` (see the mixin's own
+docstring), so a raw ``_client.post("/v1/chash/import", ...)`` call from
+OUTSIDE this class breaks outright post-adoption (a relative path against a
+client with no base_url). :meth:`import_rows` closes that gap and routes the
+endpoint through the same self-healing transport as every other write here.
 """
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
-import httpx
-import structlog
-
-_log = structlog.get_logger(__name__)
+from nexus.db.t2._raw_handle_guard import RawHandleGuardMixin
+from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -52,22 +76,22 @@ DEFAULT_TENANT: str = "default"
 _BATCH_SIZE: int = 200
 
 
-# RDR-152 nexus-fjwxh: env-only resolution replaced by the centralized
-# resolver (env halves -> ServiceRegistry lease -> fail loud), so the
-# T2 service-mode default works wherever the supervisor is running.
-from nexus.db.service_endpoint import resolve_service_endpoint as _resolve_endpoint
-from nexus.db.t2._raw_handle_guard import RawHandleGuardMixin
-
-
 # ── HttpChashIndex ─────────────────────────────────────────────────────────────
 
 
-class HttpChashIndex(RawHandleGuardMixin):
+class HttpChashIndex(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     """ChashIndex drop-in that delegates to the RDR-152 Java HTTP service.
 
-    Uses a keep-alive :class:`httpx.Client` connection pool. Reads
-    ``NX_SERVICE_HOST``, ``NX_SERVICE_PORT``, and ``NX_SERVICE_TOKEN``
-    from the environment at construction time.
+    Uses a keep-alive :class:`httpx.Client` connection pool via
+    :class:`~nexus.db.t2._refreshable_client.RefreshableHttpStoreMixin`,
+    which resolves ``NX_SERVICE_HOST``, ``NX_SERVICE_PORT``, and
+    ``NX_SERVICE_TOKEN`` (or a managed ``service_url``/``service_token``)
+    fresh on construction AND self-heals (re-resolve + retry once) on a
+    401 or a connection-refused/reset — see the mixin's own docstring for
+    the full resolution order. ``__init__`` is inherited unchanged (this
+    class's constructor signature — ``(base_url=None, tenant=DEFAULT_TENANT,
+    *, _token=None)`` — matches the mixin's pinned contract exactly, so no
+    override is needed).
 
     All public methods match the :class:`~nexus.db.t2.chash_index.ChashIndex`
     interface exactly: same parameter names, same return types, same exception
@@ -79,42 +103,6 @@ class HttpChashIndex(RawHandleGuardMixin):
     with an actionable ``AttributeError`` (so ``hasattr`` /
     ``has_raw_access`` cleanly return False — nexus-9613q.2).
     """
-
-    def __init__(
-        self,
-        base_url: str | None = None,
-        tenant: str = DEFAULT_TENANT,
-        _token: str | None = None,
-    ) -> None:
-        """
-        Args:
-            base_url: Override for ``http://<host>:<port>`` (used in tests).
-                      When ``None``, resolved from NX_SERVICE_HOST + NX_SERVICE_PORT.
-            tenant:   Tenant identifier sent in ``X-Nexus-Tenant`` header.
-            _token:   Token override (used in tests). When ``None``,
-                      resolved from NX_SERVICE_TOKEN env var.
-        """
-        if base_url is None:
-            base_url, resolved_token = _resolve_endpoint()
-        else:
-            resolved_token = _token or os.environ.get("NX_SERVICE_TOKEN", "")
-            if not resolved_token:
-                raise RuntimeError(
-                    "NX_SERVICE_TOKEN is required when NX_STORAGE_BACKEND_CHASH_INDEX=service."
-                )
-
-        self._base_url = base_url.rstrip("/")
-        self._tenant = tenant
-        self._headers = {
-            "Authorization": f"Bearer {resolved_token}",
-            "X-Nexus-Tenant": tenant,
-            "Content-Type": "application/json",
-        }
-        self._client = httpx.Client(
-            base_url=self._base_url,
-            headers=self._headers,
-            timeout=30.0,
-        )
 
     # ── upsert ─────────────────────────────────────────────────────────────────
 
@@ -129,8 +117,7 @@ class HttpChashIndex(RawHandleGuardMixin):
         if not collection:
             raise ValueError("collection must not be empty")
 
-        resp = self._client.post("/v1/chash/upsert", json={"chash": chash, "collection": collection})
-        _raise_for_status(resp, "upsert")
+        self._post("/v1/chash/upsert", {"chash": chash, "collection": collection})
 
     # ── upsert_many ────────────────────────────────────────────────────────────
 
@@ -161,11 +148,10 @@ class HttpChashIndex(RawHandleGuardMixin):
         # Batch into chunks
         for i in range(0, len(valid), _BATCH_SIZE):
             batch = valid[i: i + _BATCH_SIZE]
-            resp = self._client.post(
+            self._post(
                 "/v1/chash/upsert_many",
-                json={"chashes": batch, "collection": collection},
+                {"chashes": batch, "collection": collection},
             )
-            _raise_for_status(resp, "upsert_many")
 
     # ── lookup ─────────────────────────────────────────────────────────────────
 
@@ -174,10 +160,8 @@ class HttpChashIndex(RawHandleGuardMixin):
 
         Returns ``[]`` when ``chash`` is unknown.
         """
-        resp = self._client.get("/v1/chash/lookup", params={"chash": chash})
-        _raise_for_status(resp, "lookup")
-        data = resp.json()
-        return data.get("rows", [])
+        data = self._get("/v1/chash/lookup", params={"chash": chash})
+        return (data or {}).get("rows", [])
 
     # ── delete_collection ──────────────────────────────────────────────────────
 
@@ -186,25 +170,22 @@ class HttpChashIndex(RawHandleGuardMixin):
 
         Idempotent: absent collection yields 0.
         """
-        resp = self._client.post("/v1/chash/delete_collection", json={"collection": collection})
-        _raise_for_status(resp, "delete_collection")
-        return int(resp.json().get("deleted", 0))
+        data = self._post("/v1/chash/delete_collection", {"collection": collection})
+        return int((data or {}).get("deleted", 0))
 
     # ── distinct_collections ───────────────────────────────────────────────────
 
     def distinct_collections(self) -> set[str]:
         """Return every distinct ``physical_collection`` value in the index."""
-        resp = self._client.get("/v1/chash/distinct_collections")
-        _raise_for_status(resp, "distinct_collections")
-        return set(resp.json().get("collections", []))
+        data = self._get("/v1/chash/distinct_collections")
+        return set((data or {}).get("collections", []))
 
     # ── rename_collection ──────────────────────────────────────────────────────
 
     def rename_collection(self, *, old: str, new: str) -> int:
         """Re-point every row from ``old`` -> ``new``. Returns updated row count."""
-        resp = self._client.post("/v1/chash/rename_collection", json={"old": old, "new": new})
-        _raise_for_status(resp, "rename_collection")
-        return int(resp.json().get("updated", 0))
+        data = self._post("/v1/chash/rename_collection", {"old": old, "new": new})
+        return int((data or {}).get("updated", 0))
 
     # ── delete_stale ───────────────────────────────────────────────────────────
 
@@ -213,25 +194,22 @@ class HttpChashIndex(RawHandleGuardMixin):
 
         Returns 0 when the PK was already absent.
         """
-        resp = self._client.post("/v1/chash/delete_stale", json={"chash": chash, "collection": collection})
-        _raise_for_status(resp, "delete_stale")
-        return int(resp.json().get("deleted", 0))
+        data = self._post("/v1/chash/delete_stale", {"chash": chash, "collection": collection})
+        return int((data or {}).get("deleted", 0))
 
     # ── is_empty ───────────────────────────────────────────────────────────────
 
     def is_empty(self) -> bool:
         """True when no rows exist — the "fresh install" guard."""
-        resp = self._client.get("/v1/chash/is_empty")
-        _raise_for_status(resp, "is_empty")
-        return bool(resp.json().get("empty", True))
+        data = self._get("/v1/chash/is_empty")
+        return bool((data or {}).get("empty", True))
 
     # ── count_for_collection ───────────────────────────────────────────────────
 
     def count_for_collection(self, collection: str) -> int:
         """Return the row count for ``collection``. Returns 0 for unknown collection."""
-        resp = self._client.get("/v1/chash/count_for_collection", params={"collection": collection})
-        _raise_for_status(resp, "count_for_collection")
-        return int(resp.json().get("count", 0))
+        data = self._get("/v1/chash/count_for_collection", params={"collection": collection})
+        return int((data or {}).get("count", 0))
 
     # ── registered_chashes_for_collection ─────────────────────────────────────
 
@@ -254,19 +232,33 @@ class HttpChashIndex(RawHandleGuardMixin):
 
         Raises:
             ValueError:   if ``collection`` is empty.
-            RuntimeError: on HTTP error.
+            httpx.HTTPStatusError: on a (non-self-healable) HTTP error.
         """
         if not collection:
             raise ValueError("collection must not be empty")
-        resp = self._client.get("/v1/chash/registered_chashes", params={"collection": collection})
-        _raise_for_status(resp, "registered_chashes_for_collection")
-        return set(resp.json().get("chashes", []))
+        data = self._get("/v1/chash/registered_chashes", params={"collection": collection})
+        return set((data or {}).get("chashes", []))
 
-    # ── close ──────────────────────────────────────────────────────────────────
+    # ── import_rows (ETL fidelity) ────────────────────────────────────────────
 
-    def close(self) -> None:
-        """Close the keep-alive HTTP connection pool (idempotent)."""
-        self._client.close()
+    def import_rows(self, rows: list[dict[str, str]]) -> int:
+        """Fidelity-preserving ETL import: ``POST /v1/chash/import``.
+
+        Writes ``chash``/``collection``/``created_at`` VERBATIM from each row
+        (unlike :meth:`upsert`, which stamps ``created_at=now()``) — the
+        correct path for any ETL that must preserve the original index
+        timestamp. Server-side upsert semantics (``ON CONFLICT ... DO
+        UPDATE``) make re-imports idempotent.
+
+        Args:
+            rows: dicts with ``chash``, ``collection``, ``created_at`` keys
+                  (ISO-8601 UTC string).
+
+        Returns:
+            The number of rows the service reports as imported.
+        """
+        data = self._post("/v1/chash/import", {"rows": rows})
+        return int((data or {}).get("imported", 0))
 
     # ── Context manager ────────────────────────────────────────────────────────
 
@@ -275,18 +267,3 @@ class HttpChashIndex(RawHandleGuardMixin):
 
     def __exit__(self, *_: object) -> None:
         self.close()
-
-
-# ── Internal helpers ───────────────────────────────────────────────────────────
-
-
-def _raise_for_status(resp: httpx.Response, op: str) -> None:
-    """Raise RuntimeError on non-2xx, with service error body in message."""
-    if resp.is_success:
-        return
-    try:
-        body = resp.json()
-        msg = body.get("error", resp.text)
-    except Exception:  # noqa: BLE001 — best-effort response-body parse before raising RuntimeError
-        msg = resp.text
-    raise RuntimeError(f"HttpChashIndex.{op} failed (HTTP {resp.status_code}): {msg}")

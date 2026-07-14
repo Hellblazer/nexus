@@ -1072,12 +1072,11 @@ class TestMeasuredDimOverride:
     def test_measured_768_targets_onnx_even_in_cloud_mode(self):
         # The reason string promises "no Voyage key needed" — so the remap
         # target must be ONNX in EVERY mode; re-embedding provably-bge
-        # content into a voyage model would bill tokens. (Note: with a key
-        # PRESENT a voyage-NAMED collection classifies supported and is
-        # never probed — the supported-name-wrong-dim case is a recorded
-        # out-of-scope limitation; this pins the resolver's contract for
-        # any measured-768 classification, e.g. a two-segment name on a
-        # key-present deployment.)
+        # content into a voyage model would bill tokens. This pins the
+        # resolver's contract for any measured-768 classification, e.g. a
+        # two-segment name on a key-present deployment (the voyage-NAMED +
+        # key-present case is covered separately below — nexus-x7t5y closed
+        # the "never probed" gap this comment used to describe).
         from nexus.migration.detection import (
             classify_collections,
             remap_target_model,
@@ -1164,6 +1163,88 @@ class TestMeasuredDimOverride:
         assert c.support == "supported-onnx"
         assert c.measured_dim is None
         assert c.reason == ""
+
+
+class TestVoyageKeyPresentMeasuredDimOverride:
+    """nexus-x7t5y: with a local NX_VOYAGE_API_KEY present, a voyage-NAMED
+    collection short-circuits to support == "supported-voyage-1024" BEFORE
+    the measured-dim probe (which only fired for support == "unsupported")
+    ever ran -- so a pre-RDR-109 mislabeled bge-768 collection carrying a
+    voyage-conformant name was never measured, classified as genuine
+    voyage, and would be billed-re-embedded into a voyage collection of
+    the WRONG semantics. This closes that gap: the probe must also fire
+    for a voyage-named, key-present collection, and a 768-dim measurement
+    must force the SAME remap treatment as the no-key case."""
+
+    def test_voyage_named_key_present_but_768_vectors_reclassifies_unsupported(self):
+        from nexus.migration.detection import (
+            classify_collections,
+            cross_model_remappable,
+        )
+
+        client = _FakeChromaClient(
+            {"docs__owner__voyage-context-3__v1": 500},
+            stored_dims={"docs__owner__voyage-context-3__v1": 768},
+        )
+        report = classify_collections(
+            local_client=client, voyage_key_present=True
+        )
+        (c,) = report.classifications
+        assert c.support == "unsupported", (
+            "a voyage-NAMED collection with a KEY present must still be "
+            "reclassified when the stored vector measures bge-768 -- "
+            "the fix this bead adds"
+        )
+        assert c.measured_dim == 768
+        assert cross_model_remappable(c), (
+            "measured 768 must override the voyage-key-present short-circuit"
+        )
+        assert "measures 768-dim" in c.reason
+        assert "Voyage" in c.reason  # billing avoided, still surfaced in the diagnostic
+
+    def test_voyage_named_key_present_genuine_1024_vectors_unaffected(self):
+        from nexus.migration.detection import classify_collections
+
+        client = _FakeChromaClient(
+            {"docs__owner__voyage-context-3__v1": 500},
+            stored_dims={"docs__owner__voyage-context-3__v1": 1024},
+        )
+        report = classify_collections(
+            local_client=client, voyage_key_present=True
+        )
+        (c,) = report.classifications
+        assert c.support == "supported-voyage-1024"
+        assert c.measured_dim == 1024
+        assert c.reason == ""
+
+    def test_probe_now_actually_runs_for_voyage_named_key_present(self):
+        """Direct proof the probe fires (not just an indirect effect via a
+        768-dim fixture) -- a genuine call-count check on the fake."""
+        from nexus.migration.detection import classify_collections
+
+        class _CountingCollection(_FakeCollection):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                self.get_calls = 0
+
+            def get(self, limit: int = 1, include: list | None = None) -> dict:
+                if include != []:  # exclude the legacy-id probe from the count
+                    self.get_calls += 1
+                return super().get(limit=limit, include=include)
+
+        col = _CountingCollection(
+            "docs__owner__voyage-context-3__v1", 500, stored_dim=1024
+        )
+
+        class _Client:
+            def list_collections(self):
+                return [col]
+
+        classify_collections(local_client=_Client(), voyage_key_present=True)
+        assert col.get_calls == 1, (
+            "measured-dim probe must fire exactly once for a voyage-named, "
+            "key-present collection -- pre-fix this was zero"
+        )
 
 
 class TestLegacyChunkIds:

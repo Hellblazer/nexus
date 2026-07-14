@@ -93,7 +93,13 @@ class RawSqlGateTest {
         "PoolerModeCheck.java", java.util.Set.of(
             // `SHOW CONFIG` is a PgBouncer admin-console meta-command, not SQL against any
             // table/schema — no jOOQ DSL form exists (no bind params, no fixed column set).
-            "fetchShowConfig")
+            "fetchShowConfig"),
+        "SchemaMigrator.java", java.util.Set.of(
+            // nexus-c4143 root fix: pg_constraint is a Postgres SYSTEM CATALOG (jOOQ
+            // codegen only covers the nexus/t1 application schemas, no generated table
+            // exists for pg_catalog), and ALTER TABLE ... {NO} FORCE ROW LEVEL SECURITY
+            // is DDL jOOQ has no typed-DSL form for at all.
+            "preflightChashConstraints")
     );
 
     /** Length-preserving blank-out of comment bodies and string/char literal

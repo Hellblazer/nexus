@@ -123,6 +123,7 @@ def _iter_rows(
     desired_cols: tuple[str, ...],
     *,
     page_size: int = _READ_PAGE,
+    min_rowid: int = 0,
 ) -> Iterator[dict[str, Any]]:
     """Yield *table*'s rows as projected dicts in LIMIT/OFFSET pages (RDR-176 /
     nexus-lbolo: page the read so peak memory is one page, not the whole table).
@@ -137,9 +138,12 @@ def _iter_rows(
     cols_sql = ", ".join(cols)
     offset = 0
     while True:
+        # min_rowid > 0: the verify-fill watermark (nexus-te885.10) — probe
+        # only source rows the last breaker-clean fill has not yet verified.
         page = conn.execute(
-            f"SELECT {cols_sql} FROM {table} ORDER BY ROWID ASC "
-            f"LIMIT {page_size} OFFSET {offset}"
+            f"SELECT {cols_sql} FROM {table} WHERE ROWID > ? ORDER BY ROWID ASC "
+            f"LIMIT {page_size} OFFSET {offset}",
+            (min_rowid,),
         ).fetchall()
         if not page:
             break
@@ -323,7 +327,7 @@ def _run_batched(
     GREATEST) so a re-run lands it.
     """
     breaker = breaker if breaker is not None else EtlCircuitBreaker()
-    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — branch-local; quota constant
+    from nexus.db.limits import QUOTAS  # noqa: PLC0415 — branch-local; quota constant
     bsize = QUOTAS.MAX_RECORDS_PER_WRITE
 
     read_n = written_n = 0
@@ -635,8 +639,19 @@ _SIMPLE_BUILDERS: dict[str, tuple[tuple[str, ...], Any]] = {
 }
 
 
+def max_source_rowid(conn: sqlite3.Connection, table: str) -> int:
+    """Max ROWID in *table* (0 when empty/absent) — the verify-fill
+    watermark's advance value (nexus-te885.10)."""
+    try:
+        row = conn.execute(f"SELECT COALESCE(MAX(ROWID), 0) FROM {table}").fetchone()
+        return int(row[0]) if row else 0
+    except sqlite3.OperationalError:
+        return 0
+
+
 def read_rows_for_fill(
     conn: sqlite3.Connection, table: str, *, collector: Any = None,
+    min_rowid: int = 0,
 ) -> list[dict[str, Any]]:
     """Read + TRANSFORM ALL of *table*'s rows for the verify-fill inner
     loop (P3b) — the SAME per-row ``_build_*`` transform ``_migrate_all``
@@ -656,14 +671,16 @@ def read_rows_for_fill(
     unparseable timestamp) is SKIPPED and recorded via *collector* — same
     ``_SkipRow`` policy ``_run_batched`` applies, never a crash.
 
-    INVARIANT for future retention/TTL authors (R3b critique, 2026-07-02):
-    verify-fill treats a target-side-absent key as a HOLE and re-imports
-    it. As of today NO retention/pruning mechanism deletes rows from these
-    tables target-side, so that is correct. The moment a retention sweep
-    is added to any telemetry table, verify-fill will silently RESURRECT
-    pruned rows unless the fill path learns to exclude retention-expired
-    source rows (e.g. only probe/fill rows newer than the retention
-    horizon). Do not add retention without updating this path.
+    INVARIANT for retention/TTL authors (R3b critique 2026-07-02; CORRECTED
+    2026-07-13, nexus-24p05): verify-fill treats a target-side-absent key as
+    a HOLE and re-imports it. ``relevance_log`` ALREADY has target-side
+    retention (``expire_relevance_log``, 90-day TTL, fired by the default-on
+    SessionEnd hook via ``T2Database.expire()`` in service mode) — so a
+    verify-fill over a >90-day-old source can RESURRECT expired rows there
+    (pre-existing behavior, tracked in nexus-24p05; the same reason it is
+    excluded from the verify_fill_watermark tables). The other tables have
+    no retention today. Do not add retention to any of them without
+    updating this path AND re-checking the watermark exclusion list.
     """
     if table == "nx_answer_runs":
         cols = _NX_ANSWER_RUNS_COLS
@@ -681,7 +698,7 @@ def read_rows_for_fill(
         cols, build = _SIMPLE_BUILDERS[table]
 
     rows: list[dict[str, Any]] = []
-    for raw in _iter_rows(conn, table, cols, page_size=_READ_PAGE):
+    for raw in _iter_rows(conn, table, cols, page_size=_READ_PAGE, min_rowid=min_rowid):
         try:
             row_dict, _sample_id = build(raw, collector)
         except _SkipRow as skip:

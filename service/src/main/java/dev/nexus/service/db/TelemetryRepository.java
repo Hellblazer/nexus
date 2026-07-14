@@ -214,9 +214,45 @@ public final class TelemetryRepository {
     public int expireRelevanceLog(String tenant, int days) {
         return tenantScope.withTenant(tenant, ctx -> {
             OffsetDateTime cutoff = OffsetDateTime.now(ZoneOffset.UTC).minusDays(days);
-            return ctx.deleteFrom(RELEVANCE_LOG)
+            int deleted = ctx.deleteFrom(RELEVANCE_LOG)
                 .where(RELEVANCE_LOG.TIMESTAMP.lt(cutoff))
                 .execute();
+            if (deleted > 0) {
+                // nexus-24p05: publish the cumulative-deletes retention marker
+                // in the SAME tenant scope — the verify-fill watermark's
+                // rollback detector (a fresh schema resets it; ordinary sweep
+                // activity advances it monotonically).
+                ctx.insertInto(RETENTION_MARKERS,
+                        RETENTION_MARKERS.TENANT_ID, RETENTION_MARKERS.RELATION,
+                        RETENTION_MARKERS.TOTAL_DELETED, RETENTION_MARKERS.UPDATED_AT)
+                    .values(tenant, "nexus.relevance_log",
+                        (long) deleted, OffsetDateTime.now(ZoneOffset.UTC))
+                    .onConflict(RETENTION_MARKERS.TENANT_ID, RETENTION_MARKERS.RELATION)
+                    .doUpdate()
+                    .set(RETENTION_MARKERS.TOTAL_DELETED,
+                        RETENTION_MARKERS.TOTAL_DELETED.plus((long) deleted))
+                    .set(RETENTION_MARKERS.UPDATED_AT, OffsetDateTime.now(ZoneOffset.UTC))
+                    .execute();
+            }
+            return deleted;
+        });
+    }
+
+    /**
+     * Cumulative-deletes retention markers for *relations* (nexus-24p05) —
+     * the verify-fill watermark's rollback detector. Relations with no
+     * marker row (never swept, or a fresh post-rollback schema) are simply
+     * absent from the result; the Python side treats absent as 0.
+     */
+    public Map<String, Long> getRetentionMarkers(String tenant, List<String> relations) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            Map<String, Long> out = new java.util.LinkedHashMap<>();
+            ctx.select(RETENTION_MARKERS.RELATION, RETENTION_MARKERS.TOTAL_DELETED)
+                .from(RETENTION_MARKERS)
+                .where(RETENTION_MARKERS.RELATION.in(relations))
+                .fetch()
+                .forEach(r -> out.put(r.value1(), r.value2()));
+            return out;
         });
     }
 
@@ -437,6 +473,48 @@ public final class TelemetryRepository {
                 .execute();
             return null;
         });
+    }
+
+    /**
+     * Record a consent event (RDR-182 P1.2 / nexus-ng2sy — service-mode
+     * parity for {@code Telemetry.record_consent}). Append-only: a grant AND
+     * a revoke are each their own row ({@code granted} distinguishes them).
+     * {@code tsIso} is caller-supplied (the consent gesture's timestamp).
+     */
+    public void recordConsent(String tenant,
+                              String scope,
+                              String tsIso,
+                              boolean granted) {
+        tenantScope.withTenant(tenant, ctx -> {
+            ctx.insertInto(CLAUDE_ASSISTED_REMEDIATION_CONSENTS)
+                .set(CLAUDE_ASSISTED_REMEDIATION_CONSENTS.TENANT_ID, tenant)
+                .set(CLAUDE_ASSISTED_REMEDIATION_CONSENTS.SCOPE, scope)
+                .set(CLAUDE_ASSISTED_REMEDIATION_CONSENTS.TS,
+                     tsIso != null ? parseTs(tsIso) : OffsetDateTime.now(ZoneOffset.UTC))
+                .set(CLAUDE_ASSISTED_REMEDIATION_CONSENTS.GRANTED, granted)
+                .execute();
+            return null;
+        });
+    }
+
+    /**
+     * Read the consent-audit trail for the tenant, in insertion order
+     * (grants and revokes; the {@code nx remediate --history} read surface).
+     * Returns {@code [{scope, ts, granted}, ...]}.
+     */
+    public List<Map<String, Object>> listConsents(String tenant) {
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.select(
+                CLAUDE_ASSISTED_REMEDIATION_CONSENTS.SCOPE,
+                CLAUDE_ASSISTED_REMEDIATION_CONSENTS.TS,
+                CLAUDE_ASSISTED_REMEDIATION_CONSENTS.GRANTED)
+                .from(CLAUDE_ASSISTED_REMEDIATION_CONSENTS)
+                .orderBy(CLAUDE_ASSISTED_REMEDIATION_CONSENTS.ID.asc())
+                .fetch()
+                .map(r -> Map.<String, Object>of(
+                    "scope",   str(r.value1()),
+                    "ts",      r.value2() != null ? r.value2().toString() : "",
+                    "granted", r.value3() != null && r.value3())));
     }
 
     /**

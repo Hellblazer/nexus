@@ -33,6 +33,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def repo_dir(home: Path) -> Path:
     d = home / "myrepo"
     d.mkdir()
+    (d / ".git").mkdir()
     return d
 
 
@@ -94,6 +95,34 @@ def test_index_repo_idempotent_when_already_registered(runner, repo_dir, mock_re
 def test_index_repo_invalid_path(runner, home):
     result = runner.invoke(main, ["index", "repo", str(home / "nonexistent")])
     assert result.exit_code != 0
+
+
+def test_index_repo_refuses_directory_without_git(runner, home):
+    """Indexing a directory with no ``.git`` (e.g. the parent of many repos,
+    ``~/git`` instead of ``~/git/myrepo``) must refuse loudly instead of
+    silently registering an owner spanning unrelated content. Real incident
+    2026-07-10: `nx index repo ~/git` created a bogus owner named "git"
+    sweeping in an unrelated project's files."""
+    not_a_repo = home / "git"
+    not_a_repo.mkdir()
+    (not_a_repo / "some_unrelated_project").mkdir()
+    result = runner.invoke(main, ["index", "repo", str(not_a_repo)])
+    assert result.exit_code != 0
+    assert ".git" in result.output
+
+
+def test_index_repo_accepts_git_worktree(runner, home):
+    """A git worktree's ``.git`` is a FILE (containing ``gitdir: ...``), not
+    a directory — the guard must accept that shape too, not just a real
+    ``.git/`` directory."""
+    worktree = home / "myrepo-worktree"
+    worktree.mkdir()
+    (worktree / ".git").write_text("gitdir: /somewhere/else/.git/worktrees/myrepo-worktree\n")
+    reg = MagicMock()
+    reg.get.return_value = None
+    result, mock_idx = _invoke_repo(runner, [str(worktree)], reg)
+    assert result.exit_code == 0, result.output
+    mock_idx.assert_called_once()
 
 
 # ── nx index pdf / md basic ──────────────────────────────────────────────────
@@ -221,6 +250,7 @@ def test_monitor_flag_accepted(runner, home, subcmd, extra_args):
     if subcmd == "repo":
         target = home / "myrepo"
         target.mkdir()
+        (target / ".git").mkdir()
     elif subcmd in ("pdf", "md"):
         target = home / f"doc.{subcmd}"
         target.write_bytes(b"fake")
@@ -779,3 +809,28 @@ def test_index_repo_no_handler_leak_after_exception(runner, repo_dir, home, mock
         and h.baseFilename == str(log_path)
     ]
     assert leaked == []
+
+
+# ── GH #1397 / nexus-94fxl: identity-drop summary ───────────────────────────
+
+def test_identity_drop_summary_silent_when_none(runner, repo_dir, mock_reg):
+    result, _ = _invoke_repo(runner, [str(repo_dir)], mock_reg)
+    assert result.exit_code == 0, result.output
+    assert "WITHOUT a catalog document identity" not in result.output
+
+
+def test_identity_drop_summary_surfaces_drops(runner, repo_dir, mock_reg, monkeypatch):
+    monkeypatch.setattr(
+        "nexus.mcp_infra.get_manifest_identity_drops",
+        lambda: [
+            {"collection": "rdr__nexus", "batch_size": 23},
+            {"collection": "rdr__nexus", "batch_size": 4},
+        ],
+    )
+    result, _ = _invoke_repo(runner, [str(repo_dir)], mock_reg)
+    assert result.exit_code == 0, result.output
+    assert (
+        "WARNING: 2 chunk batch(es) (27 chunks; collection(s): rdr__nexus) "
+        "were indexed WITHOUT a catalog document identity" in result.output
+    )
+    assert "nx catalog reconcile" in result.output

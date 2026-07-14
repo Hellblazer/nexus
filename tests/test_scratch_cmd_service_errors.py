@@ -3,11 +3,14 @@
 surface as clean, actionable ClickExceptions — not tracebacks.
 
 The 401 case is load-bearing: service-backed T1 requires a MINTED session
-token (session_tokens row); re-minting ROTATES the token (TokenStore
-issueSessionToken ON CONFLICT DO UPDATE), so the bare CLI can never safely
-self-mint for a session an MCP may own. The only correct CLI behavior is a
-crisp explanation of the two sanctioned paths (run inside a session that
-minted, or NX_T1_ISOLATED=1)."""
+token (session_tokens row). nexus-rn3wo.1: a bare CLI with no inherited live
+MCP session now mints (and reuses, via a persisted CLI-dedicated session id)
+its own token and self-heals once on a rotated-token 401 — so a 401 that
+still reaches ``_clean_service_errors`` means that self-heal retry also
+failed (persistent auth breakage) or a LIVE inherited MCP session's token
+went stale (that path still never self-mints, since re-minting it would
+rotate the token out from under the owning MCP server). Either way the CLI
+must surface a crisp, actionable message rather than a raw traceback."""
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch

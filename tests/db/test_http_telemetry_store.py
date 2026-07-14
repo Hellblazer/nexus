@@ -41,6 +41,8 @@ PAST_TS = "2024-01-15T10:30:00Z"
 _relevance_log: list[dict[str, Any]] = []
 _search_telemetry: list[dict[str, Any]] = []
 _tier_writes: list[dict[str, Any]] = []
+_retention_markers: dict[str, int] = {}
+_consents: list[dict[str, Any]] = []
 _nx_answer_runs: list[dict[str, Any]] = []
 _hook_failures: list[dict[str, Any]] = []
 _frecency: dict[str, dict[str, Any]] = {}  # keyed by chunk_id
@@ -55,6 +57,8 @@ def _clear_all() -> None:
         _relevance_log.clear()
         _search_telemetry.clear()
         _tier_writes.clear()
+        _consents.clear()
+        _retention_markers.clear()
         _nx_answer_runs.clear()
         _hook_failures.clear()
         _frecency.clear()
@@ -204,6 +208,15 @@ class _FakeTelemetryHandler(BaseHTTPRequestHandler):
                 })
             self._send(200, {"ok": True})
 
+        elif pp == "/v1/telemetry/consents/record":
+            with _STORE_LOCK:
+                _consents.append({
+                    "scope":   body.get("scope", ""),
+                    "ts":      body.get("ts", ""),
+                    "granted": bool(body.get("granted")),
+                })
+            self._send(200, {"ok": True})
+
         elif pp == "/v1/telemetry/nx_answer_runs/record":
             with _STORE_LOCK:
                 _ID_SEQ["nar"] += 1
@@ -347,6 +360,19 @@ class _FakeTelemetryHandler(BaseHTTPRequestHandler):
                 results = sorted(results, key=lambda x: x["timestamp"], reverse=True)[:limit]
             self._send(200, results)
 
+        elif pp == "/v1/telemetry/consents/list":
+            with _STORE_LOCK:
+                self._send(200, list(_consents))
+            return
+
+        elif pp == "/v1/telemetry/retention/markers":
+            relations = [r for r in qs.get("relations", "").split(",") if r]
+            with _STORE_LOCK:
+                markers = {r: _retention_markers[r] for r in relations
+                           if r in _retention_markers}
+            self._send(200, {"markers": markers})
+            return
+
         elif pp == "/v1/telemetry/search/stats":
             collection = qs.get("collection", "")
             days       = int(qs.get("days", "30"))
@@ -433,9 +459,18 @@ class TestLogRelevance:
         assert rows[0]["collection"] == "knowledge__nexus"
 
     def test_log_sends_auth_headers(self, fake_server):
-        """Wrong token must raise HTTP 401."""
+        """Wrong token must raise, not silently succeed.
+
+        Post-mixin-adoption (nexus-f2qvx.1): both ``base_url`` and
+        ``_token`` are explicitly pinned here (a test double), so a 401
+        does NOT self-heal-and-retry to a bare ``httpx.HTTPStatusError``
+        — ``RefreshableHttpStoreMixin._invalidate_and_reresolve`` refuses
+        to re-resolve when both halves are pinned (nothing it could
+        change would fix a fully-pinned endpoint) and raises
+        ``RuntimeError`` instead. Either way, the call must not succeed.
+        """
         bad = HttpTelemetryStore(base_url=fake_server, _token="wrong-token")
-        with pytest.raises(Exception, match="401"):
+        with pytest.raises(RuntimeError, match="cannot self-heal"):
             bad.log_relevance("q", "c", "a")
         bad.close()
 
@@ -542,6 +577,37 @@ class TestTrimSearchTelemetry:
         client.log_search_batch(rows)
         deleted = client.trim_search_telemetry(days=365 * 3)
         assert deleted >= 1
+
+
+class TestConsentAudit:
+    """RDR-182 nexus-ng2sy: the service-mode consent-audit twin routes through
+    HTTP to /v1/telemetry/consents/{record,list}."""
+
+    def test_record_and_list_grant_revoke_in_order(self, client):
+        client.record_consent(
+            scope="flag:claude_assisted_remediation",
+            ts="2026-07-13T00:00:00Z", granted=True,
+        )
+        client.record_consent(
+            scope="remediate:chash-poison",
+            ts="2026-07-13T00:01:00Z", granted=True,
+        )
+        client.record_consent(
+            scope="flag:claude_assisted_remediation",
+            ts="2026-07-13T00:02:00Z", granted=False,
+        )
+        rows = client.list_consents()
+        assert rows == [
+            {"scope": "flag:claude_assisted_remediation",
+             "ts": "2026-07-13T00:00:00Z", "granted": True},
+            {"scope": "remediate:chash-poison",
+             "ts": "2026-07-13T00:01:00Z", "granted": True},
+            {"scope": "flag:claude_assisted_remediation",
+             "ts": "2026-07-13T00:02:00Z", "granted": False},
+        ]
+
+    def test_empty_trail_returns_empty_list(self, client):
+        assert client.list_consents() == []
 
 
 class TestTrimHookFailures:
@@ -775,3 +841,16 @@ class TestConfigErrors:
         monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
         with pytest.raises(RuntimeError, match="NX_SERVICE_TOKEN"):
             HttpTelemetryStore(base_url=fake_server)
+
+
+class TestRetentionMarkers:
+    def test_get_retention_markers_roundtrip(self, client):
+        """nexus-24p05: the watermark's rollback-detector read."""
+        _retention_markers["nexus.relevance_log"] = 7
+        got = client.get_retention_markers(
+            ["nexus.relevance_log", "nexus.search_telemetry"]
+        )
+        assert got == {"nexus.relevance_log": 7}  # never-swept relation absent
+
+    def test_get_retention_markers_empty(self, client):
+        assert client.get_retention_markers(["nexus.relevance_log"]) == {}

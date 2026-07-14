@@ -849,7 +849,17 @@ class TestListPlans:
 
 class TestAuthErrors:
     def test_wrong_token_raises(self, fake_server):
+        """Wrong token must raise, not silently succeed.
+
+        Post-mixin-adoption (nexus-f2qvx.1): both ``base_url`` and
+        ``_token`` are explicitly pinned here (a test double), so a 401
+        does NOT self-heal-and-retry to a bare ``httpx.HTTPStatusError``
+        — ``RefreshableHttpStoreMixin._invalidate_and_reresolve`` refuses
+        to re-resolve when both halves are pinned (nothing it could
+        change would fix a fully-pinned endpoint) and raises
+        ``RuntimeError`` instead. Either way, the call must not succeed.
+        """
         bad = HttpPlanLibrary(base_url=fake_server, _token="wrong-token")
-        with pytest.raises(Exception, match="401"):
+        with pytest.raises(RuntimeError, match="cannot self-heal"):
             bad.save_plan(query="Should fail", plan_json="{}")
         bad.close()

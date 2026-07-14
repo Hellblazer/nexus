@@ -393,6 +393,20 @@ def index_repo_cmd(
     reg = _registry()
     path = path.resolve()
 
+    # nexus-git-guard: refuse a PATH with no .git (file or directory — a
+    # worktree's .git is a file). Without this, indexing the PARENT of many
+    # repos (e.g. ~/git instead of ~/git/myrepo) silently succeeds: git
+    # rev-parse fails, _resolve_main_repo falls back to using the path
+    # as-is, and a bogus owner named after the parent directory (e.g.
+    # "git") gets registered, sweeping in whatever unrelated content lives
+    # underneath it. Real incident 2026-07-10.
+    if not (path / ".git").exists():
+        raise click.ClickException(
+            f"{path} has no .git — this does not look like a repository "
+            "root. If you meant to index a specific repo, pass its path "
+            "directly (e.g. ~/git/myrepo, not ~/git)."
+        )
+
     from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — deliberate function-local import (matches existing deferred-import convention in this function)
     from nexus.logging_setup import open_run_log  # noqa: PLC0415 — deliberate function-local import (matches existing deferred-import convention in this function)
     _log_basename, _log_hash8 = _repo_identity(path)
@@ -482,10 +496,15 @@ def index_repo_cmd(
         # summary reflects only this run's backoffs.
         from nexus.retry import get_retry_stats, reset_retry_stats  # noqa: PLC0415 — deliberate function-local import (per-run retry accumulator reset)
         reset_retry_stats()
-        # GH #1371: zero the manifest-write-failure collector so the
-        # end-of-run summary reflects only this run's failures.
-        from nexus.mcp_infra import reset_manifest_write_failures  # noqa: PLC0415 — deliberate function-local import (per-run failure collector reset)
+        # GH #1371 + GH #1397: zero the manifest-write-failure and
+        # identity-drop collectors so the end-of-run summary reflects only
+        # this run's gaps.
+        from nexus.mcp_infra import (  # noqa: PLC0415 — deliberate function-local import (per-run failure collector reset)
+            reset_manifest_identity_drops,
+            reset_manifest_write_failures,
+        )
         reset_manifest_write_failures()
+        reset_manifest_identity_drops()
 
         bar: tqdm | None = None
         n = 0
@@ -578,16 +597,34 @@ def index_repo_cmd(
             # catalog manifest-write failure previously surfaced only as a
             # structlog WARNING — invisible without log capture wired up.
             # Silent on zero failures (the common case).
-            from nexus.mcp_infra import get_manifest_write_failures  # noqa: PLC0415 — deliberate function-local import (rare branch: only on failure)
-            failed = get_manifest_write_failures()
-            if not failed:
-                return
-            click.echo(
-                f"  WARNING: catalog manifest write failed for {len(failed)} "
-                f"document(s) — they will not appear in catalog-aware "
-                f"queries. Run 'nx catalog reconcile' to repair.",
-                err=True,
+            from nexus.mcp_infra import (  # noqa: PLC0415 — deliberate function-local import (rare branch: only on failure)
+                get_manifest_identity_drops,
+                get_manifest_write_failures,
             )
+            failed = get_manifest_write_failures()
+            if failed:
+                click.echo(
+                    f"  WARNING: catalog manifest write failed for {len(failed)} "
+                    f"document(s) — they will not appear in catalog-aware "
+                    f"queries. Run 'nx catalog reconcile' to repair.",
+                    err=True,
+                )
+            # GH #1397 / nexus-94fxl: batches DROPPED for missing document
+            # identity never reach the write, so they are invisible to the
+            # failure count above — a clean "0 failed" hid them entirely.
+            drops = get_manifest_identity_drops()
+            if drops:
+                n_chunks = sum(d["batch_size"] for d in drops)
+                cols = sorted({d["collection"] for d in drops})
+                click.echo(
+                    f"  WARNING: {len(drops)} chunk batch(es) ({n_chunks} chunks; "
+                    f"collection(s): {', '.join(cols)}) were indexed WITHOUT a "
+                    f"catalog document identity — their manifests were not "
+                    f"written and the documents will not appear in "
+                    f"catalog-aware queries. Run 'nx catalog reconcile' to "
+                    f"repair.",
+                    err=True,
+                )
 
         # nexus-7niu: per-stage timer collection. The callback appends one
         # StageTimers per file; end-of-run aggregation formats the table.

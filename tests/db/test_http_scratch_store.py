@@ -478,15 +478,14 @@ class TestPromote:
 
 
 class TestGetT1DatabaseFactory:
-    def test_factory_returns_t1database_by_default(self, monkeypatch):
-        """Without NX_STORAGE_BACKEND_T1=service, returns a T1Database."""
+    def test_factory_defaults_to_service_like_every_other_store(self, monkeypatch):
+        """nexus-rn3wo.1: without any override, T1 follows the SERVICE hard
+        default like every other store — the earlier T1-only SQLite carve-out
+        is gone now that HttpScratchStore has a CLI-dedicated session path."""
         monkeypatch.delenv("NX_STORAGE_BACKEND_T1", raising=False)
         monkeypatch.delenv("NX_STORAGE_BACKEND", raising=False)
-        from nexus.db.t1 import T1Database, get_t1_database
-        # Can't fully construct T1Database without a live Chroma server;
-        # just verify the routing resolves to T1Database path (import works, no error)
         from nexus.db.storage_mode import StorageBackend, storage_backend_for
-        assert storage_backend_for("t1") == StorageBackend.SQLITE
+        assert storage_backend_for("t1") == StorageBackend.SERVICE
 
     def test_factory_routes_to_http_when_service(self, monkeypatch):
         """With NX_STORAGE_BACKEND_T1=service, factory targets HttpScratchStore."""
@@ -506,8 +505,7 @@ class TestGetT1DatabaseFactory:
         # fake_server is a URL string like "http://127.0.0.1:<port>"
         port = fake_server.split(":")[-1]
         monkeypatch.setenv("NX_STORAGE_BACKEND_T1", "service")
-        monkeypatch.delenv("NEXUS_SKIP_T1", raising=False)  # autouse fixture sets it; isolation wins post-h8rf6
-        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)  # autouse fixture sets it; isolation wins post-h8rf6
         monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
         monkeypatch.setenv("NX_SERVICE_PORT", port)
         monkeypatch.setenv("NX_SERVICE_TOKEN", TOKEN)
@@ -521,25 +519,28 @@ class TestGetT1DatabaseFactory:
             f"NX_STORAGE_BACKEND_T1=service, got {type(result).__name__}"
         )
 
-    def test_get_t1_database_does_not_return_http_when_backend_unset(self, monkeypatch):
-        """get_t1_database() does NOT return HttpScratchStore when backend unset.
-
-        Verifies the default (Chroma) path is unaffected by the service routing seam.
+    def test_get_t1_database_reaches_chroma_path_on_explicit_sqlite_opt_out(
+        self, monkeypatch
+    ):
+        """nexus-rn3wo.1: the default flipped to SERVICE, but the explicit
+        sqlite opt-out (``NX_STORAGE_BACKEND=sqlite``) still reaches the
+        legacy Chroma-backed T1Database path — the escape hatch matches every
+        other store's opt-out semantics.
         """
         monkeypatch.delenv("NX_STORAGE_BACKEND_T1", raising=False)
-        monkeypatch.delenv("NX_STORAGE_BACKEND", raising=False)
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
+        monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
 
         from nexus.db.http_scratch_store import HttpScratchStore
         from nexus.db.storage_mode import StorageBackend, storage_backend_for
-        # Verify the route IS the sqlite/chroma path (can't construct T1Database without server)
-        assert storage_backend_for("t1") != StorageBackend.SERVICE
+        assert storage_backend_for("t1") == StorageBackend.SQLITE
         # get_t1_database() on this path will raise T1ServerNotFoundError (no live chroma);
         # the important thing is it does NOT produce an HttpScratchStore.
         from nexus.db.t1 import T1ServerNotFoundError, get_t1_database
         try:
             result = get_t1_database()
             assert not isinstance(result, HttpScratchStore), (
-                "get_t1_database() must NOT return HttpScratchStore on the default path"
+                "get_t1_database() must NOT return HttpScratchStore on the sqlite opt-out path"
             )
         except T1ServerNotFoundError:
             pass  # Expected when no Chroma server is running in the test environment

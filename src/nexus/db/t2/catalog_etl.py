@@ -538,7 +538,7 @@ def migrate_catalog(
     # doc batching is not possible under the doc-scoped envelope; a doc with few
     # chunks is still one POST — the server-side jOOQ batch is the further
     # optimisation, bead nexus-1qpni.)
-    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — branch-local; quota constant
+    from nexus.db.limits import QUOTAS  # noqa: PLC0415 — branch-local; quota constant
     _chunk_cap = QUOTAS.MAX_RECORDS_PER_WRITE
 
     for doc_id, doc_chunks in chunks_by_doc.items():
@@ -669,7 +669,7 @@ def _import_table(
     the batch after one bounded ``_etl_with_retry`` cycle.
     """
     breaker = breaker if breaker is not None else EtlCircuitBreaker()
-    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — branch-local; quota constant
+    from nexus.db.limits import QUOTAS  # noqa: PLC0415 — branch-local; quota constant
     bsize = QUOTAS.MAX_RECORDS_PER_WRITE
 
     read_count = 0

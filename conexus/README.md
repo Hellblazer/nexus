@@ -1,6 +1,6 @@
 # Nexus Claude Code Plugin
 
-13 agents (10 active + 3 stubs pointing at MCP tools), 43 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search, plan-centric retrieval via `nx_answer`, and knowledge management.
+13 agents (10 active + 3 stubs pointing at MCP tools), 45 skills, session hooks, slash commands, and two bundled MCP servers for software engineering workflows — backed by the [Nexus CLI](../README.md) for semantic search, plan-centric retrieval via `nx_answer`, and knowledge management.
 
 ## Installation
 
@@ -48,11 +48,11 @@ SDK-bridge transport.
 ## What You Get
 
 - **13 agents** (10 active + 3 MCP-tool redirect stubs) matched to task complexity: opus for reasoning, sonnet for implementation, haiku for utility
-- **43 skills** — 12 infrastructure standalone + 9 RDR-078 verb skills + 4 MCP-tool pointer skills (RDR-080) + 10 agent-dispatcher skills + 8 RDR workflow skills
+- **45 skills** — infrastructure standalone, RDR-078 verb skills, MCP-tool pointer skills (RDR-080), agent-dispatcher skills, and RDR workflow skills
 - **5 standard pipelines** — feature, bug, research, onboarding, architecture (`plan-auditor` / `plan-enricher` / `knowledge-tidier` steps now direct MCP tool invocations per RDR-080)
 - **Session hooks** — surface T2 memory context, prime beads, health-check dependencies
 - **Permission auto-approval** — safe commands and all nexus MCP tools skip the confirmation prompt
-- **Two bundled MCP servers** — `nexus` (26 tools: search, query, store, memory, scratch, plans, traverse, 5 LLM-backed operators, and 4 orchestration tools including `nx_answer` for plan-centric retrieval) and `nexus-catalog` (10 catalog tools) — plus `sequential-thinking` fetched via npx
+- **Two bundled MCP servers** — `nexus` (38 tools: search, query, store, memory, scratch, plans, traverse, scoped/graph-hop search, 10 LLM-backed operators, 4 orchestration tools including `nx_answer` for plan-centric retrieval, and the consent-gated `forensics`/`remediate` pair) and `nexus-catalog` (10 catalog tools) — plus `sequential-thinking` fetched via npx
 
 ### Pick your entry point
 
@@ -297,21 +297,24 @@ The plugin ships `.mcp.json` which Claude Code picks up automatically on install
 
 | Server | Purpose | Tools |
 |--------|---------|-------|
-| `nexus` | Retrieval + storage (core) | 26 tools — see below |
+| `nexus` | Retrieval + storage (core) | 38 tools — see below |
 | `nexus-catalog` | Catalog access (RDR-062) | `search`, `show`, `list`, `register`, `update`, `link`, `links`, `link_query`, `resolve`, `stats` |
 | `sequential-thinking` | Compaction-resilient reasoning chains | `sequentialthinking` |
 
-### `nexus` MCP tool catalog (26 tools)
+### `nexus` MCP tool catalog (38 tools)
 
 | Category | Tools |
 |----------|-------|
 | Retrieval (T3) | `search`, `query`, `store_put`, `store_get`, `store_get_many`, `store_list` |
+| Scoped search (RDR-156, service mode) | `search_metadata_scoped`, `search_topic_scoped`, `search_graph_hop` |
 | Memory (T2) | `memory_put`, `memory_get`, `memory_search`, `memory_delete`, `memory_consolidate` |
 | Scratch (T1) | `scratch`, `scratch_manage` |
 | Collections | `collection_list` |
-| Plans (RDR-078) | `plan_save`, `plan_search`, `traverse` |
-| Operators (RDR-079) | `operator_extract`, `operator_rank`, `operator_compare`, `operator_summarize`, `operator_generate` |
+| Plans (RDR-078) | `plan_save`, `plan_search`, `plan_delete`, `traverse` |
+| Operators (RDR-079/088/093) | `operator_extract`, `operator_rank`, `operator_compare`, `operator_summarize`, `operator_generate`, `operator_filter`, `operator_groupby`, `operator_aggregate`, `operator_check`, `operator_verify` |
 | Orchestration (RDR-080) | `nx_answer`, `nx_tidy`, `nx_enrich_beads`, `nx_plan_audit` |
+| Remediation (RDR-182, consent-gated) | `forensics`, `remediate` |
+| Admin | `daemon_uninstall` |
 
 **`nx_answer`** is the retrieval entry point for multi-step questions.
 It runs `plan_match` against the library, executes the best-matching plan
@@ -320,7 +323,7 @@ via `plan_run`, and falls through to an inline planner on miss.  See
 
 ### Nexus MCP Servers (`nx-mcp`, `nx-mcp-catalog`)
 
-The nexus core server exposes 15 MCP tools and the nexus-catalog server exposes 10 catalog tools, for 25 registered tools total (6 tools demoted to Python-only). These give agents direct access to all three storage tiers and the catalog without requiring Bash. This eliminates failures in background agents and restricted permission contexts where Bash is unavailable.
+The nexus core server exposes 38 MCP tools and the nexus-catalog server exposes 10 catalog tools, for 48 registered tools total (3 tools demoted to Python-only). These give agents direct access to all three storage tiers and the catalog without requiring Bash. This eliminates failures in background agents and restricted permission contexts where Bash is unavailable.
 
 **Pagination**: `search`, `store_list`, and `memory_search` return paged results. Pass `offset=N` for subsequent pages. Response footer: `--- showing X-Y of Z. next: offset=N` or `(end)`.
 

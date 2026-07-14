@@ -29,8 +29,9 @@ def test_all_command_modules_registered():
     registered_names = {cmd for cmd in main.commands}
     modules = _command_modules()
 
-    # Map module names to expected CLI command names
-    # (some modules use different names via add_command(..., name="X"))
+    # Map module names to expected CLI command name(s). A value may be a
+    # single name or a list when one module registers multiple commands via
+    # several add_command() calls (all of which must be present).
     _MODULE_TO_CLI = {
         "command_context": "command-context",
         "config_cmd": "config",
@@ -48,13 +49,18 @@ def test_all_command_modules_registered():
         "taxonomy_cmd": "taxonomy",
         "tenant_cmd": "tenant",
         "tier_status": "tier-status",
+        # RDR-182: one module, two commands (opposite sides of the consent
+        # taxonomy — display-only forensics vs consented remediate).
+        "remediation_cmd": ["forensics", "remediate"],
     }
 
     missing = []
     for mod in modules:
-        expected_name = _MODULE_TO_CLI.get(mod, mod)
-        if expected_name not in registered_names:
-            missing.append(f"{mod} (expected CLI name: {expected_name})")
+        expected = _MODULE_TO_CLI.get(mod, mod)
+        expected_names = [expected] if isinstance(expected, str) else expected
+        for name in expected_names:
+            if name not in registered_names:
+                missing.append(f"{mod} (expected CLI name: {name})")
 
     assert not missing, (
         f"Command modules not registered in cli.py: {missing}. "

@@ -5,11 +5,16 @@ description: Audit a project's RDR lifecycle for silent-scope-reduction base rat
 
 # RDR Audit
 
-!`nx rdr preamble rdr-audit -- '$ARGUMENTS'`
+!`nx rdr preamble rdr-audit`
 
 ## Arguments
 
 $ARGUMENTS
+
+**Targeted dispatch**: if `$ARGUMENTS` carries flags/targets, re-run, via the
+Bash tool, `nx rdr preamble rdr-audit -- <parsed args>` passing each parsed
+token as a real argv token. Never splice raw `$ARGUMENTS` into a shell-quoted
+line — free text with apostrophes/quotes breaks the quoting (nexus-ybvyo).
 
 ## Action
 

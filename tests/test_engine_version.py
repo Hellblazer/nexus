@@ -16,13 +16,20 @@ from nexus.engine_version import REQUIRED_ENGINE_VERSION, parse_engine_version
 
 
 class TestRequiredEngineVersion:
-    def test_pinned_floor_is_0134(self) -> None:
+    def test_pinned_floor_is_0139(self) -> None:
         # (0,1,5)->(0,1,8) for nexus-x2g1z; ->(0,1,34) for 6.5.0: the client
         # hard-requires catalog-012 (graph-hop `where` — pre-012 engines
         # silently ignore the key, the H2 version-skew failure class) and
         # catalog-013-1b (pre-1b engines fail boot VALIDATE on tenants with
-        # legacy 64-char chash rows — the nexus-1wjmq incident).
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 34)
+        # legacy 64-char chash rows — the nexus-1wjmq incident). ->(0,1,39)
+        # for nexus-rn3wo.1: T1 scratch now defaults to the PG-backed service
+        # with no Chroma fallback, and every engine before v0.1.38 has a
+        # native-image reflection gap that 500s on every T1 get/search/list
+        # (nexus-opr9m). ->(0,1,41) for the 2026-07-13 release-gate arc:
+        # service-mode remediation consent audit needs telemetry-002-consents
+        # (v0.1.40+), retention markers + range where-operators need v0.1.41,
+        # and tags <=0.1.40 are invalid rollback targets post-A6.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 41)
 
 
 class TestParseEngineVersion:
@@ -63,7 +70,7 @@ class TestFloorComparison:
         assert parse_engine_version("0.1.5") < REQUIRED_ENGINE_VERSION
 
     def test_at_floor_compares_equal(self) -> None:
-        assert parse_engine_version("0.1.34") == REQUIRED_ENGINE_VERSION
+        assert parse_engine_version("0.1.41") == REQUIRED_ENGINE_VERSION
 
     def test_above_floor_compares_greater(self) -> None:
         assert parse_engine_version("0.2.0") > REQUIRED_ENGINE_VERSION
@@ -87,3 +94,31 @@ def test_module_is_stdlib_only_leaf() -> None:
             for alias in node.names:
                 if alias.name.split(".")[0] == "nexus":
                     raise AssertionError(f"engine_version.py imports nexus: {alias.name}")
+
+
+class TestDownstreamConsumersTrackTheFloor:
+    def test_cold_rehearsal_tag_is_at_least_the_floor(self) -> None:
+        """The migration-rehearsal COLD_TAG default must satisfy the
+        guided-upgrade version pin, or `run.sh --cold` fail-closes at the
+        version gate before migrating anything (demonstrated live
+        2026-07-12: the (0,1,39) floor bump left COLD_TAG at v0.1.37 and
+        the cold MVV died on 'engine-service v0.1.37 < required v0.1.39').
+        Same drift class as the CI stamp-step regex (fixed 975dcd9a) and
+        the original two hand-typed pins nexus-b6qlf unified — every
+        hand-written downstream consumer of the floor gets a tripwire."""
+        import re
+        from pathlib import Path
+
+        run_sh = Path(__file__).parent.parent / (
+            "tests/e2e/migration-rehearsal/run.sh"
+        )
+        m = re.search(
+            r'COLD_TAG="\$\{NEXUS_SERVICE_TAG:-engine-service-v(\d+\.\d+\.\d+)\}"',
+            run_sh.read_text(),
+        )
+        assert m, "COLD_TAG default not found/parseable in run.sh"
+        assert parse_engine_version(m.group(1)) >= REQUIRED_ENGINE_VERSION, (
+            f"COLD_TAG default v{m.group(1)} is below the "
+            f"guided-upgrade floor {REQUIRED_ENGINE_VERSION} — bump it "
+            "with the floor (AGENTS.md § Engine-service release)"
+        )

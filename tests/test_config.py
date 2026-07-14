@@ -11,6 +11,7 @@ from nexus.config import (
     get_telemetry_config,
     get_verification_config,
     load_config,
+    set_config_value,
 )
 
 
@@ -325,3 +326,49 @@ class TestTelemetryConfig:
         assert cfg["telemetry"]["search_enabled"] is False
         # Unset key keeps its default.
         assert cfg["telemetry"]["stderr_silent_zero"] is True
+
+
+# ── set_config_value dotted-key collisions (nexus-s4a98) ─────────────────────
+
+
+def test_set_config_value_through_flat_scalar_converts(home: Path) -> None:
+    """nexus-s4a98 regression: a hand-written flat scalar at a section key is
+    converted to the nested form instead of crashing with TypeError — the
+    RDR-182 refusal text directs users to exactly this command as the remedy
+    for the flat shape, so it must succeed on it."""
+    cfg = home / ".config" / "nexus" / "config.yml"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text("claude_assisted_remediation: true\nother: keep\n")
+
+    set_config_value("claude_assisted_remediation.enabled", "true")
+
+    data = yaml.safe_load(cfg.read_text())
+    assert data["claude_assisted_remediation"] == {"enabled": "true"}
+    assert data["other"] == "keep"  # sibling keys survive the conversion
+
+
+def test_set_config_value_deep_chain_through_scalar(home: Path) -> None:
+    """Every non-dict intermediate on the dotted path is replaced, not just
+    the first — a scalar two levels deep must not resurface the TypeError."""
+    cfg = home / ".config" / "nexus" / "config.yml"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text("a:\n  b: 5\n")
+
+    set_config_value("a.b.c.d", "v")
+
+    data = yaml.safe_load(cfg.read_text())
+    assert data["a"]["b"]["c"]["d"] == "v"
+
+
+def test_set_config_value_dict_intermediates_merge_not_replace(home: Path) -> None:
+    """Guard against overcorrection: existing DICT intermediates must still be
+    merged into (siblings preserved), never wholesale-replaced."""
+    cfg = home / ".config" / "nexus" / "config.yml"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text("pdf:\n  extractor: docling\n  timeout: 30\n")
+
+    set_config_value("pdf.extractor", "mineru")
+
+    data = yaml.safe_load(cfg.read_text())
+    assert data["pdf"]["extractor"] == "mineru"
+    assert data["pdf"]["timeout"] == 30  # sibling of the leaf survives

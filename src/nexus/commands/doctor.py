@@ -759,7 +759,7 @@ def _legacy_fields_present(collection, fields: tuple[str, ...]) -> set[str]:
     """
     found: set[str] = set()
     offset = 0
-    page = 300  # chroma_quotas._PAGE ceiling
+    page = 300  # nexus.db.limits paging ceiling (RDR-155 P4b rehome)
     while True:
         res = collection.get(limit=page, offset=offset, include=["metadatas"])
         metas = res.get("metadatas") or []
@@ -1909,7 +1909,7 @@ def _collect_quota_report() -> dict:
     counters give operators the most actionable signal — "backed off N
     times, slept Xs total" — without new plumbing.
     """
-    from nexus.db.chroma_quotas import QUOTAS  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.db.limits import QUOTAS  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
     from nexus.retry import get_retry_stats  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     chromadb_limits = {

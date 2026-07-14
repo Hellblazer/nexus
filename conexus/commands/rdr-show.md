@@ -5,11 +5,17 @@ description: Show detailed information about a specific RDR including content, r
 
 # RDR Show
 
-!`nx rdr preamble rdr-show -- '$ARGUMENTS'`
+!`nx rdr preamble rdr-show`
 
 ## RDR to Show
 
 $ARGUMENTS
+
+**Targeted load**: if an RDR ID appears in `$ARGUMENTS`, run, via the Bash
+tool, `nx rdr preamble rdr-show -- <ID>` with the parsed **numeric ID** as a
+literal argv token (e.g. `nx rdr preamble rdr-show -- 003`). Never splice raw
+`$ARGUMENTS` into a shell-quoted line — free text with apostrophes/quotes
+breaks the quoting (nexus-ybvyo).
 
 ## Action
 

@@ -29,41 +29,29 @@ from nexus.cli import main
 # ── Fakes ────────────────────────────────────────────────────────────────────
 
 
-class _FakeResponse:
-    def __init__(self, status_code: int = 200, payload: dict[str, Any] | None = None) -> None:
-        self.status_code = status_code
-        self._payload = payload or {"imported": 0}
-
-    def raise_for_status(self) -> None:
-        if self.status_code >= 400:
-            raise RuntimeError(f"HTTP {self.status_code}")
-
-    def json(self) -> dict[str, Any]:
-        return self._payload
-
-
-class _FakeHttpClient:
-    """Records every POST; used as ``HttpChashIndex._client``."""
-
-    def __init__(self, posts: list[tuple[str, dict[str, Any]]]) -> None:
-        self._posts = posts
-
-    def post(self, url: str, json: dict[str, Any] | None = None) -> _FakeResponse:  # noqa: A002 — matches httpx.Client.post signature
-        self._posts.append((url, json))
-        return _FakeResponse()
-
-
 def _make_fake_chash_store(registered: dict[str, set[str]], posts: list[tuple[str, dict]]):
     """Factory: a fake HttpChashIndex bound to shared *registered*/*posts*
     state the test seeds/inspects (mirrors ``_fake_etls``'s closure pattern
-    in test_storage_migrate_all.py)."""
+    in test_storage_migrate_all.py).
+
+    nexus-f2qvx.3: ``_chash_import_fn`` (orchestrator.py) now calls the
+    public ``HttpChashIndex.import_rows()`` wrapper instead of reaching
+    into ``http_chash._client.post(...)`` directly (the pre-mixin-adoption
+    shape, which broke once RefreshableHttpStoreMixin's httpx.Client
+    stopped baking a base_url) — so this fake exposes ``import_rows``
+    rather than a fake ``._client``.
+    """
 
     class _FakeChashStore:
         def __init__(self, *args: Any, **kwargs: Any) -> None:
-            self._client = _FakeHttpClient(posts)
+            pass
 
         def registered_chashes_for_collection(self, collection: str) -> set[str]:
             return set(registered.get(collection, set()))
+
+        def import_rows(self, rows: list[dict[str, Any]]) -> int:
+            posts.append(("/v1/chash/import", {"rows": rows}))
+            return len(rows)
 
         def close(self) -> None:
             pass

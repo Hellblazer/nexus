@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -85,9 +86,25 @@ def resolve_active_session_id(arg: str | None = None) -> str | None:
     Resolution chain (highest priority first):
 
     1. Explicit ``arg`` (caller-supplied; non-empty after strip).
-    2. ``NX_SESSION_ID`` env var (non-empty after strip).
-    3. ``~/.config/nexus/current_session`` via ``read_claude_session_id``.
-    4. ``None``.
+    2. ``NX_SESSION_ID`` env var (non-empty after strip). Nexus's own
+       override — stays the highest env-based priority so nested
+       ``claude -p`` dispatch and tests that force a specific session id
+       are never shadowed by tier 3 below.
+    3. ``CLAUDE_CODE_SESSION_ID`` env var (non-empty after strip).
+       Claude Code sets this natively in every subprocess it spawns
+       (Bash tool calls, and Agent-tool-dispatched subagents inherit the
+       IDENTICAL value from their parent top-level session — verified
+       empirically). It is harness-provided per-process, not file-based,
+       so it does not suffer the flat-file's last-writer-wins clobbering
+       when a second top-level Claude Code session starts on the same
+       machine (nexus-36q84).
+    4. ``~/.config/nexus/current_session`` via ``read_claude_session_id``.
+       Machine-wide and unscoped — a second top-level Claude Code session
+       overwrites this file unconditionally on its own SessionStart
+       (``hooks.session_start()``). Now the last-resort fallback for
+       genuinely no-harness contexts (e.g. a bare shell invocation with
+       neither env var set).
+    5. ``None``.
 
     Returns ``None`` when nothing in the chain resolves. Callers choose
     their own fallback at the call site:
@@ -108,6 +125,10 @@ def resolve_active_session_id(arg: str | None = None) -> str | None:
     Issue #594 / nexus-9e9a: this helper is the structural fix for the
     three-site drift class. Any future change to the chain happens here
     once.
+
+    nexus-36q84: added the ``CLAUDE_CODE_SESSION_ID`` tier (3) between
+    ``NX_SESSION_ID`` and the flat file to close a machine-wide session
+    collision — see tier docs above.
     """
     if arg:
         stripped = arg.strip()
@@ -116,6 +137,9 @@ def resolve_active_session_id(arg: str | None = None) -> str | None:
     env = os.environ.get("NX_SESSION_ID", "").strip()
     if env:
         return env
+    claude_code_env = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+    if claude_code_env:
+        return claude_code_env
     file_id = read_claude_session_id()
     if file_id:
         return file_id
@@ -206,8 +230,39 @@ def _make_t1_store_dir(config_dir: Path) -> Path:
 def _sweep_one_tmpdir_root(
     root: Path,
     cutoff: float,
+    live_paths: set[str] | None = None,
 ) -> int:
     """Reap ``nx_t1_*`` dirs under *root* older than *cutoff* (epoch seconds).
+
+    *live_paths*, when given, is a set of ``--path`` values currently in
+    use by a running T1 chromadb server (see
+    :func:`_live_t1_chromadb_paths`). Any candidate whose
+    ``os.path.abspath(str(d))`` is in *live_paths* is skipped BEFORE the
+    mtime check — an idle-but-live session must never have its backing
+    store reaped out from under it, even if it has been idle past
+    *cutoff* (nexus-oj1hn / GH #1151).
+
+    ``os.path.abspath`` (not a bare ``str(d)``) is deliberate: chroma's
+    reported ``--path`` comes from ``tempfile.mkdtemp``, which internally
+    returns ``os.path.abspath(file)`` rather than a naive join — for
+    every CURRENT caller this is a no-op (``nexus_config_dir()`` always
+    returns an already-absolute path today).
+
+    SCOPE, not fully closed (substantive-critic finding, review round 2):
+    ``os.path.abspath`` resolves against the CALLING PROCESS's cwd, not a
+    fixed reference point. ``sweep_orphan_tmpdirs`` genuinely runs from two
+    separate processes in production — ``nx doctor --reap-tmpdirs`` (a
+    freshly launched CLI, whatever cwd the operator invoked it from) and
+    the long-lived MCP daemon that originally called ``start_t1_server``
+    (whatever cwd Claude Code set at spawn time). If ``NEXUS_CONFIG_DIR``
+    were ever set to a RELATIVE path, each process's ``os.path.abspath``
+    could resolve it differently, and this comparison would silently stop
+    converging — reproducing this exact bug under that precondition. No
+    current call site sets a relative ``NEXUS_CONFIG_DIR`` (verified both
+    review rounds), so this is accepted narrow residual risk, not fixed:
+    the permanent fix is normalizing inside :func:`nexus.config.nexus_config_dir`
+    itself (a single source of truth for every caller), tracked separately
+    rather than expanding this bead's scope.
 
     Returns the count reaped. Silently skips missing roots and unreadable dirs.
     """
@@ -215,9 +270,13 @@ def _sweep_one_tmpdir_root(
 
     if not root.exists():
         return 0
+    live = live_paths or set()
     reaped = 0
     for d in root.glob("nx_t1_*"):
         if not d.is_dir():
+            continue
+        if os.path.abspath(str(d)) in live:
+            _log.debug("sweep_skipped_live_tmpdir", path=str(d))
             continue
         try:
             mtime = d.stat().st_mtime
@@ -258,24 +317,26 @@ def sweep_orphan_tmpdirs(
 
     Pre-RDR-105-P4 the sweep also took a ``sessions_dir`` parameter
     and skipped any tmpdir referenced by a live ``<uuid>.session``
-    record. The session-record machinery is gone; mtime is the sole
-    protection gate. Any ``nx_t1_*`` tmpdir older than 24h with no
-    live owner is treated as an orphan; tests or operators that
-    need to keep an old tmpdir around must touch it (refresh
-    mtime) on a sub-24h cadence or move it outside the
-    ``nx_t1_*`` namespace.
+    record. The session-record machinery is gone; mtime is no longer
+    the sole protection gate (nexus-oj1hn / GH #1151): before reaping,
+    the sweep also asks ``ps`` which ``nx_t1_*`` paths currently back
+    a running chromadb server (see :func:`_live_t1_chromadb_paths`)
+    and skips those regardless of age. An idle-but-live session with
+    zero T1 activity in 24h+ must survive; only a tmpdir with no
+    live owner AND age past *max_age_hours* is treated as an orphan.
     """
     cutoff = time.time() - max_age_hours * 3600.0
     reaped = 0
+    live_paths = _live_t1_chromadb_paths()
 
     # Primary: new config-dir root (nexus-ycwec Fix #1).
     if config_dir is not None:
-        reaped += _sweep_one_tmpdir_root(config_dir / "t1", cutoff)
+        reaped += _sweep_one_tmpdir_root(config_dir / "t1", cutoff, live_paths)
 
     # Legacy migration: OS-temp root (pre-fix orphans).
     if tmpdir_root is None:
         tmpdir_root = Path(tempfile.gettempdir())
-    reaped += _sweep_one_tmpdir_root(tmpdir_root, cutoff)
+    reaped += _sweep_one_tmpdir_root(tmpdir_root, cutoff, live_paths)
 
     return reaped
 
@@ -498,6 +559,82 @@ def _parse_orphan_t1_chromadb_candidates(
             continue
         out.append(pid)
     return out
+
+
+# Matches a `--path <value>` argument on a chroma command line, capturing
+# to END OF LINE rather than to the next whitespace. A naive `(\S+)`
+# capture would silently truncate at the first embedded space -- and a
+# store path CAN contain one (an unvalidated NEXUS_CONFIG_DIR override,
+# or a space-containing $HOME on macOS), which would defeat the exact-
+# string match this function exists to provide and silently reintroduce
+# the reaped-live-dir bug (code-review-expert finding, review round 1).
+# End-of-line capture is safe here because start_t1_server's Popen call
+# always places `--path <tmpdir>` as the LAST two argv elements.
+_LIVE_T1_PATH_RE = re.compile(r"--path\s+(.+)$")
+
+
+def _parse_live_t1_chromadb_paths(ps_output: str) -> set[str]:
+    """Parse ``ps -eo pid,command -ww`` output and return the set of
+    ``--path`` values for every T1 chromadb server currently running,
+    at ANY ppid (nexus-oj1hn / GH #1151).
+
+    A row is included iff its command contains BOTH ``chroma run`` AND
+    ``nx_t1_`` (same marker pair as
+    :func:`_parse_orphan_t1_chromadb_candidates`). Unlike that
+    function -- which only matches ``ppid == 1`` because it is the
+    KILL gate for re-parented/orphaned processes -- this is a PROTECT
+    gate: it must also recognise a chromadb whose parent Claude Code
+    session is still alive, so :func:`sweep_orphan_tmpdirs` never
+    reaps that session's backing store out from under it.
+
+    Callers MUST pass ``-ww`` (unlimited width) to ``ps``; a
+    width-truncated command line can cut off or mangle the ``--path``
+    value, which would silently defeat the liveness match this
+    function exists to provide.
+
+    Pure function; no subprocess. Header, blank, and malformed rows
+    are skipped, as are rows missing an extractable ``--path`` token.
+    """
+    paths: set[str] = set()
+    for line in ps_output.splitlines():
+        s = line.strip()
+        if not s or not s[0].isdigit():
+            continue  # header row or blank
+        parts = s.split(None, 1)
+        if len(parts) < 2:
+            continue
+        cmd = parts[1]
+        if "chroma run" not in cmd or "nx_t1_" not in cmd:
+            continue
+        match = _LIVE_T1_PATH_RE.search(cmd)
+        if not match:
+            continue
+        paths.add(match.group(1))
+    return paths
+
+
+def _live_t1_chromadb_paths() -> set[str]:
+    """Return the ``--path`` values of every currently-running T1
+    chromadb server (nexus-oj1hn / GH #1151).
+
+    Runs ``ps -eo pid,command -ww`` -- the ``-ww`` (unlimited width)
+    is load-bearing: a truncated command line can cut off a long
+    ``nx_t1_`` path, defeating the exact-string match in
+    :func:`_sweep_one_tmpdir_root` and letting a live session's
+    tmpdir be reaped anyway (the reported bug). Fails open (returns
+    an empty set) on subprocess errors, matching every other sweep's
+    failure mode in this module -- best-effort, non-fatal.
+    """
+    try:
+        ps_output = subprocess.check_output(
+            ["ps", "-eo", "pid,command", "-ww"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError) as exc:
+        _log.debug("live_t1_chromadb_paths_ps_failed", error=str(exc))
+        return set()
+    return _parse_live_t1_chromadb_paths(ps_output)
 
 
 def sweep_orphan_t1_chromadbs(
@@ -815,33 +952,32 @@ def find_immediate_claude_pid(start_pid: int | None = None) -> int:
     return immediate_ppid
 
 
-_NEXUS_SKIP_T1_DEPRECATION_WARNED: bool = False
 
-
-
+_LEGACY_SKIP_T1_IGNORED_WARNED: bool = False
 
 
 def _t1_isolated_env() -> bool:
     """Return True when the current env opts into per-process T1 ephemeral.
 
-    Honours the new ``NX_T1_ISOLATED=1`` name; for the 4.27 -> 4.28
-    deprecation cycle (RF-4) the legacy ``NEXUS_SKIP_T1=1`` is also
-    accepted with a one-shot warning when the new name is absent.
-    Removed in 5.0. The one-shot guard
-    ``_NEXUS_SKIP_T1_DEPRECATION_WARNED`` keeps long-running MCP
-    workflows from spamming the log on every ``T1Database``
-    construction.
+    ``NX_T1_ISOLATED=1`` only. The legacy ``NEXUS_SKIP_T1=1`` alias
+    (4.27 -> 4.28 deprecation cycle, RF-4) was removed at 6.5.2 — a full
+    major past its promised 5.0 removal. It is recognized-but-IGNORED with
+    a one-shot warning (critique 2026-07-13: with a live T1 discoverable, a
+    stale alias would otherwise SILENTLY connect the caller to the shared
+    T1 instead of the isolation they asked for — the warning is the only
+    remaining signal).
     """
-    global _NEXUS_SKIP_T1_DEPRECATION_WARNED
+    global _LEGACY_SKIP_T1_IGNORED_WARNED
     isolated = os.environ.get("NX_T1_ISOLATED", "").strip().lower() in ("1", "true", "yes")
     legacy = os.environ.get("NEXUS_SKIP_T1", "").strip().lower() in ("1", "true", "yes")
-    if legacy and not isolated and not _NEXUS_SKIP_T1_DEPRECATION_WARNED:
-        _NEXUS_SKIP_T1_DEPRECATION_WARNED = True
+    if legacy and not isolated and not _LEGACY_SKIP_T1_IGNORED_WARNED:
+        _LEGACY_SKIP_T1_IGNORED_WARNED = True
         _log.warning(
-            "nexus_skip_t1_deprecated",
-            message="NEXUS_SKIP_T1 is deprecated; use NX_T1_ISOLATED=1 instead. Will be removed in 5.0.",
+            "nexus_skip_t1_removed_ignored",
+            message="NEXUS_SKIP_T1 was REMOVED at 6.5.2 and is IGNORED — it no "
+                    "longer isolates T1. Set NX_T1_ISOLATED=1.",
         )
-    return isolated or legacy
+    return isolated
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────

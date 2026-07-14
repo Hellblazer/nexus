@@ -249,11 +249,19 @@ class TestMigrationStateIntegration:
             creds_path=creds_file,
             psql_bin=_PSQL,
         )
-        assert len(results) == 1
-        r = results[0]
-        assert r.ok is True
-        assert "applied" in r.detail
-        assert "0 FAILED" in r.detail
+        # nexus-vounk: the chash-poison probe now rides this check, so the
+        # contract is TWO results. The synthetic creds_file has no
+        # NX_DB_DIAG_* keys (a pre-P2.1 install by construction), so the
+        # chash probe must degrade to a WARN — never a false "clean", and
+        # never a hard failure that would block an old install's doctor.
+        assert len(results) == 2
+        migration = next(r for r in results if "chash" not in r.label.lower())
+        assert migration.ok is True
+        assert "applied" in migration.detail
+        assert "0 FAILED" in migration.detail
+        chash = next(r for r in results if "chash" in r.label.lower())
+        assert chash.ok is False and chash.warn is True and chash.fatal is False
+        assert "no nexus_diag diagnostic credentials" in chash.detail
 
 
 class TestRlsPresentIntegration:

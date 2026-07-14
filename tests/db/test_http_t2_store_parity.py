@@ -20,9 +20,14 @@ SQLite store class; it survives P4. A separate, P4-deletable faithfulness guard
 (``test_contract_matches_live_sqlite_oracle``) cross-checks the frozen snapshot
 against the live SQLite classes for as long as they exist.
 
-This is a static signature guard (cheap, no service needed). Return-SHAPE
-parity (dict keys) is exercised behaviourally by the ``-m integration``
-suites in ``tests/db/test_http_*_integration.py`` against the real service.
+This is a static signature guard (cheap, no service needed): method names and
+shared-prefix parameter names, not return-VALUE shape. Return-SHAPE parity
+(dict keys) is NOT currently exercised anywhere -- the ``-m integration``
+suites in ``tests/db/test_http_*_integration.py`` call the real service but
+do not assert on result dict key-sets. A caller that assumes a key present in
+one backend's row shape survives a backend swap (e.g. nexus-c4143-adjacent:
+``search_cmd``'s 2026-07-11 ``r['distance']`` KeyError, ``T1Database.search``
+vs ``HttpScratchStore.search``) is undefended by this file. See nexus-w2q0s.
 """
 from __future__ import annotations
 
@@ -56,8 +61,22 @@ _STORE_PAIRS = [
 # RDR-152 nexus-1di3r Phase 6: the taxonomy compute/persist/orchestrator pipeline
 # is now FULLY service-backed on HttpTaxonomyStore (delegate-thin compute statics +
 # centroid-port ANN + Java relational persist), so there are NO taxonomy exclusions
-# left — the tripwire is strict for every taxonomy method. RF-158-1: zero exemptions
-# across all nine pairs. Re-adding any entry here is a documented, auditable act.
+# left — the tripwire is strict for every taxonomy method. RF-158-1 established
+# zero exemptions across all nine pairs; re-adding any entry here is a documented,
+# auditable act. RDR-182 P1.2 (nexus-ykzbj.6) is the first re-addition:
+# ``record_consent`` is deliberately SQLite-only per the bead's explicit "raw
+# sqlite3" scope — the Java engine has no
+# ``claude_assisted_remediation_consents`` table nor a
+# ``/v1/telemetry/consents/record`` endpoint yet. In service mode a caller
+# invoking ``db.telemetry.record_consent(...)`` gets a loud ``AttributeError``
+# (HttpTelemetryStore has no such method), never a silently-dropped consent
+# row — the same fail-loud posture ``record_hook_failure`` closed for
+# tier_writes. Service-mode parity is bead nexus-ng2sy; until it lands,
+# the RDR-182 consent audit only has coverage on local (non-service) T2.
+# RF-158-1: zero exemptions across all nine pairs. The RDR-182 record_consent/
+# list_consents exclusions were removed 2026-07-13 when nexus-ng2sy landed the
+# engine-side consent table + /consents/{record,list} routes + the
+# HttpTelemetryStore twins — the parity tripwire is strict again.
 _EXCLUSIONS: dict[str, dict[str, str]] = {}
 
 # Per-(store, method) param-drift exemptions: the method exists on both the

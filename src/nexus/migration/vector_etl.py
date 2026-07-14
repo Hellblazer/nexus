@@ -90,6 +90,7 @@ from nexus.migration.chroma_read import (
     open_cloud_read_client,
     open_local_read_client,
 )
+from nexus.migration.pg_read import PgReadClient
 
 _log = structlog.get_logger(__name__)
 
@@ -249,7 +250,7 @@ class MigrationReport:
     operator handling, never a green light.
     """
 
-    leg: Literal["local", "cloud"]
+    leg: Literal["local", "cloud", "pg"]
     results: tuple[CollectionResult, ...]
 
     @property
@@ -1467,7 +1468,7 @@ def verify_fill_collections(
     read_client: Any,
     vector_client: Any,
     *,
-    leg: Literal["local", "cloud"],
+    leg: Literal["local", "cloud", "pg"],
     collections: list[str] | None = None,
     page_size: int | None = None,
     on_result: "Callable[[CollectionResult], None] | None" = None,
@@ -1583,6 +1584,83 @@ def verify_fill_cloud(
         read_client,
         vector_client,
         leg="cloud",
+        collections=collections,
+        page_size=page_size,
+        on_result=on_result,
+        target_names=target_names,
+        breaker=breaker,
+    )
+
+
+def resolve_local_service_endpoint(
+    explicit_url: str | None = None,
+    explicit_token: str | None = None,
+) -> tuple[str, str]:
+    """``(base_url, token)`` for the LOCAL pg-source read leg (nexus-te885.8.2).
+
+    Per-field explicit override: an explicitly-given URL or token is used
+    verbatim; whichever half is absent falls back to
+    :func:`nexus.db.service_endpoint.discover_lease` — called DIRECTLY,
+    never through :class:`~nexus.db.http_vector_client.HttpVectorClient`'s
+    process-wide singleton (:func:`~nexus.db.http_vector_client.get_http_vector_client`),
+    which resolves exactly one endpoint per process and is already in use
+    as the migration TARGET (cloud) in the pg-source-reconcile scenario this
+    resolver exists for — reusing it here would collapse two distinct
+    endpoints (local source, cloud target) onto one.
+
+    Fails loud (no silent fallback) when neither an explicit value nor a
+    discoverable lease can fill a gap: a ``(None, None)`` resolution
+    means no local supervisor is running and no override was given, so
+    there is nothing safe to fall back to.
+    """
+    from nexus.db.service_endpoint import discover_lease  # noqa: PLC0415 — deferred to avoid import-cycle risk (mirrors resolve_service_endpoint's own pattern)
+
+    url = (explicit_url or "").strip().rstrip("/") or None
+    token = (explicit_token or "").strip() or None
+    if url is None or token is None:
+        lease_url, lease_token = discover_lease()
+        url = url or lease_url
+        token = token or lease_token
+    if not url or not token:
+        raise RuntimeError(
+            "local pg-source endpoint is not resolvable (no explicit "
+            "local-service URL/token AND no local supervisor lease found): "
+            "start the local nexus-service with 'nx daemon service start' "
+            "(publishes the endpoint lease this resolver auto-discovers), "
+            "or pass local_service_url/local_token explicitly."
+        )
+    return url, token
+
+
+def verify_fill_pg_source(
+    local_service_url: str | None,
+    vector_client: Any,
+    *,
+    local_token: str | None = None,
+    collections: list[str] | None = None,
+    page_size: int | None = None,
+    on_result: "Callable[[CollectionResult], None] | None" = None,
+    target_names: dict[str, str] | None = None,
+    breaker: EtlCircuitBreaker | None = None,
+) -> MigrationReport:
+    """PG-SOURCE leg verify-fill (nexus-te885.8.2): reconcile rows written
+    directly to LOCAL pgvector post-cutover that exist in no Chroma store at
+    all — the substrate behind the 2026-07-01 nexus-te885.1 incident
+    (previously reconciled once by an ad hoc manual script).
+
+    Mirrors :func:`verify_fill_local`/:func:`verify_fill_cloud`'s exact
+    shape: resolve an endpoint, open a Chroma-shaped read client
+    (:class:`~nexus.migration.pg_read.PgReadClient`), delegate to
+    :func:`verify_fill_collections` unchanged. ``local_service_url``/
+    ``local_token`` are explicit overrides; ``None`` for either falls back
+    to :func:`resolve_local_service_endpoint`'s lease discovery.
+    """
+    base_url, token = resolve_local_service_endpoint(local_service_url, local_token)
+    read_client = PgReadClient(base_url, token)
+    return verify_fill_collections(
+        read_client,
+        vector_client,
+        leg="pg",
         collections=collections,
         page_size=page_size,
         on_result=on_result,

@@ -528,67 +528,6 @@ def catalog_path() -> Path:
     return nexus_config_dir() / "catalog"
 
 
-#: RDR-120 P0.B → P6 (nexus-qg86h): accepted values for the legacy
-#: ``NX_STORAGE_MODE`` env-var. ``daemon`` is now the only supported
-#: mode (``direct`` was decommissioned at P6); the constant is retained
-#: for one release so external callers reading the public symbol get a
-#: deprecation signal rather than an ``ImportError``.
-VALID_STORAGE_MODES: tuple[str, ...] = ("daemon",)
-
-
-class StorageModeError(click.ClickException):
-    """Raised when ``NX_STORAGE_MODE`` is set to a value other than
-    ``daemon``. Kept for backwards compatibility — see
-    :func:`storage_mode` for the deprecation window."""
-
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
-
-
-def storage_mode() -> str:
-    """Return the storage backend mode.
-
-    **RDR-120 P6 (nexus-qg86h): direct mode decommissioned.** This
-    function always returns ``"daemon"``. The legacy
-    ``NX_STORAGE_MODE`` env-var is retained for one release with the
-    following semantics:
-
-    - unset / empty / whitespace / ``"daemon"`` → ``"daemon"``
-      (no warning).
-    - ``"direct"`` → ``"daemon"`` + ``DeprecationWarning``. Operators
-      who relied on direct mode must now run ``nx daemon t2 start``
-      and ``nx daemon t3 start`` (local mode only; cloud mode is
-      unaffected).
-    - any other value → ``StorageModeError`` (unchanged shape).
-
-    The function itself is also slated for removal in the release
-    following the deprecation cycle; new code should not call it
-    (the storage mode is no longer a meaningful runtime branch).
-    """
-    raw = os.environ.get("NX_STORAGE_MODE", "")
-    normalized = raw.strip().lower()
-    if not normalized or normalized == "daemon":
-        return "daemon"
-    if normalized == "direct":
-        import warnings  # noqa: PLC0415 — branch-local; only on decommissioned-mode path
-
-        warnings.warn(
-            "NX_STORAGE_MODE=direct is decommissioned (RDR-120 P6). "
-            "Direct mode is gone; daemon mode is the only supported "
-            "backend. Start the daemons via `nx daemon t2 start` and "
-            "(in local mode) `nx daemon t3 start`. The env-var itself "
-            "is honoured-as-daemon for this release and will be "
-            "removed in the next.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return "daemon"
-    raise StorageModeError(
-        f"NX_STORAGE_MODE={raw!r} is not a recognized value. "
-        f"Valid values: {', '.join(VALID_STORAGE_MODES)}."
-    )
-
-
 def is_local_mode() -> bool:
     """Return True if nexus should use the local T3 backend.
 
@@ -705,6 +644,22 @@ _DEFAULTS: dict[str, Any] = {
         "enabled": False,
         "weight": 0.025,
     },
+    # RDR-182: Claude-assisted upgrade forensics / remediation. DEFAULT-OFF —
+    # the MCP surface is autonomously agent-invocable, so the durable opt-in
+    # is enforced at the tool boundary itself (the tool refuses before
+    # emitting content when this is false). Enable:
+    #   nx config set claude_assisted_remediation.enabled true
+    # NOTE: that write path stores the STRING "true"; consumers must parse
+    # strictly (see nexus.mcp.core._remediation_opt_in), never truthiness.
+    # CONSENT-PROVENANCE EXCEPTION (critic-p3 Critical, 2026-07-12): unlike
+    # every other flag, the gate does NOT honor this key from the merged
+    # load_config() view — a repo-local .nexus.yml (which arrives via git
+    # pull) is not a human consent gesture. _remediation_opt_in reads the
+    # GLOBAL config.yml only; this default exists for documentation and
+    # `nx config list` visibility.
+    "claude_assisted_remediation": {
+        "enabled": False,
+    },
     # RDR-087: search-observability opt-outs. Default-on.
     "telemetry": {
         "search_enabled": True,       # Phase 2.2 hot-path INSERT OR IGNORE.
@@ -804,6 +759,13 @@ def set_config_value(dotted_key: str, value: str) -> None:
 
         pdf:
           extractor: mineru
+
+    A non-dict value at an intermediate key (e.g. a hand-written flat
+    ``claude_assisted_remediation: true`` when setting
+    ``claude_assisted_remediation.enabled``) is REPLACED by the nested form —
+    the dotted command expresses explicit intent for the section shape, and the
+    RDR-182 refusal text names this command as the remedy for exactly that flat
+    shape (nexus-s4a98). The replacement is logged with the discarded value.
     """
     path = _global_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -814,8 +776,19 @@ def set_config_value(dotted_key: str, value: str) -> None:
             data = yaml.safe_load(path.read_text()) or {}
         # Build nested dict from dotted path
         node = data
-        for part in parts[:-1]:
-            node = node.setdefault(part, {})
+        for i, part in enumerate(parts[:-1]):
+            existing = node.get(part)
+            if not isinstance(existing, dict):
+                if existing is not None:
+                    _log.warning(
+                        "config_scalar_section_replaced",
+                        key=".".join(parts[: i + 1]),
+                        discarded_value=existing,
+                        dotted_key=dotted_key,
+                    )
+                existing = {}
+                node[part] = existing
+            node = existing
         node[parts[-1]] = value
         content = yaml.dump(data, default_flow_style=False)
         tmp_fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=".config_")

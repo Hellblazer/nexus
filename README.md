@@ -35,7 +35,7 @@ uv tool install conexus                  # 1. the nx CLI (the plugin's MCP serve
 
 The plugin's MCP servers (`nx-mcp`, `nx-mcp-catalog`) are console-scripts from the `conexus` package, so **the `nx` CLI must be installed too**: `/plugin install` alone leaves the servers unable to launch. Install the CLI first (step 1; see [CLI quick-start](#cli-quick-start) to then provision the storage backend).
 
-The plugin ships 13 specialized agents, 45 skills (RDR lifecycle, plan-centric retrieval, dev workflows), and 50 MCP tools split across two focused servers. Session hooks load project context at startup.
+The plugin ships 13 specialized agents, 45 skills (RDR lifecycle, plan-centric retrieval, dev workflows), and 48 MCP tools split across two focused servers. Session hooks load project context at startup.
 
 ### Claude Cowork
 

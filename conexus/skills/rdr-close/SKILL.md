@@ -182,6 +182,7 @@ If T2 record has no `epic_bead` field (user skipped planning at accept time):
    ```
    Code-enforced flip: rewrites the RDR file `status -> closed`, adds `closed_date`, and updates the README index-row status cell in one tested action. Hand-editing frontmatter is the source of the RDR-165/166 ledger drift (T2 advanced, file left stale) — always use the command. (`--date YYYY-MM-DD` overrides the default of today.)
 3. (The README index row is updated by the command in step 2 — no separate regen step.)
+3b. **Tick or annotate every remaining `- [ ]` checkbox in the RDR body** — check it off if done, or replace with `- [deferred: nexus-XXXXX]` / `- [waived: <reason>]`. A closed RDR with unchecked boxes reads as hidden scope loss to every future audit (58 of 144 closed RDRs carried them as of 2026-07-13).
 4. **Scoped conditional reindex** — if the RDR body changed during close (e.g. divergence notes added, post-mortem link inserted, or any text outside the frontmatter block modified), run `nx index rdr` **scoped to the single RDR file**, NOT the whole corpus:
 
    ```bash

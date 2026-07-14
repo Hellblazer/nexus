@@ -15,8 +15,6 @@ Interface parity (bead nexus-gmiaf.15, RDR-152 P2.5; extended nexus-gmiaf.16):
 """
 from __future__ import annotations
 
-import json
-import os
 from typing import Any
 
 import httpx
@@ -32,8 +30,15 @@ DEFAULT_TENANT: str = "default"
 # RDR-152 nexus-fjwxh: env-only resolution replaced by the centralized
 # resolver (env halves -> ServiceRegistry lease -> fail loud), so the
 # T2 service-mode default works wherever the supervisor is running.
-from nexus.db.service_endpoint import resolve_service_endpoint as _resolve_endpoint
+# nexus-f2qvx.2: construction, credential/endpoint refresh-on-401, and the
+# HTTP transport itself (_post/_get/_delete) are now inherited wholesale
+# from RefreshableHttpStoreMixin — HttpDocumentHighlightsStore no longer
+# bakes a ``self._headers`` dict or a ``httpx.Client(base_url=...,
+# headers=...)`` at construction time, which is what let a rotated bearer
+# or a supervisor-restart port change go silently stale for the life of
+# the instance. See ``nx memory get -p nexus -t design-bikit-refreshable-http-store-mixin.md``.
 from nexus.db.t2._raw_handle_guard import RawHandleGuardMixin
+from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 
 
 def _record_to_body(record: HighlightRecord) -> dict[str, Any]:
@@ -58,68 +63,40 @@ def _body_to_record(body: dict[str, Any]) -> HighlightRecord:
     )
 
 
-class HttpDocumentHighlightsStore(RawHandleGuardMixin):
+class HttpDocumentHighlightsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     """DocumentHighlights drop-in that delegates to the RDR-152 Java HTTP service.
+
+    Uses a keep-alive :class:`httpx.Client` connection pool via
+    :class:`~nexus.db.t2._refreshable_client.RefreshableHttpStoreMixin`,
+    which resolves ``NX_SERVICE_HOST``, ``NX_SERVICE_PORT``, and
+    ``NX_SERVICE_TOKEN`` (or a managed ``service_url``/``service_token``)
+    fresh on construction AND self-heals (re-resolve + retry once) on a
+    401 or a connection-refused/reset — see the mixin's own docstring for
+    the full resolution order. ``__init__`` is inherited unchanged (this
+    class's constructor signature matches the mixin's pinned contract
+    exactly, so no override is needed).
 
     Args:
         base_url: Optional override for the service base URL.
         tenant:   Tenant to stamp on every request (default: ``DEFAULT_TENANT``).
     """
 
-    def __init__(
-        self,
-        base_url: str | None = None,
-        tenant: str = DEFAULT_TENANT,
-        *,
-        _token: str | None = None,
-    ) -> None:
-        if base_url is not None:
-            if _token is None:
-                _token = os.environ.get("NX_SERVICE_TOKEN", "")
-                if not _token:
-                    raise RuntimeError(
-                        "NX_SERVICE_TOKEN is required when "
-                        "NX_STORAGE_BACKEND_DOCUMENT_HIGHLIGHTS=service."
-                    )
-            self._base_url = base_url.rstrip("/")
-        else:
-            self._base_url, token = _resolve_endpoint()
-            _token = token
-
-        self._tenant = tenant
-        self._headers = {
-            "Authorization": f"Bearer {_token}",
-            "X-Nexus-Tenant": tenant,
-            "Content-Type": "application/json",
-        }
-        self._client = httpx.Client(
-            base_url=self._base_url,
-            headers=self._headers,
-            timeout=30.0,
-        )
-        _log.debug(
-            "http_document_highlights_store.init",
-            base_url=self._base_url,
-            tenant=tenant,
-        )
-
-    def close(self) -> None:
-        """Close the keep-alive connection pool (idempotent)."""
-        self._client.close()
-
     # ── Internal helpers ───────────────────────────────────────────────────────
+    #
+    # These stay LOCAL overrides (not a straight inherit) because every method
+    # in this class calls self._post/self._get with a SHORT path suffix
+    # (e.g. "/upsert") — the "/v1/aspects/highlights" prefix is store-specific
+    # routing, not part of the mixin's shared contract. Every actual HTTP
+    # round-trip still goes through the inherited, self-healing
+    # super()._post/_get (RefreshableHttpStoreMixin._send), never
+    # self._client directly.
 
     def _post(self, path: str, body: dict[str, Any]) -> Any:
-        resp = self._client.post(f"/v1/aspects/highlights{path}", content=json.dumps(body))
-        resp.raise_for_status()
-        return resp.json()
+        return super()._post(f"/v1/aspects/highlights{path}", body)
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
-        resp = self._client.get(f"/v1/aspects/highlights{path}", params={
-            k: str(v) for k, v in (params or {}).items() if v is not None
-        })
-        resp.raise_for_status()
-        return resp.json()
+        q = {k: str(v) for k, v in (params or {}).items() if v is not None}
+        return super()._get(f"/v1/aspects/highlights{path}", q)
 
     # ── Public API — mirrors DocumentHighlights ───────────────────────────────
 

@@ -562,6 +562,86 @@ class PgVectorRepositoryContractTest {
             .containsExactly("snear000000000000000000000000000", "sfar0000000000000000000000000000");
     }
 
+    // Contract 4c: range operators, operand-typed (nexus-4l80g).
+
+    @Test
+    void search_whereGteNumeric_matchesJsonNumbersOnly_neverCastErrors() {
+        String col = "code__searchgte__voyage-code-3__v1";
+        embedder1024.register("search query", 1.0f, 0.0f);
+        embedder1024.register("year t1", 1.0f, 0.0f);
+        embedder1024.register("year t2", 0.8f, 0.6f);
+        embedder1024.register("year t3", 0.6f, 0.8f);
+        embedder1024.register("year t4", 0.0f, 1.0f);
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of("gtey1000000000000000000000000000", "gtey2000000000000000000000000000",
+                    "gtey3000000000000000000000000000", "gtey4000000000000000000000000000"),
+            List.of("year t1", "year t2", "year t3", "year t4"),
+            List.of(Map.of("bib_year", 2021),
+                    Map.of("bib_year", 2020),
+                    Map.of("bib_year", 2019),
+                    // JSON-STRING year: must be excluded by a numeric operand
+                    // WITHOUT aborting the query on the ::numeric cast.
+                    Map.of("bib_year", "not-a-year")));
+
+        List<Map<String, Object>> rows = repo1024.search(
+            TENANT_A, "search query", List.of(col), 10,
+            Map.of("bib_year", Map.of("$gte", 2020)));
+
+        assertThat(rows).extracting(r -> r.get("id"))
+            .as("{bib_year:{$gte:2020}} matches the two JSON-number rows >= 2020, "
+                + "excludes 2019 AND the non-numeric row, distance-ordered")
+            .containsExactly("gtey1000000000000000000000000000", "gtey2000000000000000000000000000");
+    }
+
+    @Test
+    void search_whereGtString_isLexical_theDocumentedNineVsTenHazard() {
+        String col = "code__searchlex__voyage-code-3__v1";
+        embedder1024.register("search query", 1.0f, 0.0f);
+        embedder1024.register("lex t1", 1.0f, 0.0f);
+        embedder1024.register("lex t2", 0.0f, 1.0f);
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of("lexc1000000000000000000000000000", "lexc2000000000000000000000000000"),
+            List.of("lex t1", "lex t2"),
+            List.of(Map.of("rank", "9"), Map.of("rank", "10")));
+
+        List<Map<String, Object>> rows = repo1024.search(
+            TENANT_A, "search query", List.of(col), 10,
+            Map.of("rank", Map.of("$gt", "10")));
+
+        assertThat(rows).extracting(r -> r.get("id"))
+            .as("string operand compares LEXICALLY by design: '9' > '10' matches, "
+                + "'10' > '10' does not — numeric intent must pass a number")
+            .containsExactly("lexc1000000000000000000000000000");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void getWhere_gteNumeric_jooqTwinMatchesAppendWherePredicate() {
+        // Review c0e4493e finding 2: metadataCondition (the jOOQ twin used by
+        // getWhere/getAllMetadata) carries its own range-operator branch —
+        // "the two translators must not drift" needs DB-level proof on BOTH,
+        // not just the search() path.
+        String col = "code__getwheregte__voyage-code-3__v1";
+        embedder1024.register("gw t1", 1.0f, 0.0f);
+        embedder1024.register("gw t2", 0.8f, 0.6f);
+        embedder1024.register("gw t3", 0.0f, 1.0f);
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of("gwy21000000000000000000000000000", "gwy19000000000000000000000000000",
+                    "gwybad00000000000000000000000000"),
+            List.of("gw t1", "gw t2", "gw t3"),
+            List.of(Map.of("bib_year", 2021),
+                    Map.of("bib_year", 2019),
+                    Map.of("bib_year", "not-a-year")));
+
+        Map<String, Object> env = repo1024.getWhere(
+            TENANT_A, col, Map.of("bib_year", Map.of("$gte", 2020)), 10, 0, false);
+
+        assertThat((List<String>) env.get("ids"))
+            .as("jOOQ twin: numeric $gte matches only JSON-number rows >= 2020, "
+                + "excludes 2019 and the non-numeric row, no cast error")
+            .containsExactly("gwy21000000000000000000000000000");
+    }
+
     @Test
     void search_whereEqOperatorForm_matchesPlainEquality() {
         String col = "code__searcheq__voyage-code-3__v1";

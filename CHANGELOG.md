@@ -6,6 +6,93 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.7.0] - 2026-07-13
+
+### Added
+
+- **Claude-assisted remediation (RDR-182)**: `nx forensics <topic>` (read-only
+  diagnostics) and `nx remediate <topic>` (consented, audited recovery), plus
+  the matching `forensics`/`remediate` MCP tools. Both are consent-gated
+  (global-only opt-in; refusal at the tool boundary when unconfigured), every
+  invocation lands in the `claude_assisted_remediation_consents` audit table,
+  and all diagnostic SQL passes a fail-closed read-only lint (aggregate-only:
+  counts and lengths, never row content) before emission.
+- **`nexus_diag` diagnostic role**: a dedicated BYPASSRLS, SELECT-only Postgres
+  role behind a single connection choke point carries all cross-tenant
+  diagnostics (the chash-poison health probe now routes through it). RDR-182
+  Amendment A6 adds a structural content boundary: a superuser-owned
+  counts-only view (`diag_chash_conformance`) replaces direct table SELECT,
+  which is revoked per-relation by the engine's grants changeset — content
+  exposure is impossible by construction, not just by lint.
+- **Range metadata filters**: `--where` (CLI) and `where=` (MCP search/query)
+  accept `>=`, `<=`, `>`, `<` with numeric auto-coercion for any field;
+  quoting the operand forces an ordered-string compare for ISO dates.
+- **Retention markers**: the engine and both T2 telemetry stores publish a
+  per-tenant cumulative-delete counter (`GET /v1/telemetry/retention/markers`),
+  giving the migration verify-fill a rollback detector — `relevance_log`
+  rejoins the watermark-gated fast path soundly (tenant-scoped keys,
+  fresh-window-only fill that provably cannot resurrect expired rows).
+- **Verify-fill watermark + reconcile**: rowid watermarks let clean re-runs
+  skip already-verified telemetry tables (trust requires live-count
+  validation); a pg-source reconcile leg covers migrated-then-diverged rows.
+- **`RefreshableHttpStoreMixin`** across all ten T2 HTTP store twins:
+  credential staleness (rotated bearer tokens) now refreshes and retries once
+  instead of failing the call.
+- **T1 session hardening**: session-token refresh with lease freshness and
+  ownership recovery, flock-serialized stale-lease recovery, local CLI scratch
+  routed through the PG-backed service, and a liveness-aware orphan-tmpdir
+  sweep.
+- Service-mode consent-audit parity: `nx remediate` consent audit works
+  against the HTTP service tier, not just local SQLite.
+- Catalog: manifest identity-drops are surfaced, and `nx catalog reconcile`
+  heals `chunk_count=0` ghost documents.
+- Engine-side: typed upstream-auth 502 (a Voyage 401 no longer masquerades as
+  an opaque 500) and a cross-tenant T1 TTL sweep.
+- `nx index repo` refuses a `PATH` with no `.git` (file or directory — git
+  worktrees included), instead of silently registering a bogus owner
+  spanning unrelated content. Real incident: `nx index repo ~/git` was run
+  against the parent of many repos instead of a specific repo subdirectory,
+  discovered via `nx catalog doctor --t3-vs-catalog`.
+
+### Changed
+
+- **Engine floor raised to `engine-service-v0.1.41`** (fresh installs
+  auto-acquire it): this release's remediation consent audit, retention
+  markers, and range filters hard-require the v0.1.40/41 schema; engine tags
+  at or below v0.1.40 are invalid rollback targets after the A6 grants
+  changeset.
+- `nx migrate` runs the engine version-floor gate before the cost guardrail,
+  so an incompatible target fails fast instead of after cost estimation.
+- Install-time bge-768 ONNX fetch comes from the project's self-hosted GitHub
+  release asset with pinned sha256 digests (retires the chronic anonymous
+  HuggingFace 429 dependency).
+
+### Fixed
+
+- `nx config set` converts flat scalar keys on the dotted path instead of
+  erroring (`nexus-s4a98`).
+- `nx scratch search` KeyError on the service-backed default tier.
+- `current_session` multi-session collision under concurrent Claude sessions.
+- Command preambles are apostrophe-safe; transient `OSError` in tier probes
+  degrades gracefully instead of crashing the doctor.
+- Native-image smoke now exercises memory/plans/taxonomy/chash/T1 through the
+  real Python clients (native reflection gaps fail the gate, not production).
+
+### Removed
+
+- The legacy `NEXUS_SKIP_T1=1` env alias (deprecated 4.27, promised removed in
+  5.0) no longer selects T1 isolation. It is recognized-but-ignored with a
+  one-shot warning; set `NX_T1_ISOLATED=1` instead. NOTE: with a live T1
+  discoverable, a stale `NEXUS_SKIP_T1=1` now connects to the discovered T1
+  rather than an isolated ephemeral — the warning is the migration signal.
+- `nexus.taxonomy.cluster_and_persist` / `rebuild_taxonomy` no-op stubs
+  ("Removed in 4.0"), `nexus.config.storage_mode()` / `StorageModeError` /
+  `VALID_STORAGE_MODES` (RDR-120 P6 shim) and the `NX_STORAGE_MODE` env var,
+  and `nexus.db.t3._STORE_TYPES` — all past their deprecation windows, all
+  with zero production callers.
+- The `route_coverage` telemetry table and its plumbing (superseded by the
+  telemetry count whitelist).
+
 ## [6.6.1] - 2026-07-11
 
 Bug-fix release. Three service-mode daemon gaps found and fixed same-day

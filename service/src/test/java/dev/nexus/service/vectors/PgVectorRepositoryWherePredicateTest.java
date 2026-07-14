@@ -129,4 +129,40 @@ class PgVectorRepositoryWherePredicateTest {
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessageContaining("list operand");
     }
+    // ── nexus-4l80g: range operators, operand-typed ──────────────────────────
+
+    @Test
+    void gteNumericOperand_typeofGuardedNumericCompare_bindsKeyTwice() {
+        var sql = new StringBuilder();
+        var binds = binds();
+        PgVectorRepository.appendWherePredicate(sql, binds, "bib_year", Map.of("$gte", 2020));
+        assertThat(sql.toString()).isEqualTo(
+            " AND jsonb_typeof(metadata->?) = 'number' AND (metadata->>?)::numeric >= ?");
+        assertThat(binds).containsExactly("bib_year", "bib_year", new java.math.BigDecimal("2020"));
+    }
+
+    @Test
+    void ltStringOperand_lexicalTextCompare() {
+        var sql = new StringBuilder();
+        var binds = binds();
+        PgVectorRepository.appendWherePredicate(sql, binds, "rank", Map.of("$lt", "m"));
+        assertThat(sql.toString()).isEqualTo(" AND metadata->>? < ?");
+        assertThat(binds).containsExactly("rank", "m");
+    }
+
+    @Test
+    void rangeOperator_rejectsNonScalarOperand_loud() {
+        assertThatThrownBy(() -> PgVectorRepository.appendWherePredicate(
+                new StringBuilder(), binds(), "k", Map.of("$gt", List.of(1))))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("numeric or string operand");
+    }
+
+    @Test
+    void unsupportedOperator_errorListsRangeOperators() {
+        assertThatThrownBy(() -> PgVectorRepository.appendWherePredicate(
+                new StringBuilder(), binds(), "k", Map.of("$regex", "x")))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("$gte, $lte, $gt, $lt");
+    }
 }

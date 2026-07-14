@@ -27,7 +27,7 @@ import numpy as np
 import structlog
 
 from nexus.corpus import embedding_model_for_collection_name, index_model_for_collection
-from nexus.db.chroma_quotas import QUOTAS
+from nexus.db.limits import QUOTAS
 from nexus.db.local_ef import _MODEL_DIMS as _LOCAL_RAW_MODEL_DIMS
 from nexus.db.local_ef import _MODEL_TOKENS as _LOCAL_MODEL_TOKENS
 from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415 — same cross-module reuse pattern as commands/catalog_cmds/doctor.py

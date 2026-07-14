@@ -1801,13 +1801,9 @@ def service_start_cmd(
         )
 
 
-# Full, clickable URL to the recovery playbook — surfaced verbatim in the
-# gate below (and worth keeping in one place, nexus-pnwu0). Most terminals
-# autolink an https:// URL; releases promote develop -> main, so an operator
-# on a released build finds §8.1 on main.
-_MIGRATION_RUNBOOK_URL = (
-    "https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md"
-)
+# The recovery-playbook URL moved to nexus.remediation.MIGRATION_RUNBOOK_URL
+# with the RDR-182 P1.3 hoist (nexus-ykzbj.7) — the shared Playbook emitter
+# is now the single source of truth for the gate's guidance text.
 
 
 def _emit_chash_poison_gate(config_dir: Path, *, force: bool) -> None:
@@ -1837,42 +1833,21 @@ def _emit_chash_poison_gate(config_dir: Path, *, force: bool) -> None:
     if not poison:
         return
 
-    detail = poison[0].detail
-    prompt = (
-        "My conexus/nexus store has non-32-char chash rows in pgvector "
-        "(GH #1390 / nexus-pnwu0) and a new engine would crash-loop on boot. "
-        "Walk me through the recovery in "
-        f"{_MIGRATION_RUNBOOK_URL} section 8.1: roll back the poisoned "
-        "pgvector target (nx storage migrate vectors --rollback), re-index the "
-        "affected legacy-id collections from source, re-run nx guided-upgrade, "
-        "and only then let me upgrade the engine. Do NOT drop the chash "
-        "length constraints."
+    # RDR-182 P1.3 (nexus-ykzbj.7): guidance text lives in the shared
+    # Playbook emitter — one source of truth for this gate AND the Phase-3
+    # MCP forensics/remediate tools. Byte-locked to the pre-hoist text by
+    # tests/remediation/test_playbook.py; this function keeps only the
+    # probe + flow control (force branch, exit code).
+    from nexus.remediation import StoreState, emit_playbook  # noqa: PLC0415 — deferred, CLI startup cost
+
+    playbook = emit_playbook(
+        "chash-poison", StoreState(detail=poison[0].detail)
     )
     if force:
-        click.echo(
-            "WARNING (nexus-pnwu0): --force overrides the chash-poison gate. "
-            f"{detail} The new engine may crash-loop on boot unless you have "
-            "already remediated. Recovery: " + _MIGRATION_RUNBOOK_URL
-            + " §8.1.",
-            err=True,
-        )
+        click.echo(playbook.force_override_warning(), err=True)
         return
 
-    click.echo(
-        "\nRefusing to install (nexus-pnwu0 / GH #1390): booting a new engine "
-        "on this store would crash-loop.\n"
-        f"  {detail}\n\n"
-        "Remediate first — full recovery playbook (clickable):\n"
-        f"  {_MIGRATION_RUNBOOK_URL} §8.1\n\n"
-        "Or paste this to your Claude to be walked through it:\n"
-        "  ----------------------------------------------------------------\n"
-        f"  {prompt}\n"
-        "  ----------------------------------------------------------------\n\n"
-        "Do NOT drop the chash length constraints to force it through — that "
-        "is the exact action that caused GH #1390. Re-run with --force ONLY "
-        "after you have remediated.",
-        err=True,
-    )
+    click.echo(playbook.terminal_block(), err=True)
     sys.exit(3)
 
 
