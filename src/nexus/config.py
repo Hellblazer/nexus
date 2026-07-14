@@ -110,6 +110,10 @@ class PDFConfig:
 
     extractor: str = "auto"
     mineru_server_url: str = "http://127.0.0.1:8010"
+    #: nexus-1qdb9: the PDF pipeline may spawn a local MinerU server on
+    #: demand when it routes a document to MinerU and none is running.
+    #: False = operator manages the server out-of-band (launchctl, remote).
+    mineru_autostart: bool = True
     mineru_table_enable: bool = False
     mineru_page_batch: int = 1
     # RDR-148 Gap 6: hard RLIMIT_AS address-space ceiling (MB) applied to the
@@ -137,6 +141,7 @@ def get_pdf_config(repo_root: Path | None = None) -> PDFConfig:
     return PDFConfig(
         extractor=extractor,
         mineru_server_url=pdf.get("mineru_server_url", "http://127.0.0.1:8010"),
+        mineru_autostart=bool(pdf.get("mineru_autostart", True)),
         mineru_table_enable=bool(pdf.get("mineru_table_enable", False)),
         mineru_page_batch=max(1, int(pdf.get("mineru_page_batch", 1))),
         mineru_memory_ceiling_mb=max(0, int(pdf.get("mineru_memory_ceiling_mb", 0))),

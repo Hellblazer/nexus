@@ -940,7 +940,23 @@ class PDFExtractor:
             self._mineru_server_checked = True
             return True
 
-        # No live server after rediscovery — loud, reasoned fallback.
+        # nexus-1qdb9: on-demand lifecycle before conceding — elect a
+        # single spawner via the RDR-149 substrate and wait (bounded) for
+        # health. Config-gated (pdf.mineru_autostart) and remote-intent-
+        # safe; None = degrade exactly as before.
+        try:
+            from nexus.daemon.mineru_lifecycle import ensure_mineru_running  # noqa: PLC0415 — deferred import
+            ensured = ensure_mineru_running()
+        except Exception:  # noqa: BLE001 — lifecycle must never break extraction
+            _log.warning("mineru_ensure_crashed", exc_info=True)
+            ensured = None
+        if ensured is not None:
+            _log.info("mineru_server_autostarted", url=ensured)
+            self._mineru_server_up = True
+            self._mineru_server_checked = True
+            return True
+
+        # No live server after rediscovery + autostart — loud, reasoned fallback.
         self._mineru_server_up = False
         self._mineru_server_checked = True
         _log.warning(

@@ -168,6 +168,56 @@ def _resolve_mineru_api_bin() -> str | None:
     return shutil.which("mineru-api")
 
 
+def spawn_server_process(port: int) -> "subprocess.Popen | None":
+    """Launch the mineru-api child + write its pid file (nexus-1qdb9).
+
+    The launch core shared by the ``nx mineru start`` command and the
+    on-demand lifecycle (``nexus.daemon.mineru_lifecycle``). Returns the
+    Popen handle, or ``None`` when the mineru-api binary is unavailable.
+    The pid file is written IMMEDIATELY after the Popen so a concurrent
+    elector sees the claim before health passes.
+    """
+    mineru_bin = _resolve_mineru_api_bin()
+    if mineru_bin is None:
+        return None
+    cmd = [mineru_bin, "--host", "127.0.0.1", "--port", str(port)]
+    output_root = _mineru_output_root()
+    # RDR-148 Gap 4: the mineru-api server is long-lived; DEVNULL discarded
+    # its startup banner and crash tracebacks, the only record of WHY it
+    # died (same silent-death class as the chroma/storage-service children,
+    # nexus-ovbr7). Route stdout+stderr to a rotated child log instead.
+    from nexus.logging_setup import open_child_log_or_devnull  # noqa: PLC0415 — branch-local; only when spawning the server child
+
+    # config_dir defaults to None (the global config dir): the mineru
+    # subsystem is not config-dir-parameterized — _pid_file_path(),
+    # _server_env() and _mineru_output_root() all resolve the default dir —
+    # so unlike the daemon precedent (self._config_dir) None is correct here.
+    server_log = open_child_log_or_devnull("mineru_server")
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            env=_server_env(output_root),
+            stdout=server_log,
+            stderr=server_log,
+            start_new_session=True,
+        )
+    except (FileNotFoundError, PermissionError):
+        return None
+    finally:
+        if not isinstance(server_log, int):
+            server_log.close()
+
+    # Write PID file with 0o600 + record output_root so stop can clean up
+    # the per-user extraction artifact directory.
+    _write_pid_file(_pid_file_path(), {
+        "pid": proc.pid,
+        "port": port,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "output_root": str(output_root),
+    })
+    return proc
+
+
 @mineru_group.command()
 @click.option("--port", type=int, default=0, help="Port for mineru-api (0 = auto-assign).")
 def start(port: int) -> None:
@@ -195,47 +245,11 @@ def start(port: int) -> None:
     # PATH.  uv tool install only links conexus's own entry points, not
     # dependencies', so the bare name "mineru-api" fails even though the script
     # exists at <venv>/bin/mineru-api.
-    mineru_bin = _resolve_mineru_api_bin()
-    if mineru_bin is None:
+    proc = spawn_server_process(port)
+    if proc is None:
         click.echo("Error: mineru-api not found on PATH. Install MinerU first.", err=True)
         raise click.exceptions.Exit(1)
-    cmd = [mineru_bin, "--host", "127.0.0.1", "--port", str(port)]
-    output_root = _mineru_output_root()
-    # RDR-148 Gap 4: the mineru-api server is long-lived; DEVNULL discarded
-    # its startup banner and crash tracebacks, the only record of WHY it
-    # died (same silent-death class as the chroma/storage-service children,
-    # nexus-ovbr7). Route stdout+stderr to a rotated child log instead.
-    from nexus.logging_setup import open_child_log_or_devnull  # noqa: PLC0415 — branch-local; only when spawning the server child
-
-    # config_dir defaults to None (the global config dir): the mineru
-    # subsystem is not config-dir-parameterized — _pid_file_path(),
-    # _server_env() and _mineru_output_root() all resolve the default dir —
-    # so unlike the daemon precedent (self._config_dir) None is correct here.
-    server_log = open_child_log_or_devnull("mineru_server")
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            env=_server_env(output_root),
-            stdout=server_log,
-            stderr=server_log,
-            start_new_session=True,
-        )
-    except (FileNotFoundError, PermissionError):
-        click.echo("Error: mineru-api not found on PATH. Install MinerU first.", err=True)
-        raise click.exceptions.Exit(1)
-    finally:
-        if not isinstance(server_log, int):
-            server_log.close()
-
-    # Write PID file with 0o600 + record output_root so stop can clean up
-    # the per-user extraction artifact directory.
     pid_path = _pid_file_path()
-    _write_pid_file(pid_path, {
-        "pid": proc.pid,
-        "port": port,
-        "started_at": datetime.now(timezone.utc).isoformat(),
-        "output_root": str(output_root),
-    })
 
     # Poll /health until ready
     url = f"http://127.0.0.1:{port}/health"

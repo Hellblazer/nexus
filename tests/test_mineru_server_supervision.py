@@ -138,8 +138,10 @@ def test_health_fail_triggers_single_rediscovery_then_loud_fallback() -> None:
         "httpx.get", side_effect=httpx.ConnectError("refused"),
     ) as mock_get, capture_logs() as logs:
         assert ex._mineru_server_available() is False
-        # First probe + exactly one rediscovery probe = 2 calls.
-        assert mock_get.call_count == 2
+        # First probe + exactly one rediscovery probe + the nexus-1qdb9
+        # lifecycle's own gate probe (autostart pinned OFF suite-wide in
+        # conftest, so ensure() stops after its health check) = 3 calls.
+        assert mock_get.call_count == 3
     # The fallback decision is loud and reasoned, not silent.
     fallback = [e for e in logs if e["event"] == "mineru_fallback_to_subprocess"]
     assert len(fallback) == 1, f"expected one loud fallback warning; got {logs!r}"
