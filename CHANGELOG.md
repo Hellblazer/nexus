@@ -6,6 +6,58 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.9.0] - 2026-07-14
+
+MinerU becomes self-healing, catalog search stops being blind to the files
+you indexed, and long sessions stop losing T1 mid-flight. Ships with (and
+requires) engine-service-v0.1.42.
+
+### Added
+
+- **MinerU on-demand lifecycle** (nexus-1qdb9, nexus-c7odl, nexus-m45o6):
+  when the PDF pipeline routes a document to MinerU and the server is down,
+  it now auto-starts — race-free across concurrent indexing runs via the
+  RDR-149 election primitive (`ServiceRegistry.election()`, newly public).
+  Gated by `pdf.mineru_autostart` (default true) / `NX_MINERU_AUTOSTART`
+  (case-insensitive `0/false/no/off` disable); an explicit remote
+  `pdf.mineru_server_url` is never shadowed by a local spawn. First-start
+  model warm-up is a SHARED budget — a slow warm-up stalls a batch once,
+  not per document — and a fast-crashing child (port in use) falls back in
+  one poll tick. Every automatic spawn trigger (on-demand ensure,
+  crash-restart, upgrade-finish restart-stale) honors the same policy
+  gates and election; `nx mineru start`/`stop` run under the election too,
+  and the explicit verbs stay ungated.
+
+### Fixed
+
+- **Catalog free-text search was blind to filename-titled documents**
+  (nexus-8gue1, GH #1397): the service PG tokenized `rdr-021.md` /
+  `docs/rdr/rdr-021.md` as single opaque lexemes, so every repo-indexed
+  document (title = file basename) was invisible to `nx catalog search`.
+  Engine catalog-015 adds a separator-normalized FTS segment + matching
+  query leg; `RDR-021` now finds `rdr-021.md`. Local-mode SQLite FTS5 was
+  never affected — this restores local/service parity.
+- **`Indexed:` timestamps no longer freeze at the original registration
+  date** (nexus-p5qk8): manifest writes (including `--force` backfill
+  repair) refresh `indexed_at` on both substrates; clears never stamp;
+  migration replays deliberately do not reset provenance.
+- **T1 session tokens survive owner rotation** (nexus-g5hzk): a resumed or
+  concurrent MCP incarnation that borrowed the session token no longer
+  goes permanently dark when the owning incarnation's half-TTL re-mint
+  rotates it — on 401 the store re-reads the owner-republished lease and
+  retries once (never minting). The 401 guidance at both surfaces now says
+  the self-heal already ran before advising reconnect.
+
+### Changed
+
+- **`REQUIRED_ENGINE_VERSION` → 0.1.42** (and `PINNED_SERVICE_TAG` with it,
+  by derivation): the catalog search + indexed_at fixes live in the engine,
+  and for local service-mode installs the floor/pin is the only
+  fix-delivery vehicle. New standing rule recorded in `engine_version.py`:
+  the floor bumps for advertised engine-side fixes, not only client
+  hard-dependencies.
+
+
 ## [6.8.0] - 2026-07-14
 
 Two user-experience arcs, both born from live dogfooding of the 6.7.x

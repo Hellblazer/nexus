@@ -25,7 +25,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import nexus.commands.mineru as _mineru_mod
+# nexus-1qdb9 review M1: the resolver moved to the spawn-core module —
+# the __file__ anchor and the function under test both live there now.
+import nexus._mineru_spawn as _mineru_mod
 
 
 # ---------------------------------------------------------------------------
@@ -216,9 +218,9 @@ class TestStartCommandUsesResolver:
         resp = MagicMock()
         resp.status_code = 200
 
-        with patch("nexus.commands.mineru._resolve_mineru_api_bin",
+        with patch("nexus._mineru_spawn._resolve_mineru_api_bin",
                    return_value=sentinel_bin) as mock_resolver, \
-             patch("nexus.commands.mineru.subprocess.Popen",
+             patch("nexus._mineru_spawn.subprocess.Popen",
                    return_value=proc) as mock_popen, \
              patch("nexus.commands.mineru.httpx.get", return_value=resp), \
              patch("nexus.commands.mineru._find_free_port", return_value=8010), \
@@ -238,7 +240,7 @@ class TestStartCommandUsesResolver:
         from nexus.cli import main
 
         runner = CliRunner()
-        with patch("nexus.commands.mineru._resolve_mineru_api_bin",
+        with patch("nexus._mineru_spawn._resolve_mineru_api_bin",
                    return_value=None), \
              patch("nexus.config.load_config", return_value={}), \
              patch.dict(os.environ, {"HOME": str(tmp_path)}):
@@ -265,9 +267,13 @@ class TestPdfExtractorRestartUsesResolver:
         extractor._MINERU_MAX_RESTARTS = 3
         return extractor
 
-    def test_restart_uses_resolver_path(self, tmp_path: Path) -> None:
+    def test_restart_uses_resolver_path(self, tmp_path: Path, monkeypatch) -> None:
         """_restart_mineru_server passes the resolver's path as argv[0] to Popen."""
         import subprocess as _real_subprocess
+
+        # nexus-c7odl: restart is policy-gated + election-guarded now.
+        monkeypatch.setenv("NX_MINERU_AUTOSTART", "1")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
 
         extractor = self._make_extractor()
 
@@ -284,12 +290,12 @@ class TestPdfExtractorRestartUsesResolver:
         # patch at the stdlib level; the local alias is the same object.
         # read_pid_file and _pid_file_path are locally imported from
         # nexus._mineru_pid, so patch there.
-        with patch("nexus.commands.mineru._resolve_mineru_api_bin",
+        with patch("nexus._mineru_spawn._resolve_mineru_api_bin",
                    return_value=sentinel_bin) as mock_resolver, \
              patch.object(_real_subprocess, "Popen", return_value=proc) as mock_popen, \
              patch("nexus.pdf_extractor.httpx.get", return_value=resp), \
              patch("nexus._mineru_pid.read_pid_file", return_value=None), \
-             patch("nexus.commands.mineru._find_free_port", return_value=8099), \
+             patch("nexus._mineru_spawn._find_free_port", return_value=8099), \
              patch("nexus._mineru_pid._pid_file_path",
                    return_value=pid_file):
             result = extractor._restart_mineru_server()
@@ -301,14 +307,17 @@ class TestPdfExtractorRestartUsesResolver:
         )
 
     def test_restart_logs_not_found_when_resolver_returns_none(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch
     ) -> None:
         """When resolver returns None, restart returns False without spawning."""
         import subprocess as _real_subprocess
 
+        monkeypatch.setenv("NX_MINERU_AUTOSTART", "1")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+
         extractor = self._make_extractor()
 
-        with patch("nexus.commands.mineru._resolve_mineru_api_bin",
+        with patch("nexus._mineru_spawn._resolve_mineru_api_bin",
                    return_value=None), \
              patch.object(_real_subprocess, "Popen") as mock_popen, \
              patch("nexus._mineru_pid.read_pid_file", return_value=None):

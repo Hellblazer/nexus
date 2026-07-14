@@ -170,6 +170,7 @@
          after catalog-002 (the four constraints) and chash-001 (the table). -->
     <include file="db/changelog/catalog-013-chash-checks-validate.xml"/>
     <include file="db/changelog/catalog-014-manifest-collection-stamp.xml"/>
+    <include file="db/changelog/catalog-015-fts-filename-tokens.xml"/>
 
     <!-- pgvector taxonomy centroids (bead nexus-t1hnc.1, RDR-156):
          taxonomy_centroids_384/768/1024 — moves the taxonomy__centroids ChromaDB

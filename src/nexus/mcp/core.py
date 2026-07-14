@@ -94,11 +94,15 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
     if SESSION_UNAUTHORIZED_MARKER in text:
         return (
             f"Error: {text}\n"
-            "The MCP session's T1 (scratch) session token is no longer valid "
-            "(expired past its TTL, or revoked server-side) — reconnect the "
-            "conexus MCP/extension so a fresh session-scoped token is minted. "
-            "A bare CLI self-heals this automatically on its next invocation; "
-            "a live MCP session cannot re-mint its own token mid-conversation."
+            "The MCP session's T1 (scratch) session token is no longer valid, "
+            "AND the automatic self-heal already failed: on this 401 the store "
+            "re-read the owner-republished session lease and found no fresh "
+            "token to adopt (nexus-g5hzk — no lease, expired, or unchanged). "
+            "That means the token's owner incarnation is gone or its refresh "
+            "loop died — reconnect the conexus MCP/extension so a fresh "
+            "session-scoped token is minted. A bare CLI self-heals on its "
+            "next invocation; a live MCP session can adopt a rotated token "
+            "from the lease but cannot MINT one mid-conversation."
         )
     if isinstance(e, (ConnectionError, TimeoutError)) or any(
         m in text.lower() for m in _CONNECTION_ERROR_MARKERS
@@ -598,17 +602,18 @@ async def _t1_chroma_lifespan(_app: Any):
         # piggybacks on that owner's lifecycle rather than starting a
         # SECOND, competing refresh loop for the same session id (which
         # would race the real owner's own re-mint -- see
-        # `_t1_session_refresh_loop`'s docstring). Known residual: a
-        # long-lived borrower's in-process env copy of the token is only
-        # ever read once, here, at startup -- if the true owner refreshes
-        # again later in this borrower's lifetime, the borrower's copy goes
-        # locally stale even though the lease file itself has been updated.
-        # Every borrower observed in practice (a nested `nx-mcp` subprocess,
-        # the detached SessionEnd hook) is short-lived relative to the
-        # refresh cadence (half the token TTL, so >=12h for the server's 24h
-        # default), so this is accepted rather than solved here; a
-        # genuinely long-lived borrower would need to periodically re-READ
-        # (never re-mint) the lease file to pick up the owner's refreshes.
+        # `_t1_session_refresh_loop`'s docstring). The formerly-"accepted"
+        # residual here -- a long-lived borrower's one-shot token copy going
+        # stale when the owner rotates -- is now HANDLED, reactively, one
+        # layer down: HttpScratchStore._refresh_session_token_from_lease
+        # re-reads this lease on a 401 and retries once (nexus-g5hzk). The
+        # original acceptance rested on two premises the 2026-07-14 live
+        # incident falsified: borrowers are NOT always short-lived (a
+        # same-session RESUMED PEER MCP borrows and lives for hours), and
+        # the refresh cadence is NOT >=12h (the deployed server TTL was 1h,
+        # a 30-min rotation -- the borrower went dark 4 minutes after
+        # borrowing). Re-READ on 401 (never re-mint) is exactly the remedy
+        # this comment used to defer.
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
         from nexus.db.t1 import T1RoutingAction, resolve_t1_routing_tiers  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 

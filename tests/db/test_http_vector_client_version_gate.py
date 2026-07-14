@@ -32,6 +32,13 @@ from nexus.db.managed_endpoint import (
 )
 
 
+from nexus.engine_version import REQUIRED_ENGINE_VERSION as _FLOOR_TUPLE
+
+#: The current floor as a string — these tests assert the DIAGNOSTIC text
+#: carries the real floor, whatever it is; hard-coding the literal made every
+#: floor bump fail CI here (v6.9.0 release, 2026-07-14).
+_FLOOR_STR = ".".join(str(p) for p in _FLOOR_TUPLE)
+
 def _caps() -> ManagedCapabilities:
     return ManagedCapabilities(
         base_url="https://api.conexus-nexus.com",
@@ -73,7 +80,7 @@ class TestCloudModeIncompatible:
             side_effect=ManagedServiceIncompatible(
                 "managed nexus service at https://api.conexus-nexus.com is "
                 "release_version '0.1.8', below the minimum this client "
-                "supports (v0.1.41)."
+                f"supports (v{_FLOOR_STR})."
             )
         )
         monkeypatch.setattr("nexus.db.managed_endpoint.probe_managed_service", probe)
@@ -166,7 +173,7 @@ class TestCloudProbeMessageDoesNotSelfContradict:
         message = str(exc_info.value).lower()
         assert "cannot be fixed locally" in message
         assert "0.1.8" in message  # deployed version, for diagnostic value
-        assert "0.1.41" in message  # required floor, for diagnostic value
+        assert _FLOOR_STR in message  # required floor, for diagnostic value
         assert "downgrade" not in message
         assert "upgrade the nx client" not in message
         assert "or upgrade/downgrade" not in message

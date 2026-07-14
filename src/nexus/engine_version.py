@@ -45,12 +45,27 @@ from __future__ import annotations
 #: handoff, the managed-cloud probe, AND — since 2026-07-12 —
 #: ``nexus.daemon.binary_install.PINNED_SERVICE_TAG``, the exact tag a fresh
 #: local install downloads, which is now DERIVED from this constant rather
-#: than independently hand-typed) — there is no second knob to remember. -> (0,1,41) for the 2026-07-13 release-gate
+#: than independently hand-typed) — there is no second knob to remember.
+#:
+#: WHEN TO BUMP (refined 2026-07-14, per Hal): not only when the client
+#: hard-requires new engine features — ALSO when the engine release carries
+#: user-facing FIXES the client release will advertise. For local
+#: service-mode installs this floor/pin is the ONLY fix-delivery vehicle:
+#: the engine on a local box moves solely via PINNED_SERVICE_TAG (fresh
+#: installs) or a floor bump (doctor / upgrade path). A release whose
+#: changelog claims an engine-side fix without moving this floor ships a
+#: broken promise to every local install and pins fresh installs to the
+#: still-broken engine.
+#:
+#: -> (0,1,41) for the 2026-07-13 release-gate
 #: arc: service-mode remediation consent audit hard-requires the consents
 #: table (telemetry-002, v0.1.40+); retention markers + range where-operators
 #: hard-require v0.1.41; and conexus declared tags <=0.1.40 invalid rollback
 #: targets after the A6 view-era grants changeset (engine-rollback-floor-0141).
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 41)
+#: -> (0,1,42) 2026-07-14: catalog-015 FTS filename-token fix (nexus-8gue1,
+#: the GH #1397 search blindness) + indexed_at repair provenance
+#: (nexus-p5qk8) live in the engine — the fix-delivery rule above, applied.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 42)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:

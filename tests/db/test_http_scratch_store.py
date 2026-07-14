@@ -31,6 +31,7 @@ is in tests/db/test_http_scratch_store_integration.py (marked integration).
 from __future__ import annotations
 
 import json
+import os
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -39,6 +40,7 @@ from typing import Any
 import pytest
 
 from nexus.db.http_scratch_store import DEFAULT_TENANT, HttpScratchStore
+from nexus.db.t1 import publish_t1_session_lease
 
 TOKEN = "fake-scratch-token-abc123"
 SESSION = "test-session-unit"
@@ -49,6 +51,11 @@ OTHER_SESSION = "other-session-unit"
 # {id: entry_dict}
 _STORE: dict[str, dict[str, Any]] = {}
 _STORE_LOCK = threading.Lock()
+
+#: nexus-g5hzk: when {"token": <str>} is set, the fake 401s any request whose
+#: X-Nexus-T1-Session header differs (the require-minted gate). {"token": None}
+#: (the default) disables the gate so the legacy contract tests run unchanged.
+_REQUIRED_T1_TOKEN: dict[str, Any] = {"token": None}
 
 
 def _make_entry(id: str, content: str, session_id: str, **kwargs: Any) -> dict[str, Any]:
@@ -81,6 +88,12 @@ class _FakeScratchHandler(BaseHTTPRequestHandler):
             return False
         if not tenant:
             self._send(400, {"error": "missing X-Nexus-Tenant"})
+            return False
+        # nexus-g5hzk: optional require-minted-session gate, mirroring the
+        # Java AuthFilter — active only when a test sets _REQUIRED_T1_TOKEN.
+        required = _REQUIRED_T1_TOKEN.get("token")
+        if required is not None and self.headers.get("X-Nexus-T1-Session", "") != required:
+            self._send(401, {"error": "unauthorized"})
             return False
         return True
 
@@ -544,3 +557,69 @@ class TestGetT1DatabaseFactory:
             )
         except T1ServerNotFoundError:
             pass  # Expected when no Chroma server is running in the test environment
+
+
+# ── nexus-g5hzk: 401 -> lease-reread -> retry-once (borrower self-heal) ────────
+
+
+class TestTokenRotationSelfHeal:
+    """Live incident 2026-07-14: the owner's half-TTL re-mint ROTATES the
+    server-side token; a borrower's cached string stops resolving and every
+    call 401s for the rest of the process. The owner republishes the lease
+    file at each rotation — on 401 the store re-reads it and retries once."""
+
+    FRESH = "fresh-rotated-token"
+    STALE = "stale-borrowed-token"
+
+    @pytest.fixture
+    def gated_store(self, fake_server, tmp_path, monkeypatch):
+        _STORE.clear()
+        _REQUIRED_T1_TOKEN["token"] = self.FRESH  # server only accepts FRESH
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        # Review M2: the SUT itself mutates NX_T1_SESSION[_ID] on a heal;
+        # pre-registering them with monkeypatch makes teardown revert the
+        # SUT's raw os.environ writes too (no cross-test leak).
+        monkeypatch.setenv("NX_T1_SESSION", self.STALE)
+        monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
+        monkeypatch.setenv("NX_T1_SESSION_ID", SESSION)
+        store = HttpScratchStore(
+            base_url=fake_server,
+            tenant=DEFAULT_TENANT,
+            session_id=SESSION,
+            _token=TOKEN,
+            _session_token=self.STALE,  # the borrower's snapshot, now rotated out
+        )
+        yield store
+        _REQUIRED_T1_TOKEN["token"] = None
+
+    def _publish_lease(self, tmp_path, token, ttl=300.0):
+        publish_t1_session_lease(SESSION, token, tmp_path, ttl_seconds=ttl)
+
+    def test_401_rereads_lease_and_retries_once(self, gated_store, tmp_path, monkeypatch):
+        self._publish_lease(tmp_path, self.FRESH)  # the owner's republished lease
+        id_ = gated_store.put("healed content")
+        assert id_  # the retry with the adopted token succeeded
+        assert gated_store._session_token == self.FRESH
+        # Subprocess children must inherit the LIVE token — and the id
+        # stays the ID (review M1: the ctor fallback chain must never
+        # collapse the token into a session id for a later store).
+        assert os.environ.get("NX_T1_SESSION") == self.FRESH
+        assert os.environ.get("NX_T1_SESSION_ID") == SESSION
+        # And subsequent calls ride the fresh token with no further 401 dance.
+        assert gated_store.get(id_) is not None
+
+    def test_401_with_no_lease_raises_marker(self, gated_store):
+        with pytest.raises(RuntimeError, match="unauthorized T1 session"):
+            gated_store.put("no lease to heal from")
+
+    def test_401_with_unchanged_token_raises_not_loops(self, gated_store, tmp_path):
+        # The lease holds OUR OWN (dead) token: refresh declines, the 401
+        # stands, and there is no retry loop.
+        self._publish_lease(tmp_path, self.STALE)
+        with pytest.raises(RuntimeError, match="unauthorized T1 session"):
+            gated_store.put("own token is genuinely dead")
+
+    def test_401_with_expired_lease_raises_marker(self, gated_store, tmp_path):
+        self._publish_lease(tmp_path, self.FRESH, ttl=-1.0)  # already expired
+        with pytest.raises(RuntimeError, match="unauthorized T1 session"):
+            gated_store.put("expired lease is never borrowed")

@@ -258,6 +258,20 @@ class ServiceRegistry:
 
     # -- publish / heartbeat / discover / relinquish ------------------------
 
+    def election(self, scope_key: str) -> contextlib.AbstractContextManager[None]:
+        """PUBLIC spawn-guard election for *scope_key* (nexus-1qdb9).
+
+        Exposes the substrate's per-scope election flock as a context
+        manager so on-demand spawners (the MinerU lifecycle being the
+        first) get a race-free check-then-spawn critical section WITHOUT
+        growing a bespoke flock outside this primitive — the lifecycle
+        gate (tests/daemon/test_lifecycle_gate.py) forbids exactly that.
+        Hold it only for the check + process launch; wait for health
+        OUTSIDE so a slow model load cannot starve other electors, who
+        will re-enter, see the fresh pid, and skip their own spawn.
+        """
+        return self._elect(scope_key)
+
     def publish(
         self,
         scope_key: str,

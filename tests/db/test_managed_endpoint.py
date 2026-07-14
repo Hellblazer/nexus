@@ -34,6 +34,13 @@ from nexus.db.managed_endpoint import (
 _ENV_VARS = ("NX_SERVICE_URL", "NX_SERVICE_TOKEN")
 
 
+from nexus.engine_version import REQUIRED_ENGINE_VERSION as _FLOOR_TUPLE
+
+#: The current floor as a string — these tests assert the DIAGNOSTIC text
+#: carries the real floor, whatever it is; hard-coding the literal made every
+#: floor bump fail CI here (v6.9.0 release, 2026-07-14).
+_FLOOR_STR = ".".join(str(p) for p in _FLOOR_TUPLE)
+
 @pytest.fixture(autouse=True)
 def _clear_env(monkeypatch):
     for v in _ENV_VARS:
@@ -51,7 +58,7 @@ def _resp(status_code: int, body: dict) -> httpx.Response:
 def _version_body(
     app_version: str = "1.0-SNAPSHOT",
     mode: str = "voyage",
-    release_version: str | None = "0.1.41",
+    release_version: str | None = _FLOOR_STR,
 ) -> dict:
     # nexus-x2g1z: the gate pins on release_version. app_version is the frozen
     # 1.0-SNAPSHOT dev coordinate (informational only). The managed public
@@ -70,7 +77,7 @@ def _version_body(
     return body
 
 
-def _trimmed_version_body(release_version: str = "0.1.41") -> dict:
+def _trimmed_version_body(release_version: str = _FLOOR_STR) -> dict:
     """The trimmed managed public /version payload (relay [4566])."""
     return {"app_version": "1.0-SNAPSHOT", "release_version": release_version}
 
@@ -217,7 +224,7 @@ def test_probe_below_release_floor_is_incompatible():
     with pytest.raises(ManagedServiceIncompatible) as exc:
         probe_managed_service(base_url="https://x", http_get=fake_get)
     # remedy names the offending version and the floor
-    assert "0.1.5" in str(exc.value) and "0.1.41" in str(exc.value)
+    assert "0.1.5" in str(exc.value) and _FLOOR_STR in str(exc.value)
 
 
 def test_probe_below_release_floor_exception_carries_structured_versions():
@@ -235,7 +242,7 @@ def test_probe_below_release_floor_exception_carries_structured_versions():
     with pytest.raises(ManagedServiceIncompatible) as exc:
         probe_managed_service(base_url="https://x", http_get=fake_get)
     assert exc.value.deployed_version == "0.1.5"
-    assert exc.value.required_version == "0.1.41"
+    assert exc.value.required_version == _FLOOR_STR
 
 
 def test_managed_service_incompatible_fields_default_to_none():
@@ -253,11 +260,11 @@ def test_probe_snapshot_app_version_is_not_gated():
     # app_version=1.0-SNAPSHOT is the frozen dev coordinate and must NOT fail
     # the gate as long as release_version clears the floor (nexus-x2g1z).
     def fake_get(url: str, timeout: float) -> httpx.Response:
-        return _resp(200, _version_body(app_version="1.0-SNAPSHOT", release_version="0.1.41"))
+        return _resp(200, _version_body(app_version="1.0-SNAPSHOT", release_version=_FLOOR_STR))
 
     caps = probe_managed_service(base_url="https://x", http_get=fake_get)
     assert caps.app_version == "1.0-SNAPSHOT"
-    assert caps.release_version == "0.1.41"
+    assert caps.release_version == _FLOOR_STR
 
 
 # ── probe: compatible ────────────────────────────────────────────────────────
@@ -275,7 +282,7 @@ def test_probe_compatible_returns_capabilities():
     # probes the unauthenticated /version handshake
     assert seen["url"] == "https://api.conexus-nexus.com/version"
     assert caps.app_version == "1.0-SNAPSHOT"
-    assert caps.release_version == "0.1.41"
+    assert caps.release_version == _FLOOR_STR
     assert caps.embedding_mode == "voyage"
     assert caps.embedding_models == ["voyage-context-3", "voyage-code-3"]
     assert caps.schema_latest_id == "vectors-002"
@@ -285,10 +292,10 @@ def test_probe_compatible_returns_capabilities():
 
 def test_probe_at_release_floor_passes():
     def fake_get(url: str, timeout: float) -> httpx.Response:
-        return _resp(200, _version_body(release_version="0.1.41"))
+        return _resp(200, _version_body(release_version=_FLOOR_STR))
 
     caps = probe_managed_service(base_url="https://x", http_get=fake_get)
-    assert caps.release_version == "0.1.41"
+    assert caps.release_version == _FLOOR_STR
 
 
 def test_probe_above_release_floor_passes():
@@ -313,10 +320,10 @@ def test_probe_trimmed_payload_passes_and_defaults_optional_fields():
     # {app_version, release_version}; the optional embedding/schema fields are
     # absent and must default gracefully — not fail the probe.
     def fake_get(url: str, timeout: float) -> httpx.Response:
-        return _resp(200, _trimmed_version_body(release_version="0.1.41"))
+        return _resp(200, _trimmed_version_body(release_version=_FLOOR_STR))
 
     caps = probe_managed_service(base_url="https://x", http_get=fake_get)
-    assert caps.release_version == "0.1.41"
+    assert caps.release_version == _FLOOR_STR
     assert caps.app_version == "1.0-SNAPSHOT"
     assert caps.embedding_mode == "unknown"
     assert caps.embedding_models == []

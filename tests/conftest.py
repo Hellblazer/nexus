@@ -251,6 +251,19 @@ def _isolate_t1_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.fixture(autouse=True)
+def _pin_mineru_autostart_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Suite-wide MinerU autostart kill-switch (nexus-1qdb9).
+
+    ensure_mineru_running() spawns a REAL mineru-api process on demand;
+    an unpatched unit test that wanders into the PDF extractor's server
+    check must never do that (2026-07-14: one suite run left four stray
+    servers). Lifecycle tests that exercise the spawn path re-enable via
+    monkeypatch.setenv("NX_MINERU_AUTOSTART", "1") + patched spawn core.
+    """
+    monkeypatch.setenv("NX_MINERU_AUTOSTART", "0")
+
+
+@pytest.fixture(autouse=True)
 def _pin_storage_backend_sqlite(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pin the unit suite to the SQLite storage backend (RDR-152 nexus-fjwxh).
 

@@ -819,6 +819,13 @@ class _WriteOps:
                         )
                     ],
                 )
+            # nexus-p5qk8 (GH #1397): a manifest write is an indexing event —
+            # refresh indexed_at (empty-replace clears rows above and returns
+            # early: a clear is not an indexing event).
+            cat._db.execute(
+                "UPDATE documents SET indexed_at = ? WHERE tumbler = ?",
+                (datetime.now(UTC).isoformat(), doc_id),
+            )
 
     def resync_chunk_count_cache(self, doc_id: str) -> None:
         """nexus-zq79: re-derive ``documents.chunk_count`` from current
@@ -921,12 +928,23 @@ class _WriteOps:
                             )
                         ],
                     )
-            cat._db.execute(
-                "UPDATE documents SET chunk_count = ("
-                "SELECT COUNT(*) FROM document_chunks WHERE doc_id = ?"
-                ") WHERE tumbler = ?",
-                (doc_id, doc_id),
-            )
+            if chunks:
+                # nexus-p5qk8: a REAL manifest write refreshes indexed_at;
+                # an empty replace (a clear) is not an indexing event —
+                # same gate as write_manifest / append_manifest_chunks.
+                cat._db.execute(
+                    "UPDATE documents SET chunk_count = ("
+                    "SELECT COUNT(*) FROM document_chunks WHERE doc_id = ?"
+                    "), indexed_at = ? WHERE tumbler = ?",
+                    (doc_id, datetime.now(UTC).isoformat(), doc_id),
+                )
+            else:
+                cat._db.execute(
+                    "UPDATE documents SET chunk_count = ("
+                    "SELECT COUNT(*) FROM document_chunks WHERE doc_id = ?"
+                    ") WHERE tumbler = ?",
+                    (doc_id, doc_id),
+                )
 
     def append_manifest_chunks(self, doc_id: str, chunks: list[dict]) -> None:
         """UPSERT manifest rows for one document without deleting prior rows
@@ -986,6 +1004,13 @@ class _WriteOps:
                         )
                     ],
                 )
+            # nexus-p5qk8 (GH #1397): a manifest write is an indexing event —
+            # refresh indexed_at so a --force backfill doesn't leave repair
+            # provenance frozen at the original (ghost) registration date.
+            cat._db.execute(
+                "UPDATE documents SET indexed_at = ? WHERE tumbler = ?",
+                (datetime.now(UTC).isoformat(), doc_id),
+            )
 
     def get_manifest(self, doc_id: str) -> list[ManifestRow]:
         """Return manifest rows for ``doc_id`` ordered by position (nexus-572g K6).

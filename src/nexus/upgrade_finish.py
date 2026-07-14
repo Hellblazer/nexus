@@ -267,6 +267,24 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
             except (ProcessLookupError, PermissionError) as exc:
                 actions.append(f"{proc.kind} pid {proc.pid}: {exc}")
         elif proc.kind == "mineru":
+            # nexus-c7odl (critique 60ed904e): this is an AUTOMATED cycle,
+            # so it honors the same spawn policy as every other automatic
+            # trigger — an operator who set mineru_autostart: false manages
+            # the server out-of-band, staleness included. The explicit
+            # `nx mineru stop`/`start` verbs remain available and ungated.
+            try:
+                from nexus.daemon.mineru_lifecycle import spawn_policy_allows  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+                policy_ok = spawn_policy_allows()
+            except Exception:  # noqa: BLE001 — policy probe must not break restart-stale
+                policy_ok = True
+            if not policy_ok:
+                actions.append(
+                    f"mineru pid {proc.pid} is stale but autostart policy is "
+                    "off (pdf.mineru_autostart / NX_MINERU_AUTOSTART) — cycle "
+                    "it yourself: `nx mineru stop && nx mineru start`"
+                )
+                continue
             try:
                 subprocess.run(["nx", "mineru", "stop"], capture_output=True,
                                timeout=60)

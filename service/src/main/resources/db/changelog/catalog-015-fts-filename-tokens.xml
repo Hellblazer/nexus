@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-8gue1 (GH #1397 field report, 2026-07-13).
+
+    catalog_documents.fts_vector tokenized filenames and paths as SINGLE
+    opaque lexemes: to_tsvector('english','rdr-021.md') = 'rdr-021.md' and
+    to_tsvector('simple','docs/rdr/rdr-021.md') = 'docs/rdr/rdr-021.md',
+    while plainto_tsquery('RDR-021') produces 'rdr' & '-021'. Net effect:
+    every document whose only searchable text is a file basename or path -
+    which is exactly what repo indexing registers (title = basename) - was
+    INVISIBLE to nx catalog search free-text. SQLite FTS5 (local mode,
+    unicode61) splits on -./_ so this never reproduced locally; the
+    catalog-001 "PG >= FTS5 superset" claim was false for filenames.
+
+    Fix: a fifth OR'd tsvector segment that normalizes the separator
+    characters / . - _ to spaces before tokenizing, so 'rdr-021.md' also
+    yields 'rdr','021','md' and 'docs/rdr/rdr-021.md' yields
+    'docs','rdr','021','md'. The query side (CatalogRepository.
+    searchDocuments) gains the matching translated plainto_tsquery leg.
+    Existing segments stay untouched, so every previously-matching query
+    still matches.
+
+    PG cannot ALTER a generated column's expression: DROP + re-ADD (table
+    rewrite, seconds at live-tenant scale ~22k docs) + recreate the GIN
+    index. ACCESS EXCLUSIVE for the rewrite is fine in the single-instance
+    rm-then-run deploy window (nothing serves during boot, same framing as
+    catalog-014); Liquibase runs the changeset in one transaction, so an
+    interrupted rewrite rolls back whole - never a dropped-column limbo.
+    DDL only - no row DML, so the FORCE-RLS silent-no-op class (nexus-1wjmq
+    / catalog-014's discipline note) does not apply here.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="catalog-015-0" author="nexus-8gue1">
+        <comment>fts_vector: add separator-normalized segment so filename/path fragments (rdr-021.md) are findable by free-text search (RDR-021)</comment>
+        <sql splitStatements="true">
+ALTER TABLE nexus.catalog_documents DROP COLUMN fts_vector;
+ALTER TABLE nexus.catalog_documents
+    ADD COLUMN fts_vector tsvector GENERATED ALWAYS AS (
+        to_tsvector('english', coalesce(title, ''))
+        || to_tsvector('simple',  coalesce(author, ''))
+        || to_tsvector('simple',  coalesce(corpus, ''))
+        || to_tsvector('simple',  coalesce(file_path, ''))
+        || to_tsvector('simple',
+               translate(coalesce(title, '') || ' ' || coalesce(file_path, ''),
+                         '/.-_', '    '))
+    ) STORED;
+CREATE INDEX idx_catalog_documents_fts
+    ON nexus.catalog_documents USING GIN (fts_vector);
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+ALTER TABLE nexus.catalog_documents DROP COLUMN fts_vector;
+ALTER TABLE nexus.catalog_documents
+    ADD COLUMN fts_vector tsvector GENERATED ALWAYS AS (
+        to_tsvector('english', coalesce(title, ''))
+        || to_tsvector('simple',  coalesce(author, ''))
+        || to_tsvector('simple',  coalesce(corpus, ''))
+        || to_tsvector('simple',  coalesce(file_path, ''))
+    ) STORED;
+CREATE INDEX idx_catalog_documents_fts
+    ON nexus.catalog_documents USING GIN (fts_vector);
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

@@ -130,6 +130,31 @@ class TestRestartStale:
         # MCP hosts are NEVER killed — a live Claude session owns them.
         assert any("pid 100" in a and "NEEDS HUMAN" in a for a in actions)
 
+    def test_mineru_cycle_honors_spawn_policy(self):
+        """nexus-c7odl (critique 60ed904e): the AUTOMATED upgrade-finish
+        cycle honors mineru_autostart=off — an operator managing the
+        server out-of-band owns its staleness too. The explicit verbs
+        stay available (the action line says exactly which)."""
+        from unittest.mock import MagicMock  # noqa: PLC0415 — file pattern: deferred imports
+
+        r = SkewReport(installed_version="6.7.1")
+        r.stale = [StaleProcess(pid=300, kind="mineru", command="mineru-api", age_s=99)]
+
+        with patch("nexus.daemon.mineru_lifecycle.spawn_policy_allows",
+                   return_value=False), \
+                patch("nexus.upgrade_finish.subprocess.run") as sp:
+            actions = restart_stale(r)
+        sp.assert_not_called()
+        assert any("autostart policy is off" in a for a in actions)
+
+        with patch("nexus.daemon.mineru_lifecycle.spawn_policy_allows",
+                   return_value=True), \
+                patch("nexus.upgrade_finish.subprocess.run",
+                      return_value=MagicMock(returncode=0)) as sp:
+            actions = restart_stale(r)
+        assert sp.call_count == 2  # stop && start
+        assert any("cycled MinerU" in a for a in actions)
+
 
 class TestVersionTransition:
     def test_first_run_stamps_quietly(self, tmp_path):

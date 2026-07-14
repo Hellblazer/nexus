@@ -926,9 +926,25 @@ public final class CatalogRepository {
                                                       String contentType, int limit) {
         if (query == null || query.isBlank()) return List.of();
         return tenantScope.withTenant(tenant, ctx -> {
-            Condition ftsMatch = DSL.condition(
-                "fts_vector @@ plainto_tsquery('english', {0}) OR fts_vector @@ plainto_tsquery('simple', {0})",
-                DSL.val(query));
+            // nexus-8gue1: third leg matches the catalog-015 separator-
+            // normalized segment — 'RDR-021' must find a doc whose only
+            // searchable text is the basename 'rdr-021.md' / its path
+            // (plainto_tsquery('RDR-021') = 'rdr' & '-021', which the
+            // opaque filename lexeme never satisfies). Skipped when the
+            // query has no separator: translate() would be a no-op and the
+            // leg identical to the plain simple leg.
+            boolean hasSeparator = query.chars()
+                .anyMatch(c -> c == '/' || c == '.' || c == '-' || c == '_');
+            Condition ftsMatch = hasSeparator
+                ? DSL.condition(
+                    "fts_vector @@ plainto_tsquery('english', {0}) "
+                    + "OR fts_vector @@ plainto_tsquery('simple', {0}) "
+                    + "OR fts_vector @@ plainto_tsquery('simple', translate({0}, '/.-_', '    '))",
+                    DSL.val(query))
+                : DSL.condition(
+                    "fts_vector @@ plainto_tsquery('english', {0}) "
+                    + "OR fts_vector @@ plainto_tsquery('simple', {0})",
+                    DSL.val(query));
             Condition where = ftsMatch;
             if (contentType != null && !contentType.isBlank()) {
                 where = where.and(CATALOG_DOCUMENTS.CONTENT_TYPE.eq(contentType));
@@ -1426,9 +1442,34 @@ public final class CatalogRepository {
         return (pc == null || pc.isEmpty()) ? null : pc;
     }
 
+    /**
+     * nexus-p5qk8 (GH #1397 field report): manifest writes must refresh the
+     * parent document's indexed_at. Before this, a chunk backfill (nx index
+     * --force repairing chunk_count=0 ghosts) left indexed_at frozen at the
+     * original ghost registration date — misleading repair provenance.
+     */
+    private static final java.time.format.DateTimeFormatter INDEXED_AT_FMT =
+        java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSSSSxxx");
+
+    private static void stampIndexedAt(DSLContext ctx, String tenant, String docId) {
+        // Fixed-width micros + "+00:00", byte-identical shape to Python's
+        // datetime.now(UTC).isoformat(): indexed_at is TEXT and MAX()'d
+        // lexicographically (catalog-009 collection_health_meta) — mixed
+        // widths/suffixes would break sortability at second-boundary ties.
+        ctx.update(CATALOG_DOCUMENTS)
+           .set(CATALOG_DOCUMENTS.INDEXED_AT,
+                java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC).format(INDEXED_AT_FMT))
+           .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant))
+           .and(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+           .execute();
+    }
+
     private static void writeManifestRows(DSLContext ctx, String tenant, String docId,
                                           List<Map<String, Object>> rows) {
         ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId)).execute();
+        if (!rows.isEmpty()) {
+            stampIndexedAt(ctx, tenant, docId);
+        }
         String coll = physicalCollectionOf(ctx, tenant, docId);
         for (var row : rows) {
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
@@ -1559,6 +1600,9 @@ public final class CatalogRepository {
     /** Append manifest rows (upsert by position). */
     public void appendManifestChunks(String tenant, String docId, List<Map<String, Object>> rows) {
         tenantScope.withTenant(tenant, ctx -> {
+            if (!rows.isEmpty()) {
+                stampIndexedAt(ctx, tenant, docId);
+            }
             String coll = physicalCollectionOf(ctx, tenant, docId);
             for (var row : rows) {
                 ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,

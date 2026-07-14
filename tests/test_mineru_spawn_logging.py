@@ -21,8 +21,12 @@ from click.testing import CliRunner
 # ── nx mineru start: behavioral — Popen receives the child-log handle ──
 
 
-def test_start_routes_server_output_to_child_log(tmp_path: Path) -> None:
+def test_start_routes_server_output_to_child_log(
+    tmp_path: Path, monkeypatch,
+) -> None:
     from nexus.commands.mineru import start
+
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))  # election flock dir
 
     # A non-int sentinel standing in for the opened child-log handle; the
     # spawn site must close it (isinstance(..., int) is False -> close()).
@@ -32,7 +36,7 @@ def test_start_routes_server_output_to_child_log(tmp_path: Path) -> None:
     healthy_resp = MagicMock(status_code=200)
 
     with patch(
-        "nexus.commands.mineru._resolve_mineru_api_bin",
+        "nexus._mineru_spawn._resolve_mineru_api_bin",
         return_value="/fake/bin/mineru-api",
     ), patch(
         "nexus.commands.mineru._read_pid_file", return_value=None,
@@ -40,7 +44,10 @@ def test_start_routes_server_output_to_child_log(tmp_path: Path) -> None:
         "nexus.commands.mineru._pid_file_path",
         return_value=tmp_path / "mineru.pid",
     ), patch(
-        "nexus.commands.mineru._mineru_output_root", return_value=tmp_path,
+        "nexus._mineru_pid._pid_file_path",
+        return_value=tmp_path / "mineru.pid",
+    ), patch(
+        "nexus._mineru_spawn._mineru_output_root", return_value=tmp_path,
     ), patch(
         # Patch the SOURCE module, not nexus.commands.mineru: the import is
         # deferred inside start() and runs under this patch context, so the
@@ -48,7 +55,7 @@ def test_start_routes_server_output_to_child_log(tmp_path: Path) -> None:
         "nexus.logging_setup.open_child_log_or_devnull",
         return_value=log_handle,
     ) as mock_open_log, patch(
-        "nexus.commands.mineru.subprocess.Popen", return_value=proc,
+        "nexus._mineru_spawn.subprocess.Popen", return_value=proc,
     ) as mock_popen, patch(
         "nexus.commands.mineru.httpx.get", return_value=healthy_resp,
     ):
@@ -68,8 +75,15 @@ def test_start_routes_server_output_to_child_log(tmp_path: Path) -> None:
 # ── _restart_mineru_server: behavioral — same routing on the restart path ──
 
 
-def test_restart_server_routes_output_to_child_log(tmp_path: Path) -> None:
+def test_restart_server_routes_output_to_child_log(
+    tmp_path: Path, monkeypatch,
+) -> None:
     from nexus.pdf_extractor import PDFExtractor
+
+    # nexus-c7odl: the restart path is now policy-gated (conftest pins
+    # autostart OFF) and election-guarded (flock in the config dir).
+    monkeypatch.setenv("NX_MINERU_AUTOSTART", "1")
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
 
     log_handle = MagicMock(name="child_log_handle")
     proc = MagicMock(pid=4321)
@@ -83,12 +97,12 @@ def test_restart_server_routes_output_to_child_log(tmp_path: Path) -> None:
         "nexus._mineru_pid._pid_file_path",
         return_value=tmp_path / "mineru.pid",
     ), patch(
-        "nexus.commands.mineru._resolve_mineru_api_bin",
+        "nexus._mineru_spawn._resolve_mineru_api_bin",
         return_value="/fake/bin/mineru-api",
     ), patch(
-        "nexus.commands.mineru._find_free_port", return_value=8099,
+        "nexus._mineru_spawn._find_free_port", return_value=8099,
     ), patch(
-        "nexus.commands.mineru._mineru_output_root", return_value=tmp_path,
+        "nexus._mineru_spawn._mineru_output_root", return_value=tmp_path,
     ), patch(
         "nexus.logging_setup.open_child_log_or_devnull",
         return_value=log_handle,
