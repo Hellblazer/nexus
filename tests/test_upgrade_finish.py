@@ -41,9 +41,19 @@ class TestEtimeParse:
         assert _parse_etime("8-00:00:05") == 8 * 86400 + 5
 
 
+_TOOL_ROOT = "/Users/u/.local/share/uv/tools/conexus/lib/python3.12/site-packages"
+
+
+def _pin_tool_root():
+    from pathlib import Path as _P  # noqa: PLC0415 — file pattern: deferred imports
+
+    return patch("nexus.upgrade_finish._install_root", return_value=_P(_TOOL_ROOT))
+
+
 class TestEnumerate:
     def test_filters_to_conexus_processes(self):
-        procs = enumerate_processes(_PS)
+        with _pin_tool_root():
+            procs = enumerate_processes(_PS)
         pids = [p[0] for p in procs]
         assert pids == [100, 101, 200, 300]  # vim + the ps probe excluded
 
@@ -51,7 +61,7 @@ class TestEnumerate:
         with patch(
             "nexus.upgrade_finish.install_mtime_and_version",
             return_value=(1_000_000.0, "6.7.1"),
-        ):
+        ), _pin_tool_root():
             # now = install + 30min: the 1h-old MCP pair and the multi-day
             # daemons all predate the install -> all stale.
             report = detect_stale_processes(_PS, now=1_000_000.0 + 1800)
@@ -67,7 +77,7 @@ class TestEnumerate:
         with patch(
             "nexus.upgrade_finish.install_mtime_and_version",
             return_value=(1_000_000.0, "6.7.1"),
-        ):
+        ), _pin_tool_root():
             # now = install + 10 days: everything in the fixture STARTED
             # after the install (ages < 10 days except the 8-day mineru...
             # 8d < 10d so started 2 days AFTER install -> fresh).
@@ -104,11 +114,19 @@ class TestRestartStale:
             "/u/.local/share/uv/tools/conexus/bin/python3 "
             "/u/.local/bin/nx daemon aspect-worker start\n"
         ))
-        with patch("nexus.upgrade_finish.os.kill") as k, \
+
+        calls = []
+
+        def _kill(pid, sig):
+            calls.append((pid, sig))
+            if sig == 0:
+                raise ProcessLookupError  # drained on first poll
+        with patch("nexus.upgrade_finish.os.kill", side_effect=_kill), \
+                patch("nexus.upgrade_finish.time.sleep"), \
                 patch("nexus.upgrade_finish.subprocess.run", return_value=probe):
             actions = restart_stale(self._report())
-        k.assert_called_once_with(200, signal.SIGTERM)
-        assert any("restarted aspect-worker" in a for a in actions)
+        assert calls[0] == (200, signal.SIGTERM)
+        assert any("restarted aspect-worker" in a and "drained" in a for a in actions)
         # MCP hosts are NEVER killed — a live Claude session owns them.
         assert any("pid 100" in a and "NEEDS HUMAN" in a for a in actions)
 
@@ -132,6 +150,10 @@ class TestVersionTransition:
 
     def test_transition_runs_finish_and_summarizes(self, tmp_path):
         (tmp_path / "last_seen_version").write_text("6.7.0\n")
+        self._tool = patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
+        )
+        self._tool.start()
         with patch(
             "nexus.upgrade_finish.install_mtime_and_version",
             return_value=(0.0, "6.7.1"),
@@ -140,11 +162,16 @@ class TestVersionTransition:
             return_value=SkewReport(installed_version="6.7.1"),
         ):
             line = check_version_transition(tmp_path)
+        self._tool.stop()
         assert line == "upgraded 6.7.0 -> 6.7.1; no stale processes"
         assert (tmp_path / "last_seen_version").read_text().strip() == "6.7.1"
 
     def test_transition_reports_actions(self, tmp_path):
         (tmp_path / "last_seen_version").write_text("6.7.0\n")
+        self._tool = patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
+        )
+        self._tool.start()
         r = SkewReport(installed_version="6.7.1")
         r.stale = [StaleProcess(pid=7, kind="mcp-host", command="m", age_s=9)]
         with patch(
@@ -154,6 +181,7 @@ class TestVersionTransition:
             "nexus.upgrade_finish.detect_stale_processes", return_value=r,
         ):
             line = check_version_transition(tmp_path)
+        self._tool.stop()
         assert "NEEDS HUMAN" in line and "6.7.0 -> 6.7.1" in line
 
     def test_finish_failure_never_blocks_startup(self, tmp_path):
@@ -164,6 +192,8 @@ class TestVersionTransition:
         ), patch(
             "nexus.upgrade_finish.detect_stale_processes",
             side_effect=RuntimeError("ps exploded"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
         ):
             assert check_version_transition(tmp_path) is None
         # Stamp still advanced: the transition is consumed, not retried
@@ -212,3 +242,23 @@ class TestFailLoud:
         with patch("nexus.upgrade_finish.subprocess.run", return_value=bad), \
                 _pytest.raises(RuntimeError, match="ps failed"):
             enumerate_processes(None)
+
+
+class TestCrossVenvGuard:
+    def test_dev_venv_never_runs_the_finish_pass(self, tmp_path):
+        """Critique 38b7db3d C2: a dev checkout's venv mtime says nothing
+        about production processes — the transition consumes the stamp but
+        the restart pass never runs from a non-tool interpreter."""
+        (tmp_path / "last_seen_version").write_text("6.7.0\n")
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install",
+            return_value=False,
+        ), patch(
+            "nexus.upgrade_finish.detect_stale_processes",
+        ) as detect:
+            assert check_version_transition(tmp_path) is None
+        detect.assert_not_called()
+        assert (tmp_path / "last_seen_version").read_text().strip() == "6.7.1"

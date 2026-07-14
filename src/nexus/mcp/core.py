@@ -6408,6 +6408,23 @@ def _resolve_mode_diagnostics() -> dict[str, str | None]:
 
 
 def main():
+    # nexus-4xgfy (critique 38b7db3d C1): the dominant post-upgrade path is
+    # a Claude session spawning THIS process with no bare `nx` invocation in
+    # between — the finish trigger must fire here too. Report-safe: the MCP
+    # host never kills anything from its own startup; the transition stamp +
+    # safe restarts are handled identically to the CLI trigger.
+    try:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred import
+        from nexus.upgrade_finish import check_version_transition  # noqa: PLC0415 — deferred import
+
+        _summary = check_version_transition(nexus_config_dir())
+        if _summary:
+            import structlog as _sl  # noqa: PLC0415 — deferred import
+
+            _sl.get_logger(__name__).info("upgrade_finish", summary=_summary)
+    except Exception:  # noqa: BLE001 — the trigger must never break server startup
+        pass
+
     """Run the core MCP server on stdio transport.
 
     Lifecycle logging: emits ``mcp_server_starting``,

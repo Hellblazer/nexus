@@ -37,8 +37,29 @@ import structlog
 
 _log = structlog.get_logger(__name__)
 
-#: Marker substrings identifying conexus processes in `ps` output.
+#: Fallback marker substrings identifying conexus processes in `ps`
+#: output. The AUTHORITATIVE marker is derived per-call from the running
+#: distribution's actual install root (critique 38b7db3d: a hardcoded
+#: production-only literal both fails open on custom install layouts and
+#: let a dev-checkout invocation measure PRODUCTION processes against the
+#: dev venv's mtime — the cross-venv confusion that could SIGTERM a live
+#: worker from an unrelated dev command).
 _PROC_MARKERS = ("uv/tools/conexus", ".local/bin/nx")
+
+
+def _install_root() -> Path:
+    """Site-packages root of the RUNNING conexus distribution."""
+    import importlib.metadata as md  # noqa: PLC0415 — stdlib, deferred
+
+    return Path(str(md.distribution("conexus").locate_file("")))
+
+
+def running_from_tool_install() -> bool:
+    """True when this interpreter IS the uv tool install (vs a dev
+    checkout venv). The restart pass only ever acts from the tool
+    install — a dev venv's mtime says nothing about production
+    processes and must never kill them."""
+    return "uv/tools/conexus" in str(_install_root())
 
 #: Filename of the version stamp inside the nexus config dir.
 STAMP_FILENAME = "last_seen_version"
@@ -143,12 +164,18 @@ def enumerate_processes(ps_output: str | None = None) -> list[tuple[int, int, st
         ps_output = proc.stdout
     out: list[tuple[int, int, str]] = []
     me = os.getpid()
+    try:
+        # site-packages -> lib/pythonX.Y -> lib -> THE VENV ROOT: the one
+        # path every process launched from this install carries.
+        markers: tuple[str, ...] = (str(_install_root().parents[2]),)
+    except Exception:  # noqa: BLE001 — metadata unavailable: fall back to the conventional layout
+        markers = _PROC_MARKERS
     for line in ps_output.splitlines()[1:]:
         m = re.match(r"\s*(\d+)\s+(\S+)\s+(.*)", line)
         if not m:
             continue
         pid, etime, command = int(m.group(1)), m.group(2), m.group(3)
-        if pid == me or not any(k in command for k in _PROC_MARKERS):
+        if pid == me or not any(k in command for k in markers):
             continue
         try:
             age = _parse_etime(etime)
@@ -211,10 +238,32 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
                 import signal as _signal  # noqa: PLC0415 — stdlib, deferred
 
                 os.kill(proc.pid, _signal.SIGTERM)
-                actions.append(
-                    f"restarted {proc.kind} (pid {proc.pid} stopped; "
-                    "respawns on demand)"
-                )
+                # Critique 38b7db3d C3: the worker's graceful drain is
+                # bounded at 10s while an in-flight claude -p child can run
+                # far longer, and PDEATHSIG is inactive on macOS (the RF8
+                # orphan gap). Poll for ACTUAL exit past the drain window;
+                # never SIGKILL (that is what orphans the child), and never
+                # claim success we did not observe.
+                deadline = time.time() + 12
+                exited = False
+                while time.time() < deadline:
+                    try:
+                        os.kill(proc.pid, 0)
+                    except ProcessLookupError:
+                        exited = True
+                        break
+                    time.sleep(0.5)
+                if exited:
+                    actions.append(
+                        f"restarted {proc.kind} (pid {proc.pid} drained; "
+                        "respawns on demand)"
+                    )
+                else:
+                    actions.append(
+                        f"{proc.kind} pid {proc.pid}: SIGTERM sent but still "
+                        "draining (likely an in-flight extraction) — left "
+                        "running; re-check with `nx doctor`"
+                    )
             except (ProcessLookupError, PermissionError) as exc:
                 actions.append(f"{proc.kind} pid {proc.pid}: {exc}")
         elif proc.kind == "mineru":
@@ -227,11 +276,19 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
             except Exception as exc:  # noqa: BLE001 — best-effort cycle; failure surfaced in the action line
                 actions.append(f"mineru cycle failed: {exc}")
     for proc in report.session_bound:
-        actions.append(
-            f"NEEDS HUMAN: {proc.kind} (pid {proc.pid}) belongs to a live "
-            "Claude session — exit that session to pick up "
-            f"{report.installed_version}"
-        )
+        if proc.kind == "mcp-host":
+            remedy = (
+                "belongs to a live Claude session — exit that session to "
+                f"pick up {report.installed_version}"
+            )
+        elif proc.kind == "service":
+            remedy = (
+                "is the storage service — cycle it via its own lifecycle "
+                "(`nx daemon service stop` / next use respawns it)"
+            )
+        else:
+            remedy = f"predates {report.installed_version}; restart it manually"
+        actions.append(f"NEEDS HUMAN: {proc.kind} (pid {proc.pid}) {remedy}")
     return actions
 
 
@@ -312,6 +369,11 @@ def check_version_transition(config_dir: Path) -> str | None:
         return None  # unwritable config dir: skip silently, retry next run
     if not seen:
         return None  # first-ever run: nothing stale to finish
+    if not running_from_tool_install():
+        # A dev checkout's venv mtime says nothing about the production
+        # processes on this box — measuring (let alone killing) them from
+        # here is the cross-venv confusion class. Report-only via doctor.
+        return None
     try:
         report = detect_stale_processes()
         actions = restart_stale(report)
