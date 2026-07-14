@@ -643,9 +643,9 @@ The summary splits unmatched documents into two classes so real regressions are 
 
 Also see the end-of-run summary on `nx index repo`: a persistent manifest-write failure during indexing is now surfaced there (`WARNING: catalog manifest write failed for N document(s)`) with a pointer to this command.
 
-#### Orphan-GC safety floor (environment knobs)
+#### Orphan-GC quarantine (soft delete)
 
-The `nx index repo` orphan GC refuses a sweep that would delete more than `NX_GC_FLOOR_FRACTION` (default `0.25`) of a collection's decidable chunks when at least 100 chunks are condemned — that shape is almost always a manifest defect (the misclassification class that once deleted 6 live documents), not a real cleanup. The refusal is logged with counts and the verification path (`nx catalog doctor --t3-vs-catalog`, `nx catalog reconcile`). Set `NX_GC_FORCE=1` to override after confirming the chunks are genuinely dead. Every executed prune logs a per-document identity sample.
+The `nx index repo` orphan GC never hard-deletes directly: orphan chunks MOVE to a sibling collection (`quarantine__<owner>__<model>__v<n>`, excluded from every search surface by its prefix), embeddings intact. If a later heal or re-index references a quarantined chunk again, it is restored automatically. Quarantined chunks older than `NX_GC_QUARANTINE_DAYS` (default `14`) are hard-deleted on a later pass — and only THAT expiry step is guarded by the safety floor: a hard-delete condemning more than `NX_GC_FLOOR_FRACTION` (default `0.25`) of the quarantine at 100+ chunks means a manifest defect persisted for the whole grace window (the misclassification class that once deleted 6 live documents) and is refused with the verification path logged (`nx catalog doctor --t3-vs-catalog`, `nx catalog reconcile`); `NX_GC_FORCE=1` overrides after confirming. Ordinary mass updates (a large `git pull` superseding much of a repo) quarantine silently and expire quietly — no warnings, no action needed. Every move logs a per-document identity sample.
 
 ### nx catalog orphans
 
