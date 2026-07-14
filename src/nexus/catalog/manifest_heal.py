@@ -50,6 +50,7 @@ class ManifestHealResult:
     gapped: int = 0
     ghost_gapped: int = 0  # gapped subset with chunk_count == 0
     reconciled: int = 0
+    write_failed: int = 0
     dup_collapsed: int = 0
     dup_old_total: int = 0
     dup_new_total: int = 0
@@ -80,11 +81,12 @@ def _order_key(pair: tuple) -> tuple:
 def heal_manifest_gaps(
     entries: list,
     cat: Any,
-    t3: Any,
-    writer: Any | None,
+    t3_factory: Callable[[], Any],
+    writer_factory: Callable[[], Any] | None,
     *,
     dry_run: bool = False,
     echo: Callable[[str], None] | None = None,
+    yield_before_write: Callable[[], None] | None = None,
 ) -> ManifestHealResult:
     """Detect and rebuild manifest gaps for *entries*.
 
@@ -94,14 +96,23 @@ def heal_manifest_gaps(
             Filtered here to indexable candidates (``chunk_count > 0`` OR
             the ghost shape: recorded content_hash + physical_collection).
         cat: Catalog READER (``get_manifests``).
-        t3: T3 database handle (``get_collection``).
-        writer: Catalog WRITER (``atomic_manifest_replace`` +
-            ``resync_chunk_count_cache``). May be ``None`` only when
-            *dry_run* is True.
+        t3_factory: Zero-arg factory for the T3 handle. Called LAZILY,
+            only after gap detection finds work (review 4711f521 Medium-1:
+            the eager form constructed a real writer + T3 client on every
+            nothing-to-do invocation). The core closes what it creates.
+        writer_factory: Zero-arg factory for the catalog WRITER
+            (``atomic_manifest_replace`` + ``resync_chunk_count_cache``).
+            May be ``None`` only when *dry_run* is True. Same lazy + close
+            contract as *t3_factory*.
         dry_run: Report without writing.
         echo: Optional line sink for progress output (the observability
             half of nexus-8g0ch: a silent long walk reads as a hang).
             ``None`` degrades to structlog-only.
+        yield_before_write: Optional fairness hook invoked before EVERY
+            manifest write (review 4711f521: the indexer threads the
+            RDR-146 P2 ``await_fair_window`` through here so a large heal
+            backlog cannot starve a foreground interactive writer — the
+            GH #1046 class).
     """
     say = echo or (lambda _s: None)
     result = ManifestHealResult()
@@ -135,6 +146,11 @@ def heal_manifest_gaps(
     from nexus.indexer import _paginated_get  # noqa: PLC0415 — deferred: nexus.indexer is heavy and imports back into catalog
     from nexus.mcp_infra import _manifest_chunk_rows  # noqa: PLC0415 — deferred: circular-dep avoidance
 
+    # Lazy instantiation (review 4711f521 Medium-1): only a run with real
+    # gaps pays for a T3 client + catalog writer. The core closes both.
+    t3 = t3_factory()
+    writer = writer_factory() if (writer_factory and not dry_run) else None
+
     def _classify_unmatched(entry: Any) -> None:
         (result.never_chunked if entry.chunk_count == 0
          else result.lost).append(entry)
@@ -147,6 +163,44 @@ def heal_manifest_gaps(
             continue
         by_coll[entry.physical_collection].append((entry, content_hash))
 
+    try:
+        _heal_collections(
+            by_coll, t3, writer, result, say,
+            dry_run=dry_run, yield_before_write=yield_before_write,
+            classify_unmatched=_classify_unmatched,
+            paginated_get=_paginated_get,
+            manifest_chunk_rows=_manifest_chunk_rows,
+        )
+    finally:
+        for handle in (t3, writer):
+            close = getattr(handle, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # noqa: BLE001 — best-effort handle cleanup
+                    pass
+
+    return result
+
+
+def _heal_collections(
+    by_coll: dict,
+    t3: Any,
+    writer: Any | None,
+    result: ManifestHealResult,
+    say: Callable[[str], None],
+    *,
+    dry_run: bool,
+    yield_before_write: Callable[[], None] | None,
+    classify_unmatched: Callable[[Any], None],
+    paginated_get: Any,
+    manifest_chunk_rows: Any,
+) -> None:
+    """The per-collection fetch + rebuild walk (split from the entry point
+    so handle cleanup wraps it in one place)."""
+    _classify_unmatched = classify_unmatched
+    _paginated_get = paginated_get
+    _manifest_chunk_rows = manifest_chunk_rows
     for coll_i, (coll_name, pairs) in enumerate(sorted(by_coll.items()), 1):
         try:
             col = t3.get_collection(coll_name)
@@ -235,12 +289,23 @@ def heal_manifest_gaps(
                 result.dup_old_total += entry.chunk_count
                 result.dup_new_total += len(chunks)
             if not dry_run:
-                writer.atomic_manifest_replace(str(entry.tumbler), chunks)
-                # atomic_manifest_replace's local-SQLite path re-derives
-                # chunk_count in-transaction, but the HTTP/service-mode path
-                # only resyncs when told to — without this the gap detector
-                # re-flags the same documents forever (GH #1371 follow-up).
-                writer.resync_chunk_count_cache(str(entry.tumbler))
+                try:
+                    # RDR-146 P2 fairness: a large heal backlog must yield to
+                    # a foreground interactive writer (GH #1046 class).
+                    if yield_before_write is not None:
+                        yield_before_write()
+                    writer.atomic_manifest_replace(str(entry.tumbler), chunks)
+                    # atomic_manifest_replace's local-SQLite path re-derives
+                    # chunk_count in-transaction, but the HTTP/service-mode
+                    # path only resyncs when told to — without this the gap
+                    # detector re-flags the same documents forever (GH #1371
+                    # follow-up).
+                    writer.resync_chunk_count_cache(str(entry.tumbler))
+                except Exception as exc:  # noqa: BLE001 — critique 4711f521 Sig-3: a mid-pass write failure must not lose the progress accounting
+                    _log.warning(
+                        "manifest_heal_write_failed",
+                        tumbler=str(entry.tumbler), error=str(exc),
+                    )
+                    result.write_failed += 1
+                    continue
             result.reconciled += 1
-
-    return result

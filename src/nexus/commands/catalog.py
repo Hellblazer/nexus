@@ -805,21 +805,16 @@ def reconcile_cmd(dry_run: bool) -> None:
 
     cat = _get_catalog()
     entries = cat.all_documents(limit=0)
-    t3 = make_t3()
-    writer = _get_catalog_writer() if not dry_run else None
-    try:
-        # nexus-c21fk: the heal core is shared with the `nx index repo`
-        # self-heal pass — one implementation, two scopes (whole catalog
-        # here; one owner there). Candidate filtering, gap detection, the
-        # batched $in fetch (8g0ch), and the rebuild all live in the core.
-        result = heal_manifest_gaps(
-            entries, cat, t3, writer, dry_run=dry_run, echo=click.echo,
-        )
-    finally:
-        if writer is not None:
-            _close = getattr(writer, "close", None)
-            if callable(_close):
-                _close()
+    # nexus-c21fk: the heal core is shared with the `nx index repo`
+    # self-heal pass — one implementation, two scopes (whole catalog here;
+    # one owner there). Factories are LAZY (review 4711f521 Medium-1): a
+    # nothing-to-reconcile invocation never constructs a T3 client or a
+    # catalog writer; the core closes what it creates.
+    result = heal_manifest_gaps(
+        entries, cat, make_t3,
+        _get_catalog_writer if not dry_run else None,
+        dry_run=dry_run, echo=click.echo,
+    )
 
     corrected_note = (
         f" ({result.dup_collapsed} with chunk_count corrected "

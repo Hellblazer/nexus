@@ -1145,44 +1145,7 @@ def _catalog_hook(
         indexed_set = _indexed_relpaths(indexed_files, repo)
         _run_housekeeping(cat, owner, indexed_set, writer=writer)
         _stage_s["housekeeping"] = time.monotonic() - _stage_mark
-        _stage_mark = time.monotonic()
 
-        # nexus-c21fk: manifest self-heal. The staleness check keys on T3
-        # chunk state only, so a doc whose chunks exist in T3 but whose
-        # document_chunks manifest rows were dropped (interrupted run,
-        # failed hook — the GH #1397 class) is skipped as "current"
-        # forever, and the post-store manifest hooks that skipped files
-        # never trigger can never repair it. This pass rebuilds those
-        # manifests from the T3 chunks already stored — NO re-embedding —
-        # via the shared heal core (owner scope; the reconcile verb runs
-        # the same core catalog-wide). Best-effort: a heal failure must
-        # never fail the index run.
-        try:
-            from nexus.catalog.manifest_heal import heal_manifest_gaps  # noqa: PLC0415 — deferred: keeps indexer import-light
-
-            from nexus.db import make_t3  # noqa: PLC0415 — deferred import
-
-            _progress(f"  Catalog: manifest self-heal…\r")
-            heal = heal_manifest_gaps(
-                cat.by_owner(owner), cat, make_t3(), writer,
-            )
-            if heal.reconciled or heal.lost:
-                _progress(
-                    f"  Catalog: manifest self-heal restored "
-                    f"{heal.reconciled} doc(s)"
-                    + (f", {len(heal.lost)} with chunks LOST (real gap — "
-                       "see structlog)" if heal.lost else "")
-                    + "\n"
-                )
-            _log.info(
-                "catalog_manifest_self_heal",
-                candidates=heal.candidates, gapped=heal.gapped,
-                ghost_gapped=heal.ghost_gapped, reconciled=heal.reconciled,
-                lost=len(heal.lost), never_chunked=len(heal.never_chunked),
-            )
-        except Exception:  # noqa: BLE001 — best-effort self-heal; error surfaced via log, must not crash the index run
-            _log.warning("catalog_manifest_self_heal_failed", exc_info=True)
-        _stage_s["manifest_heal"] = time.monotonic() - _stage_mark
         _log.info(
             "catalog_hook_stage_timing",
             total_s=round(time.monotonic() - _stage_t0, 1),
@@ -3434,6 +3397,78 @@ def _run_index(
         # files) — the cost was the per-doc serial manifest fetch, now
         # batched inside _prune_misclassified_in_collection (nexus-yz8bt),
         # so the pass stays unconditional AND fast.
+        # nexus-c21fk: manifest self-heal. The staleness check keys on T3
+        # chunk state only, so a doc whose chunks exist in T3 but whose
+        # document_chunks manifest rows were dropped is skipped as
+        # "current" forever — and the post-store manifest hooks that
+        # skipped files never trigger can never repair it. This pass
+        # rebuilds those manifests from the T3 chunks already stored (NO
+        # re-embedding) via the shared heal core. PLACEMENT IS LOAD-BEARING
+        # (critique 4711f521 Critical): it runs AFTER per-file indexing so
+        # gaps created by THIS run's own manifest-write hook are healed
+        # too, and BEFORE the prune passes below so the manifest-keyed GC
+        # (the nexus-mr89x hazard) never sees an unhealed gap. Cost
+        # decision (review 4711f521 Medium-3, accepted deliberately): the
+        # detection is one owner-scoped by_owner + one batched
+        # get_manifests per run — bounded, and the price of self-heal
+        # actually meaning self-heal; ghost-class T3 fetches dedupe to
+        # near-nothing because identical empty files share one
+        # content_hash. Best-effort: a heal failure must never fail the
+        # index run.
+        _phase("Catalog manifest self-heal…")
+        _t = time.monotonic()
+        try:
+            from nexus.catalog.factory import make_catalog_writer as _mk_writer  # noqa: PLC0415 — deferred import
+            from nexus.catalog.manifest_heal import heal_manifest_gaps  # noqa: PLC0415 — deferred: keeps indexer import-light
+            from nexus.db import make_t3 as _mk_t3  # noqa: PLC0415 — deferred import
+
+            if _cat is not None:
+                _, _heal_repo_hash = _repo_identity(repo)
+                _heal_owner = _cat.owner_for_repo(_heal_repo_hash)
+                if _heal_owner is not None:
+                    from nexus.catalog.write_priority import await_fair_window  # noqa: PLC0415 — deferred import
+                    _heal_writer_box: list = []
+
+                    def _tracked_writer():
+                        _heal_writer_box.append(_mk_writer())
+                        return _heal_writer_box[0]
+
+                    def _yield_fair():
+                        # RDR-146 P2: yield to a foreground interactive
+                        # writer before every heal write (GH #1046 class).
+                        if _heal_writer_box:
+                            await_fair_window(
+                                _heal_writer_box[0].is_interactive_write_pending,
+                                on_locked,
+                            )
+
+                    heal = heal_manifest_gaps(
+                        _cat.by_owner(_heal_owner), _cat, _mk_t3,
+                        _tracked_writer, yield_before_write=_yield_fair,
+                    )
+                    if heal.reconciled or heal.lost or heal.write_failed:
+                        _phase(
+                            f"Catalog manifest self-heal: "
+                            f"{heal.reconciled} restored"
+                            + (f", {len(heal.lost)} chunks LOST (real gap)"
+                               if heal.lost else "")
+                            + (f", {heal.write_failed} write failure(s)"
+                               if heal.write_failed else "")
+                        )
+                    _log.info(
+                        "catalog_manifest_self_heal",
+                        candidates=heal.candidates, gapped=heal.gapped,
+                        ghost_gapped=heal.ghost_gapped,
+                        reconciled=heal.reconciled,
+                        write_failed=heal.write_failed,
+                        lost=len(heal.lost),
+                        never_chunked=len(heal.never_chunked),
+                        elapsed_s=round(time.monotonic() - _t, 1),
+                    )
+        except Exception:  # noqa: BLE001 — best-effort self-heal; error surfaced via log, must not crash the index run
+            _log.warning("catalog_manifest_self_heal_failed", exc_info=True)
+        _phase(f"Catalog manifest self-heal done ({time.monotonic() - _t:.1f}s)")
+
         _phase("Pruning misclassified chunks…")
         _t = time.monotonic()
         _prune_misclassified(
