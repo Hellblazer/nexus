@@ -41,7 +41,7 @@ requires_t3 = pytest.mark.skipif(
 
 
 def _voyage_key_present() -> bool:
-    from nexus.config import get_credential
+    from nexus.config import get_credential  # noqa: PLC0415 — deferred so collection doesn't import the config stack
 
     return bool(get_credential("voyage_api_key"))
 
