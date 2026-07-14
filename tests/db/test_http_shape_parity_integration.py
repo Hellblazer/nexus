@@ -33,9 +33,30 @@ pytestmark = pytest.mark.integration
 
 @pytest.fixture(scope="module")
 def sqlite_db(tmp_path_factory):
-    return T2Database(
-        tmp_path_factory.mktemp("shape") / "t2.db", run_migrations=True,
-    )
+    """A GENUINELY-SQLite T2Database (the local half of the parity pair).
+
+    T2Database's hard default is StorageBackend.SERVICE (RDR-152
+    nexus-fjwxh), so an unpinned construction here routes every domain
+    store to whatever service endpoint resolves — under the local-service
+    gate that was the GATE's service (wrong bearer -> 401 on every
+    parity op), and on a dev box it was the LIVE supervisor lease, i.e.
+    this test silently wrote its probe rows into the production T2 and
+    compared the service against itself. Pin the opt-out for the
+    construction window; the store objects keep their backend for life.
+    """
+    import os
+
+    old = os.environ.get("NX_STORAGE_BACKEND")
+    os.environ["NX_STORAGE_BACKEND"] = "sqlite"
+    try:
+        return T2Database(
+            tmp_path_factory.mktemp("shape") / "t2.db", run_migrations=True,
+        )
+    finally:
+        if old is None:
+            os.environ.pop("NX_STORAGE_BACKEND", None)
+        else:
+            os.environ["NX_STORAGE_BACKEND"] = old
 
 
 @pytest.fixture()
@@ -162,14 +183,22 @@ def test_taxonomy_topics_shape_parity_live(service, sqlite_db, _token_env):
     base_url, _token, _ = service
     http = HttpTaxonomyStore(base_url=base_url, tenant="default")
     try:
-        topic = dict(
+        # Each side is seeded through its OWN real write path: the local
+        # CatalogTaxonomy has no import_topic (that verb exists only on the
+        # HTTP twin for cross-store migration) — the earlier version of this
+        # test called import_topic on "both" sides and passed only because
+        # the un-pinned sqlite_db was secretly service-backed too.
+        sqlite_db.taxonomy.persist_discovered_topics(
+            "knowledge__shape",
+            [{"label": "shape-parity-topic", "doc_count": 1,
+              "terms": "shape,parity", "doc_ids": []}],
+        )
+        http.import_topic(
             src_id=1, label="shape-parity-topic", parent_id=None,
             collection="knowledge__shape", centroid_hash="abc",
             doc_count=1, created_at="2026-07-13T00:00:00Z",
             review_status="pending", terms="shape,parity",
         )
-        for s in (sqlite_db.taxonomy, http):
-            s.import_topic(**topic)
         l_rows = sqlite_db.taxonomy.get_topics()
         r_rows = http.get_topics()
         assert l_rows and r_rows

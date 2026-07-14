@@ -148,6 +148,16 @@ if [ -f "$REPO_ROOT/.env" ]; then
   source "$REPO_ROOT/.env"
   set +a
 fi
+# NEXUS_GATE_NO_VOYAGE=1: mask the Voyage key AFTER sourcing .env. A DEAD key
+# hard-fails the voyage/CCE subset (the embed 401s surface as typed 502s),
+# whereas an ABSENT key makes the same subset skip with a clear reason — the
+# honest posture when the key is known-rotated/revoked (2026-07-13: the .env
+# key is dead; rotation is operator work). The vacuity guard still enforces
+# the skip BUDGET, so masking cannot silently hollow out the gate.
+if [ -n "${NEXUS_GATE_NO_VOYAGE:-}" ]; then
+  unset VOYAGE_API_KEY NX_VOYAGE_API_KEY
+  echo "[gate] NEXUS_GATE_NO_VOYAGE=1 — voyage/CCE subset will SKIP (key masked)"
+fi
 
 # shellcheck disable=SC2329  # invoked indirectly via the EXIT trap below
 cleanup() {
