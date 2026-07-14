@@ -108,7 +108,10 @@ def main(ctx: click.Context, verbose: bool) -> None:
         if _summary:
             click.echo(f"[upgrade-finish] {_summary}", err=True)
     except Exception:  # noqa: BLE001 — the trigger must never break CLI startup
-        pass
+        import structlog  # noqa: PLC0415 — deferred import
+        structlog.get_logger(__name__).warning(
+            "upgrade_finish_trigger_failed", exc_info=True,
+        )
 
 
 main.add_command(catalog)

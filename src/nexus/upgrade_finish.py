@@ -107,9 +107,20 @@ def install_mtime_and_version() -> tuple[float, str]:
 
     dist = md.distribution("conexus")
     version = dist.version
-    path = getattr(dist, "_path", None)
-    mtime = Path(str(path)).stat().st_mtime if path else 0.0
-    return mtime, version
+    # PUBLIC API only (review 38b7db3d Critical-1: the prior dist._path
+    # private-attr read fell back to mtime=0.0 when absent, which made
+    # `started < mtime` always false — silently disabling ALL skew detection,
+    # the exact fail-open this module exists to eliminate). locate_file("")
+    # is the documented site-packages root; the dist-info dir name is
+    # deterministic from name+version. Missing => RAISE (fail loud).
+    root = Path(str(dist.locate_file("")))
+    dist_info = root / f"conexus-{version}.dist-info"
+    if not dist_info.exists():
+        raise RuntimeError(
+            f"cannot locate conexus dist-info under {root} — "
+            "process-skew detection unavailable in this environment"
+        )
+    return dist_info.stat().st_mtime, version
 
 
 def enumerate_processes(ps_output: str | None = None) -> list[tuple[int, int, str]]:
@@ -119,10 +130,17 @@ def enumerate_processes(ps_output: str | None = None) -> list[tuple[int, int, st
     parses identically on macOS and Linux). Injectable for tests.
     """
     if ps_output is None:
-        ps_output = subprocess.run(
-            ["ps", "-eo", "pid,etime,command"],
+        proc = subprocess.run(
+            ["ps", "-wweo", "pid,etime,command"],
             capture_output=True, text=True, timeout=15,
-        ).stdout
+        )
+        if proc.returncode != 0 or not proc.stdout.strip():
+            # Review 38b7db3d M5: a silent empty ps = zero processes
+            # detected = the fail-open class again. Fail loud instead.
+            raise RuntimeError(
+                f"ps failed (rc={proc.returncode}): {proc.stderr.strip()[:200]}"
+            )
+        ps_output = proc.stdout
     out: list[tuple[int, int, str]] = []
     me = os.getpid()
     for line in ps_output.splitlines()[1:]:
@@ -131,8 +149,6 @@ def enumerate_processes(ps_output: str | None = None) -> list[tuple[int, int, st
             continue
         pid, etime, command = int(m.group(1)), m.group(2), m.group(3)
         if pid == me or not any(k in command for k in _PROC_MARKERS):
-            continue
-        if " ps -eo" in command or command.startswith("ps "):
             continue
         try:
             age = _parse_etime(etime)
@@ -177,7 +193,24 @@ def restart_stale(report: SkewReport, *, dry_run: bool = False) -> list[str]:
             continue
         if proc.kind == "aspect-worker":
             try:
-                os.kill(proc.pid, 15)
+                # Review 38b7db3d High-3 (pid-recycle TOCTOU): re-verify the
+                # pid still runs OUR command immediately before signaling —
+                # the same convention as t2_daemon's pre-kill re-check.
+                probe = subprocess.run(
+                    ["ps", "-p", str(proc.pid), "-o", "command="],
+                    capture_output=True, text=True, timeout=10,
+                )
+                current = probe.stdout.strip()
+                if "aspect-worker" not in current or not any(
+                    k in current for k in _PROC_MARKERS
+                ):
+                    actions.append(
+                        f"{proc.kind} pid {proc.pid}: gone or recycled; skipped"
+                    )
+                    continue
+                import signal as _signal  # noqa: PLC0415 — stdlib, deferred
+
+                os.kill(proc.pid, _signal.SIGTERM)
                 actions.append(
                     f"restarted {proc.kind} (pid {proc.pid} stopped; "
                     "respawns on demand)"
@@ -209,23 +242,30 @@ def install_source() -> str:
     a directory-tracking install never consults PyPI, and an ==-pinned
     one never moves past its pin (both live incidents, 2026-07-13).
     """
+    import tomllib  # noqa: PLC0415 — stdlib, deferred for startup cost
+
     receipt = Path.home() / ".local/share/uv/tools/conexus/uv-receipt.toml"
     try:
-        text = receipt.read_text()
-    except OSError:
-        return "unknown (no uv receipt)"
-    if "directory = " in text:
-        m = re.search(r'directory = "([^"]+)"', text)
+        data = tomllib.loads(receipt.read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        return "unknown (no readable uv receipt)"
+    reqs = (data.get("tool") or {}).get("requirements") or data.get("requirements") or []
+    req = next(
+        (r for r in reqs if isinstance(r, dict) and r.get("name") == "conexus"),
+        {},
+    )
+    if req.get("directory"):
         return (
-            f"local checkout ({m.group(1) if m else '?'}) — `uv tool "
-            "upgrade` never consults PyPI for this install; use "
-            "scripts/reinstall-tool.sh or reinstall from PyPI"
+            f"local checkout ({req['directory']}) — `uv tool upgrade` never "
+            "consults PyPI for this install; use scripts/reinstall-tool.sh "
+            "or reinstall from PyPI"
         )
-    m = re.search(r'specifier = "==([^"]+)"', text)
-    if m or "==" in text.split("requirements")[-1][:200]:
+    spec = str(req.get("specifier", ""))
+    if spec.startswith("=="):
         return (
-            "PyPI, PINNED — `uv tool upgrade` will never move past the "
-            "pin; reinstall unpinned (`uv tool install --reinstall conexus`)"
+            f"PyPI, PINNED ({spec}) — `uv tool upgrade` will never move "
+            "past the pin; reinstall unpinned "
+            "(`uv tool install --reinstall conexus`)"
         )
     return "PyPI, unpinned — `uv tool upgrade conexus` upgrades normally"
 
@@ -251,7 +291,23 @@ def check_version_transition(config_dir: Path) -> str | None:
         return None
     try:
         config_dir.mkdir(parents=True, exist_ok=True)
-        stamp.write_text(version + "\n")
+        # Review 38b7db3d M4: two concurrent nx invocations right after an
+        # upgrade must not BOTH run the finish pass (a doubled MinerU
+        # stop/start can race itself broken). O_EXCL claim: exactly one
+        # transitioner; losers skip (the winner's pass covers them).
+        lock = config_dir / (STAMP_FILENAME + ".lock")
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+        except FileExistsError:
+            return None
+        try:
+            stamp.write_text(version + "\n")
+        finally:
+            try:
+                lock.unlink()
+            except OSError:
+                pass
     except OSError:
         return None  # unwritable config dir: skip silently, retry next run
     if not seen:

@@ -86,16 +86,28 @@ class TestRestartStale:
         return r
 
     def test_dry_run_touches_nothing(self):
-        with patch("nexus.upgrade_finish.os.kill") as k:
+        with patch("nexus.upgrade_finish.os.kill") as k, \
+                patch("nexus.upgrade_finish.subprocess.run") as sp:
             actions = restart_stale(self._report(), dry_run=True)
+        sp.assert_not_called()
         k.assert_not_called()
         assert any("would restart aspect-worker" in a for a in actions)
         assert any("NEEDS HUMAN: mcp-host" in a for a in actions)
 
     def test_kills_worker_reports_session_bound(self):
-        with patch("nexus.upgrade_finish.os.kill") as k:
+        import signal  # noqa: PLC0415 — file pattern: deferred imports
+        from unittest.mock import MagicMock  # noqa: PLC0415 — file pattern: deferred imports
+
+        # Pre-kill re-verification (review 38b7db3d High-3): the probe must
+        # see OUR command at that pid, else the kill is skipped.
+        probe = MagicMock(returncode=0, stdout=(
+            "/u/.local/share/uv/tools/conexus/bin/python3 "
+            "/u/.local/bin/nx daemon aspect-worker start\n"
+        ))
+        with patch("nexus.upgrade_finish.os.kill") as k, \
+                patch("nexus.upgrade_finish.subprocess.run", return_value=probe):
             actions = restart_stale(self._report())
-        k.assert_called_once_with(200, 15)
+        k.assert_called_once_with(200, signal.SIGTERM)
         assert any("restarted aspect-worker" in a for a in actions)
         # MCP hosts are NEVER killed — a live Claude session owns them.
         assert any("pid 100" in a and "NEEDS HUMAN" in a for a in actions)
@@ -157,3 +169,46 @@ class TestVersionTransition:
         # Stamp still advanced: the transition is consumed, not retried
         # forever against a broken probe.
         assert (tmp_path / "last_seen_version").read_text().strip() == "6.7.1"
+
+
+class TestRecycledPid:
+    def test_recycled_pid_is_never_signaled(self):
+        """High-3: the pid re-verification sees a DIFFERENT command at the
+        snapshot's pid (recycled) — the kill must be skipped."""
+        from unittest.mock import MagicMock  # noqa: PLC0415 — file pattern: deferred imports
+
+        r = SkewReport(installed_version="6.8.0")
+        r.stale = [StaleProcess(pid=200, kind="aspect-worker", command="w", age_s=9)]
+        probe = MagicMock(returncode=0, stdout="/usr/bin/vim innocent.txt\n")
+        with patch("nexus.upgrade_finish.os.kill") as k, \
+                patch("nexus.upgrade_finish.subprocess.run", return_value=probe):
+            actions = restart_stale(r)
+        k.assert_not_called()
+        assert any("gone or recycled" in a for a in actions)
+
+
+class TestFailLoud:
+    def test_missing_dist_info_raises(self, tmp_path):
+        """Critical-1: an unlocatable dist-info must RAISE, never degrade to
+        mtime=0.0 (which silently disabled ALL skew detection)."""
+        import pytest as _pytest  # noqa: PLC0415 — file pattern: deferred imports
+        from unittest.mock import MagicMock  # noqa: PLC0415 — file pattern: deferred imports
+
+        from nexus.upgrade_finish import install_mtime_and_version  # noqa: PLC0415 — file pattern: deferred imports
+
+        dist = MagicMock()
+        dist.version = "6.8.0"
+        dist.locate_file.return_value = tmp_path  # no dist-info inside
+        with patch("importlib.metadata.distribution", return_value=dist), \
+                _pytest.raises(RuntimeError, match="dist-info"):
+            install_mtime_and_version()
+
+    def test_ps_failure_raises(self):
+        """M5: a failed/empty ps must RAISE, never read as zero processes."""
+        import pytest as _pytest  # noqa: PLC0415 — file pattern: deferred imports
+        from unittest.mock import MagicMock  # noqa: PLC0415 — file pattern: deferred imports
+
+        bad = MagicMock(returncode=1, stdout="", stderr="boom")
+        with patch("nexus.upgrade_finish.subprocess.run", return_value=bad), \
+                _pytest.raises(RuntimeError, match="ps failed"):
+            enumerate_processes(None)
