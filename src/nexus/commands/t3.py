@@ -205,7 +205,13 @@ def prune_stale_cmd(collection: str, dry_run: bool, confirm: bool) -> None:
         except Exception as exc:  # noqa: BLE001 — boundary catch; logged then re-raised as a domain error
             click.echo(f"Failed to list collections: {exc}")
             raise click.exceptions.Exit(1)
-        target_collections = [c["name"] for c in all_colls]
+        # nexus-xukbj: quarantine siblings are managed by the GC's own
+        # grace-window expiry (with its safety floor) — the legacy sweep
+        # must never hard-delete them out-of-band.
+        target_collections = [
+            c["name"] for c in all_colls
+            if not c["name"].startswith("quarantine-")
+        ]
 
     if not target_collections:
         click.echo("No collections to scan.")

@@ -571,6 +571,10 @@ def _gc_db(per_collection_rows: dict[str, list[tuple[str, str]]]):
 
     db.get_or_create_collection.side_effect = _goc
     db.get_collection.side_effect = _get_only
+    # Local-mode shape: a bare MagicMock's auto-attrs would make the db
+    # look service-mode (truthy upsert_chunks_with_embeddings) and swallow
+    # quarantine writes silently (review 4cb743be H3 — permissive mocks).
+    db.upsert_chunks_with_embeddings = None
     return db, cols
 
 
@@ -611,7 +615,7 @@ def test_prune_deleted_files_orphan_chunk_deleted(tmp_path):
     # nexus-xukbj: the orphan MOVES to quarantine (recoverable), the live
     # chunk stays in the origin.
     assert list(cols["code__repo"]._rows) == ["live-id-synthetic"]
-    assert "orphan-id-synthetic" in cols["quarantine__repo"]._rows
+    assert "orphan-id-synthetic" in cols["quarantine-code__repo"]._rows
 
 
 def test_prune_deleted_files_preserves_live_synthetic_id(tmp_path):
@@ -1763,7 +1767,7 @@ def test_prune_deleted_files_paginates(tmp_path, monkeypatch):
     _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
 
     assert set(cols["code__repo"]._rows) == {r[0] for r in live}
-    assert set(cols["quarantine__repo"]._rows) == {r[0] for r in orphan}
+    assert set(cols["quarantine-code__repo"]._rows) == {r[0] for r in orphan}
 
 
 def test_frecency_update_paginates(tmp_path):
@@ -2117,7 +2121,7 @@ class TestQuarantineLifecycle:
         rows, live, db, cols, catalog = self._setup()
         _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
         origin = cols["code__repo"]._rows
-        q = cols["quarantine__repo"]._rows
+        q = cols["quarantine-code__repo"]._rows
         assert len(origin) == 20 and len(q) == 180
         sample = next(iter(q.values()))
         assert sample["origin_collection"] == "code__repo"
@@ -2131,7 +2135,7 @@ class TestQuarantineLifecycle:
         rows, live, db, cols, catalog = self._setup(n_total=551, n_live=397)
         _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
         assert len(cols["code__repo"]._rows) == 397
-        assert len(cols["quarantine__repo"]._rows) == 154
+        assert len(cols["quarantine-code__repo"]._rows) == 154
 
     def test_rereferenced_chashes_restore_from_quarantine(self, monkeypatch):
         """A heal that re-references quarantined chashes copies them back
@@ -2141,14 +2145,14 @@ class TestQuarantineLifecycle:
         monkeypatch.delenv("NX_GC_FORCE", raising=False)
         rows, live, db, cols, catalog = self._setup()
         _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
-        assert len(cols["quarantine__repo"]._rows) == 180
+        assert len(cols["quarantine-code__repo"]._rows) == 180
         # The manifest now references EVERYTHING (heal healed the gap).
         catalog2 = _gc_catalog({
             "code__repo": {r[1][:32] for r in rows}, "docs__repo": set(),
         })
         _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog2)
         assert len(cols["code__repo"]._rows) == 200
-        assert len(cols["quarantine__repo"]._rows) == 0
+        assert len(cols["quarantine-code__repo"]._rows) == 0
         restored = cols["code__repo"]._rows["id-0150"]
         assert "quarantined_at" not in restored
         assert "origin_collection" not in restored
@@ -2163,22 +2167,22 @@ class TestQuarantineLifecycle:
         monkeypatch.delenv("NX_GC_FORCE", raising=False)
         old = "2020-01-01T00:00:00Z"
         rows = [(f"q-{i:04d}", f"{i:032d}" + "e" * 32) for i in range(150)]
-        db, cols = _gc_db({"quarantine__repo": rows})
-        for m in cols["quarantine__repo"]._rows.values():
+        db, cols = _gc_db({"quarantine-code__repo": rows})
+        for m in cols["quarantine-code__repo"]._rows.values():
             m["quarantined_at"] = old
         # 100% of 150 expiring >= floor -> refused.
         expired, refused = expire_quarantine(
             db, "code__repo", floor_fraction=0.25, floor_min_chunks=100,
         )
         assert (expired, refused) == (0, 150)
-        assert len(cols["quarantine__repo"]._rows) == 150
+        assert len(cols["quarantine-code__repo"]._rows) == 150
         # Explicit override sweeps.
         monkeypatch.setenv("NX_GC_FORCE", "1")
         expired, refused = expire_quarantine(
             db, "code__repo", floor_fraction=0.25, floor_min_chunks=100,
         )
         assert (expired, refused) == (150, 0)
-        assert len(cols["quarantine__repo"]._rows) == 0
+        assert len(cols["quarantine-code__repo"]._rows) == 0
 
     def test_small_or_fresh_quarantine_expires_normally(self, monkeypatch):
         """Under the floor's min-chunk gate, expiry proceeds; fresh rows
@@ -2188,8 +2192,8 @@ class TestQuarantineLifecycle:
         monkeypatch.delenv("NX_GC_FORCE", raising=False)
         monkeypatch.setenv("NX_GC_QUARANTINE_DAYS", "not-a-number")
         rows = [(f"q-{i:02d}", f"{i:032d}" + "e" * 32) for i in range(10)]
-        db, cols = _gc_db({"quarantine__repo": rows})
-        items = list(cols["quarantine__repo"]._rows.values())
+        db, cols = _gc_db({"quarantine-code__repo": rows})
+        items = list(cols["quarantine-code__repo"]._rows.values())
         for m in items[:6]:
             m["quarantined_at"] = "2020-01-01T00:00:00Z"
         for m in items[6:]:
@@ -2198,7 +2202,7 @@ class TestQuarantineLifecycle:
             db, "code__repo", floor_fraction=0.25, floor_min_chunks=100,
         )
         assert (expired, refused) == (6, 0)
-        assert len(cols["quarantine__repo"]._rows) == 4
+        assert len(cols["quarantine-code__repo"]._rows) == 4
 
     def test_quarantine_isolated_per_collection(self, monkeypatch):
         """A mass move in code__ never touches docs__ (the v7mn distinct-
@@ -2214,5 +2218,41 @@ class TestQuarantineLifecycle:
         })
         _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
         assert len(cols["code__repo"]._rows) == 10
-        assert len(cols["quarantine__repo"]._rows) == 140 + 1  # both origins share owner suffix
+        # Review 4cb743be C3 fix: each origin owns a DISTINCT sibling —
+        # the code__ mass move and the docs__ single orphan land apart.
+        assert len(cols["quarantine-code__repo"]._rows) == 140
+        assert list(cols["quarantine-docs__repo"]._rows) == ["d-orphan"]
         assert list(cols["docs__repo"]._rows) == ["d-live"]
+
+
+def test_quarantine_siblings_distinct_for_shared_owner_and_chash(monkeypatch):
+    """Critique 4cb743be Critical-1, realistic shape: docs__ and rdr__ of
+    the SAME repo share owner + embedding model (RDR-103), and identical
+    boilerplate can share a chash across both. Per-type siblings keep the
+    two moves apart, restore stays origin-faithful, and the expiry floor's
+    denominator is never cross-contaminated."""
+    from nexus.catalog.chunk_quarantine import quarantine_collection_name  # noqa: PLC0415 — file pattern: deferred imports
+    from nexus.indexer import _prune_deleted_files  # noqa: PLC0415 — file pattern: deferred imports
+
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    docs = "docs__nexus-1-1__voyage-context-3__v1"
+    rdr = "rdr__nexus-1-1__voyage-context-3__v1"
+    assert quarantine_collection_name(docs) != quarantine_collection_name(rdr)
+
+    shared = "c" * 64  # identical boilerplate chunk in both collections
+    db, cols = _gc_db({docs: [("d-1", shared)], rdr: [("r-1", shared)]})
+    catalog = _gc_catalog({docs: set(), rdr: set()})
+    # Empty-manifest guard would skip; give each a live row + manifest ref.
+    db2, cols2 = _gc_db({
+        docs: [("d-live", "a" * 64), ("d-1", shared)],
+        rdr: [("r-live", "b" * 64), ("r-1", shared)],
+    })
+    catalog2 = _gc_catalog({
+        docs: {("a" * 64)[:32]}, rdr: {("b" * 64)[:32]},
+    })
+    _prune_deleted_files(docs, rdr, db2, catalog=catalog2)
+    qd = cols2[quarantine_collection_name(docs)]._rows
+    qr = cols2[quarantine_collection_name(rdr)]._rows
+    assert list(qd) == ["d-1"] and list(qr) == ["r-1"]
+    assert qd["d-1"]["origin_collection"] == docs
+    assert qr["r-1"]["origin_collection"] == rdr

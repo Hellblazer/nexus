@@ -44,15 +44,21 @@ _WRITE_BATCH = 300  # ChromaCloud MAX_RECORDS_PER_WRITE; safe everywhere
 
 
 def quarantine_collection_name(origin: str) -> str:
-    """``code__nexus-1-1__voyage-code-3__v1`` -> its quarantine sibling.
+    """``code__nexus-1-1__voyage-code-3__v1`` -> its quarantine sibling
+    ``quarantine-code__nexus-1-1__voyage-code-3__v1``.
 
-    Swaps the content-type segment for ``quarantine`` — stays a conformant
-    4-part name, and the prefix keeps it out of every search corpus.
+    The origin's content-type stays IN the prefix segment (review 4cb743be
+    C3: dropping it collided every same-owner/model origin onto one
+    sibling, cross-contaminating the expiry floor), so each origin owns a
+    distinct sibling. The ``quarantine-*`` prefix matches no search corpus,
+    which is what keeps quarantined chunks out of every retrieval surface.
+    These names are deliberately outside the strict conformance enum —
+    creation passes ``strict=False`` (system-internal collections).
     """
     parts = origin.split("__", 1)
-    return f"{QUARANTINE_PREFIX}__{parts[1]}" if len(parts) == 2 else (
-        f"{QUARANTINE_PREFIX}__{origin}"
-    )
+    if len(parts) == 2:
+        return f"{QUARANTINE_PREFIX}-{parts[0]}__{parts[1]}"
+    return f"{QUARANTINE_PREFIX}-x__{origin}"
 
 
 def quarantine_days() -> int:
@@ -79,24 +85,63 @@ def _fetch_full(db: Any, col: Any, collection_name: str, ids: list[str]):
     not carry them on ``get`` — its client exposes ``get_embeddings``.
     """
     got = col.get(ids=ids, include=["metadatas", "documents", "embeddings"])
+    got_ids = got["ids"]
     embs = got.get("embeddings")
     if embs is None or (hasattr(embs, "__len__") and len(embs) == 0):
-        client = getattr(db, "_vector_client", None) or getattr(db, "client", None)
-        if client is not None and hasattr(client, "get_embeddings"):
-            embs = client.get_embeddings(collection_name, got["ids"])
-    return got["ids"], embs, got.get("metadatas") or [], got.get("documents") or []
+        # Service mode: the collection stub carries no embeddings on get;
+        # both T3Database and HttpVectorClient expose get_embeddings
+        # directly (review 4cb743be H1 — the old fallback probed
+        # attributes that never existed and was permanently dead).
+        if hasattr(db, "get_embeddings"):
+            embs = db.get_embeddings(collection_name, got_ids)
+    # Alignment guard (review 4cb743be H2): get_embeddings DROPS ids the
+    # store lacks — positional zip against a shorter array would attach
+    # WRONG embeddings to every subsequent id (silent corruption). A
+    # mismatched batch moves without embeddings instead (or fails loud at
+    # the service upsert, which requires them — either way, never mixed).
+    if embs is not None and hasattr(embs, "__len__") and len(embs) != len(got_ids):
+        _log.warning(
+            "quarantine_embeddings_misaligned",
+            collection=collection_name, ids=len(got_ids), embeddings=len(embs),
+        )
+        embs = None
+    return got_ids, embs, got.get("metadatas") or [], got.get("documents") or []
 
 
 def _upsert_full(db: Any, name: str, ids, embeddings, metadatas, documents) -> None:
-    qcol = db.get_or_create_collection(name)
+    # Review 4cb743be C2: the service-mode collection stub has NO upsert —
+    # writes go through db.upsert_chunks_with_embeddings (the ETL-proven
+    # path, embeddings required). Local mode uses the chroma handle, created
+    # strict=False (quarantine names are deliberately non-conformant, C1).
+    service_upsert = getattr(db, "upsert_chunks_with_embeddings", None)
+    qcol = None
+    if service_upsert is None:
+        try:
+            qcol = db.get_or_create_collection(name, strict=False)
+        except TypeError:  # test shims without the strict kwarg
+            qcol = db.get_or_create_collection(name)
     for i in range(0, len(ids), _WRITE_BATCH):
         sl = slice(i, i + _WRITE_BATCH)
-        qcol.upsert(
-            ids=ids[sl],
-            embeddings=embeddings[sl] if embeddings is not None else None,
-            metadatas=metadatas[sl],
-            documents=documents[sl],
-        )
+        if service_upsert is not None:
+            if embeddings is None:
+                raise RuntimeError(
+                    "service-mode quarantine move requires embeddings "
+                    "(upsert_chunks_with_embeddings contract); batch kept "
+                    "in place for retry"
+                )
+            service_upsert(
+                name, ids=list(ids[sl]),
+                documents=list(documents[sl]),
+                embeddings=[list(e) for e in embeddings[sl]],
+                metadatas=list(metadatas[sl]),
+            )
+        else:
+            qcol.upsert(
+                ids=ids[sl],
+                embeddings=embeddings[sl] if embeddings is not None else None,
+                metadatas=metadatas[sl],
+                documents=documents[sl],
+            )
 
 
 def quarantine_orphans(
@@ -164,7 +209,6 @@ def restore_rereferenced(
     if not back_ids:
         return 0
     restored = 0
-    origin = db.get_or_create_collection(collection_name)
     for i in range(0, len(back_ids), _WRITE_BATCH):
         batch = back_ids[i:i + _WRITE_BATCH]
         try:
@@ -217,13 +261,21 @@ def expire_quarantine(
         return 0, 0
     cutoff = datetime.now(UTC) - timedelta(days=quarantine_days())
     cutoff_s = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Review 4cb743be C3: filter to THIS origin's rows — legacy shared
+    # siblings (pre-fix names) may hold multiple origins, and the floor's
+    # fraction must never be computed across unrelated populations.
+    mine = [
+        (cid, m) for cid, m in zip(all_ids, rows.get("metadatas") or [])
+        if (m or {}).get("origin_collection", collection_name) == collection_name
+    ]
+    _FAR_FUTURE = "9999-12-31T23:59:59Z"
     expired_ids = [
-        cid for cid, m in zip(all_ids, rows.get("metadatas") or [])
-        if (m or {}).get("quarantined_at", "9999") <= cutoff_s
+        cid for cid, m in mine
+        if (m or {}).get("quarantined_at", _FAR_FUTURE) <= cutoff_s
     ]
     if not expired_ids:
         return 0, 0
-    frac = len(expired_ids) / len(all_ids) if all_ids else 0.0
+    frac = len(expired_ids) / len(mine) if mine else 0.0
     if (
         len(expired_ids) >= floor_min_chunks
         and frac > floor_fraction
@@ -232,7 +284,7 @@ def expire_quarantine(
         _log.warning(
             "gc_quarantine_expiry_floor_refused",
             collection=collection_name, expiring=len(expired_ids),
-            quarantined=len(all_ids), fraction=round(frac, 3),
+            quarantined=len(mine), fraction=round(frac, 3),
             note=(
                 "a mass hard-delete surviving the full grace window means a "
                 "manifest defect persisted for weeks — verify with "
