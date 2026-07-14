@@ -140,6 +140,14 @@ elif [ "$DO_BUILD" = 1 ]; then
     # TESTCONTAINERS_HOST_OVERRIDE + the host-gateway alias make the build
     # container reach the sibling pgvector. -Ob = quick-build (correctness gate,
     # not a perf binary). Output: service/target/nexus-service + its *.so siblings.
+    # Builder heap: the pom default (native.image.maxheap=5632m) is sized for
+    # the 7GB CI runner; locally it GC-thrashes (403 GCs / 6.8% of build time
+    # observed on the 8GB-VM default, 2026-07-13). Auto-size to ~70% of the
+    # Docker VM's memory, never below the pom default.
+    vm_mib=$(( $(docker info --format '{{.MemTotal}}') / 1048576 ))
+    NATIVE_MAXHEAP="$(( vm_mib * 70 / 100 ))m"
+    [ "$(( vm_mib * 70 / 100 ))" -lt 5632 ] && NATIVE_MAXHEAP=5632m
+    echo "      (builder heap ${NATIVE_MAXHEAP} — 70% of the ${vm_mib}MiB Docker VM)"
     docker run --rm --entrypoint bash \
       --add-host=host.docker.internal:host-gateway \
       -v "$PWD":/src -w /src/service \
@@ -147,7 +155,7 @@ elif [ "$DO_BUILD" = 1 ]; then
       -e TESTCONTAINERS_RYUK_DISABLED=true \
       -e TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal \
       "$GRAAL_IMAGE" \
-      -c './mvnw -B -Pnative -DskipTests -Dnative.image.opt=-Ob package'
+      -c "./mvnw -B -Pnative -DskipTests -Dnative.image.opt=-Ob -Dnative.image.maxheap=${NATIVE_MAXHEAP} package"
   else
     echo "      (native binary already built — reusing service/target/nexus-service)"
   fi
