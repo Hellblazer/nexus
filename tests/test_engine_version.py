@@ -16,7 +16,7 @@ from nexus.engine_version import REQUIRED_ENGINE_VERSION, parse_engine_version
 
 
 class TestRequiredEngineVersion:
-    def test_pinned_floor_is_0139(self) -> None:
+    def test_pinned_floor_is_current(self) -> None:
         # (0,1,5)->(0,1,8) for nexus-x2g1z; ->(0,1,34) for 6.5.0: the client
         # hard-requires catalog-012 (graph-hop `where` — pre-012 engines
         # silently ignore the key, the H2 version-skew failure class) and
@@ -29,7 +29,12 @@ class TestRequiredEngineVersion:
         # service-mode remediation consent audit needs telemetry-002-consents
         # (v0.1.40+), retention markers + range where-operators need v0.1.41,
         # and tags <=0.1.40 are invalid rollback targets post-A6.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 41)
+        # ->(0,1,42) 2026-07-14: fix-delivery rule (per Hal) — the engine
+        # carries the catalog-015 FTS filename-token fix (nexus-8gue1) and
+        # indexed_at repair provenance (nexus-p5qk8); local installs receive
+        # engine fixes ONLY via this floor/pin, so an advertised engine fix
+        # moves the floor even with zero client-side hard dependency.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 42)
 
 
 class TestParseEngineVersion:
@@ -70,7 +75,7 @@ class TestFloorComparison:
         assert parse_engine_version("0.1.5") < REQUIRED_ENGINE_VERSION
 
     def test_at_floor_compares_equal(self) -> None:
-        assert parse_engine_version("0.1.41") == REQUIRED_ENGINE_VERSION
+        assert parse_engine_version("0.1.42") == REQUIRED_ENGINE_VERSION
 
     def test_above_floor_compares_greater(self) -> None:
         assert parse_engine_version("0.2.0") > REQUIRED_ENGINE_VERSION
