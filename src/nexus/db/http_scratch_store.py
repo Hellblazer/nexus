@@ -186,6 +186,50 @@ class HttpScratchStore:
         self._client = self._build_client()
         return True
 
+    def _refresh_session_token_from_lease(self) -> bool:
+        """nexus-g5hzk: on a 401, re-read the session lease republished by the
+        token OWNER and adopt its token if it differs from ours.
+
+        The borrow path (``t1_session_inherited_no_mint``) caches the owner's
+        token string once at startup; the owner's refresh loop re-mints on a
+        half-TTL cadence and ``start_session`` is ON CONFLICT DO UPDATE — every
+        re-mint ROTATES the server-side token, stranding every borrower on a
+        string that no longer resolves (live incident 2026-07-14: a resumed
+        session 401'd four minutes after borrowing and stayed dark all day
+        while its elder incarnation kept rotating). The owner republishes the
+        lease file with each rotation, so the fresh token is on disk — re-read
+        and retry once. Never MINTS: the nexus-ngcpo single-minter ownership
+        rule stands; when the owner is genuinely gone the lease ages out and
+        this returns False, letting the 401 stand.
+
+        Returns True only when a fresh, DIFFERENT token was adopted (a retry
+        is worthwhile); False on no lease / unreadable / expired / unchanged.
+        """
+        try:
+            from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+            from nexus.db.t1 import read_t1_session_lease  # noqa: PLC0415 — deferred to avoid circular import
+
+            fresh = read_t1_session_lease(self._session_id, nexus_config_dir())
+        except Exception:  # noqa: BLE001 — best-effort self-heal; the original 401 stands
+            return False
+        if not fresh or fresh == self._session_token:
+            return False
+        _log.warning(
+            "http_scratch_store.session_token_refreshed_from_lease",
+            session_id=self._session_id,
+        )
+        self._session_token = fresh
+        self._headers[_HEADER_T1_SESSION] = fresh
+        # Subprocess children resolve NX_T1_SESSION at spawn — hand them the
+        # live token, not the stranded one.
+        os.environ[_SESSION_ENV] = fresh
+        try:
+            self._client.close()
+        except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
+            pass
+        self._client = self._build_client()
+        return True
+
     def _build_client(self) -> httpx.Client:
         return httpx.Client(base_url=self._base_url, headers=self._headers, timeout=30.0)
 
@@ -446,6 +490,15 @@ class HttpScratchStore:
                 raise RuntimeError(f"HttpScratchStore: connect failed on retry {path}: {exc}") from exc
         except httpx.HTTPError as exc:
             raise RuntimeError(f"HttpScratchStore: network error on {path}: {exc}") from exc
+        if resp.status_code == 401 and self._refresh_session_token_from_lease():
+            # nexus-g5hzk: the owner rotated the token; ours went stale. The
+            # fresh one was just adopted from the lease — retry ONCE.
+            try:
+                resp = self._client.post(path, json=payload)
+            except httpx.HTTPError as exc:
+                raise RuntimeError(
+                    f"HttpScratchStore: network error on token-refresh retry {path}: {exc}"
+                ) from exc
         if not resp.is_success:
             if resp.status_code == 401:
                 raise RuntimeError(
@@ -471,6 +524,14 @@ class HttpScratchStore:
                 raise RuntimeError(f"HttpScratchStore: connect failed on retry {path}: {exc}") from exc
         except httpx.HTTPError as exc:
             raise RuntimeError(f"HttpScratchStore: network error on {path}: {exc}") from exc
+        if resp.status_code == 401 and self._refresh_session_token_from_lease():
+            # nexus-g5hzk: rotated token — retry ONCE with the lease's fresh one.
+            try:
+                resp = self._client.post(path, json=payload)
+            except httpx.HTTPError as exc:
+                raise RuntimeError(
+                    f"HttpScratchStore: network error on token-refresh retry {path}: {exc}"
+                ) from exc
         if resp.status_code == 404:
             return {"found": False}
         if not resp.is_success:
