@@ -26,6 +26,83 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   spanning unrelated content. Real incident: `nx index repo ~/git` was run
   against the parent of many repos instead of a specific repo subdirectory,
   discovered via `nx catalog doctor --t3-vs-catalog`.
+## [6.6.1] - 2026-07-11
+
+Bug-fix release. Three service-mode daemon gaps found and fixed same-day
+during live incident triage on a production install, plus a follow-up sweep
+of the same bug class elsewhere in the catalog doctor surface, found by a
+retroactive stacked-reviewer pass (nexus-pyv0e, nexus-64np7, nexus-bikit
+tracks a remaining architectural follow-up, not shipped here).
+
+### Fixed
+
+- `nx daemon t2 ensure-running`: now short-circuits immediately
+  (`SERVICE_MODE_SKIP`) when the memory store is in service mode, instead of
+  cold-spawning a process that exits instantly by design. Every nx-mcp
+  session-start call and `nx upgrade` invoke this path; the missing check
+  could trip the crash-loop guard with a misleading "crash-loop suppressed"
+  error under concurrent sessions even though nothing was actually broken.
+- `nx catalog doctor --name-vs-embed-dim`: fixed a crash
+  (`AttributeError: 'HttpVectorClient' object has no attribute '_client'`) in
+  service/cloud mode — the now-primary T3 backend. Also fixed the same
+  Chroma-internals reach-through in `--t3-vs-catalog` (was silently
+  swallowing the error into a false PASS with zero detection capability),
+  `--chunk-size-distribution`, `--chunk-text-dedup`, and
+  `--t3-doc-id-coverage` (these already failed loud, just non-functional in
+  service mode).
+- Aspect-worker daemon `reclaim_stale` loop: previously held one HTTP client
+  for its entire process lifetime with no recovery on a credential error. A
+  rotated bearer token could cause continuous 401s until a manual daemon
+  restart (an actual incident: 23+ hours, 1394 failures). Now rebuilds the
+  client on demand after any failure, so a token rotation self-heals within
+  one reclaim interval (~30s).
+
+## [6.6.0] - 2026-07-10
+
+The clean-5.x-upgrade release. Hardens the store-migration path against the
+edges that produced GH #1390, and pins the crash-loop-fixed engine.
+
+### Added
+
+- `nx migration-audit`: retroactive, read-only forensic detection of pre-guard
+  silent pgvector target-name merges (nexus-p9vqa). Classifies the retained
+  Chroma source under both voyage-key histories, probes each would-have-collided
+  target, and reports per-target verdicts (merged / single-source /
+  never-materialized / partial / indeterminate). `--legs both|local|cloud`
+  audits a surviving leg loudly when the other is gone; `--json` for machines.
+- `nx doctor` chunk-chash-conformance probe: warns (never fatal) when the
+  pgvector store holds non-32-char chash rows, so a poisoned box is caught
+  before an engine upgrade crash-loops on it (nexus-pnwu0). Carries the
+  recovery-playbook URL.
+- `nx doctor` now surfaces the specific failing Liquibase changeset when the
+  service is down, instead of only "vector service unreachable".
+
+### Fixed
+
+- **GH #1390 root cause**: legacy non-32-char Chroma chunk ids (pre-RDR-108
+  stores) now block cleanly at the migration pre-gate and per-batch ETL guard
+  with a re-index diagnostic, instead of 409-ing every upsert (which previously
+  tempted the destructive constraint-drop that corrupted a store). The migration
+  never rewrites ids (that would sever the catalog-manifest chash join)
+  (nexus-sot7v).
+- `nx daemon service install-binary` refuses (unless `--force`) to install a new
+  engine onto a store with non-32-char chash rows — a new engine would
+  crash-loop Liquibase's VALIDATE on boot; emits a clickable runbook URL and a
+  paste-to-Claude remediation prompt (nexus-pnwu0 / nexus-c4143).
+- T3 local-token collection names now pin the exact local embedding model the
+  name encodes, never the currently-active one — closes a silent wrong-model
+  vector write on the first write to a stale conformant name after a local-tier
+  change (nexus-a4h7b).
+- Engine-version floor unified into one source across the cloud and native
+  paths, with a fail-loud probe on the real connection graph and CLI-bypass
+  closure (nexus-b6qlf); pre-flight target-name collision guard for cross-model
+  remaps (nexus-5b9v0).
+
+### Changed
+
+- Pinned engine advanced to `engine-service-v0.1.37` (the catalog-013 crash-loop
+  fix; `v0.1.36` was the affected version). Local installs now auto-acquire the
+  fixed engine.
 
 ## [6.5.2] - 2026-07-09
 
