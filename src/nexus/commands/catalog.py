@@ -816,7 +816,10 @@ def reconcile_cmd(dry_run: bool) -> None:
         or ((e.meta or {}).get("content_hash") and e.physical_collection)
     ]
     if not entries:
-        click.echo(f"{verb} 0 document(s); 0 could not be matched to chunks.")
+        click.echo(
+            f"{verb} 0 document(s); 0 with chunks LOST (real gap), "
+            "0 never-chunked (expected: nothing to rebuild)."
+        )
         return
 
     manifests = cat.get_manifests([str(e.tumbler) for e in entries])
@@ -829,7 +832,10 @@ def reconcile_cmd(dry_run: bool) -> None:
         or (e.chunk_count == 0 and not manifests.get(str(e.tumbler)))
     ]
     if not gapped:
-        click.echo(f"{verb} 0 document(s); 0 could not be matched to chunks.")
+        click.echo(
+            f"{verb} 0 document(s); 0 with chunks LOST (real gap), "
+            "0 never-chunked (expected: nothing to rebuild)."
+        )
         return
 
     ghost_count = sum(1 for e in gapped if e.chunk_count == 0)
@@ -863,7 +869,14 @@ def reconcile_cmd(dry_run: bool) -> None:
             continue
         by_coll[entry.physical_collection].append((entry, content_hash))
 
-    _IN_BATCH = 64  # hashes per $in predicate (one predicate; well under quota)
+    # Hashes per $in predicate. One top-level predicate (MAX_WHERE_PREDICATES
+    # bounds predicate COUNT, not $in array size — no named constant bounds
+    # that; 64 verified live against the pgvector engine). Documented
+    # tradeoff (critique d470eda1): a batch-fetch failure marks up to
+    # _IN_BATCH docs unmatched at once, vs 1 under the old per-doc loop —
+    # accepted because _paginated_get already retries transients internally,
+    # so a surviving failure is almost always collection-wide anyway.
+    _IN_BATCH = 64
 
     try:
         for coll_i, (coll_name, pairs) in enumerate(sorted(by_coll.items()), 1):
@@ -887,6 +900,7 @@ def reconcile_cmd(dry_run: bool) -> None:
             )
             hashes = sorted({ch for _, ch in pairs})
             fetched_rows = 0
+            fetch_failed_docs = 0
             for i in range(0, len(hashes), _IN_BATCH):
                 batch = hashes[i:i + _IN_BATCH]
                 try:
@@ -901,9 +915,9 @@ def reconcile_cmd(dry_run: bool) -> None:
                         error=str(exc),
                     )
                     batch_set = set(batch)
-                    unmatched.extend(
-                        e for e, ch in pairs if ch in batch_set
-                    )
+                    dropped = [e for e, ch in pairs if ch in batch_set]
+                    unmatched.extend(dropped)
+                    fetch_failed_docs += len(dropped)
                     pairs = [(e, ch) for e, ch in pairs if ch not in batch_set]
                     continue
                 for cid, m in zip(
@@ -914,9 +928,16 @@ def reconcile_cmd(dry_run: bool) -> None:
                         rows_by_hash[h][0].append(cid)
                         rows_by_hash[h][1].append(m)
                         fetched_rows += 1
+            # Review d470eda1 Medium-1: a batch-fetch failure mid-collection
+            # must be VISIBLE in the progress line, not just structlog — the
+            # summary otherwise shows a silently smaller doc count.
+            fetch_note = (
+                f", {fetch_failed_docs} doc(s) unmatched (fetch error)"
+                if fetch_failed_docs else ""
+            )
             click.echo(
                 f"  [{coll_i}/{len(by_coll)}] {coll_name}: {len(pairs)} doc(s), "
-                f"{fetched_rows} chunk row(s) fetched"
+                f"{fetched_rows} chunk row(s) fetched{fetch_note}"
             )
 
             for entry, content_hash in pairs:
@@ -979,15 +1000,28 @@ def reconcile_cmd(dry_run: bool) -> None:
         "for duplicate-text collapse)"
         if dup_collapsed else ""
     )
+    # Critique d470eda1: split the unmatched report so the permanent
+    # ghost-noise (never-chunked files — chunk_count==0 and T3 has nothing,
+    # e.g. thousands of empty __init__.py) cannot bury a REAL regression
+    # (chunk_count>0 with rows missing = chunks actually lost). Live run
+    # 2026-07-13: 8,653 unmatched of which ~8,6xx were the expected class.
+    never_chunked = [e for e in unmatched if e.chunk_count == 0]
+    lost = [e for e in unmatched if e.chunk_count > 0]
     click.echo(
         f"{verb} {reconciled} document(s){corrected_note}; "
-        f"{len(unmatched)} could not be matched to chunks."
+        f"{len(lost)} with chunks LOST (real gap), "
+        f"{len(never_chunked)} never-chunked (expected: nothing to rebuild)."
     )
-    if unmatched:
-        for entry in unmatched[:20]:
-            click.echo(f"    {entry.tumbler}  {entry.file_path or entry.title}")
-        if len(unmatched) > 20:
-            click.echo(f"    ... and {len(unmatched) - 20} more")
+    if lost:
+        for entry in lost[:20]:
+            click.echo(f"    LOST {entry.tumbler}  {entry.file_path or entry.title}")
+        if len(lost) > 20:
+            click.echo(f"    ... and {len(lost) - 20} more")
+    if never_chunked:
+        for entry in never_chunked[:5]:
+            click.echo(f"    (empty) {entry.tumbler}  {entry.file_path or entry.title}")
+        if len(never_chunked) > 5:
+            click.echo(f"    ... and {len(never_chunked) - 5} more never-chunked")
 
 
 # ── Backfill helpers ──────────────────────────────────────────────────────────
