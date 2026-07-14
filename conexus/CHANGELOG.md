@@ -4,6 +4,12 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.9.0] - 2026-07-14
+
+Plugin version aligned with conexus 6.9.0. No plugin-side changes; see the
+root CHANGELOG for the MinerU lifecycle, catalog search, and T1 token
+self-heal work in this release.
+
 ## [6.8.0] - 2026-07-14
 
 Plugin version aligned with conexus 6.8.0. Plugin-relevant: the MCP servers
