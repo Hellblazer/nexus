@@ -523,6 +523,14 @@
                      5632m there was 31% of RAM and heap-starved the build at 1208-2519
                      GCs); the migration-rehearsal auto-sizes to 70% of its Docker VM. -->
                 <native.image.maxheap>5632m</native.image.maxheap>
+                <!-- Runtime GC compiled INTO the produced binary via the gc build
+                     option (NOT the builder JVM's GC, which is the UseParallelGC
+                     flag below). serial = GraalVM default: smallest footprint,
+                     right for local nx-init installs and the only choice on macOS
+                     (G1 is linux-only). Override per-invocation with
+                     -Dnative.image.gc=G1 for throughput experiments / a future
+                     linux-cloud split; A/B harness: tests/e2e/gc-ab/run-ab.sh. -->
+                <native.image.gc>serial</native.image.gc>
             </properties>
             <build>
                 <plugins>
@@ -611,6 +619,7 @@
                                              heap is now a single knob to raise on a larger runner. -->
                                         <buildArg>-J-Xmx${native.image.maxheap}</buildArg>
                                         <buildArg>-J-XX:+UseParallelGC</buildArg>
+                                        <buildArg>--gc=${native.image.gc}</buildArg>
                                         <!-- nexus-9yrus (2) optimization level (see profile properties):
                                              -O2 for release, -Ob (quick-build) for PR/smoke. -->
                                         <buildArg>${native.image.opt}</buildArg>
