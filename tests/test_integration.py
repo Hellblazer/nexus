@@ -421,15 +421,33 @@ def test_t3_put_embedding_model_in_search_metadata():
 
 @pytest.mark.integration
 @requires_t3
-@requires_voyage_key
 def test_migrate_t3_ensure_databases_is_idempotent(runner):
-    import os
-    from nexus.commands._provision import ensure_databases, _cloud_admin_client
+    """Chroma-CLOUD-admin-keyed (not Voyage): provisions databases on the
+    RETIRING backend (RDR-155 — Chroma is migration-source-only; P4b
+    deletes this path and this test with it). Post-migration the Chroma
+    key's admin scope is legitimately gone, so absent creds OR a
+    permission-denied admin call are expected states, not regressions —
+    skip with reason rather than fail a gate on a backend on its way out."""
+    import os  # noqa: PLC0415 — file pattern: deferred imports
+
+    from chromadb.errors import ChromaError  # noqa: PLC0415 — file pattern: deferred imports
+
+    from nexus.commands._provision import _cloud_admin_client, ensure_databases  # noqa: PLC0415 — file pattern: deferred imports
 
     api_key = os.environ.get("CHROMA_API_KEY", "")
     database = os.environ.get("CHROMA_DATABASE", "")
-    admin = _cloud_admin_client(api_key)
-    first = ensure_databases(admin, base=database)
-    second = ensure_databases(admin, base=database)
+    if not (api_key and database):
+        pytest.skip("no Chroma Cloud admin credentials (retiring backend)")
+    try:
+        admin = _cloud_admin_client(api_key)
+        first = ensure_databases(admin, base=database)
+        second = ensure_databases(admin, base=database)
+    except ChromaError as exc:
+        if "permission" in str(exc).lower():
+            pytest.skip(
+                "Chroma Cloud key lacks admin scope (expected post-migration; "
+                "RDR-155 P4b removes this path)"
+            )
+        raise
     assert set(first.keys()) == {database}
     assert all(not v for v in second.values())
