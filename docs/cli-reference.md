@@ -1685,6 +1685,27 @@ For a SQLite T2 daemon that survives reboots independent of Claude Code, use
 own autostart unit (`nx daemon service install --autostart`, or accepting the
 `nx init` prompt) covers reboot-persistence for every tier.
 
+### nx daemon restart-stale
+
+```
+nx daemon restart-stale [--dry-run]
+```
+
+Finish an upgrade: after `uv tool upgrade conexus` the disk holds the new
+version but every long-lived process (MCP hosts, the aspect-worker, MinerU)
+keeps executing the old code from memory. This verb detects every conexus
+process whose start time predates the installed distribution, restarts the
+classes that are safe to cycle (aspect-worker — respawns on demand; MinerU —
+cycled via its own lifecycle verbs), and names the ones only you can close
+(MCP hosts belong to live Claude sessions). It also reports the install's
+uv-receipt source (local checkout / pinned / PyPI-unpinned), which explains
+why `uv tool upgrade` sometimes reports "Nothing to upgrade".
+
+This runs automatically on the first `nx` invocation after a version change
+(a `last_seen_version` stamp in the config dir), printing one
+`[upgrade-finish]` summary line; the verb is the manual form. `nx doctor`'s
+"Process freshness" check surfaces the same skew.
+
 ### nx daemon t2 start
 
 Start the T2 daemon in the foreground. The daemon IS this Python
