@@ -25,8 +25,11 @@ class TestRequiredEngineVersion:
         # for nexus-rn3wo.1: T1 scratch now defaults to the PG-backed service
         # with no Chroma fallback, and every engine before v0.1.38 has a
         # native-image reflection gap that 500s on every T1 get/search/list
-        # (nexus-opr9m).
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 39)
+        # (nexus-opr9m). ->(0,1,41) for the 2026-07-13 release-gate arc:
+        # service-mode remediation consent audit needs telemetry-002-consents
+        # (v0.1.40+), retention markers + range where-operators need v0.1.41,
+        # and tags <=0.1.40 are invalid rollback targets post-A6.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 41)
 
 
 class TestParseEngineVersion:
@@ -67,7 +70,7 @@ class TestFloorComparison:
         assert parse_engine_version("0.1.5") < REQUIRED_ENGINE_VERSION
 
     def test_at_floor_compares_equal(self) -> None:
-        assert parse_engine_version("0.1.39") == REQUIRED_ENGINE_VERSION
+        assert parse_engine_version("0.1.41") == REQUIRED_ENGINE_VERSION
 
     def test_above_floor_compares_greater(self) -> None:
         assert parse_engine_version("0.2.0") > REQUIRED_ENGINE_VERSION

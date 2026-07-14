@@ -45,8 +45,12 @@ from __future__ import annotations
 #: handoff, the managed-cloud probe, AND — since 2026-07-12 —
 #: ``nexus.daemon.binary_install.PINNED_SERVICE_TAG``, the exact tag a fresh
 #: local install downloads, which is now DERIVED from this constant rather
-#: than independently hand-typed) — there is no second knob to remember.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 39)
+#: than independently hand-typed) — there is no second knob to remember. -> (0,1,41) for the 2026-07-13 release-gate
+#: arc: service-mode remediation consent audit hard-requires the consents
+#: table (telemetry-002, v0.1.40+); retention markers + range where-operators
+#: hard-require v0.1.41; and conexus declared tags <=0.1.40 invalid rollback
+#: targets after the A6 view-era grants changeset (engine-rollback-floor-0141).
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 41)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:
