@@ -145,6 +145,16 @@ class HttpScratchStore:
             "Content-Type": "application/json",
         }
         self._client = self._build_client()
+        # nexus-g5hzk review H1: guards the 401 self-heal's read-check-
+        # mutate-rebuild sequence. Latent under the current single-event-loop
+        # MCP dispatch (sync tool bodies never interleave), but the RDR-105
+        # contract invites concurrent subagent fan-out through one store, and
+        # the sibling T2 singleton already carries the same guard
+        # (_service_t2_lock) for exactly this close()-under-a-live-caller
+        # class.
+        import threading  # noqa: PLC0415 — stdlib, deferred; ctor-only
+
+        self._refresh_lock = threading.Lock()
         _log.info(
             "http_scratch_store.init",
             base_url=self._base_url,
@@ -186,7 +196,7 @@ class HttpScratchStore:
         self._client = self._build_client()
         return True
 
-    def _refresh_session_token_from_lease(self) -> bool:
+    def _refresh_session_token_from_lease(self, sent_token: str) -> bool:
         """nexus-g5hzk: on a 401, re-read the session lease republished by the
         token OWNER and adopt its token if it differs from ours.
 
@@ -202,33 +212,57 @@ class HttpScratchStore:
         rule stands; when the owner is genuinely gone the lease ages out and
         this returns False, letting the 401 stand.
 
-        Returns True only when a fresh, DIFFERENT token was adopted (a retry
-        is worthwhile); False on no lease / unreadable / expired / unchanged.
-        """
-        try:
-            from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
-            from nexus.db.t1 import read_t1_session_lease  # noqa: PLC0415 — deferred to avoid circular import
+        *sent_token* is the token the failed request actually carried: under
+        concurrent 401s (review H1) the losing thread finds the winner already
+        healed the shared store — current token != sent — and retries on the
+        healed client instead of spuriously raising.
 
-            fresh = read_t1_session_lease(self._session_id, nexus_config_dir())
-        except Exception:  # noqa: BLE001 — best-effort self-heal; the original 401 stands
+        Returns True when a retry is worthwhile (a differing token was adopted,
+        or another thread already adopted one); False on no lease / unreadable
+        / expired / unchanged.
+        """
+        session_id = getattr(self, "_session_id", "")
+        if not session_id:
             return False
-        if not fresh or fresh == self._session_token:
-            return False
-        _log.warning(
-            "http_scratch_store.session_token_refreshed_from_lease",
-            session_id=self._session_id,
-        )
-        self._session_token = fresh
-        self._headers[_HEADER_T1_SESSION] = fresh
-        # Subprocess children resolve NX_T1_SESSION at spawn — hand them the
-        # live token, not the stranded one.
-        os.environ[_SESSION_ENV] = fresh
-        try:
-            self._client.close()
-        except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
-            pass
-        self._client = self._build_client()
-        return True
+        with self._refresh_lock:
+            if self._session_token != sent_token:
+                # Another thread healed the store while we waited on the
+                # lock (or mid-request) — just retry with its work.
+                return True
+            try:
+                from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+                from nexus.db.t1 import read_t1_session_lease  # noqa: PLC0415 — deferred to avoid circular import
+
+                fresh = read_t1_session_lease(session_id, nexus_config_dir())
+            except Exception as exc:  # noqa: BLE001 — best-effort self-heal; the original 401 stands
+                # read_t1_session_lease handles "no lease" internally (None) —
+                # reaching here means the self-heal ITSELF broke; leave a trail.
+                _log.warning(
+                    "http_scratch_store.session_token_refresh_failed",
+                    session_id=session_id, error=str(exc),
+                )
+                return False
+            if not fresh or fresh == self._session_token:
+                return False
+            _log.warning(
+                "http_scratch_store.session_token_refreshed_from_lease",
+                session_id=session_id,
+            )
+            self._session_token = fresh
+            self._headers[_HEADER_T1_SESSION] = fresh
+            # Subprocess children resolve NX_T1_SESSION at spawn — hand them
+            # the live token, not the stranded one. Review M1: export the id
+            # alongside when absent, so a later ctor's fallback chain
+            # (session_id or NX_T1_SESSION_ID or NX_T1_SESSION) can never
+            # collapse the TOKEN into a session id.
+            os.environ[_SESSION_ENV] = fresh
+            os.environ.setdefault(_SESSION_ID_ENV, session_id)
+            try:
+                self._client.close()
+            except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
+                pass
+            self._client = self._build_client()
+            return True
 
     def _build_client(self) -> httpx.Client:
         return httpx.Client(base_url=self._base_url, headers=self._headers, timeout=30.0)
@@ -476,6 +510,7 @@ class HttpScratchStore:
 
         Raises RuntimeError on non-2xx responses.
         """
+        sent_token = getattr(self, "_session_token", "")
         try:
             resp = self._client.post(path, json=payload)
         except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError):
@@ -490,7 +525,7 @@ class HttpScratchStore:
                 raise RuntimeError(f"HttpScratchStore: connect failed on retry {path}: {exc}") from exc
         except httpx.HTTPError as exc:
             raise RuntimeError(f"HttpScratchStore: network error on {path}: {exc}") from exc
-        if resp.status_code == 401 and self._refresh_session_token_from_lease():
+        if resp.status_code == 401 and self._refresh_session_token_from_lease(sent_token):
             # nexus-g5hzk: the owner rotated the token; ours went stale. The
             # fresh one was just adopted from the lease — retry ONCE.
             try:
@@ -511,6 +546,7 @@ class HttpScratchStore:
 
     def _post_raw(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         """POST *payload* to *path* and return parsed JSON without raising on 404-class."""
+        sent_token = getattr(self, "_session_token", "")
         try:
             resp = self._client.post(path, json=payload)
         except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError):
@@ -524,7 +560,7 @@ class HttpScratchStore:
                 raise RuntimeError(f"HttpScratchStore: connect failed on retry {path}: {exc}") from exc
         except httpx.HTTPError as exc:
             raise RuntimeError(f"HttpScratchStore: network error on {path}: {exc}") from exc
-        if resp.status_code == 401 and self._refresh_session_token_from_lease():
+        if resp.status_code == 401 and self._refresh_session_token_from_lease(sent_token):
             # nexus-g5hzk: rotated token — retry ONCE with the lease's fresh one.
             try:
                 resp = self._client.post(path, json=payload)

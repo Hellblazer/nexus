@@ -576,6 +576,12 @@ class TestTokenRotationSelfHeal:
         _STORE.clear()
         _REQUIRED_T1_TOKEN["token"] = self.FRESH  # server only accepts FRESH
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        # Review M2: the SUT itself mutates NX_T1_SESSION[_ID] on a heal;
+        # pre-registering them with monkeypatch makes teardown revert the
+        # SUT's raw os.environ writes too (no cross-test leak).
+        monkeypatch.setenv("NX_T1_SESSION", self.STALE)
+        monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
+        monkeypatch.setenv("NX_T1_SESSION_ID", SESSION)
         store = HttpScratchStore(
             base_url=fake_server,
             tenant=DEFAULT_TENANT,
@@ -594,8 +600,11 @@ class TestTokenRotationSelfHeal:
         id_ = gated_store.put("healed content")
         assert id_  # the retry with the adopted token succeeded
         assert gated_store._session_token == self.FRESH
-        # Subprocess children must inherit the LIVE token.
+        # Subprocess children must inherit the LIVE token — and the id
+        # stays the ID (review M1: the ctor fallback chain must never
+        # collapse the token into a session id for a later store).
         assert os.environ.get("NX_T1_SESSION") == self.FRESH
+        assert os.environ.get("NX_T1_SESSION_ID") == SESSION
         # And subsequent calls ride the fresh token with no further 401 dance.
         assert gated_store.get(id_) is not None
 
