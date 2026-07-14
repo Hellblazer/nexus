@@ -832,6 +832,13 @@ def reconcile_cmd(dry_run: bool) -> None:
         click.echo(f"{verb} 0 document(s); 0 could not be matched to chunks.")
         return
 
+    ghost_count = sum(1 for e in gapped if e.chunk_count == 0)
+    click.echo(
+        f"Scanning: {len(entries)} candidate(s), {len(gapped)} gapped "
+        f"({ghost_count} ghost-class chunk_count==0); rebuilding manifests "
+        f"from T3 chunks…"
+    )
+
     t3 = make_t3()
     writer = _get_catalog_writer() if not dry_run else None
     reconciled = 0
@@ -839,74 +846,128 @@ def reconcile_cmd(dry_run: bool) -> None:
     dup_old_total = 0
     dup_new_total = 0
     unmatched: list = []
-    try:
-        for entry in gapped:
-            content_hash = (entry.meta or {}).get("content_hash", "")
-            if not content_hash or not entry.physical_collection:
-                unmatched.append(entry)
-                continue
-            try:
-                col = t3.get_collection(entry.physical_collection)
-                fetched = _paginated_get(
-                    col, include=["metadatas"],
-                    where={"content_hash": content_hash},
-                )
-            except Exception as exc:  # noqa: BLE001 — boundary catch; a T3 fetch failure for one doc must not abort the whole reconcile pass
-                _log.warning(
-                    "catalog_reconcile_t3_fetch_failed",
-                    tumbler=str(entry.tumbler), error=str(exc),
-                )
-                unmatched.append(entry)
-                continue
-            ids = fetched.get("ids") or []
-            metas = fetched.get("metadatas") or []
-            if not ids:
-                unmatched.append(entry)
-                continue
-            # RDR-108 Phase 3 dropped chunk_index from chunk metadata, so
-            # the char/line span is the only ordering signal left; fall
-            # back to line_start, then to a stable id sort so identically-
-            # spanned rows (both absent) still get a deterministic order.
-            def _order_key(pair: tuple) -> tuple:
-                _cid, m = pair
-                m = m or {}
-                start = m.get("chunk_start_char")
-                if start is None:
-                    start = m.get("line_start")
-                return (0, start, _cid) if start is not None else (1, 0, _cid)
 
-            ordered = sorted(zip(ids, metas), key=_order_key)
-            indexed_metas = []
-            for i, (cid, m) in enumerate(ordered):
-                m = dict(m or {})
-                if not m.get("chunk_text_hash"):
-                    m["chunk_text_hash"] = cid
-                m["chunk_index"] = i
-                indexed_metas.append((i, m))
-            chunks = _manifest_chunk_rows(indexed_metas)
-            if not any(c["chash"] for c in chunks):
-                unmatched.append(entry)
+    # nexus-8g0ch: group by physical_collection and batch-fetch chunk rows
+    # with a paged ``$in`` over content hashes. The prior shape issued 2-3
+    # HTTP round-trips PER gapped document — 1h42m+ on a service-mode
+    # catalog with 8.7k gapped docs — for a walk that is now a few hundred
+    # calls total. Per-collection progress lines keep a long pass legible
+    # (observability doctrine: a silent long walk reads as a hang).
+    from collections import defaultdict  # noqa: PLC0415 — command-local
+
+    by_coll: dict[str, list] = defaultdict(list)
+    for entry in gapped:
+        content_hash = (entry.meta or {}).get("content_hash", "")
+        if not content_hash or not entry.physical_collection:
+            unmatched.append(entry)
+            continue
+        by_coll[entry.physical_collection].append((entry, content_hash))
+
+    _IN_BATCH = 64  # hashes per $in predicate (one predicate; well under quota)
+
+    try:
+        for coll_i, (coll_name, pairs) in enumerate(sorted(by_coll.items()), 1):
+            try:
+                col = t3.get_collection(coll_name)
+            except Exception as exc:  # noqa: BLE001 — boundary catch; one collection's failure must not abort the pass
+                _log.warning(
+                    "catalog_reconcile_collection_unavailable",
+                    collection=coll_name, docs=len(pairs), error=str(exc),
+                )
+                unmatched.extend(e for e, _ in pairs)
+                click.echo(
+                    f"  [{coll_i}/{len(by_coll)}] {coll_name}: "
+                    f"UNAVAILABLE — {len(pairs)} doc(s) unmatched"
+                )
                 continue
-            if len(chunks) < entry.chunk_count:
-                # RDR-108: duplicate chunk text collapses to one T3 row by
-                # design, so a rebuilt manifest can legitimately have fewer
-                # rows than the document's stale chunk_count. Not an error —
-                # tracked so the summary reports it instead of hiding it.
-                dup_collapsed += 1
-                dup_old_total += entry.chunk_count
-                dup_new_total += len(chunks)
-            if not dry_run:
-                writer.atomic_manifest_replace(str(entry.tumbler), chunks)
-                # atomic_manifest_replace's local-SQLite path re-derives
-                # chunk_count from the post-write row count in the same
-                # transaction, but the HTTP/service-mode path only resyncs
-                # when new_chunk_count= is passed (which this call site
-                # doesn't do) -- so chunk_count stayed stale forever in
-                # service mode and the gap detector re-flagged the same
-                # documents on every run (GH #1371 follow-up). Explicitly
-                # resyncing here is correct and idempotent on both backends.
-                writer.resync_chunk_count_cache(str(entry.tumbler))
-            reconciled += 1
+
+            # hash -> (ids, metas), shared across docs with identical content.
+            rows_by_hash: dict[str, tuple[list, list]] = defaultdict(
+                lambda: ([], [])
+            )
+            hashes = sorted({ch for _, ch in pairs})
+            fetched_rows = 0
+            for i in range(0, len(hashes), _IN_BATCH):
+                batch = hashes[i:i + _IN_BATCH]
+                try:
+                    fetched = _paginated_get(
+                        col, include=["metadatas"],
+                        where={"content_hash": {"$in": batch}},
+                    )
+                except Exception as exc:  # noqa: BLE001 — boundary catch; parity with the old per-doc failure semantics
+                    _log.warning(
+                        "catalog_reconcile_t3_fetch_failed",
+                        collection=coll_name, batch_size=len(batch),
+                        error=str(exc),
+                    )
+                    batch_set = set(batch)
+                    unmatched.extend(
+                        e for e, ch in pairs if ch in batch_set
+                    )
+                    pairs = [(e, ch) for e, ch in pairs if ch not in batch_set]
+                    continue
+                for cid, m in zip(
+                    fetched.get("ids") or [], fetched.get("metadatas") or [],
+                ):
+                    h = (m or {}).get("content_hash", "")
+                    if h:
+                        rows_by_hash[h][0].append(cid)
+                        rows_by_hash[h][1].append(m)
+                        fetched_rows += 1
+            click.echo(
+                f"  [{coll_i}/{len(by_coll)}] {coll_name}: {len(pairs)} doc(s), "
+                f"{fetched_rows} chunk row(s) fetched"
+            )
+
+            for entry, content_hash in pairs:
+                ids, metas = rows_by_hash.get(content_hash, ([], []))
+                if not ids:
+                    unmatched.append(entry)
+                    continue
+                # RDR-108 Phase 3 dropped chunk_index from chunk metadata, so
+                # the char/line span is the only ordering signal left; fall
+                # back to line_start, then to a stable id sort so identically-
+                # spanned rows (both absent) still get a deterministic order.
+                def _order_key(pair: tuple) -> tuple:
+                    _cid, m = pair
+                    m = m or {}
+                    start = m.get("chunk_start_char")
+                    if start is None:
+                        start = m.get("line_start")
+                    return (0, start, _cid) if start is not None else (1, 0, _cid)
+
+                ordered = sorted(zip(ids, metas), key=_order_key)
+                indexed_metas = []
+                for i, (cid, m) in enumerate(ordered):
+                    m = dict(m or {})
+                    if not m.get("chunk_text_hash"):
+                        m["chunk_text_hash"] = cid
+                    m["chunk_index"] = i
+                    indexed_metas.append((i, m))
+                chunks = _manifest_chunk_rows(indexed_metas)
+                if not any(c["chash"] for c in chunks):
+                    unmatched.append(entry)
+                    continue
+                if len(chunks) < entry.chunk_count:
+                    # RDR-108: duplicate chunk text collapses to one T3 row by
+                    # design, so a rebuilt manifest can legitimately have fewer
+                    # rows than the document's stale chunk_count. Not an error —
+                    # tracked so the summary reports it instead of hiding it.
+                    dup_collapsed += 1
+                    dup_old_total += entry.chunk_count
+                    dup_new_total += len(chunks)
+                if not dry_run:
+                    writer.atomic_manifest_replace(str(entry.tumbler), chunks)
+                    # atomic_manifest_replace's local-SQLite path re-derives
+                    # chunk_count from the post-write row count in the same
+                    # transaction, but the HTTP/service-mode path only resyncs
+                    # when new_chunk_count= is passed (which this call site
+                    # doesn't do) -- so chunk_count stayed stale forever in
+                    # service mode and the gap detector re-flagged the same
+                    # documents on every run (GH #1371 follow-up). Explicitly
+                    # resyncing here is correct and idempotent on both backends.
+                    writer.resync_chunk_count_cache(str(entry.tumbler))
+                reconciled += 1
     finally:
         if writer is not None:
             _close = getattr(writer, "close", None)

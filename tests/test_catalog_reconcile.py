@@ -338,3 +338,41 @@ def test_reconcile_zero_ghost_with_hash_but_no_t3_chunks_reported(t3_db, catalog
     assert result.exit_code == 0, result.output
     assert "Reconciled 0 document(s); 1 could not be matched" in result.output
     assert "1.3.151" in result.output
+
+
+def test_reconcile_batches_t3_fetches_per_collection(t3_db, catalog, runner):
+    """nexus-8g0ch: the T3 fetch is batched per collection ($in over content
+    hashes), never per document. The pre-fix shape issued 2-3 HTTP round
+    trips PER gapped doc — 1h42m+ on a real 8.7k-gap service-mode catalog.
+    Three gapped docs sharing one collection must cost exactly ONE
+    _paginated_get call (3 unique hashes < the 64-hash batch size)."""
+    from unittest.mock import patch as _patch  # noqa: PLC0415 — file pattern: deferred imports
+
+    import nexus.indexer as indexer_mod  # noqa: PLC0415 — file pattern: deferred imports
+
+    for i in range(1, 4):
+        _seed_doc(
+            catalog, tumbler=f"1.1.{i}", collection="code__delos",
+            chunk_count=2, content_hash=f"hash{i:03d}",
+        )
+        _seed_chunks(t3_db, "code__delos", f"hash{i:03d}", 2)
+
+    calls: list[dict] = []
+    real = indexer_mod._paginated_get
+
+    def counting(col, **kwargs):
+        calls.append(kwargs.get("where") or {})
+        return real(col, **kwargs)
+
+    with patch_reconcile(t3_db, catalog), \
+            _patch("nexus.indexer._paginated_get", side_effect=counting):
+        result = runner.invoke(main, ["catalog", "reconcile"])
+    assert result.exit_code == 0, result.output
+    assert "Reconciled 3 document(s)" in result.output
+
+    assert len(calls) == 1, f"expected ONE batched fetch, got {len(calls)}: {calls}"
+    in_list = calls[0]["content_hash"]["$in"]
+    assert sorted(in_list) == ["hash001", "hash002", "hash003"]
+    # Progress emission (observability half of nexus-8g0ch): per-collection
+    # line plus the scan header.
+    assert "gapped" in result.output and "code__delos" in result.output
