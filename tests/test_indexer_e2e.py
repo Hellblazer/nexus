@@ -784,9 +784,9 @@ def test_reindex_self_heals_missing_manifest(
     assert len(manifest_before) > 0
 
     # Sabotage: the GH #1397 shape — manifest rows gone, chunk_count zeroed.
-    cat._db.execute("DELETE FROM document_chunks WHERE doc_id = ?", (tumbler,))
+    cat._db.execute("DELETE FROM document_chunks WHERE doc_id = ?", (tumbler,))  # epsilon-allow: deliberate corruption injection — the GH #1397 manifest-drop shape under test
     cat._db.execute(
-        "UPDATE documents SET chunk_count = 0 WHERE tumbler = ?", (tumbler,),
+        "UPDATE documents SET chunk_count = 0 WHERE tumbler = ?", (tumbler,),  # epsilon-allow: deliberate corruption injection — the GH #1397 manifest-drop shape under test
     )
     cat._db.commit()
     cat._db.close()
