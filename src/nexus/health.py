@@ -134,6 +134,50 @@ def _check_python() -> list[HealthResult]:
     return [r]
 
 
+def _check_process_skew() -> list[HealthResult]:
+    """nexus-4xgfy: the disk can be upgraded while every running process
+    still executes the old code from memory — three live incidents
+    (6.7.0/6.7.1 upgrades) where doctor said 'latest' and the whole
+    machine was stale. Enumerate running conexus processes, compare their
+    start times against the installed distribution's mtime, and WARN with
+    the per-process remedy. Also names the install's uv-receipt source so
+    'uv tool upgrade did nothing' is self-explanatory.
+    """
+    try:
+        from nexus.upgrade_finish import (  # noqa: PLC0415 — deferred import
+            detect_stale_processes,
+            install_source,
+        )
+
+        report = detect_stale_processes()
+    except Exception:  # noqa: BLE001 — probe failure must not fail doctor; skip silently
+        return []
+    if not report.stale:
+        return [HealthResult(
+            label="Process freshness",
+            ok=True,
+            detail=(
+                f"all running conexus processes match the installed "
+                f"{report.installed_version} (install source: "
+                f"{install_source().split(' — ')[0]})"
+            ),
+        )]
+    names = ", ".join(
+        f"{p.kind} pid {p.pid}" for p in report.stale[:6]
+    )
+    return [HealthResult(
+        label="Process freshness",
+        ok=False,
+        warn=True,
+        detail=(
+            f"{len(report.stale)} process(es) predate the installed "
+            f"{report.installed_version} and are running OLD code: {names}. "
+            "Run `nx daemon restart-stale` (restarts what is safe; names "
+            "the Claude sessions only you can close)."
+        ),
+    )]
+
+
 def _check_cli_version() -> list[HealthResult]:
     """Check whether a newer conexus version is available on PyPI."""
     try:
@@ -2701,6 +2745,7 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
 
     results.extend(_check_python())
     results.extend(_check_cli_version())
+    results.extend(_check_process_skew())
     results.extend(_check_plugin_name())
     results.extend(_check_credential_persistence())
 
