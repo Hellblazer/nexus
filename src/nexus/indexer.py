@@ -2480,7 +2480,7 @@ def _prune_deleted_files(
             _log.info("pruned orphan chunks",
                       collection=collection_name, count=len(orphan_ids),
                       fraction=round(frac, 3), sample=orphan_sample)
-            _log.debug("pruned orphan chunk ids",
+            _log.debug("pruned_orphan_chunk_ids",
                        collection=collection_name, ids=orphan_ids)
 
 
