@@ -94,13 +94,20 @@ jobs:
       # deferring it keeps linux concurrency while giving mac an uncontended slot.
       max-parallel: 2
       matrix:
+        # maxheap: log-measured per-runner (engine-service-v0.1.40 run 29258747763).
+        # Both linux boxes report ~16GB (5632m showed as 31% of system memory) and
+        # were heap-starved at the pom default (1208/2519 GCs); 11g = ~69%, leaving
+        # room for the observed ~1.7GB native-image RSS overhead above heap.
+        # mac-arm64 stays at the pom default: its log shows peak RSS (4.55GB) never
+        # reached the 5.25GB heap — the 8GB box itself is the constraint there, and
+        # a larger heap would deepen the swap pressure behind its 25%-GC-time build.
         target:
-          - { arch: linux-amd64, runner: ubuntu-latest,    smoke: true }
-          - { arch: linux-arm64, runner: ubuntu-24.04-arm, smoke: true }
+          - { arch: linux-amd64, runner: ubuntu-latest,    smoke: true,  maxheap: 11g }
+          - { arch: linux-arm64, runner: ubuntu-24.04-arm, smoke: true,  maxheap: 11g }
           # mac-arm64: build + publish, but UNSMOKED. native-smoke.sh needs Docker
           # (throwaway pgvector) which GH macOS lacks; macOS runtime correctness is
           # covered by the mac-arm64 CA-3 gate + the lp2qo native-serving spike.
-          - { arch: mac-arm64,   runner: macos-14,          smoke: false }
+          - { arch: mac-arm64,   runner: macos-14,          smoke: false, maxheap: 5632m }
     env:
       ASSET: nexus-service-${{ matrix.target.arch }}
 
@@ -188,7 +195,7 @@ jobs:
         # -Pprebuilt-jooq unbinds the testcontainers codegen and compiles the
         # downloaded sources → no Docker needed (mac-arm64 builds here).
         # Do NOT `clean`: it would wipe the downloaded target/generated-sources/jooq.
-        run: ./mvnw -q -Pnative -Pprebuilt-jooq -DskipTests package
+        run: ./mvnw -q -Pnative -Pprebuilt-jooq -DskipTests -Dnative.image.maxheap=${{ matrix.target.maxheap }} package
 
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         if: matrix.target.smoke

@@ -638,7 +638,11 @@ jobs:
         # guards) — it only skips the optimization passes — so it cuts the build ~half
         # and lowers peak memory while preserving the gate's purpose. The RELEASE build
         # (engine-service-release.yml) keeps the default -O2 full optimization.
-        run: ./mvnw -q -Pnative -Pprebuilt-jooq -DskipTests -Dnative.image.opt=-Ob package
+        # maxheap 11g: ubuntu-latest is a 16GB box by the release-run logs
+        # (run 29258747763: 5632m reported as 31.3% of system memory, 1208
+        # heap-pressure GCs) — the pom's 5632m default is sized for a 7GB
+        # runner this job no longer uses.
+        run: ./mvnw -q -Pnative -Pprebuilt-jooq -DskipTests -Dnative.image.opt=-Ob -Dnative.image.maxheap=11g package
 
   write-seam-gate:
     # nexus-h29w1 — Behavioural cross-boundary write-seam CI gate (F1 closure).
