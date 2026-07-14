@@ -263,6 +263,14 @@ _LOCK_STALE_SECONDS = 5  # lock files older than this with no live PID are stale
 #: multi-page behaviour without a 1000+ file corpus.
 _CATALOG_REGISTER_PAGE = 1000
 
+#: nexus-mr89x: minimum orphan count before the GC safety floor can refuse a
+#: sweep. Below this, even a 100%-orphan verdict is small enough to be a
+#: plausible real cleanup (tiny collections, test corpora) and refusing
+#: would just nag; at/above it, a >floor-fraction verdict is the
+#: manifest-gap misclassification shape. Pairs with NX_GC_FLOOR_FRACTION
+#: (default 0.5) and the NX_GC_FORCE=1 operator override at the check site.
+_GC_FLOOR_MIN_CHUNKS = 100
+
 
 def _clear_stale_lock(lock_path: Path) -> None:
     """Delete *lock_path* if it is stale (dead PID or old empty file).
@@ -2384,9 +2392,59 @@ def _prune_deleted_files(
                                "to populate chunk_text_hash; until then GC "
                                "cannot decide these chunks safely"))
         if orphan_ids:
+            # nexus-mr89x (a): partial-gap safety floor — the sibling of the
+            # manifest-EMPTY guard above for the manifest-PARTIAL case. A
+            # collection-name stamp mismatch (the nexus-x6kdz class) or a
+            # mass manifest drop classifies ~ALL chunks as orphans; deleting
+            # them is unrecoverable data loss (the 2026-07-09 field incident
+            # pruned 6 live RDR docs). Refuse mass deletion: above the floor
+            # the sweep is far more likely a manifest defect than a real
+            # cleanup, and the c21fk self-heal pass has ALREADY run before
+            # this GC — a surviving mass-orphan verdict is deeply suspect.
+            # Legitimate large cleanups stay under the floor or use the
+            # explicit override.
+            total = len(all_chunks["ids"])
+            frac = len(orphan_ids) / total
+            floor_frac = float(os.environ.get("NX_GC_FLOOR_FRACTION", "0.5"))
+            if (
+                len(orphan_ids) >= _GC_FLOOR_MIN_CHUNKS
+                and frac > floor_frac
+                and os.environ.get("NX_GC_FORCE", "") != "1"
+            ):
+                _log.warning(
+                    "gc_safety_floor_refused",
+                    collection=collection_name,
+                    orphans=len(orphan_ids), total=total,
+                    fraction=round(frac, 3),
+                    note=(
+                        "refusing to prune: orphan fraction exceeds the "
+                        "safety floor — this is the manifest-gap "
+                        "misclassification shape (nexus-mr89x), not a "
+                        "normal cleanup. Verify with `nx catalog doctor "
+                        "--t3-vs-catalog` and `nx catalog reconcile`; "
+                        "override with NX_GC_FORCE=1 only after confirming "
+                        "the chunks are genuinely dead."
+                    ),
+                )
+                continue
+            # nexus-mr89x (b): per-doc visibility. The field incident gave
+            # zero per-doc signal — the operator reverse-engineered the 6
+            # pruned docs from a set difference. Log a bounded identity
+            # sample at INFO; the full id list at DEBUG.
+            _meta_by_id = dict(zip(all_chunks["ids"], all_chunks["metadatas"]))
+            sample = [
+                {
+                    "chash12": ((_meta_by_id.get(cid) or {}).get("chunk_text_hash") or cid)[:12],
+                    "title": (_meta_by_id.get(cid) or {}).get("title", ""),
+                }
+                for cid in orphan_ids[:20]
+            ]
             _batched_delete(col, orphan_ids)
             _log.info("pruned orphan chunks",
-                      collection=collection_name, count=len(orphan_ids))
+                      collection=collection_name, count=len(orphan_ids),
+                      fraction=round(frac, 3), sample=sample)
+            _log.debug("pruned orphan chunk ids",
+                       collection=collection_name, ids=orphan_ids)
 
 
 # ── Main indexing pipeline ───────────────────────────────────────────────────

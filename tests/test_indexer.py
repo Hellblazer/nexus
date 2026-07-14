@@ -2073,3 +2073,55 @@ def test_drain_markers_on_phase_none_safe():
     from nexus.indexer import _drain_batcher_with_markers
     b = _StubBatcher({"chunks": 5, "collections": 1, "in_flight": 0}, flushes=1)
     assert _drain_batcher_with_markers(b, None) == 1
+
+
+class TestGcSafetyFloor:
+    """nexus-mr89x (a): the partial-gap safety floor — the sibling of the
+    manifest-empty guard for the manifest-PARTIAL case. A collection-name
+    stamp mismatch or mass manifest drop classifies ~all chunks as orphans;
+    the 2026-07-09 field incident pruned 6 live RDR docs that way."""
+
+    @staticmethod
+    def _mass_orphan_setup(n_total=200, n_live=20):
+        """n_total chunks, only n_live referenced -> 90% orphan verdict."""
+        rows = [(f"id-{i:04d}", f"{i:032d}" + "f" * 32) for i in range(n_total)]
+        live = {r[1][:32] for r in rows[:n_live]}
+        col = _gc_col(rows)
+        db = MagicMock()
+        db.get_or_create_collection.return_value = col
+        db.get_collection.return_value = col
+        catalog = _gc_catalog({"code__repo": live, "docs__repo": set()})
+        return col, db, catalog
+
+    def test_mass_orphan_verdict_refused(self, monkeypatch):
+        from nexus.indexer import _prune_deleted_files  # noqa: PLC0415 — file pattern: deferred imports
+        monkeypatch.delenv("NX_GC_FORCE", raising=False)
+        col, db, catalog = self._mass_orphan_setup()
+        _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
+        assert _deleted_ids(col) == []  # refused: nothing deleted
+
+    def test_operator_override_allows_the_sweep(self, monkeypatch):
+        from nexus.indexer import _prune_deleted_files  # noqa: PLC0415 — file pattern: deferred imports
+        monkeypatch.setenv("NX_GC_FORCE", "1")
+        col, db, catalog = self._mass_orphan_setup()
+        _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
+        assert len(_deleted_ids(col)) == 180  # explicit override sweeps
+
+    def test_under_floor_fraction_prunes_normally(self, monkeypatch):
+        from nexus.indexer import _prune_deleted_files  # noqa: PLC0415 — file pattern: deferred imports
+        monkeypatch.delenv("NX_GC_FORCE", raising=False)
+        # 200 chunks, 120 live -> 40% orphans: under the 50% floor.
+        col, db, catalog = self._mass_orphan_setup(n_total=200, n_live=120)
+        _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
+        assert len(_deleted_ids(col)) == 80
+
+    def test_small_collection_exempt_from_floor(self, monkeypatch):
+        from nexus.indexer import _prune_deleted_files  # noqa: PLC0415 — file pattern: deferred imports
+        monkeypatch.delenv("NX_GC_FORCE", raising=False)
+        # ~89% orphan verdict but only 8 orphans (< _GC_FLOOR_MIN_CHUNKS):
+        # plausible real cleanup of a tiny corpus — must still prune.
+        # (n_live=1 keeps the manifest non-empty so the older oqku
+        # empty-manifest guard does not preempt this case.)
+        col, db, catalog = self._mass_orphan_setup(n_total=9, n_live=1)
+        _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
+        assert len(_deleted_ids(col)) == 8
