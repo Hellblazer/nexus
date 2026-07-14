@@ -1131,3 +1131,75 @@ class TestManifestIsAuthoritative:
         # And docs_for_chashes won't find any chash mapping to this
         # doc either.
         assert cat.docs_for_chashes(["x" * 32]) == {}
+
+
+class TestManifestWritesRefreshIndexedAt:
+    """nexus-p5qk8 (GH #1397 field report): a manifest write is an indexing
+    event — the parent doc's indexed_at must reflect it. Before this fix a
+    --force backfill repaired chunk_count=0 ghosts while leaving indexed_at
+    frozen at the original ghost registration date."""
+
+    _FROZEN = "2026-07-09T17:42:10+00:00"
+
+    def _doc_with_frozen_ts(self, tmp_path):
+        cat = _make_catalog(tmp_path)
+        _insert_doc(cat, "1.3.142", "rdr__x__voyage-context-3__v1")
+        cat._db.execute(  # epsilon-allow: fixture freezes indexed_at to the pre-repair date under test
+            "UPDATE documents SET indexed_at = ? WHERE tumbler = ?",
+            (self._FROZEN, "1.3.142"),
+        )
+        cat._db.commit()
+        return cat
+
+    def _indexed_at(self, cat):
+        return cat._db.execute(
+            "SELECT indexed_at FROM documents WHERE tumbler = '1.3.142'",
+        ).fetchone()[0]
+
+    def test_append_manifest_chunks_stamps_indexed_at(self, tmp_path):
+        cat = self._doc_with_frozen_ts(tmp_path)
+        cat.append_manifest_chunks("1.3.142", [
+            {"position": 0, "chash": "c" * 32, "chunk_index": 0},
+        ])
+        after = self._indexed_at(cat)
+        assert after != self._FROZEN
+        assert after  # a real timestamp, not cleared
+
+    def test_write_manifest_stamps_indexed_at(self, tmp_path):
+        cat = self._doc_with_frozen_ts(tmp_path)
+        cat.write_manifest("1.3.142", [
+            {"position": 0, "chash": "d" * 32, "chunk_index": 0},
+        ])
+        assert self._indexed_at(cat) != self._FROZEN
+
+    def test_empty_append_does_not_stamp(self, tmp_path):
+        cat = self._doc_with_frozen_ts(tmp_path)
+        cat.append_manifest_chunks("1.3.142", [])
+        assert self._indexed_at(cat) == self._FROZEN
+
+    def test_atomic_manifest_replace_stamps_indexed_at(self, tmp_path):
+        """nexus-cmjr7: the PRIMARY production write path (the shrink-reindex
+        hook calls atomic_manifest_replace directly) briefly had exactly the
+        empty-clear stamping bug during review — pin both directions."""
+        cat = self._doc_with_frozen_ts(tmp_path)
+        cat.atomic_manifest_replace("1.3.142", [
+            {"position": 0, "chash": "e" * 32, "chunk_index": 0},
+        ])
+        assert self._indexed_at(cat) != self._FROZEN
+
+    def test_atomic_manifest_replace_empty_clear_does_not_stamp(self, tmp_path):
+        cat = self._doc_with_frozen_ts(tmp_path)
+        cat.append_manifest_chunks("1.3.142", [
+            {"position": 0, "chash": "e" * 32, "chunk_index": 0},
+        ])
+        cat._db.execute(  # epsilon-allow: fixture re-freezes indexed_at after seeding rows
+            "UPDATE documents SET indexed_at = ? WHERE tumbler = ?",
+            (self._FROZEN, "1.3.142"),
+        )
+        cat._db.commit()
+        cat.atomic_manifest_replace("1.3.142", [])
+        assert self._indexed_at(cat) == self._FROZEN  # a clear is not an indexing event
+        count = cat._db.execute(
+            "SELECT chunk_count FROM documents WHERE tumbler = '1.3.142'",
+        ).fetchone()[0]
+        assert count == 0  # ...but the projection still re-derives
