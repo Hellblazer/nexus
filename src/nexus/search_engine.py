@@ -424,7 +424,17 @@ def _prefilter_from_catalog(
     if not where or catalog is None:
         return None
 
-    db = getattr(catalog, "_db", None)
+    # Service-mode HttpCatalogClient deliberately exposes ``_db`` as a
+    # RAISING property (the xnz0o sentinel) — getattr's default only covers
+    # a MISSING attribute, so without the try this best-effort optimization
+    # killed every MCP search carrying a catalog-mappable where key
+    # (page_count, bib_year, ...) in service mode, the shipped default
+    # (found live in the 6.7.0 post-release shakeout). No prefilter is
+    # available over HTTP; fall through to standard post-filtering.
+    try:
+        db = getattr(catalog, "_db", None)
+    except Exception:  # noqa: BLE001 — the sentinel raises by design; prefilter is best-effort
+        return None
     if db is None:
         return None
 
