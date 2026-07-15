@@ -8,7 +8,7 @@ author: Hal Hildebrand
 reviewed-by: ""
 created: 2026-07-15
 related_issues: []
-related_rdrs: [RDR-024, RDR-065, RDR-066, RDR-069, RDR-121]
+related_rdrs: [RDR-024, RDR-065, RDR-066, RDR-069, RDR-109, RDR-121, RDR-149]
 supersedes: []
 related_tests: []
 ---
@@ -162,7 +162,14 @@ Full draft: T2 `nexus/design-orchestration-protocol.md` (REVISED v2 per critique
    expectations-file mechanism proves unreliable in Phase 1.
 3. **Prose-only protocol (v1 design)** — rejected by the design critique:
    unenforced text in every dispatch degrades under context pressure;
-   the observed failures happened WITH instructions present.
+   the observed failures happened WITH instructions present. Project-local
+   precedent (meta-critique 2026-07-15): the daemon-lifecycle class
+   consumed ~10 RDRs of tier-local prose fixes before RDR-149 ended it
+   with a shared primitive + conformance suite + lint; RDR-109's
+   mode-lint promotion promise sat unkept 2+ months until an incident
+   forced today's exact-count ratchet. In this codebase, prose
+   commitments decay silently; mechanized ones (ratchets, conformance
+   suites, hooks) hold.
 4. **SubagentStop reminder (non-blocking)** — rejected: highest-frequency
    failure warrants the mechanical ratchet; block-once with the
    stop_hook_active guard bounds the cost (verified 21c).
@@ -171,6 +178,18 @@ Full draft: T2 `nexus/design-orchestration-protocol.md` (REVISED v2 per critique
 6. **Agent-side self-reported directive ledger** (v1) — rejected: cannot
    report unread mail; replaced by orchestrator-side send-log diffing +
    final-inbox-poll row.
+7. **Surface-narrowing: sync-only dispatch for shared-state work**
+   (meta-critique 2026-07-15) — PARTIALLY ADOPTED for Gaps 2/4. Finding 4
+   already establishes synchronous dispatches are structurally immune to
+   Gaps 1/2 (result returns as the tool result; no mailbox race window).
+   Dispatch policy: work that will stage/commit files in the shared tree
+   or is likely to receive mid-flight scope updates routes through
+   synchronous dispatch by default; background/named teammates are
+   reserved for genuinely parallel work on non-shared state (worktree
+   isolation, read-only review, independent harness runs). Not adopted
+   as a hard ban: long-running suites and watch-style tasks legitimately
+   need background mode — for those the Gap-1/2 mechanisms plus the
+   tripwires below are the defense.
 
 ## Trade-offs
 
@@ -192,11 +211,20 @@ Full draft: T2 `nexus/design-orchestration-protocol.md` (REVISED v2 per critique
   (below). A missed declaration degrades to today's behavior (no
   block), never worse.
 - **Orchestrator-procedural fixes (Gap 2, Gap 4 orchestrator side)**:
-  bind via memory directives, not mechanism — verifiable only
-  retrospectively (transcript/`git log --stat` audits). Accepted: the
-  mechanical alternatives (message middleware, commit hooks) exceed
-  proportionality for a single-user workflow today; revisit if retros
-  show recurrence.
+  bind via memory directives, not mechanism. Accepted: the mechanical
+  alternatives (message middleware, commit hooks) exceed proportionality
+  for a single-user workflow today. BUT — per the meta-critique — the
+  "revisit if retros show recurrence" conditional is itself the promise
+  shape that decayed twice in this project (RDR-109 mode-lint, the
+  pre-RDR-149 daemon-lifecycle class), so Gaps 2/4 get cheap TRIPWIRES
+  now rather than a deferred intention: (a) a commit-scope audit helper
+  (Phase 0) that lists every session commit's file set from
+  `git log --stat` for foreign-file detection, and (b) a crossed-resend
+  counter (T1 scratch, incremented at each detect-and-resend). Escalation
+  threshold, concrete: ANY foreign-file commit, or >2 crossed-resends in
+  a session, triggers mechanization (commit hook / middleware) as a
+  follow-on bead — not another retro note. Surface-narrowing
+  (Alternative 7) shrinks the exposed window in the meantime.
 - **Plugin-shipped hook**: rides a plugin release; interim protection is
   the memory-directive discipline already active.
 
@@ -204,7 +232,9 @@ Full draft: T2 `nexus/design-orchestration-protocol.md` (REVISED v2 per critique
 
 - **Phase 0 (repo-local, immediate)**: mkdir lock helper + guards in the
   four audited harnesses (finding 2) + per-script concurrent-invocation
-  tests. Independent of the plugin cycle.
+  tests; plus the Gap-4 commit-scope audit helper (session-ranged
+  `git log --stat` file-set listing for foreign-file detection).
+  Independent of the plugin cycle.
 - **Phase 1 (plugin)**: expectations-file write path (orchestrator
   dispatch convention + SubagentStart stamp if payload allows) — the
   write happens BEFORE the dispatch call, never after, closing the
@@ -397,7 +427,10 @@ Adopt the v2 seed design with the hook-point choice settled by finding 5:
 2. **Gap 2 (directive races)** — orchestrator-side send-log diffing +
    the final-inbox-poll heredoc row; ledger header retained only as the
    diff's input format. Orchestrator behaviors bind via the durable
-   memory directive, not skill prose.
+   memory directive, not skill prose. Update-likely work prefers
+   synchronous dispatch (Alternative 7); each detect-and-resend
+   increments the T1 crossed-resend counter, and >2 in a session trips
+   the mechanization escalation (Trade-offs).
 3. **Gap 3 (singleton resources)** — mkdir-based lock helper (verified
    both platforms; stale-lock pid+liveness handling) across the four
    audited fixed-resource harnesses (finding 2), each with a
@@ -406,9 +439,29 @@ Adopt the v2 seed design with the hook-point choice settled by finding 5:
    (heredoc row); orchestrator commits are pathspec-limited
    (`git commit <paths>`) — both already binding via the memory
    directive; the heredoc row makes the agent side injected rather
-   than remembered.
+   than remembered. Commit-adjacent work prefers synchronous dispatch
+   or worktree isolation (Alternative 7); the Phase-0 commit-scope
+   audit helper is the tripwire, and ANY foreign-file commit trips the
+   mechanization escalation (Trade-offs).
 
 Verification set: cc-validation scenario 21 (standing), a new scenario
 for the production Stop-hook behavior, and the per-harness lock tests.
 Plugin-shipped artifacts (hook + heredoc rows) ride the next plugin
 release; repo-local locks land immediately.
+
+## Revision History
+
+- 2026-07-15 — Draft from the 6.10.0/6.10.1 marathon's orchestration
+  observations; v1 seed design critiqued (8 findings), revised to v2.
+- 2026-07-15 — Research findings 1-6 (injection path, harness lock
+  surface, mkdir locking, stop-event docs, empirical scenario 21,
+  live git-index incident).
+- 2026-07-15 — Gate round 1 BLOCKED (2 Critical): section set completed;
+  transcript-heuristic discriminator replaced with dispatch-time
+  expectations-file declaration.
+- 2026-07-15 — Gate round 2 PASSED (0C/1S/4O); Significant-1
+  (declaration-discipline residual risk) folded in same day.
+- 2026-07-15 — Meta-critique folds: RDR-149/RDR-109 precedent cited in
+  Alternative 3; Alternative 7 (sync-only surface narrowing) partially
+  adopted for Gaps 2/4; Gap-2/4 tripwires with a concrete escalation
+  threshold replace the "revisit if retros show recurrence" conditional.
