@@ -11,15 +11,31 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from nexus.engine_version import REQUIRED_ENGINE_VERSION
 from nexus.upgrade_finish import (
     SkewReport,
     StaleProcess,
     _parse_etime,
     check_version_transition,
+    converge_engine,
+    detect_engine_convergence,
     detect_stale_processes,
     enumerate_processes,
+    heal_diag_view,
     restart_stale,
 )
+
+_REQUIRED_STR = ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
+_PINNED_TAG = "engine-service-v" + _REQUIRED_STR
+
+
+def _older_version_str() -> str:
+    major, minor, patch = REQUIRED_ENGINE_VERSION
+    if patch > 0:
+        return f"{major}.{minor}.{patch - 1}"
+    if minor > 0:
+        return f"{major}.{minor - 1}.999"
+    return f"{max(major - 1, 0)}.999.999"
 
 _PS = """\
   PID ELAPSED COMMAND
@@ -268,6 +284,24 @@ class TestFailLoud:
                 _pytest.raises(RuntimeError, match="ps failed"):
             enumerate_processes(None)
 
+    def test_ps_binary_missing_raises_actionable_runtimeerror(self):
+        """nexus-cfgo9: a minimal-container box with no `ps` at all (no
+        procps) must raise a CLEAR, actionable RuntimeError -- not let the
+        bare FileNotFoundError escape as an unhandled traceback. Found via
+        the real --package-upgrade rehearsal (debian:trixie-slim has no
+        procps): `nx daemon restart-stale` crashed entirely before engine
+        convergence ever ran. Still fail-loud (never silently zero
+        processes) -- every caller already degrades this ONE leg gracefully
+        on any Exception and continues (restart_stale_cmd,
+        check_version_transition, nx doctor's _check_process_skew)."""
+        import pytest as _pytest  # noqa: PLC0415 — file pattern: deferred imports
+
+        with patch(
+            "nexus.upgrade_finish.subprocess.run",
+            side_effect=FileNotFoundError(2, "No such file or directory", "ps"),
+        ), _pytest.raises(RuntimeError, match="'ps' command is not available"):
+            enumerate_processes(None)
+
 
 class TestCrossVenvGuard:
     def test_dev_venv_never_runs_the_finish_pass(self, tmp_path):
@@ -287,3 +321,455 @@ class TestCrossVenvGuard:
             assert check_version_transition(tmp_path) is None
         detect.assert_not_called()
         assert (tmp_path / "last_seen_version").read_text().strip() == "6.7.1"
+
+
+class TestDetectEngineConvergence:
+    """nexus-cfgo9: the ONE-engine model — an existing local install
+    converges its engine binary to REQUIRED_ENGINE_VERSION rather than
+    merely refusing a stale one."""
+
+    def _creds(self, tmp_path):
+        (tmp_path / "pg_credentials").write_text("NX_DB_URL=postgresql://x/nexus\n")
+
+    def test_not_applicable_in_cloud_mode(self, tmp_path):
+        self._creds(tmp_path)
+        with patch("nexus.config.is_local_mode", return_value=False):
+            status = detect_engine_convergence(tmp_path)
+        assert status.applicable is False
+        assert status.converged is True
+
+    def test_not_applicable_when_service_not_configured(self, tmp_path):
+        # No pg_credentials written -- not a service-mode install.
+        with patch("nexus.config.is_local_mode", return_value=True):
+            status = detect_engine_convergence(tmp_path)
+        assert status.applicable is False
+
+    def test_converged_when_installed_matches_required(self, tmp_path):
+        self._creds(tmp_path)
+        with patch("nexus.config.is_local_mode", return_value=True), patch(
+            "nexus.daemon.binary_lifecycle.read_installed_provenance",
+            return_value={"version": _REQUIRED_STR},
+        ):
+            status = detect_engine_convergence(tmp_path)
+        assert status.applicable is True
+        assert status.converged is True
+        assert status.installed_version == REQUIRED_ENGINE_VERSION
+
+    def test_mismatch_when_installed_is_older(self, tmp_path):
+        self._creds(tmp_path)
+        older = _older_version_str()
+        with patch("nexus.config.is_local_mode", return_value=True), patch(
+            "nexus.daemon.binary_lifecycle.read_installed_provenance",
+            return_value={"version": older},
+        ):
+            status = detect_engine_convergence(tmp_path)
+        assert status.applicable is True
+        assert status.converged is False
+        assert status.installed_version == tuple(
+            int(p) for p in older.split(".")
+        )
+        assert older in status.reason
+        assert _REQUIRED_STR in status.reason
+
+    def test_mismatch_when_no_provenance_recorded(self, tmp_path):
+        self._creds(tmp_path)
+        with patch("nexus.config.is_local_mode", return_value=True), patch(
+            "nexus.daemon.binary_lifecycle.read_installed_provenance",
+            return_value=None,
+        ):
+            status = detect_engine_convergence(tmp_path)
+        assert status.applicable is True
+        assert status.converged is False
+        assert status.installed_version is None
+
+
+class TestConvergeEngine:
+    """converge_engine: the actual install+cycle action (EngineConvergence)."""
+
+    def _creds(self, tmp_path):
+        (tmp_path / "pg_credentials").write_text("NX_DB_URL=postgresql://x/nexus\n")
+
+    def _mismatch(self, tmp_path):
+        self._creds(tmp_path)
+        return patch(
+            "nexus.daemon.binary_lifecycle.read_installed_provenance",
+            return_value={"version": _older_version_str()},
+        )
+
+    def test_skips_cleanly_on_match(self, tmp_path):
+        self._creds(tmp_path)
+        with patch("nexus.config.is_local_mode", return_value=True), patch(
+            "nexus.daemon.binary_lifecycle.read_installed_provenance",
+            return_value={"version": _REQUIRED_STR},
+        ), patch("nexus.daemon.binary_install.install_binary") as install:
+            actions = converge_engine(tmp_path)
+        assert actions == []
+        install.assert_not_called()
+
+    def test_not_applicable_returns_empty(self, tmp_path):
+        # No pg_credentials -- not service mode; must not act or report.
+        with patch("nexus.config.is_local_mode", return_value=True), patch(
+            "nexus.daemon.binary_install.install_binary"
+        ) as install:
+            actions = converge_engine(tmp_path)
+        assert actions == []
+        install.assert_not_called()
+
+    def test_dry_run_reports_without_acting(self, tmp_path):
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                self._mismatch(tmp_path), \
+                patch(
+                    "nexus.upgrade_finish._poison_playbook", return_value=None,
+                ), \
+                patch("nexus.daemon.binary_install.install_binary") as install, \
+                patch("nexus.upgrade_finish.subprocess.run") as sp:
+            actions = converge_engine(tmp_path, dry_run=True)
+        install.assert_not_called()
+        sp.assert_not_called()
+        assert len(actions) == 1
+        assert "would converge" in actions[0]
+        assert _REQUIRED_STR in actions[0]
+
+    def test_dry_run_reports_poison_block_not_would_converge(self, tmp_path):
+        """code-review LOW: the poison gate must be checked BEFORE the
+        dry-run early-return -- a dry-run preview must never promise a
+        convergence a real run would actually block. Previously the poison
+        check ran only on the non-dry-run path, so `--dry-run` against a
+        poisoned store reported 'would converge' when a real run would
+        immediately hit NEEDS-HUMAN instead."""
+        class _StubPlaybook:
+            def terminal_block(self) -> str:
+                return "UNBLOCK: remediate chash poison first, see runbook §8.1"
+
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                self._mismatch(tmp_path), \
+                patch(
+                    "nexus.upgrade_finish._poison_playbook",
+                    return_value=_StubPlaybook(),
+                ), \
+                patch("nexus.daemon.binary_install.install_binary") as install:
+            actions = converge_engine(tmp_path, dry_run=True)
+
+        install.assert_not_called()
+        assert len(actions) == 1
+        assert "would converge" not in actions[0]
+        assert "would be BLOCKED by chash-poison gate" in actions[0]
+        assert "UNBLOCK: remediate chash poison first" in actions[0]
+
+    def test_fires_on_mismatch_installs_pinned_tag_and_cycles_service(self, tmp_path):
+        from unittest.mock import MagicMock
+
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                self._mismatch(tmp_path), \
+                patch(
+                    "nexus.upgrade_finish._poison_playbook", return_value=None,
+                ), \
+                patch(
+                    "nexus.daemon.binary_install.install_binary",
+                    return_value=(tmp_path / "service" / "nexus-service", {"version": _REQUIRED_STR}),
+                ) as install, \
+                patch(
+                    "nexus.upgrade_finish.subprocess.run",
+                    return_value=MagicMock(returncode=0),
+                ) as sp:
+            actions = converge_engine(tmp_path)
+
+        install.assert_called_once()
+        called_tag = install.call_args[0][0]
+        assert called_tag == _PINNED_TAG
+        assert sp.call_count == 2  # stop && start
+        assert any("converged engine" in a and _PINNED_TAG in a for a in actions)
+        assert any("restarted the storage service" in a for a in actions)
+
+    def test_poison_gate_blocks_and_surfaces_unblock_text(self, tmp_path):
+        class _StubPlaybook:
+            def terminal_block(self) -> str:
+                return "UNBLOCK: remediate chash poison first, see runbook §8.1"
+
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                self._mismatch(tmp_path), \
+                patch(
+                    "nexus.upgrade_finish._poison_playbook",
+                    return_value=_StubPlaybook(),
+                ), \
+                patch("nexus.daemon.binary_install.install_binary") as install:
+            actions = converge_engine(tmp_path)
+
+        install.assert_not_called()
+        assert len(actions) == 1
+        assert "NEEDS HUMAN" in actions[0]
+        assert "UNBLOCK: remediate chash poison first" in actions[0]
+
+    def test_install_failure_reports_needs_human_never_raises(self, tmp_path):
+        from nexus.daemon.binary_install import BinaryVerificationError
+
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                self._mismatch(tmp_path), \
+                patch(
+                    "nexus.upgrade_finish._poison_playbook", return_value=None,
+                ), \
+                patch(
+                    "nexus.daemon.binary_install.install_binary",
+                    side_effect=BinaryVerificationError("sha256 mismatch"),
+                ), \
+                patch("nexus.upgrade_finish.subprocess.run") as sp:
+            actions = converge_engine(tmp_path)
+
+        sp.assert_not_called()
+        assert len(actions) == 1
+        assert "NEEDS HUMAN" in actions[0]
+        assert "sha256 mismatch" in actions[0]
+
+    def test_install_bare_oserror_reports_needs_human_never_raises(self, tmp_path):
+        """code-review HIGH: install_binary can raise more than
+        BinaryVerificationError -- _atomic_copy (binary_install.py) re-raises
+        bare OSError/etc UNWRAPPED on disk-full, permission-denied, or mkdir
+        failure. converge_engine's 'never raises' contract must hold for
+        EVERY exception, not just the expected one (a narrower catch let
+        these escape uncaught -- the exact GH #1402 silent-failure shape in
+        the auto path, since the caller's own try/except would swallow the
+        propagated exception with zero action line)."""
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                self._mismatch(tmp_path), \
+                patch(
+                    "nexus.upgrade_finish._poison_playbook", return_value=None,
+                ), \
+                patch(
+                    "nexus.daemon.binary_install.install_binary",
+                    side_effect=OSError("disk full"),
+                ), \
+                patch("nexus.upgrade_finish.subprocess.run") as sp:
+            actions = converge_engine(tmp_path)
+
+        sp.assert_not_called()
+        assert len(actions) == 1
+        assert "NEEDS HUMAN" in actions[0]
+        assert "disk full" in actions[0]
+
+    def test_restart_failure_reports_needs_human_but_install_stands(self, tmp_path):
+        from unittest.mock import MagicMock
+
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                self._mismatch(tmp_path), \
+                patch(
+                    "nexus.upgrade_finish._poison_playbook", return_value=None,
+                ), \
+                patch(
+                    "nexus.daemon.binary_install.install_binary",
+                    return_value=(tmp_path / "service" / "nexus-service", {"version": _REQUIRED_STR}),
+                ), \
+                patch(
+                    "nexus.upgrade_finish.subprocess.run",
+                    return_value=MagicMock(returncode=1),
+                ):
+            actions = converge_engine(tmp_path)
+
+        assert any("converged engine" in a for a in actions)
+        assert any("NEEDS HUMAN" in a for a in actions)
+
+
+class TestCheckVersionTransitionEngineConvergence:
+    """check_version_transition's automatic post-upgrade pass also runs
+    engine convergence (nexus-cfgo9) alongside stale-process restart."""
+
+    def test_transition_includes_convergence_actions(self, tmp_path):
+        (tmp_path / "last_seen_version").write_text("6.7.0\n")
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
+        ), patch(
+            "nexus.upgrade_finish.detect_stale_processes",
+            return_value=SkewReport(installed_version="6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.converge_engine",
+            return_value=["converged engine: installed engine-service-v9.9.9 (was 1.0.0)"],
+        ):
+            line = check_version_transition(tmp_path)
+        assert "converged engine" in line
+
+    def test_install_oserror_needs_human_line_is_not_silently_absorbed(self, tmp_path):
+        """code-review HIGH, end-to-end: drives the REAL converge_engine
+        (not mocked) with install_binary raising a bare OSError. Before the
+        widened catch, this exception would propagate out of converge_engine,
+        be swallowed by check_version_transition's own outer try/except (a
+        structlog warning only, no user-visible trace), and the finish
+        summary would read as if nothing needed converging -- the exact
+        GH #1402 silent-failure shape. After the fix, converge_engine
+        catches it internally and returns a NEEDS HUMAN line, which flows
+        through into the summary normally."""
+        (tmp_path / "last_seen_version").write_text("6.7.0\n")
+        (tmp_path / "pg_credentials").write_text("NX_DB_URL=postgresql://x/nexus\n")
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
+        ), patch(
+            "nexus.upgrade_finish.detect_stale_processes",
+            return_value=SkewReport(installed_version="6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.heal_diag_view", return_value=[],
+        ), patch(
+            "nexus.config.is_local_mode", return_value=True,
+        ), patch(
+            "nexus.daemon.binary_lifecycle.read_installed_provenance",
+            return_value={"version": _older_version_str()},
+        ), patch(
+            "nexus.upgrade_finish._poison_playbook", return_value=None,
+        ), patch(
+            "nexus.daemon.binary_install.install_binary",
+            side_effect=OSError("disk full"),
+        ):
+            line = check_version_transition(tmp_path)
+        assert line is not None
+        assert "NEEDS HUMAN" in line
+        assert "disk full" in line
+
+    def test_convergence_failure_never_blocks_the_finish_summary(self, tmp_path):
+        (tmp_path / "last_seen_version").write_text("6.7.0\n")
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
+        ), patch(
+            "nexus.upgrade_finish.detect_stale_processes",
+            return_value=SkewReport(installed_version="6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.converge_engine",
+            side_effect=RuntimeError("boom"),
+        ):
+            line = check_version_transition(tmp_path)
+        assert line == "upgraded 6.7.0 -> 6.7.1; no stale processes"
+
+
+class TestHealDiagView:
+    """nexus-cfgo9 (GH #1402 second symptom): the thin
+    ``upgrade_finish.heal_diag_view`` wiring around
+    ``nexus.db.pg_provision.heal_diag_view_grants_and_ownership`` — grant/
+    ownership repair only, unconditional (not gated on engine mismatch)."""
+
+    def _creds(self, tmp_path, port: str = "54321"):
+        (tmp_path / "pg_credentials").write_text(f"PG_PORT={port}\n")
+
+    def test_not_applicable_in_cloud_mode(self, tmp_path):
+        self._creds(tmp_path)
+        with patch("nexus.config.is_local_mode", return_value=False), patch(
+            "nexus.db.pg_provision.heal_diag_view_grants_and_ownership"
+        ) as heal:
+            actions = heal_diag_view(tmp_path)
+        assert actions == []
+        heal.assert_not_called()
+
+    def test_not_applicable_when_service_not_configured(self, tmp_path):
+        # No pg_credentials written -- not a service-mode install.
+        with patch("nexus.config.is_local_mode", return_value=True), patch(
+            "nexus.db.pg_provision.heal_diag_view_grants_and_ownership"
+        ) as heal:
+            actions = heal_diag_view(tmp_path)
+        assert actions == []
+        heal.assert_not_called()
+
+    def test_delegates_with_port_and_bootstrap_superuser(self, tmp_path):
+        from unittest.mock import MagicMock
+
+        self._creds(tmp_path, port="54321")
+        fake_bins = MagicMock()
+        with patch("nexus.config.is_local_mode", return_value=True), patch(
+            "nexus.db.pg_provision.discover_pg_binaries", return_value=fake_bins,
+        ), patch(
+            "nexus.db.pg_provision.bootstrap_superuser", return_value="hal.hildebrand",
+        ), patch(
+            "nexus.db.pg_provision.heal_diag_view_grants_and_ownership",
+            return_value=["healed: nexus_diag lacked SELECT ..."],
+        ) as heal:
+            actions = heal_diag_view(tmp_path)
+
+        heal.assert_called_once_with(fake_bins, 54321, "hal.hildebrand")
+        assert actions == ["healed: nexus_diag lacked SELECT ..."]
+
+    def test_probe_failure_degrades_to_empty_never_raises(self, tmp_path):
+        self._creds(tmp_path)
+        with patch("nexus.config.is_local_mode", return_value=True), patch(
+            "nexus.db.pg_provision.discover_pg_binaries",
+            side_effect=RuntimeError("no pg binaries"),
+        ):
+            actions = heal_diag_view(tmp_path)
+        assert actions == []
+
+    def test_missing_or_zero_port_is_a_noop(self, tmp_path):
+        self._creds(tmp_path, port="0")
+        with patch("nexus.config.is_local_mode", return_value=True), patch(
+            "nexus.db.pg_provision.heal_diag_view_grants_and_ownership"
+        ) as heal:
+            actions = heal_diag_view(tmp_path)
+        assert actions == []
+        heal.assert_not_called()
+
+
+class TestCheckVersionTransitionDiagViewHeal:
+    """check_version_transition's finish pass also runs the diag-view heal
+    (nexus-cfgo9), independently try/excepted from engine convergence."""
+
+    def test_transition_includes_heal_actions(self, tmp_path):
+        (tmp_path / "last_seen_version").write_text("6.7.0\n")
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
+        ), patch(
+            "nexus.upgrade_finish.detect_stale_processes",
+            return_value=SkewReport(installed_version="6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.converge_engine", return_value=[],
+        ), patch(
+            "nexus.upgrade_finish.heal_diag_view",
+            return_value=["healed: nexus.diag_chash_conformance was owned by ..."],
+        ):
+            line = check_version_transition(tmp_path)
+        assert "healed: nexus.diag_chash_conformance" in line
+
+    def test_heal_failure_never_blocks_the_finish_summary(self, tmp_path):
+        (tmp_path / "last_seen_version").write_text("6.7.0\n")
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
+        ), patch(
+            "nexus.upgrade_finish.detect_stale_processes",
+            return_value=SkewReport(installed_version="6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.converge_engine", return_value=[],
+        ), patch(
+            "nexus.upgrade_finish.heal_diag_view",
+            side_effect=RuntimeError("boom"),
+        ):
+            line = check_version_transition(tmp_path)
+        assert line == "upgraded 6.7.0 -> 6.7.1; no stale processes"
+
+    def test_engine_convergence_failure_does_not_block_heal_actions(self, tmp_path):
+        """The two new legs (converge_engine, heal_diag_view) are
+        independently try/excepted -- one failing must not swallow the
+        other's actions."""
+        (tmp_path / "last_seen_version").write_text("6.7.0\n")
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
+        ), patch(
+            "nexus.upgrade_finish.detect_stale_processes",
+            return_value=SkewReport(installed_version="6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.converge_engine",
+            side_effect=RuntimeError("boom"),
+        ), patch(
+            "nexus.upgrade_finish.heal_diag_view",
+            return_value=["healed: nexus_diag lacked SELECT ..."],
+        ):
+            line = check_version_transition(tmp_path)
+        assert "healed: nexus_diag lacked SELECT" in line

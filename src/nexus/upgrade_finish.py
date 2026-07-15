@@ -35,6 +35,8 @@ from pathlib import Path
 
 import structlog
 
+from nexus.engine_version import REQUIRED_ENGINE_VERSION, parse_engine_version
+
 _log = structlog.get_logger(__name__)
 
 #: Fallback marker substrings identifying conexus processes in `ps`
@@ -151,10 +153,27 @@ def enumerate_processes(ps_output: str | None = None) -> list[tuple[int, int, st
     parses identically on macOS and Linux). Injectable for tests.
     """
     if ps_output is None:
-        proc = subprocess.run(
-            ["ps", "-wweo", "pid,etime,command"],
-            capture_output=True, text=True, timeout=15,
-        )
+        try:
+            proc = subprocess.run(
+                ["ps", "-wweo", "pid,etime,command"],
+                capture_output=True, text=True, timeout=15,
+            )
+        except FileNotFoundError as exc:
+            # nexus-cfgo9: a minimal-container deployment (no procps package)
+            # has no `ps` binary at all -- distinct from "ps ran and failed"
+            # below. Re-raised as a RuntimeError (not the bare
+            # FileNotFoundError) so this is still fail-loud and diagnosable,
+            # never a silent "zero processes" read (review 38b7db3d M5), but
+            # with an actionable message. Every caller (check_version_
+            # transition, nx doctor's _check_process_skew, nx daemon
+            # restart-stale) already degrades this ONE leg gracefully on any
+            # Exception and continues — this does not need its own recovery
+            # path, just a clear cause.
+            raise RuntimeError(
+                "the 'ps' command is not available on this system "
+                "(install procps, or run on a host that provides it) — "
+                "process-skew detection cannot run"
+            ) from exc
         if proc.returncode != 0 or not proc.stdout.strip():
             # Review 38b7db3d M5: a silent empty ps = zero processes
             # detected = the fail-open class again. Fail loud instead.
@@ -345,6 +364,289 @@ def install_source() -> str:
     return "PyPI, unpinned — `uv tool upgrade conexus` upgrades normally"
 
 
+# ── nexus-cfgo9: ONE-engine model — converge the installed engine ─────────
+#
+# GH #1402 (2026-07-15, 14h delivery failure): 6.10.0 shipped
+# REQUIRED_ENGINE_VERSION=(0,1,43) + PINNED_SERVICE_TAG=engine-service-v0.1.43,
+# but the pin was consumed ONLY by fresh `nx init` — no upgrade path ever
+# installed the fix on an EXISTING service-mode box, so the box kept
+# crash-looping the old engine indefinitely. The fix: a local engine-version
+# mismatch is a CONVERGENCE step (install the dependency, cycle the
+# service), driven from the same finish-the-upgrade choreography that
+# already restarts stale processes above — never a user-facing refusal.
+
+
+@dataclass
+class EngineConvergence:
+    """Whether the local box's installed engine matches the release
+    dependency (:data:`nexus.engine_version.REQUIRED_ENGINE_VERSION`).
+
+    ``applicable`` is False for cloud-mode installs (the managed handshake
+    governs there, see :mod:`nexus.db.managed_endpoint`) and for local
+    installs that are not on the service stack at all (no ``pg_credentials``)
+    — neither case has a local engine to converge. When ``applicable`` is
+    True, ``converged`` is True only when the installed engine's parsed
+    version exactly equals :data:`REQUIRED_ENGINE_VERSION`; an unreadable/
+    absent provenance sidecar counts as a mismatch (the safe default is to
+    converge, not to assume a match we cannot prove).
+    """
+
+    applicable: bool
+    installed_version: tuple[int, int, int] | None
+    required_version: tuple[int, int, int]
+    converged: bool
+    reason: str | None = None
+
+
+def detect_engine_convergence(config_dir: Path) -> EngineConvergence:
+    """Compare the box's installed engine against the release dependency.
+
+    "Installed" is read from the provenance sidecar
+    :func:`nexus.daemon.binary_lifecycle.read_installed_provenance` writes at
+    ``nx daemon service install-binary`` time — the on-disk binary's own
+    record, not a live ``/version`` probe. This is deliberate: the incident
+    this fix addresses is a CRASH-LOOPING engine, where the running service
+    may never answer ``/version`` at all; the disk record is available
+    regardless of whether the service is currently up.
+    """
+    from nexus.config import is_local_mode  # noqa: PLC0415 — deferred for test patchability
+
+    if not is_local_mode():
+        return EngineConvergence(
+            applicable=False,
+            installed_version=None,
+            required_version=REQUIRED_ENGINE_VERSION,
+            converged=True,
+            reason=(
+                "cloud mode — the managed handshake governs engine "
+                "compatibility, not local convergence"
+            ),
+        )
+
+    from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred, circular-dep avoidance
+
+    creds_path = config_dir / CREDENTIALS_FILENAME
+    if not creds_path.exists():
+        return EngineConvergence(
+            applicable=False,
+            installed_version=None,
+            required_version=REQUIRED_ENGINE_VERSION,
+            converged=True,
+            reason="service mode not configured (pg_credentials absent)",
+        )
+
+    from nexus.daemon.binary_lifecycle import read_installed_provenance  # noqa: PLC0415 — deferred, CLI startup cost
+
+    prov = read_installed_provenance(config_dir)
+    raw = prov.get("version") if prov else None
+    parsed = parse_engine_version(raw) if isinstance(raw, str) else None
+    req_s = ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
+
+    if parsed is None:
+        return EngineConvergence(
+            applicable=True,
+            installed_version=None,
+            required_version=REQUIRED_ENGINE_VERSION,
+            converged=False,
+            reason=(
+                "installed engine version unknown (no readable install "
+                f"provenance) — required v{req_s}"
+            ),
+        )
+
+    converged = parsed == REQUIRED_ENGINE_VERSION
+    reason = None
+    if not converged:
+        got_s = ".".join(str(p) for p in parsed)
+        reason = f"installed engine v{got_s} != required v{req_s}"
+    return EngineConvergence(
+        applicable=True,
+        installed_version=parsed,
+        required_version=REQUIRED_ENGINE_VERSION,
+        converged=converged,
+        reason=reason,
+    )
+
+
+def _poison_playbook(config_dir: Path):  # noqa: ANN201 — returns nexus.remediation.Playbook | None, deferred import
+    """The chash-poison Playbook when the store is poisoned, else ``None``.
+
+    Reuses the SAME probe ``nx daemon service install-binary``'s own gate
+    uses (:func:`nexus.health._check_migration_state`, nexus-pnwu0 / GH
+    #1390): a new engine boots a Liquibase VALIDATE CONSTRAINT that
+    crash-loops on non-32-char chash rows. Automated convergence must NEVER
+    install a new engine onto a store in that state — but it must also never
+    silently skip; the caller renders this Playbook's ``terminal_block()``
+    as a loud, actionable NEEDS-HUMAN line. A probe that cannot run (PG
+    down, not service mode, an unrelated error) returns ``None`` — it must
+    never block a legitimate convergence.
+    """
+    try:
+        from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred, circular-dep avoidance
+        from nexus.health import _check_migration_state  # noqa: PLC0415 — deferred, CLI startup cost
+
+        creds_path = config_dir / CREDENTIALS_FILENAME
+        poison = [
+            r for r in _check_migration_state(creds_path=creds_path)
+            if r.label == "Chunk chash conformance"
+            and not r.ok and "non-32-char chash" in r.detail
+        ]
+    except Exception:  # noqa: BLE001 — the gate must never block a valid convergence on an unrelated error
+        return None
+    if not poison:
+        return None
+
+    from nexus.remediation import StoreState, emit_playbook  # noqa: PLC0415 — deferred, CLI startup cost
+
+    return emit_playbook("chash-poison", StoreState(detail=poison[0].detail))
+
+
+def converge_engine(config_dir: Path, *, dry_run: bool = False) -> list[str]:
+    """Install the release-dependency engine and cycle the service on a
+    mismatch. Returns human-readable action lines (empty when not
+    applicable or already converged — the common case, mirroring
+    :func:`restart_stale`'s silence on the happy path).
+
+    Never raises: a poison-gate block or an install/restart failure is
+    reported as a loud ``NEEDS HUMAN`` action line, never a silent skip and
+    never a crash that could leave the box worse off.
+    """
+    status = detect_engine_convergence(config_dir)
+    if not status.applicable or status.converged:
+        return []
+
+    req_s = ".".join(str(p) for p in status.required_version)
+    got_s = (
+        ".".join(str(p) for p in status.installed_version)
+        if status.installed_version else "unknown"
+    )
+
+    # nexus-cfgo9 code-review LOW: the poison gate is checked BEFORE the
+    # dry-run early-return, never after — a dry-run preview must never
+    # promise a convergence a real run would actually block. Previously the
+    # poison check ran only on the real (non-dry-run) path, so `--dry-run`
+    # could report "would converge" against a store that would immediately
+    # hit NEEDS-HUMAN on the real run.
+    playbook = _poison_playbook(config_dir)
+    if playbook is not None:
+        if dry_run:
+            return [
+                f"would be BLOCKED by chash-poison gate ({got_s} -> {req_s}): "
+                f"{playbook.terminal_block()}"
+            ]
+        return [
+            "NEEDS HUMAN: engine convergence blocked — the store looks "
+            f"chash-poisoned; installed engine stays at {got_s}, required "
+            f"{req_s}. Remediate first, then re-run: "
+            f"{playbook.terminal_block()}"
+        ]
+
+    if dry_run:
+        return [
+            f"would converge engine ({got_s} -> {req_s}): install the "
+            "pinned tag and restart the storage service"
+        ]
+
+    from nexus.daemon.binary_install import (  # noqa: PLC0415 — deferred, CLI startup cost
+        PINNED_SERVICE_TAG,
+        install_binary,
+    )
+
+    tag = PINNED_SERVICE_TAG
+    if not tag:
+        return [
+            f"NEEDS HUMAN: engine convergence needed ({got_s} -> {req_s}) "
+            "but no pinned service tag is configured — set "
+            "NEXUS_SERVICE_TAG or reinstall conexus."
+        ]
+
+    try:
+        install_binary(tag, config_dir, installed_by="upgrade-finish engine convergence")
+    except Exception as exc:  # noqa: BLE001 — code-review HIGH: install_binary
+        # can raise more than BinaryVerificationError -- _atomic_copy
+        # (binary_install.py) re-raises bare OSError/etc UNWRAPPED on
+        # disk-full, permission-denied, or mkdir failure. A narrower catch
+        # let those escape uncaught: silently absorbed by the auto path's
+        # outer try/except in check_version_transition (the exact GH #1402
+        # silent-failure shape -- the finish pass would look like "nothing
+        # to converge"), and an unhandled traceback on the CLI path that
+        # also skipped the heal leg entirely. "Never raises" (this
+        # function's own docstring contract) means EVERY exception here,
+        # not just the expected one.
+        return [f"NEEDS HUMAN: engine convergence failed installing {tag}: {exc}"]
+
+    actions = [f"converged engine: installed {tag} (was {got_s})"]
+    try:
+        stop = subprocess.run(
+            ["nx", "daemon", "service", "stop"], capture_output=True, timeout=60,
+        )
+        start = subprocess.run(
+            ["nx", "daemon", "service", "start"], capture_output=True, timeout=120,
+        )
+        if stop.returncode == 0 and start.returncode == 0:
+            actions.append(
+                "restarted the storage service to pick up the converged engine"
+            )
+        else:
+            actions.append(
+                "NEEDS HUMAN: engine installed but the service restart did "
+                "not report success — run `nx daemon service stop && nx "
+                "daemon service start` yourself to pick it up"
+            )
+    except Exception as exc:  # noqa: BLE001 — best-effort cycle; failure surfaced in the action line
+        actions.append(
+            f"NEEDS HUMAN: engine installed but restarting the service "
+            f"raised {exc} — run `nx daemon service stop && nx daemon "
+            "service start` yourself to pick it up"
+        )
+    return actions
+
+
+def heal_diag_view(config_dir: Path) -> list[str]:
+    """GH #1402's SECOND symptom: repair drift on
+    ``nexus.diag_chash_conformance`` (grants + ownership only — no DDL that
+    creates or alters the view's definition; see
+    :func:`nexus.db.pg_provision.heal_diag_view_grants_and_ownership`, which
+    this thinly wires up). Runs unconditionally alongside engine convergence
+    in the finish pass — the grant/ownership drift is orthogonal to engine
+    version, so this is not gated on a mismatch.
+
+    Best-effort: degrades to ``[]`` on any probe failure (PG down, not
+    service mode, no PG binaries on this box) — a probe that cannot run must
+    never break the finish pass. Returns loud action lines only for what was
+    actually healed (silent on the common case: nothing to fix).
+    """
+    from nexus.config import is_local_mode  # noqa: PLC0415 — deferred for test patchability
+
+    if not is_local_mode():
+        return []
+
+    from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred, circular-dep avoidance
+
+    creds_path = config_dir / CREDENTIALS_FILENAME
+    if not creds_path.exists():
+        return []
+
+    try:
+        from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred, circular-dep avoidance
+            _read_credentials,
+            bootstrap_superuser,
+            discover_pg_binaries,
+            heal_diag_view_grants_and_ownership,
+        )
+
+        creds = _read_credentials(creds_path)
+        port = int(creds.get("PG_PORT", 0) or 0)
+        if port <= 0:
+            return []
+        bins = discover_pg_binaries()
+        os_user = bootstrap_superuser()
+        return heal_diag_view_grants_and_ownership(bins, port, os_user)
+    except Exception as exc:  # noqa: BLE001 — best-effort heal; must never break the finish pass
+        _log.debug("diag_view_heal_failed", error=str(exc))
+        return []
+
+
 def check_version_transition(config_dir: Path) -> str | None:
     """Version-stamp auto-trigger. Returns a one-line summary when a
     version transition was detected and the safe finish pass ran; None
@@ -352,6 +654,20 @@ def check_version_transition(config_dir: Path) -> str | None:
 
     uv offers no post-install hook, so the first invocation after an
     upgrade is the earliest the product can finish the job itself.
+
+    TOPOLOGY GAP (inherited from nexus-4xgfy, same posture as MCP-host
+    process-skew): this trigger fires on the first ``nx`` CLI invocation
+    after a package upgrade. A long-lived MCP host process that survives
+    the upgrade with no CLI invocation on the box in the meantime never
+    hits this trigger, so engine convergence for that box is not
+    automatic in that window either — MCP hosts are never auto-restarted
+    (they belong to a live Claude session; ``restart_stale`` only NAMES
+    them for the human, same as for process-skew). The backstop is
+    ``nx doctor`` (:func:`nexus.health._check_engine_convergence`), which
+    runs in its own fresh subprocess and surfaces "engine convergence
+    pending" independent of whether any CLI trigger has fired — so a
+    human path to detection always exists even when no automatic trigger
+    does.
     """
     try:
         _, version = install_mtime_and_version()
@@ -398,6 +714,18 @@ def check_version_transition(config_dir: Path) -> str | None:
     except Exception:  # noqa: BLE001 — the finish pass must never break CLI startup
         _log.warning("upgrade_finish_failed", exc_info=True)
         return None
+    # nexus-cfgo9: engine convergence and the diag-view heal are two more
+    # independent legs of the finish pass — each try/excepted on its own so
+    # one leg's failure never swallows the actions already computed by the
+    # others.
+    try:
+        actions = actions + converge_engine(config_dir)
+    except Exception:  # noqa: BLE001 — the finish pass must never break CLI startup
+        _log.warning("engine_convergence_failed", exc_info=True)
+    try:
+        actions = actions + heal_diag_view(config_dir)
+    except Exception:  # noqa: BLE001 — the finish pass must never break CLI startup
+        _log.warning("diag_view_heal_failed", exc_info=True)
     _log.info(
         "upgrade_finish_ran",
         from_version=seen, to_version=version, actions=actions,

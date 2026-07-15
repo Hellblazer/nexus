@@ -441,6 +441,152 @@ class TestIdempotency:
         assert creds.get("NX_DB_DIAG_PASS"), "diag password missing after backfill"
 
 
+# ── heal_diag_view_grants_and_ownership (nexus-cfgo9, GH #1402 2nd symptom) ────
+
+
+class TestHealDiagViewGrantsAndOwnership:
+    """The narrowly-scoped GRANT/ALTER OWNER repair for
+    ``nexus.diag_chash_conformance`` — no view-creation DDL (that stays
+    provisioning's job), just the two independent drift classes GH #1402
+    exposed: a missing SELECT grant, and ownership fragmentation."""
+
+    # Drives PostgreSQL directly via psql; never launches the JVM service
+    # jar, so exempt from tests/db/conftest.py's jar-freshness gate.
+    pytestmark = pytest.mark.no_service_jar
+
+    @pytest.fixture()
+    def diag_view(self, provisioned, bins):
+        """A minimal stand-in view, created correctly (superuser-owned,
+        granted) — the healthy starting state each test mutates and repairs.
+        Not RDR-182's real chash-count DDL (this fixture's cluster has no
+        chash tables); a trivial view is sufficient to exercise ownership/
+        grant repair, which does not care about the view's SELECT list.
+        """
+        result, config_dir = provisioned
+        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "CREATE SCHEMA IF NOT EXISTS nexus")
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "CREATE OR REPLACE VIEW nexus.diag_chash_conformance AS "
+              "SELECT 'stub'::text AS table_name, 0::bigint AS non_conformant")
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              f'ALTER VIEW nexus.diag_chash_conformance OWNER TO "{os_user}"')
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "GRANT SELECT ON nexus.diag_chash_conformance TO nexus_diag")
+        yield result, config_dir, os_user
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "DROP VIEW IF EXISTS nexus.diag_chash_conformance")
+
+    def test_absent_view_is_a_noop(self, provisioned, bins):
+        """No view at all (this fixture's fresh cluster has no chash tables,
+        so provisioning never created one) -- nothing to heal, and no DDL is
+        issued to create it (that would violate the bead's explicit scope)."""
+        from nexus.db.pg_provision import heal_diag_view_grants_and_ownership
+
+        result, config_dir = provisioned
+        os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+        assert _query(
+            bins, result.port, NEXUS_DB_NAME, os_user,
+            "SELECT 1 FROM pg_class c JOIN pg_namespace n "
+            "ON n.oid = c.relnamespace WHERE n.nspname = 'nexus' "
+            "AND c.relname = 'diag_chash_conformance'",
+        ) == "", "precondition: view must be absent in the fresh cluster"
+
+        actions = heal_diag_view_grants_and_ownership(bins, result.port, os_user)
+
+        assert actions == []
+
+    def test_already_healthy_is_silent(self, diag_view, bins):
+        from nexus.db.pg_provision import heal_diag_view_grants_and_ownership
+
+        result, config_dir, os_user = diag_view
+
+        actions = heal_diag_view_grants_and_ownership(bins, result.port, os_user)
+
+        assert actions == []
+
+    def test_missing_grant_is_healed(self, diag_view, bins):
+        from nexus.db.pg_provision import heal_diag_view_grants_and_ownership
+
+        result, config_dir, os_user = diag_view
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "REVOKE SELECT ON nexus.diag_chash_conformance FROM nexus_diag")
+        assert _query(
+            bins, result.port, NEXUS_DB_NAME, os_user,
+            "SELECT has_table_privilege('nexus_diag', "
+            "'nexus.diag_chash_conformance', 'SELECT')",
+        ) == "f", "precondition: grant must be absent"
+
+        actions = heal_diag_view_grants_and_ownership(bins, result.port, os_user)
+
+        assert len(actions) == 1
+        assert "missing-grant class" in actions[0]
+        assert _query(
+            bins, result.port, NEXUS_DB_NAME, os_user,
+            "SELECT has_table_privilege('nexus_diag', "
+            "'nexus.diag_chash_conformance', 'SELECT')",
+        ) == "t", "grant was not repaired"
+
+    def test_non_exempt_ownership_is_healed(self, diag_view, bins):
+        """Simulates the documented bring-your-own-Postgres workaround
+        (docs/configuration.md §3) run without genuine superuser access: the
+        view ends up owned by nexus_admin (NOSUPERUSER NOBYPASSRLS) --
+        RLS-exempt is false, the nexus-vounk false-clean class."""
+        from nexus.db.pg_provision import heal_diag_view_grants_and_ownership
+
+        result, config_dir, os_user = diag_view
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "ALTER VIEW nexus.diag_chash_conformance OWNER TO nexus_admin")
+        owner_sql = (
+            "SELECT r.rolname FROM pg_class c "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "JOIN pg_roles r ON r.oid = c.relowner "
+            "WHERE n.nspname = 'nexus' AND c.relname = 'diag_chash_conformance'"
+        )
+        assert _query(bins, result.port, NEXUS_DB_NAME, os_user, owner_sql) == "nexus_admin", (
+            "precondition: view must be owned by nexus_admin"
+        )
+
+        actions = heal_diag_view_grants_and_ownership(bins, result.port, os_user)
+
+        assert any("ownership fragmentation" in a for a in actions)
+        assert _query(bins, result.port, NEXUS_DB_NAME, os_user, owner_sql) == os_user, (
+            "ownership was not reassigned back to the superuser bootstrap role"
+        )
+
+    def test_no_diag_role_is_a_noop(self, diag_view, bins):
+        """Pre-P2.1 install: nexus_diag does not exist at all. Role creation
+        is _backfill_diag_role's job, not this function's narrower scope --
+        it must degrade to no-op, never error."""
+        from nexus.db.pg_provision import heal_diag_view_grants_and_ownership
+
+        result, config_dir, os_user = diag_view
+        # The fixture granted nexus_diag SELECT on the view; drop that
+        # dependency first or the role drop fails ("privileges for view...").
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user,
+              "REVOKE SELECT ON nexus.diag_chash_conformance FROM nexus_diag")
+        _psql(bins, result.port, NEXUS_DB_NAME, os_user, "DROP ROLE IF EXISTS nexus_diag")
+        try:
+            assert _query(
+                bins, result.port, NEXUS_DB_NAME, os_user,
+                "SELECT 1 FROM pg_roles WHERE rolname = 'nexus_diag'",
+            ) == "", "precondition: nexus_diag role must be absent"
+
+            actions = heal_diag_view_grants_and_ownership(bins, result.port, os_user)
+
+            assert actions == []
+        finally:
+            # Restore nexus_diag for sibling tests / the module-scoped cluster.
+            diag_pass = _read_credentials(result.credentials_path).get(
+                "NX_DB_DIAG_PASS", "restored-in-test"
+            )
+            _psql(
+                bins, result.port, NEXUS_DB_NAME, os_user,
+                f"CREATE ROLE nexus_diag NOSUPERUSER NOCREATEDB NOCREATEROLE "
+                f"BYPASSRLS LOGIN PASSWORD '{diag_pass}'",
+            )
+
+
 # ── Test 5: end-to-end provision → migrate DDL → svc DML under RLS ────────────
 
 # DDL run AS nexus_admin to prove the two-role contract WITHOUT the service JAR.

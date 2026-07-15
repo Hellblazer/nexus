@@ -2358,26 +2358,84 @@ def aspect_worker_start_cmd(
 @click.option("--dry-run", is_flag=True, default=False,
               help="Report what would be restarted without touching anything.")
 def restart_stale_cmd(dry_run: bool) -> None:
-    """Finish an upgrade: restart processes still running old code.
+    """Finish an upgrade: restart processes still running old code, converge
+    the local engine to the release dependency, and heal diag-view drift.
 
     After ``uv tool upgrade conexus`` the disk is new but every long-lived
     process (MCP hosts, aspect-worker, MinerU) keeps executing the old
     code from memory (nexus-4xgfy). This verb restarts the classes that
     are safe to cycle and names the ones only you can close (MCP hosts
-    belong to live Claude sessions). Runs automatically on the first
-    ``nx`` invocation after a version change; this is the manual form.
+    belong to live Claude sessions). It also converges a service-mode
+    install's engine binary to the release's required version (nexus-cfgo9:
+    the ONE-engine model — a version mismatch is fixed here, not merely
+    refused), and repairs ``nexus.diag_chash_conformance`` grant/ownership
+    drift (GH #1402's second symptom — GRANT/ALTER OWNER only, no view
+    DDL). Runs automatically on the first ``nx`` invocation after a version
+    change; this is the manual form (also the re-run path for convergence
+    outside a version transition, e.g. after remediating a chash-poison
+    block).
     """
     from nexus.upgrade_finish import (  # noqa: PLC0415 — deferred import
+        converge_engine,
         detect_stale_processes,
+        heal_diag_view,
         install_source,
         restart_stale,
     )
 
-    report = detect_stale_processes()
-    click.echo(f"installed: conexus {report.installed_version}  "
-               f"(source: {install_source()})")
-    if not report.stale:
-        click.echo("no stale processes — the machine matches the disk.")
-        return
-    for line in restart_stale(report, dry_run=dry_run):
-        click.echo(f"  {line}")
+    # nexus-cfgo9: process-skew detection is independent of engine
+    # convergence and the diag-view heal below — a `ps`-less environment
+    # (e.g. a minimal container with no procps) must not prevent the other
+    # two legs from running. Previously this was unguarded and a
+    # FileNotFoundError here aborted the whole command before convergence
+    # ever got a chance to fire.
+    try:
+        report = detect_stale_processes()
+        click.echo(f"installed: conexus {report.installed_version}  "
+                   f"(source: {install_source()})")
+        if not report.stale:
+            click.echo("no stale processes — the machine matches the disk.")
+        else:
+            for line in restart_stale(report, dry_run=dry_run):
+                click.echo(f"  {line}")
+    except Exception as exc:  # noqa: BLE001 — one leg's failure must not block the others
+        click.echo(f"process-skew detection failed ({exc}) — skipping this leg.", err=True)
+
+    config_dir = nexus_config_dir()
+
+    # nexus-cfgo9 code-review HIGH: converge_engine documents a "never
+    # raises" contract, but that contract lives in one function's docstring
+    # -- defense-in-depth wraps the call site too, the same independent-leg
+    # pattern as the process-skew try/except above. Without this, a gap in
+    # converge_engine's own exception handling (or a future regression of
+    # it) would abort the command before the diag-view heal leg below ever
+    # runs -- the identical asymmetry the process-skew fix closed.
+    try:
+        engine_actions = converge_engine(config_dir, dry_run=dry_run)
+        if not engine_actions:
+            click.echo(
+                "engine: no convergence action needed (already converged, or "
+                "not on the local service stack)."
+            )
+        else:
+            for line in engine_actions:
+                click.echo(f"  {line}")
+    except Exception as exc:  # noqa: BLE001 — one leg's failure must not block the others
+        click.echo(f"engine convergence failed ({exc}) — skipping this leg.", err=True)
+
+    if dry_run:
+        click.echo("diag-view heal: skipped (--dry-run — GRANT/ALTER OWNER "
+                    "are not previewed).")
+    else:
+        try:
+            heal_actions = heal_diag_view(config_dir)
+            if not heal_actions:
+                click.echo(
+                    "diag-view heal: no action needed (grants/ownership already "
+                    "healthy, or not on the local service stack)."
+                )
+            else:
+                for line in heal_actions:
+                    click.echo(f"  {line}")
+        except Exception as exc:  # noqa: BLE001 — one leg's failure must not block the others
+            click.echo(f"diag-view heal failed ({exc}) — skipping this leg.", err=True)

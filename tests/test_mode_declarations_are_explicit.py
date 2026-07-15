@@ -73,3 +73,42 @@ def test_mode_declarations_are_explicit(request: pytest.FixtureRequest) -> None:
             "behavior; or add the nodeid to `_MODE_LINT_EXCLUDE` in "
             "tests/conftest.py with a documented reason."
         )
+
+
+# RDR-109 / nexus-vgq89 ratchet: these two exclusion sets may only ever
+# SHRINK. A PR that grows either one is silently re-introducing the
+# "Phase 1 ships excluded, subsequent PRs promote each" grandfathering
+# this bead burned down (2026-07-15) -- every entry above this point
+# already carries an individually documented reason; a bare growth of
+# the count with no accompanying rationale comment is exactly the
+# regression these two assertions exist to catch. To legitimately grow
+# either number: add the new exclusion with its own documented
+# rationale comment (matching the style used throughout
+# `_MODE_LINT_EXCLUDE_FILES` / `_MODE_LINT_EXCLUDE_NODEIDS` above), then
+# consciously bump the corresponding constant below in the same diff.
+_MODE_LINT_EXCLUDE_FILES_CEILING = 72
+# 43 -> 46 (6.10.1): +3 real keyed integration tests in test_integration.py
+# — cloud_mode's fake credentials broke them against the live Voyage API
+# (their mode declaration is the requires-key gating; see conftest entry).
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 46
+
+
+def test_mode_lint_exclude_files_ratchet() -> None:
+    assert len(_MODE_LINT_EXCLUDE_FILES) == _MODE_LINT_EXCLUDE_FILES_CEILING, (
+        f"_MODE_LINT_EXCLUDE_FILES has {len(_MODE_LINT_EXCLUDE_FILES)} "
+        f"entries, expected exactly {_MODE_LINT_EXCLUDE_FILES_CEILING}. "
+        "This set may only shrink (promote a file's tests to `cloud_mode` "
+        "or per-test `_MODE_LINT_EXCLUDE_NODEIDS` entries) or grow with a "
+        "documented per-entry rationale plus a conscious bump of "
+        "`_MODE_LINT_EXCLUDE_FILES_CEILING` in this file."
+    )
+
+
+def test_mode_lint_exclude_nodeids_ratchet() -> None:
+    assert len(_MODE_LINT_EXCLUDE_NODEIDS) == _MODE_LINT_EXCLUDE_NODEIDS_CEILING, (
+        f"_MODE_LINT_EXCLUDE_NODEIDS has {len(_MODE_LINT_EXCLUDE_NODEIDS)} "
+        f"entries, expected exactly {_MODE_LINT_EXCLUDE_NODEIDS_CEILING}. "
+        "This set may only shrink (promote a test to `cloud_mode`) or grow "
+        "with a documented per-entry rationale plus a conscious bump of "
+        "`_MODE_LINT_EXCLUDE_NODEIDS_CEILING` in this file."
+    )

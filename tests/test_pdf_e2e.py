@@ -52,7 +52,7 @@ def _local_embed(chunks, model, api_key, input_type="document", timeout=120.0, o
 class TestIndexPdfE2E:
     """AC-E1 / AC-E2 / AC-E3: index_pdf with real extraction + local embedding."""
 
-    def test_e2e_simple_pdf_queryable(self, simple_pdf: Path, local_t3) -> None:
+    def test_e2e_simple_pdf_queryable(self, simple_pdf: Path, local_t3, cloud_mode) -> None:
         """AC-E1: simple.pdf indexed → query returns a pdf chunk with distance < 1.0."""
         with patch("nexus.config.get_credential", side_effect=lambda k: "test-key"), \
              patch("nexus.doc_indexer._embed_with_fallback", side_effect=_local_embed):
@@ -65,7 +65,7 @@ class TestIndexPdfE2E:
         # RDR-101 Phase 5c: store_type dropped; content_type is canonical.
         assert results[0]["content_type"] == "pdf"
 
-    def test_e2e_multipage_page_attribution(self, multipage_pdf: Path, local_t3) -> None:
+    def test_e2e_multipage_page_attribution(self, multipage_pdf: Path, local_t3, cloud_mode) -> None:
         """AC-E2: multipage.pdf → query for 'database transactions' returns page 2 chunk."""
         with patch("nexus.config.get_credential", side_effect=lambda k: "test-key"), \
              patch("nexus.doc_indexer._embed_with_fallback", side_effect=_local_embed):
@@ -85,7 +85,7 @@ class TestIndexPdfE2E:
             f"Expected at least one page 2 chunk in top-3 results, got: {page_numbers}"
         )
 
-    def test_e2e_staleness_guard(self, simple_pdf: Path, local_t3) -> None:
+    def test_e2e_staleness_guard(self, simple_pdf: Path, local_t3, cloud_mode) -> None:
         """AC-E3: Re-indexing the same PDF returns 0 and document count is unchanged."""
         with patch("nexus.config.get_credential", side_effect=lambda k: "test-key"), \
              patch("nexus.doc_indexer._embed_with_fallback", side_effect=_local_embed):
@@ -121,7 +121,7 @@ class TestIndexPdfFileE2E:
     """AC-E4: _index_pdf_file E2E with real git repo + local embedding."""
 
     def test_pdf_chunks_queryable_after_e2e_index(
-        self, pdf_git_repo_e2e: Path, local_t3
+        self, pdf_git_repo_e2e: Path, local_t3, cloud_mode,
     ) -> None:
         """AC-E4: indexed PDF chunks are queryable.
 

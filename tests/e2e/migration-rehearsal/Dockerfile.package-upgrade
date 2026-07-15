@@ -1,0 +1,59 @@
+# syntax=docker/dockerfile:1
+# nexus-cfgo9 — PACKAGE-UPGRADE convergence validation box.
+#
+# Proves the actual GH #1402 failure mode end-to-end: a box already running a
+# PREVIOUS conexus release (6.9.0, engine-service-v0.1.42) upgrades ONLY the
+# conexus PYTHON PACKAGE to the working tree — the engine binary is left
+# completely untouched by this harness — and the convergence machinery
+# (nexus.upgrade_finish.converge_engine / heal_diag_view) must acquire the
+# NEW required engine (v0.1.43) from the real published GitHub release on its
+# own, boot it clean, and prove T1 data survives the service cycle.
+#
+# Base = debian:trixie-slim (conexus's actual runtime deploy base, same as
+# Dockerfile.cold) — no native binary, no PG bundle, no ONNX model pre-staged.
+# Both engine versions (0.1.42 for the initial provision, 0.1.43 for
+# convergence) are ACQUIRED AT RUNTIME by the product's own code, never
+# supplied by this Dockerfile or the driver script.
+#
+# DELIBERATELY no `procps` (no `ps` binary) — this box represents a real
+# minimal-container deployment, and the product's process-skew detection
+# (nexus.upgrade_finish.enumerate_processes) must degrade that ONE leg
+# gracefully rather than require every deployment to carry procps. Do not
+# add it back to make this leg pass; that papers over the class of bug this
+# leg exists to catch (GH #1402's discovery: `nx daemon restart-stale`
+# crashed entirely on a `ps`-less box before convergence ever ran).
+FROM debian:trixie-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl git \
+        python3 python3-venv python3-pip \
+        libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-root user — initdb (run by `nx init --service`) refuses to run as root.
+RUN useradd -m -s /bin/bash nexus
+ENV PATH="/home/nexus/nxenv/bin:${PATH}"
+
+RUN pip3 install --no-cache-dir --break-system-packages uv
+
+USER nexus
+WORKDIR /home/nexus
+
+# The WORKING-TREE wheel — staged by run.sh into its own worktree-wheel/
+# subdirectory (real PEP 427 filename preserved; pip/uv parse the wheel
+# filename strictly, so a prefix-mangled name fails to install) so it never
+# collides with the `pip install conexus==<prev>` step the driver runs
+# first. This is the ONLY conexus artifact in the image; the previous-release
+# install and both engine acquisitions happen at runtime, exactly like
+# Dockerfile.cold.
+COPY worktree-wheel/conexus-*.whl /home/nexus/worktree-wheel/
+RUN --mount=type=cache,target=/home/nexus/.cache/uv,uid=1000,gid=1000 \
+    uv venv --python 3.12 /home/nexus/nxenv
+
+COPY rehearse_package_upgrade.sh /home/nexus/rehearse_package_upgrade.sh
+
+ENTRYPOINT ["/bin/bash", "/home/nexus/rehearse_package_upgrade.sh"]

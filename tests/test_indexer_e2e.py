@@ -544,6 +544,7 @@ def test_smart_index_search(
 
 def test_smart_index_embedding_model_metadata(
     rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
+    cloud_mode,
 ) -> None:
     _index(rich_repo, rich_registry, local_t3)
     info = rich_registry.get(rich_repo)
@@ -581,6 +582,7 @@ def test_smart_index_staleness_check(
 
 def test_migration_moves_prose_from_code_to_docs(
     rich_repo: Path, tmp_path: Path, local_t3: T3Database,
+    cloud_mode,
 ) -> None:
     """RDR-102 D2 update: ``_prune_misclassified`` in ``indexer.py``
     keys on ``doc_id`` (the post-Phase-A canonical identity) when the

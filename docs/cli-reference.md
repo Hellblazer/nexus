@@ -1759,10 +1759,24 @@ cycled via its own lifecycle verbs), and names the ones only you can close
 uv-receipt source (local checkout / pinned / PyPI-unpinned), which explains
 why `uv tool upgrade` sometimes reports "Nothing to upgrade".
 
+**Engine convergence (nexus-cfgo9).** The same pass also converges the
+installed engine-service binary to this release's engine — the exact
+version the release was built and tested with. If the on-disk install
+provenance shows a different engine, the release's pinned tag is
+downloaded through the signed install path and the service is cycled.
+A store blocked by the chash-poison install gate is never converged
+silently: the pass prints the exact unblock steps instead. The same
+pass repairs diag-view grant/ownership drift (GH #1402). Each leg is
+independent — a failure in one (even a missing `ps` binary on minimal
+containers) never blocks the others.
+
 This runs automatically on the first `nx` invocation after a version change
 (a `last_seen_version` stamp in the config dir), printing one
 `[upgrade-finish]` summary line; the verb is the manual form. `nx doctor`'s
-"Process freshness" check surfaces the same skew.
+"Process freshness" check surfaces the same skew, and its
+"Engine convergence" check reports a pending engine convergence
+(long-lived MCP-host-only boxes where no CLI runs won't auto-trigger —
+`nx doctor` or this verb is the path there).
 
 ### nx daemon t2 start
 

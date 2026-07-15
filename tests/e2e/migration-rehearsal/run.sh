@@ -29,6 +29,7 @@ STRESS=0
 FULLSTACK=0
 HOLE_PUNCH=0
 SHAKEOUT=0
+PACKAGE_UPGRADE=0
 # RDR-002 ez5.13: the release_version the guided MVV stamps into the binary so
 # its /version reports >= the guided-upgrade version-pin floor and PASSES.
 # Derived from the product constant (engine_version.REQUIRED_ENGINE_VERSION —
@@ -56,6 +57,18 @@ RELEASE_PROPS="service/src/main/resources/META-INF/nexus/release.properties"
 # names a PUBLISHED release tag, which need not equal the floor) but bumped to
 # track it; override via NEXUS_SERVICE_TAG. (nexus-v0zmv)
 COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.43}"
+# nexus-cfgo9: the PACKAGE-UPGRADE leg's starting point — a REAL, already
+# published PyPI release + the engine tag ITS OWN PINNED_SERVICE_TAG
+# resolves to (see CHANGELOG.md's "[6.9.0]" entry: "Ships with (and
+# requires) engine-service-v0.1.42"). Kept literal (like COLD_TAG) but
+# bumped alongside REQUIRED_ENGINE_VERSION so the scenario never silently
+# stops being "stale" — the guard below fails loud if it does.
+PREV_RELEASE="${NEXUS_PREV_RELEASE:-6.9.0}"
+PREV_ENGINE_TAG="${NEXUS_PREV_ENGINE_TAG:-engine-service-v0.1.42}"
+# The NEW required engine — derived from the SAME constant COLD_TAG's
+# default and GUIDED_STAMP_VERSION are, so this leg tracks a floor bump
+# automatically (nexus-b6qlf: one source of truth).
+NEW_ENGINE_TAG="engine-service-v${GUIDED_STAMP_VERSION}"
 for a in "$@"; do
   case "$a" in
     --with-cloud) WITH_CLOUD=1 ;;
@@ -67,9 +80,14 @@ for a in "$@"; do
     --fullstack)  FULLSTACK=1 ;;         # standalone: full topology (service + nx-mcp + claude) MCP-driven enqueue + worker drain
     --hole-punch) HOLE_PUNCH=1 ;;        # standalone: verify-fill delta-fill proof against a real fault-injected PG target (nexus-s3dd4.7)
     --shakeout)   SHAKEOUT=1 ;;          # standalone: CANDIDATE shakeout — CLI verb matrix + incremental index + concurrent load against the locally-built -Ob binary (nexus-h8rf6)
+    --package-upgrade) PACKAGE_UPGRADE=1 ;;  # standalone: nexus-cfgo9 ONE-engine convergence MVV — package-only upgrade from a real previous release, engine acquired for real by the product, never supplied by this harness
     *) echo "unknown arg: $a" >&2; exit 2 ;;
   esac
 done
+[ "$PACKAGE_UPGRADE" = 1 ] && [ "${PREV_ENGINE_TAG#engine-service-v}" = "$GUIDED_STAMP_VERSION" ] && {
+  echo "FATAL: PREV_ENGINE_TAG ($PREV_ENGINE_TAG) already equals the current REQUIRED_ENGINE_VERSION ($GUIDED_STAMP_VERSION) — the package-upgrade scenario is no longer 'stale'. Bump NEXUS_PREV_RELEASE/NEXUS_PREV_ENGINE_TAG in run.sh to the release immediately before this floor bump." >&2
+  exit 2
+}
 
 # --guided: stamp release.properties so the native binary reports a release
 # version (an unstamped build -> release_version=null -> version-pin fail-closes,
@@ -109,6 +127,12 @@ trap '_guided_restore' EXIT
 # service/ tree natively (like --guided) and drives its own entrypoint
 # (rehearse_shakeout.sh, nexus-h8rf6) — never combined with another flow flag.
 [ "$SHAKEOUT" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ] || [ "$WITH_CLOUD" = 1 ] || [ "$COMPREHENSIVE" = 1 ] || [ "$STRESS" = 1 ] || [ "$FULLSTACK" = 1 ] || [ "$HOLE_PUNCH" = 1 ]; } && { echo "--shakeout is a standalone candidate shakeout (its own entrypoint); do not combine with other legs" >&2; exit 2; }
+# --package-upgrade is a standalone journey (nexus-cfgo9): NO native build (the
+# NEW engine is acquired for real by the product's own convergence code, never
+# locally built or supplied by this harness) — never combined with another
+# flow flag.
+[ "$PACKAGE_UPGRADE" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ] || [ "$WITH_CLOUD" = 1 ] || [ "$COMPREHENSIVE" = 1 ] || [ "$STRESS" = 1 ] || [ "$FULLSTACK" = 1 ] || [ "$HOLE_PUNCH" = 1 ] || [ "$SHAKEOUT" = 1 ]; } && { echo "--package-upgrade is a standalone convergence journey (its own entrypoint); do not combine with other legs" >&2; exit 2; }
+[ "$PACKAGE_UPGRADE" = 1 ] && [ "$DO_BUILD" = 0 ] && { echo "--package-upgrade always rebuilds the working-tree wheel; --no-build is irrelevant" >&2; exit 2; }
 
 if [ "$GUIDED" = 1 ]; then
   # --guided force-rebuilds the native binary with the stamp baked in, so it is
@@ -123,10 +147,10 @@ if [ "$GUIDED" = 1 ]; then
 fi
 
 GRAAL_IMAGE="container-registry.oracle.com/graalvm/native-image-community:25"
-if [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ]; then
-  # nexus-4mm24 / nexus-s3dd4.7: the cold box (and --hole-punch, which reuses
-  # it) acquires the PUBLISHED binary + PG bundle at runtime — NO local native
-  # build, NO stamping. Just the wheel.
+if [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ] || [ "$PACKAGE_UPGRADE" = 1 ]; then
+  # nexus-4mm24 / nexus-s3dd4.7 / nexus-cfgo9: these boxes acquire every
+  # engine binary at runtime (PUBLISHED release) — NO local native build, NO
+  # stamping. Just the wheel.
   echo "[1/2] Building the conexus wheel (host)…"
   uv build --wheel >/dev/null 2>&1
   ls dist/conexus-*.whl >/dev/null 2>&1 || { echo "no wheel in dist/" >&2; exit 1; }
@@ -163,7 +187,7 @@ else
   echo "[1-2/3] --no-build: reusing existing wheel + native binary"
 fi
 
-if [ "$COLD" = 0 ] && [ "$HOLE_PUNCH" = 0 ]; then
+if [ "$COLD" = 0 ] && [ "$HOLE_PUNCH" = 0 ] && [ "$PACKAGE_UPGRADE" = 0 ]; then
   ls dist/conexus-*.whl >/dev/null 2>&1 || { echo "no wheel in dist/ — drop --no-build" >&2; exit 1; }
   [ -x service/target/nexus-service ] || { echo "no native binary at service/target/nexus-service — drop --no-build" >&2; exit 1; }
 fi
@@ -200,7 +224,19 @@ echo "[stage] Staging a minimal build context + building image (COLD=$COLD HOLE_
 STAGE="$(mktemp -d)"
 trap '_guided_restore; rm -rf "$STAGE"' EXIT
 cp "$(ls -t dist/conexus-*.whl | head -1)"            "$STAGE/"   # keep real PEP 427 name
-if [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ]; then
+if [ "$PACKAGE_UPGRADE" = 1 ]; then
+  # nexus-cfgo9: the WORKING-TREE wheel travels in under its OWN subdirectory
+  # (its real PEP 427 filename preserved — pip/uv parse the filename strictly
+  # and a prefix-mangled name fails with "invalid version") so it never
+  # collides with the driver script's `pip install conexus==$PREV_RELEASE`
+  # from real PyPI into the SAME venv. No engine artifact is staged at all
+  # (both $PREV_ENGINE_TAG and $NEW_ENGINE_TAG are acquired at runtime by the
+  # product's own code — the harness never supplies an engine binary).
+  mkdir -p "$STAGE/worktree-wheel"
+  cp "$(ls -t dist/conexus-*.whl | head -1)" "$STAGE/worktree-wheel/"
+  cp "$HERE/Dockerfile.package-upgrade" "$STAGE/Dockerfile"
+  cp "$HERE/rehearse_package_upgrade.sh" "$STAGE/"
+elif [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ]; then
   # nexus-4mm24: NOTHING the service needs is staged — the cold box acquires the
   # binary + PG bundle from the published release at runtime. Only the wheel +
   # both cold drivers (rehearse_cold.sh, rehearse_hole_punch.sh — nexus-s3dd4.7)
@@ -257,6 +293,9 @@ if [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ]; then
   # acquire from (--hole-punch needs v0.1.18+ for /v1/telemetry/ids/probe).
   run_env+=(-e "NEXUS_SERVICE_TAG=$COLD_TAG")
 fi
+if [ "$PACKAGE_UPGRADE" = 1 ]; then
+  run_env+=(-e "PREV_RELEASE=$PREV_RELEASE" -e "PREV_ENGINE_TAG=$PREV_ENGINE_TAG" -e "NEW_ENGINE_TAG=$NEW_ENGINE_TAG")
+fi
 if [ "$WITH_CLOUD" = 1 ]; then
   # Forward the Voyage key from .env (export VOYAGE_API_KEY=…) under both names
   # the code probes. Never echoed.
@@ -292,6 +331,10 @@ elif [ "$HOLE_PUNCH" = 1 ]; then
   # verify-fill hole-punch journey instead of the plain cold-acquire MVV.
   docker run --rm "${run_env[@]}" --entrypoint /bin/bash "$IMAGE" \
     /home/nexus/rehearse_hole_punch.sh
+elif [ "$PACKAGE_UPGRADE" = 1 ]; then
+  # nexus-cfgo9: Dockerfile.package-upgrade's default entrypoint IS
+  # rehearse_package_upgrade.sh.
+  docker run --rm "${run_env[@]}" "$IMAGE"
 elif [ "$COLD" = 1 ]; then
   # nexus-4mm24: Dockerfile.cold's default entrypoint IS rehearse_cold.sh.
   docker run --rm "${run_env[@]}" "$IMAGE"

@@ -39,9 +39,23 @@ This gate exists because the engine silently drifted 22 `service/` commits / 4 d
 ```bash
 uv run pytest                        # unit suite (no API keys)
 tests/e2e/local-service-gate.sh      # integration incl. the local-service functional gate
+tests/e2e/migration-rehearsal/run.sh --package-upgrade   # ONE-engine convergence MVV (nexus-cfgo9)
 ```
 
-Both must pass. Integration is excluded from CI and is the last line of defense before tag-push.
+All must pass. Integration is excluded from CI and is the last line of defense before tag-push.
+
+**`--package-upgrade` — the fix-delivery gate (GH #1402, nexus-cfgo9).** Proves
+what 6.10.0 shipped without: that an EXISTING install upgrading the package
+actually receives this release's engine. It provisions a real previous-release
+box (PyPI + its own cold-acquired engine), upgrades ONLY the conexus package to
+the working tree, and asserts — with the harness forbidden from supplying or
+touching any engine binary (sha256-verified) — that the product converges the
+engine to `REQUIRED_ENGINE_VERSION`, the service boots, the chash probe answers
+via the view path, and T1 survives the cycle. Must end
+`PACKAGE-UPGRADE CONVERGENCE MVV PASSED`. If `run.sh` aborts with the
+PREV_ENGINE_TAG staleness FATAL, bump `NEXUS_PREV_RELEASE`/`NEXUS_PREV_ENGINE_TAG`
+in `run.sh` to the release immediately before this one — the scenario must
+always start from a genuinely older engine.
 
 **Local-mode functional gate — self-provisioning** (2026-07-06 v6.3.6
 lesson; nexus-edwlp, 2026-07-07): the local-service round-trip family
