@@ -430,6 +430,11 @@ For each unique `source_title` in the collection: extracts DOI / arXiv ID from c
 | `--source {semantic-scholar\|openalex}` | Bibliographic backend (default: `semantic-scholar`) |
 | `--delay SECONDS` | Delay between API calls (default: 0.5s). Increase to avoid rate limiting |
 | `--limit N` | Maximum number of titles to enrich (default: 0 = unlimited) |
+| `--backfill-catalog` | Re-drive the catalog write from ALREADY-enriched chunk metadata — no external API calls. Populates the catalog Document rows' `bib_*` fields (surfaced by `catalog_search` / `catalog_list` / `nx catalog show`) for collections enriched before those columns had a writer. Idempotent; titles whose chunks carry bib metadata but have no matching catalog row are reported separately as skipped |
+
+Enrichment also writes the same bib fields to the matching **catalog**
+Document rows (year, authors, venue, citation count, backend id), so
+`catalog_search`, `catalog_list`, and `nx catalog show` surface them.
 
 **Note**: Semantic Scholar's public API allows 100 requests per 5 minutes without an API key. OpenAlex is unauthenticated but encourages including a contact email via `pyalex.config.email`. For large collections, increase `--delay` or use `--limit` to process in batches. DOI extraction prefers labeled DOIs (`DOI: 10.x/y`) over bare DOI strings to avoid contamination from cited references.
 
