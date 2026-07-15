@@ -205,7 +205,7 @@ def test_t3_database_voyage_client_has_timeout() -> None:
         mock_ctor.assert_called_once_with(api_key="test-key", timeout=60.0, max_retries=0)
 
 
-def test_embed_with_fallback_voyage_client_has_timeout() -> None:
+def test_embed_with_fallback_voyage_client_has_timeout(cloud_mode) -> None:
     from nexus.doc_indexer import _embed_with_fallback
     mock_client = MagicMock()
     cce_result = MagicMock()
@@ -243,7 +243,7 @@ def _make_cce_success_2chunk() -> MagicMock:
 
 
 @pytest.mark.parametrize("test_id", ["cce_embed", "embed_fallback_cce", "embed_fallback_std"])
-def test_retry_at_call_site(test_id: str) -> None:
+def test_retry_at_call_site(test_id: str, cloud_mode) -> None:
     if test_id == "cce_embed":
         from nexus.db.t3 import T3Database
         mock_voyage = MagicMock()
@@ -288,7 +288,7 @@ def test_retry_at_call_site(test_id: str) -> None:
         assert model == "voyage-code-3"
 
 
-def test_index_code_file_embed_retries(tmp_path) -> None:
+def test_index_code_file_embed_retries(tmp_path, cloud_mode) -> None:
     from nexus.indexer import _index_code_file
     py_file = tmp_path / "hello.py"
     py_file.write_text("def hello():\n    return 'world'\n")
@@ -333,7 +333,7 @@ def test_rerank_retries_then_degrades() -> None:
 
 # ── Integration: propagation and exhaustion ─────────────────────────────────
 
-def test_cce_retry_then_split_then_propagate() -> None:
+def test_cce_retry_then_split_then_propagate(cloud_mode) -> None:
     from nexus.doc_indexer import _embed_with_fallback
     mock_client = MagicMock()
     mock_client.contextualized_embed.side_effect = _ve.APIConnectionError("persistent down")
@@ -345,7 +345,7 @@ def test_cce_retry_then_split_then_propagate() -> None:
     mock_client.embed.assert_not_called()
 
 
-def test_standard_path_propagates_after_exhaustion() -> None:
+def test_standard_path_propagates_after_exhaustion(cloud_mode) -> None:
     from nexus.doc_indexer import _embed_with_fallback
     mock_client = MagicMock()
     mock_client.embed.side_effect = _ve.APIConnectionError("persistent")
@@ -356,7 +356,7 @@ def test_standard_path_propagates_after_exhaustion() -> None:
     assert mock_client.embed.call_count == 3
 
 
-def test_client_constructed_with_config_timeout() -> None:
+def test_client_constructed_with_config_timeout(cloud_mode) -> None:
     from nexus.doc_indexer import _embed_with_fallback
     mock_client = MagicMock()
     mock_client.embed.return_value = MagicMock(embeddings=[[0.1] * 1024])

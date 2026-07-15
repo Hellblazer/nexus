@@ -489,7 +489,7 @@ def test_index_raises_credentials_missing_when_cloud_mode_explicit(
     assert "NX_LOCAL" in str(excinfo.value)
 
 
-def test_index_pdf_skips_if_hash_unchanged(sample_pdf, monkeypatch):
+def test_index_pdf_skips_if_hash_unchanged(sample_pdf, monkeypatch, cloud_mode):
     set_credentials(monkeypatch)
     content_hash = hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
     mock_col = MagicMock()
@@ -518,6 +518,7 @@ def test_index_pdf_upserts_chunks_when_new(sample_pdf, monkeypatch, mock_t3, voy
 
 def test_index_pdf_fires_document_hook_exactly_once(
     sample_pdf, monkeypatch, mock_t3, voyage_client,
+    cloud_mode,
 ) -> None:
     """RDR-089 runtime fire-once invariant (substantive critic
     Significant #5). The AST drift guard counts call-sites
@@ -744,7 +745,7 @@ def test_index_markdown_offsets(has_fm, fm_text, body, expected_start, expected_
     (2, [[0.1, 0.2], [0.3, 0.4]]),
     (1, [[0.5, 0.6]]),
 ])
-def test_embed_with_fallback_calls_cce(n_chunks, expected_embs):
+def test_embed_with_fallback_calls_cce(n_chunks, expected_embs, cloud_mode):
 
     mock_client = MagicMock()
     cce_result = MagicMock(spec=ContextualizedEmbeddingsResult)
@@ -763,7 +764,7 @@ def test_embed_with_fallback_calls_cce(n_chunks, expected_embs):
     assert model == "voyage-context-3"
 
 
-def test_single_chunk_cce_uses_contextualized_embed():
+def test_single_chunk_cce_uses_contextualized_embed(cloud_mode):
 
     client = _make_cce_client(embeddings_per_call=[[0.1] * 10])
     with patch("voyageai.Client", return_value=client):
@@ -774,7 +775,7 @@ def test_single_chunk_cce_uses_contextualized_embed():
     assert len(embeddings) == 1
 
 
-def test_embed_with_fallback_cce_failure_splits_and_stays_on_model():
+def test_embed_with_fallback_cce_failure_splits_and_stays_on_model(cloud_mode):
 
     client = _make_cce_client(fail_on_call={1})
     with patch("voyageai.Client", return_value=client):
@@ -784,7 +785,7 @@ def test_embed_with_fallback_cce_failure_splits_and_stays_on_model():
     client.embed.assert_not_called()
 
 
-def test_embed_with_fallback_batches_large_input():
+def test_embed_with_fallback_batches_large_input(cloud_mode):
 
     chunks = [f"chunk{i}_" + "x" * 24_000 for i in range(6)]
     client = _make_cce_client()
@@ -796,7 +797,7 @@ def test_embed_with_fallback_batches_large_input():
     assert len(embeddings) == 6
 
 
-def test_partial_cce_failure_splits_failed_batch():
+def test_partial_cce_failure_splits_failed_batch(cloud_mode):
 
     client = _make_cce_client(fail_on_call={2})
     chunks = ["chunk a", "chunk b", "chunk c", "chunk d"]
@@ -835,7 +836,7 @@ def test_cce_contract_spec_mock_rejects_wrong_attribute():
         _ = spec_mock.embeddings
 
 
-def test_cce_contract_embed_with_fallback_uses_correct_access_path():
+def test_cce_contract_embed_with_fallback_uses_correct_access_path(cloud_mode):
 
     mock_client = MagicMock()
     item = MagicMock(spec=ContextualizedEmbeddingsResult)
@@ -896,7 +897,7 @@ def test_batch_chunks_for_cce_singleton_not_merged_when_target_at_limit():
     assert sum(len(b) for b in batches) == _CCE_MAX_BATCH_CHUNKS + 1
 
 
-def test_cce_contract_large_input_still_uses_cce():
+def test_cce_contract_large_input_still_uses_cce(cloud_mode):
 
     chunks = [f"chunk{i}_" + "x" * 18_000 for i in range(8)]
     client = _make_cce_client()
@@ -942,7 +943,7 @@ def test_index_pdf_uses_cce_for_docs_collection(sample_pdf, monkeypatch):
     ("voyage-code-3", 2),
     ("voyage-context-3", 0),
 ])
-def test_index_pdf_hash_match_model_check(stored_model, expected_result, sample_pdf, monkeypatch):
+def test_index_pdf_hash_match_model_check(stored_model, expected_result, sample_pdf, monkeypatch, cloud_mode):
     set_credentials(monkeypatch)
     content_hash = hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
     mock_chunk, mock_extract = _make_pdf_mocks()
@@ -993,7 +994,7 @@ def test_batch_index_marks_failed_on_error(kind, tmp_path):
     assert result[str(bad)] == "failed"
 
 
-def test_embed_standard_path_batches_over_128_chunks():
+def test_embed_standard_path_batches_over_128_chunks(cloud_mode):
     from nexus.doc_indexer import _EMBED_BATCH_SIZE
     chunks = [f"chunk_{i}" for i in range(200)]
     mock_client = MagicMock()
@@ -1024,7 +1025,7 @@ def test_cce_max_total_chunks_constant():
 
 
 @pytest.mark.parametrize("limit_override,n_chunks", [(2, 2), (1, 2)])
-def test_embed_with_fallback_warns_on_excessive_chunks(limit_override, n_chunks):
+def test_embed_with_fallback_warns_on_excessive_chunks(limit_override, n_chunks, cloud_mode):
 
     mock_client = MagicMock()
     mock_result = MagicMock()
@@ -1041,14 +1042,14 @@ def test_embed_with_fallback_warns_on_excessive_chunks(limit_override, n_chunks)
             assert "chunk count exceeds" in mock_log.warning.call_args[0][0]
 
 
-def test_embed_with_fallback_empty_chunks():
+def test_embed_with_fallback_empty_chunks(cloud_mode):
 
     embeddings, model = _embed_with_fallback([], "voyage-context-3", "vk_test")
     assert embeddings == []
     assert model == "voyage-context-3"
 
 
-def test_embed_with_fallback_filters_empty_strings():
+def test_embed_with_fallback_filters_empty_strings(cloud_mode):
 
     mock_result = MagicMock(spec=EmbeddingsObject)
     mock_result.embeddings = [[0.1, 0.2]]
@@ -1064,7 +1065,7 @@ def test_embed_with_fallback_filters_empty_strings():
     assert len(embeddings) == 1
 
 
-def test_embed_with_fallback_all_empty_strings():
+def test_embed_with_fallback_all_empty_strings(cloud_mode):
 
     mock_client = MagicMock()
     with patch("voyageai.Client", return_value=mock_client):
@@ -1073,7 +1074,7 @@ def test_embed_with_fallback_all_empty_strings():
     mock_client.embed.assert_not_called()
 
 
-def test_cce_failure_splits_recursively():
+def test_cce_failure_splits_recursively(cloud_mode):
 
     client = _make_cce_client(fail_on_call={1})
     with patch("voyageai.Client", return_value=client):
@@ -1083,7 +1084,7 @@ def test_cce_failure_splits_recursively():
     client.embed.assert_not_called()
 
 
-def test_embed_partial_batch_failure_stays_same_model():
+def test_embed_partial_batch_failure_stays_same_model(cloud_mode):
 
     chunks = ["chunk a", "chunk b", "chunk c", "chunk d"]
     forced_batches = [["chunk a", "chunk b"], ["chunk c", "chunk d"]]
@@ -1113,7 +1114,7 @@ def test_embed_partial_batch_failure_stays_same_model():
     client.embed.assert_not_called()
 
 
-def test_embed_single_chunk_failure_raises():
+def test_embed_single_chunk_failure_raises(cloud_mode):
 
     mock_client = MagicMock()
     mock_client.contextualized_embed.side_effect = RuntimeError("single chunk too large")
@@ -1122,7 +1123,7 @@ def test_embed_single_chunk_failure_raises():
             _embed_with_fallback(["one giant chunk"], "voyage-context-3", "vk_test")
 
 
-def test_embed_with_fallback_cce_empty_result_raises():
+def test_embed_with_fallback_cce_empty_result_raises(cloud_mode):
 
     mock_client = MagicMock()
 
@@ -1141,7 +1142,7 @@ def test_embed_with_fallback_cce_empty_result_raises():
 
 
 @pytest.mark.parametrize("indexer", ["pdf", "markdown"])
-def test_force_bypasses_staleness(indexer, sample_pdf, sample_md, monkeypatch):
+def test_force_bypasses_staleness(indexer, sample_pdf, sample_md, monkeypatch, cloud_mode):
     set_credentials(monkeypatch)
     path = sample_pdf if indexer == "pdf" else sample_md
     content_hash = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -1180,7 +1181,7 @@ def test_force_bypasses_staleness(indexer, sample_pdf, sample_md, monkeypatch):
     mock_t3.upsert_chunks_with_embeddings.assert_called_once()
 
 
-def test_force_default_false_still_skips(sample_pdf, monkeypatch):
+def test_force_default_false_still_skips(sample_pdf, monkeypatch, cloud_mode):
     set_credentials(monkeypatch)
     content_hash = hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
     mock_col = MagicMock()
@@ -1260,7 +1261,7 @@ def test_index_pdf_return_metadata_true_returns_dict(sample_pdf, monkeypatch, mo
     assert isinstance(result["title"], str)
 
 
-def test_index_pdf_return_metadata_true_skipped_returns_empty_dict(sample_pdf, monkeypatch):
+def test_index_pdf_return_metadata_true_skipped_returns_empty_dict(sample_pdf, monkeypatch, cloud_mode):
     set_credentials(monkeypatch)
     content_hash = hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
     mock_col = MagicMock()
@@ -1290,7 +1291,7 @@ def test_index_markdown_return_metadata_true_returns_dict(sample_md, monkeypatch
     assert isinstance(result["chunks"], int) and isinstance(result["sections"], int)
 
 
-def test_index_markdown_return_metadata_true_skipped_returns_empty_dict(sample_md, monkeypatch):
+def test_index_markdown_return_metadata_true_skipped_returns_empty_dict(sample_md, monkeypatch, cloud_mode):
     set_credentials(monkeypatch)
     content_hash = hashlib.sha256(sample_md.read_bytes()).hexdigest()
     mock_col = MagicMock()
@@ -1310,7 +1311,7 @@ def test_index_markdown_return_metadata_true_skipped_returns_empty_dict(sample_m
     ("voyage-code-3", False),
     ("voyage-context-3", True),
 ])
-def test_embed_progress_callback_fires(model, use_cce):
+def test_embed_progress_callback_fires(model, use_cce, cloud_mode):
 
     progress: list[tuple[int, int]] = []
     mock_client = MagicMock()
@@ -1336,7 +1337,7 @@ def test_embed_progress_callback_fires(model, use_cce):
     assert progress[-1] == (n_chunks, n_chunks)
 
 
-def test_embed_progress_callback_none_is_noop():
+def test_embed_progress_callback_none_is_noop(cloud_mode):
 
     mock_client = MagicMock()
     embed_result = MagicMock()
@@ -1371,7 +1372,7 @@ def test_index_threads_on_progress(indexer, sample_pdf, sample_md, monkeypatch, 
     assert progress
 
 
-def test_stale_chunk_pruning_deletes_old_ids(sample_md, monkeypatch, voyage_client):
+def test_stale_chunk_pruning_deletes_old_ids(sample_md, monkeypatch, voyage_client, cloud_mode):
     """RDR-108 D1 (nexus-kmb6): chunk natural ID is
     ``chunk_text_hash[:32]``. Stale-chunk pruning deletes T3 chunks
     whose ID is no longer in the current upsert set (i.e. their text
@@ -1415,7 +1416,7 @@ def test_stale_chunk_pruning_deletes_old_ids(sample_md, monkeypatch, voyage_clie
 
 
 @pytest.fixture
-def incr_setup(sample_pdf, monkeypatch):
+def incr_setup(sample_pdf, monkeypatch, cloud_mode):
     """Common setup for incremental PDF tests."""
     from nexus.doc_indexer import _INCREMENTAL_THRESHOLD
     set_credentials(monkeypatch)
@@ -1572,7 +1573,7 @@ def test_token_bucket_zero_burst_still_works():
     _TokenBucket(rpm=60, burst=1).acquire()
 
 
-def test_parallel_embed_preserves_order():
+def test_parallel_embed_preserves_order(cloud_mode):
 
 
     def _mock_cce(inputs, model, input_type):
@@ -1593,7 +1594,7 @@ def test_parallel_embed_preserves_order():
     assert model == "voyage-context-3"
 
 
-def test_parallel_embed_progress_fires_for_each_batch():
+def test_parallel_embed_progress_fires_for_each_batch(cloud_mode):
 
     progress: list[tuple] = []
 

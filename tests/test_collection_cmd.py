@@ -796,7 +796,7 @@ def test_corpus_default_keeps_docs_collection(tmp_path, monkeypatch) -> None:
 # ── re-embed (nexus-bw65) ──────────────────────────────────────────────────
 
 
-def test_reembed_dry_run_reports_count(runner, env_creds, tmp_path) -> None:
+def test_reembed_dry_run_reports_count(runner, env_creds, tmp_path, cloud_mode) -> None:
     """nexus-bw65: --dry-run (default) reports the chunk count that
     would be re-embedded without making any writes. No Voyage call."""
     import chromadb
@@ -832,6 +832,7 @@ def test_reembed_dry_run_reports_count(runner, env_creds, tmp_path) -> None:
 
 def test_reembed_no_dry_run_writes_via_voyage(
     runner, env_creds, tmp_path, monkeypatch,
+    cloud_mode,
 ) -> None:
     """nexus-bw65: --no-dry-run --yes embeds via Voyage and upserts the
     new vectors. Chunk ids + document text + metadata preserved;
@@ -899,7 +900,7 @@ def test_reembed_no_dry_run_writes_via_voyage(
     assert fake_voyage_client.embed.call_args.kwargs["model"] == "voyage-code-3"
 
 
-def test_reembed_rejects_cce_model(runner, env_creds) -> None:
+def test_reembed_rejects_cce_model(runner, env_creds, cloud_mode) -> None:
     """nexus-bw65: voyage-context-3 (CCE) is not supported; click.Choice
     rejects at parse time."""
     result = _invoke(
