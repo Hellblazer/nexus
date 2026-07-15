@@ -182,6 +182,15 @@ Full draft: T2 `nexus/design-orchestration-protocol.md` (REVISED v2 per critique
 - **Expectations file**: one more session artifact to write/clean; in
   exchange, ground-truth discrimination with zero inference. Stale
   entries (orchestrator crash) expire with the session directory.
+- **Expectations-file declaration (Gap 1)**: the dispatch-time write is
+  itself a manual orchestrator step — the same discipline-failure class
+  this RDR treats, relocated (agent-forgets-to-report becomes
+  orchestrator-forgets-to-declare). Residual risk accepted for Phase 1
+  because the SubagentStart-stamp variant may close it mechanically
+  (Assumption (b)); mitigated meanwhile by the Phase-2
+  declaration-completeness audit and write-BEFORE-dispatch ordering
+  (below). A missed declaration degrades to today's behavior (no
+  block), never worse.
 - **Orchestrator-procedural fixes (Gap 2, Gap 4 orchestrator side)**:
   bind via memory directives, not mechanism — verifiable only
   retrospectively (transcript/`git log --stat` audits). Accepted: the
@@ -197,13 +206,17 @@ Full draft: T2 `nexus/design-orchestration-protocol.md` (REVISED v2 per critique
   four audited harnesses (finding 2) + per-script concurrent-invocation
   tests. Independent of the plugin cycle.
 - **Phase 1 (plugin)**: expectations-file write path (orchestrator
-  dispatch convention + SubagentStart stamp if payload allows);
+  dispatch convention + SubagentStart stamp if payload allows) — the
+  write happens BEFORE the dispatch call, never after, closing the
+  fast-stopping-teammate race;
   subagent-stop.sh blocking hook; the two heredoc rows; cc-validation
   scenarios 21d/21e + aggregate false-block measurement on a real
   session. Default-on ONLY after 21d/21e pass and the measured
   false-block rate is acceptable to Hal.
 - **Phase 2 (process)**: session-retro checklist entries (directive-diff
-  audit, commit pathspec audit) added to the continuation/retro skill;
+  audit, commit pathspec audit, declaration-completeness audit — diff
+  the expectations file against the session's actual background/named
+  dispatches) added to the continuation/retro skill;
   Gap-2 and Gap-4 orchestrator disciplines measured against the Success
   Criteria in the next comparable multi-agent session.
 
