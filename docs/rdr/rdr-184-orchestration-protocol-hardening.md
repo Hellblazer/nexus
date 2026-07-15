@@ -59,6 +59,34 @@ unrelated whole-index commit and pushed to develop (backed out
 index-only). "Stage by explicit path" does not defend against another
 actor's staged content.
 
+## Context
+
+### Background
+
+The nexus project is developed primarily through multi-agent
+orchestration: a main session dispatches developers, reviewers, judges,
+and researchers (synchronous Agent-tool calls and named/background
+teammates), coordinating via the SendMessage mailbox and a shared git
+working tree. The 2026-07-15 marathon (6.10.0 release, the GH #1402
+incident, 6.10.1) was the largest such session to date and exposed the
+protocol's failure classes at production intensity (10 idle-without-
+report occurrences by final count — two of them agents working on this
+very RDR).
+
+### Technical Environment
+
+- Claude Code hooks: SubagentStart (in use — conexus injects context
+  via `conexus/hooks/scripts/subagent-start.sh`), SubagentStop and Stop
+  (available; payloads and semantics verified in findings 4-5).
+- Dispatch modes: synchronous Agent-tool calls (result returned as the
+  tool result) vs named/background teammates (proactive SendMessage
+  reporting required — the failing mode).
+- Shared resources: one git working tree + ONE git index shared by all
+  actors; e2e harnesses with fixed docker tags / sandbox paths; the
+  one-pytest-suite-at-a-time rule.
+- Artifact split: `conexus/` hook/agent files are plugin-shipped;
+  `tests/e2e/` scripts and cc-validation scenarios are repo-local.
+
 ## Seed Design (under critique; see §Research)
 
 Full draft: T2 `nexus/design-orchestration-protocol.md` (REVISED v2 per critique — see §Research). v1 summary below retained for history; v2 supersedes:
@@ -108,11 +136,104 @@ Full draft: T2 `nexus/design-orchestration-protocol.md` (REVISED v2 per critique
   multi-agent session (measurable from teammate-message transcripts).
 - Zero lost scope updates: every mid-flight directive is either in the
   hand-back's addressed list or explicitly outstanding — never absent.
-- Concurrent invocation of any harness script fails loudly within 1s
-  (flock), never runs; verified by test.
+- Concurrent invocation of any guarded harness script fails loudly
+  within 1s (mkdir-based lock per finding 3), never runs; verified by a
+  concurrent-invocation test per script.
+- Zero foreign files in any orchestrator commit: every commit in a
+  multi-agent session is pathspec-limited, and no commit's file list
+  exceeds its stated scope (retro-checkable from `git log --stat` of
+  the session's commits) — Gap 4's measurable criterion.
 - Prompt-token overhead of the protocol text stays small enough that it
   is applied to EVERY dispatch (if it's too heavy to always use, it
   will be skipped — which is failure).
+
+## Alternatives Considered
+
+1. **Transcript-heuristic report-owing discrimination** (any SendMessage
+   use = owes a report) — REJECTED at gate: misclassifies the primary
+   case (zero-SendMessage background teammate -> never blocked) and
+   false-blocks sync dispatches that used SendMessage mid-run
+   (gate critique Criticals/Significants). Replaced by dispatch-time
+   declaration.
+2. **Own-session Stop hook with a teammate session marker** (finding 5
+   proved it fires) — viable, not chosen: requires marker plumbing into
+   every teammate session and hooks firing in N sessions instead of one
+   spawner-side point; kept as the documented fallback if the
+   expectations-file mechanism proves unreliable in Phase 1.
+3. **Prose-only protocol (v1 design)** — rejected by the design critique:
+   unenforced text in every dispatch degrades under context pressure;
+   the observed failures happened WITH instructions present.
+4. **SubagentStop reminder (non-blocking)** — rejected: highest-frequency
+   failure warrants the mechanical ratchet; block-once with the
+   stop_hook_active guard bounds the cost (verified 21c).
+5. **flock-based harness locks** — rejected: flock absent on darwin
+   (finding 3); mkdir chosen.
+6. **Agent-side self-reported directive ledger** (v1) — rejected: cannot
+   report unread mail; replaced by orchestrator-side send-log diffing +
+   final-inbox-poll row.
+
+## Trade-offs
+
+- **Blocking hook**: guarantees a report or a bounded extra turn; costs
+  one extra turn on true positives and risks noise on
+  misclassification — bounded by the once-guard and gated on Phase-1
+  scenarios 21d/21e + aggregate measurement (RDR-069 spike-before-ship
+  precedent).
+- **Expectations file**: one more session artifact to write/clean; in
+  exchange, ground-truth discrimination with zero inference. Stale
+  entries (orchestrator crash) expire with the session directory.
+- **Orchestrator-procedural fixes (Gap 2, Gap 4 orchestrator side)**:
+  bind via memory directives, not mechanism — verifiable only
+  retrospectively (transcript/`git log --stat` audits). Accepted: the
+  mechanical alternatives (message middleware, commit hooks) exceed
+  proportionality for a single-user workflow today; revisit if retros
+  show recurrence.
+- **Plugin-shipped hook**: rides a plugin release; interim protection is
+  the memory-directive discipline already active.
+
+## Implementation Plan
+
+- **Phase 0 (repo-local, immediate)**: mkdir lock helper + guards in the
+  four audited harnesses (finding 2) + per-script concurrent-invocation
+  tests. Independent of the plugin cycle.
+- **Phase 1 (plugin)**: expectations-file write path (orchestrator
+  dispatch convention + SubagentStart stamp if payload allows);
+  subagent-stop.sh blocking hook; the two heredoc rows; cc-validation
+  scenarios 21d/21e + aggregate false-block measurement on a real
+  session. Default-on ONLY after 21d/21e pass and the measured
+  false-block rate is acceptable to Hal.
+- **Phase 2 (process)**: session-retro checklist entries (directive-diff
+  audit, commit pathspec audit) added to the continuation/retro skill;
+  Gap-2 and Gap-4 orchestrator disciplines measured against the Success
+  Criteria in the next comparable multi-agent session.
+
+## Finalization Gate
+
+- **Contradiction check**: Decision item 1 no longer relies on the
+  transcript heuristic its own finding never verified; Success
+  Criteria no longer name flock; each of the four gaps has a decision
+  item, a success criterion, and either a finding or an explicit
+  Phase-1/Phase-2 verification (Gap 2 and Gap 4 are
+  procedural-with-retro-verification, stated as such in Trade-offs).
+- **Assumption verification**: (a) false-block rate acceptable —
+  UNVERIFIED, gated in Phase 1 (21d/21e + measurement) before
+  default-on; (b) SubagentStart can see background-ness — UNVERIFIED,
+  non-load-bearing (orchestrator-side expectations write is the
+  fallback and is sufficient alone); (c) all other load-bearing claims
+  carry findings 1-6.
+- **Scope verification**: no engine/service changes; no new
+  orchestration framework; plugin surface limited to one hook + two
+  heredoc rows; repo surface limited to the four audited harnesses +
+  scenarios. Forked-skill/nested dispatches: out of scope (platform
+  disallows subagent-spawned subagents today; revisit if that changes).
+- **Cross-cutting**: consistent with RDR-121 (mechanical backstop for
+  soft guidance; different hook event, same philosophy — an explicit
+  override token is intentionally omitted because the once-guard
+  auto-releases, unlike RDR-121's permanent blocks); RDR-069 precedent
+  for spike-before-ship measurement.
+- **Proportionality**: three text rows + one hook script + one lock
+  helper + scenarios, against a measured cost of one 12-hour session's
+  compounding failures and one near-miss on release-gate integrity.
 
 ## Research
 
@@ -240,17 +361,26 @@ Full draft: T2 `nexus/design-orchestration-protocol.md` (REVISED v2 per critique
 Adopt the v2 seed design with the hook-point choice settled by finding 5:
 
 1. **Gap 1 (report-before-idle)** — ONE `SubagentStop` hook (fires for
-   both sync and background dispatches, verified). Discriminator for
-   "owes a report": the hook reads `agent_transcript_path` (verified
-   present) — a dispatch that used SendMessage at least once during its
-   life is teammate-interactive and owes a final report; a dispatch with
-   zero mailbox traffic is synchronous (its result IS the tool result)
-   and is NEVER blocked. If report-owing AND the final turn contains no
-   SendMessage: `{"decision":"block","reason":"report to main"}` with
-   the `stop_hook_active` once-guard (round-trip verified, 21c).
-   **Phase-1 gate before default-on: measure false-block rate on a real
-   session.** Plus the two terse table rows in subagent-start.sh's
-   heredoc (finding 1).
+   both sync and background dispatches; finding 5). Report-owing-ness is
+   DECLARED at dispatch time, never inferred from transcript heuristics:
+   the dispatching side records an expectation (`agent_id` -> owes-report)
+   in a session-scoped expectations file (written by the orchestrator at
+   dispatch, and/or by the SubagentStart hook if the start payload
+   exposes background-ness — an implementation-phase determination). The
+   SubagentStop hook consults the file: agents NOT listed are never
+   blocked (sync dispatches stay unblockable even if they used
+   SendMessage mid-run — kills the gate critique's Significant-3 false
+   block); agents listed are blocked once (`stop_hook_active` guard;
+   round-trip verified, 21c) when their final turn lacks a
+   SendMessage-to-main (checked via `agent_transcript_path`, verified
+   present). This catches the zero-SendMessage background teammate — the
+   gate critique's Critical-2 case — by construction, because listing
+   happens at dispatch, not by traffic. **Phase-1 gates before
+   default-on: scenario 21d (zero-SendMessage background teammate gets
+   blocked, then complies) and 21e (sync dispatch that used SendMessage
+   mid-run is NOT blocked), plus an aggregate false-block measurement on
+   a real session.** Plus the two terse table rows in
+   subagent-start.sh's heredoc (finding 1).
 2. **Gap 2 (directive races)** — orchestrator-side send-log diffing +
    the final-inbox-poll heredoc row; ledger header retained only as the
    diff's input format. Orchestrator behaviors bind via the durable
