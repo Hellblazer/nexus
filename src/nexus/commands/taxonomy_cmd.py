@@ -2,6 +2,8 @@
 """CLI command group for topic taxonomy (RDR-061 P3-2, RDR-070 nexus-2dq)."""
 from __future__ import annotations
 
+import asyncio
+import json
 from typing import TYPE_CHECKING, Any
 
 import click
@@ -871,11 +873,44 @@ def _show_merge_targets(
 
 @taxonomy.command("review")
 @click.option("--collection", "-c", default="", help="Filter by collection")
-@click.option("--limit", "-n", default=15, type=int, help="Topics per session", show_default=True)
-def review_cmd(collection: str, limit: int) -> None:
+@click.option(
+    "--limit", "-n", default=None, type=int,
+    help="Topics per session (default: 15 interactive, 5000 with --auto)",
+)
+@click.option(
+    "--auto", is_flag=True,
+    help="Batched claude_dispatch verdicts instead of interactive prompts",
+)
+@click.option(
+    "--yes", "-y", is_flag=True,
+    help="Skip the destructive-action confirmation prompt (--auto only)",
+)
+@click.option(
+    "--dry-run", is_flag=True,
+    help="Print verdicts without applying any mutations (--auto only)",
+)
+@click.option(
+    "--batch-size", default=40, type=int, show_default=True,
+    help="Topics per claude_dispatch call (--auto only)",
+)
+def review_cmd(
+    collection: str,
+    limit: int | None,
+    auto: bool,
+    yes: bool,
+    dry_run: bool,
+    batch_size: int,
+) -> None:
     """Interactive topic review — accept, rename, merge, delete, or skip."""
+    resolved_limit = limit if limit is not None else (5000 if auto else 15)
+
+    if auto:
+        with _T2Database(_default_db_path()) as db:
+            _review_auto(db, collection, resolved_limit, yes, dry_run, batch_size)
+        return
+
     with _T2Database(_default_db_path()) as db:
-        topics = db.taxonomy.get_unreviewed_topics(collection=collection, limit=limit)
+        topics = db.taxonomy.get_unreviewed_topics(collection=collection, limit=resolved_limit)
         if not topics:
             click.echo("No unreviewed topics. All done!")
             return
@@ -1472,6 +1507,373 @@ async def _generate_labels_batch(
         if 0 <= slot < len(items) and 3 <= len(label) <= 60:
             results[slot] = label.strip().strip('"').strip("'")
     return results
+
+
+# ── nx taxonomy review --auto (nexus-6i01g, nexus-vfs67) ───────────────────
+
+_REVIEW_VERDICT_SCHEMA: dict = {
+    "type": "object",
+    "required": ["verdicts"],
+    "properties": {
+        "verdicts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["id", "action"],
+                "properties": {
+                    "id": {"type": "integer", "minimum": 1},
+                    "action": {
+                        "type": "string",
+                        "enum": ["accept", "rename", "delete", "merge"],
+                    },
+                    "label": {"type": "string", "minLength": 3, "maxLength": 60},
+                    "target_id": {"type": "integer"},
+                    "reason": {"type": "string", "maxLength": 200},
+                },
+            },
+        },
+    },
+}
+
+
+async def _generate_review_verdicts_batch(
+    items: list[tuple[int, str, list[str], list[str], str]],
+) -> list[dict | None]:
+    """Generate review verdicts for a batch of topics via ``claude_dispatch``.
+
+    Each item is ``(topic_id, label, terms, sample_doc_ids, collection)``.
+    Returns one verdict dict (or ``None``, fail-open) per item, in item
+    order. Verdict shapes:
+
+    - ``{"action": "accept"}``
+    - ``{"action": "rename", "label": <3-60 chars, stripped>}``
+    - ``{"action": "delete", "reason": <str>}``
+    - ``{"action": "merge", "target_id": <int>, "reason": <str>}``
+
+    Verdicts are matched back to items by the REAL topic id (schema
+    property ``"id"``), not a positional index — a stacked-review fix
+    (nexus-6i01g finding 3): a prior version keyed by 1-based ``idx``
+    alongside a displayed ``id=`` in the prompt, two near-identical
+    numbering schemes the model could conflate, producing a
+    wrong-topic-verdict. An entry whose ``id`` is not in this batch is
+    ignored (fail-open), not misapplied to some other slot by position.
+
+    Fail-open (mirrors :func:`_generate_labels_batch`): dispatch raising
+    ANY exception, a malformed/missing ``verdicts`` key, or a per-entry
+    validation failure (bad id, unknown action, missing ``label``/
+    ``target_id`` where required) all degrade to ``None`` at that slot —
+    the caller leaves the corresponding topic pending. ``target_id``
+    guard-validation (self-merge, merge-chain same-run source/target
+    collision, missing/cross-collection target, target-deleted-this-run)
+    happens in the CLI orchestration layer, not here — this function only
+    enforces schema-shape validity.
+    """
+    if not items:
+        return []
+
+    id_to_slot = {topic_id: slot for slot, (topic_id, *_rest) in enumerate(items)}
+
+    lines = []
+    for topic_id, label, terms, doc_ids, collection in items:
+        doc_names = [d.split("/")[-1].split(":")[0][:25] for d in doc_ids[:3]]
+        lines.append(
+            f'- id={topic_id} label="{label}" terms=[{", ".join(terms[:5])}] '
+            f'docs=[{", ".join(doc_names)}] collection={collection}'
+        )
+
+    prompt = (
+        "You are reviewing topic-cluster candidates from an automated taxonomy "
+        "discovery pass. For each topic below, decide exactly one action:\n"
+        "  accept - the label is specific and coherent for the terms/docs shown.\n"
+        "  rename - the underlying cluster is coherent but the label is bad; "
+        'supply a new label (3-60 chars) as "label".\n'
+        "  delete - the topic is syntax pattern-pollution, not a real subject: "
+        "pytest/monkeypatch scaffolding, Java test boilerplate, license/import "
+        'headers, CSS blobs, home-directory path fragments. Give a one-line "reason".\n'
+        "  merge - the topic is a near-duplicate of another topic in the same "
+        "collection (usually one listed below); supply the REAL topic id (the "
+        '"id=" value) as "target_id" plus a one-line "reason".\n'
+        'Return {"verdicts": [{"id": <the id= value shown above>, '
+        '"action": "<accept|rename|delete|merge>", "label": "<if rename>", '
+        '"target_id": <if merge>, "reason": "<if delete/merge>"}, ...]} — '
+        "one entry per topic, keyed by its id (not its position in this list).\n\n"
+        + "\n".join(lines)
+    )
+
+    results: list[dict | None] = [None] * len(items)
+    try:
+        from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+        payload = await claude_dispatch(prompt, _REVIEW_VERDICT_SCHEMA, timeout=180.0)
+    except Exception:  # noqa: BLE001 - best-effort payload parse; degrades to current results
+        return results
+
+    verdicts = payload.get("verdicts") if isinstance(payload, dict) else None
+    if not isinstance(verdicts, list):
+        return results
+
+    for entry in verdicts:
+        if not isinstance(entry, dict):
+            continue
+        topic_id = entry.get("id")
+        action = entry.get("action")
+        if not isinstance(topic_id, int) or not isinstance(action, str):
+            continue
+        if topic_id not in id_to_slot:
+            continue
+        slot = id_to_slot[topic_id]
+        if action == "accept":
+            results[slot] = {"action": "accept"}
+        elif action == "rename":
+            new_label = entry.get("label")
+            if isinstance(new_label, str):
+                stripped = new_label.strip()
+                if 3 <= len(stripped) <= 60:
+                    results[slot] = {"action": "rename", "label": stripped}
+        elif action == "delete":
+            reason = entry.get("reason", "")
+            results[slot] = {"action": "delete", "reason": reason if isinstance(reason, str) else ""}
+        elif action == "merge":
+            target_id = entry.get("target_id")
+            if isinstance(target_id, int):
+                reason = entry.get("reason", "")
+                results[slot] = {
+                    "action": "merge",
+                    "target_id": target_id,
+                    "reason": reason if isinstance(reason, str) else "",
+                }
+        # unknown action strings are schema-rejected upstream, but guard
+        # defensively in case a future model deviates from the enum.
+    return results
+
+
+def _print_review_destructive_plan(
+    deletes: list[dict[str, Any]], merges: list[dict[str, Any]],
+) -> None:
+    """Print a grouped, human-readable plan for pending delete/merge verdicts."""
+    click.echo("\nDestructive actions pending:")
+    if deletes:
+        click.echo(f"  Deletes ({len(deletes)}):")
+        for d in deletes:
+            reason = d.get("_reason", "")
+            click.echo(f"    [{d['id']}] {d['label']} ({d['doc_count']} docs) - {reason}")
+    if merges:
+        click.echo(f"  Merges ({len(merges)}):")
+        for m in merges:
+            reason = m.get("_reason", "")
+            click.echo(
+                f"    [{m['id']}] {m['label']} ({m['doc_count']} docs) -> "
+                f"[{m['_target_id']}] {m['_target_label']} ({m['_target_doc_count']} docs) - {reason}"
+            )
+
+
+def _review_auto(
+    db: Any,
+    collection: str,
+    limit: int,
+    yes: bool,
+    dry_run: bool,
+    batch_size: int,
+) -> None:
+    """Batched, unattended review: swaps the human judge for ``claude_dispatch``.
+
+    accept/rename apply immediately (unless ``dry_run``); delete/merge are
+    held as a destructive plan requiring ``click.confirm`` or ``--yes``
+    (``dry_run`` suppresses ALL mutations, including accept/rename).
+    Dispatch is sequential per batch — no parallelism (V1 non-goal,
+    nexus-6i01g).
+
+    Merge validation runs in a second pass once the whole batch's verdicts
+    are known (guard order documented inline below), including a CRITICAL
+    same-run merge-chain guard: a merge target that is itself a merge
+    source this run is dropped rather than applied, which would otherwise
+    risk silently orphaning assignments (``merge_topics`` has no
+    target-existence check; T2 SQLite runs with foreign keys off). Apply
+    loops additionally recheck target existence immediately before each
+    merge and wrap every ``t2_index_write`` call so one bad delete/merge
+    does not abort the remaining batch — failures are counted separately
+    from guard-dropped skips and reported in the summary line.
+    """
+    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+    topics = db.taxonomy.get_unreviewed_topics(collection=collection, limit=limit)
+    if not topics:
+        click.echo("No unreviewed topics. All done!")
+        return
+
+    click.echo(f"Auto-reviewing {len(topics)} topic(s) in batches of {batch_size}...")
+
+    accepted = 0
+    renamed = 0
+    skipped = 0
+    candidate_deletes: list[dict[str, Any]] = []
+    candidate_merges: list[dict[str, Any]] = []
+
+    for start in range(0, len(topics), batch_size):
+        batch = topics[start : start + batch_size]
+        items: list[tuple[int, str, list[str], list[str], str]] = []
+        for t in batch:
+            try:
+                terms = json.loads(t["terms"]) if t.get("terms") else []
+            except (json.JSONDecodeError, TypeError):
+                terms = []
+            doc_ids = db.taxonomy.get_topic_doc_ids(t["id"], limit=3)
+            items.append((t["id"], t["label"], terms, doc_ids, t["collection"]))
+
+        verdicts = asyncio.run(_generate_review_verdicts_batch(items))
+
+        for topic, verdict in zip(batch, verdicts):
+            if verdict is None:
+                skipped += 1
+                continue
+            action = verdict["action"]
+            if action == "accept":
+                if not dry_run:
+                    _tid = topic["id"]
+                    t2_index_write(lambda db, _t=_tid: db.taxonomy.mark_topic_reviewed(_t, "accepted"))
+                accepted += 1
+            elif action == "rename":
+                if not dry_run:
+                    _tid = topic["id"]
+                    _lbl = verdict["label"]
+                    t2_index_write(lambda db, _t=_tid, _l=_lbl: db.taxonomy.rename_topic(_t, _l))
+                renamed += 1
+            elif action == "delete":
+                candidate_deletes.append({**topic, "_reason": verdict.get("reason", "")})
+            elif action == "merge":
+                candidate_merges.append(
+                    {
+                        **topic,
+                        "_target_id": verdict.get("target_id"),
+                        "_reason": verdict.get("reason", ""),
+                    }
+                )
+
+    # Second pass: validate merges only once the full delete- and
+    # merge-source sets are known. Guard order (any violation: skipped += 1,
+    # topic stays pending):
+    #   1. self-merge (target_id == own id).
+    #   2. target is itself a merge SOURCE in this run. CRITICAL
+    #      (nexus-6i01g stacked-review finding 1): without this guard, a
+    #      same-run merge chain A->B, B->C can silently orphan data — if
+    #      B->C applies before A->B, merge_topics(A, B) runs against an
+    #      already-deleted B. CatalogTaxonomy.merge_topics has no
+    #      target-existence check and T2 SQLite has foreign keys OFF (no
+    #      ``PRAGMA foreign_keys=ON``), so A's assignments would silently
+    #      become orphaned rows pointing at a deleted topic_id. Dropping
+    #      any merge whose target is also a source is deterministic
+    #      regardless of apply order: A->B always drops, B->C always
+    #      proceeds (subject to its own guards).
+    #   3. target does not exist.
+    #   4. target is in a different collection.
+    #   5. target was itself verdict-deleted this run.
+    delete_ids = {d["id"] for d in candidate_deletes}
+    merge_source_ids = {m["id"] for m in candidate_merges}
+    pending_merges: list[dict[str, Any]] = []
+    for m in candidate_merges:
+        target_id = m["_target_id"]
+        if target_id == m["id"]:
+            skipped += 1
+            continue
+        if target_id in merge_source_ids:
+            skipped += 1
+            continue
+        target = db.taxonomy.get_topic_by_id(target_id)
+        if target is None:
+            skipped += 1
+            continue
+        if target["collection"] != m["collection"]:
+            skipped += 1
+            continue
+        if target_id in delete_ids:
+            skipped += 1
+            continue
+        pending_merges.append(
+            {
+                **m,
+                "_target_label": target["label"],
+                "_target_doc_count": target["doc_count"],
+            }
+        )
+
+    if dry_run:
+        if candidate_deletes or pending_merges:
+            _print_review_destructive_plan(candidate_deletes, pending_merges)
+        click.echo(
+            f"\nDry run: {accepted} would be accepted, {renamed} would be renamed, "
+            f"{len(candidate_deletes)} would be deleted, {len(pending_merges)} would be merged, "
+            f"{skipped} skipped."
+        )
+        return
+
+    deleted = 0
+    merged = 0
+    failed = 0
+    if candidate_deletes or pending_merges:
+        _print_review_destructive_plan(candidate_deletes, pending_merges)
+        try:
+            proceed = yes or click.confirm("Apply the above destructive actions?")
+        except (click.Abort, EOFError):
+            proceed = False
+
+        if proceed:
+            for d in candidate_deletes:
+                _tid = d["id"]
+                try:
+                    t2_index_write(lambda db, _t=_tid: db.taxonomy.delete_topic(_t))
+                except Exception as exc:  # noqa: BLE001 - per-item apply resilience: one bad delete must not abort the batch
+                    _log.warning(
+                        "taxonomy_review_auto_apply_failed",
+                        topic_id=_tid,
+                        action="delete",
+                        error=str(exc),
+                    )
+                    click.echo(f"  Failed to delete topic {_tid}: {exc}")
+                    failed += 1
+                    continue
+                deleted += 1
+            for m in pending_merges:
+                _src = m["id"]
+                _tgt = m["_target_id"]
+                # Defensive apply-time recheck (nexus-6i01g stacked-review
+                # finding 1): the target may have been removed between
+                # second-pass validation and this apply loop (e.g. an
+                # earlier delete in THIS loop, or an external actor) —
+                # merge_topics has no target-existence check of its own.
+                if db.taxonomy.get_topic_by_id(_tgt) is None:
+                    _log.warning(
+                        "taxonomy_review_auto_apply_failed",
+                        topic_id=_src,
+                        action="merge",
+                        error=f"target {_tgt} no longer exists",
+                    )
+                    click.echo(f"  Failed to merge topic {_src} into {_tgt}: target no longer exists")
+                    failed += 1
+                    continue
+                try:
+                    t2_index_write(lambda db, _s=_src, _t=_tgt: db.taxonomy.merge_topics(_s, _t))
+                except Exception as exc:  # noqa: BLE001 - per-item apply resilience: one bad merge must not abort the batch
+                    _log.warning(
+                        "taxonomy_review_auto_apply_failed",
+                        topic_id=_src,
+                        action="merge",
+                        error=str(exc),
+                    )
+                    click.echo(f"  Failed to merge topic {_src} into {_tgt}: {exc}")
+                    failed += 1
+                    continue
+                merged += 1
+        else:
+            # Finding 6: declined destructive items must still land in the
+            # skipped bucket so the summary tally accounts for every
+            # proposed action, not just the applied ones.
+            skipped += len(candidate_deletes) + len(pending_merges)
+            click.echo("Declined; topics remain pending.")
+
+    click.echo(
+        f"\nAuto-review complete: {accepted} accepted, {renamed} renamed, "
+        f"{deleted} deleted, {merged} merged, {skipped} skipped, {failed} failed."
+    )
 
 
 def relabel_topics(

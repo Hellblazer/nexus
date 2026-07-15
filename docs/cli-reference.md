@@ -874,6 +874,10 @@ nx taxonomy list                                # topic tree
 nx taxonomy list -c docs__nexus                 # topic tree for one collection
 nx taxonomy show 5                              # docs assigned to topic 5
 nx taxonomy review                              # interactive: accept/rename/merge/delete/skip
+nx taxonomy review --auto                       # unattended: batched claude_dispatch verdicts
+nx taxonomy review --auto --dry-run             # preview verdicts, apply nothing
+nx taxonomy review --auto --yes                 # skip the destructive-action confirm prompt
+nx taxonomy review --auto --batch-size 20       # topics per claude_dispatch call (default 40)
 nx taxonomy label                               # batch-relabel with Claude haiku
 nx taxonomy assign doc-id "topic label"         # manually assign a doc
 nx taxonomy rename "old label" "new label"      # rename a topic
@@ -891,6 +895,55 @@ nx taxonomy validate-refs docs/**/*.md                        # stale-reference 
 nx taxonomy backfill-source-collection                        # dry-run: backfill legacy source_collection rows
 nx taxonomy backfill-source-collection --apply                # commit the backfill (irreversible)
 ```
+
+### `nx taxonomy review --auto`
+
+Unattended alternative to the interactive judge: batches pending topics
+(`--batch-size`, default 40) and asks `claude_dispatch` for a verdict per
+topic — `accept` / `rename` / `delete` / `merge` — using the same rubric a
+human reviewer would apply (specific-coherent label -> accept; coherent
+cluster with a bad label -> rename; syntax pattern-pollution such as
+pytest/monkeypatch scaffolding, Java test boilerplate, license/import
+headers, CSS blobs, or home-directory path fragments -> delete;
+near-duplicate of another topic -> merge into its real topic id).
+
+```
+nx taxonomy review --auto                       # default: up to 5000 pending topics
+nx taxonomy review --auto -c docs__nexus         # scope to one collection
+nx taxonomy review --auto --limit 200            # cap topics considered
+nx taxonomy review --auto --batch-size 20        # topics per claude_dispatch call
+nx taxonomy review --auto --dry-run              # print verdicts, apply nothing
+nx taxonomy review --auto --yes                  # skip the destructive-action confirm prompt
+```
+
+`accept` and `rename` apply immediately (unless `--dry-run`, which suppresses
+every mutation including those). `delete` and `merge` are held and printed as
+a grouped destructive plan — topic id, label, doc count, and the model's
+one-line reason for deletes; source label -> target label and doc counts for
+merges — then applied only after an interactive `y/N` confirm or `--yes`.
+Declining leaves those topics pending.
+
+Fail-open throughout: a `claude_dispatch` exception, a malformed response, or
+an invalid verdict entry leaves that topic pending rather than raising.
+Verdicts are matched back to topics by their real id, not list position, so a
+model response cannot be misapplied to the wrong topic. Merge verdicts are
+additionally guard-validated once the whole batch is known — self-merge, a
+target that is itself a merge source in the same run (the same-run
+merge-chain guard: dropping this is what prevents a same-run `A->B, B->C`
+chain from silently orphaning `A`'s doc assignments onto an already-deleted
+`B`), a missing target, a target in a different collection, or a target that
+was itself verdict-deleted this run all drop the merge (topic stays pending)
+rather than applying it. Each destructive apply is independently
+fault-tolerant — one delete or merge raising does not abort the rest of the
+batch; it is counted as failed and logged, and remaining actions still apply.
+A closing summary line reports exact counts: accepted, renamed, deleted,
+merged, skipped (declined, fail-open, and guard-dropped), and failed
+(apply-time errors).
+
+`--limit` defaults to 15 for interactive review and 5000 for `--auto` —
+pass `--limit` explicitly to override either mode. Dispatch is sequential,
+one batch at a time; parallel dispatch is an explicit non-goal for this
+version (nexus-6i01g).
 
 ### `nx taxonomy validate-refs`
 
@@ -933,7 +986,7 @@ taxonomy:
 | `discover` | Discover topics via HDBSCAN. `--all` for all collections, `-c NAME` for one, `--force` to re-cluster |
 | `list` | Topic tree with doc counts. `-c NAME` filters by collection, `-d N` sets tree depth (default: 2) |
 | `show ID` | Documents assigned to a topic. `-n N` limits results (default: 20) |
-| `review` | Interactive review: accept, rename, merge, delete, skip. `-c NAME` to filter, `-n N` topics per session (default: 15) |
+| `review` | Interactive review: accept, rename, merge, delete, skip. `-c NAME` to filter, `-n N` topics per session (default: 15). `--auto` swaps in batched `claude_dispatch` verdicts (default limit 5000); `--yes` skips the destructive-action confirm, `--dry-run` applies nothing, `--batch-size N` sets topics per dispatch (default: 40) |
 | `label` | Batch-relabel topics with Claude haiku. `--all` relabels accepted topics too |
 | `assign DOC LABEL` | Manually assign a doc to a topic by label. `-c NAME` scopes label lookup |
 | `rename OLD NEW` | Rename a topic. `-c NAME` scopes label lookup |
