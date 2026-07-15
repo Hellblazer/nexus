@@ -137,6 +137,49 @@ Full draft: T2 `nexus/design-orchestration-protocol.md` (REVISED v2 per critique
   line in every dispatch prompt, ack-by-item on scope updates,
   harvest-on-silent-idle, singleton preflight.
 
+## Research Findings
+
+1. **[VERIFIED 2026-07-15] Injection path** — live subagent injection is
+   `conexus/hooks/scripts/subagent-start.sh:139-153`: a compact inline
+   `RELAY` heredoc TABLE ("was: awk-truncated RELAY_TEMPLATE.md. Keep
+   compact"). The v2 protocol lines fit as two table rows (Completion:
+   SendMessage full result to main before idling; Inbox: re-check inbox
+   immediately before composing a hand-back). RELAY_TEMPLATE.md stays
+   documentation. Method: direct file read.
+
+2. **[VERIFIED 2026-07-15] Harness-surface audit (lock scope)** — full
+   tests/e2e enumeration (~20 scripts). Fixed shared mutable resources
+   (the lock scope): migration-rehearsal/run.sh (fixed docker tag +
+   shared dist/ — the observed near-miss site); gc-ab/run-ab.sh (named
+   containers/network + shared out/, zero guard); release-sandbox.sh
+   (fixed ~/nexus-sandbox + tmux session name); upgrade-shakeout.sh
+   (fixed ~/nexus-upgrade-sandbox). Already mktemp-isolated:
+   local-service-gate.sh (singleton-by-policy only), index-throughput-
+   bench, scenarios/*. Method: pattern sweep across every script.
+
+3. **[VERIFIED 2026-07-15] mkdir atomic locking works on darwin AND
+   debian:trixie-slim** (live execution both platforms). POSIX-atomic,
+   no flock (absent on darwin). Design consequence: needs stale-lock
+   handling (pid + liveness inside the lockdir) — no auto-release on
+   crash.
+
+4. **[DOCS-RESEARCHED 2026-07-15; one claim gates on empirical
+   verification] SubagentStop payload + block semantics** (official
+   docs + hooks reference + GH #20221): payload carries agent_id/
+   agent_type/last_assistant_message/transcript access/stop_hook_active;
+   `{"decision":"block","reason":...}` confirmed (re-runs the subagent
+   with the reason; server-side block threshold; docs prefer
+   additionalContext over blocking). **CRITICAL CAVEAT: the research
+   indicates SendMessage-addressed background teammates do NOT fire
+   SubagentStop, and the payload lacks a teammate-vs-sync
+   discriminator.** If confirmed, F1-PRIMARY moves to a Stop hook in
+   the TEAMMATE'S OWN session (plugin hooks apply there) with a session
+   marker; the final-turn SendMessage detection transfers unchanged.
+   **GATE ITEM: cc-validation scenario — spawn a background teammate,
+   observe which stop event fires on its idle, confirm the block
+   round-trip.** Session evidence footnote: idle-without-report
+   occurrence #9 was the research agent for this very finding.
+
 ## Decision
 
 (Open — draft. Adoption decision is Hal's after the critique lands.)
