@@ -175,10 +175,35 @@ Full draft: T2 `nexus/design-orchestration-protocol.md` (REVISED v2 per critique
    discriminator.** If confirmed, F1-PRIMARY moves to a Stop hook in
    the TEAMMATE'S OWN session (plugin hooks apply there) with a session
    marker; the final-turn SendMessage detection transfers unchanged.
-   **GATE ITEM: cc-validation scenario — spawn a background teammate,
-   observe which stop event fires on its idle, confirm the block
-   round-trip.** Session evidence footnote: idle-without-report
-   occurrence #9 was the research agent for this very finding.
+   GATE ITEM → resolved by finding 5. Session evidence footnote:
+   idle-without-report occurrence #9 was the research agent for this
+   very finding.
+
+5. **[VERIFIED 2026-07-15, empirical — cc-validation scenario 21, all
+   three legs PASSED] Stop-event topology + block round-trip.**
+   - 21a (sync control): SubagentStop fires for plain Task dispatch;
+     observed payload fields: session_id, transcript_path, cwd,
+     prompt_id, permission_mode, agent_id, agent_type, effort,
+     hook_event_name, stop_hook_active, **agent_transcript_path**.
+   - 21b (background teammate): **BOTH SubagentStop (spawner side) AND
+     the teammate's own-session Stop fired** — finding 4's docs caveat
+     is REFUTED; both hook points are available. Design consequence:
+     a single SubagentStop hook covers sync AND background dispatches,
+     so the needed discriminator is not "which event" but "does THIS
+     dispatch owe a report" — sync dispatches return results as the
+     tool result (blocking them = false-block); the hook must inspect
+     `agent_transcript_path` (present, verified) for a final-turn
+     SendMessage only when the dispatch is report-owing, or the
+     own-session Stop hook can be used with a teammate session marker.
+     Either mechanism is now proven viable; choice is a design-phase
+     trade (single spawner-side hook vs per-session marker).
+   - 21c (block round-trip): `{"decision":"block","reason":...}` from a
+     Stop hook with a `stop_hook_active` once-guard: session continued,
+     complied with the reason, then stopped cleanly. The production
+     block-once pattern works as documented.
+   Scenario: tests/cc-validation/scenarios/21_stop_event_topology.sh
+   (kept — it IS the regression test finding 8's verification
+   requirement asked for).
 
 ## Decision
 

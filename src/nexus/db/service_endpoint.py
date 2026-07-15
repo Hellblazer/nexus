@@ -25,10 +25,25 @@ call so a supervisor restart that republishes the lease is picked up):
 from __future__ import annotations
 
 import os
+import time
+from collections.abc import Callable
 
 import structlog
 
 _log = structlog.get_logger(__name__)
+
+#: Bounded-wait retry mitigation for the supervisor-respawn gap (GH #1405
+#: defect 1, nexus-7dsgp): the observed dead-lease-to-live-lease gap is
+#: 5-10s, so 12s gives ~2-7s of margin without letting a genuinely-dead
+#: supervisor hang a caller for long. Budget arithmetic for callers that
+#: layer this ON TOP OF an existing per-attempt timeout/retry axis (gateway
+#: 502/503/504 backoff, httpx connect/read timeouts) MUST be documented at
+#: the call site — this constant bounds ONLY the added lease-wait, not the
+#: caller's total wall clock.
+DEFAULT_LEASE_WAIT_BUDGET_S: float = 12.0
+#: Poll, don't blind-sleep the whole budget — a lease that republishes
+#: partway through is picked up within one interval, not the full budget.
+DEFAULT_LEASE_POLL_INTERVAL_S: float = 0.5
 
 
 def discover_lease() -> tuple[str | None, str | None]:
@@ -57,7 +72,62 @@ def discover_lease() -> tuple[str | None, str | None]:
     return None, None
 
 
-def recover_endpoint_from_lease(current_base_url: str) -> tuple[str, str | None] | None:
+def discover_lease_with_wait(
+    *,
+    budget_s: float = 0.0,
+    poll_interval_s: float = DEFAULT_LEASE_POLL_INTERVAL_S,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> tuple[str | None, str | None]:
+    """:func:`discover_lease`, polled up to *budget_s* if the first read misses.
+
+    GH #1405 defect 1 (nexus-7dsgp): a retry landing in the 5-10s window
+    between the old supervisor's lease TTL expiry and the new supervisor's
+    lease publication sees :func:`discover_lease` return ``(None, None)``
+    even though the endpoint is about to become resolvable — the pre-fix
+    behavior treated that as a permanent failure. This polls instead of
+    failing on the first miss, but only for callers that explicitly opt in
+    via a nonzero ``budget_s``.
+
+    ``budget_s=0.0`` (the default) degrades to exactly one
+    :func:`discover_lease` call with no sleep — i.e. IDENTICAL behavior to
+    calling :func:`discover_lease` directly. This is deliberate: every
+    caller of this module resolves ONCE at first attempt (must fail loud
+    immediately if the supervisor was never started) and only the
+    retry/self-heal path should pass a nonzero budget. Never call this with
+    a nonzero budget from a first-attempt resolution.
+
+    ``clock``/``sleep`` are injectable (mirrors
+    :class:`~nexus.daemon.service_registry.ServiceRegistry`'s own clock
+    pattern) so tests exercise the full budget with zero real wall-clock
+    time.
+    """
+    deadline = clock() + budget_s
+    attempts = 1
+    result = discover_lease()
+    while result[0] is None and clock() < deadline:
+        remaining = deadline - clock()
+        sleep(min(poll_interval_s, max(0.0, remaining)))
+        attempts += 1
+        result = discover_lease()
+    if budget_s > 0:
+        _log.info(
+            "service_endpoint_reresolved_retry",
+            found=result[0] is not None,
+            attempts=attempts,
+            budget_s=budget_s,
+        )
+    return result
+
+
+def recover_endpoint_from_lease(
+    current_base_url: str,
+    *,
+    wait_budget_s: float = 0.0,
+    poll_interval_s: float = DEFAULT_LEASE_POLL_INTERVAL_S,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> tuple[str, str | None] | None:
     """Connection-refused recovery (nexus-om64x).
 
     After a supervisor ``_respawn`` allocates a NEW port, a long-lived MCP
@@ -87,18 +157,29 @@ def recover_endpoint_from_lease(current_base_url: str) -> tuple[str, str | None]
       session-mint + T1-scratch FATAL paths) wire this recovery today. The other
       long-lived service-backed stores (memory/taxonomy/plan/aspect/chash/…) share
       the resolve-once pattern and remain unguarded — tracked for a sweep follow-on.
+
+    ``wait_budget_s`` (nexus-7dsgp, GH #1405 defect 1): the Phase-1 restart
+    window noted above — a request landing DURING the gap sees no lease and
+    used to give up immediately. Passing a nonzero budget here polls
+    (:func:`discover_lease_with_wait`) instead, closing exactly that window.
+    Default ``0.0`` preserves the original immediate-miss behavior for any
+    caller that does not opt in.
     """
     # An explicitly-pinned NX_SERVICE_URL (a managed TLS endpoint, or any URL the
     # user named) is authoritative — never silently rebind it to a discovered
     # supervisor lease, which is ALWAYS local http (nexus-n3bwh review H1): the
     # https managed base_url would compare unequal to the http lease and rebind
     # every time, routing managed traffic to the wrong (local) service. Lease
-    # recovery is for the lease-discovered path only.
+    # recovery is for the lease-discovered path only, and the bounded wait below
+    # is NEVER applied to the managed-cloud URL path — this early return skips
+    # it entirely (nexus-7dsgp requirement).
     from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
 
     if (get_credential("service_url") or "").strip():
         return None
-    lease_url, lease_token = discover_lease()
+    lease_url, lease_token = discover_lease_with_wait(
+        budget_s=wait_budget_s, poll_interval_s=poll_interval_s, clock=clock, sleep=sleep
+    )
     if lease_url is not None and lease_url.rstrip("/") != (current_base_url or "").rstrip("/"):
         return lease_url.rstrip("/"), lease_token
     return None
@@ -128,7 +209,13 @@ def env_host_port_url() -> str | None:
     return f"http://{host}:{port}"
 
 
-def resolve_service_config() -> tuple[str, int, str]:
+def resolve_service_config(
+    *,
+    wait_budget_s: float = 0.0,
+    poll_interval_s: float = DEFAULT_LEASE_POLL_INTERVAL_S,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> tuple[str, int, str]:
     """``(host, port, token)`` — env halves, then the lease, then fail loud.
 
     The local-supervisor 3-tuple — ALWAYS ``http`` (env ``NX_SERVICE_HOST``/
@@ -142,6 +229,14 @@ def resolve_service_config() -> tuple[str, int, str]:
     ride a supervisor restart only because callers construct a fresh client per
     operation (the ``get_catalog()`` / ``t2_ctx()`` pattern). Do not cache a
     store instance across an operation that may span a restart.
+
+    ``wait_budget_s`` (nexus-7dsgp, GH #1405 defect 1): passed through to
+    :func:`discover_lease_with_wait` — ``0.0`` (the default) is a single
+    immediate lease read, identical to pre-fix behavior; a caller retrying
+    after an unresolvable-endpoint failure passes a nonzero budget to close
+    the supervisor-respawn gap. Never pass a nonzero budget from a
+    first-attempt resolution (construction-time callers must still fail
+    loud immediately when the supervisor was never started).
     """
     env_host = os.environ.get("NX_SERVICE_HOST", "").strip()
     port_str = os.environ.get("NX_SERVICE_PORT", "").strip()
@@ -158,7 +253,9 @@ def resolve_service_config() -> tuple[str, int, str]:
 
     host, token = env_host or None, env_token or None
     if port is None or token is None or host is None:
-        lease_url, lease_token = discover_lease()
+        lease_url, lease_token = discover_lease_with_wait(
+            budget_s=wait_budget_s, poll_interval_s=poll_interval_s, clock=clock, sleep=sleep
+        )
         if lease_url is not None:
             from urllib.parse import urlsplit  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
@@ -185,7 +282,13 @@ def resolve_service_config() -> tuple[str, int, str]:
     return host, port, token
 
 
-def resolve_service_endpoint() -> tuple[str, str]:
+def resolve_service_endpoint(
+    *,
+    wait_budget_s: float = 0.0,
+    poll_interval_s: float = DEFAULT_LEASE_POLL_INTERVAL_S,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> tuple[str, str]:
     """``(base_url, token)`` — the scheme-correct base-url authority.
 
     Every HTTP storage client that builds a base URL (the T2 domain stores, the
@@ -205,6 +308,14 @@ def resolve_service_endpoint() -> tuple[str, str]:
       2. Otherwise ``http://{host}:{port}`` from :func:`resolve_service_config`
          (env halves → lease → fail loud) — the local-supervisor path, always
          ``http``.
+
+    ``wait_budget_s`` (nexus-7dsgp, GH #1405 defect 1) applies ONLY to leg 2
+    (the local-lease path) — a retry against the managed ``service_url`` leg
+    NEVER waits on the lease, by construction: leg 1 returns before
+    ``resolve_service_config`` is even called, and its own lease read (the
+    token-only fallback) stays an unwrapped, non-waiting :func:`discover_lease`
+    call. This is the bead's "never for the managed-cloud URL path" contract
+    enforced structurally rather than by a caller-side guard.
     """
     from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
 
@@ -212,7 +323,7 @@ def resolve_service_endpoint() -> tuple[str, str]:
     if url is not None:
         token = (get_credential("service_token") or "").strip() or None
         if token is None:
-            _, token = discover_lease()
+            _, token = discover_lease()  # deliberately NOT discover_lease_with_wait — see docstring
         if not token:
             raise RuntimeError(
                 "service_url is set but no service_token is resolvable (neither "
@@ -221,5 +332,7 @@ def resolve_service_endpoint() -> tuple[str, str]:
                 "NX_SERVICE_TOKEN) and re-run."
             )
         return url, token
-    host, port, token = resolve_service_config()
+    host, port, token = resolve_service_config(
+        wait_budget_s=wait_budget_s, poll_interval_s=poll_interval_s, clock=clock, sleep=sleep
+    )
     return f"http://{host}:{port}", token

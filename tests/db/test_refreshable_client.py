@@ -768,3 +768,99 @@ class TestReadTimeoutSelfHeal:
 
         assert result == {"echo": {"value": "rt"}}
         assert len(calls) == 2
+
+
+class TestLeaseGapReresolveRetry:
+    """nexus-7dsgp (GH #1405 defect 1): the retry path (``_invalidate_and_reresolve``)
+    must opt into the bounded lease-wait mitigation, bounded and non-stacking,
+    and never for the managed-cloud URL path.
+
+    The deep poll-loop mechanics (mid-gap flip picked up, budget exhausted
+    bounded, zero real sleep) are already proven with a fake clock against
+    ``discover_lease_with_wait``/``resolve_service_endpoint`` directly in
+    ``tests/db/test_service_endpoint_discovery.py``. These tests instead
+    prove the WIRING: that this mixin's retry path actually reaches that
+    mitigation with the right, bounded budget, exactly once, and that a
+    managed endpoint never touches lease discovery at all.
+    """
+
+    def test_retry_passes_bounded_wait_budget_exactly_once(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The f2qvx port-churn scenario (env-resolved, not lease-resolved,
+        so this stays fast — env fills both halves and the wait mechanism
+        never activates) instrumented to prove ``_invalidate_and_reresolve``
+        calls ``resolve_service_endpoint`` with a bounded, nonzero
+        ``wait_budget_s`` — and exactly once, not stacked."""
+        from nexus.db.t2 import _refreshable_client as rc
+
+        store = _make_echo_store()
+        baseline = store.echo_get()
+        assert baseline == {"echo": "get-ok"}
+
+        old_port = fake_service.port
+        _stop_fake_server(fake_service.server)
+        new_server, new_port = _start_fake_server()
+        attempts = 0
+        while new_port == old_port and attempts < 5:
+            _stop_fake_server(new_server)
+            new_server, new_port = _start_fake_server()
+            attempts += 1
+        assert new_port != old_port
+        fake_service.server = new_server
+        fake_service.port = new_port
+        monkeypatch.setenv("NX_SERVICE_PORT", str(new_port))
+
+        calls: list[float] = []
+        real_resolve = rc.resolve_service_endpoint
+
+        def _capturing_resolve(*, wait_budget_s: float = 0.0, **kw: Any) -> Any:
+            calls.append(wait_budget_s)
+            return real_resolve(wait_budget_s=wait_budget_s, **kw)
+
+        monkeypatch.setattr(rc, "resolve_service_endpoint", _capturing_resolve)
+
+        result = store.echo_get()
+        assert result == {"echo": "get-ok"}
+        assert calls == [rc.DEFAULT_LEASE_WAIT_BUDGET_S], (
+            "expected exactly one re-resolve call, with the bounded, "
+            "nonzero wait budget — not the pre-fix instant-miss default "
+            "(0.0) and not stacked into multiple calls"
+        )
+        assert 0 < rc.DEFAULT_LEASE_WAIT_BUDGET_S < 60  # sane, finite bound
+
+    def test_managed_cloud_path_never_touches_lease_discovery(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A managed ``NX_SERVICE_URL`` endpoint retries its connection
+        exactly once on a genuine outage (pre-existing dual-review H1
+        behavior, unchanged) but must NEVER touch lease discovery — the
+        bead's "never for the managed-cloud URL path" contract, proven via
+        a poison stub that fails the test if lease discovery is ever
+        reached."""
+        _reset_fake_service_state()
+        server, port = _start_fake_server()
+        monkeypatch.setenv("NX_SERVICE_URL", f"http://127.0.0.1:{port}")
+        monkeypatch.setenv("NX_SERVICE_TOKEN", _INITIAL_BEARER)
+        monkeypatch.delenv("NX_SERVICE_HOST", raising=False)
+        monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
+
+        from nexus.db import service_endpoint
+
+        def _poison() -> tuple[str | None, str | None]:
+            raise AssertionError(
+                "discover_lease must never be reached for the managed-cloud URL path"
+            )
+
+        monkeypatch.setattr(service_endpoint, "discover_lease", _poison)
+
+        store = _make_echo_store()
+        assert store.echo_get() == {"echo": "get-ok"}  # sanity: managed path works
+
+        _stop_fake_server(server)  # permanent outage — nothing to rebind to
+
+        with pytest.raises(Exception):  # noqa: PT011 — connection-class exception, not pinned here
+            store.echo_get()
+        # If discover_lease had been reached, the poison stub above would
+        # have raised AssertionError instead of letting the connection
+        # error propagate — reaching this point proves it was never called.

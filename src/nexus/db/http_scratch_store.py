@@ -178,10 +178,24 @@ class HttpScratchStore:
         """nexus-om64x: on connection-refused (supervisor restarted on a new
         port; our env port is stale), re-resolve the endpoint from the
         ServiceRegistry lease and rebuild the client. Returns True if rebound to
-        a NEW endpoint, False otherwise (genuine outage — let the error stand)."""
-        from nexus.db.service_endpoint import recover_endpoint_from_lease  # noqa: PLC0415 — deferred to avoid circular import
+        a NEW endpoint, False otherwise (genuine outage — let the error stand).
 
-        recovered = recover_endpoint_from_lease(self._base_url)
+        nexus-7dsgp (GH #1405 defect 1): passes
+        ``DEFAULT_LEASE_WAIT_BUDGET_S`` so a retry landing in the
+        supervisor-respawn gap (old lease expired, new lease not yet
+        published) polls for up to 12s instead of giving up on the first
+        miss — this is the ONLY caller of ``recover_endpoint_from_lease``
+        on this store, so the bounded wait applies exactly once per
+        ``_post``/``_post_raw`` call, never stacked.
+        """
+        from nexus.db.service_endpoint import (  # noqa: PLC0415 — deferred to avoid circular import
+            DEFAULT_LEASE_WAIT_BUDGET_S,
+            recover_endpoint_from_lease,
+        )
+
+        recovered = recover_endpoint_from_lease(
+            self._base_url, wait_budget_s=DEFAULT_LEASE_WAIT_BUDGET_S
+        )
         if recovered is None:
             return False
         new_url, new_token = recovered
