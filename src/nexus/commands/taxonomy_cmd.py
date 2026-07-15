@@ -459,7 +459,14 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
                     "SELECT COUNT(*) FROM topic_links"
                 ).fetchone()[0]
         else:
-            link_count = 0  # service mode: link count not exposed via public API
+            # Service mode: count via the public link-pairs API (nexus-ntkr5 —
+            # the previous hardcoded 0 hid 7,520 live links after the first
+            # `links --refresh` run). Works on both stores: SQLite returns a
+            # dict, HttpTaxonomyStore a list; len() is shape-agnostic.
+            # raw_topics was fetched above in this same service-mode branch —
+            # reuse it rather than paying a second HTTP round-trip.
+            _ids = [t["id"] for t in raw_topics]
+            link_count = len(db.taxonomy.get_topic_link_pairs(_ids)) if _ids else 0
 
         # Apply filters
         rows = all_topics
