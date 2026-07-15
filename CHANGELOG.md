@@ -6,6 +6,73 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.10.0] - 2026-07-15
+
+Taxonomy curation goes unattended, bibliographic metadata finally reaches
+the catalog rows every browsing surface reads, and a boot crash-loop on
+upgraded installs is fixed engine-side. Ships with (and requires)
+engine-service-v0.1.43.
+
+### Added
+
+- **`nx taxonomy review --auto`** (nexus-vfs67, nexus-6i01g): batched,
+  unattended topic review — swaps the interactive judge for
+  `claude_dispatch` verdicts (accept / rename / delete / merge, keyed by
+  real topic id). accept/rename apply immediately; delete/merge print a
+  grouped destructive plan gated on confirmation or `--yes`; `--dry-run`
+  applies nothing. Merge guards: self-merge, missing target,
+  cross-collection target, target-deleted-this-run, and
+  target-is-a-merge-source-this-run (prevents same-run merge-chain
+  assignment orphaning). Per-item fault-tolerant apply loops with a
+  `failed` counter in the summary. Productizes the validated 2026-07-14
+  manual pass (524 topics, 0 errors).
+- **Catalog bibliographic metadata surfacing** (nexus-9l2lg, nexus-6ha8a):
+  `nx enrich bib` now writes `bib_year` / `bib_authors` / `bib_venue` /
+  `bib_citation_count` (+ backend ids, DOI, `bib_enriched_at`) to the
+  matching catalog Document rows — previously the catalog's bib columns
+  (RDR-101) had no writer at all, so `catalog_search` / `catalog_list` /
+  `nx catalog show` always showed them empty. Every browsing-surface
+  reader now carries all 8 bib columns (both local and service backends),
+  the event-sourced write path (default-ON) persists and carry-forwards
+  them at all four emission sites, and `nx catalog show` prints them.
+  New **`nx enrich bib --backfill-catalog`** re-drives the catalog write
+  from already-enriched chunk metadata — zero external API calls,
+  idempotent, honest skip counts.
+
+### Fixed
+
+- **Engine boot crash-loop on foreign-owned relations** (GH #1402,
+  nexus-0gis0; engine-side fix in engine-service-v0.1.43, which this
+  release pins): `grants-nexus-svc-1`'s bulk `GRANT ... ON ALL TABLES`
+  hard-errored as `nexus_admin` on the deliberately superuser-owned
+  `diag_chash_conformance` view, aborting every engine boot once the
+  view exists. Grants are now per-relation and owner-restricted, with a
+  boot-time NOTICE naming anything skipped. A changelog-wide conformance
+  test prevents the class from returning (third incident:
+  nexus-1wjmq, nexus-46yy3, GH #1402).
+- **Taxonomy topic_links orphaning on the SQLite leg** (nexus-y17x9):
+  every topic-deletion site (rebuild clear, `delete_topic`,
+  `merge_topics`, memory-deletion purge) now clears `topic_links`
+  explicitly — the connection runs with foreign keys off and the PG
+  cascade has no SQLite equivalent, so links silently orphaned (~6.9k
+  in the pre-migration store).
+- **Service-mode `nx taxonomy status` reported "0 topic links"**
+  (nexus-ntkr5): the link count now uses the public link-pairs API
+  instead of a hardcoded 0 (7,518 live links were invisible).
+- **Chash-probe fallback log no longer asserts "view absent"** as the
+  cause (nexus-0gis0): the view path also fails on grant/ownership gaps;
+  the note now points at the error field instead of guessing — the old
+  hardcoded guess misled the GH #1402 field diagnosis.
+
+### Changed
+
+- **`REQUIRED_ENGINE_VERSION` floor: 0.1.43** (fix-delivery rule — the
+  GH #1402 grants fix ships to local installs only via this floor/pin;
+  `PINNED_SERVICE_TAG` moves with it by construction).
+- **MinerU upgrade behavior documented** (nexus-s2rl1, wontfix-by-design):
+  upgrades cycle a running MinerU but never cold-start an absent one —
+  on-demand spawn covers first use; `nx mineru start` pre-warms.
+
 ## [6.9.0] - 2026-07-14
 
 MinerU becomes self-healing, catalog search stops being blind to the files
