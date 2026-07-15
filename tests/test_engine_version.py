@@ -34,7 +34,11 @@ class TestRequiredEngineVersion:
         # indexed_at repair provenance (nexus-p5qk8); local installs receive
         # engine fixes ONLY via this floor/pin, so an advertised engine fix
         # moves the floor even with zero client-side hard dependency.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 42)
+        # ->(0,1,43) 2026-07-15: fix-delivery rule again — GH #1402
+        # (nexus-0gis0): grants-nexus-svc-1's bulk GRANT crash-looped boot on
+        # any install whose schema carries the superuser-owned diag view;
+        # v0.1.42 and earlier are broken upgrade targets for that class.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 43)
 
 
 class TestParseEngineVersion:
@@ -75,7 +79,8 @@ class TestFloorComparison:
         assert parse_engine_version("0.1.5") < REQUIRED_ENGINE_VERSION
 
     def test_at_floor_compares_equal(self) -> None:
-        assert parse_engine_version("0.1.42") == REQUIRED_ENGINE_VERSION
+        floor_str = ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
+        assert parse_engine_version(floor_str) == REQUIRED_ENGINE_VERSION
 
     def test_above_floor_compares_greater(self) -> None:
         assert parse_engine_version("0.2.0") > REQUIRED_ENGINE_VERSION

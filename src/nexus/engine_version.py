@@ -65,7 +65,7 @@ from __future__ import annotations
 #: -> (0,1,42) 2026-07-14: catalog-015 FTS filename-token fix (nexus-8gue1,
 #: the GH #1397 search blindness) + indexed_at repair provenance
 #: (nexus-p5qk8) live in the engine — the fix-delivery rule above, applied.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 42)
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 43)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:
