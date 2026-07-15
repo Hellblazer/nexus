@@ -80,6 +80,56 @@ def _row_to_collection_dict(row: tuple) -> dict:
     return d
 
 
+# Full ``documents`` row shape for readers that return whole
+# CatalogEntry lists (nexus-6ha8a follow-up, critic finding 1). Every
+# reader that selects this full set shares one ``_entry_from_row``
+# constructor via the ``dict(zip(_DOC_COLUMNS, row))`` idiom, so a
+# future column addition is a one-place change instead of N
+# hand-rolled positional-index CatalogEntry constructions silently
+# drifting out of sync — the exact bug class this bead fixes (four
+# readers independently forgot to select bib_*, one of them also
+# forgot alias_of).
+_DOC_COLUMNS: tuple[str, ...] = (
+    "tumbler", "title", "author", "year", "content_type", "file_path",
+    "corpus", "physical_collection", "chunk_count", "head_hash",
+    "indexed_at", "metadata", "source_mtime", "alias_of", "source_uri",
+    "bib_year", "bib_authors", "bib_venue", "bib_citation_count",
+    "bib_semantic_scholar_id", "bib_openalex_id", "bib_doi",
+    "bib_enriched_at",
+)
+_DOC_COLUMNS_SQL = ", ".join(_DOC_COLUMNS)
+
+
+def _entry_from_row(row: dict) -> "CatalogEntry":
+    """Build a ``CatalogEntry`` from ``dict(zip(_DOC_COLUMNS, sql_row))``."""
+    from nexus.catalog.catalog import CatalogEntry  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+    return CatalogEntry(
+        tumbler=Tumbler.parse(row["tumbler"]),
+        title=row["title"] or "",
+        author=row["author"] or "",
+        year=row["year"] or 0,
+        content_type=row["content_type"] or "",
+        file_path=row["file_path"] or "",
+        corpus=row["corpus"] or "",
+        physical_collection=row["physical_collection"] or "",
+        chunk_count=row["chunk_count"] or 0,
+        head_hash=row["head_hash"] or "",
+        indexed_at=row["indexed_at"] or "",
+        meta=json.loads(row["metadata"]) if row.get("metadata") else {},
+        source_mtime=row["source_mtime"] or 0.0,
+        alias_of=row["alias_of"] or "",
+        source_uri=row["source_uri"] or "",
+        bib_year=row["bib_year"] or 0,
+        bib_authors=row["bib_authors"] or "",
+        bib_venue=row["bib_venue"] or "",
+        bib_citation_count=row["bib_citation_count"] or 0,
+        bib_semantic_scholar_id=row["bib_semantic_scholar_id"] or "",
+        bib_openalex_id=row["bib_openalex_id"] or "",
+        bib_doi=row["bib_doi"] or "",
+        bib_enriched_at=row["bib_enriched_at"] or "",
+    )
+
+
 class _DocumentOps:
     """Read-only catalog queries composed onto ``Catalog``.
 
@@ -108,7 +158,8 @@ class _DocumentOps:
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
             "metadata, source_mtime, alias_of, source_uri, "
-            "bib_year, bib_authors, bib_venue, bib_citation_count "
+            "bib_year, bib_authors, bib_venue, bib_citation_count, "
+            "bib_semantic_scholar_id, bib_openalex_id, bib_doi, bib_enriched_at "
             "FROM documents WHERE tumbler = ?",
             (str(target),),
         ).fetchone()
@@ -135,6 +186,11 @@ class _DocumentOps:
             bib_authors=row[16] or "",
             bib_venue=row[17] or "",
             bib_citation_count=row[18] or 0,
+            # nexus-9l2lg: the remaining 4 of 8 bib_* columns.
+            bib_semantic_scholar_id=row[19] or "",
+            bib_openalex_id=row[20] or "",
+            bib_doi=row[21] or "",
+            bib_enriched_at=row[22] or "",
         )
 
     def list_by_collection(
@@ -485,7 +541,8 @@ class _DocumentOps:
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
             "metadata, source_mtime, alias_of, source_uri, "
-            "bib_year, bib_authors, bib_venue, bib_citation_count "
+            "bib_year, bib_authors, bib_venue, bib_citation_count, "
+            "bib_semantic_scholar_id, bib_openalex_id, bib_doi, bib_enriched_at "
             "FROM documents WHERE tumbler LIKE ?",
             (prefix + ".%",),
         ).fetchall()
@@ -510,6 +567,12 @@ class _DocumentOps:
                 "bib_authors": r[16] or "",
                 "bib_venue": r[17] or "",
                 "bib_citation_count": r[18] or 0,
+                # nexus-9l2lg: the remaining 4 of 8 bib_* columns — closes
+                # the nexus-u26b4 parity gap with HttpCatalogClient.descendants().
+                "bib_semantic_scholar_id": r[19] or "",
+                "bib_openalex_id": r[20] or "",
+                "bib_doi": r[21] or "",
+                "bib_enriched_at": r[22] or "",
             }
             for r in rows
         ]
@@ -564,6 +627,16 @@ class _DocumentOps:
                 indexed_at=r["indexed_at"] or "",
                 meta=json.loads(r["metadata"]) if r.get("metadata") else {},
                 source_mtime=r["source_mtime"] if "source_mtime" in r else 0.0,
+                # nexus-9l2lg: surface bib_* on FTS search results (nx
+                # catalog search / Catalog.find()).
+                bib_year=r.get("bib_year") or 0,
+                bib_authors=r.get("bib_authors") or "",
+                bib_venue=r.get("bib_venue") or "",
+                bib_citation_count=r.get("bib_citation_count") or 0,
+                bib_semantic_scholar_id=r.get("bib_semantic_scholar_id") or "",
+                bib_openalex_id=r.get("bib_openalex_id") or "",
+                bib_doi=r.get("bib_doi") or "",
+                bib_enriched_at=r.get("bib_enriched_at") or "",
             )
             for r in rows
         ]
@@ -573,7 +646,10 @@ class _DocumentOps:
         from nexus.catalog.catalog import CatalogEntry  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         row = cat._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
+            "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
+            "metadata, source_mtime, source_uri, "
+            "bib_year, bib_authors, bib_venue, bib_citation_count, "
+            "bib_semantic_scholar_id, bib_openalex_id, bib_doi, bib_enriched_at "
             f"FROM documents WHERE {cat._prefix_sql(str(owner))[0]} AND file_path = ?",
             (*cat._prefix_sql(str(owner))[1], file_path),
         ).fetchone()
@@ -594,6 +670,17 @@ class _DocumentOps:
             meta=json.loads(row[11]) if row[11] else {},
             source_mtime=row[12] or 0.0,
             source_uri=row[13] or "",
+            # nexus-9l2lg: by_file_path was missing ALL 8 bib_* columns
+            # (a reader gap the design/plan audit didn't catch — resolve()
+            # and descendants() were the only readers named).
+            bib_year=row[14] or 0,
+            bib_authors=row[15] or "",
+            bib_venue=row[16] or "",
+            bib_citation_count=row[17] or 0,
+            bib_semantic_scholar_id=row[18] or "",
+            bib_openalex_id=row[19] or "",
+            bib_doi=row[20] or "",
+            bib_enriched_at=row[21] or "",
         )
 
     def by_source_uri(self, uri: str) -> CatalogEntry | None:
@@ -635,76 +722,30 @@ class _DocumentOps:
 
     def by_owner(self, owner: Tumbler) -> list[CatalogEntry]:
         cat = self._cat
-        from nexus.catalog.catalog import CatalogEntry  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         rows = cat._db.execute(
-            "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
+            f"SELECT {_DOC_COLUMNS_SQL} "
             f"FROM documents WHERE {cat._prefix_sql(str(owner))[0]}",
             cat._prefix_sql(str(owner))[1],
         ).fetchall()
-        return [
-            CatalogEntry(
-                tumbler=Tumbler.parse(r[0]),
-                title=r[1],
-                author=r[2],
-                year=r[3],
-                content_type=r[4],
-                file_path=r[5],
-                corpus=r[6],
-                physical_collection=r[7],
-                chunk_count=r[8],
-                head_hash=r[9],
-                indexed_at=r[10],
-                meta=json.loads(r[11]) if r[11] else {},
-                source_mtime=r[12] or 0.0,
-                source_uri=r[13] or "",
-            )
-            for r in rows
-        ]
+        return [_entry_from_row(dict(zip(_DOC_COLUMNS, r))) for r in rows]
 
     def by_content_type(self, content_type: str) -> list[CatalogEntry]:
         """List all entries with the given content type (code, paper, rdr, knowledge)."""
         cat = self._cat
-        from nexus.catalog.catalog import CatalogEntry  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         rows = cat._db.execute(
-            "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
-            "FROM documents WHERE content_type = ?",
+            f"SELECT {_DOC_COLUMNS_SQL} FROM documents WHERE content_type = ?",
             (content_type,),
         ).fetchall()
-        return [
-            CatalogEntry(
-                tumbler=Tumbler.parse(r[0]), title=r[1], author=r[2], year=r[3],
-                content_type=r[4], file_path=r[5], corpus=r[6],
-                physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
-                indexed_at=r[10], meta=json.loads(r[11]) if r[11] else {},
-                source_mtime=r[12] or 0.0,
-                source_uri=r[13] or "",
-            )
-            for r in rows
-        ]
+        return [_entry_from_row(dict(zip(_DOC_COLUMNS, r))) for r in rows]
 
     def by_corpus(self, corpus: str) -> list[CatalogEntry]:
         """List all entries with the given corpus tag."""
         cat = self._cat
-        from nexus.catalog.catalog import CatalogEntry  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         rows = cat._db.execute(
-            "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, source_mtime, source_uri "
-            "FROM documents WHERE corpus = ?",
+            f"SELECT {_DOC_COLUMNS_SQL} FROM documents WHERE corpus = ?",
             (corpus,),
         ).fetchall()
-        return [
-            CatalogEntry(
-                tumbler=Tumbler.parse(r[0]), title=r[1], author=r[2], year=r[3],
-                content_type=r[4], file_path=r[5], corpus=r[6],
-                physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
-                indexed_at=r[10], meta=json.loads(r[11]) if r[11] else {},
-                source_mtime=r[12] or 0.0,
-                source_uri=r[13] or "",
-            )
-            for r in rows
-        ]
+        return [_entry_from_row(dict(zip(_DOC_COLUMNS, r))) for r in rows]
 
     def doc_count(self) -> int:
         """Return the total number of documents in the catalog."""
@@ -731,16 +772,11 @@ class _DocumentOps:
         HttpCatalogClient (which already supported offset).
         """
         cat = self._cat
-        from nexus.catalog.catalog import CatalogEntry  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-        # alias_of at position 13 — required so verify_cmd's alias filter is non-vacuous.
-        # Without alias_of in the SELECT, CatalogEntry.alias_of defaults to "" for every
-        # row and the `not e.alias_of` guard in verify_cmd is vacuously True (nexus-xnz0o).
-        sql = (
-            "SELECT tumbler, title, author, year, content_type, file_path, "
-            "corpus, physical_collection, chunk_count, head_hash, indexed_at, metadata, "
-            "source_mtime, alias_of, source_uri "
-            "FROM documents"
-        )
+        # alias_of is in _DOC_COLUMNS — required so verify_cmd's alias filter
+        # is non-vacuous. Without alias_of in the SELECT, CatalogEntry.alias_of
+        # defaults to "" for every row and the `not e.alias_of` guard in
+        # verify_cmd is vacuously True (nexus-xnz0o).
+        sql = f"SELECT {_DOC_COLUMNS_SQL} FROM documents"
         params: tuple = ()
         if content_type:
             sql += " WHERE content_type = ?"
@@ -750,18 +786,7 @@ class _DocumentOps:
         if offset > 0:
             sql += f" OFFSET {offset}"
         rows = cat._db.execute(sql, params).fetchall()
-        return [
-            CatalogEntry(
-                tumbler=Tumbler.parse(r[0]), title=r[1], author=r[2], year=r[3],
-                content_type=r[4], file_path=r[5], corpus=r[6],
-                physical_collection=r[7], chunk_count=r[8], head_hash=r[9],
-                indexed_at=r[10], meta=json.loads(r[11]) if r[11] else {},
-                source_mtime=r[12] or 0.0,
-                alias_of=r[13] or "",
-                source_uri=r[14] or "",
-            )
-            for r in rows
-        ]
+        return [_entry_from_row(dict(zip(_DOC_COLUMNS, r))) for r in rows]
 
     def by_doc_id(self, doc_id: str) -> CatalogEntry | None:
         """Look up catalog entry by T3 doc_id stored in meta.doc_id."""

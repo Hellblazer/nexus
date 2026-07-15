@@ -233,18 +233,40 @@ class Projector:
         # every projector replay (INSERT OR REPLACE deletes-then-inserts
         # the row, triggering the cascade; ON CONFLICT DO UPDATE updates
         # in place). The SET clause lists exactly the columns that
-        # ``DocumentRegistered`` payloads carry; ``bib_*`` columns are
-        # intentionally absent so projector replay does not clobber
-        # bibliographic enrichment written by the
-        # ``BibliographicEnriched`` event handler — a behavioural
-        # divergence from the prior INSERT OR REPLACE which reset bib_*
-        # to defaults on every replay.
+        # ``DocumentRegistered`` payloads carry.
+        #
+        # nexus-6ha8a: ``bib_*`` columns are now included. This is safe
+        # ONLY because all 4 ``DocumentRegisteredPayload`` emission sites
+        # for EXISTING documents (``update()``, both ``rename_collection``
+        # sites, ``_update_document_collection_locked``) carry the row's
+        # CURRENT bib_* values forward into the payload — mirroring how
+        # ``source_mtime``/``source_uri``/``alias_of`` are already
+        # preserved. Naively wiring this SET clause without that
+        # carry-forward would have clobbered bib_* on every plain
+        # collection rename; that was the nexus-9l2lg Task 5 finding this
+        # bead (nexus-6ha8a) resolved.
+        #
+        # Replay caveat: an event written BEFORE this field existed has
+        # no ``bib_*`` keys in its serialized JSON; ``Event.from_dict``
+        # filters to declared fields, so it constructs with the payload's
+        # 0/"" defaults (events.py). A full cold replay of a pre-existing
+        # event log therefore reproduces bib_year=0/etc. for any document
+        # whose LAST ``DocumentRegistered``-type event predates this
+        # change and was never re-touched afterward — the live apply path
+        # (an event emitted now, applied now) is unaffected. This is the
+        # same class of exposure ``alias_of``/``source_uri`` already carry
+        # (fields added to this payload type after it existed); not solved
+        # here, matching that existing posture.
         self._db.execute(
             "INSERT INTO documents "
             "(tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, "
-            "indexed_at, metadata, source_mtime, alias_of, source_uri) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "indexed_at, metadata, source_mtime, alias_of, source_uri, "
+            "bib_year, bib_authors, bib_venue, bib_citation_count, "
+            "bib_semantic_scholar_id, bib_openalex_id, bib_doi, "
+            "bib_enriched_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+            "?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(tumbler) DO UPDATE SET "
             "title=excluded.title, author=excluded.author, "
             "year=excluded.year, content_type=excluded.content_type, "
@@ -253,7 +275,14 @@ class Projector:
             "chunk_count=excluded.chunk_count, head_hash=excluded.head_hash, "
             "indexed_at=excluded.indexed_at, metadata=excluded.metadata, "
             "source_mtime=excluded.source_mtime, alias_of=excluded.alias_of, "
-            "source_uri=excluded.source_uri",
+            "source_uri=excluded.source_uri, "
+            "bib_year=excluded.bib_year, bib_authors=excluded.bib_authors, "
+            "bib_venue=excluded.bib_venue, "
+            "bib_citation_count=excluded.bib_citation_count, "
+            "bib_semantic_scholar_id=excluded.bib_semantic_scholar_id, "
+            "bib_openalex_id=excluded.bib_openalex_id, "
+            "bib_doi=excluded.bib_doi, "
+            "bib_enriched_at=excluded.bib_enriched_at",
             (
                 tumbler,
                 payload.title,
@@ -274,6 +303,14 @@ class Projector:
                 payload.source_mtime,
                 payload.alias_of,
                 payload.source_uri,
+                payload.bib_year,
+                payload.bib_authors,
+                payload.bib_venue,
+                payload.bib_citation_count,
+                payload.bib_semantic_scholar_id,
+                payload.bib_openalex_id,
+                payload.bib_doi,
+                payload.bib_enriched_at,
             ),
         )
 

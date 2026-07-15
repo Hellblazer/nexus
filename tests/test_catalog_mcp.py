@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from nexus.catalog.catalog import Catalog
+from nexus.catalog.tumbler import Tumbler
 from nexus.mcp_server import (
     _reset_singletons,
     catalog_link,
@@ -187,6 +188,77 @@ def test_list_filters_by_content_type_with_pagination(cat) -> None:
     assert titles == ["rdr-A", "rdr-B"], (
         f"content_type filter not pushed into SQL: got {titles!r}"
     )
+
+
+_ENRICHED_BIB = {
+    "bib_year": 2019,
+    "bib_authors": "Dana",
+    "bib_venue": "OSDI",
+    "bib_citation_count": 314,
+    "bib_semantic_scholar_id": "ss42",
+}
+
+
+def test_list_owner_filtered_surfaces_bib_columns(cat) -> None:
+    """nexus-6ha8a follow-up (read-path split-brain, critic finding 1):
+    catalog_list(owner=...) routes through Catalog.by_owner(), which
+    truncated all 8 bib_* columns pre-fix."""
+    result = catalog_register(title="Enriched Paper", owner="1.1", content_type="paper")
+    cat.update(Tumbler.parse(result["tumbler"]), **_ENRICHED_BIB)
+
+    entries = catalog_list(owner="1.1")
+    assert len(entries) == 1
+    for key, value in _ENRICHED_BIB.items():
+        assert entries[0][key] == value, key
+
+
+def test_list_type_filtered_surfaces_bib_columns(cat) -> None:
+    """catalog_list(content_type=...) (no owner) routes through
+    Catalog.by_content_type()."""
+    result = catalog_register(title="Enriched Paper", owner="1.1", content_type="paper")
+    cat.update(Tumbler.parse(result["tumbler"]), **_ENRICHED_BIB)
+
+    entries = catalog_list(content_type="paper")
+    assert len(entries) == 1
+    for key, value in _ENRICHED_BIB.items():
+        assert entries[0][key] == value, key
+
+
+def test_list_unfiltered_surfaces_bib_columns(cat) -> None:
+    """catalog_list() with neither owner nor content_type routes
+    through Catalog.all_documents()."""
+    result = catalog_register(title="Enriched Paper", owner="1.1", content_type="paper")
+    cat.update(Tumbler.parse(result["tumbler"]), **_ENRICHED_BIB)
+
+    entries = catalog_list()
+    assert len(entries) == 1
+    for key, value in _ENRICHED_BIB.items():
+        assert entries[0][key] == value, key
+
+
+def test_search_filter_only_owner_surfaces_bib_columns(cat) -> None:
+    """catalog_search(owner=..., no query) is the filter-only SQL path
+    (no free-text FTS) — routes through Catalog.by_owner() same as
+    catalog_list."""
+    result = catalog_register(title="Enriched Paper", owner="1.1", content_type="paper")
+    cat.update(Tumbler.parse(result["tumbler"]), **_ENRICHED_BIB)
+
+    results = catalog_search(owner="1.1")
+    assert len(results) == 1
+    for key, value in _ENRICHED_BIB.items():
+        assert results[0][key] == value, key
+
+
+def test_search_filter_only_content_type_surfaces_bib_columns(cat) -> None:
+    """catalog_search(content_type=..., no query, no owner/corpus)
+    routes through Catalog.by_content_type()."""
+    result = catalog_register(title="Enriched Paper", owner="1.1", content_type="paper")
+    cat.update(Tumbler.parse(result["tumbler"]), **_ENRICHED_BIB)
+
+    results = catalog_search(content_type="paper")
+    assert len(results) == 1
+    for key, value in _ENRICHED_BIB.items():
+        assert results[0][key] == value, key
 
 
 def test_resolve_dashed_owner_returns_typed_error(cat) -> None:

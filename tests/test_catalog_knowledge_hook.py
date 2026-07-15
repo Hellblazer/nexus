@@ -311,6 +311,15 @@ class TestStorePutHook:
 
 
 class TestEnrichHook:
+    """nexus-9l2lg / nexus-6ha8a: bib_* persists under the ambient
+    default (event-sourced ON, RDR-101 Phase 3 PR ζ) as well as the
+    legacy non-event-sourced path — nexus-6ha8a extended the event-sourced
+    projector to carry bib_* forward across all 4
+    DocumentRegisteredPayload emission sites. No env pin needed here; see
+    test_catalog_bib_columns.py for the dedicated legacy-path (=0) parity
+    suite.
+    """
+
     def test_updates_catalog_metadata(self, tmp_path, monkeypatch):
         from nexus.commands.enrich import _catalog_enrich_hook
 
@@ -342,6 +351,127 @@ class TestEnrichHook:
 
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "no-catalog"))
         _catalog_enrich_hook(title="Test", bib_meta={})
+
+    def test_updates_catalog_bib_columns_s2_backend(self, tmp_path, monkeypatch):
+        from nexus.commands.enrich import _catalog_enrich_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        owner = cat.register_owner("papers", "curator")
+        cat.register(owner, "S2 Paper", content_type="paper")
+
+        _catalog_enrich_hook(
+            title="S2 Paper",
+            bib_meta={
+                "authors": "Alice, Bob",
+                "year": 2024,
+                "venue": "SIGMOD",
+                "citation_count": 42,
+                "semantic_scholar_id": "ss123",
+            },
+            backend="s2",
+        )
+        entries = cat.find("S2 Paper")
+        assert len(entries) >= 1
+        entry = cat.resolve(entries[0].tumbler)
+        assert entry.bib_year == 2024
+        assert entry.bib_venue == "SIGMOD"
+        assert entry.bib_authors == "Alice, Bob"
+        assert entry.bib_citation_count == 42
+        assert entry.bib_semantic_scholar_id == "ss123"
+        assert entry.bib_enriched_at != ""
+
+    def test_updates_catalog_bib_columns_openalex_backend(self, tmp_path, monkeypatch):
+        from nexus.commands.enrich import _catalog_enrich_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        owner = cat.register_owner("papers", "curator")
+        cat.register(owner, "OpenAlex Paper", content_type="paper")
+
+        _catalog_enrich_hook(
+            title="OpenAlex Paper",
+            bib_meta={
+                "authors": "Carol",
+                "year": 2023,
+                "venue": "ICML",
+                "citation_count": 7,
+                "openalex_id": "W999",
+                "doi": "10.1234/foo",
+            },
+            backend="openalex",
+        )
+        entries = cat.find("OpenAlex Paper")
+        assert len(entries) >= 1
+        entry = cat.resolve(entries[0].tumbler)
+        assert entry.bib_openalex_id == "W999"
+        assert entry.bib_doi == "10.1234/foo"
+        assert entry.bib_semantic_scholar_id == ""
+
+    def test_meta_no_longer_carries_venue_or_citation_count(
+        self, tmp_path, monkeypatch,
+    ):
+        from nexus.commands.enrich import _catalog_enrich_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        owner = cat.register_owner("papers", "curator")
+        cat.register(owner, "S2 Meta Paper", content_type="paper")
+        cat.register(owner, "OA Meta Paper", content_type="paper")
+
+        _catalog_enrich_hook(
+            title="S2 Meta Paper",
+            bib_meta={
+                "authors": "A", "year": 2020, "venue": "V",
+                "citation_count": 1, "semantic_scholar_id": "ss1",
+            },
+            backend="s2",
+        )
+        _catalog_enrich_hook(
+            title="OA Meta Paper",
+            bib_meta={
+                "authors": "B", "year": 2021, "venue": "W",
+                "citation_count": 2, "openalex_id": "W1", "doi": "10.1/y",
+            },
+            backend="openalex",
+        )
+
+        s2_entry = cat.resolve(cat.find("S2 Meta Paper")[0].tumbler)
+        oa_entry = cat.resolve(cat.find("OA Meta Paper")[0].tumbler)
+        for entry in (s2_entry, oa_entry):
+            assert "venue" not in entry.meta
+            assert "citation_count" not in entry.meta
+            assert "bib_semantic_scholar_id" not in entry.meta
+            assert "bib_openalex_id" not in entry.meta
+            assert "bib_doi" not in entry.meta
+
+    def test_catalog_search_surfaces_bib_year_and_citation_count_after_enrich(
+        self, tmp_path, monkeypatch,
+    ):
+        from nexus.commands.enrich import _catalog_enrich_hook
+
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+
+        owner = cat.register_owner("papers", "curator")
+        cat.register(owner, "Searchable Enriched Paper", content_type="paper")
+
+        _catalog_enrich_hook(
+            title="Searchable Enriched Paper",
+            bib_meta={
+                "authors": "Dana", "year": 2019, "venue": "OSDI",
+                "citation_count": 314, "semantic_scholar_id": "ss42",
+            },
+            backend="s2",
+        )
+
+        results = cat.find("Searchable Enriched Paper")
+        assert len(results) >= 1
+        assert results[0].bib_year == 2019
+        assert results[0].bib_citation_count == 314
 
 
 class TestEnrichHookSourcePathMatching:
@@ -410,7 +540,7 @@ class TestEnrichHookSourcePathMatching:
         assert entry_a is not None
         assert entry_a.year == 2020
         assert entry_a.author == "Author A"
-        assert entry_a.meta.get("bib_openalex_id") == "WAAA"
+        assert entry_a.bib_openalex_id == "WAAA"
         assert entry_a.meta.get("references") == ["WX", "WY"]
 
         # Paper B is untouched (was the bug: the LIMIT-1 fallback
@@ -419,7 +549,7 @@ class TestEnrichHookSourcePathMatching:
         assert entry_b is not None
         assert entry_b.year == 0
         assert entry_b.author == ""
-        assert entry_b.meta.get("bib_openalex_id", "") == ""
+        assert entry_b.bib_openalex_id == ""
 
     def test_source_paths_fan_out_across_multiple_rows(
         self, tmp_path, monkeypatch,
@@ -461,8 +591,8 @@ class TestEnrichHookSourcePathMatching:
 
         a = cat.by_file_path(owner, "papers/A.pdf")
         b = cat.by_file_path(owner, "papers/B.pdf")
-        assert a.year == 2021 and a.meta.get("bib_openalex_id") == "WBOTH"
-        assert b.year == 2021 and b.meta.get("bib_openalex_id") == "WBOTH"
+        assert a.year == 2021 and a.bib_openalex_id == "WBOTH"
+        assert b.year == 2021 and b.bib_openalex_id == "WBOTH"
 
     def test_no_source_paths_no_silent_clobber(self, tmp_path, monkeypatch):
         """Caller passes no source_paths and the title doesn't match
@@ -494,7 +624,7 @@ class TestEnrichHookSourcePathMatching:
 
         entry = cat.by_file_path(owner, "papers/X.pdf")
         assert entry.year == 0  # untouched
-        assert entry.meta.get("bib_openalex_id", "") == ""
+        assert entry.bib_openalex_id == ""
 
     def test_references_list_propagates_with_openalex(
         self, tmp_path, monkeypatch,
