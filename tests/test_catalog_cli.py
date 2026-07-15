@@ -155,6 +155,53 @@ class TestRegisterAndShow:
         assert result.exit_code == 0
         assert "URI:" not in result.output
 
+    def test_show_prints_bib_fields_when_enriched(
+        self, initialized_catalog, catalog_env,
+    ):
+        """nexus-6ha8a follow-up (critic finding 2): resolve() carries
+        bib_* since nexus-9l2lg, but the plain-text ``show`` output
+        never printed them. Print when non-empty/non-zero."""
+        from nexus.catalog.tumbler import Tumbler
+
+        runner = CliRunner()
+        runner.invoke(main, [
+            "catalog", "register",
+            "--title", "Enriched Paper",
+            "--owner", "1.1",
+            "--type", "paper",
+        ])
+        initialized_catalog.update(
+            Tumbler.parse("1.1.1"),
+            bib_year=2019, bib_authors="Dana", bib_venue="OSDI",
+            bib_citation_count=314,
+        )
+        result = runner.invoke(main, ["catalog", "show", "1.1.1"])
+        assert result.exit_code == 0
+        assert "Bib Year:    2019" in result.output
+        assert "Bib Authors: Dana" in result.output
+        assert "Bib Venue:   OSDI" in result.output
+        assert "Citations:   314" in result.output
+
+    def test_show_omits_bib_fields_when_not_enriched(
+        self, initialized_catalog, catalog_env,
+    ):
+        """Un-enriched entries (bib_* at column defaults) shouldn't
+        render bib lines at all — display is conditional, matching the
+        URI line's convention."""
+        runner = CliRunner()
+        runner.invoke(main, [
+            "catalog", "register",
+            "--title", "Plain Paper",
+            "--owner", "1.1",
+            "--type", "paper",
+        ])
+        result = runner.invoke(main, ["catalog", "show", "1.1.1"])
+        assert result.exit_code == 0
+        assert "Bib Year:" not in result.output
+        assert "Bib Authors:" not in result.output
+        assert "Bib Venue:" not in result.output
+        assert "Citations:" not in result.output
+
 
 class TestListCommand:
     def test_list_entries(self, initialized_catalog, catalog_env):

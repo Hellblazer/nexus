@@ -196,6 +196,13 @@ def _to_entry(d: dict) -> CatalogEntry:
         bib_authors=d.get("bib_authors") or "",
         bib_venue=d.get("bib_venue") or "",
         bib_citation_count=d.get("bib_citation_count") or 0,
+        # nexus-9l2lg: the remaining 4 of 8 bib_* columns — the wire dict
+        # already carries these (CatalogRepository.docRowFromRecord), this
+        # was a pure mapping gap.
+        bib_semantic_scholar_id=d.get("bib_semantic_scholar_id") or "",
+        bib_openalex_id=d.get("bib_openalex_id") or "",
+        bib_doi=d.get("bib_doi") or "",
+        bib_enriched_at=d.get("bib_enriched_at") or "",
     )
 
 

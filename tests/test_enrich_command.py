@@ -2,12 +2,17 @@
 """Tests for nx enrich CLI command."""
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
 
+from nexus.catalog.catalog import Catalog
+from nexus.catalog.tumbler import Tumbler
 from nexus.commands.enrich import enrich
 from nexus.db.http_vector_client import HttpVectorClient
+from nexus.db.t3 import T3Database
 
 
 @patch("nexus.db.make_t3")
@@ -397,3 +402,225 @@ def test_enrich_source_auto_uses_s2_when_key_present(
     assert "Backend: s2" in result.output
     mock_oa.assert_not_called()
     mock_s2.assert_called_once_with("Paper S2")
+
+
+# ── nexus-9l2lg: --backfill-catalog ─────────────────────────────────────────
+
+
+def _make_catalog(tmp_path: Path) -> tuple[Path, Catalog]:
+    catalog_dir = tmp_path / "catalog"
+    cat = Catalog.init(catalog_dir)
+    return catalog_dir, cat
+
+
+@pytest.fixture(autouse=True)
+def _backfill_catalog_env(monkeypatch):
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "Test")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@test.invalid")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "Test")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
+
+
+class TestBackfillCatalog:
+    """nexus-9l2lg Task 4: ``nx enrich bib COLLECTION --backfill-catalog``
+    re-derives the catalog bib_* write from already-enriched T3 chunk
+    metadata, with zero external API calls. Uses a real T3 (EphemeralClient)
+    + real local Catalog rather than mocks (repo convention: integration
+    over mocks for boundary-spanning behavior).
+
+    No env pin needed: nexus-6ha8a extended the event-sourced projector
+    to persist bib_* too, so these assertions hold under the ambient
+    default (ON, RDR-101 Phase 3 PR ζ). See test_catalog_bib_columns.py
+    for the dedicated legacy-path (=0) parity suite.
+    """
+
+    def _seed_collection_and_catalog(
+        self, tmp_path: Path, monkeypatch, local_t3: T3Database,
+        collection: str = "knowledge__nexus-1-1__voyage-context-3__v1",
+    ) -> tuple[Catalog, str, Tumbler]:
+        catalog_dir, cat = _make_catalog(tmp_path)
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+        monkeypatch.setattr("nexus.db.make_t3", lambda: local_t3)
+
+        col = local_t3.get_or_create_collection(collection)
+        col.add(
+            ids=["c1", "c2"],
+            documents=["chunk one text", "chunk two text"],
+            metadatas=[
+                {
+                    "title": "Enriched Paper", "source_path": "/papers/e.pdf",
+                    "bib_year": 2019, "bib_venue": "OSDI",
+                    "bib_authors": "Dana", "bib_citation_count": 314,
+                    "bib_semantic_scholar_id": "ss42",
+                },
+                {
+                    "title": "Enriched Paper", "source_path": "/papers/e.pdf",
+                    "bib_year": 2019, "bib_venue": "OSDI",
+                    "bib_authors": "Dana", "bib_citation_count": 314,
+                    "bib_semantic_scholar_id": "ss42",
+                },
+            ],
+        )
+
+        owner = cat.register_owner("papers", "curator")
+        cat.register(
+            owner, "Enriched Paper", content_type="paper",
+            physical_collection=collection, file_path="papers/e.pdf",
+        )
+        return cat, collection, owner
+
+    def test_backfill_catalog_populates_bib_columns_from_enriched_chunks(
+        self, tmp_path: Path, monkeypatch, local_t3: T3Database,
+    ) -> None:
+        cat, collection, _owner = self._seed_collection_and_catalog(
+            tmp_path, monkeypatch, local_t3,
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(enrich, ["bib", collection, "--backfill-catalog"])
+        assert result.exit_code == 0, result.output
+        assert "Backfilled 1 titles" in result.output
+
+        results = cat.find("Enriched Paper")
+        assert len(results) == 1
+        found = cat.resolve(results[0].tumbler)
+        assert found.bib_year == 2019
+        assert found.bib_venue == "OSDI"
+        assert found.bib_authors == "Dana"
+        assert found.bib_citation_count == 314
+        assert found.bib_semantic_scholar_id == "ss42"
+
+    def test_backfill_catalog_idempotent_second_run(
+        self, tmp_path: Path, monkeypatch, local_t3: T3Database,
+    ) -> None:
+        cat, collection, _owner = self._seed_collection_and_catalog(
+            tmp_path, monkeypatch, local_t3,
+        )
+
+        runner = CliRunner()
+        first = runner.invoke(enrich, ["bib", collection, "--backfill-catalog"])
+        assert first.exit_code == 0, first.output
+        before = cat.resolve(cat.find("Enriched Paper")[0].tumbler)
+
+        second = runner.invoke(enrich, ["bib", collection, "--backfill-catalog"])
+        assert second.exit_code == 0, second.output
+        assert "Backfilled 1 titles" in second.output
+
+        after = cat.resolve(cat.find("Enriched Paper")[0].tumbler)
+        for key in (
+            "bib_year", "bib_venue", "bib_authors", "bib_citation_count",
+            "bib_semantic_scholar_id",
+        ):
+            assert getattr(before, key) == getattr(after, key), key
+
+    def test_backfill_catalog_skips_non_enriched_chunks(
+        self, tmp_path: Path, monkeypatch, local_t3: T3Database,
+    ) -> None:
+        cat, collection, owner = self._seed_collection_and_catalog(
+            tmp_path, monkeypatch, local_t3,
+        )
+        col = local_t3.get_or_create_collection(collection)
+        col.add(
+            ids=["c3"],
+            documents=["chunk three text, not enriched"],
+            metadatas=[{
+                "title": "Non-Enriched Paper", "source_path": "/papers/n.pdf",
+            }],
+        )
+        cat.register(
+            owner, "Non-Enriched Paper", content_type="paper",
+            physical_collection=collection, file_path="papers/n.pdf",
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(enrich, ["bib", collection, "--backfill-catalog"])
+        assert result.exit_code == 0, result.output
+        assert "Backfilled 1 titles" in result.output
+
+        enriched = cat.resolve(cat.find("Enriched Paper")[0].tumbler)
+        assert enriched.bib_year == 2019
+
+        non_enriched = cat.resolve(cat.find("Non-Enriched Paper")[0].tumbler)
+        assert non_enriched.bib_year == 0
+        assert non_enriched.bib_semantic_scholar_id == ""
+
+    def test_backfill_catalog_counts_skipped_no_row_separately(
+        self, tmp_path: Path, monkeypatch, local_t3: T3Database,
+    ) -> None:
+        """nexus-6ha8a follow-up (critic finding 3): _backfill_catalog_
+        from_chunks previously incremented titles_backfilled
+        unconditionally, even when _catalog_enrich_hook silently
+        no-oped (no matching catalog row). A title with enriched
+        chunks but NO catalog row must count as skipped, not
+        backfilled."""
+        # Distinct collection name: chromadb's EphemeralClient has known
+        # process-shared-state behavior across tests reusing the same
+        # collection name (see project_chromadb_ephemeral_shared_state
+        # memory) — sibling TestBackfillCatalog tests add their own
+        # chunks (e.g. "c3") to the default name, which would silently
+        # inflate this test's exact chunks_scanned assertion if reused.
+        cat, collection, owner = self._seed_collection_and_catalog(
+            tmp_path, monkeypatch, local_t3,
+            collection="knowledge__nexus-1-1__bge-base-en-v15-768__v2",
+        )
+        # A second enriched title with chunks but NO matching catalog
+        # row anywhere (no register() call for it) — the hook's
+        # source_path / title / FTS lookups must all miss.
+        col = local_t3.get_or_create_collection(collection)
+        col.add(
+            ids=["c9"],
+            documents=["orphan enriched chunk text"],
+            metadatas=[{
+                "title": "Orphan Enriched Paper", "source_path": "/papers/orphan.pdf",
+                "bib_year": 2021, "bib_venue": "SOSP",
+                "bib_authors": "Eve", "bib_citation_count": 7,
+                "bib_semantic_scholar_id": "ss-orphan",
+            }],
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(enrich, ["bib", collection, "--backfill-catalog"])
+        assert result.exit_code == 0, result.output
+        # 2 enriched titles total ("Enriched Paper" has a matching row;
+        # "Orphan Enriched Paper" does not) -> N-1 backfilled, 1 skipped.
+        assert "Backfilled 1 titles" in result.output
+        assert "1 titles skipped (no matching catalog row)" in result.output
+
+        from nexus.commands.enrich import _backfill_catalog_from_chunks
+        # Direct call (fresh collection state unchanged by the CLI run
+        # above, since the CLI already applied the update) confirms the
+        # exact return-tuple contract idempotently: "Enriched Paper" is
+        # still matched (re-applies the same values -> still counted as
+        # backfilled), "Orphan Enriched Paper" is still unmatched.
+        titles_backfilled, chunks_scanned, titles_skipped_no_row = (
+            _backfill_catalog_from_chunks(collection)
+        )
+        assert titles_backfilled == 1
+        assert titles_skipped_no_row == 1
+        assert chunks_scanned == 3  # c1, c2 (Enriched Paper) + c9 (orphan)
+
+    def test_backfill_catalog_makes_zero_external_calls(
+        self, tmp_path: Path, monkeypatch, local_t3: T3Database,
+    ) -> None:
+        # Non-voyage collection name: this is a local-mode test (the
+        # embedder segment is incidental), and the RDR-109 mode lint
+        # flags any test whose source mentions voyage-(context|code)-3
+        # without the cloud_mode fixture.
+        self._seed_collection_and_catalog(
+            tmp_path, monkeypatch, local_t3,
+            collection="knowledge__nexus-1-1__bge-base-en-v15-768__v1",
+        )
+
+        def _boom(*args, **kwargs):
+            raise AssertionError("external bib_enricher call must not happen")
+
+        monkeypatch.setattr("nexus.bib_enricher.enrich", _boom, raising=False)
+        monkeypatch.setattr(
+            "nexus.bib_enricher_openalex.enrich", _boom, raising=False,
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            enrich, ["bib", "knowledge__nexus-1-1__bge-base-en-v15-768__v1", "--backfill-catalog"],
+        )
+        assert result.exit_code == 0, result.output

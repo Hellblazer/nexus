@@ -2231,8 +2231,14 @@ def _check_migration_state(
                 _log.warning(
                     "chash_probe_view_fallback_legacy",
                     error=str(view_exc)[:200],
-                    note="diag_chash_conformance view absent (pre-A6 engine) "
-                         "— probing tables directly under the legacy grants",
+                    # GH #1402: do NOT assert the cause here — the view path
+                    # also fails on a live view when nexus_diag lacks the
+                    # owner-granted view SELECT or the view owner lost table
+                    # access (ownership fragmentation). The error field
+                    # carries the real cause.
+                    note="view-path probe failed — falling back to legacy "
+                         "direct-table statements (view absent on pre-A6 "
+                         "engines, or view/owner grant gap — see error)",
                 )
                 counts = run_diagnostic_sql(
                     legacy_chash_conformance_statements(), diag_creds,

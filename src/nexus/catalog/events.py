@@ -273,6 +273,27 @@ class DocumentRegisteredPayload:
     indexed_at: str = ""
     alias_of: str = ""
     meta: dict[str, Any] = field(default_factory=dict)
+    # nexus-6ha8a: RDR-101 bib_* columns, added after this payload type
+    # already existed — same pattern as ``alias_of``/``source_uri`` before
+    # it. Defaults (0/"") apply when an OLDER event (written before this
+    # field existed) is replayed: ``Event.from_dict`` filters the parsed
+    # JSON to declared fields, so a legacy payload missing these keys
+    # constructs with the defaults rather than raising. This means a full
+    # cold replay of a pre-existing event log reproduces bib_year=0/etc.
+    # for any document whose LAST DocumentRegistered-type event predates
+    # this change and was never re-touched afterward — the live LOCAL
+    # apply path (an event emitted now, with current values carried
+    # forward from the live row) is unaffected. See catalog_writes.py's
+    # emission sites (update, rename_collection x2,
+    # _update_document_collection_locked) for the carry-forward writers.
+    bib_year: int = 0
+    bib_authors: str = ""
+    bib_venue: str = ""
+    bib_citation_count: int = 0
+    bib_semantic_scholar_id: str = ""
+    bib_openalex_id: str = ""
+    bib_doi: str = ""
+    bib_enriched_at: str = ""
 
 
 @dataclass(frozen=True, slots=True)

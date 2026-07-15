@@ -107,7 +107,9 @@ class _WriteOps:
         row = cat._db.execute(
             "SELECT tumbler, title, author, year, content_type, file_path, "
             "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-            "metadata, source_mtime, source_uri, alias_of "
+            "metadata, source_mtime, source_uri, alias_of, "
+            "bib_year, bib_authors, bib_venue, bib_citation_count, "
+            "bib_semantic_scholar_id, bib_openalex_id, bib_doi, bib_enriched_at "
             "FROM documents WHERE tumbler = ?",
             (tumbler,),
         ).fetchone()
@@ -138,6 +140,19 @@ class _WriteOps:
                 indexed_at=row[10] or "",
                 alias_of=row[14] or "",
                 meta=dict(meta_dict),
+                # nexus-6ha8a: carry the row's current bib_* forward —
+                # this is a collection re-point, not a bib change; the
+                # event-sourced projector's ON CONFLICT SET clause
+                # writes these verbatim, so omitting them would clobber
+                # any prior enrichment.
+                bib_year=int(row[15] or 0),
+                bib_authors=row[16] or "",
+                bib_venue=row[17] or "",
+                bib_citation_count=int(row[18] or 0),
+                bib_semantic_scholar_id=row[19] or "",
+                bib_openalex_id=row[20] or "",
+                bib_doi=row[21] or "",
+                bib_enriched_at=row[22] or "",
             ),
             v=0,
         )
@@ -157,6 +172,14 @@ class _WriteOps:
             "source_mtime": row[12] or 0.0,
             "source_uri": row[13] or "",
             "alias_of": row[14] or "",
+            "bib_year": row[15] or 0,
+            "bib_authors": row[16] or "",
+            "bib_venue": row[17] or "",
+            "bib_citation_count": row[18] or 0,
+            "bib_semantic_scholar_id": row[19] or "",
+            "bib_openalex_id": row[20] or "",
+            "bib_doi": row[21] or "",
+            "bib_enriched_at": row[22] or "",
         }
         if cat._event_sourced_enabled:
             cat._write_to_event_log(event)
@@ -443,6 +466,19 @@ class _WriteOps:
                 # ``entry.alias_of`` directly, silently dropping the
                 # caller-supplied value.
                 "alias_of": entry.alias_of or "",
+                # nexus-9l2lg: carry bib_* forward from the current row so
+                # an update() that doesn't pass bib kwargs preserves them
+                # (clobber protection flips from omission to carry-through;
+                # explicit bib_* kwargs below still override via the
+                # generic ``rec_dict.update(fields)`` merge).
+                "bib_year": entry.bib_year,
+                "bib_authors": entry.bib_authors,
+                "bib_venue": entry.bib_venue,
+                "bib_citation_count": entry.bib_citation_count,
+                "bib_semantic_scholar_id": entry.bib_semantic_scholar_id,
+                "bib_openalex_id": entry.bib_openalex_id,
+                "bib_doi": entry.bib_doi,
+                "bib_enriched_at": entry.bib_enriched_at,
             }
             # Merge meta dict rather than replace
             if "meta" in fields and isinstance(fields["meta"], dict):
@@ -530,6 +566,22 @@ class _WriteOps:
                     indexed_at=rec_dict["indexed_at"],
                     alias_of=rec_dict["alias_of"],
                     meta=dict(rec_dict["meta"]),
+                    # nexus-6ha8a: bib_* sourced from rec_dict, which
+                    # already carries the current row's values forward
+                    # (nexus-9l2lg Task 2) unless the caller passed
+                    # explicit bib_* kwargs, in which case those win via
+                    # the rec_dict.update(fields) merge above. This is
+                    # the emission-site carry-forward the projector's
+                    # ON CONFLICT SET clause depends on to avoid
+                    # clobbering bib_* on replay.
+                    bib_year=int(rec_dict["bib_year"] or 0),
+                    bib_authors=rec_dict["bib_authors"],
+                    bib_venue=rec_dict["bib_venue"],
+                    bib_citation_count=int(rec_dict["bib_citation_count"] or 0),
+                    bib_semantic_scholar_id=rec_dict["bib_semantic_scholar_id"],
+                    bib_openalex_id=rec_dict["bib_openalex_id"],
+                    bib_doi=rec_dict["bib_doi"],
+                    bib_enriched_at=rec_dict["bib_enriched_at"],
                 ),
                 v=0,
             )
@@ -538,7 +590,8 @@ class _WriteOps:
                 # overloaded (source_uri rename, bib enrichment, etc.);
                 # the lossless DocumentRegistered-with-post-update-state
                 # captures everything via the projector's INSERT OR
-                # REPLACE. Future Phase 3+ work may introduce
+                # REPLACE (nexus-6ha8a: including bib_*, carried forward
+                # above). Future Phase 3+ work may introduce
                 # fine-grained DocumentRenamed/DocumentEnriched events
                 # that capture intent rather than state.
                 cat._write_to_event_log(event)
@@ -559,22 +612,26 @@ class _WriteOps:
                 # no cascade fires.
                 #
                 # NOTE: the SET clause lists every column that
-                # ``cat.update()`` is expected to refresh. ``bib_*``
-                # columns are intentionally NOT in the list — under the
-                # prior ``INSERT OR REPLACE`` form, every catalog
-                # update implicitly reset bibliographic enrichment to
-                # the column defaults (because REPLACE deletes-and-
-                # re-inserts), which silently lost any ``nx enrich``
-                # data on every re-index. ON CONFLICT DO UPDATE
-                # preserves the pre-existing bib_* values: the only
-                # writer to those columns becomes the explicit
-                # ``BibliographicEnriched`` event handler.
+                # ``cat.update()`` is expected to refresh, including
+                # ``bib_*`` (nexus-9l2lg). Clobber protection is
+                # carry-through, not omission: ``rec_dict`` was seeded
+                # from the current row's ``entry.bib_*`` values above,
+                # so a caller that doesn't pass bib kwargs writes back
+                # the same values that were already there; a caller
+                # that does pass ``bib_year=...`` etc. overrides via
+                # the generic ``rec_dict.update(fields)`` merge. This
+                # replaces the prior protection-by-omission, which
+                # deferred to a "BibliographicEnriched event handler"
+                # that was never built.
                 cat._db.execute(
                     "INSERT INTO documents "
                     "(tumbler, title, author, year, content_type, file_path, "
                     "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-                    "metadata, source_mtime, source_uri, alias_of) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "metadata, source_mtime, source_uri, alias_of, "
+                    "bib_year, bib_authors, bib_venue, bib_citation_count, "
+                    "bib_semantic_scholar_id, bib_openalex_id, bib_doi, bib_enriched_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                    "?, ?, ?, ?, ?, ?, ?, ?) "
                     "ON CONFLICT(tumbler) DO UPDATE SET "
                     "title=excluded.title, author=excluded.author, "
                     "year=excluded.year, content_type=excluded.content_type, "
@@ -583,7 +640,14 @@ class _WriteOps:
                     "chunk_count=excluded.chunk_count, head_hash=excluded.head_hash, "
                     "indexed_at=excluded.indexed_at, metadata=excluded.metadata, "
                     "source_mtime=excluded.source_mtime, "
-                    "source_uri=excluded.source_uri, alias_of=excluded.alias_of",
+                    "source_uri=excluded.source_uri, alias_of=excluded.alias_of, "
+                    "bib_year=excluded.bib_year, bib_authors=excluded.bib_authors, "
+                    "bib_venue=excluded.bib_venue, "
+                    "bib_citation_count=excluded.bib_citation_count, "
+                    "bib_semantic_scholar_id=excluded.bib_semantic_scholar_id, "
+                    "bib_openalex_id=excluded.bib_openalex_id, "
+                    "bib_doi=excluded.bib_doi, "
+                    "bib_enriched_at=excluded.bib_enriched_at",
                     (
                         rec_dict["tumbler"], rec_dict["title"], rec_dict["author"],
                         rec_dict["year"], rec_dict["content_type"], rec_dict["file_path"],
@@ -594,6 +658,11 @@ class _WriteOps:
                         rec_dict.get("source_mtime", 0.0),
                         rec_dict.get("source_uri", ""),
                         rec_dict["alias_of"],
+                        rec_dict["bib_year"], rec_dict["bib_authors"],
+                        rec_dict["bib_venue"], rec_dict["bib_citation_count"],
+                        rec_dict["bib_semantic_scholar_id"],
+                        rec_dict["bib_openalex_id"], rec_dict["bib_doi"],
+                        rec_dict["bib_enriched_at"],
                     ),
                 )
                 cat._db.commit()
@@ -622,19 +691,21 @@ class _WriteOps:
             rows = cat._db.execute(
                 "SELECT tumbler, title, author, year, content_type, file_path, "
                 "corpus, physical_collection, chunk_count, head_hash, indexed_at, "
-                "metadata, source_mtime, source_uri, alias_of "
+                "metadata, source_mtime, source_uri, alias_of, "
+                "bib_year, bib_authors, bib_venue, bib_citation_count, "
+                "bib_semantic_scholar_id, bib_openalex_id, bib_doi, bib_enriched_at "
                 "FROM documents WHERE physical_collection = ?",
                 (old,),
             ).fetchall()
             from nexus.catalog.synthesizer import _owner_prefix_of as _opo  # noqa: PLC0415 — deferred to avoid circular import
             for row in rows:
-                # Preserve source_mtime + source_uri + alias_of across
-                # the rename — JSONL is the rebuild source of truth, so
-                # any column omitted here is reset to its default when
-                # Catalog.rebuild() replays the log (review finding —
-                # Reviewer B/C1, nexus-1ccq follow-up; RDR-096 P3.1
-                # extended this to source_uri; meta-review extended it
-                # to alias_of).
+                # Preserve source_mtime + source_uri + alias_of + bib_*
+                # across the rename — JSONL is the rebuild source of
+                # truth, so any column omitted here is reset to its
+                # default when Catalog.rebuild() replays the log (review
+                # finding — Reviewer B/C1, nexus-1ccq follow-up; RDR-096
+                # P3.1 extended this to source_uri; meta-review extended
+                # it to alias_of; nexus-6ha8a extended it to bib_*).
                 rec = {
                     "tumbler": row[0],
                     "title": row[1],
@@ -651,6 +722,14 @@ class _WriteOps:
                     "source_mtime": row[12] or 0.0,
                     "source_uri": row[13] or "",
                     "alias_of": row[14] or "",
+                    "bib_year": row[15] or 0,
+                    "bib_authors": row[16] or "",
+                    "bib_venue": row[17] or "",
+                    "bib_citation_count": row[18] or 0,
+                    "bib_semantic_scholar_id": row[19] or "",
+                    "bib_openalex_id": row[20] or "",
+                    "bib_doi": row[21] or "",
+                    "bib_enriched_at": row[22] or "",
                 }
                 if cat._event_sourced_enabled:
                     # Per-row event-source: write event, project to
@@ -678,6 +757,16 @@ class _WriteOps:
                             indexed_at=row[10] or "",
                             alias_of=row[14] or "",
                             meta=dict(meta_dict),
+                            # nexus-6ha8a: carry current bib_* forward —
+                            # a rename must not clobber enrichment.
+                            bib_year=int(row[15] or 0),
+                            bib_authors=row[16] or "",
+                            bib_venue=row[17] or "",
+                            bib_citation_count=int(row[18] or 0),
+                            bib_semantic_scholar_id=row[19] or "",
+                            bib_openalex_id=row[20] or "",
+                            bib_doi=row[21] or "",
+                            bib_enriched_at=row[22] or "",
                         ),
                         v=0,
                     )
@@ -740,6 +829,17 @@ class _WriteOps:
                             indexed_at=row[10] or "",
                             alias_of=row[14] or "",
                             meta=dict(meta_dict),
+                            # nexus-6ha8a: carry current bib_* forward —
+                            # shadow-emitted events must not disagree
+                            # with live SQLite on replay.
+                            bib_year=int(row[15] or 0),
+                            bib_authors=row[16] or "",
+                            bib_venue=row[17] or "",
+                            bib_citation_count=int(row[18] or 0),
+                            bib_semantic_scholar_id=row[19] or "",
+                            bib_openalex_id=row[20] or "",
+                            bib_doi=row[21] or "",
+                            bib_enriched_at=row[22] or "",
                         ),
                         v=0,
                     ))

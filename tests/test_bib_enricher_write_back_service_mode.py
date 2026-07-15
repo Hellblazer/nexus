@@ -45,6 +45,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
+from nexus.catalog.catalog import Catalog
 from nexus.catalog.factory import _ServiceCatalogWriter
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.catalog.tumbler import Tumbler
@@ -91,6 +92,12 @@ class _State:
             "bib_authors": "",
             "bib_venue": "",
             "bib_citation_count": 0,
+            # nexus-9l2lg: the remaining 4 of 8 bib_* columns, mirroring
+            # the real CatalogRepository schema.
+            "bib_semantic_scholar_id": "",
+            "bib_openalex_id": "",
+            "bib_doi": "",
+            "bib_enriched_at": "",
         }
         base.update(fields)
         cls.documents[tumbler] = base
@@ -276,14 +283,22 @@ class TestEnrichApplyServiceModeSourcePathMatch:
         assert body["tumbler"] == "1.1.1"
         assert body["author"] == "Alice, Bob"
         assert body["year"] == 2024
-        assert body["meta"]["venue"] == "NeurIPS"
-        assert body["meta"]["citation_count"] == 42
-        assert body["meta"]["bib_semantic_scholar_id"] == "ss123"
+        # nexus-9l2lg: bib_* fields write to top-level columns, not meta.
+        assert body["bib_venue"] == "NeurIPS"
+        assert body["bib_citation_count"] == 42
+        assert body["bib_semantic_scholar_id"] == "ss123"
+        assert body["bib_year"] == 2024
+        assert body["bib_authors"] == "Alice, Bob"
+        assert body["bib_enriched_at"] != ""
+        assert "venue" not in body["meta"]
+        assert "citation_count" not in body["meta"]
+        assert "bib_semantic_scholar_id" not in body["meta"]
         # No 400 — every top-level wire key is on CatalogRepository's
         # UPDATABLE_DOC_COLUMNS whitelist.
         stored = _State.documents["1.1.1"]
         assert stored["author"] == "Alice, Bob"
         assert stored["year"] == 2024
+        assert stored["bib_semantic_scholar_id"] == "ss123"
 
     def test_openalex_backend_writes_bib_openalex_id_and_doi(self, reader, writer) -> None:
         _State.add_document(
@@ -295,10 +310,12 @@ class TestEnrichApplyServiceModeSourcePathMatch:
             _OPENALEX_BIB_META, "openalex", Tumbler,
         )
         body = _State.update_bodies[0]
-        assert body["meta"]["bib_openalex_id"] == "W999"
-        assert body["meta"]["bib_doi"] == "10.1234/foo"
+        assert body["bib_openalex_id"] == "W999"
+        assert body["bib_doi"] == "10.1234/foo"
         # S2 field must NOT appear for the openalex backend.
-        assert "bib_semantic_scholar_id" not in body["meta"]
+        assert "bib_semantic_scholar_id" not in body
+        assert "bib_openalex_id" not in body["meta"]
+        assert "bib_doi" not in body["meta"]
 
     def test_absolute_and_relative_path_variants_both_match(self, reader, writer) -> None:
         """The lookup tries (sp, sp.lstrip('/')) — an absolute source_path
@@ -388,11 +405,77 @@ class TestMetaMergeSemanticsDrift:
             reader, writer, "knowledge__delos", "Existing Meta Paper", ["existing.pdf"],
             _S2_BIB_META, "s2", Tumbler,
         )
-        stored_meta = _State.documents["1.1.1"]["metadata"]
+        stored = _State.documents["1.1.1"]
+        stored_meta = stored["metadata"]
         # This is what the LOCAL (merge-semantics) contract guarantees and what
         # every writer.update(..., meta=...) call site in this codebase assumes.
         # In service mode it currently does NOT hold — the fields below are gone.
         assert stored_meta.get("content_hash") == "abc123"
         assert stored_meta.get("custom_field") == "keep-me"
-        # The new bib fields are of course present (that part works correctly).
-        assert stored_meta.get("venue") == "NeurIPS"
+        # nexus-9l2lg: bib fields are top-level columns now, not meta —
+        # this assertion moved off ``stored_meta`` accordingly.
+        assert stored["bib_venue"] == "NeurIPS"
+
+
+class TestBibColumnDualBackendParity:
+    """Standing regression guard for the divergence class recorded as T3
+    insight ``insight-developer-dual-backend-meta-merge-semantics-
+    divergence``: a "drop-in" method identical in name/signature across
+    backends (local ``Catalog`` vs ``HttpCatalogClient``) silently
+    diverging in semantics — the same class ``TestMetaMergeSemanticsDrift``
+    above caught for ``meta=``. nexus-9l2lg's column-level bib_* write
+    (Task 3) is new surface for exactly that risk.
+    """
+
+    def test_local_and_service_backends_produce_identical_bib_columns_after_enrich_apply(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch, reader, writer,
+    ) -> None:
+        monkeypatch.setenv("GIT_AUTHOR_NAME", "Test")
+        monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@test.invalid")
+        monkeypatch.setenv("GIT_COMMITTER_NAME", "Test")
+        monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
+        # No NEXUS_EVENT_SOURCED pin: nexus-6ha8a extended the
+        # event-sourced projector to persist bib_* too, so this parity
+        # check holds under the ambient default (ON, RDR-101 Phase 3
+        # PR ζ) as well as the legacy path.
+
+        # (a) local Catalog — reader and writer are the same object,
+        # mirroring the direct-fallback shape make_catalog_writer() uses
+        # when no T2 daemon is reachable.
+        local_dir = tmp_path / "catalog"
+        local_cat = Catalog(local_dir, local_dir / ".catalog.db")
+        local_owner = local_cat.register_owner("delos", "curator")
+        local_cat.register(
+            local_owner, "Parity Paper", content_type="paper",
+            physical_collection="knowledge__delos", file_path="parity.pdf",
+        )
+
+        # (b) service-mode — fake-server-backed HttpCatalogClient reader
+        # + _ServiceCatalogWriter-wrapped writer (module fixtures).
+        _State.add_document(
+            "1.1.1", title="Parity Paper", physical_collection="knowledge__delos",
+            file_path="parity.pdf",
+        )
+
+        bib_meta = dict(_S2_BIB_META)
+
+        _enrich_apply(
+            local_cat, local_cat, "knowledge__delos", "Parity Paper",
+            ["parity.pdf"], bib_meta, "s2", Tumbler,
+        )
+        _enrich_apply(
+            reader, writer, "knowledge__delos", "Parity Paper",
+            ["parity.pdf"], bib_meta, "s2", Tumbler,
+        )
+
+        local_entry = local_cat.find("Parity Paper")[0]
+        service_entry = reader.find("Parity Paper")[0]
+
+        def _bib_tuple(entry):
+            return (
+                entry.bib_year, entry.bib_authors, entry.bib_venue,
+                entry.bib_citation_count, entry.bib_semantic_scholar_id,
+                entry.bib_openalex_id, entry.bib_doi,
+            )
+
+        assert _bib_tuple(local_entry) == _bib_tuple(service_entry)

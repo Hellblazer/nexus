@@ -941,7 +941,10 @@ class CatalogStore:
             sql = (
                 "SELECT d.tumbler, d.title, d.author, d.year, d.content_type, "
                 "d.file_path, d.corpus, d.physical_collection, d.chunk_count, "
-                "d.head_hash, d.indexed_at, d.metadata, d.source_mtime "
+                "d.head_hash, d.indexed_at, d.metadata, d.source_mtime, "
+                "d.bib_year, d.bib_authors, d.bib_venue, d.bib_citation_count, "
+                "d.bib_semantic_scholar_id, d.bib_openalex_id, d.bib_doi, "
+                "d.bib_enriched_at "
                 "FROM documents d "
                 "JOIN documents_fts f ON d.rowid = f.rowid "
                 "WHERE documents_fts MATCH ?"
@@ -955,7 +958,13 @@ class CatalogStore:
             rows = self._conn.execute(sql, params).fetchall()
             columns = ["tumbler", "title", "author", "year", "content_type",
                         "file_path", "corpus", "physical_collection", "chunk_count",
-                        "head_hash", "indexed_at", "metadata", "source_mtime"]
+                        "head_hash", "indexed_at", "metadata", "source_mtime",
+                        # nexus-9l2lg: surface bib_* on FTS search results
+                        # (nx catalog search / Catalog.find()) — a reader
+                        # gap the design/plan audit didn't catch.
+                        "bib_year", "bib_authors", "bib_venue",
+                        "bib_citation_count", "bib_semantic_scholar_id",
+                        "bib_openalex_id", "bib_doi", "bib_enriched_at"]
             return [dict(zip(columns, row)) for row in rows]
 
     def descendants(self, prefix: str) -> list[dict[str, Any]]:

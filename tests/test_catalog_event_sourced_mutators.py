@@ -179,6 +179,66 @@ class TestUpdateEventSourced:
             f"original={original_at!r} refreshed={refreshed_at!r}"
         )
 
+    def test_event_sourced_update_persists_bib_kwargs(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """nexus-6ha8a (was nexus-9l2lg Task 5's deferred decision):
+        ``DocumentRegisteredPayload`` now carries all 8 ``bib_*`` fields
+        and the projector's ``_v0_document_registered`` writes them into
+        its INSERT/ON CONFLICT SET clause. ``update()``'s event-sourced
+        branch sources them from ``rec_dict``, which already carries
+        bib_* forward from the current row (nexus-9l2lg Task 2) — so a
+        caller passing ``bib_*`` kwargs under event-sourced mode now
+        persists them, matching the non-event-sourced path.
+        """
+        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
+        d = tmp_path / "catalog"
+        d.mkdir()
+        cat = Catalog(d, d / ".catalog.db")
+        owner = cat.register_owner("nexus", "repo", repo_hash="abab")
+        tumbler = cat.register(
+            owner, "doc.md", content_type="prose",
+            file_path="doc.md", chunk_count=0,
+        )
+        cat.update(
+            tumbler, bib_year=2020, bib_authors="X", bib_venue="V",
+            bib_citation_count=5, bib_semantic_scholar_id="ss1",
+            bib_openalex_id="W1", bib_doi="10.1/x",
+            bib_enriched_at="2026-01-01T00:00:00Z",
+        )
+        entry = cat.resolve(tumbler)
+        assert entry.bib_year == 2020
+        assert entry.bib_authors == "X"
+        assert entry.bib_venue == "V"
+        assert entry.bib_citation_count == 5
+        assert entry.bib_semantic_scholar_id == "ss1"
+        assert entry.bib_openalex_id == "W1"
+        assert entry.bib_doi == "10.1/x"
+        assert entry.bib_enriched_at == "2026-01-01T00:00:00Z"
+
+    def test_event_sourced_update_without_bib_kwargs_preserves_existing_bib(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Clobber regression for the ``update()`` emission site itself:
+        an update that doesn't pass bib_* must carry the current values
+        forward, not reset them (mirrors the non-event-sourced pin in
+        test_catalog_bib_columns.py)."""
+        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
+        d = tmp_path / "catalog"
+        d.mkdir()
+        cat = Catalog(d, d / ".catalog.db")
+        owner = cat.register_owner("nexus", "repo", repo_hash="abab")
+        tumbler = cat.register(
+            owner, "doc.md", content_type="prose",
+            file_path="doc.md", chunk_count=0,
+        )
+        cat.update(tumbler, bib_year=2020, bib_authors="X")
+        cat.update(tumbler, chunk_count=9)
+        entry = cat.resolve(tumbler)
+        assert entry.chunk_count == 9
+        assert entry.bib_year == 2020
+        assert entry.bib_authors == "X"
+
 
 # ── delete_document ──────────────────────────────────────────────────────
 
@@ -357,6 +417,100 @@ class TestRenameCollectionEventSourced:
         ).fetchone()
         assert rows[0] == 2
 
+    def test_rename_preserves_enriched_bib_columns(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """nexus-6ha8a clobber regression: rename_collection's two
+        DocumentRegisteredPayload emission sites (per-row event-sourced
+        loop + shadow-emit loop) must carry forward the row's current
+        bib_* values, not reset them to defaults."""
+        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
+        d = tmp_path / "catalog"
+        d.mkdir()
+        cat = Catalog(d, d / ".catalog.db")
+        owner = cat.register_owner("nexus", "repo", repo_hash="abab")
+        tumbler = cat.register(
+            owner, "a.md", content_type="prose",
+            file_path="a.md", physical_collection="docs__old",
+        )
+        cat.update(
+            tumbler, bib_year=2019, bib_authors="Dana", bib_venue="OSDI",
+            bib_citation_count=314, bib_semantic_scholar_id="ss42",
+        )
+
+        n = cat.rename_collection("docs__old", "docs__new")
+        assert n == 1
+
+        entry = cat.resolve(tumbler)
+        assert entry.physical_collection == "docs__new"
+        assert entry.bib_year == 2019
+        assert entry.bib_authors == "Dana"
+        assert entry.bib_venue == "OSDI"
+        assert entry.bib_citation_count == 314
+        assert entry.bib_semantic_scholar_id == "ss42"
+
+
+class TestUpdateDocumentCollectionEventSourced:
+    """nexus-6ha8a clobber regression: _update_document_collection_locked
+    (backing update_document_collection / update_documents_collection_batch)
+    is the fourth DocumentRegisteredPayload emission site — must carry
+    forward current bib_* values, not reset them."""
+
+    def test_update_document_collection_preserves_enriched_bib_columns(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
+        d = tmp_path / "catalog"
+        d.mkdir()
+        cat = Catalog(d, d / ".catalog.db")
+        owner = cat.register_owner("nexus", "repo", repo_hash="abab")
+        tumbler = cat.register(
+            owner, "a.md", content_type="prose",
+            file_path="a.md", physical_collection="docs__old",
+        )
+        cat.update(
+            tumbler, bib_year=2019, bib_authors="Dana", bib_venue="OSDI",
+            bib_citation_count=314, bib_semantic_scholar_id="ss42",
+        )
+
+        assert cat.update_document_collection(str(tumbler), "docs__new") is True
+
+        entry = cat.resolve(tumbler)
+        assert entry.physical_collection == "docs__new"
+        assert entry.bib_year == 2019
+        assert entry.bib_authors == "Dana"
+        assert entry.bib_venue == "OSDI"
+        assert entry.bib_citation_count == 314
+        assert entry.bib_semantic_scholar_id == "ss42"
+
+    def test_update_documents_collection_batch_preserves_enriched_bib_columns(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "1")
+        d = tmp_path / "catalog"
+        d.mkdir()
+        cat = Catalog(d, d / ".catalog.db")
+        owner = cat.register_owner("nexus", "repo", repo_hash="abab")
+        tumbler = cat.register(
+            owner, "a.md", content_type="prose",
+            file_path="a.md", physical_collection="docs__old",
+        )
+        cat.update(
+            tumbler, bib_year=2019, bib_authors="Dana", bib_venue="OSDI",
+            bib_citation_count=314, bib_semantic_scholar_id="ss42",
+        )
+
+        n = cat.update_documents_collection_batch([(str(tumbler), "docs__new")])
+        assert n == 1
+
+        entry = cat.resolve(tumbler)
+        assert entry.physical_collection == "docs__new"
+        assert entry.bib_year == 2019
+        assert entry.bib_authors == "Dana"
+        assert entry.bib_venue == "OSDI"
+        assert entry.bib_citation_count == 314
+        assert entry.bib_semantic_scholar_id == "ss42"
+
 
 # ── End-to-end: full replay equals live SQLite ────────────────────────────
 
@@ -412,6 +566,49 @@ class TestFullReplayEqualsLive:
             ).fetchone()
         assert live_doc_a == proj_doc_a == (99,)
         assert live_doc_b == proj_doc_b == (str(a),)
+
+    def test_shadow_emit_rename_replay_reconstructs_bib_columns(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """nexus-6ha8a follow-up (cre-auto finding 4): rename_collection's
+        shadow-emit loop (ES=0 + shadow-emit on) writes events.jsonl for
+        future replay. Confirm the replayed JSONL actually reconstructs
+        the enriched bib_* values on the renamed row — not just that the
+        live SQLite happens to be correct."""
+        monkeypatch.setenv("NEXUS_EVENT_SOURCED", "0")
+        monkeypatch.setenv("NEXUS_EVENT_LOG_SHADOW", "1")
+        d = tmp_path / "catalog"
+        d.mkdir()
+        cat = Catalog(d, d / ".catalog.db")
+        owner = cat.register_owner("nexus", "repo", repo_hash="abab")
+        tumbler = cat.register(
+            owner, "a.md", content_type="prose",
+            file_path="a.md", physical_collection="docs__old",
+        )
+        cat.update(
+            tumbler, bib_year=2019, bib_authors="Dana", bib_venue="OSDI",
+            bib_citation_count=314, bib_semantic_scholar_id="ss42",
+        )
+        n = cat.rename_collection("docs__old", "docs__new")
+        assert n == 1
+        cat._db.close()
+
+        # Replay events.jsonl into a fresh CatalogDB.
+        log = EventLog(d)
+        proj_db = CatalogDB(tmp_path / "projected.db")
+        try:
+            Projector(proj_db).apply_all(log.replay())
+        finally:
+            proj_db.close()
+
+        with sqlite3.connect(str(tmp_path / "projected.db")) as proj:
+            row = proj.execute(
+                "SELECT physical_collection, bib_year, bib_authors, "
+                "bib_venue, bib_citation_count, bib_semantic_scholar_id "
+                "FROM documents WHERE tumbler = ?",
+                (str(tumbler),),
+            ).fetchone()
+        assert row == ("docs__new", 2019, "Dana", "OSDI", 314, "ss42")
 
 
 # ── Shadow emit still suppressed ─────────────────────────────────────────

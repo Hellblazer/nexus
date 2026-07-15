@@ -453,6 +453,14 @@ class CatalogEntry:
     bib_authors: str = ""
     bib_venue: str = ""
     bib_citation_count: int = 0
+    # nexus-9l2lg: the remaining 4 of 8 RDR-101 bib_* columns. The engine
+    # (CatalogRepository) already persists and returns all 8; these were
+    # missing here, which meant every local reader silently truncated
+    # them even though the wire payload carried them.
+    bib_semantic_scholar_id: str = ""
+    bib_openalex_id: str = ""
+    bib_doi: str = ""
+    bib_enriched_at: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -475,6 +483,10 @@ class CatalogEntry:
             "bib_authors": self.bib_authors,
             "bib_venue": self.bib_venue,
             "bib_citation_count": self.bib_citation_count,
+            "bib_semantic_scholar_id": self.bib_semantic_scholar_id,
+            "bib_openalex_id": self.bib_openalex_id,
+            "bib_doi": self.bib_doi,
+            "bib_enriched_at": self.bib_enriched_at,
         }
 
 

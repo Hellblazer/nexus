@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 
 import click
@@ -157,8 +158,17 @@ def enrich() -> None:
         "When DEVONthink is unavailable it degrades to ``auto`` exactly."
     ),
 )
+@click.option(
+    "--backfill-catalog",
+    is_flag=True,
+    help=(
+        "Re-drive the catalog bib_* write from already-enriched T3 "
+        "chunk metadata; no external API calls. Idempotent."
+    ),
+)
 def enrich_bib(
     collection: str, delay: float, limit: int, source: str,
+    backfill_catalog: bool,
 ) -> None:
     """Backfill bibliographic metadata for chunks in COLLECTION.
 
@@ -171,8 +181,111 @@ def enrich_bib(
 
     Already-enriched chunks (the backend's ID field is non-empty) are
     skipped — the command is idempotent per backend.
+
+    ``--backfill-catalog`` (nexus-9l2lg) skips the network path
+    entirely: it re-derives the catalog ``bib_*`` write from chunk
+    metadata that a prior live enrichment already wrote, for catalog
+    rows that predate the ``_enrich_apply`` column-level write (or
+    otherwise drifted stale). Idempotent; makes zero external calls.
     """
+    if backfill_catalog:
+        _backfill_catalog_from_chunks(collection)
+        return
     run_bib_enrichment(collection, delay=delay, limit=limit, source=source)
+
+
+def _backfill_catalog_from_chunks(collection: str) -> tuple[int, int, int]:
+    """Re-drive the catalog bib_* write from already-enriched T3 chunk
+    metadata. No external API calls — zero imports of
+    ``nexus.bib_enricher*``. Idempotent: re-running re-applies the
+    same values to the same matched rows (``titles_backfilled`` counts
+    "a catalog row was matched and updated", not "this changed since
+    last run" — a title with an already-current row still counts as
+    backfilled on every run).
+
+    nexus-6ha8a follow-up (critic finding 3): a title with enriched
+    chunk metadata but NO matching catalog row (deleted, never
+    registered, migrated away, ...) is a silent no-op at the
+    ``_catalog_enrich_hook`` layer — such titles are counted in
+    ``titles_skipped_no_row``, not ``titles_backfilled``, so the
+    summary line reports what actually changed.
+
+    Returns ``(titles_backfilled, chunks_scanned, titles_skipped_no_row)``.
+    """
+    from nexus.db import make_t3  # noqa: PLC0415 — circular-dep avoidance; command-local import
+    from nexus.retry import _chroma_with_retry  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
+
+    db = make_t3()
+    col = db.get_or_create_collection(collection)
+
+    # One representative chunk's bib_* metadata per title — no
+    # re-lookup, no external call. Mirrors the already_enriched
+    # detection in run_bib_enrichment (an id field is non-empty).
+    title_bib: dict[str, dict] = {}
+    title_source_paths: dict[str, set[str]] = {}
+    chunks_scanned = 0
+    offset = 0
+    while True:
+        batch = _chroma_with_retry(
+            col.get, include=["metadatas"], limit=300, offset=offset,
+        )
+        batch_ids = batch.get("ids", [])
+        batch_meta = batch.get("metadatas", [])
+        chunks_scanned += len(batch_ids)
+        for meta in batch_meta:
+            s2_id = meta.get("bib_semantic_scholar_id", "") or ""
+            oa_id = meta.get("bib_openalex_id", "") or ""
+            if not (meta.get("bib_year") or s2_id or oa_id):
+                continue
+            title = meta.get("title", "") or ""
+            if not title:
+                continue
+            if title not in title_bib:
+                title_bib[title] = {
+                    "year": meta.get("bib_year", 0),
+                    "venue": meta.get("bib_venue", ""),
+                    "authors": meta.get("bib_authors", ""),
+                    "citation_count": meta.get("bib_citation_count", 0),
+                }
+                if oa_id:
+                    title_bib[title]["openalex_id"] = oa_id
+                    if meta.get("bib_doi"):
+                        title_bib[title]["doi"] = meta.get("bib_doi", "")
+                else:
+                    title_bib[title]["semantic_scholar_id"] = s2_id
+            sp = meta.get("source_path", "") or ""
+            if sp:
+                title_source_paths.setdefault(title, set()).add(sp)
+        if len(batch_ids) < 300:
+            break
+        offset += 300
+
+    titles_backfilled = 0
+    titles_skipped_no_row = 0
+    for title, bib in title_bib.items():
+        backend = "openalex" if bib.get("openalex_id") else "s2"
+        updated = _catalog_enrich_hook(
+            title=title, bib_meta=bib, collection_name=collection,
+            backend=backend,
+            source_paths=sorted(title_source_paths.get(title, set())),
+        )
+        # nexus-6ha8a follow-up (critic finding 3): _catalog_enrich_hook
+        # now reports whether it actually matched+updated a row. A
+        # title with enriched chunks but no corresponding catalog row
+        # (deleted, never registered, etc.) is a silent no-op there —
+        # count it as skipped, not backfilled, so this summary line
+        # doesn't overstate what changed.
+        if updated:
+            titles_backfilled += 1
+        else:
+            titles_skipped_no_row += 1
+
+    click.echo(
+        f"Backfilled {titles_backfilled} titles from {chunks_scanned} "
+        f"chunks in '{collection}' (no external calls); "
+        f"{titles_skipped_no_row} titles skipped (no matching catalog row)."
+    )
+    return titles_backfilled, chunks_scanned, titles_skipped_no_row
 
 
 def run_bib_enrichment(
@@ -615,13 +728,23 @@ def _catalog_enrich_hook(
     collection_name: str = "",
     backend: str = "s2",
     source_paths: list[str] | None = None,
-) -> None:
+) -> bool:
     """Update catalog entry with bib metadata. Silently skipped if absent.
 
-    nexus-57mk: ``backend`` selects which ID field is written into
-    catalog meta. The OpenAlex backend writes ``bib_openalex_id`` (and
-    ``bib_doi`` when present) so the citation-link generator can match
-    references in OpenAlex's W-id space.
+    Returns True when a catalog row was matched and updated, False on
+    any no-op (catalog not initialized, no matching row, or an
+    exception — best-effort, never raises).
+
+    nexus-57mk: ``backend`` selects which ID field is written. The
+    OpenAlex backend writes ``bib_openalex_id`` (and ``bib_doi`` when
+    present) so the citation-link generator can match references in
+    OpenAlex's W-id space.
+
+    nexus-9l2lg: ``bib_year``/``bib_authors``/``bib_venue``/
+    ``bib_citation_count``/``bib_enriched_at`` plus the backend id
+    field(s) write to the catalog Document's top-level ``bib_*``
+    columns (RDR-101) via ``writer.update(**bib_fields)`` — not the
+    ``meta`` JSON blob. ``meta`` now carries only ``references``.
 
     nexus-tv22: ``source_paths`` (the absolute paths of the chunks
     being enriched) is the authoritative way to find the catalog row.
@@ -645,7 +768,7 @@ def _catalog_enrich_hook(
 
         cat_path = catalog_path()
         if not Catalog.is_initialized(cat_path):
-            return
+            return False
 
         from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — circular-dep avoidance; command-local import
         reader = make_catalog_reader()
@@ -661,14 +784,21 @@ def _catalog_enrich_hook(
                 reader.close()
     except Exception:  # noqa: BLE001 — best-effort catalog enrich hook; failure logged at debug, primary enrich unaffected
         _log.debug("catalog_enrich_hook_failed", exc_info=True)
+        return False
 
 
 def _enrich_apply(
     reader, writer, collection_name, title, source_paths, bib_meta, backend, Tumbler,
-):
-    # RDR-146 P1.2: reads via the read-only reader, writes via the
-    # write-only daemon proxy. Exceptions propagate to the caller's
-    # catalog_enrich_hook_failed handler.
+) -> bool:
+    """Returns True when >=1 catalog row was matched and updated, False
+    when the hook was a silent no-op (no matching row — nexus-6ha8a
+    follow-up, critic finding 3: the caller needs this to distinguish
+    a genuine backfill from a no-op so summary counts stay honest).
+
+    RDR-146 P1.2: reads via the read-only reader, writes via the
+    write-only daemon proxy. Exceptions propagate to the caller's
+    catalog_enrich_hook_failed handler.
+    """
     target_tumblers: list[Tumbler] = []
 
     # nexus-tv22: prefer source_path match (unique per document).
@@ -741,21 +871,31 @@ def _enrich_apply(
             collection=collection_name,
             source_paths=source_paths or [],
         )
-        return
+        return False
 
     # Build the update payload once, apply to every matched row.
-    meta_update: dict = {
-        "venue": bib_meta.get("venue", ""),
-        "citation_count": bib_meta.get("citation_count", 0),
+    #
+    # nexus-9l2lg: bib_* fields write to the catalog Document's top-level
+    # bib_* columns (RDR-101), not the meta JSON blob. Nothing read venue
+    # / citation_count / the backend id fields back out of meta (verified
+    # by grep before removing) — dual storage was pure YAGNI. ``meta``
+    # keeps only ``references``, which has no catalog column.
+    bib_fields: dict = {
+        "bib_year": bib_meta.get("year", 0),
+        "bib_authors": bib_meta.get("authors", ""),
+        "bib_venue": bib_meta.get("venue", ""),
+        "bib_citation_count": bib_meta.get("citation_count", 0),
+        "bib_enriched_at": datetime.now(UTC).isoformat(),
     }
     if backend == "openalex":
-        meta_update["bib_openalex_id"] = bib_meta.get("openalex_id", "")
+        bib_fields["bib_openalex_id"] = bib_meta.get("openalex_id", "")
         if bib_meta.get("doi"):
-            meta_update["bib_doi"] = bib_meta.get("doi", "")
+            bib_fields["bib_doi"] = bib_meta.get("doi", "")
     else:
-        meta_update["bib_semantic_scholar_id"] = bib_meta.get(
+        bib_fields["bib_semantic_scholar_id"] = bib_meta.get(
             "semantic_scholar_id", "",
         )
+    meta_update: dict = {}
     refs = bib_meta.get("references", [])
     if refs:
         meta_update["references"] = refs
@@ -772,7 +912,9 @@ def _enrich_apply(
             author=bib_meta.get("authors", ""),
             year=bib_meta.get("year", 0),
             meta=meta_update,
+            **bib_fields,
         )
+    return True
 
 
 # ── nx enrich aspects (RDR-089 P2.2) ────────────────────────────────────────

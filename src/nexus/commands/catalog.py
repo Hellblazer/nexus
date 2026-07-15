@@ -482,6 +482,18 @@ def show_cmd(tumbler_or_title: str, as_json: bool) -> None:
         click.echo(f"Chunks:     {entry.chunk_count}")
         click.echo(f"Hash:       {entry.head_hash}")
         click.echo(f"Indexed:    {entry.indexed_at}")
+        # nexus-6ha8a follow-up: resolve() has carried bib_* since
+        # nexus-9l2lg, but this plain-text branch never printed them.
+        # Conditional on non-empty/non-zero, matching the URI line's
+        # convention above.
+        if entry.bib_year:
+            click.echo(f"Bib Year:    {entry.bib_year}")
+        if entry.bib_authors:
+            click.echo(f"Bib Authors: {entry.bib_authors}")
+        if entry.bib_venue:
+            click.echo(f"Bib Venue:   {entry.bib_venue}")
+        if entry.bib_citation_count:
+            click.echo(f"Citations:   {entry.bib_citation_count}")
         out_links = cat.links_from(entry.tumbler)
         in_links = cat.links_to(entry.tumbler)
         if out_links:
