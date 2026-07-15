@@ -205,6 +205,21 @@ Full draft: T2 `nexus/design-orchestration-protocol.md` (REVISED v2 per critique
    (kept — it IS the regression test finding 8's verification
    requirement asked for).
 
+6. **[LIVE INCIDENT 2026-07-15, same session] Fourth failure class:
+   the git INDEX is a shared mutable singleton.** While recording
+   finding 5, the orchestrator's `git commit` swept in another agent's
+   staged-but-unreviewed in-progress work (8 files, ~840 lines) —
+   staging by one actor + whole-index commit by another pushed
+   unreviewed code to develop (5fa9a473; backed out index-only in
+   ed9fdc37, working tree preserved). "Stage by explicit path" does
+   not protect against ANOTHER actor's staged content. Mechanical
+   fixes for the design: (a) agents in a shared tree never `git add`
+   (hand-back is diff-only); (b) orchestrator commits use
+   pathspec-limited `git commit -- <paths>` (commits named paths
+   regardless of index) or assert `git diff --cached --name-only`
+   equals the intended set pre-commit. Method: lived it.
+
+
 ## Decision
 
 (Open — draft. Adoption decision is Hal's after the critique lands.)
