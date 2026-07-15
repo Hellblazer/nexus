@@ -55,19 +55,71 @@
             loudly and migration aborts (fail-fast — no silent skip).
             runAlways: re-executed on every startup so a role created after the first
             migration is automatically provisioned on the next restart.
+            Owner-restricted per-relation iteration (nexus-46yy3 class, GH #1402,
+            nexus-0gis0): the bulk GRANT ... ON ALL TABLES/SEQUENCES form hard-errors on
+            any relation this role (nexus_admin, NOSUPERUSER) does not own — specifically
+            the deliberately superuser-owned nexus.diag_chash_conformance view (RLS-exempt
+            owner required, nexus-vounk) — aborting every engine boot once the view
+            exists. Foreign-owned relations are intentionally skipped: nexus_svc does not
+            need access to them, and only their owner can grant on them anyway.
         </comment>
-        <sql splitStatements="false">
+        <sql splitStatements="false" stripComments="false">
 -- Schema usage
 GRANT USAGE ON SCHEMA nexus TO nexus_svc;
 GRANT USAGE ON SCHEMA t1    TO nexus_svc;
 
--- DML on all existing tables in both schemas
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES    IN SCHEMA nexus TO nexus_svc;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES    IN SCHEMA t1    TO nexus_svc;
+DO $$
+DECLARE
+    rel RECORD;
+    skipped_count integer;
+    skipped_names text;
+BEGIN
+    -- DML + sequence usage on every relation THIS role owns (nexus_admin
+    -- created the schema, so this covers every table/view/sequence in
+    -- normal operation). Foreign-owned relations (e.g. the superuser-owned
+    -- diag_chash_conformance view) are skipped by construction — nexus_svc
+    -- does not need them.
+    FOR rel IN
+        SELECT n.nspname, c.relname, c.relkind
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname IN ('nexus', 't1')
+          AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+          AND pg_get_userbyid(c.relowner) = current_user
+    LOOP
+        IF rel.relkind = 'S' THEN
+            EXECUTE format(
+                'GRANT USAGE, SELECT ON %I.%I TO nexus_svc', rel.nspname, rel.relname
+            );
+        ELSE
+            EXECUTE format(
+                'GRANT SELECT, INSERT, UPDATE, DELETE ON %I.%I TO nexus_svc',
+                rel.nspname, rel.relname
+            );
+        END IF;
+    END LOOP;
 
--- Sequence usage (BIGSERIAL id columns)
-GRANT USAGE, SELECT                  ON ALL SEQUENCES IN SCHEMA nexus TO nexus_svc;
-GRANT USAGE, SELECT                  ON ALL SEQUENCES IN SCHEMA t1    TO nexus_svc;
+    -- Operator visibility (review finding): a foreign-owned relation is
+    -- skipped BY DESIGN — only its owner can grant on it, and nexus_svc does
+    -- not need the diag view today. But a deployment that ever drifts from
+    -- the nexus_admin-owns-everything contract (e.g. a future
+    -- superuser-provisioned object nexus_svc DOES need) would otherwise fail
+    -- silently at first query instead of visibly at boot. NOTICE, not
+    -- WARNING: skip is by design, not an error.
+    SELECT count(*), string_agg(n.nspname || '.' || c.relname, ', ')
+    INTO skipped_count, skipped_names
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname IN ('nexus', 't1')
+      AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+      AND pg_get_userbyid(c.relowner) != current_user;
+
+    IF skipped_count > 0 THEN
+        RAISE NOTICE 'grants-nexus-svc-1: skipped % foreign-owned relation(s), not granted to nexus_svc (only their owner can grant): %',
+            skipped_count, skipped_names;
+    END IF;
+END
+$$;
 
 -- Default privileges: future tables/sequences created by the schema owner automatically
 -- carry the same grants for nexus_svc (self-healing for new migrations).
