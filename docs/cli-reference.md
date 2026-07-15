@@ -2182,6 +2182,14 @@ during extraction. An explicit non-local `pdf.mineru_server_url` is never
 shadowed by a local spawn, and `nx mineru start` (the explicit verb) is
 never gated.
 
+**Upgrades do not start MinerU.** The post-upgrade process sweep only
+*cycles* a MinerU server it finds running (so a stale binary is replaced);
+a server that was not running at upgrade time stays absent — by design,
+since the on-demand spawn above covers first use. The trade-off is that the
+first post-upgrade PDF extraction pays the full cold start (model warm-up,
+possibly a model download). Run `nx mineru start` after an upgrade if you
+want the server warm before the first extraction touches it.
+
 ### nx mineru start
 
 ```
