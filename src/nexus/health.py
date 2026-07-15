@@ -1910,6 +1910,66 @@ def _run_psql(
     return subprocess.run(cmd, capture_output=True, text=True, check=False, env=env)
 
 
+def _check_engine_convergence(config_dir: Path | None = None) -> list[HealthResult]:
+    """nexus-cfgo9: backstop for the automatic post-upgrade engine
+    convergence pass (:func:`nexus.upgrade_finish.converge_engine`).
+
+    The auto-trigger in :func:`nexus.upgrade_finish.check_version_transition`
+    only fires on a conexus PACKAGE version transition; this check gives an
+    operator a way to see (and be pointed at fixing) drift at any time via
+    plain ``nx doctor``, without waiting for the next package upgrade.
+    Framed as CONVERGENCE PENDING, never as a refusal/violation — per the
+    ONE-engine model (GH #1402 postmortem), a local engine mismatch is
+    something the product fixes, not something the user is blamed for.
+
+    Delegates entirely to :func:`nexus.upgrade_finish.detect_engine_convergence`,
+    which is itself internally gated on local service mode + pg_credentials
+    being present — not applicable (cloud mode, no local service) yields no
+    result, same convention as the other storage-service checks in this
+    module. Any probe failure degrades to no result (best-effort, never
+    breaks `nx doctor`).
+    """
+    if config_dir is None:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+        config_dir = nexus_config_dir()
+
+    try:
+        from nexus.upgrade_finish import detect_engine_convergence  # noqa: PLC0415 — deferred to avoid circular import
+        status = detect_engine_convergence(config_dir)
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_engine_convergence_check_failed", error=str(exc))
+        return []
+
+    if not status.applicable:
+        return []
+
+    req_s = ".".join(str(p) for p in status.required_version)
+    if status.converged:
+        return [HealthResult(
+            label="Engine convergence",
+            ok=True,
+            detail=f"installed engine v{req_s} matches the release dependency",
+        )]
+
+    got_s = (
+        ".".join(str(p) for p in status.installed_version)
+        if status.installed_version else "unknown"
+    )
+    return [HealthResult(
+        label="Engine convergence",
+        ok=False,
+        warn=True,
+        detail=(
+            f"engine convergence pending — installed v{got_s}, release "
+            f"dependency v{req_s}"
+        ),
+        fix_suggestions=[
+            "nx daemon restart-stale  # installs the pinned engine and "
+            "cycles the service",
+        ],
+    )]
+
+
 def _check_migration_state(
     creds_path: Path | None = None,
     psql_bin: Path | None = None,
@@ -2820,6 +2880,7 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     # a single soft-warn-and-skip result when service/PG mode is not configured,
     # so they are always safe to run.
     results.extend(_check_storage_service_health())
+    results.extend(_check_engine_convergence())
     results.extend(_check_migration_state())
     results.extend(_check_rls_present())
 

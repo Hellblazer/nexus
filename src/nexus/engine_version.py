@@ -1,17 +1,34 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""Single source of truth for the engine-service version floor (nexus-b6qlf).
+"""Single source of truth for the engine-service dependency version (nexus-b6qlf).
 
-Prior to this module the minimum engine-service release a client would accept
-was hand-maintained as TWO independent constants that could silently drift
-apart: ``guided_upgrade.REQUIRED_RELEASE_VERSION`` (the native/local floor,
+ONE-ENGINE MODEL (nexus-cfgo9, 2026-07-15, after the 14h GH #1402 delivery
+failure): a conexus release has ONE engine dependency — the exact version it
+was built and tested against. This is NOT a "minimum" or "floor" that older
+engines might still limp along under; it is a required dependency, installed
+like any other, on EVERY box, via EVERY install path (fresh ``nx init`` AND
+convergence on an existing box's upgrade — see
+:mod:`nexus.upgrade_finish`'s ``converge_engine``). A version mismatch on a
+local install is a convergence step (install the dependency, restart the
+service), never a user-facing refusal. The ONE place a ``>=`` "floor"
+comparison legitimately survives is the cloud/managed handshake
+(:mod:`nexus.db.managed_endpoint`): the client cannot install the managed
+service's engine, and the managed deployment legitimately runs ahead of any
+given client release between PyPI cuts, so "deployed >= tested-with" is the
+right check there — nowhere else.
+
+Prior to nexus-b6qlf this module's value was hand-maintained as TWO
+independent constants that could silently drift apart:
+``guided_upgrade.REQUIRED_RELEASE_VERSION`` (the native/local floor,
 actively bumped alongside RDR work) and ``managed_endpoint.MIN_MANAGED_
 RELEASE_VERSION`` (the managed-cloud floor, introduced 2026-06-24 at
 ``(0, 1, 8)`` and never bumped again). Both currently gate the identical
 ``release_version`` field on the same ``GET /version`` handshake — there was
 never a topology reason for two numbers, only an accident of two modules
 independently owning "their" constant. This module unifies both into one
-pinned floor plus one parser; bumping it once raises the floor everywhere.
+pinned dependency version plus one parser; bumping it once moves the
+requirement everywhere — and, since nexus-cfgo9, converges every existing
+local install to match rather than merely raising a refusal threshold.
 
 **Leaf module contract**: this file MUST NOT import anything from the
 ``nexus`` package (stdlib only). Both ``nexus.db.managed_endpoint`` and
@@ -25,11 +42,22 @@ statement, which must report nothing.
 """
 from __future__ import annotations
 
-#: Minimum engine-service release ANY nexus client (native/local or managed
-#: cloud) requires, pinned on the dedicated ``release_version`` field of the
-#: unauthenticated ``GET /version`` handshake (RDR-002 contract; conexus PR
-#: #78). NOT ``app_version`` — that field is the JAR's frozen Maven coordinate
-#: ``1.0-SNAPSHOT`` and is a structural no-op to gate on (any build clears it).
+#: THE engine-service release this conexus build was made and tested
+#: against — the one engine dependency, pinned on the dedicated
+#: ``release_version`` field of the unauthenticated ``GET /version``
+#: handshake (RDR-002 contract; conexus PR #78). NOT ``app_version`` — that
+#: field is the JAR's frozen Maven coordinate ``1.0-SNAPSHOT`` and is a
+#: structural no-op to gate on (any build clears it).
+#:
+#: This is a DEPENDENCY VERSION, not a compatibility minimum: every local
+#: (native/service-mode) install is expected to converge to exactly this
+#: version, via fresh ``nx init`` (which installs it directly) or via
+#: convergence on an existing box (:func:`nexus.upgrade_finish.converge_engine`,
+#: run automatically post-upgrade and as the ``nx doctor`` backstop). Only
+#: the managed-cloud handshake (:mod:`nexus.db.managed_endpoint`) still reads
+#: this as a floor (``deployed >= this``), because a client cannot install
+#: the cloud's engine and the cloud legitimately runs ahead of any one
+#: client release.
 #:
 #: History: (0,1,5) -> (0,1,8) for nexus-x2g1z (2026-06-24, the managed-cloud
 #: probe's introduction). -> (0,1,34) for 6.5.0: the client hard-requires
@@ -41,8 +69,9 @@ from __future__ import annotations
 #: engine before v0.1.38 has a native-image reflection-registration gap that
 #: 500s on every T1 get/search/list (nexus-opr9m) — an engine below this no
 #: longer degrades, it silently breaks a hard default. Bump this ONE
-#: constant to raise the floor for every client path (native guided-upgrade
-#: handoff, the managed-cloud probe, AND — since 2026-07-12 —
+#: constant to move the dependency for every client path (native
+#: guided-upgrade handoff, the managed-cloud probe, the automated
+#: convergence pass, AND — since 2026-07-12 —
 #: ``nexus.daemon.binary_install.PINNED_SERVICE_TAG``, the exact tag a fresh
 #: local install downloads, which is now DERIVED from this constant rather
 #: than independently hand-typed) — there is no second knob to remember.
@@ -50,12 +79,12 @@ from __future__ import annotations
 #: WHEN TO BUMP (refined 2026-07-14, per Hal): not only when the client
 #: hard-requires new engine features — ALSO when the engine release carries
 #: user-facing FIXES the client release will advertise. For local
-#: service-mode installs this floor/pin is the ONLY fix-delivery vehicle:
-#: the engine on a local box moves solely via PINNED_SERVICE_TAG (fresh
-#: installs) or a floor bump (doctor / upgrade path). A release whose
-#: changelog claims an engine-side fix without moving this floor ships a
-#: broken promise to every local install and pins fresh installs to the
-#: still-broken engine.
+#: service-mode installs this dependency/pin is the ONLY fix-delivery
+#: vehicle: the engine on a local box moves via PINNED_SERVICE_TAG (fresh
+#: installs) or convergence (existing installs — see nexus-cfgo9). A release
+#: whose changelog claims an engine-side fix without moving this dependency
+#: ships a broken promise to every local install and pins fresh installs to
+#: the still-broken engine.
 #:
 #: -> (0,1,41) for the 2026-07-13 release-gate
 #: arc: service-mode remediation consent audit hard-requires the consents

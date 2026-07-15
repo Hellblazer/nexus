@@ -453,6 +453,143 @@ def _role_exists(bins: PgBinaries, port: int, superuser: str, rolename: str) -> 
     return "1 row" in res.stdout
 
 
+def bootstrap_superuser() -> str:
+    """The OS identity that owns this box's local cluster's superuser role.
+
+    initdb is run with ``--username <this>`` (see :func:`_init_cluster`), and
+    the cluster's ``pg_hba.conf`` is ``trust``-authenticated for local TCP
+    (``--auth=trust``), so any caller on this box can open a superuser
+    session as this identity with no password. A single source of truth so
+    :func:`provision` and any later repair path that needs a superuser
+    session on an ALREADY-RUNNING cluster (e.g.
+    :func:`heal_diag_view_grants_and_ownership`, nexus-cfgo9) resolve the
+    SAME identity — a second, independently re-derived copy of this
+    expression is exactly the drift class this module's docstring warns
+    about elsewhere (nexus-b6qlf).
+    """
+    return os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+
+
+def _psql_tuples(bins: PgBinaries, port: int, db: str, user: str, sql: str) -> str:
+    """Execute *sql* via psql in tuple-only, unaligned mode (``-t -A``).
+
+    Unlike :func:`_psql` (human ``-c`` output, used for existence probes via
+    ``"1 row" in stdout``), this returns bare, parseable values — a scalar or
+    ``|``-separated row — the same convention ``tests/db/test_pg_provision.py``'s
+    ``_query`` helper already uses.
+    """
+    res = _run(
+        [str(bins.psql), "-h", "127.0.0.1", "-p", str(port),
+         "-U", user, "-d", db, "-t", "-A", "-c", sql],
+    )
+    return res.stdout.strip()
+
+
+def heal_diag_view_grants_and_ownership(
+    bins: PgBinaries, port: int, os_user: str,
+) -> list[str]:
+    """Repair ``nexus.diag_chash_conformance`` grants/ownership on an
+    EXISTING cluster (nexus-cfgo9, GH #1402's second symptom).
+
+    Two independent, idempotent repairs, both run as the cluster superuser
+    (*os_user*, see :func:`bootstrap_superuser`) — GRANT and ALTER OWNER
+    only, NO DDL that creates or alters the view's definition (view
+    CREATION remains provisioning's job,
+    :func:`_provision_diag_conformance_view` — ALL DDL belongs to Liquibase
+    or that one provisioning path, never duplicated here):
+
+    1. **Missing-grant class**: ``nexus_diag`` lacks SELECT on the view —
+       re-issue the GRANT (a repeat grant is a Postgres no-op).
+    2. **Ownership-fragmentation class (nexus-vounk)**: the view is owned by
+       a role that is neither superuser nor BYPASSRLS — e.g. ``nexus_admin``,
+       from the documented bring-your-own-Postgres workaround
+       (``docs/configuration.md`` §3) run without genuine superuser access.
+       Under FORCE RLS a view counts cross-tenant rows ONLY when its owner is
+       RLS-exempt (the nexus-vounk lesson); a non-exempt owner silently
+       degrades every future probe toward the legacy-statement fallback (or
+       a false-clean 0-vs-N gap on the direct fallback route). Repaired via
+       ``ALTER VIEW ... OWNER TO`` back to *os_user*.
+
+    Returns human-readable action lines — empty when the view does not exist
+    (nothing to heal; view creation is provisioning's job, not this
+    function's) or when both checks already pass (the common case).
+    Best-effort at the CALL SITE (:func:`nexus.upgrade_finish.heal_diag_view`)
+    — this function itself raises on a genuine psql failure so the caller's
+    degrade-cleanly wrapper can log it, matching every other repair helper
+    in this module.
+    """
+    from nexus.db.chash_tables import DIAG_CONFORMANCE_VIEW  # noqa: PLC0415 — deferred, keeps provision import-light
+
+    schema, relname = DIAG_CONFORMANCE_VIEW.split(".", 1)
+    actions: list[str] = []
+
+    exists = _psql_tuples(
+        bins, port, NEXUS_DB_NAME, os_user,
+        "SELECT 1 FROM pg_class c JOIN pg_namespace n "
+        "ON n.oid = c.relnamespace "
+        f"WHERE n.nspname = '{schema}' AND c.relname = '{relname}'",
+    )
+    if exists != "1":
+        return actions
+
+    if not _role_exists(bins, port, os_user, "nexus_diag"):
+        # No diag role to grant to at all (pre-P2.1 install); role creation
+        # is _backfill_diag_role's job, not this function's narrower scope.
+        return actions
+
+    # Ownership-fragmentation repair first: GRANT below is meaningless if the
+    # owner itself cannot see cross-tenant rows to begin with — order this
+    # side so the log/action narrative reads cause-then-effect.
+    owner_row = _psql_tuples(
+        bins, port, NEXUS_DB_NAME, os_user,
+        "SELECT r.rolname, (r.rolsuper OR r.rolbypassrls) FROM pg_class c "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "JOIN pg_roles r ON r.oid = c.relowner "
+        f"WHERE n.nspname = '{schema}' AND c.relname = '{relname}'",
+    )
+    parts = owner_row.split("|")
+    if len(parts) == 2:
+        owner_name, exempt_flag = parts[0], parts[1]
+        if exempt_flag != "t":
+            # os_user is a real OS account name (e.g. "hal.hildebrand") and
+            # is NOT a valid unquoted Postgres identifier -- double-quote it
+            # (bootstrap_superuser's docstring: same identity used to -U
+            # connect, where libpq's startup packet has no such restriction,
+            # so this is the one place in this module that must quote it).
+            # Belt-and-suspenders (code-review LOW): escape an embedded
+            # double-quote by doubling it, the standard Postgres quoted-
+            # identifier escape -- os_user is OS-controlled, not attacker
+            # input, so this is defense-in-depth, not a real vulnerability
+            # under the threat model.
+            quoted_os_user = os_user.replace('"', '""')
+            _psql(
+                bins, port, NEXUS_DB_NAME, os_user,
+                f'ALTER VIEW {DIAG_CONFORMANCE_VIEW} OWNER TO "{quoted_os_user}"',
+            )
+            actions.append(
+                f"healed: {DIAG_CONFORMANCE_VIEW} was owned by non-RLS-exempt "
+                f"role {owner_name!r} (ownership fragmentation, GH #1402) — "
+                f"reassigned to the superuser bootstrap role {os_user!r}"
+            )
+
+    has_grant = _psql_tuples(
+        bins, port, NEXUS_DB_NAME, os_user,
+        f"SELECT has_table_privilege('nexus_diag', '{DIAG_CONFORMANCE_VIEW}', "
+        "'SELECT')",
+    )
+    if has_grant != "t":
+        _psql(
+            bins, port, NEXUS_DB_NAME, os_user,
+            f"GRANT SELECT ON {DIAG_CONFORMANCE_VIEW} TO nexus_diag",
+        )
+        actions.append(
+            f"healed: nexus_diag lacked SELECT on {DIAG_CONFORMANCE_VIEW} "
+            "(missing-grant class, GH #1402) — granted"
+        )
+
+    return actions
+
+
 # ── Core provisioning steps ────────────────────────────────────────────────────
 
 
@@ -1120,7 +1257,7 @@ def provision(
 
     pgdata = config_dir / "postgres"
     creds_path = config_dir / CREDENTIALS_FILENAME
-    os_user = os.environ.get("USER") or os.environ.get("LOGNAME") or "postgres"
+    os_user = bootstrap_superuser()
 
     result = ProvisionResult(credentials_path=creds_path)
 

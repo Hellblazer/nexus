@@ -47,14 +47,20 @@ DEFAULT_MANAGED_SERVICE_URL = "https://api.conexus-nexus.com"
 #: ``{app_version, release_version}`` (the embedding-mode / model / schema
 #: disclosure was dropped from the public endpoint).
 #:
-#: The version floor itself (:data:`nexus.engine_version.REQUIRED_ENGINE_VERSION`)
-#: is the SAME floor the native/local path enforces
-#: (:func:`nexus.migration.guided_upgrade.verify_service_version`) — nexus-b6qlf
-#: unified what used to be two independently-drifting constants (this module's
-#: own ``MIN_MANAGED_RELEASE_VERSION`` was introduced at ``(0,1,8)`` in
-#: nexus-x2g1z, 2026-06-24, and never bumped again while the native floor
-#: moved to ``(0,1,34)`` — exactly the drift a single source of truth
-#: prevents).
+#: The gate compares against :data:`nexus.engine_version.REQUIRED_ENGINE_VERSION`
+#: — nexus-b6qlf unified what used to be two independently-drifting constants
+#: (this module's own ``MIN_MANAGED_RELEASE_VERSION`` was introduced at
+#: ``(0,1,8)`` in nexus-x2g1z, 2026-06-24, and never bumped again while the
+#: native floor moved to ``(0,1,34)`` — exactly the drift a single source of
+#: truth prevents).
+#:
+#: THIS is the ONE place a ``deployed >= dependency`` "floor" comparison
+#: legitimately survives the nexus-cfgo9 one-engine model (see
+#: :mod:`nexus.engine_version`'s module docstring): a client cannot install
+#: the managed service's engine itself, and the managed deployment
+#: legitimately runs ahead of any one client release between PyPI cuts. Every
+#: LOCAL (native/service-mode) install instead CONVERGES to exactly the
+#: dependency version — see :func:`nexus.upgrade_finish.converge_engine`.
 
 #: Probe timeout — short, so an unreachable managed service fails fast and loud
 #: rather than hanging a CLI command.

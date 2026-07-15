@@ -620,7 +620,17 @@ def verify_service_version(
         got = ".".join(str(n) for n in parsed)
         return VersionPinOutcome(
             ok=False,
-            reason=f"engine-service v{got} < required v{req} — upgrade the service",
+            # nexus-cfgo9 (ONE-engine model, GH #1402 postmortem): a stale
+            # local engine converges automatically — point at that step
+            # rather than leaving "upgrade the service" as the only remedy.
+            reason=(
+                f"engine-service v{got} < required v{req} — run "
+                "`nx daemon restart-stale` to converge it automatically "
+                "(installs the pinned tag and restarts the service), or "
+                "manually: nx daemon service install-binary "
+                f"engine-service-v{req} && nx daemon service stop && "
+                "nx daemon service start"
+            ),
         )
     return VersionPinOutcome(ok=True, reason=None)
 

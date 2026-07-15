@@ -13,7 +13,7 @@ from __future__ import annotations
 import subprocess
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
@@ -23,6 +23,7 @@ from nexus.db.chash_tables import CHASH_BEARING_TABLES
 
 from nexus.health import (
     HealthResult,
+    _check_engine_convergence,
     _check_migration_state,
     _check_rls_present,
     _check_storage_service_health,
@@ -206,6 +207,73 @@ class TestCheckStorageServiceHealth:
         r = results[0]
         assert r.ok is False
         assert r.fatal is True
+
+
+# ── _check_engine_convergence (nexus-cfgo9) ─────────────────────────────────
+
+
+class TestCheckEngineConvergence:
+    """nx doctor backstop for the ONE-engine convergence model — reports
+    drift as convergence-pending, never as a refusal/violation."""
+
+    def test_not_applicable_yields_no_result(self, tmp_path):
+        from nexus.upgrade_finish import EngineConvergence
+
+        with patch(
+            "nexus.upgrade_finish.detect_engine_convergence",
+            return_value=EngineConvergence(
+                applicable=False, installed_version=None,
+                required_version=(0, 1, 43), converged=True,
+                reason="cloud mode",
+            ),
+        ):
+            results = _check_engine_convergence(config_dir=tmp_path)
+        assert results == []
+
+    def test_converged_returns_ok(self, tmp_path):
+        from nexus.upgrade_finish import EngineConvergence
+
+        with patch(
+            "nexus.upgrade_finish.detect_engine_convergence",
+            return_value=EngineConvergence(
+                applicable=True, installed_version=(0, 1, 43),
+                required_version=(0, 1, 43), converged=True, reason=None,
+            ),
+        ):
+            results = _check_engine_convergence(config_dir=tmp_path)
+        assert len(results) == 1
+        assert results[0].ok is True
+        assert results[0].fatal is False
+
+    def test_mismatch_returns_soft_warn_with_convergence_framing(self, tmp_path):
+        from nexus.upgrade_finish import EngineConvergence
+
+        with patch(
+            "nexus.upgrade_finish.detect_engine_convergence",
+            return_value=EngineConvergence(
+                applicable=True, installed_version=(0, 1, 42),
+                required_version=(0, 1, 43), converged=False,
+                reason="installed engine v0.1.42 != required v0.1.43",
+            ),
+        ):
+            results = _check_engine_convergence(config_dir=tmp_path)
+        assert len(results) == 1
+        r = results[0]
+        assert r.ok is False
+        assert r.warn is True  # convergence pending, not a hard violation
+        assert r.fatal is False
+        assert "0.1.42" in r.detail and "0.1.43" in r.detail
+        assert "convergence" in r.detail.lower()
+        assert "violation" not in r.detail.lower()
+        assert r.fix_suggestions
+
+    def test_probe_failure_degrades_silently(self, tmp_path):
+        with patch(
+            "nexus.upgrade_finish.detect_engine_convergence",
+            side_effect=RuntimeError("boom"),
+        ):
+            results = _check_engine_convergence(config_dir=tmp_path)
+        assert results == []
 
 
 # ── _check_migration_state ────────────────────────────────────────────────────
