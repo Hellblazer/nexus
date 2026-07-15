@@ -23,6 +23,7 @@ from nexus.upgrade_finish import (
     enumerate_processes,
     heal_diag_view,
     restart_stale,
+    unload_stale_t2_launchagent,
 )
 
 _REQUIRED_STR = ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
@@ -770,6 +771,190 @@ class TestCheckVersionTransitionDiagViewHeal:
         ), patch(
             "nexus.upgrade_finish.heal_diag_view",
             return_value=["healed: nexus_diag lacked SELECT ..."],
+        ):
+            line = check_version_transition(tmp_path)
+        assert "healed: nexus_diag lacked SELECT" in line
+
+
+class TestUnloadStaleT2Launchagent:
+    """nexus-c0vby (GH #1405 defect 2): service mode must never leave a
+    respawning com.nexus.t2 LaunchAgent behind."""
+
+    def test_local_mode_untouched(self, tmp_path):
+        """Local mode (or the default env) is not service-backed for
+        'memory' -- the T2 daemon IS the live substrate there, so this
+        leg must never touch the agent, regardless of whether one is
+        installed."""
+        from nexus.db.storage_mode import StorageBackend
+
+        with patch(
+            "nexus.db.storage_mode.storage_backend_for",
+            return_value=StorageBackend.SQLITE,
+        ), patch(
+            "nexus.commands.daemon._autostart_unit_installed"
+        ) as probe, patch(
+            "nexus.daemon.installer.uninstall_autostart"
+        ) as uninstall:
+            actions = unload_stale_t2_launchagent(tmp_path)
+        assert actions == []
+        probe.assert_not_called()
+        uninstall.assert_not_called()
+
+    def test_service_mode_no_agent_installed_is_noop(self, tmp_path):
+        from nexus.db.storage_mode import StorageBackend
+
+        with patch(
+            "nexus.db.storage_mode.storage_backend_for",
+            return_value=StorageBackend.SERVICE,
+        ), patch(
+            "nexus.commands.daemon._autostart_unit_installed", return_value=None,
+        ), patch(
+            "nexus.daemon.installer.uninstall_autostart"
+        ) as uninstall:
+            actions = unload_stale_t2_launchagent(tmp_path)
+        assert actions == []
+        uninstall.assert_not_called()
+
+    def test_service_mode_with_agent_removes_it_and_reports(self, tmp_path):
+        from pathlib import Path
+
+        from nexus.daemon.installer import UninstallResult, UninstallStatus
+        from nexus.db.storage_mode import StorageBackend
+
+        dest = tmp_path / "com.nexus.t2.plist"
+        with patch(
+            "nexus.db.storage_mode.storage_backend_for",
+            return_value=StorageBackend.SERVICE,
+        ), patch(
+            "nexus.commands.daemon._autostart_unit_installed", return_value=Path(dest),
+        ), patch(
+            "nexus.daemon.installer.uninstall_autostart",
+            return_value=UninstallResult(status=UninstallStatus.REMOVED, dest=dest),
+        ) as uninstall:
+            actions = unload_stale_t2_launchagent(tmp_path)
+        uninstall.assert_called_once_with(tier="t2")
+        assert len(actions) == 1
+        assert "removed" in actions[0]
+        assert "com.nexus.t2" in actions[0]
+        assert str(dest) in actions[0]
+
+    def test_service_mode_with_agent_surfaces_warnings(self, tmp_path):
+        from pathlib import Path
+
+        from nexus.daemon.installer import UninstallResult, UninstallStatus
+        from nexus.db.storage_mode import StorageBackend
+
+        dest = tmp_path / "com.nexus.t2.plist"
+        with patch(
+            "nexus.db.storage_mode.storage_backend_for",
+            return_value=StorageBackend.SERVICE,
+        ), patch(
+            "nexus.commands.daemon._autostart_unit_installed", return_value=Path(dest),
+        ), patch(
+            "nexus.daemon.installer.uninstall_autostart",
+            return_value=UninstallResult(
+                status=UninstallStatus.REMOVED, dest=dest,
+                warnings=("launchctl bootout gui/501/com.nexus.t2 exited 1: no such process",),
+            ),
+        ):
+            actions = unload_stale_t2_launchagent(tmp_path)
+        assert any("removed" in a for a in actions)
+        assert any("no such process" in a for a in actions)
+
+    def test_removal_failure_is_needs_human_never_raises(self, tmp_path):
+        from nexus.db.storage_mode import StorageBackend
+
+        with patch(
+            "nexus.db.storage_mode.storage_backend_for",
+            return_value=StorageBackend.SERVICE,
+        ), patch(
+            "nexus.commands.daemon._autostart_unit_installed", return_value=tmp_path / "x.plist",
+        ), patch(
+            "nexus.daemon.installer.uninstall_autostart",
+            side_effect=OSError("permission denied"),
+        ):
+            actions = unload_stale_t2_launchagent(tmp_path)
+        assert len(actions) == 1
+        assert "NEEDS HUMAN" in actions[0]
+        assert "permission denied" in actions[0]
+
+    def test_storage_backend_probe_failure_is_silent_never_raises(self, tmp_path):
+        """A malformed NX_STORAGE_BACKEND env var raises
+        StorageModeFlagError inside storage_backend_for -- this leg must
+        degrade to a no-op, not crash the finish pass (mirrors
+        heal_diag_view's probe-failure discipline)."""
+        with patch(
+            "nexus.db.storage_mode.storage_backend_for",
+            side_effect=RuntimeError("bad flag"),
+        ):
+            actions = unload_stale_t2_launchagent(tmp_path)
+        assert actions == []
+
+
+class TestCheckVersionTransitionLaunchagentUnload:
+    """check_version_transition's finish pass also runs the T2 LaunchAgent
+    unload (nexus-c0vby), independently try/excepted from the other legs."""
+
+    def test_transition_includes_unload_actions(self, tmp_path):
+        (tmp_path / "last_seen_version").write_text("6.10.0\n")
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "6.10.1"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
+        ), patch(
+            "nexus.upgrade_finish.detect_stale_processes",
+            return_value=SkewReport(installed_version="6.10.1"),
+        ), patch(
+            "nexus.upgrade_finish.converge_engine", return_value=[],
+        ), patch(
+            "nexus.upgrade_finish.heal_diag_view", return_value=[],
+        ), patch(
+            "nexus.upgrade_finish.unload_stale_t2_launchagent",
+            return_value=["removed the stray com.nexus.t2 LaunchAgent: /x.plist"],
+        ):
+            line = check_version_transition(tmp_path)
+        assert "removed the stray com.nexus.t2 LaunchAgent" in line
+
+    def test_unload_failure_never_blocks_the_finish_summary(self, tmp_path):
+        (tmp_path / "last_seen_version").write_text("6.10.0\n")
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "6.10.1"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
+        ), patch(
+            "nexus.upgrade_finish.detect_stale_processes",
+            return_value=SkewReport(installed_version="6.10.1"),
+        ), patch(
+            "nexus.upgrade_finish.converge_engine", return_value=[],
+        ), patch(
+            "nexus.upgrade_finish.heal_diag_view", return_value=[],
+        ), patch(
+            "nexus.upgrade_finish.unload_stale_t2_launchagent",
+            side_effect=RuntimeError("boom"),
+        ):
+            line = check_version_transition(tmp_path)
+        assert line == "upgraded 6.10.0 -> 6.10.1; no stale processes"
+
+    def test_unload_failure_does_not_block_other_legs_actions(self, tmp_path):
+        (tmp_path / "last_seen_version").write_text("6.10.0\n")
+        with patch(
+            "nexus.upgrade_finish.install_mtime_and_version",
+            return_value=(0.0, "6.10.1"),
+        ), patch(
+            "nexus.upgrade_finish.running_from_tool_install", return_value=True,
+        ), patch(
+            "nexus.upgrade_finish.detect_stale_processes",
+            return_value=SkewReport(installed_version="6.10.1"),
+        ), patch(
+            "nexus.upgrade_finish.converge_engine", return_value=[],
+        ), patch(
+            "nexus.upgrade_finish.heal_diag_view",
+            return_value=["healed: nexus_diag lacked SELECT ..."],
+        ), patch(
+            "nexus.upgrade_finish.unload_stale_t2_launchagent",
+            side_effect=RuntimeError("boom"),
         ):
             line = check_version_transition(tmp_path)
         assert "healed: nexus_diag lacked SELECT" in line

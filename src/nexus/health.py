@@ -1970,6 +1970,62 @@ def _check_engine_convergence(config_dir: Path | None = None) -> list[HealthResu
     )]
 
 
+def _check_t2_launchagent_stray() -> list[HealthResult]:
+    """nexus-c0vby (GH #1405 defect 2): backstop for the automatic
+    ``unload_stale_t2_launchagent`` finish-pass leg
+    (:func:`nexus.upgrade_finish.unload_stale_t2_launchagent`).
+
+    The auto-trigger only fires on a conexus PACKAGE version transition;
+    this gives an operator a way to SEE (and be pointed at fixing) a
+    stray, endlessly-respawning T2 autostart unit at any time via plain
+    ``nx doctor`` — same convention as ``_check_engine_convergence``
+    above. Framed as a soft warning (this is benign log noise, not data
+    loss), never a hard failure.
+
+    Silent (``[]``) on the common cases: local mode (the T2 tier is the
+    live substrate there — nothing stray to report), or service mode with
+    no autostart unit installed. Any probe failure ALSO degrades
+    silently — best-effort, must never break ``nx doctor``.
+    """
+    try:
+        from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import
+
+        if storage_backend_for("memory") != StorageBackend.SERVICE:
+            return []
+
+        from nexus.commands.daemon import _autostart_unit_installed  # noqa: PLC0415 — deferred, CLI startup cost
+
+        unit_path = _autostart_unit_installed()
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_t2_launchagent_check_failed", error=str(exc))
+        return []
+
+    if unit_path is None:
+        return [HealthResult(
+            label="T2 autostart unit (service mode)",
+            ok=True,
+            detail="no stray T2 autostart unit installed",
+        )]
+
+    from nexus.upgrade_finish import _T2_AUTOSTART_UNIT_KIND  # noqa: PLC0415 — deferred to avoid circular import
+
+    return [HealthResult(
+        label="T2 autostart unit (service mode)",
+        ok=False,
+        warn=True,
+        detail=(
+            f"a T2 autostart unit ({_T2_AUTOSTART_UNIT_KIND}) is installed "
+            f"at {unit_path} but service mode never starts the T2 daemon — "
+            "its OS-level restart policy respawns an immediately-exiting "
+            "process indefinitely (log noise)"
+        ),
+        fix_suggestions=[
+            "nx daemon restart-stale  # removes the stray unit (GH #1405)",
+            "nx daemon t2 uninstall --autostart  # removes it directly",
+        ],
+    )]
+
+
 def _check_migration_state(
     creds_path: Path | None = None,
     psql_bin: Path | None = None,
@@ -2881,6 +2937,7 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     # so they are always safe to run.
     results.extend(_check_storage_service_health())
     results.extend(_check_engine_convergence())
+    results.extend(_check_t2_launchagent_stray())
     results.extend(_check_migration_state())
     results.extend(_check_rls_present())
 

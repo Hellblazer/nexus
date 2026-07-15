@@ -748,6 +748,19 @@ def t2_stop_cmd(config_dir_str: str | None) -> None:
     click.echo(f"Sent SIGTERM to T2 daemon (pid={pid}).")
 
 
+#: nexus-c0vby (GH #1405 defect 2): the honest, non-error-shaped message a
+#: service-mode box sees instead of "No T2 daemon discovery file found" --
+#: that message implies something is WRONG, but in service mode the T2
+#: daemon never starts by design (t2_daemon.py's own
+#: t2_daemon_not_started_service_mode early-return). Module-level so the
+#: doctor/finish-pass action lines and this CLI message stay wordable
+#: identically without copy-paste drift.
+_T2_SERVICE_MODE_STATUS_MESSAGE = (
+    "service mode — T2 daemon intentionally not running (storage is the "
+    "engine service)"
+)
+
+
 @t2_group.command("status")
 @click.option(
     "--config-dir",
@@ -766,6 +779,27 @@ def t2_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
     disc = t2_discovery_path(config_dir)
     if not disc.exists():
+        # nexus-c0vby: distinguish "service mode — this is expected" from a
+        # genuine "daemon should be running but isn't" in local mode. The
+        # storage-mode probe itself is best-effort (mirrors
+        # unload_stale_t2_launchagent / _check_t2_launchagent_stray's own
+        # discipline) -- a probe failure falls through to the ORIGINAL
+        # error-shaped message rather than silently claiming service mode.
+        try:
+            from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred, circular-dep avoidance
+
+            service_mode = storage_backend_for("memory") == StorageBackend.SERVICE
+        except Exception:  # noqa: BLE001 — best-effort probe; falls through to the default error path
+            service_mode = False
+        if service_mode:
+            if as_json:
+                click.echo(_json.dumps(
+                    {"service_mode": True, "message": _T2_SERVICE_MODE_STATUS_MESSAGE},
+                    indent=2,
+                ))
+            else:
+                click.echo(_T2_SERVICE_MODE_STATUS_MESSAGE)
+            return
         click.echo(
             "No T2 daemon discovery file found; is the daemon running?",
             err=True,
@@ -2370,10 +2404,13 @@ def restart_stale_cmd(dry_run: bool) -> None:
     the ONE-engine model — a version mismatch is fixed here, not merely
     refused), and repairs ``nexus.diag_chash_conformance`` grant/ownership
     drift (GH #1402's second symptom — GRANT/ALTER OWNER only, no view
-    DDL). Runs automatically on the first ``nx`` invocation after a version
-    change; this is the manual form (also the re-run path for convergence
-    outside a version transition, e.g. after remediating a chash-poison
-    block).
+    DDL). It also removes a stray ``com.nexus.t2`` LaunchAgent on a
+    service-mode box (nexus-c0vby, GH #1405 defect 2 — a service-mode
+    box's T2 daemon never starts, so a leftover agent's KeepAlive would
+    otherwise respawn an immediately-exiting process forever). Runs
+    automatically on the first ``nx`` invocation after a version change;
+    this is the manual form (also the re-run path for convergence outside
+    a version transition, e.g. after remediating a chash-poison block).
     """
     from nexus.upgrade_finish import (  # noqa: PLC0415 — deferred import
         converge_engine,
@@ -2381,6 +2418,7 @@ def restart_stale_cmd(dry_run: bool) -> None:
         heal_diag_view,
         install_source,
         restart_stale,
+        unload_stale_t2_launchagent,
     )
 
     # nexus-cfgo9: process-skew detection is independent of engine
@@ -2439,3 +2477,22 @@ def restart_stale_cmd(dry_run: bool) -> None:
                     click.echo(f"  {line}")
         except Exception as exc:  # noqa: BLE001 — one leg's failure must not block the others
             click.echo(f"diag-view heal failed ({exc}) — skipping this leg.", err=True)
+
+    # nexus-c0vby: independent leg, same defense-in-depth pattern as the two
+    # above — a gap in unload_stale_t2_launchagent's own handling must not
+    # abort the command or hide the other legs' output.
+    if dry_run:
+        click.echo("T2 LaunchAgent unload: skipped (--dry-run).")
+    else:
+        try:
+            unload_actions = unload_stale_t2_launchagent(config_dir)
+            if not unload_actions:
+                click.echo(
+                    "T2 LaunchAgent: no action needed (not service mode, or "
+                    "no stray agent installed)."
+                )
+            else:
+                for line in unload_actions:
+                    click.echo(f"  {line}")
+        except Exception as exc:  # noqa: BLE001 — one leg's failure must not block the others
+            click.echo(f"T2 LaunchAgent unload failed ({exc}) — skipping this leg.", err=True)

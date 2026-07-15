@@ -24,6 +24,7 @@ def _invoke(
     *,
     engine_actions: list[str],
     heal_actions: list[str] | None = None,
+    unload_actions: list[str] | None = None,
     extra_args: list[str] | None = None,
 ):
     runner = CliRunner()
@@ -39,22 +40,25 @@ def _invoke(
     ) as converge, patch(
         "nexus.upgrade_finish.heal_diag_view",
         return_value=heal_actions if heal_actions is not None else [],
-    ) as heal:
+    ) as heal, patch(
+        "nexus.upgrade_finish.unload_stale_t2_launchagent",
+        return_value=unload_actions if unload_actions is not None else [],
+    ) as unload:
         result = runner.invoke(
             daemon_group, ["restart-stale", *(extra_args or [])],
         )
-    return result, converge, heal
+    return result, converge, heal, unload
 
 
 class TestRestartStaleEngineConvergence:
     def test_no_action_needed_prints_noop_line(self, tmp_path: Path) -> None:
-        result, converge, heal = _invoke(tmp_path, engine_actions=[])
+        result, converge, heal, unload = _invoke(tmp_path, engine_actions=[])
         assert result.exit_code == 0, result.output
         assert "engine: no convergence action needed" in result.output
         converge.assert_called_once_with(tmp_path, dry_run=False)
 
     def test_convergence_actions_are_rendered(self, tmp_path: Path) -> None:
-        result, converge, heal = _invoke(
+        result, converge, heal, unload = _invoke(
             tmp_path,
             engine_actions=[
                 "converged engine: installed engine-service-v0.1.43 (was 0.1.42)",
@@ -67,14 +71,14 @@ class TestRestartStaleEngineConvergence:
         converge.assert_called_once_with(tmp_path, dry_run=False)
 
     def test_dry_run_is_threaded_through(self, tmp_path: Path) -> None:
-        result, converge, heal = _invoke(
+        result, converge, heal, unload = _invoke(
             tmp_path, engine_actions=[], extra_args=["--dry-run"],
         )
         assert result.exit_code == 0, result.output
         converge.assert_called_once_with(tmp_path, dry_run=True)
 
     def test_needs_human_engine_action_is_rendered(self, tmp_path: Path) -> None:
-        result, converge, heal = _invoke(
+        result, converge, heal, unload = _invoke(
             tmp_path,
             engine_actions=[
                 "NEEDS HUMAN: engine convergence blocked — the store looks "
@@ -152,13 +156,13 @@ class TestRestartStaleEngineConvergence:
 
 class TestRestartStaleDiagViewHeal:
     def test_no_action_needed_prints_noop_line(self, tmp_path: Path) -> None:
-        result, converge, heal = _invoke(tmp_path, engine_actions=[], heal_actions=[])
+        result, converge, heal, unload = _invoke(tmp_path, engine_actions=[], heal_actions=[])
         assert result.exit_code == 0, result.output
         assert "diag-view heal: no action needed" in result.output
         heal.assert_called_once_with(tmp_path)
 
     def test_heal_actions_are_rendered(self, tmp_path: Path) -> None:
-        result, converge, heal = _invoke(
+        result, converge, heal, unload = _invoke(
             tmp_path,
             engine_actions=[],
             heal_actions=[
@@ -179,9 +183,89 @@ class TestRestartStaleDiagViewHeal:
     def test_dry_run_skips_heal_entirely(self, tmp_path: Path) -> None:
         """GRANT/ALTER OWNER have no dry-run preview mode — --dry-run must
         not execute them, and must say so rather than silently skipping."""
-        result, converge, heal = _invoke(
+        result, converge, heal, unload = _invoke(
             tmp_path, engine_actions=[], extra_args=["--dry-run"],
         )
         assert result.exit_code == 0, result.output
         assert "diag-view heal: skipped (--dry-run" in result.output
         heal.assert_not_called()
+
+
+class TestRestartStaleLaunchagentUnload:
+    """nexus-c0vby: ``nx daemon restart-stale`` also removes a stray
+    com.nexus.t2 LaunchAgent on a service-mode box."""
+
+    def test_no_action_needed_prints_noop_line(self, tmp_path: Path) -> None:
+        result, converge, heal, unload = _invoke(
+            tmp_path, engine_actions=[], unload_actions=[],
+        )
+        assert result.exit_code == 0, result.output
+        assert "T2 LaunchAgent: no action needed" in result.output
+        unload.assert_called_once_with(tmp_path)
+
+    def test_unload_actions_are_rendered(self, tmp_path: Path) -> None:
+        result, converge, heal, unload = _invoke(
+            tmp_path,
+            engine_actions=[],
+            unload_actions=[
+                "removed the stray com.nexus.t2 LaunchAgent (service mode — "
+                "the T2 daemon is never started; storage is the engine "
+                "service): /Users/u/Library/LaunchAgents/com.nexus.t2.plist",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "removed the stray com.nexus.t2 LaunchAgent" in result.output
+        unload.assert_called_once_with(tmp_path)
+
+    def test_needs_human_unload_action_is_rendered(self, tmp_path: Path) -> None:
+        result, converge, heal, unload = _invoke(
+            tmp_path,
+            engine_actions=[],
+            unload_actions=[
+                "NEEDS HUMAN: service mode detected a stray com.nexus.t2 "
+                "LaunchAgent but could not remove it (permission denied) — "
+                "run `nx daemon t2 uninstall --autostart` yourself",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "NEEDS HUMAN: service mode detected a stray com.nexus.t2" in result.output
+
+    def test_dry_run_skips_unload_entirely(self, tmp_path: Path) -> None:
+        result, converge, heal, unload = _invoke(
+            tmp_path, engine_actions=[], extra_args=["--dry-run"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "T2 LaunchAgent unload: skipped (--dry-run" in result.output
+        unload.assert_not_called()
+
+    def test_unload_unexpected_raise_does_not_block_other_legs(
+        self, tmp_path: Path,
+    ) -> None:
+        """Defense-in-depth, same pattern as the engine-convergence /
+        diag-view-heal call sites: a gap in unload_stale_t2_launchagent's
+        own 'never raises' contract must not abort the command or hide the
+        other legs' already-rendered output."""
+        runner = CliRunner()
+        with patch(
+            "nexus.commands.daemon.nexus_config_dir", return_value=tmp_path,
+        ), patch(
+            "nexus.upgrade_finish.detect_stale_processes",
+            return_value=SkewReport(installed_version="9.9.9"),
+        ), patch(
+            "nexus.upgrade_finish.install_source", return_value="PyPI, unpinned",
+        ), patch(
+            "nexus.upgrade_finish.converge_engine", return_value=[],
+        ), patch(
+            "nexus.upgrade_finish.heal_diag_view",
+            return_value=["healed: nexus_diag lacked SELECT ..."],
+        ), patch(
+            "nexus.upgrade_finish.unload_stale_t2_launchagent",
+            side_effect=RuntimeError("unexpected gap in the never-raises contract"),
+        ) as unload:
+            result = runner.invoke(daemon_group, ["restart-stale"])
+
+        assert result.exit_code == 0, result.output
+        assert "T2 LaunchAgent unload failed" in result.output
+        assert "unexpected gap in the never-raises contract" in result.output
+        assert "healed: nexus_diag lacked SELECT" in result.output
+        unload.assert_called_once_with(tmp_path)

@@ -26,6 +26,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
@@ -154,6 +155,82 @@ class TestStatusLiveness:
         result = CliRunner().invoke(
             main, ["daemon", "t2", "status", "--config-dir", str(tmp_path)],
         )
+        assert result.exit_code != 0
+        assert "no t2 daemon discovery file" in result.output.lower()
+
+
+class TestStatusServiceMode:
+    """nexus-c0vby (GH #1405 defect 2): service mode reports an honest,
+    non-error-shaped status instead of "No T2 daemon discovery file
+    found" — the T2 daemon is INTENTIONALLY never started there."""
+
+    def test_service_mode_no_discovery_reports_honest_message_exit_zero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+        result = CliRunner().invoke(
+            main, ["daemon", "t2", "status", "--config-dir", str(tmp_path)],
+        )
+        assert result.exit_code == 0, result.output
+        assert "service mode" in result.output.lower()
+        assert "intentionally not running" in result.output.lower()
+        assert "no t2 daemon discovery file" not in result.output.lower()
+
+    def test_service_mode_json_reports_structured_message(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+        result = CliRunner().invoke(
+            main,
+            ["daemon", "t2", "status", "--config-dir", str(tmp_path), "--json"],
+        )
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["service_mode"] is True
+        assert "intentionally not running" in payload["message"]
+
+    def test_service_mode_with_a_live_discovery_file_unaffected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Service mode only changes the ABSENT-discovery-file branch — a
+        discovery file that somehow exists (e.g. a race, or a box mid
+        local-to-service transition) is still reported normally, not
+        masked by the service-mode message."""
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+        _write_discovery(tmp_path, os.getpid())
+        result = CliRunner().invoke(
+            main, ["daemon", "t2", "status", "--config-dir", str(tmp_path)],
+        )
+        assert result.exit_code == 0, result.output
+        assert str(os.getpid()) in result.output
+        assert "intentionally not running" not in result.output.lower()
+
+    def test_local_mode_absent_discovery_unchanged(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Local mode (the default/pinned test env) keeps the original
+        error-shaped message and non-zero exit — this fix must not
+        silence a genuine 'daemon should be running but isn't'."""
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
+        result = CliRunner().invoke(
+            main, ["daemon", "t2", "status", "--config-dir", str(tmp_path)],
+        )
+        assert result.exit_code != 0
+        assert "no t2 daemon discovery file" in result.output.lower()
+
+    def test_storage_backend_probe_failure_falls_through_to_error_path(
+        self, tmp_path: Path,
+    ) -> None:
+        """A probe failure (e.g. a malformed NX_STORAGE_BACKEND) must
+        default to the ORIGINAL error-shaped message, never silently
+        claim service mode and mask a genuine problem."""
+        with patch(
+            "nexus.db.storage_mode.storage_backend_for",
+            side_effect=RuntimeError("bad flag"),
+        ):
+            result = CliRunner().invoke(
+                main, ["daemon", "t2", "status", "--config-dir", str(tmp_path)],
+            )
         assert result.exit_code != 0
         assert "no t2 daemon discovery file" in result.output.lower()
 

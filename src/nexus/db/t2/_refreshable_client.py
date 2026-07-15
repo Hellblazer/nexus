@@ -58,7 +58,12 @@ import structlog
 # additionally pins the two modules' values equal against a future
 # local-redefinition drift.
 from nexus.db.http_vector_client import _GATEWAY_RETRY_CODES, _GATEWAY_RETRY_SLEEPS
-from nexus.db.service_endpoint import discover_lease, resolve_service_endpoint
+from nexus.db.service_endpoint import (
+    DEFAULT_LEASE_WAIT_BUDGET_S,
+    discover_lease_with_wait,
+    has_ever_resolved_lease,
+    resolve_service_endpoint,
+)
 
 _log = structlog.get_logger(__name__)
 
@@ -158,7 +163,7 @@ def _is_retryable_endpoint_error(exc: Exception) -> bool:
     return isinstance(exc, (ConnectionRefusedError, ConnectionResetError))
 
 
-def _resolve_token_only() -> str:
+def _resolve_token_only(*, wait_budget_s: float = 0.0) -> str:
     """Resolve just the bearer token, WITHOUT requiring host/port to also
     be independently resolvable (nexus-bikit.4 adoption finding).
 
@@ -197,12 +202,18 @@ def _resolve_token_only() -> str:
     token with no ``NX_SERVICE_TOKEN`` env and no ``service_url``
     configured could observe a different resolution than going through
     :func:`resolve_service_endpoint` directly would have produced.
+
+    ``wait_budget_s`` (nexus-7dsgp): threaded to
+    :func:`~nexus.db.service_endpoint.discover_lease_with_wait` for the
+    same bounded-wait mitigation as :func:`resolve_service_endpoint`'s
+    local-supervisor leg — see :meth:`RefreshableHttpStoreMixin._invalidate_and_reresolve`,
+    the only caller that passes a nonzero value.
     """
     from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
 
     token = (get_credential("service_token") or "").strip()
     if not token:
-        _, lease_token = discover_lease()
+        _, lease_token = discover_lease_with_wait(budget_s=wait_budget_s)
         token = lease_token or ""
     if not token:
         raise RuntimeError(
@@ -213,6 +224,68 @@ def _resolve_token_only() -> str:
             "discoverable lease)."
         )
     return token
+
+
+def _resolve_endpoint_with_evidence_gate() -> tuple[str, str]:
+    """``resolve_service_endpoint()``, with a bounded-wait retry gated on
+    process-level evidence (nexus-7dsgp, critic round 1 CRITICAL).
+
+    ``mcp_infra.t2_ctx()`` builds a FRESH ``RefreshableHttpStoreMixin``-backed
+    store per call — there is no long-lived instance whose
+    ``_invalidate_and_reresolve`` retry path (the mixin's ONLY other
+    wait-aware call site) could ever fire for a resolution failure that
+    happens at construction time itself. Every ``memory_delete`` /
+    ``memory_put`` / T2Database-constructing MCP tool call in service mode
+    goes through exactly this path, so a call landing in the 5-10s
+    supervisor-respawn gap used to raise "endpoint is not resolvable"
+    immediately with NO chance to retry at all — the T2 analog of the
+    vector-client gap nexus-7dsgp's T3 half already closed.
+
+    The fix is NOT "always wait" (that reintroduces the nexus-1091
+    regression: a genuinely cold process — no supervisor running, ever —
+    would pay the full 12s before its correct, unavoidable fail-loud, on
+    EVERY T2Database construction). It is evidence-gated:
+    :func:`~nexus.db.service_endpoint.has_ever_resolved_lease` records
+    whether THIS process has EVER successfully discovered a live lease
+    (via any store, any prior call). Positive evidence of a lease-based
+    topology that was recently working makes the bounded wait a good bet;
+    its absence means fail fast exactly as before — the identical
+    evidence-gate principle the T3 fix already applies via its
+    ``_lease_cache``, extended to the T2 family's fresh-per-call shape.
+
+    Catches ONLY :class:`~nexus.db.service_endpoint.ServiceEndpointUnresolvableError`
+    (code-review round 2, Medium), not bare ``RuntimeError`` — a plain
+    ``except RuntimeError`` here would ALSO catch a malformed
+    ``NX_SERVICE_PORT`` (a config-typo bug, not a respawn-gap symptom;
+    retrying it burns 12s to reproduce the identical parse failure) and,
+    if a future change ever threaded ``wait_budget_s`` through the
+    managed-``service_url`` leg, would have silently retried that too —
+    reintroducing exactly the "never for the managed-cloud URL path"
+    violation this bead's other half was fixed to prevent. The subclass
+    is raised at, and only at, the genuine not-resolvable site.
+    """
+    from nexus.db.service_endpoint import ServiceEndpointUnresolvableError  # noqa: PLC0415 — deferred to avoid circular import
+
+    try:
+        return resolve_service_endpoint()
+    except ServiceEndpointUnresolvableError:
+        if not has_ever_resolved_lease():
+            raise
+        return resolve_service_endpoint(wait_budget_s=DEFAULT_LEASE_WAIT_BUDGET_S)
+
+
+def _resolve_token_only_with_evidence_gate() -> str:
+    """The ``_resolve_token_only`` analog of
+    :func:`_resolve_endpoint_with_evidence_gate` — same evidence-gated
+    bounded-wait retry, for the narrower ``base_url``-pinned-but-token-
+    omitted construction path (see :func:`_resolve_token_only`'s
+    docstring for when that shape occurs)."""
+    try:
+        return _resolve_token_only()
+    except RuntimeError:
+        if not has_ever_resolved_lease():
+            raise
+        return _resolve_token_only(wait_budget_s=DEFAULT_LEASE_WAIT_BUDGET_S)
 
 
 class RefreshableHttpStoreMixin:
@@ -271,11 +344,11 @@ class RefreshableHttpStoreMixin:
         # to connect. See _resolve_token_only()'s docstring for the three
         # real call sites this broke.
         if base_url is None:
-            resolved_url, resolved_token = resolve_service_endpoint()
+            resolved_url, resolved_token = _resolve_endpoint_with_evidence_gate()
             base_url = resolved_url
             _token = _token or resolved_token
         elif _token is None:
-            _token = _resolve_token_only()
+            _token = _resolve_token_only_with_evidence_gate()
 
         self._base_url = base_url.rstrip("/")
         self._tenant = tenant
@@ -355,6 +428,25 @@ class RefreshableHttpStoreMixin:
         change — re-issuing the identical request would just fail
         identically, so this raises a clear error instead of a pointless
         (and potentially misleading, "it retried and still failed") retry.
+
+        Budget arithmetic (nexus-7dsgp, GH #1405 defect 1 — "must not stack
+        with existing retry wrappers into unbounded totals"): both
+        resolution branches below pass
+        ``wait_budget_s=DEFAULT_LEASE_WAIT_BUDGET_S`` (12s), bounding ONLY
+        the added lease-republication wait. This method is called from
+        ``_send`` AFTER the first ``_once_with_gateway_retry()`` attempt
+        has already failed and BEFORE the second (retry) attempt, which
+        itself may re-enter the gateway backoff loop
+        (``_GATEWAY_RETRY_SLEEPS`` = 2+5+10 = 17s across up to 3 attempts,
+        each bounded by the client's ``timeout`` — 30s default). Worst
+        case for one ``_send`` call: first attempt (~30s connect timeout,
+        no gateway loop for a connection-class error) + this method's 12s
+        lease wait + second attempt (up to 30s connect timeout, or up to
+        17s extra if it hits gateway-transient codes instead) — bounded at
+        roughly the pre-existing 2x-attempt total plus a fixed 12s, never
+        unbounded. This is a PER-CALL bound; the outer T1-CLI aggregate
+        across multiple sequential calls is nexus-by875's scope, not this
+        method's.
         """
         if self._base_url_pinned and self._token_pinned:
             raise RuntimeError(
@@ -368,9 +460,9 @@ class RefreshableHttpStoreMixin:
             # base_url pinned, token not -- mirror __init__'s matching
             # branch: resolve ONLY the token, never demand host/port also
             # be independently resolvable.
-            self._token = _resolve_token_only()
+            self._token = _resolve_token_only(wait_budget_s=DEFAULT_LEASE_WAIT_BUDGET_S)
         else:
-            base_url, token = resolve_service_endpoint()
+            base_url, token = resolve_service_endpoint(wait_budget_s=DEFAULT_LEASE_WAIT_BUDGET_S)
             self._base_url = base_url.rstrip("/")
             if not self._token_pinned:
                 self._token = token
