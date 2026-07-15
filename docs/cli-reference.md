@@ -1818,6 +1818,17 @@ named config_dir, otherwise spawns it in the background (detached
 subprocess) and polls the discovery file until reachable (or the
 timeout expires).
 
+Service mode (RDR-176; nexus-daemon-6.6.1-service-mode-skip): when the
+memory store is in SERVICE mode, the SQLite T2 tier is a frozen
+migration source and the Java service is the live substrate — no
+client ever connects to a local T2 daemon. `ensure-running` detects
+this up front and returns immediately (`SERVICE_MODE_SKIP`, exit 0)
+without attempting a spawn. Prior to 6.6.1 this check was missing:
+every session-start call cold-spawned a process that exited instantly
+by design, and repeated calls across concurrent MCP sessions could
+trip the crash-loop guard below with a misleading
+"crash-loop suppressed" error even though nothing was actually broken.
+
 Stale discovery files left behind by crashed daemons trigger a
 fresh spawn rather than a false-positive — the probe is
 `os.kill(pid, 0)` against the discovery-file PID.

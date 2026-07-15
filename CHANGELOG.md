@@ -6,6 +6,214 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.9.0] - 2026-07-14
+
+MinerU becomes self-healing, catalog search stops being blind to the files
+you indexed, and long sessions stop losing T1 mid-flight. Ships with (and
+requires) engine-service-v0.1.42.
+
+### Added
+
+- **MinerU on-demand lifecycle** (nexus-1qdb9, nexus-c7odl, nexus-m45o6):
+  when the PDF pipeline routes a document to MinerU and the server is down,
+  it now auto-starts — race-free across concurrent indexing runs via the
+  RDR-149 election primitive (`ServiceRegistry.election()`, newly public).
+  Gated by `pdf.mineru_autostart` (default true) / `NX_MINERU_AUTOSTART`
+  (case-insensitive `0/false/no/off` disable); an explicit remote
+  `pdf.mineru_server_url` is never shadowed by a local spawn. First-start
+  model warm-up is a SHARED budget — a slow warm-up stalls a batch once,
+  not per document — and a fast-crashing child (port in use) falls back in
+  one poll tick. Every automatic spawn trigger (on-demand ensure,
+  crash-restart, upgrade-finish restart-stale) honors the same policy
+  gates and election; `nx mineru start`/`stop` run under the election too,
+  and the explicit verbs stay ungated.
+
+### Fixed
+
+- **Catalog free-text search was blind to filename-titled documents**
+  (nexus-8gue1, GH #1397): the service PG tokenized `rdr-021.md` /
+  `docs/rdr/rdr-021.md` as single opaque lexemes, so every repo-indexed
+  document (title = file basename) was invisible to `nx catalog search`.
+  Engine catalog-015 adds a separator-normalized FTS segment + matching
+  query leg; `RDR-021` now finds `rdr-021.md`. Local-mode SQLite FTS5 was
+  never affected — this restores local/service parity.
+- **`Indexed:` timestamps no longer freeze at the original registration
+  date** (nexus-p5qk8): manifest writes (including `--force` backfill
+  repair) refresh `indexed_at` on both substrates; clears never stamp;
+  migration replays deliberately do not reset provenance.
+- **T1 session tokens survive owner rotation** (nexus-g5hzk): a resumed or
+  concurrent MCP incarnation that borrowed the session token no longer
+  goes permanently dark when the owning incarnation's half-TTL re-mint
+  rotates it — on 401 the store re-reads the owner-republished lease and
+  retries once (never minting). The 401 guidance at both surfaces now says
+  the self-heal already ran before advising reconnect.
+
+### Changed
+
+- **`REQUIRED_ENGINE_VERSION` → 0.1.42** (and `PINNED_SERVICE_TAG` with it,
+  by derivation): the catalog search + indexed_at fixes live in the engine,
+  and for local service-mode installs the floor/pin is the only
+  fix-delivery vehicle. New standing rule recorded in `engine_version.py`:
+  the floor bumps for advertised engine-side fixes, not only client
+  hard-dependencies.
+
+
+## [6.8.0] - 2026-07-14
+
+Two user-experience arcs, both born from live dogfooding of the 6.7.x
+releases on a real install.
+
+### Added
+
+- **Chunk quarantine (soft delete).** The orphan GC never hard-deletes
+  directly: orphans MOVE to a per-origin sibling collection
+  (`quarantine-<type>__<owner>__<model>__v<n>`, excluded from every search
+  surface by its prefix), embeddings intact. Re-referenced chunks restore
+  automatically; rows older than `NX_GC_QUARANTINE_DAYS` (default 14)
+  hard-delete on a later pass, and only that expiry step is guarded by the
+  safety floor. The recurring "sweep refused" warning on large git pulls is
+  gone — mass supersede churn quarantines silently and expires quietly.
+  Doctor drift checks, migration ETL, and legacy `nx t3 gc` all treat
+  quarantine collections as expected system state. First concrete piece of
+  the RDR-156 soft-delete theme.
+- **Finish-the-upgrade.** `uv tool upgrade conexus` swaps the disk but
+  every long-lived process keeps executing old code from memory. Now: a
+  `last_seen_version` stamp triggers a safe finish pass on the first
+  invocation after a version change (in `nx`, `nx-mcp`, and
+  `nx-mcp-catalog`), restarting detached daemons (aspect-worker with
+  drain-polling; MinerU via its lifecycle verbs) and naming the processes
+  only you can close (MCP hosts belong to live Claude sessions).
+  `nx daemon restart-stale [--dry-run]` is the manual form; `nx doctor`
+  gains a "Process freshness" check; the uv-receipt source (local checkout
+  / pinned / unpinned) is reported so "Nothing to upgrade" is
+  self-explanatory. Dev-checkout invocations never act on production
+  processes (venv-scoped detection).
+
+### Fixed
+
+- README now surfaces the Claude-assisted diagnostics/recovery feature
+  (RDR-182) — it was documented only in the CLI reference.
+
+## [6.7.1] - 2026-07-14
+
+Bugfix release: every fix below was found by live post-release dogfooding of
+6.7.0 against a real service-mode install (the shakeout the release deserved).
+
+### Fixed
+
+- **Metadata-filtered search no longer dies in service mode.** The MCP
+  `search` tool's `where=` path (including the 6.7.0 range operators)
+  crashed with "catalog._db is unavailable in service mode" for any
+  catalog-mappable key (`page_count`, `bib_year`, ...): the best-effort
+  catalog prefilter used `getattr(catalog, "_db", None)`, but the
+  service-mode client's `_db` is a deliberately RAISING property, which
+  `getattr` propagates instead of defaulting. The prefilter now falls
+  through to standard post-filtering as its contract always claimed.
+- **`nx catalog reconcile` is usable on real service-mode catalogs.** The
+  walk issued 2-3 HTTP round-trips per gapped document with zero output —
+  1h42m and still running on a 21,835-doc catalog. T3 fetches now batch per
+  collection (paged `$in` over content hashes), the pass emits a scan header
+  and per-collection progress lines, and the same catalog heals in ~4
+  minutes. The summary separates `chunks LOST (real gap)` from
+  `never-chunked (expected)` so a real regression can never hide in
+  thousands of expected empty-file entries.
+- **Re-index actually repairs manifest-less documents (the permanent-skip
+  ghost class).** The staleness check keys on T3 chunk state only, so a
+  document whose chunks survived in T3 but whose manifest rows were dropped
+  was skipped as "current" forever — invisible to every catalog-routed
+  surface, with `--force` (whole-repo re-embed) the only cure. `nx index
+  repo` now runs an owner-scoped manifest self-heal (the shared reconcile
+  core) after per-file indexing and before orphan GC: gaps rebuild from the
+  T3 chunks already stored, with no re-embedding, yielding to foreground
+  interactive writers.
+- **Orphan GC can no longer mass-delete live chunks on a manifest defect.**
+  A partial manifest gap once classified 6 live RDR documents' chunks as
+  orphans and deleted them. The GC now refuses any sweep condemning more
+  than `NX_GC_FLOOR_FRACTION` (default 0.25 — chosen to catch the actual
+  27.9% field incident shape) of a collection's decidable chunks at >= 100
+  chunks, with `NX_GC_FORCE=1` as the explicit override, and logs a
+  per-document identity sample for every executed prune.
+
+### Changed
+
+- The local-service gate is fully self-provisioning: it stamps its dev jar
+  from the engine floor, pins pytest to the scratch config dir (no more
+  reads of the operator's real `~/.config/nexus`), and supports
+  `NEXUS_GATE_NO_VOYAGE=1` to mask an absent Voyage key (skip-with-reason
+  instead of hard failure; a present-but-dead key still fails loud).
+
+## [6.7.0] - 2026-07-13
+
+### Added
+
+- **Claude-assisted remediation (RDR-182)**: `nx forensics <topic>` (read-only
+  diagnostics) and `nx remediate <topic>` (consented, audited recovery), plus
+  the matching `forensics`/`remediate` MCP tools. Both are consent-gated
+  (global-only opt-in; refusal at the tool boundary when unconfigured), every
+  invocation lands in the `claude_assisted_remediation_consents` audit table,
+  and all diagnostic SQL passes a fail-closed read-only lint (aggregate-only:
+  counts and lengths, never row content) before emission.
+- **`nexus_diag` diagnostic role**: a dedicated BYPASSRLS, SELECT-only Postgres
+  role behind a single connection choke point carries all cross-tenant
+  diagnostics (the chash-poison health probe now routes through it). RDR-182
+  Amendment A6 adds a structural content boundary: a superuser-owned
+  counts-only view (`diag_chash_conformance`) replaces direct table SELECT,
+  which is revoked per-relation by the engine's grants changeset — content
+  exposure is impossible by construction, not just by lint.
+- **Range metadata filters**: `--where` (CLI) and `where=` (MCP search/query)
+  accept `>=`, `<=`, `>`, `<` with numeric auto-coercion for any field;
+  quoting the operand forces an ordered-string compare for ISO dates.
+- **Retention markers**: the engine and both T2 telemetry stores publish a
+  per-tenant cumulative-delete counter (`GET /v1/telemetry/retention/markers`),
+  giving the migration verify-fill a rollback detector — `relevance_log`
+  rejoins the watermark-gated fast path soundly (tenant-scoped keys,
+  fresh-window-only fill that provably cannot resurrect expired rows).
+- **Verify-fill watermark + reconcile**: rowid watermarks let clean re-runs
+  skip already-verified telemetry tables (trust requires live-count
+  validation); a pg-source reconcile leg covers migrated-then-diverged rows.
+- **`RefreshableHttpStoreMixin`** across all ten T2 HTTP store twins:
+  credential staleness (rotated bearer tokens) now refreshes and retries once
+  instead of failing the call.
+- **T1 session hardening**: session-token refresh with lease freshness and
+  ownership recovery, flock-serialized stale-lease recovery, local CLI scratch
+  routed through the PG-backed service, and a liveness-aware orphan-tmpdir
+  sweep.
+- Service-mode consent-audit parity: `nx remediate` consent audit works
+  against the HTTP service tier, not just local SQLite.
+- Catalog: manifest identity-drops are surfaced, and `nx catalog reconcile`
+  heals `chunk_count=0` ghost documents.
+- Engine-side: typed upstream-auth 502 (a Voyage 401 no longer masquerades as
+  an opaque 500) and a cross-tenant T1 TTL sweep.
+- `nx index repo` refuses a `PATH` with no `.git` (file or directory — git
+  worktrees included), instead of silently registering a bogus owner
+  spanning unrelated content. Real incident: `nx index repo ~/git` was run
+  against the parent of many repos instead of a specific repo subdirectory,
+  discovered via `nx catalog doctor --t3-vs-catalog`.
+
+### Changed
+
+- **Engine floor raised to `engine-service-v0.1.41`** (fresh installs
+  auto-acquire it): this release's remediation consent audit, retention
+  markers, and range filters hard-require the v0.1.40/41 schema; engine tags
+  at or below v0.1.40 are invalid rollback targets after the A6 grants
+  changeset.
+- `nx migrate` runs the engine version-floor gate before the cost guardrail,
+  so an incompatible target fails fast instead of after cost estimation.
+- Install-time bge-768 ONNX fetch comes from the project's self-hosted GitHub
+  release asset with pinned sha256 digests (retires the chronic anonymous
+  HuggingFace 429 dependency).
+
+### Fixed
+
+- `nx config set` converts flat scalar keys on the dotted path instead of
+  erroring (`nexus-s4a98`).
+- `nx scratch search` KeyError on the service-backed default tier.
+- `current_session` multi-session collision under concurrent Claude sessions.
+- Command preambles are apostrophe-safe; transient `OSError` in tier probes
+  degrades gracefully instead of crashing the doctor.
+- Native-image smoke now exercises memory/plans/taxonomy/chash/T1 through the
+  real Python clients (native reflection gaps fail the gate, not production).
+
 ### Removed
 
 - The legacy `NEXUS_SKIP_T1=1` env alias (deprecated 4.27, promised removed in
@@ -18,14 +226,86 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `VALID_STORAGE_MODES` (RDR-120 P6 shim) and the `NX_STORAGE_MODE` env var,
   and `nexus.db.t3._STORE_TYPES` — all past their deprecation windows, all
   with zero production callers.
+- The `route_coverage` telemetry table and its plumbing (superseded by the
+  telemetry count whitelist).
+
+## [6.6.1] - 2026-07-11
+
+Bug-fix release. Three service-mode daemon gaps found and fixed same-day
+during live incident triage on a production install, plus a follow-up sweep
+of the same bug class elsewhere in the catalog doctor surface, found by a
+retroactive stacked-reviewer pass (nexus-pyv0e, nexus-64np7, nexus-bikit
+tracks a remaining architectural follow-up, not shipped here).
+
+### Fixed
+
+- `nx daemon t2 ensure-running`: now short-circuits immediately
+  (`SERVICE_MODE_SKIP`) when the memory store is in service mode, instead of
+  cold-spawning a process that exits instantly by design. Every nx-mcp
+  session-start call and `nx upgrade` invoke this path; the missing check
+  could trip the crash-loop guard with a misleading "crash-loop suppressed"
+  error under concurrent sessions even though nothing was actually broken.
+- `nx catalog doctor --name-vs-embed-dim`: fixed a crash
+  (`AttributeError: 'HttpVectorClient' object has no attribute '_client'`) in
+  service/cloud mode — the now-primary T3 backend. Also fixed the same
+  Chroma-internals reach-through in `--t3-vs-catalog` (was silently
+  swallowing the error into a false PASS with zero detection capability),
+  `--chunk-size-distribution`, `--chunk-text-dedup`, and
+  `--t3-doc-id-coverage` (these already failed loud, just non-functional in
+  service mode).
+- Aspect-worker daemon `reclaim_stale` loop: previously held one HTTP client
+  for its entire process lifetime with no recovery on a credential error. A
+  rotated bearer token could cause continuous 401s until a manual daemon
+  restart (an actual incident: 23+ hours, 1394 failures). Now rebuilds the
+  client on demand after any failure, so a token rotation self-heals within
+  one reclaim interval (~30s).
+
+## [6.6.0] - 2026-07-10
+
+The clean-5.x-upgrade release. Hardens the store-migration path against the
+edges that produced GH #1390, and pins the crash-loop-fixed engine.
 
 ### Added
 
-- `nx index repo` refuses a `PATH` with no `.git` (file or directory — git
-  worktrees included), instead of silently registering a bogus owner
-  spanning unrelated content. Real incident: `nx index repo ~/git` was run
-  against the parent of many repos instead of a specific repo subdirectory,
-  discovered via `nx catalog doctor --t3-vs-catalog`.
+- `nx migration-audit`: retroactive, read-only forensic detection of pre-guard
+  silent pgvector target-name merges (nexus-p9vqa). Classifies the retained
+  Chroma source under both voyage-key histories, probes each would-have-collided
+  target, and reports per-target verdicts (merged / single-source /
+  never-materialized / partial / indeterminate). `--legs both|local|cloud`
+  audits a surviving leg loudly when the other is gone; `--json` for machines.
+- `nx doctor` chunk-chash-conformance probe: warns (never fatal) when the
+  pgvector store holds non-32-char chash rows, so a poisoned box is caught
+  before an engine upgrade crash-loops on it (nexus-pnwu0). Carries the
+  recovery-playbook URL.
+- `nx doctor` now surfaces the specific failing Liquibase changeset when the
+  service is down, instead of only "vector service unreachable".
+
+### Fixed
+
+- **GH #1390 root cause**: legacy non-32-char Chroma chunk ids (pre-RDR-108
+  stores) now block cleanly at the migration pre-gate and per-batch ETL guard
+  with a re-index diagnostic, instead of 409-ing every upsert (which previously
+  tempted the destructive constraint-drop that corrupted a store). The migration
+  never rewrites ids (that would sever the catalog-manifest chash join)
+  (nexus-sot7v).
+- `nx daemon service install-binary` refuses (unless `--force`) to install a new
+  engine onto a store with non-32-char chash rows — a new engine would
+  crash-loop Liquibase's VALIDATE on boot; emits a clickable runbook URL and a
+  paste-to-Claude remediation prompt (nexus-pnwu0 / nexus-c4143).
+- T3 local-token collection names now pin the exact local embedding model the
+  name encodes, never the currently-active one — closes a silent wrong-model
+  vector write on the first write to a stale conformant name after a local-tier
+  change (nexus-a4h7b).
+- Engine-version floor unified into one source across the cloud and native
+  paths, with a fail-loud probe on the real connection graph and CLI-bypass
+  closure (nexus-b6qlf); pre-flight target-name collision guard for cross-model
+  remaps (nexus-5b9v0).
+
+### Changed
+
+- Pinned engine advanced to `engine-service-v0.1.37` (the catalog-013 crash-loop
+  fix; `v0.1.36` was the affected version). Local installs now auto-acquire the
+  fixed engine.
 
 ## [6.5.2] - 2026-07-09
 
