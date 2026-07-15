@@ -561,7 +561,7 @@ class TestBackfillCatalog:
         # inflate this test's exact chunks_scanned assertion if reused.
         cat, collection, owner = self._seed_collection_and_catalog(
             tmp_path, monkeypatch, local_t3,
-            collection="knowledge__nexus-1-1__voyage-context-3__v2",
+            collection="knowledge__nexus-1-1__bge-base-en-v15-768__v2",
         )
         # A second enriched title with chunks but NO matching catalog
         # row anywhere (no register() call for it) — the hook's
@@ -602,7 +602,14 @@ class TestBackfillCatalog:
     def test_backfill_catalog_makes_zero_external_calls(
         self, tmp_path: Path, monkeypatch, local_t3: T3Database,
     ) -> None:
-        self._seed_collection_and_catalog(tmp_path, monkeypatch, local_t3)
+        # Non-voyage collection name: this is a local-mode test (the
+        # embedder segment is incidental), and the RDR-109 mode lint
+        # flags any test whose source mentions voyage-(context|code)-3
+        # without the cloud_mode fixture.
+        self._seed_collection_and_catalog(
+            tmp_path, monkeypatch, local_t3,
+            collection="knowledge__nexus-1-1__bge-base-en-v15-768__v1",
+        )
 
         def _boom(*args, **kwargs):
             raise AssertionError("external bib_enricher call must not happen")
@@ -614,6 +621,6 @@ class TestBackfillCatalog:
 
         runner = CliRunner()
         result = runner.invoke(
-            enrich, ["bib", "knowledge__nexus-1-1__voyage-context-3__v1", "--backfill-catalog"],
+            enrich, ["bib", "knowledge__nexus-1-1__bge-base-en-v15-768__v1", "--backfill-catalog"],
         )
         assert result.exit_code == 0, result.output
