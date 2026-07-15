@@ -1085,6 +1085,13 @@ class CatalogTaxonomy:
                 "SELECT collection FROM topics WHERE id = ?", (topic_id,),
             ).fetchone()
             collection = row[0] if row else None
+            # topic_links carries no ON DELETE CASCADE here and this
+            # connection runs with foreign_keys OFF, so links must be
+            # cleared explicitly (nexus-y17x9; PG cascades these).
+            self.conn.execute(
+                "DELETE FROM topic_links WHERE from_topic_id = ? OR to_topic_id = ?",
+                (topic_id, topic_id),
+            )
             self.conn.execute(
                 "DELETE FROM topic_assignments WHERE topic_id = ?", (topic_id,),
             )
@@ -1156,7 +1163,15 @@ class CatalogTaxonomy:
                 "UPDATE topics SET doc_count = ? WHERE id = ?",
                 (new_count, target_id),
             )
-            # Delete source topic
+            # Delete source topic's links, then the topic itself.
+            # topic_links carries no ON DELETE CASCADE here and this
+            # connection runs with foreign_keys OFF, so links must be
+            # cleared explicitly (nexus-y17x9; PG cascades these on the
+            # source-topic delete).
+            self.conn.execute(
+                "DELETE FROM topic_links WHERE from_topic_id = ? OR to_topic_id = ?",
+                (source_id, source_id),
+            )
             self.conn.execute("DELETE FROM topics WHERE id = ?", (source_id,))
             self.conn.commit()
         return collection
@@ -2597,7 +2612,27 @@ class CatalogTaxonomy:
             removed = cursor.rowcount
             # Drop topics in this collection that no longer have any
             # assignments. Scoped by collection so we don't disturb
-            # siblings from other projects.
+            # siblings from other projects. Their topic_links must go
+            # first: no ON DELETE CASCADE here and this connection runs
+            # with foreign_keys OFF, so a bare topics DELETE silently
+            # orphans links (nexus-y17x9) — and this path fires on every
+            # ordinary memory deletion that empties a topic.
+            self.conn.execute(
+                """
+                DELETE FROM topic_links
+                WHERE from_topic_id IN (
+                      SELECT id FROM topics
+                      WHERE collection = ?
+                        AND id NOT IN (SELECT DISTINCT topic_id FROM topic_assignments)
+                  )
+                   OR to_topic_id IN (
+                      SELECT id FROM topics
+                      WHERE collection = ?
+                        AND id NOT IN (SELECT DISTINCT topic_id FROM topic_assignments)
+                  )
+                """,
+                (project, project),
+            )
             self.conn.execute(
                 """
                 DELETE FROM topics
@@ -2773,7 +2808,18 @@ class CatalogTaxonomy:
         now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         topic_ids: list[int] = []
         with self._lock:
-            # Clear old T2 data for this collection.
+            # Clear old T2 data for this collection. topic_links must be
+            # cleared explicitly here: the PG leg cascades them via
+            # ON DELETE CASCADE, but this SQLite connection runs with
+            # foreign_keys OFF, so a missing DELETE silently orphans links
+            # (nexus-y17x9: ~6.9k orphaned rows in the pre-migration store).
+            self.conn.execute(
+                "DELETE FROM topic_links WHERE from_topic_id IN "
+                "(SELECT id FROM topics WHERE collection = ?) "
+                "OR to_topic_id IN "
+                "(SELECT id FROM topics WHERE collection = ?)",
+                (collection_name, collection_name),
+            )
             self.conn.execute(
                 "DELETE FROM topic_assignments WHERE topic_id IN "
                 "(SELECT id FROM topics WHERE collection = ?)",
