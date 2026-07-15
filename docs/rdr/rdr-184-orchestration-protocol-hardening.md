@@ -48,7 +48,7 @@ individually cost round-trips; one was a near-miss on result integrity.
 
 ## Seed Design (under critique; see §Research)
 
-Full draft: T2 `nexus/design-orchestration-protocol.md`. Summary:
+Full draft: T2 `nexus/design-orchestration-protocol.md` (REVISED v2 per critique — see §Research). v1 summary below retained for history; v2 supersedes:
 
 - **A. Completion protocol** — A1: mandatory terminal step in
   `conexus/agents/_shared/RELAY_TEMPLATE.md` + every agent's Completion
@@ -103,10 +103,35 @@ Full draft: T2 `nexus/design-orchestration-protocol.md`. Summary:
 
 ## Research
 
-- Substantive-critic once-over of the seed design: IN FLIGHT
-  (pressure-testing ledger-vs-race soundness, aspirational-vs-mechanical
-  enforcement layering, per-fix token cost, missed observations,
-  artifact-split landmines). Findings land here.
+- **Substantive-critic once-over: COMPLETE (2026-07-15), verdict
+  not-ready-as-written; all findings verified against repo files and
+  folded into the REVISED seed design (T2 v2).** Key findings:
+  1. A1 targeted the wrong artifact — the live injection path is
+     `conexus/hooks/scripts/subagent-start.sh`'s inline heredoc, which
+     deliberately replaced RELAY_TEMPLATE.md dumping ("Keep compact");
+     protocol lines belong there, template stays documentation.
+  2. The self-report directive ledger CANNOT close the observed race:
+     an agent can't report a directive it never read. Replaced with
+     orchestrator-side send-log diffing (ground truth) + a mandatory
+     agent-side final inbox poll before hand-back composition.
+  3. `flock` does not exist on macOS (verified) — the dev platform.
+     Lock mechanism replaced with mkdir-based atomic locking.
+  4. Dispatch-mode conflation: synchronous Agent-tool dispatches return
+     results as the tool result (idle-without-report impossible); all
+     Failure-1/2 fixes scope to named/background teammates only.
+  5. SubagentStop should be the LOAD-BEARING mechanical fix for
+     Failure 1 (the Start-hook infra + cc-validation pattern already
+     exist; Stop hooks can `{"decision": "block"}`, not just remind).
+  6. The harness audit surface is ≥6 scripts (incl. tests/e2e/gc-ab/
+     run-ab.sh, zero guard today), not the 3 named anecdotally —
+     full-surface inverse audit required before scoping the lock bead.
+  7. A2/B2 as skill prose would violate the standing no-prose-in-skills
+     rule — cut; they live as orchestrator memory directives + the hook.
+  8. Every fix needs a verification method (cc-validation scenario for
+     the Stop hook; concurrent-invocation shell test for the locks).
+- OPEN (needs empirical research before gate): can SubagentStop's input
+  payload discriminate teammate vs sync dispatches and detect a final
+  SendMessage-to-main; false-block noise budget on a real session.
 - Interim mitigations already active via orchestrator memory
   (feedback_orchestration_friction_2026_07_15): completion-protocol
   line in every dispatch prompt, ack-by-item on scope updates,
