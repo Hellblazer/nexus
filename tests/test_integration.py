@@ -305,7 +305,7 @@ def test_nx_search_knowledge_corpus(runner):
 @pytest.mark.integration
 @requires_t3
 @requires_voyage_key
-def test_voyage_code3_index_and_query(cloud_mode):
+def test_voyage_code3_index_and_query():
     import voyageai
     from nexus.config import get_credential
     from nexus.corpus import index_model_for_collection
@@ -356,7 +356,7 @@ def test_voyage_code3_index_and_query(cloud_mode):
 @pytest.mark.integration
 @requires_t3
 @requires_voyage_key
-def test_cce_query_retrieves_cce_indexed_markdown(cloud_mode):
+def test_cce_query_retrieves_cce_indexed_markdown():
     import tempfile
     from pathlib import Path
     from nexus.db import make_t3
@@ -398,7 +398,7 @@ def test_cce_query_retrieves_cce_indexed_markdown(cloud_mode):
 @pytest.mark.integration
 @requires_t3
 @requires_voyage_key
-def test_t3_put_embedding_model_in_search_metadata(cloud_mode):
+def test_t3_put_embedding_model_in_search_metadata():
     from nexus.db import make_t3
 
     uid = uuid.uuid4().hex[:8]

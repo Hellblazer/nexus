@@ -780,6 +780,17 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # Reserved for individual mixed-file exclusions. Format:
     # "tests/test_file.py::test_func"  (no parametrize suffix).
     #
+    # REAL keyed integration tests (-m integration, @requires_voyage_key):
+    # these derive cloud mode from GENUINE credentials — the cloud_mode
+    # fixture would OVERWRITE the real VOYAGE_API_KEY with the "vk_test"
+    # fake and break them against the live API (caught by the local-service
+    # gate during the 6.10.1 release: voyageai AuthenticationError; the
+    # default-marker full suite deselects -m integration, so only the gate
+    # runs these). Their mode declaration is the requires-key gating itself.
+    "tests/test_integration.py::test_voyage_code3_index_and_query",
+    "tests/test_integration.py::test_cce_query_retrieves_cce_indexed_markdown",
+    "tests/test_integration.py::test_t3_put_embedding_model_in_search_metadata",
+    #
     # nexus-pebfx.2: Java-SOURCE-PARSING parity tests — they regex the
     # EmbedderRouter/embedder .java files for RDR-103 model tokens and
     # cross-check Python _MODEL_DIMS. The voyage tokens are registry

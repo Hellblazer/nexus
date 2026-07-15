@@ -87,7 +87,10 @@ def test_mode_declarations_are_explicit(request: pytest.FixtureRequest) -> None:
 # `_MODE_LINT_EXCLUDE_FILES` / `_MODE_LINT_EXCLUDE_NODEIDS` above), then
 # consciously bump the corresponding constant below in the same diff.
 _MODE_LINT_EXCLUDE_FILES_CEILING = 72
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 43
+# 43 -> 46 (6.10.1): +3 real keyed integration tests in test_integration.py
+# — cloud_mode's fake credentials broke them against the live Voyage API
+# (their mode declaration is the requires-key gating; see conftest entry).
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 46
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:
