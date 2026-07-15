@@ -647,6 +647,110 @@ def heal_diag_view(config_dir: Path) -> list[str]:
         return []
 
 
+# ── nexus-c0vby: service mode must never leave a T2 LaunchAgent installed ──
+#
+# GH #1405 defect 2 (2026-07-15, 6.10.1 shakeout): in service mode
+# ``t2_daemon.py``'s own entry point immediately no-ops
+# (``t2_daemon_not_started_service_mode``) — the T2 tier is the frozen
+# migration source, never a live substrate, once the box is service-backed.
+# But a com.nexus.t2 LaunchAgent installed BEFORE the box switched to
+# service mode (or before this fix shipped) still has ``KeepAlive=true``,
+# so launchd respawns the immediately-exiting process every ~10s FOREVER —
+# 663KB of log in half a day, observed live. The fix mirrors
+# converge_engine/heal_diag_view's shape exactly: an independent,
+# never-raising leg of the finish pass with loud action lines only for
+# what was actually done.
+
+#: The unit is a LaunchAgent on macOS, a systemd user unit on Linux
+#: (:func:`nexus.daemon.installer.uninstall_autostart` dispatches
+#: launchctl/systemctl per platform) — code-review round 1, Low: the
+#: user-facing action/NEEDS-HUMAN strings previously hardcoded
+#: "LaunchAgent" unconditionally, which would misname the mechanism on a
+#: Linux operator's screen. ``result.dest`` (the actual unit path)
+#: already discloses which platform ran; this phrase is only so a Linux
+#: reader isn't confused by "LaunchAgent" standing alone.
+_T2_AUTOSTART_UNIT_KIND = (
+    "com.nexus.t2 LaunchAgent on macOS, nexus-t2.service on Linux"
+)
+
+
+def unload_stale_t2_launchagent(config_dir: Path) -> list[str]:
+    """Remove a service-mode box's stray ``com.nexus.t2`` LaunchAgent.
+
+    ``config_dir`` is accepted but not read: the storage-mode flag and the
+    autostart unit are both process/filesystem-global, not config-dir
+    scoped. Kept as a parameter purely so this leg's call signature
+    matches its siblings (:func:`converge_engine`, :func:`heal_diag_view`)
+    at every call site (the finish pass, ``nx daemon restart-stale``,
+    ``nx init --service``) without a special case.
+
+    Gated on the SAME oracle ``t2_daemon.py`` itself checks
+    (:func:`nexus.db.storage_mode.storage_backend_for` — env-based, no
+    filesystem probe needed) — so this leg fires exactly when the T2
+    daemon would have declined to start anyway. Local-mode boxes (or any
+    box where the T2 tier is the live substrate) are untouched: a local
+    ``nx daemon t2 install --autostart`` round-trip must keep recreating
+    the agent (verified in the test suite), never fought by this leg.
+
+    Delegates the actual removal to
+    :func:`nexus.daemon.installer.uninstall_autostart` (``tier="t2"``) —
+    the SAME launchctl-bootout + plist-removal primitive ``nx daemon t2
+    uninstall --autostart`` already uses; no hand-typed duplicate of the
+    launchd mechanics here.
+
+    Never raises. Mirrors :func:`heal_diag_view`'s two-tier discipline:
+    a failure just DETERMINING applicability (can't read the storage-mode
+    flag, can't probe for the unit file) degrades SILENTLY to ``[]`` —
+    the same "probe that cannot run must never break the finish pass"
+    contract as every other best-effort check in this module. Only a
+    failure while ACTUALLY REMOVING an agent this function has already
+    confirmed is present is reported as a loud ``NEEDS HUMAN`` action
+    line — there IS something a human needs to act on in that case.
+    """
+    try:
+        from nexus.db.storage_mode import (  # noqa: PLC0415 — deferred, circular-dep avoidance
+            StorageBackend,
+            storage_backend_for,
+        )
+
+        if storage_backend_for("memory") != StorageBackend.SERVICE:
+            return []
+
+        from nexus.commands.daemon import _autostart_unit_installed  # noqa: PLC0415 — deferred, CLI startup cost
+
+        if _autostart_unit_installed() is None:
+            return []
+    except Exception as exc:  # noqa: BLE001 — best-effort applicability probe; must never break the finish pass
+        _log.debug("t2_launchagent_applicability_probe_failed", error=str(exc))
+        return []
+
+    try:
+        from nexus.daemon.installer import (  # noqa: PLC0415 — deferred, CLI startup cost
+            UninstallStatus,
+            uninstall_autostart,
+        )
+
+        result = uninstall_autostart(tier="t2")
+    except Exception as exc:  # noqa: BLE001 — a CONFIRMED-present agent failed to remove; loud, never a crash
+        _log.warning("t2_launchagent_unload_failed", error=str(exc))
+        return [
+            f"NEEDS HUMAN: service mode detected a stray T2 autostart unit "
+            f"({_T2_AUTOSTART_UNIT_KIND}) but could not remove it ({exc}) — "
+            "run `nx daemon t2 uninstall --autostart` yourself"
+        ]
+
+    if result.status != UninstallStatus.REMOVED:
+        return []  # NOT_INSTALLED — the probe above already filtered this, defensive only
+
+    actions = [
+        f"removed the stray T2 autostart unit ({_T2_AUTOSTART_UNIT_KIND}; "
+        "service mode — the T2 daemon is never started; storage is the "
+        f"engine service): {result.dest}"
+    ]
+    actions.extend(f"NOTE: {w}" for w in result.warnings)
+    return actions
+
+
 def check_version_transition(config_dir: Path) -> str | None:
     """Version-stamp auto-trigger. Returns a one-line summary when a
     version transition was detected and the safe finish pass ran; None
@@ -726,6 +830,10 @@ def check_version_transition(config_dir: Path) -> str | None:
         actions = actions + heal_diag_view(config_dir)
     except Exception:  # noqa: BLE001 — the finish pass must never break CLI startup
         _log.warning("diag_view_heal_failed", exc_info=True)
+    try:
+        actions = actions + unload_stale_t2_launchagent(config_dir)
+    except Exception:  # noqa: BLE001 — the finish pass must never break CLI startup
+        _log.warning("t2_launchagent_unload_failed", exc_info=True)
     _log.info(
         "upgrade_finish_ran",
         from_version=seen, to_version=version, actions=actions,

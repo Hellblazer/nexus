@@ -6,6 +6,43 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.10.2] - 2026-07-15
+
+Client-side mitigations for GH #1405: MCP calls no longer hard-fail in
+the supervisor's 5-10s lease-republication gap, and stale
+pre-service-mode T2 autostart units are cleaned up. Engine unchanged
+(engine-service-v0.1.43, as installed by 6.10.1). The supervisor
+ownership topology that causes the churn itself is RDR-183 (separate
+work).
+
+### Fixed
+
+- **Lease-gap retry, evidence-gated** (nexus-7dsgp, GH #1405 defect 1):
+  when the storage-service supervisor respawns and republishes its
+  lease on a new port, client calls that land in the gap now
+  re-resolve the lease and retry once with a bounded wait (12s budget,
+  0.5s poll) instead of hard-failing with "endpoint is not resolvable".
+  The retry fires ONLY on evidence of a live-then-respawned service:
+  connection-class errors against an endpoint that already resolved,
+  or construction-time resolution failures in a process that has
+  previously resolved a lease (`ServiceEndpointUnresolvableError` +
+  the construction-time evidence gate — covers the fresh-per-call T2
+  store family incl. memory, plan, taxonomy, telemetry, and catalog
+  clients, i.e. the reported search/store_get/memory_delete failures).
+  Genuinely cold starts still fail loud immediately with zero added
+  latency; managed-cloud (service_url) and NX_SERVICE_HOST/PORT-pinned
+  endpoints never wait. Residual: HttpTokenStore/HttpScratchStore
+  construction gating tracked as nexus-bgh2j (low exposure).
+- **Stale com.nexus.t2 autostart unit removed** (nexus-c0vby, GH #1405
+  defect 2): service-mode installs upgraded from a SQLite-era version
+  could retain the old T2 autostart unit (LaunchAgent on macOS,
+  nexus-t2.service on Linux), respawning a daemon that exits instantly
+  by design, forever. The unit is now unloaded/removed during upgrade
+  finish, `nx daemon restart-stale`, and `nx init`, with an `nx doctor`
+  backstop check. `nx daemon t2 status` now reports honestly in service
+  mode (T2 served by the nexus-service, exit 0) instead of erroring
+  about a missing local daemon.
+
 ## [6.10.1] - 2026-07-15
 
 The delivery-mechanism patch: a release now installs the engine it was

@@ -27,6 +27,7 @@ from nexus.health import (
     _check_migration_state,
     _check_rls_present,
     _check_storage_service_health,
+    _check_t2_launchagent_stray,
 )
 
 
@@ -273,6 +274,67 @@ class TestCheckEngineConvergence:
             side_effect=RuntimeError("boom"),
         ):
             results = _check_engine_convergence(config_dir=tmp_path)
+        assert results == []
+
+
+# ── _check_t2_launchagent_stray (nexus-c0vby, GH #1405 defect 2) ────────────
+
+
+class TestCheckT2LaunchagentStray:
+    """nx doctor backstop for the automatic stray-com.nexus.t2-LaunchAgent
+    removal — surfaces the condition even outside a version transition."""
+
+    def test_local_mode_yields_no_result(self):
+        from nexus.db.storage_mode import StorageBackend
+
+        with patch(
+            "nexus.db.storage_mode.storage_backend_for",
+            return_value=StorageBackend.SQLITE,
+        ), patch("nexus.commands.daemon._autostart_unit_installed") as probe:
+            results = _check_t2_launchagent_stray()
+        assert results == []
+        probe.assert_not_called()
+
+    def test_service_mode_no_agent_returns_ok(self):
+        from nexus.db.storage_mode import StorageBackend
+
+        with patch(
+            "nexus.db.storage_mode.storage_backend_for",
+            return_value=StorageBackend.SERVICE,
+        ), patch(
+            "nexus.commands.daemon._autostart_unit_installed", return_value=None,
+        ):
+            results = _check_t2_launchagent_stray()
+        assert len(results) == 1
+        assert results[0].ok is True
+        assert results[0].fatal is False
+
+    def test_service_mode_with_agent_returns_soft_warn(self, tmp_path):
+        from nexus.db.storage_mode import StorageBackend
+
+        dest = tmp_path / "com.nexus.t2.plist"
+        with patch(
+            "nexus.db.storage_mode.storage_backend_for",
+            return_value=StorageBackend.SERVICE,
+        ), patch(
+            "nexus.commands.daemon._autostart_unit_installed", return_value=dest,
+        ):
+            results = _check_t2_launchagent_stray()
+        assert len(results) == 1
+        r = results[0]
+        assert r.ok is False
+        assert r.warn is True  # soft warning, never fatal (benign log noise)
+        assert r.fatal is False
+        assert str(dest) in r.detail
+        assert r.fix_suggestions
+        assert any("restart-stale" in s for s in r.fix_suggestions)
+
+    def test_probe_failure_degrades_silently(self):
+        with patch(
+            "nexus.db.storage_mode.storage_backend_for",
+            side_effect=RuntimeError("boom"),
+        ):
+            results = _check_t2_launchagent_stray()
         assert results == []
 
 

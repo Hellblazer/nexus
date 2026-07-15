@@ -65,13 +65,17 @@ credential), so this harness is deliberately simpler: one mutable
 from __future__ import annotations
 
 import json
+import os
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
+
+from nexus.daemon.service_registry import ServiceRegistry
 
 # ── In-process fake service state (module-level, reset per test) ──────────────
 
@@ -182,6 +186,23 @@ def _stop_fake_server(server: HTTPServer) -> None:
     teardown call targets only the CURRENTLY live instance."""
     server.shutdown()
     server.server_close()
+
+
+def _config_dir() -> Path:
+    # The autouse _isolate_config_dir fixture sets NEXUS_CONFIG_DIR per test.
+    d = Path(os.environ["NEXUS_CONFIG_DIR"])
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _publish_lease(*, host: str = "127.0.0.1", port: int, token: str) -> None:
+    reg = ServiceRegistry(dir=_config_dir(), tier="storage_service")
+    reg.publish(
+        str(os.getuid()),
+        endpoint={"host": host, "port": port, "token": token},
+        version="test",
+        owner_token="refreshable-client-test-owner",
+    )
 
 
 class _FakeServerHandle:
@@ -768,3 +789,305 @@ class TestReadTimeoutSelfHeal:
 
         assert result == {"echo": {"value": "rt"}}
         assert len(calls) == 2
+
+
+class TestLeaseGapReresolveRetry:
+    """nexus-7dsgp (GH #1405 defect 1): the retry path (``_invalidate_and_reresolve``)
+    must opt into the bounded lease-wait mitigation, bounded and non-stacking,
+    and never for the managed-cloud URL path.
+
+    The deep poll-loop mechanics (mid-gap flip picked up, budget exhausted
+    bounded, zero real sleep) are already proven with a fake clock against
+    ``discover_lease_with_wait``/``resolve_service_endpoint`` directly in
+    ``tests/db/test_service_endpoint_discovery.py``. These tests instead
+    prove the WIRING: that this mixin's retry path actually reaches that
+    mitigation with the right, bounded budget, exactly once, and that a
+    managed endpoint never touches lease discovery at all.
+    """
+
+    def test_retry_passes_bounded_wait_budget_exactly_once(
+        self, fake_service, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The f2qvx port-churn scenario (env-resolved, not lease-resolved,
+        so this stays fast — env fills both halves and the wait mechanism
+        never activates) instrumented to prove ``_invalidate_and_reresolve``
+        calls ``resolve_service_endpoint`` with a bounded, nonzero
+        ``wait_budget_s`` — and exactly once, not stacked."""
+        from nexus.db.t2 import _refreshable_client as rc
+
+        store = _make_echo_store()
+        baseline = store.echo_get()
+        assert baseline == {"echo": "get-ok"}
+
+        old_port = fake_service.port
+        _stop_fake_server(fake_service.server)
+        new_server, new_port = _start_fake_server()
+        attempts = 0
+        while new_port == old_port and attempts < 5:
+            _stop_fake_server(new_server)
+            new_server, new_port = _start_fake_server()
+            attempts += 1
+        assert new_port != old_port
+        fake_service.server = new_server
+        fake_service.port = new_port
+        monkeypatch.setenv("NX_SERVICE_PORT", str(new_port))
+
+        calls: list[float] = []
+        real_resolve = rc.resolve_service_endpoint
+
+        def _capturing_resolve(*, wait_budget_s: float = 0.0, **kw: Any) -> Any:
+            calls.append(wait_budget_s)
+            return real_resolve(wait_budget_s=wait_budget_s, **kw)
+
+        monkeypatch.setattr(rc, "resolve_service_endpoint", _capturing_resolve)
+
+        result = store.echo_get()
+        assert result == {"echo": "get-ok"}
+        assert calls == [rc.DEFAULT_LEASE_WAIT_BUDGET_S], (
+            "expected exactly one re-resolve call, with the bounded, "
+            "nonzero wait budget — not the pre-fix instant-miss default "
+            "(0.0) and not stacked into multiple calls"
+        )
+        assert 0 < rc.DEFAULT_LEASE_WAIT_BUDGET_S < 60  # sane, finite bound
+
+    def test_managed_cloud_path_never_touches_lease_discovery(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A managed ``NX_SERVICE_URL`` endpoint retries its connection
+        exactly once on a genuine outage (pre-existing dual-review H1
+        behavior, unchanged) but must NEVER touch lease discovery — the
+        bead's "never for the managed-cloud URL path" contract, proven via
+        a poison stub that fails the test if lease discovery is ever
+        reached."""
+        _reset_fake_service_state()
+        server, port = _start_fake_server()
+        monkeypatch.setenv("NX_SERVICE_URL", f"http://127.0.0.1:{port}")
+        monkeypatch.setenv("NX_SERVICE_TOKEN", _INITIAL_BEARER)
+        monkeypatch.delenv("NX_SERVICE_HOST", raising=False)
+        monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
+
+        from nexus.db import service_endpoint
+
+        def _poison() -> tuple[str | None, str | None]:
+            raise AssertionError(
+                "discover_lease must never be reached for the managed-cloud URL path"
+            )
+
+        monkeypatch.setattr(service_endpoint, "discover_lease", _poison)
+
+        store = _make_echo_store()
+        assert store.echo_get() == {"echo": "get-ok"}  # sanity: managed path works
+
+        _stop_fake_server(server)  # permanent outage — nothing to rebind to
+
+        with pytest.raises(Exception):  # noqa: PT011 — connection-class exception, not pinned here
+            store.echo_get()
+        # If discover_lease had been reached, the poison stub above would
+        # have raised AssertionError instead of letting the connection
+        # error propagate — reaching this point proves it was never called.
+
+
+class TestConstructionTimeEvidenceGate:
+    """nexus-7dsgp (critic round 1 CRITICAL): T2Database is built FRESH per
+    call (``mcp_infra.t2_ctx()``) — a construction landing in the
+    republication gap has NO ``_send()``-retry path to fall back on (this
+    IS the only resolution attempt; ``_invalidate_and_reresolve`` is never
+    reached because ``_send`` is never reached). Every ``memory_delete``/
+    ``memory_put``/T2Database-constructing MCP tool call in service mode
+    goes through exactly this path.
+
+    ``_resolve_endpoint_with_evidence_gate`` closes the gap, but ONLY when
+    ``has_ever_resolved_lease()`` is True (positive evidence THIS process
+    already resolved a lease successfully at some point) — a genuinely
+    cold process (no supervisor ever, the nexus-1091 regression class)
+    must keep failing fast, zero wait. These tests pin both halves at the
+    STORE-CONSTRUCTION level (``base_url=None``, the full resolution
+    path) — the existing om64x-style tests all pass ``base_url=`` and
+    bypass ``__init__``'s resolution entirely, which is why this gap
+    was not caught earlier.
+    """
+
+    def test_prior_success_construction_waits_and_recovers(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Positive evidence (a prior successful lease resolution in this
+        process) + the lease is absent on the first read, then appears —
+        construction must wait and pick up the republished lease. Fake
+        clock injected via discover_lease_with_wait — zero real sleep."""
+        from nexus.db import service_endpoint as se
+
+        monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+        monkeypatch.delenv("NX_SERVICE_HOST", raising=False)
+        monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
+        monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+
+        # Positive evidence: this process has resolved a lease before
+        # (e.g. an earlier, unrelated MCP tool call in this same process).
+        monkeypatch.setattr(se, "_has_ever_resolved_lease", True)
+
+        server, port = _start_fake_server()
+        try:
+            calls = {"n": 0}
+            real_discover = se.discover_lease
+
+            def _flaky_discover():
+                calls["n"] += 1
+                if calls["n"] < 2:
+                    return (None, None)
+                _publish_lease(port=port, token=_INITIAL_BEARER)
+                return real_discover()
+
+            monkeypatch.setattr(se, "discover_lease", _flaky_discover)
+
+            fc_now = {"t": 0.0}
+
+            def _fake_sleep(s: float) -> None:
+                fc_now["t"] += s
+
+            def _fake_clock() -> float:
+                return fc_now["t"]
+
+            real_dlw = se.discover_lease_with_wait
+
+            def _dlw_with_fake_clock(**kw):
+                kw["clock"] = _fake_clock
+                kw["sleep"] = _fake_sleep
+                return real_dlw(**kw)
+
+            monkeypatch.setattr(se, "discover_lease_with_wait", _dlw_with_fake_clock)
+
+            store = _make_echo_store()  # base_url=None -- full resolution path
+            assert store._base_url == f"http://127.0.0.1:{port}"
+            assert calls["n"] >= 2  # missed at least once before the lease landed
+        finally:
+            _stop_fake_server(server)
+
+    def test_no_prior_success_construction_fails_instantly_no_wait(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The truly-cold twin: no prior success in this process (the
+        autouse fixture resets the signal before every test) — a
+        construction landing in the "gap" must fail loud IMMEDIATELY
+        with ZERO wait. Poisoned discover_lease_with_wait proves it is
+        never reached — this is the exact shape of the nexus-1091
+        regression (a genuinely-cold caller must never pay the wait)."""
+        from nexus.db import service_endpoint as se
+
+        monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+        monkeypatch.delenv("NX_SERVICE_HOST", raising=False)
+        monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
+        monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+
+        assert se.has_ever_resolved_lease() is False  # sanity: autouse reset ran
+
+        real_dlw = se.discover_lease_with_wait
+
+        def _poison_nonzero_budget(*, budget_s: float = 0.0, **kw):
+            # budget_s=0.0 is the NORMAL first-attempt call every
+            # resolution makes (degrades to one immediate read, no wait —
+            # see discover_lease_with_wait's own docstring); only a
+            # NONZERO budget signals the wait-retry mitigation actually
+            # fired, which must never happen with no prior-success
+            # evidence (that would reintroduce the nexus-1091 cold-start
+            # stall regression).
+            if budget_s > 0:
+                raise AssertionError(
+                    "discover_lease_with_wait must never be called with a "
+                    "nonzero budget with no prior-success evidence"
+                )
+            return real_dlw(budget_s=budget_s, **kw)
+
+        monkeypatch.setattr(se, "discover_lease_with_wait", _poison_nonzero_budget)
+
+        with pytest.raises(RuntimeError, match="not resolvable"):
+            _make_echo_store()  # base_url=None -- full resolution path
+
+
+class TestTokenOnlyConstructionTimeEvidenceGate:
+    """nexus-7dsgp (code-review round 2, item 7): the fake-clock pair
+    mirroring ``TestConstructionTimeEvidenceGate`` above, but for the
+    narrower ``base_url=<pinned>``, ``_token=None`` construction branch
+    (``_resolve_token_only_with_evidence_gate``) — a caller that supplies
+    an explicit/pre-discovered ``base_url`` (e.g. a fixture pointing at a
+    fake server) but relies on the lease for the TOKEN alone. Zero tests
+    exercised this branch under the evidence gate before this bead.
+    """
+
+    def test_prior_success_token_only_waits_and_recovers(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Positive evidence + the lease token is absent on the first
+        read, then appears — construction must wait and pick up the
+        republished token. Fake clock injected via
+        discover_lease_with_wait — zero real sleep."""
+        from nexus.db import service_endpoint as se
+
+        monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+        monkeypatch.setattr(se, "_has_ever_resolved_lease", True)
+
+        server, port = _start_fake_server()
+        try:
+            calls = {"n": 0}
+            real_discover = se.discover_lease
+
+            def _flaky_discover():
+                calls["n"] += 1
+                if calls["n"] < 2:
+                    return (None, None)
+                _publish_lease(port=port, token=_INITIAL_BEARER)
+                return real_discover()
+
+            monkeypatch.setattr(se, "discover_lease", _flaky_discover)
+
+            fc_now = {"t": 0.0}
+
+            def _fake_sleep(s: float) -> None:
+                fc_now["t"] += s
+
+            def _fake_clock() -> float:
+                return fc_now["t"]
+
+            real_dlw = se.discover_lease_with_wait
+
+            def _dlw_with_fake_clock(**kw):
+                kw["clock"] = _fake_clock
+                kw["sleep"] = _fake_sleep
+                return real_dlw(**kw)
+
+            monkeypatch.setattr(se, "discover_lease_with_wait", _dlw_with_fake_clock)
+
+            # base_url explicitly pinned, _token omitted -- the
+            # _resolve_token_only branch, NOT the full-resolution one.
+            store = _make_echo_store(base_url=f"http://127.0.0.1:{port}")
+            assert store._token == _INITIAL_BEARER
+            assert calls["n"] >= 2  # missed at least once before the token landed
+        finally:
+            _stop_fake_server(server)
+
+    def test_no_prior_success_token_only_fails_instantly_no_wait(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The truly-cold twin: no prior success — construction must fail
+        loud IMMEDIATELY with ZERO wait. No HTTP server needed: token
+        resolution fails at __init__ time, before any request is ever
+        attempted, so the pinned base_url is never actually dialed."""
+        from nexus.db import service_endpoint as se
+
+        monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+
+        assert se.has_ever_resolved_lease() is False  # sanity: autouse reset ran
+
+        real_dlw = se.discover_lease_with_wait
+
+        def _poison_nonzero_budget(*, budget_s: float = 0.0, **kw):
+            if budget_s > 0:
+                raise AssertionError(
+                    "discover_lease_with_wait must never be called with a "
+                    "nonzero budget with no prior-success evidence"
+                )
+            return real_dlw(budget_s=budget_s, **kw)
+
+        monkeypatch.setattr(se, "discover_lease_with_wait", _poison_nonzero_budget)
+
+        with pytest.raises(RuntimeError, match="no service token is resolvable"):
+            _make_echo_store(base_url="http://127.0.0.1:1")  # never dialed

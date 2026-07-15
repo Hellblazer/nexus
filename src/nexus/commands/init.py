@@ -177,6 +177,26 @@ def _ensure_service_binary_step(config_dir: Path) -> bool:
     return True
 
 
+def _report_stray_t2_launchagent_cleanup(config_dir: Path) -> None:
+    """nexus-c0vby (GH #1405 defect 2): once ``nx init --service`` confirms
+    the storage service is genuinely serving, remove any stray
+    com.nexus.t2 LaunchAgent left over from before the box switched to
+    service mode — its ``KeepAlive=true`` would otherwise respawn an
+    immediately-exiting process every ~10s forever. Thin CLI wrapper
+    around :func:`nexus.upgrade_finish.unload_stale_t2_launchagent` (the
+    SAME never-raising leg the automatic post-upgrade finish pass and
+    ``nx daemon restart-stale`` already run) — echoes its action lines,
+    silent on the common case (nothing to clean up).
+    """
+    from nexus.upgrade_finish import unload_stale_t2_launchagent  # noqa: PLC0415 — deferred local import — CLI startup cost
+
+    try:
+        for line in unload_stale_t2_launchagent(config_dir):
+            click.echo(f"  {line}")
+    except Exception as exc:  # noqa: BLE001 — this step must never break `nx init`'s success path
+        click.echo(f"  T2 LaunchAgent cleanup failed ({exc}) — skipping this step.", err=True)
+
+
 def _start_service_step():  # noqa: ANN201 — returns LeaseRecord (avoid import cycle)
     """Start the PERSISTENT storage-service supervisor and confirm it is serving.
 
@@ -217,6 +237,7 @@ def _start_service_step():  # noqa: ANN201 — returns LeaseRecord (avoid import
         f"  Service running on {ep.get('host')}:{ep.get('port')} "
         f"(pid {ep.get('pid')}, generation {lease.generation})."
     )
+    _report_stray_t2_launchagent_cleanup(nexus_config_dir())
     click.echo("  nx init --service complete — the service backend is serving.")
     return lease
 
@@ -373,6 +394,7 @@ def _provision_and_autostart_service(embedder: str | None):  # noqa: ANN201 — 
         f"  Service running on {ep.get('host')}:{ep.get('port')} "
         f"(generation {lease.generation}) via the autostart unit."
     )
+    _report_stray_t2_launchagent_cleanup(config_dir)
     click.echo(
         "  nx init complete — the service backend is serving and will restart "
         "at login/boot."

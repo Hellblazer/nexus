@@ -82,10 +82,22 @@ class HttpTokenStore:
     def _rebind_from_lease(self) -> bool:
         """nexus-om64x: on connection-refused, re-resolve the endpoint from the
         ServiceRegistry lease (bypassing the stale env port) and rebuild the
-        client. Returns True if rebound to a NEW endpoint, False otherwise."""
-        from nexus.db.service_endpoint import recover_endpoint_from_lease  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        client. Returns True if rebound to a NEW endpoint, False otherwise.
 
-        recovered = recover_endpoint_from_lease(self._base_url)
+        nexus-7dsgp (GH #1405 defect 1): passes
+        ``DEFAULT_LEASE_WAIT_BUDGET_S`` so a retry landing in the
+        supervisor-respawn gap polls for up to 12s instead of giving up on
+        the first miss — the only caller of ``recover_endpoint_from_lease``
+        on this store, so the wait applies exactly once per ``_post`` call.
+        """
+        from nexus.db.service_endpoint import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+            DEFAULT_LEASE_WAIT_BUDGET_S,
+            recover_endpoint_from_lease,
+        )
+
+        recovered = recover_endpoint_from_lease(
+            self._base_url, wait_budget_s=DEFAULT_LEASE_WAIT_BUDGET_S
+        )
         if recovered is None:
             return False
         new_url, new_token = recovered

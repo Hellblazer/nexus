@@ -4,6 +4,12 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.10.2] - 2026-07-15
+
+Plugin version aligned with conexus 6.10.2. No plugin-side changes; see
+the root CHANGELOG for the GH #1405 lease-gap retry and stale T2
+autostart-unit cleanup in this release.
+
 ## [6.10.1] - 2026-07-15
 
 Plugin version aligned with conexus 6.10.1. No plugin-side changes; see

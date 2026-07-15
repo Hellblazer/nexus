@@ -284,6 +284,31 @@ def _pin_storage_backend_sqlite(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _reset_lease_resolution_history() -> None:
+    """Reset ``service_endpoint``'s process-wide "ever resolved a lease"
+    signal before AND after every test (nexus-7dsgp, critic round 1
+    CRITICAL fix).
+
+    The flag is deliberately process-lifetime in production (see its
+    docstring), but a unit-test SESSION is one process shared across
+    thousands of tests — without this reset, any earlier test that
+    successfully calls ``discover_lease()`` (there are many, e.g. every
+    ``_publish_lease``-based test in test_service_endpoint_discovery.py)
+    would leave the flag ``True`` for the rest of the run, silently
+    making a LATER, unrelated test's construction-time resolution
+    failure retry-with-wait (a REAL 12s stall with no fake clock
+    injected at most construction-time call sites) instead of the fast
+    fail-loud that test actually expects — order-dependent pollution of
+    exactly the kind nexus-1091 caught for the T3 side of this bead.
+    """
+    from nexus.db import service_endpoint
+
+    service_endpoint.reset_lease_resolution_history_for_tests()
+    yield
+    service_endpoint.reset_lease_resolution_history_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def _isolate_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Redirect NEXUS_CONFIG_DIR so child processes write under tmp_path.
 

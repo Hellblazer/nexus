@@ -890,6 +890,111 @@ class TestServiceStartStep:
         assert order == ["pg", "embed", "binary", "start"]
 
 
+class TestStrayT2LaunchagentCleanup:
+    """nexus-c0vby (GH #1405 defect 2): ``nx init --service`` removes any
+    stray com.nexus.t2 LaunchAgent once the service is confirmed serving —
+    the same never-raising leg the upgrade-finish pass and
+    ``nx daemon restart-stale`` already run."""
+
+    def test_helper_echoes_action_lines(self, tmp_path: Path, monkeypatch) -> None:
+        import nexus.commands.init as init_mod
+
+        monkeypatch.setattr(
+            "nexus.upgrade_finish.unload_stale_t2_launchagent",
+            lambda config_dir: [
+                "removed the stray com.nexus.t2 LaunchAgent: /x/com.nexus.t2.plist",
+            ],
+        )
+        out: list[str] = []
+        monkeypatch.setattr(
+            init_mod.click, "echo", lambda *a, **k: out.append(a[0] if a else "")
+        )
+        init_mod._report_stray_t2_launchagent_cleanup(tmp_path)
+        assert any("removed the stray com.nexus.t2 LaunchAgent" in line for line in out)
+
+    def test_helper_is_silent_on_no_action(self, tmp_path: Path, monkeypatch) -> None:
+        import nexus.commands.init as init_mod
+
+        monkeypatch.setattr(
+            "nexus.upgrade_finish.unload_stale_t2_launchagent",
+            lambda config_dir: [],
+        )
+        out: list[str] = []
+        monkeypatch.setattr(
+            init_mod.click, "echo", lambda *a, **k: out.append(a[0] if a else "")
+        )
+        init_mod._report_stray_t2_launchagent_cleanup(tmp_path)
+        assert out == []
+
+    def test_helper_failure_never_raises(self, tmp_path: Path, monkeypatch) -> None:
+        import nexus.commands.init as init_mod
+
+        monkeypatch.setattr(
+            "nexus.upgrade_finish.unload_stale_t2_launchagent",
+            lambda config_dir: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        out: list[str] = []
+        monkeypatch.setattr(
+            init_mod.click, "echo", lambda *a, **k: out.append(a[0] if a else "")
+        )
+        init_mod._report_stray_t2_launchagent_cleanup(tmp_path)  # must not raise
+        assert any("T2 LaunchAgent cleanup failed" in line for line in out)
+
+    def test_start_service_step_runs_cleanup_after_confirming_serving(
+        self, monkeypatch,
+    ) -> None:
+        import types
+
+        import nexus.commands.init as init_mod
+
+        lease = types.SimpleNamespace(
+            endpoint={"host": "127.0.0.1", "port": 18099, "pid": 4242},
+            generation=3,
+        )
+        monkeypatch.setattr(
+            "nexus.commands.daemon.ensure_storage_supervisor", lambda _cfg: lease
+        )
+        calls: list[Path] = []
+        monkeypatch.setattr(
+            init_mod, "_report_stray_t2_launchagent_cleanup",
+            lambda config_dir: calls.append(config_dir),
+        )
+
+        init_mod._start_service_step()
+
+        assert len(calls) == 1
+
+    def test_provision_and_autostart_service_runs_cleanup_after_confirming_serving(
+        self, monkeypatch,
+    ) -> None:
+        import types
+
+        import nexus.commands.init as init_mod
+        from nexus.daemon import installer
+
+        monkeypatch.setattr(init_mod, "provision_service_stack", lambda embedder: True)
+        monkeypatch.setattr(
+            installer, "install_autostart",
+            lambda *, tier, force=False: installer.InstallResult(
+                status=installer.InstallStatus.NEWLY_INSTALLED, dest=Path("/x.plist"),
+            ),
+        )
+        lease = types.SimpleNamespace(
+            endpoint={"host": "127.0.0.1", "port": 18099}, generation=1,
+        )
+        monkeypatch.setattr(init_mod, "_poll_service_lease", lambda config_dir: lease)
+        calls: list[Path] = []
+        monkeypatch.setattr(
+            init_mod, "_report_stray_t2_launchagent_cleanup",
+            lambda config_dir: calls.append(config_dir),
+        )
+
+        result = init_mod._provision_and_autostart_service(None)
+
+        assert result is lease
+        assert len(calls) == 1
+
+
 class TestLocalDispatchP13:
     """RDR-174 P1.3: plain ``nx init`` LOCAL-path dispatch + picker removal."""
 

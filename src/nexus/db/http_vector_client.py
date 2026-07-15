@@ -291,6 +291,55 @@ def per_collection_chunk_cap(collection: str) -> int:
     return _CCE_UPSERT_CHUNK_CAP if prefix in _CCE_COLLECTION_PREFIXES else _CODE_UPSERT_CHUNK_CAP
 
 
+def _wait_for_lease_republication() -> None:
+    """Bounded poll for the lease to republish, priming ``_lease_cache`` if
+    it reappears (nexus-7dsgp, GH #1405 defect 1).
+
+    Called between :func:`_invalidate_endpoint` and the retry attempt in
+    :func:`_request`: a retry landing in the 5-10s supervisor-respawn gap
+    (old lease TTL expired, new lease not yet published) would otherwise
+    race the SAME ``(None, None)`` miss the invalidated attempt just hit.
+    Polling here gives the new lease a chance to appear within the budget
+    and caches it directly, so the retry's :func:`_resolve_endpoint` picks
+    it up on the first read instead of gambling on timing.
+
+    Never for the managed-cloud URL path (bead requirement — mirrors
+    :func:`~nexus.db.service_endpoint.recover_endpoint_from_lease`'s
+    identical guard): when ``NX_SERVICE_URL``/``service_url`` is configured
+    the endpoint is not lease-sourced at all, so this no-ops immediately
+    rather than burning the wait budget on a lease that will never appear.
+
+    ALSO never when ``NX_SERVICE_HOST``/``NX_SERVICE_PORT`` are pinned
+    (code-review round 1, Medium): :func:`_resolve_endpoint`'s own
+    precedence (``url = url or lease_url``, line ~153) means an env-pinned
+    ``url`` is NEVER overridden by a freshly-discovered lease, however
+    fresh — priming ``_lease_cache`` here would be pure wasted latency
+    with ZERO possibility of the retry actually picking it up, since the
+    retry re-reads the SAME pinned env url first. The env-pinned box's
+    connection-class retry still fires (dual-review H1, unchanged); it
+    just retries against the identical (still-dead) pinned endpoint, same
+    as it always has — the fix is only "don't ALSO wait 12s for nothing."
+    """
+    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
+
+    if (get_credential("service_url") or "").strip():
+        return
+    from nexus.db.service_endpoint import (  # noqa: PLC0415 — deferred to avoid circular import
+        DEFAULT_LEASE_WAIT_BUDGET_S,
+        discover_lease_with_wait,
+        env_host_port_url,
+    )
+
+    if env_host_port_url() is not None:
+        return
+
+    global _lease_cache
+    discovered = discover_lease_with_wait(budget_s=DEFAULT_LEASE_WAIT_BUDGET_S)
+    if discovered[0] is not None:
+        with _endpoint_lock:
+            _lease_cache = discovered  # type: ignore[assignment]
+
+
 def _request(
     method: str, path: str, *, tenant: str, timeout: int, body: dict | None
 ) -> Any:
@@ -305,6 +354,15 @@ def _request(
     Gateway-transient HTTP codes (``_GATEWAY_RETRY_CODES``) additionally get
     a bounded backoff retry (``_GATEWAY_RETRY_SLEEPS``); all other HTTP
     errors propagate immediately — 4xx/500 are not transient.
+
+    Budget arithmetic (nexus-7dsgp, GH #1405 defect 1 — "must not stack
+    with existing retry wrappers into unbounded totals"): the RETRY branch
+    below adds ``_wait_for_lease_republication()``'s bounded 12s poll on
+    top of the existing two-attempt shape (each attempt already bounded by
+    ``timeout`` plus up to 17s of gateway backoff). Worst case for one
+    ``_request`` call: attempt 1 (~timeout, or +17s if gateway-transient)
+    + 12s lease wait + attempt 2 (~timeout, or +17s again) — a fixed 12s
+    added to the pre-existing two-attempt total, never unbounded.
     """
     import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
@@ -332,6 +390,24 @@ def _request(
     # Narrow catch (dual-review H1): only the transport/auth error families
     # participate in retry classification. RuntimeError from an unresolvable
     # endpoint propagates untouched — fail-loud must never become a retry.
+    #
+    # nexus-7dsgp (GH #1405 defect 1) considered ALSO catching the bare
+    # RuntimeError here (the "not resolvable" first-attempt case, no
+    # connection-refused precursor) and retrying it with the same bounded
+    # wait below. That was reverted (test-driven, nexus-1091's aspect-worker
+    # drain suite): a RuntimeError has NO evidence a lease was ever
+    # resolved — every cold-start caller with no supervisor running AT ALL
+    # (every unit test that touches T3 without a fake service, and any
+    # genuinely-unconfigured production install) would silently start
+    # paying the FULL 12s wait before its immediate fail-loud, a real
+    # latency regression with no compensating benefit for a case that will
+    # never resolve. The connection-class branch below has the opposite,
+    # load-bearing property: it only fires after ``_resolve_endpoint``
+    # ALREADY succeeded once (the failing call reached an actual TCP
+    # attempt) — i.e. positive evidence of exactly the lease-was-working,
+    # now-mid-respawn scenario the bead's trigger names ("connect-refused
+    # against a LEASE-RESOLVED LOCAL endpoint"). The wait belongs only
+    # where that evidence exists.
     except (urllib.error.URLError, ConnectionRefusedError, ConnectionResetError) as exc:
         # TimeoutError is intentionally NOT in this retry classifier (it is not an
         # auto-restart signature); it propagates straight to the _get/_post handler,
@@ -344,6 +420,10 @@ def _request(
             reason=type(exc).__name__,
         )
         _invalidate_endpoint()
+        # nexus-7dsgp: give a not-yet-republished lease a bounded chance to
+        # appear before the retry re-reads it — see _wait_for_lease_republication's
+        # docstring for the managed-cloud exclusion and budget arithmetic.
+        _wait_for_lease_republication()
         return _once_with_gateway_retry()
 
 
