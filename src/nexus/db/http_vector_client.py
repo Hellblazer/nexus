@@ -291,40 +291,6 @@ def per_collection_chunk_cap(collection: str) -> int:
     return _CCE_UPSERT_CHUNK_CAP if prefix in _CCE_COLLECTION_PREFIXES else _CODE_UPSERT_CHUNK_CAP
 
 
-def _wait_for_lease_republication() -> None:
-    """Bounded poll for the lease to republish, priming ``_lease_cache`` if
-    it reappears (nexus-7dsgp, GH #1405 defect 1).
-
-    Called between :func:`_invalidate_endpoint` and the retry attempt in
-    :func:`_request`: a retry landing in the 5-10s supervisor-respawn gap
-    (old lease TTL expired, new lease not yet published) would otherwise
-    race the SAME ``(None, None)`` miss the invalidated attempt just hit.
-    Polling here gives the new lease a chance to appear within the budget
-    and caches it directly, so the retry's :func:`_resolve_endpoint` picks
-    it up on the first read instead of gambling on timing.
-
-    Never for the managed-cloud URL path (bead requirement — mirrors
-    :func:`~nexus.db.service_endpoint.recover_endpoint_from_lease`'s
-    identical guard): when ``NX_SERVICE_URL``/``service_url`` is configured
-    the endpoint is not lease-sourced at all, so this no-ops immediately
-    rather than burning the wait budget on a lease that will never appear.
-    """
-    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
-
-    if (get_credential("service_url") or "").strip():
-        return
-    from nexus.db.service_endpoint import (  # noqa: PLC0415 — deferred to avoid circular import
-        DEFAULT_LEASE_WAIT_BUDGET_S,
-        discover_lease_with_wait,
-    )
-
-    global _lease_cache
-    discovered = discover_lease_with_wait(budget_s=DEFAULT_LEASE_WAIT_BUDGET_S)
-    if discovered[0] is not None:
-        with _endpoint_lock:
-            _lease_cache = discovered  # type: ignore[assignment]
-
-
 def _request(
     method: str, path: str, *, tenant: str, timeout: int, body: dict | None
 ) -> Any:
@@ -339,15 +305,6 @@ def _request(
     Gateway-transient HTTP codes (``_GATEWAY_RETRY_CODES``) additionally get
     a bounded backoff retry (``_GATEWAY_RETRY_SLEEPS``); all other HTTP
     errors propagate immediately — 4xx/500 are not transient.
-
-    Budget arithmetic (nexus-7dsgp, GH #1405 defect 1 — "must not stack
-    with existing retry wrappers into unbounded totals"): the RETRY branch
-    below adds ``_wait_for_lease_republication()``'s bounded 12s poll on
-    top of the existing two-attempt shape (each attempt already bounded by
-    ``timeout`` plus up to 17s of gateway backoff). Worst case for one
-    ``_request`` call: attempt 1 (~timeout, or +17s if gateway-transient)
-    + 12s lease wait + attempt 2 (~timeout, or +17s again) — a fixed 12s
-    added to the pre-existing two-attempt total, never unbounded.
     """
     import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
 
@@ -372,40 +329,14 @@ def _request(
 
     try:
         return _once_with_gateway_retry()
-    # Narrow catch (dual-review H1, narrowed further by nexus-7dsgp): the
-    # transport/auth error families participate in retry classification as
-    # before. RuntimeError from an unresolvable endpoint used to propagate
-    # untouched ("fail-loud must never become a retry") — but that is
-    # EXACTLY the GH #1405 defect 1 failure mode: a call landing in the
-    # 5-10s supervisor-respawn gap gets "nexus-service endpoint is not
-    # resolvable" on its very FIRST attempt (no connection-refused
-    # precursor, because _lease_cache was already empty going in) and
-    # never got a chance to retry. RuntimeError is caught below too, but
-    # ONLY this function's own resolution failure can raise it (the only
-    # RuntimeError source inside _once_with_gateway_retry/_request_once is
-    # _resolve_endpoint() — urlopen/json raise their own exception
-    # families, never RuntimeError) — so this stays a narrow, deliberate
-    # catch, not a blanket one.
-    except (
-        urllib.error.URLError,
-        ConnectionRefusedError,
-        ConnectionResetError,
-        RuntimeError,
-    ) as exc:
+    # Narrow catch (dual-review H1): only the transport/auth error families
+    # participate in retry classification. RuntimeError from an unresolvable
+    # endpoint propagates untouched — fail-loud must never become a retry.
+    except (urllib.error.URLError, ConnectionRefusedError, ConnectionResetError) as exc:
         # TimeoutError is intentionally NOT in this retry classifier (it is not an
         # auto-restart signature); it propagates straight to the _get/_post handler,
         # which reframes it for managed endpoints (nexus-kf679).
-        if isinstance(exc, RuntimeError):
-            # nexus-7dsgp: the RuntimeError widening is LOCAL-LEASE ONLY —
-            # a managed-cloud misconfiguration (service_url set, token
-            # unresolvable) must keep failing on the FIRST attempt with no
-            # retry at all, not just no wait (bead requirement: "cloud
-            # path never retries/re-resolves").
-            from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
-
-            if (get_credential("service_url") or "").strip():
-                raise
-        elif not _is_retryable_endpoint_error(exc):
+        if not _is_retryable_endpoint_error(exc):
             raise
         _log.info(
             "vector_endpoint_reresolve",
@@ -413,10 +344,6 @@ def _request(
             reason=type(exc).__name__,
         )
         _invalidate_endpoint()
-        # nexus-7dsgp: give a not-yet-republished lease a bounded chance to
-        # appear before the retry re-reads it — see _wait_for_lease_republication's
-        # docstring for the managed-cloud exclusion and budget arithmetic.
-        _wait_for_lease_republication()
         return _once_with_gateway_retry()
 
 

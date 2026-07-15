@@ -58,11 +58,7 @@ import structlog
 # additionally pins the two modules' values equal against a future
 # local-redefinition drift.
 from nexus.db.http_vector_client import _GATEWAY_RETRY_CODES, _GATEWAY_RETRY_SLEEPS
-from nexus.db.service_endpoint import (
-    DEFAULT_LEASE_WAIT_BUDGET_S,
-    discover_lease_with_wait,
-    resolve_service_endpoint,
-)
+from nexus.db.service_endpoint import discover_lease, resolve_service_endpoint
 
 _log = structlog.get_logger(__name__)
 
@@ -162,7 +158,7 @@ def _is_retryable_endpoint_error(exc: Exception) -> bool:
     return isinstance(exc, (ConnectionRefusedError, ConnectionResetError))
 
 
-def _resolve_token_only(*, wait_budget_s: float = 0.0) -> str:
+def _resolve_token_only() -> str:
     """Resolve just the bearer token, WITHOUT requiring host/port to also
     be independently resolvable (nexus-bikit.4 adoption finding).
 
@@ -201,18 +197,12 @@ def _resolve_token_only(*, wait_budget_s: float = 0.0) -> str:
     token with no ``NX_SERVICE_TOKEN`` env and no ``service_url``
     configured could observe a different resolution than going through
     :func:`resolve_service_endpoint` directly would have produced.
-
-    ``wait_budget_s`` (nexus-7dsgp): threaded to
-    :func:`~nexus.db.service_endpoint.discover_lease_with_wait` for the
-    same bounded-wait mitigation as :func:`resolve_service_endpoint`'s
-    local-supervisor leg — see :meth:`RefreshableHttpStoreMixin._invalidate_and_reresolve`,
-    the only caller that passes a nonzero value.
     """
     from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid circular import
 
     token = (get_credential("service_token") or "").strip()
     if not token:
-        _, lease_token = discover_lease_with_wait(budget_s=wait_budget_s)
+        _, lease_token = discover_lease()
         token = lease_token or ""
     if not token:
         raise RuntimeError(
@@ -365,25 +355,6 @@ class RefreshableHttpStoreMixin:
         change — re-issuing the identical request would just fail
         identically, so this raises a clear error instead of a pointless
         (and potentially misleading, "it retried and still failed") retry.
-
-        Budget arithmetic (nexus-7dsgp, GH #1405 defect 1 — "must not stack
-        with existing retry wrappers into unbounded totals"): both
-        resolution branches below pass
-        ``wait_budget_s=DEFAULT_LEASE_WAIT_BUDGET_S`` (12s), bounding ONLY
-        the added lease-republication wait. This method is called from
-        ``_send`` AFTER the first ``_once_with_gateway_retry()`` attempt
-        has already failed and BEFORE the second (retry) attempt, which
-        itself may re-enter the gateway backoff loop
-        (``_GATEWAY_RETRY_SLEEPS`` = 2+5+10 = 17s across up to 3 attempts,
-        each bounded by the client's ``timeout`` — 30s default). Worst
-        case for one ``_send`` call: first attempt (~30s connect timeout,
-        no gateway loop for a connection-class error) + this method's 12s
-        lease wait + second attempt (up to 30s connect timeout, or up to
-        17s extra if it hits gateway-transient codes instead) — bounded at
-        roughly the pre-existing 2x-attempt total plus a fixed 12s, never
-        unbounded. This is a PER-CALL bound; the outer T1-CLI aggregate
-        across multiple sequential calls is nexus-by875's scope, not this
-        method's.
         """
         if self._base_url_pinned and self._token_pinned:
             raise RuntimeError(
@@ -397,9 +368,9 @@ class RefreshableHttpStoreMixin:
             # base_url pinned, token not -- mirror __init__'s matching
             # branch: resolve ONLY the token, never demand host/port also
             # be independently resolvable.
-            self._token = _resolve_token_only(wait_budget_s=DEFAULT_LEASE_WAIT_BUDGET_S)
+            self._token = _resolve_token_only()
         else:
-            base_url, token = resolve_service_endpoint(wait_budget_s=DEFAULT_LEASE_WAIT_BUDGET_S)
+            base_url, token = resolve_service_endpoint()
             self._base_url = base_url.rstrip("/")
             if not self._token_pinned:
                 self._token = token
