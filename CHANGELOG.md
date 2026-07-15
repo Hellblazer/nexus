@@ -6,6 +6,138 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.10.1] - 2026-07-15
+
+The delivery-mechanism patch: a release now installs the engine it was
+built and tested with on EVERY box — upgrades included, not just fresh
+installs. Repairs the 6.10.0 gap where existing installs kept a stale
+(and for GH #1402 victims, crash-looping) engine while only the version
+pointer moved. Ships with (and installs) engine-service-v0.1.43.
+
+### Fixed
+
+- **Engine convergence on upgrade** (nexus-cfgo9, the GH #1402 delivery
+  gap): existing local service-mode installs now converge to the
+  release's engine automatically. The post-upgrade pass (and
+  `nx daemon restart-stale`, the manual re-trigger) detects an installed
+  engine that differs from the release's engine via the on-disk install
+  provenance (deliberately not `/version` — a crash-looping engine never
+  answers), installs the pinned release tag through the existing
+  signed-acquire path, and cycles the service. `nx doctor` reports
+  "engine convergence pending" as the backstop. The chash-poison install
+  gate is respected: a poisoned store blocks convergence LOUDLY with the
+  exact unblock steps — never a silent skip, never a brick.
+- **Diag-view grant/ownership heal** (GH #1402 second symptom): the same
+  pass repairs a missing `nexus_diag` view grant and transfers a
+  non-RLS-exempt view owner back to the bootstrap role (the field
+  workaround that silently defanged the chash-poison probe — a
+  non-exempt owner counts zero cross-tenant rows, reporting a false
+  clean). Grants and ownership only; all schema DDL remains Liquibase's.
+- **`ps`-less systems no longer crash the post-upgrade pass**: process
+  enumeration raises an actionable error (and the sweep degrades loudly)
+  instead of aborting the whole pass on minimal container images without
+  procps — previously this would have blocked convergence exactly where
+  it was needed.
+
+### Changed
+
+- **ONE-engine model**: `REQUIRED_ENGINE_VERSION` is now documented as
+  the release's single engine dependency — the exact version this build
+  was tested against — not a compatibility "floor". Local installs
+  converge to it; the only surviving `>=` comparison is the managed-cloud
+  handshake (the client cannot install the cloud's engine).
+- **New release validation leg**: `tests/e2e/migration-rehearsal/run.sh
+  --package-upgrade` — a real previous-release box (PyPI + its own
+  cold-acquired engine), package-only upgrade, and the product must
+  converge the engine itself; the harness is forbidden from supplying
+  binaries (sha256-verified). Includes the chash-probe view-path
+  end-to-end check and T1 upgrade-window assertions. Wired into the
+  release checklist as a required gate.
+- **Mode-parity lint burn-down**: the RDR-109 exclusion list shrank
+  92 -> 72 files (44 tests promoted to explicit cloud-mode declaration;
+  14 dead entries removed; every remaining entry carries a verified
+  rationale) and both exclusion lists are now ratcheted with exact
+  ceilings that fail CI on silent growth.
+
+### Notes
+
+- Field remediation for GH #1402 boxes: upgrading to 6.10.1 converges
+  the engine automatically; the diag-view heal reverses the documented
+  ALTER-OWNER workaround. Boxes that applied the workaround should
+  confirm the chash-conformance probe reports via the view path after
+  upgrade (`nx doctor`).
+- Follow-ups tracked: nexus-by875 (T1 CLI total wall-clock budget +
+  slow-path message), nexus-ampq0 (/proc-based process enumeration),
+  fail-loud skew-window variant with a pre-T1-floor engine
+  (nexus-cfgo9 comment).
+
+## [6.10.0] - 2026-07-15
+
+Taxonomy curation goes unattended, bibliographic metadata finally reaches
+the catalog rows every browsing surface reads, and a boot crash-loop on
+upgraded installs is fixed engine-side. Ships with (and requires)
+engine-service-v0.1.43.
+
+### Added
+
+- **`nx taxonomy review --auto`** (nexus-vfs67, nexus-6i01g): batched,
+  unattended topic review — swaps the interactive judge for
+  `claude_dispatch` verdicts (accept / rename / delete / merge, keyed by
+  real topic id). accept/rename apply immediately; delete/merge print a
+  grouped destructive plan gated on confirmation or `--yes`; `--dry-run`
+  applies nothing. Merge guards: self-merge, missing target,
+  cross-collection target, target-deleted-this-run, and
+  target-is-a-merge-source-this-run (prevents same-run merge-chain
+  assignment orphaning). Per-item fault-tolerant apply loops with a
+  `failed` counter in the summary. Productizes the validated 2026-07-14
+  manual pass (524 topics, 0 errors).
+- **Catalog bibliographic metadata surfacing** (nexus-9l2lg, nexus-6ha8a):
+  `nx enrich bib` now writes `bib_year` / `bib_authors` / `bib_venue` /
+  `bib_citation_count` (+ backend ids, DOI, `bib_enriched_at`) to the
+  matching catalog Document rows — previously the catalog's bib columns
+  (RDR-101) had no writer at all, so `catalog_search` / `catalog_list` /
+  `nx catalog show` always showed them empty. Every browsing-surface
+  reader now carries all 8 bib columns (both local and service backends),
+  the event-sourced write path (default-ON) persists and carry-forwards
+  them at all four emission sites, and `nx catalog show` prints them.
+  New **`nx enrich bib --backfill-catalog`** re-drives the catalog write
+  from already-enriched chunk metadata — zero external API calls,
+  idempotent, honest skip counts.
+
+### Fixed
+
+- **Engine boot crash-loop on foreign-owned relations** (GH #1402,
+  nexus-0gis0; engine-side fix in engine-service-v0.1.43, which this
+  release pins): `grants-nexus-svc-1`'s bulk `GRANT ... ON ALL TABLES`
+  hard-errored as `nexus_admin` on the deliberately superuser-owned
+  `diag_chash_conformance` view, aborting every engine boot once the
+  view exists. Grants are now per-relation and owner-restricted, with a
+  boot-time NOTICE naming anything skipped. A changelog-wide conformance
+  test prevents the class from returning (third incident:
+  nexus-1wjmq, nexus-46yy3, GH #1402).
+- **Taxonomy topic_links orphaning on the SQLite leg** (nexus-y17x9):
+  every topic-deletion site (rebuild clear, `delete_topic`,
+  `merge_topics`, memory-deletion purge) now clears `topic_links`
+  explicitly — the connection runs with foreign keys off and the PG
+  cascade has no SQLite equivalent, so links silently orphaned (~6.9k
+  in the pre-migration store).
+- **Service-mode `nx taxonomy status` reported "0 topic links"**
+  (nexus-ntkr5): the link count now uses the public link-pairs API
+  instead of a hardcoded 0 (7,518 live links were invisible).
+- **Chash-probe fallback log no longer asserts "view absent"** as the
+  cause (nexus-0gis0): the view path also fails on grant/ownership gaps;
+  the note now points at the error field instead of guessing — the old
+  hardcoded guess misled the GH #1402 field diagnosis.
+
+### Changed
+
+- **`REQUIRED_ENGINE_VERSION` floor: 0.1.43** (fix-delivery rule — the
+  GH #1402 grants fix ships to local installs only via this floor/pin;
+  `PINNED_SERVICE_TAG` moves with it by construction).
+- **MinerU upgrade behavior documented** (nexus-s2rl1, wontfix-by-design):
+  upgrades cycle a running MinerU but never cold-start an absent one —
+  on-demand spawn covers first use; `nx mineru start` pre-warms.
+
 ## [6.9.0] - 2026-07-14
 
 MinerU becomes self-healing, catalog search stops being blind to the files
