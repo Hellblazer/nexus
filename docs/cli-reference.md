@@ -1557,7 +1557,7 @@ Health check for all dependencies.
 nx doctor
 ```
 
-Checks (live T3 first): the nexus-service vector reachability probe (RDR-155: probed unconditionally — a pgvector install with the service down does NOT doctor all-green), the T3 collection census via the pgvector service, the service bge-768 model in local-service mode, and the legacy on-disk Chroma store (reported as awaiting the migration ETL, not as the live backend). Then: Voyage AI key, ripgrep binary, git binary, git hooks status for registered repos, index log last-write time, orphaned PDF checkpoints, orphaned pipeline buffer entries, T2 integrity, T2 daemon singleton (RDR-129: hard error if more than one T2 daemon serves the same `memory.db`), T2 best-effort writes (RDR-129: soft warning with the count of chash dual-writes dropped under WAL contention). The T2 integrity check reports a transient FTS5 write-lock during active indexing as a soft warning, not a hard failure (RDR-129 B4). The ChromaDB Cloud credential lines (`CHROMA_API_KEY` / `CHROMA_TENANT` / `CHROMA_DATABASE`) are still surfaced, but as of 6.0 they describe migration-source / pre-6.0 cloud config — the live T3 health surface is the vector-service probe above and `nx daemon service status`. A fresh local install with no Chroma keys is healthy.
+Checks (live T3 first): the nexus-service vector reachability probe (RDR-155: probed unconditionally — a pgvector install with the service down does NOT doctor all-green), the T3 collection census via the pgvector service, the service bge-768 model in local-service mode, and the legacy on-disk Chroma store (reported as awaiting the migration ETL, not as the live backend). Then: Voyage AI key, ripgrep binary, git binary, git hooks status for registered repos, index log last-write time, orphaned PDF checkpoints, orphaned pipeline buffer entries, T2 integrity, T2 daemon singleton (RDR-129: hard error if more than one T2 daemon serves the same `memory.db`), T2 best-effort writes (RDR-129: soft warning with the count of chash dual-writes dropped under WAL contention), and — in service mode — a stray T2 autostart unit left over from a pre-service-mode install (GH #1405: soft warning naming the unit path and the removal command). The T2 integrity check reports a transient FTS5 write-lock during active indexing as a soft warning, not a hard failure (RDR-129 B4). The ChromaDB Cloud credential lines (`CHROMA_API_KEY` / `CHROMA_TENANT` / `CHROMA_DATABASE`) are still surfaced, but as of 6.0 they describe migration-source / pre-6.0 cloud config — the live T3 health surface is the vector-service probe above and `nx daemon service status`. A fresh local install with no Chroma keys is healthy.
 
 Migration-health checks (RDR-178): the newest `<config>/migration-reports/migration-*.json` is read and doctor fails loud (fatal) when `summary.total_failed > 0` or the recorded verification verdict is `mismatch`/`indeterminate` — with the report path, per-store failure counts, and a re-run suggestion (`nx storage migrate all --verify-fill`). A legacy report written by pre-6.2 tooling (no verification key at all) with zero failures is a non-fatal WARN, not a failure. Once the newest report records a cloud `target.service_url`, a write-divergence check warns (non-fatal) when `memory.db`'s freshest local write postdates the report's `completed_at` — local writes have landed after the cloud cutover and are not in the cloud tier.
 
@@ -1766,7 +1766,11 @@ provenance shows a different engine, the release's pinned tag is
 downloaded through the signed install path and the service is cycled.
 A store blocked by the chash-poison install gate is never converged
 silently: the pass prints the exact unblock steps instead. The same
-pass repairs diag-view grant/ownership drift (GH #1402). Each leg is
+pass repairs diag-view grant/ownership drift (GH #1402) and, in service
+mode, unloads/removes a stale pre-service-mode T2 autostart unit
+(com.nexus.t2 LaunchAgent on macOS, nexus-t2.service on Linux) left over
+from a SQLite-era install (GH #1405) — such a unit otherwise respawns a
+T2 daemon that exits instantly by design, forever. Each leg is
 independent — a failure in one (even a missing `ps` binary on minimal
 containers) never blocks the others.
 
@@ -1818,7 +1822,10 @@ The recorded PID is probed for liveness (`os.kill(pid, 0)`). A discovery
 file whose PID is no longer running is reported as `STALE` (with `--json`,
 an `"alive": false` field) and exits 1, so a daemon that died leaving a
 stale discovery file is not reported as running. Exit code 1 also when no
-discovery file exists.
+discovery file exists — except in service mode: when the memory store is
+in SERVICE mode and no local T2 discovery file exists, the command reports
+that T2 is served by the nexus-service (no local daemon expected) and
+exits 0 instead of erroring (GH #1405).
 
 The output also includes `restarts_in_window` (RDR-140 P4): the number
 of cold respawns the crash-loop guard has recorded in the current window
