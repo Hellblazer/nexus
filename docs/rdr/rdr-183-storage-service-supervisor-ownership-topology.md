@@ -60,8 +60,18 @@ Field evidence (2026-07-15, one box, one day):
   WATCHDOG (no in-process respawn layers). This RDR decides the single
   spawn AUTHORITY, which RDR-175 deliberately did not.
 - Client-visible availability during transitions is bounded by the
-  defect-1 mitigation (client re-resolve + retry once); this RDR's bar
-  is eliminating the routine churn, not papering over it.
+  defect-1 mitigation (nexus-7dsgp: bounded-wait re-resolve,
+  evidence-gated on prior in-process lease success) for the T3 vector
+  client and the T2 `RefreshableHttpStoreMixin` store family (memory,
+  plan, aspect-queue, taxonomy, telemetry, chash, centroid,
+  document-aspects/highlights, catalog) — covering the reported
+  search/store_get/memory_delete failure modes. `HttpTokenStore` and
+  `HttpScratchStore` construction remain ungated at construction time
+  (their connection-refused retry legs are covered; their first-resolve
+  is not) — lower-exposure by construction pattern (session-scoped /
+  self-healing background loop) but not yet closed by the same
+  mechanism (follow-on bead). This RDR's bar is eliminating the routine
+  churn, not papering over it.
 
 ## Decision Space (candidates, not mutually exclusive)
 
