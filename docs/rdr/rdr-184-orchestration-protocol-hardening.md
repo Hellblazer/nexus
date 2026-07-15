@@ -25,26 +25,39 @@ multi-agent orchestration) surfaced three recurring failure classes in
 the dispatch protocol itself. Hal rated the observations critical. Each
 individually cost round-trips; one was a near-miss on result integrity.
 
-1. **Completed agents idle without reporting** (~8 occurrences).
-   Judges, reviewers, and developers finished work — or their
-   background jobs finished — and went idle WITHOUT messaging results
-   to the orchestrator. Worst case: a **FAILED validation-run RESULT**
-   sat unreported until the orchestrator read the agent's raw
-   task-output file from `/private/tmp`. An unreported failure is the
-   silent-failure class (the project's central defect theme) in
-   orchestration form.
-2. **Crossed-message races lose scope updates** (~4 occurrences).
-   Directives sent while an agent was mid-turn were absent from its
-   next hand-back (mailbox delivery lands between turns; the agent
-   composes its report against stale scope). Each occurrence required
-   a detect-and-resend round-trip; the failure mode if undetected is
-   shipping without the update.
-3. **Resource collisions from unconfirmed exits** (3 occurrences, one
-   integrity near-miss). Three overlapping Docker rehearsal runs shared
-   `dist/` and an image tag — a stale wheel could have produced a FALSE
-   pass or FALSE fail of a release gate. Separately, orphaned duplicate
-   pytest runs violated the one-suite-at-a-time rule and produced a
-   phantom 45-minute background task.
+#### Gap 1: Completed agents idle without reporting
+
+~8 occurrences (a 9th during this RDR's own research). Judges,
+reviewers, and developers finished work — or their background jobs
+finished — and went idle WITHOUT messaging results to the orchestrator.
+Worst case: a **FAILED validation-run RESULT** sat unreported until the
+orchestrator read the agent's raw task-output file from `/private/tmp`.
+An unreported failure is the silent-failure class (the project's
+central defect theme) in orchestration form.
+
+#### Gap 2: Crossed-message races lose scope updates
+
+~4 occurrences. Directives sent while an agent was mid-turn were absent
+from its next hand-back (mailbox delivery lands between turns; the
+agent composes its report against stale scope). Each occurrence
+required a detect-and-resend round-trip; the failure mode if undetected
+is shipping without the update.
+
+#### Gap 3: Resource collisions from unconfirmed exits
+
+3 occurrences, one integrity near-miss. Three overlapping Docker
+rehearsal runs shared `dist/` and an image tag — a stale wheel could
+have produced a FALSE pass or FALSE fail of a release gate. Separately,
+orphaned duplicate pytest runs violated the one-suite-at-a-time rule
+and produced a phantom 45-minute background task.
+
+#### Gap 4: The git index is a shared mutable singleton
+
+1 occurrence, live during this RDR's research (finding 6): one agent's
+staged-but-unreviewed files were swept into the orchestrator's
+unrelated whole-index commit and pushed to develop (backed out
+index-only). "Stage by explicit path" does not defend against another
+actor's staged content.
 
 ## Seed Design (under critique; see §Research)
 
@@ -222,4 +235,37 @@ Full draft: T2 `nexus/design-orchestration-protocol.md` (REVISED v2 per critique
 
 ## Decision
 
-(Open — draft. Adoption decision is Hal's after the critique lands.)
+(Proposed — pending gate + Hal's accept.)
+
+Adopt the v2 seed design with the hook-point choice settled by finding 5:
+
+1. **Gap 1 (report-before-idle)** — ONE `SubagentStop` hook (fires for
+   both sync and background dispatches, verified). Discriminator for
+   "owes a report": the hook reads `agent_transcript_path` (verified
+   present) — a dispatch that used SendMessage at least once during its
+   life is teammate-interactive and owes a final report; a dispatch with
+   zero mailbox traffic is synchronous (its result IS the tool result)
+   and is NEVER blocked. If report-owing AND the final turn contains no
+   SendMessage: `{"decision":"block","reason":"report to main"}` with
+   the `stop_hook_active` once-guard (round-trip verified, 21c).
+   **Phase-1 gate before default-on: measure false-block rate on a real
+   session.** Plus the two terse table rows in subagent-start.sh's
+   heredoc (finding 1).
+2. **Gap 2 (directive races)** — orchestrator-side send-log diffing +
+   the final-inbox-poll heredoc row; ledger header retained only as the
+   diff's input format. Orchestrator behaviors bind via the durable
+   memory directive, not skill prose.
+3. **Gap 3 (singleton resources)** — mkdir-based lock helper (verified
+   both platforms; stale-lock pid+liveness handling) across the four
+   audited fixed-resource harnesses (finding 2), each with a
+   concurrent-invocation regression test.
+4. **Gap 4 (shared index)** — agents in a shared tree never `git add`
+   (heredoc row); orchestrator commits are pathspec-limited
+   (`git commit <paths>`) — both already binding via the memory
+   directive; the heredoc row makes the agent side injected rather
+   than remembered.
+
+Verification set: cc-validation scenario 21 (standing), a new scenario
+for the production Stop-hook behavior, and the per-harness lock tests.
+Plugin-shipped artifacts (hook + heredoc rows) ride the next plugin
+release; repo-local locks land immediately.
