@@ -6,6 +6,71 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.10.1] - 2026-07-15
+
+The delivery-mechanism patch: a release now installs the engine it was
+built and tested with on EVERY box — upgrades included, not just fresh
+installs. Repairs the 6.10.0 gap where existing installs kept a stale
+(and for GH #1402 victims, crash-looping) engine while only the version
+pointer moved. Ships with (and installs) engine-service-v0.1.43.
+
+### Fixed
+
+- **Engine convergence on upgrade** (nexus-cfgo9, the GH #1402 delivery
+  gap): existing local service-mode installs now converge to the
+  release's engine automatically. The post-upgrade pass (and
+  `nx daemon restart-stale`, the manual re-trigger) detects an installed
+  engine that differs from the release's engine via the on-disk install
+  provenance (deliberately not `/version` — a crash-looping engine never
+  answers), installs the pinned release tag through the existing
+  signed-acquire path, and cycles the service. `nx doctor` reports
+  "engine convergence pending" as the backstop. The chash-poison install
+  gate is respected: a poisoned store blocks convergence LOUDLY with the
+  exact unblock steps — never a silent skip, never a brick.
+- **Diag-view grant/ownership heal** (GH #1402 second symptom): the same
+  pass repairs a missing `nexus_diag` view grant and transfers a
+  non-RLS-exempt view owner back to the bootstrap role (the field
+  workaround that silently defanged the chash-poison probe — a
+  non-exempt owner counts zero cross-tenant rows, reporting a false
+  clean). Grants and ownership only; all schema DDL remains Liquibase's.
+- **`ps`-less systems no longer crash the post-upgrade pass**: process
+  enumeration raises an actionable error (and the sweep degrades loudly)
+  instead of aborting the whole pass on minimal container images without
+  procps — previously this would have blocked convergence exactly where
+  it was needed.
+
+### Changed
+
+- **ONE-engine model**: `REQUIRED_ENGINE_VERSION` is now documented as
+  the release's single engine dependency — the exact version this build
+  was tested against — not a compatibility "floor". Local installs
+  converge to it; the only surviving `>=` comparison is the managed-cloud
+  handshake (the client cannot install the cloud's engine).
+- **New release validation leg**: `tests/e2e/migration-rehearsal/run.sh
+  --package-upgrade` — a real previous-release box (PyPI + its own
+  cold-acquired engine), package-only upgrade, and the product must
+  converge the engine itself; the harness is forbidden from supplying
+  binaries (sha256-verified). Includes the chash-probe view-path
+  end-to-end check and T1 upgrade-window assertions. Wired into the
+  release checklist as a required gate.
+- **Mode-parity lint burn-down**: the RDR-109 exclusion list shrank
+  92 -> 72 files (44 tests promoted to explicit cloud-mode declaration;
+  14 dead entries removed; every remaining entry carries a verified
+  rationale) and both exclusion lists are now ratcheted with exact
+  ceilings that fail CI on silent growth.
+
+### Notes
+
+- Field remediation for GH #1402 boxes: upgrading to 6.10.1 converges
+  the engine automatically; the diag-view heal reverses the documented
+  ALTER-OWNER workaround. Boxes that applied the workaround should
+  confirm the chash-conformance probe reports via the view path after
+  upgrade (`nx doctor`).
+- Follow-ups tracked: nexus-by875 (T1 CLI total wall-clock budget +
+  slow-path message), nexus-ampq0 (/proc-based process enumeration),
+  fail-loud skew-window variant with a pre-T1-floor engine
+  (nexus-cfgo9 comment).
+
 ## [6.10.0] - 2026-07-15
 
 Taxonomy curation goes unattended, bibliographic metadata finally reaches
