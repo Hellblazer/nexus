@@ -74,6 +74,19 @@ class SubstratePlan:
     #: must route through the existing cost prompt (_confirm_voyage_cost).
     billed_reembed: bool = False
 
+    def target_names(self) -> dict[str, str]:
+        """source→target for every RENAMED leg — the ``rollback_collections``
+        ``target_names`` argument. Load-bearing for PURE-REEMBED legs (P2
+        critique residual Medium): conformant ids get NO map entries, so
+        without this mapping their rollback would probe the source-named
+        collection and silently no-op. Any rollback of a plan's collections
+        MUST pass this."""
+        return {
+            leg.source_collection: leg.target_collection
+            for leg in self.legs
+            if leg.target_collection != leg.source_collection
+        }
+
 
 def plan_substrate_legs(
     classifications: Iterable["CollectionClassification"],

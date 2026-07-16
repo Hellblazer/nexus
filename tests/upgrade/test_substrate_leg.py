@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from nexus.migration.detection import CollectionClassification
+from nexus.migration.vector_etl import rollback_collections
 from nexus.migration.wire_reid import ChashRemapStore, RemapEntry
 from nexus.upgrade_ladder.rungs.substrate_etl import (
     LegPlan,
@@ -263,6 +264,78 @@ def test_mis_provenanced_vector_falls_back_to_reembed(tmp_path: pathlib.Path) ->
         assert result.ok
         new_chash = hashlib.sha256(text.encode()).hexdigest()[:32]
         assert target.rows[new_chash]["embeddings"] is None  # dropped → server re-embed
+
+
+def test_pure_reembed_leg_rolls_back_via_plan_target_names(
+    tmp_path: pathlib.Path,
+) -> None:
+    """P2 critique residual Medium, closed: a pure-reembed leg (conformant
+    ids, wrong model) writes ZERO map entries — its rollback works only
+    through SubstratePlan.target_names(), chained here plan→execute→rollback."""
+    text = "conformant text"
+    cid = hashlib.sha256(text.encode()).hexdigest()[:32]
+    src = "knowledge__notes__all-minilm-l6-v2__v1"
+    dst = "knowledge__notes__voyage-context-3__v1"
+    plan = plan_substrate_legs(
+        [
+            CollectionClassification(
+                collection=src, leg="local", model=None, dim=None,
+                support="unsupported", source_count=1, has_data=True, legacy_ids=False,
+            )
+        ],
+        prior_collections=frozenset(),
+        voyage_key_present=True,
+    )
+    (leg,) = plan.legs
+    assert leg.needs_reid is False and leg.needs_reembed is True
+    assert plan.target_names() == {src: dst}
+
+    source = OneBatchSource([{"id": cid, "document": text, "metadata": {}}])
+    target = RecordingTarget()
+    with ChashRemapStore(tmp_path / "chash_remap.db") as store:
+        result = execute_leg(leg, source, target, map_store=store, page=10, provenance="p")
+        assert result.ok
+        assert store.all_pairs() == []  # conformant ids: zero map entries
+
+        # Rollback: only target_names knows where these rows landed.
+        class RollbackVector:
+            def __init__(self, rows: dict[str, set[str]]) -> None:
+                self._rows = rows
+
+            def get_or_create_collection(self, name):
+                rows = self._rows.setdefault(name, set())
+
+                class _H:
+                    def get(self, ids=None, limit=None):
+                        return {"ids": [i for i in ids if i in rows]}
+
+                    def delete(self, ids):
+                        for i in ids:
+                            rows.discard(i)
+
+                return _H()
+
+            def count(self, name):
+                return len(self._rows.get(name, set()))
+
+        class ReadClient:
+            def get_collection(self, name):
+                class _C:
+                    def get(self, include=None, limit=None, offset=0):
+                        return {"ids": [cid] if offset == 0 else [], "documents": [text], "metadatas": [{}]}
+
+                    def count(self):
+                        return 1
+
+                return _C()
+
+        vector = RollbackVector({dst: {cid}})
+        deleted = rollback_collections(
+            ReadClient(), vector, collections=[src],
+            remap_store=store, target_names=plan.target_names(),
+        )
+        assert deleted == {src: 1}
+        assert vector.count(dst) == 0
 
 
 def test_execute_leg_resumes_from_watermark(tmp_path: pathlib.Path) -> None:
