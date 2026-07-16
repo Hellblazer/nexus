@@ -228,7 +228,12 @@ class LadderRunner:
                 _log.warning("ladder_rung_converge_failed", rung=rung.name, error=str(exc))
                 return RungRun(rung.name, RungOutcome.FAILED, detail=f"converge raised: {exc}")
             if result.deferred:
-                _log.info("ladder_rung_deferred", rung=rung.name, detail=result.detail)
+                # WARNING, not info (P1 critique Medium): DEFERRED bypasses
+                # verify/record entirely, so a rung abusing it to dodge
+                # failure visibility must at least be loud in the logs. The
+                # contract: DEFERRED is ONLY for the documented precondition-
+                # retry class (MigrationRetry shape); genuine failures raise.
+                _log.warning("ladder_rung_deferred", rung=rung.name, detail=result.detail)
                 return RungRun(rung.name, RungOutcome.DEFERRED, detail=result.detail)
             if result.completed:
                 return None

@@ -16,7 +16,14 @@ from dataclasses import dataclass, field
 import click
 import pytest
 
+from unittest.mock import patch
+
+from click.testing import CliRunner
+
+import nexus.db.migrations as migrations
 import nexus.upgrade_ladder.registry as ladder_registry
+from nexus.cli import main
+from nexus.db.migrations import Migration, MigrationRetry
 from nexus.health import _check_pending_rungs, run_health_checks
 from nexus.commands.upgrade import _run_ladder, upgrade
 from nexus.upgrade_ladder.completion import CompletionStore
@@ -245,6 +252,44 @@ def test_deferred_walk_notices_but_exits_cleanly(
     assert "deferred" in out and "catalog absent" in out
     with CompletionStore(db) as store:
         assert store.verified_rungs() == frozenset()
+
+
+def test_upgrade_invocation_executes_each_migration_step_exactly_once(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P1 critique Critical: nx upgrade runs _run_upgrade (legacy leg) then
+    the ladder walk in one invocation — in the DEFERRED case the rung must
+    REPORT the prior attempt, never re-execute apply_pending (which re-ran
+    every eligible step's body, incl. a 30s drain attempt, twice — also on
+    the SessionStart --auto hot path). Pinned end to end through the CLI."""
+    migrations._upgrade_done.clear()
+    calls = {"n": 0}
+
+    def _counting_defer(conn: object) -> None:
+        calls["n"] += 1
+        raise MigrationRetry("precondition blocked — retried next open")
+
+    monkeypatch.setattr(
+        migrations,
+        "MIGRATIONS",
+        [Migration(introduced="99.0.0", name="counting-defer", fn=_counting_defer)],
+    )
+    monkeypatch.setenv("NX_MIGRATION_NOTICE", "0")  # keep the bridge probe out
+    db = tmp_path / "memory.db"
+    with (
+        patch("nexus.commands.upgrade._db_path", return_value=db),
+        patch("nexus.commands.upgrade.T3_UPGRADES", []),
+        patch("nexus.commands.upgrade._quiesce_daemon"),
+        patch("nexus.commands.upgrade._cycle_supervised_daemons_to_current"),
+        patch("nexus.commands.upgrade._stdin_isatty", return_value=False),
+    ):
+        result = CliRunner().invoke(main, ["upgrade"])
+    assert result.exit_code == 0, result.output  # deferral is NOT a failure
+    assert calls["n"] == 1, (
+        f"deferring step executed {calls['n']} times in one nx upgrade "
+        "invocation — the ladder must report, not re-run"
+    )
+    assert "deferred" in result.output.lower()
 
 
 def test_upgrade_command_is_wired_to_the_ladder() -> None:

@@ -13,6 +13,7 @@ import inspect
 
 import pytest
 
+import nexus.migration.detection as detection_mod
 import nexus.migration.guided_upgrade as guided_upgrade
 import nexus.upgrade_ladder.census as census_mod
 from nexus.health import _check_legacy_id_census, run_health_checks
@@ -49,9 +50,9 @@ def _detection(*classifications: CollectionClassification) -> PreflightDetection
 def test_census_skips_without_opening_store_when_no_footprint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The cheap file-level gate: non-Chroma / migrated / fresh installs
-    return None WITHOUT ever invoking the store-opening classification."""
-    monkeypatch.setattr(guided_upgrade, "legacy_footprint_pending", lambda: False)
+    """The cheap file-level gate: no local Chroma directory means None
+    WITHOUT ever invoking the store-opening classification."""
+    monkeypatch.setattr(census_mod, "_chroma_footprint_present", lambda: False)
 
     def _must_not_run() -> PreflightDetection:
         raise AssertionError("detect_pending_migration must not be called")
@@ -60,8 +61,46 @@ def test_census_skips_without_opening_store_when_no_footprint(
     assert legacy_id_census() is None
 
 
+def test_census_fires_despite_service_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """P1 critique High (the GH #1408 recurrence shape): a provisioned
+    install (service exists) still carrying un-migrated legacy-id Chroma
+    collections MUST be censused — the census deliberately does NOT use
+    legacy_footprint_pending's service-evidence early-outs (provisioned is
+    not migrated: legacy-id collections CANNOT have migrated, GH #1390
+    blocks them)."""
+    # Simulate the hybrid state: bridge gate says "not pending" (service
+    # evidence), yet the Chroma footprint with legacy ids is right there.
+    monkeypatch.setattr(guided_upgrade, "legacy_footprint_pending", lambda: False)
+    monkeypatch.setattr(census_mod, "_chroma_footprint_present", lambda: True)
+    monkeypatch.setattr(
+        guided_upgrade,
+        "detect_pending_migration",
+        lambda: _detection(_classification("knowledge__old_store", legacy=True, count=18)),
+    )
+    result = legacy_id_census()
+    assert result is not None
+    assert [c.collection for c in result] == ["knowledge__old_store"]
+
+
+def test_footprint_gate_respects_kill_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NX_MIGRATION_NOTICE", "0")
+    assert census_mod._chroma_footprint_present() is False
+
+
+def test_footprint_gate_checks_local_chroma_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    monkeypatch.delenv("NX_MIGRATION_NOTICE", raising=False)
+    monkeypatch.setattr(detection_mod, "resolve_default_local_leg", lambda: str(tmp_path))
+    assert census_mod._chroma_footprint_present() is True
+    monkeypatch.setattr(
+        detection_mod, "resolve_default_local_leg", lambda: str(tmp_path) + "/absent"
+    )
+    assert census_mod._chroma_footprint_present() is False
+
+
 def test_census_lists_only_legacy_collections(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(guided_upgrade, "legacy_footprint_pending", lambda: True)
+    monkeypatch.setattr(census_mod, "_chroma_footprint_present", lambda: True)
     monkeypatch.setattr(
         guided_upgrade,
         "detect_pending_migration",
@@ -91,7 +130,7 @@ def test_census_lists_only_legacy_collections(monkeypatch: pytest.MonkeyPatch) -
 def test_census_empty_when_chroma_mode_but_conformant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(guided_upgrade, "legacy_footprint_pending", lambda: True)
+    monkeypatch.setattr(census_mod, "_chroma_footprint_present", lambda: True)
     monkeypatch.setattr(
         guided_upgrade,
         "detect_pending_migration",
@@ -103,7 +142,7 @@ def test_census_empty_when_chroma_mode_but_conformant(
 def test_census_degrades_to_none_on_probe_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(guided_upgrade, "legacy_footprint_pending", lambda: True)
+    monkeypatch.setattr(census_mod, "_chroma_footprint_present", lambda: True)
 
     def _boom() -> PreflightDetection:
         raise RuntimeError("store exploded")

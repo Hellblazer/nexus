@@ -178,7 +178,11 @@ class LadderRegistry:
         return len(self._rungs)
 
 
-def default_registry(*, db_path_fn: Callable[[], Path] | None = None) -> LadderRegistry:
+def default_registry(
+    *,
+    db_path_fn: Callable[[], Path] | None = None,
+    t2_apply_attempted: bool = False,
+) -> LadderRegistry:
     """The production ladder. Native rungs land phase by phase: t2-schema
     (P1, here), substrate-etl (P2), each slotting into :data:`RUNG_ORDER`
     position.
@@ -190,5 +194,7 @@ def default_registry(*, db_path_fn: Callable[[], Path] | None = None) -> LadderR
     """
     from nexus.upgrade_ladder.rungs.t2_schema import T2SchemaRung  # noqa: PLC0415 — deferred to avoid import cycle
 
-    kwargs = {} if db_path_fn is None else {"db_path_fn": db_path_fn}
-    return LadderRegistry((T2SchemaRung(**kwargs),))
+    kwargs: dict[str, object] = {"apply_attempted": t2_apply_attempted}
+    if db_path_fn is not None:
+        kwargs["db_path_fn"] = db_path_fn
+    return LadderRegistry((T2SchemaRung(**kwargs),))  # type: ignore[arg-type]

@@ -23,11 +23,36 @@ read-leg classification.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from pathlib import Path
 
 import structlog
 
 _log = structlog.get_logger(__name__)
+
+
+def _chroma_footprint_present() -> bool:
+    """Cheap file-level census gate: kill switch + local Chroma directory.
+
+    Deliberately NOT ``legacy_footprint_pending()`` (P1 critique High): its
+    service-evidence early-outs read "provisioned" as "migrated", which goes
+    silent on the hybrid provisioned-but-unmigrated state — a service exists
+    but legacy-id collections were never re-identified (they CANNOT migrate;
+    GH #1390 blocks them). That is the GH #1408 recurrence shape the census
+    exists to keep visible. Era-debt lives in the Chroma leg regardless of
+    service provisioning, so the only gates are the kill switch and the
+    directory existing at all.
+    """
+    if os.environ.get("NX_MIGRATION_NOTICE") == "0":
+        return False
+    try:
+        from nexus.migration.detection import resolve_default_local_leg  # noqa: PLC0415 — deferred: the migration module dies at RDR-155 P4b
+
+        return Path(resolve_default_local_leg()).is_dir()
+    except Exception as exc:  # noqa: BLE001 — best-effort gate; a broken resolver must not break nx doctor
+        _log.debug("census_footprint_gate_failed", error=str(exc))
+        return False
 
 
 @dataclass(frozen=True)
@@ -50,14 +75,13 @@ def legacy_id_census() -> list[LegacyCollection] | None:
     collections are all conformant. Non-empty = pending era-debt.
     """
     from nexus.migration.guided_upgrade import (  # noqa: PLC0415 — deferred: the whole bridge dies with the migration module at RDR-155 P4b
-        detect_pending_migration,
-        legacy_footprint_pending,
+        detect_pending_migration_memoized,
     )
 
-    if not legacy_footprint_pending():
+    if not _chroma_footprint_present():
         return None
     try:
-        detection = detect_pending_migration()
+        detection = detect_pending_migration_memoized()
     except Exception as exc:  # noqa: BLE001 — best-effort census; a broken store must not break nx doctor
         _log.warning("legacy_id_census_probe_failed", error=str(exc))
         return None

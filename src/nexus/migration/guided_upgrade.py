@@ -203,7 +203,7 @@ def pending_migration_notice() -> str | None:
         return None
 
     try:
-        detection = detect_pending_migration()
+        detection = detect_pending_migration_memoized()
     except Exception:  # noqa: BLE001 — best-effort probe; a broken store must not break nx upgrade/doctor
         _log.debug("pending_migration_notice_probe_failed", exc_info=True)
         return None
@@ -267,6 +267,44 @@ def detect_pending_migration(
         unsupported=len(report.unsupported),
     )
     return PreflightDetection(report=report, needs_migration=needs)
+
+
+#: Process-local memo for :func:`detect_pending_migration_memoized`:
+#: (producer function object, monotonic timestamp, result).
+_detection_memo: tuple[object, float, PreflightDetection] | None = None
+_DETECTION_MEMO_TTL_S: float = 60.0
+
+
+def detect_pending_migration_memoized() -> PreflightDetection:
+    """Single-probe memo over :func:`detect_pending_migration`.
+
+    RDR-185 P1 critique (High): a plain ``nx doctor`` on a Chroma-mode
+    install paid the read-leg classification TWICE back to back — once for
+    the ladder's legacy-id census (``upgrade_ladder.census``) and once for
+    the bridge notice (:func:`pending_migration_notice`). Both now share
+    this memo. The entry is keyed by the producer FUNCTION OBJECT (held by
+    reference, compared with ``is``): a test that monkeypatches
+    ``detect_pending_migration`` produces a different object and always
+    misses a foreign entry — no cross-test leakage, no stale patched
+    results. The short TTL bounds staleness in long-lived processes
+    (doctor CLI runs are one-shot; MCP daemons calling health checks
+    repeatedly re-probe at most once a minute — migration-pending state
+    changes on human timescales).
+    """
+    global _detection_memo
+    import time  # noqa: PLC0415 — stdlib, kept helper-local
+
+    producer = detect_pending_migration
+    now = time.monotonic()
+    if (
+        _detection_memo is not None
+        and _detection_memo[0] is producer
+        and now - _detection_memo[1] < _DETECTION_MEMO_TTL_S
+    ):
+        return _detection_memo[2]
+    result = producer()
+    _detection_memo = (producer, now, result)
+    return result
 
 
 # ── RDR-178 Gap 7 (nexus-1sx01): already-migrated detection ────────────────

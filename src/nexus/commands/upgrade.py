@@ -64,7 +64,7 @@ def upgrade(ctx: click.Context, dry_run: bool, force: bool, auto_mode: bool, ski
         # the upgrade ladder — every pending rung converges here (dry-run
         # reports read-only from detect()). The registry is empty until native
         # rungs land (t2-schema P1, substrate-etl P2), so this is silent today.
-        _run_ladder(dry_run=dry_run, auto_mode=auto_mode)
+        _run_ladder(dry_run=dry_run, auto_mode=auto_mode, _t2_apply_attempted=not dry_run)
         # nexus-0rwwv: the routine in-place migration above is a different
         # thing from the one-time substrate cutover (nx guided-upgrade) —
         # and nothing bridged them: a local-mode user with a pending
@@ -114,6 +114,7 @@ def _run_ladder(
     dry_run: bool,
     auto_mode: bool,
     _store_path_fn: "Callable[[], Path] | None" = None,  # noqa: F821 — lazy imports (module keeps cold-start cheap)
+    _t2_apply_attempted: bool = False,
 ) -> None:
     """RDR-185 P0.4: walk the upgrade ladder (or report it, on --dry-run).
 
@@ -137,7 +138,11 @@ def _run_ladder(
     # Route the command's _db_path seam into the T2 rung and co-locate
     # ladder.db with it, so tests that patch _db_path (the established
     # test_upgrade_cmd.py isolation) never touch a live install.
-    registry = default_registry(db_path_fn=_db_path)
+    # _t2_apply_attempted: _run_upgrade already ran apply_pending in this
+    # invocation — the T2 rung REPORTS instead of re-executing (P1 critique
+    # Critical: the deferred case otherwise re-runs every eligible step,
+    # incl. a 30s drain attempt, twice — also on the --auto hook path).
+    registry = default_registry(db_path_fn=_db_path, t2_apply_attempted=_t2_apply_attempted)
     if dry_run:
         # Per-rung detect guard (critic P0.R2 finding 1): a real rung's
         # detect() does live reads that can fail (locked db, bad path); the

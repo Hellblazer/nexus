@@ -10,8 +10,12 @@ on-open class):
   ``expected_t2_schema_version()``, with step-level truth from
   ``resolve_pending_steps`` (RDR-142 dry-run-truth) in the pending detail.
 - ``converge`` — ``apply_pending`` under the cross-process migration
-  flock. No behavior change to T2 migration itself; it now REPORTS
-  through the ladder.
+  flock; OR, when constructed with ``apply_attempted=True`` (the
+  ``nx upgrade`` flow, whose legacy ``_run_upgrade`` leg already ran
+  ``apply_pending`` in the same invocation), a pure REPORT of the stored
+  state — exactly one ``apply_pending`` execution per invocation. The
+  dual mode is interim: it dies when the legacy leg is demoted (P4) and
+  the ladder becomes the sole execution path.
 - ``verify`` — the stored row caught up to expected. ``apply_pending``
   refuses to stamp when any step deferred (``any_skipped``, the RDR-142
   guard at its source), so a deferral surfaces here as verify-fail and
@@ -71,6 +75,7 @@ class T2SchemaRung:
         db_path_fn: Callable[[], Path] | None = None,
         expected_version_fn: Callable[[], str] | None = None,
         service_mode_fn: Callable[[], bool] | None = None,
+        apply_attempted: bool = False,
     ) -> None:
         self._db_path_fn = db_path_fn if db_path_fn is not None else _default_db_path
         self._expected_fn = (
@@ -79,6 +84,15 @@ class T2SchemaRung:
         self._service_mode_fn = (
             service_mode_fn if service_mode_fn is not None else _memory_backend_is_service
         )
+        #: True when the caller (nx upgrade's legacy _run_upgrade leg) already
+        #: ran apply_pending on this path IN THIS INVOCATION — converge then
+        #: REPORTS the verdict from stored state instead of re-executing.
+        #: P1 critique Critical: without this, the deferred case re-ran every
+        #: eligible step's body (incl. an up-to-30s aspect-worker drain) twice
+        #: back to back, including on the SessionStart --auto hot path. Goes
+        #: away when the legacy leg is demoted and the ladder becomes the sole
+        #: execution path (P4).
+        self._apply_attempted = apply_attempted
 
     # ── detect ───────────────────────────────────────────────────────────────
 
@@ -166,13 +180,16 @@ class T2SchemaRung:
             )
         expected = self._expected_fn()
         path = self._db_path_fn()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with t2_migration_flock(path.parent):
-            conn = _open(path, ro=False)
-            try:
-                apply_pending(conn, expected)
-            finally:
-                conn.close()
+        if self._apply_attempted:
+            report.emit("t2_schema_rung_reporting_prior_apply", expected=expected)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with t2_migration_flock(path.parent):
+                conn = _open(path, ro=False)
+                try:
+                    apply_pending(conn, expected)
+                finally:
+                    conn.close()
         stored = self._stored_version(path)
         if stored is None or not self._caught_up(stored, expected):
             detail = (
