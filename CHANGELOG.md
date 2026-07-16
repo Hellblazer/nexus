@@ -6,6 +6,68 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.11.0] - 2026-07-16
+
+Ships with (and requires) engine-service-v0.1.44.
+
+### Added
+
+- **Service-mode tier-write visibility** (nexus-59wjj, GH #1405 arc): `nx
+  tier-status`, `nx doctor --check-tier-discipline`, and the SessionEnd
+  one-line summary now read real per-session counts from the engine via the
+  new `GET /v1/telemetry/tier_writes/query` route (engine-service-v0.1.44)
+  instead of reporting "local inspection not available" (or, for the
+  session-end summary, silently printing nothing). Against an older engine
+  or an unreachable service, each surface degrades to an honest,
+  failure-shaped message — 404 (engine predates the route) is distinguished
+  from a live engine error and from unreachable.
+- Embedding fetches report progress: the taxonomy discovery fetch prints
+  milestones across its paged `get_embeddings` round-trips instead of
+  appearing hung on large collections.
+
+### Fixed
+
+- **Taxonomy discovery no longer 504s on large collections** (nexus-g7ubw):
+  `get_embeddings` pages requests at the service quota (~3 MB/response)
+  instead of posting every id in one request — a 28k-chunk collection
+  previously returned hundreds of MB and deterministically hit the gateway
+  timeout, breaking `nx taxonomy discover` in service mode.
+- **Index runs stop paying full fetch+cluster for no-op discovers**
+  (nexus-vgtff, nexus-tevzq): non-force taxonomy discovery on a collection
+  that already has topics is a designed no-op, but the guard fired only
+  after fetching every chunk text + embedding and clustering — 300 s of
+  discarded work on every changed index run. The existing-topics check now
+  runs before the fetch (measured: 300.3 s → 0.6 s on the same repo), the
+  discover loop is gated per collection by which content kinds actually
+  wrote files, and `nx taxonomy discover` prints an honest "topics already
+  exist — use `nx taxonomy rebuild`" instead of a mute "skipped".
+- **Local service-mode installs stop cycling a current supervisor on every
+  session event** (nexus-f0pmd, GH #1405): `nx upgrade --auto` (the
+  SessionStart hook) restarted any live storage-service supervisor
+  unconditionally — 20 restarts/day with a 5-10 s lease gap each on the
+  reporting box. The cycle is now version-gated like its T2 sibling: a
+  supervisor already on the installed version is left alone; anything
+  unprovable still cycles (upgrade correctness preserved). Structured
+  skip/stale-cycle events make the decision diagnosable.
+- `nx doctor`'s index-log check reads the newest of both log surfaces
+  (git-hook append log and per-run `logs/index-*.log`) instead of reporting
+  hundreds of hours of staleness during live index runs.
+- Spurious macOS Accelerate FP warnings from large-collection kmeans
+  clustering are suppressed only when the input is provably finite;
+  genuinely degenerate input now fails loud with structured events instead
+  of warning noise.
+- `nx tier-status --last N` selects sessions by explicit `MAX(ts)` instead
+  of SQLite's implementation-defined ordering — local and service backends
+  now agree on the same data.
+
+### Changed
+
+- `REQUIRED_ENGINE_VERSION` → 0.1.44 (moves the fresh-install
+  `PINNED_SERVICE_TAG` with it, by construction).
+- SessionEnd hook timeout 3 s → 10 s: the service-mode summary reads the
+  engine post-fork with a hard 2 s single-attempt cap; the budget is
+  tied together with a parity test so the two values cannot drift.
+
 ## [6.10.2] - 2026-07-15
 
 Client-side mitigations for GH #1405: MCP calls no longer hard-fail in
