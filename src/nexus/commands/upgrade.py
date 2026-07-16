@@ -65,8 +65,13 @@ def upgrade(ctx: click.Context, dry_run: bool, force: bool, auto_mode: bool, ski
         # on-disk state each invocation (sidecar/lease/metadata), never
         # recorded. --auto keeps the engine install with the version-
         # transition path (hook timeout budget); process freshness stays.
+        # (check_version_transition at the ROOT cli group has already run on
+        # this invocation — on a version transition it converged the engine
+        # inline via the same shared mechanism; this stage's engine step
+        # then no-ops. One mechanism, two triggers: see the P3 decision
+        # addendum nexus_rdr/185-p3-engine-trigger-duality-decision.)
         if not dry_run:
-            _converge_preconditions(auto_mode=auto_mode)
+            _converge_preconditions(auto_mode=auto_mode, skip_t3=skip_t3)
         # RDR-185 P0.4 (nexus-n7u38.4): `nx upgrade` is the SINGLE trigger for
         # the upgrade ladder — every pending rung converges here (dry-run
         # reports read-only from detect()). The registry is empty until native
@@ -116,13 +121,19 @@ def upgrade(ctx: click.Context, dry_run: bool, force: bool, auto_mode: bool, ski
             _cycle_supervised_daemons_to_current(skip_t3=skip_t3)
 
 
-def _converge_preconditions(*, auto_mode: bool) -> None:
+def _converge_preconditions(*, auto_mode: bool, skip_t3: bool = False) -> None:
     """RDR-185 P3.1: converge the non-data axes before the ladder walk.
 
     Best-effort at the trigger level (a precondition failure is reported,
     remediated where derivable, and never blocks the T2 migration that
     already ran) — but the verdicts themselves are computed fresh every
     invocation and never stored.
+
+    ``--skip-t3`` (P3 review Medium): the flag's contract is "fast T2-only"
+    — it already gates the bottom-of-command storage-service cycle, so it
+    equally gates this stage's engine install and process cycle. Verdicts
+    are still computed and reported (they are sub-ms on-disk reads); only
+    the CONVERGE actions are suppressed.
     """
     try:
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
@@ -130,7 +141,8 @@ def _converge_preconditions(*, auto_mode: bool) -> None:
 
         reports = converge_preconditions(
             config_dir=nexus_config_dir(),
-            allow_engine_install=not auto_mode,
+            allow_engine_install=not auto_mode and not skip_t3,
+            allow_process_cycle=not skip_t3,
         )
         for report in reports:
             for line in report.actions:

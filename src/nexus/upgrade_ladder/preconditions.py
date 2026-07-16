@@ -162,6 +162,7 @@ def converge_preconditions(
     *,
     config_dir: Path,
     allow_engine_install: bool = True,
+    allow_process_cycle: bool = True,
     _engine_detect_fn: Callable[[], Any] | None = None,
     _engine_converge_fn: Callable[[], list[str]] | None = None,
     _lease_fn: Callable[[], Any | None] | None = None,
@@ -225,8 +226,11 @@ def converge_preconditions(
 
     # Process: RE-DERIVE after the engine step — a fresh lease read sees the
     # supervisor converge_engine just restarted, coalescing the cycles.
+    # allow_process_cycle=False (--skip-t3): verdicts still computed and
+    # reported; the cycle action is suppressed per the flag's fast-T2-only
+    # contract (P3 review Medium).
     process = _process_report(lease_fn(), installed)
-    if not process.current:
+    if not process.current and allow_process_cycle:
         cycle_fn()
         process = _process_report(lease_fn(), installed)  # re-derive post-cycle
         process = PreconditionReport(

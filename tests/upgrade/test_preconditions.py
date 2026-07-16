@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from nexus.commands.upgrade import upgrade
+from nexus.commands.upgrade import _converge_preconditions, upgrade
 from nexus.upgrade_ladder.preconditions import (
     PreconditionReport,
     check_preconditions,
@@ -207,6 +207,42 @@ def test_no_running_process_is_current_not_cycled(tmp_path: pathlib.Path) -> Non
     )
     assert {r.name: r for r in reports}["process"].current is True
     assert cycles["n"] == 0
+
+
+def test_skip_t3_suppresses_converge_actions_but_still_reports(
+    tmp_path: pathlib.Path,
+) -> None:
+    """P3 review Medium: --skip-t3's fast-T2-only contract gates this
+    stage's engine install AND process cycle (verdicts still computed —
+    they are sub-ms on-disk reads — only the actions are suppressed)."""
+    cycles = {"n": 0}
+    installs = {"n": 0}
+
+    def _engine_converge():
+        installs["n"] += 1
+        return ["installed"]
+
+    reports = converge_preconditions(
+        config_dir=tmp_path,
+        allow_engine_install=False,   # what --skip-t3 (and --auto) passes
+        allow_process_cycle=False,    # what --skip-t3 passes
+        _engine_detect_fn=lambda: _EngineStatus(),
+        _engine_converge_fn=_engine_converge,
+        _lease_fn=lambda: _Lease(version="6.10.0"),
+        _installed_version_fn=lambda: "6.12.0",
+        _cycle_fn=lambda: cycles.__setitem__("n", cycles["n"] + 1),
+    )
+    assert installs["n"] == 0
+    assert cycles["n"] == 0
+    by = {r.name: r for r in reports}
+    assert by["engine"].current is False  # still REPORTED honestly
+    assert by["process"].current is False
+
+
+def test_upgrade_trigger_threads_skip_t3_into_preconditions() -> None:
+    """Wiring pin for the --skip-t3 contract."""
+    source = inspect.getsource(_converge_preconditions)
+    assert "not skip_t3" in source  # both gates derive from the flag
 
 
 def test_package_reports_installed_version(tmp_path: pathlib.Path) -> None:

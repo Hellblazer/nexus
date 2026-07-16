@@ -81,12 +81,16 @@ def test_no_position_setter_anywhere_in_the_ladder() -> None:
 # ── Mechanism 2: preconditions are STATELESS (zero persistence) ──────────────
 
 
-_WRITE_CALL_NAMES = frozenset({"write_text", "write_bytes", "dump", "connect", "executemany"})
+_WRITE_CALL_NAMES = frozenset(
+    {"write_text", "write_bytes", "dump", "connect", "execute", "executemany"}
+)
 
 
 def _persistence_calls(tree: ast.AST) -> list[str]:
     """Call sites that could persist a verdict: file writes, json.dump,
-    sqlite connects, and open(..., mode with 'w'/'a')."""
+    sqlite connects/executes, and open(..., mode with 'w'/'a'/'+') in BOTH
+    the builtin two-arg form and the pathlib bound-method form (P3 review:
+    ``path.open('w')`` carries the mode at args[0], not args[1])."""
     hits: list[str] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -98,11 +102,15 @@ def _persistence_calls(tree: ast.AST) -> list[str]:
         if name in _WRITE_CALL_NAMES:
             hits.append(name)
         if name == "open":
-            for arg in list(node.args[1:2]) + [
+            candidates = list(node.args) + [
                 kw.value for kw in node.keywords if kw.arg == "mode"
-            ]:
-                if isinstance(arg, ast.Constant) and any(m in str(arg.value) for m in ("w", "a", "+")):
+            ]
+            for arg in candidates:
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str) and any(
+                    m in arg.value for m in ("w", "a", "+")
+                ):
                     hits.append("open(w)")
+                    break
     return hits
 
 
@@ -119,12 +127,18 @@ def test_preconditions_module_persists_nothing() -> None:
 
 
 def test_persistence_detector_is_non_vacuous() -> None:
-    """The detector actually fires on each persistence shape."""
+    """The detector actually fires on each persistence shape — including the
+    two false-negative shapes the P3 review found (pathlib bound-method
+    open, single-row execute)."""
     assert _persistence_calls(ast.parse("path.write_text('v1')")) == ["write_text"]
     assert _persistence_calls(ast.parse("json.dump(x, fh)")) == ["dump"]
     assert _persistence_calls(ast.parse("sqlite3.connect('x.db')")) == ["connect"]
     assert _persistence_calls(ast.parse("open(p, 'w')")) == ["open(w)"]
+    assert _persistence_calls(ast.parse("path.open('w')")) == ["open(w)"]  # bound form
+    assert _persistence_calls(ast.parse("path.open(mode='a')")) == ["open(w)"]
+    assert _persistence_calls(ast.parse("cursor.execute('INSERT ...')")) == ["execute"]
     assert _persistence_calls(ast.parse("open(p)")) == []  # read-only open is fine
+    assert _persistence_calls(ast.parse("path.open()")) == []
 
 
 # ── No third authority ───────────────────────────────────────────────────────
