@@ -15,7 +15,7 @@ def test_index_repo_triggers_taxonomy_discover(tmp_path) -> None:
     (tmp_path / ".git").mkdir()
     calls: list[str] = []
 
-    def fake_discover(collection_name, taxonomy, chroma_client, *, force=False):
+    def fake_discover(collection_name, taxonomy, chroma_client, *, force=False, quiet=False):
         calls.append(collection_name)
         return 2
 
@@ -43,7 +43,7 @@ def test_index_repo_no_taxonomy_flag(tmp_path) -> None:
     (tmp_path / ".git").mkdir()
     calls: list[str] = []
 
-    def fake_discover(collection_name, taxonomy, chroma_client, *, force=False):
+    def fake_discover(collection_name, taxonomy, chroma_client, *, force=False, quiet=False):
         calls.append(collection_name)
         return 0
 
@@ -65,7 +65,7 @@ def test_index_repo_frecency_only_skips_taxonomy(tmp_path) -> None:
     (tmp_path / ".git").mkdir()
     calls: list[str] = []
 
-    def fake_discover(collection_name, taxonomy, chroma_client, *, force=False):
+    def fake_discover(collection_name, taxonomy, chroma_client, *, force=False, quiet=False):
         calls.append(collection_name)
         return 0
 

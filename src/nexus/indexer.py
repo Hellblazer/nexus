@@ -3297,11 +3297,13 @@ def _run_index(
 
     # nexus-qgc4b: tally files that actually wrote chunks across all three
     # loops; used below to skip the expensive post-index passes on all-skip runs.
-    _files_written = 0
-    _files_written += run_file_loop(
+    # nexus-tevzq: kept per-kind so the caller can gate taxonomy discovery per
+    # collection (code loop → code__, prose+pdf → docs__, rdr loop → rdr__).
+    _code_written = run_file_loop(
         code_files, _index_one_code, concurrency=_concurrency,
         on_file=on_file, on_stage_timers=on_stage_timers,
     )
+    _files_written = _code_written
 
     # Index prose files → docs__ (voyage-context-3 via CCE)
     # NOTE: calls _index_prose_file (the module-level wrapper) — same reason.
@@ -3326,10 +3328,11 @@ def _run_index(
             batcher=_batcher,
         ), file)
 
-    _files_written += run_file_loop(
+    _prose_written = run_file_loop(
         prose_files, _index_one_prose, concurrency=_concurrency,
         on_file=on_file, on_stage_timers=on_stage_timers,
     )
+    _files_written += _prose_written
 
     # Index PDF files → docs__ (PDF extraction + voyage-context-3)
     _log.debug("indexing PDF files", count=len(pdf_files))
@@ -3351,10 +3354,11 @@ def _run_index(
             batcher=_batcher,
         ), file)
 
-    _files_written += run_file_loop(
+    _pdf_written = run_file_loop(
         pdf_files, _index_one_pdf, concurrency=_concurrency,
         on_file=on_file, on_stage_timers=on_stage_timers,
     )
+    _files_written += _pdf_written
 
     # Index RDR markdown files → rdr__ (nexus-3lswy: 4th run_file_loop
     # category, same wiring as prose — batched register_many/doc_id
@@ -3624,6 +3628,14 @@ def _run_index(
         "rdr_current": rdr_current,
         "rdr_failed": rdr_failed,
         "files_changed": _files_written,
+        # nexus-tevzq: per-collection-kind attribution for the caller's
+        # discover gate. Keys match the collection-name content_type prefix
+        # (RDR-103 shape). prose+pdf both land in docs__.
+        "files_changed_by_kind": {
+            "code": _code_written,
+            "docs": _prose_written + _pdf_written,
+            "rdr": _rdr_written,
+        },
     }
 
 

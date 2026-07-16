@@ -192,7 +192,7 @@ def index() -> None:
         )
 
 
-def _discover_taxonomy(collection_name, taxonomy, t3, *, force=False):
+def _discover_taxonomy(collection_name, taxonomy, t3, *, force=False, quiet=False):
     """Wrapper for discover_for_collection — importable for patching in tests.
 
     nexus-7ydks: now takes the T3 handle (``T3Database`` raw or
@@ -206,7 +206,7 @@ def _discover_taxonomy(collection_name, taxonomy, t3, *, force=False):
     # (discover_cmd/rebuild_cmd already guard; this shared wrapper did not).
     _require_supported_taxonomy_backend(t3, taxonomy)
     return discover_for_collection(
-        collection_name, taxonomy, t3, force=force,
+        collection_name, taxonomy, t3, force=force, quiet=quiet,
     )
 
 
@@ -696,8 +696,22 @@ def index_repo_cmd(
             info = reg.get(path) or {}
             collections = _collections_from_registry_info(info)
             files_changed = stats.get("files_changed", 0)
-            if files_changed > 0 or _taxonomy_incomplete(collections):
-                run_collection_postprocessing(collections, repo_path=path)
+            # One topic-existence probe serves both the qgc4b self-heal gate
+            # and the tevzq subset (review Medium-2: was two T2 opens).
+            no_topics = _collections_without_topics(collections)
+            if files_changed > 0 or no_topics:
+                # nexus-tevzq: collection-grain refinement of the qgc4b gate.
+                # Only collections whose own kind wrote files this run (plus
+                # zero-topic self-heal candidates) re-discover; a collection
+                # with zero new chunks would re-cluster into an identical
+                # taxonomy. Projection/links/L1 still see the full list.
+                discover = _discover_subset(
+                    collections, stats.get("files_changed_by_kind"),
+                    no_topics=no_topics,
+                )
+                run_collection_postprocessing(
+                    collections, repo_path=path, discover_collections=discover,
+                )
             else:
                 click.echo("  Taxonomy: no files changed — skipping discovery")
 
@@ -734,20 +748,69 @@ def _taxonomy_incomplete(collections: list[str]) -> bool:
     ``files_changed > 0``). Fails safe: on any error, returns True (run
     discovery) rather than risk stranding a collection.
     """
+    return bool(_collections_without_topics(collections))
+
+
+def _collections_without_topics(collections: list[str]) -> set[str]:
+    """Return the subset of *collections* with zero discovered topics.
+
+    The per-collection form of the qgc4b self-heal probe (nexus-tevzq).
+    Fails safe: on any probe error, returns ALL of *collections* — err
+    toward running discovery, never toward stranding a collection.
+    """
     if not collections:
-        return False
+        return set()
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — deliberate function-local import (heavy T2 dep deferred to call time)
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
 
     try:
         with T2Database(default_db_path()) as db:  # epsilon-allow: read-only topic-existence probe; no WAL writer contention (RDR-128 P3)
-            for col in collections:
-                if not db.taxonomy.get_topics_for_collection(col):
-                    return True
+            return {
+                col for col in collections
+                if not db.taxonomy.get_topics_for_collection(col)
+            }
     except Exception:  # noqa: BLE001 — probe is best-effort; on failure err toward running discovery
         _log.debug("taxonomy_incomplete_probe_failed", exc_info=True)
-        return True
-    return False
+        return set(collections)
+
+
+def _discover_subset(
+    collections: list[str],
+    files_changed_by_kind: dict | None,
+    *,
+    no_topics: set[str] | None = None,
+) -> list[str]:
+    """Collections that should run taxonomy DISCOVERY this run (nexus-tevzq).
+
+    Keeps a collection when its content-type kind (name prefix before the
+    first ``__``) wrote files this run, when it has no topics yet (qgc4b
+    self-heal), or when its kind is absent from *files_changed_by_kind*
+    (fail toward discovering). ``None`` stats shape (older indexer, bulk
+    reindex) → full list. Order of *collections* is preserved.
+
+    Known limitation (critic, 2026-07-15): ``--corpus knowledge`` repos
+    rewrite the registered docs collection to ``knowledge__*``; that prefix
+    is never a key in *files_changed_by_kind* (only code/docs/rdr), so the
+    fail-safe default keeps such collections every run — deliberate
+    err-toward-discovery, NOT a bug to "fix" by skipping. The vgtff
+    pre-fetch probe in ``discover_for_collection`` still makes the kept
+    call cheap when topics exist.
+    """
+    if not isinstance(files_changed_by_kind, dict):
+        return list(collections)
+    changed = {
+        col for col in collections
+        if files_changed_by_kind.get(col.split("__", 1)[0], 1) > 0
+    }
+    unchanged = [col for col in collections if col not in changed]
+    if not unchanged:
+        keep = changed
+    elif no_topics is not None:
+        # Caller pre-computed the probe (gate path) — don't re-open T2.
+        keep = changed | (no_topics & set(unchanged))
+    else:
+        keep = changed | _collections_without_topics(unchanged)
+    return [col for col in collections if col in keep]
 
 
 def _collections_from_registry_info(info: dict) -> list[str]:
@@ -867,6 +930,7 @@ def run_collection_postprocessing(
     *,
     repo_path: Path | None = None,
     quiet: bool = False,
+    discover_collections: list[str] | None = None,
 ) -> None:
     """Run the post-index taxonomy + projection + topic-link chain
     against *collections* and refresh the L1 context cache.
@@ -907,11 +971,25 @@ def run_collection_postprocessing(
         t3 = make_t3()
         total_topics = 0
         _tax_t0 = _time.monotonic()
+        # nexus-tevzq: only the DISCOVER loop narrows to discover_collections;
+        # projection / co-occurrence / topic-links / L1 below keep the full
+        # *collections* list (cross-collection semantics unchanged).
+        if discover_collections is None:
+            _discover_targets = collections
+        else:
+            _allowed = set(discover_collections)
+            _discover_targets = [c for c in collections if c in _allowed]
+            _n_skipped = len(collections) - len(_discover_targets)
+            if _n_skipped:
+                _say(
+                    f"  Taxonomy: {_n_skipped} unchanged collection(s) skipped "
+                    f"(no files written this run)"
+                )
         with T2Database(default_db_path()) as db:  # epsilon-allow: read-only: discover/project compute use a local chroma client; all pure-T2 writes routed via t2_index_write (RDR-151 Phase 3, nexus-uzay8)
-            for _tax_i, col_name in enumerate(collections, start=1):
-                _say(f"  [{_tax_i}/{len(collections)}] Taxonomy: discovering {col_name}...")
+            for _tax_i, col_name in enumerate(_discover_targets, start=1):
+                _say(f"  [{_tax_i}/{len(_discover_targets)}] Taxonomy: discovering {col_name}...")
                 try:
-                    n = _discover_taxonomy(col_name, db.taxonomy, t3)
+                    n = _discover_taxonomy(col_name, db.taxonomy, t3, quiet=quiet)
                     total_topics += n
                 except Exception as exc:  # noqa: BLE001 — best-effort per-collection taxonomy discovery; failure logged and chain continues
                     # nexus-qgc4b: surface the failure. A silent debug-only log
@@ -926,7 +1004,10 @@ def run_collection_postprocessing(
                     )
             _say(f"  Taxonomy: discover done ({_time.monotonic() - _tax_t0:.1f}s)")
             if total_topics:
-                _say(f"  Taxonomy: {total_topics} topics across {len(collections)} collections.")
+                _say(
+                    f"  Taxonomy: {total_topics} topics across "
+                    f"{len(_discover_targets)} collections."
+                )
                 # Auto-label with Claude if available and enabled
                 auto_label = cfg.get("taxonomy", {}).get("auto_label", True)
                 if auto_label:
