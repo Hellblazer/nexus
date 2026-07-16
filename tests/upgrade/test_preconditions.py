@@ -168,6 +168,31 @@ def test_converge_cycles_process_when_engine_already_current(
     assert {r.name: r for r in reports}["process"].current is True
 
 
+def test_failed_engine_cycle_degrades_to_bounded_second_cycle(
+    tmp_path: pathlib.Path,
+) -> None:
+    """P3 critique Medium: the coalescing claim is happy-path. When the
+    engine converge's restart FAILS to publish a current lease (stale
+    still-alive supervisor), the process step fires its own cycle — a
+    BOUNDED second pair, and if THAT also fails to freshen the lease, the
+    run reports stale honestly and stops (no in-invocation retry loop)."""
+    cycles = {"n": 0}
+    lease_state = {"version": "6.10.0"}  # engine converge does NOT freshen it
+
+    reports = converge_preconditions(
+        config_dir=tmp_path,
+        _engine_detect_fn=lambda: _EngineStatus(),
+        _engine_converge_fn=lambda: ["attempted engine install; restart failed"],
+        _lease_fn=lambda: _Lease(version=lease_state["version"]),
+        _installed_version_fn=lambda: "6.12.0",
+        _cycle_fn=lambda: cycles.__setitem__("n", cycles["n"] + 1),
+    )
+    assert cycles["n"] == 1  # exactly one process-step cycle — bounded, no loop
+    process = {r.name: r for r in reports}["process"]
+    assert process.current is False  # still stale: reported honestly, not retried
+    assert "6.10.0" in process.detail
+
+
 def test_no_running_process_is_current_not_cycled(tmp_path: pathlib.Path) -> None:
     """No lease = nothing running to cycle (upgrade must not auto-spawn) —
     process reads current-by-absence."""

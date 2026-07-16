@@ -172,10 +172,21 @@ def converge_preconditions(
     process (re-derived AFTER the engine step; see module docstring for
     the coalescing argument).
 
-    ``allow_engine_install=False`` is the ``--auto`` budget: the engine
-    axis is REPORTED but its converge (binary download + service cycle)
-    stays with the version-transition path (``check_version_transition``),
-    keeping the SessionStart hook inside its timeout.
+    ``allow_engine_install=False`` (the ``--auto`` form) prevents a
+    REDUNDANT same-invocation engine install: on a version transition the
+    root-level finisher (``check_version_transition``, which fires before
+    this stage on the same invocation) has already run the single shared
+    converge inline. The SessionStart timeout is protected by that path's
+    TRANSITION-GATING (at most one install per version bump, idempotent
+    skip every other session), not by this flag — see the P3 decision
+    addendum (nexus_rdr/185-p3-engine-trigger-duality-decision): one
+    mechanism, temporarily two triggers, the second P4-scoped for demotion.
+
+    Coalescing is the HAPPY-PATH property: a failed engine restart (or a
+    start that returns a stale still-alive lease) leaves the process
+    verdict stale and the process step fires its own BOUNDED second cycle
+    — idempotent, never a loop (every step re-derives; nothing retries
+    in-invocation).
     """
     from nexus.upgrade_finish import converge_engine, detect_engine_convergence  # noqa: PLC0415 — deferred to avoid import cost
 

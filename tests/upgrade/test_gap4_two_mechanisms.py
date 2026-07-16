@@ -180,6 +180,64 @@ def test_exactly_two_mechanism_modules_exist() -> None:
     assert answer_modules == {"completion.py", "preconditions.py"}
 
 
+SRC_ROOT = REPO_ROOT / "src" / "nexus"
+
+#: Every module allowed to invoke the SINGLE engine-convergence mechanism
+#: (detect_engine_convergence / converge_engine). P3 critique High: the
+#: package-scoped scans above cannot see a third TRIGGER growing outside
+#: upgrade_ladder/ — this census can. One mechanism, temporarily two
+#: converge triggers (decision addendum
+#: nexus_rdr/185-p3-engine-trigger-duality-decision):
+_ENGINE_MECHANISM_CALLERS = frozenset({
+    "upgrade_finish.py",              # defines it + the transition finisher
+                                      # (engine leg P4-scoped for demotion, .28)
+    "commands/daemon.py",             # restart-stale operator verb (P4 .28 scope)
+    "upgrade_ladder/preconditions.py",  # the ladder's precondition stage
+    "health.py",                      # doctor read-only convergence check
+    "engine_version.py",              # docstring/derivation home (no live call)
+})
+
+
+def test_engine_mechanism_callers_are_allowlisted() -> None:
+    """Codebase-wide census (not package-scoped): any NEW module invoking
+    the engine-convergence mechanism must be argued past this allowlist —
+    a third converge trigger reintroduced anywhere in src/ fails here."""
+    offenders: list[str] = []
+    for path in SRC_ROOT.rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        rel = path.relative_to(SRC_ROOT).as_posix()
+        if rel in _ENGINE_MECHANISM_CALLERS:
+            continue
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            if (
+                ("detect_engine_convergence" in line or "converge_engine" in line)
+                and _ALLOW_TOKEN not in line
+            ):
+                offenders.append(f"src/nexus/{rel}:{lineno}")
+    assert not offenders, (
+        "a module outside the engine-convergence allowlist invokes the "
+        "mechanism — a new trigger must be reconciled with the P3 decision "
+        f"addendum first: {offenders}"
+    )
+
+
+def test_engine_caller_allowlist_is_non_vacuous() -> None:
+    """The allowlisted callers actually exist and reference the mechanism —
+    otherwise the census above is scanning for something extinct."""
+    referencing = set()
+    for rel in _ENGINE_MECHANISM_CALLERS:
+        path = SRC_ROOT / rel
+        assert path.exists(), f"allowlisted module vanished: {rel}"
+        text = path.read_text(encoding="utf-8")
+        if "detect_engine_convergence" in text or "converge_engine" in text:
+            referencing.add(rel)
+    assert "upgrade_ladder/preconditions.py" in referencing
+    assert "upgrade_finish.py" in referencing
+
+
 def test_lease_survives_only_as_comparison_input() -> None:
     """The lease field is read via the injectable ``_lease_fn`` seam and
     compared — never re-published, never stored by the ladder. Mechanical
