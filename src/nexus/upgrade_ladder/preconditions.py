@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""RDR-185 P3.1: the two non-data axes as STATELESS preconditions.
+"""RDR-185 P3.1 + P4.0b: the non-data axes as STATELESS preconditions.
 
-Package/engine acquisition and process freshness/provisioning are NOT
-ladder rungs (RDR-185 Decision): they are converged by the same trigger
+Package/engine ACQUISITION, service-stack PROVISIONING (P4.0b,
+nexus-6nmrc — the guided-upgrade stage-2 job: a legacy footprint needs a
+target to migrate INTO), and process freshness are NOT ladder rungs
+(RDR-185 Decision): they are converged by the same trigger
 BEFORE the ladder walks, and their freshness is re-derived LIVE at every
 invocation as an installed-vs-running/required comparison — never
 recorded as independent version state (Gap-4: the second and FINAL
@@ -17,8 +19,8 @@ reads the install-time provenance sidecar (``detect_engine_convergence``
 verdict reads installed package metadata. No network, no IPC.
 
 Coalescing (the f0pmd duplicate-cycle class): converge order is package →
-engine → process, and the process verdict is RE-DERIVED after the engine
-step — ``converge_engine``'s own install/restart brings up a current
+engine → provisioning → process, and the process verdict is RE-DERIVED
+after the engine step — ``converge_engine``'s own install/restart brings up a current
 supervisor whose fresh lease already compares equal, so the process step
 skips its cycle naturally. One stop/start pair per invocation.
 
@@ -49,6 +51,37 @@ class PreconditionReport:
     actions: tuple[str, ...] = ()
 
 
+def _converge_provisioning(
+    provisioned_fn: Callable[[], bool],
+    footprint_fn: Callable[[], bool],
+    establish_fn: Callable[[], Any],
+    *,
+    allow: bool,
+) -> PreconditionReport:
+    provisioned = provisioned_fn()
+    footprint = footprint_fn()
+    if provisioned or not footprint or not allow:
+        return _provisioning_report(provisioned, footprint)
+    try:
+        readiness = establish_fn()
+    except Exception as exc:  # noqa: BLE001 — a provisioning failure is REPORTED (the walk then finds no verified target and the substrate rung stays pending), never a crash of the trigger
+        _log.warning("precondition_provisioning_failed", error=str(exc))
+        return _provisioning_report(
+            False, footprint, detail=f"provisioning failed: {exc}"
+        )
+    if not getattr(readiness, "ready", False):
+        reason = getattr(readiness, "reason", "") or "service not ready"
+        return _provisioning_report(
+            False, footprint, detail=f"service not ready — NOT migrating: {reason}"
+        )
+    url = getattr(readiness, "service_url", "")
+    return _provisioning_report(
+        True, footprint,
+        detail=f"service stack provisioned and verified at {url}",
+        actions=(f"provisioned + verified the service stack at {url}",),
+    )
+
+
 def _default_installed_version() -> str:
     from importlib.metadata import version  # noqa: PLC0415 — deferred; only needed on this path
 
@@ -65,6 +98,67 @@ def _default_lease(config_dir: Path) -> Any | None:
 
     registry = ServiceRegistry(dir=config_dir, tier="storage_service")
     return registry.discover(str(os.getuid()))
+
+
+def _default_provisioned(config_dir: Path) -> bool:
+    """ON-DISK evidence that a service stack exists for this install: the
+    pg_credentials provisioning artifact (written once by nx init /
+    guided-upgrade) or a configured service_url credential. File-level
+    only — never a probe of a possibly-down service."""
+    from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid import cycle
+    from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred, circular-dep avoidance
+
+    if (get_credential("service_url") or "").strip():
+        return True
+    return (config_dir / CREDENTIALS_FILENAME).exists()
+
+
+def _default_footprint() -> bool:
+    from nexus.upgrade_ladder.census import _chroma_footprint_present  # noqa: PLC0415 — deferred to avoid import cost
+
+    return _chroma_footprint_present()
+
+
+def _default_establish() -> Any:
+    from nexus.migration.guided_upgrade import establish_verified_service  # noqa: PLC0415 — deferred; the bridge dies at RDR-155 P4b
+
+    return establish_verified_service()
+
+
+def _provisioning_report(
+    provisioned: bool, footprint: bool, *, actions: tuple[str, ...] = (), detail: str = ""
+) -> PreconditionReport:
+    """The ACQUISITION verdict for the service stack (P4.0b, nexus-6nmrc).
+
+    N/A when there is no legacy footprint to migrate: a fresh user must
+    NEVER be provisioned by the upgrade path (nexus-ltix8's no-op).
+    Current when the on-disk provisioning artifact already exists.
+    """
+    if provisioned:
+        return PreconditionReport(
+            name="provisioning",
+            applicable=True,
+            current=True,
+            detail=detail or "service stack provisioned",
+            actions=actions,
+        )
+    if not footprint:
+        return PreconditionReport(
+            name="provisioning",
+            applicable=False,
+            current=True,
+            detail="no legacy footprint to migrate — nothing to provision (fresh install)",
+        )
+    return PreconditionReport(
+        name="provisioning",
+        applicable=True,
+        current=False,
+        detail=detail or (
+            "a legacy Chroma footprint needs a service stack to migrate into "
+            "— none provisioned yet"
+        ),
+        actions=actions,
+    )
 
 
 def _package_report(installed: str) -> PreconditionReport:
@@ -132,8 +226,10 @@ def check_preconditions(
     _engine_detect_fn: Callable[[], Any] | None = None,
     _lease_fn: Callable[[], Any | None] | None = None,
     _installed_version_fn: Callable[[], str] | None = None,
+    _provisioned_fn: Callable[[], bool] | None = None,
+    _footprint_fn: Callable[[], bool] | None = None,
 ) -> list[PreconditionReport]:
-    """READ-ONLY live verdicts for all three axes.
+    """READ-ONLY live verdicts for all four axes.
 
     Stateless by construction: every call re-reads the sidecar, the lease
     file, and package metadata. Never probes a process.
@@ -155,10 +251,16 @@ def check_preconditions(
         _installed_version_fn if _installed_version_fn is not None else _default_installed_version
     )
 
+    provisioned_fn = (
+        _provisioned_fn if _provisioned_fn is not None else (lambda: _default_provisioned(config_dir))
+    )
+    footprint_fn = _footprint_fn if _footprint_fn is not None else _default_footprint
+
     installed = installed_fn() or ""
     return [
         _package_report(installed),
         _engine_report(engine_detect()),
+        _provisioning_report(provisioned_fn(), footprint_fn()),
         _process_report(lease_fn(), installed),
     ]
 
@@ -173,6 +275,9 @@ def converge_preconditions(
     _lease_fn: Callable[[], Any | None] | None = None,
     _installed_version_fn: Callable[[], str] | None = None,
     _cycle_fn: Callable[[], None] | None = None,
+    _provisioned_fn: Callable[[], bool] | None = None,
+    _footprint_fn: Callable[[], bool] | None = None,
+    _establish_fn: Callable[[], Any] | None = None,
 ) -> list[PreconditionReport]:
     """Converge stale axes in order: package (report-only) → engine →
     process (re-derived AFTER the engine step; see module docstring for
@@ -218,6 +323,12 @@ def converge_preconditions(
 
     cycle_fn = _cycle_fn if _cycle_fn is not None else _default_cycle
 
+    provisioned_fn = (
+        _provisioned_fn if _provisioned_fn is not None else (lambda: _default_provisioned(config_dir))
+    )
+    footprint_fn = _footprint_fn if _footprint_fn is not None else _default_footprint
+    establish_fn = _establish_fn if _establish_fn is not None else _default_establish
+
     installed = installed_fn() or ""
     reports = [_package_report(installed)]
 
@@ -228,6 +339,17 @@ def converge_preconditions(
         for line in engine_actions:
             _log.info("precondition_engine_action", action=line)
     reports.append(_engine_report(engine_status, actions=engine_actions))
+
+    # Provisioning (ACQUISITION — P4.0b): a legacy footprint with no service
+    # stack has nothing to migrate INTO. Reuses establish_verified_service
+    # verbatim (provision -> health-gate -> version-pin -> discoverability).
+    # allow_process_cycle=False (--skip-t3) suppresses it: standing up the
+    # whole stack is exactly what "fast T2-only" opts out of.
+    reports.append(
+        _converge_provisioning(
+            provisioned_fn, footprint_fn, establish_fn, allow=allow_process_cycle
+        )
+    )
 
     # Process: RE-DERIVE after the engine step — a fresh lease read sees the
     # supervisor converge_engine just restarted, coalescing the cycles.
