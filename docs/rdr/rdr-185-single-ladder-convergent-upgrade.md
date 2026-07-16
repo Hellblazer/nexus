@@ -310,4 +310,9 @@ the gate must resolve.
 
 ## Decision
 
-(Open — draft.)
+Accepted 2026-07-16 (gate PASSED round 3): the Proposed Decision above is
+the decision, verbatim — one ordered auto-applied data-migration ladder
+keyed by a position derived from per-rung completion records; stateless
+on-disk-sourced preconditions converged by the same trigger; `nx upgrade`
+walks, `nx doctor` reports, every other upgrade verb demoted or deleted.
+Implementation: epic nexus-n7u38 (plan: T2 nexus/plan-rdr-185.md).
