@@ -2915,6 +2915,55 @@ def _check_pending_rungs() -> list[HealthResult]:
     )]
 
 
+def _check_legacy_id_census() -> list[HealthResult]:
+    """RDR-185 P1.2 (nexus-n7u38.9): legacy chunk-id era census (Gap-5).
+
+    Chroma-mode installs holding pre-RDR-108 (non-32-char) chunk ids see
+    the debt HERE, from this release — months before migration day (the
+    GH #1408 incident class: 18 legacy collections invisible until they
+    blocked the migration). Soft warning: the P2 substrate rung's wire
+    re-id converges this automatically at migration; no user action now.
+    Non-Chroma / already-migrated / fresh installs skip silently (the
+    census's cheap file-level gate never opens the store). Crash-proof.
+    """
+    try:
+        from nexus.upgrade_ladder import census as _census  # noqa: PLC0415 — deferred to avoid module-load cost
+
+        result = _census.legacy_id_census()
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.warning("doctor_legacy_id_census_failed", error=str(exc))
+        return [HealthResult(
+            label="Chunk-id era (upgrade ladder)", ok=True,
+            detail="check failed (non-critical)",
+        )]
+    if result is None:
+        return []  # not applicable: no legacy Chroma footprint to census
+    if not result:
+        return [HealthResult(
+            label="Chunk-id era (upgrade ladder)",
+            ok=True,
+            detail="Chroma-mode: all collections hold conformant 32-char chunk ids",
+        )]
+    names = ", ".join(
+        f"{c.collection} ({c.source_count} chunks, {c.leg})" for c in result[:6]
+    )
+    more = f" (+{len(result) - 6} more)" if len(result) > 6 else ""
+    return [HealthResult(
+        label="Chunk-id era (upgrade ladder)",
+        ok=False,
+        warn=True,
+        detail=(
+            f"{len(result)} collection(s) hold pre-RDR-108 legacy chunk ids — "
+            f"pending upgrade-ladder debt: {names}{more}"
+        ),
+        fix_suggestions=[
+            "No action needed now: the substrate migration (nx upgrade, wire "
+            "re-id) converges this automatically when it ships; the census "
+            "makes the debt visible before migration day (GH #1408 class)."
+        ],
+    )]
+
+
 def run_health_checks() -> tuple[list[HealthResult], bool]:
     """Run all health checks.
 
@@ -3001,6 +3050,8 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     results.extend(_check_rls_present())
     # RDR-185 P0.4: read-only pending-rungs surface (degrades internally).
     results.extend(_check_pending_rungs())
+    # RDR-185 P1.2: legacy chunk-id era census, Gap-5 (degrades internally).
+    results.extend(_check_legacy_id_census())
 
     # RDR-178 Pillar A (nexus-aigpt, nexus-14ndm): migration-report checks.
     # Both degrade internally (missing dir / unreadable report / absent
