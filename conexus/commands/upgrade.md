@@ -12,19 +12,25 @@ unlock engine (`nexus.migration.driver.run_guided_upgrade`).
 
 ## Footprint preview (read-only, touches no data)
 
-!`nx migrate-to-service --dry-run`
+!`nx migrate-to-service --dry-run 2>&1 || true`
 
 ## What to do with the preview
 
 The preview above classifies the existing Chroma footprint per collection
 (source leg × embedding model) and lists what would migrate, plus any
 **unsupported** collections that must be re-indexed first. It moves no data and
-needs no service token. A non-zero exit means the preview found a blocking
-condition; the preview output above names the cause per collection. The two
+needs no service token. A BLOCKED preview is this command's PRIMARY use case,
+not an error: the dry-run deliberately exits non-zero when it finds a blocking
+condition (scriptable), and the preamble above tolerates that exit so the
+report always renders — field incident 2026-07-16: the bare `!`cmd`` form made
+the skill CRASH with "Shell command failed" exactly when it had 18 blocked
+collections to explain. The preview output names the cause per collection. The
 causes have different fixes: an **unsupported model** must be re-indexed to a
-supported embedder; a **Voyage-model collection with no `NX_VOYAGE_API_KEY`**
-just needs the key set (no re-index). Resolve whichever the preview names
-before the real run.
+supported embedder; **legacy non-32-char chunk ids** (pre-RDR-108) need the
+collection re-indexed from its source content — never weaken the chash
+constraints (GH #1390); a **Voyage-model collection with no
+`NX_VOYAGE_API_KEY`** just needs the key set (no re-index). Resolve whichever
+the preview names before the real run.
 
 Walk the user through the preview, then proceed only on their go-ahead:
 
