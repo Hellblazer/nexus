@@ -31,6 +31,13 @@ from nexus.upgrade_ladder.registry import (
     expand_edges,
     validate_hard_edges,
 )
+from nexus.upgrade_ladder.runner import (
+    LadderRunner,
+    LadderRunReport,
+    RungOutcome,
+    RungRun,
+    StructlogReporter,
+)
 
 __all__ = [
     "ALL_RUNGS",
@@ -48,9 +55,14 @@ __all__ = [
     "ConvergeResult",
     "LadderOrderError",
     "LadderRegistry",
+    "LadderRunReport",
+    "LadderRunner",
     "ProgressReporter",
     "Rung",
+    "RungOutcome",
+    "RungRun",
     "RungStatus",
+    "StructlogReporter",
     "default_registry",
     "expand_edges",
     "validate_hard_edges",
