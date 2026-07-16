@@ -343,6 +343,49 @@ class TelemetryRepositoryTest {
         }
     }
 
+    @Test @Order(31)
+    void queryTierWrites_groupsFiltersAndIsolatesTenants() {
+        // nexus-59wjj: the nx tier-status read surface. Three writes in one
+        // session (two identical → count 2), one in another session, one in
+        // TENANT_B that must never leak into TENANT_A's counts.
+        // Distinct ts values: recordTierWrite dedups identical rows via
+        // onConflictDoNothing, so a same-ts duplicate would collapse to one.
+        repo.recordTierWrite(TENANT_A, "sess-q1", PAST_TS, "memory_put", "T2", "developer", "proj-q", null);
+        repo.recordTierWrite(TENANT_A, "sess-q1", "2024-01-15T10:31:00Z", "memory_put", "T2", "developer", "proj-q", null);
+        repo.recordTierWrite(TENANT_A, "sess-q1", PAST_TS, "store_put",  "T3", null, null, null);
+        repo.recordTierWrite(TENANT_A, "sess-q2", PAST_TS, "scratch",    "T1", null, null, null);
+        repo.recordTierWrite(TENANT_B, "sess-q1", PAST_TS, "memory_put", "T2", null, null, null);
+
+        // Session filter: only sess-q1, grouped, ordered by (tier, tool).
+        var rows = repo.queryTierWrites(TENANT_A, "sess-q1", "", 0);
+        assertThat(rows).hasSize(2);
+        assertThat(rows.get(0).get("tool")).isEqualTo("memory_put");
+        assertThat(rows.get(0).get("tier")).isEqualTo("T2");
+        assertThat(rows.get(0).get("count")).isEqualTo(2);
+        assertThat(rows.get(0).get("agent")).isEqualTo("developer");
+        assertThat(rows.get(1).get("tool")).isEqualTo("store_put");
+        assertThat(rows.get(1).get("agent")).isEqualTo("");  // NULL → ""
+
+        // Tenant isolation: TENANT_B's identical session id sees only its row.
+        var rowsB = repo.queryTierWrites(TENANT_B, "sess-q1", "", 0);
+        assertThat(rowsB).hasSize(1);
+        assertThat(rowsB.get(0).get("count")).isEqualTo(1);
+
+        // last_n sessions: a far-future session is deterministically the most
+        // recent regardless of what earlier @Order tests recorded — last_n=1
+        // must return exactly its one group (review: isNotEmpty was too weak
+        // to catch a max(ts) ordering regression).
+        repo.recordTierWrite(TENANT_A, "sess-q-future", "2030-01-01T00:00:00Z", "nx_answer", "plan", null, null, null);
+        var recent = repo.queryTierWrites(TENANT_A, "", "", 1);
+        assertThat(recent).hasSize(1);
+        assertThat(recent.get(0).get("tool")).isEqualTo("nx_answer");
+        assertThat(recent.get(0).get("count")).isEqualTo(1);
+
+        // since filter far in the future → empty; no filters → all groups.
+        assertThat(repo.queryTierWrites(TENANT_A, "", "2099-01-01T00:00:00Z", 0)).isEmpty();
+        assertThat(repo.queryTierWrites(TENANT_A, "", "", 0).size()).isGreaterThanOrEqualTo(3);
+    }
+
     // ── consents (RDR-182 nexus-ng2sy: service-mode consent-audit parity) ────────
 
     @Test @Order(32)

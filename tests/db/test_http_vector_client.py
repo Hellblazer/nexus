@@ -1002,6 +1002,160 @@ class TestGetEmbeddings:
         assert result.shape[0] == 0
 
 
+class TestGetEmbeddingsBatching:
+    """nexus-g7ubw: get_embeddings posted ALL ids in one request; on a 28k-chunk
+    collection the response (28k x 1024-dim vectors as JSON) deterministically
+    504'd at the gateway, breaking taxonomy discover for large collections in
+    service mode. Fetch must page at the service quota and concatenate rows in
+    request order (positional-alignment contract, nexus-7ydks S2)."""
+
+    @staticmethod
+    def _fake_post_recording(calls):
+        def fake_post(path, body, *, tenant="default", timeout=120):
+            calls.append((path, body))
+            ids = body["ids"]
+            # Echo one distinct 2-dim row per id: [index-derived, 0.0]
+            return {
+                "ids": list(ids),
+                "embeddings": [[float(int(i)), 0.0] for i in ids],
+            }
+
+        return fake_post
+
+    def test_over_quota_ids_split_into_batches(self, monkeypatch):
+        from nexus.db.limits import QUOTAS
+
+        client = HttpVectorClient()
+        calls: list = []
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post", self._fake_post_recording(calls)
+        )
+        n = QUOTAS.MAX_RECORDS_PER_WRITE * 2 + 17
+        ids = [str(i) for i in range(n)]
+        result = client.get_embeddings("col", ids)
+
+        assert len(calls) == 3
+        assert all(path == "/v1/vectors/get-embeddings" for path, _ in calls)
+        # Every batch respects the quota
+        assert all(len(body["ids"]) <= QUOTAS.MAX_RECORDS_PER_WRITE for _, body in calls)
+        # Slices cover the input exactly, in order
+        assert [i for _, body in calls for i in body["ids"]] == ids
+
+    def test_rows_concatenated_in_request_order(self, monkeypatch):
+        import numpy as np
+
+        from nexus.db.limits import QUOTAS
+
+        client = HttpVectorClient()
+        calls: list = []
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post", self._fake_post_recording(calls)
+        )
+        n = QUOTAS.MAX_RECORDS_PER_WRITE + 5
+        ids = [str(i) for i in range(n)]
+        result = client.get_embeddings("col", ids)
+
+        assert result.dtype == np.float32
+        assert result.shape == (n, 2)
+        # Row i must correspond to id i across the batch boundary
+        assert result[0][0] == np.float32(0.0)
+        assert result[QUOTAS.MAX_RECORDS_PER_WRITE][0] == np.float32(
+            QUOTAS.MAX_RECORDS_PER_WRITE
+        )
+        assert result[n - 1][0] == np.float32(n - 1)
+
+    def test_exactly_quota_ids_single_batch(self, monkeypatch):
+        from nexus.db.limits import QUOTAS
+
+        client = HttpVectorClient()
+        calls: list = []
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post", self._fake_post_recording(calls)
+        )
+        ids = [str(i) for i in range(QUOTAS.MAX_RECORDS_PER_WRITE)]
+        client.get_embeddings("col", ids)
+        assert len(calls) == 1
+
+    def test_missing_ids_dropped_across_batches(self, monkeypatch):
+        # Per-batch drops must surface as N < len(ids) overall — the caller's
+        # shape-mismatch tripwire (taxonomy_cmd refuses misaligned clustering).
+        from nexus.db.limits import QUOTAS
+
+        client = HttpVectorClient()
+
+        def fake_post(path, body, *, tenant="default", timeout=120):
+            ids = [i for i in body["ids"] if i != "1"]  # service can't resolve "1"
+            return {"ids": ids, "embeddings": [[0.5, 0.5] for _ in ids]}
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        n = QUOTAS.MAX_RECORDS_PER_WRITE + 3
+        ids = [str(i) for i in range(n)]
+        result = client.get_embeddings("col", ids)
+        assert result.shape == (n - 1, 2)
+
+    def test_empty_ids_no_post(self, monkeypatch):
+        client = HttpVectorClient()
+        calls: list = []
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post", self._fake_post_recording(calls)
+        )
+        result = client.get_embeddings("col", [])
+        assert calls == []
+        assert result.shape[0] == 0
+
+    def test_on_progress_fires_per_batch(self, monkeypatch):
+        # nexus-g7ubw follow-up: the paged fetch is ~94 round-trips on a 28k
+        # collection and looked like a hang without progress.
+        from nexus.db.limits import QUOTAS
+
+        client = HttpVectorClient()
+        calls: list = []
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post", self._fake_post_recording(calls)
+        )
+        n = QUOTAS.MAX_RECORDS_PER_WRITE * 2 + 17
+        ids = [str(i) for i in range(n)]
+        progress: list[tuple[int, int]] = []
+        client.get_embeddings("col", ids, on_progress=lambda d, t: progress.append((d, t)))
+
+        assert progress == [
+            (QUOTAS.MAX_RECORDS_PER_WRITE, n),
+            (QUOTAS.MAX_RECORDS_PER_WRITE * 2, n),
+            (n, n),
+        ]
+
+    def test_drop_in_middle_batch_keeps_later_rows_aligned(self, monkeypatch):
+        # Critic insurance (nexus-g7ubw): a drop in a MIDDLE batch must not
+        # shift rows of LATER batches. Guards against a future parallel-fetch
+        # refactor breaking the strict sequential-concat ordering.
+        import numpy as np
+
+        from nexus.db.limits import QUOTAS
+
+        client = HttpVectorClient()
+        quota = QUOTAS.MAX_RECORDS_PER_WRITE
+        dropped = str(quota + 7)  # lives in batch 1 of 3
+
+        def fake_post(path, body, *, tenant="default", timeout=120):
+            ids = [i for i in body["ids"] if i != dropped]
+            return {
+                "ids": ids,
+                "embeddings": [[float(int(i)), 0.0] for i in ids],
+            }
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        n = quota * 2 + 11  # 3 batches
+        ids = [str(i) for i in range(n)]
+        result = client.get_embeddings("col", ids)
+
+        assert result.shape == (n - 1, 2)
+        # Last row (batch 2) still carries its own id's value — alignment
+        # after the mid-batch drop is preserved.
+        assert result[-1][0] == np.float32(n - 1)
+        # The row where the dropped id would have been is its successor.
+        assert result[quota + 7][0] == np.float32(quota + 8)
+
+
 class TestEmbeddingFetchServiceModeRegression:
     """nexus-pebfx.7 critic: lock the NAMED symptom — a service-mode search's
     embedding fetch must NOT emit embedding_fetch_failed (it did, once per

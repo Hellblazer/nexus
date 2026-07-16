@@ -856,6 +856,141 @@ class TestCycleStorageServiceToCurrent:
             f"Start command must target 'service', got: {subprocess_calls[1]}"
         )
 
+    def test_same_version_lease_skips_cycle(self) -> None:
+        """nexus-f0pmd (RDR-183 candidate 0, GH #1405): a live supervisor whose
+        lease version MATCHES the installed package version must NOT be
+        cycled — the SessionStart hook's `nx upgrade --auto` was stop+starting
+        a current supervisor on every session event (20 stop_requested
+        exits/day, 5-10s lease gap each)."""
+        from unittest.mock import MagicMock
+
+        from nexus.commands.upgrade import _cycle_storage_service_to_current
+        from nexus.daemon.service_registry import LeaseRecord
+
+        fake_record = MagicMock(spec=LeaseRecord)
+        fake_record.version = "9.9.9"
+        subprocess_calls: list[list[str]] = []
+
+        _cycle_storage_service_to_current(
+            _discover_fn=lambda: fake_record,
+            _run_fn=lambda cmd, **kw: subprocess_calls.append(list(cmd)),
+            _nx_bin_fn=lambda: ["nx"],
+            _installed_version_fn=lambda: "9.9.9",
+        )
+
+        assert subprocess_calls == [], (
+            "a supervisor already on the installed version must not be cycled"
+        )
+
+    def test_version_skew_still_cycles(self) -> None:
+        from unittest.mock import MagicMock
+
+        from nexus.commands.upgrade import _cycle_storage_service_to_current
+        from nexus.daemon.service_registry import LeaseRecord
+
+        fake_record = MagicMock(spec=LeaseRecord)
+        fake_record.version = "9.9.8"
+        subprocess_calls: list[list[str]] = []
+
+        _cycle_storage_service_to_current(
+            _discover_fn=lambda: fake_record,
+            _run_fn=lambda cmd, **kw: subprocess_calls.append(list(cmd)),
+            _nx_bin_fn=lambda: ["nx"],
+            _installed_version_fn=lambda: "9.9.9",
+        )
+
+        assert len(subprocess_calls) == 2, "stale supervisor must still be cycled"
+
+    def test_empty_or_missing_lease_version_still_cycles(self) -> None:
+        # Fail TOWARD cycling: a legacy lease without a version (or an empty
+        # one) cannot prove currency — upgrade correctness wins.
+        from nexus.commands.upgrade import _cycle_storage_service_to_current
+
+        class _VersionlessLease:
+            version = ""
+
+        for lease in (_VersionlessLease(), object()):
+            calls: list[list[str]] = []
+            _cycle_storage_service_to_current(
+                _discover_fn=lambda lease=lease: lease,
+                _run_fn=lambda cmd, **kw: calls.append(list(cmd)),
+                _nx_bin_fn=lambda: ["nx"],
+                _installed_version_fn=lambda: "9.9.9",
+            )
+            assert len(calls) == 2, (
+                f"unprovable lease version must still cycle, got {calls}"
+            )
+
+    def test_default_installed_version_fn_real_path(self, monkeypatch) -> None:
+        # Review Medium-3: the four injected-fn tests all bypass the production
+        # default. Exercise it: monkeypatch importlib.metadata.version so the
+        # default seam resolves a matching version → skip.
+        from unittest.mock import MagicMock
+
+        import importlib.metadata as md
+
+        from nexus.commands.upgrade import _cycle_storage_service_to_current
+        from nexus.daemon.service_registry import LeaseRecord
+
+        monkeypatch.setattr(md, "version", lambda name: "7.7.7")
+        fake_record = MagicMock(spec=LeaseRecord)
+        fake_record.version = "7.7.7"
+        calls: list[list[str]] = []
+
+        _cycle_storage_service_to_current(
+            _discover_fn=lambda: fake_record,
+            _run_fn=lambda cmd, **kw: calls.append(list(cmd)),
+            _nx_bin_fn=lambda: ["nx"],
+        )
+        assert calls == [], "default _installed_version_fn must drive the skip"
+
+    def test_default_installed_version_fn_probe_error_cycles(self, monkeypatch) -> None:
+        # Review Medium-2 regression: ANY probe exception (not just
+        # PackageNotFoundError) must yield "" → fail toward cycling, never
+        # escape to the outer handler (which would fail toward doing nothing).
+        from unittest.mock import MagicMock
+
+        import importlib.metadata as md
+
+        from nexus.commands.upgrade import _cycle_storage_service_to_current
+        from nexus.daemon.service_registry import LeaseRecord
+
+        def _boom(name):
+            raise OSError("corrupted dist-info")
+
+        monkeypatch.setattr(md, "version", _boom)
+        fake_record = MagicMock(spec=LeaseRecord)
+        fake_record.version = "7.7.7"
+        calls: list[list[str]] = []
+
+        _cycle_storage_service_to_current(
+            _discover_fn=lambda: fake_record,
+            _run_fn=lambda cmd, **kw: calls.append(list(cmd)),
+            _nx_bin_fn=lambda: ["nx"],
+        )
+        assert len(calls) == 2, (
+            "probe failure must fail toward cycling, not silently do nothing"
+        )
+
+    def test_installed_version_unknown_still_cycles(self) -> None:
+        # If the installed version cannot be determined, do not skip.
+        from unittest.mock import MagicMock
+
+        from nexus.commands.upgrade import _cycle_storage_service_to_current
+        from nexus.daemon.service_registry import LeaseRecord
+
+        fake_record = MagicMock(spec=LeaseRecord)
+        fake_record.version = "9.9.9"
+        calls: list[list[str]] = []
+
+        _cycle_storage_service_to_current(
+            _discover_fn=lambda: fake_record,
+            _run_fn=lambda cmd, **kw: calls.append(list(cmd)),
+            _nx_bin_fn=lambda: ["nx"],
+            _installed_version_fn=lambda: "",
+        )
+        assert len(calls) == 2
+
     def test_correct_tier_used_for_discover(self, config_dir: Path) -> None:
         """The production (non-injected) path must use tier='storage_service' for
         the discovery call. Verifies the CRITICAL-1 fix is not regressed in the

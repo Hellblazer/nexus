@@ -884,23 +884,67 @@ def _run_check_tier_discipline() -> None:
         click.echo("  No current session resolvable (skip).")
         return
 
+    # nexus-59wjj critique Critical-1: the SERVICE check must come BEFORE the
+    # local-db existence gate. Service mode is the RDR-152 default and a fresh
+    # service-mode install may never create memory.db locally — gating on the
+    # local file made the service read below unreachable exactly where it
+    # matters (the check bailed with "T2 database not found (skip)").
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    if storage_backend_for("telemetry") == StorageBackend.SERVICE:
+        # nexus-59wjj: real counts via GET /v1/telemetry/tier_writes/query.
+        # On any failure (engine predates the route, service unreachable)
+        # fall back to the nexus-wyu1g honest message — never a false-clean
+        # "no writes seen" off the empty local table.
+        try:
+            from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred: service-mode-only dependency
+
+            svc_rows = HttpTelemetryStore().query_tier_writes(session_id=session_id)
+        except Exception as exc:  # noqa: BLE001 — degrade to the honest failure-shaped message, never a silent 0
+            _log.debug("doctor_tier_discipline_service_read_failed", exc_info=True)
+            from nexus.db.t2.http_telemetry_store import tier_writes_read_failure_message  # noqa: PLC0415 — deferred: service-mode-only dependency
+
+            click.echo("Tier-discipline check:")
+            click.echo(
+                "  service-backed telemetry (Postgres) — local inspection N/A; "
+                + tier_writes_read_failure_message(exc)
+            )
+            return
+        by_tier_svc: dict[str, int] = {}
+        for _tool, tier, _agent, _project, n in svc_rows:
+            by_tier_svc[tier] = by_tier_svc.get(tier, 0) + n
+        total_svc = sum(by_tier_svc.values())
+        click.echo(f"Tier-discipline check (session {session_id}, service-backed):")
+        if total_svc == 0:
+            # Output parity with the local branch below (review Medium-2).
+            click.echo(
+                "  WARNING: zero tier writes recorded for this session. "
+                "Findings produced (if any) have not been persisted."
+            )
+            click.echo(
+                "  Run with `nx tier-status --session " + session_id +
+                "` for the structured view."
+            )
+            click.echo(
+                "  Pass --json for downstream tooling. Use `nx memory put`, "
+                "`nx scratch put`, or the MCP equivalents to write back."
+            )
+            return
+        click.echo(f"  total writes: {total_svc}")
+        for tier in ("T1", "T2", "T3", "plan"):
+            if by_tier_svc.get(tier, 0):
+                click.echo(f"    {tier:<6} {by_tier_svc[tier]}")
+        if not by_tier_svc.get("T2", 0) and not by_tier_svc.get("T3", 0):
+            # Same persistent-write-back nudge the local branch prints.
+            click.echo(
+                "  NOTE: writes are T1/plan only. No persistent (T2/T3) "
+                "write-back yet — durable findings are not surfaced."
+            )
+        return
+
     db_path = _default_db_path()
     if not _Path(db_path).exists():
         click.echo("Tier-discipline check:")
         click.echo(f"  T2 database not found at {db_path} (skip).")
-        return
-
-    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-    if storage_backend_for("telemetry") == StorageBackend.SERVICE:
-        # nexus-wyu1g: in service mode tier_writes go to the service-backed
-        # telemetry store (Postgres), not local SQLite. Reading the empty local
-        # table here reported a false-clean "no writes seen"; report the
-        # backend honestly instead.
-        click.echo("Tier-discipline check:")
-        click.echo(
-            "  service-backed telemetry (Postgres) — local inspection N/A; "
-            "tier writes are recorded in the nexus-service, not local SQLite."
-        )
         return
 
     conn = _sqlite3.connect(str(db_path))  # epsilon-allow: nx doctor diagnostic — must operate when daemon offline; read-only tier_writes inspection

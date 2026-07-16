@@ -476,6 +476,60 @@ public final class TelemetryRepository {
     }
 
     /**
+     * Aggregated tier-write counts for {@code nx tier-status} in service mode
+     * (nexus-59wjj — read parity for the local SQLite {@code _query}).
+     *
+     * Filter precedence mirrors the CLI: {@code lastN} (last N distinct
+     * sessions by most-recent write) &gt; {@code sessionId} &gt; {@code sinceIso};
+     * empty/zero filters mean "all rows for the tenant". Returns
+     * {@code [{tool, tier, agent, project, count}, ...]} grouped by all four,
+     * ordered by (tier, tool). {@code agent}/{@code project} are "" when NULL
+     * (the Python reader maps "" back to None).
+     */
+    public List<Map<String, Object>> queryTierWrites(String tenant,
+                                                     String sessionId,
+                                                     String sinceIso,
+                                                     int lastN) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var cond = noCondition();
+            if (lastN > 0) {
+                List<String> sids = ctx.select(TIER_WRITES.SESSION_ID)
+                    .from(TIER_WRITES)
+                    .groupBy(TIER_WRITES.SESSION_ID)
+                    .orderBy(max(TIER_WRITES.TS).desc())
+                    .limit(lastN)
+                    .fetch(TIER_WRITES.SESSION_ID);
+                if (sids.isEmpty()) {
+                    return List.of();
+                }
+                cond = TIER_WRITES.SESSION_ID.in(sids);
+            } else if (sessionId != null && !sessionId.isEmpty()) {
+                cond = TIER_WRITES.SESSION_ID.eq(sessionId);
+            } else if (sinceIso != null && !sinceIso.isEmpty()) {
+                cond = TIER_WRITES.TS.ge(parseTs(sinceIso));
+            }
+            return ctx.select(
+                    TIER_WRITES.TOOL,
+                    TIER_WRITES.TIER,
+                    TIER_WRITES.AGENT,
+                    TIER_WRITES.PROJECT,
+                    count())
+                .from(TIER_WRITES)
+                .where(cond)
+                .groupBy(TIER_WRITES.TOOL, TIER_WRITES.TIER,
+                         TIER_WRITES.AGENT, TIER_WRITES.PROJECT)
+                .orderBy(TIER_WRITES.TIER.asc(), TIER_WRITES.TOOL.asc())
+                .fetch()
+                .map(r -> Map.<String, Object>of(
+                    "tool",    str(r.value1()),
+                    "tier",    str(r.value2()),
+                    "agent",   str(r.value3()),
+                    "project", str(r.value4()),
+                    "count",   r.value5()));
+        });
+    }
+
+    /**
      * Record a consent event (RDR-182 P1.2 / nexus-ng2sy — service-mode
      * parity for {@code Telemetry.record_consent}). Append-only: a grant AND
      * a revoke are each their own row ({@code granted} distinguishes them).

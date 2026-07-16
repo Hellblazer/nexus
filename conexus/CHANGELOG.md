@@ -4,6 +4,13 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.11.0] - 2026-07-16
+
+- SessionEnd hook timeout raised 3 s -> 10 s: the service-mode tier-write
+  summary now reads the engine post-fork with a hard 2 s single-attempt cap
+  (nexus-ov13k); the budget is parity-tested against the query cap.
+- Plugin version aligned with conexus 6.11.0.
+
 ## [6.10.2] - 2026-07-15
 
 Plugin version aligned with conexus 6.10.2. No plugin-side changes; see

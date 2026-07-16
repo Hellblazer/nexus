@@ -56,15 +56,15 @@ RELEASE_PROPS="service/src/main/resources/META-INF/nexus/release.properties"
 # stale default fail-closes the --cold MVV at the version gate. Kept literal (it
 # names a PUBLISHED release tag, which need not equal the floor) but bumped to
 # track it; override via NEXUS_SERVICE_TAG. (nexus-v0zmv)
-COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.43}"
+COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.44}"
 # nexus-cfgo9: the PACKAGE-UPGRADE leg's starting point — a REAL, already
 # published PyPI release + the engine tag ITS OWN PINNED_SERVICE_TAG
 # resolves to (see CHANGELOG.md's "[6.9.0]" entry: "Ships with (and
 # requires) engine-service-v0.1.42"). Kept literal (like COLD_TAG) but
 # bumped alongside REQUIRED_ENGINE_VERSION so the scenario never silently
 # stops being "stale" — the guard below fails loud if it does.
-PREV_RELEASE="${NEXUS_PREV_RELEASE:-6.9.0}"
-PREV_ENGINE_TAG="${NEXUS_PREV_ENGINE_TAG:-engine-service-v0.1.42}"
+PREV_RELEASE="${NEXUS_PREV_RELEASE:-6.10.2}"
+PREV_ENGINE_TAG="${NEXUS_PREV_ENGINE_TAG:-engine-service-v0.1.43}"
 # The NEW required engine — derived from the SAME constant COLD_TAG's
 # default and GUIDED_STAMP_VERSION are, so this leg tracks a floor bump
 # automatically (nexus-b6qlf: one source of truth).

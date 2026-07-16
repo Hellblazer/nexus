@@ -227,6 +227,184 @@ class TestServiceModeReadParity:
         payload = json.loads(result.stdout)
         assert payload.get("service_backed") is True
 
+    def test_tier_status_service_mode_reads_real_counts(
+        self, isolated_t2: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # nexus-59wjj: with a reachable post-59wjj engine, tier-status shows
+        # REAL service-side counts instead of the honest bail-out message.
+        from nexus.commands.tier_status import tier_status_cmd
+
+        class _FakeStore:
+            def query_tier_writes(self, *, session_id=None, since=None, last_n=None):
+                assert session_id == "sess-A"
+                return [
+                    ("memory_put", "T2", "developer", "nexus", 3),
+                    ("store_put", "T3", None, None, 1),
+                ]
+
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+        monkeypatch.setenv("NX_SESSION_ID", "sess-A")
+        monkeypatch.setattr(
+            "nexus.db.t2.http_telemetry_store.HttpTelemetryStore",
+            lambda: _FakeStore(),
+        )
+
+        result = CliRunner().invoke(tier_status_cmd, [])
+        assert result.exit_code == 0, result.output
+        assert "total: 4" in result.output
+        assert "memory_put" in result.output
+        assert "service-backed telemetry store" not in result.output
+
+    def test_tier_status_service_mode_json_real_counts(
+        self, isolated_t2: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from nexus.commands.tier_status import tier_status_cmd
+
+        class _FakeStore:
+            def query_tier_writes(self, *, session_id=None, since=None, last_n=None):
+                return [("scratch", "T1", None, None, 2)]
+
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+        monkeypatch.setenv("NX_SESSION_ID", "sess-A")
+        monkeypatch.setattr(
+            "nexus.db.t2.http_telemetry_store.HttpTelemetryStore",
+            lambda: _FakeStore(),
+        )
+
+        result = CliRunner().invoke(tier_status_cmd, ["--json"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)
+        assert payload["total_writes"] == 2
+        assert payload["by_tier"]["T1"] == 2
+        assert payload["rows"][0]["tool"] == "scratch"
+
+    def test_doctor_service_mode_real_counts_without_local_db(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Critique Critical-1: service is the RDR-152 default and a fresh
+        # service-mode install may never create memory.db — the service read
+        # must be reachable WITHOUT a local db (the old ordering bailed with
+        # "T2 database not found (skip)" before the SERVICE check).
+        import click as _click
+        from click.testing import CliRunner as _CR
+
+        import nexus.commands.doctor as doc
+
+        monkeypatch.setattr(
+            "nexus.commands._helpers.default_db_path",
+            lambda: tmp_path / "does-not-exist" / "memory.db",
+        )
+        monkeypatch.setenv("NX_SESSION_ID", "sess-A")
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+
+        class _FakeStore:
+            def query_tier_writes(self, *, session_id=None, since=None, last_n=None):
+                assert session_id == "sess-A"
+                return [
+                    ("memory_put", "T2", "developer", "nexus", 3),
+                    ("scratch", "T1", None, None, 1),
+                ]
+
+        monkeypatch.setattr(
+            "nexus.db.t2.http_telemetry_store.HttpTelemetryStore",
+            lambda: _FakeStore(),
+        )
+
+        @_click.command()
+        def _wrap() -> None:
+            doc._run_check_tier_discipline()
+
+        result = _CR().invoke(_wrap, [])
+        assert result.exit_code == 0, result.output
+        assert "total writes: 4" in result.output
+        assert "T2 database not found" not in result.output
+
+    def test_doctor_service_mode_zero_writes_prints_guidance_parity(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Review Medium-2: the service branch must print the same operator
+        # guidance the local branch does on zero writes.
+        import click as _click
+        from click.testing import CliRunner as _CR
+
+        import nexus.commands.doctor as doc
+
+        monkeypatch.setattr(
+            "nexus.commands._helpers.default_db_path",
+            lambda: tmp_path / "none" / "memory.db",
+        )
+        monkeypatch.setenv("NX_SESSION_ID", "sess-A")
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+
+        class _EmptyStore:
+            def query_tier_writes(self, **_kw):
+                return []
+
+        monkeypatch.setattr(
+            "nexus.db.t2.http_telemetry_store.HttpTelemetryStore",
+            lambda: _EmptyStore(),
+        )
+
+        @_click.command()
+        def _wrap() -> None:
+            doc._run_check_tier_discipline()
+
+        result = _CR().invoke(_wrap, [])
+        assert result.exit_code == 0, result.output
+        assert "WARNING: zero tier writes" in result.output
+        assert "nx tier-status --session sess-A" in result.output
+
+    def test_tier_status_service_read_404_names_engine_skew(
+        self, isolated_t2: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Critique Significant-3: a 404 (engine predates the route) must be
+        # diagnosed as version skew, NOT lumped with real engine errors.
+        import httpx
+
+        from nexus.commands.tier_status import tier_status_cmd
+
+        class _404Store:
+            def query_tier_writes(self, **_kw):
+                resp = httpx.Response(404, request=httpx.Request("GET", "http://x/q"))
+                raise httpx.HTTPStatusError("404", request=resp.request, response=resp)
+
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+        monkeypatch.setenv("NX_SESSION_ID", "sess-A")
+        monkeypatch.setattr(
+            "nexus.db.t2.http_telemetry_store.HttpTelemetryStore",
+            lambda: _404Store(),
+        )
+
+        result = CliRunner().invoke(tier_status_cmd, [])
+        assert result.exit_code == 0, result.output
+        assert "predates the tier_writes/query route" in result.output
+
+    def test_tier_status_service_read_500_names_engine_error(
+        self, isolated_t2: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # ...while a 500 from a live engine must point at the engine, not at
+        # version skew.
+        import httpx
+
+        from nexus.commands.tier_status import tier_status_cmd
+
+        class _500Store:
+            def query_tier_writes(self, **_kw):
+                resp = httpx.Response(500, request=httpx.Request("GET", "http://x/q"))
+                raise httpx.HTTPStatusError("500", request=resp.request, response=resp)
+
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+        monkeypatch.setenv("NX_SESSION_ID", "sess-A")
+        monkeypatch.setattr(
+            "nexus.db.t2.http_telemetry_store.HttpTelemetryStore",
+            lambda: _500Store(),
+        )
+
+        result = CliRunner().invoke(tier_status_cmd, [])
+        assert result.exit_code == 0, result.output
+        assert "HTTP 500" in result.output
+        assert "investigate the engine" in result.output
+
     def test_doctor_tier_discipline_service_mode(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

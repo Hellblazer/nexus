@@ -136,6 +136,79 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "target_title": target_title,
         })
 
+    def query_tier_writes(
+        self,
+        *,
+        session_id: str | None = None,
+        since: str | None = None,
+        last_n: int | None = None,
+    ) -> list[tuple[str, str, str | None, str | None, int]]:
+        """Aggregated tier-write counts — ``GET /v1/telemetry/tier_writes/query``.
+
+        nexus-59wjj: the service-mode twin of ``tier_status._query`` (local
+        SQLite). Same row shape ``(tool, tier, agent, project, count)`` and
+        the same filter precedence (``last_n`` = last N distinct sessions >
+        ``session_id`` > ``since``); the engine returns ``""`` for NULL
+        agent/project, mapped back to ``None`` here for local parity.
+
+        Requires engine >= the nexus-59wjj cut; older engines 404 — callers
+        surface their honest "service-backed" message on failure.
+        """
+        params: dict[str, Any] = {}
+        if last_n:
+            params["last_n"] = last_n
+        elif session_id:
+            params["session_id"] = session_id
+        elif since:
+            params["since"] = since
+        data = self._get("/v1/telemetry/tier_writes/query", params=params)
+        return self._map_tier_write_rows(data)
+
+    def query_tier_writes_once(
+        self,
+        *,
+        session_id: str,
+        timeout: float = 2.0,
+    ) -> list[tuple[str, str, str | None, str | None, int]]:
+        """Single-attempt ``tier_writes/query`` for latency-critical callers.
+
+        nexus-ov13k (session-end summary): the normal ``_get`` path composes
+        the mixin's gateway-retry sleeps (up to 17s) and the re-resolve leg's
+        12s lease-wait — a 20-50s worst case that a per-request ``timeout``
+        kwarg does NOT bound (both reviewers, independently). This variant
+        issues exactly ONE raw request against the already-resolved endpoint
+        with a hard per-request *timeout*: no gateway backoff, no re-resolve
+        retry, no lease wait. Any failure raises to the caller, whose
+        contract is best-effort. Not for general use — every other caller
+        wants the self-healing transport.
+        """
+        import httpx  # noqa: PLC0415 — deferred import — only needed on this path
+
+        resp = self._client.request(
+            "GET",
+            self._base_url + "/v1/telemetry/tier_writes/query",
+            headers=self._auth_headers(),
+            params={"session_id": session_id},
+            timeout=httpx.Timeout(timeout),
+        )
+        resp.raise_for_status()
+        return self._map_tier_write_rows(resp.json() if resp.content else [])
+
+    @staticmethod
+    def _map_tier_write_rows(
+        data: Any,
+    ) -> list[tuple[str, str, str | None, str | None, int]]:
+        return [
+            (
+                str(r.get("tool", "")),
+                str(r.get("tier", "")),
+                r.get("agent") or None,
+                r.get("project") or None,
+                int(r.get("count", 0)),
+            )
+            for r in (data or [])
+        ]
+
     @property
     def tenant(self) -> str:
         """The store's tenant. Public read-only: the verify-fill watermark
@@ -608,3 +681,38 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             resp = self._post("/v1/telemetry/ids/probe", {"table": table, "keys": batch})
             present.extend(resp.get("present") or [])
         return present
+
+
+def tier_writes_read_failure_message(exc: Exception) -> str:
+    """One shared, honest diagnosis for a failed tier_writes/query read.
+
+    Used by BOTH ``nx tier-status`` and doctor's tier-discipline check so
+    the wording cannot drift (critique). Distinguishes the three cases
+    (critique Significant-3 — a bare except collapsed them):
+
+    - HTTP 404 → the engine predates the nexus-59wjj route (version skew,
+      deploy a newer engine);
+    - any other HTTP status → the route EXISTS and failed — a live engine
+      returned an error; investigate before writing it off as version skew;
+    - no HTTP status at all → the service is unreachable.
+    """
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    prefix = (
+        "tier_writes are recorded in the service-backed telemetry store "
+        "(Postgres); "
+    )
+    if status == 404:
+        return prefix + (
+            "this engine predates the tier_writes/query route — "
+            "deploy an engine carrying nexus-59wjj to see counts."
+        )
+    if status is not None:
+        return prefix + (
+            f"the tier_writes/query route returned HTTP {status} — the route "
+            "exists but failed; investigate the engine before assuming "
+            "version skew."
+        )
+    return prefix + (
+        f"the service read failed ({type(exc).__name__}) — "
+        "service unreachable."
+    )

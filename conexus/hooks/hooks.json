@@ -59,7 +59,7 @@
           {
             "type": "command",
             "command": "nx-session-end-launcher",
-            "timeout": 3
+            "timeout": 10
           }
         ]
       }

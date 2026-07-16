@@ -142,7 +142,17 @@ def _fetch_service_vectors(
     # embeddings[i] pairs with ids[i]/texts[i]. The count-equality check below
     # is the tripwire; if the service ever returned an id->vector MAP instead,
     # this would need a by-id realign rather than the positional zip.
-    embeddings = t3.get_embeddings(collection_name, ids)
+    # Milestone progress (nexus-g7ubw follow-up): the paged embedding fetch is
+    # ~94 round-trips on a 28k collection and looked like a hang without it.
+    _emb_milestone = max(len(ids) // 4, 1)
+    _emb_next = [_emb_milestone]
+
+    def _emb_progress(done: int, total: int) -> None:
+        if done >= _emb_next[0] and done < total:
+            _progress(f"    embeddings {done:,}/{total:,} ({100 * done // total}%)")
+            _emb_next[0] += _emb_milestone
+
+    embeddings = t3.get_embeddings(collection_name, ids, on_progress=_emb_progress)
     if embeddings is None or len(embeddings) != len(ids):
         # get_embeddings drops ids the service cannot resolve (N < len(ids)),
         # which would desync ids/texts/embeddings. Refuse rather than cluster
@@ -201,6 +211,7 @@ def discover_for_collection(
     t3: Any,
     *,
     force: bool = False,
+    quiet: bool = False,
 ) -> int:
     """Fetch texts + embeddings from a T3 collection, run HDBSCAN discovery.
 
@@ -232,6 +243,34 @@ def discover_for_collection(
     int
         Number of topics created.
     """
+    # nexus-vgtff: the existing-topics guard, checked BEFORE the fetch. Both
+    # backends already no-op a non-force discover at persist time when the
+    # collection has topics ("use rebuild_taxonomy to re-discover") — but the
+    # persist-time guard fires AFTER the full chunk-text + embedding fetch and
+    # clustering (300s/run measured 2026-07-15, 0 topics created). Same
+    # decision, moved ahead of the expensive work; the persist guard remains
+    # the atomic backstop for concurrent-discover races. Probe failure falls
+    # through — err toward the normal path, never toward a silent skip.
+    if not force:
+        try:
+            if taxonomy.get_topics_for_collection(collection_name):
+                # Event name aligned with the persist-time guard's
+                # ``discover_skip_existing`` (catalog_taxonomy.py).
+                _log.info(
+                    "discover_skip_existing",
+                    collection=collection_name,
+                    at="preflight_probe",
+                )
+                if not quiet:
+                    _progress(
+                        f"    topics already exist for {collection_name} — "
+                        f"incremental assignment keeps them current; "
+                        f"use `nx taxonomy rebuild` to re-discover"
+                    )
+                return 0
+        except Exception:  # noqa: BLE001 — probe is best-effort; the persist-time guard stays authoritative
+            _log.debug("discover_topics_probe_failed", exc_info=True)
+
     # nexus-7ydks: service-backed taxonomy store → fetch from the service and
     # persist through the HttpTaxonomyStore drop-in (centroids via the service's
     # /v1/taxonomy/centroids HTTP route).

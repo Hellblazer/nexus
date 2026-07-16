@@ -2,13 +2,20 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """Phase 1C: SessionEnd launcher tier-write summary (nexus-a52i).
 
-The launcher daemonizes and detaches stdio after main(), so the
-summary must print BEFORE the fork. This test suite locks in:
+LOCAL mode prints BEFORE the fork (fast sqlite read; the launcher
+detaches stdio in the child). SERVICE mode (nexus-ov13k) prints AFTER
+the fork dispatch, from the parent — a network read must never sit
+ahead of the cleanup dispatch (review Critical: the retrying transport
+has a 20-50s worst case), so the service twin uses a pinned-endpoint,
+single-attempt read instead. This test suite locks in:
 
-- Sessions with writes get a one-line stderr summary at close.
+- Sessions with writes get a one-line stderr summary at close (both modes).
 - Sessions with zero writes are silent (no noise on transactional runs).
-- Failures (missing table, unreadable DB, no session resolvable) are
-  swallowed — telemetry must never break session close.
+- Failures (missing table, unreadable DB, no session resolvable,
+  service unreachable) are swallowed — telemetry must never break
+  session close.
+- The pre-fork printer NEVER touches the network in service mode, and
+  main() orders prefork → fork dispatch → service summary.
 """
 from __future__ import annotations
 
@@ -101,6 +108,179 @@ class TestPrintTierStatusSummary:
 
         _print_tier_status_summary()
         assert capsys.readouterr().err == ""
+
+    def test_prefork_summary_is_silent_in_service_mode(
+        self,
+        isolated_t2: Path,
+        capsys: pytest.CaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-ov13k review Critical: the PRE-fork printer must never touch
+        the network in service mode — any wait there sits ahead of the
+        cleanup dispatch (the module's historical SIGTERM race)."""
+        from nexus._session_end_launcher import _print_tier_status_summary
+
+        monkeypatch.setenv("NX_SESSION_ID", "svc-pre-1111-2222-3333-abcdefabcdef")
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+
+        def _boom(**_kw):
+            raise AssertionError("pre-fork path must not construct the HTTP store")
+
+        monkeypatch.setattr(
+            "nexus.db.t2.http_telemetry_store.HttpTelemetryStore", _boom,
+        )
+
+        _print_tier_status_summary()
+        assert capsys.readouterr().err == ""
+
+    def test_service_summary_prints_from_service(
+        self,
+        isolated_t2: Path,
+        capsys: pytest.CaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-ov13k: the POST-fork service printer reads the engine via
+        the single-attempt variant and prints the same format."""
+        from nexus._session_end_launcher import _print_service_tier_summary
+
+        sid = "svc12345-1111-2222-3333-1234567890ab"
+        monkeypatch.setenv("NX_SESSION_ID", sid)
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+
+        monkeypatch.setattr(
+            "nexus.db.service_endpoint.resolve_service_endpoint",
+            lambda **_kw: ("http://svc.test", "tok"),
+        )
+
+        class _FakeStore:
+            def query_tier_writes_once(self, *, session_id=None, timeout=None):
+                assert session_id == sid
+                assert timeout == 2.0
+                return [
+                    ("memory_put", "T2", None, None, 2),
+                    ("scratch_put", "T1", None, None, 1),
+                ]
+
+            def close(self):
+                pass
+
+        def _make_store(**kw):
+            # Both halves must be PINNED (round-2 critique: an unpinned
+            # constructor can wait 12s in the evidence-gated resolve).
+            assert kw.get("base_url") == "http://svc.test"
+            assert kw.get("_token") == "tok"
+            return _FakeStore()
+
+        monkeypatch.setattr(
+            "nexus.db.t2.http_telemetry_store.HttpTelemetryStore", _make_store,
+        )
+
+        _print_service_tier_summary()
+
+        out = capsys.readouterr().err
+        assert "nx tier writes" in out
+        assert "total=3" in out
+        assert "T2=2" in out and "T1=1" in out
+
+    def test_service_summary_read_failure_is_silent_on_stderr(
+        self,
+        isolated_t2: Path,
+        capsys: pytest.CaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Session close must never noise-fail or crash on an older engine
+        # (404) or an unreachable service.
+        from nexus._session_end_launcher import _print_service_tier_summary
+
+        monkeypatch.setenv("NX_SESSION_ID", "svc-fail-1111-2222-3333-abcdefabcdef")
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+
+        monkeypatch.setattr(
+            "nexus.db.service_endpoint.resolve_service_endpoint",
+            lambda **_kw: ("http://svc.test", "tok"),
+        )
+        class _BoomStore:
+            def query_tier_writes_once(self, **_kw):
+                raise RuntimeError("service unreachable")
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            "nexus.db.t2.http_telemetry_store.HttpTelemetryStore",
+            lambda **_kw: _BoomStore(),
+        )
+
+        _print_service_tier_summary()
+        assert capsys.readouterr().err == ""
+
+    def test_service_summary_zero_writes_silent(
+        self,
+        isolated_t2: Path,
+        capsys: pytest.CaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from nexus._session_end_launcher import _print_service_tier_summary
+
+        monkeypatch.setenv("NX_SESSION_ID", "svc-zero-1111-2222-3333-abcdefabcdef")
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+
+        monkeypatch.setattr(
+            "nexus.db.service_endpoint.resolve_service_endpoint",
+            lambda **_kw: ("http://svc.test", "tok"),
+        )
+        class _EmptyStore:
+            def query_tier_writes_once(self, **_kw):
+                return []
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            "nexus.db.t2.http_telemetry_store.HttpTelemetryStore",
+            lambda **_kw: _EmptyStore(),
+        )
+
+        _print_service_tier_summary()
+        assert capsys.readouterr().err == ""
+
+    def test_service_summary_noop_in_local_mode(
+        self,
+        isolated_t2: Path,
+        capsys: pytest.CaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from nexus._session_end_launcher import _print_service_tier_summary
+
+        monkeypatch.setenv("NX_SESSION_ID", "loc-1111-2222-3333-abcdefabcdefab")
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
+
+        _print_service_tier_summary()
+        assert capsys.readouterr().err == ""
+
+    def test_main_prints_service_summary_after_fork_dispatch(
+        self,
+        isolated_t2: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Ordering contract (review Critical): the cleanup fork dispatch must
+        # happen BEFORE the service summary attempt.
+        import nexus._session_end_launcher as launcher
+
+        order: list[str] = []
+        monkeypatch.setattr(
+            launcher, "_daemonize_and_run", lambda: order.append("fork"),
+        )
+        monkeypatch.setattr(
+            launcher, "_print_service_tier_summary", lambda: order.append("summary"),
+        )
+        monkeypatch.setattr(
+            launcher, "_print_tier_status_summary", lambda: order.append("prefork"),
+        )
+
+        launcher.main()
+
+        assert order == ["prefork", "fork", "summary"]
 
     def test_silent_when_no_session_resolvable(
         self,

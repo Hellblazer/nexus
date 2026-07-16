@@ -202,12 +202,19 @@ def test_hooks_json_session_end_uses_launcher_not_flush_directly() -> None:
     )
 
 
-def test_hooks_json_session_end_timeout_is_three_seconds() -> None:
-    """Phase C reduces SessionEnd timeout from 5s to 3s.
+def test_hooks_json_session_end_timeout_covers_service_summary() -> None:
+    """nexus-ov13k round-2 critique: the SessionEnd timeout must comfortably
+    exceed the service-mode tier summary's documented worst case, or the
+    supervisor-restart scenario surfaces a misleading "Hook cancelled"
+    even though the setsid'd cleanup grandchild succeeded.
 
-    Storage-only flush is sub-second on a typical install; the previous
-    5s window covered chroma teardown which the launcher no longer
-    triggers. Tighter timeout means a wedged hook is reaped faster.
+    Budget arithmetic: launcher python startup (~0.3-0.7s) + fork dispatch
+    (ms) + pinned-endpoint resolve (single attempt, no lease wait, ms) +
+    single-attempt query (hard 2.0s httpx timeout, no retry ladder) ≈ <3s
+    worst case; 10s is deliberate headroom, sized so the two values cannot
+    drift into conflict silently (this assertion ties them together). The
+    pre-Phase-1C history: 5s → 3s when the launcher's pre-fork cost was
+    ~17ms; the service summary moved the budget back up.
     """
     cfg = _read_plugin_hooks_json()
     timeouts = [
@@ -215,7 +222,17 @@ def test_hooks_json_session_end_timeout_is_three_seconds() -> None:
         for entry in cfg["hooks"]["SessionEnd"]
         for h in entry.get("hooks", [])
     ]
-    assert timeouts == [3], f"expected SessionEnd timeout 3s; got {timeouts!r}"
+    assert timeouts == [10], f"expected SessionEnd timeout 10s; got {timeouts!r}"
+    # The summary's per-request cap must stay well inside the hook budget.
+    import inspect
+
+    from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
+
+    sig = inspect.signature(HttpTelemetryStore.query_tier_writes_once)
+    assert sig.parameters["timeout"].default * 3 < timeouts[0], (
+        "query_tier_writes_once default timeout must leave ample headroom "
+        "inside the SessionEnd hook budget"
+    )
 
 
 def test_hooks_json_session_end_drops_detach_fallback() -> None:

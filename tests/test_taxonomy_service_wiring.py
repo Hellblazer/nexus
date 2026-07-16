@@ -81,7 +81,7 @@ class _FakeServiceT3:
     def get_or_create_collection(self, name: str) -> _FakeStub:
         return _FakeStub(self._ids, self._docs)
 
-    def get_embeddings(self, collection: str, ids: list[str]):  # noqa: ANN001
+    def get_embeddings(self, collection: str, ids: list[str], on_progress=None):  # noqa: ANN001
         # Return rows in request order (mirrors the real client contract).
         index = {i: r for i, r in zip(self._ids, self._embs)}
         return np.asarray([index[i] for i in ids], dtype=np.float32)
@@ -129,7 +129,7 @@ def test_fetch_service_vectors_bails_on_embedding_misalignment():
     ids, docs, embs = _corpus(6)
 
     class _Drops(_FakeServiceT3):
-        def get_embeddings(self, collection, ids):  # noqa: ANN001
+        def get_embeddings(self, collection, ids, on_progress=None):  # noqa: ANN001
             return np.asarray(self._embs[:-1], dtype=np.float32)  # one short
 
     assert _fetch_service_vectors("docs__demo", _Drops(ids, docs, embs)) is None
@@ -171,6 +171,106 @@ def test_discover_for_collection_service_too_few_docs_returns_zero():
 
     assert discover_for_collection("docs__demo", tax, t3) == 0
     assert not tax.discover_calls
+
+
+# ── nexus-vgtff: existing-topics guard checked BEFORE fetch+cluster ──────────
+#
+# Non-force discover on a topic-bearing collection is a designed no-op (both
+# backends guard at persist), but the guard fired AFTER the full chunk-text +
+# embedding fetch and clustering — 300s of wasted work on every index run
+# (2026-07-15 evidence: 0 topics created across three collections). The probe
+# moves the same decision before the fetch; the persist guard stays as the
+# atomic race backstop.
+
+
+class _NoFetchServiceT3(_FakeServiceT3):
+    """Fails the test if the discovery fetch path is entered at all."""
+
+    def get_or_create_collection(self, name: str):
+        raise AssertionError("fetch path entered — guard-first probe did not skip")
+
+
+class _TaxWithTopics(_FakeServiceTaxonomy):
+    def __init__(self, topics: list) -> None:
+        super().__init__()
+        self._topics = topics
+
+    def get_topics_for_collection(self, col: str):
+        return self._topics
+
+
+class _TaxProbeBoom(_FakeServiceTaxonomy):
+    def get_topics_for_collection(self, col: str):
+        raise RuntimeError("probe boom")
+
+
+def test_discover_skips_before_fetch_when_topics_exist():
+    ids, docs, embs = _corpus(8)
+    t3 = _NoFetchServiceT3(ids, docs, embs)
+    tax = _TaxWithTopics([{"id": 1, "label": "existing"}])
+
+    n = discover_for_collection("docs__demo", tax, t3, force=False)
+
+    assert n == 0
+    assert not tax.discover_calls  # never dispatched — and never fetched
+
+
+def test_discover_force_bypasses_topics_probe():
+    ids, docs, embs = _corpus(8)
+    t3 = _FakeServiceT3(ids, docs, embs)
+    tax = _TaxWithTopics([{"id": 1, "label": "existing"}])
+
+    n = discover_for_collection("docs__demo", tax, t3, force=True)
+
+    assert n == 2  # rebuild ran
+    assert len(tax.rebuild_calls) == 1
+
+
+def test_discover_probe_error_falls_through_to_normal_path():
+    # Probe failure must NOT skip — the persist guard remains the authority.
+    ids, docs, embs = _corpus(8)
+    t3 = _FakeServiceT3(ids, docs, embs)
+    tax = _TaxProbeBoom()
+
+    n = discover_for_collection("docs__demo", tax, t3, force=False)
+
+    assert n == 3
+    assert len(tax.discover_calls) == 1
+
+
+def test_discover_runs_when_no_topics_exist():
+    ids, docs, embs = _corpus(8)
+    t3 = _FakeServiceT3(ids, docs, embs)
+    tax = _TaxWithTopics([])
+
+    n = discover_for_collection("docs__demo", tax, t3, force=False)
+
+    assert n == 3
+    assert len(tax.discover_calls) == 1
+
+
+def test_discover_probe_skip_is_silent_in_quiet_mode(capsys):
+    # review Medium-1: run_collection_postprocessing(quiet=True) callers must
+    # not leak the probe's operator message through raw click.echo.
+    ids, docs, embs = _corpus(8)
+    t3 = _NoFetchServiceT3(ids, docs, embs)
+    tax = _TaxWithTopics([{"id": 1, "label": "existing"}])
+
+    n = discover_for_collection("docs__demo", tax, t3, force=False, quiet=True)
+
+    assert n == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_discover_probe_skip_echoes_when_not_quiet(capsys):
+    ids, docs, embs = _corpus(8)
+    t3 = _NoFetchServiceT3(ids, docs, embs)
+    tax = _TaxWithTopics([{"id": 1, "label": "existing"}])
+
+    n = discover_for_collection("docs__demo", tax, t3, force=False)
+
+    assert n == 0
+    assert "topics already exist" in capsys.readouterr().out
 
 
 # ── Incremental-assignment hook (nexus-7ydks C1) ────────────────────────────
@@ -372,7 +472,7 @@ class _SplitT3:
     def get_or_create_collection(self, name):  # noqa: ANN001
         return _StubWithIds(self._ids, self._docs)
 
-    def get_embeddings(self, collection, ids):  # noqa: ANN001
+    def get_embeddings(self, collection, ids, on_progress=None):  # noqa: ANN001
         return np.asarray([self._embs[i] for i in ids], dtype=np.float32)
 
 
@@ -391,7 +491,7 @@ def test_svc_fetch_by_ids_bails_on_misalign():
     ids, docs, embs = _corpus(6)
 
     class _Drop(_SplitT3):
-        def get_embeddings(self, collection, ids):  # noqa: ANN001
+        def get_embeddings(self, collection, ids, on_progress=None):  # noqa: ANN001
             return np.asarray(embs[:2], dtype=np.float32)  # short
 
     g_ids, g_texts, g_embs = HttpTaxonomyStore._svc_fetch_by_ids(_Drop(ids, docs, embs), "docs__d", ids)
@@ -413,7 +513,7 @@ def test_svc_fetch_all_embeddings_bails_on_misalign():
     ids, docs, embs = _corpus(7)
 
     class _Drop(_SplitT3):
-        def get_embeddings(self, collection, ids):  # noqa: ANN001
+        def get_embeddings(self, collection, ids, on_progress=None):  # noqa: ANN001
             return np.asarray(embs[:3], dtype=np.float32)  # short
 
     g_ids, g_embs = HttpTaxonomyStore._svc_fetch_all_embeddings(_Drop(ids, docs, embs), "docs__d")

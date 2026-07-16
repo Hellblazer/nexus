@@ -868,6 +868,24 @@ class TestMatrixIsNotVacuous:
         )
         assert calls == [], "upgrade cycle must not spawn a service that was not running"
 
+        # nexus-f0pmd (RDR-183 candidate 0): a lease already AT the installed
+        # version must be left alone — the ungated cycle ran on every
+        # SessionStart hook firing and churned a current supervisor.
+        class _CurrentLease:
+            version = "9.9.9"
+
+        calls.clear()
+        _cycle_storage_service_to_current(
+            _discover_fn=lambda: _CurrentLease(),
+            _run_fn=_run,
+            _nx_bin_fn=lambda: ["nx"],
+            _installed_version_fn=lambda: "9.9.9",
+        )
+        assert calls == [], (
+            "a supervisor already on the installed version must not be cycled "
+            f"at upgrade/SessionStart; got {calls}"
+        )
+
     def test_every_cell_covers_all_tiers(self) -> None:
         for prop, cells in EXPECTATIONS.items():
             assert set(cells) == set(TIERS), f"property {prop!r} missing a tier"

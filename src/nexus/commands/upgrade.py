@@ -228,6 +228,7 @@ def _cycle_storage_service_to_current(
     _discover_fn=None,
     _run_fn=None,
     _nx_bin_fn=None,
+    _installed_version_fn=None,
 ) -> None:
     """Bring a stale supervised storage service to the just-installed version
     (best-effort). RDR-149 P5.1 (nexus-gmiaf.30): symmetric to
@@ -238,9 +239,25 @@ def _cycle_storage_service_to_current(
     pick up the new StorageServiceSupervisor bytecode. Only acts on a running
     service (no auto-spawn during upgrade). Never raises.
 
-    Keyword-only ``_discover_fn``, ``_run_fn``, ``_nx_bin_fn`` are injectable
-    seams for unit tests (avoids patching local imports deep in try blocks).
-    Default values reproduce production behaviour exactly.
+    Version-gated (nexus-f0pmd, RDR-183 candidate 0 / GH #1405): a live
+    supervisor whose lease ``version`` equals the installed package version
+    is already current and is left alone — this function runs from
+    ``nx upgrade --auto``'s finally block on EVERY SessionStart hook firing
+    (startup|resume|clear|compact), and the ungated form stop+started a
+    current supervisor on each one (20 ``stop_requested`` exits/day, a
+    5-10s lease gap each). Match/mismatch semantics mirror the
+    version-aware T2 sibling (``ensure-running``); the undeterminable-
+    installed-version case DELIBERATELY diverges (review): T2 treats
+    ``not installed`` as already-current (skip), this gate fails TOWARD
+    cycling — for the storage service an unnecessary stop/start is a
+    bounded blip, while a stale supervisor left running after a real
+    upgrade is the #1112/RDR-149 bug class. Empty/legacy lease versions
+    likewise cannot prove currency and still cycle.
+
+    Keyword-only ``_discover_fn``, ``_run_fn``, ``_nx_bin_fn``,
+    ``_installed_version_fn`` are injectable seams for unit tests (avoids
+    patching local imports deep in try blocks). Default values reproduce
+    production behaviour exactly.
     """
     import os  # noqa: PLC0415 — stdlib import kept branch-local
     import subprocess  # noqa: PLC0415 — stdlib import kept branch-local
@@ -260,6 +277,28 @@ def _cycle_storage_service_to_current(
 
         if live is None:
             return  # nothing running to cycle
+
+        if _installed_version_fn is None:
+            def _installed_version_fn() -> str:
+                from importlib.metadata import version  # noqa: PLC0415 — deferred import — only needed on this path
+                try:
+                    return version("conexus")
+                except Exception:  # noqa: BLE001 — ANY probe failure must yield "" (fail toward cycling); a narrower catch would escape to the outer handler and fail toward doing nothing (review)
+                    return ""
+
+        live_version = str(getattr(live, "version", "") or "")
+        installed = _installed_version_fn() or ""
+        if live_version and installed and live_version == installed:
+            _log.info(
+                "upgrade_storage_service_current_skip",
+                version=installed,
+            )
+            return  # supervisor already runs the installed version
+        _log.info(
+            "upgrade_storage_service_stale_cycle",
+            live_version=live_version,
+            installed=installed,
+        )
 
         from nexus.commands.daemon import _resolve_nx_bin as _real_nx_bin  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         nx = _nx_bin_fn() if _nx_bin_fn is not None else _real_nx_bin()
