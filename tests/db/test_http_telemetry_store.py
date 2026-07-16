@@ -360,6 +360,43 @@ class _FakeTelemetryHandler(BaseHTTPRequestHandler):
                 results = sorted(results, key=lambda x: x["timestamp"], reverse=True)[:limit]
             self._send(200, results)
 
+        elif pp == "/v1/telemetry/tier_writes/query":
+            # nexus-59wjj: mirror TelemetryRepository.queryTierWrites — filter
+            # precedence last_n (sessions) > session_id > since; group by
+            # (tool, tier, agent, project); "" for NULL agent/project.
+            session_id = qs.get("session_id", "")
+            since      = qs.get("since", "")
+            last_n     = int(qs.get("last_n", "0"))
+            with _STORE_LOCK:
+                rows = list(_tier_writes)
+            if last_n > 0:
+                latest: dict[str, str] = {}
+                for r in rows:
+                    if r["session_id"] not in latest or r["ts"] > latest[r["session_id"]]:
+                        latest[r["session_id"]] = r["ts"]
+                keep = {
+                    s for s, _ in sorted(
+                        latest.items(), key=lambda kv: kv[1], reverse=True,
+                    )[:last_n]
+                }
+                rows = [r for r in rows if r["session_id"] in keep]
+            elif session_id:
+                rows = [r for r in rows if r["session_id"] == session_id]
+            elif since:
+                rows = [r for r in rows if r["ts"] >= since]
+            groups: dict[tuple, int] = {}
+            for r in rows:
+                key = (r["tool"], r["tier"], r["agent"] or "", r["project"] or "")
+                groups[key] = groups.get(key, 0) + 1
+            out = [
+                {"tool": t, "tier": ti, "agent": a, "project": p, "count": n}
+                for (t, ti, a, p), n in sorted(
+                    groups.items(), key=lambda kv: (kv[0][1], kv[0][0]),
+                )
+            ]
+            self._send(200, out)
+            return
+
         elif pp == "/v1/telemetry/consents/list":
             with _STORE_LOCK:
                 self._send(200, list(_consents))
@@ -577,6 +614,51 @@ class TestTrimSearchTelemetry:
         client.log_search_batch(rows)
         deleted = client.trim_search_telemetry(days=365 * 3)
         assert deleted >= 1
+
+
+class TestQueryTierWrites:
+    """nexus-59wjj: nx tier-status read parity — GET /v1/telemetry/tier_writes/query."""
+
+    def test_session_filter_groups_and_maps_nulls(self, client):
+        client.record_tier_write(
+            session_id="s1", ts="2026-07-15T10:00:00Z",
+            tool="memory_put", tier="T2", agent="developer", project="nexus",
+        )
+        client.record_tier_write(
+            session_id="s1", ts="2026-07-15T10:01:00Z",
+            tool="memory_put", tier="T2", agent="developer", project="nexus",
+        )
+        client.record_tier_write(
+            session_id="s1", ts="2026-07-15T10:02:00Z",
+            tool="store_put", tier="T3",
+        )
+        client.record_tier_write(
+            session_id="s2", ts="2026-07-15T10:03:00Z",
+            tool="scratch", tier="T1",
+        )
+
+        rows = client.query_tier_writes(session_id="s1")
+        assert rows == [
+            ("memory_put", "T2", "developer", "nexus", 2),
+            ("store_put", "T3", None, None, 1),  # "" from wire → None
+        ]
+
+    def test_last_n_sessions_and_since(self, client):
+        client.record_tier_write(
+            session_id="old", ts="2026-07-01T00:00:00Z", tool="a", tier="T1",
+        )
+        client.record_tier_write(
+            session_id="new", ts="2026-07-15T00:00:00Z", tool="b", tier="T2",
+        )
+
+        recent = client.query_tier_writes(last_n=1)
+        assert recent == [("b", "T2", None, None, 1)]
+
+        since = client.query_tier_writes(since="2026-07-10T00:00:00Z")
+        assert since == [("b", "T2", None, None, 1)]
+
+    def test_empty_returns_empty_list(self, client):
+        assert client.query_tier_writes(session_id="nope") == []
 
 
 class TestConsentAudit:

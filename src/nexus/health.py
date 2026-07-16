@@ -1019,25 +1019,44 @@ def _check_git_hooks() -> list[HealthResult]:
 
 
 def _check_index_log() -> list[HealthResult]:
+    """Most-recent index activity across BOTH log surfaces.
+
+    2026-07-15: this check watched only ``index.log`` (the git-HOOK append
+    log, hooks.py) and reported "last write 460 hours ago" during a session
+    with two live index runs — real runs write per-run rotated logs at
+    ``logs/index-*.log``. Report the newest of either, saying which.
+    """
     from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
 
-    log_path = nexus_config_dir() / "index.log"
-    if log_path.exists():
-        mtime = log_path.stat().st_mtime
+    def _age_str(mtime: float) -> str:
         age_s = time.time() - mtime
         if age_s < 60:
-            age_str = f"{int(age_s)}s ago"
-        elif age_s < 3600:
-            age_str = f"{int(age_s // 60)} minutes ago"
-        else:
-            age_str = f"{int(age_s // 3600)} hours ago"
+            return f"{int(age_s)}s ago"
+        if age_s < 3600:
+            return f"{int(age_s // 60)} minutes ago"
+        return f"{int(age_s // 3600)} hours ago"
+
+    candidates: list[tuple[float, str, str]] = []  # (mtime, path, kind)
+    hook_log = nexus_config_dir() / "index.log"
+    if hook_log.exists():
+        candidates.append((hook_log.stat().st_mtime, str(hook_log), "hook log"))
+    run_logs = sorted(
+        (nexus_config_dir() / "logs").glob("index-*.log"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if run_logs:
+        newest = run_logs[0]
+        candidates.append((newest.stat().st_mtime, str(newest), "run log"))
+    if not candidates:
         return [HealthResult(
             label="index log", ok=True,
-            detail=f"{log_path} (last write: {age_str})",
+            detail="no index activity recorded yet (no run logs, hooks have not fired)",
         )]
+    mtime, path, kind = max(candidates)
     return [HealthResult(
         label="index log", ok=True,
-        detail=f"{log_path} (not created yet — git hooks have not fired)",
+        detail=f"{path} ({kind}, last write: {_age_str(mtime)})",
     )]
 
 

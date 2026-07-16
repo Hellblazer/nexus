@@ -1103,6 +1103,27 @@ class TestGetEmbeddingsBatching:
         assert calls == []
         assert result.shape[0] == 0
 
+    def test_on_progress_fires_per_batch(self, monkeypatch):
+        # nexus-g7ubw follow-up: the paged fetch is ~94 round-trips on a 28k
+        # collection and looked like a hang without progress.
+        from nexus.db.limits import QUOTAS
+
+        client = HttpVectorClient()
+        calls: list = []
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._post", self._fake_post_recording(calls)
+        )
+        n = QUOTAS.MAX_RECORDS_PER_WRITE * 2 + 17
+        ids = [str(i) for i in range(n)]
+        progress: list[tuple[int, int]] = []
+        client.get_embeddings("col", ids, on_progress=lambda d, t: progress.append((d, t)))
+
+        assert progress == [
+            (QUOTAS.MAX_RECORDS_PER_WRITE, n),
+            (QUOTAS.MAX_RECORDS_PER_WRITE * 2, n),
+            (n, n),
+        ]
+
     def test_drop_in_middle_batch_keeps_later_rows_aligned(self, monkeypatch):
         # Critic insurance (nexus-g7ubw): a drop in a MIDDLE batch must not
         # shift rows of LATER batches. Guards against a future parallel-fetch

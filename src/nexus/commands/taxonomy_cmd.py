@@ -142,7 +142,17 @@ def _fetch_service_vectors(
     # embeddings[i] pairs with ids[i]/texts[i]. The count-equality check below
     # is the tripwire; if the service ever returned an id->vector MAP instead,
     # this would need a by-id realign rather than the positional zip.
-    embeddings = t3.get_embeddings(collection_name, ids)
+    # Milestone progress (nexus-g7ubw follow-up): the paged embedding fetch is
+    # ~94 round-trips on a 28k collection and looked like a hang without it.
+    _emb_milestone = max(len(ids) // 4, 1)
+    _emb_next = [_emb_milestone]
+
+    def _emb_progress(done: int, total: int) -> None:
+        if done >= _emb_next[0] and done < total:
+            _progress(f"    embeddings {done:,}/{total:,} ({100 * done // total}%)")
+            _emb_next[0] += _emb_milestone
+
+    embeddings = t3.get_embeddings(collection_name, ids, on_progress=_emb_progress)
     if embeddings is None or len(embeddings) != len(ids):
         # get_embeddings drops ids the service cannot resolve (N < len(ids)),
         # which would desync ids/texts/embeddings. Refuse rather than cluster

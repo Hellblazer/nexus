@@ -34,6 +34,7 @@ import java.util.Map;
  *   POST /v1/telemetry/search/trim             trim old entries
  *   POST /v1/telemetry/rename_collection       rename collection in all tables
  *   POST /v1/telemetry/tier_writes/record      record a tier-write event
+ *   GET  /v1/telemetry/tier_writes/query       aggregated counts for nx tier-status (nexus-59wjj)
  *   POST /v1/telemetry/consents/record         record a consent grant/revoke (RDR-182)
  *   GET  /v1/telemetry/consents/list           list the tenant's consent trail (RDR-182)
  *   GET  /v1/telemetry/retention/markers       cumulative-deletes retention markers (nexus-24p05)
@@ -94,6 +95,7 @@ public final class TelemetryHandler implements HttpHandler {
                 case "/search/trim"            -> handleSearchTrim(exchange, tenant, method);
                 case "/rename_collection"      -> handleRenameCollection(exchange, tenant, method);
                 case "/tier_writes/record"     -> handleTierWriteRecord(exchange, tenant, method);
+                case "/tier_writes/query"      -> handleTierWritesQuery(exchange, tenant, method);
                 case "/consents/record"        -> handleConsentRecord(exchange, tenant, method);
                 case "/consents/list"          -> handleConsentList(exchange, tenant, method);
                 case "/retention/markers"      -> handleRetentionMarkers(exchange, tenant, method);
@@ -219,6 +221,16 @@ public final class TelemetryHandler implements HttpHandler {
         String targetTitle = optStrNull(body, "target_title");
         repo.recordTierWrite(tenant, sessionId, tsIso, tool, tier, agent, project, targetTitle);
         HttpUtil.send(ex, 200, json(Map.of("ok", true)));
+    }
+
+    private void handleTierWritesQuery(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "GET");
+        var params = queryParams(ex);
+        String sessionId = params.getOrDefault("session_id", "");
+        String since     = params.getOrDefault("since", "");
+        int lastN = parseIntParam(params, "last_n", 0);
+        var rows = repo.queryTierWrites(tenant, sessionId, since, lastN);
+        HttpUtil.send(ex, 200, json(rows));
     }
 
     // ── consents (RDR-182 nexus-ng2sy: service-mode consent-audit parity) ────────

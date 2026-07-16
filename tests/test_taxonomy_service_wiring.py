@@ -81,7 +81,7 @@ class _FakeServiceT3:
     def get_or_create_collection(self, name: str) -> _FakeStub:
         return _FakeStub(self._ids, self._docs)
 
-    def get_embeddings(self, collection: str, ids: list[str]):  # noqa: ANN001
+    def get_embeddings(self, collection: str, ids: list[str], on_progress=None):  # noqa: ANN001
         # Return rows in request order (mirrors the real client contract).
         index = {i: r for i, r in zip(self._ids, self._embs)}
         return np.asarray([index[i] for i in ids], dtype=np.float32)
@@ -129,7 +129,7 @@ def test_fetch_service_vectors_bails_on_embedding_misalignment():
     ids, docs, embs = _corpus(6)
 
     class _Drops(_FakeServiceT3):
-        def get_embeddings(self, collection, ids):  # noqa: ANN001
+        def get_embeddings(self, collection, ids, on_progress=None):  # noqa: ANN001
             return np.asarray(self._embs[:-1], dtype=np.float32)  # one short
 
     assert _fetch_service_vectors("docs__demo", _Drops(ids, docs, embs)) is None
@@ -472,7 +472,7 @@ class _SplitT3:
     def get_or_create_collection(self, name):  # noqa: ANN001
         return _StubWithIds(self._ids, self._docs)
 
-    def get_embeddings(self, collection, ids):  # noqa: ANN001
+    def get_embeddings(self, collection, ids, on_progress=None):  # noqa: ANN001
         return np.asarray([self._embs[i] for i in ids], dtype=np.float32)
 
 
@@ -491,7 +491,7 @@ def test_svc_fetch_by_ids_bails_on_misalign():
     ids, docs, embs = _corpus(6)
 
     class _Drop(_SplitT3):
-        def get_embeddings(self, collection, ids):  # noqa: ANN001
+        def get_embeddings(self, collection, ids, on_progress=None):  # noqa: ANN001
             return np.asarray(embs[:2], dtype=np.float32)  # short
 
     g_ids, g_texts, g_embs = HttpTaxonomyStore._svc_fetch_by_ids(_Drop(ids, docs, embs), "docs__d", ids)
@@ -513,7 +513,7 @@ def test_svc_fetch_all_embeddings_bails_on_misalign():
     ids, docs, embs = _corpus(7)
 
     class _Drop(_SplitT3):
-        def get_embeddings(self, collection, ids):  # noqa: ANN001
+        def get_embeddings(self, collection, ids, on_progress=None):  # noqa: ANN001
             return np.asarray(embs[:3], dtype=np.float32)  # short
 
     g_ids, g_embs = HttpTaxonomyStore._svc_fetch_all_embeddings(_Drop(ids, docs, embs), "docs__d")

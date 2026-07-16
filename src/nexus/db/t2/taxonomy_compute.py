@@ -171,7 +171,32 @@ def _cluster(
         n_init=3,
         random_state=42,
     )
-    labels = km.fit_predict(embeddings)
+    # macOS Accelerate emits spurious FP-state RuntimeWarnings (divide by
+    # zero / overflow / invalid in matmul) from kmeans++ init even on clean
+    # unit-norm float32 input — verified 2026-07-15: full norm census of
+    # code__1-1 (28,164 x 1024) showed zero NaN/inf/zero-norm rows while the
+    # warnings fired, and the resulting topics were valid. Suppress them
+    # ONLY when the input is provably finite; genuinely bad input keeps the
+    # warnings AND gets a loud structured event (fail-loud discipline).
+    if np.isfinite(embeddings).all():
+        with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+            labels = km.fit_predict(embeddings)
+        # Tripwire (critique): isfinite gates the INPUT only. Degenerate-but-
+        # finite data (e.g. many identical points) could raise a genuine 0/0
+        # that the suppression would otherwise hide — NaN centroids are the
+        # observable symptom, so check the OUTPUT loudly.
+        if np.isnan(km.cluster_centers_).any():
+            _log.warning(
+                "clustering_nan_centroids",
+                n=n, k=k, collection=collection_name,
+            )
+    else:
+        bad = int((~np.isfinite(embeddings)).any(axis=1).sum())
+        _log.warning(
+            "clustering_nonfinite_embeddings",
+            n=n, nonfinite_rows=bad, collection=collection_name,
+        )
+        labels = km.fit_predict(embeddings)
     return labels, km.cluster_centers_
 
 

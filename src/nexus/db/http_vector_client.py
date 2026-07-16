@@ -32,7 +32,7 @@ import json
 import os
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from typing import Any, NoReturn
 
@@ -1399,7 +1399,12 @@ class HttpVectorClient:
         """
         return _ServiceCollectionStub(name=name, tenant=self._tenant)
 
-    def get_embeddings(self, collection_name: str, ids: list[str]):
+    def get_embeddings(
+        self,
+        collection_name: str,
+        ids: list[str],
+        on_progress: Callable[[int, int], None] | None = None,
+    ):
         """Fetch stored embeddings for *ids* via the service (nexus-pebfx.7).
 
         Param name ``collection_name`` matches ``T3Database.get_embeddings``
@@ -1424,6 +1429,10 @@ class HttpVectorClient:
         bytes (~3 MB at 300 ids x 1024 dims); if the write quota is ever
         raised or a higher-dimension embedding model becomes the default,
         re-derive this page size from bytes or the 504 returns.
+
+        ``on_progress(done, total)`` (id counts) fires after each batch —
+        a 28k-id fetch is ~94 sequential round-trips and looked like a hang
+        without it (nexus-g7ubw review follow-up).
         """
         import numpy as np  # noqa: PLC0415 — heavy/optional dependency deferred to call time
 
@@ -1432,12 +1441,15 @@ class HttpVectorClient:
         page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
         rows: list = []
         for start in range(0, len(ids), page_limit):
+            batch = ids[start : start + page_limit]
             result = _post(
                 "/v1/vectors/get-embeddings",
-                {"collection": collection_name, "ids": ids[start : start + page_limit]},
+                {"collection": collection_name, "ids": batch},
                 tenant=self._tenant,
             )
             rows.extend(result.get("embeddings", []))
+            if on_progress is not None:
+                on_progress(start + len(batch), len(ids))
         return np.array(rows, dtype=np.float32)
 
     # ── Stubs for T3Database surface not used by Seam B ─────────────────────

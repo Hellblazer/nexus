@@ -2613,6 +2613,8 @@ nx tier-status [--session SESSION_ID] [--last N] [--since ISO8601] [--json]
 
 Audit tier-write activity (T1 scratch, T2 memory/plans, T3 store) for a session. Defaults to the current session (`NX_SESSION_ID`); `--last N` aggregates the most recent N sessions, `--since` bounds by timestamp, `--json` emits structured output instead of the human table. Phase 1B (nexus-a52i).
 
+In service mode the counts are read from the engine via `GET /v1/telemetry/tier_writes/query` (nexus-59wjj) — same filters, same row shape as the local SQLite path. Requires an engine that carries the route; against an older engine (or an unreachable service) the command degrades to an honest "service-backed; read unavailable" message rather than reporting a false zero. The doctor tier-discipline check reads through the same route.
+
 ---
 
 ## nx command-context
