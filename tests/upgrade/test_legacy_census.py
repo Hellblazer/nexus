@@ -151,6 +151,76 @@ def test_census_degrades_to_none_on_probe_failure(
     assert legacy_id_census() is None
 
 
+# ── detect_pending_migration_memoized (P1 validator gap: the memo itself) ────
+# Every consumer test patches detect_pending_migration with a fresh object, so
+# the identity-keyed memo is a guaranteed miss there — these test the memo.
+
+
+def _spy_detection(calls: dict[str, int]) -> object:
+    def _spy() -> PreflightDetection:
+        calls["n"] += 1
+        return _detection(_classification("knowledge__old_store", legacy=True))
+
+    return _spy
+
+
+def test_memoized_detection_probes_once_within_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"n": 0}
+    monkeypatch.setattr(guided_upgrade, "_detection_memo", None)
+    monkeypatch.setattr(guided_upgrade, "detect_pending_migration", _spy_detection(calls))
+    first = guided_upgrade.detect_pending_migration_memoized()
+    second = guided_upgrade.detect_pending_migration_memoized()
+    assert calls["n"] == 1  # one underlying probe
+    assert second is first  # the cached object, not a re-probe
+
+
+def test_memoized_detection_reprobes_after_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"n": 0}
+    monkeypatch.setattr(guided_upgrade, "_detection_memo", None)
+    monkeypatch.setattr(guided_upgrade, "_DETECTION_MEMO_TTL_S", 0.0)
+    monkeypatch.setattr(guided_upgrade, "detect_pending_migration", _spy_detection(calls))
+    guided_upgrade.detect_pending_migration_memoized()
+    guided_upgrade.detect_pending_migration_memoized()
+    assert calls["n"] == 2  # expired entry re-probes
+
+
+def test_memoized_detection_misses_on_producer_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Identity keying: a different producer (a test's monkeypatch) can never
+    consume a foreign entry — the no-cross-test-leakage property."""
+    calls_a, calls_b = {"n": 0}, {"n": 0}
+    monkeypatch.setattr(guided_upgrade, "_detection_memo", None)
+    monkeypatch.setattr(guided_upgrade, "detect_pending_migration", _spy_detection(calls_a))
+    guided_upgrade.detect_pending_migration_memoized()
+    monkeypatch.setattr(guided_upgrade, "detect_pending_migration", _spy_detection(calls_b))
+    guided_upgrade.detect_pending_migration_memoized()
+    assert calls_a["n"] == 1
+    assert calls_b["n"] == 1  # fresh producer → fresh probe, not A's result
+
+
+def test_doctor_census_and_notice_share_one_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE incident pin (P1 critique High-2): one nx doctor run fires both the
+    census check and the bridge notice — together they pay the read-leg
+    classification exactly ONCE."""
+    calls = {"n": 0}
+    monkeypatch.setattr(guided_upgrade, "_detection_memo", None)
+    monkeypatch.setattr(guided_upgrade, "detect_pending_migration", _spy_detection(calls))
+    monkeypatch.setattr(guided_upgrade, "legacy_footprint_pending", lambda: True)
+    monkeypatch.setattr(census_mod, "_chroma_footprint_present", lambda: True)
+
+    census_rows = _check_legacy_id_census()
+    notice = guided_upgrade.pending_migration_notice()
+
+    assert census_rows and census_rows[0].ok is False  # census saw the debt
+    assert notice is not None  # notice fired too
+    assert calls["n"] == 1  # ...from ONE shared probe
+
+
 # ── nx doctor surface (Gap-5 falsifiable) ────────────────────────────────────
 
 
