@@ -2,11 +2,11 @@
 
 Nexus runs in three Claude surfaces, all backed by shared host state so it round-trips across them and with the `nx` CLI. This document covers install, first-run behavior, drift detection, and uninstall for each surface. The shared-state substrate is RDR-120; the unified-surface design is RDR-126.
 
-> **Upgrading to 6.0.** 6.0 moves the permanent vector store (T3) from ChromaDB to
+> **Upgrading.** 6.0 moved the permanent vector store (T3) from ChromaDB to
 > the Postgres + pgvector nexus-service. After upgrading the CLI, run
-> **`nx guided-upgrade`** once to migrate your data (one command: detect →
-> provision + verify the service → migrate → validate → unlock; copy-not-move,
-> rollback-safe). The signed native service binary + relocatable Postgres bundle
+> **`nx upgrade`** — one trigger provisions and verifies the service if needed,
+> then walks every pending data migration (copy-not-move, rollback-safe; your
+> ChromaDB store is left intact as the source). The signed native service binary + relocatable Postgres bundle
 > are acquired automatically by `nx daemon service install-binary <tag>` / `nx
 > init --service`. **macOS note:** that binary is ad-hoc signed (not
 > Developer-ID/notarized) — `install-binary` fetches it without quarantine, but a

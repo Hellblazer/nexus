@@ -3,8 +3,9 @@
 This is the no-prior-install path: point `nx` at the hosted Conexus managed
 service and reach a working search/store state with **no local service stack and
 no migration**. (Already running a local Chroma install you want to move to the
-managed service? That is the migration path, `nx migrate-to-service` — see
-[migration-runbook.md](migration-runbook.md), not this page.)
+managed service? That is the migration path — configure `service_url`, then
+`nx upgrade`; see [Migrating an existing local install](#migrating-an-existing-local-install-to-the-managed-service)
+below.)
 
 The managed service is operator-provisioned: you receive a base URL and a
 per-tenant bearer token out of band (the Conexus operator issues them; `nx` does
@@ -83,18 +84,24 @@ If you already have a local (Chroma or local-service) install and want to move
 its data to the managed service, that is the migration journey, not greenfield:
 
 ```bash
-export NX_SERVICE_TOKEN=<your-bearer-token>          # the operator-provisioned tenant token
-nx guided-upgrade --service-url https://api.conexus-nexus.com
+nx config set service_url https://api.conexus-nexus.com   # point at your managed endpoint
+export NX_SERVICE_TOKEN=<your-bearer-token>               # the operator-provisioned tenant token
+nx upgrade                                                # converge
 ```
 
-`guided-upgrade` health-gates and version-pins the managed endpoint, then drives
-the ETL (detect → migrate T2/catalog/T3 → validate → unlock), copy-not-move (your
-local source is the rollback origin and is never modified). Notes:
+Telling nexus *which* service is yours is configuration — a genuine choice the
+product cannot derive. Once it is configured, the upgrade is the same one verb
+as everywhere else: a configured `service_url` satisfies the ladder's
+provisioning precondition, so `nx upgrade` walks the substrate rung straight
+into the managed endpoint, driving the ETL (detect → migrate T2/catalog/T3 →
+validate → unlock), copy-not-move (your local source is the rollback origin and
+is never modified). Notes:
 
 - **Cost:** collections that change embedding model are re-embedded through the
-  managed Voyage key (billed); `guided-upgrade` shows an estimate-and-confirm
-  prompt before proceeding (RDR-166). Same-model voyage collections are copied
-  vector-for-vector with no re-embed (and no charge).
+  managed Voyage key (billed); the rung shows an estimate-and-confirm prompt
+  before proceeding (RDR-166) — one of the three decisions the product cannot
+  make for you. Same-model voyage collections are copied vector-for-vector with
+  no re-embed (and no charge), and a walk with nothing billable never prompts.
 - **TLS:** the managed `https://…:443` endpoint is handled end-to-end (RDR-166).
 - See [migration-runbook.md](migration-runbook.md) for the full migration detail.
 
@@ -102,17 +109,17 @@ local source is the rollback origin and is never modified). Notes:
 
 Moving an *already-on-pgvector* local-service install to the managed service
 (pgvector → managed, a cross-deployment data move) is **not supported** — there
-is no `pg_dump`/restore path across deployments in `nx`, and `guided-upgrade`'s
-ETL source is always Chroma. The only supported migration origin is a **legacy
-Chroma install** (a local `PersistentClient` store and/or Chroma Cloud); a
-local-service install has no Chroma footprint, so `guided-upgrade` reports
-"nothing to migrate." The pgvector→managed path is tracked as a documented
-follow-on (nexus-wm3t5); for now, a pgvector-local user who wants managed
-re-indexes from source against the managed endpoint.
+is no `pg_dump`/restore path across deployments in `nx`, and the substrate
+rung's ETL source is always Chroma. The only supported migration origin is a
+**legacy Chroma install** (a local `PersistentClient` store and/or Chroma
+Cloud); a local-service install has no Chroma footprint, so the rung is N/A and
+`nx upgrade` reports nothing to converge. The pgvector→managed path is tracked
+as a documented follow-on (nexus-wm3t5); for now, a pgvector-local user who
+wants managed re-indexes from source against the managed endpoint.
 
 ## Scope note
 
 One token maps to one tenant. This page covers the two managed consumer journeys:
 greenfield onboarding (above) and migrating a local install to managed
-(`guided-upgrade --service-url`). The pgvector→managed cross-deployment move is
-the documented limitation noted above.
+(`nx config set service_url` + `nx upgrade`). The pgvector→managed
+cross-deployment move is the documented limitation noted above.

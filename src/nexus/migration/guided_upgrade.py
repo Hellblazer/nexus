@@ -163,21 +163,40 @@ def endpoint_failure_migration_hint() -> str:
     they need the one-time migration. Cheap gate only; empty string when
     the install does not look like a pending legacy footprint (fresh
     installs and already-migrated installs keep the stock message).
+
+    RDR-185 P4.2 (nexus-n7u38.29): the remedy is now ``nx upgrade`` — the
+    single trigger converges the provisioning precondition and the substrate
+    rung in one walk. Unlike the retired bridge notice, this hint is NOT a
+    duplicate report: it fires on an ERROR path, where the user has hit the
+    wall with no walk in flight and the stock remedy ("start the supervisor")
+    is actively wrong for them. Naming the remedy at the wall is the same
+    pattern as rollback at ``migrate_cmd``'s block path.
     """
     if not legacy_footprint_pending():
         return ""
     return (
         " NOTE: this install has a legacy local store awaiting the ONE-TIME "
         "storage migration — if you recently upgraded from a 5.x install, "
-        "run `nx guided-upgrade` (provisions the service AND migrates your "
-        "data; shows a cost preview first) instead of starting the service "
-        "by hand."
+        "run `nx upgrade` (provisions the service AND migrates your data, "
+        "showing a cost preview before anything bills) instead of starting "
+        "the service by hand."
     )
 
 
 def pending_migration_notice() -> str | None:
     """Best-effort bridge pointer from the routine commands to the cutover
     (nexus-0rwwv).
+
+    RETIRED as a user surface — RDR-185 P4.2 (nexus-n7u38.29) removed BOTH
+    call sites (``nx upgrade``, ``nx doctor``). The bridge existed because
+    the routine upgrade and the one-time cutover were two commands with
+    nothing between them; the ladder makes them one walk, so this pointer
+    became a duplicate report of a state the ladder already reports, naming
+    a verb P4.1 demoted out of ``--help``. Left in place, callable and
+    tested, exactly like the demoted verbs it pointed at: this whole module
+    dies at RDR-155 P4b, which is a standing blocker.
+
+    Historical contract, unchanged below this line.
 
     Two upgrade commands, no bridge: a local-mode user with a pending
     Chroma -> pgvector cutover ran ``nx upgrade``, saw "migrations

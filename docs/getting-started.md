@@ -235,25 +235,34 @@ nx daemon t2 stop && nx daemon t2 start    # or: launchctl kickstart -k gui/<uid
 
 The schema-version handshake (RDR-120 P3b) fails loud on client/daemon version mismatch, so stale daemons fail closed rather than silently corrupting state.
 
-### Upgrading to 6.0 (migrating off ChromaDB)
+### Upgrading (including off ChromaDB)
 
-6.0 moves the permanent vector store (T3, the collections `nx search`/`nx store` query) from ChromaDB to the Postgres +
-pgvector service. Existing installs migrate with one command:
+Upgrading nexus is: update the code, then run `nx upgrade`.
 
 ```bash
-uv tool upgrade conexus       # get the 6.0 CLI
-nx guided-upgrade             # detect -> provision+verify the service -> migrate -> validate -> unlock
+uv tool upgrade conexus       # 1. update the code
+nx upgrade                    # 2. converge the data
 ```
 
-`nx guided-upgrade` detects your existing ChromaDB footprint, provisions and
-starts the service, version-pins it (its `/version` must report a
-`release_version` — present from engine-service v0.1.6+; the code floor is
-v0.1.8 but earlier binaries are below it / omit the field and fail closed),
-health-gates it, then migrates your collections into pgvector with validation
-and **copy-not-move** rollback safety — your ChromaDB store is left intact as
-the source. Voyage-capability and version pre-flights fail loud *before* any
-migration. It is idempotent (safe to re-run) but not a no-op after success: a
-re-run re-copies at full cost. On a validation block it leaves the migration
-state `migrated-failed` and offers a rollback command rather than auto-reverting.
+That single trigger converges everything else — it brings the package, engine,
+and process preconditions current (provisioning and starting the service stack
+if a legacy footprint needs one to migrate into), then walks one ordered ladder
+that auto-applies whichever data migrations your install actually needs: the T2
+schema, the ChromaDB → Postgres+pgvector substrate move that 6.0 introduced,
+pre-6.0 chunk identity, and embedder era. Each rung detects, converges, and
+verifies before recording completion; the walk is resumable and idempotent, and
+your ChromaDB store is left **byte-untouched** as the rollback source
+(copy-not-move). There is nothing to sequence by hand and no era to know — an
+install dormant since 5.x converges the same way a current one no-ops. Use
+`nx doctor` to see what is pending, and `nx upgrade --dry-run` to preview
+without changing anything.
+
+You are asked to decide only what the product cannot derive: **billed
+re-embedding** (an estimate-and-confirm prompt before anything charges — silent
+when nothing bills), a **source collection that has vanished** (re-acquire or
+drop; the walk defers rather than guessing), and **rollback**, which is always
+yours to invoke and never automatic. On a validation block the migration state
+is left `migrated-failed`, reads stay loudly degraded rather than silently
+empty, and the rollback command is printed as the remedy.
 
 See [docs/migration-runbook.md](https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md) for the full migration details.

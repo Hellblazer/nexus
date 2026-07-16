@@ -47,8 +47,7 @@ def _current_version() -> str:
 @click.option("--force", is_flag=True, help="Reset version gate and re-run all migrations.")
 @click.option("--auto", "auto_mode", is_flag=True, help="Quiet mode for hook invocation (T2 only, exit 0 always).")
 @click.option("--skip-t3", is_flag=True, help="Skip T3 upgrade steps (e.g., cross-collection projection backfill). Useful for fast T2-only migrations.")
-@click.pass_context
-def upgrade(ctx: click.Context, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool) -> None:
+def upgrade(dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool) -> None:
     """Run pending database migrations and upgrade steps."""
     # RDR-128 P2: quiesce the daemon BEFORE migrating so its live T2
     # connections are released — the migration flock serializes the two
@@ -76,36 +75,23 @@ def upgrade(ctx: click.Context, dry_run: bool, force: bool, auto_mode: bool, ski
         # the upgrade ladder — every pending rung converges here (dry-run
         # reports read-only from detect()). The registry is empty until native
         # rungs land (t2-schema P1, substrate-etl P2), so this is silent today.
+        # RDR-185 P4.2 (nexus-n7u38.29): the nexus-0rwwv substrate-migration
+        # bridge is RETIRED here — the walk above IS the cutover. The bridge
+        # existed because `nx upgrade` and the one-time cutover were two
+        # commands with nothing between them: a local-mode user saw
+        # "migrations complete" and no pointer to the real next step. P4.0
+        # registered the substrate rung and P4.0b made provisioning a
+        # precondition, so by the time control reaches this line the pending
+        # cutover has already converged in THIS invocation. Keeping the
+        # pointer would (a) advertise `nx guided-upgrade` — demoted to an
+        # internal primitive by P4.1, invisible in --help — as the everyday
+        # remedy, breaking "one story, one verb", and (b) re-answer a
+        # DATA-rung question ("is a substrate transition pending?") from an
+        # ad-hoc re-sample instead of the ladder, which is precisely the
+        # third mechanism the Gap-4 criterion bans. Genuine decisions the
+        # walk cannot derive (source-gone, billed re-embed) surface from
+        # INSIDE the rung; pending state is reported by `nx doctor`.
         _run_ladder(dry_run=dry_run, auto_mode=auto_mode, _t2_apply_attempted=not dry_run)
-        # nexus-0rwwv: the routine in-place migration above is a different
-        # thing from the one-time substrate cutover (nx guided-upgrade) —
-        # and nothing bridged them: a local-mode user with a pending
-        # cutover saw "migrations complete" and no pointer to the real
-        # next step. Interactive mode only: --auto is the hook path, which
-        # must stay fast and silent (and must never pay the chroma probe).
-        if not auto_mode:
-            from nexus.migration.guided_upgrade import (  # noqa: PLC0415 — deferred import — the bridge dies with the migration module at RDR-155 P4b
-                pending_migration_notice,
-            )
-
-            notice = pending_migration_notice()
-            if notice:
-                click.echo("")
-                click.echo(notice)
-                # "Hopefully migrate" (Hal, 2026-07-08): on a real terminal,
-                # offer to chain straight into the cutover so the NORMAL
-                # update route completes the migration — guided-upgrade
-                # keeps its own consent gate (cost preview + confirm), so
-                # this default-No prompt adds convenience, not risk. Piped/
-                # scripted invocations (not a TTY) get the pointer only.
-                if not dry_run and _stdin_isatty() and click.confirm(
-                    "Start the guided migration now?", default=False
-                ):
-                    from nexus.commands.guided_upgrade_cmd import (  # noqa: PLC0415 — deferred import — the bridge dies with the migration module at RDR-155 P4b
-                        guided_upgrade_cmd,
-                    )
-
-                    ctx.invoke(guided_upgrade_cmd)
     except Exception:
         if auto_mode:
             _log.warning("upgrade_auto_error", exc_info=True)
@@ -231,12 +217,6 @@ def _run_ladder(
                 click.echo(f"Upgrade ladder: rung '{run.name}' deferred — {run.detail}")
 
 
-def _stdin_isatty() -> bool:
-    """Seam for the TTY check (CliRunner swaps sys.stdin wholesale, so tests
-    patch this instead of sys.stdin.isatty)."""
-    import sys  # noqa: PLC0415 — stdlib, kept helper-local
-
-    return sys.stdin.isatty()
 
 
 def _quiesce_daemon() -> None:

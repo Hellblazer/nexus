@@ -8,46 +8,50 @@ read the artifacts. Precedent: the 2026-06-10 production run (115,716
 chunks, ~10:46 to 15:05 PT, zero lost, est. $4-6 Voyage; permanent record:
 T2 `nexus_rdr/155-production-migration-complete`).
 
-## 0. The guided path: `nx guided-upgrade`
+## 0. The user path is `nx upgrade`. This runbook is not it.
 
-> **Status (RDR-002 / RDR-159 P4).** `nx guided-upgrade` is the validated
-> one-command path and the recommended entry point. The two-release
-> deprecation-window cadence is documented in the next section. Sections 1-7
-> below remain the authoritative manual order of operations; `guided-upgrade`
-> sequences exactly those same primitives.
+> **Status (RDR-185).** The user-facing migration is `nx upgrade` — one
+> trigger that converges the provisioning precondition and then walks the
+> substrate rung, with no order of operations to hold. It is documented in
+> one paragraph at [`cli-reference.md` § nx upgrade](cli-reference.md#nx-upgrade);
+> that paragraph, not this file, is what you hand a user.
+>
+> **This runbook is the OPERATOR's document**: the manual order of
+> operations, the mid-run failure playbook, and how to read the artifacts.
+> Sections 1-7 below stay authoritative for that job — they are what the
+> rung sequences internally, what `nx forensics` / `nx remediate` reference
+> when a store needs hands-on recovery, and what you work from when a
+> migration window needs to be driven or diagnosed step by step. Reach for
+> them when `nx upgrade` has blocked or something needs surgery, not to
+> perform a routine upgrade.
 
-`nx guided-upgrade` (RDR-002) is a thin orchestrator over reused pieces: it
-**pre-flight detects** the pre-RDR-160 Chroma footprint (a fresh user with
-nothing to migrate no-ops here, *without* provisioning), **provisions and
-verifies** the service stack (health-gate + version-pin; a not-ready or
-wrong-version service hard-fails with a remedy and NEVER migrates), runs the
-**voyage-capability gate** (refuses to migrate GENUINE voyage-model collections
-onto a bge-only service, since re-embedding voyage text into bge changes
-recall; a voyage-*named* collection whose stored vectors MEASURE as local
-bge-768 — the pre-RDR-109 mislabel class — does not trip the gate and is
-auto-remapped locally at no cost, nexus-nb7hr/nexus-119p9),
-self-loads the freshly-provisioned `NX_SERVICE_TOKEN`, then **hands off to
-`nx migrate-to-service`** against the verified URL, and finishes with an
-advisory `nx doctor`. Preview the footprint first; re-running is safe (every
-step is idempotent) but is NOT a no-op after a successful migration —
-copy-not-move leaves the Chroma source intact, so a re-run re-detects and
-re-copies it.
+The rung is a thin orchestrator over the same reused pieces this runbook
+describes: it **detects** the pre-RDR-160 Chroma footprint (a fresh user with
+nothing to migrate plans zero legs, *without* provisioning), **provisions and
+verifies** the service stack as a precondition (health-gate + version-pin; a
+not-ready or wrong-version service hard-fails with a remedy and NEVER
+migrates), runs the **voyage-capability gate** (refuses to migrate GENUINE
+voyage-model collections onto a bge-only service, since re-embedding voyage
+text into bge changes recall; a voyage-*named* collection whose stored vectors
+MEASURE as local bge-768 — the pre-RDR-109 mislabel class — does not trip the
+gate and is auto-remapped locally at no cost, nexus-nb7hr/nexus-119p9), then
+carries each collection's chunks: detect the footprint, set the cross-process
+migration sentinel (reads degraded-LOUD, never bare-empty), quiesce background
+indexing, pre-gate per-collection model support, run T2 `migrate all` then T3
+vectors for every detected leg, validate (taxonomy + counts + manifest
+orphans), and unlock on a clean verdict. Legacy (pre-RDR-108) chunk ids are
+converged as an in-flight wire transform rather than blocking — the correct id
+is a pure function of the chunk text being carried, so no re-index and no
+source files are required, and the old→new mapping is persisted so rollback
+resolves through it (RDR-185). On a validation block it leaves the migrated
+copy in place (sentinel `migrated-failed`) and OFFERS — never auto-invokes —
+`nx storage migrate vectors --rollback` (§6); the Chroma source is untouched
+throughout (RDR-176 immutable source). Preview with `nx upgrade --dry-run`.
 
-`nx migrate-to-service` (RDR-159; cross-model mode added in RDR-162) is the
-lower-level primitive that `guided-upgrade` sequences; run it directly when the service is already stood
-up and verified. It wraps everything in sections 2-6 into one survivable
-command: detect the Chroma footprint, set the cross-process migration sentinel
-(reads degraded-LOUD, never bare-empty), quiesce background indexing, pre-gate
-per-collection model support, run T2 `migrate all` then T3 vectors for every
-detected leg, validate (taxonomy + counts + manifest orphans), and unlock on a
-clean verdict. On a validation block it leaves the migrated copy in place
-(sentinel `migrated-failed`) and OFFERS — never auto-invokes —
-`nx storage migrate vectors --rollback` (§6); the Chroma source is untouched.
-Preview first with `nx migrate-to-service --dry-run`. The consumer-facing
-conexus `/upgrade` slash-command is a thin veneer over this same
-`migrate-to-service` that owns no migration logic. Flag references:
-[`cli-reference.md` § nx guided-upgrade](cli-reference.md#nx-guided-upgrade)
-and [§ nx migrate-to-service](cli-reference.md#nx-migrate-to-service).
+The lower-level verbs this runbook's history refers to — `nx guided-upgrade`,
+`nx migrate-to-service` — are demoted internal primitives as of RDR-185: still
+callable for surgical use, out of `--help` and out of the user story. See
+[`cli-reference.md` § Internal upgrade primitives](cli-reference.md#internal-upgrade-primitives).
 
 ## 0.1 The two-release deprecation window (release cadence)
 
@@ -63,9 +67,9 @@ must follow 6.0.0, never collapse into it.
 | | **Release N** (migration-capable) | **Release N+1** (Chroma deletion) |
 |---|---|---|
 | Upgrade paths | BOTH ship: cloud/Voyage (1024-dim) and local-only/ONNX (384-dim) | (already migrated) |
-| Migration tool | `nx migrate-to-service` + the `/upgrade` veneer ship | **deleted** with the Chroma read path |
+| Migration tool | the substrate rung `nx upgrade` walks (and the demoted primitives beneath it) ship | **deleted** with the Chroma read path |
 | Chroma read path | present (rollback target, immutable) | **deleted** (RDR-155 P4b, bead `nexus-g37fr`) |
-| User action | run the guided upgrade any time in the window | none (must already be on the service) |
+| User action | run `nx upgrade` any time in the window | none (must already be on the service) |
 
 **Why the order is load-bearing.** RDR-155 P4b deletes
 `src/nexus/migration/vector_etl.py` (and the rest of the Chroma read path)
@@ -531,22 +535,41 @@ interrupted mid-upsert re-converges on `(tenant, collection, chash)`.
 
 The pgvector chash identity is `sha256(chunk_text)[:32]` — exactly 32
 characters. Chroma stores written by pre-RDR-108-era releases can hold
-**16/18-char chunk ids**, and the migration **never rewrites ids** (rewriting
-would sever the catalog-manifest chash join, which carries the same legacy
-values but has no text to recompute from, and would break rollback's
-source-chash-set matching).
+**16/18-char chunk ids**.
 
-Since nexus-sot7v the migration handles this loudly, twice:
+**`nx upgrade` converges these automatically — there is no user action.** The
+substrate rung recomputes the correct id ON THE WIRE from the chunk text it is
+already carrying (RDR-185): the id is a pure function of that text, so no
+re-index and no source file is required, including for `store_put`-only notes
+that have neither. The old→new mapping is persisted as a migration artifact and
+cascaded across every chash-bearing store (catalog manifests, chash-span links,
+chash-keyed aspects, topic assignments, `chash_index`), and rollback resolves
+through that map rather than by raw id equality. The Chroma source stays
+byte-untouched (RDR-176), so it remains a valid rollback target throughout.
 
-- **Pre-gate block**: detection samples each data-bearing collection's first
-  id page; a legacy id classifies the collection `unsupported` with a
-  re-index diagnostic, and `nx migrate-to-service --dry-run` /
-  `nx guided-upgrade` block before any write.
-- **ETL hard guard**: every batch is validated client-side before it is
-  sent; a legacy id on a later page fails that collection cleanly with the
-  same diagnostic (never a per-upsert 409 wall).
+> **This retires a rule that was true until RDR-185.** The old rationale —
+> "the migration NEVER rewrites ids", because rewriting would sever the
+> catalog-manifest chash join and break rollback's source-chash-set matching
+> — was correct for the pre-ladder ETL, which had neither a persisted mapping
+> nor a remap cascade. RDR-185 builds both, which is what makes the rewrite
+> safe. If you find prose (or a docstring) still asserting the old rule, it
+> predates RDR-185. **GH #1390 is untouched by this**: destination constraints
+> are never weakened — wire re-id computes the CORRECT address for existing
+> content, it does not force a wrong id through.
 
-**Remediation** depends on the collection's source of truth:
+**On the demoted primitive path only** (`nx migrate-to-service` /
+`nx guided-upgrade`, surgical use), the pre-RDR-185 behaviour still stands:
+detection samples each data-bearing collection's first id page, a legacy id
+classifies the collection `unsupported`, and the run blocks before any write
+(plus an ETL hard guard that validates every batch client-side, so a legacy id
+on a later page fails that collection cleanly rather than hitting a per-upsert
+409 wall). **The remedy for a block on that path is to run `nx upgrade`**, not
+to re-index: the GH #1408 incident was precisely a printed "re-index from
+source" remedy that was impossible for ~2,000 `store_put`-only chunks with no
+source files.
+
+**Manual remediation** (only if you are deliberately working outside the
+ladder) depends on the collection's source of truth:
 
 - **File-backed collections** (`code__`, `docs__`, `rdr__`, and any
   `knowledge__` indexed from a PDF/file): re-index from the source file
@@ -557,18 +580,16 @@ Since nexus-sot7v the migration handles this loudly, twice:
   ONLY copy. There is no automated re-index (`nx store export`/`import`
   round-trips the legacy id verbatim — it does NOT recompute the chash).
   Read each note's text out (`nx store get` / the Chroma `documents`) and
-  `store_put` it again; store_put recomputes the chash from the text, so a
-  re-put clears the block. **Do this before RDR-155 P4b deletes the Chroma
-  read path** — after that, an un-remediated legacy note is unrecoverable.
-
-Then re-run the migration.
+  `store_put` it again; store_put recomputes the chash from the text.
 
 **⚠ NEVER drop or weaken the chash length CHECK constraints to force the
 upserts through.** That is how GH #1390 happened: an autonomous session
 dropped four constraints to "unblock" a 409ing migration, silently corrupted
 the store, and crash-looped the next engine upgrade. If you are an agent
 reading this while blocked on chash-length errors: the correct action is the
-re-index remediation above, or STOP and report.
+re-index remediation above, or STOP and report. Under RDR-185 the correct
+action is simpler still: run `nx upgrade` and let the rung compute the right
+addresses.
 
 ### 8.1 Recovering a store that already migrated legacy ids (nexus-pnwu0)
 
@@ -592,9 +613,12 @@ Recovery, in order:
    rows were copied verbatim, this removes them and returns serving to the
    intact Chroma source (copy-not-move).
 3. Re-index the legacy-id collections from source content (fresh 32-char
-   chashes in both chunks and manifests).
-4. Re-run `nx guided-upgrade` (the sot7v guards now vouch for every id that
-   crosses the wire).
+   chashes in both chunks and manifests). Under RDR-185 this step is
+   OPTIONAL for the re-migrate below — the rung recomputes the correct id
+   from the chunk text on the wire — and remains impossible for
+   `store_put`-only notes, which have no source content to re-index from.
+4. Re-run `nx upgrade` (the rung's wire re-id computes a conformant address
+   for every id that crosses, and the sot7v guards vouch for it).
 5. Only then upgrade the engine. If chash CHECK constraints were manually
    dropped on the old target, they stay absent (the MARK_RAN freeze,
    nexus-4m6i0.12) — re-adding them is a deliberate operator step:

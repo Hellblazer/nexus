@@ -24,9 +24,13 @@ remedy exactly where it is needed (migrate_cmd.py's block path).
 """
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
 import pytest
 from click.testing import CliRunner
 
+import nexus
 from nexus.cli import main
 from nexus.commands.collection import collection
 
@@ -130,6 +134,109 @@ def test_rewrite_ids_was_never_built() -> None:
     on the wire inside the rung). The right verb count for this job is
     zero — this pin keeps it that way."""
     assert "rewrite-ids" not in collection.commands
+
+
+# ── the everyday surfaces never ADVERTISE a demoted verb ────────────────────
+#
+# P4.2 (nexus-n7u38.29) found the hole this section closes. The pins above
+# check --help VISIBILITY, and passed while `nx upgrade` and `nx doctor` both
+# printed "Run: nx guided-upgrade" from the nexus-0rwwv bridge — a hidden
+# verb advertised as the everyday remedy. Hiding a verb from --help while the
+# product's own output tells you to run it is not demotion.
+
+#: The everyday user-facing upgrade surfaces (the ones a user actually runs)
+#: plus the health module that renders doctor's checks.
+_EVERYDAY_SURFACE_MODULES = (
+    "commands/upgrade.py",
+    "commands/doctor.py",
+    "health.py",
+)
+
+#: Where a demoted verb name may legitimately appear in a printed string.
+#: EMPTY, deliberately — and an empty allowlist is a real claim, not an
+#: oversight: there is no everyday-output case for naming a demoted verb.
+#: Genuine remedies name reachable verbs (`endpoint_failure_migration_hint`
+#: points at `nx upgrade`; the block path prints the rollback flag, which is
+#: reachable). Adding an entry here means arguing that a user should be told
+#: to run something they cannot find in --help.
+_ADVERTISEMENT_ALLOWLIST: frozenset[tuple[str, str]] = frozenset()
+
+
+def _printed_strings(source: str) -> list[str]:
+    """Every string constant in *source* that is not a docstring.
+
+    Comments never enter the AST, so prose ABOUT the demoted verbs (this
+    module's own history, the retirement rationale at each former call site)
+    is exempt by construction, while any string that could reach a user is
+    in scope.
+    """
+    tree = ast.parse(source)
+    docstrings: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            body = getattr(node, "body", None)
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                docstrings.add(id(body[0].value))
+    return [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in docstrings
+    ]
+
+
+def _advertisements(text: str) -> list[str]:
+    """Demoted verbs *advertised as an invocation* in *text*.
+
+    The predicate is `nx <verb>`, not the bare verb name: "migration" is
+    also an ordinary English word and a module path (`nexus.migration_jobs`,
+    `migration-reports`, "Re-run the failed store migrations"). Telling a
+    user to RUN something is the failure mode; talking about migration is
+    not.
+    """
+    return [verb for verb in DEMOTED_TOP_LEVEL if f"nx {verb}" in text]
+
+
+@pytest.mark.parametrize("module", _EVERYDAY_SURFACE_MODULES)
+def test_everyday_surfaces_never_advertise_a_demoted_verb(module: str) -> None:
+    path = Path(nexus.__file__).parent / module
+    offenders = [
+        (verb, text)
+        for text in _printed_strings(path.read_text())
+        for verb in _advertisements(text)
+        if (module, verb) not in _ADVERTISEMENT_ALLOWLIST
+    ]
+    assert not offenders, (
+        f"{module} tells the user to run demoted verb(s) {[v for v, _ in offenders]} "
+        f"in: {[t for _, t in offenders]!r} — a verb hidden from --help must not be "
+        "advertised as the remedy. The everyday remedy is `nx upgrade`."
+    )
+
+
+def test_the_advertisement_census_is_not_vacuous() -> None:
+    """The pin above passes trivially if `_printed_strings` returns nothing,
+    `_advertisements` matches nothing, or the surface list rots. Prove each
+    link still sees the violation it exists to catch."""
+    # The exact shape P4.2 removed, and the shapes that must NOT trip it.
+    assert _advertisements("Run: nx guided-upgrade") == ["guided-upgrade"]
+    assert _advertisements("wrote migration-reports/") == []
+    assert _advertisements("Re-run the failed store migrations:") == []
+
+    source = "x = 'Run: nx guided-upgrade'\ny = 'plain'\n"
+    assert _printed_strings(source) == ["Run: nx guided-upgrade", "plain"]
+    # Docstrings — prose, never user output — stay out of scope.
+    assert _printed_strings("'''Run: nx guided-upgrade.'''\nx = 'plain'\n") == ["plain"]
+
+    for module in _EVERYDAY_SURFACE_MODULES:
+        path = Path(nexus.__file__).parent / module
+        assert path.exists(), f"{module} moved — the census is scanning nothing"
+        assert _printed_strings(path.read_text()), f"{module} parsed to zero strings"
 
 
 def test_no_upgrade_verb_grew_back(runner: CliRunner) -> None:

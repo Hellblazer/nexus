@@ -297,7 +297,6 @@ def test_upgrade_command_threads_flags_into_the_precondition_stage(
         patch("nexus.commands.upgrade.T3_UPGRADES", []),
         patch("nexus.commands.upgrade._quiesce_daemon"),
         patch("nexus.commands.upgrade._cycle_supervised_daemons_to_current"),
-        patch("nexus.commands.upgrade._stdin_isatty", return_value=False),
         patch("nexus.commands.upgrade._converge_preconditions") as stage,
     ):
         result = CliRunner().invoke(main, ["upgrade", "--skip-t3"])

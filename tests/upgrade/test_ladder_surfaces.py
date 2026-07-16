@@ -281,7 +281,6 @@ def test_upgrade_invocation_executes_each_migration_step_exactly_once(
         patch("nexus.commands.upgrade.T3_UPGRADES", []),
         patch("nexus.commands.upgrade._quiesce_daemon"),
         patch("nexus.commands.upgrade._cycle_supervised_daemons_to_current"),
-        patch("nexus.commands.upgrade._stdin_isatty", return_value=False),
     ):
         result = CliRunner().invoke(main, ["upgrade"])
     assert result.exit_code == 0, result.output  # deferral is NOT a failure
