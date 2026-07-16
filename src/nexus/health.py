@@ -2875,6 +2875,46 @@ def _check_migration_divergence(
     )]
 
 
+def _check_pending_rungs() -> list[HealthResult]:
+    """RDR-185 P0.4 (nexus-n7u38.4): read-only upgrade-ladder surface.
+
+    Reports pending ladder rungs from each rung's READ-ONLY ``detect()`` —
+    zero writes, zero work, the completion store is never opened (the
+    ``resolve_pending_steps`` dry-run-truth precedent). Pending rungs are a
+    soft warning with `nx upgrade` (the single trigger) as the remedy.
+    Crash-proof: any failure degrades to a non-critical pass — every check
+    in ``run_health_checks`` must never crash ``nx doctor`` as a whole.
+    """
+    try:
+        from nexus.upgrade_ladder import registry as _ladder_registry  # noqa: PLC0415 — deferred to avoid module-load cost
+        from nexus.upgrade_ladder.runner import pending_rungs  # noqa: PLC0415 — deferred to avoid module-load cost
+
+        statuses = pending_rungs(_ladder_registry.default_registry())
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.warning("doctor_pending_rungs_check_failed", error=str(exc))
+        return [HealthResult(
+            label="Upgrade ladder", ok=True, detail="check failed (non-critical)",
+        )]
+
+    pending = [(name, status) for name, status in statuses if status.pending]
+    if not pending:
+        return [HealthResult(
+            label="Upgrade ladder",
+            ok=True,
+            detail=f"no pending rungs ({len(statuses)} registered)",
+        )]
+    names = "; ".join(
+        f"{name}: {status.pending_detail or 'pending'}" for name, status in pending[:6]
+    )
+    return [HealthResult(
+        label="Upgrade ladder",
+        ok=False,
+        warn=True,
+        detail=f"{len(pending)} pending upgrade rung(s) — {names}",
+        fix_suggestions=["Run: nx upgrade"],
+    )]
+
+
 def run_health_checks() -> tuple[list[HealthResult], bool]:
     """Run all health checks.
 
@@ -2959,6 +2999,8 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     results.extend(_check_t2_launchagent_stray())
     results.extend(_check_migration_state())
     results.extend(_check_rls_present())
+    # RDR-185 P0.4: read-only pending-rungs surface (degrades internally).
+    results.extend(_check_pending_rungs())
 
     # RDR-178 Pillar A (nexus-aigpt, nexus-14ndm): migration-report checks.
     # Both degrade internally (missing dir / unreadable report / absent

@@ -7,7 +7,11 @@
 Completion records (P0.2) and the runner with the RDR-142
 verify-before-record guard (P0.3) land in sibling modules.
 """
-from nexus.upgrade_ladder.completion import CompletionRecord, CompletionStore
+from nexus.upgrade_ladder.completion import (
+    CompletionRecord,
+    CompletionStore,
+    default_ladder_db_path,
+)
 from nexus.upgrade_ladder.protocol import (
     ConvergeOutcome,
     ConvergeResult,
@@ -37,6 +41,7 @@ from nexus.upgrade_ladder.runner import (
     RungOutcome,
     RungRun,
     StructlogReporter,
+    pending_rungs,
 )
 
 __all__ = [
@@ -63,7 +68,9 @@ __all__ = [
     "RungRun",
     "RungStatus",
     "StructlogReporter",
+    "default_ladder_db_path",
     "default_registry",
     "expand_edges",
+    "pending_rungs",
     "validate_hard_edges",
 ]

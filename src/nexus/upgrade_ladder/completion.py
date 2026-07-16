@@ -41,6 +41,13 @@ def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+def default_ladder_db_path() -> Path:
+    """Production location of the ladder's own substrate file."""
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    return nexus_config_dir() / "ladder.db"
+
+
 @dataclass(frozen=True)
 class CompletionRecord:
     """One durable verified fact for one rung."""

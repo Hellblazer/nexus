@@ -60,6 +60,11 @@ def upgrade(ctx: click.Context, dry_run: bool, force: bool, auto_mode: bool, ski
         if not dry_run:
             _quiesce_daemon()
         _run_upgrade(dry_run=dry_run, force=force, auto_mode=auto_mode, skip_t3=skip_t3)
+        # RDR-185 P0.4 (nexus-n7u38.4): `nx upgrade` is the SINGLE trigger for
+        # the upgrade ladder — every pending rung converges here (dry-run
+        # reports read-only from detect()). The registry is empty until native
+        # rungs land (t2-schema P1, substrate-etl P2), so this is silent today.
+        _run_ladder(dry_run=dry_run, auto_mode=auto_mode)
         # nexus-0rwwv: the routine in-place migration above is a different
         # thing from the one-time substrate cutover (nx guided-upgrade) —
         # and nothing bridged them: a local-mode user with a pending
@@ -102,6 +107,58 @@ def upgrade(ctx: click.Context, dry_run: bool, force: bool, auto_mode: bool, ski
         # graceful cycle on a stale one. Best-effort, non-dry-run only.
         if not dry_run:
             _cycle_supervised_daemons_to_current(skip_t3=skip_t3)
+
+
+def _run_ladder(
+    *,
+    dry_run: bool,
+    auto_mode: bool,
+    _store_path_fn=None,
+) -> None:
+    """RDR-185 P0.4: walk the upgrade ladder (or report it, on --dry-run).
+
+    Dry-run truth: the pending report comes from each rung's READ-ONLY
+    ``detect()`` — the completion store is never even opened, zero writes
+    (the ``resolve_pending_steps`` consumption pattern above at the T2
+    layer). A failed rung raises ``ClickException`` — no silent fallbacks
+    for correctness problems; ``--auto`` invocations are swallowed by
+    ``upgrade()``'s existing auto-mode handler, not here.
+
+    Keyword-only ``_store_path_fn`` is an injectable seam for unit tests
+    (keeps test ladders off the real config dir).
+    """
+    from nexus.upgrade_ladder.completion import (  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
+        CompletionStore,
+        default_ladder_db_path,
+    )
+    from nexus.upgrade_ladder.registry import default_registry  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
+    from nexus.upgrade_ladder.runner import (  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
+        LadderRunner,
+        RungOutcome,
+        pending_rungs,
+    )
+
+    registry = default_registry()
+    if dry_run:
+        pending = [(name, st) for name, st in pending_rungs(registry) if st.pending]
+        for name, status in pending:
+            click.echo(f"Upgrade ladder: rung '{name}' pending — {status.pending_detail or 'behind'}")
+        return
+
+    store_path = _store_path_fn() if _store_path_fn is not None else default_ladder_db_path()
+    with CompletionStore(store_path) as store:
+        report = LadderRunner(registry, store).run()
+
+    for run in report.runs:
+        if run.outcome is RungOutcome.RECORDED and not auto_mode:
+            click.echo(f"Upgrade ladder: rung '{run.name}' converged and verified.")
+    if not report.converged:
+        failed = [
+            run for run in report.runs
+            if run.outcome in (RungOutcome.VERIFY_FAILED, RungOutcome.FAILED)
+        ]
+        summary = "; ".join(f"{run.name}: {run.outcome.value} ({run.detail})" for run in failed)
+        raise click.ClickException(f"upgrade ladder did not converge — {summary}")
 
 
 def _stdin_isatty() -> bool:

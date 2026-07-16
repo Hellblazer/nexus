@@ -1,0 +1,172 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""RDR-185 P0.4 (nexus-n7u38.4): the two user surfaces of the ladder.
+
+``nx doctor`` gets a READ-ONLY pending-rungs check (zero writes, zero
+work — the ``resolve_pending_steps`` dry-run-truth precedent), and
+``nx upgrade`` gets the single-trigger walk hook. Both stay silent while
+the production registry is empty (rungs land P1+); these tests drive them
+with synthetic registries through the injectable seams.
+"""
+from __future__ import annotations
+
+import inspect
+import pathlib
+from dataclasses import dataclass, field
+
+import click
+import pytest
+
+import nexus.upgrade_ladder.registry as ladder_registry
+from nexus.health import _check_pending_rungs, run_health_checks
+from nexus.commands.upgrade import _run_ladder, upgrade
+from nexus.upgrade_ladder.completion import CompletionStore
+from nexus.upgrade_ladder.protocol import ConvergeOutcome, ConvergeResult, ProgressReporter, RungStatus
+from nexus.upgrade_ladder.registry import LadderRegistry
+
+
+@dataclass
+class SurfaceRung:
+    name: str
+    pending: bool = True
+    verify_result: bool = True
+    converge_calls: int = 0
+    verify_calls: int = 0
+
+    def detect(self) -> RungStatus:
+        return RungStatus(
+            applicable=True,
+            converged=not self.pending,
+            pending_detail="3 collections behind" if self.pending else "",
+        )
+
+    def converge(self, report: ProgressReporter) -> ConvergeResult:
+        self.converge_calls += 1
+        self.pending = False
+        return ConvergeResult(ConvergeOutcome.COMPLETED)
+
+    def verify(self) -> bool:
+        self.verify_calls += 1
+        return self.verify_result
+
+
+@dataclass
+class _Reg:
+    rungs: tuple[SurfaceRung, ...] = field(default_factory=tuple)
+
+    def registry(self) -> LadderRegistry:
+        return LadderRegistry(self.rungs)
+
+
+# ── nx doctor: _check_pending_rungs ──────────────────────────────────────────
+
+
+def test_doctor_reports_pending_rungs_as_soft_warn(monkeypatch: pytest.MonkeyPatch) -> None:
+    rung = SurfaceRung("substrate-etl")
+    monkeypatch.setattr(ladder_registry, "default_registry", lambda: LadderRegistry((rung,)))
+    results = _check_pending_rungs()
+    assert len(results) == 1
+    result = results[0]
+    assert result.ok is False
+    assert result.warn is True  # soft warning, never fatal (RDR-129 B4)
+    assert "substrate-etl" in result.detail
+    assert "3 collections behind" in result.detail
+    assert any("nx upgrade" in fix for fix in result.fix_suggestions)
+
+
+def test_doctor_check_is_read_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The doctor surface reports from detect() only — zero work."""
+    rung = SurfaceRung("substrate-etl")
+    monkeypatch.setattr(ladder_registry, "default_registry", lambda: LadderRegistry((rung,)))
+    _check_pending_rungs()
+    assert rung.converge_calls == 0
+    assert rung.verify_calls == 0
+
+
+def test_doctor_converged_registry_is_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    rung = SurfaceRung("t2-schema", pending=False)
+    monkeypatch.setattr(ladder_registry, "default_registry", lambda: LadderRegistry((rung,)))
+    results = _check_pending_rungs()
+    assert results[0].ok is True
+    assert "no pending rungs" in results[0].detail
+
+
+def test_doctor_empty_registry_is_ok() -> None:
+    """The real (P0) registry is empty — the check passes quietly."""
+    results = _check_pending_rungs()
+    assert results[0].ok is True
+
+
+def test_doctor_check_is_crash_proof(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every doctor check must degrade internally, never crash `nx doctor`."""
+    def _boom() -> LadderRegistry:
+        raise RuntimeError("registry exploded")
+
+    monkeypatch.setattr(ladder_registry, "default_registry", _boom)
+    results = _check_pending_rungs()
+    assert results[0].ok is True
+    assert "check failed" in results[0].detail
+
+
+def test_doctor_check_is_wired_into_run_health_checks() -> None:
+    """Wiring pin: run_health_checks() actually calls the ladder check (a
+    defined-but-unregistered check is the silent-scope-reduction shape)."""
+    source = inspect.getsource(run_health_checks)
+    assert "_check_pending_rungs()" in source
+
+
+# ── nx upgrade: _run_ladder ──────────────────────────────────────────────────
+
+
+def test_walk_converges_and_records(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    rung = SurfaceRung("t2-schema")
+    monkeypatch.setattr(ladder_registry, "default_registry", lambda: LadderRegistry((rung,)))
+    db = tmp_path / "ladder.db"
+    _run_ladder(dry_run=False, auto_mode=True, _store_path_fn=lambda: db)
+    assert rung.converge_calls == 1
+    with CompletionStore(db) as store:
+        assert store.verified_rungs() == frozenset({"t2-schema"})
+
+
+def test_dry_run_reports_and_writes_nothing(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Dry-run truth: pending rungs are reported from read-only detect();
+    the completion store is never even opened (zero writes)."""
+    rung = SurfaceRung("substrate-etl")
+    monkeypatch.setattr(ladder_registry, "default_registry", lambda: LadderRegistry((rung,)))
+    db = tmp_path / "ladder.db"
+    _run_ladder(dry_run=True, auto_mode=False, _store_path_fn=lambda: db)
+    out = capsys.readouterr().out
+    assert "substrate-etl" in out
+    assert rung.converge_calls == 0
+    assert not db.exists()
+
+
+def test_empty_registry_walk_is_silent(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P0 reality: the production registry is empty — the walk must not add
+    any output to `nx upgrade` until rungs actually exist."""
+    _run_ladder(dry_run=False, auto_mode=False, _store_path_fn=lambda: tmp_path / "ladder.db")
+    _run_ladder(dry_run=True, auto_mode=False, _store_path_fn=lambda: tmp_path / "ladder.db")
+    assert capsys.readouterr().out == ""
+
+
+def test_failed_walk_raises_for_interactive(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed rung fails the upgrade loudly (no silent fallbacks for
+    correctness problems); --auto swallowing happens in upgrade()'s existing
+    handler, not here."""
+    rung = SurfaceRung("t2-schema", verify_result=False)
+    monkeypatch.setattr(ladder_registry, "default_registry", lambda: LadderRegistry((rung,)))
+    with pytest.raises(click.ClickException, match="t2-schema"):
+        _run_ladder(dry_run=False, auto_mode=False, _store_path_fn=lambda: tmp_path / "ladder.db")
+    with CompletionStore(tmp_path / "ladder.db") as store:
+        assert store.verified_rungs() == frozenset()  # RDR-142: nothing recorded
+
+
+def test_upgrade_command_is_wired_to_the_ladder() -> None:
+    """Wiring pin: the single trigger (`nx upgrade`) walks the ladder."""
+    source = inspect.getsource(upgrade.callback)
+    assert "_run_ladder(" in source

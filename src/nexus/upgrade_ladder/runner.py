@@ -66,6 +66,17 @@ class StructlogReporter:
         _log.info(event, **fields)
 
 
+def pending_rungs(registry: LadderRegistry) -> list[tuple[str, RungStatus]]:
+    """Read-only detect sweep over every rung — zero work, zero records.
+
+    The dry-run-truth surface (``resolve_pending_steps`` precedent): the
+    ``nx doctor`` pending-rungs check and ``nx upgrade --dry-run`` report
+    from this without touching anything, and without even opening the
+    completion store.
+    """
+    return [(rung.name, rung.detect()) for rung in registry]
+
+
 class RungOutcome(str, Enum):
     """What happened to one rung during a ladder walk."""
 
@@ -130,12 +141,8 @@ class LadderRunner:
     # ── read-only surface (nx doctor, P0.4) ─────────────────────────────────
 
     def pending(self) -> list[tuple[str, RungStatus]]:
-        """Read-only detect sweep over every rung — zero work, zero records.
-
-        The dry-run-truth surface (``resolve_pending_steps`` precedent):
-        ``nx doctor`` reports from this without touching anything.
-        """
-        return [(rung.name, rung.detect()) for rung in self._registry]
+        """Read-only detect sweep — delegates to :func:`pending_rungs`."""
+        return pending_rungs(self._registry)
 
     # ── the walk ─────────────────────────────────────────────────────────────
 
