@@ -55,7 +55,13 @@ Field evidence (2026-07-15, one box, one day):
   changes land in the shared primitive (`src/nexus/daemon/service_registry.py`)
   plus the conformance suite
   (`tests/daemon/test_rdr149_lifecycle_conformance.py`) — never one
-  tier's copy. Whatever ownership model wins must be expressed there.
+  tier's copy. Research nuance (finding 2): the lease/election/heartbeat
+  *primitive* is genuinely unified there (zero spawn calls in
+  service_registry.py), but spawn *authority* is today scattered across
+  `commands/daemon.py`, `commands/upgrade.py`, `commands/init.py`,
+  `upgrade_finish.py`, and both OS-unit templates — unifying it is this
+  RDR's open decision, not an already-satisfied precondition. Whatever
+  ownership model wins must be expressed in the shared substrate.
 - RDR-175's decision stands: the OS init system is the single process
   WATCHDOG (no in-process respawn layers). This RDR decides the single
   spawn AUTHORITY, which RDR-175 deliberately did not.
@@ -74,6 +80,16 @@ Field evidence (2026-07-15, one box, one day):
   churn, not papering over it.
 
 ## Decision Space (candidates, not mutually exclusive)
+
+0. **Version-gate `_cycle_storage_service_to_current`** to match its T2
+   sibling `_cycle_daemon_to_current` (research finding 2: the dominant
+   churn source is the SessionStart hook's `nx upgrade --auto`
+   unconditionally cycling a live, already-current supervisor — not
+   session teardown at all). Small, evidence-shaped, independently
+   shippable; kills the 20/day `stop_requested` class on its own.
+   Candidates 1–3 then address the RESIDUAL dual-authority problems
+   (launchd 30s `already_running_healthy` loop, start races), whose
+   severity should be re-measured after this lands.
 
 1. **Detach client-autostarted supervisors** into their own session /
    process group (`setsid` / `start_new_session=True` at spawn) so
@@ -110,11 +126,61 @@ and 3 deferred unless post-fix telemetry still shows gaps.
 
 ## Research
 
-(To be filled during rdr-research: reproduce the session-teardown TERM
-attribution — process-group membership of a client-autostarted
-supervisor vs the plist's; enumerate every current spawn call site;
-launchd kickstart semantics/latency; systemd equivalents; container/CI
-topologies without an OS unit.)
+Two research passes, 2026-07-16. Structured findings in T2:
+`nexus_rdr/183-research-1` (RQ3–RQ5, OS-init semantics) and
+`nexus_rdr/183-research-2` (RQ1–RQ2, code attribution), with full
+file:line / source detail in the `-detail` twins.
+
+### RQ1 — TERM attribution: the working hypothesis is REFUTED
+
+The problem statement's pgroup-teardown hypothesis does not survive the
+code. `ensure_storage_supervisor` (`src/nexus/commands/daemon.py:1648`)
+already spawns with `start_new_session=True` (`daemon.py:1733`) — the
+client-autostarted supervisor is session/pgroup-isolated from birth.
+The actual churn mechanism is a deliberate, direct-PID
+`os.kill(pid, SIGTERM)` (`storage_service_daemon.py:1270`) fired by
+`_cycle_storage_service_to_current` (`upgrade.py:226-276`), which
+**unconditionally** stop+starts any live supervisor — no version check,
+unlike its T2 sibling `_cycle_daemon_to_current` (`upgrade.py:170-189`)
+— and runs from `nx upgrade --auto`'s `finally:` block on **every**
+SessionStart hook firing (`conexus/hooks/hooks.json:9`, matcher
+`startup|resume|clear|compact`). This fully accounts for the 6-in-5-min
+clustering and the 20/day `stop_requested` exits.
+
+### RQ2 — Spawn call sites (full table in 183-research-2-detail)
+
+One Popen spawn path (`ensure_storage_supervisor`; callers `nx init
+--service`, `nx daemon service start` non-foreground); two OS units
+exec'ing `--foreground` directly (launchd plist without `--config-dir`,
+`KeepAlive=true`/`ThrottleInterval=30`; systemd with
+`SuccessExitStatus=143`); two unconditional cyclers (`upgrade.py`,
+`upgrade_finish.py:583`); rehearsal harnesses. Platform asymmetry:
+systemd treats graceful SIGTERM as success (no respawn churn on Linux);
+macOS `KeepAlive=true` respawns unconditionally — the permanent
+`already_running_healthy` loop is expected launchd behavior.
+
+### RQ3–RQ5 — OS-init semantics (183-research-1)
+
+launchd: `kickstart` starts a stopped job immediately but requires the
+plist bootstrapped (defensive `bootstrap` before `kickstart`); `-k`
+kill-restarts a running job; plain-kickstart-on-running and
+ThrottleInterval-bypass are UNDOCUMENTED (verification items 1–2).
+systemd: `start` no-ops on running (asymmetry to note);
+`StartLimitBurst` lockout has no launchd equivalent — verify
+`StartLimitIntervalSec=0` landed per RDR-175 Gap-4 (item 4); user units
+need lingering or they re-import session-lifetime coupling → system-unit
+vs user-unit sub-decision. Fallback: `start_new_session=True` immunity
+to POSIX pgroup teardown is confirmed (setsid(2)); macOS
+login-session-sweep immunity is unverified (item 3). Prior art for
+direct-child fallback: zonkyio/embedded-postgres; no external precedent
+for the kick-else-spawn hybrid.
+
+### Open verification items (for the gate)
+
+1. Plain `kickstart` (no `-k`) behavior on an already-running job.
+2. Whether `kickstart` bypasses `ThrottleInterval`.
+3. setsid immunity to macOS *login-session* (not pgroup) teardown.
+4. `StartLimitIntervalSec=0` present in the shipped systemd unit?
 
 ## Decision
 
