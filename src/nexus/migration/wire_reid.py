@@ -96,12 +96,21 @@ class RemapEntry:
 def derive_wire_chash(chunk: dict[str, Any]) -> str:
     """The correct content address for *chunk*, derived on the wire.
 
-    Primary: ``sha256(document)[:32]`` — the text being carried is what the
-    target stores, so the text-derived id is self-consistent with the
-    target's identity contract (``chunk_identity.chunk_id`` equivalent).
-    Fallback: recorded ``chunk_text_hash[:32]`` metadata (reference-only
-    rows carry no document). A recorded hash that disagrees with the
-    carried text is tolerated with a warning — the text wins.
+    Primary: ``sha256(document)[:32]`` over the RAW carried text — the
+    ``chunk_identity.chunk_id`` / ``chunk_text_hash[:32]`` ecosystem
+    convention. Fallback: recorded ``chunk_text_hash[:32]`` metadata
+    (reference-only rows carry no document). A recorded hash that
+    disagrees with the carried text is tolerated with a warning — the
+    text wins.
+
+    KNOWN CARVE-OUT (P2 review, pre-existing class nexus-rvfwj): Postgres
+    text/jsonb cannot hold NUL bytes, so the server strips them before
+    storing WITHOUT recomputing chash — for a NUL-bearing chunk the stored
+    text therefore hashes differently than its chash, exactly as it does
+    for every existing chunk in that class (62/5233 in production). We
+    deliberately hash the RAW text: it matches ``chunk_text_hash``
+    metadata and the ids the rest of the ecosystem derives; hashing the
+    stripped text would diverge from both.
 
     Raises :class:`WireReidError` when neither source exists.
     """

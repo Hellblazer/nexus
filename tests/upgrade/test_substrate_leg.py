@@ -209,6 +209,62 @@ def test_execute_cross_model_leg_targets_remapped_collection(
         assert conn_rows["legacy-16-chars!"] == new_chash
 
 
+def test_reid_only_leg_passes_through_stored_vectors(tmp_path: pathlib.Path) -> None:
+    """P2 review High: a re-id-only (same-model) leg must CARRY the stored
+    vectors — forcing a server re-embed would bill Voyage tokens the plan
+    promised it would not (billed_reembed=False), silently defeating the
+    consent gate."""
+    text = "note text"
+    source = OneBatchSource([
+        {
+            "id": "legacy-16-chars!",
+            "document": text,
+            "metadata": {"embedding_model": "voyage-context-3"},
+            "embedding": [0.1, 0.2],
+        }
+    ])
+    target = RecordingTarget()
+    leg = LegPlan(
+        source_collection="knowledge__old__voyage-context-3__v1",
+        target_collection="knowledge__old__voyage-context-3__v1",
+        needs_reid=True,
+        needs_reembed=False,
+    )
+    with ChashRemapStore(tmp_path / "chash_remap.db") as store:
+        result = execute_leg(leg, source, target, map_store=store, page=10, provenance="p")
+        assert result.ok
+        new_chash = hashlib.sha256(text.encode()).hexdigest()[:32]
+        assert target.rows[new_chash]["embeddings"] == [[0.1, 0.2]]  # passthrough, no bill
+
+
+def test_mis_provenanced_vector_falls_back_to_reembed(tmp_path: pathlib.Path) -> None:
+    """nexus-bfdri mismatch-only rule carried into the leg: recorded
+    provenance disagreeing with the target's declared model drops the
+    vector, so the batch re-embeds server-side (correctness over cost);
+    absent provenance is trusted."""
+    text = "note text"
+    source = OneBatchSource([
+        {
+            "id": "legacy-16-chars!",
+            "document": text,
+            "metadata": {"embedding_model": "some-other-model"},
+            "embedding": [0.9, 0.9],
+        }
+    ])
+    target = RecordingTarget()
+    leg = LegPlan(
+        source_collection="knowledge__old__voyage-context-3__v1",
+        target_collection="knowledge__old__voyage-context-3__v1",
+        needs_reid=True,
+        needs_reembed=False,
+    )
+    with ChashRemapStore(tmp_path / "chash_remap.db") as store:
+        result = execute_leg(leg, source, target, map_store=store, page=10, provenance="p")
+        assert result.ok
+        new_chash = hashlib.sha256(text.encode()).hexdigest()[:32]
+        assert target.rows[new_chash]["embeddings"] is None  # dropped → server re-embed
+
+
 def test_execute_leg_resumes_from_watermark(tmp_path: pathlib.Path) -> None:
     """P2 critique High: the rung-keyed watermark is WIRED — a re-run after
     a clean pass resumes above the floor instead of replaying the stream

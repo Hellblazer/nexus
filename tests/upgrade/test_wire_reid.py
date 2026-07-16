@@ -84,6 +84,18 @@ def test_mismatched_metadata_hash_prefers_carried_text() -> None:
     assert derive_wire_chash(chunk) == _sha32("actual text")
 
 
+def test_nul_bearing_text_hashes_raw_matching_ecosystem_identity() -> None:
+    """P2 review Medium (nexus-rvfwj class): derivation hashes the RAW text
+    including NUL bytes — matching chunk_text_hash and the ecosystem's ids
+    — even though the server strips NULs before storing (the pre-existing,
+    tolerated stored-text/chash divergence for that population)."""
+    text = "before\x00after"
+    chunk = _legacy_chunk("legacy", text)
+    assert derive_wire_chash(chunk) == _sha32(text)  # raw, not stripped
+    assert derive_wire_chash(chunk) == chunk["metadata"]["chunk_text_hash"][:32]
+    assert derive_wire_chash(chunk) != _sha32("beforeafter")  # not the stripped form
+
+
 def test_underivable_chunk_fails_loud() -> None:
     """GH #1390: never force an id through — no text AND no recorded hash
     is a loud failure, not a guess."""

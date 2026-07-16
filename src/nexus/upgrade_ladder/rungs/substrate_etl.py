@@ -138,6 +138,29 @@ def plan_substrate_legs(
     return SubstratePlan(legs=legs, decisions=decisions, billed_reembed=billed)
 
 
+def _provenance_scrub(target_collection: str):
+    """nexus-bfdri mismatch-only provenance check as a batch transform: drop
+    the stored vector ONLY when recorded provenance is present and disagrees
+    with the target name's declared model segment. Non-conformant target
+    names (no declared model) trust all vectors."""
+    segments = target_collection.split("__")
+    declared = segments[2] if len(segments) >= 3 else None
+
+    def scrub(batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if declared is None:
+            return batch
+        out: list[dict[str, Any]] = []
+        for chunk in batch:
+            prov = (chunk.get("metadata") or {}).get("embedding_model")
+            if prov and prov != declared and chunk.get("embedding") is not None:
+                chunk = dict(chunk)
+                chunk.pop("embedding", None)
+            out.append(chunk)
+        return out
+
+    return scrub
+
+
 def _leg_watermark_key(leg: LegPlan, tenant_id: str) -> str:
     from nexus.upgrade_ladder.registry import RUNG_SUBSTRATE_ETL  # noqa: PLC0415 — deferred, avoids import cycle
 
@@ -177,15 +200,34 @@ def execute_leg(
     )
     from nexus.migration.wire_reid import make_wire_reid_transform  # noqa: PLC0415 — deferred to avoid import cost
 
-    transform = None
+    reid = None
     if leg.needs_reid:
-        transform = make_wire_reid_transform(
+        reid = make_wire_reid_transform(
             map_store,
             source_collection=leg.source_collection,
             target_collection=leg.target_collection,
             provenance=provenance,
             tenant_id=tenant_id,
         )
+    # Same-model legs PASS THROUGH stored vectors (P2 review High): forcing a
+    # server-side re-embed on a re-id-only leg bills Voyage tokens the plan
+    # promised it would not (billed_reembed=False) — silently defeating the
+    # consent gate. Passthrough carries the nexus-bfdri MISMATCH-ONLY
+    # provenance rule from _migrate_one: a chunk whose recorded
+    # embedding_model is present AND disagrees with the target's declared
+    # model drops its vector (the seam's all-or-none batch check then falls
+    # back to a server re-embed for that batch); absent provenance is trusted.
+    passthrough = not leg.needs_reembed
+    scrub = _provenance_scrub(leg.target_collection) if passthrough else None
+
+    def _compose(batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if reid is not None:
+            batch = reid(batch)  # map batch persists here (r2 ordering)
+        if scrub is not None:
+            batch = scrub(batch)
+        return batch
+
+    transform = _compose if (reid is not None or scrub is not None) else None
     key = _leg_watermark_key(leg, tenant_id)
     floor = usable_rung_watermark(
         key, trusted_count=int(target.count(leg.target_collection))
@@ -210,7 +252,7 @@ def execute_leg(
         source_collection=leg.source_collection,
         target_collection=leg.target_collection,
         page=page,
-        include_embeddings=False,  # re-embed server-side or plain text copy
+        include_embeddings=passthrough,  # same-model: carry stored vectors (no bill)
         transform=transform,
         on_batch=_advance,
         skip_rows=floor,
