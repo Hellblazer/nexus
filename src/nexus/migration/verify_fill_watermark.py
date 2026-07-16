@@ -186,28 +186,31 @@ def advance_watermark(
     """
     if not service_url:
         return
+    mark: dict[str, Any] = {
+        "max_rowid": max_rowid,
+        "target_count": target_count,
+    }
+    if table in RETENTION_MARKED_TABLES:
+        if retention_marker is None:
+            return  # cannot record a rollback baseline -> no advance
+        mark["retention_marker"] = retention_marker
+    _persist_mark(_key(service_url, tenant, table), mark, log_label=table)
+
+
+def _persist_mark(store_key: str, mark: dict[str, Any], *, log_label: str) -> None:
+    """Shared persistence core: flock around load+write (read-modify-write
+    race, review c0e4493e finding 4) + atomic tmp+rename. Best-effort — a
+    persist failure only costs the next run its shortcut, never correctness."""
     import fcntl  # noqa: PLC0415 — POSIX-only (darwin/linux, the supported platforms), deferred
 
     path = _watermark_file()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        # flock around load+write: two concurrent verify-fill runs would
-        # otherwise lose each other's OTHER-table updates (read-modify-write
-        # race; safe — a lost update only costs the next run its shortcut —
-        # but silent, review c0e4493e finding 4).
         lock_path = path.parent / ".wm.lock"
         with open(lock_path, "w") as lock_fh:
             fcntl.flock(lock_fh, fcntl.LOCK_EX)
             marks = _load_all()
-            mark: dict[str, Any] = {
-                "max_rowid": max_rowid,
-                "target_count": target_count,
-            }
-            if table in RETENTION_MARKED_TABLES:
-                if retention_marker is None:
-                    return  # cannot record a rollback baseline -> no advance
-                mark["retention_marker"] = retention_marker
-            marks[_key(service_url, tenant, table)] = mark
+            marks[store_key] = mark
             fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".wm_")
             try:
                 with os.fdopen(fd, "w") as fh:
@@ -217,4 +220,63 @@ def advance_watermark(
                 Path(tmp).unlink(missing_ok=True)
                 raise
     except OSError:
-        _log.warning("verify_fill.watermark_persist_failed", table=table, exc_info=True)
+        _log.warning(
+            "verify_fill.watermark_persist_failed", table=log_label, exc_info=True
+        )
+
+
+# ── RDR-185 P2.1 (nexus-n7u38.14): rung-keyed generalization ────────────────
+#
+# The ladder's long rungs (substrate ETL) resume by ARBITRARY keys — e.g.
+# "<rung>|<tenant>|<collection>" — not by the four telemetry tables above.
+# Same JSON store (namespaced key prefix, no collision with the
+# service_url|tenant|table family), same atomic tmp+rename, same flock,
+# same distrust-on-shrink trust gate. The retention-marker extra stays
+# table-specific: rung callers with such semantics pass their own trusted
+# count reflecting them.
+
+_RUNG_KEY_PREFIX = "rung|"
+
+
+def usable_rung_watermark(rung_key: str, *, trusted_count: int | None) -> int:
+    """The position floor a rung's resume may start ABOVE, or 0 for a full run.
+
+    Trust gate verbatim from :func:`usable_min_rowid`: honoured only when
+    the caller supplies a live *trusted_count* AND it is >= the count
+    recorded at advance time — a LOWER count means target rows were deleted
+    (rollback) and the floor is invalid. Never raises.
+    """
+    if not rung_key or trusted_count is None:
+        return 0
+    mark = _load_all().get(_RUNG_KEY_PREFIX + rung_key)
+    if not isinstance(mark, dict):
+        return 0
+    recorded = mark.get("target_count")
+    position = mark.get("position")
+    if not isinstance(recorded, int) or not isinstance(position, int):
+        return 0
+    if trusted_count < recorded:
+        _log.warning(
+            "verify_fill.rung_watermark_invalidated_target_shrank",
+            rung_key=rung_key,
+            recorded_count=recorded,
+            trusted_count=trusted_count,
+            note="target rows were deleted (rollback?) — full run",
+        )
+        return 0
+    return position
+
+
+def advance_rung_watermark(rung_key: str, *, position: int, trusted_count: int) -> None:
+    """Record that everything up to *position* is verified for *rung_key*.
+
+    Same advance-gate spirit as :func:`advance_watermark`: call ONLY after a
+    verified-clean pass, with a live post-pass *trusted_count* to record.
+    """
+    if not rung_key:
+        return
+    _persist_mark(
+        _RUNG_KEY_PREFIX + rung_key,
+        {"position": position, "target_count": trusted_count},
+        log_label=rung_key,
+    )

@@ -170,3 +170,70 @@ def test_watermarks_are_tenant_scoped(tmp_path, monkeypatch):
     advance_watermark(URL, "tenant-a", "tier_writes", max_rowid=500, target_count=480)
     assert usable_min_rowid(URL, "tenant-a", "tier_writes", engine_count=480) == 500
     assert usable_min_rowid(URL, "tenant-b", "tier_writes", engine_count=480) == 0
+
+
+# ── RDR-185 P2.1 (nexus-n7u38.14): rung-keyed generalization ─────────────────
+# Arbitrary rung keys share the same JSON store, atomic tmp+rename write,
+# flock, and distrust-on-shrink trust gate as the table watermarks.
+
+from nexus.migration.verify_fill_watermark import (  # noqa: E402 — appended test section
+    _watermark_file,
+    advance_rung_watermark,
+    usable_rung_watermark,
+)
+
+RUNG_KEY = "substrate-etl|default|knowledge__old_store"
+
+
+def test_rung_watermark_roundtrip(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    advance_rung_watermark(RUNG_KEY, position=500, trusted_count=480)
+    assert usable_rung_watermark(RUNG_KEY, trusted_count=480) == 500
+
+
+def test_rung_watermark_resumes_across_interruption(tmp_path, monkeypatch):
+    """Simulated interruption: advance, 'crash' (fresh call path), resume from
+    the recorded floor, advance further."""
+    _isolate(tmp_path, monkeypatch)
+    advance_rung_watermark(RUNG_KEY, position=300, trusted_count=290)
+    assert usable_rung_watermark(RUNG_KEY, trusted_count=290) == 300
+    advance_rung_watermark(RUNG_KEY, position=600, trusted_count=585)
+    assert usable_rung_watermark(RUNG_KEY, trusted_count=585) == 600
+
+
+def test_rung_watermark_distrusts_on_shrink(tmp_path, monkeypatch):
+    """Verbatim trust-gate semantics: a live count below the recorded one
+    (rollback) invalidates the floor — full probe."""
+    _isolate(tmp_path, monkeypatch)
+    advance_rung_watermark(RUNG_KEY, position=500, trusted_count=480)
+    assert usable_rung_watermark(RUNG_KEY, trusted_count=479) == 0
+
+
+def test_rung_watermark_requires_trusted_count(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    advance_rung_watermark(RUNG_KEY, position=500, trusted_count=480)
+    assert usable_rung_watermark(RUNG_KEY, trusted_count=None) == 0
+
+
+def test_rung_watermark_unknown_key_full_probe(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    assert usable_rung_watermark("never-advanced", trusted_count=10) == 0
+
+
+def test_rung_and_table_watermarks_coexist(tmp_path, monkeypatch):
+    """Both key families live in one JSON store without collision."""
+    _isolate(tmp_path, monkeypatch)
+    advance_watermark(URL, TEN, "tier_writes", max_rowid=111, target_count=100)
+    advance_rung_watermark(RUNG_KEY, position=222, trusted_count=200)
+    assert usable_min_rowid(URL, TEN, "tier_writes", engine_count=100) == 111
+    assert usable_rung_watermark(RUNG_KEY, trusted_count=200) == 222
+
+
+def test_rung_watermark_never_raises_on_corrupt_store(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    path = _watermark_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("not json at all")
+    assert usable_rung_watermark(RUNG_KEY, trusted_count=10) == 0
+    advance_rung_watermark(RUNG_KEY, position=5, trusted_count=4)  # must not raise
+    assert usable_rung_watermark(RUNG_KEY, trusted_count=4) == 5
