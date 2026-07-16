@@ -23,9 +23,21 @@ import pytest
 from nexus.migration.etl_ports import ChromaReadSource, run_batched_etl
 from nexus.migration.remap_cascade import cascade_remap
 from nexus.migration.vector_etl import rollback_collections
+from nexus.migration.detection import CollectionClassification
 from nexus.migration.wire_reid import ChashRemapStore, make_wire_reid_transform
+from nexus.upgrade_ladder.rungs.substrate_etl import (
+    SourceGoneDecision,
+    SubstratePlan,
+    plan_substrate_legs,
+    run_substrate_migration,
+)
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.fixture(autouse=True)
+def _isolate_watermarks(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
 
 COLL = "knowledge__old_store"
 TEXT_DUP = "duplicated note text"
@@ -295,3 +307,103 @@ def test_cascade_on_real_ddl_after_migration(
     topics = conn.execute("SELECT doc_id, topic_id FROM topic_assignments").fetchall()
     conn.close()
     assert topics == [(_sha32(TEXT_DUP), 7)]
+
+
+def test_chained_plan_execute_cascade_rollback(
+    chroma_source: Any, tmp_path: pathlib.Path
+) -> None:
+    """P2 critique High-2: the audit §2 ordering exercised as ONE chain —
+    plan_substrate_legs → run_substrate_migration (execute_leg per leg,
+    then the 7-store cascade, in order) → rollback_collections — against
+    one shared map and the same fixtures. Exact assertions throughout."""
+    classification = CollectionClassification(
+        collection=COLL,
+        leg="local",
+        model="voyage-context-3",
+        dim=1024,
+        support="unsupported",  # legacy probe flips support; model stays wired
+        source_count=4,
+        has_data=True,
+        legacy_ids=True,
+    )
+    plan = plan_substrate_legs(
+        [classification], prior_collections=frozenset(), voyage_key_present=True
+    )
+    assert len(plan.legs) == 1
+    assert plan.legs[0].needs_reid is True
+    assert plan.legs[0].needs_reembed is False  # wired model: re-id only
+    assert plan.billed_reembed is False
+
+    catalog_db = tmp_path / "catalog.db"
+    memory_db = tmp_path / "memory.db"
+    conn = sqlite3.connect(catalog_db)
+    conn.executescript(
+        "CREATE TABLE document_chunks (doc_id TEXT NOT NULL, position INTEGER NOT NULL,"
+        " chash TEXT NOT NULL, PRIMARY KEY (doc_id, position));"
+    )
+    conn.execute(
+        "INSERT INTO document_chunks VALUES ('1.1', 0, 'legacy-0000000001')"
+    )
+    conn.commit()
+    conn.close()
+    conn = sqlite3.connect(memory_db)
+    conn.executescript(
+        "CREATE TABLE chash_index (chash TEXT NOT NULL, physical_collection TEXT NOT NULL,"
+        " created_at TEXT NOT NULL, PRIMARY KEY (chash, physical_collection));"
+        "CREATE TABLE topic_assignments (doc_id TEXT NOT NULL, topic_id INTEGER NOT NULL,"
+        " PRIMARY KEY (doc_id, topic_id));"
+        "CREATE TABLE frecency (chunk_id TEXT PRIMARY KEY, embedded_at TEXT NOT NULL DEFAULT '',"
+        " ttl_days INTEGER NOT NULL DEFAULT 0, frecency_score REAL NOT NULL DEFAULT 0,"
+        " miss_count INTEGER NOT NULL DEFAULT 0, last_hit_at TEXT NOT NULL DEFAULT '');"
+        "CREATE TABLE relevance_log (id INTEGER PRIMARY KEY, query TEXT NOT NULL,"
+        " chunk_id TEXT NOT NULL, collection TEXT, action TEXT NOT NULL, timestamp TEXT NOT NULL);"
+        "CREATE TABLE document_aspects (collection TEXT NOT NULL, source_path TEXT NOT NULL,"
+        " source_uri TEXT, PRIMARY KEY (collection, source_path));"
+        "CREATE TABLE aspect_extraction_queue (collection TEXT NOT NULL, source_path TEXT NOT NULL,"
+        " PRIMARY KEY (collection, source_path));"
+    )
+    conn.commit()
+    conn.close()
+
+    source = ChromaReadSource(chroma_source)
+    target = RecordingTarget()
+    with ChashRemapStore(tmp_path / "chash_remap.db") as store:
+        leg_results, cascade_results = run_substrate_migration(
+            plan, source, target,
+            map_store=store, catalog_db=catalog_db, memory_db=memory_db,
+            page=2, provenance="chain",
+        )
+        assert [r.ok for r in leg_results] == [True]
+        assert leg_results[0].written == 3  # collapse
+        by = {r.store: r for r in cascade_results}
+        assert by["document_chunks"].rewritten == 1
+        assert all(r.ok for r in cascade_results)
+
+        # Rollback via the SAME map, same source stream.
+        vector = RollbackVectorClient({COLL: set(target.rows)})
+        deleted = rollback_collections(
+            chroma_source, vector, collections=[COLL], remap_store=store
+        )
+        assert deleted == {COLL: 3}
+        assert vector.count(COLL) == 0
+
+    conn = sqlite3.connect(catalog_db)
+    assert conn.execute("SELECT chash FROM document_chunks").fetchall() == [
+        (_sha32(TEXT_DUP),)
+    ]
+    conn.close()
+    # Source untouched through the entire chain.
+    assert chroma_source.get_collection(COLL).count() == 4
+
+
+def test_chain_refuses_unresolved_decisions(tmp_path: pathlib.Path) -> None:
+    """Consent is never implicit: a plan carrying a source-gone decision
+    refuses to run."""
+    plan = SubstratePlan(decisions=[SourceGoneDecision("knowledge__vanished")])
+    with ChashRemapStore(tmp_path / "chash_remap.db") as store:
+        with pytest.raises(RuntimeError, match="unresolved genuine decisions"):
+            run_substrate_migration(
+                plan, None, None,  # type: ignore[arg-type]
+                map_store=store, catalog_db=tmp_path / "c.db",
+                memory_db=tmp_path / "m.db", page=2, provenance="p",
+            )

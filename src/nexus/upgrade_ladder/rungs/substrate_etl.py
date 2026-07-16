@@ -138,6 +138,12 @@ def plan_substrate_legs(
     return SubstratePlan(legs=legs, decisions=decisions, billed_reembed=billed)
 
 
+def _leg_watermark_key(leg: LegPlan, tenant_id: str) -> str:
+    from nexus.upgrade_ladder.registry import RUNG_SUBSTRATE_ETL  # noqa: PLC0415 — deferred, avoids import cycle
+
+    return f"{RUNG_SUBSTRATE_ETL}|{tenant_id}|{leg.source_collection}->{leg.target_collection}"
+
+
 def execute_leg(
     leg: LegPlan,
     source: "EtlSource",
@@ -148,15 +154,27 @@ def execute_leg(
     provenance: str,
     tenant_id: str = "",
 ) -> "EtlRunResult":
-    """Run one composed leg through the .14 seam.
+    """Run one composed leg through the .14 seam, RESUMABLY (RDR-178).
 
     Re-id legs get the .15 wire transform (map batch persists strictly
     before the target write — gate r2 by construction). Re-embed legs send
     NO embeddings (the service re-embeds the stored text with the target
-    collection's declared model). Same-model non-reid legs are plain
-    copies through the same seam.
+    collection's declared model).
+
+    Resume (P2 critique High): the rung-keyed watermark records how many
+    SOURCE rows are verified-sent after each clean batch, trusted against
+    the live target count (distrust-on-shrink invalidates after a
+    rollback). A crash at 99% of a 90k-chunk collection resumes from the
+    floor instead of replaying ~900s — offsets are stable because the
+    source is frozen post-cutover (RDR-176). A resumed run's full-count
+    verification is the rung verify()'s job; the seam asserts this run's
+    own rows.
     """
     from nexus.migration.etl_ports import run_batched_etl  # noqa: PLC0415 — deferred to avoid import cost
+    from nexus.migration.verify_fill_watermark import (  # noqa: PLC0415 — deferred to avoid import cost
+        advance_rung_watermark,
+        usable_rung_watermark,
+    )
     from nexus.migration.wire_reid import make_wire_reid_transform  # noqa: PLC0415 — deferred to avoid import cost
 
     transform = None
@@ -168,6 +186,24 @@ def execute_leg(
             provenance=provenance,
             tenant_id=tenant_id,
         )
+    key = _leg_watermark_key(leg, tenant_id)
+    floor = usable_rung_watermark(
+        key, trusted_count=int(target.count(leg.target_collection))
+    )
+    if floor:
+        _log.info(
+            "substrate_leg_resuming_from_watermark",
+            leg=key,
+            floor=floor,
+        )
+
+    def _advance(written: int, source_rows_this_run: int) -> None:
+        advance_rung_watermark(
+            key,
+            position=floor + source_rows_this_run,
+            trusted_count=int(target.count(leg.target_collection)),
+        )
+
     return run_batched_etl(
         source,
         target,
@@ -176,4 +212,52 @@ def execute_leg(
         page=page,
         include_embeddings=False,  # re-embed server-side or plain text copy
         transform=transform,
+        on_batch=_advance,
+        skip_rows=floor,
     )
+
+
+def run_substrate_migration(
+    plan: SubstratePlan,
+    source: "EtlSource",
+    target: "EtlTarget",
+    *,
+    map_store: "ChashRemapStore",
+    catalog_db: Any,
+    memory_db: Any,
+    page: int,
+    provenance: str,
+    tenant_id: str = "",
+) -> tuple[list["EtlRunResult"], list[Any]]:
+    """The audit §2 ordering as CODE, not prose (P2 critique High):
+
+    per leg — map persist + regenerate (``execute_leg``, r2 by
+    construction) — THEN the local-store cascade (manifest → chash_index →
+    topic_assignments → frecency/relevance_log → aspects, the
+    ``CASCADE_STORES`` order). Genuine decisions must be resolved by the
+    CALLER before this runs: it refuses a plan with pending decisions
+    (consent never happens implicitly).
+
+    Returns (per-leg results, per-store cascade results). The rung's
+    converge wraps this; its verify() is the authoritative post-state
+    check (RDR-142).
+    """
+    from nexus.migration.remap_cascade import cascade_remap  # noqa: PLC0415 — deferred to avoid import cost
+
+    if plan.decisions:
+        raise RuntimeError(
+            "substrate migration has unresolved genuine decisions "
+            f"(source-gone: {[d.collection for d in plan.decisions]!r}) — "
+            "resolve them before running (consent is never implicit)"
+        )
+    leg_results = [
+        execute_leg(
+            leg, source, target,
+            map_store=map_store, page=page, provenance=provenance, tenant_id=tenant_id,
+        )
+        for leg in plan.legs
+    ]
+    cascade_results = cascade_remap(
+        map_store, catalog_db=catalog_db, memory_db=memory_db
+    )
+    return leg_results, cascade_results

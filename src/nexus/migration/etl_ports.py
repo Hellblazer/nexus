@@ -46,7 +46,12 @@ class EtlSource(Protocol):
     def iter_batches(
         self, collection: str, *, page: int, include_embeddings: bool = False
     ) -> Iterator[list[dict[str, Any]]]:
-        """Yield page-aligned batches of ``{id, document, metadata[, embedding]}``."""
+        """Yield page-aligned batches of ``{id, document, metadata[, embedding]}``.
+
+        Implementations MAY additionally accept ``start_offset`` (keyword)
+        to begin mid-stream — the resume path passes it only when nonzero,
+        so offset-less fixtures stay conformant. Offsets are stable because
+        the source is frozen post-cutover (RDR-176 immutability)."""
         ...
 
     def count(self, collection: str) -> int: ...
@@ -87,13 +92,15 @@ class ChromaReadSource:
         self._client = read_client
 
     def iter_batches(
-        self, collection: str, *, page: int, include_embeddings: bool = False
+        self, collection: str, *, page: int, include_embeddings: bool = False,
+        start_offset: int = 0,
     ) -> Iterator[list[dict[str, Any]]]:
         from nexus.migration.chroma_read import iter_collection_chunks  # noqa: PLC0415 — deferred, keeps module import cheap
 
         batch: list[dict[str, Any]] = []
         for chunk in iter_collection_chunks(
-            self._client, collection, page_size=page, include_embeddings=include_embeddings
+            self._client, collection, page_size=page,
+            include_embeddings=include_embeddings, start_offset=start_offset,
         ):
             batch.append(chunk)
             if len(batch) == page:
@@ -140,6 +147,7 @@ def run_batched_etl(
     transform: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None,
     breaker: EtlCircuitBreaker | None = None,
     on_batch: Callable[[int, int], None] | None = None,
+    skip_rows: int = 0,
 ) -> EtlRunResult:
     """Drive one source→target batched ETL run through the seam.
 
@@ -150,7 +158,14 @@ def run_batched_etl(
     never raised (the per-collection contract ``_migrate_one`` established).
 
     ``on_batch(written_so_far, source_count_so_far)`` is the progress seam
-    (feeds the rung's :class:`~nexus.upgrade_ladder.protocol.ProgressReporter`).
+    (feeds the rung's progress reporter AND the rung-keyed watermark
+    advance — see ``substrate_etl.execute_leg``). ``skip_rows`` resumes
+    mid-stream from a watermark floor (RDR-178 resumability): counts are
+    THIS-run-relative; the caller owns floor arithmetic. When ``skip_rows``
+    is nonzero the source must accept ``start_offset``. NOTE: the final
+    count verification compares the FULL target against distinct ids seen
+    THIS run, so a resumed run's verification is delegated to the caller
+    (partial-run visibility) — verified=False result fields still hold.
     """
     from nexus.migration.vector_etl import (  # noqa: PLC0415 — deferred to avoid import cycle (vector_etl is heavy)
         _legacy_id_failure_reason,
@@ -162,9 +177,16 @@ def run_batched_etl(
     written = 0
     distinct_ids: set[str] = set()
     try:
-        for batch in source.iter_batches(
-            source_collection, page=page, include_embeddings=include_embeddings
-        ):
+        if skip_rows:
+            batches = source.iter_batches(
+                source_collection, page=page,
+                include_embeddings=include_embeddings, start_offset=skip_rows,
+            )
+        else:
+            batches = source.iter_batches(
+                source_collection, page=page, include_embeddings=include_embeddings
+            )
+        for batch in batches:
             source_count += len(batch)
             if transform is not None:
                 batch = transform(batch)
@@ -217,6 +239,25 @@ def run_batched_etl(
 
     expected = len(distinct_ids)
     target_count = int(target.count(target_collection))
+    if skip_rows:
+        # Resumed run: the target legitimately holds rows from the earlier
+        # partial pass — this run can only assert its OWN rows landed. The
+        # authoritative full-collection check is the rung's verify() (the
+        # RDR-142 gate), which sees the whole source.
+        if target_count < expected:
+            reason = (
+                f"post-write count mismatch on resume: target={target_count} "
+                f"< this-run distinct={expected}"
+            )
+            _log.error(
+                "etl_seam_resume_count_mismatch",
+                source=source_collection,
+                target=target_collection,
+                expected=expected,
+                target_count=target_count,
+            )
+            return EtlRunResult(False, source_count, written, reason)
+        return EtlRunResult(True, source_count, written)
     if target_count != expected:
         reason = (
             f"post-write count mismatch: distinct-transformed={expected} "

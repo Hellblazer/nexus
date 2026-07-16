@@ -149,6 +149,48 @@ def test_rollback_is_idempotent_with_map(map_store: ChashRemapStore) -> None:
     assert second == {"coll": 0}  # empty target: guard does not fire (target_before == 0)
 
 
+def test_cross_model_rollback_deletes_from_recorded_target(
+    map_store: ChashRemapStore,
+) -> None:
+    """P2 critique Critical (audit C2 realized): a cross-model leg wrote to
+    a RENAMED target collection — rollback must delete from the RECORDED
+    target_collection per map row, and the guards must run over the summed
+    involved-target counts (the source-named collection reading 0 must not
+    defuse the zero-removed guard into a silent clean report)."""
+    src = "knowledge__notes__all-minilm-l6-v2__v1"
+    dst = "knowledge__notes__voyage-context-3__v1"
+    read = FakeReadClient({src: ["legacy-1", "legacy-2"]})
+    vector = FakeVectorClient({dst: {NEW_A, NEW_B}})  # rows live under the RENAMED name
+    map_store.record_batch([
+        RemapEntry("", src, "legacy-1", NEW_A, dst, "p"),
+        RemapEntry("", src, "legacy-2", NEW_B, dst, "p"),
+    ])
+    deleted = rollback_collections(read, vector, collections=[src], remap_store=map_store)
+    assert deleted == {src: 2}
+    assert vector.count(dst) == 0
+    assert vector.count(src) == 0  # nothing ever created/left under the source name
+
+
+def test_cross_model_conformant_ids_roll_back_via_target_names(
+    map_store: ChashRemapStore,
+) -> None:
+    """Conformant rows in a cross-model leg carry NO map entry but still
+    landed under the renamed target — target_names supplies their home
+    (the verify_fill_collections parameter shape)."""
+    src = "knowledge__notes__all-minilm-l6-v2__v1"
+    dst = "knowledge__notes__voyage-context-3__v1"
+    conformant = "c" * 32
+    read = FakeReadClient({src: ["legacy-1", conformant]})
+    vector = FakeVectorClient({dst: {NEW_A, conformant}})
+    map_store.record_batch([RemapEntry("", src, "legacy-1", NEW_A, dst, "p")])
+    deleted = rollback_collections(
+        read, vector, collections=[src], remap_store=map_store,
+        target_names={src: dst},
+    )
+    assert deleted == {src: 2}
+    assert vector.count(dst) == 0
+
+
 def test_source_is_never_written(map_store: ChashRemapStore) -> None:
     """Immutable source (RDR-176): rollback reads the source manifest only;
     the fake read leg has no write surface to reach."""

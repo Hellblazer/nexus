@@ -121,6 +121,7 @@ def iter_collection_chunks(
     *,
     page_size: int | None = None,
     include_embeddings: bool = False,
+    start_offset: int = 0,
 ) -> Iterator[dict[str, Any]]:
     """Yield every chunk of *collection_name* as ``{id, document, metadata}``.
 
@@ -147,7 +148,7 @@ def iter_collection_chunks(
     if include_embeddings:
         include.append("embeddings")
     col = client.get_collection(collection_name)
-    offset = 0
+    offset = start_offset
     while True:
         batch = col.get(include=include, limit=page, offset=offset)
         ids = batch.get("ids") or []

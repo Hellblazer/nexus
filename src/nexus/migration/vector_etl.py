@@ -1681,6 +1681,7 @@ def rollback_collections(
     collections: list[str] | None = None,
     page_size: int | None = None,
     remap_store: Any | None = None,
+    target_names: dict[str, str] | None = None,
 ) -> dict[str, int]:
     """Undo the copy: delete from pgvector exactly the chashes present in
     the source Chroma collections. Returns exact per-collection deleted
@@ -1697,36 +1698,57 @@ def rollback_collections(
     one target lookup/delete. Rollback goes via the MAP, never live id
     equality — the map is a permanent migration artifact precisely so this
     stays possible after the source ids stop matching.
+
+    CROSS-MODEL legs (P2 critique Critical / audit C2): a co-resident leg
+    writes to a RENAMED target collection — probing the source-named
+    collection would read an empty count, defusing the zero-removed guard
+    into a silent clean-zero report while the migrated rows sit untouched.
+    Each mapped row is therefore deleted from ITS RECORDED
+    ``target_collection``; unmapped (conformant) ids use *target_names*
+    (the same source→target mapping ``verify_fill_collections`` takes) or
+    the source name. The guards run over the SUMMED counts of every
+    involved target collection.
     """
     page = page_size or QUOTAS.MAX_QUERY_RESULTS
     names = collections if collections is not None else list_collection_names(read_client)
     deleted: dict[str, int] = {}
     for name in names:
-        remap: dict[str, str] = (
-            remap_store.entries_for_collection(name) if remap_store is not None else {}
+        remap: dict[str, tuple[str, str]] = (
+            remap_store.entries_with_targets(name) if remap_store is not None else {}
         )
-        handle = vector_client.get_or_create_collection(name)
+        default_target = (target_names or {}).get(name, name)
+        involved = sorted(
+            {default_target} | {tgt or default_target for _new, tgt in remap.values()}
+        )
+        handles = {tgt: vector_client.get_or_create_collection(tgt) for tgt in involved}
         # Reachability probe BEFORE any lookup: count() propagates service
         # errors, unlike the collection handle's get(), which swallows them
         # and returns empty — without this, an unreachable service would
-        # read as a clean "deleted 0".
-        target_before = int(vector_client.count(name))
+        # read as a clean "deleted 0". Summed across every involved target.
+        target_before = sum(int(vector_client.count(tgt)) for tgt in involved)
         removed = 0
         source_ids = 0
+        seen: set[tuple[str, str]] = set()
         for batch in _iter_id_pages(read_client, name, page):
-            raw_ids = [c["id"] for c in batch]
-            source_ids += len(raw_ids)
-            ids: list[str] = []
-            seen: set[str] = set()
-            for cid in raw_ids:
-                translated = remap.get(cid, cid)
-                if translated not in seen:
-                    seen.add(translated)
-                    ids.append(translated)
-            present = handle.get(ids=ids, limit=len(ids)).get("ids") or []
-            if present:
-                handle.delete(present)
-                removed += len(present)
+            per_target: dict[str, list[str]] = {}
+            for c in batch:
+                cid = c["id"]
+                source_ids += 1
+                if cid in remap:
+                    translated, tgt = remap[cid]
+                    tgt = tgt or default_target
+                else:
+                    translated, tgt = cid, default_target
+                key = (tgt, translated)
+                if key in seen:
+                    continue  # collapse sibling: one lookup/delete per target row
+                seen.add(key)
+                per_target.setdefault(tgt, []).append(translated)
+            for tgt, ids in per_target.items():
+                present = handles[tgt].get(ids=ids, limit=len(ids)).get("ids") or []
+                if present:
+                    handles[tgt].delete(present)
+                    removed += len(present)
         if removed == 0 and source_ids > 0 and target_before > 0:
             # The target holds chunks and the source has chashes, yet not a
             # single lookup resolved. The lookup layer swallows transport
@@ -1744,7 +1766,7 @@ def rollback_collections(
             # The delete leg of the collection handle ALSO swallows transport
             # errors — verify the count actually moved by what we deleted
             # (rollback runs in the same quiescent window as migration).
-            target_after = int(vector_client.count(name))
+            target_after = sum(int(vector_client.count(tgt)) for tgt in involved)
             if target_after != target_before - removed:
                 raise RuntimeError(
                     f"rollback for '{name}': deleted {removed} chunk(s) but the "

@@ -28,6 +28,12 @@ from nexus.upgrade_ladder.rungs.substrate_etl import (
 NEW = "a" * 32
 
 
+@pytest.fixture(autouse=True)
+def _isolate_watermarks(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """execute_leg advances rung watermarks — keep them off the real config."""
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
+
+
 def _cls(
     name: str,
     *,
@@ -201,6 +207,43 @@ def test_execute_cross_model_leg_targets_remapped_collection(
             "knowledge__notes__all-minilm-l6-v2__v1"
         )
         assert conn_rows["legacy-16-chars!"] == new_chash
+
+
+def test_execute_leg_resumes_from_watermark(tmp_path: pathlib.Path) -> None:
+    """P2 critique High: the rung-keyed watermark is WIRED — a re-run after
+    a clean pass resumes above the floor instead of replaying the stream
+    (the 90k-chunk / ~905s replay the critique cited)."""
+
+    class OffsetSource:
+        def __init__(self, texts: list[str]) -> None:
+            self.texts = texts
+            self.offsets_seen: list[int] = []
+
+        def iter_batches(self, collection, *, page, include_embeddings=False, start_offset=0):
+            self.offsets_seen.append(start_offset)
+            chunk_stream = [
+                {"id": f"legacy-{i:012d}", "document": t, "metadata": {}}
+                for i, t in enumerate(self.texts)
+            ][start_offset:]
+            for i in range(0, len(chunk_stream), page):
+                yield chunk_stream[i : i + page]
+
+        def count(self, collection: str) -> int:
+            return len(self.texts)
+
+    source = OffsetSource(["t-one", "t-two", "t-three"])
+    target = RecordingTarget()
+    leg = LegPlan("src", "src", needs_reid=True, needs_reembed=False)
+    with ChashRemapStore(tmp_path / "chash_remap.db") as store:
+        first = execute_leg(leg, source, target, map_store=store, page=1, provenance="r1")
+        assert first.ok
+        assert source.offsets_seen == [0]  # fresh run: no floor
+        # Second run: the advanced watermark (position=3, trusted against the
+        # live target count) resumes ABOVE the stream — zero rows replayed.
+        second = execute_leg(leg, source, target, map_store=store, page=1, provenance="r2")
+        assert second.ok
+        assert source.offsets_seen == [0, 3]
+        assert second.source_count == 0  # nothing re-read, nothing re-sent
 
 
 def test_execute_conformant_leg_needs_no_map_entries(tmp_path: pathlib.Path) -> None:

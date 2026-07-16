@@ -224,6 +224,7 @@ def test_vector_etl_surface():
         "collections",
         "page_size",
         "remap_store",  # RDR-185 P2.4: rollback-via-map (gate r1)
+        "target_names",  # RDR-185 P2.R: cross-model rollback (audit C2)
     }
     assert _params(v.verify_counts) == {
         "read_client", "vector_client", "collections", "target_names",

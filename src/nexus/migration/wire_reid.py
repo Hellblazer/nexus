@@ -207,6 +207,21 @@ class ChashRemapStore:
         ).fetchall()
         return dict(rows)
 
+    def entries_with_targets(
+        self, source_collection: str, *, tenant_id: str = ""
+    ) -> dict[str, tuple[str, str]]:
+        """old_id → (new_chash, target_collection) for one source collection.
+
+        The rollback read shape for CROSS-MODEL legs (P2 critique Critical):
+        the re-id'd rows live under the RENAMED target collection, and only
+        the map knows where each row landed."""
+        rows = self._conn.execute(
+            "SELECT old_id, new_chash, target_collection FROM chash_remap "
+            "WHERE tenant_id = ? AND source_collection = ?",
+            (tenant_id, source_collection),
+        ).fetchall()
+        return {old: (new, tgt) for old, new, tgt in rows}
+
     def all_pairs(self, *, tenant_id: str = "") -> list[tuple[str, str]]:
         """Every (old_id, new_chash) pair across all source collections —
         the remap cascade's global-view input (it detects cross-collection
