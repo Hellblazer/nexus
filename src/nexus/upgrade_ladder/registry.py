@@ -28,7 +28,8 @@ answer.
 """
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from pathlib import Path
 
 from nexus.upgrade_ladder.protocol import Rung
 
@@ -177,7 +178,7 @@ class LadderRegistry:
         return len(self._rungs)
 
 
-def default_registry(*, db_path_fn=None) -> LadderRegistry:
+def default_registry(*, db_path_fn: Callable[[], Path] | None = None) -> LadderRegistry:
     """The production ladder. Native rungs land phase by phase: t2-schema
     (P1, here), substrate-etl (P2), each slotting into :data:`RUNG_ORDER`
     position.

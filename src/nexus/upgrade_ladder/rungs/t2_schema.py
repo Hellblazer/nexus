@@ -48,6 +48,12 @@ def _default_expected_version() -> str:
     return expected_t2_schema_version()
 
 
+def _memory_backend_is_service() -> bool:
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to keep CLI startup cheap
+
+    return storage_backend_for("memory") == StorageBackend.SERVICE
+
+
 def _open(path: Path, *, ro: bool) -> sqlite3.Connection:
     """The rung's single connect site (read-only URI for detect/verify)."""
     target = f"file:{path}?mode=ro" if ro else str(path)
@@ -64,15 +70,28 @@ class T2SchemaRung:
         *,
         db_path_fn: Callable[[], Path] | None = None,
         expected_version_fn: Callable[[], str] | None = None,
+        service_mode_fn: Callable[[], bool] | None = None,
     ) -> None:
         self._db_path_fn = db_path_fn if db_path_fn is not None else _default_db_path
         self._expected_fn = (
             expected_version_fn if expected_version_fn is not None else _default_expected_version
         )
+        self._service_mode_fn = (
+            service_mode_fn if service_mode_fn is not None else _memory_backend_is_service
+        )
 
     # ── detect ───────────────────────────────────────────────────────────────
 
     def detect(self) -> RungStatus:
+        # SERVICE mode: T2 memory lives in the service's Postgres; the local
+        # SQLite tiers are an IMMUTABLE migration source (RDR-176) — there is
+        # no local schema to migrate, and opening the .db read-write would
+        # break the downgrade guarantee. N/A → detect-and-skip (f0pmd),
+        # mirroring _run_upgrade's own guard (commands/upgrade.py). P1 review
+        # Critical: without this, `nx upgrade` on the RDR-152 default backend
+        # mutated the frozen source.
+        if self._service_mode_fn():
+            return RungStatus(applicable=False, converged=False)
         expected = self._expected_fn()
         path = self._db_path_fn()
         if not path.exists():
@@ -97,6 +116,11 @@ class T2SchemaRung:
         )
 
     def _pending_detail(self, path: Path, stored: str, expected: str) -> str:
+        # Deliberately resolve_pending_steps (the version-ELIGIBLE set), not
+        # resolve_blocking_steps: gate-class already-stamped-but-incomplete
+        # states are runtime-impact reporting and stay with nx doctor's
+        # _check_migration_state; this detail describes what the NEXT
+        # converge would attempt.
         detail = f"T2 schema at {stored}, expected {expected}"
         try:
             from nexus.db.migrations import resolve_pending_steps  # noqa: PLC0415 — deferred to avoid import cost
@@ -132,6 +156,14 @@ class T2SchemaRung:
         """
         from nexus.db.migrations import apply_pending, t2_migration_flock  # noqa: PLC0415 — deferred to avoid import cost
 
+        if self._service_mode_fn():
+            # Defense-in-depth: the runner never converges a non-applicable
+            # rung (detect gates it), but a direct caller must not be able to
+            # mutate the immutable service-mode source either.
+            raise RuntimeError(
+                "T2 schema rung: refusing to converge in service mode — the "
+                "local SQLite T2 is an immutable migration source (RDR-176)"
+            )
         expected = self._expected_fn()
         path = self._db_path_fn()
         path.parent.mkdir(parents=True, exist_ok=True)

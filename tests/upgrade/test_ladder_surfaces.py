@@ -100,6 +100,19 @@ def test_doctor_empty_registry_is_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     assert results[0].ok is True
 
 
+def test_doctor_real_registry_on_service_mode_reports_no_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P1 review Critical companion: on a SERVICE-mode install the REAL
+    registry's t2-schema rung is N/A (detect-and-skip before any path is
+    touched), so doctor reports no pending rungs instead of a spurious
+    'run nx upgrade' remedy against the immutable local source."""
+    monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+    results = _check_pending_rungs()  # real default_registry, real probe
+    assert results[0].ok is True
+    assert "no pending rungs" in results[0].detail
+
+
 def test_doctor_check_is_crash_proof(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every doctor check must degrade internally, never crash `nx doctor`."""
     def _boom() -> LadderRegistry:

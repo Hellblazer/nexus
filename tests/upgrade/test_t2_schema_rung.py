@@ -228,6 +228,65 @@ def test_real_registry_defers_without_catalog(db_path: pathlib.Path) -> None:
     assert rung.verify() is False
 
 
+# ── service mode: N/A, never touches the immutable local source ─────────────
+# (P1 review Critical: _run_upgrade guards service mode but the ladder walk
+# did not — and the autouse NX_STORAGE_BACKEND=sqlite pin meant no test could
+# see it. These override the pin / drive the seam.)
+
+
+def test_service_mode_detect_is_not_applicable(db_path: pathlib.Path) -> None:
+    rung = T2SchemaRung(db_path_fn=lambda: db_path, service_mode_fn=lambda: True)
+    status = rung.detect()
+    assert status.applicable is False
+    assert not status.pending
+    assert not db_path.exists()  # nothing touched, nothing created
+
+
+def test_service_mode_converge_refuses(db_path: pathlib.Path) -> None:
+    """Defense-in-depth: even a direct converge call must not mutate the
+    immutable service-mode source (RDR-176 downgrade guarantee)."""
+    rung = T2SchemaRung(db_path_fn=lambda: db_path, service_mode_fn=lambda: True)
+    with pytest.raises(RuntimeError, match="immutable migration source"):
+        rung.converge(_Recorder())
+    assert not db_path.exists()
+
+
+def test_service_mode_walk_skips_rung_and_writes_no_t2(
+    db_path: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """The full walk on a service-mode install: rung detect-and-skips (f0pmd),
+    memory.db is never created, nothing recorded."""
+    rung = T2SchemaRung(db_path_fn=lambda: db_path, service_mode_fn=lambda: True)
+    with CompletionStore(tmp_path / "ladder.db") as store:
+        report = LadderRunner(
+            LadderRegistry((rung,)), store, package_version_fn=lambda: "test"
+        ).run()
+        assert [r.outcome for r in report.runs] == [RungOutcome.SKIPPED_NOT_APPLICABLE]
+        assert store.verified_rungs() == frozenset()
+    assert report.converged  # N/A is a clean skip, not a failure
+    assert not db_path.exists()
+
+
+def test_default_service_probe_reads_real_backend_resolver(
+    db_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The DEFAULT service_mode_fn reads storage_backend_for('memory'):
+    NX_STORAGE_BACKEND=service (overriding the suite's autouse sqlite pin,
+    later setenv wins) must make the production-default rung N/A."""
+    monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+    rung = T2SchemaRung(db_path_fn=lambda: db_path)  # production probe
+    assert rung.detect().applicable is False
+    assert not db_path.exists()
+
+
+def test_sqlite_backend_rung_is_applicable(db_path: pathlib.Path) -> None:
+    """Companion non-vacuity: under the suite's sqlite pin the production
+    probe reports applicable — the service test above isn't passing because
+    the probe is stuck False."""
+    _bootstrapped_behind(db_path)
+    assert T2SchemaRung(db_path_fn=lambda: db_path).detect().applicable is True
+
+
 # ── through the runner / registry ────────────────────────────────────────────
 
 
