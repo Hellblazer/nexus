@@ -94,7 +94,11 @@ from __future__ import annotations
 #: -> (0,1,42) 2026-07-14: catalog-015 FTS filename-token fix (nexus-8gue1,
 #: the GH #1397 search blindness) + indexed_at repair provenance
 #: (nexus-p5qk8) live in the engine — the fix-delivery rule above, applied.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 43)
+#: -> (0,1,44) 2026-07-16: GET /v1/telemetry/tier_writes/query (nexus-59wjj)
+#: — the 6.11.0 tier-status / doctor / session-end read parity hard-depends
+#: on the route; deployed + cloud-gated 2026-07-16 (recall 12/12, hybrid
+#: p95 1920ms < 2376 bound). One-engine-per-release: ship what was tested.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 44)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:
