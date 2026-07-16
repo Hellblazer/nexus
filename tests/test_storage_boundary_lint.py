@@ -500,7 +500,12 @@ def test_dual_population_baseline_locked():
     # is migration machinery (same chicken-and-egg substrate bootstrap as
     # commands/upgrade.py:447: it migrates the store the daemon serves, so
     # it cannot route through the daemon).
-    assert result.epsilon_allow_connects == 23, (
+    # 24 = +1 for RDR-185 P2.2 (nexus-n7u38.15): migration/wire_reid.py
+    # ChashRemapStore — the persisted old->new id map owns its substrate
+    # (chash_remap.db): a migration artifact that must outlive any store it
+    # maps (gate r1 rollback consults it; RDR-158-exempt; the
+    # pipeline_buffer/CompletionStore own-substrate shape).
+    assert result.epsilon_allow_connects == 24, (
         f"raw-connect epsilon-allow baseline moved: {result.epsilon_allow_connects}"
     )
     # P3 endpoint: ZERO un-annotated direct T2Database constructions outside
