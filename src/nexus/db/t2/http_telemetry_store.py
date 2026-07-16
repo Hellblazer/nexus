@@ -162,6 +162,42 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         elif since:
             params["since"] = since
         data = self._get("/v1/telemetry/tier_writes/query", params=params)
+        return self._map_tier_write_rows(data)
+
+    def query_tier_writes_once(
+        self,
+        *,
+        session_id: str,
+        timeout: float = 2.0,
+    ) -> list[tuple[str, str, str | None, str | None, int]]:
+        """Single-attempt ``tier_writes/query`` for latency-critical callers.
+
+        nexus-ov13k (session-end summary): the normal ``_get`` path composes
+        the mixin's gateway-retry sleeps (up to 17s) and the re-resolve leg's
+        12s lease-wait — a 20-50s worst case that a per-request ``timeout``
+        kwarg does NOT bound (both reviewers, independently). This variant
+        issues exactly ONE raw request against the already-resolved endpoint
+        with a hard per-request *timeout*: no gateway backoff, no re-resolve
+        retry, no lease wait. Any failure raises to the caller, whose
+        contract is best-effort. Not for general use — every other caller
+        wants the self-healing transport.
+        """
+        import httpx  # noqa: PLC0415 — deferred import — only needed on this path
+
+        resp = self._client.request(
+            "GET",
+            self._base_url + "/v1/telemetry/tier_writes/query",
+            headers=self._auth_headers(),
+            params={"session_id": session_id},
+            timeout=httpx.Timeout(timeout),
+        )
+        resp.raise_for_status()
+        return self._map_tier_write_rows(resp.json() if resp.content else [])
+
+    @staticmethod
+    def _map_tier_write_rows(
+        data: Any,
+    ) -> list[tuple[str, str, str | None, str | None, int]]:
         return [
             (
                 str(r.get("tool", "")),

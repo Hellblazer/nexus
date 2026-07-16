@@ -660,6 +660,41 @@ class TestQueryTierWrites:
     def test_empty_returns_empty_list(self, client):
         assert client.query_tier_writes(session_id="nope") == []
 
+    def test_query_tier_writes_once_real_transport_bypasses_retry(
+        self, client, monkeypatch,
+    ):
+        # nexus-ov13k review: the single-attempt variant must go through the
+        # REAL construction + raw client (not the mocked class the launcher
+        # tests use) and must NEVER enter the retrying _send path — the
+        # 20-50s worst case it exists to avoid.
+        client.record_tier_write(
+            session_id="once-1", ts="2026-07-16T00:00:00Z",
+            tool="store_put", tier="T3",
+        )
+
+        def _no_send(*_a, **_kw):
+            raise AssertionError("query_tier_writes_once must bypass _send")
+
+        monkeypatch.setattr(type(client), "_send", _no_send)
+        rows = client.query_tier_writes_once(session_id="once-1", timeout=2.0)
+        assert rows == [("store_put", "T3", None, None, 1)]
+
+    def test_query_tier_writes_once_raises_on_http_error(
+        self, client, monkeypatch,
+    ):
+        # Single attempt: an HTTP error surfaces raw to the caller (whose
+        # contract is best-effort) — no swallow, no self-heal retry. A bad
+        # bearer makes the fake server 401.
+        import httpx
+        import pytest as _pytest
+
+        monkeypatch.setattr(
+            type(client), "_auth_headers",
+            lambda self: {"Authorization": "Bearer wrong", "X-Nexus-Tenant": "default"},
+        )
+        with _pytest.raises(httpx.HTTPStatusError):
+            client.query_tier_writes_once(session_id="once-1", timeout=2.0)
+
 
 class TestConsentAudit:
     """RDR-182 nexus-ng2sy: the service-mode consent-audit twin routes through
