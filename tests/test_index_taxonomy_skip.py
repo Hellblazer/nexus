@@ -235,6 +235,13 @@ def test_gate_passes_discover_subset_to_postprocessing(runner: CliRunner, index_
     with (
         patch("nexus.commands.index._registry", return_value=reg),
         patch("nexus.indexer.index_repository", return_value=stats),
+        # Pin the collection list: _collections_from_registry_info filters by
+        # ambient mode config (local mode excludes code__*) — CI py3.13 runs
+        # local-mode and collapsed the list to docs-only (release-PR failure).
+        patch(
+            "nexus.commands.index._collections_from_registry_info",
+            return_value=["code__myrepo__emb__v1", "docs__myrepo__emb__v1"],
+        ),
         patch("nexus.commands.index._collections_without_topics", return_value=set()),
         patch("nexus.commands.index.run_collection_postprocessing") as post,
     ):
@@ -307,6 +314,11 @@ def test_self_heal_run_narrows_to_zero_topic_collections(runner: CliRunner, inde
     with (
         patch("nexus.commands.index._registry", return_value=reg),
         patch("nexus.indexer.index_repository", return_value=stats),
+        # Pinned for the same mode-config reason as the test above.
+        patch(
+            "nexus.commands.index._collections_from_registry_info",
+            return_value=["code__myrepo__emb__v1", "docs__myrepo__emb__v1"],
+        ),
         patch(
             "nexus.commands.index._collections_without_topics",
             return_value={"docs__myrepo__emb__v1"},
