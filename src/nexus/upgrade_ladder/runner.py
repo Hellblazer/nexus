@@ -83,6 +83,9 @@ class RungOutcome(str, Enum):
     SKIPPED_NOT_APPLICABLE = "skipped-not-applicable"  # N/A for this mode
     ALREADY_RECORDED = "already-recorded"              # converged + fact on file
     RECORDED = "recorded"                              # verify passed; fact written
+    DEFERRED = "deferred"                              # precondition blocks remainder —
+                                                       # non-fatal, NOT recorded (RDR-142
+                                                       # MigrationRetry class)
     VERIFY_FAILED = "verify-failed"                    # NOT recorded (RDR-142 guard)
     FAILED = "failed"                                  # converge raised / budget out
     NOT_ATTEMPTED = "not-attempted"                    # walk stopped earlier
@@ -110,8 +113,19 @@ class LadderRunReport:
 
     @property
     def converged(self) -> bool:
-        """True when every rung ended in a non-failure outcome."""
+        """True when every rung ended in a non-failure, non-deferred outcome."""
         return all(run.outcome in self._OK for run in self.runs)
+
+    @property
+    def hard_failed(self) -> bool:
+        """True when any rung genuinely FAILED (converge error, budget out,
+        verify fail) — as opposed to merely deferring. Deferred-only runs are
+        not converged but are NOT failures: the deferral class is designed
+        to retry on a later run (RDR-142 would-defer, non-fatal)."""
+        return any(
+            run.outcome in (RungOutcome.VERIFY_FAILED, RungOutcome.FAILED)
+            for run in self.runs
+        )
 
 
 class LadderRunner:
@@ -154,7 +168,14 @@ class LadderRunner:
         for rung in rungs:
             run = self._run_rung(rung)
             runs.append(run)
-            if run.outcome in (RungOutcome.VERIFY_FAILED, RungOutcome.FAILED):
+            # A failed OR deferred rung stops the walk: the hard edges make
+            # later rungs depend on earlier ones. Deferred differs only in
+            # severity (non-fatal, retried later), not in walk semantics.
+            if run.outcome in (
+                RungOutcome.VERIFY_FAILED,
+                RungOutcome.FAILED,
+                RungOutcome.DEFERRED,
+            ):
                 runs.extend(self._not_attempted(rungs))
                 break
         return LadderRunReport(
@@ -177,9 +198,9 @@ class LadderRunner:
             return RungRun(rung.name, RungOutcome.ALREADY_RECORDED)
 
         if not status.converged:
-            failure = self._converge(rung)
-            if failure is not None:
-                return failure
+            non_completion = self._converge(rung)
+            if non_completion is not None:
+                return non_completion
 
         # Converged (either just now or found converged-but-unrecorded after a
         # crash): the RDR-142 guard — record ONLY on a passing verify.
@@ -199,13 +220,16 @@ class LadderRunner:
 
     def _converge(self, rung: Rung) -> RungRun | None:
         """Drive converge to completion (resumable batches). Returns a FAILED
-        RungRun on error/budget exhaustion, None on completion."""
+        or DEFERRED RungRun on non-completion, None on completion."""
         for _ in range(self._max_steps_per_rung):
             try:
                 result = rung.converge(self._reporter)
             except Exception as exc:  # noqa: BLE001 — any converge failure stops the walk with a reported outcome; the rung resumes from its persisted floor next run
                 _log.warning("ladder_rung_converge_failed", rung=rung.name, error=str(exc))
                 return RungRun(rung.name, RungOutcome.FAILED, detail=f"converge raised: {exc}")
+            if result.deferred:
+                _log.info("ladder_rung_deferred", rung=rung.name, detail=result.detail)
+                return RungRun(rung.name, RungOutcome.DEFERRED, detail=result.detail)
             if result.completed:
                 return None
         _log.warning(

@@ -42,10 +42,12 @@ def _utc_now_iso() -> str:
 
 
 def default_ladder_db_path() -> Path:
-    """Production location of the ladder's own substrate file."""
-    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    """Production location of the ladder's own substrate file: co-located
+    with ``memory.db`` — the ladder versions that data's era, and deriving
+    from the same path keeps test isolation single-seamed."""
+    from nexus.config import default_db_path  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
-    return nexus_config_dir() / "ladder.db"
+    return default_db_path().parent / "ladder.db"
 
 
 @dataclass(frozen=True)

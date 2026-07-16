@@ -127,17 +127,17 @@ def _run_ladder(
     Keyword-only ``_store_path_fn`` is an injectable seam for unit tests
     (keeps test ladders off the real config dir).
     """
-    from nexus.upgrade_ladder.completion import (  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
-        CompletionStore,
-        default_ladder_db_path,
-    )
+    from nexus.upgrade_ladder.completion import CompletionStore  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
     from nexus.upgrade_ladder.registry import default_registry  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
     from nexus.upgrade_ladder.runner import (  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
         LadderRunner,
         RungOutcome,
     )
 
-    registry = default_registry()
+    # Route the command's _db_path seam into the T2 rung and co-locate
+    # ladder.db with it, so tests that patch _db_path (the established
+    # test_upgrade_cmd.py isolation) never touch a live install.
+    registry = default_registry(db_path_fn=_db_path)
     if dry_run:
         # Per-rung detect guard (critic P0.R2 finding 1): a real rung's
         # detect() does live reads that can fail (locked db, bad path); the
@@ -156,20 +156,27 @@ def _run_ladder(
                 )
         return
 
-    store_path = _store_path_fn() if _store_path_fn is not None else default_ladder_db_path()
+    store_path = _store_path_fn() if _store_path_fn is not None else _db_path().parent / "ladder.db"
     with CompletionStore(store_path) as store:
         report = LadderRunner(registry, store).run()
 
     for run in report.runs:
         if run.outcome is RungOutcome.RECORDED and not auto_mode:
             click.echo(f"Upgrade ladder: rung '{run.name}' converged and verified.")
-    if not report.converged:
+    if report.hard_failed:
         failed = [
             run for run in report.runs
             if run.outcome in (RungOutcome.VERIFY_FAILED, RungOutcome.FAILED)
         ]
         summary = "; ".join(f"{run.name}: {run.outcome.value} ({run.detail})" for run in failed)
         raise click.ClickException(f"upgrade ladder did not converge — {summary}")
+    if not report.converged and not auto_mode:
+        # Deferred-only: the RDR-142 would-defer class is non-fatal by
+        # design (precondition-blocked, retried on a later run) — notice,
+        # not failure; nothing was recorded, the position stays pinned.
+        for run in report.runs:
+            if run.outcome is RungOutcome.DEFERRED:
+                click.echo(f"Upgrade ladder: rung '{run.name}' deferred — {run.detail}")
 
 
 def _stdin_isatty() -> bool:

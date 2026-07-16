@@ -10,6 +10,7 @@ verify-then-record, never by trusting the crash.
 """
 from __future__ import annotations
 
+import importlib.metadata
 import pathlib
 from dataclasses import dataclass, field
 
@@ -23,7 +24,12 @@ from nexus.upgrade_ladder.protocol import (
     RungStatus,
 )
 from nexus.upgrade_ladder.registry import LadderRegistry
-from nexus.upgrade_ladder.runner import LadderRunner, LadderRunReport, RungOutcome
+from nexus.upgrade_ladder.runner import (
+    LadderRunner,
+    LadderRunReport,
+    RungOutcome,
+    _installed_package_version,
+)
 
 
 @dataclass
@@ -40,6 +46,7 @@ class ScriptedRung:
     verify_calls: int = 0
     fail_converge: bool = False
     stuck: bool = False  # RESUMABLE forever without progress (buggy rung)
+    defer: bool = False  # precondition-blocked: converge reports DEFERRED
 
     def detect(self) -> RungStatus:
         if not self.applicable:
@@ -56,6 +63,8 @@ class ScriptedRung:
             raise RuntimeError("converge exploded")
         if self.stuck:
             return ConvergeResult(ConvergeOutcome.RESUMABLE, detail="no progress")
+        if self.defer:
+            return ConvergeResult(ConvergeOutcome.DEFERRED, detail="precondition blocked")
         if self.done < self.work_units:
             self.done += 1
         if self.done >= self.work_units:
@@ -175,6 +184,23 @@ def test_stuck_resumable_rung_exhausts_step_budget(store: CompletionStore) -> No
     assert store.verified_rungs() == frozenset()
 
 
+def test_deferred_rung_stops_walk_without_failing(store: CompletionStore) -> None:
+    """RDR-142 would-defer class: a deferred rung records nothing and stops
+    the walk (hard edges), but the report is NOT hard-failed — deferral is
+    designed to retry on a later run, never to fail the trigger."""
+    deferred = ScriptedRung("deferred", defer=True)
+    later = ScriptedRung("later")
+    report = _runner((deferred, later), store).run()
+    assert _outcomes(report) == [
+        ("deferred", RungOutcome.DEFERRED),
+        ("later", RungOutcome.NOT_ATTEMPTED),
+    ]
+    assert store.verified_rungs() == frozenset()
+    assert not report.converged
+    assert not report.hard_failed
+    assert deferred.verify_calls == 0  # deferral bypasses verify: nothing claims completion
+
+
 # ── Crash resume: converged-but-unrecorded heals by verify-then-record ──────
 
 
@@ -271,9 +297,6 @@ def test_installed_package_version_falls_back_to_unknown(
 ) -> None:
     """Validator gap 2: a broken metadata probe must degrade to 'unknown',
     never crash the runner's default record path."""
-    import importlib.metadata
-
-    from nexus.upgrade_ladder.runner import _installed_package_version
 
     def _boom(_name: str) -> str:
         raise RuntimeError("metadata exploded")

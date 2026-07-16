@@ -177,8 +177,17 @@ class LadderRegistry:
         return len(self._rungs)
 
 
-def default_registry() -> LadderRegistry:
-    """The production ladder. Empty in P0 — native rungs land phase by phase
-    (t2-schema in P1 bead .8, substrate-etl in P2), each slotting into
-    :data:`RUNG_ORDER` position here."""
-    return LadderRegistry(())
+def default_registry(*, db_path_fn=None) -> LadderRegistry:
+    """The production ladder. Native rungs land phase by phase: t2-schema
+    (P1, here), substrate-etl (P2), each slotting into :data:`RUNG_ORDER`
+    position.
+
+    ``db_path_fn`` is an injectable T2 path seam: ``nx upgrade`` routes its
+    own ``_db_path`` test seam through so patched-path tests never touch a
+    live install's ``memory.db``; ``None`` uses the production config-dir
+    default (correct for ``nx doctor``'s read-only detect sweep).
+    """
+    from nexus.upgrade_ladder.rungs.t2_schema import T2SchemaRung  # noqa: PLC0415 — deferred to avoid import cycle
+
+    kwargs = {} if db_path_fn is None else {"db_path_fn": db_path_fn}
+    return LadderRegistry((T2SchemaRung(**kwargs),))

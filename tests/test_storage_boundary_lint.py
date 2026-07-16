@@ -495,7 +495,12 @@ def test_dual_population_baseline_locked():
     # deliberately outside T2Database/apply_pending so the store exists
     # before the t2-schema rung it records (independent-audit HIGH finding;
     # RDR-158-exempt; the pipeline_buffer.py own-substrate shape).
-    assert result.epsilon_allow_connects == 22, (
+    # 23 = +1 for RDR-185 P1.1 (nexus-n7u38.8): upgrade_ladder/rungs/
+    # t2_schema.py single _open() connect site — the T2-schema ladder rung
+    # is migration machinery (same chicken-and-egg substrate bootstrap as
+    # commands/upgrade.py:447: it migrates the store the daemon serves, so
+    # it cannot route through the daemon).
+    assert result.epsilon_allow_connects == 23, (
         f"raw-connect epsilon-allow baseline moved: {result.epsilon_allow_connects}"
     )
     # P3 endpoint: ZERO un-annotated direct T2Database constructions outside

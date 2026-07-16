@@ -62,7 +62,7 @@ class _Reg:
 
 def test_doctor_reports_pending_rungs_as_soft_warn(monkeypatch: pytest.MonkeyPatch) -> None:
     rung = SurfaceRung("substrate-etl")
-    monkeypatch.setattr(ladder_registry, "default_registry", lambda: LadderRegistry((rung,)))
+    monkeypatch.setattr(ladder_registry, "default_registry", lambda **kw: LadderRegistry((rung,)))
     results = _check_pending_rungs()
     assert len(results) == 1
     result = results[0]
@@ -76,7 +76,7 @@ def test_doctor_reports_pending_rungs_as_soft_warn(monkeypatch: pytest.MonkeyPat
 def test_doctor_check_is_read_only(monkeypatch: pytest.MonkeyPatch) -> None:
     """The doctor surface reports from detect() only — zero work."""
     rung = SurfaceRung("substrate-etl")
-    monkeypatch.setattr(ladder_registry, "default_registry", lambda: LadderRegistry((rung,)))
+    monkeypatch.setattr(ladder_registry, "default_registry", lambda **kw: LadderRegistry((rung,)))
     _check_pending_rungs()
     assert rung.converge_calls == 0
     assert rung.verify_calls == 0
@@ -84,14 +84,18 @@ def test_doctor_check_is_read_only(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_doctor_converged_registry_is_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     rung = SurfaceRung("t2-schema", pending=False)
-    monkeypatch.setattr(ladder_registry, "default_registry", lambda: LadderRegistry((rung,)))
+    monkeypatch.setattr(ladder_registry, "default_registry", lambda **kw: LadderRegistry((rung,)))
     results = _check_pending_rungs()
     assert results[0].ok is True
     assert "no pending rungs" in results[0].detail
 
 
-def test_doctor_empty_registry_is_ok() -> None:
-    """The real (P0) registry is empty — the check passes quietly."""
+def test_doctor_empty_registry_is_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty registry passes quietly. (Monkeypatched empty since P1: the
+    production registry now holds the t2-schema rung, whose real detect()
+    reads whatever memory.db the environment resolves — not unit-test
+    territory; the real rung is covered in test_t2_schema_rung.py.)"""
+    monkeypatch.setattr(ladder_registry, "default_registry", lambda **kw: LadderRegistry(()))
     results = _check_pending_rungs()
     assert results[0].ok is True
 
@@ -119,7 +123,7 @@ def test_doctor_check_is_wired_into_run_health_checks() -> None:
 
 def test_walk_converges_and_records(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
     rung = SurfaceRung("t2-schema")
-    monkeypatch.setattr(ladder_registry, "default_registry", lambda: LadderRegistry((rung,)))
+    monkeypatch.setattr(ladder_registry, "default_registry", lambda **kw: LadderRegistry((rung,)))
     db = tmp_path / "ladder.db"
     _run_ladder(dry_run=False, auto_mode=True, _store_path_fn=lambda: db)
     assert rung.converge_calls == 1
@@ -133,7 +137,7 @@ def test_dry_run_reports_and_writes_nothing(
     """Dry-run truth: pending rungs are reported from read-only detect();
     the completion store is never even opened (zero writes)."""
     rung = SurfaceRung("substrate-etl")
-    monkeypatch.setattr(ladder_registry, "default_registry", lambda: LadderRegistry((rung,)))
+    monkeypatch.setattr(ladder_registry, "default_registry", lambda **kw: LadderRegistry((rung,)))
     db = tmp_path / "ladder.db"
     _run_ladder(dry_run=True, auto_mode=False, _store_path_fn=lambda: db)
     out = capsys.readouterr().out
@@ -143,10 +147,12 @@ def test_dry_run_reports_and_writes_nothing(
 
 
 def test_empty_registry_walk_is_silent(
-    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """P0 reality: the production registry is empty — the walk must not add
-    any output to `nx upgrade` until rungs actually exist."""
+    """An empty registry adds zero output to `nx upgrade`. (Monkeypatched
+    empty since P1 — the production registry now holds the t2-schema rung,
+    whose real walk would touch the environment's memory.db.)"""
+    monkeypatch.setattr(ladder_registry, "default_registry", lambda **kw: LadderRegistry(()))
     _run_ladder(dry_run=False, auto_mode=False, _store_path_fn=lambda: tmp_path / "ladder.db")
     _run_ladder(dry_run=True, auto_mode=False, _store_path_fn=lambda: tmp_path / "ladder.db")
     assert capsys.readouterr().out == ""
@@ -174,7 +180,7 @@ def test_dry_run_survives_a_rung_whose_detect_raises(
 
     healthy = SurfaceRung("substrate-etl")
     monkeypatch.setattr(
-        ladder_registry, "default_registry", lambda: LadderRegistry((BoomRung(), healthy))
+        ladder_registry, "default_registry", lambda **kw: LadderRegistry((BoomRung(), healthy))
     )
     db = tmp_path / "ladder.db"
     _run_ladder(dry_run=True, auto_mode=False, _store_path_fn=lambda: db)
@@ -191,11 +197,41 @@ def test_failed_walk_raises_for_interactive(
     correctness problems); --auto swallowing happens in upgrade()'s existing
     handler, not here."""
     rung = SurfaceRung("t2-schema", verify_result=False)
-    monkeypatch.setattr(ladder_registry, "default_registry", lambda: LadderRegistry((rung,)))
+    monkeypatch.setattr(ladder_registry, "default_registry", lambda **kw: LadderRegistry((rung,)))
     with pytest.raises(click.ClickException, match="t2-schema"):
         _run_ladder(dry_run=False, auto_mode=False, _store_path_fn=lambda: tmp_path / "ladder.db")
     with CompletionStore(tmp_path / "ladder.db") as store:
         assert store.verified_rungs() == frozenset()  # RDR-142: nothing recorded
+
+
+def test_deferred_walk_notices_but_exits_cleanly(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A deferred-only walk is NOT a failure (RDR-142 would-defer class):
+    no ClickException, a notice line instead, nothing recorded."""
+
+    @dataclass
+    class DeferRung:
+        name: str = "t2-schema"
+
+        def detect(self) -> RungStatus:
+            return RungStatus(applicable=True, converged=False, pending_detail="behind")
+
+        def converge(self, report: ProgressReporter) -> ConvergeResult:
+            return ConvergeResult(ConvergeOutcome.DEFERRED, detail="catalog absent")
+
+        def verify(self) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        ladder_registry, "default_registry", lambda **kw: LadderRegistry((DeferRung(),))
+    )
+    db = tmp_path / "ladder.db"
+    _run_ladder(dry_run=False, auto_mode=False, _store_path_fn=lambda: db)  # no raise
+    out = capsys.readouterr().out
+    assert "deferred" in out and "catalog absent" in out
+    with CompletionStore(db) as store:
+        assert store.verified_rungs() == frozenset()
 
 
 def test_upgrade_command_is_wired_to_the_ladder() -> None:

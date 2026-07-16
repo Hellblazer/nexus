@@ -51,10 +51,19 @@ class RungStatus:
 
 
 class ConvergeOutcome(str, Enum):
-    """What a :meth:`Rung.converge` call achieved. Failure raises instead."""
+    """What a :meth:`Rung.converge` call achieved. Failure raises instead.
+
+    Mirrors the proven RDR-142 step trichotomy (would-succeed /
+    would-defer / would-gate): DEFERRED is the non-fatal "did all I could;
+    a precondition blocks the remainder, retried on a later run" state
+    (``MigrationRetry`` class). A gate-class failure raises, like any
+    other converge failure.
+    """
 
     COMPLETED = "completed"    # target state reached; verify() should now pass
     RESUMABLE = "resumable"    # partial progress persisted; call again to continue
+    DEFERRED = "deferred"      # remainder blocked on a precondition — non-fatal,
+                               # NOT recorded, retried on a future run
 
 
 @dataclass(frozen=True)
@@ -67,6 +76,10 @@ class ConvergeResult:
     @property
     def completed(self) -> bool:
         return self.outcome is ConvergeOutcome.COMPLETED
+
+    @property
+    def deferred(self) -> bool:
+        return self.outcome is ConvergeOutcome.DEFERRED
 
 
 @runtime_checkable
