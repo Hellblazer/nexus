@@ -1411,15 +1411,34 @@ class HttpVectorClient:
         are DROPPED (``N < len(ids)``), which the search-engine caller
         already treats as a per-collection shape-mismatch failure —
         identical to the Chroma path's semantics.
+
+        Paged (nexus-g7ubw): a single POST carrying every id deterministically
+        504s at the gateway on large collections — 28k ids x 1024-dim vectors
+        is a response measured in hundreds of MB. Rows are concatenated
+        batch-by-batch, so request order (and the caller's
+        ``len(embeddings) == len(ids)`` alignment tripwire) is preserved.
+
+        NOTE: ``MAX_RECORDS_PER_WRITE`` here is a pragmatic per-request
+        RESPONSE-SIZE chunk, not a backend write quota (same caveat as
+        ``update_metadata_batch``). The constraint being managed is response
+        bytes (~3 MB at 300 ids x 1024 dims); if the write quota is ever
+        raised or a higher-dimension embedding model becomes the default,
+        re-derive this page size from bytes or the 504 returns.
         """
         import numpy as np  # noqa: PLC0415 — heavy/optional dependency deferred to call time
 
-        result = _post(
-            "/v1/vectors/get-embeddings",
-            {"collection": collection_name, "ids": ids},
-            tenant=self._tenant,
-        )
-        return np.array(result.get("embeddings", []), dtype=np.float32)
+        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
+
+        page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
+        rows: list = []
+        for start in range(0, len(ids), page_limit):
+            result = _post(
+                "/v1/vectors/get-embeddings",
+                {"collection": collection_name, "ids": ids[start : start + page_limit]},
+                tenant=self._tenant,
+            )
+            rows.extend(result.get("embeddings", []))
+        return np.array(rows, dtype=np.float32)
 
     # ── Stubs for T3Database surface not used by Seam B ─────────────────────
 
