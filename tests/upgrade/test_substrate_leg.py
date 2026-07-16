@@ -1,0 +1,215 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""RDR-185 P2.5 (nexus-n7u38.18): embedder-era co-resident leg + consent.
+
+RQ2 edges 4-5: chunk-identity and embedder-era are CO-RESIDENT inside the
+substrate ETL rung — one leg per collection composes wire re-id and
+cross-model re-embed as needed, never sequential rungs. Consent only at
+genuine decisions: source-gone (re-acquire vs drop) surfaces as an
+explicit decision, the billed re-embed keeps the existing cost prompt,
+and a conformant install plans ZERO legs and ZERO prompts.
+"""
+from __future__ import annotations
+
+import hashlib
+import pathlib
+from typing import Any
+
+import pytest
+
+from nexus.migration.detection import CollectionClassification
+from nexus.migration.wire_reid import ChashRemapStore, RemapEntry
+from nexus.upgrade_ladder.rungs.substrate_etl import (
+    LegPlan,
+    SourceGoneDecision,
+    execute_leg,
+    plan_substrate_legs,
+)
+
+NEW = "a" * 32
+
+
+def _cls(
+    name: str,
+    *,
+    legacy: bool = False,
+    support: str = "supported-voyage-1024",
+    model: str | None = "voyage-context-3",
+    count: int = 10,
+) -> CollectionClassification:
+    return CollectionClassification(
+        collection=name,
+        leg="local",
+        model=model,
+        dim=1024 if model else None,
+        support=support,  # type: ignore[arg-type]
+        source_count=count,
+        has_data=count > 0,
+        legacy_ids=legacy,
+    )
+
+
+# ── planning ─────────────────────────────────────────────────────────────────
+
+
+def test_conformant_install_plans_nothing_and_prompts_nothing() -> None:
+    plan = plan_substrate_legs(
+        [_cls("code__nexus__voyage_code_3__v1")],
+        prior_collections=frozenset(),
+        voyage_key_present=True,
+    )
+    assert plan.legs == []
+    assert plan.decisions == []
+    assert plan.billed_reembed is False
+
+
+def test_legacy_id_collection_plans_a_reid_leg_not_a_block() -> None:
+    """THE RDR-185 retirement: legacy ids become an in-flight transform,
+    not a refusal (the old path's block stands until P4 demotes it)."""
+    plan = plan_substrate_legs(
+        [_cls("knowledge__old_store", legacy=True)],
+        prior_collections=frozenset(),
+        voyage_key_present=True,
+    )
+    (leg,) = plan.legs
+    assert leg.needs_reid is True
+    assert leg.needs_reembed is False
+    assert leg.source_collection == leg.target_collection == "knowledge__old_store"
+    assert plan.billed_reembed is False  # same-model, no re-embed, no prompt
+
+
+def test_unsupported_model_plans_cross_model_reembed_leg() -> None:
+    plan = plan_substrate_legs(
+        [_cls("knowledge__notes__all-minilm-l6-v2__v1", support="unsupported", model=None)],
+        prior_collections=frozenset(),
+        voyage_key_present=True,
+    )
+    (leg,) = plan.legs
+    assert leg.needs_reembed is True
+    assert leg.target_collection != leg.source_collection  # model segment remapped
+    assert plan.billed_reembed is True  # voyage re-embed bills → cost prompt
+
+
+def test_co_resident_leg_composes_reid_and_reembed() -> None:
+    """The incident shape's worst case: legacy ids AND an unsupported
+    embedder — ONE leg carries both transforms (RQ2 co-residency)."""
+    plan = plan_substrate_legs(
+        [_cls("knowledge__ancient__all-minilm-l6-v2__v1", legacy=True, support="unsupported", model=None)],
+        prior_collections=frozenset(),
+        voyage_key_present=True,
+    )
+    (leg,) = plan.legs
+    assert leg.needs_reid is True
+    assert leg.needs_reembed is True
+    assert leg.target_collection != leg.source_collection
+
+
+def test_source_gone_surfaces_a_decision_never_silent() -> None:
+    """A collection known from prior migration state that no longer exists
+    in the source is a GENUINE decision (re-acquire vs drop) — an explicit
+    entry in plan.decisions, not a silent skip."""
+    plan = plan_substrate_legs(
+        [_cls("knowledge__present")],
+        prior_collections=frozenset({"knowledge__present", "knowledge__vanished"}),
+        voyage_key_present=True,
+    )
+    (decision,) = plan.decisions
+    assert isinstance(decision, SourceGoneDecision)
+    assert decision.collection == "knowledge__vanished"
+    assert set(decision.options) == {"re-acquire", "drop"}
+
+
+def test_empty_collections_are_not_legs() -> None:
+    plan = plan_substrate_legs(
+        [_cls("knowledge__empty", legacy=True, count=0)],
+        prior_collections=frozenset(),
+        voyage_key_present=True,
+    )
+    assert plan.legs == []
+
+
+# ── execution glue (the .14 seam + .15 transform composed) ──────────────────
+
+
+class OneBatchSource:
+    def __init__(self, chunks: list[dict[str, Any]]) -> None:
+        self._chunks = chunks
+
+    def iter_batches(self, collection: str, *, page: int, include_embeddings: bool = False):
+        yield list(self._chunks)
+
+    def count(self, collection: str) -> int:
+        return len(self._chunks)
+
+
+class RecordingTarget:
+    def __init__(self) -> None:
+        self.rows: dict[str, dict[str, Any]] = {}
+        self.collections: set[str] = set()
+
+    def upsert_chunks(self, collection, ids, documents, metadatas, *, embeddings=None):
+        self.collections.add(collection)
+        for cid, doc in zip(ids, documents):
+            self.rows[cid] = {"doc": doc, "embeddings": embeddings}
+
+    def count(self, collection: str) -> int:
+        return len(self.rows)
+
+
+def test_execute_reid_leg_maps_and_lands_conformant(tmp_path: pathlib.Path) -> None:
+    text = "note text"
+    new_chash = hashlib.sha256(text.encode()).hexdigest()[:32]
+    source = OneBatchSource([{"id": "legacy-16-chars!", "document": text, "metadata": {}}])
+    target = RecordingTarget()
+    leg = LegPlan(
+        source_collection="knowledge__old",
+        target_collection="knowledge__old",
+        needs_reid=True,
+        needs_reembed=False,
+    )
+    with ChashRemapStore(tmp_path / "chash_remap.db") as store:
+        result = execute_leg(leg, source, target, map_store=store, page=10, provenance="run-1")
+        assert result.ok
+        assert set(target.rows) == {new_chash}
+        assert store.lookup("knowledge__old", "legacy-16-chars!") == new_chash
+
+
+def test_execute_cross_model_leg_targets_remapped_collection(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Cross-model: the leg writes to the model-remapped TARGET collection
+    (server re-embeds from stored text — no embeddings sent) and the map
+    records target_collection for every re-id'd row (audit C2)."""
+    text = "prose"
+    new_chash = hashlib.sha256(text.encode()).hexdigest()[:32]
+    source = OneBatchSource([{"id": "legacy-16-chars!", "document": text, "metadata": {}}])
+    target = RecordingTarget()
+    leg = LegPlan(
+        source_collection="knowledge__notes__all-minilm-l6-v2__v1",
+        target_collection="knowledge__notes__voyage-context-3__v1",
+        needs_reid=True,
+        needs_reembed=True,
+    )
+    with ChashRemapStore(tmp_path / "chash_remap.db") as store:
+        result = execute_leg(leg, source, target, map_store=store, page=10, provenance="p")
+        assert result.ok
+        assert target.collections == {"knowledge__notes__voyage-context-3__v1"}
+        assert target.rows[new_chash]["embeddings"] is None  # server-side re-embed
+        rows = store.all_pairs()
+        assert rows == [("legacy-16-chars!", new_chash)]
+        # target_collection recorded (the C2 'where did it land' answer):
+        conn_rows = store.entries_for_collection(
+            "knowledge__notes__all-minilm-l6-v2__v1"
+        )
+        assert conn_rows["legacy-16-chars!"] == new_chash
+
+
+def test_execute_conformant_leg_needs_no_map_entries(tmp_path: pathlib.Path) -> None:
+    text = "fine"
+    cid = hashlib.sha256(text.encode()).hexdigest()[:32]
+    source = OneBatchSource([{"id": cid, "document": text, "metadata": {}}])
+    target = RecordingTarget()
+    leg = LegPlan("c", "c", needs_reid=False, needs_reembed=False)
+    with ChashRemapStore(tmp_path / "chash_remap.db") as store:
+        result = execute_leg(leg, source, target, map_store=store, page=10, provenance="p")
+        assert result.ok
+        assert store.all_pairs() == []
