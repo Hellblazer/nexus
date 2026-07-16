@@ -1680,17 +1680,31 @@ def rollback_collections(
     *,
     collections: list[str] | None = None,
     page_size: int | None = None,
+    remap_store: Any | None = None,
 ) -> dict[str, int]:
     """Undo the copy: delete from pgvector exactly the chashes present in
     the source Chroma collections. Returns exact per-collection deleted
     counts. The source is the rollback manifest (COPY-NOT-MOVE keeps it
     immutable, so the id set at rollback time equals the id set at
     migration time); the source itself is never modified.
+
+    RDR-185 P2.4 (gate r1): when the migration re-id'd chunks on the wire,
+    the target holds NEW chashes — raw source-id equality would miss every
+    row and trip the zero-removed guard below. *remap_store* (a
+    ``migration.wire_reid.ChashRemapStore``) translates each source id
+    through the persisted old→new map, identity-fallback for unmapped
+    (already-conformant) ids; identical-text collapse siblings dedupe to
+    one target lookup/delete. Rollback goes via the MAP, never live id
+    equality — the map is a permanent migration artifact precisely so this
+    stays possible after the source ids stop matching.
     """
     page = page_size or QUOTAS.MAX_QUERY_RESULTS
     names = collections if collections is not None else list_collection_names(read_client)
     deleted: dict[str, int] = {}
     for name in names:
+        remap: dict[str, str] = (
+            remap_store.entries_for_collection(name) if remap_store is not None else {}
+        )
         handle = vector_client.get_or_create_collection(name)
         # Reachability probe BEFORE any lookup: count() propagates service
         # errors, unlike the collection handle's get(), which swallows them
@@ -1700,8 +1714,15 @@ def rollback_collections(
         removed = 0
         source_ids = 0
         for batch in _iter_id_pages(read_client, name, page):
-            ids = [c["id"] for c in batch]
-            source_ids += len(ids)
+            raw_ids = [c["id"] for c in batch]
+            source_ids += len(raw_ids)
+            ids: list[str] = []
+            seen: set[str] = set()
+            for cid in raw_ids:
+                translated = remap.get(cid, cid)
+                if translated not in seen:
+                    seen.add(translated)
+                    ids.append(translated)
             present = handle.get(ids=ids, limit=len(ids)).get("ids") or []
             if present:
                 handle.delete(present)
