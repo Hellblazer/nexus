@@ -33,6 +33,23 @@ from nexus.upgrade_ladder.preconditions import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_real_provisioning_probes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The provisioning axis' production defaults read the REAL config dir
+    (pg_credentials / service_url) and the REAL Chroma footprint, and its
+    converge would stand up a service stack. Every test in this file that
+    does not inject those seams must never reach them (the same
+    live-environment isolation the P3 review required for the process
+    axis)."""
+    monkeypatch.setattr(pre_mod, "_default_provisioned", lambda _config_dir: True)
+    monkeypatch.setattr(pre_mod, "_default_footprint", lambda: False)
+    monkeypatch.setattr(
+        pre_mod,
+        "_default_establish",
+        lambda: pytest.fail("a test reached the real service-provisioning path"),
+    )
+
+
 @dataclass
 class _EngineStatus:
     applicable: bool = True
@@ -49,14 +66,20 @@ def _names(reports: list[PreconditionReport]) -> list[str]:
     return [r.name for r in reports]
 
 
-def test_check_covers_the_three_axes(tmp_path: pathlib.Path) -> None:
+def test_check_covers_every_precondition_axis(tmp_path: pathlib.Path) -> None:
+    """The axis census, in converge order. P4.0b (nexus-6nmrc) added
+    provisioning (ACQUISITION of a service stack for a legacy footprint) —
+    this pin is what caught it, and it stays exhaustive on purpose: a new
+    axis must be argued past this list, never appended silently."""
     reports = check_preconditions(
         config_dir=tmp_path,
         _engine_detect_fn=lambda: _EngineStatus(converged=True, reason=None),
         _lease_fn=lambda: None,
         _installed_version_fn=lambda: "6.12.0",
+        _provisioned_fn=lambda: True,
+        _footprint_fn=lambda: False,
     )
-    assert _names(reports) == ["package", "engine", "process"]
+    assert _names(reports) == ["package", "engine", "provisioning", "process"]
     assert all(r.current for r in reports)  # nothing running, engine converged
 
 
