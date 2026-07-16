@@ -181,6 +181,17 @@ else
     _pass "doctor reports no stanza drift"
 fi
 
+# RDR-185 P4.2 (nexus-n7u38.29), asserted on the REAL upgraded install: the
+# upgrade story is `nx upgrade` + `nx doctor`. Every remedy doctor prints must
+# name a verb the user can actually find — a verb demoted out of --help is a
+# dead end. This is the live counterpart to the source-level pin in
+# tests/upgrade/test_verb_demotion.py: that one reads the module's strings,
+# this one reads what a shipped install actually says to a real user.
+if echo "$DOCTOR_OUT" | grep -qE 'nx (guided-upgrade|migrate-to-service|migration-audit|collection backfill-hash|hooks update-all)'; then
+    _die "nx doctor advertised a DEMOTED verb as a remedy. Output:\n$DOCTOR_OUT"
+fi
+_pass "nx doctor names no demoted verb (the story is nx upgrade + nx doctor)"
+
 # ── 7. nx hooks update + drift cross-check ───────────────────────────────────
 _step "7/12 nx hooks update refreshes the stanza in place"
 HOME="$SANDBOX" nx hooks update "$FAKE_REPO" >/dev/null

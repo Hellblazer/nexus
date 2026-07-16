@@ -1322,6 +1322,7 @@ nx hooks install [PATH]
 | `install [PATH]` | Install `post-commit`, `post-merge`, `post-rewrite` hooks (default: `.`) |
 | `uninstall [PATH]` | Remove nexus hook stanza; leaves other hook content intact |
 | `status [PATH]` | Show hook status for each hook file |
+| `update [PATH]` | Refresh THIS repo's nexus stanza to the current one (default: `.`). The remedy `nx doctor` names when it reports stanza drift. Sweeping every managed repo is not a verb — `nx upgrade` refreshes managed hooks itself |
 
 Hooks run `nx index repo` in the background after each qualifying git operation, appending output to `~/.config/nexus/index.log`. If a hook file already exists, the nexus stanza is appended (sentinel-bounded) without overwriting existing content.
 

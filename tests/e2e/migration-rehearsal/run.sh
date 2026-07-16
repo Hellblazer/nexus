@@ -5,6 +5,7 @@
 #   tests/e2e/migration-rehearsal/run.sh --with-cloud # + Voyage leg (reads .env)
 #   tests/e2e/migration-rehearsal/run.sh --no-build   # reuse existing wheel/JAR
 #   tests/e2e/migration-rehearsal/run.sh --hole-punch # verify-fill delta-fill proof (nexus-s3dd4.7)
+#   tests/e2e/migration-rehearsal/run.sh --era-hop    # RDR-185 era-spanning hop: ancient install -> current via `nx upgrade` ALONE (nexus-n7u38.30)
 #
 # Builds the wheel on the host and the LINUX native nexus-service binary in a
 # GraalVM container (RDR-161: the native binary is the sole launch artifact; the
@@ -30,6 +31,7 @@ FULLSTACK=0
 HOLE_PUNCH=0
 SHAKEOUT=0
 PACKAGE_UPGRADE=0
+ERA_HOP=0
 # RDR-002 ez5.13: the release_version the guided MVV stamps into the binary so
 # its /version reports >= the guided-upgrade version-pin floor and PASSES.
 # Derived from the product constant (engine_version.REQUIRED_ENGINE_VERSION —
@@ -65,6 +67,21 @@ COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.44}"
 # stops being "stale" — the guard below fails loud if it does.
 PREV_RELEASE="${NEXUS_PREV_RELEASE:-6.10.2}"
 PREV_ENGINE_TAG="${NEXUS_PREV_ENGINE_TAG:-engine-service-v0.1.43}"
+# RDR-185 P4.3 (nexus-n7u38.30): the ERA-HOP's starting point. Deliberately NOT
+# "one release back" like PREV_RELEASE — this leg's whole claim is that an
+# ANCIENT install converges, so the default is the OLDEST install the product
+# still promises to carry: conexus 6.0.0, the migration-capable release (the
+# two-release deprecation window's first half, docs/migration-runbook.md §0.1)
+# and the exact population that holds the GH #1408 shape. ERA_ENGINE_TAG is
+# 6.0.0's OWN PINNED_SERVICE_TAG — the engine that install would be running —
+# and is acquired at runtime by 6.0.0's own code, never supplied by us.
+#
+# NOT the OLD_TAG rotation: nexus-dlhub owns that (a hop REDESIGN, not a bump).
+# When RDR-155 P4b deletes the Chroma read path, this leg's SOURCE disappears
+# with it and the whole scenario retires — it is a deprecation-window leg by
+# construction.
+ERA_RELEASE="${NEXUS_ERA_RELEASE:-6.0.0}"
+ERA_ENGINE_TAG="${NEXUS_ERA_ENGINE_TAG:-engine-service-v0.1.11}"
 # The NEW required engine — derived from the SAME constant COLD_TAG's
 # default and GUIDED_STAMP_VERSION are, so this leg tracks a floor bump
 # automatically (nexus-b6qlf: one source of truth).
@@ -81,6 +98,7 @@ for a in "$@"; do
     --hole-punch) HOLE_PUNCH=1 ;;        # standalone: verify-fill delta-fill proof against a real fault-injected PG target (nexus-s3dd4.7)
     --shakeout)   SHAKEOUT=1 ;;          # standalone: CANDIDATE shakeout — CLI verb matrix + incremental index + concurrent load against the locally-built -Ob binary (nexus-h8rf6)
     --package-upgrade) PACKAGE_UPGRADE=1 ;;  # standalone: nexus-cfgo9 ONE-engine convergence MVV — package-only upgrade from a real previous release, engine acquired for real by the product, never supplied by this harness
+    --era-hop)    ERA_HOP=1 ;;           # standalone: RDR-185 nexus-n7u38.30 — ancient install (old release + old engine + pre-RDR-108 ids + Chroma substrate) -> current via `nx upgrade` ALONE, unattended
     *) echo "unknown arg: $a" >&2; exit 2 ;;
   esac
 done
@@ -133,6 +151,17 @@ trap '_guided_restore' EXIT
 # flow flag.
 [ "$PACKAGE_UPGRADE" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ] || [ "$WITH_CLOUD" = 1 ] || [ "$COMPREHENSIVE" = 1 ] || [ "$STRESS" = 1 ] || [ "$FULLSTACK" = 1 ] || [ "$HOLE_PUNCH" = 1 ] || [ "$SHAKEOUT" = 1 ]; } && { echo "--package-upgrade is a standalone convergence journey (its own entrypoint); do not combine with other legs" >&2; exit 2; }
 [ "$PACKAGE_UPGRADE" = 1 ] && [ "$DO_BUILD" = 0 ] && { echo "--package-upgrade always rebuilds the working-tree wheel; --no-build is irrelevant" >&2; exit 2; }
+# --era-hop is a standalone journey (nexus-n7u38.30): NO native build (both
+# engines are acquired for real by the product's own code) — never combined.
+[ "$ERA_HOP" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ] || [ "$WITH_CLOUD" = 1 ] || [ "$COMPREHENSIVE" = 1 ] || [ "$STRESS" = 1 ] || [ "$FULLSTACK" = 1 ] || [ "$HOLE_PUNCH" = 1 ] || [ "$SHAKEOUT" = 1 ] || [ "$PACKAGE_UPGRADE" = 1 ]; } && { echo "--era-hop is a standalone era-spanning journey (its own entrypoint); do not combine with other legs" >&2; exit 2; }
+[ "$ERA_HOP" = 1 ] && [ "$DO_BUILD" = 0 ] && { echo "--era-hop always rebuilds the working-tree wheel; --no-build is irrelevant" >&2; exit 2; }
+# Staleness guard, mirroring the --package-upgrade one: if the era's engine has
+# caught up to the current floor there is no era left to span, and every
+# convergence assertion in the leg would pass vacuously.
+[ "$ERA_HOP" = 1 ] && [ "${ERA_ENGINE_TAG#engine-service-v}" = "$GUIDED_STAMP_VERSION" ] && {
+  echo "FATAL: ERA_ENGINE_TAG ($ERA_ENGINE_TAG) already equals the current REQUIRED_ENGINE_VERSION ($GUIDED_STAMP_VERSION) — there is no era to span and the hop's convergence asserts would be vacuous. Fix NEXUS_ERA_RELEASE/NEXUS_ERA_ENGINE_TAG in run.sh." >&2
+  exit 2
+}
 
 if [ "$GUIDED" = 1 ]; then
   # --guided force-rebuilds the native binary with the stamp baked in, so it is
@@ -147,8 +176,8 @@ if [ "$GUIDED" = 1 ]; then
 fi
 
 GRAAL_IMAGE="container-registry.oracle.com/graalvm/native-image-community:25"
-if [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ] || [ "$PACKAGE_UPGRADE" = 1 ]; then
-  # nexus-4mm24 / nexus-s3dd4.7 / nexus-cfgo9: these boxes acquire every
+if [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ] || [ "$PACKAGE_UPGRADE" = 1 ] || [ "$ERA_HOP" = 1 ]; then
+  # nexus-4mm24 / nexus-s3dd4.7 / nexus-cfgo9 / nexus-n7u38.30: these boxes acquire every
   # engine binary at runtime (PUBLISHED release) — NO local native build, NO
   # stamping. Just the wheel.
   echo "[1/2] Building the conexus wheel (host)…"
@@ -187,7 +216,7 @@ else
   echo "[1-2/3] --no-build: reusing existing wheel + native binary"
 fi
 
-if [ "$COLD" = 0 ] && [ "$HOLE_PUNCH" = 0 ] && [ "$PACKAGE_UPGRADE" = 0 ]; then
+if [ "$COLD" = 0 ] && [ "$HOLE_PUNCH" = 0 ] && [ "$PACKAGE_UPGRADE" = 0 ] && [ "$ERA_HOP" = 0 ]; then
   ls dist/conexus-*.whl >/dev/null 2>&1 || { echo "no wheel in dist/ — drop --no-build" >&2; exit 1; }
   [ -x service/target/nexus-service ] || { echo "no native binary at service/target/nexus-service — drop --no-build" >&2; exit 1; }
 fi
@@ -217,14 +246,24 @@ preflight_docker_prune() {
 }
 preflight_docker_prune
 
-echo "[stage] Staging a minimal build context + building image (COLD=$COLD HOLE_PUNCH=$HOLE_PUNCH WITH_CLOUD=$WITH_CLOUD)…"
+echo "[stage] Staging a minimal build context + building image (COLD=$COLD HOLE_PUNCH=$HOLE_PUNCH ERA_HOP=$ERA_HOP WITH_CLOUD=$WITH_CLOUD)…"
 # Flatten wheel + JAR + driver to fixed names in a tiny throwaway context. The
 # repo .dockerignore excludes dist/, and the inputs live in three different
 # trees — staging sidesteps both without touching the shared .dockerignore.
 STAGE="$(mktemp -d)"
 trap '_guided_restore; rm -rf "$STAGE"' EXIT
 cp "$(ls -t dist/conexus-*.whl | head -1)"            "$STAGE/"   # keep real PEP 427 name
-if [ "$PACKAGE_UPGRADE" = 1 ]; then
+if [ "$ERA_HOP" = 1 ]; then
+  # nexus-n7u38.30: same posture as --package-upgrade (working-tree wheel in its
+  # own subdirectory, real PEP 427 name preserved, no engine artifact staged at
+  # all — BOTH engines are acquired at runtime by the product's own code) PLUS
+  # the seeder, which writes the ancient Chroma/T2/catalog state under the ERA
+  # release's own libraries.
+  mkdir -p "$STAGE/worktree-wheel"
+  cp "$(ls -t dist/conexus-*.whl | head -1)" "$STAGE/worktree-wheel/"
+  cp "$HERE/Dockerfile.era-hop" "$STAGE/Dockerfile"
+  cp "$HERE/rehearse_era_hop.sh" "$HERE/seed_legacy.py" "$STAGE/"
+elif [ "$PACKAGE_UPGRADE" = 1 ]; then
   # nexus-cfgo9: the WORKING-TREE wheel travels in under its OWN subdirectory
   # (its real PEP 427 filename preserved — pip/uv parse the filename strictly
   # and a prefix-mangled name fails with "invalid version") so it never
@@ -296,6 +335,9 @@ fi
 if [ "$PACKAGE_UPGRADE" = 1 ]; then
   run_env+=(-e "PREV_RELEASE=$PREV_RELEASE" -e "PREV_ENGINE_TAG=$PREV_ENGINE_TAG" -e "NEW_ENGINE_TAG=$NEW_ENGINE_TAG")
 fi
+if [ "$ERA_HOP" = 1 ]; then
+  run_env+=(-e "ERA_RELEASE=$ERA_RELEASE" -e "ERA_ENGINE_TAG=$ERA_ENGINE_TAG" -e "NEW_ENGINE_TAG=$NEW_ENGINE_TAG")
+fi
 if [ "$WITH_CLOUD" = 1 ]; then
   # Forward the Voyage key from .env (export VOYAGE_API_KEY=…) under both names
   # the code probes. Never echoed.
@@ -334,6 +376,10 @@ elif [ "$HOLE_PUNCH" = 1 ]; then
 elif [ "$PACKAGE_UPGRADE" = 1 ]; then
   # nexus-cfgo9: Dockerfile.package-upgrade's default entrypoint IS
   # rehearse_package_upgrade.sh.
+  docker run --rm "${run_env[@]}" "$IMAGE"
+elif [ "$ERA_HOP" = 1 ]; then
+  # nexus-n7u38.30: Dockerfile.era-hop's default entrypoint IS
+  # rehearse_era_hop.sh.
   docker run --rm "${run_env[@]}" "$IMAGE"
 elif [ "$COLD" = 1 ]; then
   # nexus-4mm24: Dockerfile.cold's default entrypoint IS rehearse_cold.sh.

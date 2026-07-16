@@ -15,11 +15,19 @@ ETL), metadata = {position, tag}. Two conformant collections:
   knowledge__rehearsal__minilm-l6-v2-384__v1   (ONNX leg — re-embedded locally)
   knowledge__rehearsal__voyage-context-3__v1   (cloud leg — re-embedded via Voyage)
 
-Usage: seed_legacy.py <chroma_path> [--with-cloud] [--n N]
+Usage: seed_legacy.py <chroma_path> [--with-cloud] [--era-hop] [--n N]
        seed_legacy.py <chroma_path> --blocking=collision|pregate [--n N]
        seed_legacy.py <chroma_path> --remove-blocking[=collision|pregate]
+
 Prints one JSON line: {"collections": {name: count, ...}} for the driver to assert
 (--blocking prints {"blocking": {...}}; --remove-blocking prints {"removed": [...]}).
+
+--era-hop (RDR-185 P4.3) layers the GH #1408 work-instance shape onto the main
+seed: pre-RDR-108 16-char chunk ids as FULL catalog/T2 citizens, including a
+store_put-only note that has no source content to re-index. The ladder's
+substrate rung must converge these on the wire, so the manifest gains
+legacy_ids (what must no longer exist), expected_reid (the exact conformant
+chashes the wire transform must produce) and sourceless.
 """
 from __future__ import annotations
 
@@ -80,6 +88,37 @@ _LEGACYBARE = "knowledge__legacybare"
 _SHORTID = "knowledge__rehearsal-shortid__bge-base-en-v15-768__v1"
 _PAIR_HONEST = "knowledge__rehearsal-pair__bge-base-en-v15-768__v1"
 _PAIR_STALE = "knowledge__rehearsal-pair__voyage-context-3__v1"
+
+# RDR-185 P4.3 (nexus-n7u38.30): the ERA-HOP shapes — the 2026-07-16
+# work-instance (GH #1408) footprint, which the LADDER converges rather than
+# blocks. Distinct from the _BLOCKING shapes above in one load-bearing way:
+# these are FULL CITIZENS (entered into the chashes dict, so
+# _seed_t2_and_catalog writes catalog manifests + topic assignments keyed by
+# their LEGACY chashes). The blocking shapes are deliberately excluded from
+# T2/catalog because they only ever need to trip a pre-write guard — nothing
+# downstream of them exists. Under RDR-185 the legacy ids CONVERGE, so the
+# old->new map has to cascade through every chash-bearing store; a legacy
+# collection with no manifest rows would make that cascade vacuous and let a
+# broken cascade pass.
+#
+#   _ERA_LEGACY  file-backed, 16-char (pre-RDR-108) ids. Its catalog manifest
+#                carries the legacy chashes -> the cascade must remap them or
+#                the post-migration orphan scan finds every row dangling.
+#   _ERA_NOTE    the incident's hard case: store_put-only (NO catalog file
+#                document, only a topic_assignment) AND 16-char ids. It has no
+#                source content, so re-indexing it is IMPOSSIBLE — the printed
+#                remedy that made GH #1408 a dead end. ONLY wire re-id can
+#                converge it, and its topic_assignment's doc_id is a legacy
+#                chash the cascade must re-point.
+_ERA_LEGACY = "knowledge__rehearsal-era__bge-base-en-v15-768__v1"
+_ERA_NOTE = "knowledge__rehearsal-era-note__minilm-l6-v2-384__v1"
+
+#: Collections with NO backing source file — only a topic_assignment references
+#: them. `_seed_t2_and_catalog` skips the catalog document for these and seeds
+#: the assignment instead. Keeping this a SET (not an `== _NOTE` check) is what
+#: lets the era-hop add its own sourceless shape without the note-handling
+#: silently applying to only one of them.
+_SOURCELESS: frozenset[str] = frozenset({_NOTE, _ERA_NOTE})
 
 #: blocking collection -> (seed text prefix, vector dim, chunk-id length)
 _BLOCKING_SPEC: dict[str, tuple[str, int, int]] = {
@@ -171,24 +210,32 @@ def _seed_t2_and_catalog(collections: dict[str, list[str]]) -> dict[str, int]:
     )
 
     # RDR-162 P2: a SOURCELESS note assignment — a topic + a topic_assignment
-    # whose ``source_collection`` is the note collection (_NOTE), with NO catalog
-    # file document. The cross-model migrate must re-point this assignment to the
+    # whose ``source_collection`` is the note collection, with NO catalog file
+    # document. The cross-model migrate must re-point this assignment to the
     # bge-768 target so the post-migration taxonomy-consistency check resolves.
-    if _NOTE in collections:
+    #
+    # RDR-185 P4.3: for the era-hop's _ERA_NOTE the assignment's doc_id is a
+    # LEGACY (16-char) chash, so the rung's remap cascade must re-point the
+    # doc_id as well as the collection. topic_assignments is exactly the store
+    # RDR-180's original inventory missed (RDR-180 Failure Modes) and the .13
+    # audit re-found — seeding it with a legacy key is what makes that leg of
+    # the cascade falsifiable here.
+    for note_coll in sorted(_SOURCELESS & set(collections)):
         tax = db.taxonomy
+        label = f"{note_coll.split('__')[1]}-topic"
         tax.conn.execute(
             "INSERT INTO topics (label, collection, doc_count, created_at) "
             "VALUES (?, ?, ?, ?)",
-            ("rehearsal-note-topic", _NOTE, 1, "2026-06-18T00:00:00Z"),
+            (label, note_coll, 1, "2026-06-18T00:00:00Z"),
         )
         topic_id = tax.conn.execute(
-            "SELECT id FROM topics WHERE collection = ?", (_NOTE,)
+            "SELECT id FROM topics WHERE collection = ?", (note_coll,)
         ).fetchone()[0]
         tax.conn.execute(
             "INSERT INTO topic_assignments "
             "(doc_id, topic_id, assigned_by, source_collection) "
             "VALUES (?, ?, 'manual', ?)",
-            (collections[_NOTE][0], topic_id, _NOTE),
+            (collections[note_coll][0], topic_id, note_coll),
         )
         tax.conn.commit()
 
@@ -229,9 +276,9 @@ def _seed_t2_and_catalog(collections: dict[str, list[str]]) -> dict[str, int]:
 
     docs = 0
     for coll, chashes in collections.items():
-        # _NOTE is the SOURCELESS case: no catalog file document, only the
-        # topic_assignment seeded above references it.
-        if coll == _NOTE:
+        # The SOURCELESS cases: no catalog file document, only the
+        # topic_assignment seeded above references them.
+        if coll in _SOURCELESS:
             continue
         fp = f"{repo_root}/{coll}.md"
         Path(fp).write_text("rehearsal legacy doc\n")
@@ -288,7 +335,7 @@ def main() -> int:
     args = sys.argv[1:]
     if not args:
         print(
-            "usage: seed_legacy.py <chroma_path> [--with-cloud] [--n N]\n"
+            "usage: seed_legacy.py <chroma_path> [--with-cloud] [--era-hop] [--n N]\n"
             "       seed_legacy.py <chroma_path> --blocking=collision|pregate [--n N]\n"
             "       seed_legacy.py <chroma_path> --remove-blocking[=collision|pregate]",
             file=sys.stderr,
@@ -296,6 +343,14 @@ def main() -> int:
         return 2
     path = args[0]
     with_cloud = "--with-cloud" in args
+    era_hop = "--era-hop" in args
+    if era_hop and with_cloud:
+        # The era shapes are seeded 768/384-dim local content whose remap target
+        # is always the bge-768 name; a voyage-only service has no bge embedder
+        # and 422s the leg (the same incoherence _MISLABEL documents above).
+        print("--era-hop and --with-cloud are incoherent (era shapes remap onto "
+              "the local bge-768 target; cloud is voyage-only)", file=sys.stderr)
+        return 2
     n = 12
     if "--n" in args:
         n = int(args[args.index("--n") + 1])
@@ -337,6 +392,19 @@ def main() -> int:
     chashes: dict[str, list[str]] = {}
     chashes[_MINILM] = _seed(client, _MINILM, n, prefix="onnx chunk")
     chashes[_NOTE] = _seed(client, _NOTE, n, prefix="note chunk")
+    # RDR-185 P4.3 (nexus-n7u38.30): the ERA-HOP footprint — the GH #1408
+    # work-instance shape the ladder must converge UNATTENDED. Layered ON TOP
+    # of the main seed (not instead of it): a real era install holds a mix, and
+    # a conformant collection migrating beside a legacy one is what proves the
+    # rung composes per-collection legs rather than treating the store as one
+    # uniform era.
+    if era_hop:
+        chashes[_ERA_LEGACY] = _seed(
+            client, _ERA_LEGACY, n, prefix="era legacy chunk", dim=768, id_len=16,
+        )
+        chashes[_ERA_NOTE] = _seed(
+            client, _ERA_NOTE, n, prefix="era note chunk", id_len=16,
+        )
     # Shape (iii): voyage-NAMED, but the stored vectors are real 768-dim — the
     # measured-dim override (nexus-nb7hr/x7t5y) reclassifies it and the migrate
     # re-embeds it into the bge-768 target. Registered in T2/catalog like every
@@ -377,6 +445,13 @@ def main() -> int:
         _MINILM: _remap_model(_MINILM, _tgt_model),
         _NOTE: _remap_model(_NOTE, _tgt_model),
     }
+    if era_hop:
+        # _ERA_NOTE is minilm-384 -> re-embedded into the mode's target model,
+        # exactly like _NOTE. _ERA_LEGACY is ALREADY bge-768-named, so it is a
+        # same-name leg: only its chunk IDENTITY changes (wire re-id), not its
+        # collection. Absent from cross_model => the parity check resolves it
+        # under its own name via cross.get(name, name).
+        cross_model[_ERA_NOTE] = _remap_model(_ERA_NOTE, _tgt_model)
     if not with_cloud:
         # Shape (iii) is NOT mode-aware: remap_target_model returns the local
         # ONNX model UNCONDITIONALLY for measured-768 content (voyage mode
@@ -386,7 +461,24 @@ def main() -> int:
         # main-seed target. Skipped on --with-cloud (see the seeding note
         # above): a voyage-mode service cannot embed the bge target.
         cross_model[_MISLABEL] = _remap_model(_MISLABEL, _BGE_MODEL)
-    print(json.dumps({"collections": seeded, "cross_model": cross_model, **t2}))
+    out: dict[str, object] = {"collections": seeded, "cross_model": cross_model, **t2}
+    if era_hop:
+        # The driver asserts the CONVERGENCE, so it needs the before-state: the
+        # exact legacy ids that must no longer exist anywhere post-walk, and the
+        # text they were derived from (the rung recomputes sha256(text)[:32] on
+        # the wire, so the expected new id is derivable here too — that is the
+        # whole point of wire re-id, and it makes the assertion exact rather
+        # than a "looks 32-char" shape check).
+        out["legacy_ids"] = {
+            _ERA_LEGACY: chashes[_ERA_LEGACY],
+            _ERA_NOTE: chashes[_ERA_NOTE],
+        }
+        out["expected_reid"] = {
+            _ERA_LEGACY: [_chash(f"era legacy chunk {i:04d}") for i in range(n)],
+            _ERA_NOTE: [_chash(f"era note chunk {i:04d}") for i in range(n)],
+        }
+        out["sourceless"] = sorted(_SOURCELESS)
+    print(json.dumps(out))
     return 0
 
 
