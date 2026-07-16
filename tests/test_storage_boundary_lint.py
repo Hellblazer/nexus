@@ -490,7 +490,12 @@ def test_dual_population_baseline_locked():
     # already-migrated freshness probe — read-only mode=ro URI on the
     # frozen migration source (annotation added at full-suite triage,
     # 2026-07-02; the site itself landed 4776f0c8).
-    assert result.epsilon_allow_connects == 21, (
+    # 22 = +1 for RDR-185 P0.2 (nexus-n7u38.2): upgrade_ladder/completion.py
+    # ladder-local completion records (ladder.db) — its own substrate,
+    # deliberately outside T2Database/apply_pending so the store exists
+    # before the t2-schema rung it records (independent-audit HIGH finding;
+    # RDR-158-exempt; the pipeline_buffer.py own-substrate shape).
+    assert result.epsilon_allow_connects == 22, (
         f"raw-connect epsilon-allow baseline moved: {result.epsilon_allow_connects}"
     )
     # P3 endpoint: ZERO un-annotated direct T2Database constructions outside
