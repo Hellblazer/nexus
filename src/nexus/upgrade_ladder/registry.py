@@ -192,9 +192,12 @@ def default_registry(
     live install's ``memory.db``; ``None`` uses the production config-dir
     default (correct for ``nx doctor``'s read-only detect sweep).
     """
+    from nexus.upgrade_ladder.rungs.substrate_etl import SubstrateEtlRung  # noqa: PLC0415 — deferred to avoid import cycle
     from nexus.upgrade_ladder.rungs.t2_schema import T2SchemaRung  # noqa: PLC0415 — deferred to avoid import cycle
 
     kwargs: dict[str, object] = {"apply_attempted": t2_apply_attempted}
     if db_path_fn is not None:
         kwargs["db_path_fn"] = db_path_fn
-    return LadderRegistry((T2SchemaRung(**kwargs),))  # type: ignore[arg-type]
+    # RQ2 hard edge, live: t2-schema precedes substrate-etl (P4.0 nexus-x3z00
+    # assembled the rung; the registry's own validator enforces the order).
+    return LadderRegistry((T2SchemaRung(**kwargs), SubstrateEtlRung()))  # type: ignore[arg-type]

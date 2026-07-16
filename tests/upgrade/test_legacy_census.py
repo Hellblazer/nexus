@@ -279,9 +279,12 @@ def test_census_check_is_wired_into_run_health_checks() -> None:
     assert "_check_legacy_id_census()" in inspect.getsource(run_health_checks)
 
 
-def test_census_is_not_a_walk_rung() -> None:
-    """Detect-only in P1: registering a census rung with no remediation
-    would fail `nx upgrade` on installs that work fine today. The census
-    folds into the P2 substrate rung's detect() when remediation exists."""
+def test_census_is_not_its_own_walk_rung() -> None:
+    """The census never became a rung of its own: P1 shipped it detect-only
+    (a pending rung with no remediation would have failed `nx upgrade` on
+    installs that worked fine), and P4.0 folded its signal into the
+    substrate-etl rung's detect() — where remediation now lives — rather
+    than registering a second census rung."""
+    names = [r.name for r in default_registry()]
     assert all(r.name != "legacy-id-census" for r in default_registry())
-    assert [r.name for r in default_registry()] == ["t2-schema"]
+    assert names == ["t2-schema", "substrate-etl"]
