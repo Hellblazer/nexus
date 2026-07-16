@@ -16,9 +16,15 @@ from __future__ import annotations
 import inspect
 import pathlib
 from dataclasses import dataclass
+from unittest.mock import patch
+
+from click.testing import CliRunner
 
 import pytest
 
+import nexus.db.migrations as migrations
+import nexus.upgrade_ladder.preconditions as pre_mod
+from nexus.cli import main
 from nexus.commands.upgrade import _converge_preconditions, upgrade
 from nexus.upgrade_ladder.preconditions import (
     PreconditionReport,
@@ -239,10 +245,106 @@ def test_skip_t3_suppresses_converge_actions_but_still_reports(
     assert by["process"].current is False
 
 
-def test_upgrade_trigger_threads_skip_t3_into_preconditions() -> None:
-    """Wiring pin for the --skip-t3 contract."""
+def test_upgrade_trigger_threads_skip_t3_into_both_gates() -> None:
+    """Wiring pin, per-gate (P3 validator gap 2): a loose 'not skip_t3' in
+    source would still pass if the PROCESS gate alone regressed — the exact
+    P3-review Medium. Each gate's own clause must reference the flag."""
     source = inspect.getsource(_converge_preconditions)
-    assert "not skip_t3" in source  # both gates derive from the flag
+    engine_line = next(
+        line for line in source.splitlines() if "allow_engine_install=" in line
+    )
+    process_line = next(
+        line for line in source.splitlines() if "allow_process_cycle=" in line
+    )
+    assert "skip_t3" in engine_line, engine_line
+    assert "skip_t3" in process_line, process_line
+    assert "auto_mode" in engine_line  # --auto still gates the install
+
+
+def test_upgrade_command_threads_flags_into_the_precondition_stage(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P3 validator gap 1: nothing verified upgrade() actually FORWARDS the
+    click flags — a hardcoded skip_t3=False at the call site passed every
+    test. Drive the CLI and unpack the call kwargs."""
+    migrations._upgrade_done.clear()
+    monkeypatch.setenv("NX_MIGRATION_NOTICE", "0")
+    with (
+        patch("nexus.commands.upgrade._db_path", return_value=tmp_path / "memory.db"),
+        patch("nexus.commands.upgrade.T3_UPGRADES", []),
+        patch("nexus.commands.upgrade._quiesce_daemon"),
+        patch("nexus.commands.upgrade._cycle_supervised_daemons_to_current"),
+        patch("nexus.commands.upgrade._stdin_isatty", return_value=False),
+        patch("nexus.commands.upgrade._converge_preconditions") as stage,
+    ):
+        result = CliRunner().invoke(main, ["upgrade", "--skip-t3"])
+        assert result.exit_code == 0, result.output
+        assert stage.call_args.kwargs == {"auto_mode": False, "skip_t3": True}
+
+        stage.reset_mock()
+        migrations._upgrade_done.clear()
+        result = CliRunner().invoke(main, ["upgrade", "--auto"])
+        assert result.exit_code == 0, result.output
+        assert stage.call_args.kwargs == {"auto_mode": True, "skip_t3": False}
+
+
+def test_engine_converge_is_skipped_when_already_converged(
+    tmp_path: pathlib.Path,
+) -> None:
+    """P3 validator carry-item (a): the dual-trigger no-op, as BEHAVIOR not
+    just census+memo — when the root-level transition finisher already
+    converged the engine on this invocation, the precondition stage's
+    detect reports converged and the shared converge is never re-invoked."""
+    installs = {"n": 0}
+
+    def _engine_converge():
+        installs["n"] += 1
+        return ["should not happen"]
+
+    reports = converge_preconditions(
+        config_dir=tmp_path,
+        _engine_detect_fn=lambda: _EngineStatus(converged=True, reason=None),
+        _engine_converge_fn=_engine_converge,
+        _lease_fn=lambda: None,
+        _installed_version_fn=lambda: "6.12.0",
+        _cycle_fn=lambda: None,
+    )
+    assert installs["n"] == 0  # the finisher's work is not redone
+    assert {r.name: r for r in reports}["engine"].current is True
+
+
+def test_trigger_wrapper_never_blocks_on_precondition_failure(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P3 validator gap 3: the CLI wrapper's own best-effort body was
+    untested — a precondition explosion must NOT block the upgrade (the T2
+    migration already ran) and must not crash the command."""
+    def _boom(**_kwargs):
+        raise RuntimeError("sidecar unreadable")
+
+    monkeypatch.setattr(pre_mod, "converge_preconditions", _boom)
+    _converge_preconditions(auto_mode=False, skip_t3=False)  # must not raise
+    assert "Traceback" not in capsys.readouterr().out
+
+
+def test_trigger_wrapper_echoes_actions_and_pending(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The wrapper's reporting body (P3 validator gap 3): actions echo, a
+    non-current axis echoes its pending detail — and --auto stays silent."""
+    reports = [
+        PreconditionReport("engine", True, True, "converged", ("installed v0.1.44",)),
+        PreconditionReport("process", True, False, "supervisor lease 6.10.0 != installed 6.12.0"),
+    ]
+    monkeypatch.setattr(pre_mod, "converge_preconditions", lambda **_k: reports)
+
+    _converge_preconditions(auto_mode=False, skip_t3=False)
+    out = capsys.readouterr().out
+    assert "installed v0.1.44" in out
+    assert "pending" in out and "6.10.0" in out
+
+    _converge_preconditions(auto_mode=True, skip_t3=False)
+    assert capsys.readouterr().out == ""  # --auto: log-only, hook stays quiet
 
 
 def test_package_reports_installed_version(tmp_path: pathlib.Path) -> None:

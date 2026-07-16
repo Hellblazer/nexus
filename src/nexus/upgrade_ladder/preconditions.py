@@ -133,10 +133,15 @@ def check_preconditions(
     _lease_fn: Callable[[], Any | None] | None = None,
     _installed_version_fn: Callable[[], str] | None = None,
 ) -> list[PreconditionReport]:
-    """READ-ONLY live verdicts for all three axes (the doctor/dry-run shape).
+    """READ-ONLY live verdicts for all three axes.
 
     Stateless by construction: every call re-reads the sidecar, the lease
     file, and package metadata. Never probes a process.
+
+    NOT YET WIRED to a production surface (P3 validator gap 4 — the
+    docstring used to overclaim "the doctor/dry-run shape"): the
+    doctor-visible precondition line is the .22 follow-on bead's scope.
+    ``converge_preconditions`` is what the trigger calls today.
     """
     from nexus.upgrade_finish import detect_engine_convergence  # noqa: PLC0415 — deferred to avoid import cost
 
