@@ -2,14 +2,14 @@
 title: "Single-Ladder Convergent Upgrade: One Version, Auto-Applied Data Migrations, Delete the Upgrade Ceremony"
 id: RDR-185
 type: Architecture
-status: draft
+status: accepted
 priority: high
 author: Hal Hildebrand
 reviewed-by: ""
 created: 2026-07-16
 related_issues: ["GH #1408", "GH #1405"]
 related_rdrs: [RDR-076, RDR-142, RDR-143, RDR-144, RDR-155, RDR-159, RDR-162, RDR-170, RDR-174, RDR-176, RDR-178, RDR-180]
-supersedes: []
+supersedes: ["RDR-159 (partial: the user-facing guided-upgrade command surface; its ETL/verify/report engine is inherited, not replaced)"]
 related_tests: [tests/e2e/migration-rehearsal/run.sh, tests/e2e/upgrade-shakeout.sh]
 ---
 
@@ -25,47 +25,81 @@ code; when current code meets older data, migrate the data. The project
 already implements this correctly for exactly one axis — T2 schema
 migrations apply automatically on open, keyed by a version row
 (`apply_pending`, RDR-076/RDR-170). No user has ever run a T2-schema verb.
-
 Every transition since has instead been shipped as an EVENT with its own
-ceremony, and the accumulated result is a graph the user must hold and
-traverse — which edges apply depends on which ERA their install is from:
+ceremony. The 2026-07-16 field incident (GH #1408) forced the question: a
+long-lived work install that ran package upgrades faithfully for months
+attempted the substrate migration and was BLOCKED on 18 collections of
+pre-RDR-108 chunk ids, with an impossible printed remedy. The maintainer's
+verdict: "I'm the one who built this and I don't even know how to run the
+67 steps."
 
-- package: `uv tool upgrade` / the RDR-143 lockstep hook (deferred a
-  session; the download-vs-swap coupling is nexus-blao6)
-- T2 schema + daemon cycling: `nx upgrade` (+ `--auto` SessionStart form)
-- process freshness: `nx daemon restart-stale`
-- engine binary: `converge_engine` + `PINNED_SERVICE_TAG`
-- provisioning: `nx init --service` (RDR-174)
-- T3 substrate: `nx migrate-to-service` + `--dry-run` pregate +
-  `nx guided-upgrade` + the `/conexus:upgrade` skill (RDR-159/176/178)
-- chunk-identity era: `nx collection reindex` / `backfill-hash` / the
-  proposed `rewrite-ids` (GH #1408)
-- embedder era: the RDR-162 384→768 re-index→migrate chain, `embed_migrate`
-- hooks/config stanzas: `nx hooks update` + doctor drift checks
+#### Gap 1: The upgrade surface is a command graph, not an operation
 
-Field evidence, 2026-07-16 (the incident that forced the question): a
-long-lived work install ran package upgrades faithfully for months, then
-attempted the substrate migration and was BLOCKED on 18 collections
-carrying pre-RDR-108 chunk ids — debt that (a) nothing surfaced before
-migration day, (b) the guided path could not fix, and (c) the printed
-remedy (re-index from source) was IMPOSSIBLE for the ~2,000 store_put-only
-chunks that have no source files. The `/conexus:upgrade` skill additionally
-crashed on the dry-run's designed non-zero exit. The maintainer's verdict:
-"I'm the one who built this and I don't even know how to run the 67 steps"
-— and the id remedy itself is a pure function of stored data
+Which verbs apply depends on which ERA the install is from: package
+(`uv tool upgrade` / RDR-143 lockstep hook; the download-vs-swap coupling
+is nexus-blao6), T2 schema + daemon cycling (`nx upgrade` and its
+`--auto` SessionStart form), process freshness (`nx daemon
+restart-stale`), engine binary (`converge_engine` + `PINNED_SERVICE_TAG`),
+provisioning (`nx init --service`, RDR-174), T3 substrate
+(`nx migrate-to-service` + `--dry-run` pregate + `nx guided-upgrade` +
+the `/conexus:upgrade` skill; RDR-159/176/178), chunk-identity era
+(`nx collection reindex` / `backfill-hash` / GH #1408's proposed
+`rewrite-ids`), embedder era (the RDR-162 384→768 chain,
+`embed_migrate`), hooks/config stanzas (`nx hooks update` + doctor
+drift checks). Nobody — including the maintainer — can hold this graph.
+
+#### Gap 2: Detection is centralized; remediation is scattered
+
+Doctor already knows every one of these states. The product can SEE the
+whole path and refuses to WALK it — remediation is spread across verbs
+the user must discover, sequence, and re-run, each added at its era's
+point of pain.
+
+#### Gap 3: One axis detects but cannot remediate at all
+
+Chunk-identity era (`detection.py` legacy-id sampler) only BLOCKS. The
+2026-07-16 incident's printed remedy — re-index from source — was
+IMPOSSIBLE for the ~2,000 store_put-only chunks with no source files,
+even though the correct id is a pure function of stored data
 (`chash = sha256(chunk_text)`), requiring no re-index at all.
 
-The structural defect: **detection is centralized — doctor already knows
-every one of these states — but remediation is scattered across verbs the
-user must discover, sequence, and re-run.** The product can see the whole
-path and refuses to walk it.
+#### Gap 4: Version state is fragmented across seven mechanisms
+
+One concept — "how far is this install's data from current" — is stored
+seven ways: T2 version row, hardcoded engine constant, derived pin
+string, daemon lease record, package marker file, name-encoded embedder
+model segment, and (for chunk-id era) pure re-sampling with no persisted
+state at all. There is no single place the ladder position lives.
+
+#### Gap 5: Era debt is invisible until migration day
+
+Nothing surfaces pre-RDR-108 ids (or any dormant-collection era debt)
+before the moment it hard-blocks a migration — the work instance carried
+the 18-collection debt silently for months while passing every doctor
+check and package upgrade.
 
 ## Constraints
 
 - **Immutable-source rollback stands (RDR-176).** A substrate rung never
   mutates its source store; identity conformance is computed ON THE WIRE
   during ETL (the id is derivable from the chunk text being carried), so
-  the Chroma source remains a byte-untouched rollback target.
+  the Chroma source remains a byte-untouched rollback target. **Wire
+  re-id REVISES two existing invariants and must say so** (gate
+  Critical): (a) `rollback_collections` (`vector_etl.py:1677`) matches
+  SOURCE chash ids in the target — for a re-id'd collection every lookup
+  misses, tripping its own zero-removed guard; the rollback rung must
+  consult the persisted old→new mapping instead of raw id equality.
+  (b) `_probe_legacy_ids`' documented rationale ("the migration NEVER
+  rewrites ids") is deliberately retired by this RDR; the
+  `cross_model_remappable`-excludes-`legacy_ids` precondition
+  (`detection.py:265`) becomes an in-flight transform. The old→new
+  mapping is therefore a PERSISTED migration artifact, not transient
+  state, and the remap inventory must be audited exhaustively before
+  implementation — RDR-180's Failure Modes records this exact omission
+  class (`topic_assignments` was missed by its original inventory);
+  minimum audit set: catalog `document_chunks`, chash-span links,
+  chash-keyed aspects, `topic_assignments`, `chash_index`, and
+  `rollback_collections`' matching.
 - **GH #1390 stands.** Destination constraints are never weakened. Wire
   re-id computes the CORRECT content address for existing content; it does
   not force wrong ids through.
@@ -83,20 +117,43 @@ path and refuses to walk it.
   rung is N/A detects-and-skips (the f0pmd version-gate pattern: detect →
   current? skip → converge → verify).
 - The engine-service release lifecycle stays separate (its version rides
-  `REQUIRED_ENGINE_VERSION`); the ladder CONSUMES the pin as one rung, it
-  does not replace the engine release process.
+  `REQUIRED_ENGINE_VERSION`); the ladder's trigger CONSUMES the pin as a
+  stateless PRECONDITION check (installed-vs-required, re-derived at
+  every invocation), it does not replace the engine release process.
+  "Re-derived" means from ON-DISK state — provenance sidecar, package
+  metadata, lease file — never a network/IPC probe of a
+  possibly-unresponsive running process: `detect_engine_convergence`
+  (`upgrade_finish.py:401`) deliberately reads the install-time
+  provenance sidecar because the incident it fixes is a CRASH-LOOPING
+  engine that may never answer `/version`; that crash-loop-safe sourcing
+  is the precondition-check contract, not an exception to it.
+- **Mapping commit ordering (gate round 2):** each old→new id map batch
+  commits atomically with, or strictly before, its corresponding
+  target-row batch — a crash between target write and map persist would
+  otherwise reproduce the exact rollback-miss failure the mapping exists
+  to prevent. Resume converges from the map, never from raw id equality.
 
 ## Proposed Decision (draft — the gate test is that this stays one paragraph)
 
-Upgrade is: update the code. All data transitions live in ONE ordered
-migration ladder spanning every axis (T2 schema, T3 substrate, chunk
-identity, embedder era, hooks/config), keyed by one stored data-version;
-rungs auto-apply when newer code meets older data, each rung
+Upgrade is: update the code. All DATA transitions live in ONE ordered
+migration ladder (T2 schema, T3 substrate, chunk identity, embedder era,
+and hooks/config — the last with its ladder position deferred to the
+bootstrapping question in Research RQ2), keyed by one stored
+ladder-position derived from per-rung completion records; rungs
+auto-apply when newer code meets older data, each rung
 detect→converge→verify, idempotent and resumable, with the source of any
-substrate move kept immutable for rollback. `nx doctor` reports pending
-rungs read-only; `nx upgrade` (and its SessionStart `--auto` form) is the
-single trigger that walks the ladder; every other upgrade-cycle verb is
-demoted to an internal primitive or deleted from the user-facing story.
+substrate move kept immutable for rollback (rollback consulting the
+persisted old→new id map where a rung rewrote identity). The two
+non-data axes — package/engine acquisition and process
+freshness/provisioning — are the ladder's PRECONDITIONS: converged by
+the same trigger before the ladder walks, and deliberately STATELESS —
+their freshness is re-derived live at each invocation
+(installed-vs-running/required comparison), never recorded as
+independent version state.
+`nx doctor` reports pending rungs read-only; `nx upgrade` (and its
+SessionStart `--auto` form) is the single trigger; every other
+upgrade-cycle verb is demoted to an internal primitive or deleted from
+the user-facing story.
 
 ## Decision Space
 
@@ -124,9 +181,15 @@ Open sub-decisions for research:
   destination (RDR-108 defines the end state; manifest position rows
   preserve composition) and the old→new mapping cascade for chash-span
   links and chash-keyed aspects riding the same ETL.
-- RDR-180 alignment: the 16-byte→32-byte binary chash move is a FUTURE
-  rung of this same ladder; the wire-re-id mapping machinery must be
-  built as the reusable remap primitive 180 will need.
+- RDR-180 alignment (claim tempered per gate): the 16-byte→32-byte
+  binary move is a future rung, and this RDR's persisted old→new mapping
+  + in-DB remap-cascade primitive is a genuine SUBSET of what 180 needs —
+  but 180 additionally requires a cross-language binary value type and
+  its `chash_alias` permanent table for out-of-DB references (beads, T2
+  prose, plan_json), which are NOT built here. 180's rung is also
+  freeze-gated by its own design: it enters the ladder as a sanctioned
+  exception under the consent escape hatch (an operator-initiated rung),
+  not as an auto-applied one.
 - What survives as internal primitives (surgical/dev use, tested, out of
   user docs) vs deleted outright.
 
@@ -146,6 +209,20 @@ Open sub-decisions for research:
   and stays green.
 - No rung records complete without its verify (RDR-142 regression class
   pinned by test).
+- "How far from current" has exactly TWO answer mechanisms, by class
+  (closes Gap 4 falsifiably): DATA-rung state is answered solely by the
+  ladder position derived from per-rung completion records; PRECONDITION
+  freshness (package, engine, processes) is answered solely by a fresh
+  comparison of on-disk installed state against required (crash-loop-safe
+  sourcing per Constraints), stateless. No third
+  mechanism — marker file as authority, name-encoded model segment,
+  ad-hoc re-sampling — independently answers the question. (The daemon
+  lease's version field survives as an INPUT to the live comparison, not
+  an authority.)
+- Era debt is visible the day it exists, not on migration day:
+  `nx doctor` reports every pending rung — including legacy-id
+  collections on a Chroma-mode install — from the release that ships the
+  detector (closes Gap 5 falsifiably).
 
 ## Research
 
