@@ -60,6 +60,13 @@ def upgrade(ctx: click.Context, dry_run: bool, force: bool, auto_mode: bool, ski
         if not dry_run:
             _quiesce_daemon()
         _run_upgrade(dry_run=dry_run, force=force, auto_mode=auto_mode, skip_t3=skip_t3)
+        # RDR-185 P3.1 (nexus-n7u38.23): the two non-data axes converge as
+        # STATELESS preconditions before the ladder walks — re-derived from
+        # on-disk state each invocation (sidecar/lease/metadata), never
+        # recorded. --auto keeps the engine install with the version-
+        # transition path (hook timeout budget); process freshness stays.
+        if not dry_run:
+            _converge_preconditions(auto_mode=auto_mode)
         # RDR-185 P0.4 (nexus-n7u38.4): `nx upgrade` is the SINGLE trigger for
         # the upgrade ladder — every pending rung converges here (dry-run
         # reports read-only from detect()). The registry is empty until native
@@ -107,6 +114,34 @@ def upgrade(ctx: click.Context, dry_run: bool, force: bool, auto_mode: bool, ski
         # graceful cycle on a stale one. Best-effort, non-dry-run only.
         if not dry_run:
             _cycle_supervised_daemons_to_current(skip_t3=skip_t3)
+
+
+def _converge_preconditions(*, auto_mode: bool) -> None:
+    """RDR-185 P3.1: converge the non-data axes before the ladder walk.
+
+    Best-effort at the trigger level (a precondition failure is reported,
+    remediated where derivable, and never blocks the T2 migration that
+    already ran) — but the verdicts themselves are computed fresh every
+    invocation and never stored.
+    """
+    try:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.upgrade_ladder.preconditions import converge_preconditions  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
+
+        reports = converge_preconditions(
+            config_dir=nexus_config_dir(),
+            allow_engine_install=not auto_mode,
+        )
+        for report in reports:
+            for line in report.actions:
+                if auto_mode:
+                    _log.info("upgrade_precondition_action", axis=report.name, action=line)
+                else:
+                    click.echo(f"Precondition [{report.name}]: {line}")
+            if not report.current and not auto_mode:
+                click.echo(f"Precondition [{report.name}] pending: {report.detail}")
+    except Exception as exc:  # noqa: BLE001 — best-effort trigger stage; the walk and T2 migration must not be blocked by a precondition probe failure
+        _log.warning("upgrade_preconditions_failed", error=str(exc))
 
 
 def _run_ladder(

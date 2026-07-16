@@ -31,10 +31,17 @@ def _tmp_db(tmp_path: Path) -> Path:
 
 @pytest.fixture(autouse=True)
 def _no_real_daemon_nudge():
-    """Patch the post-upgrade daemon cycle (nexus-5ldk1) for all upgrade
-    tests so they never shell out to the real host T2 daemon. Yields the
-    mock so tests can assert whether the nudge fired."""
-    with patch("nexus.commands.upgrade._cycle_daemon_to_current") as m:
+    """Patch the post-upgrade daemon cycle (nexus-5ldk1) AND the RDR-185
+    precondition stage for all upgrade tests so they never shell out to the
+    real host daemons or cycle a live supervisor (the precondition stage's
+    production defaults read the REAL lease and, on a version mismatch,
+    would stop/start the box's live service — never from a unit test).
+    Yields the daemon-cycle mock so tests can assert whether the nudge
+    fired."""
+    with (
+        patch("nexus.commands.upgrade._cycle_daemon_to_current") as m,
+        patch("nexus.commands.upgrade._converge_preconditions"),
+    ):
         yield m
 
 
