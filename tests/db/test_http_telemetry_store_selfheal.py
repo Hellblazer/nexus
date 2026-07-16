@@ -213,15 +213,31 @@ class TestNoBypassOfMixinTransport:
 
     _BYPASS_PATTERN = re.compile(r"self\._client\.(get|post|put|delete|patch|request)\(")
 
+    #: Chartered exemptions: methods whose ENTIRE PURPOSE is bypassing the
+    #: self-healing transport, each with a review-verified latency rationale.
+    #: nexus-ov13k: query_tier_writes_once is the session-end summary's
+    #: single-attempt read — the mixin's retry ladder (gateway backoff +
+    #: evidence-gated lease-wait) has a 20-50s worst case that must never
+    #: run at session close. Every OTHER call site must use _get/_post.
+    _CHARTERED_BYPASS_METHODS = ("query_tier_writes_once",)
+
     def test_http_telemetry_store_has_zero_inline_client_call_sites(self) -> None:
         source_path = (
             Path(__file__).resolve().parent.parent.parent
             / "src" / "nexus" / "db" / "t2" / "http_telemetry_store.py"
         )
         source = source_path.read_text()
-        matches = self._BYPASS_PATTERN.findall(source)
+        # Blank out chartered methods' bodies before scanning: an inline
+        # call site is allowed ONLY inside an explicitly chartered method.
+        scan = source
+        for name in self._CHARTERED_BYPASS_METHODS:
+            start = scan.find(f"def {name}(")
+            assert start != -1, f"chartered method {name} vanished — update the charter"
+            nxt = scan.find("\n    def ", start + 1)
+            scan = scan[:start] + scan[nxt if nxt != -1 else len(scan):]
+        matches = self._BYPASS_PATTERN.findall(scan)
         assert matches == [], (
             f"found {len(matches)} inline self._client.<verb>(...) call "
-            f"site(s) in http_telemetry_store.py that bypass "
-            f"RefreshableHttpStoreMixin's self-healing transport: {matches}"
+            f"site(s) in http_telemetry_store.py outside the chartered "
+            f"bypass methods {self._CHARTERED_BYPASS_METHODS}: {matches}"
         )
