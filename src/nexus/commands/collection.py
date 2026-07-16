@@ -777,7 +777,12 @@ def _backfill_chunk_text_hash(
     return updated, skipped, total
 
 
-@collection.command("backfill-hash")
+# RDR-185 P4.1 (nexus-n7u38.28): DEMOTED to an internal primitive — hidden
+# from the user-facing surface, still callable + tested for surgical/dev use.
+# Its job is the upgrade ladder's now (upgrade-era repair; the ladder's manifest heal covers it).
+# NOT deleted: hiding keeps scripts/surgical use working, and RDR-155 P4b
+# owns the migration module's actual deletion (standing blocker).
+@collection.command("backfill-hash", hidden=True)
 @click.argument("name", required=False, default=None)
 @click.option("--all", "all_collections", is_flag=True, help="Backfill all collections")
 def backfill_hash_cmd(name: str | None, all_collections: bool) -> None:

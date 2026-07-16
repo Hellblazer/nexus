@@ -71,7 +71,12 @@ def _confirm_voyage_cost(
     return bool(_confirm("Proceed with the billed re-embed?"))
 
 
-@click.command(name="migrate-to-service")
+# RDR-185 P4.1 (nexus-n7u38.28): DEMOTED to an internal primitive — hidden
+# from the user-facing surface, still callable + tested for surgical/dev use.
+# Its job is the upgrade ladder's now (the substrate-etl rung; its --dry-run is `nx upgrade --dry-run`).
+# NOT deleted: hiding keeps scripts/surgical use working, and RDR-155 P4b
+# owns the migration module's actual deletion (standing blocker).
+@click.command(name="migrate-to-service", hidden=True)
 @click.option(
     "--dry-run",
     is_flag=True,

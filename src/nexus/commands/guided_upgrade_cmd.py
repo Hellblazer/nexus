@@ -93,7 +93,12 @@ def _provision_thunk_for_url(service_url: str):  # noqa: ANN202
     return _thunk
 
 
-@click.command("guided-upgrade")
+# RDR-185 P4.1 (nexus-n7u38.28): DEMOTED to an internal primitive — hidden
+# from the user-facing surface, still callable + tested for surgical/dev use.
+# Its job is the upgrade ladder's now (provisioning precondition + the substrate-etl rung).
+# NOT deleted: hiding keeps scripts/surgical use working, and RDR-155 P4b
+# owns the migration module's actual deletion (standing blocker).
+@click.command("guided-upgrade", hidden=True)
 @click.option("--local-path", default=None, help="Override the local Chroma path.")
 @click.option("--db", "db_path", default=None, help="Override the T2 SQLite path.")
 @click.option("--catalog-db", "catalog_db_path", default=None,

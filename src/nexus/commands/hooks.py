@@ -332,7 +332,12 @@ def refresh_all_managed_hooks(*, echo: bool = False) -> dict[str, int]:
     return summary
 
 
-@hooks.command("update-all")
+# RDR-185 P4.1 (nexus-n7u38.28): DEMOTED to an internal primitive — hidden
+# from the user-facing surface, still callable + tested for surgical/dev use.
+# Its job is the upgrade ladder's now (`nx upgrade` refreshes managed hooks itself).
+# NOT deleted: hiding keeps scripts/surgical use working, and RDR-155 P4b
+# owns the migration module's actual deletion (standing blocker).
+@hooks.command("update-all", hidden=True)
 def hooks_update_all() -> None:
     """Refresh nexus-managed git hooks across ALL catalog-registered repos.
 

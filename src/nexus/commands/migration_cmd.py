@@ -26,7 +26,12 @@ from nexus.migration.state import (
 )
 
 
-@click.command(name="migration")
+# RDR-185 P4.1 (nexus-n7u38.28): DEMOTED to an internal primitive — hidden
+# from the user-facing surface, still callable + tested for surgical/dev use.
+# Its job is the upgrade ladder's now (crash-recovery plumbing behind the single trigger).
+# NOT deleted: hiding keeps scripts/surgical use working, and RDR-155 P4b
+# owns the migration module's actual deletion (standing blocker).
+@click.command(name="migration", hidden=True)
 @click.option(
     "--clear-state",
     "do_clear",
