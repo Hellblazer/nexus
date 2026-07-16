@@ -149,12 +149,87 @@ Open sub-decisions for research:
 
 ## Research
 
-(To be filled during rdr-research: inventory every existing
-detection+remediation pair and its current owner; the rung ordering /
-dependency graph; trigger-point budget measurements; wire-re-id collision
-census on real legacy collections — the 2026-07-16 footprint is 18
-collections / ~6,026 chunks; what RDR-159/162/176/178 machinery lifts
-directly into rungs vs needs rework; version-vector vs scalar ladder.)
+Two passes, 2026-07-16. Structured findings in T2:
+`nexus_rdr/185-research-1` (external prior art, RQ5–RQ7) and
+`nexus_rdr/185-research-2` (codebase inventory, RQ1–RQ4); full file:line
+tables and sources in the referenced scratch/T3 entries.
+
+### RQ1 — Nine axes; exactly one has no remediation
+
+Most axes already pair a cheap, skip-gated detector with a remediation
+(`converge_engine`, the f0pmd version gate, T2 `apply_pending`). The one
+axis that can only BLOCK is **chunk-identity era** (`detection.py:106`
+samples legacy ids; nothing fixes them — GH #1408). Hooks/config and
+MCP-host freshness are partial/human-gated by design.
+
+### RQ2 — Ordering: five hard edges, no cycles
+
+package → everything (RDR-143); engine → substrate ETL (`pregate.py:201`);
+T2 schema → all T2 reads; chunk-identity → T3 ETL
+(`cross_model_remappable` excludes `legacy_ids`, `detection.py:265`);
+embedder-era + chunk-identity are CO-RESIDENT preconditions inside the
+same ETL rung, not sequential rungs. **One genuine ambiguity for the
+gate**: hooks/config-stanza freshness has no code-enforced ladder
+position, with a chicken-and-egg hazard (a stale stanza may not invoke
+the current lockstep hook) that nothing guards today.
+
+### RQ3 — Budgets
+
+Estimator constants `_EST_ONNX_CHUNKS_PER_SEC=100` /
+`_EST_VOYAGE_CHUNKS_PER_SEC=200` (`detection.py:655`). The Problem
+Statement's "~905s for 90,532 chunks" is the estimator's own output from
+the field dry-run, not an independent measurement. Classification:
+on-open-cheap (version/lease/marker reads, `apply_pending`) /
+explicit-walk (engine converge, daemon cycles) / long-resumable
+(substrate ETL, embedder re-index).
+
+### RQ4 — Machinery lift
+
+Migration reports + immutable-source discipline lift unchanged. Batched
+ETL and verify gates lift conceptually but need a Protocol source/target
+seam (today: concrete Chroma/pgvector params); watermark resume
+generalizes from per-(service,tenant,table) keys to arbitrary rungs.
+Version state today spans SEVEN mechanisms (T2 row, hardcoded constant,
+derived string, lease record, marker file, name-encoded model segment,
+and pure re-sampling with no state) — the heterogeneity the ladder
+unifies. RDR-142's stamp-only-on-verified-success guard is the proven
+pattern to generalize.
+
+### RQ5 — Prior art: the pattern is mainstream
+
+SQLite `user_version` (purest scalar on-open ladder, arbitrary
+skip-distance); **GitLab batched background migrations** (closest overall
+match: auto-triggered, async, resumable, adaptively batched, and the next
+major upgrade BLOCKS until all prior migrations report Finished — external
+validation of RDR-142); Core Data lightweight-vs-staged = the
+cheap-rung/big-rung split; Kubernetes level-triggered reconciliation =
+detect→converge→verify as a named pattern. Honest negatives: browser
+profile migration is weak prior art; `brew upgrade` is non-idempotent
+(cautionary); Signal/WhatsApp/Docker Desktop internals undocumented.
+
+### RQ6 — Version bookkeeping: RESOLVED
+
+Single scalar ladder position **derived from a per-rung completion-record
+table, never independently settable** (Flyway/SQLite/GitLab; independently
+re-derives RDR-142's remedy). Vector bookkeeping is correct only for
+order-independent axes; none exist in this problem statement.
+
+### RQ7 — Long-migration UX bar
+
+Background-by-default with adaptive batch throttling (GitLab model;
+Spotlight's resource-saturating reindex is the counter-example); atomic
+per-step commits as the resumability floor for every rung; progress/ETA
+read-only via `nx doctor`; blocking maintenance windows only as an opt-in
+escape hatch, never product-initiated.
+
+### Net effect on the open sub-decisions
+
+Trigger: cheap rungs on-open; long rungs auto-start in background from
+the same trigger, doctor as status surface. Bookkeeping: scalar derived
+from completion records. UX: background-by-default, throttled, resumable,
+promptless. The one-paragraph Proposed Decision survives contact with
+both passes unchanged; the hooks-stanza ladder position is the open item
+the gate must resolve.
 
 ## Decision
 
