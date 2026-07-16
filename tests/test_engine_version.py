@@ -38,7 +38,14 @@ class TestRequiredEngineVersion:
         # (nexus-0gis0): grants-nexus-svc-1's bulk GRANT crash-looped boot on
         # any install whose schema carries the superuser-owned diag view;
         # v0.1.42 and earlier are broken upgrade targets for that class.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 43)
+        # ->(0,1,44) 2026-07-16: hard dependency — the 6.11.0 tier-writes
+        # read-parity surfaces (nx tier-status, doctor tier-discipline, the
+        # SessionEnd summary; nexus-59wjj/ov13k) call the new
+        # GET /v1/telemetry/tier_writes/query route. Pre-44 engines 404 it
+        # and every surface degrades to the honest fallback forever.
+        # Deployed + cloud-gated 2026-07-16 (recall 12/12, hybrid p95
+        # 1920ms < 2376 bound).
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 44)
 
 
 class TestParseEngineVersion:

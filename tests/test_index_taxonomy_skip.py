@@ -29,7 +29,7 @@ def index_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def _mock_reg() -> MagicMock:
     mock = MagicMock()
-    mock.get.return_value = {"code_collection": "code__myrepo__voyage-code-3__v1"}
+    mock.get.return_value = {"code_collection": "code__myrepo__emb__v1"}
     return mock
 
 
@@ -37,7 +37,7 @@ def _run(runner: CliRunner, repo: Path, stats: dict, *, taxonomy_incomplete: boo
     # nexus-tevzq: the gate now probes per collection via
     # _collections_without_topics (one T2 open serves gate + subset);
     # taxonomy_incomplete=True is modeled as "every collection lacks topics".
-    no_topics = {"code__myrepo__voyage-code-3__v1"} if taxonomy_incomplete else set()
+    no_topics = {"code__myrepo__emb__v1"} if taxonomy_incomplete else set()
     with (
         patch("nexus.commands.index._registry", return_value=_mock_reg()),
         patch("nexus.indexer.index_repository", return_value=stats),
@@ -225,8 +225,8 @@ def test_gate_passes_discover_subset_to_postprocessing(runner: CliRunner, index_
 
     reg = MagicMock()
     reg.get.return_value = {
-        "code_collection": "code__myrepo__voyage-code-3__v1",
-        "docs_collection": "docs__myrepo__voyage-context-3__v1",
+        "code_collection": "code__myrepo__emb__v1",
+        "docs_collection": "docs__myrepo__emb__v1",
     }
     stats = {
         "files_changed": 3,
@@ -244,10 +244,10 @@ def test_gate_passes_discover_subset_to_postprocessing(runner: CliRunner, index_
     post.assert_called_once()
     _args, kwargs = post.call_args
     assert _args[0] == [
-        "code__myrepo__voyage-code-3__v1",
-        "docs__myrepo__voyage-context-3__v1",
+        "code__myrepo__emb__v1",
+        "docs__myrepo__emb__v1",
     ]
-    assert kwargs["discover_collections"] == ["code__myrepo__voyage-code-3__v1"]
+    assert kwargs["discover_collections"] == ["code__myrepo__emb__v1"]
 
 
 def test_postprocessing_discovers_only_subset(monkeypatch) -> None:
@@ -297,8 +297,8 @@ def test_self_heal_run_narrows_to_zero_topic_collections(runner: CliRunner, inde
 
     reg = MagicMock()
     reg.get.return_value = {
-        "code_collection": "code__myrepo__voyage-code-3__v1",
-        "docs_collection": "docs__myrepo__voyage-context-3__v1",
+        "code_collection": "code__myrepo__emb__v1",
+        "docs_collection": "docs__myrepo__emb__v1",
     }
     stats = {
         "files_changed": 0,
@@ -309,7 +309,7 @@ def test_self_heal_run_narrows_to_zero_topic_collections(runner: CliRunner, inde
         patch("nexus.indexer.index_repository", return_value=stats),
         patch(
             "nexus.commands.index._collections_without_topics",
-            return_value={"docs__myrepo__voyage-context-3__v1"},
+            return_value={"docs__myrepo__emb__v1"},
         ),
         patch("nexus.commands.index.run_collection_postprocessing") as post,
     ):
@@ -318,7 +318,7 @@ def test_self_heal_run_narrows_to_zero_topic_collections(runner: CliRunner, inde
     assert result.exit_code == 0, result.output
     post.assert_called_once()
     assert post.call_args.kwargs["discover_collections"] == [
-        "docs__myrepo__voyage-context-3__v1"
+        "docs__myrepo__emb__v1"
     ]
 
 
