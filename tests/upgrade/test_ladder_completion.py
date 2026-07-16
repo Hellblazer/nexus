@@ -186,6 +186,27 @@ def test_record_is_one_transaction(db_path: pathlib.Path) -> None:
             reader.close()
 
 
+def test_record_failure_rolls_back_and_leaves_store_usable(db_path: pathlib.Path) -> None:
+    """Validator gap 1: a failure mid-transaction (injected clock raising
+    inside the INSERT) must roll back cleanly — no partial row, no dangling
+    transaction blocking the next record."""
+    calls = {"n": 0}
+
+    def flaky_now() -> str:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("clock exploded")
+        return "t1"
+
+    with CompletionStore(db_path, now_fn=flaky_now) as store:
+        with pytest.raises(RuntimeError, match="clock exploded"):
+            store.record_verified("t2-schema", package_version="6.12.0")
+        assert store.verified_rungs() == frozenset()  # no partial row
+        # The transaction was rolled back, not left open: the next record works.
+        store.record_verified("t2-schema", package_version="6.12.0")
+        assert store.verified_rungs() == frozenset({"t2-schema"})
+
+
 def test_two_stores_on_same_path_coexist(db_path: pathlib.Path) -> None:
     """WAL: a second store (concurrent process shape) reads what the first
     committed without either erroring."""

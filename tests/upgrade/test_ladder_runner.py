@@ -266,6 +266,22 @@ def test_pending_sweep_is_read_only(store: CompletionStore) -> None:
     assert store.verified_rungs() == frozenset()
 
 
+def test_installed_package_version_falls_back_to_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validator gap 2: a broken metadata probe must degrade to 'unknown',
+    never crash the runner's default record path."""
+    import importlib.metadata
+
+    from nexus.upgrade_ladder.runner import _installed_package_version
+
+    def _boom(_name: str) -> str:
+        raise RuntimeError("metadata exploded")
+
+    monkeypatch.setattr(importlib.metadata, "version", _boom)
+    assert _installed_package_version() == "unknown"
+
+
 # ── Progress reporting ───────────────────────────────────────────────────────
 
 
