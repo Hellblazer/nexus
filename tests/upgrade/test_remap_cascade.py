@@ -24,6 +24,7 @@ import sqlite3
 
 import pytest
 
+import nexus.migration.remap_cascade as mod
 from nexus.migration.remap_cascade import (
     CASCADE_STORES,
     AmbiguousRemapError,
@@ -327,3 +328,16 @@ def test_missing_table_degrades_per_store_not_run(
     assert by["document_chunks"].ok is False  # no table in the empty catalog db
     assert "no such table" in by["document_chunks"].reason
     assert by["chash_index"].ok is True  # the rest still ran
+
+
+def test_inventory_drift_guard_fires(
+    dbs: tuple[pathlib.Path, pathlib.Path],
+    map_store: ChashRemapStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-vacuity for the runtime drift guard (P2 validator note): a store
+    named in CASCADE_STORES without an implementation refuses the run."""
+    monkeypatch.setattr(mod, "CASCADE_STORES", (*CASCADE_STORES, "phantom-store"))
+    catalog_db, memory_db = dbs
+    with pytest.raises(RuntimeError, match="inventory drift"):
+        cascade_remap(map_store, catalog_db=catalog_db, memory_db=memory_db)
