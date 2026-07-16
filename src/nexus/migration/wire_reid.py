@@ -207,6 +207,15 @@ class ChashRemapStore:
         ).fetchall()
         return dict(rows)
 
+    def all_pairs(self, *, tenant_id: str = "") -> list[tuple[str, str]]:
+        """Every (old_id, new_chash) pair across all source collections —
+        the remap cascade's global-view input (it detects cross-collection
+        ambiguity itself)."""
+        return self._conn.execute(
+            "SELECT old_id, new_chash FROM chash_remap WHERE tenant_id = ?",
+            (tenant_id,),
+        ).fetchall()
+
     def old_ids_for(
         self, source_collection: str, new_chash: str, *, tenant_id: str = ""
     ) -> frozenset[str]:

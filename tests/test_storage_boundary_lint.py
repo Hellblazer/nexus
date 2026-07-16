@@ -505,7 +505,11 @@ def test_dual_population_baseline_locked():
     # (chash_remap.db): a migration artifact that must outlive any store it
     # maps (gate r1 rollback consults it; RDR-158-exempt; the
     # pipeline_buffer/CompletionStore own-substrate shape).
-    assert result.epsilon_allow_connects == 24, (
+    # 25 = +1 for RDR-185 P2.3 (nexus-n7u38.16): migration/remap_cascade.py
+    # _connect — the cascade rewrites the LOCAL catalog.db/memory.db
+    # mid-migration BEFORE any daemon serves them (same migration-machinery
+    # class as storage_cmd/orchestrator source reads; quiesced context).
+    assert result.epsilon_allow_connects == 25, (
         f"raw-connect epsilon-allow baseline moved: {result.epsilon_allow_connects}"
     )
     # P3 endpoint: ZERO un-annotated direct T2Database constructions outside
