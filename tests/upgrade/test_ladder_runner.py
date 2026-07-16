@@ -201,6 +201,34 @@ def test_converged_but_unrecorded_with_failing_verify_stops(store: CompletionSto
     assert store.verified_rungs() == frozenset()
 
 
+def test_recorded_rung_that_goes_pending_again_reconverges(store: CompletionStore) -> None:
+    """Critic P0.R2 finding 2 (the first thing P1's t2-schema rung exercises):
+    a rung RECORDED in a prior run whose detect() later reports not-converged
+    again (new package version added new work) must re-converge, re-verify,
+    and UPSERT — never short-circuit to ALREADY_RECORDED on the stale record."""
+    rung = ScriptedRung("t2", work_units=1)
+    runner = LadderRunner(
+        LadderRegistry((rung,)),
+        store,
+        package_version_fn=lambda: "6.12.0",
+    )
+    assert _outcomes(runner.run()) == [("t2", RungOutcome.RECORDED)]
+
+    # New release ships another migration: the rung is pending again.
+    rung.work_units = 2
+    second = LadderRunner(
+        LadderRegistry((rung,)),
+        store,
+        package_version_fn=lambda: "6.13.0",
+    ).run()
+    assert _outcomes(second) == [("t2", RungOutcome.RECORDED)]
+    assert rung.done == 2  # genuinely re-converged
+
+    records = store.completions()
+    assert len(records) == 1  # upsert, not a duplicate row
+    assert records["t2"].package_version == "6.13.0"  # the fact was replaced
+
+
 # ── N/A rungs: detect→skip (f0pmd pattern) ──────────────────────────────────
 
 

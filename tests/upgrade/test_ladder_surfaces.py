@@ -152,6 +152,38 @@ def test_empty_registry_walk_is_silent(
     assert capsys.readouterr().out == ""
 
 
+def test_dry_run_survives_a_rung_whose_detect_raises(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Critic P0.R2 finding 1: a real rung's detect() does live reads that can
+    fail; --dry-run must report the broken rung and keep reporting the rest,
+    never crash with a raw traceback."""
+
+    @dataclass
+    class BoomRung:
+        name: str = "boom"
+
+        def detect(self) -> RungStatus:
+            raise RuntimeError("locked db")
+
+        def converge(self, report: ProgressReporter) -> ConvergeResult:
+            return ConvergeResult(ConvergeOutcome.COMPLETED)
+
+        def verify(self) -> bool:
+            return True
+
+    healthy = SurfaceRung("substrate-etl")
+    monkeypatch.setattr(
+        ladder_registry, "default_registry", lambda: LadderRegistry((BoomRung(), healthy))
+    )
+    db = tmp_path / "ladder.db"
+    _run_ladder(dry_run=True, auto_mode=False, _store_path_fn=lambda: db)
+    out = capsys.readouterr().out
+    assert "boom" in out and "detect failed" in out
+    assert "substrate-etl" in out  # the rest of the report still happened
+    assert not db.exists()  # still zero writes
+
+
 def test_failed_walk_raises_for_interactive(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

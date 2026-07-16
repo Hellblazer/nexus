@@ -127,6 +127,13 @@ class CompletionStore:
         Never stored, never settable — a hole in the prefix pins the
         position below it regardless of any later-rung records (RDR-142:
         the pointer must never advance past deferred or failed work).
+
+        NOT a completeness signal: a permanently-N/A rung (detect-and-skip
+        mode, e.g. substrate-etl on a PG-native install) never gets a
+        completion record, so the position pins below it forever even when
+        the walk is genuinely done. Use ``LadderRunReport.converged`` for
+        "is the ladder converged"; never test ``position == len(order)``
+        and never display position as user-facing "N of M" progress.
         """
         verified = self.verified_rungs()
         position = 0

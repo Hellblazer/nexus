@@ -113,7 +113,7 @@ def _run_ladder(
     *,
     dry_run: bool,
     auto_mode: bool,
-    _store_path_fn=None,
+    _store_path_fn: "Callable[[], Path] | None" = None,  # noqa: F821 — lazy imports (module keeps cold-start cheap)
 ) -> None:
     """RDR-185 P0.4: walk the upgrade ladder (or report it, on --dry-run).
 
@@ -135,14 +135,25 @@ def _run_ladder(
     from nexus.upgrade_ladder.runner import (  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
         LadderRunner,
         RungOutcome,
-        pending_rungs,
     )
 
     registry = default_registry()
     if dry_run:
-        pending = [(name, st) for name, st in pending_rungs(registry) if st.pending]
-        for name, status in pending:
-            click.echo(f"Upgrade ladder: rung '{name}' pending — {status.pending_detail or 'behind'}")
+        # Per-rung detect guard (critic P0.R2 finding 1): a real rung's
+        # detect() does live reads that can fail (locked db, bad path); the
+        # dry-run report must degrade per-rung like LadderRunner._run_rung
+        # does, never crash `nx upgrade --dry-run` with a raw traceback.
+        for rung in registry:
+            try:
+                status = rung.detect()
+            except Exception as exc:  # noqa: BLE001 — dry-run truth: report the broken rung, keep reporting the rest
+                _log.warning("ladder_dry_run_detect_failed", rung=rung.name, error=str(exc))
+                click.echo(f"Upgrade ladder: rung '{rung.name}' detect failed — {exc}")
+                continue
+            if status.pending:
+                click.echo(
+                    f"Upgrade ladder: rung '{rung.name}' pending — {status.pending_detail or 'behind'}"
+                )
         return
 
     store_path = _store_path_fn() if _store_path_fn is not None else default_ladder_db_path()
