@@ -155,7 +155,7 @@ _release_version() {
 if _wait_healthy 30; then
   ok "service healthy on the era's own engine"
 else
-  nx daemon service status 2>&1 | sed 's/^/       /' || true
+  "$REAL_NX" daemon service status 2>&1 | sed 's/^/       /' || true
   bad "service did not reach healthy on $ERA_RELEASE"; say "ABORT"; exit 1
 fi
 RV0="$(_release_version)"
@@ -271,7 +271,7 @@ fi
 # ── Assert: the engine precondition converged (old era -> current) ───────────
 say "Assert — the engine precondition converged across the era"
 if _wait_healthy 45; then ok "service healthy after the walk"; else
-  nx daemon service status 2>&1 | sed 's/^/       /' || true
+  "$REAL_NX" daemon service status 2>&1 | sed 's/^/       /' || true
   bad "service not healthy after nx upgrade"
 fi
 RV1="$(_release_version)"

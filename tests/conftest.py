@@ -805,6 +805,34 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # Reserved for individual mixed-file exclusions. Format:
     # "tests/test_file.py::test_func"  (no parametrize suffix).
     #
+    # RDR-185 ladder — reason: "string-literal-as-name". Every one of these
+    # builds a conformant RDR-103 collection NAME (or a
+    # CollectionClassification carrying the name's model SEGMENT) and asserts
+    # on planning/rollback/re-id behaviour keyed off that segment. None calls
+    # a Voyage embedder: the rung tests inject fakes for every collaborator,
+    # and the local bge-768 path is what actually runs. cloud_mode would
+    # change nothing they assert.
+    #
+    # The mislabel pair is the sharpest case FOR the exclusion: their whole
+    # subject is a name whose voyage token LIES (a pre-RDR-109 collection
+    # named voyage-context-3 whose stored vectors measure as local bge-768,
+    # bead nexus-j5diu). Opting them into cloud_mode would assert the
+    # opposite of their point.
+    #
+    # The six P2 entries (test_rollback_via_map, test_substrate_leg) were
+    # already offending before P4 and went unnoticed because this arc ran
+    # narrow, path-scoped selections — this lint only fires when the full
+    # session is collected, so `pytest tests/upgrade/` alone never sees it.
+    "tests/upgrade/test_rollback_via_map.py::test_cross_model_rollback_deletes_from_recorded_target",
+    "tests/upgrade/test_rollback_via_map.py::test_cross_model_conformant_ids_roll_back_via_target_names",
+    "tests/upgrade/test_substrate_leg.py::test_execute_cross_model_leg_targets_remapped_collection",
+    "tests/upgrade/test_substrate_leg.py::test_reid_only_leg_passes_through_stored_vectors",
+    "tests/upgrade/test_substrate_leg.py::test_mis_provenanced_vector_falls_back_to_reembed",
+    "tests/upgrade/test_substrate_leg.py::test_pure_reembed_leg_rolls_back_via_plan_target_names",
+    "tests/upgrade/test_substrate_rung.py::test_measured_768_mislabel_is_planned_without_a_voyage_key",
+    "tests/upgrade/test_substrate_rung.py::test_genuine_voyage_without_a_key_is_still_the_credential_case",
+    "tests/upgrade/test_gap4_two_mechanisms.py::test_rung_convergence_is_re_derived_live_never_cached",
+    #
     # REAL keyed integration tests (-m integration, @requires_voyage_key):
     # these derive cloud mode from GENUINE credentials — the cloud_mode
     # fixture would OVERWRITE the real VOYAGE_API_KEY with the "vk_test"

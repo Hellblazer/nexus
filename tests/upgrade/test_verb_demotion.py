@@ -145,11 +145,21 @@ def test_rewrite_ids_was_never_built() -> None:
 # product's own output tells you to run it is not demotion.
 
 #: The everyday user-facing upgrade surfaces (the ones a user actually runs)
-#: plus the health module that renders doctor's checks.
+#: plus the health module that renders doctor's checks and the hooks module
+#: that speaks at SessionStart.
+#:
+#: `hooks.py` was MISSING from this list until the P4.R2 harvest, and the
+#: census passed vacuously for it the whole time: `session_start` was still
+#: telling every Claude Code session to run `nx guided-upgrade` — the most
+#: everyday surface of the lot, and pinned green by its own test. A census is
+#: only as honest as its inventory, which is exactly the failure mode this
+#: module exists to catch. When a new surface starts speaking to users about
+#: upgrade, it belongs here.
 _EVERYDAY_SURFACE_MODULES = (
     "commands/upgrade.py",
     "commands/doctor.py",
     "health.py",
+    "hooks.py",
 )
 
 #: Where a demoted verb name may legitimately appear in a printed string.

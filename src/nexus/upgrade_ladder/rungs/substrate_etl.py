@@ -48,6 +48,8 @@ from nexus.upgrade_ladder.protocol import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from pathlib import Path  # noqa: F401 — annotation-only; _default_map_path already returns a Path
+
     from nexus.migration.detection import CollectionClassification  # noqa: F401 — runtime-quoted in the rung's seams
     from nexus.migration.etl_ports import EtlRunResult, EtlSource, EtlTarget
     from nexus.migration.wire_reid import ChashRemapStore
@@ -354,7 +356,7 @@ def run_substrate_migration(
 def drop_converged_legs(
     plan: SubstratePlan,
     source_counts: dict[str, int],
-    target_count_fn: Callable[[str], int | None],
+    target_counts: dict[str, int] | None,
 ) -> SubstratePlan:
     """Drop legs whose TARGET already holds the source's rows (nexus-mapbc).
 
@@ -367,24 +369,43 @@ def drop_converged_legs(
     reporting pending rungs forever, and `nx upgrade` re-running the full ETL
     on every invocation — which on a cloud leg re-bills Voyage every time.
 
-    Convergence test is count equality against the target. That is sufficient
-    for IDENTITY too, not just volume: GH #1390's chash CHECK constraints
-    enforce 32-char ids in pgvector, so legacy (16/18-char) ids cannot be
-    present in a target at all — a full-count target is necessarily a
-    conformant one. It is deliberately NOT a per-id probe: detect() runs on
-    `nx doctor`'s read-only path, and re-deriving every chash there would
-    read every source document on every health check.
+    Convergence test is count equality against the target. It is deliberately
+    NOT a per-id probe: detect() runs on `nx doctor`'s read-only path, and
+    re-deriving every chash there would read every source document on every
+    health check.
 
-    ``target_count_fn`` returns None for an absent/unreachable target, which
-    is NOT converged — never a silent skip. Decisions pass through untouched:
-    a source-gone collection is a question for converge, not a leg.
+    WHAT COUNT EQUALITY PROVES, EXACTLY (P4.R1 F2 / P4.R2 F5 — stated
+    precisely, because an earlier draft of this docstring claimed "sufficient
+    for identity" and that overclaims in two directions):
+
+    * CARDINALITY — every source row has a counterpart. Yes.
+    * ID-FORMAT conformance — yes, but only that: GH #1390's chash CHECK
+      constraints keep non-32-char ids out of pgvector entirely, so a target
+      holding a full count cannot be holding legacy ids. That is a statement
+      about id SHAPE, not about the ids being the RIGHT ones.
+    * CONTENT equivalence — NO. A target holding the right number of rows
+      with wrong bytes, or populated to the same count by some other means,
+      reads as converged here. Accepted residual: content is verified per
+      batch at ETL time, upstream of this filter (RDR-176), and targets are
+      content-type+owner+model scoped so an accidental full-count collision
+      from unrelated content is not a reachable shape in the current call
+      graph. If that ever stops being true, sample ids rather than counts.
+    * That the map was REFLECTED into the local stores — NO, and this is the
+      one that bit us: see :func:`remap_cascade.unreflected_stores`, which
+      verify() asks separately for exactly that reason.
+
+    ``target_counts`` is the whole target picture in one map (one round trip
+    upstream, not one per leg) — or None when the probe could not run at all,
+    which drops NOTHING: "I could not tell" is never "converged". A target
+    simply absent from the map is not converged either. Decisions pass through
+    untouched: a source-gone collection is a question for converge, not a leg.
     """
-    if not plan.legs:
+    if not plan.legs or target_counts is None:
         return plan
     remaining: list[LegPlan] = []
     for leg in plan.legs:
         want = source_counts.get(leg.source_collection)
-        got = target_count_fn(leg.target_collection)
+        got = target_counts.get(leg.target_collection)
         if want is not None and got is not None and got == want:
             _log.info(
                 "substrate_leg_already_converged",
@@ -397,16 +418,93 @@ def drop_converged_legs(
     return SubstratePlan(legs=remaining, decisions=list(plan.decisions))
 
 
-def _default_target_count(collection: str) -> int | None:
-    """Live row count for *collection* in the target, or None when it is
-    absent/unreachable (both mean "not converged", never "converged")."""
+def _default_target_counts() -> dict[str, int] | None:
+    """Every target collection's live row count, in ONE round trip.
+
+    `list_collections()` answers from a single ``/v1/vectors/stats`` call
+    (it exists precisely to replace an N-way count fan-out). The obvious
+    shape here — `count(collection)` per candidate leg — is an N+1 on
+    `nx doctor`'s read-only path: 18 sequential HTTP round trips per health
+    check on the GH #1408 install shape, forever, since RDR-176 keeps the
+    Chroma source (and therefore this rung's applicability) alive for good.
+    That is the same N+1 the index-perf arc already removed elsewhere
+    (nexus-vgtff: probe before fetch, 300s -> 0.6s).
+
+    Returns None when the whole probe failed — "I could not tell", which is
+    never "converged". An absent collection is simply missing from the map,
+    which `drop_converged_legs` reads as not-converged: `count()` returns 0
+    cleanly for an absent collection, so absence is data, not an error.
+    """
     from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid import cycle
 
     try:
-        return make_t3().count(collection)
-    except Exception as exc:  # noqa: BLE001 — absent target / unreachable service: not converged
-        _log.debug("substrate_target_count_failed", collection=collection, error=str(exc))
+        rows = make_t3().list_collections()
+    except Exception as exc:  # noqa: BLE001 — unreachable service: cannot tell, never "converged"
+        # WARNING, not debug (P4.R1 Finding 4): every exception reaching here
+        # is unexpected by construction — an absent collection returns 0
+        # cleanly rather than raising — so this is a network/auth/5xx failure,
+        # and it makes an already-converged install look pending. On the
+        # converge() path that means re-running a migration whose content is
+        # already there. A silent debug line is how that gets missed.
+        _log.warning("substrate_target_counts_failed", error=str(exc))
         return None
+    return {str(row["name"]): int(row.get("count") or 0) for row in rows if row.get("name")}
+
+
+def _cascade_db_paths() -> "tuple[Path, Path]":
+    """(catalog_db, memory_db) — the pair every cascade caller resolves the
+    same way. One definition so the repair path, the probe and the migration
+    can never disagree about which stores they mean."""
+    from nexus.config import default_db_path  # noqa: PLC0415 — deferred to avoid import cycle
+
+    db_path = default_db_path()
+    return db_path.parent / "catalog" / ".catalog.db", db_path
+
+
+def _default_unreflected() -> list[str]:
+    """Local stores still holding an old id the persisted map re-identified.
+
+    Read-only. An unreadable map/store answers "unreflected", never
+    "fine" — a probe that cannot tell must not certify convergence.
+    """
+    from nexus.migration.remap_cascade import unreflected_stores  # noqa: PLC0415 — deferred to avoid import cost
+    from nexus.migration.wire_reid import ChashRemapStore  # noqa: PLC0415 — deferred to avoid import cost
+
+    map_path = _default_map_path()
+    if not map_path.exists():
+        return []  # nothing was ever re-identified: nothing to reflect
+    catalog_db, memory_db = _cascade_db_paths()
+    try:
+        with ChashRemapStore(map_path) as map_store:
+            return unreflected_stores(map_store, catalog_db=catalog_db, memory_db=memory_db)
+    except Exception as exc:  # noqa: BLE001 — a probe that cannot tell must never certify convergence
+        _log.warning("substrate_unreflected_probe_failed", error=str(exc))
+        return ["<probe failed>"]
+
+
+def _default_cascade_only(report: ProgressReporter) -> str:
+    """Re-apply the persisted map to the local stores WITHOUT re-running any
+    ETL — the repair for a crash between the last target write and the
+    cascade. Returns "" on success, else a reason.
+
+    Idempotent by construction (``cascade_remap``: "rewritten old ids no
+    longer match"), so this is a cheap no-op whenever it is not needed.
+    """
+    from nexus.migration.remap_cascade import cascade_remap  # noqa: PLC0415 — deferred to avoid import cost
+    from nexus.migration.wire_reid import ChashRemapStore  # noqa: PLC0415 — deferred to avoid import cost
+
+    catalog_db, memory_db = _cascade_db_paths()
+    try:
+        with ChashRemapStore(_default_map_path()) as map_store:
+            results = cascade_remap(map_store, catalog_db=catalog_db, memory_db=memory_db)
+    except Exception as exc:  # noqa: BLE001 — reported as a FAILED rung; never a silent pass
+        return f"{type(exc).__name__}: {exc}"
+    failed = [r for r in results if not r.ok]
+    if failed:
+        return "; ".join(f"{r.store}: {r.reason or 'failed'}" for r in failed)
+    for r in results:
+        report.emit("substrate_cascade_repaired", store=r.store, rewritten=r.rewritten)
+    return ""
 
 
 def _default_footprint() -> bool:
@@ -488,7 +586,9 @@ class SubstrateEtlRung:
         prior_collections_fn: Callable[[], frozenset[str]] | None = None,
         cost_gate_fn: Callable[[SubstratePlan], bool] | None = None,
         migrate_fn: Callable[..., tuple[list[Any], list[Any]]] | None = None,
-        target_count_fn: Callable[[str], int | None] | None = None,
+        target_counts_fn: Callable[[], dict[str, int] | None] | None = None,
+        unreflected_fn: Callable[[], list[str]] | None = None,
+        cascade_only_fn: Callable[[ProgressReporter], str] | None = None,
         page: int = 300,
     ) -> None:
         self._footprint = footprint_fn if footprint_fn is not None else _default_footprint
@@ -499,8 +599,14 @@ class SubstrateEtlRung:
         )
         self._cost_gate = cost_gate_fn if cost_gate_fn is not None else _default_cost_gate
         self._migrate = migrate_fn if migrate_fn is not None else self._default_migrate
-        self._target_count = (
-            target_count_fn if target_count_fn is not None else _default_target_count
+        self._target_counts = (
+            target_counts_fn if target_counts_fn is not None else _default_target_counts
+        )
+        self._unreflected = (
+            unreflected_fn if unreflected_fn is not None else _default_unreflected
+        )
+        self._cascade_only = (
+            cascade_only_fn if cascade_only_fn is not None else _default_cascade_only
         )
         self._page = page
 
@@ -531,7 +637,7 @@ class SubstrateEtlRung:
         return drop_converged_legs(
             plan,
             {c.collection: c.source_count for c in classifications},
-            self._target_count,
+            self._target_counts(),
         )
 
     # ── detect ───────────────────────────────────────────────────────────────
@@ -563,8 +669,42 @@ class SubstrateEtlRung:
 
     def converge(self, report: ProgressReporter) -> ConvergeResult:
         plan = self._plan()
-        if plan is None or (not plan.legs and not plan.decisions):
+        if plan is None:
             return ConvergeResult(ConvergeOutcome.COMPLETED, detail="nothing to converge")
+        if not plan.legs and not plan.decisions:
+            # An empty plan does NOT mean there is nothing left to do (P4.R2
+            # Critical). `run_substrate_migration` writes every leg's target
+            # rows FIRST and cascades SECOND; a process death in that window
+            # (OOM, host restart, SIGKILL) leaves the vector counts matching,
+            # so the next run plans zero legs — while the catalog manifest,
+            # chash_index, topic_assignments et al still point at the OLD
+            # legacy chashes. Short-circuiting to COMPLETED here would record
+            # the rung done forever with a half-applied identity change, and
+            # nothing in the registry would ever repair it. Worst case is an
+            # install with a SINGLE legacy collection: the entire migration
+            # lives inside that window.
+            #
+            # cascade_remap is idempotent by construction ("rewritten old ids
+            # no longer match"), so the repair is a cheap no-op on the healthy
+            # path and the fix on the crashed one.
+            orphaned = self._unreflected()
+            if not orphaned:
+                return ConvergeResult(ConvergeOutcome.COMPLETED, detail="nothing to converge")
+            report.emit("substrate_rung_cascade_repair", stores=",".join(orphaned))
+            failed = self._cascade_only(report)
+            if failed:
+                # ConvergeOutcome has no FAILED member by design — "failure
+                # raises instead" (protocol.py), and the runner's RDR-142
+                # guard then records nothing. Half-applied identity is a
+                # data-correctness problem: fail loud, never a soft outcome.
+                raise RuntimeError(
+                    "the re-identification map was never reflected into "
+                    f"{', '.join(orphaned)} and re-applying it failed: {failed}"
+                )
+            return ConvergeResult(
+                ConvergeOutcome.COMPLETED,
+                detail=f"re-applied the interrupted remap cascade to {', '.join(orphaned)}",
+            )
         if plan.decisions:
             names = ", ".join(d.collection for d in plan.decisions)
             detail = (
@@ -640,7 +780,23 @@ class SubstrateEtlRung:
         plan = self._plan()
         if plan is None:
             return True  # N/A: nothing to verify
-        return not plan.legs
+        if plan.legs:
+            return False
+        # A decision the operator has not answered is UNFINISHED WORK, not a
+        # converged rung (P4.R2 Medium). converge() returns DEFERRED for this
+        # today so the runner never reaches verify — but verify calls itself
+        # AUTHORITATIVE and is public Rung-protocol API, so it must not hand a
+        # direct caller an answer that only happens to be unreachable.
+        if plan.decisions:
+            return False
+        # The half of the world a vector count cannot see: the map may have
+        # been written and never reflected into the local stores (the crash
+        # window converge() now repairs). Counting rows in the target proves
+        # the CONTENT arrived; it says nothing about whether every reference
+        # to it was re-pointed. RDR-142 wants verify to re-read the WORLD —
+        # this reads the rest of it, read-only and independent of anything
+        # converge recorded.
+        return not self._unreflected()
 
 
 def _installed_version() -> str:

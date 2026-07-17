@@ -234,7 +234,12 @@ def test_session_start_appends_migration_notice_when_pending(monkeypatch, tmp_pa
                 return_value=True),          _patch("nexus.hooks.write_claude_session_id"):
         output = session_start(claude_session_id="s-0rwwv")
     assert "Nexus ready" in output
-    assert "nx guided-upgrade" in output
+    # RDR-185 P4.2: the SessionStart nudge survives the bridge retirement (it
+    # is a proactive notice, not a duplicate of a line shown beside it) but
+    # must name the single trigger — a verb demoted out of --help is a dead
+    # end to point an agent at.
+    assert "nx upgrade" in output
+    assert "guided-upgrade" not in output
 
 
 def test_session_start_silent_without_pending(monkeypatch):
@@ -245,7 +250,7 @@ def test_session_start_silent_without_pending(monkeypatch):
                 return_value=False),          _patch("nexus.hooks.write_claude_session_id"):
         output = session_start(claude_session_id="s-0rwwv")
     assert "Nexus ready" in output
-    assert "guided-upgrade" not in output
+    assert "ONE-TIME storage migration" not in output
 
 
 def test_session_start_notice_failure_never_breaks_hook(monkeypatch):

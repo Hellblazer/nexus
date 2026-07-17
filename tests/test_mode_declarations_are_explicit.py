@@ -90,7 +90,20 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 72
 # 43 -> 46 (6.10.1): +3 real keyed integration tests in test_integration.py
 # — cloud_mode's fake credentials broke them against the live Voyage API
 # (their mode declaration is the requires-key gating; see conftest entry).
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 46
+# 46 -> 55 (RDR-185 P4 harvest): +9 ladder tests, reason
+# "string-literal-as-name" — each builds a conformant RDR-103 collection name
+# (or a classification carrying the name's model SEGMENT) and asserts on
+# planning / rollback / re-id behaviour keyed off that segment. None calls a
+# Voyage embedder: the rung tests inject every collaborator and the local
+# bge-768 path is what runs, so cloud_mode changes nothing they assert. The
+# mislabel pair (nexus-j5diu) is the sharpest case FOR exclusion rather than
+# promotion: their subject is a name whose voyage token LIES, so opting them
+# into cloud_mode would assert the opposite of their point.
+# SIX of the nine (test_rollback_via_map, test_substrate_leg) predate P4 and
+# had this lint red on develop since P2 — the arc ran narrow, path-scoped
+# selections, and this lint only fires when the whole session is collected, so
+# `pytest tests/upgrade/` never sees it. Rationale per entry in conftest.py.
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 55
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:

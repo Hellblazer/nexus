@@ -276,3 +276,58 @@ def test_lease_survives_only_as_comparison_input() -> None:
                     f"lease ({ident!r}) — only preconditions.py may consume "
                     "it, as an input"
                 )
+
+
+# ── a RUNG's internal convergence check (P4.R2 Finding 4) ────────────────────
+
+
+def test_rung_convergence_is_re_derived_live_never_cached() -> None:
+    """A rung's "am I converged?" is answered from the LIVE world, every time.
+
+    Gap-4 bans a THIRD mechanism that independently answers "how far is this
+    install from current". A rung's internal detect()/verify() is not that —
+    it is the level-triggered reconciliation (RQ5) the protocol requires, and
+    the thing that lets a crashed run self-heal. What WOULD be the banned
+    third mechanism is a rung persisting its own freestanding "converged"
+    verdict: a cache file, a second table, a marker. So the property to pin is
+    that the answer tracks the world rather than any remembered fact.
+
+    EVIDENTIARY NOTE (the reason this test exists — P4.R2 Finding 4): the
+    other pins in this module AST-scan for `ladder_position` /
+    `check_preconditions` definitions and for specifically-named banned
+    tokens. By construction none of them ever look at a rung's internal
+    detect/verify logic, so they pass on THIS question coincidentally, not by
+    evaluating it. Their green was cited as evidence once; it was not. This
+    test evaluates it — and it is the one that fails if a future rung starts
+    caching its verdict rather than re-deriving it.
+    """
+    from nexus.migration.detection import CollectionClassification  # noqa: PLC0415 — test-local fixture construction
+    from nexus.upgrade_ladder.rungs.substrate_etl import SubstrateEtlRung  # noqa: PLC0415 — test-local fixture construction
+
+    legacy = CollectionClassification(
+        collection="knowledge__old", leg="local", model="voyage-context-3",
+        dim=1024, support="supported-voyage-1024", source_count=10,
+        has_data=True, legacy_ids=True,
+    )
+    world = {"target_rows": 0}
+    rung = SubstrateEtlRung(
+        footprint_fn=lambda: True,
+        classify_fn=lambda: [legacy],
+        voyage_key_fn=lambda: True,
+        target_counts_fn=lambda: {"knowledge__old": world["target_rows"]},
+        unreflected_fn=lambda: [],
+        cascade_only_fn=lambda _r: "",
+    )
+
+    assert rung.detect().pending is True, "nothing migrated yet — must read pending"
+    world["target_rows"] = 10  # the world converges underneath the rung
+    assert rung.detect().pending is False, (
+        "the rung answered from a remembered verdict, not the live world — a "
+        "cached convergence fact is the Gap-4 third mechanism"
+    )
+    world["target_rows"] = 0  # ...and regresses (a rollback, a dropped target)
+    assert rung.detect().pending is True, (
+        "the rung kept saying converged after the world stopped being — "
+        "level-triggered reconciliation means the answer follows the world "
+        "in BOTH directions"
+    )

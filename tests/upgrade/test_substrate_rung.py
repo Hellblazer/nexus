@@ -16,6 +16,7 @@ from __future__ import annotations
 import inspect
 import pathlib
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -55,6 +56,27 @@ def _cls(
     )
 
 
+class _AllTargets(dict):
+    """A target world where EVERY collection reports the same row count.
+
+    A plain ``defaultdict`` will not do: ``drop_converged_legs`` reads the map
+    with ``.get()``, which never invokes a defaultdict's factory and would
+    silently answer None — i.e. "not converged" — turning every
+    already-converged fixture into a false negative.
+    """
+
+    def __init__(self, count: int) -> None:
+        super().__init__()
+        self._count = count
+
+    def get(self, _key, _default=None):  # type: ignore[override]
+        return self._count
+
+
+def _all_targets(count: int) -> dict[str, int]:
+    return _AllTargets(count)
+
+
 class _Recorder:
     def __init__(self) -> None:
         self.events: list[str] = []
@@ -69,11 +91,17 @@ def _rung(**kwargs: Any) -> SubstrateEtlRung:
         "classify_fn": lambda: [_cls("knowledge__old", legacy=True)],
         "voyage_key_fn": lambda: True,
         # nexus-mapbc: the already-converged filter probes the LIVE target, and
-        # its production default is make_t3() — a real service call. Pin it to
-        # "target absent" (the pre-filter behaviour: nothing converged, every
-        # leg stands) so no unit test can reach real infrastructure the moment
-        # a stage gains a real-world default.
-        "target_count_fn": lambda _collection: None,
+        # its production default is make_t3().list_collections() — a real
+        # service call. Pin it to "no targets" (the pre-filter behaviour:
+        # nothing converged, every leg stands) so no unit test can reach real
+        # infrastructure the moment a stage gains a real-world default.
+        "target_counts_fn": lambda: {},
+        # P4.R2 Critical: the cascade probe + repair also have production
+        # defaults that touch the real config dir's stores. Pin both — "no map
+        # was ever written" is the healthy default for a fixture with no
+        # re-identification in flight.
+        "unreflected_fn": lambda: [],
+        "cascade_only_fn": lambda _report: "",
     }
     defaults.update(kwargs)
     return SubstrateEtlRung(**defaults)
@@ -280,7 +308,7 @@ def test_verify_is_independent_of_converge_bookkeeping() -> None:
     # the target is empty, so the content did not arrive.
     rung = _rung(
         classify_fn=lambda: [_cls("knowledge__old", legacy=True, count=10)],
-        target_count_fn=lambda _c: 0,
+        target_counts_fn=lambda: _all_targets(0),
         migrate_fn=lambda *_a, **_k: ([], []),
     )
     assert rung.verify() is False
@@ -289,7 +317,7 @@ def test_verify_is_independent_of_converge_bookkeeping() -> None:
     # with no converge having run at all in this process.
     landed = _rung(
         classify_fn=lambda: [_cls("knowledge__old", legacy=True, count=10)],
-        target_count_fn=lambda _c: 10,
+        target_counts_fn=lambda: _all_targets(10),
     )
     assert landed.verify() is True
 
@@ -308,7 +336,7 @@ def test_verify_is_reachable_on_an_immutable_source() -> None:
     rung = _rung(
         footprint_fn=source_still_there,
         classify_fn=lambda: [_cls("knowledge__old", legacy=True, count=10)],
-        target_count_fn=lambda _c: 10,  # the world says: it all arrived
+        target_counts_fn=lambda: _all_targets(10),  # the world says: it all arrived
     )
     assert rung.verify() is True, (
         "verify must be satisfiable while the immutable source still exists — "
@@ -332,14 +360,14 @@ def _leg(source: str = "knowledge__old", target: str = "knowledge__new") -> LegP
 
 def test_converged_leg_is_dropped_when_the_target_holds_the_full_count() -> None:
     plan = SubstratePlan(legs=[_leg()])
-    out = drop_converged_legs(plan, {"knowledge__old": 12}, lambda _c: 12)
+    out = drop_converged_legs(plan, {"knowledge__old": 12}, _all_targets(12))
     assert out.legs == []
 
 
 def test_partial_target_is_not_converged() -> None:
     """A crashed/resumable run must stay planned — never rounded up to done."""
     plan = SubstratePlan(legs=[_leg()])
-    out = drop_converged_legs(plan, {"knowledge__old": 12}, lambda _c: 11)
+    out = drop_converged_legs(plan, {"knowledge__old": 12}, _all_targets(11))
     assert len(out.legs) == 1
 
 
@@ -347,31 +375,31 @@ def test_absent_or_unreachable_target_is_not_converged() -> None:
     """None means "could not tell" — which is never "converged". A silent
     skip here would drop real data on an unreachable service."""
     plan = SubstratePlan(legs=[_leg()])
-    assert len(drop_converged_legs(plan, {"knowledge__old": 12}, lambda _c: None).legs) == 1
+    assert len(drop_converged_legs(plan, {"knowledge__old": 12}, None).legs) == 1
 
 
-def test_converged_filter_probes_the_TARGET_not_the_source() -> None:
+def test_converged_filter_reads_the_TARGET_name_not_the_source() -> None:
     """The bug's shape: asking the (immutable, always-present) source can only
-    ever answer "still there". The probe must receive the TARGET name."""
-    seen: list[str] = []
+    ever answer "still there". Convergence is a fact about the TARGET, so the
+    lookup must be keyed by the target's name."""
+    plan = SubstratePlan(legs=[_leg(source="knowledge__src", target="knowledge__dst")])
+    counts = {"knowledge__src": 12}  # source-keyed: 12 rows, in the SOURCE
 
-    def probe(collection: str) -> int | None:
-        seen.append(collection)
-        return 12
+    # A world where only the source exists must NOT read as converged, no
+    # matter how many rows it has — that is the state before any migration.
+    assert len(drop_converged_legs(plan, {"knowledge__src": 12}, counts).legs) == 1
 
-    drop_converged_legs(
-        SubstratePlan(legs=[_leg(source="knowledge__src", target="knowledge__dst")]),
-        {"knowledge__src": 12},
-        probe,
-    )
-    assert seen == ["knowledge__dst"]
+    # ...and the same leg drops the moment the TARGET is what holds them.
+    assert drop_converged_legs(
+        plan, {"knowledge__src": 12}, {"knowledge__dst": 12},
+    ).legs == []
 
 
 def test_decisions_survive_the_converged_filter() -> None:
     """A source-gone decision is a question for converge, not a leg — the
     filter must never silently answer it by dropping it."""
     plan = SubstratePlan(legs=[_leg()], decisions=[SourceGoneDecision(collection="gone")])
-    out = drop_converged_legs(plan, {"knowledge__old": 12}, lambda _c: 12)
+    out = drop_converged_legs(plan, {"knowledge__old": 12}, _all_targets(12))
     assert out.legs == []
     assert [d.collection for d in out.decisions] == ["gone"]
 
@@ -382,7 +410,7 @@ def test_converged_install_does_not_re_migrate() -> None:
     Voyage on a cloud leg."""
     rung = _rung(
         classify_fn=lambda: [_cls("knowledge__old", legacy=True, count=10)],
-        target_count_fn=lambda _c: 10,
+        target_counts_fn=lambda: _all_targets(10),
     )
     status = rung.detect()
     assert status.applicable is True
@@ -444,3 +472,171 @@ def test_genuine_voyage_without_a_key_is_still_the_credential_case() -> None:
         [genuine], prior_collections=frozenset(), voyage_key_present=False,
     )
     assert plan.legs == []
+
+
+# ── P4.R2 Critical: the ETL-landed-but-cascade-never-ran crash window ────────
+#
+# run_substrate_migration writes every leg's target rows FIRST and cascades
+# SECOND. A process death in between (OOM, host restart, SIGKILL) leaves the
+# vector counts matching — so the next run plans ZERO legs while the catalog
+# manifest still points at legacy chashes. Before these pins, converge()
+# short-circuited to COMPLETED without ever calling _migrate, verify() saw an
+# empty plan and returned True, and the rung recorded COMPLETE FOREVER over a
+# half-applied identity change with doctor reporting clean. Nothing in the
+# 2-rung registry would ever have repaired it — and RDR-155 P4b deletes the
+# only code that could.
+
+
+def test_verify_false_when_the_map_was_never_reflected() -> None:
+    """Counting rows in the target proves the CONTENT arrived; it says nothing
+    about whether every reference to it was re-pointed."""
+    rung = _rung(
+        classify_fn=lambda: [_cls("knowledge__old", legacy=True, count=10)],
+        target_counts_fn=lambda: _all_targets(10),          # vectors all landed
+        unreflected_fn=lambda: ["document_chunks"],  # ...but the cascade did not
+    )
+    assert rung.verify() is False, (
+        "a verify that only counts vectors records completion over an orphaned "
+        "cascade — the manifest still points at legacy chashes"
+    )
+
+
+def test_converge_repairs_an_orphaned_cascade_without_re_running_the_etl() -> None:
+    """The empty plan must not short-circuit past unreflected map rows: this is
+    the ONLY thing that can ever repair the crash window."""
+    repaired: list[str] = []
+    migrated = {"n": 0}
+    rung = _rung(
+        classify_fn=lambda: [_cls("knowledge__old", legacy=True, count=10)],
+        target_counts_fn=lambda: _all_targets(10),               # plan is empty
+        unreflected_fn=lambda: ["document_chunks"],  # but the cascade is owed
+        cascade_only_fn=lambda _r: repaired.append("ran") or "",
+        migrate_fn=lambda *_a, **_k: migrated.__setitem__("n", migrated["n"] + 1),
+    )
+    result = rung.converge(_Recorder())
+    assert result.outcome is ConvergeOutcome.COMPLETED
+    assert repaired == ["ran"], "the interrupted cascade was never re-applied"
+    assert migrated["n"] == 0, (
+        "repair must NOT re-run the ETL — the vectors are already there, and "
+        "re-running would re-bill a cross-model leg"
+    )
+
+
+def test_converge_fails_loud_when_the_cascade_repair_fails() -> None:
+    """No silent fallbacks for data-correctness problems. ConvergeOutcome has
+    no FAILED member by design ("failure raises instead") — a half-applied
+    identity change must raise so the RDR-142 guard records nothing."""
+    rung = _rung(
+        classify_fn=lambda: [_cls("knowledge__old", legacy=True, count=10)],
+        target_counts_fn=lambda: _all_targets(10),
+        unreflected_fn=lambda: ["document_chunks"],
+        cascade_only_fn=lambda _r: "document_chunks: disk full",
+    )
+    with pytest.raises(RuntimeError, match="document_chunks"):
+        rung.converge(_Recorder())
+
+
+def test_healthy_converged_install_does_not_pay_the_repair_path() -> None:
+    """Non-vacuity for the pins above: with nothing owed, converge still
+    short-circuits and the repair never fires."""
+    repaired: list[str] = []
+    rung = _rung(
+        classify_fn=lambda: [_cls("knowledge__old", legacy=True, count=10)],
+        target_counts_fn=lambda: _all_targets(10),
+        unreflected_fn=lambda: [],
+        cascade_only_fn=lambda _r: repaired.append("ran") or "",
+    )
+    result = rung.converge(_Recorder())
+    assert result.outcome is ConvergeOutcome.COMPLETED
+    assert result.detail == "nothing to converge"
+    assert repaired == []
+    assert rung.verify() is True
+
+
+def test_a_probe_that_cannot_tell_never_certifies_convergence() -> None:
+    """_default_unreflected reports ["<probe failed>"] rather than [] when it
+    cannot read the map/stores. Verify must treat that as NOT converged."""
+    rung = _rung(
+        classify_fn=lambda: [_cls("knowledge__old", legacy=True, count=10)],
+        target_counts_fn=lambda: _all_targets(10),
+        unreflected_fn=lambda: ["<probe failed>"],
+    )
+    assert rung.verify() is False
+
+
+# ── P4.R2 Medium: verify() must not ignore outstanding decisions ─────────────
+
+
+def test_verify_false_while_a_genuine_decision_is_unanswered() -> None:
+    """converge() returns DEFERRED for this today, so the runner never reaches
+    verify — but verify calls itself AUTHORITATIVE and is public Rung-protocol
+    API. A direct caller must not be told a rung with unanswered work is done.
+    """
+    rung = _rung(
+        classify_fn=lambda: [_cls("knowledge__present")],
+        prior_collections_fn=lambda: frozenset({"knowledge__present", "knowledge__gone"}),
+        target_counts_fn=lambda: _all_targets(10),
+    )
+    assert rung.verify() is False
+
+
+# ── the PRODUCTION default's own body (P4.R1 F3/F4) ─────────────────────────
+#
+# Every unit test above injects a fake for target_counts_fn, which is correct
+# — it keeps them off real infrastructure. But that is exactly why this
+# phase's three P0s were invisible to 1568 green tests: NOTHING executed the
+# real defaults. These tests execute _default_target_counts' actual body with
+# only the transport faked, so its batching and its failure handling are
+# covered by something other than a happy-path container run.
+
+
+def test_default_target_counts_uses_ONE_round_trip_not_N() -> None:
+    """`list_collections()` answers every count from a single /stats call.
+    The obvious `count(collection)`-per-leg shape is an N+1 on doctor's
+    read-only path — 18 sequential HTTP round trips per health check on the
+    GH #1408 install shape, forever, because RDR-176 keeps this rung
+    applicable for good."""
+    from unittest.mock import MagicMock
+
+    from nexus.upgrade_ladder.rungs import substrate_etl as mod
+
+    client = MagicMock()
+    client.list_collections.return_value = [
+        {"name": "knowledge__a", "count": 12},
+        {"name": "knowledge__b", "count": 0},
+    ]
+    with patch.object(mod, "make_t3", create=True), \
+         patch("nexus.db.make_t3", return_value=client):
+        counts = mod._default_target_counts()
+
+    assert counts == {"knowledge__a": 12, "knowledge__b": 0}
+    client.list_collections.assert_called_once()
+    client.count.assert_not_called(), "per-collection count() is the N+1 shape"
+
+
+def test_default_target_counts_returns_None_when_it_cannot_tell() -> None:
+    """A probe failure is "I could not tell", never "converged" — and never
+    "absent" either. An absent collection returns 0 cleanly from the service,
+    so every exception here is a network/auth/5xx failure. Returning {} would
+    read as "no targets exist" and be indistinguishable from a fresh install;
+    None makes drop_converged_legs drop NOTHING.
+
+    This is the re-billing door: on the converge() path, mistaking an
+    already-migrated leg for pending re-runs the ETL and re-bills Voyage.
+    """
+    from unittest.mock import MagicMock
+
+    from nexus.upgrade_ladder.rungs import substrate_etl as mod
+
+    client = MagicMock()
+    client.list_collections.side_effect = RuntimeError("connection refused")
+    with patch("nexus.db.make_t3", return_value=client):
+        assert mod._default_target_counts() is None
+
+
+def test_a_probe_failure_never_drops_a_leg() -> None:
+    """The end-to-end consequence of the above: an unreachable service must
+    not make a pending install look converged, NOR a converged install look
+    pending-and-get-re-migrated. None drops nothing; the legs stand."""
+    plan = SubstratePlan(legs=[_leg()])
+    assert len(drop_converged_legs(plan, {"knowledge__old": 12}, None).legs) == 1

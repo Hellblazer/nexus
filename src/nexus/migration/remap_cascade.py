@@ -225,6 +225,93 @@ _STORE_FNS: dict[str, tuple[str, Callable[[sqlite3.Connection, dict[str, str]], 
 }
 
 
+#: store -> (which db, table, chash-bearing column). The READ-ONLY twin of
+#: :data:`_STORE_FNS`: a probe only needs to know WHERE old ids live, not the
+#: two-phase / scope / merge machinery a rewrite needs. Kept beside _STORE_FNS
+#: and drift-guarded against :data:`CASCADE_STORES` by the same tripwire, so a
+#: store cannot be added to one and forgotten in the other — that omission
+#: class is exactly what RDR-180's Failure Modes records (topic_assignments
+#: missed by its original inventory) and what the RDR-185 .13 audit re-found.
+_STORE_COLUMNS: dict[str, tuple[str, str, str]] = {
+    "document_chunks": ("catalog", "document_chunks", "chash"),
+    "chash_index": ("memory", "chash_index", "chash"),
+    "topic_assignments": ("memory", "topic_assignments", "doc_id"),
+    "frecency": ("memory", "frecency", "chunk_id"),
+    "relevance_log": ("memory", "relevance_log", "chunk_id"),
+    # Class D (see _cascade_aspect_table): the chash lives in source_path for
+    # note-backed rows, NOT in a column named chash. Probing a `chash` column
+    # here would be silently blind — and blind in the exact direction that
+    # reports "reflected" over an orphaned cascade.
+    "document_aspects": ("memory", "document_aspects", "source_path"),
+    "aspect_extraction_queue": ("memory", "aspect_extraction_queue", "source_path"),
+}
+
+
+def unreflected_stores(
+    map_store: ChashRemapStore,
+    *,
+    catalog_db: Path,
+    memory_db: Path,
+) -> list[str]:
+    """Stores that STILL hold an old id the map says was re-identified.
+
+    The read-only authority for "has the cascade actually landed?" — the
+    question :func:`cascade_remap`'s own return value cannot answer for a
+    LATER process (bead nexus-mapbc follow-up, P4.R2 Critical).
+
+    The crash window it closes: ``run_substrate_migration`` writes every leg's
+    target rows FIRST and cascades SECOND. A process death in between leaves
+    the vector counts matching — so the next run's plan is empty, converge has
+    nothing to do, and a count-only verify would record the rung COMPLETE
+    FOREVER while the catalog manifest still pointed at legacy chashes, with
+    doctor reporting clean. RDR-142 requires verify to re-read the WORLD; this
+    is the half of the world a vector count cannot see.
+
+    Empty map -> ``[]`` (nothing was re-identified, nothing to reflect). A
+    store that cannot be read is reported as unreflected, never skipped: "I
+    could not tell" is never "it is fine".
+    """
+    view = _global_view(map_store)  # raises AmbiguousRemapError, as the writer does
+    if not view:
+        return []
+    drift = set(CASCADE_STORES).symmetric_difference(_STORE_COLUMNS)
+    if drift:
+        raise RuntimeError(
+            f"remap probe inventory drift: {sorted(drift)!r} — "
+            "CASCADE_STORES and _STORE_COLUMNS must cover the same audited set"
+        )
+    old_ids = list(view)
+    unreflected: list[str] = []
+    conns: dict[str, sqlite3.Connection] = {}
+    try:
+        conns["catalog"] = _connect(catalog_db)
+        conns["memory"] = _connect(memory_db)
+        for store in CASCADE_STORES:
+            which, table, column = _STORE_COLUMNS[store]
+            conn = conns[which]
+            try:
+                still = 0
+                for chunk in (old_ids[i : i + 500] for i in range(0, len(old_ids), 500)):
+                    marks = ",".join("?" * len(chunk))
+                    row = conn.execute(
+                        f"SELECT COUNT(*) FROM {table} WHERE {column} IN ({marks})",  # noqa: S608 — table/column are module-internal literals
+                        chunk,
+                    ).fetchone()
+                    still += int(row[0]) if row else 0
+                    if still:
+                        break
+            except sqlite3.Error as exc:
+                _log.warning("remap_probe_store_failed", store=store, error=str(exc))
+                unreflected.append(store)
+                continue
+            if still:
+                unreflected.append(store)
+    finally:
+        for conn in conns.values():
+            conn.close()
+    return unreflected
+
+
 def cascade_remap(
     map_store: ChashRemapStore,
     *,
