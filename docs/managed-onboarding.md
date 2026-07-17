@@ -1,10 +1,13 @@
 # Managed-service onboarding (greenfield)
 
-This is the no-prior-install path: point `nx` at the hosted Conexus managed
-service and reach a working search/store state with **no local service stack and
-no migration**. (Already running a local Chroma install you want to move to the
-managed service? That is the migration path, `nx migrate-to-service` — see
-[migration-runbook.md](migration-runbook.md), not this page.)
+This is the managed journey, and the only one: point `nx` at the hosted Conexus
+managed service and reach a working search/store state with **no local service
+stack and no migration**. Managed onboarding is greenfield-only — tenants index
+fresh against the endpoint. Migrating an existing install's data INTO the
+managed service is retired (decision 2026-07-17): the one such migration that
+ever happened completed in 2026-06, and no supported population remains. An
+existing local install that wants managed re-indexes from source against the
+managed endpoint.
 
 The managed service is operator-provisioned: you receive a base URL and a
 per-tenant bearer token out of band (the Conexus operator issues them; `nx` does
@@ -77,42 +80,19 @@ revoke-and-reissue, operator-side. If a call returns `HTTP 401`, re-fetch a
 fresh token from the operator and re-run `nx config set service_token` (or
 re-export `NX_SERVICE_TOKEN`).
 
-## Migrating an existing local install to the managed service
+## Migration into the managed service: retired
 
-If you already have a local (Chroma or local-service) install and want to move
-its data to the managed service, that is the migration journey, not greenfield:
-
-```bash
-export NX_SERVICE_TOKEN=<your-bearer-token>          # the operator-provisioned tenant token
-nx guided-upgrade --service-url https://api.conexus-nexus.com
-```
-
-`guided-upgrade` health-gates and version-pins the managed endpoint, then drives
-the ETL (detect → migrate T2/catalog/T3 → validate → unlock), copy-not-move (your
-local source is the rollback origin and is never modified). Notes:
-
-- **Cost:** collections that change embedding model are re-embedded through the
-  managed Voyage key (billed); `guided-upgrade` shows an estimate-and-confirm
-  prompt before proceeding (RDR-166). Same-model voyage collections are copied
-  vector-for-vector with no re-embed (and no charge).
-- **TLS:** the managed `https://…:443` endpoint is handled end-to-end (RDR-166).
-- See [migration-runbook.md](migration-runbook.md) for the full migration detail.
-
-### Known limitation: pgvector → managed is not supported
-
-Moving an *already-on-pgvector* local-service install to the managed service
-(pgvector → managed, a cross-deployment data move) is **not supported** — there
-is no `pg_dump`/restore path across deployments in `nx`, and `guided-upgrade`'s
-ETL source is always Chroma. The only supported migration origin is a **legacy
-Chroma install** (a local `PersistentClient` store and/or Chroma Cloud); a
-local-service install has no Chroma footprint, so `guided-upgrade` reports
-"nothing to migrate." The pgvector→managed path is tracked as a documented
-follow-on (nexus-wm3t5); for now, a pgvector-local user who wants managed
-re-indexes from source against the managed endpoint.
+There is no supported data-migration journey into the managed service
+(decision 2026-07-17). This section previously documented
+`nx config set service_url` + `nx upgrade` as a managed-migration path; it was
+design-derived and never exercised by any user other than the operator, whose
+own migration completed in 2026-06. Managed onboarding is greenfield-only: an
+existing install (local Chroma or local-service pgvector alike) re-indexes from
+source against the managed endpoint. The historical record of the one completed
+migration lives in [migration-runbook.md](migration-runbook.md).
 
 ## Scope note
 
-One token maps to one tenant. This page covers the two managed consumer journeys:
-greenfield onboarding (above) and migrating a local install to managed
-(`guided-upgrade --service-url`). The pgvector→managed cross-deployment move is
-the documented limitation noted above.
+One token maps to one tenant. This page covers the one managed consumer
+journey: greenfield onboarding. Data migration into the managed service is
+retired (above).

@@ -1971,10 +1971,86 @@ _vector_client_instance: HttpVectorClient | None = None
 #: the top of :func:`get_http_vector_client`, before the lock) are
 #: INTENTIONALLY unguarded -- a standard double-checked-locking pattern,
 #: safe under the GIL for a read of a bool/reference. Only the WRITE path
-#: (a probe result being cached) holds :data:`_vector_client_lock`. Cleared
-#: by :func:`reset_http_vector_client_for_tests`.
+#: (a probe result being cached, or the nexus-5t1jp healing clear of an
+#: expired unreachable-class failure) holds :data:`_vector_client_lock`.
+#: Because the healing clear made ``_version_probe_error`` production-
+#: writable back to None, lock-free readers MUST take a single snapshot via
+#: :func:`_authoritative_cached_probe_error` (nexus-aedaw) rather than
+#: reading the global twice. Also cleared by
+#: :func:`reset_http_vector_client_for_tests`.
 _version_probe_done: bool = False
 _version_probe_error: Exception | None = None
+
+#: nexus-5t1jp: monotonic timestamp of the cached probe FAILURE, driving the
+#: unreachable-class retry window below. None whenever no failure is cached.
+_version_probe_failed_at: float | None = None
+
+#: nexus-5t1jp: how long a cached UNREACHABLE-class probe failure stays
+#: authoritative before the next call re-probes. Bounded, not per-call: a
+#: dead-host probe can burn its full connect timeout, and hammering that on
+#: every T3 tool call would make a down service cost seconds per call. Within
+#: the window callers get the cheap cached re-raise; after it, one caller
+#: pays one probe. The INCOMPATIBLE class never retries (below).
+_PROBE_UNREACHABLE_RETRY_S: float = 30.0
+
+#: Indirection for tests: patching the global ``time`` module would leak
+#: across the suite; patching this name affects only this cache's clock.
+_monotonic = time.monotonic
+
+
+def _authoritative_cached_probe_error() -> Exception | None:
+    """Is the cached probe failure still authoritative? (nexus-5t1jp)
+
+    The cache used to be unconditional for the process lifetime — the same
+    disease nexus-brw1s cured for T1, one layer down: a managed service that
+    was down at the FIRST T3 call left every T3 tool cached-failed for the
+    rest of the session, even after `nx daemon service start` brought it back.
+
+    The split is by FAILURE CLASS, honoring the original nexus-b6qlf
+    rationale rather than discarding it:
+
+    * INCOMPATIBLE (below-floor engine, non-nexus endpoint, bad /version
+      body): genuinely stable within a process — the deployed engine does not
+      change under a running client — so the cache is authoritative forever,
+      exactly as b6qlf designed. Never re-probed.
+    * UNREACHABLE (connect/TLS/DNS/timeout): transient by nature. The cache
+      is authoritative only within :data:`_PROBE_UNREACHABLE_RETRY_S`; after
+      that the next call clears it and re-probes, so the session HEALS when
+      the service comes back. b6qlf's traceback-accumulation concern applied
+      to re-raising the SAME instance, never to re-probing — the fresh-copy
+      re-raise mechanism is unchanged within the window.
+
+    Returns the SNAPSHOT of the cached error when it is still authoritative,
+    else None. Returning the snapshot (not a bool) is load-bearing
+    (nexus-aedaw): the healing clear made ``_version_probe_error`` writable
+    in production, so a bool-returning helper plus a re-read in the caller is
+    a TOCTOU — a concurrent clear between the two reads would hand
+    ``_reraise_cached_probe_error`` a None and surface a raw TypeError
+    instead of a ManagedServiceError. Callers must re-raise exactly the
+    object returned here.
+    """
+    # Single snapshot read of _version_probe_error, taken FIRST. A torn read
+    # against the (lock-held) writers degrades safely: any inconsistency
+    # between the snapshot and _version_probe_failed_at returns None here,
+    # and the caller falls through to the lock, which re-validates -- never
+    # a wrong fast-path raise.
+    cached = _version_probe_error
+    if cached is None:
+        return None
+
+    from nexus.db.managed_endpoint import ManagedServiceIncompatible  # noqa: PLC0415
+
+    if isinstance(cached, ManagedServiceIncompatible):
+        return cached  # incompatible-class: process-lifetime, by design
+    # Everything else (unreachable today; any future ManagedServiceError
+    # subclass) is treated as transient — the safe default is a retry
+    # window, never forever-cached.
+    failed_at = _version_probe_failed_at
+    if failed_at is None:  # torn/cleared: treat as expired
+        return None
+    if (_monotonic() - failed_at) < _PROBE_UNREACHABLE_RETRY_S:
+        return cached
+    return None
 
 
 def _reraise_cached_probe_error(cached: Exception) -> NoReturn:
@@ -2062,31 +2138,43 @@ def get_http_vector_client() -> HttpVectorClient:
       every later cloud-mode call returns the singleton with zero extra
       HTTP round-trips.
     * Probe fails: the (reworded, cloud-specific) error is cached and
-      RAISED immediately, blocking construction. Every subsequent call
-      this process re-raises a FRESH instance of the same cached error
-      (type + message, chained via ``__cause__``) rather than re-probing a
-      state we already know -- re-raising the SAME instance across call
-      frames would make CPython prepend a new traceback frame every time,
-      growing unboundedly in a long-running process (nexus-b6qlf Fix 3).
+      RAISED immediately, blocking construction. While the cache is
+      authoritative (see :func:`_authoritative_cached_probe_error` -- forever for
+      the INCOMPATIBLE class, within :data:`_PROBE_UNREACHABLE_RETRY_S` for
+      the UNREACHABLE class, nexus-5t1jp), each call re-raises a FRESH
+      instance of the same cached error (type + message, chained via
+      ``__cause__``) rather than re-probing a state we already know --
+      re-raising the SAME instance across call frames would make CPython
+      prepend a new traceback frame every time, growing unboundedly in a
+      long-running process (nexus-b6qlf Fix 3). An unreachable-class
+      failure whose window elapsed is cleared and re-probed, so the
+      session heals when the managed service comes back.
     * Local mode: the probe is skipped entirely. Local mode's own floor
       enforcement (the native ``guided_upgrade`` / ``nx upgrade`` flow) is
       untouched by this gate.
     """
     global _vector_client_instance, _version_probe_done, _version_probe_error
+    global _version_probe_failed_at
     from nexus.config import is_local_mode  # noqa: PLC0415 -- deferred for test patchability
 
     cloud_mode = not is_local_mode()
 
-    if cloud_mode and _version_probe_error is not None:
-        _reraise_cached_probe_error(_version_probe_error)
+    if cloud_mode and (cached_failure := _authoritative_cached_probe_error()) is not None:
+        _reraise_cached_probe_error(cached_failure)
 
     if _vector_client_instance is not None and (not cloud_mode or _version_probe_done):
         return _vector_client_instance
 
     with _vector_client_lock:
         if cloud_mode:
+            if (cached_failure := _authoritative_cached_probe_error()) is not None:
+                _reraise_cached_probe_error(cached_failure)
             if _version_probe_error is not None:
-                _reraise_cached_probe_error(_version_probe_error)
+                # nexus-5t1jp: an unreachable-class failure whose retry window
+                # elapsed — clear it and fall through to a fresh probe.
+                _log.info("cloud_engine_version_reprobe_after_unreachable")
+                _version_probe_error = None
+                _version_probe_failed_at = None
             if not _version_probe_done:
                 from nexus.db.managed_endpoint import (  # noqa: PLC0415 -- deferred, see module docstring
                     ManagedServiceError,
@@ -2098,6 +2186,7 @@ def get_http_vector_client() -> HttpVectorClient:
                 except ManagedServiceError as exc:
                     wrapped = type(exc)(_cloud_probe_failure_message(exc))
                     _version_probe_error = wrapped
+                    _version_probe_failed_at = _monotonic()
                     # nexus-dizod: log the REWRITTEN (cloud-correct) message,
                     # never str(exc) -- the raw ManagedServiceIncompatible
                     # text ends "...upgrade/downgrade the nx client to
@@ -2122,10 +2211,12 @@ def get_http_vector_client() -> HttpVectorClient:
 def reset_http_vector_client_for_tests() -> None:
     """Test helper: reset the singleton and the cloud version-probe cache."""
     global _vector_client_instance, _version_probe_done, _version_probe_error
+    global _version_probe_failed_at
     with _vector_client_lock:
         _vector_client_instance = None
         _version_probe_done = False
         _version_probe_error = None
+        _version_probe_failed_at = None
 
 
 def is_vector_service_mode() -> bool:

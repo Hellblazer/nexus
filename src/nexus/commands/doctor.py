@@ -1709,18 +1709,15 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
     output, failed = format_health_for_cli(results, local_mode=is_local)
     click.echo(output)
 
-    # nexus-0rwwv: substrate-migration bridge — a local-mode install with a
-    # pending Chroma→pgvector cutover gets a pointer to nx guided-upgrade.
-    # Best-effort (returns None on service mode / fresh installs / probe
-    # failure); printed before the failed-exit so it shows either way.
-    from nexus.migration.guided_upgrade import (  # noqa: PLC0415 — deferred import — the bridge dies with the migration module at RDR-155 P4b
-        pending_migration_notice,
-    )
-
-    notice = pending_migration_notice()
-    if notice:
-        click.echo("")
-        click.echo(notice)
+    # RDR-185 P4.2 (nexus-n7u38.29): the nexus-0rwwv bridge notice is RETIRED
+    # here. A pending Chroma→pgvector cutover is reported by the ladder's own
+    # read-only surface — health's `_check_pending_rungs` renders the
+    # substrate rung's detect() ("Upgrade ladder: N pending rung(s) …") with
+    # `nx upgrade` as the remedy, strictly superseding the bridge's coarse
+    # count. Two lines for one state, with two different remedies (one of
+    # them a verb P4.1 demoted out of --help), is the scattered-remediation
+    # Gap-2 this RDR closes — and the bridge's ad-hoc re-sample is the third
+    # DATA-rung mechanism the Gap-4 criterion bans.
 
     if failed:
         raise click.exceptions.Exit(1)

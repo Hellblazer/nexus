@@ -6,6 +6,7 @@ RDR-076 (nexus-jda).
 """
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 
 import click
@@ -47,9 +48,20 @@ def _current_version() -> str:
 @click.option("--force", is_flag=True, help="Reset version gate and re-run all migrations.")
 @click.option("--auto", "auto_mode", is_flag=True, help="Quiet mode for hook invocation (T2 only, exit 0 always).")
 @click.option("--skip-t3", is_flag=True, help="Skip T3 upgrade steps (e.g., cross-collection projection backfill). Useful for fast T2-only migrations.")
-@click.pass_context
-def upgrade(ctx: click.Context, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool) -> None:
-    """Run pending database migrations and upgrade steps."""
+@click.option("--yes", "assume_yes", is_flag=True, help="Assume yes to the billed re-embed consent prompt (equivalent to NX_ASSUME_YES=1). Nothing else prompts.")
+def upgrade(
+    dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool, assume_yes: bool
+) -> None:
+    """Run pending database migrations and upgrade steps.
+
+    ``--yes`` is NOT a general "say yes to everything" switch, and must not
+    become one: the only prompt the ladder can raise is the billed Voyage
+    re-embed (RDR-185 ## Constraints' third genuine decision; source-gone and
+    rollback DEFER rather than ask). It exists because `nx upgrade` is the one
+    verb and an ancient install must still converge UNATTENDED (SC-1) — without
+    a consent channel, making the cost gate actually fire (nexus-k1m2f) traded a
+    silent bill for a silent hang on a `click.confirm` no hook can answer.
+    """
     # RDR-128 P2: quiesce the daemon BEFORE migrating so its live T2
     # connections are released — the migration flock serializes the two
     # MIGRATOR processes, but only quiescing frees the daemon's serving
@@ -60,35 +72,40 @@ def upgrade(ctx: click.Context, dry_run: bool, force: bool, auto_mode: bool, ski
         if not dry_run:
             _quiesce_daemon()
         _run_upgrade(dry_run=dry_run, force=force, auto_mode=auto_mode, skip_t3=skip_t3)
-        # nexus-0rwwv: the routine in-place migration above is a different
-        # thing from the one-time substrate cutover (nx guided-upgrade) —
-        # and nothing bridged them: a local-mode user with a pending
-        # cutover saw "migrations complete" and no pointer to the real
-        # next step. Interactive mode only: --auto is the hook path, which
-        # must stay fast and silent (and must never pay the chroma probe).
-        if not auto_mode:
-            from nexus.migration.guided_upgrade import (  # noqa: PLC0415 — deferred import — the bridge dies with the migration module at RDR-155 P4b
-                pending_migration_notice,
-            )
-
-            notice = pending_migration_notice()
-            if notice:
-                click.echo("")
-                click.echo(notice)
-                # "Hopefully migrate" (Hal, 2026-07-08): on a real terminal,
-                # offer to chain straight into the cutover so the NORMAL
-                # update route completes the migration — guided-upgrade
-                # keeps its own consent gate (cost preview + confirm), so
-                # this default-No prompt adds convenience, not risk. Piped/
-                # scripted invocations (not a TTY) get the pointer only.
-                if not dry_run and _stdin_isatty() and click.confirm(
-                    "Start the guided migration now?", default=False
-                ):
-                    from nexus.commands.guided_upgrade_cmd import (  # noqa: PLC0415 — deferred import — the bridge dies with the migration module at RDR-155 P4b
-                        guided_upgrade_cmd,
-                    )
-
-                    ctx.invoke(guided_upgrade_cmd)
+        # RDR-185 P3.1 (nexus-n7u38.23): the two non-data axes converge as
+        # STATELESS preconditions before the ladder walks — re-derived from
+        # on-disk state each invocation (sidecar/lease/metadata), never
+        # recorded. --auto keeps the engine install with the version-
+        # transition path (hook timeout budget); process freshness stays.
+        # (check_version_transition at the ROOT cli group has already run on
+        # this invocation — on a version transition it converged the engine
+        # inline via the same shared mechanism; this stage's engine step
+        # then no-ops. One mechanism, two triggers: see the P3 decision
+        # addendum nexus_rdr/185-p3-engine-trigger-duality-decision.)
+        if not dry_run:
+            _converge_preconditions(auto_mode=auto_mode, skip_t3=skip_t3)
+        # RDR-185 P0.4 (nexus-n7u38.4): `nx upgrade` is the SINGLE trigger for
+        # the upgrade ladder — every pending rung converges here (dry-run
+        # reports read-only from detect()). The registry is empty until native
+        # rungs land (t2-schema P1, substrate-etl P2), so this is silent today.
+        # RDR-185 P4.2 (nexus-n7u38.29): the nexus-0rwwv substrate-migration
+        # bridge is RETIRED here — the walk above IS the cutover. The bridge
+        # existed because `nx upgrade` and the one-time cutover were two
+        # commands with nothing between them: a local-mode user saw
+        # "migrations complete" and no pointer to the real next step. P4.0
+        # registered the substrate rung and P4.0b made provisioning a
+        # precondition, so by the time control reaches this line the pending
+        # cutover has already converged in THIS invocation. Keeping the
+        # pointer would (a) advertise `nx guided-upgrade` — demoted to an
+        # internal primitive by P4.1, invisible in --help — as the everyday
+        # remedy, breaking "one story, one verb", and (b) re-answer a
+        # DATA-rung question ("is a substrate transition pending?") from an
+        # ad-hoc re-sample instead of the ladder, which is precisely the
+        # third mechanism the Gap-4 criterion bans. Genuine decisions the
+        # walk cannot derive (source-gone, billed re-embed) surface from
+        # INSIDE the rung; pending state is reported by `nx doctor`.
+        with _standing_consent(assume_yes):
+            _run_ladder(dry_run=dry_run, auto_mode=auto_mode, _t2_apply_attempted=not dry_run)
     except Exception:
         if auto_mode:
             _log.warning("upgrade_auto_error", exc_info=True)
@@ -104,12 +121,150 @@ def upgrade(ctx: click.Context, dry_run: bool, force: bool, auto_mode: bool, ski
             _cycle_supervised_daemons_to_current(skip_t3=skip_t3)
 
 
-def _stdin_isatty() -> bool:
-    """Seam for the TTY check (CliRunner swaps sys.stdin wholesale, so tests
-    patch this instead of sys.stdin.isatty)."""
-    import sys  # noqa: PLC0415 — stdlib, kept helper-local
+@contextlib.contextmanager
+def _standing_consent(assume_yes: bool):
+    """Scope ``--yes`` to the ladder walk — the ONLY thing that reads it.
 
-    return sys.stdin.isatty()
+    The rung reads standing consent from the environment because the unattended
+    callers (hooks, cron) never type a flag; the flag therefore sets what that
+    channel reads, rather than growing a second gate to drift from it.
+
+    NARROW BY CONSTRUCTION, not by frame ordering. An earlier draft set the env
+    for the whole command and restored it in an outer finally — but `nx
+    upgrade`'s own finally SPAWNS DAEMONS (`_cycle_supervised_daemons_to_current`
+    and, earlier, `_quiesce_daemon` / `_converge_preconditions`), and those
+    subprocesses pass no ``env=``, so they inherit this process's environment
+    and ran BEFORE the outer restore. `--yes`, typed once for one invocation,
+    reached every long-lived daemon as standing consent to spend money. The
+    window now contains exactly the one call that consumes it, so there is no
+    ordering left to get wrong.
+    """
+    import os  # noqa: PLC0415 — stdlib, branch-local
+
+    if not assume_yes:
+        yield
+        return
+    prior = os.environ.get("NX_ASSUME_YES")
+    os.environ["NX_ASSUME_YES"] = "1"
+    try:
+        yield
+    finally:
+        if prior is None:
+            os.environ.pop("NX_ASSUME_YES", None)
+        else:
+            os.environ["NX_ASSUME_YES"] = prior
+
+
+def _converge_preconditions(*, auto_mode: bool, skip_t3: bool = False) -> None:
+    """RDR-185 P3.1: converge the non-data axes before the ladder walk.
+
+    Best-effort at the trigger level (a precondition failure is reported,
+    remediated where derivable, and never blocks the T2 migration that
+    already ran) — but the verdicts themselves are computed fresh every
+    invocation and never stored.
+
+    ``--skip-t3`` (P3 review Medium): the flag's contract is "fast T2-only"
+    — it already gates the bottom-of-command storage-service cycle, so it
+    equally gates this stage's engine install and process cycle. Verdicts
+    are still computed and reported (they are sub-ms on-disk reads); only
+    the CONVERGE actions are suppressed.
+    """
+    try:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.upgrade_ladder.preconditions import converge_preconditions  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
+
+        reports = converge_preconditions(
+            config_dir=nexus_config_dir(),
+            allow_engine_install=not auto_mode and not skip_t3,
+            allow_process_cycle=not skip_t3,
+        )
+        for report in reports:
+            for line in report.actions:
+                if auto_mode:
+                    _log.info("upgrade_precondition_action", axis=report.name, action=line)
+                else:
+                    click.echo(f"Precondition [{report.name}]: {line}")
+            if not report.current and not auto_mode:
+                click.echo(f"Precondition [{report.name}] pending: {report.detail}")
+    except Exception as exc:  # noqa: BLE001 — best-effort trigger stage; the walk and T2 migration must not be blocked by a precondition probe failure
+        _log.warning("upgrade_preconditions_failed", error=str(exc))
+
+
+def _run_ladder(
+    *,
+    dry_run: bool,
+    auto_mode: bool,
+    _store_path_fn: "Callable[[], Path] | None" = None,  # noqa: F821 — lazy imports (module keeps cold-start cheap)
+    _t2_apply_attempted: bool = False,
+) -> None:
+    """RDR-185 P0.4: walk the upgrade ladder (or report it, on --dry-run).
+
+    Dry-run truth: the pending report comes from each rung's READ-ONLY
+    ``detect()`` — the completion store is never even opened, zero writes
+    (the ``resolve_pending_steps`` consumption pattern above at the T2
+    layer). A failed rung raises ``ClickException`` — no silent fallbacks
+    for correctness problems; ``--auto`` invocations are swallowed by
+    ``upgrade()``'s existing auto-mode handler, not here.
+
+    Keyword-only ``_store_path_fn`` is an injectable seam for unit tests
+    (keeps test ladders off the real config dir).
+    """
+    from nexus.upgrade_ladder.completion import CompletionStore  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
+    from nexus.upgrade_ladder.registry import default_registry  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
+    from nexus.upgrade_ladder.runner import (  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
+        LadderRunner,
+        RungOutcome,
+    )
+
+    # Route the command's _db_path seam into the T2 rung and co-locate
+    # ladder.db with it, so tests that patch _db_path (the established
+    # test_upgrade_cmd.py isolation) never touch a live install.
+    # _t2_apply_attempted: _run_upgrade already ran apply_pending in this
+    # invocation — the T2 rung REPORTS instead of re-executing (P1 critique
+    # Critical: the deferred case otherwise re-runs every eligible step,
+    # incl. a 30s drain attempt, twice — also on the --auto hook path).
+    registry = default_registry(db_path_fn=_db_path, t2_apply_attempted=_t2_apply_attempted)
+    if dry_run:
+        # Per-rung detect guard (critic P0.R2 finding 1): a real rung's
+        # detect() does live reads that can fail (locked db, bad path); the
+        # dry-run report must degrade per-rung like LadderRunner._run_rung
+        # does, never crash `nx upgrade --dry-run` with a raw traceback.
+        for rung in registry:
+            try:
+                status = rung.detect()
+            except Exception as exc:  # noqa: BLE001 — dry-run truth: report the broken rung, keep reporting the rest
+                _log.warning("ladder_dry_run_detect_failed", rung=rung.name, error=str(exc))
+                click.echo(f"Upgrade ladder: rung '{rung.name}' detect failed — {exc}")
+                continue
+            if status.pending:
+                click.echo(
+                    f"Upgrade ladder: rung '{rung.name}' pending — {status.pending_detail or 'behind'}"
+                )
+        return
+
+    store_path = _store_path_fn() if _store_path_fn is not None else _db_path().parent / "ladder.db"
+    with CompletionStore(store_path) as store:
+        report = LadderRunner(registry, store).run()
+
+    for run in report.runs:
+        if run.outcome is RungOutcome.RECORDED and not auto_mode:
+            click.echo(f"Upgrade ladder: rung '{run.name}' converged and verified.")
+    if report.hard_failed:
+        failed = [
+            run for run in report.runs
+            if run.outcome in (RungOutcome.VERIFY_FAILED, RungOutcome.FAILED)
+        ]
+        summary = "; ".join(f"{run.name}: {run.outcome.value} ({run.detail})" for run in failed)
+        raise click.ClickException(f"upgrade ladder did not converge — {summary}")
+    if not report.converged and not auto_mode:
+        # Deferred-only: the RDR-142 would-defer class is non-fatal by
+        # design (precondition-blocked, retried on a later run) — notice,
+        # not failure; nothing was recorded, the position stays pinned.
+        for run in report.runs:
+            if run.outcome is RungOutcome.DEFERRED:
+                click.echo(f"Upgrade ladder: rung '{run.name}' deferred — {run.detail}")
+
+
 
 
 def _quiesce_daemon() -> None:

@@ -49,7 +49,7 @@ flowchart TD
   T2D --> SQL[("nexus.db (SQLite + FTS5, WAL)<br/>+ .catalog.db")]
 
   CHROMA[("legacy ChromaDB<br/>migration source · read-only")]
-  CHROMA -.->|"nx guided-upgrade<br/>one-time ETL"| SVC
+  CHROMA -.->|"nx upgrade<br/>substrate rung ETL"| SVC
 ```
 
 (The [reference architecture diagram](architecture-diagram.svg) covers the *retrieval / planning* layer — query decomposition, the operator DAG, taxonomy, the knowledge graph — which is substrate-agnostic; the diagram above is its storage-plane complement.)
@@ -201,8 +201,11 @@ cluster, `/version` handshake with `embedding_mode`).
 > `chromadb.PersistentClient` (local) or `chromadb.CloudClient` + Voyage
 > (cloud). That path (`db/t3.py`, `nx daemon t3`) still registers but serves
 > nothing — it survives only as the immutable migration *source* until RDR-155
-> P4b deletes it. Existing Chroma data migrates onto the service via
-> `nx guided-upgrade` (see [Migration Runbook](migration-runbook.md)).
+> P4b deletes it. Existing Chroma data migrates onto the service via the
+> ladder's substrate rung — run `nx upgrade` (see
+> [`cli-reference.md` § nx upgrade](cli-reference.md#nx-upgrade); the
+> [Migration Runbook](migration-runbook.md) is the operator's manual order of
+> operations, not the user path).
 
 ### Collections
 
@@ -222,7 +225,7 @@ Conformant collection names (RDR-103) follow a 4-segment shape:
 
 **Legacy shape (fallback, pre-RDR-103)**: 2-segment `<content_type>__<repo>-<hash>`, e.g. `code__myrepo-a1b2c3`. Still present on collections created before the conformance migration; new collections use the 4-segment shape above.
 
-A collection is indexed and queried under the same embedding model — mixing models across one vector space produces near-random similarity scores. The voyage-capability gate (`nx guided-upgrade`) refuses to migrate genuine voyage-model collections onto a bge-only service for exactly this reason. The same principle is enforced at query time: multi-collection combined queries are dispatched per embedding-model group by the MCP layer (a corpus spanning `voyage-code-3` and `voyage-context-3` collections issues one query per model and merges results, nexus-3l6gz), and the service rejects a mixed-model collection list outright (`requireHomogeneousModel`, engine-service ≥ 0.1.36).
+A collection is indexed and queried under the same embedding model — mixing models across one vector space produces near-random similarity scores. The voyage-capability gate in the ladder's substrate rung refuses to migrate genuine voyage-model collections onto a bge-only service for exactly this reason. The same principle is enforced at query time: multi-collection combined queries are dispatched per embedding-model group by the MCP layer (a corpus spanning `voyage-code-3` and `voyage-context-3` collections issues one query per model and merges results, nexus-3l6gz), and the service rejects a mixed-model collection list outright (`requireHomogeneousModel`, engine-service ≥ 0.1.36).
 
 **TTL and expiry**: `nx store expire` removes expired entries from `knowledge__*` collections only. Code, docs, and RDR collections are never expired — they are refreshed via re-indexing.
 

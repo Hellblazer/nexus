@@ -179,8 +179,17 @@ class TestEndpointFailureHint:
     def test_pending_appends_pointer(self):
         # No patches beyond the fixture: the vanilla-upgrader default state
         # (legacy dir, zero service evidence) must produce the hint.
+        #
+        # RDR-185 P4.2: the remedy is the single trigger. Unlike the retired
+        # bridge notice, this hint survives — it fires on an ERROR path where
+        # the user is stuck with no walk in flight and the stock remedy
+        # ("start the supervisor") is actively wrong. It must name the verb
+        # the user can actually see: `nx guided-upgrade` is demoted out of
+        # --help, so pointing at it from an error would be a dead end.
         from nexus.migration.guided_upgrade import endpoint_failure_migration_hint
-        assert "nx guided-upgrade" in endpoint_failure_migration_hint()
+        hint = endpoint_failure_migration_hint()
+        assert "nx upgrade" in hint
+        assert "guided-upgrade" not in hint
 
     def test_not_pending_is_empty(self, monkeypatch):
         from nexus.migration.guided_upgrade import endpoint_failure_migration_hint

@@ -31,10 +31,17 @@ def _tmp_db(tmp_path: Path) -> Path:
 
 @pytest.fixture(autouse=True)
 def _no_real_daemon_nudge():
-    """Patch the post-upgrade daemon cycle (nexus-5ldk1) for all upgrade
-    tests so they never shell out to the real host T2 daemon. Yields the
-    mock so tests can assert whether the nudge fired."""
-    with patch("nexus.commands.upgrade._cycle_daemon_to_current") as m:
+    """Patch the post-upgrade daemon cycle (nexus-5ldk1) AND the RDR-185
+    precondition stage for all upgrade tests so they never shell out to the
+    real host daemons or cycle a live supervisor (the precondition stage's
+    production defaults read the REAL lease and, on a version mismatch,
+    would stop/start the box's live service — never from a unit test).
+    Yields the daemon-cycle mock so tests can assert whether the nudge
+    fired."""
+    with (
+        patch("nexus.commands.upgrade._cycle_daemon_to_current") as m,
+        patch("nexus.commands.upgrade._converge_preconditions"),
+    ):
         yield m
 
 
@@ -215,12 +222,24 @@ class TestT3UpgradeStep:
         assert step.name == "test"
         assert step.fn is fn
 
-class TestSubstrateBridgeNotice:
-    """nexus-0rwwv: interactive ``nx upgrade`` appends the guided-upgrade
-    pointer when a substrate cutover is pending; ``--auto`` (the hook path)
-    never even probes."""
+class TestSubstrateBridgeRetired:
+    """RDR-185 P4.2 (nexus-n7u38.29): the nexus-0rwwv bridge is RETIRED.
 
-    def test_interactive_upgrade_prints_pointer(
+    The bridge pointed ``nx upgrade`` at ``nx guided-upgrade`` when a
+    substrate cutover was pending, and offered to chain into it. P4.0
+    registered the substrate rung and P4.0b made provisioning a
+    precondition, so the walk IS the cutover — the pointer would advertise
+    a verb P4.1 demoted out of ``--help`` (breaking "one story, one verb")
+    and re-answer a DATA-rung question from an ad-hoc re-sample (the third
+    mechanism Gap-4 bans).
+
+    These are RETIREMENT pins: the probe must not run, its output must not
+    reach the user, and the walk must never chain into the demoted verb —
+    each pinned with the probe patched to a LOUD return, so a re-introduced
+    bridge fails rather than passing vacuously.
+    """
+
+    def test_pending_cutover_never_advertises_the_demoted_verb(
         self, runner: CliRunner, tmp_path: Path, monkeypatch,
     ) -> None:
         monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
@@ -228,11 +247,13 @@ class TestSubstrateBridgeNotice:
             patch("nexus.commands.upgrade._db_path", return_value=tmp_path / "memory.db"),
             patch("nexus.commands.upgrade.T3_UPGRADES", []),
             patch("nexus.migration.guided_upgrade.pending_migration_notice",
-                  return_value="A one-time storage migration is pending: run nx guided-upgrade"),
+                  return_value="A one-time storage migration is pending: run nx guided-upgrade") as notice,
         ):
             result = runner.invoke(main, ["upgrade"])
         assert result.exit_code == 0
-        assert "nx guided-upgrade" in result.output
+        # Not merely absent from the output — never probed at all.
+        notice.assert_not_called()
+        assert "guided-upgrade" not in result.output
 
     def test_auto_mode_never_probes(
         self, runner: CliRunner, tmp_path: Path, monkeypatch,
@@ -247,26 +268,14 @@ class TestSubstrateBridgeNotice:
         assert result.exit_code == 0
         notice.assert_not_called()
 
-    def test_no_pending_no_banner(
+    def test_never_chains_into_guided_upgrade_even_on_a_tty(
         self, runner: CliRunner, tmp_path: Path, monkeypatch,
     ) -> None:
-        monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
-        with (
-            patch("nexus.commands.upgrade._db_path", return_value=tmp_path / "memory.db"),
-            patch("nexus.commands.upgrade.T3_UPGRADES", []),
-            patch("nexus.migration.guided_upgrade.pending_migration_notice",
-                  return_value=None),
-        ):
-            result = runner.invoke(main, ["upgrade"])
-        assert result.exit_code == 0
-        assert "guided-upgrade" not in result.output
-
-    def test_tty_offer_chains_into_guided_upgrade(
-        self, runner: CliRunner, tmp_path: Path, monkeypatch,
-    ) -> None:
-        # "Hopefully migrate": on a real terminal, confirming the offer
-        # chains straight into guided-upgrade (which keeps its own consent
-        # gate). Non-TTY invocations (the default in CliRunner) never prompt.
+        # The chain prompt is gone: a knob at a derivable point. The walk
+        # already converged the cutover in this same invocation, and the
+        # genuine decisions it cannot derive (source-gone, billed re-embed)
+        # are consented INSIDE the rung. Nothing may prompt to run the
+        # demoted verb, and nothing may invoke it.
         from unittest.mock import MagicMock
 
         monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
@@ -277,45 +286,9 @@ class TestSubstrateBridgeNotice:
             patch("nexus.migration.guided_upgrade.pending_migration_notice",
                   return_value="A one-time storage migration is pending"),
             patch("nexus.commands.guided_upgrade_cmd.guided_upgrade_cmd", guided),
-            patch("nexus.commands.upgrade._stdin_isatty", return_value=True),
-            patch("click.confirm", return_value=True),
-        ):
-            result = runner.invoke(main, ["upgrade"])
-        assert result.exit_code == 0
-        guided.assert_called_once()
-
-    def test_tty_offer_declined_does_not_chain(
-        self, runner: CliRunner, tmp_path: Path, monkeypatch,
-    ) -> None:
-        from unittest.mock import MagicMock
-
-        monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
-        guided = MagicMock()
-        with (
-            patch("nexus.commands.upgrade._db_path", return_value=tmp_path / "memory.db"),
-            patch("nexus.commands.upgrade.T3_UPGRADES", []),
-            patch("nexus.migration.guided_upgrade.pending_migration_notice",
-                  return_value="A one-time storage migration is pending"),
-            patch("nexus.commands.guided_upgrade_cmd.guided_upgrade_cmd", guided),
-            patch("nexus.commands.upgrade._stdin_isatty", return_value=True),
-            patch("click.confirm", return_value=False),
+            patch("click.confirm", return_value=True) as confirm,
         ):
             result = runner.invoke(main, ["upgrade"])
         assert result.exit_code == 0
         guided.assert_not_called()
-
-    def test_non_tty_never_prompts(
-        self, runner: CliRunner, tmp_path: Path, monkeypatch,
-    ) -> None:
-        monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
-        with (
-            patch("nexus.commands.upgrade._db_path", return_value=tmp_path / "memory.db"),
-            patch("nexus.commands.upgrade.T3_UPGRADES", []),
-            patch("nexus.migration.guided_upgrade.pending_migration_notice",
-                  return_value="A one-time storage migration is pending"),
-            patch("nexus.commands.upgrade._stdin_isatty", return_value=False),
-            patch("click.confirm") as confirm,
-        ):
-            result = runner.invoke(main, ["upgrade"])
-        assert result.exit_code == 0
         confirm.assert_not_called()

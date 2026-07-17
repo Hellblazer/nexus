@@ -114,6 +114,34 @@ if [[ "$MODE" == "help" || "$MODE" == "--help" || "$MODE" == "-h" ]]; then
     exit 0
 fi
 
+# RDR-184 P0.2 (nexus-ccs9v.2): serialize on the machine-global fixed
+# resources this harness mutates — $HOME/nexus-sandbox and the fixed tmux
+# session name. Lock dir lives under a stable machine-global temp root, NOT
+# under this checkout — the sandbox HOME and tmux session are per-machine
+# singleton resources, so two different checkouts on the same host must
+# still serialize. Acquired here, after option parsing/help dispatch (usage
+# errors don't need the lock) but strictly before the first mutation (the
+# "reset"/Step-1 sandbox rm -rf just below). Lock dir is a HARD-CODED /tmp
+# path, deliberately NOT ${TMPDIR:-/tmp} (code-review SIGNIFICANT fix): on
+# darwin, an interactive shell's TMPDIR is a per-user /var/folders/... path
+# while a LaunchAgent/CI/stripped-env invocation sees plain /tmp — two
+# different invocation contexts would silently compute DIFFERENT lockdirs
+# and never contend, defeating the whole point of a machine-global guard
+# (this repo runs LaunchAgents that could race an interactive run). /tmp is
+# always the same path across every context on the same host.
+# shellcheck source=./lib/lock.sh disable=SC1091
+source "$SCRIPT_DIR/lib/lock.sh"
+LOCKDIR="/tmp/nexus-e2e-locks/release-sandbox.lock"
+mkdir -p "$(dirname "$LOCKDIR")"
+lock_acquire "$LOCKDIR" || exit 1
+trap 'lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
+echo "[rdr-184] lock acquired: $LOCKDIR (pid $$)" >&2
+# Test seam (RDR-184 P0.2, nexus-ccs9v.2): tests/e2e/lib/harness_lock_test.sh
+# sets this to prove a concurrent invocation gets PAST the lock without ever
+# running this harness's real body (reinstall / index / sandbox rm -rf).
+# No-op — unset in every normal invocation.
+[[ -n "${NX_E2E_LOCK_SELFTEST:-}" ]] && exit 0
+
 if [[ "$MODE" == "reset" ]]; then
     if [[ -d "$SANDBOX" ]]; then
         echo "Removing $SANDBOX ..."
@@ -460,7 +488,11 @@ case "$MODE" in
         if ! nx init --service --no-autostart 2>&1 | sed 's/^/    /'; then
             _die "nx init --service did not reach serving (see remedy above)"
         fi
-        trap _svc_teardown EXIT
+        # RDR-184 P0.2 (nexus-ccs9v.2): chain the top-level lock release into
+        # this mode's own teardown trap — this assignment REPLACES the
+        # top-level trap set earlier, so the lock release must be re-added
+        # here or a crash in this window would leak the lock.
+        trap '_svc_teardown; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
 
         # ── serving proof: /health == ok (NOT merely "a lease exists"). ──
         echo
@@ -494,6 +526,10 @@ case "$MODE" in
         echo
         trap - EXIT
         _svc_teardown
+        # trap - EXIT above cleared the combined teardown+lock-release trap,
+        # so release explicitly now that teardown has run manually (RDR-184
+        # P0.2, nexus-ccs9v.2).
+        lock_release "$LOCKDIR" 2>/dev/null || true
         # Re-confirm the lease is gone (teardown actually stopped the service).
         if [[ "$(_svc_field health)" == "ok" ]]; then
             _die "service still serving after stop --with-pg — teardown failed"
@@ -509,8 +545,15 @@ case "$MODE" in
         echo "      Exit the subshell to restore your real \$HOME."
         echo
         # Subshell: env stays sandboxed, exit returns control + restores HOME.
+        # NOT `exec` (RDR-184 P0.2, nexus-ccs9v.2): exec replaces this
+        # script's own process image, which would skip the EXIT trap
+        # entirely and leak the lock for the whole interactive session. Run
+        # as a plain child instead — the lock stays held for the duration
+        # of the interactive sandbox use (the correct semantics: another
+        # invocation must not touch this sandbox while it is in use), and
+        # releases via the normal EXIT trap once the user exits the shell.
         cd "$SANDBOX"
-        exec env \
+        env \
             HOME="$SANDBOX" \
             PATH="$SANDBOX/.local/bin:$PATH" \
             VOYAGE_API_KEY="${VOYAGE_API_KEY:-}" \

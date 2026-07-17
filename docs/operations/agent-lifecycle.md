@@ -16,18 +16,18 @@ exclusively through that service stack in both local and cloud mode.
        ▲                                                                        │
        │                                                                (supervisor start)
        │                                                                        ▼
-       │                                  ┌──── nx upgrade / guided-upgrade ────┐
+       │                                  ┌──────────── nx upgrade ─────────────┐
        │                                  ▼                                     │
        └──────── nx uninstall ◀──────── running ───────────────────────────▶ upgrading
                                                                                 │
-                                                          (migration/migrations apply, back to running)
+                                                          (ladder rungs converge, back to running)
 ```
 
 - **uninstalled** — no autostart unit, no service binary, no provisioned PG.
 - **installed** — the `nexus-service` binary is fetched + positioned; `nx` resolvable.
 - **provisioned** — Postgres 17 + pgvector provisioned, schema migrated (Liquibase), embedder wired (bge-768 local, or Voyage in cloud mode).
 - **running** — the supervisor publishes a `storage_service` lease; T2 + T3 serve.
-- **upgrading** — a transient state during `nx upgrade` (schema/T3 migrations) or `nx guided-upgrade` (Chroma → service migration).
+- **upgrading** — a transient state during `nx upgrade`, while the ladder walks its pending rungs (T2 schema, the Chroma → service substrate move, chunk identity, embedder era).
 
 The running-state machinery (lease publish/heartbeat/relinquish, single-writer
 discovery, version-skew) is the shared service-registry primitive
@@ -42,7 +42,7 @@ discovery, version-skew) is the shared service-registry primitive
 | Install | `nx init` (collapsed flow), `nx daemon service install-binary <tag>`, `nx daemon service install --autostart` | RDR-157 (distribution), RDR-161 (native-only), RDR-174 (collapsed init + autostart), RDR-175 (OS-init watchdog) |
 | Provision | bundled PG17 + pgvector, Liquibase migrate, bge-768 ONNX fetch | RDR-155 (pgvector substrate), RDR-160 (bge-768 embedder) |
 | Run | T2 daemon + T3 `nexus-service`; lease lifecycle | RDR-149 (daemon lifecycle), RDR-152 (endpoint discovery) |
-| Upgrade | `nx upgrade` (migrations), `nx guided-upgrade` (Chroma→service) | RDR-159 (guided upgrade), RDR-162 (cross-model) |
+| Upgrade | `nx upgrade` — the single trigger for every data transition; `nx doctor` reports pending rungs | RDR-185 (the ladder), RDR-159 (the inherited ETL engine), RDR-162 (cross-model) |
 | Uninstall | `nx uninstall` (CLI), `daemon_uninstall` (MCP) | RDR-165 (this RDR) |
 
 ## Install
@@ -74,21 +74,32 @@ at the endpoint with an operator-provisioned token; no install, no provision.
 
 ## Upgrade
 
-- **`nx upgrade`** — applies pending T2 + T3 schema/migration steps. Idempotent;
-  runs `--auto` (T2 only) on session start via the plugin hook. See
-  [cli-reference.md](../cli-reference.md#nx-upgrade).
-- **`nx guided-upgrade`** — the one-shot Chroma → service migration for a
-  pre-6.0 install: detect footprint, provision + version-pin the service, migrate
-  (T2, then each T3 leg with its catalog ref-remap), validate, unlock.
-  Copy-not-move (the Chroma source is the
-  rollback manifest). See [migration-runbook.md](../migration-runbook.md) and
-  RDR-002 / RDR-159. Cross-model collections (e.g. legacy minilm) are re-embedded
-  into the target model (RDR-162); same-model voyage collections are copied
-  verbatim, skipping the billed re-embed (RDR-166).
+- **`nx upgrade`** — the single trigger (RDR-185). It converges the stateless
+  preconditions (package, engine, process, and provisioning — standing up the
+  service stack when a legacy footprint needs one to migrate into), then walks
+  the ladder: every pending rung, in order, each detecting → converging →
+  verifying before completion is recorded. Idempotent and resumable; runs
+  `--auto` (T2 only, no engine install) on session start via the plugin hook.
+  See [cli-reference.md](../cli-reference.md#nx-upgrade).
+- **`nx doctor`** — reports pending rungs read-only, plus era debt (pre-RDR-108
+  chunk ids) from the release that ships the detector rather than on migration
+  day.
 
-When to upgrade: on a version bump (`nx upgrade` runs automatically for T2) or
-when moving a pre-6.0 Chroma install onto the service stack (`nx guided-upgrade`,
-once). Rollback: the Chroma source is never modified; a blocked migration leaves
+The Chroma → service move is one of those rungs, not a separate journey: detect
+footprint, migrate (T2, then each T3 leg with its catalog ref-remap), validate,
+unlock — copy-not-move, with the Chroma source left byte-untouched as the
+rollback origin (RDR-176). Cross-model collections (e.g. legacy minilm) are
+re-embedded into the target model (RDR-162); same-model voyage collections are
+copied verbatim, skipping the billed re-embed (RDR-166). Legacy (pre-RDR-108)
+chunk ids are recomputed on the wire from the chunk text — no re-index, no
+source files needed (RDR-185). The engine below it is RDR-159's, inherited; the
+`nx guided-upgrade` / `nx migrate-to-service` verbs that used to front it are
+demoted internal primitives. See [migration-runbook.md](../migration-runbook.md)
+for the operator's manual order of operations.
+
+When to upgrade: whenever you update the code — `nx upgrade` converges whatever
+that install actually needs, whether that is one schema migration or a five-year
+gap. Rollback: the Chroma source is never modified; a blocked migration leaves
 reads degraded-loud and offers rollback, never auto-invoked.
 
 ## Uninstall
@@ -126,4 +137,4 @@ The `daemon_uninstall` MCP tool remains for in-chat teardown of the local daemon
 - [managed-onboarding.md](../managed-onboarding.md) — the hosted-service journey
 - [migration-runbook.md](../migration-runbook.md) — Chroma → service migration
 - [cli-reference.md](../cli-reference.md) — every command + flag
-- RDRs: 165 (this lifecycle), 155 (substrate), 157/161 (distribution), 149 (daemon lifecycle), 159 (guided upgrade), 162 (cross-model upgrade), 166 (managed journeys)
+- RDRs: 165 (this lifecycle), 185 (the upgrade ladder), 155 (substrate), 157/161 (distribution), 149 (daemon lifecycle), 159 (the inherited guided-upgrade ETL engine), 162 (cross-model upgrade), 166 (managed journeys)

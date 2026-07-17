@@ -392,12 +392,11 @@ Set `NEXUS_CATALOG_ALLOW_CROSS_PROJECT=1` to bypass the guard for emergency reco
 
 ```bash
 nx catalog backfill            # re-populate catalog from T3 + backfill chunk_text_hash
-nx collection backfill-hash    # backfill chunk_text_hash on one collection (or --all)
 ```
 
 `backfill` re-discovers documents from existing T3 collections and registered repos without re-indexing. Also adds `chunk_text_hash` metadata to any chunks missing it. Use after data recovery or if the catalog gets out of sync with T3.
 
-`backfill-hash` is the targeted version — updates metadata on a single collection without touching embeddings or documents.
+Missing `chunk_text_hash` metadata on an upgraded store is the ladder's job, not a verb's: run `nx upgrade`.
 
 ```bash
 nx catalog reconcile --dry-run    # preview manifest-gap repairs

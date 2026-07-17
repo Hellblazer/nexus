@@ -557,7 +557,7 @@ def test_indexer_has_zero_unallowed_voyageai_after_cutover():
 
 
 def test_lint_baseline_unchanged_after_voyageai_extension():
-    """The existing baseline metrics (epsilon_allow_connects == 21,
+    """The existing baseline metrics (epsilon_allow_connects == 25,
     total_violations == 0, t2database_constructions == 31) must remain
     stable after adding voyageai to the BANLIST.
 
@@ -566,13 +566,29 @@ def test_lint_baseline_unchanged_after_voyageai_extension():
     taxonomy-consistency T2 read; 19-21 = RDR-178 additions — health.py
     divergence check (Gap 2), orchestrator.py chash source read (P4),
     guided_upgrade.py freshness probe (Gap 7) — same bumps documented in
-    test_storage_boundary_lint.test_dual_population_baseline_locked.)"""
+    test_storage_boundary_lint.test_dual_population_baseline_locked.)
+
+    21 -> 25: the four RDR-185 ladder sites, each already justified at its
+    call site and in test_storage_boundary_lint's own copy of this baseline —
+    upgrade_ladder/completion.py (P0.2, the ladder's own substrate),
+    upgrade_ladder/rungs/t2_schema.py (P1.1), migration/wire_reid.py (P2.2,
+    the chash_remap map artifact) and migration/remap_cascade.py (P2.3, the
+    mid-migration local rewrite). total_violations stays 0 — these are
+    documented epsilon-allows, not boundary violations.
+
+    THIS COPY WENT STALE, and that is the finding worth keeping: the sibling
+    baseline in test_storage_boundary_lint.py was bumped to 25 as each landed
+    while this duplicate stayed at 21, so this test has been RED on develop
+    since P0.2/P1.1 — invisible because the arc ran narrow, path-scoped test
+    selections and never the full suite. Two independent copies of one number
+    is the drift; if a third consumer appears, derive it rather than paste it.
+    """
     result = _lint_check()
     assert result.total_violations == 0, (
         f"Baseline violation count changed after voyageai lint extension: "
         f"{[(v.file, v.line, v.symbol) for v in result.violations]}"
     )
-    assert result.epsilon_allow_connects == 21, (
+    assert result.epsilon_allow_connects == 25, (
         f"epsilon_allow_connects baseline changed: {result.epsilon_allow_connects}"
     )
     # RDR-152 nexus-fjwxh: 31 -> 33 (CLI t2_handle + MCP t2_index_write service-

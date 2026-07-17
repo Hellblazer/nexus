@@ -171,6 +171,21 @@ def clear_search_traces() -> None:
         _search_traces.clear()
 
 
+#: nexus-brw1s (GH #1405): a callable the lifespan registers when T1 session
+#: minting was DEFERRED at startup (storage service unreachable). Consulted by
+#: get_t1() before first construction: it either completes the mint (env vars
+#: land, the hook unregisters itself) or raises an actionable per-call error.
+#: The seam lives HERE and the logic in mcp/core.py because core imports this
+#: module, never the reverse.
+_t1_pre_init_hook = None
+
+
+def set_t1_pre_init_hook(hook) -> None:
+    """Register (or clear, with None) the deferred-T1-mint hook."""
+    global _t1_pre_init_hook
+    _t1_pre_init_hook = hook
+
+
 def get_t1():
     """Return (T1Database, is_isolated), lazy init on first call.
 
@@ -183,11 +198,24 @@ def get_t1():
     four-branch fail-loud gate raises ``T1ServerNotFoundError`` if
     the lifespan did not run for any reason, which surfaces a clear
     error rather than silently degrading.
+
+    nexus-brw1s: when the lifespan DEFERRED the T1 session mint (storage
+    service unreachable at MCP start — the crash that used to take down the
+    whole server and every non-T1 tool with it), the registered pre-init hook
+    runs FIRST, under the same lock. It either completes the mint now (the
+    service came up; env vars land and construction proceeds normally) or
+    raises an actionable error for THIS call only — nothing is cached, so the
+    next T1-touching call retries. The hook must run BEFORE construction:
+    constructing with neither session env var set would silently route this
+    MCP into the shared CLI-dedicated identity, the session-isolation
+    regression the lifespan's own comments treat as security-relevant.
     """
     global _t1_instance, _t1_isolated
     if _t1_instance is None:
         with _t1_lock:
             if _t1_instance is None:
+                if _t1_pre_init_hook is not None:
+                    _t1_pre_init_hook()  # raises => propagate; cache stays empty
                 with warnings.catch_warnings(record=True) as caught:
                     warnings.simplefilter("always")
                     from nexus.db.t1 import get_t1_database  # noqa: PLC0415 — deferred to avoid circular import (db.t1)

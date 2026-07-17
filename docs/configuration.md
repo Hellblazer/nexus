@@ -18,8 +18,7 @@ Nexus auto-detects local mode when cloud credentials are absent. The recommended
 | Env var | Default | Description |
 |---|---|---|
 | `NX_LOCAL` | (auto) | `1` = force local, `0` = force cloud, unset = auto-detect |
-| `NX_LOCAL_CHROMA_PATH` | `~/.local/share/nexus/chroma` | Path to the legacy ChromaDB store. As of 6.0 this is read only as the **migration source** (`nx guided-upgrade`); T3 serves from the Postgres+pgvector service, not this path. |
-| `NX_LOCAL_EMBED_MODEL` | (auto) | Force a specific local embedding model name |
+| `NX_LOCAL_CHROMA_PATH` | `~/.local/share/nexus/chroma` | Path to the legacy ChromaDB store. As of 6.0 this is read only as the **migration source** for the ladder's substrate rung (`nx upgrade`); T3 serves from the Postgres+pgvector service, not this path. |
 | `NEXUS_CATALOG_PATH` | `~/.config/nexus/catalog` | Override catalog git repo location |
 | `NEXUS_CATALOG_ALLOW_CROSS_PROJECT` | unset | Set to `1` to bypass the register-time cross-project source_uri guard. Emergency-only escape hatch for known-good recovery scripts that legitimately need to register rows across project boundaries; never the right answer for normal indexing |
 
@@ -34,7 +33,7 @@ Nexus auto-detects local mode when cloud credentials are absent. The recommended
 
 **Embedding tiers**: Tier 0 (bundled MiniLM-L6-v2, 384d) is always available. Install `uv tool install "conexus[local]"` for tier 1 (bge-base-en-v1.5, 768d, better quality; downloads the model on first embed). To add the extra to an existing install: `uv tool install --reinstall "conexus[local]"`. Upgrade later with `uv tool upgrade conexus`, which preserves the extra — never `uv tool install --force`, which drops it.
 
-**Legacy ChromaDB store path**: Defaults to `$XDG_DATA_HOME/nexus/chroma` or `~/.local/share/nexus/chroma`, overridable with `NX_LOCAL_CHROMA_PATH`. As of 6.0 this path is read only as the **migration source** (`nx guided-upgrade`); live T3 serves from the Postgres+pgvector service.
+**Legacy ChromaDB store path**: Defaults to `$XDG_DATA_HOME/nexus/chroma` or `~/.local/share/nexus/chroma`, overridable with `NX_LOCAL_CHROMA_PATH`. As of 6.0 this path is read only as the **migration source** for the ladder's substrate rung (`nx upgrade`); live T3 serves from the Postgres+pgvector service.
 
 **Switching embedders or modes**: Changing the embedding model (switching local↔cloud, *or* switching local tiers 384-dim MiniLM ↔ 768-dim bge) makes the existing vectors incompatible (different dimensions/space). On the next `nx index repo .` the staleness check detects the model change and re-embeds into **new** collections under the new model token. **It does NOT automatically delete or migrate the old collections**: they remain behind under the previous token and silently return no results (their dimension no longer matches the active embedder).
 
@@ -53,7 +52,7 @@ Export both in your shell profile or process manager. You do not supply a Voyage
 
 ### Migration-source credentials (pre-6.0 only)
 
-These ChromaDB Cloud keys are **not** used for live T3 serving in 6.0. They are read only when `nx guided-upgrade` / `nx migrate-to-service` needs to read an existing ChromaDB Cloud store as the migration source:
+These ChromaDB Cloud keys are **not** used for live T3 serving in 6.0. They are read only when the ladder's substrate rung (`nx upgrade`) needs to read an existing ChromaDB Cloud store as the migration source:
 
 | Config key | Env var | Notes |
 |---|---|---|
@@ -337,7 +336,7 @@ If no marker file is found and no command is configured, the test check is skipp
 | File | Purpose |
 |---|---|
 | `~/.config/nexus/config.yml` | Global config and credentials |
-| `~/.local/share/nexus/chroma/` | Legacy ChromaDB store — migration source only as of 6.0 (`nx guided-upgrade`); not live T3 data |
+| `~/.local/share/nexus/chroma/` | Legacy ChromaDB store — migration source only as of 6.0 (read by `nx upgrade`'s substrate rung); not live T3 data |
 | `~/.config/nexus/postgres/` | The nx-provisioned Postgres cluster the service serves T3 from (local `nx init`) |
 | `~/.config/nexus/memory.db` | T2 SQLite database |
 | `~/.config/nexus/catalog/.catalog.db` | Catalog: canonical repo→collection registration, documents, and links (`nx index repo` writes here). Replaced `repos.json` as the source of truth in 5.4.0 (RDR-137); a one-shot migration on `nx upgrade` folds any legacy `repos.json` into the catalog and removes it. |

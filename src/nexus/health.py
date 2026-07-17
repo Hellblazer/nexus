@@ -2875,6 +2875,157 @@ def _check_migration_divergence(
     )]
 
 
+def _check_pending_rungs() -> list[HealthResult]:
+    """RDR-185 P0.4 (nexus-n7u38.4): read-only upgrade-ladder surface.
+
+    Reports pending ladder rungs from each rung's READ-ONLY ``detect()`` —
+    zero writes, zero work, the completion store is never opened (the
+    ``resolve_pending_steps`` dry-run-truth precedent). Pending rungs are a
+    soft warning with `nx upgrade` (the single trigger) as the remedy.
+    Crash-proof: any failure degrades to a non-critical pass — every check
+    in ``run_health_checks`` must never crash ``nx doctor`` as a whole.
+    """
+    try:
+        from nexus.upgrade_ladder import registry as _ladder_registry  # noqa: PLC0415 — deferred to avoid module-load cost
+        from nexus.upgrade_ladder.runner import pending_rungs  # noqa: PLC0415 — deferred to avoid module-load cost
+
+        statuses = pending_rungs(_ladder_registry.default_registry())
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.warning("doctor_pending_rungs_check_failed", error=str(exc))
+        return [HealthResult(
+            label="Upgrade ladder", ok=True, detail="check failed (non-critical)",
+        )]
+
+    pending = [(name, status) for name, status in statuses if status.pending]
+    if not pending:
+        return [HealthResult(
+            label="Upgrade ladder",
+            ok=True,
+            detail=f"no pending rungs ({len(statuses)} registered)",
+        )]
+    names = "; ".join(
+        f"{name}: {status.pending_detail or 'pending'}" for name, status in pending[:6]
+    )
+    return [HealthResult(
+        label="Upgrade ladder",
+        ok=False,
+        warn=True,
+        detail=f"{len(pending)} pending upgrade rung(s) — {names}",
+        fix_suggestions=["Run: nx upgrade"],
+    )]
+
+
+def _check_legacy_id_census() -> list[HealthResult]:
+    """RDR-185 P1.2 (nexus-n7u38.9): legacy chunk-id era census (Gap-5).
+
+    Chroma-mode installs holding OUTSTANDING pre-RDR-108 (non-32-char)
+    chunk ids see the debt HERE — months before migration day (the
+    GH #1408 incident class: 18 legacy collections invisible until they
+    blocked the migration). Soft warning, and never a directive: the
+    substrate rung's wire re-id converges this in flight at migration,
+    and the upgrade-ladder row — not this one — is the authority on
+    pending work (Gap-4). Non-Chroma / fresh installs skip silently (the
+    census's cheap file-level gate never opens the store); a CONVERGED
+    install prints the clean row, because the debt is gone even though
+    the immutable RDR-176 source still holds its legacy ids and always
+    will (nexus-6or3m). Crash-proof.
+
+    Reads the census row ONLY. It pairs with ``_check_pending_rungs``:
+    count equality cannot see an unreflected remap cascade, so a clean
+    row here plus a pending ladder row is a coherent pair, not a
+    contradiction — the ladder row carries the half this cannot.
+    """
+    try:
+        from nexus.upgrade_ladder import census as _census  # noqa: PLC0415 — deferred to avoid module-load cost
+
+        result = _census.legacy_id_census()
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.warning("doctor_legacy_id_census_failed", error=str(exc))
+        return [HealthResult(
+            label="Chunk-id era (upgrade ladder)", ok=True,
+            detail="check failed (non-critical)",
+        )]
+    if result is None:
+        return []  # not applicable: no legacy Chroma footprint to census
+    if not result:
+        # NOT "all collections hold conformant ids" (nexus-6or3m): on a
+        # converged install the immutable RDR-176 source still holds its legacy
+        # ids forever, and always will. What is true in both worlds — never
+        # migrated + conformant, and migrated + converged — is that no debt is
+        # outstanding.
+        return [HealthResult(
+            label="Chunk-id era (upgrade ladder)",
+            ok=True,
+            detail="no outstanding legacy chunk-id debt",
+        )]
+    names = ", ".join(
+        f"{c.collection} ({c.source_count} chunks, {c.leg})" for c in result[:6]
+    )
+    more = f" (+{len(result) - 6} more)" if len(result) > 6 else ""
+    # A collection the upgrade CANNOT converge gets the remedy that actually
+    # works, named (bead nexus-mq42b). Without this the row's silence reads as
+    # "the upgrade will handle it", and for a keyless voyage collection it never
+    # will — the planner skips it and the ladder then reports converged. That is
+    # the impossible-remedy shape RDR-185 exists to end, so the one case that
+    # needs a user action is the one case this row must speak up about.
+    blocked = [c for c in result if c.blocked_reason]
+    blocked_more = f" (+{len(blocked) - 3} more)" if len(blocked) > 3 else ""
+    blocked_suggestions = (
+        [
+            f"{len(blocked)} of these cannot be converged by the upgrade: "
+            + "; ".join(f"{c.collection} — {c.blocked_reason}" for c in blocked[:3])
+            + blocked_more
+            + ". Configure the Voyage key and re-run `nx upgrade` to include "
+            "them, or re-index them from source against the current embedder."
+        ]
+        if blocked
+        else []
+    )
+    return [HealthResult(
+        label="Chunk-id era (upgrade ladder)",
+        ok=False,
+        warn=True,
+        detail=(
+            f"{len(result)} collection(s) hold pre-RDR-108 legacy chunk ids — "
+            f"pending upgrade-ladder debt: {names}{more}"
+        ),
+        # This row deliberately issues NO directive, and that is a contract, not
+        # an omission (RDR-185 Gap-4: the census must not become a THIRD
+        # mechanism answering "how far from current" — the upgrade-ladder row is
+        # the authority on pending work; this row is visibility).
+        #
+        # An earlier draft of this fix said "Run: nx upgrade" here. Both
+        # reviewers caught it and it was wrong twice over: the census's whole
+        # reason to exist is keeping visible the collections that CANNOT
+        # migrate, and for the sharpest of those — a voyage-named legacy
+        # collection with no key — `nx upgrade` provably no-ops (the planner
+        # skips it at the credential gate, the rung then reports converged, and
+        # this row fires again forever). Directing a user to a verb the product
+        # will not honour rebuilds the impossible-remedy shape RDR-185 exists to
+        # end. The credential gate's own silent skip is bead nexus-mq42b; this
+        # row's silence is the message-layer workaround, not the fix.
+        fix_suggestions=[
+            # Conditional, or the row contradicts itself: "No action needed
+            # here" cannot print directly above "N of these cannot be converged
+            # by the upgrade" (code review, 2026-07-17). When anything is
+            # blocked, the blocked line IS the message.
+            *(
+                []
+                if blocked
+                else [
+                    "No action needed here: the substrate migration (nx "
+                    "upgrade, wire re-id) converges legacy chunk ids in flight "
+                    "— no re-index, no re-embed. This row is visibility (the "
+                    "GH #1408 class: era debt that used to surface only ON "
+                    "migration day); the upgrade-ladder row is what reports "
+                    "pending work."
+                ]
+            ),
+            *blocked_suggestions,
+        ],
+    )]
+
+
 def run_health_checks() -> tuple[list[HealthResult], bool]:
     """Run all health checks.
 
@@ -2959,6 +3110,10 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     results.extend(_check_t2_launchagent_stray())
     results.extend(_check_migration_state())
     results.extend(_check_rls_present())
+    # RDR-185 P0.4: read-only pending-rungs surface (degrades internally).
+    results.extend(_check_pending_rungs())
+    # RDR-185 P1.2: legacy chunk-id era census, Gap-5 (degrades internally).
+    results.extend(_check_legacy_id_census())
 
     # RDR-178 Pillar A (nexus-aigpt, nexus-14ndm): migration-report checks.
     # Both degrade internally (missing dir / unreadable report / absent

@@ -824,50 +824,172 @@ class TestMintErrorWrapping:
         finally:
             _MINT_FAILS = False
 
-    def test_branch0_mint_failure_raises_clean_runtime_error_with_remedy_sentence(
+    def test_branch0_mint_failure_DEFERS_and_the_server_starts(
         self, fake_service, config_dir, monkeypatch
     ) -> None:
-        """nexus-1si7z follow-up (code-review-expert, round 2): Branch 0's
-        mint-failure path (_t1_chroma_lifespan's `except Exception` around
-        the now-narrowed `mint_t1_session_token(...)` call) had ZERO test
-        coverage before this -- unlike its two CLI-dedicated siblings above,
-        which both exercise `_MINT_FAILS` directly. This closes that gap and
-        pins two things at once: (a) a non-RuntimeError mint failure (e.g.
-        httpx.HTTPStatusError from a bad NX_SERVICE_TOKEN) still comes out
-        as a clean RuntimeError, not a raw traceback; (b) the re-wrap
-        appends the Phase-E remedy sentence onto the shared helper's own
-        message with a real sentence boundary (a prior draft produced a
-        run-on with no period between the two)."""
+        """nexus-brw1s (GH #1405, field report stevengharris): a startup mint
+        failure must NEVER crash the server. The old contract raised here; the
+        RuntimeError escaped the stdio TaskGroup, the whole MCP server died,
+        and Claude Code cached the dead connection for the session's entire
+        lifetime — every nexus tool gone, including the majority that never
+        touch T1, because a scratch precondition could not reach a service
+        that was merely not up yet.
+
+        New contract, all pinned here: the lifespan REACHES YIELD (the server
+        starts); the deferred-mint retry hook is registered with mcp_infra;
+        no session env vars are set (Phase E require-minted holds — there is
+        no bare-id fallback); and lifespan exit unregisters the hook and
+        clears the deferred state so nothing dangles."""
         import asyncio
 
-        import httpx
-
+        from nexus import mcp_infra
         from nexus.mcp import core as mcp_core
 
-        live_session_id = "mcp-branch0-mint-failure-test"
+        live_session_id = "mcp-branch0-mint-deferral-test"
         monkeypatch.setattr(
             "nexus.session.resolve_active_session_id", lambda: live_session_id
         )
+        monkeypatch.delenv("NX_T1_SESSION", raising=False)
+        monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
 
         global _MINT_FAILS
         _MINT_FAILS = True
+        reached = {"yield": False}
 
         async def _run() -> None:
             async with mcp_core._t1_chroma_lifespan(None):
-                pass  # pragma: no cover — must never reach yield on mint failure
+                reached["yield"] = True
+                # During the deferred window: hook registered, state present,
+                # NO session env (a bare-id or CLI-dedicated fallback would be
+                # the session-isolation regression the lifespan documents).
+                assert mcp_infra._t1_pre_init_hook is mcp_core._retry_deferred_t1_mint
+                assert mcp_core._DEFERRED_T1_MINT["session_id"] == live_session_id
+                assert "NX_T1_SESSION" not in _t1_env()
+
+        def _t1_env() -> dict:
+            import os
+            return {k: v for k, v in os.environ.items() if k == "NX_T1_SESSION"}
 
         try:
-            with pytest.raises(RuntimeError) as exc_info:
-                asyncio.run(_run())
+            asyncio.run(_run())
         finally:
             _MINT_FAILS = False
 
-        assert not isinstance(exc_info.value, httpx.HTTPStatusError)
-        message = str(exc_info.value)
-        assert "Phase E require-minted" in message
-        # Real sentence boundary between the helper's message and the
-        # appended remedy sentence -- not a run-on ("...cause The storage").
-        assert ". The storage service must be reachable" in message
+        assert reached["yield"], "the server must start despite the mint failure"
+        # Exit cleaned up: no dangling hook, no dangling deferred state.
+        assert mcp_infra._t1_pre_init_hook is None
+        assert not mcp_core._DEFERRED_T1_MINT
+
+    def test_deferred_mint_retry_fails_per_call_and_stays_retryable(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """While the service stays down, each T1-touching call fails with an
+        ACTIONABLE error and nothing is cached — the next call retries. The
+        walk to recovery is 'start the service', never 'restart the Claude
+        session'."""
+        from nexus import mcp_infra
+        from nexus.mcp import core as mcp_core
+
+        monkeypatch.setattr(mcp_infra, "_t1_instance", None)
+        monkeypatch.setattr(mcp_infra, "_t1_isolated", False)
+        mcp_core._DEFERRED_T1_MINT.clear()
+        mcp_core._DEFERRED_T1_MINT.update(
+            session_id="deferred-retry-test", config_dir=config_dir, loop=None
+        )
+        mcp_infra.set_t1_pre_init_hook(mcp_core._retry_deferred_t1_mint)
+
+        calls = {"n": 0}
+
+        def _still_down(_sid, _cfg):
+            calls["n"] += 1
+            raise RuntimeError("connect refused")
+
+        monkeypatch.setattr(
+            "nexus.db.t1._lock_guarded_mint_or_borrow", _still_down
+        )
+        try:
+            for attempt in (1, 2):
+                with pytest.raises(RuntimeError) as exc_info:
+                    mcp_infra.get_t1()
+                assert "nx daemon service start" in str(exc_info.value)
+                # The honest blast-radius claim (critic SIG-1): T1 only —
+                # never "every non-T1 tool is unaffected", which is false in
+                # cloud mode (the nexus-5t1jp probe cache).
+                assert "affects T1 scratch only" in str(exc_info.value)
+                assert mcp_infra._t1_instance is None, "a failure must cache nothing"
+                assert calls["n"] == attempt, "every call must retry the mint"
+            # The hook stays registered for the next call.
+            assert mcp_infra._t1_pre_init_hook is not None
+        finally:
+            mcp_core._DEFERRED_T1_MINT.clear()
+            mcp_infra.set_t1_pre_init_hook(None)
+            mcp_infra._t1_instance = None
+
+    def test_deferred_mint_completes_when_the_service_arrives(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """The service came up mid-session: the FIRST T1-touching call mints
+        through the same flock/borrow discipline, sets the session env,
+        records ownership, unregisters the hook, and construction proceeds —
+        the session behaves as if the mint had succeeded at startup.
+
+        The construction stub RECORDS the env it saw, so this also pins the
+        ORDER: hook completes the mint BEFORE the T1 handle is built (built
+        with no session env, the handle would route into the shared
+        CLI-dedicated identity — the security regression)."""
+        import os
+
+        from nexus import mcp_infra
+        from nexus.mcp import core as mcp_core
+
+        monkeypatch.setattr(mcp_infra, "_t1_instance", None)
+        monkeypatch.setattr(mcp_infra, "_t1_isolated", False)
+        monkeypatch.delenv("NX_T1_SESSION", raising=False)
+        monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
+        mcp_core._OWNED_T1_SESSION.pop("session_id", None)
+        mcp_core._DEFERRED_T1_MINT.clear()
+        mcp_core._DEFERRED_T1_MINT.update(
+            session_id="deferred-arrival-test", config_dir=config_dir, loop=None
+        )
+        mcp_infra.set_t1_pre_init_hook(mcp_core._retry_deferred_t1_mint)
+
+        minted = {"n": 0}
+
+        def _service_up(_sid, _cfg):
+            minted["n"] += 1
+            return "tok-deferred-arrival", True, 3600.0
+
+        monkeypatch.setattr(
+            "nexus.db.t1._lock_guarded_mint_or_borrow", _service_up
+        )
+        seen_env = {}
+
+        def _construct_stub():
+            seen_env["NX_T1_SESSION"] = os.environ.get("NX_T1_SESSION")
+            seen_env["NX_T1_SESSION_ID"] = os.environ.get("NX_T1_SESSION_ID")
+            return object()
+
+        monkeypatch.setattr("nexus.db.t1.get_t1_database", _construct_stub)
+        try:
+            t1_first, _ = mcp_infra.get_t1()
+            # The mint landed BEFORE construction, with the minted values.
+            assert seen_env["NX_T1_SESSION"] == "tok-deferred-arrival"
+            assert seen_env["NX_T1_SESSION_ID"] == "deferred-arrival-test"
+            # Ownership recorded (SIGTERM/atexit revocation still works);
+            # hook + state cleared; loop=None -> refresh skipped with a
+            # warning, never a failure of the successful mint.
+            assert mcp_core._OWNED_T1_SESSION.get("session_id") == "deferred-arrival-test"
+            assert mcp_infra._t1_pre_init_hook is None
+            assert not mcp_core._DEFERRED_T1_MINT
+            # Cached: the second call re-mints nothing and reuses the handle.
+            t1_second, _ = mcp_infra.get_t1()
+            assert t1_second is t1_first
+            assert minted["n"] == 1
+        finally:
+            mcp_core._OWNED_T1_SESSION.pop("session_id", None)
+            mcp_infra._t1_instance = None
+            os.environ.pop("NX_T1_SESSION", None)
+            os.environ.pop("NX_T1_SESSION_ID", None)
 
 
 # ── mcp/core.py Branch 0 wiring: publish-on-mint, clear-on-teardown ────────────
@@ -1557,3 +1679,165 @@ class TestResolveT1RoutingTiers:
             "sufficient evidence the fallthrough still mints (nexus-1si7z, "
             "superseded call path per nexus-jwqjm)"
         )
+
+
+class TestDeferredMintBoundaries:
+    """nexus-brw1s review round: the guarantees asserted ONE FRAME UP from
+    where the first three pins stopped (critic SIG-2 — 'the tests assert the
+    precondition, not the guarantee'), plus the shutdown sentinel (reviewer
+    LOW-1) and the real-loop refresh scheduling (reviewer LOW-3)."""
+
+    def _arm_deferred(self, mcp_core, mcp_infra, config_dir, monkeypatch, loop=None):
+        monkeypatch.setattr(mcp_infra, "_t1_instance", None)
+        monkeypatch.setattr(mcp_infra, "_t1_isolated", False)
+        mcp_core._DEFERRED_T1_MINT.clear()
+        mcp_core._DEFERRED_T1_MINT.update(
+            session_id="deferred-boundary-test", config_dir=config_dir, loop=loop
+        )
+        mcp_infra.set_t1_pre_init_hook(mcp_core._retry_deferred_t1_mint)
+
+    def _disarm(self, mcp_core, mcp_infra):
+        import os
+
+        mcp_core._DEFERRED_T1_MINT.clear()
+        mcp_infra.set_t1_pre_init_hook(None)
+        mcp_infra._t1_instance = None
+        mcp_core._OWNED_T1_SESSION.pop("session_id", None)
+        os.environ.pop("NX_T1_SESSION", None)
+        os.environ.pop("NX_T1_SESSION_ID", None)
+
+    def test_scratch_tool_returns_an_error_string_not_a_raise(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """THE user-facing guarantee (critic SIG-2 part 1): in the deferred
+        window with the service still down, the REAL scratch tool returns an
+        actionable error STRING — it does not raise out of the worker. The
+        earlier pins asserted get_t1() raises; this asserts the boundary
+        catches it. Remove scratch's try/except and this goes red while every
+        other pin stays green — which is exactly why it exists."""
+        from nexus import mcp_infra
+        from nexus.mcp import core as mcp_core
+        from nexus.mcp.core import scratch
+
+        self._arm_deferred(mcp_core, mcp_infra, config_dir, monkeypatch)
+
+        def _still_down(_sid, _cfg):
+            raise RuntimeError("connect refused")
+
+        monkeypatch.setattr("nexus.db.t1._lock_guarded_mint_or_borrow", _still_down)
+        try:
+            result = scratch(action="put", content="deferred-window write")
+            assert isinstance(result, str)
+            assert "nx daemon service start" in result, result
+            assert mcp_infra._t1_instance is None, "a failed call must cache nothing"
+        finally:
+            self._disarm(mcp_core, mcp_infra)
+
+    def test_deferral_logs_warning_and_never_the_fatal_error_event(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """The severity transition IS the fix (critic SIG-2 part 2): the old
+        path emitted error-level t1_session_mint_failed and died; the new path
+        emits warning-level t1_session_mint_deferred and serves. Pin both
+        directions — the WARNING fires, the ERROR never does."""
+        import asyncio
+
+        from structlog.testing import capture_logs
+
+        from nexus.mcp import core as mcp_core
+
+        monkeypatch.setattr(
+            "nexus.session.resolve_active_session_id",
+            lambda: "mcp-deferral-severity-test",
+        )
+        monkeypatch.delenv("NX_T1_SESSION", raising=False)
+        monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
+
+        global _MINT_FAILS
+        _MINT_FAILS = True
+
+        async def _run() -> None:
+            async with mcp_core._t1_chroma_lifespan(None):
+                pass
+
+        try:
+            with capture_logs() as cap:
+                asyncio.run(_run())
+        finally:
+            _MINT_FAILS = False
+
+        deferred = [e for e in cap if e.get("event") == "t1_session_mint_deferred"]
+        assert deferred, f"the deferral warning must fire: {cap}"
+        assert all(e.get("log_level") == "warning" for e in deferred)
+        assert not [e for e in cap if e.get("event") == "t1_session_mint_failed"], (
+            "the fatal-path error event must be gone"
+        )
+
+    def test_deferred_refresh_task_is_scheduled_on_the_real_loop(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """Reviewer LOW-3: the loop=None arrival test never exercised the real
+        scheduling path. Here the hook runs in a genuine worker thread while
+        the lifespan's loop is alive, and the refresh task must actually be
+        created on it."""
+        import asyncio
+
+        from nexus import mcp_infra
+        from nexus.mcp import core as mcp_core
+
+        monkeypatch.setattr(
+            "nexus.db.t1._lock_guarded_mint_or_borrow",
+            lambda _sid, _cfg: ("tok-real-loop", True, 3600.0),
+        )
+        monkeypatch.setattr("nexus.db.t1.get_t1_database", lambda: object())
+
+        async def _run() -> None:
+            self._arm_deferred(
+                mcp_core, mcp_infra, config_dir, monkeypatch,
+                loop=asyncio.get_running_loop(),
+            )
+            await asyncio.to_thread(mcp_infra.get_t1)  # a real worker thread
+            await asyncio.sleep(0.05)  # let call_soon_threadsafe land
+            assert mcp_core._T1_SESSION_REFRESH_TASK is not None, (
+                "the refresh task was never scheduled on the live loop"
+            )
+            await mcp_core._cancel_t1_session_refresh_task()
+
+        try:
+            asyncio.run(_run())
+        finally:
+            self._disarm(mcp_core, mcp_infra)
+
+    def test_mint_completing_during_shutdown_is_discarded(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """Reviewer LOW-1, the shutdown sentinel: a mint that completes AFTER
+        the lifespan finally cleared the deferred state must commit NOTHING —
+        no ownership (it would land after the revoke: the nexus-5daww leak
+        class), no env (an env-less construction would route into the shared
+        CLI-dedicated identity), no cached instance. It raises instead."""
+        import os
+
+        import pytest as _pytest
+
+        from nexus import mcp_infra
+        from nexus.mcp import core as mcp_core
+
+        self._arm_deferred(mcp_core, mcp_infra, config_dir, monkeypatch)
+
+        def _mint_then_shutdown(_sid, _cfg):
+            # The lifespan finally runs while this mint is in flight.
+            mcp_core._DEFERRED_T1_MINT.clear()
+            return "tok-too-late", True, 3600.0
+
+        monkeypatch.setattr(
+            "nexus.db.t1._lock_guarded_mint_or_borrow", _mint_then_shutdown
+        )
+        try:
+            with _pytest.raises(RuntimeError, match="session is ending"):
+                mcp_infra.get_t1()
+            assert "session_id" not in mcp_core._OWNED_T1_SESSION
+            assert "NX_T1_SESSION" not in os.environ
+            assert mcp_infra._t1_instance is None
+        finally:
+            self._disarm(mcp_core, mcp_infra)

@@ -11,7 +11,7 @@ All persistent data lives on the host machine running Conexus:
 - **Indexed content** — text from files you ask Conexus to index (`nx index repo`, `nx index pdf`), plus structured metadata (file paths, chunk identifiers, taxonomy assignments). As of 6.0 the T3 vector store is the native nexus-service (Postgres 17 + pgvector). Stored in:
   - the local nexus-service's Postgres cluster on disk (local mode — embeddings + chunk text, embedded server-side with bge-768)
   - a managed nexus-service's Postgres (managed-cloud mode — only if you point Conexus at a hosted service)
-  - `~/.local/share/nexus/chroma/` (legacy ChromaDB store, read only as the migration source for `nx guided-upgrade`)
+  - `~/.local/share/nexus/chroma/` (legacy ChromaDB store, read only as the migration source for `nx upgrade`'s substrate rung)
 - **Memory entries** — anything you (or an agent) writes via `nx memory put` or the `memory_put` MCP tool. Stored in `~/.config/nexus/memory.db` (SQLite, FTS5).
 - **Catalog** — document registry and typed-link graph. Stored in `~/.config/nexus/catalog/` (JSONL + SQLite cache).
 - **Session scratch** — ephemeral working notes shared across agents within a session. In-memory ChromaDB; wiped at session end.

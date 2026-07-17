@@ -17,7 +17,7 @@ If you're on 3.14+, install 3.13 with `uv python install 3.13` — uv will use i
 
 ## Install
 
-See the [Quick Start in README.md](https://github.com/Hellblazer/nexus/blob/main/README.md#quick-start) for the full install walkthrough: `uv tool install conexus`, `nx init` (embedder choice, **nexus-service** provisioning — the native Postgres + pgvector backend that serves every persistent tier), updating, and verifying with `nx doctor`.
+See the [Quick Start in README.md](https://github.com/Hellblazer/nexus/blob/main/README.md#cli-quick-start) for the full install walkthrough: `uv tool install conexus`, `nx init` (embedder choice, **nexus-service** provisioning — the native Postgres + pgvector backend that serves every persistent tier), updating, and verifying with `nx doctor`.
 
 Once you have a working install, come back here for repo indexing, the storage-tier CLIs, and troubleshooting below. If you're upgrading an *existing* pre-6.0 install rather than installing fresh, skip to [Upgrading an existing install](#upgrading-an-existing-install-skip-this-if-this-is-your-first-install) at the end of this document.
 
@@ -79,7 +79,7 @@ See [Document Catalog](catalog.md) for details.
 
 ## Claude Code plugin (optional)
 
-The conexus plugin gives Claude Code agents access to all three storage tiers, 13 specialized agents, and 43 skills covering the RDR lifecycle, plan-centric retrieval, and development workflows.
+The conexus plugin gives Claude Code agents access to all three storage tiers, 13 specialized agents, and 45 skills covering the RDR lifecycle, plan-centric retrieval, and development workflows.
 
 **Plugin-only prerequisite: [Node.js](https://nodejs.org/).** The plugin's `sequential-thinking` and `context7` MCP servers are spawned via `npx -y …` and silently fail to start without `node`/`npm` on PATH. Install with `brew install node` (macOS) or your platform's installer before running the plugin commands below.
 
@@ -221,39 +221,54 @@ nx taxonomy discover --all
 
 ## Upgrading an existing install (skip this if this is your first install)
 
+Upgrading nexus is **two steps — both required on every upgrade**: update the
+code, then converge the data.
+
 ```bash
-uv tool upgrade conexus
+uv tool upgrade conexus       # 1. update the code (preserves your extras, e.g. [local])
+nx upgrade                    # 2. converge the data — walks the upgrade ladder
 ```
 
-Always upgrade with `uv tool upgrade conexus` — it preserves the spec you installed with, so a `[local]` install stays `[local]`. **Do not** re-run `uv tool install conexus` (or `--force`) just to upgrade: that resets the environment and **drops `[local]`**, silently downgrading the embedder 768→384-dim, which dimension-mismatches existing 768-dim collections and makes search return nothing. To recover: `uv tool install --reinstall "conexus[local]"`. When you update the Claude Code plugin, upgrade the CLI to the matching version at the same time.
+`nx upgrade` is the single trigger that converges everything else — it brings the
+package, engine, and process preconditions current (provisioning and starting the
+service stack if a legacy footprint needs one to migrate into), then walks one
+ordered ladder that auto-applies whichever data migrations your install actually
+needs: the T2 schema, the ChromaDB → Postgres+pgvector substrate move that 6.0
+introduced, pre-RDR-108 chunk identity, and embedder era. Each rung detects,
+converges, and verifies before recording completion; the walk is resumable and
+idempotent, and your ChromaDB store is left **byte-untouched** as the rollback
+source (copy-not-move). There is nothing to sequence by hand and no era to know —
+an install dormant since 5.x converges the same way a current one no-ops. Use
+`nx doctor` to see what is pending, and `nx upgrade --dry-run` to preview without
+changing anything.
 
-After upgrading, restart the daemon so it picks up the new binary:
+You are asked to decide only what the product cannot derive: **billed
+re-embedding** (an estimate-and-confirm prompt before anything charges — silent
+when nothing bills; pass `nx upgrade --yes` or set `NX_ASSUME_YES=1` to
+pre-approve it unattended), a **source collection that has vanished** (re-acquire
+or drop; the walk defers rather than guessing), and **rollback**, which is always
+yours to invoke and never automatic. On a validation block the migration state is
+left `migrated-failed`, reads stay loudly degraded rather than silently empty, and
+the rollback command is printed as the remedy.
+
+**Always upgrade with `uv tool upgrade conexus` for step 1.** It preserves the
+spec you installed with, so a `[local]` install stays `[local]`. **Do not** re-run
+`uv tool install conexus` (or `--force`) just to upgrade: that resets the
+environment and **drops `[local]`**, silently downgrading the embedder 768→384-dim,
+which dimension-mismatches existing 768-dim collections and makes search return
+nothing. To recover: `uv tool install --reinstall "conexus[local]"`.
+
+After step 1, restart the daemon so it picks up the new binary (step 2's
+`nx upgrade` then converges the data):
 
 ```bash
 nx daemon t2 stop && nx daemon t2 start    # or: launchctl kickstart -k gui/<uid>/com.nexus.t2
 ```
 
-The schema-version handshake (RDR-120 P3b) fails loud on client/daemon version mismatch, so stale daemons fail closed rather than silently corrupting state.
+The schema-version handshake (RDR-120 P3b) fails loud on client/daemon version
+mismatch, so stale daemons fail closed rather than silently corrupting state.
 
-### Upgrading to 6.0 (migrating off ChromaDB)
-
-6.0 moves the permanent vector store (T3, the collections `nx search`/`nx store` query) from ChromaDB to the Postgres +
-pgvector service. Existing installs migrate with one command:
-
-```bash
-uv tool upgrade conexus       # get the 6.0 CLI
-nx guided-upgrade             # detect -> provision+verify the service -> migrate -> validate -> unlock
-```
-
-`nx guided-upgrade` detects your existing ChromaDB footprint, provisions and
-starts the service, version-pins it (its `/version` must report a
-`release_version` — present from engine-service v0.1.6+; the code floor is
-v0.1.8 but earlier binaries are below it / omit the field and fail closed),
-health-gates it, then migrates your collections into pgvector with validation
-and **copy-not-move** rollback safety — your ChromaDB store is left intact as
-the source. Voyage-capability and version pre-flights fail loud *before* any
-migration. It is idempotent (safe to re-run) but not a no-op after success: a
-re-run re-copies at full cost. On a validation block it leaves the migration
-state `migrated-failed` and offers a rollback command rather than auto-reverting.
+When you update the Claude Code plugin (`/plugin update`), run **both** upgrade
+steps above so the CLI stays in lockstep with the plugin version.
 
 See [docs/migration-runbook.md](https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md) for the full migration details.

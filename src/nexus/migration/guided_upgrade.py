@@ -163,21 +163,40 @@ def endpoint_failure_migration_hint() -> str:
     they need the one-time migration. Cheap gate only; empty string when
     the install does not look like a pending legacy footprint (fresh
     installs and already-migrated installs keep the stock message).
+
+    RDR-185 P4.2 (nexus-n7u38.29): the remedy is now ``nx upgrade`` — the
+    single trigger converges the provisioning precondition and the substrate
+    rung in one walk. Unlike the retired bridge notice, this hint is NOT a
+    duplicate report: it fires on an ERROR path, where the user has hit the
+    wall with no walk in flight and the stock remedy ("start the supervisor")
+    is actively wrong for them. Naming the remedy at the wall is the same
+    pattern as rollback at ``migrate_cmd``'s block path.
     """
     if not legacy_footprint_pending():
         return ""
     return (
         " NOTE: this install has a legacy local store awaiting the ONE-TIME "
         "storage migration — if you recently upgraded from a 5.x install, "
-        "run `nx guided-upgrade` (provisions the service AND migrates your "
-        "data; shows a cost preview first) instead of starting the service "
-        "by hand."
+        "run `nx upgrade` (provisions the service AND migrates your data, "
+        "showing a cost preview before anything bills) instead of starting "
+        "the service by hand."
     )
 
 
 def pending_migration_notice() -> str | None:
     """Best-effort bridge pointer from the routine commands to the cutover
     (nexus-0rwwv).
+
+    RETIRED as a user surface — RDR-185 P4.2 (nexus-n7u38.29) removed BOTH
+    call sites (``nx upgrade``, ``nx doctor``). The bridge existed because
+    the routine upgrade and the one-time cutover were two commands with
+    nothing between them; the ladder makes them one walk, so this pointer
+    became a duplicate report of a state the ladder already reports, naming
+    a verb P4.1 demoted out of ``--help``. Left in place, callable and
+    tested, exactly like the demoted verbs it pointed at: this whole module
+    dies at RDR-155 P4b, which is a standing blocker.
+
+    Historical contract, unchanged below this line.
 
     Two upgrade commands, no bridge: a local-mode user with a pending
     Chroma -> pgvector cutover ran ``nx upgrade``, saw "migrations
@@ -203,7 +222,7 @@ def pending_migration_notice() -> str | None:
         return None
 
     try:
-        detection = detect_pending_migration()
+        detection = detect_pending_migration_memoized()
     except Exception:  # noqa: BLE001 — best-effort probe; a broken store must not break nx upgrade/doctor
         _log.debug("pending_migration_notice_probe_failed", exc_info=True)
         return None
@@ -267,6 +286,44 @@ def detect_pending_migration(
         unsupported=len(report.unsupported),
     )
     return PreflightDetection(report=report, needs_migration=needs)
+
+
+#: Process-local memo for :func:`detect_pending_migration_memoized`:
+#: (producer function object, monotonic timestamp, result).
+_detection_memo: tuple[object, float, PreflightDetection] | None = None
+_DETECTION_MEMO_TTL_S: float = 60.0
+
+
+def detect_pending_migration_memoized() -> PreflightDetection:
+    """Single-probe memo over :func:`detect_pending_migration`.
+
+    RDR-185 P1 critique (High): a plain ``nx doctor`` on a Chroma-mode
+    install paid the read-leg classification TWICE back to back — once for
+    the ladder's legacy-id census (``upgrade_ladder.census``) and once for
+    the bridge notice (:func:`pending_migration_notice`). Both now share
+    this memo. The entry is keyed by the producer FUNCTION OBJECT (held by
+    reference, compared with ``is``): a test that monkeypatches
+    ``detect_pending_migration`` produces a different object and always
+    misses a foreign entry — no cross-test leakage, no stale patched
+    results. The short TTL bounds staleness in long-lived processes
+    (doctor CLI runs are one-shot; MCP daemons calling health checks
+    repeatedly re-probe at most once a minute — migration-pending state
+    changes on human timescales).
+    """
+    global _detection_memo
+    import time  # noqa: PLC0415 — stdlib, kept helper-local
+
+    producer = detect_pending_migration
+    now = time.monotonic()
+    if (
+        _detection_memo is not None
+        and _detection_memo[0] is producer
+        and now - _detection_memo[1] < _DETECTION_MEMO_TTL_S
+    ):
+        return _detection_memo[2]
+    result = producer()
+    _detection_memo = (producer, now, result)
+    return result
 
 
 # ── RDR-178 Gap 7 (nexus-1sx01): already-migrated detection ────────────────

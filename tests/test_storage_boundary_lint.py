@@ -490,7 +490,26 @@ def test_dual_population_baseline_locked():
     # already-migrated freshness probe — read-only mode=ro URI on the
     # frozen migration source (annotation added at full-suite triage,
     # 2026-07-02; the site itself landed 4776f0c8).
-    assert result.epsilon_allow_connects == 21, (
+    # 22 = +1 for RDR-185 P0.2 (nexus-n7u38.2): upgrade_ladder/completion.py
+    # ladder-local completion records (ladder.db) — its own substrate,
+    # deliberately outside T2Database/apply_pending so the store exists
+    # before the t2-schema rung it records (independent-audit HIGH finding;
+    # RDR-158-exempt; the pipeline_buffer.py own-substrate shape).
+    # 23 = +1 for RDR-185 P1.1 (nexus-n7u38.8): upgrade_ladder/rungs/
+    # t2_schema.py single _open() connect site — the T2-schema ladder rung
+    # is migration machinery (same chicken-and-egg substrate bootstrap as
+    # commands/upgrade.py:447: it migrates the store the daemon serves, so
+    # it cannot route through the daemon).
+    # 24 = +1 for RDR-185 P2.2 (nexus-n7u38.15): migration/wire_reid.py
+    # ChashRemapStore — the persisted old->new id map owns its substrate
+    # (chash_remap.db): a migration artifact that must outlive any store it
+    # maps (gate r1 rollback consults it; RDR-158-exempt; the
+    # pipeline_buffer/CompletionStore own-substrate shape).
+    # 25 = +1 for RDR-185 P2.3 (nexus-n7u38.16): migration/remap_cascade.py
+    # _connect — the cascade rewrites the LOCAL catalog.db/memory.db
+    # mid-migration BEFORE any daemon serves them (same migration-machinery
+    # class as storage_cmd/orchestrator source reads; quiesced context).
+    assert result.epsilon_allow_connects == 25, (
         f"raw-connect epsilon-allow baseline moved: {result.epsilon_allow_connects}"
     )
     # P3 endpoint: ZERO un-annotated direct T2Database constructions outside

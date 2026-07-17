@@ -1023,45 +1023,43 @@ class TestCheckT1:
         assert result.exit_code == 0, result.output
         assert "chroma reachable" in result.output
 
-# ── nexus-0rwwv: substrate-migration bridge on the default health path ──────
+# ── RDR-185 P4.2: the nexus-0rwwv bridge is retired from the health path ────
+#
+# A pending cutover is reported by the ladder's own read-only surface
+# (health's `_check_pending_rungs`, which renders the substrate rung's
+# detect() with `nx upgrade` as the remedy). The bridge's coarse count with
+# a `nx guided-upgrade` remedy was a second line for the same state naming a
+# demoted verb — Gap-2 scattered remediation, and a third DATA-rung
+# mechanism per Gap-4.
 
 
-def test_doctor_default_prints_migration_pointer(runner, monkeypatch):
+def test_doctor_never_advertises_the_demoted_verb(runner, monkeypatch):
     monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
     with (
         patch("nexus.health.run_health_checks", return_value=([], True)),
         patch("nexus.health.format_health_for_cli", return_value=("all green", [])),
         patch("nexus.migration.guided_upgrade.pending_migration_notice",
-              return_value="A one-time storage migration is pending: run nx guided-upgrade"),
+              return_value="A one-time storage migration is pending: run nx guided-upgrade") as notice,
     ):
         result = runner.invoke(main, ["doctor"])
     assert result.exit_code == 0
-    assert "nx guided-upgrade" in result.output
+    # Not merely absent from the output — never probed at all.
+    notice.assert_not_called()
+    assert "guided-upgrade" not in result.output
 
 
-def test_doctor_default_pointer_survives_failed_checks(runner, monkeypatch):
-    # The notice prints BEFORE the failed-exit, so a red doctor still points.
+def test_doctor_stays_silent_on_the_retired_bridge_when_checks_fail(runner, monkeypatch):
+    # The old notice printed before the failed-exit so a red doctor still
+    # pointed. Retired on BOTH paths — a red doctor must not resurrect it.
     monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
     with (
         patch("nexus.health.run_health_checks", return_value=([], True)),
         patch("nexus.health.format_health_for_cli",
               return_value=("something failed", ["something"])),
         patch("nexus.migration.guided_upgrade.pending_migration_notice",
-              return_value="A one-time storage migration is pending: run nx guided-upgrade"),
+              return_value="A one-time storage migration is pending: run nx guided-upgrade") as notice,
     ):
         result = runner.invoke(main, ["doctor"])
     assert result.exit_code == 1
-    assert "nx guided-upgrade" in result.output
-
-
-def test_doctor_default_silent_without_pending(runner, monkeypatch):
-    monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
-    with (
-        patch("nexus.health.run_health_checks", return_value=([], True)),
-        patch("nexus.health.format_health_for_cli", return_value=("all green", [])),
-        patch("nexus.migration.guided_upgrade.pending_migration_notice",
-              return_value=None),
-    ):
-        result = runner.invoke(main, ["doctor"])
-    assert result.exit_code == 0
+    notice.assert_not_called()
     assert "guided-upgrade" not in result.output

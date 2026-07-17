@@ -16,12 +16,44 @@
 #
 # Requires: docker, uv, the repo checkout. ~15 min total on a 32GB Docker VM.
 set -euo pipefail
+# Captured BEFORE the `cd` below so it is robust to the invocation cwd
+# (RDR-184 P0.2, nexus-ccs9v.2).
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$(dirname "$0")/../../.."   # repo root
 
 GRAAL_IMAGE="container-registry.oracle.com/graalvm/native-image-community:25"
 OUT="tests/e2e/gc-ab/out"
 WORKERS="${GCAB_WORKERS:-8}"
 ITERS="${GCAB_ITERS:-150}"
+
+# RDR-184 P0.2 (nexus-ccs9v.2): this harness had ZERO concurrency guard —
+# named containers/network (gcab-net/gcab-pg/gcab-svc) and the shared out/
+# dir race a second invocation outright. Lock dir lives under a stable
+# machine-global temp root, NOT under this checkout — the docker daemon and
+# out/ dir this harness mutates are machine-global (one per host), so two
+# different checkouts on the same host must still serialize. Acquired here,
+# before the first mutation (mkdir -p "$OUT" below). Lock dir is a
+# HARD-CODED /tmp path, deliberately NOT ${TMPDIR:-/tmp} (code-review
+# SIGNIFICANT fix): on darwin, an interactive shell's TMPDIR is a per-user
+# /var/folders/... path while a LaunchAgent/CI/stripped-env invocation sees
+# plain /tmp — two different invocation contexts would silently compute
+# DIFFERENT lockdirs and never contend, defeating the whole point of a
+# machine-global guard (this repo runs LaunchAgents that could race an
+# interactive run). /tmp is always the same path across every context on
+# the same host.
+# shellcheck source=../lib/lock.sh disable=SC1091
+source "$SCRIPT_DIR/../lib/lock.sh"
+LOCKDIR="/tmp/nexus-e2e-locks/gc-ab.lock"
+mkdir -p "$(dirname "$LOCKDIR")"
+lock_acquire "$LOCKDIR" || exit 1
+trap 'lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
+echo "[rdr-184] lock acquired: $LOCKDIR (pid $$)" >&2
+# Test seam (RDR-184 P0.2, nexus-ccs9v.2): tests/e2e/lib/harness_lock_test.sh
+# sets this to prove a concurrent invocation gets PAST the lock without ever
+# running this harness's real body (native build / docker). No-op — unset in
+# every normal invocation.
+[[ -n "${NX_E2E_LOCK_SELFTEST:-}" ]] && exit 0
+
 mkdir -p "$OUT"
 
 build_variant() { # gc-name

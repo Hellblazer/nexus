@@ -237,11 +237,22 @@ class TestDiscoverLease:
 
 class TestMigrationHintOnFailure:
     """nexus-0rwwv: the endpoint-resolution failure is the exact wall an
-    un-migrated 5.x→6.x install hits — the error must point at
-    `nx guided-upgrade` when the install looks like a pending legacy
-    footprint, and must NOT for migrated/fresh installs."""
+    un-migrated 5.x→6.x install hits — the error must name the remedy when the
+    install looks like a pending legacy footprint, and must NOT for
+    migrated/fresh installs.
 
-    def test_pending_footprint_appends_guided_upgrade(self, monkeypatch, tmp_path):
+    RDR-185 P4.2 (nexus-n7u38.29): the remedy is now `nx upgrade`. This hint
+    SURVIVED the bridge retirement while the `nx upgrade`/`nx doctor` notices
+    did not, and the distinction is the point: those two were duplicate
+    reports of a state the ladder already reports, whereas this fires on an
+    ERROR path where the user is stuck with no walk in flight and the stock
+    remedy ("start the supervisor") is actively wrong for them. A genuine
+    remedy at a genuine wall — which must therefore name a verb the user can
+    actually find. `nx guided-upgrade` is demoted out of --help, so pointing
+    at it from an error would be a dead end.
+    """
+
+    def test_pending_footprint_names_the_single_trigger(self, monkeypatch, tmp_path):
         # THE vanilla-upgrader state (critique CRITICAL): legacy dir present,
         # NO backend env, NO service evidence — storage-mode left at its real
         # unpatched SERVICE hard default. The hint must still appear.
@@ -250,8 +261,11 @@ class TestMigrationHintOnFailure:
             "nexus.migration.detection.resolve_default_local_leg",
             lambda: tmp_path,
         )
-        with pytest.raises(RuntimeError, match="nx guided-upgrade"):
+        with pytest.raises(RuntimeError, match="nx upgrade") as exc:
             resolve_service_config()
+        assert "guided-upgrade" not in str(exc.value), (
+            "the wall must not send the user to a verb that is hidden from --help"
+        )
 
     def test_no_footprint_keeps_stock_message(self, monkeypatch, tmp_path):
         monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
@@ -261,4 +275,4 @@ class TestMigrationHintOnFailure:
         )
         with pytest.raises(RuntimeError) as exc:
             resolve_service_config()
-        assert "guided-upgrade" not in str(exc.value)
+        assert "ONE-TIME storage migration" not in str(exc.value)

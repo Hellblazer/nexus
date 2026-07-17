@@ -1,0 +1,98 @@
+name: Era-spanning upgrade hop (weekly + on ladder-path changes)
+
+# RDR-185 P4.3 (nexus-n7u38.30), wired to CI per the P4.R2 critique's HIGH.
+#
+# `tests/e2e/migration-rehearsal/run.sh --era-hop` is the ONLY thing that ever
+# executes the substrate rung's real PRODUCTION DEFAULTS. The unit suite injects
+# a fake for every one of them (footprint_fn / classify_fn / voyage_key_fn /
+# prior_collections_fn / migrate_fn / target_count_fn / unreflected_fn /
+# cascade_only_fn) — which is correct test design, it keeps unit tests off real
+# infrastructure, but it means 1568 green tests say nothing about whether those
+# defaults work. That blind spot cost THREE P0s in a single session (2026-07-16),
+# none visible to the suite, all found by one real run of this leg:
+#
+#   * `_default_migrate` imported open_read_legs from the wrong module — the rung
+#     had NEVER once converged; every Chroma user would have hit it on their
+#     first `nx upgrade`.
+#   * verify() was unsatisfiable on RDR-176's immutable source — the rung could
+#     never record completion, doctor nagged forever, and every `nx upgrade`
+#     re-ran the whole ETL (re-billing Voyage on a cloud leg).
+#   * a pre-RDR-109 mislabeled collection was silently dropped from the plan and
+#     never migrated at all.
+#
+# tests/upgrade/test_deferred_imports_resolve.py closes the import-resolution
+# SYMPTOM package-wide, but it only proves names resolve — not that the bodies
+# work. Executing them is the only thing that does, and that is this leg.
+#
+# The hop: conexus 6.0.0 (the migration-capable release — the oldest install the
+# product promises to carry, and the population holding the GH #1408 shape) with
+# its own pinned engine-service-v0.1.11, a Chroma substrate, pre-RDR-108 16-char
+# chunk ids, and a store_put-only note with no source content -> current, via
+# `nx upgrade` ALONE, unattended. Both engines are acquired at runtime by the
+# product's own code; the harness never supplies an engine binary.
+#
+# CI-cost discipline (CLAUDE.md DIRECTIVES): NO native GraalVM build (unlike the
+# guided MVV — both engines come from published releases), but it does pull two
+# engines, a PG bundle and the bge-768 ONNX, so it runs ONLY when its inputs
+# change (path-gated push to develop), on a WEEKLY heartbeat (the ladder's change
+# velocity is low; a nightly would re-test the same tree most days), and on
+# manual dispatch. Never per-PR. ubuntu-only. Secret-free: the era hop is local
+# bge-768 mode end to end, and its footprint is deliberately free of all three
+# genuine decisions, so nothing bills and nothing prompts.
+#
+# This leg RETIRES with RDR-155 P4b by construction: P4b deletes the Chroma read
+# path, which is this hop's own migration source. It is a deprecation-window
+# gate, like guided-upgrade-mvv.yml beside it — that one protects the demoted
+# primitive, this one protects the verb that replaced it.
+
+on:
+  schedule:
+    - cron: "17 11 * * 3"   # Wednesdays 11:17 UTC — off the guided-MVV (Mon) and nightly-gate paths
+  workflow_dispatch:
+  push:
+    branches: [develop]
+    paths:
+      - "src/nexus/upgrade_ladder/**"
+      - "src/nexus/migration/**"
+      - "src/nexus/commands/upgrade.py"
+      - "src/nexus/commands/doctor.py"
+      - "src/nexus/engine_version.py"
+      - "src/nexus/daemon/binary_install.py"
+      - "src/nexus/db/pg_provision.py"
+      - "src/nexus/db/pg_bundle.py"
+      - "tests/e2e/migration-rehearsal/**"
+      - ".github/workflows/era-hop-mvv.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: era-hop-mvv
+  cancel-in-progress: true
+
+jobs:
+  era-hop:
+    name: nx upgrade alone, across an era (container-isolated)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
+
+      - name: Run the era-spanning hop
+        # run.sh --era-hop builds the working-tree wheel on the host, builds
+        # Dockerfile.era-hop (debian-slim: no PG, no binary, no ONNX), and runs
+        # rehearse_era_hop.sh inside it. The leg carries its own NON-VACUITY
+        # GATE — the product's own `nx upgrade --dry-run` must report the
+        # substrate rung pending before the walk, or it ABORTS rather than
+        # grade a no-op. (Learned the hard way: the first run had `nx upgrade`
+        # exit 0 AND `nx doctor` report "no pending rungs" over ZERO migrated
+        # collections, because the fixture was seeded where the rung does not
+        # look. A leg that cannot see its own fixture passes loudest.)
+        #
+        # ERA_ENGINE_TAG's staleness guard fails the run loud if the era engine
+        # ever catches up to REQUIRED_ENGINE_VERSION — at which point there is
+        # no era to span and every convergence assert would be vacuous.
+        run: bash tests/e2e/migration-rehearsal/run.sh --era-hop

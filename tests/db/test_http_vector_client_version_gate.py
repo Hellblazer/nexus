@@ -7,8 +7,10 @@ check on the actual connection path -- probe_managed_service() was only ever
 invoked from nx init/nx doctor/nx service probe, never from
 get_http_vector_client() construction. A too-old cloud engine degraded
 silently. This suite pins the fix: the probe runs once per process in cloud
-mode, a pass is cached forever, a failure is cached and re-raised verbatim
-on every subsequent call (never re-probed), and local mode is provably
+mode, a pass is cached forever, an INCOMPATIBLE failure is cached and
+re-raised verbatim on every subsequent call (never re-probed), an
+UNREACHABLE failure is authoritative only within the nexus-5t1jp retry
+window (then re-probed, so the session heals), and local mode is provably
 untouched.
 """
 from __future__ import annotations
@@ -18,7 +20,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import nexus.db.http_vector_client as hvc
 from nexus.db.http_vector_client import (
+    _PROBE_UNREACHABLE_RETRY_S,
     HttpVectorClient,
     _cloud_probe_failure_message,
     get_http_vector_client,
@@ -109,10 +113,16 @@ class TestCloudModeIncompatible:
         assert str(first_exc.value) == str(second_exc.value) == str(third_exc.value)
         assert probe.call_count == 1  # never re-probed once the outcome is cached
 
-    def test_unreachable_error_also_cached_and_reraised_verbatim(self, monkeypatch):
+    def test_unreachable_error_cached_WITHIN_the_retry_window_only(self, monkeypatch):
+        """nexus-5t1jp revises the original pin here: unreachable is cached,
+        but only inside _PROBE_UNREACHABLE_RETRY_S — not for the process
+        lifetime. This test holds the clock still and asserts the cheap
+        cached re-raise (probe called once); the healing behavior past the
+        window is TestUnreachableRetryWindow below."""
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
         probe = MagicMock(side_effect=ManagedServiceUnreachable("connection refused"))
         monkeypatch.setattr("nexus.db.managed_endpoint.probe_managed_service", probe)
+        monkeypatch.setattr("nexus.db.http_vector_client._monotonic", lambda: 1000.0)
 
         with pytest.raises(ManagedServiceUnreachable) as first_exc:
             get_http_vector_client()
@@ -121,6 +131,72 @@ class TestCloudModeIncompatible:
 
         assert str(first_exc.value) == str(second_exc.value)
         assert probe.call_count == 1
+
+    def test_below_floor_stays_cached_even_after_the_retry_window(self, monkeypatch):
+        """The class split's other half: INCOMPATIBLE never re-probes, no
+        matter how much time passes — the deployed engine does not change
+        under a running client (nexus-b6qlf). Mutation check: making the
+        incompatible class retryable turns this red."""
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+        probe = MagicMock(side_effect=ManagedServiceIncompatible("stale engine"))
+        monkeypatch.setattr("nexus.db.managed_endpoint.probe_managed_service", probe)
+        clock = {"now": 1000.0}
+        monkeypatch.setattr("nexus.db.http_vector_client._monotonic", lambda: clock["now"])
+
+        with pytest.raises(ManagedServiceIncompatible):
+            get_http_vector_client()
+        clock["now"] += 3600.0  # far beyond any retry window
+        with pytest.raises(ManagedServiceIncompatible):
+            get_http_vector_client()
+
+        assert probe.call_count == 1
+
+
+class TestUnreachableRetryWindow:
+    """nexus-5t1jp: the session HEALS when the managed service comes back."""
+
+    def test_reprobe_after_window_heals_and_stops_probing(self, monkeypatch):
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+        outcomes = [ManagedServiceUnreachable("connection refused"), _caps(), _caps()]
+        probe = MagicMock(side_effect=outcomes)
+        monkeypatch.setattr("nexus.db.managed_endpoint.probe_managed_service", probe)
+        clock = {"now": 1000.0}
+        monkeypatch.setattr("nexus.db.http_vector_client._monotonic", lambda: clock["now"])
+
+        with pytest.raises(ManagedServiceUnreachable):
+            get_http_vector_client()
+        # still inside the window: cached, no second probe
+        with pytest.raises(ManagedServiceUnreachable):
+            get_http_vector_client()
+        assert probe.call_count == 1
+
+        clock["now"] += _PROBE_UNREACHABLE_RETRY_S + 0.1
+        healed = get_http_vector_client()
+        assert isinstance(healed, HttpVectorClient)
+        assert probe.call_count == 2
+
+        # once healed, the pass is cached forever — no per-call probing
+        assert get_http_vector_client() is healed
+        assert probe.call_count == 2
+
+    def test_reprobe_failure_rearms_the_window(self, monkeypatch):
+        """Still down after the window: exactly one fresh probe, then the
+        cache is authoritative again — never a probe per call."""
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+        probe = MagicMock(side_effect=ManagedServiceUnreachable("connection refused"))
+        monkeypatch.setattr("nexus.db.managed_endpoint.probe_managed_service", probe)
+        clock = {"now": 1000.0}
+        monkeypatch.setattr("nexus.db.http_vector_client._monotonic", lambda: clock["now"])
+
+        with pytest.raises(ManagedServiceUnreachable):
+            get_http_vector_client()
+        clock["now"] += _PROBE_UNREACHABLE_RETRY_S + 0.1
+        with pytest.raises(ManagedServiceUnreachable):
+            get_http_vector_client()
+        assert probe.call_count == 2
+        with pytest.raises(ManagedServiceUnreachable):
+            get_http_vector_client()
+        assert probe.call_count == 2  # re-armed: cached again inside the new window
 
 
 class TestLocalModeUntouched:
@@ -266,3 +342,59 @@ class TestResetClearsProbeCache:
         client = get_http_vector_client()
         assert isinstance(client, HttpVectorClient)
         assert probe.call_count == 2
+
+
+class TestProbeCacheStateHygiene:
+    """Review findings H1/M1 (nexus-5t1jp): the cache is the PAIR
+    (_version_probe_error, _version_probe_failed_at); nothing may clear one
+    without the other. The original H1 defect (reset dropped the stamp) was
+    invisible to every behavioral test because the None check on the error
+    short-circuits first — so these pin the globals directly."""
+
+    def test_reset_clears_the_failure_stamp_too(self, monkeypatch):
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+        probe = MagicMock(side_effect=ManagedServiceUnreachable("connection refused"))
+        monkeypatch.setattr("nexus.db.managed_endpoint.probe_managed_service", probe)
+
+        with pytest.raises(ManagedServiceUnreachable):
+            get_http_vector_client()
+        assert hvc._version_probe_error is not None
+        assert hvc._version_probe_failed_at is not None
+
+        reset_http_vector_client_for_tests()
+        assert hvc._version_probe_error is None
+        assert hvc._version_probe_failed_at is None
+
+    def test_window_boundary_is_strict_less_than(self, monkeypatch):
+        """L3: at EXACTLY _PROBE_UNREACHABLE_RETRY_S elapsed the cache is no
+        longer binding — a < → <= flip turns this red."""
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+        probe = MagicMock(side_effect=ManagedServiceUnreachable("connection refused"))
+        monkeypatch.setattr("nexus.db.managed_endpoint.probe_managed_service", probe)
+        clock = {"now": 1000.0}
+        monkeypatch.setattr("nexus.db.http_vector_client._monotonic", lambda: clock["now"])
+
+        with pytest.raises(ManagedServiceUnreachable):
+            get_http_vector_client()
+        clock["now"] += _PROBE_UNREACHABLE_RETRY_S
+        with pytest.raises(ManagedServiceUnreachable):
+            get_http_vector_client()
+        assert probe.call_count == 2  # exactly-at-boundary => expired => re-probed
+
+    def test_fast_path_reraises_the_validated_snapshot_not_a_reread(self, monkeypatch):
+        """nexus-aedaw TOCTOU contract: get_http_vector_client must re-raise
+        exactly the object _authoritative_cached_probe_error returned, never
+        re-read the global — a concurrent healing clear between validate and
+        re-raise would turn the re-read into TypeError(None). Simulated
+        deterministically: helper returns a sentinel while the global is None;
+        a re-read implementation raises TypeError here instead."""
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+        sentinel = ManagedServiceUnreachable("validated snapshot")
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client._authoritative_cached_probe_error",
+            lambda: sentinel,
+        )
+        assert hvc._version_probe_error is None  # the torn-state half
+
+        with pytest.raises(ManagedServiceUnreachable, match="validated snapshot"):
+            get_http_vector_client()

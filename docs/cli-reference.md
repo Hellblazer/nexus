@@ -184,7 +184,7 @@ groups, tags, and groups flow into Nexus indexing without manual
 UUID/path copying, and Nexus search results round-trip back to DT via
 `nx dt open`. Design rationale and acceptance criteria live in
 [RDR-099](rdr/rdr-099-devonthink-integration.md); the smart-rule recipe
-is in [`devonthink-smart-rules.md`](devonthink-smart-rules.md).
+is in [`devonthink-smart-rules.md`](integrations/devonthink-smart-rules.md).
 
 The substrate (`x-devonthink-item://` URI scheme,
 `meta.devonthink_uri` reverse-lookup) shipped in 4.17.0; `nx dt` is
@@ -750,10 +750,11 @@ Update catalog entry metadata. `TUMBLER` accepts a tumbler or title. Batch mode 
 ### nx catalog gc
 
 ```
-nx catalog gc [--dry-run]
+nx catalog gc                          # report-only (default is --dry-run)
+nx catalog gc --no-dry-run --confirm   # actually delete
 ```
 
-Remove orphan catalog entries (entries with `miss_count >= 2` — missed in 2 consecutive index runs). Use `--dry-run` to preview.
+Remove orphan catalog entries (entries with `miss_count >= 2` — missed in 2 consecutive index runs). Double-gated like `nx t3 gc`: it is report-only by default, and deleting requires **both** `--no-dry-run` **and** `--confirm` — `--no-dry-run` alone silently makes no changes.
 
 ### nx catalog link-density
 
@@ -1012,7 +1013,7 @@ taxonomy:
   local_exclude_collections: []       # default: ["code__*"] — local embeddings cluster poorly on code
 ```
 
-**Upgrade path**: Run `nx upgrade` after upgrading to apply pending migrations and T3 upgrade steps (including cross-collection projection backfill). Run `nx taxonomy discover --all` to populate topics for new collections.
+**Upgrade path**: Run `nx upgrade` — it converges every pending rung, including the cross-collection projection backfill. Run `nx taxonomy discover --all` to populate topics for new collections.
 
 ---
 
@@ -1211,7 +1212,6 @@ nx collection list
 | `info NAME` | Details for one collection |
 | `verify NAME` | Existence check + document count |
 | `reindex NAME` | Delete and re-index a collection from its source documents |
-| `backfill-hash [NAME]` | Add `chunk_text_hash` metadata to chunks missing it (no re-embedding) |
 | `rename OLD NEW` | In-place metadata-only rename in the T3 vector store + T2 + catalog cascade (4.8.0, nexus-1ccq). Never re-embeds; same-prefix renames whose embedding-model segment differs are rejected (6.3.1, nexus-tcvpn) |
 | `re-embed NAME --to MODEL` | In-place re-embed for non-CCE Voyage models (nexus-bw65). Service mode: same-model only — the computed vectors ride the verbatim passthrough; a cross-model `--to` fails loud (server-side embedding routes by the collection NAME's model segment; cross-model moves are the migration pipeline's job). `--no-dry-run --yes` to apply (6.3.1, nexus-c9xr2/u37lw) |
 | `rewrite-metadata [NAME]` | Rewrite/repair chunk metadata in place; `--all` for every collection, `--source-path` to scope to one source, `--dry-run` to report counts only |
@@ -1234,13 +1234,6 @@ nx collection list
 
 The `reindex` command performs a pre-delete safety check before wiping the collection: it confirms the original source documents are still accessible. If the check fails, the command aborts unless `--force` is given. After re-indexing, a `verify --deep` probe runs automatically to confirm retrieval health. The command dispatches per collection type (`code__`, `docs__`, `rdr__`, `knowledge__`) to the appropriate indexer.
 
-**`backfill-hash` flags:**
-
-| Flag | Description |
-|------|-------------|
-| `--all` | Backfill all collections instead of a single named one |
-
-Reads each chunk's stored text from the T3 store and computes `sha256(text.encode()).hexdigest()`, updating metadata in-place. Embeddings and documents are untouched — no API keys or re-embedding needed. Idempotent: chunks that already have `chunk_text_hash` are skipped. Also runs automatically during `nx catalog setup`.
 
 **RDR-086 Phase 1.3 — T2 `chash_index` reconciliation.** The same per-chunk
 pass also populates the T2 `chash_index` table so `nx doc cite` and
@@ -1285,7 +1278,7 @@ takes ~25–70 minutes on ChromaDB Cloud. Maintenance-window operation.
 
 | Flag | Description |
 |------|-------------|
-| `--force-prefix-change` | Allow a cross-prefix rename (e.g. `code__foo` → `docs__foo`) OR a same-prefix rename whose embedding-model segment differs (6.3.1, nexus-tcvpn). Rename never re-embeds, so either change leaves the vectors in the OLD model space under a name claiming the new one — use only when you know the vectors already match the target name (cross-model moves belong to `nx migrate` / guided-upgrade, the RDR-162 vector ETL) |
+| `--force-prefix-change` | Allow a cross-prefix rename (e.g. `code__foo` → `docs__foo`) OR a same-prefix rename whose embedding-model segment differs (6.3.1, nexus-tcvpn). Rename never re-embeds, so either change leaves the vectors in the OLD model space under a name claiming the new one — use only when you know the vectors already match the target name (cross-model moves belong to the ladder's substrate rung, the RDR-162 vector ETL — `nx upgrade`) |
 
 Renames the collection in the T3 vector store via `t3.rename_collection` (a metadata-only update on the pgvector service path — no embedding re-upload, no Voyage cost, no vector egress), and cascades the new name through T2 taxonomy, `chash_index`, and catalog (JSONL + SQLite). Ordering (SIG-8 / nexus-nhyh): the T2 cascade runs FIRST, then the T3 rename, so a partial failure is recoverable: if the T3 rename fails the T2/catalog rows can be re-pointed or the rename re-run; if T2 fails no T3 rename was attempted.
 
@@ -1330,7 +1323,7 @@ nx hooks install [PATH]
 | `install [PATH]` | Install `post-commit`, `post-merge`, `post-rewrite` hooks (default: `.`) |
 | `uninstall [PATH]` | Remove nexus hook stanza; leaves other hook content intact |
 | `status [PATH]` | Show hook status for each hook file |
-| `update-all` | Refresh the nexus stanza in already-managed hooks across **all** catalog-registered repos (brings every repo to the current stanza after an upgrade; unmanaged/uninstalled hooks are left untouched). Also run automatically by `nx upgrade`. |
+| `update [PATH]` | Refresh THIS repo's nexus stanza to the current one (default: `.`). The remedy `nx doctor` names when it reports stanza drift. Sweeping every managed repo is not a verb — `nx upgrade` refreshes managed hooks itself |
 
 Hooks run `nx index repo` in the background after each qualifying git operation, appending output to `~/.config/nexus/index.log`. If a hook file already exists, the nexus stanza is appended (sentinel-bounded) without overwriting existing content.
 
@@ -1545,7 +1538,7 @@ nx doc cite "claim" --against knowledge__corpus --limit 10 --min-similarity 0.25
 Exit codes:
 - `0` — cite emitted; in JSON mode, `threshold_met=true`
 - `1` — top distance above `--min-similarity`; stderr warning, stdout empty (markdown); JSON still returns candidates
-- `2` — empty `chash_index` (run `nx collection backfill-hash --all`), empty collection, or unknown collection
+- `2` — empty `chash_index` (run `nx upgrade` — the ladder heals the manifest), empty collection, or unknown collection
 
 ---
 
@@ -1664,12 +1657,19 @@ The `--check-aspect-queue` flag (introduced 4.18.0, `nexus-1pfq`) reports the `a
 Plan library maintenance commands (RDR-092 Phase 0d).
 
 ```
-nx plan repair                   # Backfill dimensions on legacy rows + list low-conf entries
+nx plan repair all               # Run every repair pass in order (the usual entry point)
+nx plan repair dimensions        # Just the RDR-092 dimension backfill (below)
+nx plan repair scope-tags        # Backfill scope tags on legacy rows
+nx plan repair match-text        # Rebuild plan match-text from dimensional identity
+nx plan repair retire-legacy     # Retire pre-dimensional legacy plans
+nx plan repair builtin-bindings  # Refresh built-in plan bindings
 ```
 
-The `repair` subcommand (introduced 4.9.12, nexus-1kvj) re-runs the
-RDR-092 Phase 0d.1 plan-dimension backfill heuristic against the live
-T2 DB. On every run it:
+`nx plan repair` is a command group — run one of the subcommands above
+(bare `nx plan repair` just prints help). `nx plan repair all` runs them
+all in order; the rest target one pass. The `dimensions` pass
+(introduced 4.9.12, nexus-1kvj) re-runs the RDR-092 Phase 0d.1
+plan-dimension backfill heuristic against the live T2 DB. On every run it:
 
 - backfills `verb` / `name` / `dimensions` on any row where
   `dimensions IS NULL`, using a 20-rule verb-from-stem dictionary
@@ -1692,7 +1692,19 @@ nx plan disable PLAN_ID    # Soft-disable a plan without deleting it
 nx plan enable PLAN_ID     # Re-enable a previously disabled plan
 ```
 
-Introduced 4.18.0 (`nexus-mrzp`). `disable` flips `outcome=disabled` on the plan row so it drops out of `plan_match` results without losing its row id, telemetry counters, or T1 cache embedding. `enable` flips it back to `outcome=success`. Useful for triaging a plan whose match-text is misrouting traffic without committing to a delete + re-seed cycle. The pair operates on plan ids returned from `nx plan repair` or `plan_inspect_default`.
+Introduced 4.18.0 (`nexus-mrzp`). `disable` flips `outcome=disabled` on the plan row so it drops out of `plan_match` results without losing its row id, telemetry counters, or T1 cache embedding. `enable` flips it back to `outcome=success`. Useful for triaging a plan whose match-text is misrouting traffic without committing to a delete + re-seed cycle. The pair operates on plan ids returned from `nx plan list` or `nx plan repair`.
+
+### Inspecting and managing plans
+
+```
+nx plan list [--scope SCOPE] [--origin ORIGIN] [--name NAME] [--limit N]
+nx plan show ID_OR_NAME        # full record: json + dimensions + run metrics
+nx plan delete PLAN_ID         # delete one plan row (add --yes to skip the prompt)
+nx plan set-scope PLAN_ID [TAGS]   # set/override a plan's scope_tags
+nx plan reseed                 # re-run the four-tier plan-library seed loader
+```
+
+`list` shows the plan library (filter by scope, origin, or name; `--limit` defaults to 50). `show` prints one plan's full record by id or name. `delete` removes a single row by id. `set-scope` overrides the scope tags used for scope-aware matching. `reseed` re-runs the seed loader that populates built-in and template plans.
 
 ---
 
@@ -1945,7 +1957,8 @@ Reverse of `install --autostart`: deactivate via
 > The permanent vector store now serves through the native nexus-service over
 > Postgres + pgvector — see `nx daemon service` below and `nx init`.
 > `nx daemon t3` (the managed `chroma run` subprocess) remains only for reading a
-> pre-6.0 ChromaDB store as the **migration source** (`nx guided-upgrade`).
+> pre-6.0 ChromaDB store as the **migration source** (the substrate rung `nx
+> upgrade` walks; the source is left byte-untouched as the rollback target).
 
 Same shape as the `t2` subcommands, applies to the legacy T3 ChromaDB daemon.
 It wraps the upstream `chroma run` server lifecycle under launchd / systemd
@@ -2100,28 +2113,72 @@ process precisely so that inheritance happens.
 
 ## nx upgrade
 
-Run pending database migrations and T3 upgrade steps.
+The single trigger for the upgrade ladder ([RDR-185](rdr/rdr-185-single-ladder-convergent-upgrade.md)).
+
+Upgrading nexus is: update the code, then run `nx upgrade`. That single trigger
+converges everything else — it brings the package, engine, and process
+preconditions current, then walks one ordered ladder that auto-applies whichever
+data migrations your install actually needs (T2 schema, the ChromaDB →
+Postgres+pgvector substrate move, pre-RDR-108 chunk identity, embedder era), each
+rung detecting, converging, and verifying before it records completion, resumable
+and idempotent, with your existing store left byte-untouched as a rollback
+target. There is nothing to sequence by hand and no era to know: `nx doctor`
+reports pending rungs read-only, `nx upgrade` walks them, and an install that has
+been dormant for a year converges the same way a current one no-ops. You are
+asked to decide only what the product cannot derive for you — **billed
+re-embedding** (a cost preview before anything charges; silent when nothing
+bills), a **source collection that has vanished** (re-acquire or drop: the walk
+defers rather than guessing), and **rollback**, which is always yours to invoke
+and never automatic (`nx storage migrate vectors --rollback`, printed as the
+remedy where a migration blocks).
 
 ```
-nx upgrade                        # Apply all pending T2 + T3 migrations
-nx upgrade --dry-run              # List pending migrations without executing
-nx upgrade --force                # Reset version gate and re-run all migrations
-nx upgrade --auto                 # Quiet mode for hook invocation (T2 only, exit 0 always)
+nx upgrade                        # Converge: preconditions, then every pending rung
+nx upgrade --dry-run              # Report what is pending, read-only — changes nothing
+nx upgrade --force                # Reset the T2 version gate and re-run all migrations
+nx upgrade --auto                 # Quiet mode for hook invocation (exit 0 always)
+nx upgrade --yes                  # Unattended: pre-approve the billed re-embed (=NX_ASSUME_YES=1)
 ```
 
 | Flag | Description |
 |------|-------------|
-| `--dry-run` | List pending migrations without executing (creates base tables if absent) |
-| `--force` | Reset version gate to 0.0.0 and re-run all migrations. Per-migration idempotency guards still apply |
-| `--auto` | Quiet mode for SessionStart hook. T2 migrations only (T3 skipped — may exceed hook timeout). Exit 0 always |
+| `--dry-run` | Report pending T2 migrations and pending ladder rungs without executing (creates base tables if absent). Each rung's read-only `detect()` — the completion store is never opened |
+| `--force` | Reset the T2 version gate to 0.0.0 and re-run all migrations. Per-migration idempotency guards still apply |
+| `--auto` | Quiet mode for the SessionStart hook. T3 upgrade steps and the engine install are skipped (hook timeout budget); exit 0 always |
+| `--skip-t3` | Skip T3 upgrade steps for a fast T2-only run. Also suppresses the precondition stage's engine install and process cycle (verdicts are still reported) |
+| `--yes` | Assume yes to the **billed re-embed** consent prompt only (equivalent to `NX_ASSUME_YES=1`) — the unattended channel for a walk that would otherwise block on the cost preview. Not a blanket "say yes to everything": a vanished source still defers rather than guessing, and rollback is never automatic |
 
-**How it works**: The CLI version (`importlib.metadata.version("conexus")`) is compared against the last-seen version stored in T2 (`_nexus_version` table). Migrations tagged with versions between last-seen and current are executed. Each migration is idempotent via `PRAGMA table_info()` / `sqlite_master` guards.
+**Ladder position is derived, never stored.** How far an install is from current has exactly two answers, by class: DATA-rung state comes solely from the ladder position derived from per-rung completion records; PRECONDITION freshness (package, engine, processes) comes solely from a fresh comparison of on-disk installed state against required, and is deliberately stateless — re-derived at every invocation, never recorded. A rung is recorded complete only when its own verify passed ([RDR-142](rdr/rdr-142-migration-completeness-vs-version-row.md)), so the position never advances past deferred or failed work.
 
-**Auto-upgrade**: `nx upgrade --auto` runs as the first SessionStart hook in the Claude Code plugin. T2 migrations apply silently on every session start. T3 upgrade steps (e.g., cross-collection projection backfill) run only via explicit `nx upgrade`.
+**Auto-upgrade**: `nx upgrade --auto` runs as the first SessionStart hook in the Claude Code plugin — T2 migrations apply silently on every session start. Long rungs and T3 upgrade steps run only via explicit `nx upgrade`.
 
-**Substrate-migration bridge (nexus-0rwwv)**: interactive `nx upgrade` (never `--auto`) also detects a pending one-time Chroma→PostgreSQL cutover and prints a banner pointing at `nx guided-upgrade`; on a real terminal it offers to chain straight into the guided migration (default No — guided keeps its own cost preview and consent prompt). Default `nx doctor` prints the same pointer, and the "endpoint is not resolvable" errors carry it too. Detection is evidence-based (legacy store present AND no configured `service_url`, no `NX_SERVICE_HOST`/`PORT`, no `pg_credentials`, no live lease); set `NX_MIGRATION_NOTICE=0` to disable.
+**How the T2 rung works**: The CLI version (`importlib.metadata.version("conexus")`) is compared against the last-seen version stored in T2 (`_nexus_version` table). Migrations tagged with versions between last-seen and current are executed. Each migration is idempotent via `PRAGMA table_info()` / `sqlite_master` guards.
 
-**Adding new migrations**: Append a `Migration("x.y.z", "description", fn)` entry to the `MIGRATIONS` list in `src/nexus/db/migrations.py`. For T3 operations, use `T3UpgradeStep`.
+**Adding new migrations**: Append a `Migration("x.y.z", "description", fn)` entry to the `MIGRATIONS` list in `src/nexus/db/migrations.py`. For T3 operations, use `T3UpgradeStep`. A new data axis becomes a ladder rung in `src/nexus/upgrade_ladder/rungs/`, registered in `registry.py` — not a new verb.
+
+### Internal upgrade primitives
+
+These verbs' only job was upgrade-cycle work the ladder now does, so they are
+**demoted**: still callable and still tested (surgical/dev use and existing
+scripts keep working), but out of `--help` and out of the story above. Nothing
+routine should need them; if you find yourself reaching for one, `nx doctor` and
+`nx upgrade` are the supported path.
+
+| Demoted verb | Its only job was | Now done by |
+|---|---|---|
+| `nx guided-upgrade` | provision + migrate | the provisioning precondition + the substrate rung |
+| `nx migrate-to-service` | the T3 substrate ETL (+ `--dry-run` pregate) | the substrate rung; preview is `nx upgrade --dry-run` |
+| `nx migration` | migration-sentinel inspect/recover | crash-recovery plumbing behind the trigger |
+| `nx migration-audit` | a forensic diagnostic | `nx doctor` is the diagnostic surface |
+| `nx collection backfill-hash` | upgrade-era `chunk_text_hash` repair | the ladder's manifest heal |
+| `nx hooks update-all` | manual managed-hook sweep | `nx upgrade` refreshes managed hooks itself |
+
+Verbs that appeared in the old upgrade graph but have a genuine **non-upgrade**
+job keep their surface — `nx collection reindex` (refresh changed content),
+`nx collection re-embed --to MODEL` (deliberately choose a different embedder),
+`nx daemon restart-stale` (covers the aspect-worker/MinerU population the process
+precondition does not touch), `nx init` (fresh install), `nx hooks install`
+(new-repo setup).
 
 ---
 
@@ -2320,187 +2377,6 @@ nx service token list [--tenant TENANT]
 ```
 
 List service tokens: 12-char id prefix, tenant, status (`active`/`expired`/`revoked`), label, expiry, and revocation time. Never prints the raw token. Use the id prefix with `nx service token revoke`.
-
-## nx guided-upgrade
-
-```
-nx guided-upgrade [--local-path PATH] [--db PATH] [--catalog-db PATH] [--service-url URL] [--timeout SECS] [--yes] [--force]
-```
-
-The **one-command upgrade from a pre-6.0 (ChromaDB) install to the service
-stack** (RDR-002). It is the recommended migration entry point — it stands up
-the service and then drives `nx migrate-to-service`, so you never hand-sequence
-provisioning + migration.
-
-Sequence: **pre-flight detect** (if there is no ChromaDB footprint to migrate it
-no-ops without provisioning) → **provision + serve** the local service (the full
-`nx init` path: Postgres + bge-768 ONNX + the native binary) — or, with
-`--service-url`, gate an already-running service → **version-pin** (`/version`
-`/version` must report a `release_version` — present from engine-service
-v0.1.6+, code floor v0.1.8; older/below-floor binaries fail closed) → **bounded
-health-gate** → **voyage-
-capability pre-flight** (if the footprint has voyage collections, the target
-service must be able to serve them — fail loud before migrating) → drive
-**`nx migrate-to-service`** (detect → ETL → validate → unlock) → advisory
-`nx doctor`.
-
-- `--service-url URL` migrates into an already-running service instead of
-  provisioning a local one; requires `NX_SERVICE_TOKEN` to be set.
-- `--timeout SECS` bounds the wait for the service to become healthy (default 120).
-- `--yes` / `-y` skips the confirmation prompt.
-- `--force` (RDR-178 Gap 7) skips already-migrated detection and re-migrates
-  every T2 store unconditionally.
-
-**PostgreSQL acquisition (6.4.0+, GH #1381):** the provision step always
-downloads the signed self-contained Postgres bundle (pgvector already
-compiled in) from the wheel's pinned engine tag (sha256 + Sigstore verified)
-and provisions from it — you do not need PostgreSQL installed, and a
-PostgreSQL you already have is never probed or used. Two exceptions only: an
-explicit `NEXUS_PG_BIN` override is honoured as-is (never downloaded over),
-and an existing cluster data directory — serving or stopped — is left
-untouched (idempotent re-run: an established install keeps whatever
-PostgreSQL created it).
-Acquisition failure (offline, no pinned tag) fails loud with the remedy; on
-≤ 6.3.x, pre-stage the bundle explicitly and re-run:
-
-```
-nx daemon service install-binary <engine-service-vX.Y.Z>   # installs binary + Postgres bundle
-nx guided-upgrade
-```
-
-A not-ready or wrong-version service **hard-fails before any migration**.
-Idempotent and safe to re-run. The **T2 (SQLite) side is a true no-op on
-re-run** (RDR-178 Gap 7): before migrating, the command consults the newest
-`<config>/migration-reports/` artifacts plus a local-SQLite freshness probe
-and skips any T2 store already covered by a clean report with no newer local
-writes — printing an `already migrated <date>, no newer local writes` line
-per skipped store. `--force` bypasses this and re-migrates every T2 store
-unconditionally. The **T3 (ChromaDB → pgvector) side is NOT yet a no-op** —
-copy-not-move leaves the ChromaDB source intact, so it is always re-detected
-and re-verified at full cost (already-migrated detection for the T3 legs is
-tracked separately, RDR-178 Wave 2). On a validation block it leaves the
-`migrated-failed` sentinel and offers a rollback command (copy-not-move;
-never auto-reverts). Operational narrative:
-[`docs/migration-runbook.md`](migration-runbook.md).
-
-## nx migrate-to-service
-
-```
-nx migrate-to-service [--dry-run] [--local-path PATH] [--db PATH] [--catalog-db PATH] [--service-url URL]
-```
-
-The lower-level Chroma-to-service migration primitive (RDR-159) that
-`nx guided-upgrade` wraps. Use `nx guided-upgrade` for the full one-command
-experience; use this directly when the service is **already provisioned and
-running** and you only need the migration step. It sequences the proven
-`nx storage migrate` primitives into one survivable command so a user never
-hand-sequences the ~8-step gauntlet.
-
-- `--dry-run` ships the read-only front half: it classifies the Chroma
-  footprint per collection (source leg × embedding model, resolved against the
-  deployment's wired embedders) and previews what would migrate — per-leg /
-  per-model counts, a coarse token + time estimate, and unsupported collections
-  flagged for re-index. It touches no data, and exits non-zero when any
-  unsupported collection is present (a real run would block on it).
-- The bare invocation runs the full flow: **detect** → **sequence** (set the
-  cross-process migration sentinel, quiesce background indexing, per-collection
-  model pre-gate, T2 `migrate all` requiring `total_failed == 0`, then T3
-  vectors for every detected leg, refusing partial-leg success) → **validate**
-  (taxonomy floor + source==target counts + manifest-orphans, no short-circuit)
-  → **unlock** on a clean verdict (clear the sentinel; serve from pgvector).
-
-On any validation block the migrated copy is left in place, reads stay
-degraded-LOUD (the `migrated-failed` sentinel stands in for a bare empty index),
-and rollback is **offered, never auto-invoked** — the Chroma source is untouched
-(copy-not-move), so `nx storage migrate vectors --rollback [--cloud]` returns
-the user to a fully-working pre-upgrade state. A fresh user with no Chroma data
-is a clean no-op. Requires `NX_SERVICE_TOKEN` and a reachable nexus-service (the
-T2 catalog ETL + manifest validation call the service). The operational
-narrative lives in [`docs/migration-runbook.md`](migration-runbook.md).
-
-## nx migration-audit
-
-```
-nx migration-audit [--local-path PATH] [--json] [--legs both|local|cloud] [--assume-voyage-key | --assume-no-voyage-key]
-```
-
-Retroactive forensic audit for the pre-guard target-name collision class
-(nexus-p9vqa, the nexus-5b9v0 follow-up). The guided upgrade now **blocks**
-any fresh run where two distinct source collections would write into the same
-pgvector target name — but a run that happened *before* that guard existed
-could hit the overlapping-chash variant of the bug SILENTLY, merging two
-collections' content under one target with no count mismatch and no error.
-This command finds that damage after the fact: it re-runs the migration's own
-classification against the retained Chroma source (copy-not-move keeps it
-intact through the deprecation window), rebuilds the historical target-name
-map with the guard's own logic, and probes each would-have-collided pgvector
-target for which sources' ids it actually holds.
-
-Strictly **read-only** on both stores. Per flagged target the verdict is one
-of: `merged` (two or more sources fully present — the silent-merge signature;
-remediate by removing/re-indexing the stale duplicate source, dropping the
-merged target, and re-migrating), `single-source` (the collision never merged
-but the other source's data is an unmigrated remainder), `never-materialized`
-(the target does not exist; the guard will block the next attempt),
-`partial` (fragments of several sources — an interrupted/retried run), or
-`indeterminate` (the target holds rows but no probed id resolved — a probe
-anomaly; re-run before trusting any verdict).
-
-Classification is voyage-key-dependent, and the historical run's key state
-may differ from today's (a local-mode migration audited after a Voyage key
-was added would classify falsely clean under today's environment). By default
-the audit therefore reconstructs the map under **both** possible histories
-and probes the union of their collision groups — sound because verdicts are
-evidence-based (what the target actually holds), so extra candidates cannot
-fabricate a `merged`. Each finding names the world(s) that produced it.
-
-- `--local-path PATH` overrides the local Chroma path (same as
-  `nx guided-upgrade`).
-- `--json` emits the machine-readable report instead of the rendered summary.
-- `--legs both|local|cloud` (default `both`) selects which retained Chroma
-  source legs to audit. Narrow only when a leg is permanently gone (e.g. a
-  retired ChromaCloud account whose credentials are now rejected) — the
-  report and JSON stay loudly partial-scope, and a `clean` verdict speaks
-  only for the audited leg(s). A rejected-credential leg fails with an
-  actionable error rather than being silently skipped, and a store whose
-  source legs are ALL absent is a hard error, never `clean`.
-- `--assume-voyage-key` / `--assume-no-voyage-key` narrows the audit to one
-  known migration history (use only when you know whether a Voyage key was
-  configured when the store migrated).
-
-Exit codes: `0` no collision groups exist; `1` flagged targets; `2` at least
-one target indeterminate. **Exit `0` does not distinguish full-scope clean
-from partial-scope clean** — automated consumers must inspect the JSON
-report's `partial_scope` / `audited_legs` fields, never the exit code or
-`clean` alone. Requires a reachable nexus-service (targets are probed via
-the same engine-floor-checked client every cloud-mode caller uses).
-
-## nx migration
-
-```
-nx migration [--clear-state] [--force]
-```
-
-Inspect or recover the cross-process migration sentinel (RDR-159). Bare `nx
-migration` prints the current phase read-only (`not-migrating`, `migrating`,
-`migrated`, or `migrated-failed`) with progress and any failure message.
-
-- `--clear-state` removes a **stranded** sentinel — the named escape hatch for a
-  CLI crash between a clean T3 copy and the UNLOCK clear, which would otherwise
-  leave every read surface banner-wrapped (`migrating`/`migrated-failed`)
-  forever. Clearing is **safe**: a resumed `nx migrate-to-service` recomputes
-  done-vs-total from live source-vs-target counts (the ETL is idempotent on
-  `(tenant, collection, chash)`), so it never trusts the stale marker. A no-op
-  when no sentinel is present.
-- `--force` is required to clear a `migrating` sentinel, which may belong to a
-  live migration in another process (clearing it drops the read-surface banner
-  mid-migration). A `migrated-failed` sentinel clears without `--force` — its
-  writer is already dead.
-
-This is distinct from re-running the migration itself: `nx migrate-to-service`
-transitions a `migrated-failed` sentinel back to `migrating` (resume); `nx
-migration --clear-state` drops it straight to `not-migrating` (abandon /
-recover).
 
 ## nx storage
 

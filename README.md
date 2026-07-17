@@ -66,19 +66,20 @@ You never choose an engine version: every conexus release is built pinned to the
 
 `nx init` provisions the bundled Postgres 17 + pgvector cluster, fetches the bge-768 ONNX model the service embeds with, starts the persistent service, and offers to register the OS autostart unit so it restarts at login/boot (prompt defaults to yes; `--yes` accepts non-interactively, `--no-autostart` starts a session supervisor only). There is **no** separate `nx daemon t2 install` step — T2 (notes/plans) is served by the same service in the default config. The permanent vector store (T3) serves through this native service; the bundled binary + Postgres are cosign-verified and acquired automatically. `nx init` is idempotent — safe to re-run. (The older `nx init --service` flag still works but is deprecated — plain `nx init` is the path now.) **First run only:** this downloads a few hundred MB (the signed ~134 MB service binary, the relocatable Postgres bundle, and the ~140 MB bge-768 model) and takes a few minutes; subsequent starts are fast.
 
-> **Upgrading from a pre-6.0 install?** 6.0 moves the permanent vector store from ChromaDB to the Postgres + pgvector service. After `uv tool upgrade conexus`, run **`nx guided-upgrade`** — one command detects your existing store, provisions and version-pins the service (installing the self-contained Postgres bundle — no Homebrew/apt PostgreSQL needed), and migrates your data with validation and copy-not-move rollback safety. Your ChromaDB data is left intact as the migration source.
-
 The `nx` CLI provides direct access to all storage tiers, indexing, search, the catalog, and taxonomy. See [Getting Started](https://github.com/Hellblazer/nexus/blob/main/docs/getting-started.md) for a walkthrough, [CLI Reference](https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md) for every command and flag.
 
 ## Updating
 
 ```bash
-uv tool upgrade conexus                  # upgrade the nx CLI — PRESERVES your extras (e.g. [local])
+uv tool upgrade conexus                  # 1. update the code — PRESERVES your extras (e.g. [local])
+nx upgrade                               # 2. converge the data
 ```
+
+Upgrading nexus is: update the code, then run `nx upgrade`. That single trigger converges everything else — it brings the package, engine, and process preconditions current, then walks one ordered ladder that auto-applies whichever data migrations your install actually needs (T2 schema, the ChromaDB → Postgres+pgvector substrate move, pre-RDR-108 chunk identity, embedder era), each rung detecting, converging, and verifying before it records completion, resumable and idempotent, with your existing store left byte-untouched as a rollback target. There is nothing to sequence by hand and no era to know: `nx doctor` reports pending rungs read-only, `nx upgrade` walks them, and an install that has been dormant for a year converges the same way a current one no-ops. You are asked to decide only what the product cannot derive for you — **billed re-embedding** (a cost preview before anything charges; silent when nothing bills — pass `--yes` or set `NX_ASSUME_YES=1` to pre-approve it for an unattended run), a **source collection that has vanished** (re-acquire or drop: the walk defers rather than guessing), and **rollback**, which is always yours to invoke and never automatic.
 
 **Always upgrade with `uv tool upgrade conexus`.** It retains the spec you installed with, so a `[local]` install stays a `[local]` install. **Do not** upgrade with `uv tool install conexus --force` / `uv tool install conexus` — that *resets* the install and **drops `[local]`**, silently downgrading your embedder from 768-dim to 384-dim. With existing 768-dim collections that produces a dimension mismatch and search returns nothing. If you hit that, reinstall the extra: `uv tool install --reinstall "conexus[local]"`.
 
-When you update the **Claude Code plugin** (`/plugin update`), upgrade the CLI to the matching version at the same time so the two stay in lockstep.
+When you update the **Claude Code plugin** (`/plugin update`), run **both** upgrade steps above (`uv tool upgrade conexus` then `nx upgrade`) so the CLI stays in lockstep with the plugin version.
 
 ### Something broken?
 
