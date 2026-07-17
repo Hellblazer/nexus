@@ -344,12 +344,53 @@ def _leg_can_bill(target_collection: str) -> bool:
     return _declared_model(target_collection) in _VOYAGE_MODELS
 
 
+class UnconsentedReembed(RuntimeError):
+    """A passthrough leg discovered IN FLIGHT that it must bill (nexus-92vz5).
+
+    The plan promised this leg costs nothing — that is WHY it is a passthrough:
+    ``needs_reembed`` False, so ``billed`` False, so the cost gate never asked.
+    Then the scrub found a chunk whose recorded provenance disagrees with the
+    target's declared model and had to drop its vector; ``run_batched_etl``
+    attaches embeddings only if EVERY chunk in the batch still has one, so that
+    single drop makes the service re-embed the whole batch — against a billed
+    model, with nobody having consented.
+
+    Raised, not warned. Spending a user's money without asking is the failure
+    the whole consent gate exists to prevent, and this is that failure arriving
+    by a side door. The neighbours in this file already settled the principle:
+    the cascade raises rather than record half-applied identity, and the
+    credential gate refuses to let an unmigratable collection vanish.
+    """
+
+
 def _provenance_scrub(target_collection: str):
     """nexus-bfdri mismatch-only provenance check as a batch transform: drop
     the stored vector ONLY when recorded provenance is present and disagrees
     with the target name's declared model segment. Non-conformant target
-    names (no declared model) trust all vectors."""
+    names (no declared model) trust all vectors.
+
+    REFUSES rather than drops when the drop would bill (nexus-92vz5, found by
+    the substantive critic). The plan-time predicate cannot know whether a
+    collection's provenance matches its own name — ``measured_dim`` is not
+    probed for legacy collections — and an earlier draft used that to license
+    silence. But the argument is plan-time and this is RUN time: here every
+    input is present. ``declared`` is known, ``prov`` is in the chunk, the drop
+    is happening, and this transform is installed ONLY on passthrough legs —
+    the ones whose plan said ``billed=False``. A drop on a billed-target
+    passthrough leg IS that promise being falsified in flight, and it is
+    detectable with no new plan input and no new knob.
+
+    Standing consent still authorizes it: a user who ran ``nx upgrade --yes``
+    has said yes to a billed re-embed, and this is one. Read at call time, the
+    same channel the gate uses — one mechanism, not a second to drift.
+
+    Never fires on a healthy install: matching provenance does not drop, absent
+    provenance is trusted, and a bge-declared target cannot bill. It fires on
+    exactly the mislabeled (bfdri) class, which is the class that would
+    otherwise be billed in silence.
+    """
     declared = _declared_model(target_collection)
+    billed_target = _leg_can_bill(target_collection)
 
     def scrub(batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if declared is None:
@@ -359,6 +400,18 @@ def _provenance_scrub(target_collection: str):
         for chunk in batch:
             prov = (chunk.get("metadata") or {}).get("embedding_model")
             if prov and prov != declared and chunk.get("embedding") is not None:
+                if billed_target and not assume_yes():
+                    raise UnconsentedReembed(
+                        f"collection {target_collection!r} declares model "
+                        f"{declared!r} but holds chunks recorded as {prov!r}, so "
+                        "migrating it re-embeds against a BILLED Voyage model — "
+                        "which this walk never asked you about, because a "
+                        "re-identification alone was expected to cost nothing. "
+                        "Re-run with `nx upgrade --yes` (or NX_ASSUME_YES=1) to "
+                        "authorize the spend, or re-index the collection from "
+                        "source so its content and its name agree. Nothing was "
+                        "billed and nothing was recorded."
+                    )
                 chunk = dict(chunk)
                 chunk.pop("embedding", None)
             out.append(chunk)
@@ -841,9 +894,18 @@ def _has_terminal() -> bool:
 
     try:
         return bool(sys.stdin) and sys.stdin.isatty()
-    except (AttributeError, ValueError):
-        # Detached or closed stdin (pytest capture, a daemon, a closed fd):
-        # no terminal. isatty() raises ValueError on a closed file.
+    except (AttributeError, ValueError, OSError):
+        # Detached, closed, or OS-level-invalid stdin: no terminal.
+        #   AttributeError — sys.stdin replaced by something without isatty
+        #   ValueError     — closed file (also io.UnsupportedOperation)
+        #   OSError        — EBADF: fd 0 closed at the OS level, the shape a
+        #                    daemon actually has. Without it, isatty() RAISES
+        #                    through this gate, converge() raises, and the
+        #                    runner reports FAILED rather than DEFERRED —
+        #                    exit 1 with an empty reason, which is the precise
+        #                    failure this function exists to prevent, one
+        #                    exception class wider (code review, 2026-07-17).
+        # Answering "is anyone there" must never itself throw.
         return False
 
 

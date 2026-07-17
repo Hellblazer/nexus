@@ -690,9 +690,43 @@ def test_standing_consent_lets_a_billed_walk_converge_unattended(
     — trading a silent bill for a silent hang, for exactly the ancient install
     SC-1 promises reaches current UNATTENDED. NX_ASSUME_YES is standing consent;
     the RDR's ## Constraints now enumerate the billed re-embed as the third
-    genuine decision, and a permitted prompt must have an unattended channel."""
+    genuine decision, and a permitted prompt must have an unattended channel.
+
+    NO TERMINAL — that is the condition the name claims, and it must be the
+    condition the test creates. An earlier draft used `_spy_confirm`, which
+    forces `_has_terminal() -> True`, so it proved standing consent works with a
+    human present: true, and the opposite of unattended. The property is real
+    because the gate checks `assume_yes()` BEFORE `_has_terminal()`; this pin is
+    what makes that ORDER load-bearing rather than incidental. Swap the two and
+    an unattended keyed install stops converging — silently, at exit 0.
+    (Sixth vacuous pin of this arc, same species as the other five: written from
+    the story rather than from the code.)"""
+    import click
+
     plan = SubstratePlan(legs=[_billed_leg()])
-    asked = _spy_confirm(monkeypatch)
+    monkeypatch.setattr(mod, "_has_terminal", lambda: False)
+
+    def _must_not_ask(*_a: object, **_kw: object) -> bool:
+        raise AssertionError("asked a question no unattended caller can answer")
+
+    monkeypatch.setattr(click, "confirm", _must_not_ask)
+
+    monkeypatch.setenv("NX_ASSUME_YES", "1")
+    assert _default_cost_gate(plan) is True  # converges, with nobody there
+
+    # Non-vacuity: the SAME no-terminal plan declines without standing consent,
+    # so the assertion above turns on the consent and not on the plan.
+    monkeypatch.delenv("NX_ASSUME_YES")
+    assert _default_cost_gate(plan) is False
+
+
+def test_standing_consent_short_circuits_the_prompt_even_with_a_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The attended half, kept separate so each says which world it is in: a
+    user who already consented via the flag is not asked again."""
+    plan = SubstratePlan(legs=[_billed_leg()])
+    asked = _spy_confirm(monkeypatch)  # forces a terminal
 
     monkeypatch.setenv("NX_ASSUME_YES", "1")
     assert _default_cost_gate(plan) is True
@@ -728,6 +762,44 @@ def test_no_terminal_declines_the_bill_without_ever_asking(
 
     monkeypatch.setattr(click, "confirm", _must_not_ask)
     assert _default_cost_gate(plan) is False  # declined, NOT raised
+
+
+def test_has_terminal_never_raises_whatever_stdin_is(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Asking "is anyone there" must not itself throw. Every shape a real
+    unattended caller presents answers False rather than raising — the OSError
+    case especially: a daemon with fd 0 closed at the OS level raises EBADF from
+    isatty(), which would escape the gate, make converge() raise, and land the
+    runner on FAILED instead of DEFERRED — exit 1 with an empty reason, the
+    exact failure this gate exists to prevent (code review, 2026-07-17)."""
+    import io
+
+    class _EbadfStdin:
+        def isatty(self) -> bool:
+            raise OSError(9, "Bad file descriptor")
+
+    class _NoIsatty:
+        pass
+
+    closed = io.StringIO()
+    closed.close()
+
+    for stub in (None, closed, _EbadfStdin(), _NoIsatty()):
+        monkeypatch.setattr("sys.stdin", stub)
+        assert mod._has_terminal() is False
+
+    # Non-vacuity: the REAL body must also be able to answer True, or every
+    # assertion above passes on a function that returns False unconditionally —
+    # and "False" is "decline", which is permanent silent DEFER. This is the one
+    # function in the gate whose failure mode IS this arc's signature, and its
+    # bare except would swallow a typo in `isatty` into exactly that.
+    class _Tty:
+        def isatty(self) -> bool:
+            return True
+
+    monkeypatch.setattr("sys.stdin", _Tty())
+    assert mod._has_terminal() is True
 
 
 def test_ctrl_c_at_the_prompt_is_not_a_decline(
@@ -809,7 +881,9 @@ def test_planner_marks_only_the_voyage_targeted_leg_as_billed() -> None:
     assert to_bge.billed_reembed is False
 
 
-def test_sc1s_own_shape_converges_with_nothing_to_consent_to() -> None:
+def test_sc1s_own_shape_converges_with_nothing_to_consent_to(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """SC-1 + SC-2 together, on the install that motivated the whole RDR: an
     ancient voyage-keyed instance whose collections carry pre-RDR-108 ids.
     SC-2: "Zero re-embedding ... for pure id-scheme conformance". So the leg
@@ -833,6 +907,14 @@ def test_sc1s_own_shape_converges_with_nothing_to_consent_to() -> None:
     assert leg.needs_reembed is False      # ...and the vectors ride along free
     assert leg.billed is False             # so there is nothing to consent to
     assert plan.billed_reembed is False
+
+    # ...and the property the NAME claims: it converges with nobody there. The
+    # plan booleans are only the input to that chain; the Critical this pins was
+    # the composite (billed -> gate -> DEFER at exit 0), so the gate itself must
+    # be asked (substantive critic, 2026-07-17).
+    monkeypatch.setattr(mod, "_has_terminal", lambda: False)
+    monkeypatch.delenv("NX_ASSUME_YES", raising=False)
+    assert _default_cost_gate(plan) is True  # nothing to consent to => proceed
 
 
 def test_credential_gated_survives_the_converged_filter() -> None:

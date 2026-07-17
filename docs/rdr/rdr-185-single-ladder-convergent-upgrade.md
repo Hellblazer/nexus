@@ -125,9 +125,18 @@ check and package upgrade.
     belonged here from the start.
   - **A permitted prompt must have an unattended channel**, or it
     contradicts SC-1. `nx upgrade --yes` / `NX_ASSUME_YES=1` is standing
-    consent for the billed re-embed; with neither, `click.confirm` aborts
-    on a non-TTY rather than billing. Source-gone and rollback need no
-    channel: they DEFER (non-fatal, re-derived next run) instead of asking.
+    consent for the billed re-embed; with neither, a non-TTY DECLINES
+    rather than billing (the walk defers, non-fatal, and re-derives next
+    run). Source-gone and rollback need no channel: they DEFER instead of
+    asking. Standing consent is checked BEFORE the terminal, or an
+    unattended install that consented would decline anyway.
+    - *Prose corrected 2026-07-17*: this said "`click.confirm` aborts on a
+      non-TTY rather than billing", describing a mechanism now retired.
+      Catching that abort was wrong in both directions — `click.confirm`
+      raises the same `Abort` for `KeyboardInterrupt`, so it also swallowed
+      Ctrl-C into a clean exit-0 deferral. The terminal question is now
+      settled BEFORE asking, so the prompt is never reached unattended and
+      an interrupt still means what click means by it.
 - Applies across local, service, and managed-cloud modes; a mode where a
   rung is N/A detects-and-skips (the f0pmd version-gate pattern: detect →
   current? skip → converge → verify).

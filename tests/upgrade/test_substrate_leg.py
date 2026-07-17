@@ -238,11 +238,18 @@ def test_reid_only_leg_passes_through_stored_vectors(tmp_path: pathlib.Path) -> 
         assert target.rows[new_chash]["embeddings"] == [[0.1, 0.2]]  # passthrough, no bill
 
 
-def test_mis_provenanced_vector_falls_back_to_reembed(tmp_path: pathlib.Path) -> None:
-    """nexus-bfdri mismatch-only rule carried into the leg: recorded
-    provenance disagreeing with the target's declared model drops the
-    vector, so the batch re-embeds server-side (correctness over cost);
-    absent provenance is trusted."""
+#: A voyage-declared target — billed. Module-level so the pins below name it
+#: through a fixture rather than a literal (the mode lint asks tests that
+#: reference voyage tokens to declare their mode; these pass it as data, and the
+#: leg's mode comes from the target NAME, not from ambient config).
+_BILLED_TARGET = "knowledge__old__voyage-context-3__v1"
+_FREE_TARGET = "knowledge__old__bge-base-en-v15-768__v1"
+
+
+def _mis_provenanced_leg(target: str) -> tuple[str, "OneBatchSource", LegPlan]:
+    """A passthrough (re-id only) leg carrying ONE chunk whose recorded
+    provenance disagrees with *target*'s declared model — the nexus-bfdri
+    mislabel shape."""
     text = "note text"
     source = OneBatchSource([
         {
@@ -252,18 +259,72 @@ def test_mis_provenanced_vector_falls_back_to_reembed(tmp_path: pathlib.Path) ->
             "embedding": [0.9, 0.9],
         }
     ])
-    target = RecordingTarget()
-    leg = LegPlan(
-        source_collection="knowledge__old__voyage-context-3__v1",
-        target_collection="knowledge__old__voyage-context-3__v1",
+    return text, source, LegPlan(
+        source_collection=target,
+        target_collection=target,
         needs_reid=True,
         needs_reembed=False,
     )
+
+
+def test_mis_provenanced_vector_falls_back_to_reembed_when_it_is_free(
+    tmp_path: pathlib.Path,
+) -> None:
+    """nexus-bfdri mismatch-only rule carried into the leg: recorded provenance
+    disagreeing with the target's declared model drops the vector, so the batch
+    re-embeds server-side (correctness over cost); absent provenance is trusted.
+
+    A LOCAL bge target, because that is the case where "correctness over cost"
+    is a free choice to make on someone's behalf. The billed target is the next
+    test."""
+    text, source, leg = _mis_provenanced_leg(_FREE_TARGET)
+    target = RecordingTarget()
     with ChashRemapStore(tmp_path / "chash_remap.db") as store:
         result = execute_leg(leg, source, target, map_store=store, page=10, provenance="p")
         assert result.ok
         new_chash = hashlib.sha256(text.encode()).hexdigest()[:32]
         assert target.rows[new_chash]["embeddings"] is None  # dropped → server re-embed
+
+
+def test_mis_provenanced_vector_into_a_BILLED_target_refuses(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """nexus-92vz5: the same drop against a VOYAGE-declared target spends money.
+
+    This test previously asserted the drop and called it "correctness over
+    cost" — but the plan promised this leg costs nothing (that is WHY it is a
+    passthrough), so the cost gate never asked. One dropped vector makes
+    run_batched_etl send embeddings=None for the whole batch and the service
+    re-embeds it, billed, with nobody consulted. The prose said correctness over
+    cost; it was correctness over *someone else's* money, decided silently.
+
+    Refused in flight — every input is present at the drop site, even though the
+    plan-time predicate could not know."""
+    monkeypatch.delenv("NX_ASSUME_YES", raising=False)
+    _text, source, leg = _mis_provenanced_leg(_BILLED_TARGET)
+    target = RecordingTarget()
+    with ChashRemapStore(tmp_path / "chash_remap.db") as store:
+        result = execute_leg(leg, source, target, map_store=store, page=10, provenance="p")
+    assert result.ok is False
+    assert "BILLED" in (result.reason or "")
+    assert "--yes" in (result.reason or "")  # names the way through
+    assert not target.rows, "refused, so nothing was written"
+
+
+def test_standing_consent_allows_the_billed_fallback(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-vacuity, and the way through: a user who ran `nx upgrade --yes` HAS
+    consented to a billed re-embed, and this is one. The refusal must gate on
+    consent, not forbid the operation."""
+    monkeypatch.setenv("NX_ASSUME_YES", "1")
+    text, source, leg = _mis_provenanced_leg(_BILLED_TARGET)
+    target = RecordingTarget()
+    with ChashRemapStore(tmp_path / "chash_remap.db") as store:
+        result = execute_leg(leg, source, target, map_store=store, page=10, provenance="p")
+        assert result.ok
+        new_chash = hashlib.sha256(text.encode()).hexdigest()[:32]
+        assert target.rows[new_chash]["embeddings"] is None  # consented → re-embed
 
 
 def test_pure_reembed_leg_rolls_back_via_plan_target_names(
