@@ -52,22 +52,38 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SANDBOX="$HOME/nexus-upgrade-sandbox"
 FAKE_REPO="$SANDBOX/fakerepo"
 
+# _print_help — inline, NOT a re-invocation of "$0" (RDR-184 P0.2,
+# code-review CRITICAL-2 fix). The pre-existing code called `"$0" --help`
+# as a subprocess whenever MODE was anything other than "reset"/"run" —
+# including MODE="help", the DEFAULT when no args are given at all. Since
+# the child's own MODE becomes "--help" (consumed as the mode positional,
+# never reaching the arg-parsing while loop's `--help|-h` case below, which
+# only fires for a SUBSEQUENT option), the child ALSO hit "MODE != reset/
+# run" and re-invoked "$0" --help again — unbounded recursion on a bare
+# no-arg invocation, entirely pre-existing and independent of the lock (a
+# background verification run of this exact bug spawned 100+ live
+# processes before being force-killed; do not re-run a bare invocation of
+# the unfixed script). Extracting the usage text into a plain shell
+# function (mirroring release-sandbox.sh's `_print_help`) prints it
+# in-process with no subprocess and no recursion.
+_print_help() {
+    printf '%s\n' \
+        "Usage: $0 <mode> [--from-version X.Y.Z]" \
+        "" \
+        "Modes:" \
+        "  run    Full upgrade-shakeout sequence" \
+        "  reset  Remove sandbox HOME without running" \
+        "" \
+        "Defaults:" \
+        "  --from-version <latest stable on PyPI>"
+}
+
 MODE="${1:-help}"; shift || true
 FROM_VERSION=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --from-version) FROM_VERSION="$2"; shift 2 ;;
-        --help|-h)
-            printf '%s\n' \
-                "Usage: $0 <mode> [--from-version X.Y.Z]" \
-                "" \
-                "Modes:" \
-                "  run    Full upgrade-shakeout sequence" \
-                "  reset  Remove sandbox HOME without running" \
-                "" \
-                "Defaults:" \
-                "  --from-version <latest stable on PyPI>"
-            exit 0 ;;
+        --help|-h) _print_help; exit 0 ;;
         *) echo "ERROR: unknown arg $1" >&2; exit 2 ;;
     esac
 done
@@ -76,15 +92,58 @@ _die() { echo "FAIL: $*" >&2; exit 1; }
 _pass() { echo "  ✓ $*"; }
 _step() { echo; echo "── $* ──"; }
 
+# Help/usage dispatch BEFORE the lock (RDR-184 P0.2, code-review CRITICAL-2
+# fix): neither "help" (the default MODE when no args are given at all) nor
+# any garbage MODE touches $SANDBOX, so neither needs the lock. This MUST
+# stay ahead of lock_acquire below — the original placement had this branch
+# AFTER the lock, so a bare no-arg invocation would acquire the lock, THEN
+# re-invoke `"$0" --help` as a CHILD process that tried to acquire the SAME
+# lock its own parent was still holding. The child's lock_acquire failed
+# against its own parent, and under `set -e` that failure aborted the
+# parent before it ever reached its `exit 0` — a bare `./upgrade-shakeout.sh`
+# exited 1 with a lock-contention error instead of printing help. Calling
+# _print_help directly (not `"$0" --help`, which is what ALSO caused the
+# pre-existing unbounded recursion noted above _print_help's definition)
+# means this path is not just lock-free but subprocess-free. Only "reset"
+# and "run" mutate $SANDBOX and reach the lock below; every other MODE
+# exits right here.
+if [[ "$MODE" != "reset" && "$MODE" != "run" ]]; then
+    _print_help; exit 0
+fi
+
+# RDR-184 P0.2 (nexus-ccs9v.2): serialize on the machine-global fixed
+# resource this harness mutates — $HOME/nexus-upgrade-sandbox. Shared by
+# BOTH the "reset" branch just below and the "run" body further down (both
+# mutate $SANDBOX) — reached only once the guard above has confirmed MODE
+# is one of those two. Lock dir is a HARD-CODED /tmp path, deliberately NOT
+# ${TMPDIR:-/tmp} (code-review SIGNIFICANT fix): on darwin, an interactive
+# shell's TMPDIR is a per-user /var/folders/... path while a LaunchAgent/CI/
+# stripped-env invocation sees plain /tmp — two different invocation
+# contexts would silently compute DIFFERENT lockdirs and never contend,
+# defeating the whole point of a machine-global guard (this repo runs
+# LaunchAgents that could race an interactive run). /tmp is always the same
+# path across every context on the same host.
+# shellcheck source=./lib/lock.sh disable=SC1091
+source "$SCRIPT_DIR/lib/lock.sh"
+LOCKDIR="/tmp/nexus-e2e-locks/upgrade-shakeout.lock"
+mkdir -p "$(dirname "$LOCKDIR")"
+lock_acquire "$LOCKDIR" || exit 1
+trap 'lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
+echo "[rdr-184] lock acquired: $LOCKDIR (pid $$)" >&2
+# Test seam (RDR-184 P0.2, nexus-ccs9v.2): tests/e2e/lib/harness_lock_test.sh
+# sets this to prove a concurrent invocation gets PAST the lock without ever
+# running this harness's real body (uv tool install / sandbox rm -rf). No-op
+# — unset in every normal invocation.
+[[ -n "${NX_E2E_LOCK_SELFTEST:-}" ]] && exit 0
+
 if [[ "$MODE" == "reset" ]]; then
     [[ -d "$SANDBOX" ]] && rm -rf "$SANDBOX"
     echo "Sandbox removed."
     exit 0
 fi
 
-if [[ "$MODE" != "run" ]]; then
-    "$0" --help; exit 0
-fi
+# MODE == "run" — guaranteed by the guard above (every other value exited
+# already, lock-free); no redundant re-check needed here.
 
 # Resolve FROM_VERSION default — latest stable on PyPI.
 if [[ -z "$FROM_VERSION" ]]; then

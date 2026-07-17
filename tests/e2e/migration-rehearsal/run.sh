@@ -18,6 +18,11 @@
 # inside the box by nx itself.
 set -euo pipefail
 
+# Captured BEFORE the `cd` below so it is robust to the invocation cwd (RDR-184
+# P0.2, nexus-ccs9v.2): BASH_SOURCE is relative to wherever this script was
+# invoked FROM, not the repo root the next line cd's into.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 cd "$(git rev-parse --show-toplevel)"
 HERE="tests/e2e/migration-rehearsal"
 IMAGE="nexus-migration-rehearsal"
@@ -163,6 +168,44 @@ trap '_guided_restore' EXIT
   exit 2
 }
 
+# RDR-184 P0.2 (nexus-ccs9v.2): serialize on the machine-global fixed
+# resources this harness mutates — the fixed docker tag ($IMAGE) and the
+# shared dist/ wheel output (the near-miss that motivated this bead: two
+# concurrent rehearsals racing the same wheel/image). The lock dir lives
+# under a stable machine-global temp root, NOT under this checkout — the
+# resource being serialized (one docker daemon, one dist/ per host) is
+# machine-global, so two different checkouts on the same host must still
+# serialize against each other. Acquired here, after arg parsing/validation
+# (usage errors don't need the lock) but strictly before the first mutation
+# (the --guided release.properties stamp just below). Lock dir is a
+# HARD-CODED /tmp path, deliberately NOT ${TMPDIR:-/tmp} (code-review
+# SIGNIFICANT fix): on darwin, an interactive shell's TMPDIR is a per-user
+# /var/folders/... path while a LaunchAgent/CI/stripped-env invocation sees
+# plain /tmp — two different invocation contexts would silently compute
+# DIFFERENT lockdirs and never contend, defeating the whole point of a
+# machine-global guard (this repo runs LaunchAgents that could race an
+# interactive run). /tmp is always the same path across every context on
+# the same host.
+# shellcheck source=../lib/lock.sh disable=SC1091
+source "$SCRIPT_DIR/../lib/lock.sh"
+LOCKDIR="/tmp/nexus-e2e-locks/migration-rehearsal.lock"
+mkdir -p "$(dirname "$LOCKDIR")"
+lock_acquire "$LOCKDIR" || exit 1
+# Code-review CRITICAL fix: the trap installed at the top of the script
+# (before LOCKDIR existed) referenced $LOCKDIR unconditionally — any of the
+# 12 argument-conflict guards ABOVE this point firing `exit 2` would invoke
+# that trap under `set -u` with $LOCKDIR unbound, aborting on the trap's own
+# evaluation instead of the documented exit 2. LOCKDIR cannot be referenced
+# by a trap before this line, where it is first assigned — reassign the
+# trap to the lock-aware form only now that it is safe to do so.
+trap '_guided_restore; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
+echo "[rdr-184] lock acquired: $LOCKDIR (pid $$)" >&2
+# Test seam (RDR-184 P0.2, nexus-ccs9v.2): tests/e2e/lib/harness_lock_test.sh
+# sets this to prove a concurrent invocation gets PAST the lock without ever
+# running this harness's real body (wheel build / native build / docker).
+# No-op — unset in every normal invocation.
+[[ -n "${NX_E2E_LOCK_SELFTEST:-}" ]] && exit 0
+
 if [ "$GUIDED" = 1 ]; then
   # --guided force-rebuilds the native binary with the stamp baked in, so it is
   # incompatible with --no-build (which would reuse a stale/unstamped binary).
@@ -251,7 +294,7 @@ echo "[stage] Staging a minimal build context + building image (COLD=$COLD HOLE_
 # repo .dockerignore excludes dist/, and the inputs live in three different
 # trees — staging sidesteps both without touching the shared .dockerignore.
 STAGE="$(mktemp -d)"
-trap '_guided_restore; rm -rf "$STAGE"' EXIT
+trap '_guided_restore; rm -rf "$STAGE"; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
 cp "$(ls -t dist/conexus-*.whl | head -1)"            "$STAGE/"   # keep real PEP 427 name
 if [ "$ERA_HOP" = 1 ]; then
   # nexus-n7u38.30: same posture as --package-upgrade (working-tree wheel in its
@@ -314,7 +357,7 @@ DCFG="$HOME/.docker/config.json"
 if [ -f "$DCFG" ] && grep -q '"credsStore"' "$DCFG"; then
   cp "$DCFG" "$STAGE/.docker-config.bak"
   python3 -c "import json,os;p=os.path.expanduser('~/.docker/config.json');d=json.load(open(p));d.pop('credsStore',None);json.dump(d,open(p,'w'),indent=2)"
-  trap '_guided_restore; cp "$STAGE/.docker-config.bak" "$DCFG"; rm -rf "$STAGE"' EXIT
+  trap '_guided_restore; cp "$STAGE/.docker-config.bak" "$DCFG"; rm -rf "$STAGE"; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
   echo "      (temporarily stripped credsStore from ~/.docker/config.json — restored on exit)"
 fi
 
