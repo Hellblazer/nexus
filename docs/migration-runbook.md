@@ -266,6 +266,12 @@ nx storage migrate vectors --cloud --dry-run    # cloud leg, count only
 nx storage migrate vectors --cloud              # ChromaCloud leg
 ```
 
+> **The `--cloud` leg is retired history (2026-07-17).** Chroma *Cloud* as a
+> migration origin has no remaining population — the sole install that ever had
+> one completed its migration in 2026-06. The commands stay documented because
+> this runbook records how that migration was run; do not treat them as live
+> guidance. New migrations have exactly one leg: the local store.
+
 Run BOTH legs, separately: "an ETL with only one leg is a silent
 half-migration" (`vector_etl.py` module docstring). Chunk text, chash, and
 metadata transfer byte-verbatim; the service re-embeds server-side

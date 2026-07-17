@@ -111,9 +111,12 @@ Moving an *already-on-pgvector* local-service install to the managed service
 (pgvector → managed, a cross-deployment data move) is **not supported** — there
 is no `pg_dump`/restore path across deployments in `nx`, and the substrate
 rung's ETL source is always Chroma. The only supported migration origin is a
-**legacy Chroma install** (a local `PersistentClient` store and/or Chroma
-Cloud); a local-service install has no Chroma footprint, so the rung is N/A and
-`nx upgrade` reports nothing to converge. The pgvector→managed path is tracked
+**local legacy Chroma install** (a `PersistentClient` store on disk); a
+local-service install has no Chroma footprint, so the rung is N/A and
+`nx upgrade` reports nothing to converge. Chroma *Cloud* as a migration origin
+is retired: the sole install that ever had one completed its migration in
+2026-06, and no supported population remains (decision 2026-07-17; the
+remaining read-leg code leaves with the migration module at RDR-155 P4b). The pgvector→managed path is tracked
 as a documented follow-on (nexus-wm3t5); for now, a pgvector-local user who
 wants managed re-indexes from source against the managed endpoint.
 
