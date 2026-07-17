@@ -41,11 +41,15 @@ money — the walk defers before it would need any of them.
 """
 from __future__ import annotations
 
+import os
 import pathlib
 import subprocess
 import sys
 
+import chromadb
 import pytest
+
+from nexus.catalog.catalog_db import CatalogDB
 
 _LEGACY_COLLECTION = "knowledge__gate__minilm-l6-v2-384__v1"
 
@@ -57,8 +61,6 @@ def _seed_billable_footprint(chroma_path: pathlib.Path) -> None:
     shape that reaches the cost gate: ``needs_reembed`` True (minilm is wired by
     nothing) and the target's declared model is billed.
     """
-    import chromadb
-
     client = chromadb.PersistentClient(path=str(chroma_path))
     coll = client.create_collection(_LEGACY_COLLECTION)
     coll.add(
@@ -96,8 +98,6 @@ def _billable_install(tmp_path: pathlib.Path) -> dict[str, str]:
     Isolated by NEXUS_CONFIG_DIR + NX_LOCAL_CHROMA_PATH — this must never touch
     the developer's real install (feedback_dont_break_live_nexus_install).
     """
-    import os
-
     chroma = tmp_path / "chroma"
     _seed_billable_footprint(chroma)
     config_dir = tmp_path / "cfg"
@@ -107,8 +107,6 @@ def _billable_install(tmp_path: pathlib.Path) -> dict[str, str]:
     # — the substrate rung would never be reached and this gate would pass while
     # testing nothing. Found by the non-vacuity test below, which is why it is
     # here.
-    from nexus.catalog.catalog_db import CatalogDB
-
     CatalogDB(config_dir / "catalog" / ".catalog.db").close()
 
     env = dict(os.environ)
@@ -152,14 +150,21 @@ def test_a_billed_walk_defers_unattended_instead_of_crashing_or_hanging(
 
     assert proc.returncode == 0, f"an unattended billed walk must not fail:\n{out}"
 
-    # The line the USER reads — `Upgrade ladder: rung '...' deferred — <detail>`.
-    # Asserted on that line specifically, NOT on the whole output: the cost
-    # gate's structlog WARNING also names `--yes`, so a whole-output search
-    # passes while the user-facing message says nothing useful. Falsification
-    # caught exactly that — stripping the channel from the deferral left this
-    # test green via the log line (the seventh vacuous pin of this arc).
-    deferrals = [ln for ln in out.splitlines() if "deferred" in ln.lower() and "rung" in ln]
-    assert deferrals, f"the walk must SAY it deferred, to the user:\n{out}"
+    # The line the USER reads — the `click.echo` at upgrade.py's deferred-only
+    # branch — selected by STREAM and PREFIX, not grepped out of a merged blob.
+    # Two drafts of this assertion were vacuous, one commit apart, for the same
+    # reason: `--yes` also rides structlog WARNINGS (`substrate_cost_gate_
+    # declined_no_tty`, then `ladder_rung_deferred`, which embeds the identical
+    # detail), so any stdout+stderr search is backstopped by a log line nobody
+    # reads. structlog goes to STDERR; the echo goes to STDOUT with a fixed
+    # prefix. Asserting on a surface means selecting the stream and the prefix
+    # (pins seven AND eight of this arc — the second found by mutating the echo
+    # alone, which left the merged-blob version green via the stderr log).
+    deferrals = [
+        ln for ln in proc.stdout.splitlines()
+        if ln.startswith("Upgrade ladder: rung ") and "deferred" in ln
+    ]
+    assert deferrals, f"the walk must SAY it deferred, to the user, on stdout:\n{out}"
     said = "\n".join(deferrals)
     assert "--yes" in said or "NX_ASSUME_YES" in said, (
         f"the deferral the user reads must name the consent channel:\n{said}"
@@ -173,5 +178,16 @@ def test_the_deferral_is_not_a_no_op_report(
     skipped the footprint and reported 'deferred' about something else. Without
     this, a walk that saw no collections at all would satisfy the test above."""
     proc = _run_upgrade(_billable_install, "--dry-run")
-    out = (proc.stdout + proc.stderr).lower()
-    assert "substrate-etl" in out, f"the substrate rung never engaged:\n{out}"
+    # Same stream-and-prefix discipline as the deferral assertion: the dry-run
+    # pending line is a click.echo on STDOUT, and its pending_detail NAMES the
+    # collections the planner gave legs. Asserting the seeded collection by
+    # name proves the BILLED leg specifically was planned — "substrate-etl
+    # appeared somewhere" would also match the stderr structlog stream.
+    pending = [
+        ln for ln in proc.stdout.splitlines()
+        if ln.startswith("Upgrade ladder: rung 'substrate-etl'") and "pending" in ln
+    ]
+    assert pending, f"the substrate rung never engaged:\n{proc.stdout}\n{proc.stderr}"
+    assert _LEGACY_COLLECTION in "\n".join(pending), (
+        f"the seeded billable collection was never planned:\n{pending}"
+    )
