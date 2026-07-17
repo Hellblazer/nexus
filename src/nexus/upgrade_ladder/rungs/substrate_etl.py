@@ -503,7 +503,7 @@ class SubstrateEtlRung:
     ) -> tuple[list[Any], list[Any]]:
         from nexus.config import default_db_path  # noqa: PLC0415 — deferred to avoid import cycle
         from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid import cycle
-        from nexus.migration.chroma_read import open_read_legs  # noqa: PLC0415 — deferred; RDR-176 read leg
+        from nexus.migration.detection import open_read_legs  # noqa: PLC0415 — deferred; RDR-176 read leg
         from nexus.migration.etl_ports import ChromaReadSource, VectorServiceTarget  # noqa: PLC0415 — deferred to avoid import cost
         from nexus.migration.wire_reid import ChashRemapStore  # noqa: PLC0415 — deferred to avoid import cost
 

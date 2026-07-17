@@ -7,8 +7,12 @@
 # 18-collection report becomes a progress line, not homework."
 #
 #   pip install conexus==$ERA_RELEASE     a REAL old PyPI release (the era)
-#   nx init --service                     cold-acquires ITS OWN engine
-#                                          ($ERA_ENGINE_TAG) — the old engine
+#   nx daemon service install-binary +    stand the era's install up the way
+#   nx init --service                      that era actually did: pre-stage
+#                                          binary + PG bundle, then provision.
+#                                          The always-download bundle is 6.4.0+
+#                                          (GH #1381), so a <= 6.3.x era MUST
+#                                          pre-stage or it demands a system PG.
 #   seed_legacy.py --era-hop              the ancient DATA: Chroma substrate,
 #                                          pre-RDR-108 16-char ids as full
 #                                          catalog/T2 citizens, plus a
@@ -53,6 +57,20 @@ export NX_SERVICE_MAX_HEAP="${NX_SERVICE_MAX_HEAP:-1g}"
 git config --global user.email "era-hop@nexus.local" >/dev/null 2>&1 || true
 git config --global user.name  "nexus era hop"       >/dev/null 2>&1 || true
 
+# THE SEEDED STORE MUST BE AT THE PATH THE PRODUCT READS. `nx upgrade` has no
+# --local-path knob — deliberately: naming your store is configuration, not
+# upgrade ceremony — so the substrate rung's footprint gate resolves the store
+# via NX_LOCAL_CHROMA_PATH -> $XDG_DATA_HOME/nexus/chroma. Seeding somewhere
+# else and expecting the walk to find it is the nexus-id750 / GH #1381 class
+# exactly: a detector pointed at a directory the store does not live in sees no
+# footprint and no-ops "successfully".
+#
+# Observed live 2026-07-16 (first --era-hop run): seeded to /home/nexus/
+# legacy-chroma while the rung read the XDG default, so the rung reported N/A,
+# `nx upgrade` exited 0 and `nx doctor` printed "no pending rungs" — with ZERO
+# collections migrated. Only the parity assert caught it.
+export NX_LOCAL_CHROMA_PATH="$CHROMA_LOCAL"
+
 # ── Quarantine ───────────────────────────────────────────────────────────────
 say "Quarantine — nothing pre-staged"
 command -v initdb >/dev/null 2>&1 && bad "system PostgreSQL present — not a clean box" || ok "no system PostgreSQL (bundle must provide it)"
@@ -69,23 +87,60 @@ GOT_VER="$(nx --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
 [ "$GOT_VER" = "$ERA_RELEASE" ] && ok "nx --version reports $GOT_VER" \
   || bad "nx --version reports $GOT_VER, expected $ERA_RELEASE"
 
-# ── Stage 2: the OLD engine, acquired by the OLD release's own pin ───────────
-say "Stage 2 — nx init --service (real cold-acquire of the era's own engine)"
+# ── Stage 2: the OLD engine + the era's own provisioning path ────────────────
+# The pre-stage is NOT optional ceremony and must not be "simplified" away: the
+# always-download Postgres bundle arrived in 6.4.0 (GH #1381). On a <= 6.3.x
+# release — which is the whole point of an ERA hop — `nx init --service` does
+# NOT fetch the bundle and hard-fails on a box with no system PostgreSQL
+# ("Install PostgreSQL 17: sudo apt-get install postgresql-17"), which is
+# precisely what this cold box is. The era's documented path is to pre-stage
+# binary + bundle with `install-binary` and then init, exactly as
+# rehearse_cold.sh does; 6.0.0's binary_install.py carries install_pg_bundle
+# for this reason. (Observed live 2026-07-16: without this, Stage 2 aborts.)
+#
+# This step SUPPLIES the era engine tag rather than letting the release resolve
+# its own pin, so it does not prove "6.0.0's PINNED_SERVICE_TAG resolves to
+# v0.1.11" — that is --package-upgrade's claim, not this leg's. It reconstructs
+# the state a real 6.0.0 install HAS (ERA_ENGINE_TAG is 6.0.0's own pin, so the
+# reconstruction is faithful), and the /version assert below proves the era
+# engine is genuinely what is running before the hop starts.
+say "Stage 2a — pre-stage the era's binary + PG bundle (the <= 6.3.x path)"
 unset NEXUS_SERVICE_TAG NX_SERVICE_TAG 2>/dev/null || true
+if nx daemon service install-binary "$ERA_ENGINE_TAG" 2>&1 | tail -12 | sed 's/^/       /'; then
+  ok "install-binary acquired + verified the era binary + PG bundle ($ERA_ENGINE_TAG)"
+else
+  bad "install-binary failed for $ERA_ENGINE_TAG on $ERA_RELEASE"; say "ABORT"; exit 1
+fi
+
+say "Stage 2b — nx init --service (provision PG from the era bundle, fetch bge, serve)"
+export NEXUS_SERVICE_TAG="$ERA_ENGINE_TAG"   # already installed: the ensure-binary step no-ops
 if nx init --service --embedder bge-768 --yes 2>&1 | tail -20 | sed 's/^/       /'; then
   ok "nx init --service (provisioned PG + the era engine + started)"
 else
   bad "nx init --service failed on $ERA_RELEASE"; say "ABORT (provision failed)"; exit 1
 fi
+# The hop must converge the engine on its own merits from here on — leave no
+# pin in the environment for the ladder's precondition to read.
+unset NEXUS_SERVICE_TAG NX_SERVICE_TAG 2>/dev/null || true
 export NX_STORAGE_BACKEND=service
 # shellcheck disable=SC1091
 [ -f "$HOME/.config/nexus/pg_credentials" ] && { set -a; . "$HOME/.config/nexus/pg_credentials"; set +a; }
 unset NX_SERVICE_URL NX_SERVICE_PORT NX_SERVICE_HOST 2>/dev/null || true
 
+# INSTRUMENTATION, not the upgrade path. These two helpers ask the box what
+# state it is in; they never converge anything. They deliberately call the REAL
+# nx rather than the audited shim, because the audit's question is "did
+# converging this install require any verb besides `nx upgrade`?" — and a
+# harness taking a MEASUREMENT is not the user running a verb. Routing them
+# through the shim logged `daemon` twice and failed the audit on the harness's
+# own thermometer (observed live 2026-07-16). Anything that actually acts on
+# the install must go through plain `nx` so the audit sees it.
+REAL_NX="$(command -v nx)"
+[ -n "$REAL_NX" ] || { bad "cannot resolve nx"; say "ABORT"; exit 1; }
 _wait_healthy() {
   local tries="${1:-30}"
   for _ in $(seq 1 "$tries"); do
-    if nx daemon service status 2>&1 | grep -qiE "health.*ok|healthy|serving|status.*ok|running"; then
+    if "$REAL_NX" daemon service status 2>&1 | grep -qiE "health.*ok|healthy|serving|status.*ok|running"; then
       return 0
     fi
     sleep 2
@@ -93,7 +148,7 @@ _wait_healthy() {
   return 1
 }
 _release_version() {
-  nx daemon service status --json 2>/dev/null \
+  "$REAL_NX" daemon service status --json 2>/dev/null \
     | python3 -c 'import sys,json;print(json.load(sys.stdin).get("service_release_version") or "")' 2>/dev/null
 }
 
@@ -160,8 +215,6 @@ AFTER_SHA="$(sha256sum "$HOME/.config/nexus/service/nexus-service" 2>/dev/null |
 # implementation detail, not a verb the user ran, and counting it would make
 # "one verb" untestable rather than true.
 say "Arming the verb audit — every top-level nx invocation is recorded"
-REAL_NX="$(command -v nx)"
-[ -n "$REAL_NX" ] || { bad "cannot resolve the real nx to shim"; say "ABORT"; exit 1; }
 mkdir -p "$HOME/verbaudit"
 cat > "$HOME/verbaudit/nx" <<SHIM
 #!/usr/bin/env bash
@@ -176,6 +229,30 @@ export PATH="$HOME/verbaudit:$PATH"
 : > "$VERB_LOG"
 [ "$(command -v nx)" = "$HOME/verbaudit/nx" ] && ok "shim is first on PATH (real nx: $REAL_NX)" \
   || bad "shim did not take effect — the one-verb audit would be vacuous"
+
+# ── NON-VACUITY GATE: there must BE something to converge ────────────────────
+# The lesson of the first live run. `nx upgrade` exited 0 and `nx doctor`
+# printed "✓ Upgrade ladder: no pending rungs (2 registered)" on a box where
+# NOTHING migrated — because the rung correctly saw no footprint at the path it
+# reads. Both of those are the assertions a reasonable person writes first, and
+# BOTH were green over a total no-op. A leg that cannot see its own fixture
+# passes loudest.
+#
+# So: before the walk, the product itself must SAY the substrate rung is
+# pending. This is the product's own read-only detect() — not a harness
+# re-derivation — so it fails when the fixture is invisible for ANY reason
+# (wrong path, kill switch, a footprint gate that regressed), rather than
+# letting every downstream assert grade a walk that never had work to do.
+say "Non-vacuity gate — the product must SEE the seeded era footprint"
+DRY_OUT="$(nx upgrade --dry-run 2>&1 < /dev/null)"
+printf '%s\n' "$DRY_OUT" | sed 's/^/       /'
+if printf '%s' "$DRY_OUT" | grep -q "rung 'substrate-etl' pending"; then
+  ok "the substrate rung reports PENDING before the walk — there is real work to converge"
+else
+  bad "nx upgrade --dry-run does NOT report the substrate rung pending — the seeded footprint is invisible to the product (check NX_LOCAL_CHROMA_PATH=$NX_LOCAL_CHROMA_PATH vs the rung's resolver). Every convergence assert below would grade a no-op."
+  say "ABORT (vacuous fixture — refusing to report a pass over work that never existed)"
+  exit 1
+fi
 
 # ── Stage 5: THE WHOLE UPGRADE ───────────────────────────────────────────────
 say "Stage 5 — nx upgrade (the single trigger; unattended, no TTY, no --yes)"
