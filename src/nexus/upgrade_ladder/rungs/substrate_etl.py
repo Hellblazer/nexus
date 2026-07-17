@@ -532,15 +532,27 @@ def _default_prior_collections() -> frozenset[str]:
     decisions."""
     from nexus.migration.wire_reid import ChashRemapStore  # noqa: PLC0415 — deferred to avoid import cost
 
+    map_path = _default_map_path()
+    if not map_path.exists():
+        # NORMAL: nothing has ever been re-identified, so there is no prior
+        # state and no source-gone decision to make. Silent by design.
+        return frozenset()
     try:
-        with ChashRemapStore(_default_map_path()) as store:
+        with ChashRemapStore(map_path) as store:
             return frozenset(
                 row[0] for row in store._conn.execute(  # noqa: SLF001 — same-package read of its own store
                     "SELECT DISTINCT source_collection FROM chash_remap"
                 ).fetchall()
             )
-    except Exception as exc:  # noqa: BLE001 — an unreadable map means no prior state to compare; decisions degrade to none, never a crash
-        _log.debug("substrate_rung_prior_collections_unreadable", error=str(exc))
+    except Exception as exc:  # noqa: BLE001 — decisions degrade to none rather than crashing the trigger; loud because that degradation HIDES a genuine decision
+        # WARNING, not debug (P4.V Finding B): the map EXISTS and could not be
+        # read. Degrading to "no prior state" here silently drops every
+        # SOURCE-GONE decision — a collection the user must choose to
+        # re-acquire or drop simply stops being asked about, and the walk
+        # proceeds as though it never existed. Absence is normal (handled
+        # above); unreadable is not, and must be visible. Mirrors
+        # _default_target_counts' "could not tell is never fine" rule.
+        _log.warning("substrate_rung_prior_collections_unreadable", error=str(exc))
         return frozenset()
 
 
@@ -647,6 +659,36 @@ class SubstrateEtlRung:
         if plan is None:
             return RungStatus(applicable=False, converged=False)
         if not plan.legs and not plan.decisions:
+            # detect() and verify() MUST agree on what "converged" means, or
+            # the repair path is unreachable (P4.V Finding A — found by the
+            # test-validator, missed by both reviewers, reproduced live).
+            #
+            # LadderRunner._run_rung only calls converge() when detect() says
+            # NOT converged. In the ETL-landed-but-cascade-never-ran crash
+            # window the vector counts already match, so a legs-only detect()
+            # reported converged, the runner skipped straight to verify(),
+            # verify() correctly returned False (unreflected map) — and the
+            # repair inside converge()'s empty-plan branch was never reached.
+            # Result: VERIFY_FAILED on every future run, forever, with no path
+            # to self-heal. Worse than the mapbc bug it replaced: that one
+            # recorded false success, this one fails loud with no way out. And
+            # RDR-155 P4b deletes the only module that could fix it by hand.
+            #
+            # An unreflected map is UNFINISHED WORK, which is exactly what
+            # "not converged" means. Saying so here makes the runner call
+            # converge(), which repairs, and makes `nx doctor` truthful about
+            # an install that still owes a cascade.
+            orphaned = self._unreflected()
+            if orphaned:
+                return RungStatus(
+                    applicable=True,
+                    converged=False,
+                    pending_detail=(
+                        "the re-identification map was never reflected into "
+                        f"{', '.join(orphaned)} — an interrupted migration to "
+                        "re-apply (no re-ETL: the vectors are already there)"
+                    ),
+                )
             return RungStatus(applicable=True, converged=True)
         details: list[str] = []
         if plan.legs:

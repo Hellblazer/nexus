@@ -16,15 +16,28 @@ from __future__ import annotations
 import inspect
 import pathlib
 from typing import Any
-from unittest.mock import patch
+import sqlite3
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from nexus.migration.detection import CollectionClassification
 from nexus.migration.etl_ports import EtlRunResult
-from nexus.migration.remap_cascade import StoreCascadeResult
+from nexus.migration.remap_cascade import (
+    StoreCascadeResult,
+    cascade_remap,
+    unreflected_stores,
+)
+from nexus.migration.wire_reid import ChashRemapStore, RemapEntry
+from nexus.upgrade_ladder.completion import CompletionStore
 from nexus.upgrade_ladder.protocol import ConvergeOutcome, Rung, RungStatus
-from nexus.upgrade_ladder.registry import RUNG_SUBSTRATE_ETL, default_registry
+from nexus.upgrade_ladder.registry import (
+    RUNG_SUBSTRATE_ETL,
+    LadderRegistry,
+    default_registry,
+)
+from nexus.upgrade_ladder.runner import LadderRunner, RungOutcome
+from nexus.upgrade_ladder.rungs import substrate_etl as mod
 from nexus.upgrade_ladder.rungs.substrate_etl import (
     LegPlan,
     SourceGoneDecision,
@@ -596,10 +609,6 @@ def test_default_target_counts_uses_ONE_round_trip_not_N() -> None:
     read-only path — 18 sequential HTTP round trips per health check on the
     GH #1408 install shape, forever, because RDR-176 keeps this rung
     applicable for good."""
-    from unittest.mock import MagicMock
-
-    from nexus.upgrade_ladder.rungs import substrate_etl as mod
-
     client = MagicMock()
     client.list_collections.return_value = [
         {"name": "knowledge__a", "count": 12},
@@ -624,10 +633,6 @@ def test_default_target_counts_returns_None_when_it_cannot_tell() -> None:
     This is the re-billing door: on the converge() path, mistaking an
     already-migrated leg for pending re-runs the ETL and re-bills Voyage.
     """
-    from unittest.mock import MagicMock
-
-    from nexus.upgrade_ladder.rungs import substrate_etl as mod
-
     client = MagicMock()
     client.list_collections.side_effect = RuntimeError("connection refused")
     with patch("nexus.db.make_t3", return_value=client):
@@ -640,3 +645,185 @@ def test_a_probe_failure_never_drops_a_leg() -> None:
     pending-and-get-re-migrated. None drops nothing; the legs stand."""
     plan = SubstratePlan(legs=[_leg()])
     assert len(drop_converged_legs(plan, {"knowledge__old": 12}, None).legs) == 1
+
+
+# ── P4.V Finding A: the repair must be reachable THROUGH THE RUNNER ──────────
+#
+# Every cascade-repair test above calls rung.converge() directly. Those are
+# valid unit tests of the method and they were FALSE CONFIDENCE about the walk:
+# LadderRunner._run_rung only calls converge() when detect() reports NOT
+# converged, so a legs-only detect() made the whole repair unreachable in
+# production — VERIFY_FAILED forever, no self-heal, and RDR-155 P4b deletes the
+# only module that could fix it by hand. Both stacked reviewers signed off on
+# the unreachable fix; the test-validator caught it by driving the real runner.
+#
+# So this pin drives the REAL LadderRunner + a REAL CompletionStore. If the
+# repair is ever moved back behind a detect()-says-converged gate, this fails
+# and the direct-converge() tests above will not.
+
+
+def test_the_crash_window_heals_through_a_real_runner_walk(tmp_path: pathlib.Path) -> None:
+
+    # The crash state: every vector landed (counts match), the map was written,
+    # the cascade never ran, nothing was recorded.
+    world = {"reflected": False}
+    repairs: list[str] = []
+    migrated = {"n": 0}
+
+    def _cascade_only(_report) -> str:
+        repairs.append("ran")
+        world["reflected"] = True
+        return ""
+
+    rung = _rung(
+        classify_fn=lambda: [_cls("knowledge__old", legacy=True, count=10)],
+        target_counts_fn=lambda: _all_targets(10),
+        unreflected_fn=lambda: [] if world["reflected"] else ["document_chunks"],
+        cascade_only_fn=_cascade_only,
+        migrate_fn=lambda *_a, **_k: migrated.__setitem__("n", migrated["n"] + 1),
+    )
+
+    with CompletionStore(tmp_path / "ladder.db", now_fn=lambda: "t0") as store:
+        report = LadderRunner(
+            LadderRegistry((rung,)), store, package_version_fn=lambda: "6.12.0",
+        ).run()
+
+        assert repairs == ["ran"], (
+            "the walk never reached the cascade repair — detect() reported "
+            "converged, so the runner skipped converge() entirely and the fix "
+            "is dead code in production"
+        )
+        assert migrated["n"] == 0, "repair must not re-run the ETL"
+        outcomes = [r.outcome for r in report.runs]
+        assert outcomes == [RungOutcome.RECORDED], (
+            f"a repairable crash window must converge and record, got {outcomes}"
+        )
+        assert RUNG_SUBSTRATE_ETL in store.verified_rungs()
+
+
+def test_an_unrepairable_crash_window_never_records(tmp_path: pathlib.Path) -> None:
+    """Non-vacuity for the pin above: if the repair genuinely fails, the walk
+    must NOT record. The heal path must not become a way to launder a broken
+    cascade into a recorded completion."""
+
+    rung = _rung(
+        classify_fn=lambda: [_cls("knowledge__old", legacy=True, count=10)],
+        target_counts_fn=lambda: _all_targets(10),
+        unreflected_fn=lambda: ["document_chunks"],   # never becomes reflected
+        cascade_only_fn=lambda _r: "document_chunks: disk full",
+    )
+
+    with CompletionStore(tmp_path / "ladder.db", now_fn=lambda: "t0") as store:
+        report = LadderRunner(
+            LadderRegistry((rung,)), store, package_version_fn=lambda: "6.12.0",
+        ).run()
+        assert report.hard_failed
+        assert RUNG_SUBSTRATE_ETL not in store.verified_rungs()
+
+
+def test_detect_and_verify_agree_that_an_unreflected_map_is_unfinished() -> None:
+    """The root cause of Finding A, pinned directly: the two must not disagree
+    about what "converged" means, or the runner's detect-first gate routes past
+    the repair. detect() said converged while verify() said no."""
+    rung = _rung(
+        classify_fn=lambda: [_cls("knowledge__old", legacy=True, count=10)],
+        target_counts_fn=lambda: _all_targets(10),
+        unreflected_fn=lambda: ["document_chunks"],
+    )
+    assert rung.detect().converged is False
+    assert rung.verify() is False
+
+    healthy = _rung(
+        classify_fn=lambda: [_cls("knowledge__old", legacy=True, count=10)],
+        target_counts_fn=lambda: _all_targets(10),
+        unreflected_fn=lambda: [],
+    )
+    assert healthy.detect().converged is True
+    assert healthy.verify() is True
+
+
+# ── the cascade defaults' REAL bodies (P4.V Finding B) ───────────────────────
+#
+# _default_unreflected / _default_cascade_only are the newest production
+# defaults and — per Finding A — were literally unreachable in production until
+# detect() learned to consult them. Every test above injects fakes for both.
+# These execute the real bodies against a real map + real sqlite stores, which
+# is the only thing that catches a wrong table/column (the first draft of the
+# probe guessed a `chash` column for the aspect tables; they key on
+# source_path, and the wrong guess would have been silently blind in exactly
+# the direction that certifies an orphaned cascade).
+
+
+def _seeded_cascade(tmp_path: pathlib.Path) -> tuple[Any, str, str]:
+    """A real map with one old->new pair + a real catalog db holding the OLD
+    chash in its manifest — i.e. the crash window, on disk."""
+
+    old, new = "a" * 16, "b" * 32
+    catalog_db = tmp_path / "catalog.db"
+    con = sqlite3.connect(catalog_db)
+    con.execute("CREATE TABLE document_chunks (doc_id TEXT, chash TEXT, position INT)")
+    con.execute("INSERT INTO document_chunks VALUES ('d1', ?, 0)", (old,))
+    con.commit()
+    con.close()
+
+    store = ChashRemapStore(tmp_path / "map.db")
+    store.record_batch([RemapEntry(
+        source_collection="knowledge__old", target_collection="knowledge__new",
+        old_id=old, new_chash=new, provenance="test", tenant_id="",
+    )])
+    return store, str(catalog_db), old
+
+
+def test_unreflected_stores_sees_an_orphaned_cascade_and_clears_after_it_runs(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The probe's real body against real stores, both directions."""
+
+    store, catalog_db, old = _seeded_cascade(tmp_path)
+    memory_db = tmp_path / "memory.db"
+    sqlite3.connect(memory_db).close()  # empty: its tables simply do not exist
+
+    with store:
+        before = unreflected_stores(store, catalog_db=pathlib.Path(catalog_db), memory_db=memory_db)
+        assert "document_chunks" in before, (
+            "the probe cannot see an old chash still sitting in the manifest — "
+            "it would certify an orphaned cascade as converged"
+        )
+        cascade_remap(store, catalog_db=pathlib.Path(catalog_db), memory_db=memory_db)
+        after = unreflected_stores(store, catalog_db=pathlib.Path(catalog_db), memory_db=memory_db)
+        assert "document_chunks" not in after
+
+    con = sqlite3.connect(catalog_db)
+    assert con.execute("SELECT chash FROM document_chunks").fetchone()[0] == "b" * 32
+    con.close()
+
+
+def test_unreflected_stores_is_empty_for_an_empty_map(tmp_path: pathlib.Path) -> None:
+    """Nothing was ever re-identified -> nothing to reflect. Must not report
+    every store as unreflected on an install that never re-id'd anything."""
+
+    with ChashRemapStore(tmp_path / "map.db") as store:
+        assert unreflected_stores(
+            store, catalog_db=tmp_path / "nope.db", memory_db=tmp_path / "nope2.db",
+        ) == []
+
+
+def test_default_unreflected_is_silent_when_no_map_was_ever_written(
+    tmp_path: pathlib.Path, monkeypatch,
+) -> None:
+    """The production default's own gate: a first-run install has no map file,
+    which is [] (nothing owed) — never "<probe failed>", which would make
+    detect() report pending forever on a healthy fresh box."""
+    monkeypatch.setattr(mod, "_default_map_path", lambda: tmp_path / "absent.db")
+    assert mod._default_unreflected() == []
+
+
+def test_default_unreflected_reports_probe_failure_rather_than_certifying(
+    tmp_path: pathlib.Path, monkeypatch,
+) -> None:
+    """A probe that cannot tell must never answer "converged"."""
+    map_path = tmp_path / "map.db"
+    map_path.write_text("not a sqlite database")
+    monkeypatch.setattr(mod, "_default_map_path", lambda: map_path)
+    monkeypatch.setattr(mod, "_cascade_db_paths", lambda: (tmp_path / "c.db", tmp_path / "m.db"))
+    assert mod._default_unreflected() == ["<probe failed>"]

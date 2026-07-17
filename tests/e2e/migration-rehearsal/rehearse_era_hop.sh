@@ -429,6 +429,49 @@ sys.exit(1 if fails else 0)
 PY
 
 # ── Assert: doctor reports a converged ladder ────────────────────────────────
+# ── IDEMPOTENCE: the second walk (P4.V Finding B) ────────────────────────────
+# The RDR Constraint, verbatim: "the ladder as a whole is idempotent (re-run
+# converges, never duplicates)". One `nx upgrade` never tests that — and the
+# ALREADY-CONVERGED path is where the production defaults do their most
+# dangerous work: drop_converged_legs deciding, against a real target, that
+# there is nothing left to do. Get that wrong in the "still pending" direction
+# and every future `nx upgrade` re-runs the whole ETL and re-bills Voyage
+# (bead nexus-mapbc, which shipped exactly that bug); get it wrong the other
+# way and an unfinished migration reads as done.
+#
+# A single-invocation leg cannot see either. This second walk is the cheapest
+# possible coverage of the path a real install takes on every subsequent
+# upgrade for the rest of its life.
+say "Idempotence — a SECOND nx upgrade must be a clean no-op"
+UP2_OUT="$(nx upgrade 2>&1 < /dev/null)"
+UP2_RC=$?
+printf '%s\n' "$UP2_OUT" | sed 's/^/       /'
+[ "$UP2_RC" = 0 ] && ok "the second nx upgrade exited 0" || bad "the second nx upgrade exited $UP2_RC"
+
+if printf '%s' "$UP2_OUT" | grep -q "rung 'substrate-etl' converged and verified"; then
+  bad "the second walk RE-CONVERGED the substrate rung — the already-converged filter did not hold, so every future upgrade re-runs the ETL (and re-bills a cross-model leg)"
+else
+  ok "the second walk did not re-run the substrate ETL"
+fi
+
+# Counts must be IDENTICAL, not merely present: a re-run that re-upserted would
+# still show full counts, but a re-run that DUPLICATED would not.
+python3 - "$SEED_JSON" <<'PY' && ok "row counts unchanged by the second walk — converges, never duplicates" || bad "the second walk changed the target row counts"
+import json, sys
+m = json.loads(sys.argv[1])
+seeded, cross = m.get("collections", {}), m.get("cross_model", {})
+from nexus.db import make_t3
+t3 = make_t3()
+fails = 0
+for name, want in seeded.items():
+    target = cross.get(name, name)
+    got = t3.count(target)
+    if got != want:
+        print(f"       {target}: {got} != {want} after the second walk")
+        fails += 1
+sys.exit(1 if fails else 0)
+PY
+
 say "Assert — nx doctor reports no pending rungs"
 DOC_OUT="$(nx doctor 2>&1 < /dev/null)"
 printf '%s\n' "$DOC_OUT" | grep -iE 'upgrade ladder|chunk-id era' | sed 's/^/       /' || true
