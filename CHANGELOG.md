@@ -6,6 +6,49 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.12.0] - 2026-07-17
+
+Ships with (and requires) engine-service-v0.1.44.
+
+### Added
+
+- **One convergent upgrade: `nx upgrade` walks a single ordered ladder**
+  ([RDR-185](docs/rdr/rdr-185-single-ladder-convergent-upgrade.md)). Upgrading
+  nexus is now: update the code, then run `nx upgrade`. That one trigger brings
+  the package, engine, and process preconditions current, then walks one ordered
+  ladder that auto-applies whichever data migrations your install actually needs
+  — T2 schema, the ChromaDB → Postgres+pgvector substrate move, pre-RDR-108
+  chunk identity (legacy non-32-char IDs rewritten in place to `sha256` chash,
+  content and embeddings preserved — closes GH #1408), and embedder era. Each
+  rung detects, converges, and verifies before recording completion; the whole
+  walk is resumable and idempotent, your existing store is left byte-untouched as
+  a rollback target, and a year-dormant install converges the same way a current
+  one no-ops. There is nothing to sequence by hand and no era to know.
+- **`nx doctor` reports pending ladder rungs read-only**, including a legacy
+  chunk-ID census that shows outstanding chunk-identity debt the day it exists.
+- **`nx upgrade --yes` / `NX_ASSUME_YES`** — the unattended channel for the one
+  decision the product cannot derive for you, a **billed Voyage re-embed**: a
+  cost preview prints before anything charges (silent when nothing bills), and
+  `--yes` pre-approves it for automation. A vanished source collection still
+  defers rather than guessing, and rollback is never automatic.
+- The upgrade-cycle verbs are demoted to one story, one verb: `nx upgrade` is the
+  single trigger; the older upgrade/migration commands remain but point at it.
+
+### Fixed
+
+- **Cloud-mode probe failures now heal instead of poisoning the session for its
+  lifetime** (nexus-5t1jp). A managed service that was unreachable at the first
+  T3 call used to leave every T3 operation cached-failed until the process
+  restarted. Unreachable-class failures (connect/TLS/DNS/timeout) are now cached
+  only within a bounded retry window, after which the next call re-probes and the
+  session recovers when the service returns; below-floor-engine (incompatible)
+  failures remain cached for the process lifetime, as before.
+- **The MCP server no longer crashes on startup when its T1 scratch session fails
+  to mint** (GH #1405). The mint is deferred and retried per-call; the server
+  starts and degrades T1 scratch honestly instead of failing the whole session.
+- `/conexus:upgrade` preamble tolerates the dry-run's by-design BLOCKED exit
+  (field incident 2026-07-16).
+
 ## [6.11.0] - 2026-07-16
 
 Ships with (and requires) engine-service-v0.1.44.

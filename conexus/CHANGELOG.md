@@ -4,6 +4,14 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.12.0] - 2026-07-17
+
+- `/conexus:upgrade` preamble tolerates the dry-run's by-design BLOCKED exit
+  (field incident 2026-07-16), so the guided upgrade path no longer misreports
+  a clean preview as a failure.
+- Plugin version aligned with conexus 6.12.0. See the root CHANGELOG for the
+  6.12.0 headline: the single convergent `nx upgrade` ladder (RDR-185).
+
 ## [6.11.0] - 2026-07-16
 
 - SessionEnd hook timeout raised 3 s -> 10 s: the service-mode tier-write
