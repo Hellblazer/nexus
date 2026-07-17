@@ -643,11 +643,17 @@ def _billed_leg() -> LegPlan:
 
 
 def _spy_confirm(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Record whether the REAL gate reached click.confirm. Necessary: an
-    unpatched confirm raises OSError under pytest's captured stdin, which would
-    make "did it prompt?" indistinguishable from a test-harness accident."""
+    """Record whether the REAL gate reached click.confirm, WITH a terminal.
+
+    Both halves are necessary. An unpatched confirm raises OSError under
+    pytest's captured stdin, which would make "did it prompt?" indistinguishable
+    from a harness accident — hence the spy. And pytest has no TTY, so
+    `_has_terminal()` is False and the gate now declines WITHOUT ever asking:
+    a test that spies on the prompt is by definition a test that presumes
+    someone is there to answer it, and must say so."""
     import click
 
+    monkeypatch.setattr(mod, "_has_terminal", lambda: True)
     asked: list[str] = []
     monkeypatch.setattr(
         click, "confirm", lambda msg, **_kw: bool(asked.append(msg)) or False
@@ -698,28 +704,56 @@ def test_standing_consent_lets_a_billed_walk_converge_unattended(
     assert asked, "without standing consent the user must be asked"
 
 
-def test_no_tty_declines_the_bill_instead_of_crashing_the_walk(
+def test_no_terminal_declines_the_bill_without_ever_asking(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A non-TTY is a DECLINE, not a crash (code review, 2026-07-17).
 
-    click.confirm raises click.Abort when it cannot read stdin, and Abort is a
-    RuntimeError whose str() is EMPTY. Letting it escape made converge() raise,
-    which the runner reports as FAILED (not DEFERRED) and `nx upgrade` renders
-    as "did not converge — substrate-etl: failed (converge raised: )": an empty
-    reason, exit 1, and no mention of the flag that fixes it — on exactly the
-    unattended ancient install SC-1 promises will converge. Reproduced before
-    the fix; this pin is why it cannot come back."""
+    Letting click.Abort escape made converge() raise, which the runner reports
+    as FAILED (not DEFERRED) and `nx upgrade` renders as "did not converge —
+    substrate-etl: failed (converge raised: )": an empty reason (Abort's str()
+    is ""), exit 1, and no mention of the flag that fixes it — on exactly the
+    unattended install SC-1 promises will converge.
+
+    Decided BEFORE asking, so the prompt is never even reached: that is what
+    keeps the next test's Ctrl-C distinction possible."""
     import click
 
     plan = SubstratePlan(legs=[_billed_leg()])
     monkeypatch.delenv("NX_ASSUME_YES", raising=False)
+    monkeypatch.setattr(mod, "_has_terminal", lambda: False)
 
-    def _no_tty(*_a: object, **_kw: object) -> bool:
-        raise click.Abort()
+    def _must_not_ask(*_a: object, **_kw: object) -> bool:
+        raise AssertionError("asked a question with no terminal to answer it")
 
-    monkeypatch.setattr(click, "confirm", _no_tty)
+    monkeypatch.setattr(click, "confirm", _must_not_ask)
     assert _default_cost_gate(plan) is False  # declined, NOT raised
+
+
+def test_ctrl_c_at_the_prompt_is_not_a_decline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half, and the reason `_has_terminal` exists at all.
+
+    click.confirm catches BOTH KeyboardInterrupt and EOFError and raises the
+    SAME click.Abort, with an empty str() — so catching Abort to mean "no
+    terminal" also swallowed Ctrl-C, and an interrupted upgrade returned a
+    clean deferral and exit 0. A script reading that code would believe it
+    succeeded. The two causes are indistinguishable AFTER the fact, so the
+    question is settled BEFORE asking: with a terminal, Abort means only what
+    click means by it, and propagates."""
+    import click
+
+    plan = SubstratePlan(legs=[_billed_leg()])
+    monkeypatch.delenv("NX_ASSUME_YES", raising=False)
+    monkeypatch.setattr(mod, "_has_terminal", lambda: True)
+
+    def _interrupted(*_a: object, **_kw: object) -> bool:
+        raise click.Abort()  # what click raises for a Ctrl-C at the prompt
+
+    monkeypatch.setattr(click, "confirm", _interrupted)
+    with pytest.raises(click.Abort):
+        _default_cost_gate(plan)
 
 
 def test_a_declined_bill_defers_and_names_the_channel(
@@ -775,25 +809,30 @@ def test_planner_marks_only_the_voyage_targeted_leg_as_billed() -> None:
     assert to_bge.billed_reembed is False
 
 
-def test_a_reid_only_leg_into_a_voyage_target_still_counts_as_billed() -> None:
-    """The billing path `needs_reembed` cannot see (code review, 2026-07-17).
+def test_sc1s_own_shape_converges_with_nothing_to_consent_to() -> None:
+    """SC-1 + SC-2 together, on the install that motivated the whole RDR: an
+    ancient voyage-keyed instance whose collections carry pre-RDR-108 ids.
+    SC-2: "Zero re-embedding ... for pure id-scheme conformance". So the leg
+    bills NOTHING and must never reach the consent gate.
 
-    A re-id-only leg passes stored vectors through — but `_provenance_scrub`
-    drops any chunk whose recorded embedding_model disagrees with the target's
-    declared segment, and `run_batched_etl` attaches embeddings only if EVERY
-    chunk in the batch has one. One mismatched chunk sends embeddings=None for
-    the whole batch and the service re-embeds it all, billed, with
-    needs_reembed False throughout. The predicate is therefore the TARGET'S
-    DECLARED MODEL, not the re-embed flag."""
-    # _GATED is the same shape (a genuine voyage collection with legacy ids);
-    # here the key IS present, so it is planned rather than credential-gated.
+    This pin exists because a draft broke it. `_leg_can_bill` was widened to the
+    target's declared model alone, to cover the mislabel billing path
+    (nexus-92vz5) — but a pure re-id leg's target IS its source name, so every
+    voyage-declared legacy collection read as billed. Combined with "no terminal
+    declines", SC-1's own install stopped converging and reported exit 0 while
+    doing it: a silent permanent non-convergence on the RDR's flagship shape,
+    invisible to the era-hop (nexus-dnnbl). Reproduced against the real planner
+    before the revert."""
+    # _GATED is that shape (a genuine voyage collection with legacy ids); with
+    # the key present it is planned rather than credential-gated.
     plan = plan_substrate_legs(
         [_GATED], prior_collections=frozenset(), voyage_key_present=True
     )
     (leg,) = plan.legs
-    assert leg.needs_reembed is False      # passthrough...
-    assert leg.billed is True              # ...and it can STILL bill
-    assert plan.billed_reembed is True
+    assert leg.needs_reid is True          # ids are rewritten on the wire...
+    assert leg.needs_reembed is False      # ...and the vectors ride along free
+    assert leg.billed is False             # so there is nothing to consent to
+    assert plan.billed_reembed is False
 
 
 def test_credential_gated_survives_the_converged_filter() -> None:

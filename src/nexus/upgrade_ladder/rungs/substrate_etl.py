@@ -229,7 +229,10 @@ def plan_substrate_legs(
                 target_collection=target,
                 needs_reid=needs_reid,
                 needs_reembed=needs_reembed,
-                billed=_leg_can_bill(target),
+                # AND needs_reembed: a leg that carries its vectors through
+                # bills nothing, and SC-2 promises exactly that for pure re-id
+                # (nexus-92vz5 holds the mislabel residual).
+                billed=needs_reembed and _leg_can_bill(target),
             )
         )
     _refuse_target_collisions(legs)
@@ -306,20 +309,35 @@ def _declared_model(collection: str) -> str | None:
 
 
 def _leg_can_bill(target_collection: str) -> bool:
-    """Can this leg cause a server-side embed against a BILLED model?
+    """Does this leg's target declare a BILLED model? (Half the predicate — the
+    caller ANDs it with ``needs_reembed``; see the warning below.)
 
-    Keyed on the TARGET'S DECLARED MODEL, not on ``needs_reembed`` — the
-    narrower predicate missed a real billing path (code review, 2026-07-17):
-    a re-id-only leg passes stored vectors through, but ``_provenance_scrub``
-    drops any chunk whose recorded ``embedding_model`` disagrees with the
-    target's declared segment, and ``run_batched_etl`` attaches embeddings only
-    if EVERY chunk in the batch has one. One mismatched chunk therefore sends
-    ``embeddings=None`` for the whole batch and the service re-embeds all of it
-    — billed, with ``needs_reembed`` False the whole time.
+    NOT sufficient on its own, and the attempt to make it so is instructive.
+    An earlier draft billed on the declared model ALONE, to cover a real path
+    the narrow predicate misses: a re-id-only leg passes stored vectors through,
+    but ``_provenance_scrub`` drops any chunk whose recorded ``embedding_model``
+    disagrees with the target's declared segment, and ``run_batched_etl``
+    attaches embeddings only if EVERY chunk in a batch has one — so one
+    mismatched chunk sends ``embeddings=None`` and the service re-embeds the
+    batch, billed, with ``needs_reembed`` False throughout.
 
-    Conservative by construction: a voyage-declared target can bill, so it asks.
-    The cost of a false ask is one prompt; the cost of a false silence is an
-    unconsented bill.
+    That widening broke the RDR's flagship promise. A pure re-id leg has
+    ``target == source``, so ANY voyage-declared collection carrying legacy ids
+    read as billed — which is precisely SC-1's motivating install (the
+    18-collection work instance) and precisely what SC-2 says costs nothing:
+    "Zero re-embedding ... for pure id-scheme conformance". Combined with "no
+    terminal declines", that install stopped converging entirely and reported
+    exit 0 while doing it. A false ask is NOT cheap once a declined ask is
+    permanent silent non-convergence; the widening's own "cost of a false ask
+    is one prompt" justification expired the moment the prompt could not be
+    answered.
+
+    The honest predicate is "WILL bill", and the missing input — does this
+    collection's recorded provenance disagree with its own name — is a
+    plan-time question nothing answers today (``measured_dim`` is not probed for
+    legacy collections). Tracked as nexus-92vz5. Until then the narrow
+    predicate stands: it is right for every collection whose provenance matches
+    its name, which is all of them but the mislabeled (nexus-bfdri) class.
     """
     from nexus.migration.vector_etl import _VOYAGE_MODELS  # noqa: PLC0415 — deferred, vector_etl is heavy
 
@@ -805,6 +823,30 @@ def assume_yes() -> bool:
     return os.environ.get("NX_ASSUME_YES", "").strip() in {"1", "true", "yes"}
 
 
+def _has_terminal() -> bool:
+    """Is there a human to ask? Established BEFORE prompting, never inferred
+    from the exception afterwards.
+
+    ``click.confirm`` catches ``(KeyboardInterrupt, EOFError)`` and raises the
+    SAME ``click.Abort`` for both, with an empty ``str()``. So "nobody is there
+    to answer" and "the user pressed Ctrl-C" arrive indistinguishable — and an
+    earlier draft caught Abort and called both a decline, which made a
+    deliberate interrupt exit 0 and report a clean deferral. A script reading
+    that exit code would believe the upgrade succeeded.
+
+    The two causes are only indistinguishable AFTER the fact. Whether a terminal
+    exists is knowable in advance, so ask that instead.
+    """
+    import sys  # noqa: PLC0415 — stdlib, branch-local
+
+    try:
+        return bool(sys.stdin) and sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        # Detached or closed stdin (pytest capture, a daemon, a closed fd):
+        # no terminal. isatty() raises ValueError on a closed file.
+        return False
+
+
 def _default_cost_gate(plan: SubstratePlan) -> bool:
     """The billed-Voyage consent gate: one of the three genuine decisions
     (RDR-185 ## Constraints, amended 2026-07-17 to enumerate it).
@@ -825,35 +867,25 @@ def _default_cost_gate(plan: SubstratePlan) -> bool:
     if assume_yes():
         _log.info("substrate_cost_gate_assumed_yes", legs=len(plan.legs))
         return True
-    import click  # noqa: PLC0415 — deferred, CLI-only path
-
-    try:
-        return bool(
-            click.confirm(
-                # "MAY re-embed", not "re-embeds": the predicate establishes
-                # that this leg CAN bill (its target's declared model is a
-                # billed one), not that it will. A re-id-only passthrough
-                # re-embeds only if a provenance mismatch drops a vector.
-                # Asserting certainty about someone's money we do not have is
-                # its own defect. (No estimate yet either — nexus-byosf.)
-                "This upgrade may re-embed collections with a billed Voyage "
-                "model. Proceed?",
-                default=False,
-            )
-        )
-    except click.Abort:
-        # A NON-TTY IS A DECLINE, NOT A CRASH. click.confirm raises Abort when
-        # it cannot read stdin, and Abort is a RuntimeError whose str() is ""
-        # — so letting it escape made converge() raise, which the runner reports
-        # as FAILED (not DEFERRED) and `nx upgrade` renders as "did not
-        # converge — substrate-etl: failed (converge raised: )". An empty
-        # reason, exit 1, and no mention of the flag that fixes it, on exactly
-        # the unattended ancient install SC-1 promises will converge.
+    if not _has_terminal():
+        # NO TERMINAL IS A DECLINE, NOT A CRASH — and the decision is made
+        # HERE, before asking, rather than by catching what the asking throws.
         #
-        # Declining is the correct, non-fatal answer: converge() returns
-        # DEFERRED, nothing is recorded, nothing is billed, and the next run
-        # re-derives. The RDR's ## Constraints say a non-TTY "aborts rather
-        # than billing" — this is what makes that sentence true.
+        # Letting click.Abort escape made converge() raise, which the runner
+        # reports as FAILED (not DEFERRED) and `nx upgrade` renders as "did not
+        # converge — substrate-etl: failed (converge raised: )": an empty
+        # reason (Abort's str() is ""), exit 1, and no mention of the flag that
+        # fixes it, on exactly the unattended install SC-1 promises will
+        # converge. But CATCHING Abort was equally wrong in the other
+        # direction: click raises the same Abort for KeyboardInterrupt, so
+        # treating it as a decline made Ctrl-C exit 0 and report a clean
+        # deferral — a deliberate interrupt reported as success to any script
+        # reading the code.
+        #
+        # Declining is the correct, non-fatal answer when nobody is there:
+        # converge() returns DEFERRED, nothing is recorded, nothing is billed,
+        # the next run re-derives. With a terminal, Abort now means only what
+        # click means by it — the user interrupted — and propagates.
         _log.warning(
             "substrate_cost_gate_declined_no_tty",
             legs=len(plan.legs),
@@ -863,6 +895,21 @@ def _default_cost_gate(plan: SubstratePlan) -> bool:
             ),
         )
         return False
+    import click  # noqa: PLC0415 — deferred, CLI-only path
+
+    return bool(
+        click.confirm(
+            # "MAY re-embed", not "re-embeds": the predicate establishes that
+            # this leg CAN bill (its target's declared model is a billed one),
+            # not that it will. A re-id-only passthrough re-embeds only if a
+            # provenance mismatch drops a vector. Asserting certainty about
+            # someone's money we do not have is its own defect. (No estimate
+            # yet either — nexus-byosf.)
+            "This upgrade may re-embed collections with a billed Voyage "
+            "model. Proceed?",
+            default=False,
+        )
+    )
 
 
 class SubstrateEtlRung:

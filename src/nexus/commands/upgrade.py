@@ -6,6 +6,7 @@ RDR-076 (nexus-jda).
 """
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 
 import click
@@ -61,38 +62,6 @@ def upgrade(
     a consent channel, making the cost gate actually fire (nexus-k1m2f) traded a
     silent bill for a silent hang on a `click.confirm` no hook can answer.
     """
-    import os  # noqa: PLC0415 — stdlib, branch-local
-
-    # The rung reads standing consent from the environment (hooks and cron never
-    # type a flag), so the flag sets what the env channel reads — one mechanism,
-    # two front doors, rather than a second gate to drift.
-    #
-    # RESTORED on the way out, and that is not tidiness: this function's own
-    # finally-block starts daemons (`nx daemon t2 ensure-running`, `t3 start`,
-    # `service start`) as subprocesses with no `env=`, so they inherit this
-    # process's environment. Leaking NX_ASSUME_YES would hand a long-lived
-    # daemon standing consent to spend money, granted by a flag the user typed
-    # once for one invocation. Latent today (no daemon reads it) and exactly the
-    # kind of latency that stops being latent.
-    _prior_assume_yes = os.environ.get("NX_ASSUME_YES")
-    if assume_yes:
-        os.environ["NX_ASSUME_YES"] = "1"
-    try:
-        _upgrade_body(
-            dry_run=dry_run, force=force, auto_mode=auto_mode, skip_t3=skip_t3
-        )
-    finally:
-        if assume_yes:
-            if _prior_assume_yes is None:
-                os.environ.pop("NX_ASSUME_YES", None)
-            else:
-                os.environ["NX_ASSUME_YES"] = _prior_assume_yes
-
-
-def _upgrade_body(
-    *, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool
-) -> None:
-    """The upgrade sequence proper — see :func:`upgrade` for the flag contract."""
     # RDR-128 P2: quiesce the daemon BEFORE migrating so its live T2
     # connections are released — the migration flock serializes the two
     # MIGRATOR processes, but only quiescing frees the daemon's serving
@@ -135,7 +104,8 @@ def _upgrade_body(
         # third mechanism the Gap-4 criterion bans. Genuine decisions the
         # walk cannot derive (source-gone, billed re-embed) surface from
         # INSIDE the rung; pending state is reported by `nx doctor`.
-        _run_ladder(dry_run=dry_run, auto_mode=auto_mode, _t2_apply_attempted=not dry_run)
+        with _standing_consent(assume_yes):
+            _run_ladder(dry_run=dry_run, auto_mode=auto_mode, _t2_apply_attempted=not dry_run)
     except Exception:
         if auto_mode:
             _log.warning("upgrade_auto_error", exc_info=True)
@@ -149,6 +119,40 @@ def _upgrade_body(
         # graceful cycle on a stale one. Best-effort, non-dry-run only.
         if not dry_run:
             _cycle_supervised_daemons_to_current(skip_t3=skip_t3)
+
+
+@contextlib.contextmanager
+def _standing_consent(assume_yes: bool):
+    """Scope ``--yes`` to the ladder walk — the ONLY thing that reads it.
+
+    The rung reads standing consent from the environment because the unattended
+    callers (hooks, cron) never type a flag; the flag therefore sets what that
+    channel reads, rather than growing a second gate to drift from it.
+
+    NARROW BY CONSTRUCTION, not by frame ordering. An earlier draft set the env
+    for the whole command and restored it in an outer finally — but `nx
+    upgrade`'s own finally SPAWNS DAEMONS (`_cycle_supervised_daemons_to_current`
+    and, earlier, `_quiesce_daemon` / `_converge_preconditions`), and those
+    subprocesses pass no ``env=``, so they inherit this process's environment
+    and ran BEFORE the outer restore. `--yes`, typed once for one invocation,
+    reached every long-lived daemon as standing consent to spend money. The
+    window now contains exactly the one call that consumes it, so there is no
+    ordering left to get wrong.
+    """
+    import os  # noqa: PLC0415 — stdlib, branch-local
+
+    if not assume_yes:
+        yield
+        return
+    prior = os.environ.get("NX_ASSUME_YES")
+    os.environ["NX_ASSUME_YES"] = "1"
+    try:
+        yield
+    finally:
+        if prior is None:
+            os.environ.pop("NX_ASSUME_YES", None)
+        else:
+            os.environ["NX_ASSUME_YES"] = prior
 
 
 def _converge_preconditions(*, auto_mode: bool, skip_t3: bool = False) -> None:

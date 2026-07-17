@@ -69,7 +69,7 @@ class _Reg:
 
 
 def test_yes_flag_reaches_the_rungs_consent_channel(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The WIRE, not the gate. Every other NX_ASSUME_YES test calls
     _default_cost_gate directly with monkeypatch.setenv, so deleting the
@@ -78,33 +78,63 @@ def test_yes_flag_reaches_the_rungs_consent_channel(
     coverage of the only part a user touches. This arc already shipped a
     NameError in a production default no test executed; same class.
 
-    Drives the real CLI and reads what the rung would read, from inside the
-    command's own process."""
-    import os
-
-    from click.testing import CliRunner
-
+    Observes at `_run_ladder`, the ONLY consumer, reading exactly what the rung's
+    `assume_yes()` would read."""
     from nexus.upgrade_ladder.rungs.substrate_etl import assume_yes
 
     seen: list[bool] = []
-    monkeypatch.setattr(
-        upgrade_mod, "_upgrade_body", lambda **_kw: seen.append(assume_yes())
-    )
+    monkeypatch.setattr(upgrade_mod, "_run_ladder", lambda **_kw: seen.append(assume_yes()))
+    monkeypatch.setattr(upgrade_mod, "_quiesce_daemon", lambda: None)
+    monkeypatch.setattr(upgrade_mod, "_run_upgrade", lambda **_kw: None)
+    monkeypatch.setattr(upgrade_mod, "_converge_preconditions", lambda **_kw: None)
+    monkeypatch.setattr(upgrade_mod, "_cycle_supervised_daemons_to_current", lambda **_kw: None)
     monkeypatch.delenv("NX_ASSUME_YES", raising=False)
 
     CliRunner().invoke(upgrade, ["--yes"], catch_exceptions=False)
     assert seen == [True], "`--yes` never reached the rung's consent channel"
 
-    # Non-vacuity: the same command without the flag must NOT consent...
+    # Non-vacuity: the same command without the flag must NOT consent.
     seen.clear()
     CliRunner().invoke(upgrade, [], catch_exceptions=False)
     assert seen == [False]
 
-    # ...and the flag must not outlive the invocation: the finally-block spawns
-    # daemons with no env= and they inherit this process's environment. A
-    # long-lived daemon must not carry standing consent to spend money because
-    # of a flag typed once.
-    assert "NX_ASSUME_YES" not in os.environ
+
+def test_yes_flag_is_not_visible_to_the_daemons_the_upgrade_spawns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Samples the env AT THE DAEMON-SPAWN INSTANT, which is the only moment
+    that can observe the leak.
+
+    The first draft of this pin asserted `"NX_ASSUME_YES" not in os.environ`
+    AFTER the command returned. That was true, and true for a reason unrelated
+    to the property: the daemon spawns happen inside the command's OWN finally,
+    40 lines and one stack frame before any outer restore runs. The assertion
+    could not fail for the reason it named, and passed under the real bug
+    (substantive critic, 2026-07-17 — the fifth vacuous pin in this arc, and the
+    first to short-circuit in TIME rather than control flow).
+
+    `_cycle_supervised_daemons_to_current` and friends spawn subprocesses with
+    no `env=`, so they inherit this process's environment. A flag typed once for
+    one invocation must not hand a long-lived daemon standing consent to spend
+    money."""
+    import os
+
+    at_spawn: dict[str, str | None] = {}
+    monkeypatch.setattr(upgrade_mod, "_quiesce_daemon", lambda: None)
+    monkeypatch.setattr(upgrade_mod, "_run_upgrade", lambda **_kw: None)
+    monkeypatch.setattr(upgrade_mod, "_converge_preconditions", lambda **_kw: None)
+    monkeypatch.setattr(upgrade_mod, "_run_ladder", lambda **_kw: None)
+    monkeypatch.setattr(
+        upgrade_mod,
+        "_cycle_supervised_daemons_to_current",
+        lambda **_kw: at_spawn.update(seen=os.environ.get("NX_ASSUME_YES")),
+    )
+    monkeypatch.delenv("NX_ASSUME_YES", raising=False)
+
+    CliRunner().invoke(upgrade, ["--yes"], catch_exceptions=False)
+    assert at_spawn == {"seen": None}, (
+        "the daemons `nx upgrade --yes` spawns inherited standing consent"
+    )
 
 
 # ── nexus-fffey: a rung that CANNOT answer must not read as converged ────────
@@ -392,13 +422,5 @@ def test_upgrade_invocation_executes_each_migration_step_exactly_once(
 def test_upgrade_command_is_wired_to_the_ladder() -> None:
     """Wiring pin: the single trigger (`nx upgrade`) walks the ladder.
 
-    Follows the whole chain, not one frame: the command delegates to
-    `_upgrade_body` (which exists so `--yes` can be restored on the way out
-    without leaking NX_ASSUME_YES into the daemons the finally-block spawns).
-    Asserting only on the callback would silently pass the day the body stops
-    being reached at all — the defined-but-unregistered shape this pin exists
-    to catch."""
-    from nexus.commands.upgrade import _upgrade_body  # noqa: PLC0415 — test-local
-
-    assert "_upgrade_body(" in inspect.getsource(upgrade.callback)
-    assert "_run_ladder(" in inspect.getsource(_upgrade_body)
+    """
+    assert "_run_ladder(" in inspect.getsource(upgrade.callback)
