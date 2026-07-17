@@ -2,7 +2,8 @@
 title: "Single-Ladder Convergent Upgrade: One Version, Auto-Applied Data Migrations, Delete the Upgrade Ceremony"
 id: RDR-185
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-07-17
 priority: high
 author: Hal Hildebrand
 reviewed-by: ""
