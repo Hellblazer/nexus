@@ -281,7 +281,18 @@ def _failed_past_the_gate(proc: subprocess.CompletedProcess[str]) -> bool:
         if ln.startswith("Error: upgrade ladder did not converge")
     ]
     said = "\n".join(failures)
-    return bool(failures) and "converge raised" in said and "detect raised" not in said
+    # "substrate-etl" is the one token that anchors the marker to the rung the
+    # consent gate lives in (critic, final round). Without it, a pre-substrate
+    # rung hard-failing with its own `converge raised` stamp satisfies the
+    # helper while substrate-etl sits NOT_ATTEMPTED and the gate never runs —
+    # today that is prevented only by the fixture creating the catalog, which
+    # is a proxy kept honest by fixture state, the arc's whole disease.
+    return (
+        bool(failures)
+        and "substrate-etl" in said
+        and "converge raised" in said
+        and "detect raised" not in said
+    )
 
 
 def test_standing_consent_is_honored_end_to_end(
@@ -435,3 +446,26 @@ def test_the_free_shape_converges_unattended_with_zero_spend(
     assert all(r["embedding"] is not None for r in target.rows.values())
     # ...and the ids landed CONFORMANT (the wire re-id did its job en route).
     assert all(len(cid) == 32 for cid in target.rows)
+
+
+def _proc(returncode: int, stderr: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args=["nx"], returncode=returncode, stdout="", stderr=stderr)
+
+
+def test_failed_past_the_gate_is_anchored_to_the_substrate_rung() -> None:
+    """The helper is a pure function; pin its truth table directly. The
+    t2-schema row is the load-bearing one: a PRE-substrate rung hard-failing
+    with its own `converge raised` stamp must NOT read as "the consent gate was
+    passed" — substrate-etl would be NOT_ATTEMPTED. Before the anchor token,
+    only the fixture's catalog-creation kept that row False."""
+    line = "Error: upgrade ladder did not converge — {}"
+    assert _failed_past_the_gate(
+        _proc(1, line.format("substrate-etl: failed (converge raised: dial tcp refused)"))
+    )
+    assert not _failed_past_the_gate(
+        _proc(1, line.format("t2-schema: failed (converge raised: locked)"))
+    )
+    assert not _failed_past_the_gate(
+        _proc(1, line.format("substrate-etl: failed (detect raised: boom)"))
+    )
+    assert not _failed_past_the_gate(_proc(0, ""))
