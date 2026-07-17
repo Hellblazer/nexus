@@ -152,6 +152,21 @@ cat <<'RELAY'
 Relays are constructed by the caller. Subagents output "Recommended Next Step" blocks for the caller to use.
 RELAY
 
+# RDR-184 P1.3 (nexus-ccs9v.8): Gap-1/2/4 agent-side directives. Separate
+# heredoc (RELAY is at 413 bytes; the <500-byte body ceiling above is the
+# bash 5.3.x pipe-deadlock guard). Enforced by
+# tests/hooks/test_subagent_start_hook.py.
+cat <<'ORCH'
+
+## Orchestration (Required)
+
+| Directive | Rule |
+|-----------|------|
+| Completion | SendMessage full result to main BEFORE idling: success/failure/blocked + live background task ids |
+| Inbox | Re-check inbox right before composing any hand-back; newest directive wins |
+| Git | Shared tree: NEVER git add/commit. Hand back diffs+paths; orchestrator commits pathspec-limited |
+ORCH
+
 # Serena + Context7 guidance injected by sn plugin (sn/hooks/scripts/mcp-inject.sh).
 
 if [[ $SKIP_STORAGE_DOCS -eq 0 ]]; then

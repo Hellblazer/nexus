@@ -56,6 +56,32 @@ class TestSubagentStartHook:
         payload = json.loads(result.stdout)
         assert payload["hookSpecificOutput"]["hookEventName"] == "SubagentStart"
 
+    def test_orchestration_directive_rows_injected(self) -> None:
+        """RDR-184 P1.3 (nexus-ccs9v.8): the THREE orchestration directive
+        rows — Completion (Gap 1), Inbox (Gap 2), Git (Gap 4) — ride the
+        live injection path into every subagent's initial context."""
+        result = _run_hook()
+        ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        assert "| Completion |" in ctx
+        assert "SendMessage full result to main BEFORE idling" in ctx
+        assert "| Inbox |" in ctx
+        assert "Re-check inbox right before composing any hand-back" in ctx
+        assert "| Git |" in ctx
+        assert "NEVER git add/commit" in ctx
+        assert "orchestrator commits pathspec-limited" in ctx
+
+    def test_heredoc_bodies_respect_deadlock_ceiling(self) -> None:
+        """The file's own rule: heredoc bodies stay under 500 bytes (bash
+        5.3.x pipe deadlock). Guard the NEW ORCH heredoc mechanically;
+        pre-existing PHASE_GATE (540 bytes) is grandfathered until its
+        owner trims it."""
+        import re
+
+        src = SCRIPT.read_text()
+        m = re.search(r"cat <<'ORCH'\n(.*?)\nORCH\n", src, re.S)
+        assert m is not None, "ORCH heredoc missing from subagent-start.sh"
+        assert len(m.group(1).encode()) < 500
+
 
 class TestSessionIdExport:
     """nexus-7o1zh: this hook runs detached from any live nx-mcp process and
