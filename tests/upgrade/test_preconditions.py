@@ -395,7 +395,15 @@ def test_unreadable_package_metadata_is_loud(tmp_path: pathlib.Path) -> None:
 
 def test_upgrade_trigger_wires_preconditions_before_the_walk() -> None:
     """Wiring pin: nx upgrade converges preconditions BEFORE _run_ladder
-    (source-order inspection, matching the P0 wiring-pin style)."""
-    source = inspect.getsource(upgrade.callback)
+    (source-order inspection, matching the P0 wiring-pin style).
+
+    Reads `_upgrade_body`, the frame the command delegates to (it exists so
+    `--yes` can be unset on the way out rather than leaking NX_ASSUME_YES into
+    spawned daemons). The delegation itself is pinned by
+    test_upgrade_command_is_wired_to_the_ladder."""
+    from nexus.commands.upgrade import _upgrade_body  # noqa: PLC0415 — test-local
+
+    assert "_upgrade_body(" in inspect.getsource(upgrade.callback)
+    source = inspect.getsource(_upgrade_body)
     assert "_converge_preconditions(" in source
     assert source.index("_converge_preconditions(") < source.index("_run_ladder(")

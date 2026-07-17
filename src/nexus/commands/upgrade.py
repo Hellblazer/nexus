@@ -63,11 +63,36 @@ def upgrade(
     """
     import os  # noqa: PLC0415 — stdlib, branch-local
 
+    # The rung reads standing consent from the environment (hooks and cron never
+    # type a flag), so the flag sets what the env channel reads — one mechanism,
+    # two front doors, rather than a second gate to drift.
+    #
+    # RESTORED on the way out, and that is not tidiness: this function's own
+    # finally-block starts daemons (`nx daemon t2 ensure-running`, `t3 start`,
+    # `service start`) as subprocesses with no `env=`, so they inherit this
+    # process's environment. Leaking NX_ASSUME_YES would hand a long-lived
+    # daemon standing consent to spend money, granted by a flag the user typed
+    # once for one invocation. Latent today (no daemon reads it) and exactly the
+    # kind of latency that stops being latent.
+    _prior_assume_yes = os.environ.get("NX_ASSUME_YES")
     if assume_yes:
-        # The rung reads standing consent from the environment (hooks and cron
-        # never type a flag), so the flag sets what the env channel reads —
-        # one mechanism, two front doors, rather than a second gate to drift.
         os.environ["NX_ASSUME_YES"] = "1"
+    try:
+        _upgrade_body(
+            dry_run=dry_run, force=force, auto_mode=auto_mode, skip_t3=skip_t3
+        )
+    finally:
+        if assume_yes:
+            if _prior_assume_yes is None:
+                os.environ.pop("NX_ASSUME_YES", None)
+            else:
+                os.environ["NX_ASSUME_YES"] = _prior_assume_yes
+
+
+def _upgrade_body(
+    *, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool
+) -> None:
+    """The upgrade sequence proper — see :func:`upgrade` for the flag contract."""
     # RDR-128 P2: quiesce the daemon BEFORE migrating so its live T2
     # connections are released — the migration flock serializes the two
     # MIGRATOR processes, but only quiescing frees the daemon's serving

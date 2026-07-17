@@ -272,6 +272,13 @@ def _refuse_target_collisions(legs: list[LegPlan]) -> None:
     # leg) is one source seen twice, not a merge of two. Keying on the raw list
     # refused a healthy install outright (`nx upgrade` FAILED forever) the
     # moment a Chroma Cloud leg was configured beside the local one.
+    #
+    # That duplicate leg is a defect in its own right, NOT settled truth: the
+    # rung classifies the cloud leg and then reads only local, so the second leg
+    # is a phantom it can never execute (bead nexus-bmiq9). This guard is simply
+    # not the place to fix it — silently merging two DISTINCT collections is
+    # what it exists to refuse, and it must not refuse a healthy install on the
+    # way.
     collided = {t: s for t, s in sorted(by_target.items()) if len(s) > 1}
     if not collided:
         return
@@ -820,13 +827,42 @@ def _default_cost_gate(plan: SubstratePlan) -> bool:
         return True
     import click  # noqa: PLC0415 — deferred, CLI-only path
 
-    return bool(
-        click.confirm(
-            "This upgrade re-embeds collections with a billed Voyage model. "
-            "Proceed?",
-            default=False,
+    try:
+        return bool(
+            click.confirm(
+                # "MAY re-embed", not "re-embeds": the predicate establishes
+                # that this leg CAN bill (its target's declared model is a
+                # billed one), not that it will. A re-id-only passthrough
+                # re-embeds only if a provenance mismatch drops a vector.
+                # Asserting certainty about someone's money we do not have is
+                # its own defect. (No estimate yet either — nexus-byosf.)
+                "This upgrade may re-embed collections with a billed Voyage "
+                "model. Proceed?",
+                default=False,
+            )
         )
-    )
+    except click.Abort:
+        # A NON-TTY IS A DECLINE, NOT A CRASH. click.confirm raises Abort when
+        # it cannot read stdin, and Abort is a RuntimeError whose str() is ""
+        # — so letting it escape made converge() raise, which the runner reports
+        # as FAILED (not DEFERRED) and `nx upgrade` renders as "did not
+        # converge — substrate-etl: failed (converge raised: )". An empty
+        # reason, exit 1, and no mention of the flag that fixes it, on exactly
+        # the unattended ancient install SC-1 promises will converge.
+        #
+        # Declining is the correct, non-fatal answer: converge() returns
+        # DEFERRED, nothing is recorded, nothing is billed, and the next run
+        # re-derives. The RDR's ## Constraints say a non-TTY "aborts rather
+        # than billing" — this is what makes that sentence true.
+        _log.warning(
+            "substrate_cost_gate_declined_no_tty",
+            legs=len(plan.legs),
+            note=(
+                "billed re-embed needs consent and there is no terminal to ask "
+                "— set NX_ASSUME_YES=1 or run `nx upgrade --yes` to proceed"
+            ),
+        )
+        return False
 
 
 class SubstrateEtlRung:
@@ -1009,7 +1045,12 @@ class SubstrateEtlRung:
             report.emit("substrate_rung_deferred_cost_gate")
             return ConvergeResult(
                 ConvergeOutcome.DEFERRED,
-                detail="deferred: the billed re-embed cost gate was declined",
+                detail=(
+                    "deferred: this walk would re-embed with a billed Voyage "
+                    "model and consent was declined (or there was no terminal "
+                    "to ask). Re-run with `nx upgrade --yes`, or set "
+                    "NX_ASSUME_YES=1, to proceed"
+                ),
             )
         leg_results, cascade_results = self._migrate(plan, report=report)
         failed_legs = [r for r in leg_results if not getattr(r, "ok", True)]

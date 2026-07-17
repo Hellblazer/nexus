@@ -25,6 +25,7 @@ import nexus.upgrade_ladder.registry as ladder_registry
 from nexus.cli import main
 from nexus.db.migrations import Migration, MigrationRetry
 from nexus.health import _check_pending_rungs, run_health_checks
+import nexus.commands.upgrade as upgrade_mod
 from nexus.commands.upgrade import _run_ladder, upgrade
 from nexus.upgrade_ladder.completion import CompletionStore
 from nexus.upgrade_ladder.protocol import ConvergeOutcome, ConvergeResult, ProgressReporter, RungStatus
@@ -62,6 +63,48 @@ class _Reg:
 
     def registry(self) -> LadderRegistry:
         return LadderRegistry(self.rungs)
+
+
+# ── nexus-k1m2f: `nx upgrade --yes` must actually reach the rung's cost gate ──
+
+
+def test_yes_flag_reaches_the_rungs_consent_channel(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    """The WIRE, not the gate. Every other NX_ASSUME_YES test calls
+    _default_cost_gate directly with monkeypatch.setenv, so deleting the
+    flag->env wiring in the command passed 387 tests (code review, 2026-07-17) —
+    the consent channel RDR-185's amended Constraints make load-bearing had zero
+    coverage of the only part a user touches. This arc already shipped a
+    NameError in a production default no test executed; same class.
+
+    Drives the real CLI and reads what the rung would read, from inside the
+    command's own process."""
+    import os
+
+    from click.testing import CliRunner
+
+    from nexus.upgrade_ladder.rungs.substrate_etl import assume_yes
+
+    seen: list[bool] = []
+    monkeypatch.setattr(
+        upgrade_mod, "_upgrade_body", lambda **_kw: seen.append(assume_yes())
+    )
+    monkeypatch.delenv("NX_ASSUME_YES", raising=False)
+
+    CliRunner().invoke(upgrade, ["--yes"], catch_exceptions=False)
+    assert seen == [True], "`--yes` never reached the rung's consent channel"
+
+    # Non-vacuity: the same command without the flag must NOT consent...
+    seen.clear()
+    CliRunner().invoke(upgrade, [], catch_exceptions=False)
+    assert seen == [False]
+
+    # ...and the flag must not outlive the invocation: the finally-block spawns
+    # daemons with no env= and they inherit this process's environment. A
+    # long-lived daemon must not carry standing consent to spend money because
+    # of a flag typed once.
+    assert "NX_ASSUME_YES" not in os.environ
 
 
 # ── nexus-fffey: a rung that CANNOT answer must not read as converged ────────
@@ -347,6 +390,15 @@ def test_upgrade_invocation_executes_each_migration_step_exactly_once(
 
 
 def test_upgrade_command_is_wired_to_the_ladder() -> None:
-    """Wiring pin: the single trigger (`nx upgrade`) walks the ladder."""
-    source = inspect.getsource(upgrade.callback)
-    assert "_run_ladder(" in source
+    """Wiring pin: the single trigger (`nx upgrade`) walks the ladder.
+
+    Follows the whole chain, not one frame: the command delegates to
+    `_upgrade_body` (which exists so `--yes` can be restored on the way out
+    without leaking NX_ASSUME_YES into the daemons the finally-block spawns).
+    Asserting only on the callback would silently pass the day the body stops
+    being reached at all — the defined-but-unregistered shape this pin exists
+    to catch."""
+    from nexus.commands.upgrade import _upgrade_body  # noqa: PLC0415 — test-local
+
+    assert "_upgrade_body(" in inspect.getsource(upgrade.callback)
+    assert "_run_ladder(" in inspect.getsource(_upgrade_body)

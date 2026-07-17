@@ -616,12 +616,19 @@ def test_one_collection_seen_on_two_read_legs_is_not_a_collision() -> None:
             source_count=12, has_data=True, legacy_ids=True,
         )
 
+    # Asserts ONLY that the guard does not refuse. Deliberately NOT
+    # `len(plan.legs) == 2`: that duplicate is itself a defect (nexus-bmiq9 —
+    # the rung classifies the cloud leg and then reads only local, so the second
+    # leg is a phantom it can never execute). Pinning the count would make the
+    # phantom the contract and force bmiq9's fix to delete this test. The
+    # guard's contract is "two DISTINCT sources must not merge"; one source
+    # seen twice is simply not its business.
     plan = plan_substrate_legs(
         [_leg_of("local"), _leg_of("cloud")],
         prior_collections=frozenset(),
         voyage_key_present=False,
     )
-    assert len(plan.legs) == 2  # refused nothing; both classifications planned
+    assert plan.legs, "the guard refused a single source seen on two read legs"
 
 
 # ── nexus-k1m2f: the billed-Voyage consent gate must survive the plan filter ──
@@ -689,6 +696,46 @@ def test_standing_consent_lets_a_billed_walk_converge_unattended(
     monkeypatch.delenv("NX_ASSUME_YES")
     assert _default_cost_gate(plan) is False
     assert asked, "without standing consent the user must be asked"
+
+
+def test_no_tty_declines_the_bill_instead_of_crashing_the_walk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-TTY is a DECLINE, not a crash (code review, 2026-07-17).
+
+    click.confirm raises click.Abort when it cannot read stdin, and Abort is a
+    RuntimeError whose str() is EMPTY. Letting it escape made converge() raise,
+    which the runner reports as FAILED (not DEFERRED) and `nx upgrade` renders
+    as "did not converge — substrate-etl: failed (converge raised: )": an empty
+    reason, exit 1, and no mention of the flag that fixes it — on exactly the
+    unattended ancient install SC-1 promises will converge. Reproduced before
+    the fix; this pin is why it cannot come back."""
+    import click
+
+    plan = SubstratePlan(legs=[_billed_leg()])
+    monkeypatch.delenv("NX_ASSUME_YES", raising=False)
+
+    def _no_tty(*_a: object, **_kw: object) -> bool:
+        raise click.Abort()
+
+    monkeypatch.setattr(click, "confirm", _no_tty)
+    assert _default_cost_gate(plan) is False  # declined, NOT raised
+
+
+def test_a_declined_bill_defers_and_names_the_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Declining must be non-fatal AND actionable: DEFERRED (nothing recorded,
+    re-derived next run), with the deferral naming the consent channel. A
+    non-fatal message that does not say what to do leaves the user exactly as
+    stuck as the hard failure did, just quieter."""
+    rung = _rung(
+        classify_fn=lambda: [_cls("knowledge__old", legacy=True)],
+        cost_gate_fn=lambda _plan: False,
+    )
+    result = rung.converge(_Recorder())
+    assert result.outcome is ConvergeOutcome.DEFERRED
+    assert "--yes" in result.detail or "NX_ASSUME_YES" in result.detail
 
 
 def test_a_converged_billed_leg_stops_asking(
