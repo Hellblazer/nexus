@@ -25,9 +25,13 @@ from nexus.migration.remap_cascade import StoreCascadeResult
 from nexus.upgrade_ladder.protocol import ConvergeOutcome, Rung, RungStatus
 from nexus.upgrade_ladder.registry import RUNG_SUBSTRATE_ETL, default_registry
 from nexus.upgrade_ladder.rungs.substrate_etl import (
+    LegPlan,
+    SourceGoneDecision,
     SubstrateEtlRung,
     SubstratePlan,
     _default_cost_gate,
+    drop_converged_legs,
+    plan_substrate_legs,
 )
 
 
@@ -64,6 +68,12 @@ def _rung(**kwargs: Any) -> SubstrateEtlRung:
         "footprint_fn": lambda: True,
         "classify_fn": lambda: [_cls("knowledge__old", legacy=True)],
         "voyage_key_fn": lambda: True,
+        # nexus-mapbc: the already-converged filter probes the LIVE target, and
+        # its production default is make_t3() — a real service call. Pin it to
+        # "target absent" (the pre-filter behaviour: nothing converged, every
+        # leg stands) so no unit test can reach real infrastructure the moment
+        # a stage gains a real-world default.
+        "target_count_fn": lambda _collection: None,
     }
     defaults.update(kwargs)
     return SubstrateEtlRung(**defaults)
@@ -258,7 +268,179 @@ def test_verify_true_when_not_applicable() -> None:
 
 def test_verify_is_independent_of_converge_bookkeeping() -> None:
     """RDR-142: verify re-reads the WORLD, never a return value the converge
-    handed it (the resume path's full-count check delegates here)."""
-    source = inspect.getsource(SubstrateEtlRung.verify)
-    assert "self._classify" in source or "_census" in source
-    assert "result" not in source  # no converge bookkeeping consulted
+    handed it (the resume path's full-count check delegates here).
+
+    Behaviour, not source text: this used to assert `"self._classify" in
+    inspect.getsource(verify)`, which pinned the IMPLEMENTATION's spelling
+    rather than the property — it broke the moment verify delegated to
+    _plan() (which reads the world exactly as required) and would equally
+    have passed a verify that called _classify and then ignored it.
+    """
+    # A converge that loudly claims total success cannot make verify true:
+    # the target is empty, so the content did not arrive.
+    rung = _rung(
+        classify_fn=lambda: [_cls("knowledge__old", legacy=True, count=10)],
+        target_count_fn=lambda _c: 0,
+        migrate_fn=lambda *_a, **_k: ([], []),
+    )
+    assert rung.verify() is False
+
+    # ...and the same rung verifies true once the WORLD says the rows landed,
+    # with no converge having run at all in this process.
+    landed = _rung(
+        classify_fn=lambda: [_cls("knowledge__old", legacy=True, count=10)],
+        target_count_fn=lambda _c: 10,
+    )
+    assert landed.verify() is True
+
+
+def test_verify_is_reachable_on_an_immutable_source() -> None:
+    """nexus-mapbc — the regression that made the rung unfinishable.
+
+    RDR-176 keeps the Chroma source byte-untouched as the rollback target, so
+    a source-derived verify asks "does a source exist?" — true forever — and
+    the rung could NEVER record completion. Observed live in the P4.3 era-hop:
+    4/4 legs migrated perfectly, verify-failed, doctor reported pending rungs
+    forever, and every `nx upgrade` re-ran the full ETL (re-billing Voyage on
+    a cloud leg). The source being present must not, by itself, mean pending.
+    """
+    source_still_there = lambda: True  # noqa: E731 — RDR-176: it always is
+    rung = _rung(
+        footprint_fn=source_still_there,
+        classify_fn=lambda: [_cls("knowledge__old", legacy=True, count=10)],
+        target_count_fn=lambda _c: 10,  # the world says: it all arrived
+    )
+    assert rung.verify() is True, (
+        "verify must be satisfiable while the immutable source still exists — "
+        "otherwise the rung has no terminal state"
+    )
+    assert rung.detect().pending is False, (
+        "a converged rung must also stop reporting pending, or doctor nags "
+        "forever and nx upgrade re-migrates at full cost every run"
+    )
+
+
+# ── nexus-mapbc: the already-converged filter (the rung's terminal state) ────
+
+
+def _leg(source: str = "knowledge__old", target: str = "knowledge__new") -> LegPlan:
+    return LegPlan(
+        source_collection=source, target_collection=target,
+        needs_reid=True, needs_reembed=False,
+    )
+
+
+def test_converged_leg_is_dropped_when_the_target_holds_the_full_count() -> None:
+    plan = SubstratePlan(legs=[_leg()])
+    out = drop_converged_legs(plan, {"knowledge__old": 12}, lambda _c: 12)
+    assert out.legs == []
+
+
+def test_partial_target_is_not_converged() -> None:
+    """A crashed/resumable run must stay planned — never rounded up to done."""
+    plan = SubstratePlan(legs=[_leg()])
+    out = drop_converged_legs(plan, {"knowledge__old": 12}, lambda _c: 11)
+    assert len(out.legs) == 1
+
+
+def test_absent_or_unreachable_target_is_not_converged() -> None:
+    """None means "could not tell" — which is never "converged". A silent
+    skip here would drop real data on an unreachable service."""
+    plan = SubstratePlan(legs=[_leg()])
+    assert len(drop_converged_legs(plan, {"knowledge__old": 12}, lambda _c: None).legs) == 1
+
+
+def test_converged_filter_probes_the_TARGET_not_the_source() -> None:
+    """The bug's shape: asking the (immutable, always-present) source can only
+    ever answer "still there". The probe must receive the TARGET name."""
+    seen: list[str] = []
+
+    def probe(collection: str) -> int | None:
+        seen.append(collection)
+        return 12
+
+    drop_converged_legs(
+        SubstratePlan(legs=[_leg(source="knowledge__src", target="knowledge__dst")]),
+        {"knowledge__src": 12},
+        probe,
+    )
+    assert seen == ["knowledge__dst"]
+
+
+def test_decisions_survive_the_converged_filter() -> None:
+    """A source-gone decision is a question for converge, not a leg — the
+    filter must never silently answer it by dropping it."""
+    plan = SubstratePlan(legs=[_leg()], decisions=[SourceGoneDecision(collection="gone")])
+    out = drop_converged_legs(plan, {"knowledge__old": 12}, lambda _c: 12)
+    assert out.legs == []
+    assert [d.collection for d in out.decisions] == ["gone"]
+
+
+def test_converged_install_does_not_re_migrate() -> None:
+    """The cost consequence, end to end: a fully-migrated install must plan
+    ZERO legs, or every `nx upgrade` re-runs the whole ETL — and re-bills
+    Voyage on a cloud leg."""
+    rung = _rung(
+        classify_fn=lambda: [_cls("knowledge__old", legacy=True, count=10)],
+        target_count_fn=lambda _c: 10,
+    )
+    status = rung.detect()
+    assert status.applicable is True
+    assert status.converged is True
+    assert status.pending is False
+
+
+# ── nexus-j5diu: the measured-768 mislabel must not be silently skipped ──────
+
+
+def _mislabel(count: int = 12) -> CollectionClassification:
+    """The pre-RDR-109 shape: voyage-NAMED, but a stored vector measured as
+    local bge/ONNX 768 — the name lies, the content was never voyage text."""
+    return CollectionClassification(
+        collection="knowledge__mislabel__voyage-context-3__v1",
+        leg="local",
+        model="voyage-context-3",
+        dim=1024,
+        support="unsupported",
+        source_count=count,
+        has_data=True,
+        measured_dim=768,
+    )
+
+
+def test_measured_768_mislabel_is_planned_without_a_voyage_key() -> None:
+    """It needs no key: bge content re-embedded into bge is loss-free. The
+    era-hop caught this collection being silently dropped — no leg, no error,
+    no decision, service=0 vs seeded=12."""
+    plan = plan_substrate_legs(
+        [_mislabel()], prior_collections=frozenset(), voyage_key_present=False,
+    )
+    assert [leg.source_collection for leg in plan.legs] == [
+        "knowledge__mislabel__voyage-context-3__v1"
+    ], "the measured-768 mislabel must be a leg, not a silent skip"
+
+
+def test_measured_768_mislabel_targets_the_local_model_and_never_bills() -> None:
+    plan = plan_substrate_legs(
+        [_mislabel()], prior_collections=frozenset(), voyage_key_present=False,
+    )
+    assert plan.legs[0].target_collection.endswith("__bge-base-en-v15-768__v1")
+    assert plan.billed_reembed is False, (
+        "provably-bge content must never bill a voyage re-embed (nexus-nb7hr)"
+    )
+
+
+def test_genuine_voyage_without_a_key_is_still_the_credential_case() -> None:
+    """The rescue must not swallow the gate it is an exception to: real voyage
+    content (no measured-768 proof) stays out of the plan without a key —
+    re-embedding voyage text into bge would silently change recall."""
+    genuine = CollectionClassification(
+        collection="knowledge__real__voyage-context-3__v1",
+        leg="local", model="voyage-context-3", dim=1024,
+        support="unsupported", source_count=12, has_data=True,
+        measured_dim=None,  # never probed as local bge
+    )
+    plan = plan_substrate_legs(
+        [genuine], prior_collections=frozenset(), voyage_key_present=False,
+    )
+    assert plan.legs == []

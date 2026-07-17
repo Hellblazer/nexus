@@ -109,7 +109,11 @@ def plan_substrate_legs(
     keys) — anything there that no longer classifies from the live source
     is the SOURCE-GONE decision case.
     """
-    from nexus.migration.detection import remap_target_model, wired_models  # noqa: PLC0415 — deferred, detection is heavy
+    from nexus.migration.detection import (  # noqa: PLC0415 — deferred, detection is heavy
+        is_measured_dim_override,
+        remap_target_model,
+        wired_models,
+    )
     from nexus.migration.vector_etl import _VOYAGE_MODELS, cross_model_target_name  # noqa: PLC0415 — deferred, vector_etl is heavy
 
     wired = wired_models(voyage_key_present=voyage_key_present)
@@ -127,7 +131,25 @@ def plan_substrate_legs(
         # collection without the key stays with the upstream credential gate
         # (C3) — re-embedding voyage text into bge would silently change
         # recall (cross_model_remappable's deliberate exclusion).
-        if c.model in _VOYAGE_MODELS and not voyage_key_present:
+        #
+        # ...UNLESS a stored vector PROVED the content is local bge/ONNX
+        # (nexus-nb7hr measured-dim override). Then the voyage token in the
+        # name is a pre-RDR-109 mislabel, the content was never voyage text,
+        # no key is needed, and re-embedding bge into bge is loss-free. The
+        # ORDER is the whole point and mirrors cross_model_remappable, which
+        # checks the override BEFORE its own name-based voyage exclusion —
+        # `is_measured_dim_override` exists precisely so callers reuse the
+        # identical test "instead of re-deriving it and risking drift".
+        # This re-derived it and drifted: bead nexus-j5diu, caught by the
+        # P4.3 era-hop when a voyage-NAMED measured-768 collection was
+        # silently dropped from the plan and never migrated (service=0 vs
+        # seeded=12) — no leg, no error, no decision. A collection that
+        # cannot migrate must surface LOUD or as a decision, never vanish.
+        if (
+            c.model in _VOYAGE_MODELS
+            and not voyage_key_present
+            and not is_measured_dim_override(c)
+        ):
             continue  # credential gate territory, not a leg
         needs_reembed = c.model not in wired
         target = c.collection
@@ -329,6 +351,64 @@ def run_substrate_migration(
 # ── P4.0 (nexus-x3z00): the assembled rung ──────────────────────────────────
 
 
+def drop_converged_legs(
+    plan: SubstratePlan,
+    source_counts: dict[str, int],
+    target_count_fn: Callable[[str], int | None],
+) -> SubstratePlan:
+    """Drop legs whose TARGET already holds the source's rows (nexus-mapbc).
+
+    The rung's terminal state. Without this the substrate rung can never
+    finish: every question it asked was aimed at the SOURCE, which RDR-176
+    guarantees is byte-untouched forever, so a perfectly migrated install
+    still classified the same collections, still planned the same legs, and
+    ``verify()`` still returned False. Observed live (P4.3 era-hop): 4/4 legs
+    migrated correctly, verify-failed, completion never recorded, `nx doctor`
+    reporting pending rungs forever, and `nx upgrade` re-running the full ETL
+    on every invocation — which on a cloud leg re-bills Voyage every time.
+
+    Convergence test is count equality against the target. That is sufficient
+    for IDENTITY too, not just volume: GH #1390's chash CHECK constraints
+    enforce 32-char ids in pgvector, so legacy (16/18-char) ids cannot be
+    present in a target at all — a full-count target is necessarily a
+    conformant one. It is deliberately NOT a per-id probe: detect() runs on
+    `nx doctor`'s read-only path, and re-deriving every chash there would
+    read every source document on every health check.
+
+    ``target_count_fn`` returns None for an absent/unreachable target, which
+    is NOT converged — never a silent skip. Decisions pass through untouched:
+    a source-gone collection is a question for converge, not a leg.
+    """
+    if not plan.legs:
+        return plan
+    remaining: list[LegPlan] = []
+    for leg in plan.legs:
+        want = source_counts.get(leg.source_collection)
+        got = target_count_fn(leg.target_collection)
+        if want is not None and got is not None and got == want:
+            _log.info(
+                "substrate_leg_already_converged",
+                source=leg.source_collection,
+                target=leg.target_collection,
+                count=got,
+            )
+            continue
+        remaining.append(leg)
+    return SubstratePlan(legs=remaining, decisions=list(plan.decisions))
+
+
+def _default_target_count(collection: str) -> int | None:
+    """Live row count for *collection* in the target, or None when it is
+    absent/unreachable (both mean "not converged", never "converged")."""
+    from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid import cycle
+
+    try:
+        return make_t3().count(collection)
+    except Exception as exc:  # noqa: BLE001 — absent target / unreachable service: not converged
+        _log.debug("substrate_target_count_failed", collection=collection, error=str(exc))
+        return None
+
+
 def _default_footprint() -> bool:
     from nexus.upgrade_ladder.census import _chroma_footprint_present  # noqa: PLC0415 — deferred to avoid import cost
 
@@ -408,6 +488,7 @@ class SubstrateEtlRung:
         prior_collections_fn: Callable[[], frozenset[str]] | None = None,
         cost_gate_fn: Callable[[SubstratePlan], bool] | None = None,
         migrate_fn: Callable[..., tuple[list[Any], list[Any]]] | None = None,
+        target_count_fn: Callable[[str], int | None] | None = None,
         page: int = 300,
     ) -> None:
         self._footprint = footprint_fn if footprint_fn is not None else _default_footprint
@@ -418,20 +499,39 @@ class SubstrateEtlRung:
         )
         self._cost_gate = cost_gate_fn if cost_gate_fn is not None else _default_cost_gate
         self._migrate = migrate_fn if migrate_fn is not None else self._default_migrate
+        self._target_count = (
+            target_count_fn if target_count_fn is not None else _default_target_count
+        )
         self._page = page
 
     # ── plan ─────────────────────────────────────────────────────────────────
 
     def _plan(self) -> SubstratePlan | None:
-        """The live plan, or None when this rung is N/A (no Chroma
-        footprint: service-mode or fresh install — the census's cheap
-        file-level gate never opens a store)."""
+        """The live plan of what STILL needs doing, or None when this rung is
+        N/A (no Chroma footprint: service-mode or fresh install — the census's
+        cheap file-level gate never opens a store).
+
+        The already-converged filter is what gives this rung a TERMINAL STATE
+        (bead nexus-mapbc). The source is immutable by design (RDR-176
+        copy-not-move keeps it as the rollback target), so "a source exists"
+        is true forever and can never mean "work is pending". Asking the
+        SOURCE whether the migration happened is unanswerable; asking the
+        TARGET is the whole question. This is the same check the P2 seam
+        already deferred here — "a resumed run's full-count verification is
+        the rung verify()'s job".
+        """
         if not self._footprint():
             return None
-        return plan_substrate_legs(
-            self._classify(),
+        classifications = list(self._classify())
+        plan = plan_substrate_legs(
+            classifications,
             prior_collections=self._prior(),
             voyage_key_present=self._voyage_key(),
+        )
+        return drop_converged_legs(
+            plan,
+            {c.collection: c.source_count for c in classifications},
+            self._target_count,
         )
 
     # ── detect ───────────────────────────────────────────────────────────────
@@ -524,17 +624,22 @@ class SubstrateEtlRung:
     # ── verify ───────────────────────────────────────────────────────────────
 
     def verify(self) -> bool:
-        """AUTHORITATIVE post-state check (RDR-142): re-reads the WORLD —
-        the live census must show no legacy-id collection and no pending
-        leg. Never consults converge's bookkeeping (the .14 resume path's
-        relaxed this-run count check delegates the full check here)."""
-        if not self._footprint():
+        """AUTHORITATIVE post-state check (RDR-142): re-reads the WORLD and
+        asks it whether the content ARRIVED — never consults converge's
+        bookkeeping (the .14 resume path's relaxed this-run count check
+        delegates the full check here).
+
+        The world it must read is the TARGET (bead nexus-mapbc). This used to
+        re-plan from the source alone and so could never return True: the
+        source is immutable by design, so it describes what the install once
+        held, not what it still owes. ``_plan()`` now answers the real
+        question — every leg whose target holds the source's full row count is
+        converged and gone from the plan — so an empty plan is a genuine
+        terminal state rather than an unreachable one.
+        """
+        plan = self._plan()
+        if plan is None:
             return True  # N/A: nothing to verify
-        plan = plan_substrate_legs(
-            self._classify(),
-            prior_collections=frozenset(),  # decisions are converge's concern
-            voyage_key_present=self._voyage_key(),
-        )
         return not plan.legs
 
 
