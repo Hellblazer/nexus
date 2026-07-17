@@ -13,13 +13,17 @@ import inspect
 
 import pytest
 
+import nexus.config as config_mod
 import nexus.migration.detection as detection_mod
 import nexus.migration.guided_upgrade as guided_upgrade
 import nexus.upgrade_ladder.census as census_mod
+import nexus.upgrade_ladder.rungs.substrate_etl as substrate_mod
+from nexus.db.pg_provision import CREDENTIALS_FILENAME
 from nexus.health import _check_legacy_id_census, run_health_checks
 from nexus.migration.detection import CollectionClassification, DetectionReport
 from nexus.migration.guided_upgrade import PreflightDetection
 from nexus.upgrade_ladder.census import LegacyCollection, legacy_id_census
+from nexus.upgrade_ladder.rungs.substrate_etl import SourceProgress, SubstrateTargetCollision
 from nexus.upgrade_ladder.registry import default_registry
 
 
@@ -42,6 +46,14 @@ def _detection(*classifications: CollectionClassification) -> PreflightDetection
         report=DetectionReport(classifications=tuple(classifications)),
         needs_migration=bool(classifications),
     )
+
+
+def _nothing_converged(_classifications: object) -> SourceProgress:
+    """The pre-migration world, injected: the census asks the target and the
+    target holds nothing yet. Also keeps unit tests off the network — the
+    production ``_default_progress`` opens an HTTP client (its own body is
+    exercised by ``test_default_progress_*`` below)."""
+    return SourceProgress()
 
 
 # ── legacy_id_census ─────────────────────────────────────────────────────────
@@ -77,7 +89,7 @@ def test_census_fires_despite_service_evidence(monkeypatch: pytest.MonkeyPatch) 
         "detect_pending_migration",
         lambda: _detection(_classification("knowledge__old_store", legacy=True, count=18)),
     )
-    result = legacy_id_census()
+    result = legacy_id_census(progress_fn=_nothing_converged)
     assert result is not None
     assert [c.collection for c in result] == ["knowledge__old_store"]
 
@@ -110,7 +122,7 @@ def test_census_lists_only_legacy_collections(monkeypatch: pytest.MonkeyPatch) -
             _classification("docs__legacy_two", legacy=True, count=7),
         ),
     )
-    result = legacy_id_census()
+    result = legacy_id_census(progress_fn=_nothing_converged)
     assert result == [
         LegacyCollection(
             collection="knowledge__old_store",
@@ -149,6 +161,275 @@ def test_census_degrades_to_none_on_probe_failure(
 
     monkeypatch.setattr(guided_upgrade, "detect_pending_migration", _boom)
     assert legacy_id_census() is None
+
+
+# ── nexus-6or3m: the census reports OUTSTANDING debt, not history ────────────
+# Reproduced live in a PASSING era-hop run: a fully converged install, every
+# collection at parity on the wire, doctor reporting "no pending rungs" — and
+# the census still warning about era debt, because it asked the SOURCE. RDR-176
+# keeps that source byte-untouched forever as the rollback target, so it holds
+# its legacy ids for the rest of the install's life. "A source exists" can never
+# mean "work is pending" (the third instance of this class: nexus-mapbc,
+# nexus-j5diu, this).
+
+
+def test_census_drops_a_collection_the_target_has_converged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE pin. The source still holds legacy ids (it always will) — and the
+    census must say nothing, because the target already holds its rows."""
+    monkeypatch.setattr(census_mod, "_chroma_footprint_present", lambda: True)
+    monkeypatch.setattr(
+        guided_upgrade,
+        "detect_pending_migration",
+        lambda: _detection(_classification("knowledge__old_store", legacy=True)),
+    )
+    assert legacy_id_census(
+        progress_fn=lambda _: SourceProgress(converged=frozenset({"knowledge__old_store"}))
+    ) == []
+
+
+def test_census_reports_only_the_UNconverged_of_several(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A half-migrated install still owes the half that did not land — the fix
+    must not degrade into "migration started, therefore silence"."""
+    monkeypatch.setattr(census_mod, "_chroma_footprint_present", lambda: True)
+    monkeypatch.setattr(
+        guided_upgrade,
+        "detect_pending_migration",
+        lambda: _detection(
+            _classification("knowledge__done", legacy=True),
+            _classification("docs__pending", legacy=True, count=7),
+        ),
+    )
+    result = legacy_id_census(progress_fn=lambda _: SourceProgress(converged=frozenset({"knowledge__done"})))
+    assert [c.collection for c in result] == ["docs__pending"]
+
+
+def test_census_asks_the_target_nothing_when_no_debt_ever_existed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cost pin: `nx doctor` runs constantly and the convergence probe is a
+    live round trip. A conformant install has no legacy collection to ask
+    about, so it must not pay for one."""
+    monkeypatch.setattr(census_mod, "_chroma_footprint_present", lambda: True)
+    monkeypatch.setattr(
+        guided_upgrade,
+        "detect_pending_migration",
+        lambda: _detection(_classification("code__ok", legacy=False)),
+    )
+
+    def _must_not_run(_classifications: object) -> frozenset[str]:
+        raise AssertionError("the target must not be probed with no debt to weigh")
+
+    assert legacy_id_census(progress_fn=_must_not_run) == []
+
+
+# ── the production default's own body (the injected-fakes-hide-defaults rule) ─
+
+
+def _legacy_on_wired_model() -> CollectionClassification:
+    """Legacy ids on an already-wired model: re-id only, target == source."""
+    return CollectionClassification(
+        collection="knowledge__proj__bge-base-en-v15-768__v1",
+        leg="local",
+        model="bge-base-en-v15-768",
+        dim=768,
+        support="unsupported",
+        source_count=12,
+        has_data=True,
+        legacy_ids=True,
+    )
+
+
+def test_default_progress_reads_the_live_target_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runs `_default_converged`'s REAL body against a faked HTTP boundary.
+    Every collaborator above is injected, which is exactly how three P0s hid
+    behind green tests this arc: nothing had executed the real thing."""
+    monkeypatch.setattr(census_mod, "_no_target_provisioned", lambda: False)
+    monkeypatch.setattr(detection_mod, "voyage_key_available", lambda: False)
+    monkeypatch.setattr(
+        substrate_mod,
+        "_default_target_counts",
+        lambda: {"knowledge__proj__bge-base-en-v15-768__v1": 12},
+    )
+    assert census_mod._default_progress([_legacy_on_wired_model()]).converged == frozenset(
+        {"knowledge__proj__bge-base-en-v15-768__v1"}
+    )
+
+
+def test_default_progress_reports_nothing_converged_when_the_probe_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A probe that cannot tell must never certify convergence — the debt stays
+    visible in doctor rather than being erased by an unreachable service.
+
+    The classification is one that WOULD converge (its target holds the full
+    count), so the assertion actually distinguishes the raise from the happy
+    path. An empty list would pass whether or not the except branch exists —
+    `[]` plans no legs and returns frozenset() regardless (code reviewer,
+    2026-07-16; the same non-vacuity discipline the era-hop leg carries)."""
+    monkeypatch.setattr(census_mod, "_no_target_provisioned", lambda: False)
+    monkeypatch.setattr(
+        substrate_mod,
+        "_default_target_counts",
+        lambda: {"knowledge__proj__bge-base-en-v15-768__v1": 12},
+    )
+    cls = _legacy_on_wired_model()
+    # Control: without the raise, this very input DOES converge.
+    monkeypatch.setattr(detection_mod, "voyage_key_available", lambda: False)
+    assert census_mod._default_progress([cls]).converged == frozenset(
+        {"knowledge__proj__bge-base-en-v15-768__v1"}
+    )
+
+    def _boom() -> None:
+        raise RuntimeError("service unreachable")
+
+    monkeypatch.setattr(detection_mod, "voyage_key_available", _boom)
+    assert census_mod._default_progress([cls]).converged == frozenset()
+
+
+def test_default_progress_never_probes_an_unprovisioned_install(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No service provisioned means nothing can have converged INTO it — answer
+    from the on-disk fact, do not pay a doomed HTTP attempt and do not fire
+    `substrate_target_counts_failed` at WARNING on every `nx doctor` for the
+    un-provisioned legacy-bearing install (the GH #1408 population the census
+    exists for). The deliberately-loud probe failure must stay rare enough to
+    mean something (substantive critic, 2026-07-16).
+
+    Records the call instead of raising on it: `_default_converged` catches
+    Exception by design, so a raise-based "must not call" is swallowed and the
+    test passes with the gate DELETED. Found by falsifying this very pin — the
+    first draft of it was vacuous.
+
+    The stubbed counts are ones that WOULD converge the collection, so removing
+    the gate changes the ANSWER as well as firing the probe. Both are asserted.
+    """
+    monkeypatch.setattr(census_mod, "_no_target_provisioned", lambda: True)
+    monkeypatch.setattr(detection_mod, "voyage_key_available", lambda: False)
+    probes: list[str] = []
+
+    def _record_probe() -> dict[str, int]:
+        probes.append("probed")
+        return {"knowledge__proj__bge-base-en-v15-768__v1": 12}
+
+    monkeypatch.setattr(substrate_mod, "_default_target_counts", _record_probe)
+    assert census_mod._default_progress([_legacy_on_wired_model()]).converged == frozenset()
+    assert probes == [], "probed a target that cannot exist on an unprovisioned install"
+
+
+def _colliding_pair() -> list[CollectionClassification]:
+    """Two DISTINCT sources that remap onto one target: a 2-segment
+    (pre-RDR-103) name is SYNTHESIZED into `__bge-base-en-v15-768__v1`, and the
+    4-segment (pre-RDR-109) name has its model segment SWAPPED to the same."""
+    def _c(name: str, model: str | None) -> CollectionClassification:
+        return CollectionClassification(
+            collection=name, leg="local", model=model, dim=None,
+            support="unsupported", source_count=12, has_data=True, legacy_ids=True,
+        )
+
+    return [_c("knowledge__old", None), _c("knowledge__old__minilm-l6-v2-384__v1", "minilm-l6-v2-384")]
+
+
+def test_default_progress_reports_debt_when_the_world_is_unmigratable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-fffey through this surface: `nx upgrade` refuses a collided world
+    LOUDLY, but `nx doctor` must still print its rows. Nothing converged is the
+    true and safe answer — the collided collections have not moved.
+
+    Feeds the REAL colliding pair, so the collision is raised where it actually
+    is — inside `plan_substrate_legs`, within `source_progress`. An earlier
+    draft raised it from a stubbed `_default_target_counts`, a boundary that can
+    never raise it: `plan_substrate_legs` runs AFTER those counts are already
+    in hand. Both reviewers mutation-proved that draft passed with
+    `_refuse_target_collisions` deleted entirely — it named fffey and
+    constrained nothing about it.
+
+    The stubbed counts WOULD converge both collections, so a missing guard
+    changes the answer and the assertion can tell the difference."""
+    monkeypatch.setattr(census_mod, "_no_target_provisioned", lambda: False)
+    monkeypatch.setattr(detection_mod, "voyage_key_available", lambda: False)
+    monkeypatch.setattr(
+        substrate_mod,
+        "_default_target_counts",
+        lambda: {"knowledge__old__bge-base-en-v15-768__v1": 12},
+    )
+    progress = census_mod._default_progress(_colliding_pair())
+    assert progress.converged == frozenset()
+
+
+def test_census_marks_a_credential_gated_collection_as_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-mq42b: the row must distinguish debt the upgrade converges from
+    debt it CANNOT — telling the owner of a keyless voyage collection to run
+    `nx upgrade` is a dead end the planner will silently skip."""
+    monkeypatch.setattr(census_mod, "_chroma_footprint_present", lambda: True)
+    monkeypatch.setattr(
+        guided_upgrade,
+        "detect_pending_migration",
+        lambda: _detection(
+            _classification("knowledge__v", legacy=True),
+            _classification("knowledge__ok", legacy=True),
+        ),
+    )
+    result = legacy_id_census(
+        progress_fn=lambda _: SourceProgress(
+            credential_gated=frozenset({"knowledge__v"})
+        )
+    )
+    blocked = {c.collection: c.blocked_reason for c in result}
+    assert "Voyage key" in blocked["knowledge__v"]
+    assert blocked["knowledge__ok"] == ""  # the ordinary case stays unadorned
+
+
+def test_doctor_names_the_real_remedy_for_a_blocked_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one case this row MUST speak up about: a collection `nx upgrade`
+    will skip needs the key named, or its owner is told nothing actionable
+    while the ladder simultaneously reports converged (nexus-mq42b)."""
+    monkeypatch.setattr(
+        census_mod,
+        "legacy_id_census",
+        lambda: [
+            LegacyCollection(
+                "knowledge__v", "local", 12, "legacy ids",
+                blocked_reason="no Voyage key is configured",
+            )
+        ],
+    )
+    (result,) = _check_legacy_id_census()
+    joined = " ".join(result.fix_suggestions)
+    assert "cannot be converged by the upgrade" in joined
+    assert "knowledge__v" in joined
+    assert "Voyage key" in joined
+    # ...and the row must not contradict itself: "No action needed here" cannot
+    # print directly above "N of these cannot be converged by the upgrade"
+    # (code review, 2026-07-17).
+    assert "No action needed here" not in joined
+
+
+def test_doctor_says_no_action_needed_only_when_nothing_is_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-vacuity for the assertion above: the reassurance IS the right message
+    when every listed collection is one the upgrade converges on its own."""
+    monkeypatch.setattr(
+        census_mod,
+        "legacy_id_census",
+        lambda: [LegacyCollection("knowledge__ok", "local", 12, "legacy ids")],
+    )
+    (result,) = _check_legacy_id_census()
+    joined = " ".join(result.fix_suggestions)
+    assert "No action needed here" in joined
+    assert "cannot be converged by the upgrade" not in joined
 
 
 # ── detect_pending_migration_memoized (P1 validator gap: the memo itself) ────
@@ -212,6 +493,7 @@ def test_doctor_census_and_notice_share_one_probe(
     monkeypatch.setattr(guided_upgrade, "detect_pending_migration", _spy_detection(calls))
     monkeypatch.setattr(guided_upgrade, "legacy_footprint_pending", lambda: True)
     monkeypatch.setattr(census_mod, "_chroma_footprint_present", lambda: True)
+    monkeypatch.setattr(census_mod, "_default_progress", _nothing_converged)
 
     census_rows = _check_legacy_id_census()
     notice = guided_upgrade.pending_migration_notice()
@@ -222,6 +504,43 @@ def test_doctor_census_and_notice_share_one_probe(
 
 
 # ── nx doctor surface (Gap-5 falsifiable) ────────────────────────────────────
+
+
+def test_no_target_provisioned_reads_the_on_disk_evidence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    """The gate's REAL body: reuses the precondition's file-level test rather
+    than a second notion of "is there a service"."""
+    monkeypatch.setattr(
+        config_mod, "default_db_path", lambda: tmp_path / "nexus.db"  # type: ignore[operator]
+    )
+    monkeypatch.setattr(config_mod, "get_credential", lambda _k: "")
+    assert census_mod._no_target_provisioned() is True
+
+    (tmp_path / CREDENTIALS_FILENAME).write_text("{}")  # type: ignore[operator]
+    assert census_mod._no_target_provisioned() is False
+
+
+def test_doctor_census_row_never_directs_the_user_to_a_verb(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gap-4 + the credential-gate dead end (both reviewers, 2026-07-16).
+
+    An earlier draft told this row's reader to "Run: nx upgrade". For a
+    voyage-named legacy collection with no key that provably no-ops — the
+    planner skips it, the ladder row then reports converged, and this row fires
+    again forever. The census's reason to exist is keeping visible what CANNOT
+    migrate, so a migrate directive is wrong exactly where it matters most; and
+    Gap-4 forbids this row becoming a second authority on pending work."""
+    monkeypatch.setattr(
+        census_mod,
+        "legacy_id_census",
+        lambda: [LegacyCollection("knowledge__v", "local", 12, "legacy ids")],
+    )
+    (result,) = _check_legacy_id_census()
+    suggestions = " ".join(result.fix_suggestions).lower()
+    assert "run: nx upgrade" not in suggestions
+    assert result.warn is True  # still visible, still soft
 
 
 def test_doctor_lists_legacy_collections_as_pending_debt(
@@ -247,13 +566,19 @@ def test_doctor_lists_legacy_collections_as_pending_debt(
     assert result.fix_suggestions  # visibility with guidance, not a dead end
 
 
-def test_doctor_conformant_chroma_install_reports_ok(
+def test_doctor_clean_census_does_not_claim_the_source_is_conformant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An empty census covers TWO worlds: never-migrated-and-conformant, and
+    migrated-and-converged. In the second the immutable RDR-176 source still
+    holds its legacy ids and always will, so the old "all collections hold
+    conformant 32-char chunk ids" was simply false there (nexus-6or3m). The row
+    must state what is true in both: nothing is outstanding."""
     monkeypatch.setattr(census_mod, "legacy_id_census", lambda: [])
     results = _check_legacy_id_census()
     assert results[0].ok is True
-    assert "conformant" in results[0].detail
+    assert "no outstanding" in results[0].detail
+    assert "conformant" not in results[0].detail
 
 
 def test_doctor_non_chroma_install_skips_cleanly(

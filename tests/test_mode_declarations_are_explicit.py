@@ -103,6 +103,12 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 72
 # had this lint red on develop since P2 — the arc ran narrow, path-scoped
 # selections, and this lint only fires when the whole session is collected, so
 # `pytest tests/upgrade/` never sees it. Rationale per entry in conftest.py.
+# Unchanged by nexus-6or3m / nexus-mq42b / nexus-k1m2f (RDR-185 P5): the new
+# credential-gate and billed-consent pins name voyage tokens only through
+# module-level fixtures (`_GATED`, `_billed_leg`), the pattern this file's own
+# `_cls` helper has always used — so the set did not need to grow. Preferred to
+# an exclusion: the tests read better without duplicated magic strings, and an
+# exclusion the lint does not need is dead weight the ratchet then guards.
 _MODE_LINT_EXCLUDE_NODEIDS_CEILING = 55
 
 

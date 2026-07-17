@@ -486,6 +486,25 @@ else
   ok "nx doctor named no demoted verb"
 fi
 
+# ── The Gap-5 census must report NO debt on a converged install (nexus-6or3m) ─
+# The leg above asserts the ladder is clean; this asserts the OTHER surface
+# agrees. It did not: run 7 passed everything above while doctor still warned
+# "2 collection(s) hold pre-RDR-108 legacy chunk ids" — because the census asked
+# the SOURCE, which RDR-176 keeps byte-untouched forever (this leg asserts that
+# immutability above, as the rollback-target proof). A user who did everything
+# right was told they still owed work, for the rest of the install's life.
+#
+# Non-vacuity first: the census row must be PRESENT. An absent row would sail
+# through the debt check below while proving nothing — the exact shape that let
+# this leg's first run pass over zero migrated collections.
+if ! printf '%s' "$DOC_OUT" | grep -qi 'chunk-id era'; then
+  bad "nx doctor printed no chunk-id era census row — the census did not run, so the debt assertion below would pass vacuously"
+elif printf '%s' "$DOC_OUT" | grep -qi 'legacy chunk ids'; then
+  bad "nx doctor reports era debt on a CONVERGED install — the census is asking the immutable source, not the target (nexus-6or3m)"
+else
+  ok "no false era debt — the census asks the target, and the target has converged"
+fi
+
 # ── THE ONE-VERB AUDIT ───────────────────────────────────────────────────────
 say "Assert — ONLY nx upgrade was invoked (mechanical audit)"
 note "recorded top-level invocations:"

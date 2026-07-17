@@ -43,7 +43,9 @@ from nexus.upgrade_ladder.rungs.substrate_etl import (
     SourceGoneDecision,
     SubstrateEtlRung,
     SubstratePlan,
+    SubstrateTargetCollision,
     _default_cost_gate,
+    source_progress,
     drop_converged_legs,
     plan_substrate_legs,
 )
@@ -266,7 +268,9 @@ def test_cost_gate_sees_an_unbilled_plan_for_a_same_model_leg() -> None:
 def test_production_cost_gate_is_promptless_when_nothing_is_billed() -> None:
     """The production default gate, directly: an unbilled plan proceeds
     without any click.confirm (which would abort a non-TTY run)."""
-    assert _default_cost_gate(SubstratePlan(legs=[], billed_reembed=False)) is True
+    # No legs => nothing billed (billed_reembed is derived, not passed: as a
+    # stored field it was silently dropped by drop_converged_legs — nexus-k1m2f).
+    assert _default_cost_gate(SubstratePlan(legs=[])) is True
 
 
 def test_converge_fails_loud_on_a_failed_leg() -> None:
@@ -429,6 +433,338 @@ def test_converged_install_does_not_re_migrate() -> None:
     assert status.applicable is True
     assert status.converged is True
     assert status.pending is False
+
+
+# ── nexus-6or3m: the convergence question, asked without a plan ──────────────
+# The Gap-5 census holds classifications, not a plan, and needs the same answers.
+# These pin that `source_progress` composes the two primitives above rather than
+# becoming a THIRD derivation of "is this converged?" — the drift that produced
+# nexus-mapbc and nexus-j5diu.
+
+_BGE = "bge-base-en-v15-768"
+
+
+def _reid_only(name: str, *, count: int = 12) -> CollectionClassification:
+    """Legacy ids on an already-wired model: re-id, no re-embed, target ==
+    source. The era-debt shape the census exists to report."""
+    return _cls(name, legacy=True, model=_BGE, support="unsupported", count=count)
+
+
+#: A GENUINE voyage collection (not a measured-dim mislabel): with no key this
+#: deployment wires no embedder for it, so no leg is possible.
+_GATED = _cls(
+    "knowledge__v__voyage-context-3__v1",
+    legacy=True,
+    model="voyage-context-3",
+    count=12,
+)
+
+
+def test_converged_sources_names_the_collection_whose_target_holds_its_rows() -> None:
+    cls = [_reid_only("knowledge__proj__bge-base-en-v15-768__v1")]
+    assert source_progress(
+        cls,
+        voyage_key_present=False,
+        target_counts={"knowledge__proj__bge-base-en-v15-768__v1": 12},
+    ).converged == frozenset({"knowledge__proj__bge-base-en-v15-768__v1"})
+
+
+def test_converged_sources_is_empty_before_any_migration() -> None:
+    """The pre-migration world: the source holds the rows and the target does
+    not exist. Nothing is converged — this is what the census must still see."""
+    cls = [_reid_only("knowledge__proj__bge-base-en-v15-768__v1")]
+    assert source_progress(
+        cls, voyage_key_present=False, target_counts={}
+    ).converged == frozenset()
+
+
+def test_converged_sources_answers_nothing_when_the_probe_cannot_tell() -> None:
+    """None ("could not tell") certifies NOTHING as converged — the census then
+    keeps reporting the debt, which is the safe direction: a momentarily
+    unreachable service must not silently erase real era debt from doctor."""
+    cls = [_reid_only("knowledge__proj__bge-base-en-v15-768__v1")]
+    assert source_progress(
+        cls, voyage_key_present=False, target_counts=None
+    ).converged == frozenset()
+
+
+def test_converged_sources_tracks_the_RENAMED_target_of_a_reembed_leg() -> None:
+    """A re-embed leg's target is renamed, so only the planner knows which
+    collection to count. Answering by source name would report a converged
+    cross-model leg as debt forever."""
+    cls = [_cls("knowledge__old", legacy=True, model=None, count=12)]
+    renamed = f"knowledge__old__{_BGE}__v1"
+    assert source_progress(
+        cls, voyage_key_present=False, target_counts={renamed: 12}
+    ).converged == frozenset({"knowledge__old"})
+    # ...and the source's own name holding the rows is NOT convergence.
+    assert source_progress(
+        cls, voyage_key_present=False, target_counts={"knowledge__old": 12}
+    ).converged == frozenset()
+
+
+def test_credential_gated_legacy_collection_is_never_reported_converged() -> None:
+    """The nexus-j5diu shape in the census surface. A voyage-named collection
+    with no key is dropped by the PLANNER (credential-gate territory), so it
+    has no leg and no target to count. It cannot migrate at all, which makes it
+    the realest era debt there is — reporting it converged because the planner
+    declined to plan it would vanish it from the one surface that shows it.
+
+    MIXED world deliberately, and the mixing is the whole test (substantive
+    critic, 2026-07-16): with the gated collection ALONE the plan is empty and
+    the `if not plan.legs` short-circuit answers before the composition runs, so
+    a single-collection fixture passes even when the answer is built from
+    `classifications` instead of `plan.legs` — the exact drift this pin names.
+    Mutation-verified: that mutant returns BOTH names here, and dies.
+    """
+    progress = source_progress(
+        [_GATED, _reid_only("knowledge__b__bge-base-en-v15-768__v1")],
+        voyage_key_present=False,
+        target_counts=_all_targets(12),
+    )
+    assert progress.converged == frozenset({"knowledge__b__bge-base-en-v15-768__v1"})
+
+
+def test_credential_gated_collection_is_NAMED_not_vanished() -> None:
+    """nexus-mq42b. The planner cannot give it a leg, but it must still SAY so:
+    a bare `continue` left the rung reporting converged over un-migrated data,
+    and nothing on the `nx upgrade` path ever named the missing key. (The
+    comment that skip deferred to — "the upstream credential gate C3" — lives in
+    migrate_cmd / the dry-run preview, both DEMOTED at P4.)"""
+    progress = source_progress(
+        [_GATED], voyage_key_present=False, target_counts=_all_targets(12)
+    )
+    assert progress.credential_gated == frozenset({_GATED.collection})
+    assert progress.converged == frozenset()  # named AND still outstanding
+
+
+def test_credential_gate_lifts_when_the_key_is_present() -> None:
+    """Non-vacuity for the pin above: the SAME collection is not gated once the
+    deployment wires voyage — otherwise the test would pass on any always-gated
+    implementation."""
+    progress = source_progress(
+        [_GATED], voyage_key_present=True, target_counts=_all_targets(12)
+    )
+    assert progress.credential_gated == frozenset()
+
+
+def test_converged_sources_ignores_a_conformant_wired_collection() -> None:
+    """A collection with conformant ids AND a wired model is never planned, so
+    it is never in the answer. NOT the general claim: a conformant-ID collection
+    on an UNWIRED model does get a re-embed leg and can appear — harmless for
+    the census (which filters to legacy) but not something this pins."""
+    assert source_progress(
+        [_cls("code__fine", model=_BGE)],
+        voyage_key_present=False,
+        target_counts=_all_targets(10),
+    ).converged == frozenset()
+
+
+# ── nexus-fffey: two sources, one target — refuse, never merge ───────────────
+
+
+def test_two_sources_remapping_onto_one_target_are_refused() -> None:
+    """The ETL would write BOTH sources' rows into one collection — a silent,
+    irreversible merge of two distinct collections. `cross_model_target_name`
+    SYNTHESIZES for a 2-segment name and SWAPS for a 4-segment one, so these two
+    land on the same target. Reachable on exactly the ancient install GH #1408
+    describes (pre-RDR-103 and pre-RDR-109 collections side by side).
+
+    A data-correctness problem fails LOUD; it is not a decision the operator can
+    answer from a prompt."""
+    colliding = [
+        _cls("knowledge__old", legacy=True, model=None, count=12),
+        _cls("knowledge__old__minilm-l6-v2-384__v1", legacy=True,
+             model="minilm-l6-v2-384", count=12),
+    ]
+    with pytest.raises(SubstrateTargetCollision) as exc:
+        plan_substrate_legs(
+            colliding, prior_collections=frozenset(), voyage_key_present=False
+        )
+    # Names BOTH sources and the target they collide on — a bare "collision"
+    # would leave the user with nothing to act on.
+    assert "knowledge__old" in str(exc.value)
+    assert "knowledge__old__minilm-l6-v2-384__v1" in str(exc.value)
+    assert f"knowledge__old__{_BGE}__v1" in str(exc.value)
+
+
+def test_distinct_targets_are_not_a_collision() -> None:
+    """Non-vacuity: the guard must not fire on the ordinary multi-leg plan."""
+    fine = [
+        _reid_only("knowledge__a__bge-base-en-v15-768__v1"),
+        _reid_only("knowledge__b__bge-base-en-v15-768__v1"),
+    ]
+    plan = plan_substrate_legs(
+        fine, prior_collections=frozenset(), voyage_key_present=False
+    )
+    assert len(plan.legs) == 2
+
+
+def test_one_collection_seen_on_two_read_legs_is_not_a_collision() -> None:
+    """`classify_collections` emits one classification PER READ LEG, so a
+    collection present on both local and cloud Chroma classifies twice — the
+    SAME source, seen twice, not two sources merging.
+
+    The first draft of the guard keyed on the raw source list and refused this
+    outright: `plan_substrate_legs` raised, `detect()` raised, the rung went
+    FAILED and `nx upgrade` was bricked forever on a perfectly healthy install
+    (code review, 2026-07-17). The guard means DISTINCT sources."""
+    def _leg_of(leg: str) -> CollectionClassification:
+        return CollectionClassification(
+            collection="knowledge__proj__bge-base-en-v15-768__v1",
+            leg=leg, model=_BGE, dim=768, support="unsupported",
+            source_count=12, has_data=True, legacy_ids=True,
+        )
+
+    plan = plan_substrate_legs(
+        [_leg_of("local"), _leg_of("cloud")],
+        prior_collections=frozenset(),
+        voyage_key_present=False,
+    )
+    assert len(plan.legs) == 2  # refused nothing; both classifications planned
+
+
+# ── nexus-k1m2f: the billed-Voyage consent gate must survive the plan filter ──
+
+
+def _billed_leg() -> LegPlan:
+    return LegPlan(
+        source_collection="knowledge__old",
+        target_collection="knowledge__old__voyage-context-3__v1",
+        needs_reid=False, needs_reembed=True, billed=True,
+    )
+
+
+def _spy_confirm(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record whether the REAL gate reached click.confirm. Necessary: an
+    unpatched confirm raises OSError under pytest's captured stdin, which would
+    make "did it prompt?" indistinguishable from a test-harness accident."""
+    import click
+
+    asked: list[str] = []
+    monkeypatch.setattr(
+        click, "confirm", lambda msg, **_kw: bool(asked.append(msg)) or False
+    )
+    return asked
+
+
+def test_billed_flag_survives_the_converged_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE consent pin. `billed_reembed` used to be a stored field, and
+    `drop_converged_legs` rebuilt the plan without it — so the cost gate saw
+    False on every production path and billed Voyage with no estimate and no
+    prompt (nexus-k1m2f). Deriving it from the surviving legs makes it
+    unloseable by any future reconstruction."""
+    plan = SubstratePlan(legs=[_billed_leg()])
+    assert plan.billed_reembed is True
+    # The leg has NOT converged (the target holds nothing), so it survives —
+    # and the bill it implies must survive with it.
+    survived = drop_converged_legs(plan, {"knowledge__old": 12}, {})
+    assert len(survived.legs) == 1
+    assert survived.billed_reembed is True
+
+    asked = _spy_confirm(monkeypatch)
+    assert _default_cost_gate(survived) is False  # declined => do not bill
+    assert asked, "a billed leg survived the filter but the user was never asked"
+
+
+def test_standing_consent_lets_a_billed_walk_converge_unattended(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SC-1's unattended channel (critique, 2026-07-17). Making the cost gate
+    actually fire (k1m2f) gave `nx upgrade` a prompt no hook or cron can answer
+    — trading a silent bill for a silent hang, for exactly the ancient install
+    SC-1 promises reaches current UNATTENDED. NX_ASSUME_YES is standing consent;
+    the RDR's ## Constraints now enumerate the billed re-embed as the third
+    genuine decision, and a permitted prompt must have an unattended channel."""
+    plan = SubstratePlan(legs=[_billed_leg()])
+    asked = _spy_confirm(monkeypatch)
+
+    monkeypatch.setenv("NX_ASSUME_YES", "1")
+    assert _default_cost_gate(plan) is True
+    assert asked == [], "standing consent must not stop to ask"
+
+    # Non-vacuity: without it, the same plan DOES stop and ask.
+    monkeypatch.delenv("NX_ASSUME_YES")
+    assert _default_cost_gate(plan) is False
+    assert asked, "without standing consent the user must be asked"
+
+
+def test_a_converged_billed_leg_stops_asking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other direction, which preserving the flag verbatim would get wrong:
+    once the billed leg converges and leaves the plan there is nothing left to
+    bill, so a converged install must not prompt on every `nx upgrade`."""
+    leg = _billed_leg()
+    survived = drop_converged_legs(
+        SubstratePlan(legs=[leg]),
+        {leg.source_collection: 12},
+        {leg.target_collection: 12},   # the billed leg has landed
+    )
+    assert survived.legs == []
+    assert survived.billed_reembed is False
+
+    asked = _spy_confirm(monkeypatch)
+    assert _default_cost_gate(survived) is True  # nothing to bill...
+    assert asked == []  # ...and nothing to ask
+
+
+def test_planner_marks_only_the_voyage_targeted_leg_as_billed() -> None:
+    """Real body: a cross-model leg targeting a VOYAGE model bills; the same
+    shape targeting local bge does not."""
+    cross = [_cls("knowledge__old", legacy=True, model=None, count=12)]
+    to_voyage = plan_substrate_legs(
+        cross, prior_collections=frozenset(), voyage_key_present=True
+    )
+    assert [leg.billed for leg in to_voyage.legs] == [True]
+    assert to_voyage.billed_reembed is True
+
+    to_bge = plan_substrate_legs(
+        cross, prior_collections=frozenset(), voyage_key_present=False
+    )
+    assert [leg.billed for leg in to_bge.legs] == [False]
+    assert to_bge.billed_reembed is False
+
+
+def test_a_reid_only_leg_into_a_voyage_target_still_counts_as_billed() -> None:
+    """The billing path `needs_reembed` cannot see (code review, 2026-07-17).
+
+    A re-id-only leg passes stored vectors through — but `_provenance_scrub`
+    drops any chunk whose recorded embedding_model disagrees with the target's
+    declared segment, and `run_batched_etl` attaches embeddings only if EVERY
+    chunk in the batch has one. One mismatched chunk sends embeddings=None for
+    the whole batch and the service re-embeds it all, billed, with
+    needs_reembed False throughout. The predicate is therefore the TARGET'S
+    DECLARED MODEL, not the re-embed flag."""
+    # _GATED is the same shape (a genuine voyage collection with legacy ids);
+    # here the key IS present, so it is planned rather than credential-gated.
+    plan = plan_substrate_legs(
+        [_GATED], prior_collections=frozenset(), voyage_key_present=True
+    )
+    (leg,) = plan.legs
+    assert leg.needs_reembed is False      # passthrough...
+    assert leg.billed is True              # ...and it can STILL bill
+    assert plan.billed_reembed is True
+
+
+def test_credential_gated_survives_the_converged_filter() -> None:
+    """The k1m2f shape, guarded rather than re-lived: `drop_converged_legs`
+    reconstructs the plan, and a field that is neither derived nor pinned is one
+    refactor from being silently dropped — which is exactly how the billed flag
+    died. `billed_reembed` is now derived and cannot be lost; `credential_gated`
+    is a fact about the SOURCE world (not about which legs remain), so it is
+    copied — and this is the pin that keeps the copy honest.
+
+    The plan MUST carry a leg: `drop_converged_legs` early-returns the plan
+    untouched when there are none, so an empty-legs fixture never reaches the
+    reconstruction and passes with the copy deleted. Found by falsifying this
+    very pin — its first draft was vacuous."""
+    plan = SubstratePlan(legs=[_leg()], credential_gated=["knowledge__v"])
+    survived = drop_converged_legs(plan, {"knowledge__old": 12}, {})  # leg survives
+    assert survived.legs, "the reconstruction must actually run"
+    assert survived.credential_gated == ["knowledge__v"]
 
 
 # ── nexus-j5diu: the measured-768 mislabel must not be silently skipped ──────

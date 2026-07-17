@@ -2918,13 +2918,22 @@ def _check_pending_rungs() -> list[HealthResult]:
 def _check_legacy_id_census() -> list[HealthResult]:
     """RDR-185 P1.2 (nexus-n7u38.9): legacy chunk-id era census (Gap-5).
 
-    Chroma-mode installs holding pre-RDR-108 (non-32-char) chunk ids see
-    the debt HERE, from this release — months before migration day (the
+    Chroma-mode installs holding OUTSTANDING pre-RDR-108 (non-32-char)
+    chunk ids see the debt HERE — months before migration day (the
     GH #1408 incident class: 18 legacy collections invisible until they
-    blocked the migration). Soft warning: the P2 substrate rung's wire
-    re-id converges this automatically at migration; no user action now.
-    Non-Chroma / already-migrated / fresh installs skip silently (the
-    census's cheap file-level gate never opens the store). Crash-proof.
+    blocked the migration). Soft warning, and never a directive: the
+    substrate rung's wire re-id converges this in flight at migration,
+    and the upgrade-ladder row — not this one — is the authority on
+    pending work (Gap-4). Non-Chroma / fresh installs skip silently (the
+    census's cheap file-level gate never opens the store); a CONVERGED
+    install prints the clean row, because the debt is gone even though
+    the immutable RDR-176 source still holds its legacy ids and always
+    will (nexus-6or3m). Crash-proof.
+
+    Reads the census row ONLY. It pairs with ``_check_pending_rungs``:
+    count equality cannot see an unreflected remap cascade, so a clean
+    row here plus a pending ladder row is a coherent pair, not a
+    contradiction — the ladder row carries the half this cannot.
     """
     try:
         from nexus.upgrade_ladder import census as _census  # noqa: PLC0415 — deferred to avoid module-load cost
@@ -2939,15 +2948,39 @@ def _check_legacy_id_census() -> list[HealthResult]:
     if result is None:
         return []  # not applicable: no legacy Chroma footprint to census
     if not result:
+        # NOT "all collections hold conformant ids" (nexus-6or3m): on a
+        # converged install the immutable RDR-176 source still holds its legacy
+        # ids forever, and always will. What is true in both worlds — never
+        # migrated + conformant, and migrated + converged — is that no debt is
+        # outstanding.
         return [HealthResult(
             label="Chunk-id era (upgrade ladder)",
             ok=True,
-            detail="Chroma-mode: all collections hold conformant 32-char chunk ids",
+            detail="no outstanding legacy chunk-id debt",
         )]
     names = ", ".join(
         f"{c.collection} ({c.source_count} chunks, {c.leg})" for c in result[:6]
     )
     more = f" (+{len(result) - 6} more)" if len(result) > 6 else ""
+    # A collection the upgrade CANNOT converge gets the remedy that actually
+    # works, named (bead nexus-mq42b). Without this the row's silence reads as
+    # "the upgrade will handle it", and for a keyless voyage collection it never
+    # will — the planner skips it and the ladder then reports converged. That is
+    # the impossible-remedy shape RDR-185 exists to end, so the one case that
+    # needs a user action is the one case this row must speak up about.
+    blocked = [c for c in result if c.blocked_reason]
+    blocked_more = f" (+{len(blocked) - 3} more)" if len(blocked) > 3 else ""
+    blocked_suggestions = (
+        [
+            f"{len(blocked)} of these cannot be converged by the upgrade: "
+            + "; ".join(f"{c.collection} — {c.blocked_reason}" for c in blocked[:3])
+            + blocked_more
+            + ". Configure the Voyage key and re-run `nx upgrade` to include "
+            "them, or re-index them from source against the current embedder."
+        ]
+        if blocked
+        else []
+    )
     return [HealthResult(
         label="Chunk-id era (upgrade ladder)",
         ok=False,
@@ -2956,10 +2989,39 @@ def _check_legacy_id_census() -> list[HealthResult]:
             f"{len(result)} collection(s) hold pre-RDR-108 legacy chunk ids — "
             f"pending upgrade-ladder debt: {names}{more}"
         ),
+        # This row deliberately issues NO directive, and that is a contract, not
+        # an omission (RDR-185 Gap-4: the census must not become a THIRD
+        # mechanism answering "how far from current" — the upgrade-ladder row is
+        # the authority on pending work; this row is visibility).
+        #
+        # An earlier draft of this fix said "Run: nx upgrade" here. Both
+        # reviewers caught it and it was wrong twice over: the census's whole
+        # reason to exist is keeping visible the collections that CANNOT
+        # migrate, and for the sharpest of those — a voyage-named legacy
+        # collection with no key — `nx upgrade` provably no-ops (the planner
+        # skips it at the credential gate, the rung then reports converged, and
+        # this row fires again forever). Directing a user to a verb the product
+        # will not honour rebuilds the impossible-remedy shape RDR-185 exists to
+        # end. The credential gate's own silent skip is bead nexus-mq42b; this
+        # row's silence is the message-layer workaround, not the fix.
         fix_suggestions=[
-            "No action needed now: the substrate migration (nx upgrade, wire "
-            "re-id) converges this automatically when it ships; the census "
-            "makes the debt visible before migration day (GH #1408 class)."
+            # Conditional, or the row contradicts itself: "No action needed
+            # here" cannot print directly above "N of these cannot be converged
+            # by the upgrade" (code review, 2026-07-17). When anything is
+            # blocked, the blocked line IS the message.
+            *(
+                []
+                if blocked
+                else [
+                    "No action needed here: the substrate migration (nx "
+                    "upgrade, wire re-id) converges legacy chunk ids in flight "
+                    "— no re-index, no re-embed. This row is visibility (the "
+                    "GH #1408 class: era debt that used to surface only ON "
+                    "migration day); the upgrade-ladder row is what reports "
+                    "pending work."
+                ]
+            ),
+            *blocked_suggestions,
         ],
     )]
 

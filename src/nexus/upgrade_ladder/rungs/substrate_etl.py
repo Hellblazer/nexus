@@ -22,9 +22,17 @@ Consent only at genuine decisions (RDR-185 Constraints):
 - SOURCE-GONE (nexus-8jlsl): a collection known from prior migration
   state that no longer exists in the source surfaces as an explicit
   :class:`SourceGoneDecision` (re-acquire vs drop) — never a silent skip.
-- The billed Voyage re-embed keeps the EXISTING cost prompt
-  (``_confirm_voyage_cost``); the plan flags ``billed_reembed`` so the
-  trigger knows to route through it.
+- The billed Voyage re-embed asks before spending: ``billed_reembed`` is
+  DERIVED from the surviving legs (nexus-k1m2f — as a stored flag it was
+  dropped by every reconstruction of the plan, and the prompt never fired
+  in production), and ``NX_ASSUME_YES`` / ``nx upgrade --yes`` is the
+  standing-consent channel that keeps an unattended run converging (SC-1).
+  This is the RDR's THIRD genuine decision, enumerated in ## Constraints
+  as of 2026-07-17; the prompt carries no dollar estimate yet (nexus-byosf).
+- A collection this deployment wires no embedder for cannot migrate at
+  all: it is recorded in ``credential_gated``, logged at WARNING, and
+  surfaced by the Gap-5 census with the remedy that works (nexus-mq42b).
+  Advisory, never blocking — it must not stop the collections that can.
 - Everything derivable is automatic: a conformant install plans zero
   legs and zero prompts.
 
@@ -65,6 +73,12 @@ class LegPlan:
     target_collection: str
     needs_reid: bool
     needs_reembed: bool
+    #: This leg re-embeds into a BILLED Voyage model — the input to the cost
+    #: consent gate. Lives on the LEG, not the plan (bead nexus-k1m2f): as a
+    #: plan-level field it was silently dropped by every reconstruction of the
+    #: plan, which killed the prompt in production. A fact derived from the legs
+    #: survives any reconstruction by construction.
+    billed: bool = False
 
 
 @dataclass(frozen=True)
@@ -76,13 +90,51 @@ class SourceGoneDecision:
     options: tuple[str, ...] = ("re-acquire", "drop")
 
 
+class SubstrateTargetCollision(RuntimeError):
+    """Two source collections remap onto ONE target (bead nexus-fffey).
+
+    Refused, never reconciled: running such a plan would write both sources'
+    rows into one collection — a silent merge of two distinct collections'
+    content, which no later step can unpick. `cross_model_target_name`
+    SYNTHESIZES a target for a 2-segment (pre-RDR-103) name and SWAPS the model
+    segment for a 4-segment (pre-RDR-109) one, so `knowledge__old` and
+    `knowledge__old__minilm-l6-v2-384__v1` both land on
+    `knowledge__old__bge-base-en-v15-768__v1` — reachable on exactly the ancient
+    install GH #1408 describes.
+
+    Not a `SourceGoneDecision`: the operator cannot answer this mid-walk from a
+    prompt (they must rename or drop a collection), and every convergence
+    reading of a collided pair is wrong in BOTH directions — one migrated leg
+    makes both read converged (real debt erased); both migrated makes neither
+    (nexus-6or3m recurs). A data-correctness problem fails LOUD.
+    """
+
+
 @dataclass(frozen=True)
 class SubstratePlan:
     legs: list[LegPlan] = field(default_factory=list)
     decisions: list[SourceGoneDecision] = field(default_factory=list)
-    #: True when any leg re-embeds into a billed Voyage model — the trigger
-    #: must route through the existing cost prompt (_confirm_voyage_cost).
-    billed_reembed: bool = False
+    #: Collections the planner CANNOT give a leg because this deployment wires
+    #: no embedder for them (a voyage-named collection with no Voyage key).
+    #: Carried so the surfaces can say so out loud — an earlier bare `continue`
+    #: vanished them entirely (bead nexus-mq42b). Advisory, NEVER blocking: one
+    #: keyless collection must not stop the collections that CAN migrate.
+    credential_gated: list[str] = field(default_factory=list)
+
+    @property
+    def billed_reembed(self) -> bool:
+        """True when any SURVIVING leg re-embeds into a billed Voyage model —
+        the trigger must route through the cost prompt (_confirm_voyage_cost).
+
+        DERIVED, never stored (bead nexus-k1m2f). As a stored field this was
+        silently dropped by `drop_converged_legs`' reconstruction, so the cost
+        gate saw False on every production path and billed Voyage with no
+        estimate and no consent — one of the three genuine decisions RDR-185
+        requires. Deriving it also gets the converged case right, which
+        preserving the flag verbatim would not: once the billed leg converges
+        and leaves the plan, there is nothing left to bill and nothing to ask.
+        """
+        return any(leg.billed for leg in self.legs)
 
     def target_names(self) -> dict[str, str]:
         """source→target for every RENAMED leg — the ``rollback_collections``
@@ -120,7 +172,7 @@ def plan_substrate_legs(
 
     wired = wired_models(voyage_key_present=voyage_key_present)
     legs: list[LegPlan] = []
-    billed = False
+    gated: list[str] = []
     live_names: set[str] = set()
     for c in classifications:
         live_names.add(c.collection)
@@ -152,14 +204,23 @@ def plan_substrate_legs(
             and not voyage_key_present
             and not is_measured_dim_override(c)
         ):
-            continue  # credential gate territory, not a leg
+            # Credential-gate territory: no leg is possible (re-embedding voyage
+            # text into bge would silently change recall). It is still REAL
+            # un-migrated data, so it is recorded and said out loud — an earlier
+            # bare `continue` vanished it, and the rung then reported converged
+            # over a collection that had not moved (bead nexus-mq42b). The
+            # comment this replaces deferred to "the upstream credential gate
+            # (C3)"; that gate lives in migrate_cmd / the dry-run preview, both
+            # DEMOTED at P4, so nothing on the `nx upgrade` path had said it
+            # since. Advisory, not a decision: it must never block the
+            # collections that CAN migrate.
+            gated.append(c.collection)
+            continue
         needs_reembed = c.model not in wired
         target = c.collection
         if needs_reembed:
             target_model = remap_target_model(c, voyage_key_present=voyage_key_present)
             target = cross_model_target_name(c.collection, target_model)
-            if target_model in _VOYAGE_MODELS:
-                billed = True
         if not needs_reid and not needs_reembed:
             continue  # conformant: nothing to do, nothing to ask
         legs.append(
@@ -168,7 +229,21 @@ def plan_substrate_legs(
                 target_collection=target,
                 needs_reid=needs_reid,
                 needs_reembed=needs_reembed,
+                billed=_leg_can_bill(target),
             )
+        )
+    _refuse_target_collisions(legs)
+    if gated:
+        # WARNING, not debug: this is un-migrated user data that the walk is
+        # about to leave behind, and the deployment cannot fix it for them.
+        # Silence here is what made the rung claim converged over it.
+        _log.warning(
+            "substrate_leg_credential_gated",
+            collections=sorted(gated),
+            note=(
+                "no Voyage key: these collections cannot migrate and are NOT "
+                "converged — supply the key and re-run to include them"
+            ),
         )
     decisions = [
         SourceGoneDecision(collection=name)
@@ -180,7 +255,68 @@ def plan_substrate_legs(
             collections=[d.collection for d in decisions],
             note="genuine decision surfaced (re-acquire vs drop) — never silent",
         )
-    return SubstratePlan(legs=legs, decisions=decisions, billed_reembed=billed)
+    return SubstratePlan(legs=legs, decisions=decisions, credential_gated=sorted(gated))
+
+
+def _refuse_target_collisions(legs: list[LegPlan]) -> None:
+    """Refuse a plan that would write two sources into ONE target (nexus-fffey).
+
+    Fails LOUD rather than merging: see :class:`SubstrateTargetCollision`. Cheap
+    and total — checked on every plan, so `nx doctor`'s detect and `nx upgrade`
+    both refuse the same worlds rather than one discovering it mid-ETL.
+    """
+    by_target: dict[str, set[str]] = {}
+    for leg in legs:
+        by_target.setdefault(leg.target_collection, set()).add(leg.source_collection)
+    # DISTINCT sources — the same collection name classified twice (one per read
+    # leg) is one source seen twice, not a merge of two. Keying on the raw list
+    # refused a healthy install outright (`nx upgrade` FAILED forever) the
+    # moment a Chroma Cloud leg was configured beside the local one.
+    collided = {t: s for t, s in sorted(by_target.items()) if len(s) > 1}
+    if not collided:
+        return
+    detail = "; ".join(
+        f"{', '.join(sorted(sources))} -> {target}" for target, sources in collided.items()
+    )
+    _log.error("substrate_plan_target_collision", collisions=detail)
+    raise SubstrateTargetCollision(
+        "two or more DISTINCT source collections remap onto the same target "
+        "collection, which would merge their content irreversibly: "
+        f"{detail}. Rename or drop one of each colliding pair in the source "
+        "store, then re-run."
+    )
+
+
+def _declared_model(collection: str) -> str | None:
+    """The model segment a conformant RDR-103 name declares, else None.
+
+    One definition: the scrub and the billing predicate must not disagree about
+    what a target's declared model IS, or one drops a vector the other did not
+    expect to be re-embedded.
+    """
+    segments = collection.split("__")
+    return segments[2] if len(segments) >= 3 else None
+
+
+def _leg_can_bill(target_collection: str) -> bool:
+    """Can this leg cause a server-side embed against a BILLED model?
+
+    Keyed on the TARGET'S DECLARED MODEL, not on ``needs_reembed`` — the
+    narrower predicate missed a real billing path (code review, 2026-07-17):
+    a re-id-only leg passes stored vectors through, but ``_provenance_scrub``
+    drops any chunk whose recorded ``embedding_model`` disagrees with the
+    target's declared segment, and ``run_batched_etl`` attaches embeddings only
+    if EVERY chunk in the batch has one. One mismatched chunk therefore sends
+    ``embeddings=None`` for the whole batch and the service re-embeds all of it
+    — billed, with ``needs_reembed`` False the whole time.
+
+    Conservative by construction: a voyage-declared target can bill, so it asks.
+    The cost of a false ask is one prompt; the cost of a false silence is an
+    unconsented bill.
+    """
+    from nexus.migration.vector_etl import _VOYAGE_MODELS  # noqa: PLC0415 — deferred, vector_etl is heavy
+
+    return _declared_model(target_collection) in _VOYAGE_MODELS
 
 
 def _provenance_scrub(target_collection: str):
@@ -188,12 +324,12 @@ def _provenance_scrub(target_collection: str):
     the stored vector ONLY when recorded provenance is present and disagrees
     with the target name's declared model segment. Non-conformant target
     names (no declared model) trust all vectors."""
-    segments = target_collection.split("__")
-    declared = segments[2] if len(segments) >= 3 else None
+    declared = _declared_model(target_collection)
 
     def scrub(batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if declared is None:
             return batch
+
         out: list[dict[str, Any]] = []
         for chunk in batch:
             prov = (chunk.get("metadata") or {}).get("embedding_model")
@@ -415,7 +551,88 @@ def drop_converged_legs(
             )
             continue
         remaining.append(leg)
-    return SubstratePlan(legs=remaining, decisions=list(plan.decisions))
+    # Every field must survive this reconstruction. `billed_reembed` is derived
+    # from the surviving legs so it cannot be dropped here again (nexus-k1m2f:
+    # as a stored field it WAS, silently, and the cost prompt never fired in
+    # production); `credential_gated` is copied because it is a fact about the
+    # source world, not about which legs remain.
+    return SubstratePlan(
+        legs=remaining,
+        decisions=list(plan.decisions),
+        credential_gated=list(plan.credential_gated),
+    )
+
+
+@dataclass(frozen=True)
+class SourceProgress:
+    """What the world says about each SOURCE collection, from ONE plan build.
+
+    Two facts, one derivation: a collection is converged (its target holds its
+    rows) or credential-gated (this deployment wires no embedder for it, so no
+    leg is possible). Returned together because both come from the same plan —
+    building it twice is how derivations drift apart.
+    """
+
+    #: Sources whose target already holds their rows — no longer outstanding.
+    converged: frozenset[str] = frozenset()
+    #: Sources the planner cannot give a leg (nexus-mq42b). NEVER converged:
+    #: they are the realest debt there is, and they need a credential, not a verb.
+    credential_gated: frozenset[str] = frozenset()
+
+
+def source_progress(
+    classifications: Iterable["CollectionClassification"],
+    *,
+    voyage_key_present: bool,
+    target_counts: dict[str, int] | None,
+) -> SourceProgress:
+    """What the TARGET says about each source collection (nexus-6or3m).
+
+    Pure: the caller supplies ``target_counts`` (``_default_target_counts`` in
+    production, None when the probe could not tell). Exists so a caller holding
+    a classification list rather than a plan — the Gap-5 census — can ask the
+    convergence question WITHOUT re-deriving it. Three independent derivations
+    of "is this converged?" is what produced nexus-mapbc and nexus-j5diu; this
+    composes the two existing primitives and adds no third test.
+
+    The composition is deliberately plan-shaped rather than name-shaped: a
+    re-embed leg's target is RENAMED (``cross_model_target_name``), so only the
+    planner knows which target to count. The answer is the delta between the
+    legs the planner produced and the legs ``drop_converged_legs`` kept.
+
+    A legacy collection the planner never gives a leg is NOT reported converged
+    here, and that is load-bearing: the credential gate drops voyage-named
+    collections with no key, which cannot migrate at all. They are the most
+    real era debt there is, and vanishing them from the census would be the
+    nexus-j5diu shape in a new surface. Only a collection the planner PLANNED
+    and the target then answered for is converged — which is why the answer is
+    built from ``plan.legs``, never from ``classifications``.
+
+    Raises :class:`SubstrateTargetCollision` for a world that cannot be
+    migrated at all; callers on a read-only surface degrade to "nothing
+    converged" (every collection still outstanding), which is true.
+    """
+    classifications = list(classifications)
+    plan = plan_substrate_legs(
+        classifications,
+        prior_collections=frozenset(),  # source-gone is a converge decision, not a census question
+        voyage_key_present=voyage_key_present,
+    )
+    gated = frozenset(plan.credential_gated)
+    if not plan.legs:
+        return SourceProgress(credential_gated=gated)
+    remaining = drop_converged_legs(
+        plan,
+        {c.collection: c.source_count for c in classifications},
+        target_counts,
+    )
+    kept = {leg.source_collection for leg in remaining.legs}
+    return SourceProgress(
+        converged=frozenset(
+            leg.source_collection for leg in plan.legs if leg.source_collection not in kept
+        ),
+        credential_gated=gated,
+    )
 
 
 def _default_target_counts() -> dict[str, int] | None:
@@ -562,11 +779,44 @@ def _default_map_path():
     return default_db_path().parent / "chash_remap.db"
 
 
+def assume_yes() -> bool:
+    """Standing consent for the billed re-embed, from the environment.
+
+    The unattended channel RDR-185's SC-1 needs (code critique, 2026-07-17).
+    `nx upgrade` is the ONE verb and it must converge an ancient install with no
+    TTY; before this, making the cost prompt actually fire (nexus-k1m2f) meant a
+    keyed install blocked on a `click.confirm` nothing could answer — trading a
+    silent bill for a silent hang. The demoted `nx migrate-to-service` had
+    `--yes`; nothing on the rung path did, which is the same P4 demotion-gap
+    class as nexus-mq42b's C3 gate.
+
+    Env, not just a flag, because the unattended callers are hooks and cron —
+    they never type a flag. `nx upgrade --yes` sets it for the one invocation.
+    """
+    import os  # noqa: PLC0415 — stdlib, branch-local
+
+    return os.environ.get("NX_ASSUME_YES", "").strip() in {"1", "true", "yes"}
+
+
 def _default_cost_gate(plan: SubstratePlan) -> bool:
-    """The EXISTING billed-Voyage consent gate (nexus-cewad), unchanged: a
-    run that bills nothing proceeds silently; a billed run without --yes
-    never proceeds unattended (click.confirm aborts on a non-TTY)."""
+    """The billed-Voyage consent gate: one of the three genuine decisions
+    (RDR-185 ## Constraints, amended 2026-07-17 to enumerate it).
+
+    A run that bills nothing proceeds silently. A billed run consents via
+    NX_ASSUME_YES / `nx upgrade --yes`, else asks; with neither, click.confirm
+    aborts on a non-TTY rather than billing — declining is the safe default
+    because the cost is real money.
+
+    NOT the cewad gate: this asks WITHOUT the dollar estimate
+    (`render_cost_confirmation`), which lives on the demoted
+    `nx migrate-to-service` path and needs a DryRunPreview this rung does not
+    build. Consenting to an unquantified bill is a weaker decision than cewad
+    shipped — tracked as nexus-byosf, not papered over here.
+    """
     if not plan.billed_reembed:
+        return True
+    if assume_yes():
+        _log.info("substrate_cost_gate_assumed_yes", legs=len(plan.legs))
         return True
     import click  # noqa: PLC0415 — deferred, CLI-only path
 

@@ -64,6 +64,61 @@ class _Reg:
         return LadderRegistry(self.rungs)
 
 
+# ── nexus-fffey: a rung that CANNOT answer must not read as converged ────────
+
+
+@dataclass
+class _RefusingRung:
+    """A rung whose detect() refuses the world — what `plan_substrate_legs`
+    does on a target collision (`SubstrateTargetCollision`)."""
+
+    name: str = "substrate-etl"
+
+    def detect(self) -> RungStatus:
+        raise RuntimeError("two DISTINCT source collections remap onto the same target")
+
+    def converge(self, report: ProgressReporter) -> ConvergeResult:  # pragma: no cover
+        raise AssertionError("converge must not run when detect refused")
+
+    def verify(self) -> bool:  # pragma: no cover
+        raise AssertionError("verify must not run when detect refused")
+
+
+def test_a_rung_that_cannot_answer_is_pending_not_green(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`pending_rungs` was a bare comprehension, so a raising detect() escaped
+    the whole sweep into `_check_pending_rungs`' blanket handler and doctor
+    printed `ok=True — "check failed (non-critical)"`. An install `nx upgrade`
+    REFUSES then read as healthy, and the refusal's message — the only text
+    naming the remedy — appeared nowhere. Gap-4 makes this row the authority on
+    pending work; it must not answer "fine" when it cannot answer at all."""
+    monkeypatch.setattr(
+        ladder_registry, "default_registry", lambda **kw: LadderRegistry((_RefusingRung(),))
+    )
+    (result,) = _check_pending_rungs()
+    assert result.ok is False
+    assert result.warn is True
+    assert "remap onto the same target" in result.detail  # the reason survives
+
+
+def test_one_refusing_rung_does_not_blind_the_others(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per-rung degradation: the healthy rung's verdict must still be reported.
+    A sweep-wide except loses every other rung's answer along with the broken
+    one's."""
+    healthy = SurfaceRung("t2-schema", pending=True)
+    monkeypatch.setattr(
+        ladder_registry,
+        "default_registry",
+        lambda **kw: LadderRegistry((healthy, _RefusingRung())),
+    )
+    (result,) = _check_pending_rungs()
+    assert "t2-schema" in result.detail          # the healthy rung still spoke
+    assert "substrate-etl" in result.detail      # ...and so did the broken one
+
+
 # ── nx doctor: _check_pending_rungs ──────────────────────────────────────────
 
 

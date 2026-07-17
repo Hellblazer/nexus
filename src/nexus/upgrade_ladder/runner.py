@@ -73,8 +73,32 @@ def pending_rungs(registry: LadderRegistry) -> list[tuple[str, RungStatus]]:
     ``nx doctor`` pending-rungs check and ``nx upgrade --dry-run`` report
     from this without touching anything, and without even opening the
     completion store.
+
+    PER-RUNG degradation, like :meth:`LadderRunner._run_rung` and the
+    dry-run loop (nexus-fffey). A bare comprehension let one rung's raising
+    ``detect()`` escape the whole sweep into ``nx doctor``'s blanket handler,
+    which reports the ladder row as ``ok=True, "check failed
+    (non-critical)"`` — so an install `nx upgrade` REFUSES read as healthy,
+    and the refusal's message (the only text naming the remedy) appeared
+    nowhere. A rung that cannot answer is PENDING and says why: it is
+    certainly not converged, and Gap-4 makes this row the authority on
+    pending work.
     """
-    return [(rung.name, rung.detect()) for rung in registry]
+    out: list[tuple[str, RungStatus]] = []
+    for rung in registry:
+        try:
+            out.append((rung.name, rung.detect()))
+        except Exception as exc:  # noqa: BLE001 — one broken rung must not blind the sweep, and must not read as converged
+            _log.warning("ladder_detect_failed", rung=rung.name, error=str(exc))
+            out.append((
+                rung.name,
+                RungStatus(
+                    applicable=True,
+                    converged=False,
+                    pending_detail=f"cannot determine state: {exc}",
+                ),
+            ))
+    return out
 
 
 class RungOutcome(str, Enum):

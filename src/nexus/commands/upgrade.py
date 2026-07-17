@@ -47,8 +47,27 @@ def _current_version() -> str:
 @click.option("--force", is_flag=True, help="Reset version gate and re-run all migrations.")
 @click.option("--auto", "auto_mode", is_flag=True, help="Quiet mode for hook invocation (T2 only, exit 0 always).")
 @click.option("--skip-t3", is_flag=True, help="Skip T3 upgrade steps (e.g., cross-collection projection backfill). Useful for fast T2-only migrations.")
-def upgrade(dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool) -> None:
-    """Run pending database migrations and upgrade steps."""
+@click.option("--yes", "assume_yes", is_flag=True, help="Assume yes to the billed re-embed consent prompt (equivalent to NX_ASSUME_YES=1). Nothing else prompts.")
+def upgrade(
+    dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool, assume_yes: bool
+) -> None:
+    """Run pending database migrations and upgrade steps.
+
+    ``--yes`` is NOT a general "say yes to everything" switch, and must not
+    become one: the only prompt the ladder can raise is the billed Voyage
+    re-embed (RDR-185 ## Constraints' third genuine decision; source-gone and
+    rollback DEFER rather than ask). It exists because `nx upgrade` is the one
+    verb and an ancient install must still converge UNATTENDED (SC-1) — without
+    a consent channel, making the cost gate actually fire (nexus-k1m2f) traded a
+    silent bill for a silent hang on a `click.confirm` no hook can answer.
+    """
+    import os  # noqa: PLC0415 — stdlib, branch-local
+
+    if assume_yes:
+        # The rung reads standing consent from the environment (hooks and cron
+        # never type a flag), so the flag sets what the env channel reads —
+        # one mechanism, two front doors, rather than a second gate to drift.
+        os.environ["NX_ASSUME_YES"] = "1"
     # RDR-128 P2: quiesce the daemon BEFORE migrating so its live T2
     # connections are released — the migration flock serializes the two
     # MIGRATOR processes, but only quiescing frees the daemon's serving

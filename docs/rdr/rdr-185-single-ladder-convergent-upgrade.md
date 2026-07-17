@@ -111,8 +111,23 @@ check and package upgrade.
   never duplicates).
 - **Consent only at genuine decisions.** The only prompts permitted are
   choices the product cannot make: a source that no longer exists
-  (re-acquire vs drop), an explicit rollback. Everything derivable is
-  automatic.
+  (re-acquire vs drop), an explicit rollback, and a **billed Voyage
+  re-embed** (spend the user's money vs leave the collection behind).
+  Everything derivable is automatic.
+  - *Amended 2026-07-17 (bead nexus-k1m2f).* The billed re-embed was
+    missing from this enumeration, which listed two. That was inert only
+    because the prompt was unreachable: `drop_converged_legs` rebuilt the
+    plan without the stored `billed_reembed` flag, so the cost gate saw
+    False on every production path and Voyage was billed with no estimate
+    and no consent. Fixing the gate made the omission load-bearing, so the
+    constraint now says what the product must actually do. Spending a
+    user's money is the definitional "choice the product cannot make"; it
+    belonged here from the start.
+  - **A permitted prompt must have an unattended channel**, or it
+    contradicts SC-1. `nx upgrade --yes` / `NX_ASSUME_YES=1` is standing
+    consent for the billed re-embed; with neither, `click.confirm` aborts
+    on a non-TTY rather than billing. Source-gone and rollback need no
+    channel: they DEFER (non-fatal, re-derived next run) instead of asking.
 - Applies across local, service, and managed-cloud modes; a mode where a
   rung is N/A detects-and-skips (the f0pmd version-gate pattern: detect →
   current? skip → converge → verify).
