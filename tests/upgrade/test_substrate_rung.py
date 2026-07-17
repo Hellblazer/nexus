@@ -459,6 +459,19 @@ _GATED = _cls(
     count=12,
 )
 
+#: A pre-RDR-109 MISLABEL: voyage-NAMED, but its stored vectors measure as local
+#: bge/ONNX (768). The name lies (nexus-nb7hr).
+_MISLABEL = CollectionClassification(
+    collection="knowledge__mis__voyage-context-3__v1",
+    leg="local",
+    model="voyage-context-3",
+    dim=1024,
+    support="unsupported",
+    source_count=12,
+    has_data=True,
+    measured_dim=768,
+)
+
 
 def test_converged_sources_names_the_collection_whose_target_holds_its_rows() -> None:
     cls = [_reid_only("knowledge__proj__bge-base-en-v15-768__v1")]
@@ -933,6 +946,29 @@ def test_credential_gated_survives_the_converged_filter() -> None:
     survived = drop_converged_legs(plan, {"knowledge__old": 12}, {})  # leg survives
     assert survived.legs, "the reconstruction must actually run"
     assert survived.credential_gated == ["knowledge__v"]
+
+
+def test_a_measured_768_mislabel_remaps_in_BOTH_modes() -> None:
+    """The name LIES, so whether the name's model is "wired" is the wrong
+    question — in either mode (code review, 2026-07-17).
+
+    `is_measured_dim_override` used to be consulted only inside the no-key
+    conjunction. On a KEYED install the lie was therefore believed: the voyage
+    token read as wired, needs_reembed came out False, and the collection was
+    skipped as CONFORMANT — its 768-dim vectors left in a voyage-named
+    collection forever while the service embedded queries at 1024 dims. Silently
+    broken recall, on the mode nobody tested.
+
+    seed_legacy.py's own comment has always claimed this shape remaps
+    "UNCONDITIONALLY — in voyage mode too ... vectors that were never voyage
+    must never bill a voyage re-embed". Only the no-key branch made it true."""
+    for key_present in (False, True):
+        plan = plan_substrate_legs(
+            [_MISLABEL], prior_collections=frozenset(), voyage_key_present=key_present
+        )
+        (leg,) = plan.legs  # never skipped, never gated — in EITHER mode
+        assert leg.target_collection == f"knowledge__mis__{_BGE}__v1"
+        assert leg.billed is False  # content that was never voyage never bills
 
 
 # ── nexus-j5diu: the measured-768 mislabel must not be silently skipped ──────

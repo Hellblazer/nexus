@@ -199,10 +199,22 @@ def plan_substrate_legs(
         # silently dropped from the plan and never migrated (service=0 vs
         # seeded=12) — no leg, no error, no decision. A collection that
         # cannot migrate must surface LOUD or as a decision, never vanish.
+        # The NAME LIES (nexus-nb7hr): a stored vector measured as local
+        # bge/ONNX, whatever the name's model token claims. Read ONCE, and used
+        # in BOTH branches below — an earlier version consulted it only inside
+        # the no-key conjunction, so on a KEYED install the lie was believed:
+        # the voyage token read as "wired", `needs_reembed` came out False, and
+        # the collection was skipped as CONFORMANT. Its 768-dim vectors then sat
+        # in a voyage-named collection forever while the service embedded
+        # queries against it at 1024 dims — silently broken recall, on the mode
+        # where nobody was looking. seed_legacy.py's own comment says this shape
+        # remaps "UNCONDITIONALLY — in voyage mode too"; only the no-key branch
+        # ever made that true.
+        mislabeled = is_measured_dim_override(c)
         if (
             c.model in _VOYAGE_MODELS
             and not voyage_key_present
-            and not is_measured_dim_override(c)
+            and not mislabeled
         ):
             # Credential-gate territory: no leg is possible (re-embedding voyage
             # text into bge would silently change recall). It is still REAL
@@ -216,7 +228,12 @@ def plan_substrate_legs(
             # collections that CAN migrate.
             gated.append(c.collection)
             continue
-        needs_reembed = c.model not in wired
+        # A mislabel ALWAYS re-embeds, in every mode: `wired` answers "is this
+        # NAME's model served", which is the wrong question when the name is
+        # known to lie. `remap_target_model` then sends it to the model its
+        # vectors actually are (ONNX for measured-768), so this costs nothing —
+        # vectors that were never voyage must never bill a voyage re-embed.
+        needs_reembed = mislabeled or c.model not in wired
         target = c.collection
         if needs_reembed:
             target_model = remap_target_model(c, voyage_key_present=voyage_key_present)
