@@ -49,12 +49,17 @@ docstring overclaimed "closes the gap"):
   regression made exactly this shape defer forever at exit 0.
 * the GRANT channel — NX_ASSUME_YES carries a billed walk past the gate.
 
-WHAT IT DELIBERATELY DOES NOT COVER: full convergence-and-verify of any leg.
-The fixture's service is an unreachable address by design, so the grant/free
-tests prove their walks reach the SERVICE BOUNDARY (which a deferred walk never
-dials) and stop there. Asserting actual convergence needs a live voyage-capable
-target — the era-hop covers the bge shapes; the voyage passthrough remains
-ungated past this boundary.
+WHAT IT DELIBERATELY DOES NOT COVER: full convergence-and-verify against a
+LIVE service. The fixture's service is an unreachable address by design, and
+the walk dials it in PRE-GATE probes (engine-version, target-counts) on every
+path — a deferring walk included — so "the service was dialled" discriminates
+nothing (pin nine; see `_failed_past_the_gate`). What the grant/free tests
+prove is WHERE the walk failed: `converge raised` means the consent gate was
+consulted, passed, and the migrate itself ran into the dead address. Free-shape
+convergence itself needs no service at all — the passthrough carries stored
+vectors, so an in-process stub target suffices, and the test below proves the
+SC-2 install reaches RECORDED unattended with zero spend. Only the BILLED
+shape's full convergence (a real re-embed) needs a live voyage-capable target.
 """
 from __future__ import annotations
 
@@ -67,6 +72,12 @@ import chromadb
 import pytest
 
 from nexus.catalog.catalog_db import CatalogDB
+from nexus.migration.detection import CollectionClassification
+from nexus.migration.wire_reid import ChashRemapStore
+from nexus.upgrade_ladder.completion import CompletionStore
+from nexus.upgrade_ladder.registry import LadderRegistry
+from nexus.upgrade_ladder.runner import LadderRunner, RungOutcome
+from nexus.upgrade_ladder.rungs.substrate_etl import SubstrateEtlRung, execute_leg
 
 _LEGACY_COLLECTION = "knowledge__gate__minilm-l6-v2-384__v1"
 #: SC-1+SC-2's own shape: voyage-NAMED, carrying pre-RDR-108 legacy ids. With a
@@ -75,6 +86,21 @@ _LEGACY_COLLECTION = "knowledge__gate__minilm-l6-v2-384__v1"
 #: deliberately: 768 would trip the measured-dim override and relabel it a
 #: mislabel, which is a different shape with a different plan.
 _FREE_REID_COLLECTION = "knowledge__gate__voyage-context-3__v1"
+#: The same shape as a live CLASSIFICATION (for the in-process convergence
+#: test). Module-level fixture, per this suite's mode-lint convention: the
+#: voyage token is the collection's NAME under test, not an ambient-mode
+#: assertion — the leg it plans is a passthrough precisely because the name's
+#: model never runs.
+_FREE_REID_CLASSIFICATION = CollectionClassification(
+    collection=_FREE_REID_COLLECTION,
+    leg="local",
+    model="voyage-context-3",
+    dim=1024,
+    support="unsupported",
+    source_count=3,
+    has_data=True,
+    legacy_ids=True,
+)
 
 
 def _seed(chroma_path: pathlib.Path, name: str, dim: int) -> None:
@@ -85,16 +111,6 @@ def _seed(chroma_path: pathlib.Path, name: str, dim: int) -> None:
         documents=[f"chunk {i}" for i in range(3)],
         embeddings=[[0.1] * dim for _ in range(3)],
     )
-
-
-def _seed_billable_footprint(chroma_path: pathlib.Path) -> None:
-    """A legacy-id collection on an UNWIRED model.
-
-    With a Voyage key present that remaps to a voyage target, which is the only
-    shape that reaches the cost gate: ``needs_reembed`` True (minilm is wired by
-    nothing) and the target's declared model is billed.
-    """
-    _seed(chroma_path, _LEGACY_COLLECTION, 384)
 
 
 def _run_upgrade(env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
@@ -238,6 +254,36 @@ def test_the_deferral_is_not_a_no_op_report(
     assert "(re-embed)" in said, f"the leg planned is not a re-embed:\n{pending}"
 
 
+def _failed_past_the_gate(proc: subprocess.CompletedProcess[str]) -> bool:
+    """Did the walk provably get PAST the consent gate before failing?
+
+    The runner stamps WHERE a rung failed into its detail — `detect raised:`
+    (pre-gate: _plan()/probes) vs `converge raised:` (post-gate: the gate was
+    consulted, passed, and the migrate itself failed — here, at this fixture's
+    deliberately unreachable service). click renders the hard failure to STDERR
+    with a fixed prefix, so this is stream+prefix selected like every other
+    surface assertion in this file.
+
+    The first draft asserted `returncode != 0 and "unreachable" in out` and
+    called it a service-boundary proof. Both reviewers proved it vacuous
+    (pin NINE, same species as 7-8): "unreachable" is printed by the
+    engine-version and target-counts probes at DETECT time, on every path
+    INCLUDING a deferring walk — the fixture makes it constant-true — and a
+    pre-gate `detect raised` failure produced RC!=0 + "unreachable" with the
+    gate never exercised (mutation-verified false green). The docstring's
+    "a deferred walk never dials the service" was contradicted by the
+    program's own output: the pre-gate probes dial it on every walk.
+    """
+    if proc.returncode == 0:
+        return False
+    failures = [
+        ln for ln in proc.stderr.splitlines()
+        if ln.startswith("Error: upgrade ladder did not converge")
+    ]
+    said = "\n".join(failures)
+    return bool(failures) and "converge raised" in said and "detect raised" not in said
+
+
 def test_standing_consent_is_honored_end_to_end(
     _billable_install: dict[str, str],
 ) -> None:
@@ -247,11 +293,10 @@ def test_standing_consent_is_honored_end_to_end(
     process with the env set (critic, 2026-07-17: every other NX_ASSUME_YES
     test calls the gate function directly).
 
-    What CAN be asserted here ends at the service boundary: this fixture's
-    service is deliberately unreachable, so the walk proceeds past consent and
-    then fails AT THE SERVICE — which is exactly the proof that consent was
-    granted (a declined walk never dials it). Full convergence needs a live
-    voyage-capable target; see the module docstring."""
+    The proof that consent was granted is WHERE the walk fails: `converge
+    raised` — the gate was consulted, passed, and the migrate dialled this
+    fixture's deliberately dead address. (NOT "the service was dialled": the
+    pre-gate probes dial it on every path, deferring walks included.)"""
     env = dict(_billable_install)
     env["NX_ASSUME_YES"] = "1"
     proc = _run_upgrade(env)
@@ -262,9 +307,8 @@ def test_standing_consent_is_honored_end_to_end(
         if ln.startswith("Upgrade ladder: rung ") and "deferred" in ln
     ]
     assert not deferrals, f"standing consent was ignored — the walk deferred:\n{out}"
-    # The walk got past the gate and reached for the (unreachable) target:
-    assert proc.returncode != 0 and "unreachable" in out, (
-        f"the walk never reached the service boundary:\n{out}"
+    assert _failed_past_the_gate(proc), (
+        f"the walk never provably got PAST the consent gate:\n{out}"
     )
 
 
@@ -278,9 +322,10 @@ def test_a_free_pure_reid_walk_never_reaches_the_consent_gate(
     — reporting success while never converging, invisible to every gate.
 
     Under that regression this walk DEFERS (exit 0, deferral line). Under
-    correct code it sails past the gate unprompted and fails only at this
-    fixture's deliberately unreachable service — the same service-boundary
-    proof as the grant test, with NO consent given: nothing needed asking."""
+    correct code it sails past the gate unprompted and fails post-gate
+    (`converge raised`) at the dead address — with NO consent given: nothing
+    needed asking. In-process convergence of this same shape is proven by
+    test_the_free_shape_converges_unattended_with_zero_spend below."""
     proc = _run_upgrade(_free_reid_install)
     out = proc.stdout + proc.stderr
 
@@ -291,6 +336,102 @@ def test_a_free_pure_reid_walk_never_reaches_the_consent_gate(
     assert not deferrals, (
         f"a FREE pure-re-id walk was asked for consent it does not need:\n{out}"
     )
-    assert proc.returncode != 0 and "unreachable" in out, (
-        f"the walk never reached the service boundary:\n{out}"
+    assert _failed_past_the_gate(proc), (
+        f"the walk never provably got PAST the consent gate:\n{out}"
     )
+
+
+# ── SC-2's flagship, converged IN PROCESS with zero spend ────────────────────
+# The critic's eb8edd73 finding, re-found one level down in this file's first
+# draft: "convergence needs a live voyage-capable target" is FALSE for the free
+# shape. Its leg is a passthrough — stored vectors carried, no embed call — so
+# the target only has to accept writes and return counts. The rung is
+# constructor-injected for exactly this.
+
+
+class _StubTarget:
+    """An EtlTarget that accepts writes and answers counts. Nothing else —
+    which is the point: if the free shape needed more, it would not be free."""
+
+    def __init__(self) -> None:
+        self.rows: dict[str, dict[str, object]] = {}
+        self.embed_calls = 0  # any server-side embed request would count here
+
+    def upsert_chunks(self, collection, ids, documents, metadatas, *, embeddings=None):
+        if embeddings is None:
+            self.embed_calls += 1  # embeddings=None asks the SERVICE to embed
+        for i, cid in enumerate(ids):
+            self.rows[cid] = {
+                "doc": documents[i],
+                "embedding": None if embeddings is None else embeddings[i],
+            }
+
+    def count(self, collection: str) -> int:
+        return len(self.rows)
+
+
+class _StubSource:
+    def __init__(self, chunks: list[dict[str, object]]) -> None:
+        self._chunks = chunks
+
+    def iter_batches(self, collection, *, page, include_embeddings=False):
+        yield [dict(c) for c in self._chunks]
+
+    def count(self, collection: str) -> int:
+        return len(self._chunks)
+
+
+def test_the_free_shape_converges_unattended_with_zero_spend(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SC-1+SC-2, end to end IN PROCESS: the voyage-named legacy-ids install
+    walks to RECORDED — real planner, real cost gate (uninjected), real ETL
+    seam, real re-id map, real runner — unattended, and spends nothing.
+
+    The gate is the PRODUCTION default deliberately: no cost_gate_fn injection,
+    NX_ASSUME_YES unset, no TTY (pytest's captured stdin). A billed plan would
+    therefore DEFER here — which is exactly what r4's widened predicate did to
+    this install, and what re-applying it does to this test (RECORDED becomes
+    DEFERRED, red). Zero spend is asserted structurally: the passthrough must
+    CARRY every stored vector (an embeddings=None upsert is a request for a
+    server-side embed, i.e. the thing that would bill)."""
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))  # watermarks off the real install
+    monkeypatch.delenv("NX_ASSUME_YES", raising=False)
+
+    chunks = [
+        {"id": f"legacy-id-{i:04d}", "document": f"chunk {i}",
+         "metadata": {}, "embedding": [0.2] * 1024}
+        for i in range(3)
+    ]
+    source, target = _StubSource(chunks), _StubTarget()
+
+    def _migrate(plan, *, report):
+        with ChashRemapStore(tmp_path / "chash_remap.db") as store:
+            results = [
+                execute_leg(leg, source, target, map_store=store, page=10, provenance="gate")
+                for leg in plan.legs
+            ]
+        return results, []
+
+    rung = SubstrateEtlRung(
+        footprint_fn=lambda: True,
+        classify_fn=lambda: [_FREE_REID_CLASSIFICATION],
+        voyage_key_fn=lambda: True,
+        prior_collections_fn=frozenset,
+        migrate_fn=_migrate,
+        # LIVE re-derivation, from the stub: empty before the migrate (leg
+        # stands), full after (converged) — the mapbc terminal state, real.
+        target_counts_fn=lambda: {_FREE_REID_COLLECTION: target.count(_FREE_REID_COLLECTION)},
+        unreflected_fn=list,
+    )
+
+    with CompletionStore(tmp_path / "ladder.db") as store:
+        report = LadderRunner(LadderRegistry((rung,)), store).run()
+
+    (run,) = report.runs
+    assert run.outcome is RungOutcome.RECORDED, f"did not converge: {run}"
+    assert target.count(_FREE_REID_COLLECTION) == 3
+    assert target.embed_calls == 0, "a passthrough leg asked the service to embed — that bills"
+    assert all(r["embedding"] is not None for r in target.rows.values())
+    # ...and the ids landed CONFORMANT (the wire re-id did its job en route).
+    assert all(len(cid) == 32 for cid in target.rows)
