@@ -2,9 +2,11 @@
 title: "Content-Address Chunks by a Canonical 32-Byte Binary chash: One Digest, Stored as Bytes, Hex Only at the Boundary"
 id: RDR-180
 type: Architecture
-status: draft
+status: accepted
+accepted_date: 2026-07-18
 priority: high
 author: Hal Hildebrand
+reviewed-by: self
 created: 2026-07-04
 related_issues: [nexus-z4skl, nexus-kmb6]
 related: [RDR-108, RDR-152, RDR-155, RDR-156]
