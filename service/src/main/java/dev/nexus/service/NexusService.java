@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpServer;
 import dev.nexus.service.db.AspectRepository;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.ChashRepository;
+import dev.nexus.service.db.LadderRepository;
 import dev.nexus.service.db.MemoryRepository;
 import dev.nexus.service.db.MigrationJobRepository;
 import dev.nexus.service.db.PlanRepository;
@@ -21,6 +22,7 @@ import dev.nexus.service.http.MigrationHandler;
 import dev.nexus.service.http.ChashHandler;
 import dev.nexus.service.http.HealthHandler;
 import dev.nexus.service.http.VersionHandler;
+import dev.nexus.service.http.LadderHandler;
 import dev.nexus.service.http.MemoryHandler;
 import dev.nexus.service.http.PlanHandler;
 import dev.nexus.service.http.RemapHandler;
@@ -224,6 +226,7 @@ public final class NexusService {
         var aspectRepo    = new AspectRepository(tenantScope);
         var chashRepo     = new ChashRepository(tenantScope);
         var remapRepo     = new RemapRepository(tenantScope);
+        var ladderRepo    = new LadderRepository(tenantScope);
         var catalogRepo   = new CatalogRepository(tenantScope);
         var migrationJobRepo = new MigrationJobRepository(tenantScope);
 
@@ -275,6 +278,11 @@ public final class NexusService {
         // map write-through + per-leg clear + live membership counts)
         var remapCtx = server.createContext("/v1/remap", new RemapHandler(remapRepo));
         remapCtx.getFilters().addAll(authFilter);
+
+        // /v1/ladder/* — upgrade-ladder completion bookkeeping (RDR-186
+        // nexus-146xx.12: the ladder.db retirement's PG write/read surface)
+        var ladderCtx = server.createContext("/v1/ladder", new LadderHandler(ladderRepo));
+        ladderCtx.getFilters().addAll(authFilter);
 
         // /v1/catalog/* — catalog endpoints (bead nexus-gmiaf.18)
         var catalogCtx = server.createContext("/v1/catalog", new CatalogHandler(catalogRepo));
