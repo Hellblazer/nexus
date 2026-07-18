@@ -7,7 +7,6 @@ import click
 
 from nexus.commands._helpers import default_db_path as _default_db_path
 from nexus.commands._helpers import t2_handle
-from nexus.config import get_credential
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
 from nexus.ttl import parse_ttl
@@ -278,19 +277,7 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
         if entry is None:
             raise click.ClickException(f"Entry {entry_id} not found in T2 memory.")
 
-        from nexus.config import is_local_mode  # noqa: PLC0415 — deliberate function-local import: branch-local, only on promote path
         from nexus.db import make_t3  # noqa: PLC0415 — deliberate function-local import: heavy T3 dep deferred to command invocation
-
-        if not is_local_mode():
-            missing = [
-                k
-                for k in ("chroma_api_key", "voyage_api_key", "chroma_database")
-                if not get_credential(k)
-            ]
-            if missing:
-                raise click.ClickException(
-                    f"{', '.join(missing)} not set — run: nx config set <key> <value>"
-                )
 
         # nexus-hmxi: probe T3 so promote targets land in the same
         # collection that ``nx store list`` / ``nx search`` resolve to.
