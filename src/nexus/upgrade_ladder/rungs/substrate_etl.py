@@ -60,6 +60,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
     from nexus.migration.detection import CollectionClassification  # noqa: F401 — runtime-quoted in the rung's seams
     from nexus.migration.etl_ports import EtlRunResult, EtlSource, EtlTarget
+    from nexus.migration.remap_client import HttpRemapStore  # noqa: F401 — annotation-only
     from nexus.migration.wire_reid import ChashRemapStore
 
 _log = structlog.get_logger(__name__)
@@ -448,7 +449,7 @@ def execute_leg(
     source: "EtlSource",
     target: "EtlTarget",
     *,
-    map_store: "ChashRemapStore",
+    map_store: "ChashRemapStore | HttpRemapStore",
     page: int,
     provenance: str,
     tenant_id: str = "",
@@ -540,7 +541,7 @@ def run_substrate_migration(
     source: "EtlSource",
     target: "EtlTarget",
     *,
-    map_store: "ChashRemapStore",
+    map_store: "ChashRemapStore | HttpRemapStore",
     catalog_db: Any,
     memory_db: Any,
     page: int,
@@ -778,17 +779,33 @@ def _default_unreflected() -> list[str]:
 
     Read-only. An unreadable map/store answers "unreflected", never
     "fine" — a probe that cannot tell must not certify convergence.
+
+    RDR-186 .6: the map's system of record is the PG ``chash_remap`` table;
+    the probe reads the ENGINE facts unioned with any pre-seed local legacy
+    facts (``CompositeReadMapStore``) so an install whose history has not
+    been seeded yet never probes falsely clean. The former
+    ``map_path.exists()`` short-circuit is gone for the same reason: a
+    post-.6 migration writes no local file at all. The zero-facts case is
+    one cheap engine COUNT round trip (live, never cached).
     """
     from nexus.migration.remap_cascade import unreflected_stores  # noqa: PLC0415 — deferred to avoid import cost
+    from nexus.migration.remap_client import CompositeReadMapStore, HttpRemapStore  # noqa: PLC0415 — deferred to avoid import cost
     from nexus.migration.wire_reid import ChashRemapStore  # noqa: PLC0415 — deferred to avoid import cost
 
     map_path = _default_map_path()
-    if not map_path.exists():
-        return []  # nothing was ever re-identified: nothing to reflect
     catalog_db, memory_db = _cascade_db_paths()
     try:
-        with ChashRemapStore(map_path) as map_store:
-            return unreflected_stores(map_store, catalog_db=catalog_db, memory_db=memory_db)
+        with HttpRemapStore() as engine:
+            if map_path.exists():
+                with ChashRemapStore(map_path) as local:
+                    return unreflected_stores(
+                        CompositeReadMapStore(engine, local),
+                        catalog_db=catalog_db, memory_db=memory_db,
+                    )
+            return unreflected_stores(
+                CompositeReadMapStore(engine, None),
+                catalog_db=catalog_db, memory_db=memory_db,
+            )
     except Exception as exc:  # noqa: BLE001 — a probe that cannot tell must never certify convergence
         _log.warning("substrate_unreflected_probe_failed", error=str(exc))
         return ["<probe failed>"]
@@ -803,12 +820,19 @@ def _default_cascade_only(report: ProgressReporter) -> str:
     longer match"), so this is a cheap no-op whenever it is not needed.
     """
     from nexus.migration.remap_cascade import cascade_remap  # noqa: PLC0415 — deferred to avoid import cost
-    from nexus.migration.wire_reid import ChashRemapStore  # noqa: PLC0415 — deferred to avoid import cost
+    from nexus.migration.remap_client import HttpRemapStore, seed_and_quarantine  # noqa: PLC0415 — deferred to avoid import cost
 
     catalog_db, memory_db = _cascade_db_paths()
     try:
-        with ChashRemapStore(_default_map_path()) as map_store:
-            results = cascade_remap(map_store, catalog_db=catalog_db, memory_db=memory_db)
+        # Converge-path repair: the engine is up here, so any pre-.6 local
+        # facts are seeded ONCE then the file is quarantined (renamed
+        # *.seeded — the reseed-resurrection guard: a rollback's engine-side
+        # clear must never be undone by a re-upload of stale local facts).
+        # The cascade then runs from the PG facts, the single system of
+        # record (RDR-186 .6).
+        with HttpRemapStore() as engine:
+            seed_and_quarantine(_default_map_path(), engine)
+            results = cascade_remap(engine, catalog_db=catalog_db, memory_db=memory_db)
     except Exception as exc:  # noqa: BLE001 — reported as a FAILED rung; never a silent pass
         return f"{type(exc).__name__}: {exc}"
     failed = [r for r in results if not r.ok]
@@ -841,29 +865,29 @@ def _default_prior_collections() -> frozenset[str]:
     """Source collections known from prior migration state — the SOURCE-GONE
     input. Read from the persisted map (the only durable record of what a
     prior run touched); empty on a first run, which correctly yields no
-    decisions."""
+    decisions.
+
+    RDR-186 .6: reads the ENGINE facts unioned with any pre-seed local
+    legacy facts (``CompositeReadMapStore``) — post-.6 migrations write no
+    local file, so the PG table is the durable record. Genuinely-empty maps
+    still answer ``frozenset()`` (normal first run); an UNREADABLE map
+    (engine unreachable, local corrupt) stays a loud warning, because that
+    degradation HIDES a genuine source-gone decision — a collection the
+    user must choose to re-acquire or drop simply stops being asked about
+    (P4.V Finding B; mirrors _default_target_counts' "could not tell is
+    never fine" rule).
+    """
+    from nexus.migration.remap_client import CompositeReadMapStore, HttpRemapStore  # noqa: PLC0415 — deferred to avoid import cost
     from nexus.migration.wire_reid import ChashRemapStore  # noqa: PLC0415 — deferred to avoid import cost
 
     map_path = _default_map_path()
-    if not map_path.exists():
-        # NORMAL: nothing has ever been re-identified, so there is no prior
-        # state and no source-gone decision to make. Silent by design.
-        return frozenset()
     try:
-        with ChashRemapStore(map_path) as store:
-            return frozenset(
-                row[0] for row in store._conn.execute(  # noqa: SLF001 — same-package read of its own store
-                    "SELECT DISTINCT source_collection FROM chash_remap"
-                ).fetchall()
-            )
+        with HttpRemapStore() as engine:
+            if map_path.exists():
+                with ChashRemapStore(map_path) as local:
+                    return CompositeReadMapStore(engine, local).source_collections()
+            return CompositeReadMapStore(engine, None).source_collections()
     except Exception as exc:  # noqa: BLE001 — decisions degrade to none rather than crashing the trigger; loud because that degradation HIDES a genuine decision
-        # WARNING, not debug (P4.V Finding B): the map EXISTS and could not be
-        # read. Degrading to "no prior state" here silently drops every
-        # SOURCE-GONE decision — a collection the user must choose to
-        # re-acquire or drop simply stops being asked about, and the walk
-        # proceeds as though it never existed. Absence is normal (handled
-        # above); unreadable is not, and must be visible. Mirrors
-        # _default_target_counts' "could not tell is never fine" rule.
         _log.warning("substrate_rung_prior_collections_unreadable", error=str(exc))
         return frozenset()
 
@@ -1015,6 +1039,24 @@ class SubstrateEtlRung:
         cascade_only_fn: Callable[[ProgressReporter], str] | None = None,
         page: int = 300,
     ) -> None:
+        # The r2 map-atomicity coupling (critic-146xx-6 Q1): the wire-reid
+        # transform posts each ETL batch's map facts to the engine, whose
+        # record_batch endpoint commits at most MAX_RECORDS_PER_WRITE (300)
+        # entries per PG transaction. page <= that cap is what guarantees
+        # EXACTLY ONE map transaction per ETL batch — the "ONE transaction,
+        # the r2 ordering unit" contract the local store gave for free. A
+        # larger page would silently split a batch's map facts across
+        # transactions, so a partial failure could leave facts for chunks
+        # the aborted batch never wrote; enforced loudly here, not left as
+        # a numeric coincidence.
+        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — deferred to avoid import cost
+
+        if page > QUOTAS.MAX_RECORDS_PER_WRITE:
+            raise ValueError(
+                f"page={page} exceeds MAX_RECORDS_PER_WRITE="
+                f"{QUOTAS.MAX_RECORDS_PER_WRITE}: the ETL page must fit one "
+                "engine map transaction (r2 ordering unit)"
+            )
         self._footprint = footprint_fn if footprint_fn is not None else _default_footprint
         self._classify = classify_fn if classify_fn is not None else _default_classify
         self._voyage_key = voyage_key_fn if voyage_key_fn is not None else _default_voyage_key
@@ -1204,11 +1246,18 @@ class SubstrateEtlRung:
         from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid import cycle
         from nexus.migration.detection import open_read_legs  # noqa: PLC0415 — deferred; RDR-176 read leg
         from nexus.migration.etl_ports import ChromaReadSource, VectorServiceTarget  # noqa: PLC0415 — deferred to avoid import cost
-        from nexus.migration.wire_reid import ChashRemapStore  # noqa: PLC0415 — deferred to avoid import cost
+        from nexus.migration.remap_client import HttpRemapStore, seed_and_quarantine  # noqa: PLC0415 — deferred to avoid import cost
 
         local, _cloud = open_read_legs(None)
         db_path = default_db_path()
-        with ChashRemapStore(_default_map_path()) as map_store:
+        # RDR-186 .6: the map's write path is the ENGINE (/v1/remap) — the PG
+        # chash_remap table is the system of record. Any pre-.6 local facts
+        # are seeded ONCE then the file is quarantined (renamed *.seeded —
+        # the reseed-resurrection guard: a rollback's engine-side clear must
+        # never be undone by a re-upload of stale local facts). The file
+        # survives intact as the read-only migration source.
+        with HttpRemapStore() as map_store:
+            seed_and_quarantine(_default_map_path(), map_store)
             return run_substrate_migration(
                 plan,
                 ChromaReadSource(local),

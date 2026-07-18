@@ -1348,22 +1348,91 @@ def test_unreflected_stores_is_empty_for_an_empty_map(tmp_path: pathlib.Path) ->
         ) == []
 
 
-def test_default_unreflected_is_silent_when_no_map_was_ever_written(
+def test_rung_rejects_page_above_map_transaction_cap() -> None:
+    """The r2 coupling guard (critic-146xx-6 Q1): page <= 300 is what makes
+    the wire-reid transform's map POST exactly ONE engine transaction per
+    ETL batch. Above the cap the map facts would silently split across
+    transactions, so a partial failure could commit facts for chunks the
+    aborted batch never wrote. Enforced loudly, never a numeric coincidence."""
+    import pytest
+
+    from nexus.db.limits import QUOTAS
+
+    with pytest.raises(ValueError, match="MAX_RECORDS_PER_WRITE"):
+        mod.SubstrateEtlRung(page=QUOTAS.MAX_RECORDS_PER_WRITE + 1)
+    # The boundary itself is fine.
+    mod.SubstrateEtlRung(page=QUOTAS.MAX_RECORDS_PER_WRITE)
+
+
+class _FakeEngineMapStore:
+    """Stand-in for HttpRemapStore in the probe defaults (RDR-186 .6)."""
+
+    def __init__(self, pairs=(), sources=frozenset()):
+        self._pairs = list(pairs)
+        self._sources = frozenset(sources)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return None
+
+    def total_count(self, source_collection=None):
+        return len(self._pairs)
+
+    def all_pairs(self):
+        return list(self._pairs)
+
+    def source_collections(self):
+        return self._sources
+
+
+def test_default_unreflected_is_silent_when_engine_empty_and_no_local_map(
     tmp_path: pathlib.Path, monkeypatch,
 ) -> None:
-    """The production default's own gate: a first-run install has no map file,
-    which is [] (nothing owed) — never "<probe failed>", which would make
-    detect() report pending forever on a healthy fresh box."""
+    """The production default's own gate, post-RDR-186 .6: a first-run
+    install has no local map file AND no engine facts, which is [] (nothing
+    owed) — never "<probe failed>", which would make detect() report pending
+    forever on a healthy fresh box. The former local-file-absence
+    short-circuit is gone by design: post-.6 migrations write no local file,
+    so only the engine's live zero answers "nothing was ever re-identified"."""
+    import nexus.migration.remap_client as remap_client
+
     monkeypatch.setattr(mod, "_default_map_path", lambda: tmp_path / "absent.db")
+    monkeypatch.setattr(mod, "_cascade_db_paths", lambda: (tmp_path / "c.db", tmp_path / "m.db"))
+    monkeypatch.setattr(remap_client, "HttpRemapStore", _FakeEngineMapStore)
     assert mod._default_unreflected() == []
+
+
+def test_default_unreflected_engine_unreachable_reports_probe_failure(
+    tmp_path: pathlib.Path, monkeypatch,
+) -> None:
+    """Engine unreachable = could-not-tell = loud "<probe failed>" — never a
+    silent [] that certifies convergence it cannot check (RDR-186 .6: the
+    engine holds the facts, so an unreachable engine means the probe is
+    blind)."""
+    import nexus.migration.remap_client as remap_client
+
+    def _raise():
+        raise ConnectionError("engine down")
+
+    monkeypatch.setattr(mod, "_default_map_path", lambda: tmp_path / "absent.db")
+    monkeypatch.setattr(mod, "_cascade_db_paths", lambda: (tmp_path / "c.db", tmp_path / "m.db"))
+    monkeypatch.setattr(remap_client, "HttpRemapStore", _raise)
+    assert mod._default_unreflected() == ["<probe failed>"]
 
 
 def test_default_unreflected_reports_probe_failure_rather_than_certifying(
     tmp_path: pathlib.Path, monkeypatch,
 ) -> None:
-    """A probe that cannot tell must never answer "converged"."""
+    """A probe that cannot tell must never answer "converged" — here the
+    engine is fine but the pre-seed LOCAL legacy map is corrupt, so the
+    composite read cannot cover the local half."""
+    import nexus.migration.remap_client as remap_client
+
     map_path = tmp_path / "map.db"
     map_path.write_text("not a sqlite database")
     monkeypatch.setattr(mod, "_default_map_path", lambda: map_path)
     monkeypatch.setattr(mod, "_cascade_db_paths", lambda: (tmp_path / "c.db", tmp_path / "m.db"))
+    monkeypatch.setattr(remap_client, "HttpRemapStore", _FakeEngineMapStore)
     assert mod._default_unreflected() == ["<probe failed>"]

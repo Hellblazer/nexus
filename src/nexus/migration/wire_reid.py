@@ -240,6 +240,39 @@ class ChashRemapStore:
             (tenant_id,),
         ).fetchall()
 
+    def all_entries(self, *, tenant_id: str = "") -> list[RemapEntry]:
+        """Every full fact row — the RDR-186 .6 seed reader: uploads this
+        (now read-only) local map's history to the PG table once, via
+        :func:`nexus.migration.remap_client.seed_local_map`."""
+        rows = self._conn.execute(
+            "SELECT source_collection, old_id, new_chash, target_collection, "
+            "provenance FROM chash_remap WHERE tenant_id = ?",
+            (tenant_id,),
+        ).fetchall()
+        return [
+            RemapEntry(
+                tenant_id=tenant_id,
+                source_collection=src,
+                old_id=old,
+                new_chash=new,
+                target_collection=tgt,
+                provenance=prov,
+            )
+            for src, old, new, tgt, prov in rows
+        ]
+
+    def source_collections(self, *, tenant_id: str = "") -> frozenset[str]:
+        """Distinct source collections — the source-gone probe's read shape
+        (replaces the probe's former raw ``_conn`` access)."""
+        return frozenset(
+            row[0]
+            for row in self._conn.execute(
+                "SELECT DISTINCT source_collection FROM chash_remap "
+                "WHERE tenant_id = ?",
+                (tenant_id,),
+            ).fetchall()
+        )
+
     def old_ids_for(
         self, source_collection: str, new_chash: str, *, tenant_id: str = ""
     ) -> frozenset[str]:
