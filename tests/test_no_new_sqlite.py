@@ -12,7 +12,10 @@ retirement epic nexus-146xx.
 This suite FREEZES the 2026-07-18 census of client-side SQLite so the
 debt can only shrink:
 
-* per-file counts of inline SQLite DDL (``CREATE [VIRTUAL] TABLE``), and
+* per-file counts of inline SQLite DDL (``CREATE [VIRTUAL] TABLE``),
+* per-file counts of ``ALTER TABLE`` statements (RDR-186 P0 harden
+  decision, Hal 2026-07-18 — closes the schema-GROWTH blind spot the
+  CREATE-only regex cannot see), and
 * per-file counts of ``# epsilon-allow:`` overrides — the
   storage-boundary lint (RDR-120) accepts any >=8-char reason, which
   made exemptions self-service; freezing the population makes each NEW
@@ -49,6 +52,7 @@ REPO_ROOT = pathlib.Path(__file__).parent.parent
 SRC = REPO_ROOT / "src" / "nexus"
 
 _DDL_RE = re.compile(r"CREATE\s+(?:VIRTUAL\s+)?TABLE", re.IGNORECASE)
+_ALTER_RE = re.compile(r"ALTER\s+TABLE", re.IGNORECASE)
 _EPSILON_RE = re.compile(r"#\s*epsilon-allow\s*:")
 
 _DIRECTIVE = (
@@ -77,6 +81,25 @@ DDL_CENSUS: dict[str, int] = {
     "src/nexus/migration/wire_reid.py": 1,        # chash_remap.db (PG twin = RDR-185 .16 Liquibase work)
     "src/nexus/pipeline_buffer.py": 3,            # pipeline.db own-substrate
     "src/nexus/upgrade_ladder/completion.py": 2,  # ladder.db own-substrate
+}
+
+#: 2026-07-18 census — per-file counts of ``ALTER TABLE`` statements
+#: (RDR-186 P0 adjudication, Hal 2026-07-18: HARDEN — the CREATE-only DDL
+#: regex is blind to schema GROWTH on an already-censused store, which is
+#: exactly how the reverted ``leg_convergence`` near-miss would have
+#: landed on a second attempt; bead nexus-146xx.2).
+ALTER_CENSUS: dict[str, int] = {
+    "src/nexus/aspect_promotion.py": 5,           # 1 real + 4 prose self-mentions
+    "src/nexus/commands/enrich.py": 1,            # docstring mirror of aspect_promotion's DDL (censused there) — not own debt
+    "src/nexus/db/migrations.py": 36,             # 27 real + 9 prose self-mentions
+    "src/nexus/db/t2/aspect_extraction_queue.py": 2,
+    "src/nexus/db/t2/catalog.py": 9,              # 8 real + 1 self-referential SQL comment
+    "src/nexus/db/t2/chash_index.py": 1,
+    "src/nexus/db/t2/memory_store.py": 1,         # comment mirror of migrations.py DDL (censused there) — not own debt
+    "src/nexus/db/t2/plan_library.py": 1,         # comment mirror of migrations.py DDL (censused there) — not own debt
+    "src/nexus/health.py": 1,                     # PG/Liquibase RLS syntax in a comment (health.py:1673) — not SQLite debt
+    "src/nexus/pipeline_buffer.py": 1,
+    "src/nexus/plans/repair.py": 1,               # docstring mention only; module runs NO DDL — not own debt
 }
 
 #: 2026-07-18 census — per-file counts of ``# epsilon-allow:`` overrides.
@@ -166,6 +189,15 @@ def test_no_new_inline_ddl() -> None:
     )
 
 
+def test_no_new_alter_table() -> None:
+    grown, shrunk = _census_delta(_count_matches(_ALTER_RE), ALTER_CENSUS)
+    assert not grown, f"ALTER TABLE statements GREW at {grown}: {_DIRECTIVE}"
+    assert not shrunk, (
+        f"stale ALTER_CENSUS count(s) {shrunk}: ALTER DDL was removed (good!) — "
+        "lower the census entry so the frozen debt ledger stays exact."
+    )
+
+
 def test_no_new_epsilon_allows() -> None:
     grown, shrunk = _census_delta(_count_matches(_EPSILON_RE), EPSILON_CENSUS)
     assert not grown, (
@@ -184,6 +216,11 @@ def test_census_is_nonvacuous() -> None:
     broke (path drift, encoding) and the `grown` half above would go
     vacuously green."""
     assert _count_matches(_DDL_RE)
+    assert _count_matches(_ALTER_RE)
     assert _count_matches(_EPSILON_RE)
     assert sum(DDL_CENSUS.values()) >= 15
+    # Loose sanity floor like its siblings (critic 2026-07-18): legitimate
+    # D6 shrink-side retirements must not trip it — it only proves the
+    # scanner still sees a substantial census.
+    assert sum(ALTER_CENSUS.values()) >= 20
     assert sum(EPSILON_CENSUS.values()) >= 40
