@@ -52,7 +52,9 @@ class JooqRecordReflectionFeatureTest {
     // raw-fact substrate) and nexus.ladder_completions (upgrade-ladder bookkeeping).
     // 56 -> 57: nexus-146xx.5 added nexus.remap_membership(text,text) — jOOQ
     // generates a record type for the table-valued function's RETURNS TABLE shape.
-    private static final int EXPECTED_RECORD_TYPES = 57;
+    // 57 -> 60: nexus-146xx.16 added the engine-hosted streaming-PDF buffer
+    // (nexus.pdf_pipeline, nexus.pdf_pages, nexus.pdf_chunks).
+    private static final int EXPECTED_RECORD_TYPES = 60;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

@@ -7,6 +7,7 @@ import dev.nexus.service.db.ChashRepository;
 import dev.nexus.service.db.LadderRepository;
 import dev.nexus.service.db.MemoryRepository;
 import dev.nexus.service.db.MigrationJobRepository;
+import dev.nexus.service.db.PipelineRepository;
 import dev.nexus.service.db.PlanRepository;
 import dev.nexus.service.db.RemapRepository;
 import dev.nexus.service.db.ScratchRepository;
@@ -24,6 +25,7 @@ import dev.nexus.service.http.HealthHandler;
 import dev.nexus.service.http.VersionHandler;
 import dev.nexus.service.http.LadderHandler;
 import dev.nexus.service.http.MemoryHandler;
+import dev.nexus.service.http.PipelineHandler;
 import dev.nexus.service.http.PlanHandler;
 import dev.nexus.service.http.RemapHandler;
 import dev.nexus.service.http.ScratchHandler;
@@ -227,6 +229,7 @@ public final class NexusService {
         var chashRepo     = new ChashRepository(tenantScope);
         var remapRepo     = new RemapRepository(tenantScope);
         var ladderRepo    = new LadderRepository(tenantScope);
+        var pipelineRepo  = new PipelineRepository(tenantScope);
         var catalogRepo   = new CatalogRepository(tenantScope);
         var migrationJobRepo = new MigrationJobRepository(tenantScope);
 
@@ -283,6 +286,12 @@ public final class NexusService {
         // nexus-146xx.12: the ladder.db retirement's PG write/read surface)
         var ladderCtx = server.createContext("/v1/ladder", new LadderHandler(ladderRepo));
         ladderCtx.getFilters().addAll(authFilter);
+
+        // /v1/pipeline/* — engine-hosted streaming-PDF buffer (RDR-186
+        // nexus-146xx.16: pipeline.db's PG twin; state hosts here, the
+        // extraction compute stays client-side)
+        var pipelineCtx = server.createContext("/v1/pipeline", new PipelineHandler(pipelineRepo));
+        pipelineCtx.getFilters().addAll(authFilter);
 
         // /v1/catalog/* — catalog endpoints (bead nexus-gmiaf.18)
         var catalogCtx = server.createContext("/v1/catalog", new CatalogHandler(catalogRepo));

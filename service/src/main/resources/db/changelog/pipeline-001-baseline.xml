@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-186 bead nexus-146xx.16 — streaming-PDF pipeline buffer baseline
+    (Hal P0 ruling 2026-07-18: ENGINE-HOST; RDR-048 design lineage, the
+    RDR-173-STYLE hosting shape = the STATE moves engine-side while the
+    extraction compute stays client-side — MinerU/Docling are Python-only).
+
+    The PG twin of the client's pipeline.db (src/nexus/pipeline_buffer.py):
+    crash-resumable working state for the three-stage streaming PDF ingest
+    (extract pages → chunk → upload). Mirrored 1:1 with tenant_id promoted
+    to the RLS discriminator; metadata stays TEXT (wire parity with the
+    SQLite JSON strings — the buffer is transient working state, JSONB's
+    query surface is unused by design).
+
+    WORKING STATE, not permanent: rows live for one ingest and are swept
+    when stale (the client's STALE_THRESHOLD heartbeat semantics carry to
+    the .16 endpoint surface). NO data-carry from pipeline.db (the pinned
+    three-way asymmetry: chash_remap = permanent facts → seed+quarantine;
+    ladder = re-derivable bookkeeping → durability-gated carry; pipeline =
+    transient buffers → an in-flight local pipeline simply re-runs from the
+    still-present source PDF, RDR-048's own resume design).
+
+    embedding sentinel semantics (nexus-9n1u3, carried VERBATIM):
+      NULL          = not embedded yet
+      packed floats = client-embedded vectors
+      empty bytes   = service-mode sentinel (the JVM embeds at upload)
+
+    Deliberately NO index beyond the PKs: a tenant's live pipeline set is
+    tiny (a handful of concurrent ingests), and the stale sweep scans it.
+
+    Grants: consolidated runAlways grants-nexus-svc.xml — no per-store grant.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: the three buffer tables ────────────────────────────── -->
+    <changeSet id="pipeline-001-1" author="nexus-146xx.16">
+        <comment>Create pdf_pipeline / pdf_pages / pdf_chunks mirroring the SQLite pipeline.db schema with tenant_id</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.pdf_pipeline (
+    tenant_id       TEXT        NOT NULL,
+    content_hash    TEXT        NOT NULL,
+    pdf_path        TEXT        NOT NULL,
+    collection      TEXT        NOT NULL,
+    total_pages     INTEGER,
+    pages_extracted INTEGER     NOT NULL DEFAULT 0,
+    chunks_created  INTEGER,
+    chunks_embedded INTEGER,
+    chunks_uploaded INTEGER     NOT NULL DEFAULT 0,
+    status          TEXT        NOT NULL DEFAULT 'running',
+    error           TEXT        NOT NULL DEFAULT '',
+    extraction_meta TEXT        NOT NULL DEFAULT '',
+    started_at      TIMESTAMPTZ NOT NULL,
+    updated_at      TIMESTAMPTZ NOT NULL,
+    CONSTRAINT pdf_pipeline_pk PRIMARY KEY (tenant_id, content_hash)
+);
+
+CREATE TABLE nexus.pdf_pages (
+    tenant_id     TEXT        NOT NULL,
+    content_hash  TEXT        NOT NULL,
+    page_index    INTEGER     NOT NULL,
+    page_text     TEXT        NOT NULL,
+    metadata_json TEXT        NOT NULL DEFAULT '{}',
+    created_at    TIMESTAMPTZ NOT NULL,
+    CONSTRAINT pdf_pages_pk PRIMARY KEY (tenant_id, content_hash, page_index)
+);
+
+CREATE TABLE nexus.pdf_chunks (
+    tenant_id     TEXT        NOT NULL,
+    content_hash  TEXT        NOT NULL,
+    chunk_index   INTEGER     NOT NULL,
+    chunk_text    TEXT        NOT NULL,
+    chunk_id      TEXT        NOT NULL,
+    metadata_json TEXT        NOT NULL DEFAULT '{}',
+    embedding     BYTEA,
+    uploaded      BOOLEAN     NOT NULL DEFAULT FALSE,
+    created_at    TIMESTAMPTZ NOT NULL,
+    CONSTRAINT pdf_chunks_pk PRIMARY KEY (tenant_id, content_hash, chunk_index)
+);
+        </sql>
+        <rollback>
+            DROP TABLE IF EXISTS nexus.pdf_chunks CASCADE;
+            DROP TABLE IF EXISTS nexus.pdf_pages CASCADE;
+            DROP TABLE IF EXISTS nexus.pdf_pipeline CASCADE;
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: RLS enable + force + policies ──────────────────────── -->
+    <changeSet id="pipeline-001-2" author="nexus-146xx.16">
+        <comment>Enable and force RLS; tenant isolation policies on all three tables</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.pdf_pipeline ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.pdf_pipeline FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.pdf_pipeline
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+
+ALTER TABLE nexus.pdf_pages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.pdf_pages FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.pdf_pages
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+
+ALTER TABLE nexus.pdf_chunks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.pdf_chunks FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.pdf_chunks
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.pdf_chunks;
+            ALTER TABLE nexus.pdf_chunks NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.pdf_chunks DISABLE ROW LEVEL SECURITY;
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.pdf_pages;
+            ALTER TABLE nexus.pdf_pages NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.pdf_pages DISABLE ROW LEVEL SECURITY;
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.pdf_pipeline;
+            ALTER TABLE nexus.pdf_pipeline NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.pdf_pipeline DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

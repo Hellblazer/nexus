@@ -218,6 +218,11 @@
          verdict, RF-186-1). After remap-001 and vectors-001; before grants. -->
     <include file="db/changelog/remap-002-membership-function.xml"/>
 
+    <!-- RDR-186 nexus-146xx.16: pdf_pipeline/pdf_pages/pdf_chunks — the
+         engine-hosted streaming-PDF buffer (pipeline.db's PG twin; transient
+         working state, RDR-048 lineage). Standalone tables; before grants. -->
+    <include file="db/changelog/pipeline-001-baseline.xml"/>
+
     <!-- RDR-186 nexus-146xx.10: ladder_completions — PG home for upgrade-ladder
          rung completion bookkeeping (D3 derive-first record-late; position is
          always derived, never stored). Standalone table; before grants. -->
