@@ -2,10 +2,11 @@
 title: "Client-Persistence Closure: PG in Every Mode — Retire Every SQLite Substrate Outside RDR-158's Seven-Domain Scope, and End Self-Granted Exemptions"
 id: RDR-186
 type: Architecture
-status: draft
+status: accepted
+accepted_date: 2026-07-18
 priority: high
 author: Hal Hildebrand
-reviewed-by: pending
+reviewed-by: self
 created: 2026-07-18
 related_issues: [nexus-146xx, nexus-tidtd, nexus-83ld0, nexus-tcqah, nexus-ixl85, nexus-gmiaf]
 related: [RDR-152, RDR-153, RDR-155, RDR-156, RDR-157, RDR-158, RDR-185]
