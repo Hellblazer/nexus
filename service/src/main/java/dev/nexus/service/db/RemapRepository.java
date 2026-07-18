@@ -239,6 +239,24 @@ public final class RemapRepository {
                .fetch(r -> List.of(r.value1(), r.value2())));
     }
 
+    /**
+     * Total fact-row count for the tenant (optionally one source collection) —
+     * ONE cheap round trip serving both .6 design inputs: the
+     * probe-before-fetch short-circuit (skip the paged /pairs scan when the
+     * count is unchanged since the last clean check, the nexus-vgtff pattern)
+     * and the paged-read torn-read reconcile (count before and after paging;
+     * mismatch = could-not-tell, never silently accepted).
+     */
+    public long count(String tenant, String sourceCollection) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            var where = CHASH_REMAP.TENANT_ID.eq(tenant);
+            if (sourceCollection != null && !sourceCollection.isBlank()) {
+                where = where.and(CHASH_REMAP.SOURCE_COLLECTION.eq(sourceCollection));
+            }
+            return (long) ctx.fetchCount(CHASH_REMAP, where);
+        });
+    }
+
     /** Distinct source collections — the prior-collections (source-gone) probe input. */
     public List<String> sourceCollections(String tenant) {
         return tenantScope.withTenant(tenant, ctx ->

@@ -413,6 +413,46 @@ class RemapHandlerTest {
     }
 
     @Test
+    void countEndpoint_totalAndPerSource() throws Exception {
+        String srcA = "legacy__h10__srcA";
+        String srcB = "legacy__h10__srcB";
+        String tgt = "knowledge__h10__tgt";
+        post("/v1/remap/record_batch", TOKEN, TENANT, """
+            {"source_collection":"%s","entries":[
+              {"old_id":"c-1","new_chash":"%s","target_collection":"%s","provenance":"test"},
+              {"old_id":"c-2","new_chash":"%s","target_collection":"%s","provenance":"test"}
+            ]}""".formatted(srcA, chash("h10a1"), tgt, chash("h10a2"), tgt));
+        post("/v1/remap/record_batch", TOKEN, TENANT, """
+            {"source_collection":"%s","entries":[
+              {"old_id":"c-3","new_chash":"%s","target_collection":"%s","provenance":"test"}
+            ]}""".formatted(srcB, chash("h10b1"), tgt));
+
+        // Per-source counts are exact (this test owns these collections).
+        var perSourceA = mapper.readValue(
+            get("/v1/remap/count?source_collection=" + srcA, TOKEN, TENANT).body(), MAP_T);
+        assertThat(((Number) perSourceA.get("total")).longValue()).isEqualTo(2);
+        var perSourceB = mapper.readValue(
+            get("/v1/remap/count?source_collection=" + srcB, TOKEN, TENANT).body(), MAP_T);
+        assertThat(((Number) perSourceB.get("total")).longValue()).isEqualTo(1);
+
+        // Tenant-wide total covers at least this test's 3 facts (other tests'
+        // facts may interleave in the shared container) and moves with writes:
+        // the probe-before-fetch contract is "count changed => rescan".
+        long before = ((Number) mapper.readValue(
+            get("/v1/remap/count", TOKEN, TENANT).body(), MAP_T).get("total")).longValue();
+        assertThat(before).isGreaterThanOrEqualTo(3);
+        post("/v1/remap/record_batch", TOKEN, TENANT, """
+            {"source_collection":"%s","entries":[
+              {"old_id":"c-4","new_chash":"%s","target_collection":"%s","provenance":"test"}
+            ]}""".formatted(srcB, chash("h10b2"), tgt));
+        long after = ((Number) mapper.readValue(
+            get("/v1/remap/count", TOKEN, TENANT).body(), MAP_T).get("total")).longValue();
+        assertThat(after)
+            .as("count must move with writes — the probe-before-fetch signal")
+            .isEqualTo(before + 1);
+    }
+
+    @Test
     void readEndpoints_rlsScoped() throws Exception {
         String src = "legacy__h9__src";
         String tgt = "knowledge__h9__tgt";

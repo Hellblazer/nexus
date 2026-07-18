@@ -42,6 +42,9 @@ import java.util.Map;
  *                                 ?limit=&amp;offset= → {pairs: [[old, new], ...]}
  *   GET  /v1/remap/source_collections  distinct sources — the prior-collections
  *                                 (source-gone) probe input
+ *   GET  /v1/remap/count          total fact rows (?source_collection= optional
+ *                                 filter) → {total} — the probe-before-fetch
+ *                                 short-circuit + paged-read reconcile input
  * </pre>
  *
  * <p>RF-186-1: raw facts and live counts only — no verdict surface exists and
@@ -95,6 +98,7 @@ public final class RemapHandler implements HttpHandler {
                 case "/entries"            -> handleEntries(exchange, tenant, method);
                 case "/pairs"              -> handlePairs(exchange, tenant, method);
                 case "/source_collections" -> handleSourceCollections(exchange, tenant, method);
+                case "/count"              -> handleCount(exchange, tenant, method);
                 default                    -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
             }
         } catch (IllegalArgumentException e) {
@@ -208,6 +212,15 @@ public final class RemapHandler implements HttpHandler {
         var sources = repo.sourceCollections(tenant);
         HttpUtil.send(exchange, 200,
                 MAPPER.writeValueAsString(Map.of("source_collections", sources)));
+    }
+
+    // ── GET /v1/remap/count ──────────────────────────────────────────────────
+
+    private void handleCount(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        String sourceCollection = queryParam(exchange, "source_collection");  // optional
+        long total = repo.count(tenant, sourceCollection);
+        HttpUtil.send(exchange, 200, "{\"total\":" + total + "}");
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
