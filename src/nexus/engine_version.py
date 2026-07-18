@@ -98,7 +98,14 @@ from __future__ import annotations
 #: — the 6.11.0 tier-status / doctor / session-end read parity hard-depends
 #: on the route; deployed + cloud-gated 2026-07-16 (recall 12/12, hybrid
 #: p95 1920ms < 2376 bound). One-engine-per-release: ship what was tested.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 44)
+#: -> (0,1,47) 2026-07-18: RDR-186 SQLite retirement hard-depends on the
+#: full /v1 trio — /v1/remap (v0.1.45, chash_remap facts + live-membership
+#: convergence, nexus-146xx.4/.5), /v1/ladder (v0.1.46, completion ledger,
+#: .12), /v1/pipeline (v0.1.47, the streaming-PDF buffer, .16). The client
+#: has NO local fallback for any of them (pipeline.db/ladder.db deleted),
+#: so a client at this release against an older engine cannot index PDFs
+#: or record ladder completions — the floor IS the fix-delivery vehicle.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 47)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:

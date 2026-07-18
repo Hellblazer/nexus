@@ -6,7 +6,43 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Ships with (and requires) engine-service-v0.1.47.
+
 ### Added
+
+- **Client persistence moved fully to the engine's Postgres — no SQLite in
+  any mode** ([RDR-186](docs/rdr/rdr-186-client-persistence-closure-no-sqlite.md)):
+  the chash re-identification map, upgrade-ladder completion records, and the
+  streaming-PDF pipeline buffer now live in the engine (`/v1/remap`,
+  `/v1/ladder`, `/v1/pipeline` — engine-service v0.1.45–v0.1.47) in BOTH
+  local and cloud modes. No user action: the re-id map is seeded once from
+  the local artifact then quarantined; completion records flush through with
+  durability-gated carry; pipeline rows are transient per-ingest state.
+- Streaming PDF ingest batches its buffer writes over the wire (pages/chunks
+  coalesced per flush with read-your-writes ordering), so large-PDF ingest
+  does not turn into per-page HTTP round-trips.
+
+### Fixed
+
+- **`nx upgrade` substrate migration now converges across embedder eras**
+  (nexus-tidtd): the drop-test compares live re-id membership instead of raw
+  count equality, so a target collection independently indexed to a
+  different count than its stale source no longer hard-fails the upgrade
+  forever. The same relaxation is applied to the legacy migration path's
+  post-write checks (nexus-83ld0).
+- **Rollback of a substrate migration leg is whole-leg and loss-proof**: the
+  store cascade must fully revert before the re-id map is cleared; a partial
+  revert now fails loudly with the map intact, and a rollback-cleared leg
+  can no longer be resurrected by a stale local re-seed.
+- `nx doctor --clean-pipelines` fails with a clean message instead of a
+  stack trace when the engine is unreachable.
+
+### Removed
+
+- The client-local SQLite substrates `pipeline.db`, `ladder.db`, and the
+  `_nexus_t3_steps` bookkeeping table are retired (their state lives in the
+  engine per RDR-186). Existing files are left in place and harmless; a
+  later release sweeps them.
 
 - **RDR-184 orchestration guard, default-ON** (nexus-ccs9v Phase 1+2): new
   `SubagentStop` hook blocks a NAMED background teammate's idle exactly once

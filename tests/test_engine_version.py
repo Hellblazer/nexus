@@ -45,7 +45,14 @@ class TestRequiredEngineVersion:
         # and every surface degrades to the honest fallback forever.
         # Deployed + cloud-gated 2026-07-16 (recall 12/12, hybrid p95
         # 1920ms < 2376 bound).
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 44)
+        # ->(0,1,47) 2026-07-18: hard dependency — RDR-186 retired every
+        # client-local substrate behind the /v1 trio: /v1/remap (v0.1.45),
+        # /v1/ladder (v0.1.46), /v1/pipeline (v0.1.47). pipeline.db and
+        # ladder.db are DELETED; pre-47 engines 404 the routes and PDF
+        # indexing / ladder completion recording have no fallback. Cut +
+        # published + cold-validated 2026-07-18; cloud deploy = Hal's relay
+        # (release Step 0's floor gate blocks the cut until confirmed).
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 47)
 
 
 class TestParseEngineVersion:
