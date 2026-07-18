@@ -189,6 +189,31 @@ expectations_already_blocked() {
         "$file" 2>/dev/null
 }
 
+# expectations_undeclared <session_id> — the declaration-completeness
+# retro audit (RDR-184 .16; query hardened out of markdown after the
+# Phase-2 critique proved the unfiltered version false-flagged every
+# sync dispatch). Prints one "UNDECLARED\t<agent_id>\t<agent_type>" line
+# per NAMED-morphology START row (agent_id == "a<agent_type>-<hash>")
+# that has NO EXPECT row for that name. An EXPECT row of EITHER mode
+# suppresses — a deliberately-declared named-sync dispatch stays
+# audit-clean. Unnamed (sync-shaped) dispatches are never flagged: their
+# START rows lack the morphology, and finding 4 already proves sync
+# dispatches cannot idle-without-report. Missing/unreadable file => no
+# output, exit 0 (fail-open, like every consult surface here).
+expectations_undeclared() {
+    local sid="$1"
+    [[ -n "$sid" ]] || return 0
+    local file
+    file="$(expectations_file "$sid" 2>/dev/null)" || return 0
+    [[ -r "$file" ]] || return 0
+    awk -F'\t' '
+        $2 == "START" && index($3, "a" $4 "-") == 1 && length($3) > length($4) + 2 { s[$3] = $4 }
+        $2 == "EXPECT" { e[$3] = 1 }
+        END { for (id in s) if (!(s[id] in e)) print "UNDECLARED\t" id "\t" s[id] }
+    ' "$file" 2>/dev/null
+    return 0
+}
+
 # expectations_sweep — best-effort reap of expectations files older than 7
 # days (no session-directory tie; the lifespan orphan-reaper precedent).
 # Safe to call from any hook entry; never fails the caller.

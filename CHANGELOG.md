@@ -6,6 +6,23 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **RDR-184 orchestration guard, default-ON** (nexus-ccs9v Phase 1+2): new
+  `SubagentStop` hook blocks a NAMED background teammate's idle exactly once
+  when it never sent its orchestrator a completion report, consulting a
+  session-scoped expectations file the orchestrator writes BEFORE dispatch.
+  Fail-open by construction: users who never write EXPECT rows can never be
+  blocked. A companion `SubagentStart` stamp records dispatch (START) rows to
+  `~/.local/state/nexus/orchestration/<session_id>.expectations` (0600,
+  swept after 7 days) — the only new behavior for users not using the
+  declaration convention is this small local state write. Opt out per
+  session with `NX_ORCH_STOP_GUARD=off`; `observe` mode records
+  would-block census rows without blocking. Three orchestration directive
+  rows (Completion / Inbox / Git) now ride the SubagentStart context
+  injection, and `/conexus:continuation` gained session-retro audits
+  (directive-diff, commit-pathspec, declaration-completeness).
+
 ## [6.11.0] - 2026-07-16
 
 Ships with (and requires) engine-service-v0.1.44.

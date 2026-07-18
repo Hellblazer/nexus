@@ -307,6 +307,50 @@ else
     bad "one junk line broke the consult rule (fail-closed per line, should be per entry)"
 fi
 
+# ── Test 12b: undeclared-dispatch audit (the .16 retro query) ────────────
+# The Phase-2 critique (Critical-1) proved the original markdown-embedded
+# awk false-flagged every ordinary SYNC dispatch (no morphology filter,
+# untested). The audit is now a tested function: flag ONLY named-
+# morphology START rows (agent_id == "a<agent_type>-<hash>") that have
+# no EXPECT row for that name; an EXPECT row of EITHER mode suppresses
+# (a deliberately-declared named-sync dispatch stays audit-clean).
+echo "Test 12b: undeclared audit flags only undeclared NAMED dispatches"
+AUD_SID="audit-session"
+audf="$(expectations_file "$AUD_SID")"
+rm -f "$audf"
+# sync unnamed dispatch: START row with subagent_type + hash id -> never flagged
+expectations_start "$AUD_SID" "a16b397f79df79c42" "general-purpose"
+# named background teammate, DECLARED -> not flagged
+expectations_expect "$AUD_SID" "declared-bg" "background"
+expectations_start "$AUD_SID" "adeclared-bg-1234567890abcdef" "declared-bg"
+# named dispatch declared SYNC -> suppressed
+expectations_expect "$AUD_SID" "declared-sync" "sync"
+expectations_start "$AUD_SID" "adeclared-sync-1234567890abcd" "declared-sync"
+# named teammate, UNDECLARED -> the one true positive
+expectations_start "$AUD_SID" "arogue-bg-1234567890abcdef" "rogue-bg"
+out="$(expectations_undeclared "$AUD_SID")"
+if [[ "$(printf '%s\n' "$out" | grep -c "UNDECLARED")" == "1" ]]; then
+    ok "exactly one UNDECLARED line for four mixed dispatches"
+else
+    bad "expected exactly 1 UNDECLARED, got: $out"
+fi
+if printf '%s\n' "$out" | grep -q $'UNDECLARED\tarogue-bg-1234567890abcdef\trogue-bg'; then
+    ok "the undeclared named teammate is the one flagged"
+else
+    bad "wrong/missing UNDECLARED line: $out"
+fi
+if printf '%s\n' "$out" | grep -qE "general-purpose|declared-bg|declared-sync"; then
+    bad "audit flagged a sync or declared dispatch (cry-wolf class): $out"
+else
+    ok "sync-unnamed and both declared dispatches not flagged"
+fi
+if expectations_undeclared "no-such-audit-session"; then
+    ok "missing file: audit exits 0 with no output (fail-open)"
+else
+    bad "audit errored on a missing file"
+fi
+rm -f "$audf"
+
 # ── Test 13: sweep removes only stale files ──────────────────────────────
 echo "Test 13: sweep removes >7d-old files, keeps fresh ones"
 oldf="$(expectations_file "old-session")"
