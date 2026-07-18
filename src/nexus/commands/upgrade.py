@@ -210,6 +210,7 @@ def _run_ladder(
     (keeps test ladders off the real config dir).
     """
     from nexus.upgrade_ladder.completion import CompletionStore  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
+    from nexus.upgrade_ladder.holder import InProcessCompletionHolder  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
     from nexus.upgrade_ladder.registry import default_registry  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
     from nexus.upgrade_ladder.runner import (  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
         LadderRunner,
@@ -243,8 +244,12 @@ def _run_ladder(
         return
 
     store_path = _store_path_fn() if _store_path_fn is not None else _db_path().parent / "ladder.db"
+    # RDR-186 P2 (nexus-146xx.11): the walk runs against the in-process
+    # holder fronting the durable store, so verified_rungs() stays served
+    # within the walk even while the durable backend is unavailable (the
+    # engine-defer window, RF-186-2).
     with CompletionStore(store_path) as store:
-        report = LadderRunner(registry, store).run()
+        report = LadderRunner(registry, InProcessCompletionHolder(store)).run()
 
     for run in report.runs:
         if run.outcome is RungOutcome.RECORDED and not auto_mode:

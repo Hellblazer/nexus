@@ -41,6 +41,25 @@ def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
+def derive_ladder_position(verified: frozenset[str], order: Sequence[str]) -> int:
+    """THE single ladder-position derivation (Gap-4 mechanism 1): the max
+    contiguous prefix of *order* whose rungs are all in *verified*.
+
+    Module-level so every completion surface (the durable store, the
+    RDR-186 in-process holder via the runner) derives through ONE
+    algorithm — a second copy would be a competing data authority, which
+    ``test_gap4_two_mechanisms.py`` pins against. Never stored, never
+    settable; a hole in the prefix pins the position below it regardless
+    of later-rung records (RDR-142).
+    """
+    position = 0
+    for rung_name in order:
+        if rung_name not in verified:
+            break
+        position += 1
+    return position
+
+
 def default_ladder_db_path() -> Path:
     """Production location of the ladder's own substrate file: co-located
     with ``memory.db`` — the ladder versions that data's era, and deriving
@@ -137,13 +156,7 @@ class CompletionStore:
         "is the ladder converged"; never test ``position == len(order)``
         and never display position as user-facing "N of M" progress.
         """
-        verified = self.verified_rungs()
-        position = 0
-        for rung_name in order:
-            if rung_name not in verified:
-                break
-            position += 1
-        return position
+        return derive_ladder_position(self.verified_rungs(), order)
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
