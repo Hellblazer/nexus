@@ -78,7 +78,6 @@ DDL_CENSUS: dict[str, int] = {
     "src/nexus/db/t2/plan_library.py": 3,
     "src/nexus/db/t2/telemetry.py": 4,
     "src/nexus/migration/wire_reid.py": 1,        # chash_remap.db (PG twin = RDR-185 .16 Liquibase work)
-    "src/nexus/pipeline_buffer.py": 3,            # pipeline.db own-substrate
 }
 
 #: 2026-07-18 census — per-file counts of ``ALTER TABLE`` statements
@@ -96,7 +95,6 @@ ALTER_CENSUS: dict[str, int] = {
     "src/nexus/db/t2/memory_store.py": 1,         # comment mirror of migrations.py DDL (censused there) — not own debt
     "src/nexus/db/t2/plan_library.py": 1,         # comment mirror of migrations.py DDL (censused there) — not own debt
     "src/nexus/health.py": 1,                     # PG/Liquibase RLS syntax in a comment (health.py:1673) — not SQLite debt
-    "src/nexus/pipeline_buffer.py": 1,
     "src/nexus/plans/repair.py": 1,               # docstring mention only; module runs NO DDL — not own debt
 }
 
@@ -142,7 +140,6 @@ EPSILON_CENSUS: dict[str, int] = {
     "src/nexus/migration/vector_etl.py": 1,
     "src/nexus/migration/wire_reid.py": 1,
     "src/nexus/operators/aspect_sql.py": 6,
-    "src/nexus/pipeline_buffer.py": 1,
     "src/nexus/storage_boundary_lint.py": 10,     # defines the token; matches its own docs
     "src/nexus/taxonomy.py": 1,
     "src/nexus/upgrade_ladder/rungs/t2_schema.py": 1,

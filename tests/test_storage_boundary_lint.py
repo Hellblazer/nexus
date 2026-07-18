@@ -511,7 +511,10 @@ def test_dual_population_baseline_locked():
     # class as storage_cmd/orchestrator source reads; quiesced context).
     # 24 = -1 for RDR-186 .12: completion.py's ladder.db epsilon connect
     # retired with the CompletionStore (shrink-side ratchet, same commit).
-    assert result.epsilon_allow_connects == 24, (
+    # 23 = -1 for RDR-186 .16: pipeline_buffer.py's pipeline.db epsilon
+    # connect retired with PipelineDB (buffer moved to nexus.pdf_pipeline
+    # in PG; shrink-side ratchet, same commit).
+    assert result.epsilon_allow_connects == 23, (
         f"raw-connect epsilon-allow baseline moved: {result.epsilon_allow_connects}"
     )
     # P3 endpoint: ZERO un-annotated direct T2Database constructions outside

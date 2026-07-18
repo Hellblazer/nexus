@@ -36,13 +36,11 @@ def sandbox_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     import nexus.session
     import nexus.context
     import nexus.checkpoint
-    import nexus.pipeline_buffer
     import nexus.commands.search_cmd
     import nexus.db.t2.memory_store
     importlib.reload(nexus.session)
     importlib.reload(nexus.context)
     importlib.reload(nexus.checkpoint)
-    importlib.reload(nexus.pipeline_buffer)
     importlib.reload(nexus.commands.search_cmd)
     importlib.reload(nexus.db.t2.memory_store)
 
@@ -54,7 +52,6 @@ def sandbox_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     importlib.reload(nexus.session)
     importlib.reload(nexus.context)
     importlib.reload(nexus.checkpoint)
-    importlib.reload(nexus.pipeline_buffer)
     importlib.reload(nexus.commands.search_cmd)
     importlib.reload(nexus.db.t2.memory_store)
 
@@ -222,12 +219,6 @@ class TestCheckpointAndBufferRedirects:
         from nexus.checkpoint import CHECKPOINT_DIR
 
         assert CHECKPOINT_DIR == sandbox_dir / "checkpoints"
-
-    def test_pipeline_db_redirects(self, sandbox_dir: Path):
-        from nexus.pipeline_buffer import PIPELINE_DB_PATH
-
-        assert PIPELINE_DB_PATH == sandbox_dir / "pipeline.db"
-
 
 class TestContextRedirects:
     def test_context_l1_dir_redirects(self, sandbox_dir: Path):

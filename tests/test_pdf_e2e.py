@@ -23,6 +23,19 @@ from nexus.indexer import _git_metadata, _index_pdf_file
 _local_ef = DefaultEmbeddingFunction()
 
 
+
+
+@pytest.fixture(autouse=True)
+def _fake_pipeline_engine(monkeypatch):
+    """RDR-186 .16: the streaming path's default buffer is the engine-backed
+    HttpPipelineDB; wire it to the in-memory fake (one engine per test, shared
+    across same-test index_pdf calls so resume/staleness state persists)."""
+    from tests.pipeline_fake_engine import make_fake_engine_db
+
+    db, engine = make_fake_engine_db()
+    monkeypatch.setattr("nexus.pipeline_stages.HttpPipelineDB", lambda: db)
+    return engine
+
 @pytest.fixture(autouse=True)
 def _legacy_vector_backend(monkeypatch):
     # nexus-9n1u3: these e2e tests use a raw chromadb EphemeralClient T3 +

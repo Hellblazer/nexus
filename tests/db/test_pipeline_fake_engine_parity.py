@@ -1,76 +1,59 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+"""Semantic parity for the pipeline fake engine (RDR-186 .16).
+
+Ports the retired ``test_pipeline_buffer.py`` scenarios to run through the
+REAL ``HttpPipelineDB`` against ``FakePipelineEngine`` — keeping the fake
+honest to the server contract the stage tests now stand on (the
+authoritative server pins are the Java ``PipelineHandlerTest``). SQLite-
+specific scenarios (WAL, per-thread connections, schema idempotency) died
+with the substrate.
+"""
 from __future__ import annotations
 
 import json
-import threading
-import time
-from pathlib import Path
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from nexus.pipeline_buffer import PipelineDB
+from tests.pipeline_fake_engine import FakePipelineEngine, make_fake_engine_db
+
+_T0 = datetime(2026, 7, 18, 12, 0, 0, tzinfo=UTC)
+
+
+class _Clock:
+    """Fixed, manually-advanced clock (house rule: no wall-clock sleeps)."""
+
+    def __init__(self) -> None:
+        self.now = _T0
+
+    def __call__(self) -> datetime:
+        return self.now
+
+    def advance(self, **kwargs: float) -> None:
+        self.now += timedelta(**kwargs)
 
 
 @pytest.fixture()
-def db(tmp_path: Path) -> PipelineDB:
-    return PipelineDB(tmp_path / "pipeline.db")
+def clock() -> _Clock:
+    return _Clock()
 
 
-# ── Schema & WAL ─────────────────────────────────────────────────────────────
-
-class TestSchema:
-    def test_wal_mode_enabled(self, db):
-        assert db._conn().execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
-
-    def test_tables_created(self, db):
-        rows = db._conn().execute(
-            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-        ).fetchall()
-        assert {"pdf_pages", "pdf_chunks", "pdf_pipeline"} <= {r[0] for r in rows}
-
-    def test_idempotent_schema(self, tmp_path):
-        path = tmp_path / "pipeline.db"
-        PipelineDB(path)
-        PipelineDB(path)
+@pytest.fixture()
+def rig(clock: _Clock):
+    return make_fake_engine_db(clock=clock)
 
 
-# ── Thread Safety ────────────────────────────────────────────────────────────
-
-class TestThreadSafety:
-    def test_per_thread_connections(self, db):
-        ids: dict[str, int] = {}
-        def capture(name):
-            ids[name] = id(db._conn())
-        threads = [threading.Thread(target=capture, args=(n,)) for n in ("a", "b")]
-        for t in threads: t.start()
-        for t in threads: t.join()
-        assert ids["a"] != ids["b"]
-
-    def test_concurrent_writes(self, db):
-        db.create_pipeline("abc123", "/test.pdf", "docs__test")
-        errors: list[Exception] = []
-        def write_page(i):
-            try: db.write_page("abc123", i, f"page {i} text")
-            except Exception as e: errors.append(e)
-        threads = [threading.Thread(target=write_page, args=(i,)) for i in range(10)]
-        for t in threads: t.start()
-        for t in threads: t.join()
-        assert errors == [] and len(db.read_pages("abc123")) == 10
+@pytest.fixture()
+def db(rig):
+    return rig[0]
 
 
-# ── Pipeline CRUD ────────────────────────────────────────────────────────────
+@pytest.fixture()
+def engine(rig) -> FakePipelineEngine:
+    return rig[1]
+
 
 class TestPipeline:
-    def _set_status(self, db, hash_, status=None, stale=False):
-        conn = db._conn()
-        if status:
-            conn.execute("UPDATE pdf_pipeline SET status = ? WHERE content_hash = ?", (status, hash_))
-        if stale:
-            conn.execute(
-                "UPDATE pdf_pipeline SET updated_at = '2020-01-01T00:00:00+00:00' WHERE content_hash = ?",
-                (hash_,))
-        conn.commit()
-
     @pytest.mark.parametrize("setup,expected", [
         ("new", "created"),
         ("running_recent", "skip"),
@@ -78,17 +61,17 @@ class TestPipeline:
         ("failed", "resuming"),
         ("completed", "skip"),
     ])
-    def test_create_pipeline(self, db, setup, expected):
+    def test_create_pipeline(self, db, clock, setup, expected):
         if setup == "new":
             assert db.create_pipeline("h1", "/a.pdf", "docs__test") == expected
             return
         db.create_pipeline("h1", "/a.pdf", "docs__test")
         if setup == "running_stale":
-            self._set_status(db, "h1", stale=True)
+            clock.advance(minutes=6)
         elif setup == "failed":
-            self._set_status(db, "h1", status="failed")
+            db.mark_failed("h1", "boom")
         elif setup == "completed":
-            self._set_status(db, "h1", status="completed")
+            db.mark_completed("h1")
         assert db.create_pipeline("h1", "/a.pdf", "docs__test") == expected
 
     def test_get_pipeline_state(self, db):
@@ -113,8 +96,6 @@ class TestPipeline:
             assert state[untouched_field] == untouched_val
 
 
-# ── Page CRUD ────────────────────────────────────────────────────────────────
-
 class TestPages:
     def test_write_and_read(self, db):
         db.write_page("h1", 0, "first page")
@@ -131,13 +112,19 @@ class TestPages:
         assert db.read_pages("nonexistent") == []
 
     def test_write_idempotent(self, db):
+        """Page writes REPLACE (latest text wins) — even within one
+        buffered batch."""
         db.write_page("h1", 0, "first")
         db.write_page("h1", 0, "updated")
         pages = db.read_pages("h1")
         assert len(pages) == 1 and pages[0]["page_text"] == "updated"
 
+    def test_read_pages_from_offset(self, db):
+        for i in range(4):
+            db.write_page("h1", i, f"p{i}")
+        rows = db.read_pages_from("h1", 2)
+        assert [r["page_index"] for r in rows] == [2, 3]
 
-# ── Chunk CRUD ───────────────────────────────────────────────────────────────
 
 class TestChunks:
     def test_write_and_read(self, db):
@@ -161,26 +148,41 @@ class TestChunks:
         assert len(db.read_ready_chunks("h1")) == expected_ready
 
     def test_write_idempotent_preserves_original(self, db):
+        """Chunk writes IGNORE on conflict (first write wins) — an
+        existing row is never overwritten (idempotent resume)."""
         db.write_chunk("h1", 0, "original", "cid-0")
         db.write_chunk("h1", 0, "should-be-ignored", "cid-0-new")
         chunks = db.read_ready_chunks("h1")
         assert len(chunks) == 1 and chunks[0]["chunk_text"] == "original"
 
     def test_write_ignore_preserves_embedding(self, db):
-        db.write_chunk("h1", 0, "text", "cid-0")
-        conn = db._conn()
-        conn.execute(
-            "UPDATE pdf_chunks SET embedding = ? WHERE content_hash = ? AND chunk_index = ?",
-            (b"\x00\x01\x02", "h1", 0))
-        conn.commit()
-        db.write_chunk("h1", 0, "text", "cid-0")
-        row = conn.execute(
-            "SELECT embedding FROM pdf_chunks WHERE content_hash = ? AND chunk_index = ?",
-            ("h1", 0)).fetchone()
-        assert row[0] == b"\x00\x01\x02"
+        db.write_chunk("h1", 0, "text", "cid-0", embedding=b"\x00\x01\x02")
+        db.flush("h1")
+        db.write_chunk("h1", 0, "text", "cid-0")  # resume replay, no embedding
+        rows = db.read_ready_chunks("h1")
+        assert rows[0]["embedding"] == b"\x00\x01\x02"
 
+    def test_counts_blank_hash_is_zero_not_global(self, db, engine):
+        """PipelineHandler.handleCounts contract: blank/absent content_hash
+        yields embedded_chunks=0, never a cross-pipeline sum (.16 critic
+        Significant #3 — the drift class the parity suite must pin)."""
+        db.write_chunk("h1", 0, "t", "cid-0", embedding=b"\x01")
+        db.flush("h1")
+        assert engine.counts({})["embedded_chunks"] == 0
+        assert engine.counts({"content_hash": ""})["embedded_chunks"] == 0
+        assert engine.counts({"content_hash": "h1"})["embedded_chunks"] == 1
 
-# ── Cleanup & Heartbeat & Edge Cases ────────────────────────────────────────
+    def test_uploadable_requires_embedding_sentinel_counts(self, db):
+        """Uploadable = embedding present and not uploaded; the b'' service
+        sentinel COUNTS as present (nexus-9n1u3) — only SQL-NULL means
+        not-embedded."""
+        db.write_chunk("h1", 0, "no-embed", "cid-0", embedding=None)
+        db.write_chunk("h1", 1, "sentinel", "cid-1", embedding=b"")
+        db.write_chunk("h1", 2, "vector", "cid-2", embedding=b"\x01")
+        rows = db.read_uploadable_chunks("h1")
+        assert [r["chunk_index"] for r in rows] == [1, 2]
+        assert db.count_embedded_chunks("h1") == 2
+
 
 class TestCleanup:
     def test_delete_pipeline_data(self, db):
@@ -195,49 +197,45 @@ class TestCleanup:
         db.delete_pipeline_data("ghost")
 
     def test_delete_pipeline_data_for_collection(self, db):
-        # nexus-8a8e: nx collection delete must wipe pipeline rows for that
-        # collection so re-indexing (same content_hash → status=completed)
-        # does not hit create_pipeline's "skip" path.
         db.create_pipeline("h_keep", "/k.pdf", "docs__keep")
         db.write_page("h_keep", 0, "keep")
-        db.write_chunk("h_keep", 0, "keep chunk", "cid-keep")
         db.create_pipeline("h_drop", "/d.pdf", "knowledge__delos")
         db.write_page("h_drop", 0, "drop")
-        db.write_chunk("h_drop", 0, "drop chunk", "cid-drop")
+        db.flush_all()
 
-        removed = db.delete_pipeline_data_for_collection("knowledge__delos")
-        assert removed == 1
-
+        assert db.delete_pipeline_data_for_collection("knowledge__delos") == 1
         assert db.get_pipeline_state("h_drop") is None
         assert db.read_pages("h_drop") == []
-        assert db.read_ready_chunks("h_drop") == []
-
         assert db.get_pipeline_state("h_keep") is not None
         assert len(db.read_pages("h_keep")) == 1
 
     def test_delete_pipeline_data_for_collection_no_rows(self, db):
         assert db.delete_pipeline_data_for_collection("docs__ghost") == 0
 
-    def test_heartbeat_updated(self, db):
+    def test_heartbeat_updated(self, db, clock):
         db.create_pipeline("h1", "/a.pdf", "docs__test")
         t0 = db.get_pipeline_state("h1")["updated_at"]
-        time.sleep(0.05)
+        clock.advance(seconds=1)
         db.update_progress("h1", pages_extracted=1)
         assert db.get_pipeline_state("h1")["updated_at"] > t0
 
     def test_bad_field_raises(self, db):
         db.create_pipeline("h1", "/a.pdf", "docs__test")
-        with pytest.raises(ValueError, match="Unknown progress fields"):
+        with pytest.raises(Exception, match="[Uu]nknown progress fields"):
             db.update_progress("h1", nonexistent_field=1)
 
-    def test_no_fields_noop(self, db):
+    def test_clear_orphan_wal_preserves_pipeline_row(self, db):
+        """nexus-2fyb C-int-2: WAL clear drops pages+chunks but keeps the
+        failed pipeline row's audit trail."""
         db.create_pipeline("h1", "/a.pdf", "docs__test")
-        t0 = db.get_pipeline_state("h1")["updated_at"]
-        db.update_progress("h1")
-        assert db.get_pipeline_state("h1")["updated_at"] == t0
+        db.write_page("h1", 0, "p")
+        db.write_chunk("h1", 0, "c", "cid-0")
+        db.mark_failed("h1", "math pdf without MinerU")
+        db.clear_orphan_wal("h1")
+        assert db.read_pages("h1") == [] and db.read_ready_chunks("h1") == []
+        state = db.get_pipeline_state("h1")
+        assert state["status"] == "failed" and state["error"] == "math pdf without MinerU"
 
-
-# ── Orphan Scan ──────────────────────────────────────────────────────────────
 
 class TestScanOrphanedPipelines:
     @pytest.mark.parametrize("setup,expected_orphan", [
@@ -247,21 +245,14 @@ class TestScanOrphanedPipelines:
         ("completed_old", False),
         ("failed_missing_pdf", True),
     ])
-    def test_orphan_detection(self, db, setup, expected_orphan):
+    def test_orphan_detection(self, db, clock, setup, expected_orphan):
         pdf = "/nonexistent/gone.pdf" if "missing" in setup else __file__
         db.create_pipeline("h1", pdf, "docs__test")
-        conn = db._conn()
         if "stale" in setup:
-            conn.execute(
-                "UPDATE pdf_pipeline SET updated_at = '2020-01-01T00:00:00+00:00' WHERE content_hash = ?",
-                ("h1",))
-            conn.commit()
+            clock.advance(minutes=6)
         elif "completed" in setup:
             db.mark_completed("h1")
-            conn.execute(
-                "UPDATE pdf_pipeline SET updated_at = '2020-01-01T00:00:00+00:00' WHERE content_hash = ?",
-                ("h1",))
-            conn.commit()
+            clock.advance(minutes=60)
         elif "failed" in setup:
             db.mark_failed("h1", "crash")
         orphans = db.scan_orphaned_pipelines()

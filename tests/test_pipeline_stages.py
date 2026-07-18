@@ -13,7 +13,8 @@ import pytest
 from nexus.pdf_chunker import TextChunk
 from nexus.pdf_extractor import ExtractionResult
 from nexus.db.t3 import T3Database
-from nexus.pipeline_buffer import PipelineDB
+from nexus.db.http_pipeline_client import HttpPipelineDB
+from tests.pipeline_fake_engine import make_fake_engine_db
 from nexus.pipeline_stages import (
     PipelineCancelled,
     _enrich_metadata_from_extraction,
@@ -76,8 +77,17 @@ def _tc(*specs: tuple[str, int, dict]) -> list[TextChunk]:
 
 
 @pytest.fixture()
-def db(tmp_path: Path) -> PipelineDB:
-    return PipelineDB(tmp_path / "pipeline.db")
+def db() -> HttpPipelineDB:
+    store, _engine = make_fake_engine_db()
+    return store
+
+
+@pytest.fixture(autouse=True)
+def _fast_poll(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The production poll widened to 2.0s for the HTTP backend (RDR-186
+    .16); the fake engine is in-memory, so poll fast to keep the suite
+    quick."""
+    monkeypatch.setattr("nexus.pipeline_stages._POLL_INTERVAL", 0.01)
 
 
 @pytest.fixture()
@@ -95,7 +105,7 @@ def mock_t3() -> MagicMock:
     return m
 
 
-def _pop_pages(db: PipelineDB, h: str, n: int) -> None:
+def _pop_pages(db: HttpPipelineDB, h: str, n: int) -> None:
     db.create_pipeline(h, "/a.pdf", "docs__test")
     for i in range(n):
         db.write_page(h, i, f"Page {i} content here.",
@@ -103,7 +113,7 @@ def _pop_pages(db: PipelineDB, h: str, n: int) -> None:
     db.update_progress(h, total_pages=n, pages_extracted=n)
 
 
-def _pop_chunks(db: PipelineDB, h: str, n: int) -> None:
+def _pop_chunks(db: HttpPipelineDB, h: str, n: int) -> None:
     db.create_pipeline(h, "/a.pdf", "docs__test")
     db.update_progress(h, total_pages=1, pages_extracted=1, chunks_created=n, chunks_embedded=n)
     for i in range(n):
@@ -172,7 +182,7 @@ class TestServiceModeStreaming:
 
 
 class TestExtractorLoop:
-    def test_writes_pages_to_buffer(self, db: PipelineDB) -> None:
+    def test_writes_pages_to_buffer(self, db: HttpPipelineDB) -> None:
         result = _er(3)
         db.create_pipeline("h1", "/a.pdf", "docs__test")
         with patch(_P_EXT) as ME:
@@ -188,7 +198,7 @@ class TestExtractorLoop:
         assert db.get_pipeline_state("h1")["total_pages"] == 3
         assert ret is result
 
-    def test_cancel_raises_pipeline_cancelled(self, db: PipelineDB) -> None:
+    def test_cancel_raises_pipeline_cancelled(self, db: HttpPipelineDB) -> None:
         db.create_pipeline("h1", "/a.pdf", "docs__test")
         cancel = threading.Event()
         def f(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None):
@@ -204,7 +214,7 @@ class TestExtractorLoop:
         assert len(db.read_pages("h1")) <= 3
         assert result.text == ""
 
-    def test_resume_skips_existing_pages(self, db: PipelineDB) -> None:
+    def test_resume_skips_existing_pages(self, db: HttpPipelineDB) -> None:
         db.create_pipeline("h1", "/a.pdf", "docs__test")
         db.write_page("h1", 0, "Original page 0")
         db.update_progress("h1", pages_extracted=1)
@@ -219,7 +229,7 @@ class TestExtractorLoop:
             extractor_loop(Path("/a.pdf"), "h1", db, threading.Event())
         assert 0 not in written and 1 in written
 
-    def test_returns_extraction_result(self, db: PipelineDB) -> None:
+    def test_returns_extraction_result(self, db: HttpPipelineDB) -> None:
         result = _er()
         db.create_pipeline("h1", "/a.pdf", "docs__test")
         with patch(_P_EXT) as ME:

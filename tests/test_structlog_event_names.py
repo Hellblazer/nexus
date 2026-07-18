@@ -114,7 +114,7 @@ _SEGMENT = re.compile(r"^[a-z][a-z0-9_]*$")
 
 # Grandfathered prose-message events as of nexus-whh61.3 (AST count over src/).
 # Ratchet DOWN as sites are fixed; never UP (a new prose event must fail CI).
-SNAKE_CASE_EVENT_BASELINE = 81
+SNAKE_CASE_EVENT_BASELINE = 80  # 81 -> 80: RDR-186 .16 retired pipeline_buffer.py ("WAL mode not available" site gone)
 
 
 def _event_is_snake_case(event: str) -> bool:

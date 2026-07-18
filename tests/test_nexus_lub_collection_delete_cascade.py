@@ -517,20 +517,20 @@ class TestPipelineDeleteCascade:
 
         from nexus.commands.collection import delete_cmd
         from nexus.db.t2 import T2Database
-        from nexus.pipeline_buffer import PipelineDB
+        from tests.pipeline_fake_engine import make_fake_engine_db
 
         db_path = tmp_path / "memory.db"
         with T2Database(db_path):
             pass  # schema initialized
 
-        pipe_path = tmp_path / "pipeline.db"
-        pdb = PipelineDB(pipe_path)
+        pdb, engine = make_fake_engine_db()
         # Two rows targeting the doomed collection; one that must survive.
         pdb.create_pipeline("hA", "/a.pdf", "knowledge__delos")
         pdb.write_page("hA", 0, "a")
         pdb.create_pipeline("hB", "/b.pdf", "knowledge__delos")
         pdb.write_chunk("hB", 0, "b", "cid-b")
         pdb.create_pipeline("hC", "/c.pdf", "docs__keep")
+        pdb.flush_all()
 
         # make_t3()/_t3() return the service-backed HttpVectorClient
         # unconditionally in production since RDR-155 P4a.2 -- cloud
@@ -546,18 +546,19 @@ class TestPipelineDeleteCascade:
                  "nexus.commands._helpers.default_db_path",
                  return_value=db_path,
              ), \
-             patch("nexus.pipeline_buffer.PIPELINE_DB_PATH", pipe_path):
+             patch("nexus.db.http_pipeline_client.HttpPipelineDB", return_value=pdb):
             result = runner.invoke(delete_cmd, ["knowledge__delos", "--yes"])
 
         assert result.exit_code == 0, result.output
 
-        verify = PipelineDB(pipe_path)
-        assert verify.get_pipeline_state("hA") is None
-        assert verify.get_pipeline_state("hB") is None
-        assert verify.read_pages("hA") == []
-        assert verify.read_ready_chunks("hB") == []
+        # Verify against the fake engine's state directly (the purge closed
+        # the shared client on context exit).
+        assert "hA" not in engine.pipelines
+        assert "hB" not in engine.pipelines
+        assert not any(h == "hA" for (h, _) in engine.pages)
+        assert not any(h == "hB" for (h, _) in engine.chunks)
         # Survivor row untouched.
-        assert verify.get_pipeline_state("hC") is not None
+        assert "hC" in engine.pipelines
 
         # Output must include the pipeline-rows count so operators can
         # see the cascade worked without re-running with `--force`.
@@ -575,14 +576,13 @@ class TestPipelineDeleteCascade:
 
         from nexus.commands.collection import delete_cmd
         from nexus.db.t2 import T2Database
-        from nexus.pipeline_buffer import PipelineDB
+        from tests.pipeline_fake_engine import make_fake_engine_db
 
         db_path = tmp_path / "memory.db"
         with T2Database(db_path):
             pass
 
-        pipe_path = tmp_path / "pipeline.db"
-        pdb = PipelineDB(pipe_path)
+        pdb, engine = make_fake_engine_db()
         pdb.create_pipeline("orphan_h", "/o.pdf", "docs__gone")
 
         # make_t3()/_t3() return the service-backed HttpVectorClient
@@ -601,8 +601,8 @@ class TestPipelineDeleteCascade:
                  "nexus.commands._helpers.default_db_path",
                  return_value=db_path,
              ), \
-             patch("nexus.pipeline_buffer.PIPELINE_DB_PATH", pipe_path):
+             patch("nexus.db.http_pipeline_client.HttpPipelineDB", return_value=pdb):
             result = runner.invoke(delete_cmd, ["docs__gone", "--yes"])
 
         assert result.exit_code == 0, result.output
-        assert PipelineDB(pipe_path).get_pipeline_state("orphan_h") is None
+        assert "orphan_h" not in engine.pipelines
