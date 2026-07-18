@@ -12,7 +12,8 @@
 #
 # DECISION TABLE (every uncertain path fails OPEN — never block a stop on
 # missing evidence; the file is an enabling allowlist, not a gate):
-#   NX_ORCH_STOP_GUARD unset/off/unknown  -> exit 0        (DEFAULT-OFF until P1.G, bead .15)
+#   NX_ORCH_STOP_GUARD off/unknown        -> exit 0        (explicit opt-out)
+#   NX_ORCH_STOP_GUARD unset              -> block         (DEFAULT-ON since P1.G, bead .15, 2026-07-17)
 #   stop_hook_active true                 -> exit 0        (21c once-guard round-trip)
 #   agent not listed / sync / unnamed     -> exit 0        (sync stays unblockable by construction)
 #   BLOCKED row already present           -> exit 0        (once-guard belt)
@@ -38,10 +39,14 @@
 # decoy call evades it. This is a hygiene guard for cooperative Claude
 # subagents, not an enforcement surface against adversarial ones.
 #
-# P1.G / bead .15 (default-ON flip): change the MODE fallback below from
-# ":-off" to ":-block" — that single token is the gate.
+# P1.G / bead .15: FLIPPED default-ON 2026-07-17 (Hal accept; gates
+# discharged: 3x same-day scenario-21 green incl. an independent
+# validator run; 97MB worst-case transcript scans in 0.14s vs the 10s
+# hook timeout; .13-S1 accept-in-writing — the flip precedes the .11
+# census, safe because undeclared dispatches are fail-open by
+# construction). Opt out per-session with NX_ORCH_STOP_GUARD=off.
 
-MODE="${NX_ORCH_STOP_GUARD:-off}"
+MODE="${NX_ORCH_STOP_GUARD:-block}"
 if [[ "$MODE" != "observe" && "$MODE" != "block" ]]; then
     exit 0
 fi

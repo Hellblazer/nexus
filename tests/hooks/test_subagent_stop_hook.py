@@ -139,14 +139,23 @@ def _decision(proc: subprocess.CompletedProcess[str]) -> dict | None:
     return None
 
 
-class TestDefaultOff:
-    def test_unset_mode_is_off_even_for_owing_agent(self, tmp_path: Path) -> None:
-        """DEFAULT-OFF (P1.G gate not passed): a would-block payload must
-        produce no decision and exit 0 when NX_ORCH_STOP_GUARD is unset."""
+class TestDefaultMode:
+    def test_unset_mode_blocks_owing_agent(self, tmp_path: Path) -> None:
+        """DEFAULT-ON (P1.G flipped 2026-07-17, bead .15): with
+        NX_ORCH_STOP_GUARD unset, an owing unreported agent IS blocked."""
         _expect_row(tmp_path)
         t = _transcript(tmp_path, with_sendmessage=False)
         proc = _run_hook(_payload(transcript=str(t)), tmp_path, mode=None)
         assert proc.returncode == 0, proc.stderr
+        decision = _decision(proc)
+        assert decision is not None and decision["decision"] == "block"
+
+    def test_unset_mode_still_failopen_for_unlisted(self, tmp_path: Path) -> None:
+        """Default-ON must not change the fail-open floor: no EXPECT row =>
+        no block, even with the guard defaulted on."""
+        t = _transcript(tmp_path, with_sendmessage=False)
+        proc = _run_hook(_payload(transcript=str(t)), tmp_path, mode=None)
+        assert proc.returncode == 0
         assert _decision(proc) is None
 
     def test_explicit_off(self, tmp_path: Path) -> None:

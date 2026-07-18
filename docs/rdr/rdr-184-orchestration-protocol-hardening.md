@@ -478,3 +478,12 @@ release; repo-local locks land immediately.
   fail-open bias). The .11 measurement is two-sided to compensate:
   WOULDBLOCK rows = false-block candidates, REPORTED rows = missed-block
   candidates; the .15 default-ON gate is approved against both.
+- 2026-07-17 — P1.G (.15) default-ON FLIPPED (Hal accept). Gates
+  discharged: scenarios 21d/21e green three times same-day (including an
+  independent validator run, 15/15); 97MB worst-case transcript scans in
+  0.14s against the 10s hook timeout; the .13-critique S1 resolved as
+  accept-in-writing — the flip precedes the .11 census (undeclared
+  dispatches are fail-open by construction) and the .11 measurement now
+  runs in live-block mode (REPORTED x BLOCKED replaces REPORTED x
+  WOULDBLOCK). Stamp + repo project-settings defaults flipped in the
+  same commit; per-session opt-out is NX_ORCH_STOP_GUARD=off.

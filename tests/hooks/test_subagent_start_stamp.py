@@ -49,8 +49,17 @@ def _expfile(tmp_path: Path) -> Path:
     return tmp_path / "state" / "nexus" / "orchestration" / f"{SESSION}.expectations"
 
 
-def test_default_off_writes_nothing(tmp_path: Path) -> None:
+def test_unset_mode_stamps(tmp_path: Path) -> None:
+    """DEFAULT-ON (P1.G flipped 2026-07-17): unset mode stamps, matching
+    subagent-stop.sh's block default."""
     proc = _run(_payload(), tmp_path, mode=None)
+    assert proc.returncode == 0
+    assert proc.stdout == ""
+    assert f"\tSTART\t{AGENT_ID}\t" in _expfile(tmp_path).read_text()
+
+
+def test_explicit_off_writes_nothing(tmp_path: Path) -> None:
+    proc = _run(_payload(), tmp_path, mode="off")
     assert proc.returncode == 0
     assert proc.stdout == ""
     assert not _expfile(tmp_path).exists()
@@ -103,10 +112,10 @@ def test_registered_in_plugin_hooks_json() -> None:
     assert any("subagent-start-stamp.sh" in c for c in commands)
 
 
-def test_project_settings_arm_observe_by_default() -> None:
+def test_project_settings_arm_block_by_default() -> None:
     """Option-(b) instrumentation (bead .11): repo sessions run the stop
-    hook + stamp from project settings, defaulting to observe (env can
-    override to block), via $CLAUDE_PROJECT_DIR."""
+    hook + stamp from project settings, defaulting to block since the
+    P1.G flip (env can override), via $CLAUDE_PROJECT_DIR."""
     settings = json.loads((REPO_ROOT / ".claude" / "settings.json").read_text())
     stop_cmds = [
         h["command"]
@@ -119,10 +128,10 @@ def test_project_settings_arm_observe_by_default() -> None:
         for h in entry["hooks"]
     ]
     assert any(
-        "subagent-stop.sh" in c and "${NX_ORCH_STOP_GUARD:-observe}" in c and "$CLAUDE_PROJECT_DIR" in c
+        "subagent-stop.sh" in c and "${NX_ORCH_STOP_GUARD:-block}" in c and "$CLAUDE_PROJECT_DIR" in c
         for c in stop_cmds
     )
     assert any(
-        "subagent-start-stamp.sh" in c and "${NX_ORCH_STOP_GUARD:-observe}" in c and "$CLAUDE_PROJECT_DIR" in c
+        "subagent-start-stamp.sh" in c and "${NX_ORCH_STOP_GUARD:-block}" in c and "$CLAUDE_PROJECT_DIR" in c
         for c in start_cmds
     )

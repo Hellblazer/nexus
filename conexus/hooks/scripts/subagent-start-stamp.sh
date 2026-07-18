@@ -10,8 +10,9 @@
 # rows — scenario 27: the start payload cannot classify background-ness).
 #
 # Contract:
-#   - Mode-gated: writes ONLY when NX_ORCH_STOP_GUARD is observe|block
-#     (default installs stay write-free, matching subagent-stop.sh).
+#   - Mode-gated: writes when NX_ORCH_STOP_GUARD is observe|block —
+#     which since the P1.G default-ON flip (2026-07-17) includes UNSET
+#     (default block, matching subagent-stop.sh). Explicit off opts out.
 #   - Idempotent per agent_id: plugin hooks.json AND the repo's project
 #     settings.json may both register this script in one session; two
 #     firings must compose to ONE row.
@@ -21,7 +22,7 @@
 #     stdout emitted.
 #   - Fail-open shape: any parse/validation failure exits 0 silently.
 
-MODE="${NX_ORCH_STOP_GUARD:-off}"
+MODE="${NX_ORCH_STOP_GUARD:-block}"
 if [[ "$MODE" != "observe" && "$MODE" != "block" ]]; then
     exit 0
 fi
