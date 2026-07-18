@@ -21,7 +21,7 @@ Unit tests use `chromadb.EphemeralClient` + bundled ONNX MiniLM — no API keys 
 Three storage tiers, by lifetime:
 
 - **T1** — `chromadb` Ephemeral or per-session HTTP server. Session scratch (`nx scratch`).
-- **T2** — SQLite + FTS5, seven domain stores behind a `T2Database` facade. Persistent notes, plans, taxonomy, telemetry, chash, aspects, aspect queue.
+- **T2** — seven domain stores behind a `T2Database` facade. Persistent notes, plans, taxonomy, telemetry, chash, aspects, aspect queue. **Substrate: MIGRATING SQLite → PG (directive 2026-07-18, see Hot rules). The SQLite+FTS5 implementation is the migration SOURCE, not the architecture.**
 - **T3** — `chromadb.PersistentClient` + local ONNX (local mode) **or** `chromadb.CloudClient` + Voyage (cloud mode). Permanent knowledge (`nx store`, `nx search`).
 
 ### T1 sub-agent contract (RDR-105)
@@ -51,10 +51,10 @@ For the full module map, post-store hook contracts, T2 schema, and design herita
 
 - **Python 3.12+** — use `match/case`, `tomllib`, `typing.Protocol`, walrus freely.
 - **Type hints on every public API.** Module-level constants too.
-- **No ORM.** Raw `sqlite3` for T2; WAL mode enabled on open.
+- **No ORM.** Raw SQL. (Existing T2 SQLite code: raw `sqlite3`, WAL on open — maintenance only, see the NO-SQLITE hot rule.)
 - **Composition over inheritance.** Protocols, not deep hierarchies. Constructor injection — no global singletons, no service locators.
 - **TDD.** Test file before implementation. Deterministic: seeded randomness, fixed clocks, `port=0` for dynamic allocation.
-- **Integration over mocks.** Hit a real `chromadb.EphemeralClient` and a real tmp-path SQLite — mocks hide boundary bugs.
+- **Integration over mocks.** Hit real substrates — mocks hide boundary bugs. For existing SQLite-backed stores that means a real tmp-path SQLite (maintenance only); NEW persistence targets PG via the engine (see the NO-SQLITE hot rule), so its tests hit PG, not a new SQLite fixture.
 - **Structured logging only.** `structlog.get_logger(__name__)`. Never `print()` in library code; CLI commands use `click.echo()`.
 - **`uv` as package manager.** `pyproject.toml` for deps. Don't bump `llama-index-core` or `tree-sitter-language-pack` without exercising the chunking pipeline — they have known breaking incompatibilities.
 
@@ -79,6 +79,7 @@ Pagination over a large collection: `limit ≤ 300` per call, `offset += 300` in
 
 ## Hot rules (don'ts paired with dos)
 
+- **⛔ NO new SQLite — nexus is MIGRATING from SQLite TO PG, in EVERY mode. There is NO SQLite hybrid mode** (Hal directive 2026-07-18; record: T2 `nexus/directive-no-sqlite-pg-everywhere`). SQLite is a migration SOURCE only, never a destination. Never add a SQLite table, database file, or `CREATE TABLE` bootstrap in Python; new persistent state goes to PG through Liquibase via the engine (every install ships the PG bundle — local mode's endpoint is the bundled local PG, same shape as service mode). Existing client SQLite stores (`db/t2/*`, `db/migrations.py`, `ladder.db`, `chash_remap.db`, `pipeline.db`, strays) are retirement debt — never a home for new columns/tables/features. In review, a diff adding SQLite DDL or a new `sqlite3.connect` substrate is a **Critical**. Exemptions are Hal's explicit decisions, never code comments.
 - **Never `print()` in library code.** Use `structlog.get_logger(__name__).info(event=..., **fields)`.
 - **`develop` release boundary LIFTED 2026-06-29** — release-blocker bead `nexus-luxe6` closed; conexus 6.0.0 (the migration-capable release) published from develop, and `develop` is releasable again. `nx guided-upgrade` carries an existing install across (Chroma → PG17+pgvector, copy-not-move). **⛔ What's still blocked: RDR-155 P4b (the FINAL Chroma deletion, which also deletes the migration tool itself) — DO NOT START.** This is the two-release deprecation window's second half: 6.0.0 shipped both the new substrate AND the migration tool; Chroma stays intact as the migration source until the release AFTER this deprecation window closes. Authoritative record: T2 `nexus/release-boundary-since-p4a` (updated). Engine-side production migration is complete (`nexus_rdr/155-production-migration-complete`); Chroma sources remain untouched rollback targets in the interim.
 - **Integration branch is `develop`.** Open PRs against `develop`, not `main`. `main` carries the plugin marketplace surface; the develop split protects it from in-flight churn. Releases promote `develop` to `main` via merge. The only direct-to-`main` commit allowed is the version-bump during a release (`docs/contributing.md` § Release Process).
