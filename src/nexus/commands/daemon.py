@@ -1855,10 +1855,12 @@ def _emit_chash_poison_gate(config_dir: Path, *, force: bool) -> None:
         from nexus.health import _check_migration_state  # noqa: PLC0415 — deferred, CLI startup cost
 
         creds_path = config_dir / CREDENTIALS_FILENAME
+        from nexus.db.chash_tables import POISON_DETAIL_TOKEN  # noqa: PLC0415 — deferred, circular-dep avoidance
+
         poison = [
             r for r in _check_migration_state(creds_path=creds_path)
             if r.label == "Chunk chash conformance"
-            and not r.ok and "non-32-char chash" in r.detail
+            and not r.ok and POISON_DETAIL_TOKEN in r.detail
         ]
     except Exception as exc:  # noqa: BLE001 — the gate must never block a valid install on an unrelated error
         click.echo(f"(chash-conformance pre-check skipped: {exc})", err=True)

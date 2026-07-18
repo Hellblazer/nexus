@@ -58,9 +58,23 @@ def test_view_ddl_covers_exactly_the_chash_tables():
     ddl = diag_conformance_view_ddl()
     for t in CHASH_BEARING_TABLES:
         assert f"'{t.table}' AS table_name" in ddl
-        assert f"FROM {t.table} WHERE length({t.column}) <> 32" in ddl
+        assert f"FROM {t.table} WHERE octet_length({t.column}) <> 32" in ddl
     # One UNION arm per table, no extras.
     assert ddl.count("UNION ALL") == len(CHASH_BEARING_TABLES) - 1
+
+
+def test_predicate_is_era_safe_octet_length_never_length():
+    """RDR-180 Item6a (nexus-jxizy.5): octet_length accepts exactly the
+    era-canonical form in each era (32-hex TEXT today == 32 octets; 32-byte
+    BYTEA post-flip == 32 octets), so ONE spelling survives the cutover.
+    Bare length() (chars on text, bytes on bytea) must never come back —
+    it is the 32-vs-64 units ambiguity this RDR exists to kill."""
+    for stmt in (
+        diag_conformance_view_ddl(),
+        *legacy_chash_conformance_statements(),
+    ):
+        assert "octet_length(" in stmt
+        assert not re.search(r"(?<!octet_)length\(", stmt), stmt
 
 
 def test_gate_statements_are_poison_only_against_the_view():
@@ -90,7 +104,7 @@ def test_legacy_statements_are_poison_only_direct_counts():
     stmts = legacy_chash_conformance_statements()
     assert len(stmts) == len(POISON_CHASH_TABLES)
     for stmt, t in zip(stmts, POISON_CHASH_TABLES):
-        assert f"FROM {t.table} WHERE length({t.column}) <> 32" in stmt
+        assert f"FROM {t.table} WHERE octet_length({t.column}) <> 32" in stmt
 
 
 def test_view_statements_pass_the_diagnostic_lint():
@@ -144,6 +158,25 @@ def test_cascade_covers_every_debt_table():
             f"{t.table}.{t.column} is observed as chash legacy debt but has "
             "no remap-cascade implementation - extend CASCADE_STORES"
         )
+
+
+def test_poison_detail_token_couples_probe_and_gates():
+    """The install-binary gate (daemon.py) and the convergence gate
+    (upgrade_finish.py) distinguish REAL poison from probe-degraded WARNs
+    by substring-matching the health detail. All three sides must use the
+    ONE constant — a hand-typed phrase on any side silently disarms the
+    gate (nexus-jxizy.5)."""
+    from nexus.db.chash_tables import POISON_DETAIL_TOKEN
+
+    for rel in (
+        "src/nexus/health.py",
+        "src/nexus/commands/daemon.py",
+        "src/nexus/upgrade_finish.py",
+    ):
+        src = (_REPO / rel).read_text()
+        assert "POISON_DETAIL_TOKEN" in src, rel
+        assert '"non-32-char chash" in r.detail' not in src, rel
+    assert POISON_DETAIL_TOKEN  # non-empty, importable
 
 
 def test_grants_changeset_view_era_revokes_tables():

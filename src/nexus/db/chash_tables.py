@@ -75,6 +75,16 @@ DEBT_CHASH_TABLES: tuple[ChashBearingTable, ...] = tuple(
 )
 
 
+#: The poison-detail matcher token (nexus-jxizy.5): the health probe's
+#: poison HealthResult embeds this exact phrase in its ``detail``, and the
+#: install-binary gate (``commands/daemon.py``) plus the convergence gate
+#: (``upgrade_finish.py``) substring-match on it to distinguish REAL poison
+#: from probe-degraded WARNs under the same label. ONE constant so the
+#: wording and its matchers cannot drift (era-neutral: octet_length ≠ 32 is
+#: the predicate in both the text era and the bytea era).
+POISON_DETAIL_TOKEN: str = "width-non-conformant chash"
+
+
 #: RDR-182 Amendment A6 (nexus-9bufb): the structural content boundary. A
 #: superuser-owned counts view — the diagnostic role reads COUNTS BY
 #: CONSTRUCTION (definer semantics + RLS exemption via the superuser owner),
@@ -92,10 +102,20 @@ def diag_conformance_view_ddl() -> str:
     counts cross-tenant rows only when its OWNER is RLS-exempt, which only
     the superuser context can arrange (the nexus-vounk lesson, structurally).
     Managed/DBA deployments get the rendered copy in docs/configuration.md.
+
+    ERA-SAFE PREDICATE (RDR-180 Item6a, nexus-jxizy.5): the conformance
+    predicate is ``octet_length(col) <> 32`` — deliberately NOT ``length``.
+    ``octet_length`` of today's 32-hex TEXT value is 32 (bytes==chars for
+    hex ASCII) and of the post-flip 32-byte BYTEA value is also 32, so ONE
+    spelling accepts exactly the era-canonical form in each era: a
+    premature 64-hex text write counts as poison today, and a leftover
+    16-byte legacy value counts as poison after the BYTEA cutover. The
+    32-vs-64 units ambiguity (hex chars vs bytes) cannot recur in this
+    predicate by construction.
     """
     union = "\nUNION ALL\n".join(
         f"SELECT '{t.table}' AS table_name, count(*) AS non_conformant "
-        f"FROM {t.table} WHERE length({t.column}) <> 32"
+        f"FROM {t.table} WHERE octet_length({t.column}) <> 32"
         for t in CHASH_BEARING_TABLES
     )
     return f"CREATE OR REPLACE VIEW {DIAG_CONFORMANCE_VIEW} AS\n{union}"
@@ -139,8 +159,9 @@ def legacy_chash_conformance_statements() -> tuple[str, ...]:
     exactly as before; without it the install-binary gate would fail loud on
     every store one engine-generation behind. Poison-only: pre-A6 engines
     predate the telemetry-001 debt tables, so direct debt counts there would
-    fail on missing relations."""
+    fail on missing relations. Same era-safe ``octet_length`` predicate as
+    the view (see :func:`diag_conformance_view_ddl`)."""
     return tuple(
-        f"SELECT count(*) FROM {t.table} WHERE length({t.column}) <> 32"
+        f"SELECT count(*) FROM {t.table} WHERE octet_length({t.column}) <> 32"
         for t in POISON_CHASH_TABLES
     )

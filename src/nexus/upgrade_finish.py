@@ -486,10 +486,12 @@ def _poison_playbook(config_dir: Path):  # noqa: ANN201 — returns nexus.remedi
         from nexus.health import _check_migration_state  # noqa: PLC0415 — deferred, CLI startup cost
 
         creds_path = config_dir / CREDENTIALS_FILENAME
+        from nexus.db.chash_tables import POISON_DETAIL_TOKEN  # noqa: PLC0415 — deferred, circular-dep avoidance
+
         poison = [
             r for r in _check_migration_state(creds_path=creds_path)
             if r.label == "Chunk chash conformance"
-            and not r.ok and "non-32-char chash" in r.detail
+            and not r.ok and POISON_DETAIL_TOKEN in r.detail
         ]
     except Exception:  # noqa: BLE001 — the gate must never block a valid convergence on an unrelated error
         return None

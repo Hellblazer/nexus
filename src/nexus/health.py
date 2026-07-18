@@ -2311,7 +2311,8 @@ def _check_migration_state(
             fatal=True,
         )]
 
-    # Query 4 (nexus-pnwu0 / GH #1390): non-32-char chash rows across the
+    # Query 4 (nexus-pnwu0 / GH #1390): width-non-conformant chash rows
+    # (octet_length <> 32, era-safe — see chash_tables.py) across the
     # chunk tables. A box that migrated legacy short ids pre-guard (or had
     # its chash CHECK constraints dropped out-of-band — the GH #1390 shape)
     # runs FINE on its current engine, but catalog-013-3's VALIDATE
@@ -2332,6 +2333,7 @@ def _check_migration_state(
     # diagnostic role (pre-P2.1 install) or a probe failure degrades to a
     # WARN, never a false "clean".
     from nexus.db.chash_tables import (  # noqa: PLC0415 — deferred to avoid circular import
+        POISON_DETAIL_TOKEN,
         chash_conformance_statements,
         debt_chash_conformance_statements,
         legacy_chash_conformance_statements,
@@ -2417,11 +2419,12 @@ def _check_migration_state(
             label="Chunk chash conformance",
             ok=False,
             detail=(
-                f"{nonconforming} chunk row(s) have a non-32-char chash "
-                "(legacy pre-RDR-108 ids, or chash CHECK constraints were "
-                "dropped out-of-band). The current engine serves fine, but "
-                "an engine UPGRADE will crash-loop on catalog-013-3's "
-                "VALIDATE CONSTRAINT (GH #1390 / nexus-pnwu0)."
+                f"{nonconforming} chunk row(s) have a {POISON_DETAIL_TOKEN} "
+                "(octet_length <> 32 — legacy pre-RDR-108 ids, or chash "
+                "CHECK constraints were dropped out-of-band). The current "
+                "engine serves fine, but an engine UPGRADE will crash-loop "
+                "on catalog-013-3's VALIDATE CONSTRAINT (GH #1390 / "
+                "nexus-pnwu0)."
             ),
             fix_suggestions=[
                 "Do NOT upgrade the engine binary until remediated "
@@ -2461,7 +2464,8 @@ def _check_migration_state(
                 ok=False,
                 detail=(
                     f"{debt} row(s) across topic_assignments/frecency/"
-                    "relevance_log carry a non-32-char chash reference. "
+                    "relevance_log carry a width-non-conformant chash "
+                    "reference (octet_length <> 32). "
                     "NON-GATING (no CHECK constraint exists on these tables), "
                     "but the rows silently miss their joins against the chunk "
                     "tables — the remap cascade / RDR-180 Item6 ETL converges "

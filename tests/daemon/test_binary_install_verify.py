@@ -356,11 +356,15 @@ def test_verify_signature_real_bundle_end_to_end():
 
 
 def _poison_result():
+    from nexus.db.chash_tables import POISON_DETAIL_TOKEN
     from nexus.health import HealthResult
     return HealthResult(
         label="Chunk chash conformance",
         ok=False,
-        detail="12 chunk row(s) have a non-32-char chash (legacy pre-RDR-108 ids).",
+        detail=(
+            f"12 chunk row(s) have a {POISON_DETAIL_TOKEN} "
+            "(legacy pre-RDR-108 ids)."
+        ),
         warn=True,
     )
 

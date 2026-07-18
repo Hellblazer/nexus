@@ -213,21 +213,21 @@ run:
 
    ```sql
    CREATE OR REPLACE VIEW nexus.diag_chash_conformance AS
-   SELECT 'nexus.chunks_384' AS table_name, count(*) AS non_conformant FROM nexus.chunks_384 WHERE length(chash) <> 32
+   SELECT 'nexus.chunks_384' AS table_name, count(*) AS non_conformant FROM nexus.chunks_384 WHERE octet_length(chash) <> 32
    UNION ALL
-   SELECT 'nexus.chunks_768' AS table_name, count(*) AS non_conformant FROM nexus.chunks_768 WHERE length(chash) <> 32
+   SELECT 'nexus.chunks_768' AS table_name, count(*) AS non_conformant FROM nexus.chunks_768 WHERE octet_length(chash) <> 32
    UNION ALL
-   SELECT 'nexus.chunks_1024' AS table_name, count(*) AS non_conformant FROM nexus.chunks_1024 WHERE length(chash) <> 32
+   SELECT 'nexus.chunks_1024' AS table_name, count(*) AS non_conformant FROM nexus.chunks_1024 WHERE octet_length(chash) <> 32
    UNION ALL
-   SELECT 'nexus.chash_index' AS table_name, count(*) AS non_conformant FROM nexus.chash_index WHERE length(chash) <> 32
+   SELECT 'nexus.chash_index' AS table_name, count(*) AS non_conformant FROM nexus.chash_index WHERE octet_length(chash) <> 32
    UNION ALL
-   SELECT 'nexus.catalog_document_chunks' AS table_name, count(*) AS non_conformant FROM nexus.catalog_document_chunks WHERE length(chash) <> 32
+   SELECT 'nexus.catalog_document_chunks' AS table_name, count(*) AS non_conformant FROM nexus.catalog_document_chunks WHERE octet_length(chash) <> 32
    UNION ALL
-   SELECT 'nexus.topic_assignments' AS table_name, count(*) AS non_conformant FROM nexus.topic_assignments WHERE length(doc_id) <> 32
+   SELECT 'nexus.topic_assignments' AS table_name, count(*) AS non_conformant FROM nexus.topic_assignments WHERE octet_length(doc_id) <> 32
    UNION ALL
-   SELECT 'nexus.frecency' AS table_name, count(*) AS non_conformant FROM nexus.frecency WHERE length(chunk_id) <> 32
+   SELECT 'nexus.frecency' AS table_name, count(*) AS non_conformant FROM nexus.frecency WHERE octet_length(chunk_id) <> 32
    UNION ALL
-   SELECT 'nexus.relevance_log' AS table_name, count(*) AS non_conformant FROM nexus.relevance_log WHERE length(chunk_id) <> 32;
+   SELECT 'nexus.relevance_log' AS table_name, count(*) AS non_conformant FROM nexus.relevance_log WHERE octet_length(chunk_id) <> 32;
    GRANT SELECT ON nexus.diag_chash_conformance TO nexus_diag;
    ```
 
