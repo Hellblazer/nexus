@@ -317,6 +317,129 @@ tests is deleted, per Hal 2026-07-18).
   the CLI may need before the first engine start, and is all of it config
   (yaml) rather than data?
 
+## P0 Inventory Adjudication (nexus-146xx.1)
+
+> Status: DRAFT 2026-07-18 — settled rows transcribe D2–D5 (no
+> re-adjudication); rows marked ⚠ are open product forks awaiting Hal's
+> sign-off. The table becomes the decision record at re-gate; each
+> surviving artifact is a named, Hal-decided row.
+
+### DDL census (15 files, 63 statements — `DDL_CENSUS`)
+
+| File | N | Artifact | Bin | Data carry | Gate |
+|---|---|---|---|---|---|
+| `aspect_promotion.py` | 1 | `aspect_promotion_log` stray | ⚠ **HAL (D4 fork)**: migrate-to-PG telemetry (RDR-177) **or** delete-with-feature | per choice; log is observability | `.14` (P3) |
+| `commands/upgrade.py` | 1 | `_nexus_t3_steps` stray | delete-with-feature — subsumed by ladder mechanism (D3/D4) | none: upgrade bookkeeping, re-derivable | `.15` (P3) |
+| `db/migrations.py` | 25 | seven-domain T2 registry | rides-RDR-158-P3/P4 | RDR-158 ETL | nexus-i711w |
+| `db/t2/aspect_extraction_queue.py` | 3 | T2 domain store | rides-RDR-158-P3/P4 | RDR-158 ETL | nexus-i711w |
+| `db/t2/catalog.py` | 9 | catalog store (D5) | rides-RDR-158-P3/P4 | `HttpCatalogClient` drop-in (RDR-156 tables) | nexus-i711w; NO bead here (D5) |
+| `db/t2/catalog_taxonomy.py` | 4 | T2 domain store | rides-RDR-158-P3/P4 | RDR-158 ETL | nexus-i711w |
+| `db/t2/chash_index.py` | 2 | T2 domain store | rides-RDR-158-P3/P4 | RDR-158 ETL | nexus-i711w |
+| `db/t2/document_aspects.py` | 1 | T2 domain store | rides-RDR-158-P3/P4 | RDR-158 ETL | nexus-i711w |
+| `db/t2/document_highlights.py` | 1 | T2 domain store | rides-RDR-158-P3/P4 | RDR-158 ETL | nexus-i711w |
+| `db/t2/memory_store.py` | 3 | T2 domain store (FTS5) | rides-RDR-158-P3/P4 | FTS5→tsvector parity (RDR-152, locked) | nexus-i711w |
+| `db/t2/plan_library.py` | 3 | T2 domain store (FTS5) | rides-RDR-158-P3/P4 | RDR-158 ETL | nexus-i711w |
+| `db/t2/telemetry.py` | 4 | T2 domain store | rides-RDR-158-P3/P4 | RDR-158 ETL | nexus-i711w |
+| `migration/wire_reid.py` | 1 | `chash_remap.db` | migrate-to-PG (D2) | engine bulk-remap; local file demoted read-only source | `.3`/`.6` (P1) |
+| `pipeline_buffer.py` | 3 | `pipeline.db` | ⚠ **HAL (Q4 fork)**: engine-host (RDR-173 lineage) **or** retire | per choice; streaming-PDF resume state | `.16` (P3) |
+| `upgrade_ladder/completion.py` | 2 | `ladder.db` | delete-with-feature (D3 derive-first; RF-186-2: re-derivable, no falsification) | none — in-process holder + PG flush | `.11`/`.12` (P2) |
+
+### Epsilon-allow census (43 files, 118 overrides — `EPSILON_CENSUS`)
+
+Overrides fall into six classes; every censused file is listed with its
+dominant class. Mixed files carry a note.
+
+**Class R — raw/read-only access to seven-domain T2 stores (RDR-128 P3
+lineage: daemon-offline reads, guarded raw cursors, service-mode-guarded
+branches). Bin: rides-RDR-158-P3/P4** — the call sites are rewritten or
+die when T2 is PG-only; no data carry of their own (they touch stores
+carried by RDR-158's ETL): `_session_end_launcher.py` (1),
+`aspect_promotion.py` (6), `catalog/catalog_owners.py` (1, D5),
+`collection_audit.py` (3; note: `:370` is `.catalog.db`, D5),
+`collection_health.py` (3), `commands/_helpers.py` (1),
+`commands/aspects.py` (7; note: `:349`/`:495` are pre-migration repair
+verbs — die with the migration window), `commands/catalog.py` (1),
+`commands/catalog_cmds/backfill.py` (3, D5),
+`commands/catalog_cmds/report.py` (3), `commands/daemon.py` (1),
+`commands/doc.py` (3), `commands/doctor.py` (6; note: `:1354` is help
+text mentioning the token — census noise), `commands/enrich.py` (9;
+note: `:1837` also writes `aspect_promotion_log` — follows `.14`),
+`commands/index.py` (3; note: `:1295` is a chroma `EphemeralClient`
+dry-run — non-SQLite, out-of-scope-155), `commands/plan.py` (2),
+`commands/rdr.py` (1), `commands/search_cmd.py` (1),
+`commands/taxonomy_cmd.py` (17), `commands/tier_status.py` (1),
+`commands/upgrade.py` (3, chicken-and-egg bootstrap — dies with SQLite
+T2), `console/routes/health.py` (1), `context.py` (1), `health.py` (2),
+`mcp_infra.py` (4), `merge_candidates.py` (2),
+`operators/aspect_sql.py` (6), `taxonomy.py` (1),
+`upgrade_ladder/rungs/t2_schema.py` (1, the t2-schema rung's bootstrap —
+retires with SQLite T2 at RDR-158 P4).
+
+**Class M — migration-source machinery (ETL source reads, frozen-source
+probes, chroma read legs). Bin: delete-with-feature** — deleted when the
+RDR-155 P4b / migration-module window closes; reads sources, never a
+destination: `db/t2/chash_etl.py` (1), `commands/storage_cmd.py` (1),
+`migration/chroma_read.py` (2, the P4a.1-contract survivors),
+`migration/guided_upgrade.py` (1), `migration/orchestrator.py` (1),
+`migration/remap_cascade.py` (1), `migration/vector_etl.py` (1).
+
+**Class O — own-substrate connects (the incident class). Bin: per the
+DDL rows above**: `migration/wire_reid.py` (1 → D2, P1),
+`upgrade_ladder/completion.py` (1 → D3, P2), `pipeline_buffer.py`
+(1 → ⚠ Q4, P3).
+
+**Class V — legacy non-service Voyage embed paths (non-SQLite; the
+epsilon token covers other storage-boundary axes too). Bin:
+delete-with-feature** (self-declared "Phase-4 deletion target"):
+`doc_indexer.py` (1), `indexer.py` (1), `commands/collection.py` (1).
+These block the D6 token retirement until deleted — tracked, not SQLite
+debt.
+
+**Class N — census noise. Bin: not-actually-debt**:
+`storage_boundary_lint.py` (10, self-referential token definitions).
+
+### Q3 resolution (FTS5 outside the seven domains)
+
+Audited 2026-07-18 (`grep -rn "fts5|FTS5|CREATE VIRTUAL"` over
+`src/nexus` excluding `db/t2/`): **no FTS5 dependency grew outside the
+seven domains.** The only FTS5 DDL lives in `db/migrations.py`
+(`memory_fts`, `plans_fts`) and `db/t2/catalog.py` (catalog FTS, D5) —
+all in-scope-158. Every out-of-domain reference (health integrity probe,
+doctor checks, plan matcher fallback, T1 overlap detection, MCP search)
+is a read-side CONSUMER of those in-scope tables and converts with them
+under RDR-152's locked FTS5→tsvector parity contract. Q3 CLOSED.
+
+### Q6 resolution (cold-start state audit)
+
+Traced 2026-07-18 (`commands/init.py` + RF-186-2's doctor/init trace):
+the precise pre-first-engine-start state set on a fresh machine is
+(i) `config.yaml` + `.env` credentials — config; (ii) downloaded
+artifacts: PG bundle binaries, embedding models — re-downloadable
+caches, not data; (iii) logs. `nx init` provisions the PG cluster
+itself (that is engine bring-up, not client data); it never touches the
+ladder, and `nx doctor` never opens the completion store
+(`health.py:2878-2914`, detect-only). **All pre-engine state is config
+or re-downloadable artifact — no client data store is needed before the
+first engine start.** Post-retirement, any pre-engine T2 access becomes
+engine-gated, which `_converge_preconditions()` already enforces on the
+normal path. Q6 CLOSED.
+
+### Gap 1 scanner blind spots — harden-vs-accept
+
+⚠ **HAL decision** (conditional bead `.2`). Recommendation:
+
+- **HARDEN the `ALTER TABLE` blindness** — add an `ALTER_CENSUS`
+  (per-file counts; live 2026-07-18: 59 statements across 11 files, the
+  largest `db/migrations.py` at 36). Cheap (same regex-census shape) and
+  closes the exact incident class: schema growth on an existing censused
+  store is precisely how the reverted `leg_convergence` near-miss would
+  have landed on a second attempt.
+- **ACCEPT the bare-`sqlite3.connect` blindness** — already covered on a
+  different axis: `storage_boundary_lint.py` ratchets the count of
+  epsilon-allow'd connect sites, and the epsilon census above freezes
+  the override population; a new connect needs a new override, which
+  fails `test_no_new_epsilon_allows`.
+
 ## Research Findings
 
 ### RF-186-1 (VERIFIED, agent analyst-186-q2): the Gap-4 pin is behavioral and substrate-agnostic — D2's stored delivery fact is NO-GO in PG too; live membership computation is the compliant design
