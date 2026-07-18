@@ -245,13 +245,12 @@ tests is deleted, per Hal 2026-07-18).
   line is "raw facts a live computation interprets: fine; persisted
   verdicts consulted instead of re-deriving: banned". Pin stands
   unamended (one documenting docstring line only).
-- **Q7 (product fork, Hal's decision at gate — from RF-186-1):** Is a
-  deliberately rolled-back leg "converged" or "pending"? Under D2-revised,
-  rollback clears the leg's `chash_remap` rows, so the system reads
-  "nothing owed → pending again if the source still classifies" — the
-  semantically honest default, but it means a rolled-back install that
-  re-runs `nx upgrade` will re-plan the leg (behind the cost-consent
-  gate). Ratify or override at gate.
+- ~~**Q7 (product fork, Hal's decision at gate — from RF-186-1):** Is a
+  deliberately rolled-back leg "converged" or "pending"?~~ **RATIFIED by
+  Hal 2026-07-18: rolled-back means PENDING.** Rollback clears the leg's
+  `chash_remap` rows; the system reads "nothing owed → pending again if
+  the source still classifies"; a rolled-back install that re-runs
+  `nx upgrade` re-plans the leg behind the cost-consent gate.
 - **Q3:** FTS5 in local mode — the seven-domain retirement inherits RDR-152's
   locked FTS5→tsvector parity contract; confirm nothing outside those
   domains grew an FTS5 dependency (memory_store FTS is in-scope-158; anything
