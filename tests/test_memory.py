@@ -237,7 +237,7 @@ def _promote(runner, db, row_id, col="knowledge__proj", extra=None, use_cm=False
     args = ["memory", "promote", str(row_id), "--collection", col, *(extra or [])]
     with (
         patch("nexus.commands.memory.t2_handle", return_value=t2),
-        patch("nexus.commands.memory.get_credential", return_value="fake-key"),
+        patch("nexus.config.get_credential", return_value="fake-key"),
         patch("nexus.config.is_local_mode", return_value=False),
         patch("nexus.db.make_t3", return_value=mt3),
     ):
@@ -248,16 +248,9 @@ def _promote(runner, db, row_id, col="knowledge__proj", extra=None, use_cm=False
 # ── Promote tests ────────────────────────────────────────────────────────────
 
 
-def test_promote_no_credentials(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
-    row_id = db.put(project="p", title="note.md", content="hello", ttl=30)
-    with (
-        patch("nexus.commands.memory.t2_handle", return_value=db),
-        patch("nexus.commands.memory.get_credential", return_value=""),
-        patch("nexus.config.is_local_mode", return_value=False),
-    ):
-        result = runner.invoke(main, ["memory", "promote", str(row_id), "--collection", "knowledge__p"])
-    assert result.exit_code != 0
-    assert "not set" in result.output.lower() or "config init" in result.output.lower()
+# test_promote_no_credentials removed (nexus-c7aj3): the promote-path
+# credential pre-flight is deleted; the no-creds success scenario is pinned
+# in tests/test_c7aj3_service_mode_cred_gates.py.
 
 
 def test_promote_entry_not_found(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
@@ -297,17 +290,7 @@ def test_promote_remove_deletes_t2(runner: CliRunner, mem_home: Path, db: T2Data
     assert "removed" in result.output.lower()
 
 
-def test_promote_missing_database(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
-    row_id = db.put(project="p", title="note.md", content="hello", ttl=30)
-    cred = lambda key: "" if key == "chroma_database" else "fake-value"  # noqa: E731
-    with (
-        patch("nexus.commands.memory.t2_handle", return_value=db),
-        patch("nexus.commands.memory.get_credential", side_effect=cred),
-        patch("nexus.config.is_local_mode", return_value=False),
-    ):
-        result = runner.invoke(main, ["memory", "promote", str(row_id), "--collection", "knowledge__p"])
-    assert result.exit_code != 0
-    assert "chroma_database" in result.output and "not set" in result.output.lower()
+# test_promote_missing_database removed (nexus-c7aj3): same as above.
 
 
 def test_promote_expires_at_from_t2_timestamp(runner: CliRunner, mem_home: Path, db: T2Database) -> None:

@@ -673,21 +673,27 @@ def _check_t3_cloud() -> list[HealthResult]:
     results.append(_check_vector_service())
     results.extend(_check_managed_service_probe())
 
+    # Credential lines are INFORMATIONAL, never fatal (nexus-nmw3i /
+    # nexus-c7aj3): serving is the vector service in every mode (RDR-155
+    # P4a.2 — make_t3() is service-backed unconditionally), so these
+    # ChromaDB/Voyage client credentials are MIGRATION-SOURCE config.
+    # DELIBERATE TRADEOFF, disclosed: a pre-/mid-migration install with
+    # absent source creds doctors clean here and learns about the gap from
+    # the migration command itself (the ETL open_read_legs checks fail
+    # loud) — a wrong-exit-1 on every migrated install was the worse
+    # failure mode.
+    _absent_detail = (
+        "not set (migration-source only — needed by the legacy-store "
+        "migration ETL, not for serving)"
+    )
+
     # CHROMA_API_KEY
     chroma_key = get_credential("chroma_api_key")
-    r = HealthResult(
+    results.append(HealthResult(
         label="ChromaDB  (CHROMA_API_KEY)",
-        ok=bool(chroma_key),
-        detail="set" if chroma_key else "not set",
-        fatal=True,
-    )
-    if not chroma_key:
-        r.fix_suggestions = [
-            "nx config init                           (interactive wizard)",
-            "nx config set chroma_api_key <your-key>  (set individually)",
-            "Get key: https://trychroma.com  →  Cloud  →  API Keys",
-        ]
-    results.append(r)
+        ok=True,
+        detail="set" if chroma_key else _absent_detail,
+    ))
 
     # CHROMA_TENANT (optional)
     chroma_tenant = get_credential("chroma_tenant")
@@ -700,44 +706,39 @@ def _check_t3_cloud() -> list[HealthResult]:
 
     # CHROMA_DATABASE
     chroma_database = get_credential("chroma_database")
-    r = HealthResult(
+    results.append(HealthResult(
         label="ChromaDB  (CHROMA_DATABASE)",
-        ok=bool(chroma_database),
-        detail=chroma_database if chroma_database else "not set",
-        fatal=True,
-    )
-    if not chroma_database:
-        r.fix_suggestions = [
-            "nx config set chroma_database <name>     (migration-source database; legacy/Chroma only)",
-            "e.g. nx config set chroma_database nexus",
-        ]
-    results.append(r)
+        ok=True,
+        detail=chroma_database if chroma_database else _absent_detail,
+    ))
 
     # Vector-serving reachability is probed UNCONDITIONALLY at the top of
     # this function via _check_vector_service() (RDR-155 P4a.2): the direct
     # ChromaDB Cloud probe retired with the serving path, and the service
     # probe must not be gated on legacy ChromaCloud credential presence.
-    # The ChromaCloud credentials above still matter: the Phase-5 ETL reads
-    # the legacy store through them.
+    # The ChromaCloud credentials above still matter to ONE consumer: the
+    # Phase-5 migration ETL reads the legacy store through them. Their
+    # absence is deliberately non-fatal here (see the tradeoff note above).
 
-    # VOYAGE_API_KEY
+    # VOYAGE_API_KEY — server-side embedding on the service path; the
+    # client key is migration/enrichment config (e.g. rerank soft-degrades
+    # without it), not a serving requirement.
     voyage_key = get_credential("voyage_api_key")
-    r = HealthResult(
+    results.append(HealthResult(
         label="Voyage AI (VOYAGE_API_KEY)",
-        ok=bool(voyage_key),
-        detail="set" if voyage_key else "not set",
-        fatal=True,
-    )
-    if not voyage_key:
-        r.fix_suggestions = [
-            "nx config init                           (interactive wizard)",
-            "nx config set voyage_api_key <your-key>  (set individually)",
-            "Get key: https://voyageai.com  →  Dashboard  →  API Keys",
-        ]
-    results.append(r)
+        ok=True,
+        detail="set" if voyage_key else _absent_detail,
+    ))
 
-    # Pipeline version check
-    if chroma_key and chroma_database and voyage_key:
+    # Pipeline version check. Without the legacy source creds the line
+    # must still appear — as "retired", not vanish (reviewer-c7aj3 Medium).
+    if not (chroma_key and chroma_database and voyage_key):
+        results.append(HealthResult(
+            label="pipeline versions",
+            ok=True,
+            detail="sweep retired with the Chroma serving path (RDR-155 P4a)",
+        ))
+    elif chroma_key and chroma_database and voyage_key:
         from nexus.indexer import PIPELINE_VERSION, get_collection_pipeline_version  # noqa: PLC0415 — deferred to avoid circular import
 
         # RDR-155 P4a.2 (nexus-1k8s1): the sweep reads Chroma COLLECTION
@@ -1628,6 +1629,18 @@ def _check_credential_persistence() -> list[HealthResult]:
             file_creds = data.get("credentials", {}) or {}
         except Exception:  # noqa: BLE001 — creds-file read is best-effort; fall back to empty mapping
             file_creds = {}
+
+    # nexus-nmw3i (the "present as shell-env-only" false-flag, critic
+    # Critical): the misdetection premise of this check is that a
+    # GUI-spawned process, missing the shell-only cloud creds, flips
+    # is_local_mode() to True. But is_local_mode() checks service_url
+    # FIRST — when service_url is PERSISTED to config.yml (every migrated
+    # install), the GUI spawn resolves the mode identically with or
+    # without the shell creds, and shell-only legacy creds are
+    # migration-source config, not a mode anchor. No gap to warn about.
+    if str(file_creds.get("service_url", "")).strip():
+        return []
+
 
     env_only: list[str] = []
     for key in cloud_keys:

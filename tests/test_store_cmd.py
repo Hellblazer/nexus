@@ -63,34 +63,11 @@ def _store_entry(id="aabbccdd1234", title="doc.md", tags="", ttl_days=0,
             "expires_at": expires_at, "indexed_at": indexed_at}
 
 
-# ── _t3() factory error paths ───────────────────────────────────────────────
-
-@pytest.mark.parametrize("missing_key,present,cred_override,expect", [
-    ("CHROMA_API_KEY", {"VOYAGE_API_KEY": "vk", "CHROMA_TENANT": "t", "CHROMA_DATABASE": "d"},
-     {"chroma_database": "d", "voyage_api_key": "vk", "chroma_api_key": ""}, "chroma_api_key"),
-    ("VOYAGE_API_KEY", {"CHROMA_API_KEY": "ck", "CHROMA_TENANT": "t", "CHROMA_DATABASE": "d"},
-     None, "voyage_api_key"),
-    ("CHROMA_DATABASE", {"CHROMA_API_KEY": "ck", "VOYAGE_API_KEY": "vk"},
-     None, "chroma_database"),
-])
-def test_store_put_missing_credential(runner, monkeypatch, tmp_path,
-                                      missing_key, present, cred_override, expect):
-    monkeypatch.setenv("NX_LOCAL", "0")
-    monkeypatch.delenv(missing_key, raising=False)
-    if "CHROMA_TENANT" not in present:
-        monkeypatch.delenv("CHROMA_TENANT", raising=False)
-    for k, v in present.items():
-        monkeypatch.setenv(k, v)
-    src = tmp_path / "f.txt"
-    src.write_text("content")
-    if cred_override:
-        with patch("nexus.config.get_credential", side_effect=lambda k: cred_override.get(k, "")):
-            result = runner.invoke(main, ["store", "put", str(src)])
-    else:
-        result = runner.invoke(main, ["store", "put", str(src)])
-    assert result.exit_code != 0
-    assert expect in result.output.lower()
-
+# ── _t3() factory ───────────────────────────────────────────────────────────
+# The credential pre-flight was DELETED (nexus-c7aj3): make_t3() is
+# service-backed unconditionally, so no store/search/collection verb needs
+# Chroma/Voyage creds. The no-creds victim scenario is pinned end-to-end in
+# tests/test_c7aj3_service_mode_cred_gates.py.
 
 def test_store_put_tenant_optional(runner, monkeypatch, tmp_path):
     monkeypatch.setenv("CHROMA_API_KEY", "ck")

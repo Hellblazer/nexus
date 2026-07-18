@@ -14,25 +14,13 @@ from nexus.ttl import parse_ttl
 
 
 def _t3() -> T3Database:
-    from nexus.config import get_credential, is_local_mode  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-
-    if not is_local_mode():
-        database = get_credential("chroma_database")
-        api_key = get_credential("chroma_api_key")
-        voyage_api_key = get_credential("voyage_api_key")
-
-        if not api_key:
-            raise click.ClickException(
-                "chroma_api_key not set — run: nx config set chroma_api_key <value>"
-            )
-        if not voyage_api_key:
-            raise click.ClickException(
-                "voyage_api_key not set — run: nx config set voyage_api_key <value>"
-            )
-        if not database:
-            raise click.ClickException(
-                "chroma_database not set — run: nx config set chroma_database <name>"
-            )
+    # No credential pre-flight (nexus-c7aj3): make_t3() constructs the
+    # service-backed client unconditionally (RDR-155 P4a.2) — no call site
+    # here can reach a direct-Chroma client, so a Chroma/Voyage cred check
+    # at this boundary only ever produced false failures on migrated
+    # installs. Legacy creds are migration-source config; the ETL that
+    # reads them does its own checks. Real construction failures surface
+    # as make_t3()'s own honest errors.
     try:
         return make_t3()
     except RuntimeError as exc:

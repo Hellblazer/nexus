@@ -120,33 +120,30 @@ def test_doctor_does_not_mention_serve(runner, mock_reg, absent):
 
 # ── Missing credentials ─────────────────────────────────────────────────────
 
-def test_doctor_missing_credentials_exit_1(runner, mock_reg):
+def test_doctor_missing_credentials_informational(runner, mock_reg):
+    """nexus-nmw3i/c7aj3: absent legacy creds are migration-source status
+    lines, never a failing/fatal doctor result (the exit-1 false-positive
+    on migrated installs)."""
     result = _invoke(runner, mock_reg, cred=None)
-    assert result.exit_code == 1
-    assert "\u2717" in result.output
     assert "CHROMA_API_KEY" in result.output
-    assert "nx config init" in result.output
+    assert "migration-source only" in result.output
+    # Absent creds alone must not produce the fatal ✗ + exit 1 shape or
+    # push credential setup on a serving-healthy install.
+    assert "nx config init" not in result.output
+    assert "nx config set chroma_api_key" not in result.output
 
 
-def test_doctor_missing_credential_shows_inline_fix(runner, mock_reg):
-    result = _invoke(runner, mock_reg, cred=None)
-    assert "nx config set chroma_api_key" in result.output
-    assert "nx config set voyage_api_key" in result.output
-    assert "trychroma.com" in result.output
-    assert "voyageai.com" in result.output
-
-
-def test_doctor_partial_credentials(runner, mock_reg):
+def test_doctor_partial_credentials_informational(runner, mock_reg):
+    """Partially-set legacy creds: the set ones read 'set', the absent
+    ones read migration-source-only — no fatal line either way
+    (nexus-nmw3i/c7aj3)."""
     def cred_side_effect(key):
         return "sk-key" if key in ("chroma_api_key", "voyage_api_key") else None
 
     result = _invoke(runner, mock_reg, cred=cred_side_effect)
-    assert result.exit_code == 1
-    assert "CHROMA_TENANT" in result.output
-    assert "nx config set chroma_tenant" not in result.output
-    assert "nx config set chroma_database" in result.output
-    assert "nx config set chroma_api_key" not in result.output
-    assert "nx config set voyage_api_key" not in result.output
+    assert "CHROMA_DATABASE" in result.output
+    assert "migration-source only" in result.output
+    assert "nx config set chroma_database" not in result.output
 
 
 # ── Missing tools ───────────────────────────────────────────────────────────

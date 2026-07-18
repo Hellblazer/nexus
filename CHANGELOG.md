@@ -6,6 +6,27 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.13.1] - 2026-07-18
+
+Ships with (and requires) engine-service-v0.1.47 (unchanged from 6.13.0).
+
+### Fixed
+
+- **CLI T3 verbs no longer demand legacy Chroma credentials on migrated /
+  cloud installs** (nexus-c7aj3): `nx search`, `nx store`, `nx collection`,
+  and `nx memory promote` hard-failed "chroma_api_key not set" on any
+  install whose environment lacked the migration-source credentials — a
+  born-cloud user could not use the CLI T3 surface at all. The obsolete
+  pre-flight is removed; the serving path (the vector service, both modes)
+  needs no client-side Chroma/Voyage credentials.
+- **`nx doctor` no longer exit-1s over absent migration-source
+  credentials** (nexus-nmw3i): the ChromaDB/Voyage credential lines are
+  informational ("migration-source only"), and the shell-env-only
+  credential-persistence warning is silenced when `service_url` is
+  persisted (the mode anchor makes its GUI-spawn misdetection premise
+  void). A missing source credential surfaces from the migration command
+  itself.
+
 ## [6.13.0] - 2026-07-18
 
 Ships with (and requires) engine-service-v0.1.47.
