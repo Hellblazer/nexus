@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "SubagentStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "NX_ORCH_STOP_GUARD=\"${NX_ORCH_STOP_GUARD:-observe}\" bash \"$CLAUDE_PROJECT_DIR/conexus/hooks/scripts/subagent-start-stamp.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "NX_ORCH_STOP_GUARD=\"${NX_ORCH_STOP_GUARD:-observe}\" bash \"$CLAUDE_PROJECT_DIR/conexus/hooks/scripts/subagent-stop.sh\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

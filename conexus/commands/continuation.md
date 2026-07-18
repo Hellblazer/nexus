@@ -12,7 +12,16 @@ Generates a handoff document under `/tmp/` that a future Claude Code session can
 
 ## Action
 
-Two steps. Write the handoff file, then emit one line of chat. Nothing else.
+Three steps. Run the session-retro audits, write the handoff file, then emit one line of chat. Nothing else.
+
+### Step 0: session-retro audits (RDR-184 — multi-agent sessions only; skip if zero Agent dispatches)
+
+Any tripped threshold files a mechanization bead (`bd create`) — never just a handoff note.
+
+1. **Directive-diff (Gap 2)**: diff sent scope-updates vs each hand-back's addressed items; count `nx scratch` tag `crossed-resend`. >2 crossed-resends → bead.
+2. **Commit-pathspec (Gap 4)**: `bash tests/e2e/lib/commit_scope_audit.sh <session-start-ref>.. <intended pathspecs...>`. Any `!!! FOREIGN FILE(S)` → bead.
+3. **Declaration-completeness (Gap 1)**: in `${XDG_STATE_HOME:-$HOME/.local/state}/nexus/orchestration/<session_id>.expectations` — every `START` row whose agent was a background teammate has a matching `EXPECT` row (`awk -F'\t' '$2=="START"{s[$3]=$4} $2=="EXPECT"{e[$3]=1} END{for(id in s) if(!(e[s[id]])) print "UNDECLARED", id, s[id]}'`). Any UNDECLARED → bead. Census for nexus-ccs9v.11: report `EXPECT`/`REPORTED`/`WOULDBLOCK`/`BLOCKED` row counts in the handoff.
+4. **Payload-morphology tripwire**: after any Claude Code version change, rerun `./tests/cc-validation/runner.sh --scenario 27` (the `a<name>-<hash>` encoding is production-load-bearing).
 
 ### Step 1: write the full handoff to `<Target file>`
 
