@@ -258,7 +258,17 @@ def run_batched_etl(
             )
             return EtlRunResult(False, source_count, written, reason)
         return EtlRunResult(True, source_count, written)
-    if target_count != expected:
+    # `<`, not `!=` (nexus-tidtd): a co-resident target legitimately holds
+    # rows this leg never wrote — independently indexed data or another
+    # era's legs. Equality assumed the leg exclusively owns the target and
+    # turned a fully-landed leg into a forever-failing upgrade. Same
+    # semantics as the resume branch above. ACCEPTED, UNMITIGATED residual:
+    # pre-existing rows can mask a partial this-run loss here, and nothing
+    # downstream catches it today — drop_converged_legs still tests count
+    # equality (the nexus-tidtd root cause), so it will re-plan, not
+    # verify membership. The full-membership convergence check is the
+    # deferred nexus-tidtd design (PG-side per the NO-SQLITE directive).
+    if target_count < expected:
         reason = (
             f"post-write count mismatch: distinct-transformed={expected} "
             f"target={target_count} (raw source={source_count})"
