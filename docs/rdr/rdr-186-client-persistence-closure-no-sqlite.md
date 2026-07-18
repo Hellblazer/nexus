@@ -98,16 +98,30 @@ RDR's inventory table with Hal's decision recorded. Zero SQLite databases,
 zero inline SQLite DDL, zero `# epsilon-allow:` SQLite overrides. The
 tripwire censuses ratchet monotonically to empty and then assert empty.
 
-**D2 — Migration artifacts go to PG via the already-planned surfaces.**
+**D2 — Migration artifacts go to PG via the already-planned surfaces; the
+convergence question is answered by LIVE computation, never a stored
+verdict.** (Revised per RF-186-1 — the original draft proposed a
+`leg_convergence` relation and is NO-GO: the Gap-4 pin is behavioral and
+substrate-agnostic, so a stored "converged at T" row consulted by detect()
+collides with it in PG exactly as it did in SQLite.)
+
 `chash_remap.db` → the RDR-185 .16 PG `chash_remap` table (Liquibase,
-tenant/RLS), with the local file demoted to migration *source* and read-only.
-The nexus-tidtd per-leg delivery/convergence fact lands in the same Liquibase
-surface (a `leg_convergence` relation or columns on `chash_remap`'s
-aggregate) — resolving the tidtd design fork *inside* the sanctioned
-mechanism instead of a new client table. Note the Gap-4 two-mechanism pin
-(RDR-185, `test_gap4_two_mechanisms.py`) constrains where the *verdict*
-lives; research must reconcile "delivery fact in PG" with that pin
-explicitly, in writing.
+tenant/RLS), with the local file demoted to migration *source* and
+read-only. The nexus-tidtd convergence question is then answered
+engine-side by a **live membership computation** over the target chunk
+tables joined to `chash_remap` (RDR-154 leverage style — an indexed SQL
+function computing "how many of this leg's transformed source ids are
+present", called by rung detect()/verify() each time). No verdict is ever
+persisted: the map rows are raw facts a live computation interprets, the
+sanctioned shape `_default_unreflected` already uses. Rollback CLEARS the
+leg's `chash_remap` rows, so delivered-then-rolled-back and
+never-delivered collapse to the same live state (nothing owed) — the
+resurrection hazard is resolved at the fact layer, no verdict lifecycle
+needed. This simultaneously replaces the broken count-equality test (the
+real nexus-tidtd fix) and resolves nexus-ixl85's probe-cost concern for
+this rung (one indexed SQL call per leg). The Gap-4 pin stands
+**unamended**; its docstring gains one documenting line recording
+live-membership-computation as the sanctioned cheap detect().
 
 **D3 — Ladder state: derive-first, record-late.** The completion store's
 bootstrap-ordering argument is real: the ladder runs when the engine may be
@@ -121,6 +135,19 @@ re-derivation (idempotent by the RDR-142 contract), not correctness. If
 research falsifies this (a rung whose completion is genuinely
 non-re-derivable), the fallback is a **flat file** (append-only JSONL, no
 query surface, no DDL) — never SQLite.
+
+(CONFIRMED by RF-186-2, no falsification: the completion store is pure
+bookkeeping — the runner's only read of `verified_rungs()` skips a
+redundant verify() when detect() already re-derived; losing the store
+costs one extra cheap read-only verify() per rung, and both loss
+scenarios are already mechanically pinned in `test_ladder_runner.py`.
+`nx doctor` never opens the store; `nx init` never touches the ladder;
+`_converge_preconditions()` brings the engine up before `_run_ladder()`
+on the normal path. P2 design obligations from the research: the
+in-process holder must serve the `verified_rungs()` check for later
+rungs within the SAME walk while the engine is down; the
+`verified_at`/`package_version` audit metadata is observability-only and
+may be accepted as lossy across the transition.)
 
 **D4 — Strays are adjudicated, not inherited.** `aspect_promotion_log` is an
 observability log → PG telemetry surface (RDR-177 territory) or explicit
@@ -204,16 +231,27 @@ tests is deleted, per Hal 2026-07-18).
 
 ## Open Questions
 
-- **Q1 (P2-blocking):** Is every rung's completion genuinely re-derivable
-  with the engine down? Enumerate rungs; the t2-schema rung's
-  `apply_attempted` report-mode and the substrate-etl rung's cascade-repair
-  path are the suspects. What is the worst-case re-derivation cost on the
-  resume path (the RDR-178 watermark interplay)?
-- **Q2 (P1-blocking):** Does the delivery-fact-in-PG design collide with the
-  Gap-4 two-mechanism pin the way the SQLite marker did, or does living
-  inside the engine's substrate (queried by rung detect(), not cached beside
-  it) satisfy the pin's "no freestanding verdict" language? Needs an explicit
-  written reconciliation + pinned-test docstring update if scope is amended.
+- ~~**Q1 (P2-blocking):** Is every rung's completion genuinely re-derivable
+  with the engine down?~~ **RESOLVED by RF-186-2 — yes, unconditionally;
+  ladder.db retirable per D3 as specced.** Both suspects cleared
+  (`apply_attempted` is an in-process flag; cascade-repair never reads
+  ladder.db). The watermark file is ALREADY flat JSON (the D3-blessed
+  shape), not SQLite, needs no census adjudication; it is where the real
+  replay cost lives (~900s/90k-chunk worst case if lost).
+- ~~**Q2 (P1-blocking):** Does the delivery-fact-in-PG design collide with
+  the Gap-4 two-mechanism pin?~~ **RESOLVED by RF-186-1 — yes, it
+  collides; D2 revised to live membership computation with no stored
+  verdict.** The pin is behavioral and substrate-agnostic; the principled
+  line is "raw facts a live computation interprets: fine; persisted
+  verdicts consulted instead of re-deriving: banned". Pin stands
+  unamended (one documenting docstring line only).
+- **Q7 (product fork, Hal's decision at gate — from RF-186-1):** Is a
+  deliberately rolled-back leg "converged" or "pending"? Under D2-revised,
+  rollback clears the leg's `chash_remap` rows, so the system reads
+  "nothing owed → pending again if the source still classifies" — the
+  semantically honest default, but it means a rolled-back install that
+  re-runs `nx upgrade` will re-plan the leg (behind the cost-consent
+  gate). Ratify or override at gate.
 - **Q3:** FTS5 in local mode — the seven-domain retirement inherits RDR-152's
   locked FTS5→tsvector parity contract; confirm nothing outside those
   domains grew an FTS5 dependency (memory_store FTS is in-scope-158; anything
@@ -231,4 +269,62 @@ tests is deleted, per Hal 2026-07-18).
 
 ## Research Findings
 
-(pending — populate via /conexus:rdr-research)
+### RF-186-1 (VERIFIED, agent analyst-186-q2): the Gap-4 pin is behavioral and substrate-agnostic — D2's stored delivery fact is NO-GO in PG too; live membership computation is the compliant design
+
+A stored `leg_convergence` "converged at T" row consulted by rung detect()
+to skip the live probe collides with RDR-185's Gap-4 pin
+(`test_gap4_two_mechanisms.py::test_rung_convergence_is_re_derived_live_never_cached`)
+regardless of substrate: SQLite→PG changes storage, not epistemics. The
+principled line, adjudicated with evidence: **raw facts a rung's detect()
+interprets against the live world are fine** (the chash_remap map already
+passes — consulted at `substrate_etl.py:1093`/`:1258` via
+`_default_unreflected:776` as an inert input to a live computation);
+**persisted verdicts consulted instead of re-deriving are banned**
+(discriminator: the pinned test's "answer follows the world in BOTH
+directions"). The "verdict wearing a fact costume" steelman is confirmed
+for the marker (co-resident partial rollback → reads converged forever).
+
+Recommended and adopted (D2 revised): engine-side live membership
+computation over target chunk tables ⋈ PG `chash_remap` (RDR-154 style,
+indexed SQL, no stored verdict), with rollback clearing the leg's
+`chash_remap` rows so delivered-then-rolled-back and never-delivered
+collapse to the same live state. Simultaneously: pin-compliant, NO-SQLITE
+compliant, resolves nexus-ixl85's probe cost for this rung, and is the
+real nexus-tidtd fix. Rejected alternatives scored in T2: amend-pin
+(reopens the slammed door), probe-always-fact-as-witness (reopens ixl85 in
+full), fold-into-completion-store (detect() never reads completion
+records; wiring it would invert the level-triggered mechanism). Full
+analysis: T2 `nexus/research-rdr186-q2-gap4-reconciliation`; registered as
+`nexus_rdr/186-research-1`.
+
+### RF-186-2 (VERIFIED, agent analyst-186-q1): every rung's completion is re-derivable engine-down — ladder.db is retirable per D3, no falsification found
+
+Per-rung: t2-schema needs no engine at all (raw local `sqlite3` against
+`memory.db`; refuses service mode) — re-derivable unconditionally.
+substrate-etl needs the engine only to converge; engine-down its
+detect()/verify() honestly report not-converged (never a false positive)
+and no completion record is written in that window. The completion store
+is pure bookkeeping: the runner's only production read
+(`runner.py:221` `verified_rungs()`) skips a redundant verify() when
+detect() already re-derived converged — losing the store costs one extra
+cheap read-only verify() per rung, never a re-converge, and BOTH loss
+scenarios are already mechanically pinned
+(`test_ladder_runner.py::test_crash_between_converge_and_record_heals_on_next_run`,
+`::test_recorded_rung_that_goes_pending_again_reconverges`). `nx doctor`
+never opens the store (`health.py:2878-2914`, detect-only); `nx init`
+never touches the ladder. Suspects cleared: `apply_attempted` is an
+in-process constructor flag (`upgrade.py:108`), never read from
+ladder.db; cascade-repair's `_unreflected()` reads
+chash_remap/catalog/memory, never ladder.db. The watermark store
+(`verify_fill_watermarks.json`) is ALREADY flat JSON — the D3-blessed
+fallback shape, not SQLite, no census adjudication needed; it holds the
+one real replay cost (~900s/90k-chunk collection if lost). Bootstrap:
+`_converge_preconditions()` runs before `_run_ladder()` in the same
+invocation, so the engine is normally up before any flush; the
+engine-defer window degrades to redundant cheap verify() calls, never
+data loss. P2 obligations: the in-process holder must serve
+`verified_rungs()` for later rungs within the same walk;
+`verified_at`/`package_version` audit metadata is observability-only,
+accepted lossy. Full analysis: T2
+`nexus/research-rdr186-q1-rung-rederivability`; registered as
+`nexus_rdr/186-research-2`.
