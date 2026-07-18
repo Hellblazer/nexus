@@ -50,7 +50,9 @@ class JooqRecordReflectionFeatureTest {
     // registered for native-image reflection; this guard is the deliberate count bump.
     // 54 -> 56: RDR-186 nexus-146xx.3/.10 added nexus.chash_remap (wire re-id map,
     // raw-fact substrate) and nexus.ladder_completions (upgrade-ladder bookkeeping).
-    private static final int EXPECTED_RECORD_TYPES = 56;
+    // 56 -> 57: nexus-146xx.5 added nexus.remap_membership(text,text) — jOOQ
+    // generates a record type for the table-valued function's RETURNS TABLE shape.
+    private static final int EXPECTED_RECORD_TYPES = 57;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

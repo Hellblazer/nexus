@@ -213,6 +213,11 @@
          Standalone table (no FKs); before grants. -->
     <include file="db/changelog/remap-001-baseline.xml"/>
 
+    <!-- RDR-186 nexus-146xx.5: remap_membership() — live leg-convergence counts
+         over chash_remap ⋈ chunks_<dim> (the real nexus-tidtd fix; no stored
+         verdict, RF-186-1). After remap-001 and vectors-001; before grants. -->
+    <include file="db/changelog/remap-002-membership-function.xml"/>
+
     <!-- RDR-186 nexus-146xx.10: ladder_completions — PG home for upgrade-ladder
          rung completion bookkeeping (D3 derive-first record-late; position is
          always derived, never stored). Standalone table; before grants. -->
