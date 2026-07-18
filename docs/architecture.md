@@ -190,6 +190,47 @@ addressing, the `document_chunks` manifest schema, span formats (`chash:<hex>`
 content-addressed spans vs. positional line/char spans), link types, the
 migration runbook, and admin/maintenance CLI surface.
 
+### Chunk identity: the canonical chash ([RDR-180](rdr/rdr-180-content-address-chash-binary-32byte.md))
+
+A **chash IS the 32-byte SHA-256 digest of the chunk text** — the full digest,
+never truncated. It has exactly two representations, with a hard rule about
+which appears where:
+
+- **Storage form: 32 raw bytes.** Postgres `BYTEA` with
+  `CHECK (octet_length(chash) = 32)`. Content-addressable storage keys on the
+  *value*, not its rendering; binary makes the width unambiguous (bytes are not
+  characters) and halves the key width vs hex text.
+- **Interchange form: 64 lowercase hex chars.** JSON wire values, the
+  `chash:[0-9a-f]{64}` citation grammar, CLI display, log lines. Hex belongs on
+  the wire, never in the key column.
+
+**One encode/decode seam, everywhere.** All conversions between the two forms
+go through a single boundary pair per side — nothing else encodes or decodes:
+
+| Side | Storage → interchange | Interchange → storage |
+|---|---|---|
+| Python client (`chunk_identity.py`) | `to_citation_hex()` | `to_storage_bytes()` |
+| Java engine (`db/Chash.java`) | `Chash.toHex()` | `Chash.fromHex()` / `Chash.fromSha256Bytes()` |
+
+Width validation lives inside that seam (the type constructor / the helper),
+so a wrong-width value fails loudly at the boundary with the offending length —
+never deep inside a transaction.
+
+**Why this is written down** (the bug class this eliminates): historically the
+stored chunk id was `sha256(chunk_text).hexdigest()[:32]` — 32 *hex chars* =
+128 bits = **half** the digest — while the citation grammar advertised the full
+64-hex digest, bridged by silent truncation. "32" meant hex-chars in one place
+and bytes in another. The canonical definition above makes the two subsystems
+agree at the full 256 bits, by construction.
+
+**Migration status:** stored chashes are legacy 32-hex until the RDR-180
+freeze-gated ETL (epic `nexus-jxizy`, Item6) rekeys them. For every rehashable
+row the legacy 32-hex is the strict prefix of the new 64-hex (same text, same
+digest); the persisted `chash_alias` table is the collision-free resolver for
+legacy references thereafter (prefix matching only *builds* the map, it is not
+the resolver). The table below describes **current** (pre-flip) producer
+behavior where it says `[:32]`.
+
 ### Metadata field semantics (chunk vs document level)
 
 Two hash fields look similar but mean very different things. Confusing them produces false-positive panic findings (e.g. "94% redundancy across the corpus" turns out to be 94% of chunks share a doc-level hash, which is correct: every chunk of one paper has the same `content_hash`). The table below locks the contract; consult before drawing conclusions from a metadata distribution.
@@ -198,7 +239,7 @@ Two hash fields look similar but mean very different things. Confusing them prod
 |---|---|---|---|---|
 | `content_hash` | document | `sha256(file_bytes)` | every indexer at register time (`indexer.py:1198`) | document-level dedup; staleness comparison; backup-snapshot identity |
 | `chunk_text_hash` | chunk | `sha256(chunk_text)` (full 64 chars) | every indexer per chunk; healed on an upgraded store by the ladder (`nx upgrade`) | content-addressed link spans (`chash:<hex>`); `nx t3 reidentify` natural-ID source (first 32 chars); cross-collection chunk dedup |
-| `chunk_text_hash[:32]` | chunk | first 32 chars of the SHA | `nx t3 reidentify` upsert ([RDR-108](rdr/rdr-108-graph-identity-normalization.md) Phase 2) | Chroma natural ID for the chunk; the join key from `document_chunks.chash` |
+| `chunk_text_hash[:32]` | chunk | first 32 chars of the SHA | `nx t3 reidentify` upsert ([RDR-108](rdr/rdr-108-graph-identity-normalization.md) Phase 2) | Chroma natural ID for the chunk; the join key from `document_chunks.chash`. **Legacy width** — retired by the [RDR-180](rdr/rdr-180-content-address-chash-binary-32byte.md) full-digest flip (see § Chunk identity above) |
 | `source_uri` | document | `file://...` or `x-devonthink-item://<uuid>` etc. | indexer / MCP write paths | persistent URI identity; aspect-extraction routing; audit-membership home detection |
 | `source_path` | document | absolute or repo-relative file path | indexer | display + grep targets; legacy path predating `source_uri` |
 | `chunk_start_char` / `chunk_end_char` | chunk | char offsets in the source file | indexer per chunk | `chunk:char` span resolution; UI highlight |
