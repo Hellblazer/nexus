@@ -44,26 +44,32 @@ destination. Exemptions are Hal's decisions, never code comments.
 This RDR closes the gap between RDR-158's enumerated scope and the
 directive's totality.
 
-### The gaps, named
+#### Gap 1: Scope hole — anything outside RDR-158's enumeration can claim exemption
 
-- **Gap A — scope hole.** RDR-158 governs the seven-domain stores. Any store
+RDR-158 governs the seven-domain stores. Any store
   outside that list (ladder, chash-remap, pipeline buffer, catalog local
   file, ad-hoc tables in `nexus.db`) can claim it is not covered. The
   directive admits no such reading; this RDR is where the *complete*
   inventory gets adjudicated.
-- **Gap B — bootstrap ordering.** The upgrade ladder's completion store
+#### Gap 2: Bootstrap ordering — the one honest argument in the exemption comments
+
+The upgrade ladder's completion store
   exists "before the t2-schema rung it records"; migration artifacts must
   survive engine absence and mid-install crashes. Retiring these is a design
   problem (what persists when the engine is down?), not a sed. This is the
   *one* honest argument the exemption comments contain, and it deserves a
   real answer instead of a comment.
-- **Gap C — stray data outside every migration path.** `aspect_promotion_log`
+#### Gap 3: Stray data outside every migration path
+
+`aspect_promotion_log`
   (`aspect_promotion.py:290`, created lazily "so we avoid yet another T2
   migration entry") and `_nexus_t3_steps` (`commands/upgrade.py:687`, created
   inline mid-command) live in `nexus.db` but are registered in **no**
   migration registry and **no** ETL. RDR-158 P4 deleting the SQLite schema
   would silently drop their data.
-- **Gap D — enforcement.** Until 2026-07-18 nothing mechanically resisted new
+#### Gap 4: Enforcement — nothing mechanically resisted new SQLite
+
+Until 2026-07-18 nothing mechanically resisted new
   SQLite. `tests/test_no_new_sqlite.py` (commit `54f7bd65`) now freezes
   per-file counts of inline SQLite DDL (15 files) and `# epsilon-allow:`
   overrides (43 files); growth fails. The freeze stops accretion; this RDR
