@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.13.1] - 2026-07-18
+
+Ships with (and requires) engine-service-v0.1.47 (unchanged from 6.13.0).
+
 ### Fixed
 
 - **CLI T3 verbs no longer demand legacy Chroma credentials on migrated /

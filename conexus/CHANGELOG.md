@@ -4,6 +4,12 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.13.1] - 2026-07-18
+
+- Plugin version aligned with conexus 6.13.1. No plugin-side changes. Root
+  CHANGELOG: CLI T3 verbs and nx doctor no longer demand legacy Chroma
+  credentials on migrated/cloud installs (nexus-c7aj3, nexus-nmw3i).
+
 ## [6.13.0] - 2026-07-18
 
 - Plugin version aligned with conexus 6.13.0. No plugin-side changes. See the
