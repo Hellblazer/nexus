@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from nexus.upgrade_ladder.completion import CompletionStore
+from nexus.upgrade_ladder.completion import CompletionRecord
 from nexus.upgrade_ladder.protocol import (
     ConvergeOutcome,
     ConvergeResult,
@@ -84,13 +84,31 @@ class Recorder:
         self.events.append((event, fields))
 
 
+class InMemoryLedger:
+    """Minimal CompletionLedger for runner tests (RDR-186 .12: ladder.db is
+    retired; the runner's contract is substrate-independent)."""
+
+    def __init__(self) -> None:
+        self.records: dict[str, CompletionRecord] = {}
+
+    def record_verified(self, rung_name: str, *, package_version: str, detail: str = "") -> None:
+        self.records[rung_name] = CompletionRecord(
+            rung_name=rung_name, verified_at="t0", package_version=package_version, detail=detail
+        )
+
+    def verified_rungs(self) -> frozenset[str]:
+        return frozenset(self.records)
+
+    def completions(self) -> dict[str, CompletionRecord]:
+        return dict(self.records)
+
+
 @pytest.fixture
-def store(tmp_path: pathlib.Path) -> CompletionStore:
-    with CompletionStore(tmp_path / "ladder.db", now_fn=lambda: "t0") as s:
-        yield s
+def store() -> InMemoryLedger:
+    return InMemoryLedger()
 
 
-def _runner(rungs: tuple[ScriptedRung, ...], store: CompletionStore, **kwargs: object) -> LadderRunner:
+def _runner(rungs: tuple[ScriptedRung, ...], store: InMemoryLedger, **kwargs: object) -> LadderRunner:
     return LadderRunner(
         LadderRegistry(rungs),
         store,
@@ -106,7 +124,7 @@ def _outcomes(report: LadderRunReport) -> list[tuple[str, RungOutcome]]:
 # ── Happy path ───────────────────────────────────────────────────────────────
 
 
-def test_walk_converges_and_records_in_order(store: CompletionStore) -> None:
+def test_walk_converges_and_records_in_order(store: InMemoryLedger) -> None:
     a, b = ScriptedRung("a"), ScriptedRung("b")
     report = _runner((a, b), store).run()
     assert _outcomes(report) == [("a", RungOutcome.RECORDED), ("b", RungOutcome.RECORDED)]
@@ -116,14 +134,14 @@ def test_walk_converges_and_records_in_order(store: CompletionStore) -> None:
     assert store.completions()["a"].package_version == "6.12.0"
 
 
-def test_resumable_rung_is_driven_to_completion_in_one_run(store: CompletionStore) -> None:
+def test_resumable_rung_is_driven_to_completion_in_one_run(store: InMemoryLedger) -> None:
     rung = ScriptedRung("multi", work_units=3)
     report = _runner((rung,), store).run()
     assert _outcomes(report) == [("multi", RungOutcome.RECORDED)]
     assert rung.converge_calls == 3
 
 
-def test_rerun_is_idempotent(store: CompletionStore) -> None:
+def test_rerun_is_idempotent(store: InMemoryLedger) -> None:
     rung = ScriptedRung("a")
     runner = _runner((rung,), store)
     first = runner.run()
@@ -139,7 +157,7 @@ def test_rerun_is_idempotent(store: CompletionStore) -> None:
 # ── The RDR-142 guard: verify-fail must NOT advance position ────────────────
 
 
-def test_verify_fail_records_nothing_and_stops_the_walk(store: CompletionStore) -> None:
+def test_verify_fail_records_nothing_and_stops_the_walk(store: InMemoryLedger) -> None:
     bad = ScriptedRung("bad", verify_result=False)
     later = ScriptedRung("later")
     report = _runner((bad, later), store).run()
@@ -153,7 +171,7 @@ def test_verify_fail_records_nothing_and_stops_the_walk(store: CompletionStore) 
     assert later.converge_calls == 0  # the ladder never walks past failed work
 
 
-def test_verify_fail_after_earlier_success_pins_position(store: CompletionStore) -> None:
+def test_verify_fail_after_earlier_success_pins_position(store: InMemoryLedger) -> None:
     good = ScriptedRung("good")
     bad = ScriptedRung("bad", verify_result=False)
     report = _runner((good, bad), store).run()
@@ -161,7 +179,7 @@ def test_verify_fail_after_earlier_success_pins_position(store: CompletionStore)
     assert store.verified_rungs() == frozenset({"good"})
 
 
-def test_converge_error_records_nothing_and_stops(store: CompletionStore) -> None:
+def test_converge_error_records_nothing_and_stops(store: InMemoryLedger) -> None:
     boom = ScriptedRung("boom", fail_converge=True)
     later = ScriptedRung("later")
     report = _runner((boom, later), store).run()
@@ -173,7 +191,7 @@ def test_converge_error_records_nothing_and_stops(store: CompletionStore) -> Non
     assert store.verified_rungs() == frozenset()
 
 
-def test_stuck_resumable_rung_exhausts_step_budget(store: CompletionStore) -> None:
+def test_stuck_resumable_rung_exhausts_step_budget(store: InMemoryLedger) -> None:
     """A buggy rung claiming RESUMABLE forever must not spin the runner —
     the step budget fails it loudly, records nothing, stops the walk."""
     stuck = ScriptedRung("stuck", stuck=True)
@@ -184,7 +202,7 @@ def test_stuck_resumable_rung_exhausts_step_budget(store: CompletionStore) -> No
     assert store.verified_rungs() == frozenset()
 
 
-def test_deferred_rung_stops_walk_without_failing(store: CompletionStore) -> None:
+def test_deferred_rung_stops_walk_without_failing(store: InMemoryLedger) -> None:
     """RDR-142 would-defer class: a deferred rung records nothing and stops
     the walk (hard edges), but the report is NOT hard-failed — deferral is
     designed to retry on a later run, never to fail the trigger."""
@@ -204,12 +222,16 @@ def test_deferred_rung_stops_walk_without_failing(store: CompletionStore) -> Non
 # ── Crash resume: converged-but-unrecorded heals by verify-then-record ──────
 
 
-def test_crash_between_converge_and_record_heals_on_next_run(store: CompletionStore) -> None:
-    """Simulate a crash after converge but before record: the rung's state is
-    converged, the store has no row. Position stays at the last VERIFIED rung
-    until the next run verifies and records — never trusting the crash."""
+def test_crash_between_converge_and_record_heals_on_next_run(store: InMemoryLedger) -> None:
+    """Converged-but-unrecorded state: the rung's state is converged, the
+    ledger has no row. Originally framed as a crash window; since RDR-186
+    .12 this is ALSO the normal pre-flush transient (engine-defer window) —
+    either way, position stays at the last VERIFIED rung until the next run
+    verifies and records, never trusting the unrecorded convergence."""
     crashed = ScriptedRung("crashed", done=1)  # converged on disk, unrecorded
-    assert store.ladder_position(("crashed",)) == 0  # pre-heal: not verified
+    from nexus.upgrade_ladder.completion import derive_ladder_position
+
+    assert derive_ladder_position(store.verified_rungs(), ("crashed",)) == 0  # pre-heal: not verified
 
     report = _runner((crashed,), store).run()
     assert _outcomes(report) == [("crashed", RungOutcome.RECORDED)]
@@ -218,7 +240,7 @@ def test_crash_between_converge_and_record_heals_on_next_run(store: CompletionSt
     assert report.position == 1
 
 
-def test_converged_but_unrecorded_with_failing_verify_stops(store: CompletionStore) -> None:
+def test_converged_but_unrecorded_with_failing_verify_stops(store: InMemoryLedger) -> None:
     """The heal path still runs through the guard: a converged-looking rung
     whose verify fails is VERIFY_FAILED, not silently recorded."""
     liar = ScriptedRung("liar", done=1, verify_result=False)
@@ -227,7 +249,7 @@ def test_converged_but_unrecorded_with_failing_verify_stops(store: CompletionSto
     assert store.verified_rungs() == frozenset()
 
 
-def test_recorded_rung_that_goes_pending_again_reconverges(store: CompletionStore) -> None:
+def test_recorded_rung_that_goes_pending_again_reconverges(store: InMemoryLedger) -> None:
     """Critic P0.R2 finding 2 (the first thing P1's t2-schema rung exercises):
     a rung RECORDED in a prior run whose detect() later reports not-converged
     again (new package version added new work) must re-converge, re-verify,
@@ -258,7 +280,7 @@ def test_recorded_rung_that_goes_pending_again_reconverges(store: CompletionStor
 # ── N/A rungs: detect→skip (f0pmd pattern) ──────────────────────────────────
 
 
-def test_not_applicable_rung_is_skipped_without_record(store: CompletionStore) -> None:
+def test_not_applicable_rung_is_skipped_without_record(store: InMemoryLedger) -> None:
     na = ScriptedRung("na", applicable=False)
     after = ScriptedRung("after")
     report = _runner((na, after), store).run()
@@ -274,7 +296,7 @@ def test_not_applicable_rung_is_skipped_without_record(store: CompletionStore) -
 # ── Read-only pending sweep (the doctor surface, consumed by P0.4) ──────────
 
 
-def test_pending_sweep_is_read_only(store: CompletionStore) -> None:
+def test_pending_sweep_is_read_only(store: InMemoryLedger) -> None:
     pending_rung = ScriptedRung("pending-rung")
     converged_rung = ScriptedRung("converged-rung", done=1)
     na = ScriptedRung("na", applicable=False)
@@ -308,7 +330,7 @@ def test_installed_package_version_falls_back_to_unknown(
 # ── Progress reporting ───────────────────────────────────────────────────────
 
 
-def test_runner_emits_walk_events(store: CompletionStore) -> None:
+def test_runner_emits_walk_events(store: InMemoryLedger) -> None:
     recorder = Recorder()
     rung = ScriptedRung("a")
     LadderRunner(

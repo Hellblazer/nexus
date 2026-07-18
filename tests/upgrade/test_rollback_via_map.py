@@ -200,3 +200,196 @@ def test_source_is_never_written(map_store: ChashRemapStore) -> None:
     vector = FakeVectorClient({"coll": {NEW_A}})
     map_store.record_batch([RemapEntry("", "coll", "legacy-1", NEW_A, "coll", "p")])
     rollback_collections(read, vector, collections=["coll"], remap_store=map_store)
+
+
+# ── nexus-146xx.8: whole-leg map-clear ordering (RDR-186 D2) ─────────────────
+#
+# The leg's chash_remap rows are cleared ONLY after the WHOLE function's
+# verification completes — strictly after every collection's target_after
+# check, never eagerly, never per-page/per-collection. The map is
+# load-bearing for rollback's OWN retry idempotency (gate Critical): a
+# mid-rollback crash must find the translation table intact. Before the
+# clear, cascade_revert points the local stores back at the old ids — a
+# leg is not "rolled back" while local stores still reference its new
+# chashes.
+
+
+class _OrderSpy:
+    """Records the interleaving of deletes, reverts, and clears."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple] = []
+
+    def revert_fn(self, leg_entries):
+        from nexus.migration.remap_cascade import RevertReport, StoreCascadeResult
+
+        self.events.append(("revert", tuple(sorted(leg_entries))))
+        return RevertReport(stores=[StoreCascadeResult("spy-store", True)])
+
+    def clear_fn(self, source: str, target: str) -> int:
+        self.events.append(("clear", source, target))
+        return len([e for e in self.events if e[0] == "clear"])
+
+
+class _SpyingVectorClient(FakeVectorClient):
+    """FakeVectorClient that also records deletes into the shared spy."""
+
+    def __init__(self, rows, spy: _OrderSpy) -> None:
+        super().__init__(rows)
+        self._spy = spy
+
+    def get_or_create_collection(self, name: str):
+        handle = super().get_or_create_collection(name)
+        spy = self._spy
+        orig_delete = handle.delete
+
+        def spying_delete(ids):
+            spy.events.append(("delete", name, tuple(sorted(ids))))
+            orig_delete(ids)
+
+        handle.delete = spying_delete  # type: ignore[method-assign]
+        return handle
+
+
+def test_map_clear_fires_only_after_every_collection_verified(
+    map_store: ChashRemapStore,
+) -> None:
+    """Happy path over TWO collections: every delete (and its verification)
+    precedes every revert, and every revert precedes every clear — the
+    whole-function scope, not per-collection. Falsify by moving the
+    revert/clear block inside the per-collection loop: the interleaving
+    assertion fails (collection B's delete would follow collection A's
+    clear)."""
+    spy = _OrderSpy()
+    read = FakeReadClient({"collA": ["legacy-1"], "collB": ["legacy-2"]})
+    vector = _SpyingVectorClient({"collA": {NEW_A}, "collB": {NEW_B}}, spy)
+    map_store.record_batch([
+        RemapEntry("", "collA", "legacy-1", NEW_A, "collA", "p"),
+        RemapEntry("", "collB", "legacy-2", NEW_B, "collB", "p"),
+    ])
+
+    deleted = rollback_collections(
+        read, vector, collections=["collA", "collB"], remap_store=map_store,
+        cascade_revert_fn=spy.revert_fn, map_clear_fn=spy.clear_fn,
+    )
+
+    assert deleted == {"collA": 1, "collB": 1}
+    kinds = [e[0] for e in spy.events]
+    assert kinds == ["delete", "delete", "revert", "clear", "revert", "clear"], (
+        "whole-function ordering: ALL deletes/verifications first, then per-leg "
+        f"revert-then-clear — got {kinds}"
+    )
+    assert ("clear", "collA", "collA") in spy.events
+    assert ("clear", "collB", "collB") in spy.events
+
+
+def test_crash_mid_rollback_leaves_map_untouched(
+    map_store: ChashRemapStore,
+) -> None:
+    """The gate Critical: a crash before the whole-function verification
+    completes (collection B's target refuses deletes → count-verification
+    raises) must leave the map INTACT — no revert, no clear — so a retry
+    still translates every id. Mutation per the bead: clear per-collection
+    and this test fails (collA's rows would already be gone)."""
+    spy = _OrderSpy()
+
+    class RefusingVectorClient(FakeVectorClient):
+        def get_or_create_collection(self, name: str):
+            handle = super().get_or_create_collection(name)
+            if name == "collB":
+                handle.delete = lambda ids: None  # type: ignore[method-assign] — swallowed delete: count never moves
+            return handle
+
+    read = FakeReadClient({"collA": ["legacy-1"], "collB": ["legacy-2"]})
+    vector = RefusingVectorClient({"collA": {NEW_A}, "collB": {NEW_B}})
+    map_store.record_batch([
+        RemapEntry("", "collA", "legacy-1", NEW_A, "collA", "p"),
+        RemapEntry("", "collB", "legacy-2", NEW_B, "collB", "p"),
+    ])
+
+    with pytest.raises(RuntimeError, match="swallowed|count went"):
+        rollback_collections(
+            read, vector, collections=["collA", "collB"], remap_store=map_store,
+            cascade_revert_fn=spy.revert_fn, map_clear_fn=spy.clear_fn,
+        )
+
+    assert spy.events == [], (
+        "a failed rollback must neither revert local stores nor clear the map "
+        f"— retry idempotency depends on it; got {spy.events}"
+    )
+    assert map_store.entries_with_targets("collA") != {}, "map intact for retry"
+
+
+def test_clear_targets_the_recorded_leg_pairs(map_store: ChashRemapStore) -> None:
+    """Cross-model: the clear is issued per RECORDED (source, target) pair —
+    the co-residency-safe scoped clear the engine endpoint requires."""
+    spy = _OrderSpy()
+    read = FakeReadClient({"coll": ["legacy-1", "legacy-2"]})
+    vector = FakeVectorClient({"coll__voyage": {NEW_A, NEW_B}})
+    map_store.record_batch([
+        RemapEntry("", "coll", "legacy-1", NEW_A, "coll__voyage", "p"),
+        RemapEntry("", "coll", "legacy-2", NEW_B, "coll__voyage", "p"),
+    ])
+
+    rollback_collections(
+        read, vector, collections=["coll"], remap_store=map_store,
+        target_names={"coll": "coll__voyage"},
+        cascade_revert_fn=spy.revert_fn, map_clear_fn=spy.clear_fn,
+    )
+
+    clears = [e for e in spy.events if e[0] == "clear"]
+    assert clears == [("clear", "coll", "coll__voyage")]
+
+
+def test_no_map_entries_means_no_revert_no_clear(map_store: ChashRemapStore) -> None:
+    """A conformant-id collection has no leg claims — nothing to revert,
+    nothing to clear (the fns must not be called with empty legs)."""
+    spy = _OrderSpy()
+    read = FakeReadClient({"coll": [NEW_A]})
+    vector = FakeVectorClient({"coll": {NEW_A}})
+
+    rollback_collections(
+        read, vector, collections=["coll"], remap_store=map_store,
+        cascade_revert_fn=spy.revert_fn, map_clear_fn=spy.clear_fn,
+    )
+
+    assert [e for e in spy.events if e[0] in ("revert", "clear")] == []
+
+
+def test_partial_revert_failure_blocks_the_map_clear(
+    map_store: ChashRemapStore,
+) -> None:
+    """The reviewer-146xx-8 Critical, pinned: a revert that fails on ANY
+    store must abort BEFORE the map clear — clearing anyway would erase the
+    only signal (the map) that can ever detect the unreverted store. The
+    failure is loud and the whole rollback stays retryable."""
+    from nexus.migration.remap_cascade import RevertReport, StoreCascadeResult
+
+    events: list[tuple] = []
+
+    def failing_revert(leg_entries):
+        events.append(("revert", tuple(sorted(leg_entries))))
+        return RevertReport(stores=[
+            StoreCascadeResult("document_chunks", True, rewritten=1),
+            StoreCascadeResult("document_aspects", False, reason="database is locked"),
+        ])
+
+    def must_not_clear(source, target):
+        events.append(("clear", source, target))
+        raise AssertionError("map clear must never run after a partial revert")
+
+    read = FakeReadClient({"coll": ["legacy-1"]})
+    vector = FakeVectorClient({"coll": {NEW_A}})
+    map_store.record_batch([RemapEntry("", "coll", "legacy-1", NEW_A, "coll", "p")])
+
+    with pytest.raises(RuntimeError, match="revert failed.*NOT[\\s\\S]*cleared|document_aspects"):
+        rollback_collections(
+            read, vector, collections=["coll"], remap_store=map_store,
+            cascade_revert_fn=failing_revert, map_clear_fn=must_not_clear,
+        )
+
+    assert ("revert", ("legacy-1",)) in events
+    assert not [e for e in events if e[0] == "clear"]
+    assert map_store.entries_with_targets("coll") != {}, (
+        "the map survives a failed revert — the unreverted store stays detectable"
+    )

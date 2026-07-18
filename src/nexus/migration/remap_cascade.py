@@ -76,6 +76,31 @@ class StoreCascadeResult:
     reason: str = ""
 
 
+@dataclass(frozen=True)
+class RevertReport:
+    """:func:`cascade_revert`'s result — per-store outcomes PLUS the
+    collapse loss, returned as DATA (reviewer-146xx-8: a WARNING log alone
+    cannot reach the CLI operator deciding whether the rollback is clean).
+
+    The CALLER (``rollback_collections``' whole-leg block) MUST refuse to
+    clear the leg's map rows unless every store reverted ok — a partial
+    revert with the map cleared anyway would erase the one signal that can
+    ever detect the unreverted store."""
+
+    stores: list[StoreCascadeResult]
+    #: Old ids whose rows the FORWARD cascade's dedupe merged away —
+    #: unrestorable (byte-identical siblings; the survivor carries the
+    #: sorted-first old id). Empty on legs with no identical-text collapse.
+    unrestorable: tuple[str, ...] = ()
+
+    @property
+    def ok(self) -> bool:
+        return all(r.ok for r in self.stores)
+
+    def failures(self) -> list[StoreCascadeResult]:
+        return [r for r in self.stores if not r.ok]
+
+
 def _global_view(map_store: ChashRemapStore) -> dict[str, str]:
     """Collapse the per-collection map to old_id → new_chash, failing loud
     on cross-collection ambiguity."""
@@ -312,27 +337,20 @@ def unreflected_stores(
     return unreflected
 
 
-def cascade_remap(
-    map_store: ChashRemapStore,
-    *,
-    catalog_db: Path,
-    memory_db: Path,
+def _run_stores(
+    view: dict[str, str], *, catalog_db: Path, memory_db: Path, event: str
 ) -> list[StoreCascadeResult]:
-    """Apply the persisted map across every audited local store.
-
-    One transaction PER STORE (a crash resumes idempotently: rewritten
-    old ids no longer match). Per-store failures are reported, not
-    raised — except :class:`AmbiguousRemapError`, which aborts the run
-    before any write. Every ``CASCADE_STORES`` entry yields a result row
-    (the completeness tripwire).
-    """
+    """The shared per-store runner: one transaction PER STORE, per-store
+    failures reported not raised, every ``CASCADE_STORES`` entry yields a
+    result row (the completeness tripwire). *view* maps
+    from-value → to-value — the forward cascade passes old→new, the
+    rollback revert passes new→old through the identical machinery."""
     missing = set(CASCADE_STORES).symmetric_difference(_STORE_FNS)
     if missing:
         raise RuntimeError(
             f"remap cascade inventory drift: {sorted(missing)!r} — "
             "CASCADE_STORES and _STORE_FNS must cover the same audited set"
         )
-    view = _global_view(map_store)  # raises AmbiguousRemapError pre-write
     results: list[StoreCascadeResult] = []
     conns: dict[str, sqlite3.Connection] = {}
     try:
@@ -356,7 +374,7 @@ def cascade_remap(
                 results.append(StoreCascadeResult(store, False, reason=str(exc)))
                 continue
             _log.info(
-                "remap_cascade_store_done",
+                event,
                 store=store,
                 rewritten=rewritten,
                 deduped=deduped,
@@ -366,3 +384,90 @@ def cascade_remap(
         for conn in conns.values():
             conn.close()
     return results
+
+
+def cascade_remap(
+    map_store: ChashRemapStore,
+    *,
+    catalog_db: Path,
+    memory_db: Path,
+) -> list[StoreCascadeResult]:
+    """Apply the persisted map across every audited local store.
+
+    One transaction PER STORE (a crash resumes idempotently: rewritten
+    old ids no longer match). Per-store failures are reported, not
+    raised — except :class:`AmbiguousRemapError`, which aborts the run
+    before any write. Every ``CASCADE_STORES`` entry yields a result row
+    (the completeness tripwire).
+    """
+    view = _global_view(map_store)  # raises AmbiguousRemapError pre-write
+    return _run_stores(
+        view, catalog_db=catalog_db, memory_db=memory_db,
+        event="remap_cascade_store_done",
+    )
+
+
+def cascade_revert(
+    leg_entries: dict[str, tuple[str, str]],
+    *,
+    catalog_db: Path,
+    memory_db: Path,
+) -> RevertReport:
+    """Point the local stores BACK at one leg's old ids — the rollback's
+    un-pointing half (RDR-186 D2 / nexus-146xx.8): a leg is not "rolled
+    back" while local stores still reference chashes whose target rows the
+    rollback just deleted.
+
+    *leg_entries* is the leg's ``entries_with_targets`` shape
+    (``old_id → (new_chash, target_collection)``), read BEFORE the caller
+    clears the leg's map rows — the map is the only record of what to
+    revert, which is exactly why the clear must come strictly after this.
+
+    LOSSY-INVERSE CONTRACT (stated, never silent): the forward cascade's
+    two-phase dedupe DELETED collapse-sibling rows and ``frecency`` merged
+    their values with MAX — that information is gone, so an exact inverse
+    does not exist. When N old ids collapsed into one new chash, the
+    surviving row is restored under the deterministic sorted-first old id
+    and the other N-1 are logged loudly as unrestorable
+    (``remap_revert_collapse_loss``). This is a choice among byte-identical
+    representations, not a semantic guess: collapse siblings carry the SAME
+    chunk text, so either old id points at the content the restored source
+    serves. Runs through the identical per-store machinery as the forward
+    cascade — same stores, same two-phase shapes, same per-store
+    transactions, inverted view.
+
+    STRUCTURAL NO-OPS ON REVERT (reviewer-146xx-8, stated so the shared
+    machinery's behavior is intentional, not incidental): after a completed
+    forward cascade no row exists at any of the leg's OLD ids in these
+    stores, so the two-phase DELETE-dedupe step and ``frecency``'s merge
+    SQL cannot fire on the revert direction — the restore rides entirely on
+    the final rename UPDATE. When a stray row DOES pre-exist at an old id
+    (an out-of-band write between cascade and revert), the dedupe step
+    handles it exactly as the forward direction would: the stray absorbs
+    the reverting row (merge for frecency, delete-then-keep elsewhere) —
+    tested, not assumed.
+
+    Returns a :class:`RevertReport`; the caller gates the map-clear on
+    ``report.ok``.
+    """
+    reverse: dict[str, str] = {}
+    lost: list[str] = []
+    for old_id in sorted(leg_entries):
+        new_chash, _target = leg_entries[old_id]
+        if new_chash in reverse:
+            lost.append(old_id)  # collapse sibling: its row was merged away
+        else:
+            reverse[new_chash] = old_id
+    if lost:
+        _log.warning(
+            "remap_revert_collapse_loss",
+            unrestorable=len(lost),
+            old_ids=lost[:20],
+            note="forward dedupe merged these siblings' rows; the surviving "
+            "row reverts to the sorted-first old id (byte-identical text)",
+        )
+    results = _run_stores(
+        reverse, catalog_db=catalog_db, memory_db=memory_db,
+        event="remap_revert_store_done",
+    )
+    return RevertReport(stores=results, unrestorable=tuple(lost))

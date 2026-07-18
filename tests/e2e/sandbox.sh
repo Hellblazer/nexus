@@ -12,6 +12,35 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SANDBOX="$HOME/nexus-sandbox"
 
+# RDR-184 P0 guard-surface gap (nexus-ccs9v.4/.5 review): this script
+# mutates the IDENTICAL fixed resource ($HOME/nexus-sandbox, unconditional
+# rm -rf below) as release-sandbox.sh — SAME lockdir name as
+# release-sandbox.sh, not a new lock, because it is the same underlying
+# resource: running this while release-sandbox.sh holds its lock (e.g.
+# mid smoke/shakedown/tmux run) would otherwise rm -rf the sandbox HOME
+# out from under it with zero contention signal. Acquired here, before
+# the first mutation, same pattern as the other guarded harnesses.
+# shellcheck source=./lib/lock.sh disable=SC1091
+source "$SCRIPT_DIR/lib/lock.sh"
+LOCKDIR="/tmp/nexus-e2e-locks/release-sandbox.lock"
+mkdir -p "$(dirname "$LOCKDIR")"
+# Held-by-parent seam: release-sandbox.sh already holds this exact lock when
+# it invokes us on its fresh-sandbox path — the lock is non-reentrant, so a
+# second acquire here self-deadlocks (found cutting 6.13.0: the fresh path
+# had never run under the hardened lock). The parent sets the env ONLY when
+# it holds the lock; standalone invocations still acquire + release.
+if [[ -z "${NX_E2E_LOCK_HELD_BY_PARENT:-}" ]]; then
+    lock_acquire "$LOCKDIR" || exit 1
+    trap 'lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
+    echo "[rdr-184] lock acquired: $LOCKDIR (pid $$)" >&2
+else
+    echo "[rdr-184] lock held by parent (pid $PPID) — not re-acquiring" >&2
+fi
+# Test seam (RDR-184 P0.2/.4, nexus-ccs9v.2/.4): tests/e2e/lib/harness_lock_test.sh
+# sets this to prove a concurrent invocation gets PAST the lock without ever
+# running this harness's real body (rm -rf $SANDBOX etc). No-op in normal use.
+[[ -n "${NX_E2E_LOCK_SELFTEST:-}" ]] && exit 0
+
 # Load API keys
 [[ -f "$REPO_ROOT/.env" ]] && set -a && source "$REPO_ROOT/.env" && set +a
 

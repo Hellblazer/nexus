@@ -4,9 +4,12 @@ import com.sun.net.httpserver.HttpServer;
 import dev.nexus.service.db.AspectRepository;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.ChashRepository;
+import dev.nexus.service.db.LadderRepository;
 import dev.nexus.service.db.MemoryRepository;
 import dev.nexus.service.db.MigrationJobRepository;
+import dev.nexus.service.db.PipelineRepository;
 import dev.nexus.service.db.PlanRepository;
+import dev.nexus.service.db.RemapRepository;
 import dev.nexus.service.db.ScratchRepository;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TelemetryRepository;
@@ -20,8 +23,11 @@ import dev.nexus.service.http.MigrationHandler;
 import dev.nexus.service.http.ChashHandler;
 import dev.nexus.service.http.HealthHandler;
 import dev.nexus.service.http.VersionHandler;
+import dev.nexus.service.http.LadderHandler;
 import dev.nexus.service.http.MemoryHandler;
+import dev.nexus.service.http.PipelineHandler;
 import dev.nexus.service.http.PlanHandler;
+import dev.nexus.service.http.RemapHandler;
 import dev.nexus.service.http.ScratchHandler;
 import dev.nexus.service.http.SessionTokenHandler;
 import dev.nexus.service.http.TaxonomyHandler;
@@ -221,6 +227,9 @@ public final class NexusService {
         var taxonomyCentroidRepo = new dev.nexus.service.vectors.TaxonomyCentroidRepository(tenantScope);
         var aspectRepo    = new AspectRepository(tenantScope);
         var chashRepo     = new ChashRepository(tenantScope);
+        var remapRepo     = new RemapRepository(tenantScope);
+        var ladderRepo    = new LadderRepository(tenantScope);
+        var pipelineRepo  = new PipelineRepository(tenantScope);
         var catalogRepo   = new CatalogRepository(tenantScope);
         var migrationJobRepo = new MigrationJobRepository(tenantScope);
 
@@ -267,6 +276,22 @@ public final class NexusService {
         // /v1/chash/* — chash_index endpoints (bead nexus-gmiaf.16)
         var chashCtx = server.createContext("/v1/chash", new ChashHandler(chashRepo));
         chashCtx.getFilters().addAll(authFilter);
+
+        // /v1/remap/* — chash_remap endpoints (RDR-186 nexus-146xx.4: wire re-id
+        // map write-through + per-leg clear + live membership counts)
+        var remapCtx = server.createContext("/v1/remap", new RemapHandler(remapRepo));
+        remapCtx.getFilters().addAll(authFilter);
+
+        // /v1/ladder/* — upgrade-ladder completion bookkeeping (RDR-186
+        // nexus-146xx.12: the ladder.db retirement's PG write/read surface)
+        var ladderCtx = server.createContext("/v1/ladder", new LadderHandler(ladderRepo));
+        ladderCtx.getFilters().addAll(authFilter);
+
+        // /v1/pipeline/* — engine-hosted streaming-PDF buffer (RDR-186
+        // nexus-146xx.16: pipeline.db's PG twin; state hosts here, the
+        // extraction compute stays client-side)
+        var pipelineCtx = server.createContext("/v1/pipeline", new PipelineHandler(pipelineRepo));
+        pipelineCtx.getFilters().addAll(authFilter);
 
         // /v1/catalog/* — catalog endpoints (bead nexus-gmiaf.18)
         var catalogCtx = server.createContext("/v1/catalog", new CatalogHandler(catalogRepo));

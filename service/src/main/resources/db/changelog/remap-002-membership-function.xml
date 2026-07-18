@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-186 bead nexus-146xx.5 — nexus.remap_membership() live-membership function.
+
+    The REAL nexus-tidtd fix (RDR-186 D2 / RF-186-1). Computes, per leg
+    (source_collection, target_collection), how many of the leg's chash_remap
+    claims have their new_chash PRESENT in the target chunk tables — a LIVE
+    count, computed fresh on every call, never persisted. Called by the
+    substrate-etl rung's detect()/verify() (client bead nexus-146xx.7) each
+    walk, replacing the broken count-equality convergence test
+    (source_count == target_count, substrate_etl.py:587) that forever-fails
+    cross-embedder-era re-chunk migrations (nexus-tidtd: 3 stale minilm source
+    chunks vs 6712 independently-indexed voyage target chunks).
+
+    Interpretation contract (the CLIENT rung's job, not this function's):
+      converged  <=>  present_count == mapped_total
+    including the 0 == 0 case — a leg with no outstanding claims owes nothing
+    (delivered-then-rolled-back and never-delivered collapse to the same state
+    because rollback clears the leg's map rows, D2 absence-encoding). The
+    function returns raw counts, never a verdict — the answer tracks the world
+    in BOTH directions (Gap-4 pin: map-clear -> 0/0; target row deleted ->
+    present < mapped) because nothing is cached anywhere.
+
+    SECURITY INVOKER + STABLE: runs under the calling role's RLS context
+    (FORCE RLS on chash_remap AND chunks_<dim> scopes every count to the
+    stamped nexus.tenant GUC), reads only, no side effects.
+
+    Probes ALL three chunk dims (384/768/1024): a target collection lives in
+    exactly one dim table (per its embedding model), and the caller should not
+    need to know which. Each EXISTS probe is a PK point lookup
+    ((tenant_id, collection, chash) — tenant_id supplied by the RLS predicate),
+    so the cost is one indexed scan of the leg's map rows with three index
+    probes per row. This is the nexus-ixl85 resolution: one SQL round trip
+    replaces the paged HTTP existing_ids probe.
+
+    Also resolves this RDR-186 sequencing note: chash_remap deliberately has
+    NO FK to catalog_collections — source collections are historical (often
+    Chroma-era names that never existed in PG), and map rows must survive
+    target-collection deletion for rollback-retry idempotency (permanent
+    retention, cleared only by verified whole-leg rollback).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: nexus.remap_membership(text, text) ─────────────────── -->
+    <changeSet id="remap-002-1" author="nexus-146xx.5">
+        <comment>
+            nexus.remap_membership(p_source_collection, p_target_collection)
+            RETURNS TABLE(mapped_total bigint, present_count bigint).
+            SECURITY INVOKER — RLS scopes both the map read and the chunk probes
+            to the stamped tenant. Live computation, no stored verdict (RF-186-1).
+        </comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.remap_membership(
+    p_source_collection text,
+    p_target_collection text
+) RETURNS TABLE(mapped_total bigint, present_count bigint)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $fn$
+    SELECT
+        count(*)::bigint AS mapped_total,
+        count(*) FILTER (WHERE
+            EXISTS (SELECT 1 FROM nexus.chunks_384 c
+                     WHERE c.collection = p_target_collection
+                       AND c.chash = r.new_chash)
+         OR EXISTS (SELECT 1 FROM nexus.chunks_768 c
+                     WHERE c.collection = p_target_collection
+                       AND c.chash = r.new_chash)
+         OR EXISTS (SELECT 1 FROM nexus.chunks_1024 c
+                     WHERE c.collection = p_target_collection
+                       AND c.chash = r.new_chash)
+        )::bigint AS present_count
+    FROM nexus.chash_remap r
+    WHERE r.source_collection = p_source_collection
+      AND r.target_collection = p_target_collection
+$fn$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus.remap_membership(text, text)</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: GRANT EXECUTE to nexus_svc ─────────────────────────── -->
+    <changeSet id="remap-002-2" author="nexus-146xx.5">
+        <comment>GRANT EXECUTE on remap_membership to nexus_svc (catalog-004 pattern)</comment>
+        <sql splitStatements="true" stripComments="false">
+GRANT EXECUTE ON FUNCTION nexus.remap_membership(text, text) TO nexus_svc;
+        </sql>
+        <rollback>
+            REVOKE EXECUTE ON FUNCTION nexus.remap_membership(text, text) FROM nexus_svc;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

@@ -162,8 +162,29 @@ class TestMigrateVectorsCmd:
             opened.append(Path(path))
             return object()
 
-        def fake_rollback(read_client, vector_client, *, collections=None, page_size=None):
+        wired: dict = {}
+
+        def fake_rollback(read_client, vector_client, *, collections=None,
+                          page_size=None, remap_store=None, target_names=None,
+                          cascade_revert_fn=None, map_clear_fn=None):
+            # RDR-186 .8: the CLI must wire the engine-backed map + the
+            # whole-leg revert/clear fns — pin the wiring, not just the count.
+            wired.update(
+                remap_store=remap_store,
+                revert=callable(cascade_revert_fn),
+                clear=callable(map_clear_fn),
+            )
             return {_COLL: 7}
+
+        class FakeRemapEngine:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return None
+
+            def clear_leg(self, source, target):
+                return 0
 
         monkeypatch.setattr(
             "nexus.migration.chroma_read.open_local_read_client", fake_open_local
@@ -171,11 +192,19 @@ class TestMigrateVectorsCmd:
         monkeypatch.setattr(
             "nexus.migration.vector_etl.rollback_collections", fake_rollback
         )
+        monkeypatch.setattr(
+            "nexus.migration.remap_client.HttpRemapStore", FakeRemapEngine
+        )
+        monkeypatch.setattr(
+            "nexus.migration.remap_client.seed_and_quarantine", lambda *_a, **_k: 0
+        )
         result = runner.invoke(migrate_vectors_cmd, ["--rollback", "--local-path", str(tmp_path)])
         assert result.exit_code == 0, result.output
         assert opened == [tmp_path]
         assert "7 chunk(s) removed" in result.output
         assert "source untouched" in result.output
+        assert isinstance(wired["remap_store"], FakeRemapEngine)
+        assert wired["revert"] and wired["clear"]
 
 
 class TestEngineFloorGate:

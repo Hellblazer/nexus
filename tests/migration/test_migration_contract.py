@@ -225,6 +225,8 @@ def test_vector_etl_surface():
         "page_size",
         "remap_store",  # RDR-185 P2.4: rollback-via-map (gate r1)
         "target_names",  # RDR-185 P2.R: cross-model rollback (audit C2)
+        "cascade_revert_fn",  # RDR-186 .8: local-store un-pointing before the clear
+        "map_clear_fn",  # RDR-186 .8: whole-leg engine map-clear (D2 ordering)
     }
     assert _params(v.verify_counts) == {
         "read_client", "vector_client", "collections", "target_names",

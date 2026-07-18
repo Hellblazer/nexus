@@ -713,9 +713,16 @@ def _migrate_one(
             target_collection=target if is_cross_model else None,
         )
 
-    # Post-write verification: exact TARGET count or it did not happen.
+    # Post-write verification: the target must hold AT LEAST the source's
+    # rows. `<` not `!=` (nexus-83ld0, mirroring etl_ports.py's relaxation):
+    # a co-resident target — independently indexed to MORE rows than the
+    # stale source — is not a failed write; strict equality hard-failed a
+    # fully-landed write on exactly the nexus-tidtd install shape. Accepted
+    # residual (same as etl_ports): `>=` proves arrival cardinality, not
+    # membership; the authoritative convergence answer is the live
+    # membership computation (RDR-186 .7), upstream of this legacy path.
     target_count = int(vector_client.count(target))
-    if target_count != source_count:
+    if target_count < source_count:
         reason = (
             f"post-write count mismatch: source={source_count} "
             f"target={target_count}"
@@ -901,10 +908,12 @@ def _verify_fill_one(
             missing_count=missing_count, filled_count=filled_count,
         )
 
-    # Post-write verification: exact TARGET count or it did not happen —
-    # the same non-negotiable gate as _migrate_one's post-write check.
+    # Post-write verification: the target must hold AT LEAST the source's
+    # rows — the same `<` relaxation as _migrate_one's post-write check
+    # (nexus-83ld0; co-resident targets legitimately exceed the source
+    # count, see the comment there).
     target_count_after = int(vector_client.count(target))
-    if target_count_after != source_count:
+    if target_count_after < source_count:
         reason = (
             f"post-write count mismatch: source={source_count} "
             f"target={target_count_after}"
@@ -1682,6 +1691,8 @@ def rollback_collections(
     page_size: int | None = None,
     remap_store: Any | None = None,
     target_names: dict[str, str] | None = None,
+    cascade_revert_fn: Any | None = None,
+    map_clear_fn: Any | None = None,
 ) -> dict[str, int]:
     """Undo the copy: delete from pgvector exactly the chashes present in
     the source Chroma collections. Returns exact per-collection deleted
@@ -1692,12 +1703,35 @@ def rollback_collections(
     RDR-185 P2.4 (gate r1): when the migration re-id'd chunks on the wire,
     the target holds NEW chashes — raw source-id equality would miss every
     row and trip the zero-removed guard below. *remap_store* (a
-    ``migration.wire_reid.ChashRemapStore``) translates each source id
+    ``migration.wire_reid.ChashRemapStore`` or the engine-backed
+    ``migration.remap_client.HttpRemapStore``) translates each source id
     through the persisted old→new map, identity-fallback for unmapped
     (already-conformant) ids; identical-text collapse siblings dedupe to
     one target lookup/delete. Rollback goes via the MAP, never live id
-    equality — the map is a permanent migration artifact precisely so this
-    stays possible after the source ids stop matching.
+    equality. Retention (RDR-186 .8, narrowed from "permanent"): the map
+    survives every failure and retry, and is cleared ONLY by a leg
+    rollback that verifiably completed — see the whole-leg block below.
+
+    WHOLE-LEG MAP-CLEAR ORDERING (RDR-186 D2 / nexus-146xx.8, gate
+    Critical): when *cascade_revert_fn* / *map_clear_fn* are provided, the
+    rolled-back legs' map rows are cleared ONLY after the WHOLE function's
+    verification completes — strictly after EVERY collection's
+    ``target_after`` check, never eagerly, never per-page or
+    per-collection. The map is load-bearing for this function's OWN retry
+    idempotency: entries are resolved up front and deletes are paged, so a
+    mid-rollback crash must find the translation table intact or a
+    cross-model retry silently probes the wrong target. Per rolled-back
+    leg, strictly in order: (1) ``cascade_revert_fn(leg_entries)`` points
+    the local stores back at the old ids (a leg is not "rolled back" while
+    local stores still reference its new chashes — the old ids return to
+    being the live ids once the migrated rows are gone); then (2)
+    ``map_clear_fn(source, target)`` clears the leg's claims per RECORDED
+    (source, target) pair (the engine's co-residency-safe scoped clear).
+    After the clear, live membership reads 0/0 — nothing owed — and the
+    leg is re-plannable behind the cost-consent gate (Q7: rolled-back =
+    PENDING). A crash AFTER verification but between per-leg clears leaves
+    the remaining legs' maps intact; re-running then re-deletes nothing
+    (idempotent) and completes the reverts/clears.
 
     CROSS-MODEL legs (P2 critique Critical / audit C2): a co-resident leg
     writes to a RENAMED target collection — probing the source-named
@@ -1712,10 +1746,15 @@ def rollback_collections(
     page = page_size or QUOTAS.MAX_QUERY_RESULTS
     names = collections if collections is not None else list_collection_names(read_client)
     deleted: dict[str, int] = {}
+    # (source, leg_entries) for every collection whose map had claims —
+    # consumed by the whole-leg revert/clear block strictly AFTER the loop.
+    legs_to_clear: list[tuple[str, dict[str, tuple[str, str]]]] = []
     for name in names:
         remap: dict[str, tuple[str, str]] = (
             remap_store.entries_with_targets(name) if remap_store is not None else {}
         )
+        if remap:
+            legs_to_clear.append((name, remap))
         default_target = (target_names or {}).get(name, name)
         involved = sorted(
             {default_target} | {tgt or default_target for _new, tgt in remap.values()}
@@ -1777,6 +1816,49 @@ def rollback_collections(
                 )
         deleted[name] = removed
         _log.info("vector_etl_rollback", collection=name, deleted=removed)
+    # ── WHOLE-FUNCTION scope: every collection above passed its target_after
+    # verification (any failure raised out of the loop) — only NOW may the
+    # rolled-back legs' local pointers revert and their map claims clear
+    # (RDR-186 D2; see the docstring's ordering block).
+    if map_clear_fn is not None or cascade_revert_fn is not None:
+        for name, leg_entries in legs_to_clear:
+            if cascade_revert_fn is not None:
+                # The revert GATES the clear (reviewer-146xx-8 Critical): a
+                # partial per-store revert with the map cleared anyway would
+                # erase the only signal that can ever detect the unreverted
+                # store (unreflected probes read the map). Per-store failures
+                # are REPORTED by the cascade machinery, not raised — so the
+                # caller must inspect and refuse, loudly. The map stays
+                # intact; the whole rollback is retryable.
+                report = cascade_revert_fn(leg_entries)
+                if not report.ok:
+                    failed = "; ".join(
+                        f"{r.store}: {r.reason or 'failed'}" for r in report.failures()
+                    )
+                    raise RuntimeError(
+                        f"rollback for '{name}': local-store revert failed "
+                        f"({failed}) — the leg's chash_remap rows are NOT "
+                        "cleared so the unreverted store stays detectable; "
+                        "fix the store and re-run (rollback is idempotent)"
+                    )
+                if report.unrestorable:
+                    _log.warning(
+                        "vector_etl_rollback_collapse_loss",
+                        source=name,
+                        unrestorable=len(report.unrestorable),
+                    )
+            if map_clear_fn is not None:
+                default_target = (target_names or {}).get(name, name)
+                for target in sorted(
+                    {tgt or default_target for _new, tgt in leg_entries.values()}
+                ):
+                    cleared = map_clear_fn(name, target)
+                    _log.info(
+                        "vector_etl_rollback_map_cleared",
+                        source=name,
+                        target=target,
+                        cleared=cleared,
+                    )
     return deleted
 
 

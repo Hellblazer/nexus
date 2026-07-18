@@ -613,6 +613,24 @@ class TestMigrateCollectionsUnit:
         assert "count" in result.reason.lower()
         assert report.ok is False
 
+    def test_co_resident_target_passes_post_write_check(self, source_client) -> None:
+        """nexus-83ld0 (the legacy-path twin of nexus-tidtd): a target holding
+        MORE rows than this leg wrote — independently indexed, co-resident —
+        is a fully-landed write, not a failure. The old strict `!=` hard-
+        failed exactly this shape on Hal's live install (source=3 stale
+        chunks vs target=6712). `<` keeps the lossy direction loud (the test
+        above) while letting co-residency pass. Falsify by restoring `!=` at
+        vector_etl's post-write check: this test then fails."""
+        name = _coll("etlunit-cores")
+        _seed_source(source_client, name, 3)
+        fake = FakeVectorClient(count_delta={name: +6709})
+
+        report = migrate_collections(source_client, fake, leg="local")
+
+        result = report.results[0]
+        assert result.status == "migrated"
+        assert report.ok is True
+
     def test_dry_run_writes_nothing(self, source_client) -> None:
         name = _coll("etlunit-dry")
         _seed_source(source_client, name, 4)

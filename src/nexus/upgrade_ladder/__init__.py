@@ -9,8 +9,6 @@ verify-before-record guard (P0.3) land in sibling modules.
 """
 from nexus.upgrade_ladder.completion import (
     CompletionRecord,
-    CompletionStore,
-    default_ladder_db_path,
 )
 from nexus.upgrade_ladder.protocol import (
     ConvergeOutcome,
@@ -55,7 +53,6 @@ __all__ = [
     "RUNG_SUBSTRATE_ETL",
     "RUNG_T2_SCHEMA",
     "CompletionRecord",
-    "CompletionStore",
     "ConvergeOutcome",
     "ConvergeResult",
     "LadderOrderError",
@@ -68,7 +65,6 @@ __all__ = [
     "RungRun",
     "RungStatus",
     "StructlogReporter",
-    "default_ladder_db_path",
     "default_registry",
     "expand_edges",
     "pending_rungs",

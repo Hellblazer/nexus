@@ -117,6 +117,15 @@ def test_service_mode_uses_single_endpoint_and_maps_counts(
     monkeypatch.setattr(
         "nexus.catalog.factory.make_catalog_reader", lambda: _FakeClient()
     )
+    # RDR-186 .16: the pipeline step now routes to the engine's
+    # delete_collection endpoint; wire it to the fake engine so the cascade's
+    # pipeline leg succeeds (failures == [] assertion below).
+    from tests.pipeline_fake_engine import make_fake_engine_db
+
+    pipeline_db, _engine = make_fake_engine_db()
+    monkeypatch.setattr(
+        "nexus.db.http_pipeline_client.HttpPipelineDB", lambda: pipeline_db
+    )
 
     counts = purge_collection_cascade(_ExplodingDb(), "knowledge__svc__minilm-l6-v2-384__v1")
 

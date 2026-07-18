@@ -34,6 +34,15 @@
 #   bash tests/e2e/lib/harness_lock_test.sh
 set -u -o pipefail
 
+# RDR-184 P0 review M3: `declare -A` (below) is bash 4.0+ only and does
+# not exist on stock macOS /bin/bash 3.2 (the OS-shipped default on this
+# repo's own stated primary dev platform) — fail loud with a clear
+# message rather than a bare parse error if invoked under an old bash.
+if ((BASH_VERSINFO[0] < 4)); then
+    echo "harness_lock_test.sh: requires bash >= 4 (found ${BASH_VERSION}); on macOS, run via Homebrew bash (e.g. /opt/homebrew/bin/bash), not the OS-shipped /bin/bash 3.2" >&2
+    exit 1
+fi
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../../.." && pwd)"
 # shellcheck source=./lock.sh disable=SC1091
@@ -44,15 +53,20 @@ FAIL=0
 ok()  { echo "  [ok] $1"; PASS=$((PASS + 1)); }
 bad() { echo "  [FAIL] $1"; FAIL=$((FAIL + 1)); }
 
-# name -> script path (repo-root relative)
+# name -> script path (repo-root relative). `sandbox` and
+# `t2-migration-sqlite` added RDR-184 P0 review guard-surface gap fix
+# (nexus-ccs9v.4/.5): both were unguarded fixed-shared-resource scripts
+# the original Phase-0 audit missed.
 declare -A HARNESS_SCRIPT=(
     [migration-rehearsal]="tests/e2e/migration-rehearsal/run.sh"
     [gc-ab]="tests/e2e/gc-ab/run-ab.sh"
     [release-sandbox]="tests/e2e/release-sandbox.sh"
     [upgrade-shakeout]="tests/e2e/upgrade-shakeout.sh"
+    [sandbox]="tests/e2e/sandbox.sh"
+    [t2-migration-sqlite]="tests/e2e/t2-migration-sqlite/run.sh"
 )
-# name -> cheap, side-effect-free positional args (empty for the two
-# no-argument scripts; a real, valid, non-mutating mode for the two
+# name -> cheap, side-effect-free positional args (empty for the
+# no-argument scripts; a real, valid, non-mutating mode for the
 # mode-dispatch scripts so they never hit an early "unknown mode"/"--help"
 # path that would exit BEFORE reaching lock_acquire, which would make the
 # test vacuous rather than exercising the lock).
@@ -61,6 +75,21 @@ declare -A HARNESS_ARGS=(
     [gc-ab]=""
     [release-sandbox]="reset"
     [upgrade-shakeout]="reset"
+    [sandbox]=""
+    [t2-migration-sqlite]=""
+)
+# Per-harness lockdir NAME override — defaults to "$LOCKROOT/$name.lock"
+# when a name has no entry here. `sandbox` deliberately shares
+# release-sandbox's lockdir name: sandbox.sh mutates the IDENTICAL fixed
+# resource ($HOME/nexus-sandbox) as release-sandbox.sh, so it is the SAME
+# lock, not a new one (RDR-184 P0 review guard-surface gap). Using this
+# override in the loop below means the loop's "(2) simulate a running
+# holder" step for name=sandbox acquires the literal
+# release-sandbox.lock lockdir — i.e. this exercises the actual
+# cross-script contention (sandbox.sh blocked by release-sandbox's own
+# lock), not a lookalike.
+declare -A HARNESS_LOCKDIR=(
+    [sandbox]="release-sandbox"
 )
 
 # Machine-global lock root the harnesses themselves use (must match — this
@@ -71,12 +100,13 @@ declare -A HARNESS_ARGS=(
 # harness itself, silently validating nothing.
 LOCKROOT="/tmp/nexus-e2e-locks"
 
-for name in migration-rehearsal gc-ab release-sandbox upgrade-shakeout; do
+for name in migration-rehearsal gc-ab release-sandbox upgrade-shakeout sandbox t2-migration-sqlite; do
     echo
     echo "=== $name ==="
     script="${HARNESS_SCRIPT[$name]}"
     args="${HARNESS_ARGS[$name]}"
-    lockdir="$LOCKROOT/$name.lock"
+    lock_name="${HARNESS_LOCKDIR[$name]:-$name}"
+    lockdir="$LOCKROOT/$lock_name.lock"
 
     # ── non-vacuity: wiring assertion ────────────────────────────────────
     # shellcheck disable=SC2016 # intentional literal — grepping for the literal source line, not expanding it

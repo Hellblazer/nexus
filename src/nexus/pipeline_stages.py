@@ -2,11 +2,13 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """Pipeline stage functions for streaming PDF indexing (RDR-048).
 
-Three concurrent stages connected by PipelineDB:
+Three concurrent stages connected by the engine-backed pipeline buffer
+(``HttpPipelineDB`` over ``nexus.pdf_pipeline`` — RDR-186 .16; the local
+``pipeline.db`` SQLite buffer is retired):
 
 1. **extractor_loop** — extracts pages → ``pdf_pages`` buffer
 2. **chunker_loop** — polls pages, chunks stable prefix, embeds → ``pdf_chunks``
-3. **uploader_loop** — reads embedded chunks, upserts to T3 ChromaDB
+3. **uploader_loop** — reads embedded chunks, upserts to T3
 
 After all three stages complete, the orchestrator runs post-passes to:
 - Enrich chunk metadata from the ExtractionResult (title, author, etc.)
@@ -36,14 +38,21 @@ import structlog
 
 from nexus.pdf_chunker import PDFChunker
 from nexus.pdf_extractor import ExtractionResult, PDFExtractor
-from nexus.pipeline_buffer import PipelineDB
+from nexus.db.http_pipeline_client import HttpPipelineDB
 from nexus.retry import _chroma_with_retry
 
 _log = structlog.get_logger(__name__)
 
 _UPLOAD_BATCH_SIZE = 128  # Conservative vs ChromaDB's 300 limit — matches _INCREMENTAL_BATCH_SIZE in doc_indexer
 _EMBED_BATCH_SIZE = 32  # Smaller than batch path (128) — favours heartbeat freshness in streaming
-_POLL_INTERVAL = 0.1
+# 2.0s (was 0.1 against local SQLite): each poll-driven read now flushes
+# buffered writes and issues an HTTP GET, so the cadence matches the
+# aspect_worker's 2s idle poll. Governs the uploader's wait-for-chunks
+# sleep and the chunker's no-event fallback; the chunker's primary wait is
+# extraction_done.wait(timeout=0.5) (always constructed in the real
+# pipeline_index_pdf path). Latency cost is bounded by a few poll cycles
+# per ingest; extraction dominates wall-clock.
+_POLL_INTERVAL = 2.0
 
 EmbedFn = Callable[[list[str], str], tuple[list[list[float]], str]]
 
@@ -58,13 +67,13 @@ class PipelineCancelled(Exception):
 def extractor_loop(
     pdf_path: Path,
     content_hash: str,
-    db: PipelineDB,
+    db: HttpPipelineDB,
     cancel: threading.Event,
     extractor: str = "auto",
     on_formula_oom: str = "fail",
     extraction_done: threading.Event | None = None,
 ) -> ExtractionResult:
-    """Extract pages to PipelineDB buffer via the on_page streaming callback.
+    """Extract pages to the pipeline buffer via the on_page streaming callback.
 
     On resume, if all pages are already in the buffer, skips re-extraction
     entirely and returns the stored ExtractionResult metadata.
@@ -180,7 +189,7 @@ def _build_chunk_metadata(
 def _embed_and_write_batch(
     chunks_to_embed: list,
     content_hash: str,
-    db: PipelineDB,
+    db: HttpPipelineDB,
     embed_fn: EmbedFn | None,
     cancel: threading.Event,
     total_embedded_so_far: int,
@@ -256,7 +265,7 @@ def _embed_and_write_batch(
 
 def chunker_loop(
     content_hash: str,
-    db: PipelineDB,
+    db: HttpPipelineDB,
     cancel: threading.Event,
     embed_fn: EmbedFn | None,
     chunk_chars: int = 1500,
@@ -413,7 +422,7 @@ def chunker_loop(
 
 def uploader_loop(
     content_hash: str,
-    db: PipelineDB,
+    db: HttpPipelineDB,
     t3: Any,
     collection: str,
     cancel: threading.Event,
@@ -605,7 +614,7 @@ def pipeline_index_pdf(
     collection: str,
     t3: Any,
     *,
-    db: PipelineDB | None = None,
+    db: HttpPipelineDB | None = None,
     embed_fn: EmbedFn | None = None,
     extractor: str = "auto",
     on_formula_oom: str = "fail",
@@ -626,19 +635,22 @@ def pipeline_index_pdf(
 
     Args:
         force: Break the partial-ingest deadlock (nexus-9ji). When True,
-            pre-flight deletes both (a) the pipeline.db rows for this
-            ``content_hash`` across ``pdf_pipeline``/``pdf_pages``/
-            ``pdf_chunks`` and (b) any orphan T3 chunks in *collection*
+            pre-flight deletes both (a) the engine pipeline-buffer rows
+            for this ``content_hash`` across ``nexus.pdf_pipeline``/
+            ``pdf_pages``/``pdf_chunks`` and (b) any orphan T3 chunks in *collection*
             whose ``content_hash`` matches — so neither the pipeline
             state nor half-written prior chunks can silently skip the
             re-ingest or race the upsert. No-op when False.
 
     Returns total chunks indexed.
     """
-    from nexus.pipeline_buffer import PIPELINE_DB_PATH  # noqa: PLC0415 - deferred to avoid circular import at module load
-
     if db is None:
-        db = PipelineDB(PIPELINE_DB_PATH)
+        # Unconditional — no local/service mode dispatch (resolves the
+        # bead's backend-selection question): post-RDR-155-P4a the
+        # nexus-service IS the serving path in BOTH modes (local mode's
+        # endpoint is the bundled local PG engine), so the engine-backed
+        # buffer is the only backend.
+        db = HttpPipelineDB()
 
     # Normalize to absolute so staleness checks are path-form-independent.
     pdf_path = pdf_path.resolve()
@@ -666,7 +678,7 @@ def pipeline_index_pdf(
         )
 
     # nexus-9ji: --force must break the partial-ingest deadlock. Both
-    # pipeline.db state and T3 orphan chunks can independently block
+    # pipeline-buffer state and T3 orphan chunks can independently block
     # re-ingest; wipe both before the pre-flight.
     if force:
         db.delete_pipeline_data(content_hash)

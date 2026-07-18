@@ -163,6 +163,63 @@ def test_count_mismatch_fails_verification() -> None:
     assert "count mismatch" in result.reason
 
 
+# ── co-resident targets (nexus-tidtd) ────────────────────────────────────────
+
+
+@dataclass
+class PrePopulatedTarget(FixtureTarget):
+    """A target that already holds rows this leg did not write — the
+    co-resident shape: independently indexed data, or another era's
+    migration, sharing the collection (nexus-tidtd live incident)."""
+
+    baseline: int = 0
+
+    def count(self, collection: str) -> int:
+        return self.baseline + super().count(collection)
+
+
+def test_prepopulated_target_passes_when_all_rows_land() -> None:
+    """The non-resume post-write check must accept a target holding MORE
+    rows than this leg wrote (nexus-tidtd): a co-resident target is a
+    legitimate row-holder beyond the leg's own. The old `!=` assumed the
+    leg exclusively owns the target — on the live incident that turned a
+    fully-landed 3-row leg into etl_seam_count_mismatch (6712 != 3) and a
+    forever-failing `nx upgrade`."""
+    target = PrePopulatedTarget(baseline=6712)
+    result = run_batched_etl(
+        FixtureSource([[_chunk(HEX32_A), _chunk(HEX32_B)], [_chunk(HEX32_C)]]),
+        target,
+        source_collection="src", target_collection="dst", page=2,
+    )
+    assert result.ok
+    assert result.written == 3
+
+
+def test_prepopulated_target_cannot_mask_total_loss() -> None:
+    """The `<` still fires when the target holds FEWER rows than this leg's
+    distinct ids. Acknowledged weakening vs the old `!=`: pre-existing rows
+    can mask a partial this-run loss at the seam, and NOTHING downstream
+    catches that today (drop_converged_legs still tests count equality —
+    the nexus-tidtd root cause — so it re-plans rather than verifying
+    membership). Accepted, unmitigated, until the deferred nexus-tidtd
+    full-membership convergence design lands PG-side."""
+    @dataclass
+    class SwallowingTarget(FixtureTarget):
+        def upsert_chunks(self, collection, ids, documents, metadatas, *, embeddings=None):
+            pass  # accepts the call, keeps nothing
+
+        def count(self, collection: str) -> int:
+            return 1  # fewer than the 3 distinct ids this run sent
+
+    result = run_batched_etl(
+        FixtureSource([[_chunk(HEX32_A), _chunk(HEX32_B), _chunk(HEX32_C)]]),
+        SwallowingTarget(),
+        source_collection="src", target_collection="dst", page=10,
+    )
+    assert not result.ok
+    assert "count mismatch" in result.reason
+
+
 # ── immutable-source discipline (RDR-176) ────────────────────────────────────
 
 

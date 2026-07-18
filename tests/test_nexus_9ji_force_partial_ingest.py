@@ -37,21 +37,15 @@ class TestPipelineStateBypass:
         """When pipeline.db already records a content_hash as 'completed',
         a force=True caller must see delete_pipeline_data called BEFORE
         create_pipeline so the new run isn't silently skipped."""
-        from nexus.pipeline_buffer import PipelineDB
+        from tests.pipeline_fake_engine import make_fake_engine_db
 
-        db_path = tmp_path / "pipeline.db"
-        db = PipelineDB(db_path)
-        # Seed: mark a content_hash as completed in pipeline.db
+        db, engine = make_fake_engine_db()
+        # Seed: mark a content_hash as completed (aged heartbeat, as a
+        # prior ingest would have left it)
         h = "a" * 64
-        conn = db._conn()
-        conn.execute(
-            "INSERT INTO pdf_pipeline "
-            "(content_hash, pdf_path, collection, status, started_at, "
-            " updated_at) VALUES (?, ?, ?, 'completed', ?, ?)",
-            (h, str(tmp_path / "fake.pdf"), "knowledge__test",
-             "2026-04-15T00:00:00Z", "2026-04-15T00:00:00Z"),
-        )
-        conn.commit()
+        db.create_pipeline(h, str(tmp_path / "fake.pdf"), "knowledge__test")
+        db.mark_completed(h)
+        engine.pipelines[h]["updated_at"] = "2026-04-15T00:00:00+00:00"
         # Sanity: create_pipeline returns skip when not forced
         assert db.create_pipeline(h, "fake.pdf", "x") == "skip"
 
@@ -79,30 +73,25 @@ class TestPipelineIndexPdfForce:
         doc.close()
         return pdf_path
 
-    def _seed_prior_completed(self, db, content_hash: str, pdf_path: Path):
-        """Seed pipeline.db as if a prior ingest marked this content_hash
-        'completed'. Emulates the partial-ingest / force-race scenario."""
-        conn = db._conn()
-        conn.execute(
-            "INSERT INTO pdf_pipeline "
-            "(content_hash, pdf_path, collection, status, started_at, "
-            " updated_at) VALUES (?, ?, ?, 'completed', ?, ?)",
-            (content_hash, str(pdf_path), "knowledge__reproducer",
-             "2026-04-15T00:00:00Z", "2026-04-15T00:00:00Z"),
-        )
-        conn.commit()
+    def _seed_prior_completed(self, db, engine, content_hash: str, pdf_path: Path):
+        """Seed the pipeline buffer as if a prior ingest marked this
+        content_hash 'completed' with an aged heartbeat. Emulates the
+        partial-ingest / force-race scenario."""
+        db.create_pipeline(content_hash, str(pdf_path), "knowledge__reproducer")
+        db.mark_completed(content_hash)
+        engine.pipelines[content_hash]["updated_at"] = "2026-04-15T00:00:00+00:00"
 
     def test_force_false_still_skips_when_pipeline_completed(
         self, tmp_path: Path, fake_pdf: Path,
     ):
         """Default behaviour (no --force) is preserved: pipeline.db says
         completed → skip with no work done."""
-        from nexus.pipeline_buffer import PipelineDB
         from nexus.pipeline_stages import pipeline_index_pdf
+        from tests.pipeline_fake_engine import make_fake_engine_db
 
-        db = PipelineDB(tmp_path / "pipeline.db")
+        db, engine = make_fake_engine_db()
         h = "b" * 64
-        self._seed_prior_completed(db, h, fake_pdf)
+        self._seed_prior_completed(db, engine, h, fake_pdf)
 
         fake_t3 = MagicMock()
         result = pipeline_index_pdf(
@@ -117,12 +106,12 @@ class TestPipelineIndexPdfForce:
         self, tmp_path: Path, fake_pdf: Path,
     ):
         """force=True wipes pipeline.db row + T3 orphans, then runs."""
-        from nexus.pipeline_buffer import PipelineDB
         from nexus.pipeline_stages import pipeline_index_pdf
+        from tests.pipeline_fake_engine import make_fake_engine_db
 
-        db = PipelineDB(tmp_path / "pipeline.db")
+        db, engine = make_fake_engine_db()
         h = "c" * 64
-        self._seed_prior_completed(db, h, fake_pdf)
+        self._seed_prior_completed(db, engine, h, fake_pdf)
 
         fake_t3 = MagicMock()
         fake_col = MagicMock()
@@ -175,10 +164,10 @@ class TestPipelineIndexPdfForce:
         """force=True must delete T3 chunks matching this content_hash
         before re-upload so orphans from a partial prior ingest don't
         race with the new chunks."""
-        from nexus.pipeline_buffer import PipelineDB
         from nexus.pipeline_stages import pipeline_index_pdf
+        from tests.pipeline_fake_engine import make_fake_engine_db
 
-        db = PipelineDB(tmp_path / "pipeline.db")
+        db, _engine = make_fake_engine_db()
         h = "d" * 64
 
         fake_t3 = MagicMock()

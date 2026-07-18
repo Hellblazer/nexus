@@ -4,6 +4,12 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.13.0] - 2026-07-18
+
+- Plugin version aligned with conexus 6.13.0. No plugin-side changes. See the
+  root CHANGELOG for the 6.13.0 headline: client persistence fully engine-hosted
+  (RDR-186 — no SQLite in any mode) and the cross-era upgrade convergence fix.
+
 ## [6.12.0] - 2026-07-17
 
 - `/conexus:upgrade` preamble tolerates the dry-run's by-design BLOCKED exit
@@ -80,6 +86,23 @@ consent-gated) ship in this release's MCP server.
 - Plugin version aligned with conexus 6.5.0. Plugin-side: the SessionStart hook now surfaces a pending Chroma→PostgreSQL substrate migration into the session context (nexus-0rwwv), so the agent points users at `nx guided-upgrade`.
 
 ## [Unreleased]
+
+### Added
+
+- **RDR-184 orchestration guard, default-ON** (nexus-ccs9v Phase 1+2): new
+  `SubagentStop` hook blocks a NAMED background teammate's idle exactly once
+  when it never sent its orchestrator a completion report, consulting a
+  session-scoped expectations file the orchestrator writes BEFORE dispatch.
+  Fail-open by construction: users who never write EXPECT rows can never be
+  blocked. A companion `SubagentStart` stamp records dispatch (START) rows to
+  `~/.local/state/nexus/orchestration/<session_id>.expectations` (0600,
+  swept after 7 days) — the only new behavior for users not using the
+  declaration convention is this small local state write. Opt out per
+  session with `NX_ORCH_STOP_GUARD=off`; `observe` mode records
+  would-block census rows without blocking. Three orchestration directive
+  rows (Completion / Inbox / Git) now ride the SubagentStart context
+  injection, and `/conexus:continuation` gained session-retro audits
+  (directive-diff, commit-pathspec, declaration-completeness).
 
 ## [6.4.0] - 2026-07-07
 

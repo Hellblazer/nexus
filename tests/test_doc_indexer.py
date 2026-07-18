@@ -24,6 +24,19 @@ from tests.conftest import set_credentials
 # fastembed is installed (tier 1: bge-base-en-v15-768, else tier 0:
 # minilm-l6-v2-384). Resolve at runtime so the suite is deterministic on
 # CI (no fastembed) and dev machines (fastembed pulled by experiments).
+
+
+@pytest.fixture(autouse=True)
+def _fake_pipeline_engine(monkeypatch):
+    """RDR-186 .16: the streaming path's default buffer is the engine-backed
+    HttpPipelineDB; wire it to the in-memory fake (one engine per test, shared
+    across same-test index_pdf calls so resume/staleness state persists)."""
+    from tests.pipeline_fake_engine import make_fake_engine_db
+
+    db, engine = make_fake_engine_db()
+    monkeypatch.setattr("nexus.pipeline_stages.HttpPipelineDB", lambda: db)
+    return engine
+
 def _local_token() -> str:
     from nexus.db.local_ef import local_model_token
     return local_model_token()

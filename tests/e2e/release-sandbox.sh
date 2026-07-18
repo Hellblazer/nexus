@@ -169,7 +169,7 @@ fi
 
 if [[ ! -d "$SANDBOX" ]]; then
     echo "[1/3] Creating fresh sandbox at $SANDBOX ..."
-    "$REPO_ROOT/tests/e2e/sandbox.sh" >/dev/null
+    NX_E2E_LOCK_HELD_BY_PARENT=1 "$REPO_ROOT/tests/e2e/sandbox.sh" >/dev/null
 fi
 
 # Activate the sandbox HOME/PATH BEFORE the reinstall below (not after, as

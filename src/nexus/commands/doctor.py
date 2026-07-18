@@ -1589,12 +1589,14 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         return
 
     if clean_pipelines:
-        from nexus.pipeline_buffer import PIPELINE_DB_PATH, PipelineDB  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-        if not PIPELINE_DB_PATH.exists():
-            click.echo("No pipeline database found.")
-            return
-        db = PipelineDB(PIPELINE_DB_PATH)
-        deleted = db.scan_orphaned_pipelines(delete=True)
+        from nexus.db.http_pipeline_client import HttpPipelineDB  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        try:
+            with HttpPipelineDB() as db:
+                deleted = db.scan_orphaned_pipelines(delete=True)
+        except Exception as exc:  # noqa: BLE001 — engine unreachable must not stack-trace a doctor verb
+            raise click.ClickException(
+                f"pipeline scan unavailable (engine unreachable?): {exc}"
+            ) from exc
         if deleted:
             click.echo(f"Deleted {len(deleted)} orphaned pipeline entry/entries.")
         else:

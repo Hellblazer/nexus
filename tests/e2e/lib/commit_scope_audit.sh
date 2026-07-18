@@ -25,16 +25,44 @@
 #            commit touched a file outside it; 2 on usage error.
 #
 # Implementation note: per-commit file sets are resolved via
-# `git diff-tree --no-commit-id --name-only -r --root`, which is the
-# same underlying diff machinery `git log --stat` uses to compute its
-# per-commit file list — chosen over parsing `--stat`'s text/number
-# columns directly, which is fragile (rename arrows, truncated stat
-# bars) for what is fundamentally a "list the files" query. Merge
-# commits are skipped from the per-file diff (git's default behavior
-# for `log`/`diff-tree` without `-m`), matching this repo's normal
-# single-parent commit workflow; a merge landing foreign files by itself
-# is out of scope for this helper.
+# `git -c core.quotePath=false diff-tree --no-commit-id --name-only -r
+# --root`, which is the same underlying diff machinery `git log --stat`
+# uses to compute its per-commit file list — chosen over parsing
+# `--stat`'s text/number columns directly, which is fragile (rename
+# arrows, truncated stat bars) for what is fundamentally a "list the
+# files" query. `core.quotePath=false` is forced on the invocation
+# (RDR-184 P0 review M1) rather than relying on ambient repo/global git
+# config: under the default `core.quotePath=true`, `--name-only` quotes
+# and octal-escapes any non-ASCII byte in a path (e.g. `src/café.txt`
+# becomes the literal string `"src/caf\303\251.txt"`), which no longer
+# matches a plain-text allowlist pathspec via prefix/glob comparison and
+# was verified to produce a false "OUTSIDE ALLOWLIST" flag on an
+# otherwise in-scope file. Quoting can only ever push a path further
+# from matching (adds characters), never closer, so this was
+# exclusively a false-positive risk, never a way to dodge detection —
+# still worth forcing off since a tripwire that cries wolf gets ignored.
+#
+# Merge commits: `git diff-tree` without `-m`/`-c` produces zero files
+# for a merge commit (git's default behavior for `log`/`diff-tree`
+# without `-m`) — this repo's release process uses REAL merge commits
+# (`gh pr merge --merge`, never `--squash`), so merges are a normal part
+# of history here, not a hypothetical. Rather than silently reporting
+# "0 files, nothing to flag" for a merge (indistinguishable from "this
+# commit legitimately touched nothing outside the allowlist"), every run
+# explicitly counts and reports how many merge commits in range were
+# skipped (RDR-184 P0 review M2), so a clean report never reads as
+# "exhaustively checked" when it wasn't.
 set -euo pipefail
+
+# RDR-184 P0 review M3: `mapfile` (below) is bash 4.0+ only and silently
+# does not exist on stock macOS /bin/bash 3.2 (the OS-shipped default on
+# this repo's own stated primary dev platform, still frozen at 3.2 for
+# GPLv3-avoidance reasons) — fail loud with a clear message rather than a
+# bare "mapfile: command not found" if invoked under an old bash.
+if ((BASH_VERSINFO[0] < 4)); then
+    echo "commit_scope_audit.sh: requires bash >= 4 (found ${BASH_VERSION}); on macOS, run via Homebrew bash (e.g. /opt/homebrew/bin/bash), not the OS-shipped /bin/bash 3.2" >&2
+    exit 1
+fi
 
 usage() {
     cat >&2 <<'EOF'
@@ -102,11 +130,21 @@ if [[ ${#commits[@]} -eq 0 ]]; then
 fi
 
 exit_code=0
+merge_skipped=0
 for c in "${commits[@]}"; do
     subject="$(git log -1 --format='%s' "$c")"
+
+    read -r -a parent_words <<<"$(git log -1 --format='%P' "$c")"
+    if [[ ${#parent_words[@]} -gt 1 ]]; then
+        echo "commit ${c}  ${subject}  [merge commit -- not audited]"
+        merge_skipped=$((merge_skipped + 1))
+        echo
+        continue
+    fi
+
     echo "commit ${c}  ${subject}"
 
-    mapfile -t files < <(git diff-tree --no-commit-id --name-only -r --root "$c")
+    mapfile -t files < <(git -c core.quotePath=false diff-tree --no-commit-id --name-only -r --root "$c")
     foreign=()
     for f in "${files[@]}"; do
         [[ -z "$f" ]] && continue
@@ -124,5 +162,7 @@ for c in "${commits[@]}"; do
     fi
     echo
 done
+
+echo "${merge_skipped} merge commit(s) skipped -- not audited"
 
 exit "$exit_code"

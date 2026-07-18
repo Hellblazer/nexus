@@ -45,15 +45,17 @@ class CascadeCounts:
 
 
 def _purge_pipeline_db(name: str, counts: CascadeCounts) -> CascadeCounts:
-    """Delete streaming-pipeline rows for *name* (client-side in BOTH modes — the
-    pipeline buffer is local SQLite per RDR-164 CA-4). Best-effort; records the
-    count on success and a failure message otherwise. Returns *counts*."""
+    """Delete streaming-pipeline rows for *name* via the engine's
+    ``/v1/pipeline/delete_collection`` (RDR-186 .16: the pipeline buffer is
+    ``nexus.pdf_pipeline`` in Postgres in BOTH modes — the RDR-164 CA-4
+    "stays client-side" note described the retired SQLite buffer). Best-effort;
+    records the count on success and a failure message otherwise. Returns
+    *counts*."""
     try:
-        from nexus.pipeline_buffer import PIPELINE_DB_PATH, PipelineDB  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.db.http_pipeline_client import HttpPipelineDB  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
-        counts.pipeline_rows_deleted = PipelineDB(
-            PIPELINE_DB_PATH
-        ).delete_pipeline_data_for_collection(name)
+        with HttpPipelineDB() as pipeline_db:
+            counts.pipeline_rows_deleted = pipeline_db.delete_pipeline_data_for_collection(name)
     except Exception as exc:  # noqa: BLE001 — best-effort; failure logged via _log.warning and recorded in counts.failures, cascade continues
         _log.warning("purge_cascade_pipeline_failed", collection=name, error=str(exc))
         counts.failures.append(f"pipeline-state cleanup failed: {exc}")

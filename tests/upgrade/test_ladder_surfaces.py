@@ -27,7 +27,7 @@ from nexus.db.migrations import Migration, MigrationRetry
 from nexus.health import _check_pending_rungs, run_health_checks
 import nexus.commands.upgrade as upgrade_mod
 from nexus.commands.upgrade import _run_ladder, upgrade
-from nexus.upgrade_ladder.completion import CompletionStore
+from nexus.upgrade_ladder.completion import CompletionRecord
 from nexus.upgrade_ladder.protocol import ConvergeOutcome, ConvergeResult, ProgressReporter, RungStatus
 from nexus.upgrade_ladder.registry import LadderRegistry
 
@@ -267,16 +267,41 @@ def test_doctor_check_is_wired_into_run_health_checks() -> None:
 
 
 # ── nx upgrade: _run_ladder ──────────────────────────────────────────────────
+#
+# RDR-186 .12: ladder.db is retired — the injectable seam is now the durable
+# LEDGER itself (_ledger_fn), served in production by the engine-backed
+# DeferredLadderLedger. Tests inject an in-memory CompletionLedger.
+
+
+class InMemoryLedger:
+    """Minimal CompletionLedger for surface tests (no substrate at all)."""
+
+    def __init__(self) -> None:
+        self.records: dict[str, CompletionRecord] = {}
+
+    def record_verified(self, rung_name: str, *, package_version: str, detail: str = "") -> None:
+        self.records[rung_name] = CompletionRecord(
+            rung_name=rung_name, verified_at="t", package_version=package_version, detail=detail
+        )
+
+    def verified_rungs(self) -> frozenset[str]:
+        return frozenset(self.records)
+
+    def completions(self) -> dict[str, CompletionRecord]:
+        return dict(self.records)
+
+
+def _must_not_construct() -> InMemoryLedger:
+    raise AssertionError("the completion ledger must never be constructed on this path")
 
 
 def test_walk_converges_and_records(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
     rung = SurfaceRung("t2-schema")
     monkeypatch.setattr(ladder_registry, "default_registry", lambda **kw: LadderRegistry((rung,)))
-    db = tmp_path / "ladder.db"
-    _run_ladder(dry_run=False, auto_mode=True, _store_path_fn=lambda: db)
+    ledger = InMemoryLedger()
+    _run_ladder(dry_run=False, auto_mode=True, _ledger_fn=lambda: ledger)
     assert rung.converge_calls == 1
-    with CompletionStore(db) as store:
-        assert store.verified_rungs() == frozenset({"t2-schema"})
+    assert ledger.verified_rungs() == frozenset({"t2-schema"})
 
 
 def test_dry_run_reports_and_writes_nothing(
@@ -286,12 +311,10 @@ def test_dry_run_reports_and_writes_nothing(
     the completion store is never even opened (zero writes)."""
     rung = SurfaceRung("substrate-etl")
     monkeypatch.setattr(ladder_registry, "default_registry", lambda **kw: LadderRegistry((rung,)))
-    db = tmp_path / "ladder.db"
-    _run_ladder(dry_run=True, auto_mode=False, _store_path_fn=lambda: db)
+    _run_ladder(dry_run=True, auto_mode=False, _ledger_fn=_must_not_construct)
     out = capsys.readouterr().out
     assert "substrate-etl" in out
     assert rung.converge_calls == 0
-    assert not db.exists()
 
 
 def test_empty_registry_walk_is_silent(
@@ -301,8 +324,8 @@ def test_empty_registry_walk_is_silent(
     empty since P1 — the production registry now holds the t2-schema rung,
     whose real walk would touch the environment's memory.db.)"""
     monkeypatch.setattr(ladder_registry, "default_registry", lambda **kw: LadderRegistry(()))
-    _run_ladder(dry_run=False, auto_mode=False, _store_path_fn=lambda: tmp_path / "ladder.db")
-    _run_ladder(dry_run=True, auto_mode=False, _store_path_fn=lambda: tmp_path / "ladder.db")
+    _run_ladder(dry_run=False, auto_mode=False, _ledger_fn=InMemoryLedger)
+    _run_ladder(dry_run=True, auto_mode=False, _ledger_fn=_must_not_construct)
     assert capsys.readouterr().out == ""
 
 
@@ -330,12 +353,11 @@ def test_dry_run_survives_a_rung_whose_detect_raises(
     monkeypatch.setattr(
         ladder_registry, "default_registry", lambda **kw: LadderRegistry((BoomRung(), healthy))
     )
-    db = tmp_path / "ladder.db"
-    _run_ladder(dry_run=True, auto_mode=False, _store_path_fn=lambda: db)
+    _run_ladder(dry_run=True, auto_mode=False, _ledger_fn=_must_not_construct)
     out = capsys.readouterr().out
     assert "boom" in out and "detect failed" in out
     assert "substrate-etl" in out  # the rest of the report still happened
-    assert not db.exists()  # still zero writes
+    # zero writes: the ledger was never even constructed (_must_not_construct)
 
 
 def test_failed_walk_raises_for_interactive(
@@ -346,10 +368,10 @@ def test_failed_walk_raises_for_interactive(
     handler, not here."""
     rung = SurfaceRung("t2-schema", verify_result=False)
     monkeypatch.setattr(ladder_registry, "default_registry", lambda **kw: LadderRegistry((rung,)))
+    ledger = InMemoryLedger()
     with pytest.raises(click.ClickException, match="t2-schema"):
-        _run_ladder(dry_run=False, auto_mode=False, _store_path_fn=lambda: tmp_path / "ladder.db")
-    with CompletionStore(tmp_path / "ladder.db") as store:
-        assert store.verified_rungs() == frozenset()  # RDR-142: nothing recorded
+        _run_ladder(dry_run=False, auto_mode=False, _ledger_fn=lambda: ledger)
+    assert ledger.verified_rungs() == frozenset()  # RDR-142: nothing recorded
 
 
 def test_deferred_walk_notices_but_exits_cleanly(
@@ -374,12 +396,11 @@ def test_deferred_walk_notices_but_exits_cleanly(
     monkeypatch.setattr(
         ladder_registry, "default_registry", lambda **kw: LadderRegistry((DeferRung(),))
     )
-    db = tmp_path / "ladder.db"
-    _run_ladder(dry_run=False, auto_mode=False, _store_path_fn=lambda: db)  # no raise
+    ledger = InMemoryLedger()
+    _run_ladder(dry_run=False, auto_mode=False, _ledger_fn=lambda: ledger)  # no raise
     out = capsys.readouterr().out
     assert "deferred" in out and "catalog absent" in out
-    with CompletionStore(db) as store:
-        assert store.verified_rungs() == frozenset()
+    assert ledger.verified_rungs() == frozenset()
 
 
 def test_upgrade_invocation_executes_each_migration_step_exactly_once(
@@ -424,3 +445,69 @@ def test_upgrade_command_is_wired_to_the_ladder() -> None:
 
     """
     assert "_run_ladder(" in inspect.getsource(upgrade.callback)
+
+
+def test_run_ladder_flushes_owed_records_after_the_walk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The .12 flush wiring, pinned at the CLI seam: a record that misses the
+    backend during the walk (engine still coming up) is retried by the
+    end-of-walk flush — deleting the flush() call in _run_ladder fails this
+    test (the record would stay owed with exactly one attempt)."""
+
+    class FlakyLedger(InMemoryLedger):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attempts = 0
+
+        def record_verified(self, rung_name: str, *, package_version: str, detail: str = "") -> None:
+            self.attempts += 1
+            if self.attempts == 1:
+                raise ConnectionError("engine still coming up")
+            super().record_verified(
+                rung_name, package_version=package_version, detail=detail
+            )
+
+    rung = SurfaceRung("t2-schema")
+    monkeypatch.setattr(ladder_registry, "default_registry", lambda **kw: LadderRegistry((rung,)))
+    ledger = FlakyLedger()
+    _run_ladder(dry_run=False, auto_mode=True, _ledger_fn=lambda: ledger)
+
+    assert ledger.attempts == 2, "write-through missed once; the flush retried"
+    assert ledger.verified_rungs() == frozenset({"t2-schema"}), (
+        "the owed record reached the backend via the end-of-walk flush"
+    )
+
+
+def test_run_ladder_flushes_even_when_a_rung_hard_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Facts are facts: a rung that verified earlier in the walk flushes
+    durably even though a LATER rung hard-failed the walk — the flush runs
+    before the ClickException is raised (reviewer-146xx-12c minor gap)."""
+
+    class FlakyLedger(InMemoryLedger):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attempts = 0
+
+        def record_verified(self, rung_name: str, *, package_version: str, detail: str = "") -> None:
+            self.attempts += 1
+            if self.attempts == 1:
+                raise ConnectionError("engine still coming up")
+            super().record_verified(
+                rung_name, package_version=package_version, detail=detail
+            )
+
+    good = SurfaceRung("t2-schema")
+    bad = SurfaceRung("substrate-etl", verify_result=False)
+    monkeypatch.setattr(
+        ladder_registry, "default_registry", lambda **kw: LadderRegistry((good, bad))
+    )
+    ledger = FlakyLedger()
+    with pytest.raises(click.ClickException, match="substrate-etl"):
+        _run_ladder(dry_run=False, auto_mode=False, _ledger_fn=lambda: ledger)
+
+    assert ledger.verified_rungs() == frozenset({"t2-schema"}), (
+        "the verified rung's fact flushed before the hard-failure surfaced"
+    )

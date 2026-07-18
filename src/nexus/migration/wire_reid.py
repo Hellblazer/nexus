@@ -140,9 +140,21 @@ def derive_wire_chash(chunk: dict[str, Any]) -> str:
 class ChashRemapStore:
     """The persisted old→new map — a local, queryable migration artifact.
 
-    Own sqlite substrate (WAL, bootstrap-on-open), PERMANENT retention
-    (out-of-band references to old ids are unbounded). ``record_batch``
-    is ONE transaction — the r2 ordering unit.
+    Own sqlite substrate (WAL, bootstrap-on-open). ``record_batch`` is ONE
+    transaction — the r2 ordering unit.
+
+    RETENTION (narrowed at RDR-186 .8 from the original "PERMANENT"):
+    map facts survive every failure and retry, and are cleared ONLY by a
+    leg rollback that verifiably completed (the whole-function scope of
+    ``rollback_collections`` — every collection's ``target_after``
+    verification passed). Out-of-band references to OLD ids stay
+    resolvable forever either way: while the migration stands, the map
+    translates them; after a completed rollback, the old ids return to
+    being the live ids. STATUS (RDR-186 .6): this LOCAL store is a
+    read-only migration source — the system of record is the PG
+    ``nexus.chash_remap`` table via ``remap_client.HttpRemapStore``; the
+    local write path survives for test fixtures and the one-time
+    ``seed_and_quarantine`` upload only.
     """
 
     def __init__(self, db_path: Path, *, now_fn: Callable[[], str] | None = None) -> None:
@@ -239,6 +251,39 @@ class ChashRemapStore:
             "SELECT old_id, new_chash FROM chash_remap WHERE tenant_id = ?",
             (tenant_id,),
         ).fetchall()
+
+    def all_entries(self, *, tenant_id: str = "") -> list[RemapEntry]:
+        """Every full fact row — the RDR-186 .6 seed reader: uploads this
+        (now read-only) local map's history to the PG table once, via
+        :func:`nexus.migration.remap_client.seed_local_map`."""
+        rows = self._conn.execute(
+            "SELECT source_collection, old_id, new_chash, target_collection, "
+            "provenance FROM chash_remap WHERE tenant_id = ?",
+            (tenant_id,),
+        ).fetchall()
+        return [
+            RemapEntry(
+                tenant_id=tenant_id,
+                source_collection=src,
+                old_id=old,
+                new_chash=new,
+                target_collection=tgt,
+                provenance=prov,
+            )
+            for src, old, new, tgt, prov in rows
+        ]
+
+    def source_collections(self, *, tenant_id: str = "") -> frozenset[str]:
+        """Distinct source collections — the source-gone probe's read shape
+        (replaces the probe's former raw ``_conn`` access)."""
+        return frozenset(
+            row[0]
+            for row in self._conn.execute(
+                "SELECT DISTINCT source_collection FROM chash_remap "
+                "WHERE tenant_id = ?",
+                (tenant_id,),
+            ).fetchall()
+        )
 
     def old_ids_for(
         self, source_collection: str, new_chash: str, *, tenant_id: str = ""

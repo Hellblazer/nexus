@@ -26,7 +26,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+if TYPE_CHECKING:  # annotation-only — protocol.py stays the base seam module, no runtime import of the store
+    from nexus.upgrade_ladder.completion import CompletionRecord
 
 
 @dataclass(frozen=True)
@@ -93,6 +96,35 @@ class ProgressReporter(Protocol):
 
     def emit(self, event: str, **fields: object) -> None:
         """Report one progress event (structlog-shaped: event + fields)."""
+        ...
+
+
+@runtime_checkable
+class CompletionLedger(Protocol):
+    """The completion-record surface the runner walks against (RDR-186 P2).
+
+    Structural: ``HttpLadderStore`` (durable, the engine's
+    ``ladder_completions`` table — RDR-186 .12; ladder.db is retired) and
+    ``InProcessCompletionHolder`` (in-memory overlay for the engine-defer
+    window) both conform. Deliberately NO position surface here: ladder
+    position is DERIVED from ``verified_rungs()`` through the single
+    ``completion.derive_ladder_position`` algorithm (RDR-185 Gap-4
+    mechanism 1 — one derivation, never stored, never settable).
+    """
+
+    def record_verified(self, rung_name: str, *, package_version: str, detail: str = "") -> None:
+        """Record that *rung_name*'s verify passed. Callers invoke this ONLY
+        after ``Rung.verify()`` returned True."""
+        ...
+
+    def verified_rungs(self) -> frozenset[str]:
+        """Names of rungs with a verified completion fact."""
+        ...
+
+    def completions(self) -> dict[str, "CompletionRecord"]:
+        """All completion facts keyed by rung name (audit metadata —
+        ``verified_at``/``package_version`` are observability-only and
+        accepted lossy per RF-186-2)."""
         ...
 
 

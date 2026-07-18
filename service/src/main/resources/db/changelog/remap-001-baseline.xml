@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-186 bead nexus-146xx.3 — chash_remap baseline changelog (RDR-185 .16
+    lineage: the PG twin of the client-side chash_remap.db migration artifact).
+
+    The persisted old-id -> new-chash map written by wire re-identification
+    (src/nexus/migration/wire_reid.py): one row per remapped chunk id, per
+    source collection, per tenant. Raw facts only — the map is an INPUT the
+    substrate rung's live membership computation (nexus-146xx.5) interprets
+    against the current chunk tables; the map alone never answers "converged".
+
+    ============================================================================
+    RF-186-1 INVARIANT (load-bearing — do not extend this table):
+      NO verdict column, EVER. No "converged", "delivered", "status",
+      "delivered_at" — nothing a rung detect() could consult INSTEAD of
+      re-deriving against the live world. A stored convergence verdict violates
+      the Gap-4 two-mechanism pin (tests/upgrade/test_gap4_two_mechanisms.py::
+      test_rung_convergence_is_re_derived_live_never_cached) regardless of
+      substrate — PG exactly as SQLite. RemapSchemaLiquibaseTest pins the exact
+      column set as the structural tripwire. Rollback intent is encoded as row
+      ABSENCE: rollback_collections clears a leg's rows only after the whole
+      leg's target_after verification (RDR-186 D2 whole-leg ordering,
+      nexus-146xx.8), so delivered-then-rolled-back and never-delivered
+      collapse to the same live state.
+    ============================================================================
+
+    Column mapping (SQLite chash_remap -> Postgres):
+      tenant_id         TEXT NOT NULL DEFAULT ''      -> TEXT NOT NULL (RLS discriminator, no default)
+      source_collection TEXT NOT NULL                 -> TEXT NOT NULL
+      old_id            TEXT NOT NULL                 -> TEXT NOT NULL (legacy 16/18-char or any pre-remap id)
+      new_chash         TEXT NOT NULL CHECK(len=32)   -> TEXT NOT NULL CHECK(len=32)
+      target_collection TEXT NOT NULL                 -> TEXT NOT NULL
+      created_at        TEXT NOT NULL (ISO-8601)      -> TIMESTAMPTZ NOT NULL
+      provenance        TEXT NOT NULL                 -> TEXT NOT NULL
+
+    Natural key (SQLite): (tenant_id, source_collection, old_id) — already
+    tenant-prefixed locally (DEFAULT ''); PG requires the stamped tenant.
+
+    Indexes mirror SQLite:
+      - PRIMARY KEY (tenant_id, source_collection, old_id) — forward lookup + upsert target
+      - idx_chash_remap_new (tenant_id, new_chash) — reverse lookup (which old ids map here)
+    The .5 live-membership function reads per-leg via the PK prefix
+    (tenant_id, source_collection); no additional index is added speculatively —
+    .5 adds one in its own changeset if EXPLAIN demands it.
+
+    Retention: permanent across every failure and retry; rows are cleared ONLY
+    by a leg rollback that verifiably completed (D2). Grants: consolidated in
+    grants-nexus-svc.xml (runAlways) — no per-store grant here.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: chash_remap table + constraints + indexes ──────────── -->
+    <changeSet id="remap-001-1" author="nexus-146xx.3">
+        <comment>Create chash_remap table mirroring the SQLite wire_reid schema with tenant_id (raw-fact map, RF-186-1: no verdict column)</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.chash_remap (
+    tenant_id         TEXT        NOT NULL,
+    source_collection TEXT        NOT NULL,
+    old_id            TEXT        NOT NULL,
+    new_chash         TEXT        NOT NULL,
+    target_collection TEXT        NOT NULL,
+    created_at        TIMESTAMPTZ NOT NULL,
+    provenance        TEXT        NOT NULL,
+    CONSTRAINT chash_remap_pk PRIMARY KEY (tenant_id, source_collection, old_id),
+    CONSTRAINT chash_remap_new_chash_len_32 CHECK (length(new_chash) = 32)
+);
+
+-- idx_chash_remap_new: reverse lookup — which old ids map onto a given chash
+CREATE INDEX idx_chash_remap_new ON nexus.chash_remap (tenant_id, new_chash);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.chash_remap CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: RLS enable + force + policy ──────────────────────── -->
+    <changeSet id="remap-001-2" author="nexus-146xx.3">
+        <comment>Enable and force RLS; create tenant isolation policy</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chash_remap ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chash_remap FORCE ROW LEVEL SECURITY;
+
+-- cmd=ALL: covers SELECT, INSERT, UPDATE, DELETE in one policy.
+-- current_setting('nexus.tenant', true): missing_ok=true so unset GUC returns NULL
+--   rather than raising. NULL != any tenant_id -> zero rows visible = fail-closed.
+CREATE POLICY tenant_isolation ON nexus.chash_remap
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.chash_remap;
+            ALTER TABLE nexus.chash_remap NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.chash_remap DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

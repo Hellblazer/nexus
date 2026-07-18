@@ -39,8 +39,8 @@ from enum import Enum
 
 import structlog
 
-from nexus.upgrade_ladder.completion import CompletionStore
-from nexus.upgrade_ladder.protocol import ProgressReporter, Rung, RungStatus
+from nexus.upgrade_ladder.completion import derive_ladder_position
+from nexus.upgrade_ladder.protocol import CompletionLedger, ProgressReporter, Rung, RungStatus
 from nexus.upgrade_ladder.registry import LadderRegistry
 
 _log = structlog.get_logger(__name__)
@@ -153,7 +153,7 @@ class LadderRunReport:
 
 
 class LadderRunner:
-    """Walks a :class:`LadderRegistry` against a :class:`CompletionStore`.
+    """Walks a :class:`LadderRegistry` against a :class:`CompletionLedger`.
 
     Constructor injection throughout: the completion store, the progress
     reporter, and the package-version probe are all seams.
@@ -162,7 +162,7 @@ class LadderRunner:
     def __init__(
         self,
         registry: LadderRegistry,
-        store: CompletionStore,
+        store: CompletionLedger,
         *,
         reporter: ProgressReporter | None = None,
         package_version_fn: Callable[[], str] | None = None,
@@ -204,7 +204,9 @@ class LadderRunner:
                 break
         return LadderRunReport(
             runs=tuple(runs),
-            position=self._store.ladder_position([r.name for r in self._registry]),
+            position=derive_ladder_position(
+                self._store.verified_rungs(), [r.name for r in self._registry]
+            ),
         )
 
     def _run_rung(self, rung: Rung) -> RungRun:

@@ -48,7 +48,13 @@ class JooqRecordReflectionFeatureTest {
     // (the service-mode consent-audit table), so jOOQ codegen emits one more record
     // type. The feature enumerates via the schema model, so the new record is already
     // registered for native-image reflection; this guard is the deliberate count bump.
-    private static final int EXPECTED_RECORD_TYPES = 54;
+    // 54 -> 56: RDR-186 nexus-146xx.3/.10 added nexus.chash_remap (wire re-id map,
+    // raw-fact substrate) and nexus.ladder_completions (upgrade-ladder bookkeeping).
+    // 56 -> 57: nexus-146xx.5 added nexus.remap_membership(text,text) — jOOQ
+    // generates a record type for the table-valued function's RETURNS TABLE shape.
+    // 57 -> 60: nexus-146xx.16 added the engine-hosted streaming-PDF buffer
+    // (nexus.pdf_pipeline, nexus.pdf_pages, nexus.pdf_chunks).
+    private static final int EXPECTED_RECORD_TYPES = 60;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

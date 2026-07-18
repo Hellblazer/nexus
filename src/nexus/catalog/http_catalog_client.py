@@ -300,8 +300,10 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         ``chash_index``, ``topic_assignments``, ``topics``,
         ``taxonomy_centroids_*``, ``document_aspects``, ``document_highlights``,
         ``aspect_extraction_queue``, ``catalog_documents``,
-        ``catalog_collections``). ``pipeline.db`` and the local-mode cascade
-        stay client-side (see ``purge_collection_cascade``).
+        ``catalog_collections``). The streaming pipeline buffer is swept via
+        its own engine endpoint (``/v1/pipeline/delete_collection``, RDR-186
+        .16); the local-mode cascade stays client-side (see
+        ``purge_collection_cascade``).
         """
         result = self._post("/collections/delete", {"name": name})
         return (result or {}).get("deleted", {}) or {}
@@ -1678,7 +1680,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         ``document_highlights``, ``aspect_extraction_queue``, ``catalog_documents``,
         ``search_telemetry``, ``hook_failures``, ``catalog_collections_deleted``).
         The cross-model COPY branch (target already registered) returns only
-        ``catalog_documents``. ``pipeline.db`` and the local-mode fan-out stay
+        ``catalog_documents``. The streaming pipeline buffer lives engine-side
+        (``nexus.pdf_pipeline``, RDR-186 .16); the local-mode fan-out stays
         client-side (see ``rename_collection_data_plane``).
 
         ``cross_model`` (nexus-gaou3): pass ``True`` ONLY for a deliberate RDR-162

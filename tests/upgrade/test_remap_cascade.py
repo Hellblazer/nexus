@@ -341,3 +341,171 @@ def test_inventory_drift_guard_fires(
     catalog_db, memory_db = dbs
     with pytest.raises(RuntimeError, match="inventory drift"):
         cascade_remap(map_store, catalog_db=catalog_db, memory_db=memory_db)
+
+
+# ── nexus-146xx.8: cascade_revert — the rollback's local-store un-pointing ───
+#
+# A leg is not "rolled back" while local stores still point at its new
+# chashes (RDR-186 D2). cascade_revert applies the INVERTED leg view
+# (new → old) through the SAME per-store machinery, restoring what is
+# restorable. The forward cascade is LOSSY under identical-text collapse
+# (two-phase dedupe DELETED sibling rows; frecency merged with MAX), so an
+# exact inverse does not exist: the surviving row gets the deterministic
+# sorted-first old id, and the lost siblings are COUNTED loudly in the
+# result — never silently dropped. Semantically sound because collapse
+# siblings are byte-identical text: either old id points at the same
+# content the restored source serves.
+
+
+def test_revert_manifest_rows_return_to_old_ids(dbs, map_store: ChashRemapStore) -> None:
+    catalog_db, memory_db = dbs
+    _seed(
+        catalog_db,
+        "INSERT INTO document_chunks (doc_id, position, chash) VALUES (?,?,?)",
+        [("1.2.3", 0, "legacy-old-1"), ("1.2.3", 1, "legacy-old-2")],
+    )
+    _map(map_store, ("legacy-old-1", NEW_A), ("legacy-old-2", NEW_B))
+    cascade_remap(map_store, catalog_db=catalog_db, memory_db=memory_db)
+    assert _q(catalog_db, "SELECT chash FROM document_chunks ORDER BY position") == [
+        (NEW_A,), (NEW_B,),
+    ]
+
+    leg = map_store.entries_with_targets("src")
+    report = mod.cascade_revert(leg, catalog_db=catalog_db, memory_db=memory_db)
+
+    by = {r.store: r for r in report.stores}
+    assert by["document_chunks"].ok and by["document_chunks"].rewritten == 2
+    assert _q(catalog_db, "SELECT chash FROM document_chunks ORDER BY position") == [
+        ("legacy-old-1",), ("legacy-old-2",),
+    ]
+
+
+def test_revert_is_leg_scoped_other_legs_untouched(dbs, map_store: ChashRemapStore) -> None:
+    """Only the rolled-back leg's pointers revert — a sibling leg's rows
+    keep their new chashes (rollback is per-leg, D2)."""
+    catalog_db, memory_db = dbs
+    _seed(
+        catalog_db,
+        "INSERT INTO document_chunks (doc_id, position, chash) VALUES (?,?,?)",
+        [("d", 0, "legacy-old-1"), ("d", 1, "legacy-other-1")],
+    )
+    _map(map_store, ("legacy-old-1", NEW_A))
+    _map(map_store, ("legacy-other-1", NEW_B), coll="other-src")
+    cascade_remap(map_store, catalog_db=catalog_db, memory_db=memory_db)
+
+    leg = map_store.entries_with_targets("src")  # ONLY src's facts
+    mod.cascade_revert(leg, catalog_db=catalog_db, memory_db=memory_db)
+
+    assert _q(catalog_db, "SELECT chash FROM document_chunks ORDER BY position") == [
+        ("legacy-old-1",),  # reverted (src leg)
+        (NEW_B,),           # untouched (other-src leg)
+    ]
+
+
+def test_revert_collapse_survivor_gets_first_old_and_loss_is_counted(
+    dbs, map_store: ChashRemapStore
+) -> None:
+    """The lossy-inverse contract: two olds collapsed forward into ONE
+    chash_index row; revert restores ONE row under the sorted-first old id
+    and reports the lost sibling — never a silent drop, never a guess
+    beyond byte-identical content."""
+    catalog_db, memory_db = dbs
+    _seed(
+        memory_db,
+        "INSERT INTO chash_index (chash, physical_collection, created_at) VALUES (?,?,?)",
+        [("legacy-old-1", "coll", "t"), ("legacy-old-2", "coll", "t")],
+    )
+    _map(map_store, ("legacy-old-1", NEW_A), ("legacy-old-2", NEW_A))
+    cascade_remap(map_store, catalog_db=catalog_db, memory_db=memory_db)
+    assert _q(memory_db, "SELECT chash FROM chash_index") == [(NEW_A,)]  # collapsed
+
+    leg = map_store.entries_with_targets("src")
+    report = mod.cascade_revert(leg, catalog_db=catalog_db, memory_db=memory_db)
+
+    assert _q(memory_db, "SELECT chash FROM chash_index") == [("legacy-old-1",)]
+    by = {r.store: r for r in report.stores}
+    assert by["chash_index"].rewritten == 1
+    # The loss is returned AS DATA (reviewer-146xx-8): the CLI decides
+    # what to tell the operator; a log line alone reaches nobody.
+    assert report.unrestorable == ("legacy-old-2",)
+    assert all(r.deduped == 0 for r in report.stores)  # revert deduped nothing
+
+
+def test_revert_empty_leg_is_noop(dbs, map_store: ChashRemapStore) -> None:
+    catalog_db, memory_db = dbs
+    report = mod.cascade_revert({}, catalog_db=catalog_db, memory_db=memory_db)
+    assert [r.store for r in report.stores] == list(CASCADE_STORES)
+    assert all(r.ok and r.rewritten == 0 for r in report.stores)
+    assert report.ok and report.unrestorable == ()
+
+
+def test_revert_then_forward_roundtrip_is_stable(dbs, map_store: ChashRemapStore) -> None:
+    """Idempotence both ways: forward → revert → forward lands back on the
+    new ids (the map still holds the facts until the CALLER clears them —
+    revert never touches the map itself)."""
+    catalog_db, memory_db = dbs
+    _seed(
+        catalog_db,
+        "INSERT INTO document_chunks (doc_id, position, chash) VALUES (?,?,?)",
+        [("d", 0, "legacy-old-1")],
+    )
+    _map(map_store, ("legacy-old-1", NEW_A))
+    cascade_remap(map_store, catalog_db=catalog_db, memory_db=memory_db)
+    leg = map_store.entries_with_targets("src")
+    mod.cascade_revert(leg, catalog_db=catalog_db, memory_db=memory_db)
+    cascade_remap(map_store, catalog_db=catalog_db, memory_db=memory_db)
+    assert _q(catalog_db, "SELECT chash FROM document_chunks") == [(NEW_A,)]
+
+
+def test_revert_collapse_loss_is_logged_loud(dbs, map_store: ChashRemapStore) -> None:
+    """Non-vacuity for the loss WARNING itself (reviewer-146xx-8 Gap B):
+    deleting the log call fails this test, not just the data field."""
+    from structlog.testing import capture_logs
+
+    catalog_db, memory_db = dbs
+    _map(map_store, ("legacy-old-1", NEW_A), ("legacy-old-2", NEW_A))
+    leg = map_store.entries_with_targets("src")
+
+    with capture_logs() as logs:
+        mod.cascade_revert(leg, catalog_db=catalog_db, memory_db=memory_db)
+
+    loss_events = [e for e in logs if e["event"] == "remap_revert_collapse_loss"]
+    assert len(loss_events) == 1
+    assert loss_events[0]["unrestorable"] == 1
+
+
+def test_revert_stray_row_at_old_id_is_absorbed_not_duplicated(
+    dbs, map_store: ChashRemapStore
+) -> None:
+    """The structural-no-op invariant, exercised on its EDGE (reviewer-146xx-8
+    item 1): normally no row exists at an old id post-forward-cascade, so the
+    two-phase dedupe never fires on revert. When an out-of-band write DID
+    recreate a row at the old id, the dedupe branch fires exactly as in the
+    forward direction — the reverting row is absorbed, never PK-collided and
+    never duplicated. Intentional, tested behavior — not an untested no-op."""
+    catalog_db, memory_db = dbs
+    _seed(
+        memory_db,
+        "INSERT INTO chash_index (chash, physical_collection, created_at) VALUES (?,?,?)",
+        [("legacy-old-1", "coll", "t")],
+    )
+    _map(map_store, ("legacy-old-1", NEW_A))
+    cascade_remap(map_store, catalog_db=catalog_db, memory_db=memory_db)
+    # Out-of-band write recreates a row at the OLD id before the revert.
+    _seed(
+        memory_db,
+        "INSERT INTO chash_index (chash, physical_collection, created_at) VALUES (?,?,?)",
+        [("legacy-old-1", "coll", "t2")],
+    )
+
+    leg = map_store.entries_with_targets("src")
+    report = mod.cascade_revert(leg, catalog_db=catalog_db, memory_db=memory_db)
+
+    assert report.ok
+    rows = _q(memory_db, "SELECT chash, physical_collection FROM chash_index")
+    assert rows == [("legacy-old-1", "coll")], (
+        "exactly ONE row survives: the stray absorbed the reverting row via "
+        f"the dedupe branch — got {rows}"
+    )
+    by = {r.store: r for r in report.stores}
+    assert by["chash_index"].deduped == 1, "the dedupe branch fired on revert"

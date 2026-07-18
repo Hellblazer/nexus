@@ -466,3 +466,24 @@ release; repo-local locks land immediately.
   Alternative 3; Alternative 7 (sync-only surface narrowing) partially
   adopted for Gaps 2/4; Gap-2/4 tripwires with a concrete escalation
   threshold replace the "revisit if retros show recurrence" conditional.
+- 2026-07-17 — P1.1/.7 determination (scenario 27): SubagentStart payload
+  carries no background flag and no name field; name is morphology-encoded
+  (agent_type == name, agent_id == "a<name>-<hash>"). Orchestrator
+  write-before-dispatch is therefore the load-bearing path, and only NAMED
+  background dispatches are enforceable (convention on bead .17).
+- 2026-07-17 — P1.2/.9 report-check narrowing (documented, reviewed): the
+  Decision's "final turn lacks a SendMessage-to-main" ships v1 as "any
+  SendMessage tool_use in an ASSISTANT message, any recipient" (turn
+  boundaries and recipient identity are transcript-format-fragile;
+  fail-open bias). The .11 measurement is two-sided to compensate:
+  WOULDBLOCK rows = false-block candidates, REPORTED rows = missed-block
+  candidates; the .15 default-ON gate is approved against both.
+- 2026-07-17 — P1.G (.15) default-ON FLIPPED (Hal accept). Gates
+  discharged: scenarios 21d/21e green three times same-day (including an
+  independent validator run, 15/15); 97MB worst-case transcript scans in
+  0.14s against the 10s hook timeout; the .13-critique S1 resolved as
+  accept-in-writing — the flip precedes the .11 census (undeclared
+  dispatches are fail-open by construction) and the .11 measurement now
+  runs in live-block mode (REPORTED x BLOCKED replaces REPORTED x
+  WOULDBLOCK). Stamp + repo project-settings defaults flipped in the
+  same commit; per-session opt-out is NX_ORCH_STOP_GUARD=off.

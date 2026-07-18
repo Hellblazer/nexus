@@ -60,6 +60,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
     from nexus.migration.detection import CollectionClassification  # noqa: F401 — runtime-quoted in the rung's seams
     from nexus.migration.etl_ports import EtlRunResult, EtlSource, EtlTarget
+    from nexus.migration.remap_client import HttpRemapStore  # noqa: F401 — annotation-only
     from nexus.migration.wire_reid import ChashRemapStore
 
 _log = structlog.get_logger(__name__)
@@ -448,7 +449,7 @@ def execute_leg(
     source: "EtlSource",
     target: "EtlTarget",
     *,
-    map_store: "ChashRemapStore",
+    map_store: "ChashRemapStore | HttpRemapStore",
     page: int,
     provenance: str,
     tenant_id: str = "",
@@ -540,7 +541,7 @@ def run_substrate_migration(
     source: "EtlSource",
     target: "EtlTarget",
     *,
-    map_store: "ChashRemapStore",
+    map_store: "ChashRemapStore | HttpRemapStore",
     catalog_db: Any,
     memory_db: Any,
     page: int,
@@ -584,10 +585,21 @@ def run_substrate_migration(
 # ── P4.0 (nexus-x3z00): the assembled rung ──────────────────────────────────
 
 
+#: Per-plan membership-probe count above which the fan-out warning fires —
+#: the evidence trigger for a bulk endpoint (see drop_converged_legs' N+1 note).
+#: Each probe also pays its own HttpRemapStore construction (endpoint/token
+#: resolution + a fresh connection), not just its SQL call (reviewer-146xx-7
+#: Low) — the same single-digit bound covers both costs; a shared per-plan
+#: store rides the same bulk-endpoint trigger if the warning ever fires.
+_MEMBERSHIP_FANOUT_NOTE_AT: int = 8
+
+
 def drop_converged_legs(
     plan: SubstratePlan,
     source_counts: dict[str, int],
     target_counts: dict[str, int] | None,
+    *,
+    membership_fn: Callable[[str, str], tuple[int, int] | None] | None = None,
 ) -> SubstratePlan:
     """Drop legs whose TARGET already holds the source's rows (nexus-mapbc).
 
@@ -630,10 +642,51 @@ def drop_converged_legs(
     which drops NOTHING: "I could not tell" is never "converged". A target
     simply absent from the map is not converged either. Decisions pass through
     untouched: a source-gone collection is a question for converge, not a leg.
+
+    LIVE MEMBERSHIP (RDR-186 .7 — the REAL nexus-tidtd fix): count equality
+    is structurally unreliable across embedder-era re-chunking — a target
+    independently indexed to 6712 rows never count-matches a 3-chunk stale
+    source, so the tidtd leg re-migrated (re-billing Voyage) on every run,
+    forever. For a ``needs_reid`` leg that count equality KEPT,
+    ``membership_fn(source, target)`` asks the engine's
+    ``nexus.remap_membership()`` for the live ``(mapped_total,
+    present_count)`` pair — one indexed SQL round trip per surviving re-id
+    leg, computed fresh every call, no verdict stored anywhere (RF-186-1;
+    this is the sanctioned cheap detect() the Gap-4 pin's docstring records,
+    and the nexus-ixl85 resolution for this rung).
+
+    The interpretation rules (the pinned .7 design inputs, stated here
+    because the function is fact-only by design):
+
+    * ``mapped_total > 0 and present_count == mapped_total`` — every claim
+      this leg ever recorded is present in the target: CONVERGED.
+    * ``mapped_total == 0`` — NEVER wins for a re-id leg. A needs_reid leg
+      that ran records >= 1 claim by construction (it classified needs_reid
+      precisely because legacy ids exist to remap), so zero claims means
+      never-attempted or rolled-back (Q7: rolled-back = PENDING): KEPT.
+    * ``present_count < mapped_total`` — the world regressed or delivery is
+      partial: KEPT (the Gap-4 both-directions property, at planner level).
+    * ``membership_fn`` absent or returning None — could-not-tell: KEPT,
+      same contract as ``target_counts=None``.
+    * Conformant (``needs_reid=False``) legs record no claims by
+      construction — membership is NEVER probed for them (no wasted round
+      trip); count equality remains their governing signal, correct because
+      the ETL preserves their cardinality 1:1.
+
+    N+1 note (pinned design input, decided here): membership fires only for
+    needs_reid legs that count equality kept — bounded by the install's
+    re-id leg count (single digit in every observed install), NOT by map
+    size, collection count, or history (categorically unlike the vgtff /
+    paged-pairs N+1 classes). One PK-indexed SQL call each. If an install
+    ever presents more re-id legs than ``_MEMBERSHIP_FANOUT_NOTE_AT``, the
+    warning below is the evidence trigger for a bulk
+    ``remap_membership_bulk`` endpoint (ride it with .12's ladder endpoint
+    on the next engine cut).
     """
     if not plan.legs or target_counts is None:
         return plan
     remaining: list[LegPlan] = []
+    membership_probes = 0
     for leg in plan.legs:
         want = source_counts.get(leg.source_collection)
         got = target_counts.get(leg.target_collection)
@@ -645,7 +698,27 @@ def drop_converged_legs(
                 count=got,
             )
             continue
+        if leg.needs_reid and membership_fn is not None:
+            membership = membership_fn(leg.source_collection, leg.target_collection)
+            membership_probes += 1
+            if membership is not None:
+                mapped_total, present_count = membership
+                if mapped_total > 0 and present_count == mapped_total:
+                    _log.info(
+                        "substrate_leg_converged_by_membership",
+                        source=leg.source_collection,
+                        target=leg.target_collection,
+                        mapped=mapped_total,
+                    )
+                    continue
         remaining.append(leg)
+    if membership_probes > _MEMBERSHIP_FANOUT_NOTE_AT:
+        _log.warning(
+            "substrate_membership_fanout_high",
+            probes=membership_probes,
+            note="evidence trigger for a bulk remap_membership_bulk endpoint "
+            "(batch with the .12 ladder endpoint on the next engine cut)",
+        )
     # Every field must survive this reconstruction. `billed_reembed` is derived
     # from the surviving legs so it cannot be dropped here again (nexus-k1m2f:
     # as a stored field it WAS, silently, and the cost prompt never fired in
@@ -680,6 +753,7 @@ def source_progress(
     *,
     voyage_key_present: bool,
     target_counts: dict[str, int] | None,
+    membership_fn: Callable[[str, str], tuple[int, int] | None] | None = None,
 ) -> SourceProgress:
     """What the TARGET says about each source collection (nexus-6or3m).
 
@@ -720,6 +794,7 @@ def source_progress(
         plan,
         {c.collection: c.source_count for c in classifications},
         target_counts,
+        membership_fn=membership_fn,
     )
     kept = {leg.source_collection for leg in remaining.legs}
     return SourceProgress(
@@ -728,6 +803,28 @@ def source_progress(
         ),
         credential_gated=gated,
     )
+
+
+def _default_membership(source_collection: str, target_collection: str) -> tuple[int, int] | None:
+    """Production live-membership probe: ONE engine round trip per asked leg
+    (``nexus.remap_membership()`` via GET /v1/remap/membership). Computed
+    fresh on every call — no cache, no marker, no stored verdict (RF-186-1 /
+    the Gap-4 pin's sanctioned cheap detect()). Answers None (could-not-tell,
+    never converged) when the engine is unreachable — loud, mirroring
+    ``_default_target_counts``' "could not tell is never fine" rule."""
+    from nexus.migration.remap_client import HttpRemapStore  # noqa: PLC0415 — deferred to avoid import cost
+
+    try:
+        with HttpRemapStore() as engine:
+            return engine.membership(source_collection, target_collection)
+    except Exception as exc:  # noqa: BLE001 — a probe that cannot tell must never certify convergence
+        _log.warning(
+            "substrate_membership_probe_failed",
+            source=source_collection,
+            target=target_collection,
+            error=str(exc),
+        )
+        return None
 
 
 def _default_target_counts() -> dict[str, int] | None:
@@ -778,17 +875,33 @@ def _default_unreflected() -> list[str]:
 
     Read-only. An unreadable map/store answers "unreflected", never
     "fine" — a probe that cannot tell must not certify convergence.
+
+    RDR-186 .6: the map's system of record is the PG ``chash_remap`` table;
+    the probe reads the ENGINE facts unioned with any pre-seed local legacy
+    facts (``CompositeReadMapStore``) so an install whose history has not
+    been seeded yet never probes falsely clean. The former
+    ``map_path.exists()`` short-circuit is gone for the same reason: a
+    post-.6 migration writes no local file at all. The zero-facts case is
+    one cheap engine COUNT round trip (live, never cached).
     """
     from nexus.migration.remap_cascade import unreflected_stores  # noqa: PLC0415 — deferred to avoid import cost
+    from nexus.migration.remap_client import CompositeReadMapStore, HttpRemapStore  # noqa: PLC0415 — deferred to avoid import cost
     from nexus.migration.wire_reid import ChashRemapStore  # noqa: PLC0415 — deferred to avoid import cost
 
     map_path = _default_map_path()
-    if not map_path.exists():
-        return []  # nothing was ever re-identified: nothing to reflect
     catalog_db, memory_db = _cascade_db_paths()
     try:
-        with ChashRemapStore(map_path) as map_store:
-            return unreflected_stores(map_store, catalog_db=catalog_db, memory_db=memory_db)
+        with HttpRemapStore() as engine:
+            if map_path.exists():
+                with ChashRemapStore(map_path) as local:
+                    return unreflected_stores(
+                        CompositeReadMapStore(engine, local),
+                        catalog_db=catalog_db, memory_db=memory_db,
+                    )
+            return unreflected_stores(
+                CompositeReadMapStore(engine, None),
+                catalog_db=catalog_db, memory_db=memory_db,
+            )
     except Exception as exc:  # noqa: BLE001 — a probe that cannot tell must never certify convergence
         _log.warning("substrate_unreflected_probe_failed", error=str(exc))
         return ["<probe failed>"]
@@ -803,12 +916,19 @@ def _default_cascade_only(report: ProgressReporter) -> str:
     longer match"), so this is a cheap no-op whenever it is not needed.
     """
     from nexus.migration.remap_cascade import cascade_remap  # noqa: PLC0415 — deferred to avoid import cost
-    from nexus.migration.wire_reid import ChashRemapStore  # noqa: PLC0415 — deferred to avoid import cost
+    from nexus.migration.remap_client import HttpRemapStore, seed_and_quarantine  # noqa: PLC0415 — deferred to avoid import cost
 
     catalog_db, memory_db = _cascade_db_paths()
     try:
-        with ChashRemapStore(_default_map_path()) as map_store:
-            results = cascade_remap(map_store, catalog_db=catalog_db, memory_db=memory_db)
+        # Converge-path repair: the engine is up here, so any pre-.6 local
+        # facts are seeded ONCE then the file is quarantined (renamed
+        # *.seeded — the reseed-resurrection guard: a rollback's engine-side
+        # clear must never be undone by a re-upload of stale local facts).
+        # The cascade then runs from the PG facts, the single system of
+        # record (RDR-186 .6).
+        with HttpRemapStore() as engine:
+            seed_and_quarantine(_default_map_path(), engine)
+            results = cascade_remap(engine, catalog_db=catalog_db, memory_db=memory_db)
     except Exception as exc:  # noqa: BLE001 — reported as a FAILED rung; never a silent pass
         return f"{type(exc).__name__}: {exc}"
     failed = [r for r in results if not r.ok]
@@ -841,29 +961,29 @@ def _default_prior_collections() -> frozenset[str]:
     """Source collections known from prior migration state — the SOURCE-GONE
     input. Read from the persisted map (the only durable record of what a
     prior run touched); empty on a first run, which correctly yields no
-    decisions."""
+    decisions.
+
+    RDR-186 .6: reads the ENGINE facts unioned with any pre-seed local
+    legacy facts (``CompositeReadMapStore``) — post-.6 migrations write no
+    local file, so the PG table is the durable record. Genuinely-empty maps
+    still answer ``frozenset()`` (normal first run); an UNREADABLE map
+    (engine unreachable, local corrupt) stays a loud warning, because that
+    degradation HIDES a genuine source-gone decision — a collection the
+    user must choose to re-acquire or drop simply stops being asked about
+    (P4.V Finding B; mirrors _default_target_counts' "could not tell is
+    never fine" rule).
+    """
+    from nexus.migration.remap_client import CompositeReadMapStore, HttpRemapStore  # noqa: PLC0415 — deferred to avoid import cost
     from nexus.migration.wire_reid import ChashRemapStore  # noqa: PLC0415 — deferred to avoid import cost
 
     map_path = _default_map_path()
-    if not map_path.exists():
-        # NORMAL: nothing has ever been re-identified, so there is no prior
-        # state and no source-gone decision to make. Silent by design.
-        return frozenset()
     try:
-        with ChashRemapStore(map_path) as store:
-            return frozenset(
-                row[0] for row in store._conn.execute(  # noqa: SLF001 — same-package read of its own store
-                    "SELECT DISTINCT source_collection FROM chash_remap"
-                ).fetchall()
-            )
+        with HttpRemapStore() as engine:
+            if map_path.exists():
+                with ChashRemapStore(map_path) as local:
+                    return CompositeReadMapStore(engine, local).source_collections()
+            return CompositeReadMapStore(engine, None).source_collections()
     except Exception as exc:  # noqa: BLE001 — decisions degrade to none rather than crashing the trigger; loud because that degradation HIDES a genuine decision
-        # WARNING, not debug (P4.V Finding B): the map EXISTS and could not be
-        # read. Degrading to "no prior state" here silently drops every
-        # SOURCE-GONE decision — a collection the user must choose to
-        # re-acquire or drop simply stops being asked about, and the walk
-        # proceeds as though it never existed. Absence is normal (handled
-        # above); unreadable is not, and must be visible. Mirrors
-        # _default_target_counts' "could not tell is never fine" rule.
         _log.warning("substrate_rung_prior_collections_unreadable", error=str(exc))
         return frozenset()
 
@@ -1013,8 +1133,27 @@ class SubstrateEtlRung:
         target_counts_fn: Callable[[], dict[str, int] | None] | None = None,
         unreflected_fn: Callable[[], list[str]] | None = None,
         cascade_only_fn: Callable[[ProgressReporter], str] | None = None,
+        membership_fn: Callable[[str, str], tuple[int, int] | None] | None = None,
         page: int = 300,
     ) -> None:
+        # The r2 map-atomicity coupling (critic-146xx-6 Q1): the wire-reid
+        # transform posts each ETL batch's map facts to the engine, whose
+        # record_batch endpoint commits at most MAX_RECORDS_PER_WRITE (300)
+        # entries per PG transaction. page <= that cap is what guarantees
+        # EXACTLY ONE map transaction per ETL batch — the "ONE transaction,
+        # the r2 ordering unit" contract the local store gave for free. A
+        # larger page would silently split a batch's map facts across
+        # transactions, so a partial failure could leave facts for chunks
+        # the aborted batch never wrote; enforced loudly here, not left as
+        # a numeric coincidence.
+        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — deferred to avoid import cost
+
+        if page > QUOTAS.MAX_RECORDS_PER_WRITE:
+            raise ValueError(
+                f"page={page} exceeds MAX_RECORDS_PER_WRITE="
+                f"{QUOTAS.MAX_RECORDS_PER_WRITE}: the ETL page must fit one "
+                "engine map transaction (r2 ordering unit)"
+            )
         self._footprint = footprint_fn if footprint_fn is not None else _default_footprint
         self._classify = classify_fn if classify_fn is not None else _default_classify
         self._voyage_key = voyage_key_fn if voyage_key_fn is not None else _default_voyage_key
@@ -1031,6 +1170,9 @@ class SubstrateEtlRung:
         )
         self._cascade_only = (
             cascade_only_fn if cascade_only_fn is not None else _default_cascade_only
+        )
+        self._membership = (
+            membership_fn if membership_fn is not None else _default_membership
         )
         self._page = page
 
@@ -1062,6 +1204,7 @@ class SubstrateEtlRung:
             plan,
             {c.collection: c.source_count for c in classifications},
             self._target_counts(),
+            membership_fn=self._membership,
         )
 
     # ── detect ───────────────────────────────────────────────────────────────
@@ -1204,11 +1347,18 @@ class SubstrateEtlRung:
         from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid import cycle
         from nexus.migration.detection import open_read_legs  # noqa: PLC0415 — deferred; RDR-176 read leg
         from nexus.migration.etl_ports import ChromaReadSource, VectorServiceTarget  # noqa: PLC0415 — deferred to avoid import cost
-        from nexus.migration.wire_reid import ChashRemapStore  # noqa: PLC0415 — deferred to avoid import cost
+        from nexus.migration.remap_client import HttpRemapStore, seed_and_quarantine  # noqa: PLC0415 — deferred to avoid import cost
 
         local, _cloud = open_read_legs(None)
         db_path = default_db_path()
-        with ChashRemapStore(_default_map_path()) as map_store:
+        # RDR-186 .6: the map's write path is the ENGINE (/v1/remap) — the PG
+        # chash_remap table is the system of record. Any pre-.6 local facts
+        # are seeded ONCE then the file is quarantined (renamed *.seeded —
+        # the reseed-resurrection guard: a rollback's engine-side clear must
+        # never be undone by a re-upload of stale local facts). The file
+        # survives intact as the read-only migration source.
+        with HttpRemapStore() as map_store:
+            seed_and_quarantine(_default_map_path(), map_store)
             return run_substrate_migration(
                 plan,
                 ChromaReadSource(local),
@@ -1227,6 +1377,14 @@ class SubstrateEtlRung:
         asks it whether the content ARRIVED — never consults converge's
         bookkeeping (the .14 resume path's relaxed this-run count check
         delegates the full check here).
+
+        COST NOTE (critic-146xx-12c): the "losing a completion record costs
+        one cheap redundant verify" claim (RF-186-2) is load-bearing on
+        ``detect_pending_migration_memoized``'s 60s process-local memo in
+        ``migration/guided_upgrade.py`` — detect() and verify() run
+        back-to-back in one process, so the re-classification here is a memo
+        hit. Shorten that TTL (or insert work between detect and verify) and
+        the redundant verify becomes a full classification sweep.
 
         The world it must read is the TARGET (bead nexus-mapbc). This used to
         re-plan from the source alone and so could never return True: the

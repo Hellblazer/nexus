@@ -1208,19 +1208,16 @@ def _check_orphan_checkpoints() -> list[HealthResult]:
 
 
 def _check_orphan_pipelines() -> list[HealthResult]:
-    from nexus.pipeline_buffer import PIPELINE_DB_PATH, PipelineDB  # noqa: PLC0415 — deferred to avoid circular import
-
-    if not PIPELINE_DB_PATH.exists():
-        return [HealthResult(label="PDF pipeline buffer", ok=True, detail="no pipeline database")]
+    from nexus.db.http_pipeline_client import HttpPipelineDB  # noqa: PLC0415 — deferred to avoid circular import
 
     try:
-        db = PipelineDB(PIPELINE_DB_PATH)
-        orphans = db.scan_orphaned_pipelines(delete=False)
+        with HttpPipelineDB() as db:
+            orphans = db.scan_orphaned_pipelines(delete=False)
+            total = db.count_pipelines()
     except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
         _log.debug("orphan_pipeline_scan_failed", error=str(exc))
         return [HealthResult(label="PDF pipeline buffer", ok=True, detail="scan failed — skipping")]
 
-    total = db.count_pipelines()
     if orphans:
         return [HealthResult(
             label="PDF pipeline buffer",
@@ -1688,14 +1685,19 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     "nexus.catalog_meta",
     "nexus.catalog_owners",
     "nexus.chash_index",
+    "nexus.chash_remap",
     "nexus.claude_assisted_remediation_consents",
     "nexus.document_aspects",
     "nexus.document_highlights",
     "nexus.frecency",
     "nexus.hook_failures",
+    "nexus.ladder_completions",
     "nexus.memory",
     "nexus.migration_jobs",
     "nexus.nx_answer_runs",
+    "nexus.pdf_chunks",
+    "nexus.pdf_pages",
+    "nexus.pdf_pipeline",
     "nexus.plans",
     "nexus.relevance_log",
     "nexus.retention_markers",
