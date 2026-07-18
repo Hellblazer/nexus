@@ -158,7 +158,11 @@ to the carve-out that actually holds: permanent across every failure
 and retry, cleared only by a leg rollback that verifiably completed —
 out-of-band references to OLD ids remain resolvable forever because the
 old ids return to being the live ids when the migrated rows are
-removed.
+removed. ("Full rollback verifiably completes" means the WHOLE-LEG
+scope — every collection the leg touched has passed its `target_after`
+verification, i.e. the whole-function return of `rollback_collections`,
+not any single collection's per-loop check — re-gate residual,
+2026-07-18.)
 
 **D3 — Ladder state: derive-first, record-late.** The completion store's
 bootstrap-ordering argument is real: the ladder runs when the engine may be
