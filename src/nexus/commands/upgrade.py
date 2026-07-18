@@ -190,6 +190,63 @@ def _converge_preconditions(*, auto_mode: bool, skip_t3: bool = False) -> None:
         _log.warning("upgrade_preconditions_failed", error=str(exc))
 
 
+#: Namespace prefix for T3-step completion records in the ladder ledger
+#: (RDR-186 .15). Position derivation ignores these by construction.
+_T3_STEP_PREFIX: str = "t3-step:"
+
+
+def _t3_step_key(introduced: str, name: str) -> str:
+    return f"{_T3_STEP_PREFIX}{introduced}:{name}"
+
+
+def _t3_completion_holder():
+    """The T3-step completion ledger — the SAME surface the ladder uses
+    (RDR-186 .15 subsumption): a DeferredLadderLedger (engine-backed,
+    first-use construction) fronted by the in-process holder. Patchable
+    seam for tests."""
+    from nexus.upgrade_ladder.holder import InProcessCompletionHolder  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
+    from nexus.upgrade_ladder.http_store import DeferredLadderLedger  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
+
+    return InProcessCompletionHolder(DeferredLadderLedger())
+
+
+def _carry_t3_step_rows(conn, holder, current: str) -> None:
+    """One-time carry of pre-.15 ``_nexus_t3_steps`` rows into the ledger,
+    then DROP the table (the retirement) — the DROP GATED on confirmed
+    durability (critic-146xx-15): the table is deleted ONLY when nothing is
+    left owed in the holder after a flush, i.e. every carried fact reached
+    the engine. Engine down → the table stays for the next invocation's
+    idempotent re-carry (records upsert), and a warning says so.
+
+    Precedent honesty (the critic's factual catch): this is the FIRST bead
+    in the epic to delete a local artifact at all — .6 DEMOTES chash_remap.db
+    to a quarantined read-only source (never deletes), and .14 LEAVES
+    aspect_promotion_log in place for the RDR-158 window. Deletion is
+    appropriate here because the records are re-derivable bookkeeping
+    (RF-186-2 class) — but only once durably carried, hence the gate."""
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='_nexus_t3_steps'"
+    ).fetchone()
+    if row is None:
+        return
+    rows = conn.execute("SELECT introduced, name FROM _nexus_t3_steps").fetchall()
+    for introduced, name in rows:
+        holder.record_verified(
+            _t3_step_key(introduced, name), package_version=current, detail=name
+        )
+    if holder.flush() == 0:
+        conn.execute("DROP TABLE _nexus_t3_steps")
+        conn.commit()
+        _log.info("t3_steps_table_carried_and_dropped", carried=len(rows))
+    else:
+        _log.warning(
+            "t3_steps_table_carry_deferred",
+            carried=len(rows),
+            note="engine unreachable — the local table stays for the next "
+            "invocation's idempotent re-carry; nothing was dropped",
+        )
+
+
 def _run_ladder(
     *,
     dry_run: bool,
@@ -693,32 +750,56 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool =
 
         # T3 steps (skipped in auto mode — require ChromaDB, may exceed hook timeout)
         #
-        # CLI review: track T3 step completion in a dedicated
-        # ``_nexus_t3_steps`` table so a failed step is retried on the
-        # next ``nx upgrade`` run. The previous code caught the exception
-        # with a warning — but because ``apply_pending`` had already
-        # advanced ``_nexus_version.cli_version`` to ``current``, the
-        # next run computed ``pending_t3 = []`` and never re-tried.
+        # Completion tracking (RDR-186 .15): each step's done-fact is a
+        # namespaced record in the LADDER's own CompletionLedger
+        # (``t3-step:<introduced>:<name>`` in PG ladder_completions via the
+        # engine) — the inline ``_nexus_t3_steps`` table is RETIRED. The
+        # namespace can never collide with real rung names, and
+        # ``derive_ladder_position`` ignores it by construction (position
+        # only consults the canonical rung ORDER — pinned by
+        # test_rows_outside_the_order_are_ignored). A record that misses the
+        # engine stays owed in the holder and is retried by the flush below;
+        # a record lost with the process costs one redundant re-run of an
+        # idempotent step (the same RF-186-2 class as rung records). The
+        # retry-on-failure contract, stated PRECISELY (critic-146xx-15 found
+        # the old "retried next nx upgrade" claim was never true across
+        # invocations — pending_t3's version gate closes once apply_pending
+        # stamps, before AND after .15; filed as its own bug): a FAILED step
+        # records nothing, the run exits non-zero, and the retry VEHICLE is
+        # --force (which reopens the gate; the ledger's done-tracking then
+        # skips succeeded steps and retries failed ones — test-pinned).
+        # (Precision, reviewer
+        # 146xx-15: the loss cost is bounded by the number of SEPARATE
+        # upgrade invocations that see the backend down before one flush
+        # succeeds — each such invocation can lose its own in-process
+        # records — not literally one re-run ever. Correctness-preserving
+        # either way; wasteful only while the engine stays down.)
         if not auto_mode and pending_t3:
             from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
             from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
             from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS _nexus_t3_steps ("
-                "    introduced TEXT NOT NULL, "
-                "    name       TEXT NOT NULL, "
-                "    applied_at TEXT NOT NULL, "
-                "    PRIMARY KEY (introduced, name)"
-                ")"
-            )
-            done_rows = conn.execute(
-                "SELECT introduced, name FROM _nexus_t3_steps"
-            ).fetchall()
-            done_set = {(r[0], r[1]) for r in done_rows}
-            unapplied = [s for s in pending_t3 if (s.introduced, s.name) not in done_set]
+            # The whole block (carry, done-check, steps) shares one holder
+            # whose flush+close runs in the OUTER finally — including the
+            # nothing-to-apply branch (critic-146xx-15: the earlier shape
+            # flushed/closed only inside the apply branch, leaking the
+            # carry's connection on the steady-state path).
+            t3_holder = _t3_completion_holder()
+            try:
+                _carry_t3_step_rows(conn, t3_holder, current)
+                done_keys = {
+                    key for key in t3_holder.verified_rungs() if key.startswith(_T3_STEP_PREFIX)
+                }
+                unapplied = [
+                    s for s in pending_t3 if _t3_step_key(s.introduced, s.name) not in done_keys
+                ]
+            except BaseException:
+                t3_holder.close()
+                raise
             if not unapplied:
                 click.echo("All T3 upgrade steps already applied.")
+                t3_holder.flush()
+                t3_holder.close()
             else:
                 t2_db: T2Database | None = None
                 applied = 0
@@ -752,14 +833,15 @@ def _run_upgrade(*, dry_run: bool, force: bool, auto_mode: bool, skip_t3: bool =
                                     err=True,
                                 )
                                 continue
-                            conn.execute(
-                                "INSERT OR REPLACE INTO _nexus_t3_steps "
-                                "(introduced, name, applied_at) VALUES (?, ?, datetime('now'))",
-                                (step.introduced, step.name),
+                            t3_holder.record_verified(
+                                _t3_step_key(step.introduced, step.name),
+                                package_version=current,
+                                detail=step.name,
                             )
-                            conn.commit()
                             applied += 1
                 finally:
+                    t3_holder.flush()
+                    t3_holder.close()
                     if t2_db is not None:
                         t2_db.close()
                 if applied:

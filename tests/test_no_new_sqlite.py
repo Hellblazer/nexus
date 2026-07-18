@@ -67,7 +67,6 @@ _DIRECTIVE = (
 #: Retirement targets (epic nexus-146xx), never precedents.
 DDL_CENSUS: dict[str, int] = {
     "src/nexus/aspect_promotion.py": 1,           # aspect_promotion_log stray (dodges migrations.py)
-    "src/nexus/commands/upgrade.py": 1,           # _nexus_t3_steps stray (inline mid-command)
     "src/nexus/db/migrations.py": 25,             # the sanctioned-until-retired T2 registry
     "src/nexus/db/t2/aspect_extraction_queue.py": 3,
     "src/nexus/db/t2/catalog.py": 9,

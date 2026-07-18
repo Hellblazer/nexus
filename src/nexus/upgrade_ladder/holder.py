@@ -146,6 +146,15 @@ class InProcessCompletionHolder:
             _log.warning("ladder_completion_flush_incomplete", owed=remaining)
         return remaining
 
+    def close(self) -> None:
+        """Close the backend's connection pool, when it has one (the
+        DeferredLadderLedger/HttpLadderStore shape) — so callers never reach
+        into ``_backend`` (critic-146xx-15 encapsulation note). Idempotent;
+        an in-memory backend without close() is a no-op."""
+        backend_close = getattr(self._backend, "close", None)
+        if callable(backend_close):
+            backend_close()
+
     def _read_backend(self, reader: Callable[[], _T], fallback: _T) -> _T:
         """One read through the backend with the engine-defer degradation.
 
