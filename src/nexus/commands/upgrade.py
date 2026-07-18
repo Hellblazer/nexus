@@ -194,32 +194,35 @@ def _run_ladder(
     *,
     dry_run: bool,
     auto_mode: bool,
-    _store_path_fn: "Callable[[], Path] | None" = None,  # noqa: F821 — lazy imports (module keeps cold-start cheap)
+    _ledger_fn: "Callable[[], object] | None" = None,  # noqa: F821 — lazy imports (module keeps cold-start cheap)
     _t2_apply_attempted: bool = False,
 ) -> None:
     """RDR-185 P0.4: walk the upgrade ladder (or report it, on --dry-run).
 
     Dry-run truth: the pending report comes from each rung's READ-ONLY
-    ``detect()`` — the completion store is never even opened, zero writes
+    ``detect()`` — the completion ledger is never even opened, zero writes
     (the ``resolve_pending_steps`` consumption pattern above at the T2
     layer). A failed rung raises ``ClickException`` — no silent fallbacks
     for correctness problems; ``--auto`` invocations are swallowed by
     ``upgrade()``'s existing auto-mode handler, not here.
 
-    Keyword-only ``_store_path_fn`` is an injectable seam for unit tests
-    (keeps test ladders off the real config dir).
+    Keyword-only ``_ledger_fn`` is an injectable seam for unit tests: it
+    returns the durable :class:`CompletionLedger` backend the holder
+    fronts (production default: the engine-backed ``HttpLadderStore`` —
+    RDR-186 .12, ladder.db retired; NO local substrate exists any more).
     """
-    from nexus.upgrade_ladder.completion import CompletionStore  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
     from nexus.upgrade_ladder.holder import InProcessCompletionHolder  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
+    from nexus.upgrade_ladder.http_store import DeferredLadderLedger  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
     from nexus.upgrade_ladder.registry import default_registry  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
     from nexus.upgrade_ladder.runner import (  # noqa: PLC0415 — deferred to avoid import cost on cold CLI start
         LadderRunner,
         RungOutcome,
     )
 
-    # Route the command's _db_path seam into the T2 rung and co-locate
-    # ladder.db with it, so tests that patch _db_path (the established
-    # test_upgrade_cmd.py isolation) never touch a live install.
+    # Route the command's _db_path seam into the T2 rung, so tests that
+    # patch _db_path (the established test_upgrade_cmd.py isolation) never
+    # touch a live install. (ladder.db is gone — RDR-186 .12 — so the seam
+    # covers only the rung's own reads now.)
     # _t2_apply_attempted: _run_upgrade already ran apply_pending in this
     # invocation — the T2 rung REPORTS instead of re-executing (P1 critique
     # Critical: the deferred case otherwise re-runs every eligible step,
@@ -243,13 +246,26 @@ def _run_ladder(
                 )
         return
 
-    store_path = _store_path_fn() if _store_path_fn is not None else _db_path().parent / "ladder.db"
-    # RDR-186 P2 (nexus-146xx.11): the walk runs against the in-process
-    # holder fronting the durable store, so verified_rungs() stays served
-    # within the walk even while the durable backend is unavailable (the
-    # engine-defer window, RF-186-2).
-    with CompletionStore(store_path) as store:
-        report = LadderRunner(registry, InProcessCompletionHolder(store)).run()
+    # RDR-186 .12: the durable ledger is the ENGINE's ladder_completions
+    # table (HttpLadderStore); ladder.db is retired — the pre-engine window
+    # is served entirely by the in-process holder (nexus-146xx.11), and a
+    # crash before the end-of-walk flush costs one idempotent re-derivation
+    # (RF-186-2), never correctness. The holder's write-through covers the
+    # normal path; flush() below retries whatever the engine-defer window
+    # left owed, because the walk's own rungs may have brought the engine up.
+    # DeferredLadderLedger resolves the engine endpoint on FIRST USE, not
+    # here — the ladder must walk while the engine is still absent (its own
+    # rungs install it); an unresolvable engine degrades to backend-down
+    # inside the holder, never a crash before the walk starts.
+    ledger = _ledger_fn() if _ledger_fn is not None else DeferredLadderLedger()
+    try:
+        holder = InProcessCompletionHolder(ledger)
+        report = LadderRunner(registry, holder).run()
+        holder.flush()
+    finally:
+        close = getattr(ledger, "close", None)
+        if callable(close):
+            close()
 
     for run in report.runs:
         if run.outcome is RungOutcome.RECORDED and not auto_mode:

@@ -29,7 +29,7 @@ from nexus.migration.remap_cascade import (
     unreflected_stores,
 )
 from nexus.migration.wire_reid import ChashRemapStore, RemapEntry
-from nexus.upgrade_ladder.completion import CompletionStore
+from nexus.upgrade_ladder.completion import CompletionRecord
 from nexus.upgrade_ladder.protocol import ConvergeOutcome, Rung, RungStatus
 from nexus.upgrade_ladder.registry import (
     RUNG_SUBSTRATE_ETL,
@@ -117,6 +117,11 @@ def _rung(**kwargs: Any) -> SubstrateEtlRung:
         # re-identification in flight.
         "unreflected_fn": lambda: [],
         "cascade_only_fn": lambda _report: "",
+        # nexus-146xx.7: the live-membership probe's production default is an
+        # engine HTTP call. Pin to (0, 0) — "engine reachable, no claims" —
+        # which by the ambiguity rule keeps every leg planned (the healthy
+        # pre-filter behaviour for fixtures with no re-id claims in flight).
+        "membership_fn": lambda _s, _t: (0, 0),
     }
     defaults.update(kwargs)
     return SubstrateEtlRung(**defaults)
@@ -419,6 +424,121 @@ def test_decisions_survive_the_converged_filter() -> None:
     out = drop_converged_legs(plan, {"knowledge__old": 12}, _all_targets(12))
     assert out.legs == []
     assert [d.collection for d in out.decisions] == ["gone"]
+
+
+# ── nexus-146xx.7: live-membership convergence (the REAL nexus-tidtd fix) ────
+
+
+def test_tidtd_reid_leg_converges_via_membership_where_counts_never_match() -> None:
+    """THE nexus-tidtd regression (Hal's live install, 2026-07-17): source =
+    3 stale legacy chunks, target = 6712 independently-indexed rows. Count
+    equality forever-fails (3 != 6712, both directions across re-chunking
+    eras); the LIVE membership answer — 3 claims recorded, 3 present in the
+    target — is what certifies convergence. Falsify by reverting the
+    membership branch in drop_converged_legs: this leg is then kept forever
+    and nx upgrade re-migrates (re-billing Voyage) every run."""
+    plan = SubstratePlan(legs=[_leg()])  # needs_reid=True
+    calls: list[tuple[str, str]] = []
+
+    def membership(source: str, target: str) -> tuple[int, int]:
+        calls.append((source, target))
+        return (3, 3)
+
+    out = drop_converged_legs(
+        plan, {"knowledge__old": 3}, _all_targets(6712), membership_fn=membership,
+    )
+    assert out.legs == []
+    assert calls == [("knowledge__old", "knowledge__new")]
+
+
+def test_membership_zero_claims_keeps_the_leg_never_attempted_rule() -> None:
+    """The mapped_total=0 ambiguity rule (pinned design input): a needs_reid
+    leg that RAN records >= 1 claim by construction — it classified
+    needs_reid precisely because legacy ids exist to remap. 0/0 therefore
+    means never-attempted or rolled-back (Q7: rolled-back = PENDING), and
+    the leg stays planned. Membership 0/0 never wins for a re-id leg."""
+    plan = SubstratePlan(legs=[_leg()])
+    out = drop_converged_legs(
+        plan, {"knowledge__old": 3}, _all_targets(6712),
+        membership_fn=lambda _s, _t: (0, 0),
+    )
+    assert len(out.legs) == 1
+
+
+def test_membership_partial_presence_keeps_the_leg() -> None:
+    """Gap-4 down-direction through the planner: a claim whose chash left
+    the target (present < mapped) reads not-converged on the very next
+    call — nothing is cached anywhere."""
+    plan = SubstratePlan(legs=[_leg()])
+    out = drop_converged_legs(
+        plan, {"knowledge__old": 3}, _all_targets(6712),
+        membership_fn=lambda _s, _t: (3, 2),
+    )
+    assert len(out.legs) == 1
+
+
+def test_membership_probe_failure_keeps_the_leg() -> None:
+    """None = could-not-tell, which is never converged (the same contract as
+    target_counts=None)."""
+    plan = SubstratePlan(legs=[_leg()])
+    out = drop_converged_legs(
+        plan, {"knowledge__old": 3}, _all_targets(6712),
+        membership_fn=lambda _s, _t: None,
+    )
+    assert len(out.legs) == 1
+
+
+def test_membership_not_called_for_conformant_legs() -> None:
+    """A needs_reid=False leg records no map claims by construction, so
+    membership has nothing to say — count equality governs it (unchanged),
+    and the probe must not burn a round trip asking."""
+    leg = LegPlan(
+        source_collection="knowledge__old", target_collection="knowledge__new",
+        needs_reid=False, needs_reembed=True,
+    )
+
+    def must_not_call(_s: str, _t: str) -> tuple[int, int]:
+        raise AssertionError("membership must not be probed for a conformant leg")
+
+    out = drop_converged_legs(
+        SubstratePlan(legs=[leg]), {"knowledge__old": 12}, _all_targets(12),
+        membership_fn=must_not_call,
+    )
+    assert out.legs == []  # count equality dropped it; membership never asked
+
+
+def test_membership_not_called_when_count_equality_already_converged() -> None:
+    """The cheap path stays cheap (the N+1 design input): count equality
+    drops the leg with ZERO membership round trips; membership is asked
+    only for legs count equality kept."""
+    def must_not_call(_s: str, _t: str) -> tuple[int, int]:
+        raise AssertionError("membership must not be probed when counts already match")
+
+    out = drop_converged_legs(
+        SubstratePlan(legs=[_leg()]), {"knowledge__old": 12}, _all_targets(12),
+        membership_fn=must_not_call,
+    )
+    assert out.legs == []
+
+
+def test_rung_detect_and_verify_converge_via_membership_end_to_end() -> None:
+    """The tidtd install shape through the WHOLE rung: detect() stops
+    reporting pending and verify() returns True once the live membership
+    answer covers the leg — no count ever matched."""
+    rung = _rung(
+        classify_fn=lambda: [_cls("knowledge__old", legacy=True, count=3)],
+        target_counts_fn=lambda: _all_targets(6712),
+        membership_fn=lambda _s, _t: (3, 3),
+    )
+    assert rung.detect().pending is False
+    assert rung.verify() is True
+
+
+def test_rung_membership_fixture_default_keeps_legs() -> None:
+    """The fixture's pinned membership (0, 0) must leave legacy legs planned
+    — proving the (0,0)-never-wins rule holds at rung level too."""
+    rung = _rung(target_counts_fn=lambda: _all_targets(6712))
+    assert rung.detect().pending is True
 
 
 def test_converged_install_does_not_re_migrate() -> None:
@@ -1197,9 +1317,27 @@ def test_a_probe_failure_never_drops_a_leg() -> None:
 # only module that could fix it by hand. Both stacked reviewers signed off on
 # the unreachable fix; the test-validator caught it by driving the real runner.
 #
-# So this pin drives the REAL LadderRunner + a REAL CompletionStore. If the
-# repair is ever moved back behind a detect()-says-converged gate, this fails
-# and the direct-converge() tests above will not.
+# So this pin drives the REAL LadderRunner + a real CompletionLedger (an
+# in-memory one since RDR-186 .12 retired ladder.db — the runner's routing is
+# what this pins, not the substrate). If the repair is ever moved back behind
+# a detect()-says-converged gate, this fails and the direct-converge() tests
+# above will not.
+
+
+class _LedgerForPins:
+    def __init__(self) -> None:
+        self.records: dict[str, CompletionRecord] = {}
+
+    def record_verified(self, rung_name: str, *, package_version: str, detail: str = "") -> None:
+        self.records[rung_name] = CompletionRecord(
+            rung_name=rung_name, verified_at="t0", package_version=package_version, detail=detail
+        )
+
+    def verified_rungs(self) -> frozenset[str]:
+        return frozenset(self.records)
+
+    def completions(self) -> dict[str, CompletionRecord]:
+        return dict(self.records)
 
 
 def test_the_crash_window_heals_through_a_real_runner_walk(tmp_path: pathlib.Path) -> None:
@@ -1223,22 +1361,22 @@ def test_the_crash_window_heals_through_a_real_runner_walk(tmp_path: pathlib.Pat
         migrate_fn=lambda *_a, **_k: migrated.__setitem__("n", migrated["n"] + 1),
     )
 
-    with CompletionStore(tmp_path / "ladder.db", now_fn=lambda: "t0") as store:
-        report = LadderRunner(
-            LadderRegistry((rung,)), store, package_version_fn=lambda: "6.12.0",
-        ).run()
+    store = _LedgerForPins()
+    report = LadderRunner(
+        LadderRegistry((rung,)), store, package_version_fn=lambda: "6.12.0",
+    ).run()
 
-        assert repairs == ["ran"], (
-            "the walk never reached the cascade repair — detect() reported "
-            "converged, so the runner skipped converge() entirely and the fix "
-            "is dead code in production"
-        )
-        assert migrated["n"] == 0, "repair must not re-run the ETL"
-        outcomes = [r.outcome for r in report.runs]
-        assert outcomes == [RungOutcome.RECORDED], (
-            f"a repairable crash window must converge and record, got {outcomes}"
-        )
-        assert RUNG_SUBSTRATE_ETL in store.verified_rungs()
+    assert repairs == ["ran"], (
+        "the walk never reached the cascade repair — detect() reported "
+        "converged, so the runner skipped converge() entirely and the fix "
+        "is dead code in production"
+    )
+    assert migrated["n"] == 0, "repair must not re-run the ETL"
+    outcomes = [r.outcome for r in report.runs]
+    assert outcomes == [RungOutcome.RECORDED], (
+        f"a repairable crash window must converge and record, got {outcomes}"
+    )
+    assert RUNG_SUBSTRATE_ETL in store.verified_rungs()
 
 
 def test_an_unrepairable_crash_window_never_records(tmp_path: pathlib.Path) -> None:
@@ -1253,12 +1391,12 @@ def test_an_unrepairable_crash_window_never_records(tmp_path: pathlib.Path) -> N
         cascade_only_fn=lambda _r: "document_chunks: disk full",
     )
 
-    with CompletionStore(tmp_path / "ladder.db", now_fn=lambda: "t0") as store:
-        report = LadderRunner(
-            LadderRegistry((rung,)), store, package_version_fn=lambda: "6.12.0",
-        ).run()
-        assert report.hard_failed
-        assert RUNG_SUBSTRATE_ETL not in store.verified_rungs()
+    store = _LedgerForPins()
+    report = LadderRunner(
+        LadderRegistry((rung,)), store, package_version_fn=lambda: "6.12.0",
+    ).run()
+    assert report.hard_failed
+    assert RUNG_SUBSTRATE_ETL not in store.verified_rungs()
 
 
 def test_detect_and_verify_agree_that_an_unreflected_map_is_unfinished() -> None:

@@ -26,7 +26,6 @@ import pytest
 
 from nexus.upgrade_ladder.completion import (
     CompletionRecord,
-    CompletionStore,
     derive_ladder_position,
 )
 from nexus.upgrade_ladder.holder import InProcessCompletionHolder
@@ -288,26 +287,25 @@ def test_holder_is_consulted_second_walk_skips_redundant_verify() -> None:
     assert second.position == 1
 
 
-# ── Over the real CompletionStore: production wiring shape ───────────────────
+# ── Over a durable backend: production wiring shape ─────────────────────────
 
 
-def test_holder_over_real_completion_store_is_behaviorally_transparent(
-    tmp_path: pathlib.Path,
-) -> None:
-    """The upgrade-command wiring wraps ``CompletionStore`` in the holder;
-    with the backend up this must be a behavioral no-op: records land
-    durably and a fresh store (new process) sees them."""
-    db = tmp_path / "ladder.db"
-    with CompletionStore(db, now_fn=lambda: "t0") as store:
-        holder = InProcessCompletionHolder(store)
-        rung = ScriptedRung("a")
-        report = LadderRunner(
-            LadderRegistry((rung,)), holder, package_version_fn=lambda: "6.13.0"
-        ).run()
-        assert _outcomes(report) == [("a", RungOutcome.RECORDED)]
-        assert holder.unflushed() == {}
-    with CompletionStore(db, now_fn=lambda: "t1") as fresh:
-        assert fresh.verified_rungs() == frozenset({"a"})
+def test_holder_over_durable_backend_is_behaviorally_transparent() -> None:
+    """The upgrade-command wiring wraps the durable ledger (RDR-186 .12: the
+    engine-backed HttpLadderStore in production) in the holder; with the
+    backend up this must be a behavioral no-op: records write through
+    durably and a FRESH view of the backend (a new process's read) sees
+    them with nothing left owed."""
+    backend = ScriptedBackend()
+    holder = InProcessCompletionHolder(backend, now_fn=lambda: "t0")
+    rung = ScriptedRung("a")
+    report = LadderRunner(
+        LadderRegistry((rung,)), holder, package_version_fn=lambda: "6.13.0"
+    ).run()
+    assert _outcomes(report) == [("a", RungOutcome.RECORDED)]
+    assert holder.unflushed() == {}
+    # A fresh process's view = the backend's own records, no holder overlay.
+    assert frozenset(backend.records) == frozenset({"a"})
 
 
 def test_holder_never_swallows_memory_state_on_backend_recovery() -> None:
@@ -328,3 +326,71 @@ def test_holder_never_swallows_memory_state_on_backend_recovery() -> None:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ── flush() — the end-of-walk engine-up retry (nexus-146xx.12) ───────────────
+
+
+def test_flush_delivers_owed_records_once_backend_recovers() -> None:
+    """The .12 flush: records that missed the backend during the walk reach
+    it when flush() runs after the walk (the walk's own rungs brought the
+    engine up)."""
+    backend = ScriptedBackend(down=True)
+    holder = _holder(backend)
+    holder.record_verified("engine-install", package_version="6.12.0")
+    holder.record_verified("t2-schema", package_version="6.12.0", detail="ok")
+    assert set(holder.unflushed()) == {"engine-install", "t2-schema"}
+
+    backend.down = False
+    remaining = holder.flush()
+
+    assert remaining == 0
+    assert holder.unflushed() == {}
+    assert set(backend.records) == {"engine-install", "t2-schema"}
+    assert backend.records["t2-schema"].detail == "ok"
+
+
+def test_flush_with_backend_still_down_keeps_records_owed() -> None:
+    backend = ScriptedBackend(down=True)
+    holder = _holder(backend)
+    holder.record_verified("engine-install", package_version="6.12.0")
+
+    remaining = holder.flush()
+
+    assert remaining == 1
+    assert set(holder.unflushed()) == {"engine-install"}
+    assert backend.records == {}
+
+
+def test_flush_noop_when_nothing_owed() -> None:
+    backend = ScriptedBackend()
+    holder = _holder(backend)
+    holder.record_verified("engine-install", package_version="6.12.0")
+    calls_before = backend.record_calls
+
+    assert holder.flush() == 0
+    assert backend.record_calls == calls_before, "nothing owed => zero retries"
+
+
+def test_flush_contract_violation_propagates_loud() -> None:
+    """AttributeError/TypeError from the backend is a programming error,
+    never masked as an outage — the same loud contract as the write-through
+    (the .11 Protocol-drift Critical class)."""
+    class BrokenBackend:
+        def record_verified(self, rung_name, *, package_version, detail=""):
+            raise BackendDown("down at record time")
+
+        def verified_rungs(self):
+            return frozenset()
+
+        def completions(self):
+            return {}
+
+    holder = InProcessCompletionHolder(BrokenBackend(), now_fn=lambda: "t")
+    holder.record_verified("r1", package_version="1")
+    # Swap in a backend missing the method entirely — the flush must raise.
+    holder._backend = object()
+    import pytest as _pytest
+
+    with _pytest.raises(AttributeError):
+        holder.flush()

@@ -30,7 +30,7 @@ from nexus.db.migrations import (
     bootstrap_version,
     expected_t2_schema_version,
 )
-from nexus.upgrade_ladder.completion import CompletionStore
+from tests.upgrade.conftest import ledger_ctx as _ledger_ctx
 from nexus.upgrade_ladder.protocol import ConvergeOutcome
 from nexus.upgrade_ladder.registry import RUNG_T2_SCHEMA, LadderRegistry, default_registry
 from nexus.upgrade_ladder.rungs.t2_schema import T2SchemaRung
@@ -207,7 +207,7 @@ def test_deferred_step_reports_deferred_not_completed(
     assert "deferred" in result.detail
     assert rung.verify() is False  # stored never advanced past deferred work
 
-    with CompletionStore(db_path.parent / "ladder.db") as store:
+    with _ledger_ctx() as store:
         report = LadderRunner(
             LadderRegistry((rung,)), store, package_version_fn=lambda: "test"
         ).run()
@@ -257,7 +257,7 @@ def test_service_mode_walk_skips_rung_and_writes_no_t2(
     """The full walk on a service-mode install: rung detect-and-skips (f0pmd),
     memory.db is never created, nothing recorded."""
     rung = T2SchemaRung(db_path_fn=lambda: db_path, service_mode_fn=lambda: True)
-    with CompletionStore(tmp_path / "ladder.db") as store:
+    with _ledger_ctx() as store:
         report = LadderRunner(
             LadderRegistry((rung,)), store, package_version_fn=lambda: "test"
         ).run()
@@ -294,14 +294,16 @@ def test_runner_records_t2_rung(
     db_path: pathlib.Path, tmp_path: pathlib.Path, synthetic_registry: None
 ) -> None:
     _bootstrapped_behind(db_path)
-    with CompletionStore(tmp_path / "ladder.db") as store:
+    with _ledger_ctx() as store:
         report = LadderRunner(
             LadderRegistry((_rung(db_path),)),
             store,
             package_version_fn=lambda: "6.12.0",
         ).run()
         assert [r.outcome for r in report.runs] == [RungOutcome.RECORDED]
-        assert store.ladder_position((RUNG_T2_SCHEMA,)) == 1
+        from nexus.upgrade_ladder.completion import derive_ladder_position
+
+        assert derive_ladder_position(store.verified_rungs(), (RUNG_T2_SCHEMA,)) == 1
 
 
 def test_default_registry_contains_t2_rung() -> None:

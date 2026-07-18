@@ -140,9 +140,21 @@ def derive_wire_chash(chunk: dict[str, Any]) -> str:
 class ChashRemapStore:
     """The persisted old→new map — a local, queryable migration artifact.
 
-    Own sqlite substrate (WAL, bootstrap-on-open), PERMANENT retention
-    (out-of-band references to old ids are unbounded). ``record_batch``
-    is ONE transaction — the r2 ordering unit.
+    Own sqlite substrate (WAL, bootstrap-on-open). ``record_batch`` is ONE
+    transaction — the r2 ordering unit.
+
+    RETENTION (narrowed at RDR-186 .8 from the original "PERMANENT"):
+    map facts survive every failure and retry, and are cleared ONLY by a
+    leg rollback that verifiably completed (the whole-function scope of
+    ``rollback_collections`` — every collection's ``target_after``
+    verification passed). Out-of-band references to OLD ids stay
+    resolvable forever either way: while the migration stands, the map
+    translates them; after a completed rollback, the old ids return to
+    being the live ids. STATUS (RDR-186 .6): this LOCAL store is a
+    read-only migration source — the system of record is the PG
+    ``nexus.chash_remap`` table via ``remap_client.HttpRemapStore``; the
+    local write path survives for test fixtures and the one-time
+    ``seed_and_quarantine`` upload only.
     """
 
     def __init__(self, db_path: Path, *, now_fn: Callable[[], str] | None = None) -> None:

@@ -103,7 +103,8 @@ class ProgressReporter(Protocol):
 class CompletionLedger(Protocol):
     """The completion-record surface the runner walks against (RDR-186 P2).
 
-    Structural: ``CompletionStore`` (durable, ladder.db) and
+    Structural: ``HttpLadderStore`` (durable, the engine's
+    ``ladder_completions`` table — RDR-186 .12; ladder.db is retired) and
     ``InProcessCompletionHolder`` (in-memory overlay for the engine-defer
     window) both conform. Deliberately NO position surface here: ladder
     position is DERIVED from ``verified_rungs()`` through the single

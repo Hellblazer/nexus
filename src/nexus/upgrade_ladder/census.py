@@ -137,6 +137,7 @@ def _default_progress(
     """
     from nexus.migration.detection import voyage_key_available  # noqa: PLC0415 — deferred, detection is heavy
     from nexus.upgrade_ladder.rungs.substrate_etl import (  # noqa: PLC0415 — deferred, avoids an import cycle (the rung reads this module's footprint gate)
+        _default_membership,
         _default_target_counts,
         source_progress,
     )
@@ -147,6 +148,10 @@ def _default_progress(
             classifications,
             voyage_key_present=voyage_key_available(),
             target_counts=counts,  # None => nothing converged; the debt is real
+            # nexus-146xx.7: the census must agree with the rung's detect() on
+            # membership-converged (tidtd-shaped) legs, or doctor's census rows
+            # and the rung's pending status split-brain on the same install.
+            membership_fn=None if _no_target_provisioned() else _default_membership,
         )
     except Exception as exc:  # noqa: BLE001 — best-effort: a failed probe reports debt, never hides it
         # Includes SubstrateTargetCollision (nexus-fffey): a world the migration

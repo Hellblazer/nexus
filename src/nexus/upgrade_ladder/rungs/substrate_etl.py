@@ -585,10 +585,21 @@ def run_substrate_migration(
 # ── P4.0 (nexus-x3z00): the assembled rung ──────────────────────────────────
 
 
+#: Per-plan membership-probe count above which the fan-out warning fires —
+#: the evidence trigger for a bulk endpoint (see drop_converged_legs' N+1 note).
+#: Each probe also pays its own HttpRemapStore construction (endpoint/token
+#: resolution + a fresh connection), not just its SQL call (reviewer-146xx-7
+#: Low) — the same single-digit bound covers both costs; a shared per-plan
+#: store rides the same bulk-endpoint trigger if the warning ever fires.
+_MEMBERSHIP_FANOUT_NOTE_AT: int = 8
+
+
 def drop_converged_legs(
     plan: SubstratePlan,
     source_counts: dict[str, int],
     target_counts: dict[str, int] | None,
+    *,
+    membership_fn: Callable[[str, str], tuple[int, int] | None] | None = None,
 ) -> SubstratePlan:
     """Drop legs whose TARGET already holds the source's rows (nexus-mapbc).
 
@@ -631,10 +642,51 @@ def drop_converged_legs(
     which drops NOTHING: "I could not tell" is never "converged". A target
     simply absent from the map is not converged either. Decisions pass through
     untouched: a source-gone collection is a question for converge, not a leg.
+
+    LIVE MEMBERSHIP (RDR-186 .7 — the REAL nexus-tidtd fix): count equality
+    is structurally unreliable across embedder-era re-chunking — a target
+    independently indexed to 6712 rows never count-matches a 3-chunk stale
+    source, so the tidtd leg re-migrated (re-billing Voyage) on every run,
+    forever. For a ``needs_reid`` leg that count equality KEPT,
+    ``membership_fn(source, target)`` asks the engine's
+    ``nexus.remap_membership()`` for the live ``(mapped_total,
+    present_count)`` pair — one indexed SQL round trip per surviving re-id
+    leg, computed fresh every call, no verdict stored anywhere (RF-186-1;
+    this is the sanctioned cheap detect() the Gap-4 pin's docstring records,
+    and the nexus-ixl85 resolution for this rung).
+
+    The interpretation rules (the pinned .7 design inputs, stated here
+    because the function is fact-only by design):
+
+    * ``mapped_total > 0 and present_count == mapped_total`` — every claim
+      this leg ever recorded is present in the target: CONVERGED.
+    * ``mapped_total == 0`` — NEVER wins for a re-id leg. A needs_reid leg
+      that ran records >= 1 claim by construction (it classified needs_reid
+      precisely because legacy ids exist to remap), so zero claims means
+      never-attempted or rolled-back (Q7: rolled-back = PENDING): KEPT.
+    * ``present_count < mapped_total`` — the world regressed or delivery is
+      partial: KEPT (the Gap-4 both-directions property, at planner level).
+    * ``membership_fn`` absent or returning None — could-not-tell: KEPT,
+      same contract as ``target_counts=None``.
+    * Conformant (``needs_reid=False``) legs record no claims by
+      construction — membership is NEVER probed for them (no wasted round
+      trip); count equality remains their governing signal, correct because
+      the ETL preserves their cardinality 1:1.
+
+    N+1 note (pinned design input, decided here): membership fires only for
+    needs_reid legs that count equality kept — bounded by the install's
+    re-id leg count (single digit in every observed install), NOT by map
+    size, collection count, or history (categorically unlike the vgtff /
+    paged-pairs N+1 classes). One PK-indexed SQL call each. If an install
+    ever presents more re-id legs than ``_MEMBERSHIP_FANOUT_NOTE_AT``, the
+    warning below is the evidence trigger for a bulk
+    ``remap_membership_bulk`` endpoint (ride it with .12's ladder endpoint
+    on the next engine cut).
     """
     if not plan.legs or target_counts is None:
         return plan
     remaining: list[LegPlan] = []
+    membership_probes = 0
     for leg in plan.legs:
         want = source_counts.get(leg.source_collection)
         got = target_counts.get(leg.target_collection)
@@ -646,7 +698,27 @@ def drop_converged_legs(
                 count=got,
             )
             continue
+        if leg.needs_reid and membership_fn is not None:
+            membership = membership_fn(leg.source_collection, leg.target_collection)
+            membership_probes += 1
+            if membership is not None:
+                mapped_total, present_count = membership
+                if mapped_total > 0 and present_count == mapped_total:
+                    _log.info(
+                        "substrate_leg_converged_by_membership",
+                        source=leg.source_collection,
+                        target=leg.target_collection,
+                        mapped=mapped_total,
+                    )
+                    continue
         remaining.append(leg)
+    if membership_probes > _MEMBERSHIP_FANOUT_NOTE_AT:
+        _log.warning(
+            "substrate_membership_fanout_high",
+            probes=membership_probes,
+            note="evidence trigger for a bulk remap_membership_bulk endpoint "
+            "(batch with the .12 ladder endpoint on the next engine cut)",
+        )
     # Every field must survive this reconstruction. `billed_reembed` is derived
     # from the surviving legs so it cannot be dropped here again (nexus-k1m2f:
     # as a stored field it WAS, silently, and the cost prompt never fired in
@@ -681,6 +753,7 @@ def source_progress(
     *,
     voyage_key_present: bool,
     target_counts: dict[str, int] | None,
+    membership_fn: Callable[[str, str], tuple[int, int] | None] | None = None,
 ) -> SourceProgress:
     """What the TARGET says about each source collection (nexus-6or3m).
 
@@ -721,6 +794,7 @@ def source_progress(
         plan,
         {c.collection: c.source_count for c in classifications},
         target_counts,
+        membership_fn=membership_fn,
     )
     kept = {leg.source_collection for leg in remaining.legs}
     return SourceProgress(
@@ -729,6 +803,28 @@ def source_progress(
         ),
         credential_gated=gated,
     )
+
+
+def _default_membership(source_collection: str, target_collection: str) -> tuple[int, int] | None:
+    """Production live-membership probe: ONE engine round trip per asked leg
+    (``nexus.remap_membership()`` via GET /v1/remap/membership). Computed
+    fresh on every call — no cache, no marker, no stored verdict (RF-186-1 /
+    the Gap-4 pin's sanctioned cheap detect()). Answers None (could-not-tell,
+    never converged) when the engine is unreachable — loud, mirroring
+    ``_default_target_counts``' "could not tell is never fine" rule."""
+    from nexus.migration.remap_client import HttpRemapStore  # noqa: PLC0415 — deferred to avoid import cost
+
+    try:
+        with HttpRemapStore() as engine:
+            return engine.membership(source_collection, target_collection)
+    except Exception as exc:  # noqa: BLE001 — a probe that cannot tell must never certify convergence
+        _log.warning(
+            "substrate_membership_probe_failed",
+            source=source_collection,
+            target=target_collection,
+            error=str(exc),
+        )
+        return None
 
 
 def _default_target_counts() -> dict[str, int] | None:
@@ -1037,6 +1133,7 @@ class SubstrateEtlRung:
         target_counts_fn: Callable[[], dict[str, int] | None] | None = None,
         unreflected_fn: Callable[[], list[str]] | None = None,
         cascade_only_fn: Callable[[ProgressReporter], str] | None = None,
+        membership_fn: Callable[[str, str], tuple[int, int] | None] | None = None,
         page: int = 300,
     ) -> None:
         # The r2 map-atomicity coupling (critic-146xx-6 Q1): the wire-reid
@@ -1074,6 +1171,9 @@ class SubstrateEtlRung:
         self._cascade_only = (
             cascade_only_fn if cascade_only_fn is not None else _default_cascade_only
         )
+        self._membership = (
+            membership_fn if membership_fn is not None else _default_membership
+        )
         self._page = page
 
     # ── plan ─────────────────────────────────────────────────────────────────
@@ -1104,6 +1204,7 @@ class SubstrateEtlRung:
             plan,
             {c.collection: c.source_count for c in classifications},
             self._target_counts(),
+            membership_fn=self._membership,
         )
 
     # ── detect ───────────────────────────────────────────────────────────────
@@ -1276,6 +1377,14 @@ class SubstrateEtlRung:
         asks it whether the content ARRIVED — never consults converge's
         bookkeeping (the .14 resume path's relaxed this-run count check
         delegates the full check here).
+
+        COST NOTE (critic-146xx-12c): the "losing a completion record costs
+        one cheap redundant verify" claim (RF-186-2) is load-bearing on
+        ``detect_pending_migration_memoized``'s 60s process-local memo in
+        ``migration/guided_upgrade.py`` — detect() and verify() run
+        back-to-back in one process, so the re-classification here is a memo
+        hit. Shorten that TTL (or insert work between detect and verify) and
+        the redundant verify becomes a full classification sweep.
 
         The world it must read is the TARGET (bead nexus-mapbc). This used to
         re-plan from the source alone and so could never return True: the

@@ -80,7 +80,6 @@ DDL_CENSUS: dict[str, int] = {
     "src/nexus/db/t2/telemetry.py": 4,
     "src/nexus/migration/wire_reid.py": 1,        # chash_remap.db (PG twin = RDR-185 .16 Liquibase work)
     "src/nexus/pipeline_buffer.py": 3,            # pipeline.db own-substrate
-    "src/nexus/upgrade_ladder/completion.py": 2,  # ladder.db own-substrate
 }
 
 #: 2026-07-18 census — per-file counts of ``ALTER TABLE`` statements
@@ -147,7 +146,6 @@ EPSILON_CENSUS: dict[str, int] = {
     "src/nexus/pipeline_buffer.py": 1,
     "src/nexus/storage_boundary_lint.py": 10,     # defines the token; matches its own docs
     "src/nexus/taxonomy.py": 1,
-    "src/nexus/upgrade_ladder/completion.py": 1,
     "src/nexus/upgrade_ladder/rungs/t2_schema.py": 1,
 }
 

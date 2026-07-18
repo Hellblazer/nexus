@@ -588,7 +588,10 @@ def test_lint_baseline_unchanged_after_voyageai_extension():
         f"Baseline violation count changed after voyageai lint extension: "
         f"{[(v.file, v.line, v.symbol) for v in result.violations]}"
     )
-    assert result.epsilon_allow_connects == 25, (
+    # 25 -> 24: RDR-186 .12 retired completion.py's ladder.db epsilon connect
+    # (kept in lockstep with test_storage_boundary_lint's copy — same number,
+    # same commit; the derive-don't-paste note above still stands).
+    assert result.epsilon_allow_connects == 24, (
         f"epsilon_allow_connects baseline changed: {result.epsilon_allow_connects}"
     )
     # RDR-152 nexus-fjwxh: 31 -> 33 (CLI t2_handle + MCP t2_index_write service-

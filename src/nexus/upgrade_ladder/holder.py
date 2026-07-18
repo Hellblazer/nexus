@@ -51,8 +51,8 @@ class InProcessCompletionHolder:
     records once the engine is up is nexus-146xx.12's job, kept off the
     read path so a read-only sweep stays read-only.
 
-    ``now_fn`` is the injectable clock seam (deterministic tests), same
-    shape as :class:`~nexus.upgrade_ladder.completion.CompletionStore`.
+    ``now_fn`` is the injectable clock seam (deterministic tests) — the
+    house shape every completion surface uses.
 
     NOT thread-safe by design: the holder lives inside one ladder walk in
     one process (the ``_run_ladder`` invocation) — plain dicts, no locks.
@@ -111,6 +111,40 @@ class InProcessCompletionHolder:
         """Records held in-process that have NOT reached the backend — what
         the engine-up flush (nexus-146xx.12) owes durability."""
         return dict(self._unflushed)
+
+    def flush(self) -> int:
+        """Retry every owed record against the backend — the end-of-walk
+        flush (nexus-146xx.12): the walk's own rungs may have brought the
+        engine up AFTER earlier records missed it.
+
+        Re-recording is a safe idempotent upsert; the engine re-stamps
+        ``verified_at`` at flush time by design (RF-186-2 lossy audit
+        metadata — see ``http_store``'s module docstring). Records that
+        still miss stay owed (warned per record by the same degradation
+        contract as the write-through); a record lost with the process
+        costs one idempotent re-derivation, never correctness.
+
+        Returns the number of records STILL owed after the attempt.
+        """
+        for rung_name, record in list(self._unflushed.items()):
+            try:
+                self._backend.record_verified(
+                    rung_name,
+                    package_version=record.package_version,
+                    detail=record.detail,
+                )
+            except (AttributeError, TypeError):
+                raise  # contract violation — never masked as an outage
+            except Exception as exc:  # noqa: BLE001 — still down: stays owed; loss costs a redundant verify (RF-186-2)
+                _log.warning(
+                    "ladder_completion_flush_deferred", rung=rung_name, error=str(exc)
+                )
+            else:
+                self._unflushed.pop(rung_name, None)
+        remaining = len(self._unflushed)
+        if remaining:
+            _log.warning("ladder_completion_flush_incomplete", owed=remaining)
+        return remaining
 
     def _read_backend(self, reader: Callable[[], _T], fallback: _T) -> _T:
         """One read through the backend with the engine-defer degradation.

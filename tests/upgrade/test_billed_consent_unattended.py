@@ -74,7 +74,7 @@ import pytest
 from nexus.catalog.catalog_db import CatalogDB
 from nexus.migration.detection import CollectionClassification
 from nexus.migration.wire_reid import ChashRemapStore
-from nexus.upgrade_ladder.completion import CompletionStore
+from tests.upgrade.conftest import ledger_ctx as _ledger_ctx
 from nexus.upgrade_ladder.registry import LadderRegistry
 from nexus.upgrade_ladder.runner import LadderRunner, RungOutcome
 from nexus.upgrade_ladder.rungs.substrate_etl import SubstrateEtlRung, execute_leg
@@ -436,7 +436,7 @@ def test_the_free_shape_converges_unattended_with_zero_spend(
         unreflected_fn=list,
     )
 
-    with CompletionStore(tmp_path / "ladder.db") as store:
+    with _ledger_ctx() as store:
         report = LadderRunner(LadderRegistry((rung,)), store).run()
 
     (run,) = report.runs

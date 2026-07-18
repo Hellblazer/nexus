@@ -1379,13 +1379,53 @@ def migrate_vectors_cmd(
             open_local_read_client,
         )
 
+        # RDR-186 .8: rollback consults + clears the ENGINE-side map (the
+        # system of record post-.6). Seed-and-quarantine first so any pre-.6
+        # local facts are engine-visible (and can never resurrect a cleared
+        # leg later); the whole-leg revert/clear ordering lives inside
+        # rollback_collections itself.
+        from pathlib import Path  # noqa: PLC0415 — local wiring only
+
+        from nexus.config import default_db_path  # noqa: PLC0415 — deferred to avoid import cycle
+        from nexus.migration.remap_cascade import cascade_revert  # noqa: PLC0415 — circular-dep avoidance
+        from nexus.migration.remap_client import HttpRemapStore, seed_and_quarantine  # noqa: PLC0415 — circular-dep avoidance
+
         try:
             read_client = (
                 open_cloud_read_client() if cloud else open_local_read_client(local_path)
             )
-            deleted = rollback_collections(
-                read_client, vector_client, collections=collections
-            )
+            db_path = default_db_path()
+            catalog_db = db_path.parent / "catalog" / ".catalog.db"
+
+            def _revert_and_report(leg_entries):
+                report = cascade_revert(
+                    leg_entries, catalog_db=catalog_db, memory_db=db_path
+                )
+                if report.unrestorable:
+                    # Surface the collapse loss on the CLI, not only in
+                    # structlog (reviewer-146xx-8): identical-text siblings
+                    # merged during migration cannot be resurrected; the
+                    # surviving reference carries byte-identical content.
+                    click.echo(
+                        f"note: {len(report.unrestorable)} identical-text sibling "
+                        "reference(s) were merged during migration and share one "
+                        "restored reference (content identical)",
+                        err=True,
+                    )
+                return report
+
+            with HttpRemapStore() as remap_engine:
+                seed_and_quarantine(
+                    Path(db_path.parent / "chash_remap.db"), remap_engine
+                )
+                deleted = rollback_collections(
+                    read_client,
+                    vector_client,
+                    collections=collections,
+                    remap_store=remap_engine,
+                    cascade_revert_fn=_revert_and_report,
+                    map_clear_fn=remap_engine.clear_leg,
+                )
         except Exception as exc:  # noqa: BLE001 — boundary catch; re-raised as a domain error
             raise click.ClickException(f"rollback failed: {exc}")
         for name, count in sorted(deleted.items()):

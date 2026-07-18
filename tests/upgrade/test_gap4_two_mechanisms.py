@@ -50,16 +50,40 @@ def _defs_named(tree: ast.AST, name: str) -> list[ast.FunctionDef | ast.AsyncFun
 
 
 def test_ladder_position_defined_only_in_completion_store() -> None:
-    """The data-mechanism's single source of truth: ``ladder_position`` is
-    defined exactly once, in the completion store. A second definition is a
-    competing data authority."""
+    """The data-mechanism's single source of truth: the position derivation
+    is defined exactly once, in completion.py. A second definition is a
+    competing data authority. (RDR-186 .12: the SQLite store's
+    ``ladder_position`` wrapper died with ladder.db; ``derive_ladder_position``
+    is — and always was — the single pinned algorithm, so the scan tracks
+    the surviving definition. Assertion shape unchanged: exactly one def,
+    exactly one home.)"""
     definitions: list[pathlib.Path] = []
     for path in _ladder_files():
-        if _defs_named(ast.parse(path.read_text(encoding="utf-8")), "ladder_position"):
+        if _defs_named(ast.parse(path.read_text(encoding="utf-8")), "derive_ladder_position"):
             definitions.append(path)
     assert definitions == [COMPLETION], (
-        f"ladder_position must be defined ONLY in completion.py; found "
+        f"derive_ladder_position must be defined ONLY in completion.py; found "
         f"{[str(p.relative_to(REPO_ROOT)) for p in definitions]}"
+    )
+
+
+def test_retired_ladder_position_name_is_never_reintroduced() -> None:
+    """The RETIRED name stays under surveillance (Hal directive 2026-07-18):
+    ``ladder_position`` was the SQLite store's wrapper, deleted with
+    ladder.db at RDR-186 .12. A NEW def by that name — anywhere in the
+    ladder package — would be a second position authority alongside
+    ``derive_ladder_position``, the exact competing-definition class this
+    suite exists to ban. The scan above tracks the surviving single
+    definition; this one bans the ghost coming back."""
+    offenders: list[str] = []
+    for path in _ladder_files():
+        for node in _defs_named(
+            ast.parse(path.read_text(encoding="utf-8")), "ladder_position"
+        ):
+            offenders.append(f"{path.relative_to(REPO_ROOT)}:{node.lineno}")
+    assert offenders == [], (
+        "the retired `ladder_position` name was reintroduced as a definition — "
+        f"derive_ladder_position is the ONLY sanctioned algorithm: {offenders}"
     )
 
 
@@ -167,18 +191,19 @@ def test_ladder_never_consults_the_marker_stamp() -> None:
 
 
 def test_completion_records_carry_no_precondition_state() -> None:
-    """Class separation both ways: the completion store's schema has no
-    engine/process/package columns — provisioning state never enters the
-    data mechanism's records."""
-    source = COMPLETION.read_text(encoding="utf-8")
-    schema_start = source.index("CREATE TABLE")
-    schema = source[schema_start : source.index('"""', schema_start)]
-    for token in ("engine", "process", "package_state", "lease"):
-        assert token not in schema, (
-            f"completion-record schema gained a provisioning column ({token}) "
-            "— precondition state must stay on the stateless axis"
-        )
+    """Class separation both ways: the completion FACT SHAPE has no
+    engine/process/package-binary columns — provisioning state never enters
+    the data mechanism's records. (RDR-186 .12 port: the SQLite schema died
+    with ladder.db; the surviving authority on what a completion fact
+    carries is the CompletionRecord dataclass every ledger serves.)"""
+    from nexus.upgrade_ladder.completion import CompletionRecord
 
+    fields = set(CompletionRecord.__dataclass_fields__)
+    assert fields == {"rung_name", "verified_at", "package_version", "detail"}
+    forbidden = {"engine", "process", "binary", "position", "installed", "required"}
+    assert not any(
+        any(token in f for token in forbidden) for f in fields
+    ), f"precondition/position state leaked into the completion fact shape: {fields}"
 
 def test_exactly_two_mechanism_modules_exist() -> None:
     """The census pin: the ladder package's answer surfaces are exactly
@@ -188,7 +213,7 @@ def test_exactly_two_mechanism_modules_exist() -> None:
     answer_modules = {
         p.name
         for p in _ladder_files()
-        if _defs_named(ast.parse(p.read_text(encoding="utf-8")), "ladder_position")
+        if _defs_named(ast.parse(p.read_text(encoding="utf-8")), "derive_ladder_position")
         or _defs_named(ast.parse(p.read_text(encoding="utf-8")), "check_preconditions")
     }
     assert answer_modules == {"completion.py", "preconditions.py"}
@@ -300,6 +325,16 @@ def test_rung_convergence_is_re_derived_live_never_cached() -> None:
     evaluating it. Their green was cited as evidence once; it was not. This
     test evaluates it — and it is the one that fails if a future rung starts
     caching its verdict rather than re-deriving it.
+
+    SANCTIONED CHEAP DETECT (RDR-186 .7, recorded so no future reader
+    re-proposes a marker): an engine-side LIVE membership computation —
+    ``nexus.remap_membership()`` over the raw-fact ``chash_remap`` map
+    joined to the live chunk tables, called fresh by detect()/verify() each
+    walk — is the compliant way to make the substrate rung's detect() cheap.
+    It is the RESOLVED form of nexus-ixl85: one indexed SQL round trip
+    replaces the paged probe, with NO stored verdict anywhere (the map rows
+    are inert inputs a live computation interprets; the answer tracks the
+    world in both directions exactly as this test demands).
     """
     from nexus.migration.detection import CollectionClassification  # noqa: PLC0415 — test-local fixture construction
     from nexus.upgrade_ladder.rungs.substrate_etl import SubstrateEtlRung  # noqa: PLC0415 — test-local fixture construction
@@ -317,6 +352,10 @@ def test_rung_convergence_is_re_derived_live_never_cached() -> None:
         target_counts_fn=lambda: {"knowledge__old": world["target_rows"]},
         unreflected_fn=lambda: [],
         cascade_only_fn=lambda _r: "",
+        # Pin the membership seam like every other rung test (critic-146xx-7
+        # hygiene): None = could-not-tell, so count-equality alone drives
+        # this test's world-tracking assertions — no engine construction.
+        membership_fn=lambda _s, _t: None,
     )
 
     assert rung.detect().pending is True, "nothing migrated yet — must read pending"
