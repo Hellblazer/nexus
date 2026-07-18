@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-186 bead nexus-146xx.10 — ladder_completions baseline changelog.
+
+    The PG home for upgrade-ladder rung completion bookkeeping (RDR-186 D3:
+    derive-first, record-late). Mirrors the client-side ladder.db
+    rung_completions schema (src/nexus/upgrade_ladder/completion.py) 1:1 with
+    tenant_id added: one durable "verified" fact per rung, written only after
+    the rung's verify() passed (the runner owns that guard). First-class
+    relation per the RDR-154 bias; Hal's Q5 relaxation (2026-07-18) permits a
+    transitional KV facility instead, but the relation is the same effort here
+    so the bias stands.
+
+    Completion records are position BOOKKEEPING, not truth (RDR-142 /
+    RF-186-2): ladder position is DERIVED at read time (derive_ladder_position,
+    the single Gap-4 mechanism-1 algorithm) as the max contiguous verified
+    prefix of the rung order. NO stored position column, no setter — ever.
+    verified_at / package_version are observability-only audit metadata,
+    accepted lossy across the SQLite->PG transition (RF-186-2). The client
+    flushes in-process completion records here once the engine is up
+    (nexus-146xx.12) and then retires ladder.db.
+
+    Column mapping (SQLite rung_completions -> Postgres):
+      tenant_id       (none)                     -> TEXT NOT NULL (RLS discriminator)
+      rung_name       TEXT PRIMARY KEY           -> TEXT NOT NULL
+      verified_at     TEXT NOT NULL (ISO-8601)   -> TIMESTAMPTZ NOT NULL
+      package_version TEXT NOT NULL              -> TEXT NOT NULL
+      detail          TEXT NOT NULL DEFAULT ''   -> TEXT NOT NULL DEFAULT ''
+
+    Natural key: rung_name; Postgres key: (tenant_id, rung_name).
+
+    Grants: consolidated in grants-nexus-svc.xml (runAlways) — no per-store
+    grant here.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: ladder_completions table ─────────────────────────── -->
+    <changeSet id="ladder-001-1" author="nexus-146xx.10">
+        <comment>Create ladder_completions table mirroring the SQLite rung_completions schema with tenant_id (bookkeeping only — position is always derived, never stored)</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.ladder_completions (
+    tenant_id       TEXT        NOT NULL,
+    rung_name       TEXT        NOT NULL,
+    verified_at     TIMESTAMPTZ NOT NULL,
+    package_version TEXT        NOT NULL,
+    detail          TEXT        NOT NULL DEFAULT '',
+    CONSTRAINT ladder_completions_pk PRIMARY KEY (tenant_id, rung_name)
+);
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.ladder_completions CASCADE</rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: RLS enable + force + policy ──────────────────────── -->
+    <changeSet id="ladder-001-2" author="nexus-146xx.10">
+        <comment>Enable and force RLS; create tenant isolation policy</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.ladder_completions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.ladder_completions FORCE ROW LEVEL SECURITY;
+
+-- cmd=ALL: covers SELECT, INSERT, UPDATE, DELETE in one policy.
+-- current_setting('nexus.tenant', true): missing_ok=true so unset GUC returns NULL
+--   rather than raising. NULL != any tenant_id -> zero rows visible = fail-closed.
+CREATE POLICY tenant_isolation ON nexus.ladder_completions
+    USING      (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+            DROP POLICY IF EXISTS tenant_isolation ON nexus.ladder_completions;
+            ALTER TABLE nexus.ladder_completions NO FORCE ROW LEVEL SECURITY;
+            ALTER TABLE nexus.ladder_completions DISABLE ROW LEVEL SECURITY;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

@@ -207,6 +207,17 @@
          2026-07-02 gate-critique constraint; extends RDR-176 non-persistence). -->
     <include file="db/changelog/migration-001-baseline.xml"/>
 
+    <!-- RDR-186 nexus-146xx.3 (RDR-185 .16 lineage): chash_remap — the PG twin
+         of the client-side chash_remap.db wire re-id map. RAW-FACT substrate,
+         RF-186-1: no verdict column ever (see the changelog file header).
+         Standalone table (no FKs); before grants. -->
+    <include file="db/changelog/remap-001-baseline.xml"/>
+
+    <!-- RDR-186 nexus-146xx.10: ladder_completions — PG home for upgrade-ladder
+         rung completion bookkeeping (D3 derive-first record-late; position is
+         always derived, never stored). Standalone table; before grants. -->
+    <include file="db/changelog/ladder-001-baseline.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
