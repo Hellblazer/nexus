@@ -44,7 +44,20 @@ destination. Exemptions are Hal's decisions, never code comments.
 This RDR closes the gap between RDR-158's enumerated scope and the
 directive's totality.
 
-#### Gap 1: Scope hole — anything outside RDR-158's enumeration can claim exemption
+#### Gap 1: Scope hole with no mechanical resistance — anything outside RDR-158's enumeration can claim exemption
+
+(Named "the scope-hole gap" in citations — never "Gap 4"; that token
+belongs to RDR-185's two-mechanism pin, cited throughout this document.)
+
+Until 2026-07-18 nothing mechanically resisted new SQLite.
+`tests/test_no_new_sqlite.py` (commit `54f7bd65`) now freezes per-file
+counts of inline SQLite DDL (15 files) and `# epsilon-allow:` overrides
+(43 files); growth fails. The freeze stops accretion; this RDR supplies
+the *ratchet to zero*. Known scanner limitations, tracked not blocking:
+the DDL regex cannot see schema growth via `ALTER TABLE`, nor a new
+`sqlite3.connect` call in an already-censused file with no new
+`CREATE TABLE` (the boundary lint's separate connect-count ratchet
+partially covers the latter); P0 hardens or accepts these explicitly.
 
 RDR-158 governs the seven-domain stores. Any store
   outside that list (ladder, chash-remap, pipeline buffer, catalog local
@@ -67,14 +80,6 @@ The upgrade ladder's completion store
   inline mid-command) live in `nexus.db` but are registered in **no**
   migration registry and **no** ETL. RDR-158 P4 deleting the SQLite schema
   would silently drop their data.
-#### Gap 4: Enforcement — nothing mechanically resisted new SQLite
-
-Until 2026-07-18 nothing mechanically resisted new
-  SQLite. `tests/test_no_new_sqlite.py` (commit `54f7bd65`) now freezes
-  per-file counts of inline SQLite DDL (15 files) and `# epsilon-allow:`
-  overrides (43 files); growth fails. The freeze stops accretion; this RDR
-  supplies the *ratchet to zero*.
-
 ### Evidence
 
 - `src/nexus/upgrade_ladder/completion.py:73`, `src/nexus/migration/wire_reid.py:151`,
@@ -128,6 +133,32 @@ real nexus-tidtd fix) and resolves nexus-ixl85's probe-cost concern for
 this rung (one indexed SQL call per leg). The Gap-4 pin stands
 **unamended**; its docstring gains one documenting line recording
 live-membership-computation as the sanctioned cheap detect().
+
+**The rollback-clear is a change to `rollback_collections`, with a hard
+ordering constraint** (gate Critical, 2026-07-18): today
+`rollback_collections` (`vector_etl.py:1677`) does NOT touch the map —
+that is precisely what RF-186-1 fixes — and the map's documented
+"PERMANENT retention" (`wire_reid.py:143`) is load-bearing for
+rollback's own retry idempotency: the function resolves
+`entries_with_targets()` up front and pages through deletes, so a
+crash/retry mid-rollback must find the translation table intact or a
+cross-model retry silently probes the wrong target. Therefore the leg's
+map rows are cleared ONLY after the leg's full rollback verifiably
+completes (strictly after the existing `target_after` count
+verification), never eagerly, never per-page — the same
+clear-only-after-proof shape `clear_convergence` was reviewed to in the
+reverted marker design. Rolling back a leg also reverts the downstream
+remap-cascade targets keyed by the map (the RDR-185 .13 audit set:
+manifest, chash_index, topic_assignments, frecency/relevance_log,
+aspects; `CHASH_BEARING_TABLES` + nexus-z5j0t extension) before or
+atomically with the map-row clear — a leg is not "rolled back" while
+local stores still point at its new chashes. At P1 both docstrings'
+"permanent" language (`wire_reid.py:143`, `vector_etl.py:1698`) narrows
+to the carve-out that actually holds: permanent across every failure
+and retry, cleared only by a leg rollback that verifiably completed —
+out-of-band references to OLD ids remain resolvable forever because the
+old ids return to being the live ids when the migrated rows are
+removed.
 
 **D3 — Ladder state: derive-first, record-late.** The completion store's
 bootstrap-ordering argument is real: the ladder runs when the engine may be
@@ -185,15 +216,24 @@ tests is deleted, per Hal 2026-07-18).
 
 1. **P0 — Inventory adjudication (no code).** Every entry in the two frozen
    censuses binned into {migrate-to-PG, delete-with-feature, flat-file
-   demotion, rides-RDR-158-P3/P4}, each row carrying its data-carry plan and
-   its gate. Deliverable: the adjudication table appended to this RDR,
-   gated + accepted — this is where "exceptions are Hal's decisions" becomes
+   demotion, rides-RDR-158-P3/P4, not-actually-debt}, each row carrying its
+   data-carry plan and its gate. (The fifth bin exists for entries like
+   `storage_boundary_lint.py`'s 10 self-referential token-definition
+   matches — census noise, not persistence debt; binning them explicitly
+   beats silently ignoring them.) P0 also resolves Q3 (FTS5 audit outside
+   the seven domains) and Q6 (cold-start state audit), and decides
+   harden-vs-accept for the tripwire's known scanner limitations (Gap 1).
+   Deliverable: the adjudication table appended to this RDR, gated +
+   accepted — this is where "exceptions are Hal's decisions" becomes
    literal.
 2. **P1 — chash_remap to PG (engine-side, second release lifecycle).** The
    .16 Liquibase changeset + bulk-remap endpoint; `wire_reid` writes through
-   the engine; the local file becomes read-only source. Includes the
-   nexus-tidtd delivery-fact relation (D2) and unblocks the real tidtd fix
-   (membership-probe convergence with a PG-persisted proof).
+   the engine; the local file becomes read-only source. Includes the D2
+   live-membership SQL function (no persisted relation — the real
+   nexus-tidtd fix), the `rollback_collections` change with the
+   clear-only-after-verified-completion ordering + downstream cascade
+   revert (D2), and the narrowed-retention docstring updates in
+   `wire_reid.py` and `vector_etl.py`.
 3. **P2 — Ladder state derive-first (D3).** Prove or falsify pre-engine
    re-derivability per rung; implement the PG flush; retire `ladder.db` or
    demote to flat file per the research outcome.
@@ -257,7 +297,7 @@ tests is deleted, per Hal 2026-07-18).
   `chash_remap` rows; the system reads "nothing owed → pending again if
   the source still classifies"; a rolled-back install that re-runs
   `nx upgrade` re-plans the leg behind the cost-consent gate.
-- **Q3:** FTS5 in local mode — the seven-domain retirement inherits RDR-152's
+- **Q3 (resolved at P0):** FTS5 in local mode — the seven-domain retirement inherits RDR-152's
   locked FTS5→tsvector parity contract; confirm nothing outside those
   domains grew an FTS5 dependency (memory_store FTS is in-scope-158; anything
   else?).
@@ -267,7 +307,7 @@ tests is deleted, per Hal 2026-07-18).
   for client bookkeeping, or does each artifact get a first-class relation?
   (Bias per RDR-154: first-class relations with real schemas; a KV bucket is
   the SQLite hybrid wearing a PG costume.)
-- **Q6:** Windows/cold-start: `nx` invoked before any engine has EVER been
+- **Q6 (resolved at P0):** Windows/cold-start: `nx` invoked before any engine has EVER been
   installed (fresh machine, first run) — what is the precise set of state
   the CLI may need before the first engine start, and is all of it config
   (yaml) rather than data?
