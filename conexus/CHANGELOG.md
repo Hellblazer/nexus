@@ -4,6 +4,12 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.13.0] - 2026-07-18
+
+- Plugin version aligned with conexus 6.13.0. No plugin-side changes. See the
+  root CHANGELOG for the 6.13.0 headline: client persistence fully engine-hosted
+  (RDR-186 — no SQLite in any mode) and the cross-era upgrade convergence fix.
+
 ## [6.12.0] - 2026-07-17
 
 - `/conexus:upgrade` preamble tolerates the dry-run's by-design BLOCKED exit

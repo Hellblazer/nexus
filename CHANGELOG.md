@@ -6,6 +6,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.13.0] - 2026-07-18
+
 Ships with (and requires) engine-service-v0.1.47.
 
 ### Added
