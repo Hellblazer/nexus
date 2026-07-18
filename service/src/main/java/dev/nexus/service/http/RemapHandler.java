@@ -34,6 +34,14 @@ import java.util.Map;
  *   GET  /v1/remap/membership     live leg-convergence counts (bead .5 function):
  *                                 ?source_collection=&amp;target_collection=
  *                                 → {mapped_total, present_count}
+ *   GET  /v1/remap/entries        one source collection's facts (bead .6/.8 read
+ *                                 shape): ?source_collection= → {entries:
+ *                                 [{old_id, new_chash, target_collection}]}
+ *   GET  /v1/remap/pairs          paged global (old_id, new_chash) view — the
+ *                                 remap cascade's all_pairs input:
+ *                                 ?limit=&amp;offset= → {pairs: [[old, new], ...]}
+ *   GET  /v1/remap/source_collections  distinct sources — the prior-collections
+ *                                 (source-gone) probe input
  * </pre>
  *
  * <p>RF-186-1: raw facts and live counts only — no verdict surface exists and
@@ -81,10 +89,13 @@ public final class RemapHandler implements HttpHandler {
 
         try {
             switch (op) {
-                case "/record_batch" -> handleRecordBatch(exchange, tenant, method);
-                case "/clear_leg"    -> handleClearLeg(exchange, tenant, method);
-                case "/membership"   -> handleMembership(exchange, tenant, method);
-                default              -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
+                case "/record_batch"       -> handleRecordBatch(exchange, tenant, method);
+                case "/clear_leg"          -> handleClearLeg(exchange, tenant, method);
+                case "/membership"         -> handleMembership(exchange, tenant, method);
+                case "/entries"            -> handleEntries(exchange, tenant, method);
+                case "/pairs"              -> handlePairs(exchange, tenant, method);
+                case "/source_collections" -> handleSourceCollections(exchange, tenant, method);
+                default                    -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
             }
         } catch (IllegalArgumentException e) {
             HttpUtil.send(exchange, 400, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
@@ -166,7 +177,50 @@ public final class RemapHandler implements HttpHandler {
                 "{\"mapped_total\":" + m[0] + ",\"present_count\":" + m[1] + "}");
     }
 
+    // ── GET /v1/remap/entries ────────────────────────────────────────────────
+
+    private void handleEntries(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        String sourceCollection = queryParam(exchange, "source_collection");
+        if (sourceCollection == null || sourceCollection.isBlank()) {
+            throw new IllegalArgumentException("'source_collection' query param is required");
+        }
+        var entries = repo.entriesForCollection(tenant, sourceCollection);
+        HttpUtil.send(exchange, 200,
+                MAPPER.writeValueAsString(Map.of("entries", entries)));
+    }
+
+    // ── GET /v1/remap/pairs ──────────────────────────────────────────────────
+
+    private void handlePairs(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        int limit  = intParam(exchange, "limit", RemapRepository.MAX_PAGE);
+        int offset = intParam(exchange, "offset", 0);
+        var pairs = repo.pairs(tenant, limit, offset);
+        HttpUtil.send(exchange, 200,
+                MAPPER.writeValueAsString(Map.of("pairs", pairs)));
+    }
+
+    // ── GET /v1/remap/source_collections ─────────────────────────────────────
+
+    private void handleSourceCollections(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        var sources = repo.sourceCollections(tenant);
+        HttpUtil.send(exchange, 200,
+                MAPPER.writeValueAsString(Map.of("source_collections", sources)));
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
+
+    private static int intParam(HttpExchange exchange, String key, int defaultValue) {
+        String raw = queryParam(exchange, key);
+        if (raw == null || raw.isBlank()) return defaultValue;
+        try {
+            return Integer.parseInt(raw);
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("'" + key + "' must be an integer, got: " + raw);
+        }
+    }
 
     /**
      * Normalize a chash to its 32-char form (mirrors ChashHandler): the 64-char

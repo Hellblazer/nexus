@@ -195,6 +195,60 @@ public final class RemapRepository {
         });
     }
 
+    /**
+     * One source collection's facts: {@code [old_id, new_chash,
+     * target_collection]} rows — the client {@code entries_for_collection} /
+     * {@code entries_with_targets} read shape (rollback + cascade, bead .6/.8).
+     */
+    public List<Map<String, String>> entriesForCollection(String tenant, String sourceCollection) {
+        requireNonBlank(sourceCollection, "source_collection");
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.select(CHASH_REMAP.OLD_ID, CHASH_REMAP.NEW_CHASH, CHASH_REMAP.TARGET_COLLECTION)
+               .from(CHASH_REMAP)
+               .where(CHASH_REMAP.TENANT_ID.eq(tenant)
+                       .and(CHASH_REMAP.SOURCE_COLLECTION.eq(sourceCollection)))
+               .orderBy(CHASH_REMAP.OLD_ID)
+               .fetch(r -> Map.of(
+                       "old_id", r.value1(),
+                       "new_chash", r.value2(),
+                       "target_collection", r.value3())));
+    }
+
+    /** Page-size ceiling for {@link #pairs} (mirrors the store-list paging shape). */
+    public static final int MAX_PAGE = 1000;
+
+    /**
+     * Paged global {@code (old_id, new_chash)} view — the remap cascade's
+     * input ({@code all_pairs}). Deterministically ordered by
+     * {@code (source_collection, old_id)} so OFFSET pagination is stable.
+     */
+    public List<List<String>> pairs(String tenant, int limit, int offset) {
+        if (limit < 1 || limit > MAX_PAGE) {
+            throw new IllegalArgumentException("limit must be 1.." + MAX_PAGE + ", got " + limit);
+        }
+        if (offset < 0) {
+            throw new IllegalArgumentException("offset must be >= 0, got " + offset);
+        }
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.select(CHASH_REMAP.OLD_ID, CHASH_REMAP.NEW_CHASH)
+               .from(CHASH_REMAP)
+               .where(CHASH_REMAP.TENANT_ID.eq(tenant))
+               .orderBy(CHASH_REMAP.SOURCE_COLLECTION, CHASH_REMAP.OLD_ID)
+               .limit(limit)
+               .offset(offset)
+               .fetch(r -> List.of(r.value1(), r.value2())));
+    }
+
+    /** Distinct source collections — the prior-collections (source-gone) probe input. */
+    public List<String> sourceCollections(String tenant) {
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.selectDistinct(CHASH_REMAP.SOURCE_COLLECTION)
+               .from(CHASH_REMAP)
+               .where(CHASH_REMAP.TENANT_ID.eq(tenant))
+               .orderBy(CHASH_REMAP.SOURCE_COLLECTION)
+               .fetch(CHASH_REMAP.SOURCE_COLLECTION));
+    }
+
     private static void requireNonBlank(String value, String field) {
         if (value == null || value.isBlank()) {
             throw new IllegalArgumentException("'" + field + "' must not be blank");

@@ -334,6 +334,120 @@ class RemapHandlerTest {
         assertThat(resp.body()).contains("new_chash");
     }
 
+    // ── Test 6b: read endpoints — pairs / entries / source_collections ───────
+    //
+    // The .6 client demotion of chash_remap.db to read-only source moves the
+    // cascade (all_pairs), rollback (entries_with_targets), and the
+    // prior-collections probe onto these reads — the facts must be readable
+    // from where they are written. Raw facts only (RF-186-1).
+
+    @Test
+    void readEndpoints_pairsEntriesAndSourceCollections() throws Exception {
+        String srcA = "legacy__h8__srcA";
+        String srcB = "legacy__h8__srcB";
+        String tgt = "knowledge__h8__tgt";
+        post("/v1/remap/record_batch", TOKEN, TENANT, """
+            {"source_collection":"%s","entries":[
+              {"old_id":"a-1","new_chash":"%s","target_collection":"%s","provenance":"test"},
+              {"old_id":"a-2","new_chash":"%s","target_collection":"%s","provenance":"test"}
+            ]}""".formatted(srcA, chash("h8a1"), tgt, chash("h8a2"), tgt));
+        post("/v1/remap/record_batch", TOKEN, TENANT, """
+            {"source_collection":"%s","entries":[
+              {"old_id":"b-1","new_chash":"%s","target_collection":"%s","provenance":"test"}
+            ]}""".formatted(srcB, chash("h8b1"), tgt));
+
+        // entries: scoped to one source collection, full fact rows.
+        var entriesResp = get("/v1/remap/entries?source_collection=" + srcA, TOKEN, TENANT);
+        assertThat(entriesResp.statusCode()).isEqualTo(200);
+        var entriesBody = mapper.readValue(entriesResp.body(), MAP_T);
+        @SuppressWarnings("unchecked")
+        var entries = (java.util.List<Map<String, Object>>) entriesBody.get("entries");
+        assertThat(entries)
+            .as("entries must return srcA's 2 facts (old_id, new_chash, target_collection)")
+            .hasSize(2);
+        assertThat(entries)
+            .extracting(e -> e.get("old_id"))
+            .containsExactlyInAnyOrder("a-1", "a-2");
+        assertThat(entries.get(0))
+            .containsKeys("old_id", "new_chash", "target_collection");
+
+        // pairs: the cascade's global view, paged.
+        var pairsResp = get("/v1/remap/pairs?limit=2&offset=0", TOKEN, TENANT);
+        assertThat(pairsResp.statusCode()).isEqualTo(200);
+        var pairsBody = mapper.readValue(pairsResp.body(), MAP_T);
+        @SuppressWarnings("unchecked")
+        var page1 = (java.util.List<java.util.List<String>>) pairsBody.get("pairs");
+        assertThat(page1).as("page 1 honors limit").hasSize(2);
+        var pairsResp2 = get("/v1/remap/pairs?limit=2&offset=2", TOKEN, TENANT);
+        @SuppressWarnings("unchecked")
+        var page2 = (java.util.List<java.util.List<String>>) mapper
+            .readValue(pairsResp2.body(), MAP_T).get("pairs");
+        // Pages are disjoint and together cover at least this test's 3 facts
+        // (other tests' facts may interleave — assert on OUR ids only).
+        var allOldIds = new java.util.ArrayList<String>();
+        page1.forEach(p -> allOldIds.add(p.get(0)));
+        page2.forEach(p -> allOldIds.add(p.get(0)));
+        // fetch remaining pages until empty to collect every pair
+        int offset = 4;
+        while (true) {
+            @SuppressWarnings("unchecked")
+            var page = (java.util.List<java.util.List<String>>) mapper.readValue(
+                get("/v1/remap/pairs?limit=2&offset=" + offset, TOKEN, TENANT).body(),
+                MAP_T).get("pairs");
+            if (page.isEmpty()) break;
+            page.forEach(p -> allOldIds.add(p.get(0)));
+            offset += 2;
+        }
+        assertThat(allOldIds)
+            .as("paged pairs must cover every fact exactly once")
+            .contains("a-1", "a-2", "b-1")
+            .doesNotHaveDuplicates();
+
+        // source_collections: the prior-collections probe input.
+        var scResp = get("/v1/remap/source_collections", TOKEN, TENANT);
+        assertThat(scResp.statusCode()).isEqualTo(200);
+        @SuppressWarnings("unchecked")
+        var sources = (java.util.List<String>) mapper
+            .readValue(scResp.body(), MAP_T).get("source_collections");
+        assertThat(sources).contains(srcA, srcB).doesNotHaveDuplicates();
+    }
+
+    @Test
+    void readEndpoints_rlsScoped() throws Exception {
+        String src = "legacy__h9__src";
+        String tgt = "knowledge__h9__tgt";
+        post("/v1/remap/record_batch", OTHER_TOKEN, OTHER_TENANT, """
+            {"source_collection":"%s","entries":[
+              {"old_id":"o-1","new_chash":"%s","target_collection":"%s","provenance":"test"}
+            ]}""".formatted(src, chash("h9o1"), tgt));
+
+        var entries = (java.util.List<?>) mapper.readValue(
+            get("/v1/remap/entries?source_collection=" + src, TOKEN, TENANT).body(),
+            MAP_T).get("entries");
+        assertThat(entries)
+            .as("RLS: default tenant must not see the other tenant's facts via reads")
+            .isEmpty();
+
+        // Same isolation for the other two read shapes (each endpoint gets its
+        // own RLS assertion — the established bar for this file).
+        @SuppressWarnings("unchecked")
+        var pairs = (java.util.List<java.util.List<String>>) mapper.readValue(
+            get("/v1/remap/pairs?limit=1000&offset=0", TOKEN, TENANT).body(),
+            MAP_T).get("pairs");
+        assertThat(pairs)
+            .extracting(p -> p.get(0))
+            .as("RLS: /pairs must not leak the other tenant's old_ids")
+            .doesNotContain("o-1");
+
+        @SuppressWarnings("unchecked")
+        var sources = (java.util.List<String>) mapper.readValue(
+            get("/v1/remap/source_collections", TOKEN, TENANT).body(),
+            MAP_T).get("source_collections");
+        assertThat(sources)
+            .as("RLS: /source_collections must not leak the other tenant's sources")
+            .doesNotContain(src);
+    }
+
     // ── Test 7: auth — 401 without bearer ────────────────────────────────────
 
     @Test
