@@ -244,8 +244,9 @@ tests is deleted, per Hal 2026-07-18).
    demote to flat file per the research outcome.
 4. **P3 — Strays (D4) + pipeline buffer.** Liquibase changesets + data carry
    for what survives; explicit deletion records for what does not.
-   `pipeline_buffer.py` adjudicated in P0 (its PDF-pipeline feature may be
-   engine-hosted per RDR-173 lineage or retired).
+   `pipeline_buffer.py` adjudicated in P0 (**RATIFIED 2026-07-18:
+   engine-host** — RDR-048 design lineage via the RDR-173-style
+   engine-worker hosting pattern; retire is off the table).
 5. **P4 — Zero.** Rides RDR-158 P3/P4 and the RDR-155 P4b window (one N+1
    release, per RF-158-3): census ratchets to empty, tripwire flips to
    assert-empty, epsilon-allow SQLite arm retired. Inverse-grep clean.
@@ -306,12 +307,23 @@ tests is deleted, per Hal 2026-07-18).
   locked FTS5→tsvector parity contract; confirm nothing outside those
   domains grew an FTS5 dependency (memory_store FTS is in-scope-158; anything
   else?).
-- **Q4:** `pipeline_buffer.py` — is the streaming-PDF resume feature (RDR-048
-  lineage) still load-bearing post-RDR-173, or retirable outright?
+- ~~**Q4:** `pipeline_buffer.py` — is the streaming-PDF resume feature (RDR-048
+  lineage) still load-bearing post-RDR-173, or retirable outright?~~
+  **DECIDED by Hal 2026-07-18 (P0 adjudication): engine-host the feature.
+  Design lineage is RDR-048 (which created the pipeline buffer); the
+  hosting shape borrows RDR-173's engine-worker pattern; resume state
+  moves to an engine-side relation. Drives `.16`.**
 - **Q5:** Does the engine expose (or need) a generic small-state KV surface
   for client bookkeeping, or does each artifact get a first-class relation?
   (Bias per RDR-154: first-class relations with real schemas; a KV bucket is
   the SQLite hybrid wearing a PG costume.)
+  **RELAXED by Hal 2026-07-18:** the strict first-class-relations-only bias
+  is softened — a generic small-state KV facility is permissible,
+  especially as a *transitional* mechanism (use, then discard once the
+  artifact gets its first-class home or retires). Implementing beads
+  (`.10`/`.14`/`.16`) may choose KV-first where it shortens the path,
+  provided the facility itself is engine-side PG (never a client
+  substrate) and its retirement is recorded on the bead that adopts it.
 - **Q6 (resolved at P0):** Windows/cold-start: `nx` invoked before any engine has EVER been
   installed (fresh machine, first run) — what is the precise set of state
   the CLI may need before the first engine start, and is all of it config
@@ -319,16 +331,17 @@ tests is deleted, per Hal 2026-07-18).
 
 ## P0 Inventory Adjudication (nexus-146xx.1)
 
-> Status: DRAFT 2026-07-18 — settled rows transcribe D2–D5 (no
-> re-adjudication); rows marked ⚠ are open product forks awaiting Hal's
-> sign-off. The table becomes the decision record at re-gate; each
-> surviving artifact is a named, Hal-decided row.
+> Status: RATIFIED by Hal 2026-07-18. Settled rows transcribe D2–D5 (no
+> re-adjudication); the three open forks (aspect_promotion_log,
+> pipeline_buffer, scanner harden-vs-accept) were decided by Hal
+> 2026-07-18 and are recorded inline. This table is the decision record;
+> each surviving artifact is a named, Hal-decided row.
 
 ### DDL census (15 files, 63 statements — `DDL_CENSUS`)
 
 | File | N | Artifact | Bin | Data carry | Gate |
 |---|---|---|---|---|---|
-| `aspect_promotion.py` | 1 | `aspect_promotion_log` stray | ⚠ **HAL (D4 fork)**: migrate-to-PG telemetry (RDR-177) **or** delete-with-feature | per choice; log is observability | `.14` (P3) |
+| `aspect_promotion.py` | 1 | `aspect_promotion_log` stray | migrate-to-PG (**Hal 2026-07-18**: PG telemetry surface, RDR-177 territory) | log rows carried into PG telemetry | `.14` (P3); ordering gate: waits on RDR-177 acceptance OR lands a minimal relation / transitional facility (Q5 relaxation) that does not presuppose RDR-177's design |
 | `commands/upgrade.py` | 1 | `_nexus_t3_steps` stray | delete-with-feature — subsumed by ladder mechanism (D3/D4) | none: upgrade bookkeeping, re-derivable | `.15` (P3) |
 | `db/migrations.py` | 25 | seven-domain T2 registry | rides-RDR-158-P3/P4 | RDR-158 ETL | nexus-i711w |
 | `db/t2/aspect_extraction_queue.py` | 3 | T2 domain store | rides-RDR-158-P3/P4 | RDR-158 ETL | nexus-i711w |
@@ -341,7 +354,7 @@ tests is deleted, per Hal 2026-07-18).
 | `db/t2/plan_library.py` | 3 | T2 domain store (FTS5) | rides-RDR-158-P3/P4 | RDR-158 ETL | nexus-i711w |
 | `db/t2/telemetry.py` | 4 | T2 domain store | rides-RDR-158-P3/P4 | RDR-158 ETL | nexus-i711w |
 | `migration/wire_reid.py` | 1 | `chash_remap.db` | migrate-to-PG (D2) | engine bulk-remap; local file demoted read-only source | `.3`/`.6` (P1) |
-| `pipeline_buffer.py` | 3 | `pipeline.db` | ⚠ **HAL (Q4 fork)**: engine-host (RDR-173 lineage) **or** retire | per choice; streaming-PDF resume state | `.16` (P3) |
+| `pipeline_buffer.py` | 3 | `pipeline.db` | migrate-to-PG (**Hal 2026-07-18, resolves Q4**: engine-host the streaming-PDF resume feature — RDR-048 design lineage, hosted via the RDR-173-style engine-worker pattern) | resume state moves to an engine-side relation | `.16` (P3) |
 | `upgrade_ladder/completion.py` | 2 | `ladder.db` | delete-with-feature (D3 derive-first; RF-186-2: re-derivable, no falsification) | none — in-process holder + PG flush | `.11`/`.12` (P2) |
 
 ### Epsilon-allow census (43 files, 118 overrides — `EPSILON_CENSUS`)
@@ -386,7 +399,7 @@ destination: `db/t2/chash_etl.py` (1), `commands/storage_cmd.py` (1),
 **Class O — own-substrate connects (the incident class). Bin: per the
 DDL rows above**: `migration/wire_reid.py` (1 → D2, P1),
 `upgrade_ladder/completion.py` (1 → D3, P2), `pipeline_buffer.py`
-(1 → ⚠ Q4, P3).
+(1 → engine-host per Hal 2026-07-18, P3).
 
 **Class V — legacy non-service Voyage embed paths (non-SQLite; the
 epsilon token covers other storage-boundary axes too). Bin:
@@ -426,7 +439,7 @@ normal path. Q6 CLOSED.
 
 ### Gap 1 scanner blind spots — harden-vs-accept
 
-⚠ **HAL decision** (conditional bead `.2`). Recommendation:
+**DECIDED by Hal 2026-07-18** (activates bead `.2`):
 
 - **HARDEN the `ALTER TABLE` blindness** — add an `ALTER_CENSUS`
   (per-file counts; live 2026-07-18: 59 statements across 11 files, the
