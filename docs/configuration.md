@@ -221,7 +221,13 @@ run:
    UNION ALL
    SELECT 'nexus.chash_index' AS table_name, count(*) AS non_conformant FROM nexus.chash_index WHERE length(chash) <> 32
    UNION ALL
-   SELECT 'nexus.catalog_document_chunks' AS table_name, count(*) AS non_conformant FROM nexus.catalog_document_chunks WHERE length(chash) <> 32;
+   SELECT 'nexus.catalog_document_chunks' AS table_name, count(*) AS non_conformant FROM nexus.catalog_document_chunks WHERE length(chash) <> 32
+   UNION ALL
+   SELECT 'nexus.topic_assignments' AS table_name, count(*) AS non_conformant FROM nexus.topic_assignments WHERE length(doc_id) <> 32
+   UNION ALL
+   SELECT 'nexus.frecency' AS table_name, count(*) AS non_conformant FROM nexus.frecency WHERE length(chunk_id) <> 32
+   UNION ALL
+   SELECT 'nexus.relevance_log' AS table_name, count(*) AS non_conformant FROM nexus.relevance_log WHERE length(chunk_id) <> 32;
    GRANT SELECT ON nexus.diag_chash_conformance TO nexus_diag;
    ```
 
@@ -229,7 +235,11 @@ run:
    `nexus_diag`'s direct table SELECT on its next boot — the diagnostic role
    then reads counts by construction, never row content. (This SQL is
    generated from `nexus.db.chash_tables.CHASH_BEARING_TABLES`; a drift test
-   pins this rendered copy to the generator.)
+   pins this rendered copy to the generator.) DBAs who created the original
+   five-leg view: re-run the `CREATE OR REPLACE` above once — nexus-z5j0t
+   added three legacy-debt legs (`topic_assignments.doc_id`,
+   `frecency.chunk_id`, `relevance_log.chunk_id`; observed-only, they do not
+   gate upgrades). Until then those counts report as unknown, never as clean.
 
 ## Tuning Parameters
 

@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 
 from nexus.db.chash_tables import CHASH_BEARING_TABLES as _CHASH_TABLES
 from nexus.db.chash_tables import chash_conformance_statements as _chash_statements
+from nexus.db.chash_tables import debt_chash_conformance_statements as _debt_statements
 
 #: Full clickable https URL, pinned to ``main`` (releases promote develop ->
 #: main, so an operator on a released build finds the sections on main).
@@ -282,8 +283,16 @@ def _chash_poison_forensics(store_state: StoreState) -> Playbook:
             "run the diagnostic SQL below (each statement is lint-verified "
             "read-only; the nexus_diag path executes them in a read-only "
             "session)",
-            "interpret: any non-zero count means poison rows exist in that "
-            "table and a future engine upgrade would crash-loop on VALIDATE",
+            "interpret: any non-zero count in the first five statements "
+            "(chunks_384/768/1024, chash_index, catalog_document_chunks) "
+            "means POISON rows exist in that table and a future engine "
+            "upgrade would crash-loop on VALIDATE",
+            "interpret: the next three statements (topic_assignments, "
+            "frecency, relevance_log) are LEGACY DEBT — non-gating "
+            "(no CHECK constraint exists there), but non-zero counts mean "
+            "rows silently missing their chunk-table joins; an empty (NULL) "
+            "result means the deployed view predates these entries — report "
+            "it as unknown, not clean (nexus-z5j0t)",
             "check constraint state: unvalidated chk_% constraints indicate "
             "an earlier forced upgrade",
         ),
@@ -316,7 +325,7 @@ def _chash_poison_forensics(store_state: StoreState) -> Playbook:
         # era, and the view emits counts by construction. Same emitter the
         # health probe uses (nexus.db.chash_tables), so the two surfaces
         # cannot drift.
-        diagnostic_sql=_chash_statements() + (
+        diagnostic_sql=_chash_statements() + _debt_statements() + (
             "SELECT conname, convalidated FROM pg_constraint "
             "WHERE conname LIKE 'chk_%'",
         ),

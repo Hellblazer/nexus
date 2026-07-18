@@ -2333,6 +2333,7 @@ def _check_migration_state(
     # WARN, never a false "clean".
     from nexus.db.chash_tables import (  # noqa: PLC0415 — deferred to avoid circular import
         chash_conformance_statements,
+        debt_chash_conformance_statements,
         legacy_chash_conformance_statements,
     )
     from nexus.db.diag_connection import (  # noqa: PLC0415 — deferred to avoid circular import
@@ -2342,6 +2343,7 @@ def _check_migration_state(
     from nexus.remediation.sql_lint import DiagnosticSqlViolation  # noqa: PLC0415 — deferred to avoid circular import
 
     results: list[HealthResult] = []
+    view_era = False  # nexus-z5j0t: debt probe only runs where the view path proved live
     diag_creds = diag_credentials if diag_credentials is not None \
         else resolve_diag_credentials(creds_path)
     if diag_creds is None:
@@ -2370,6 +2372,7 @@ def _check_migration_state(
                     chash_conformance_statements(), diag_creds,
                     psql_bin=psql_bin, psql_runner=diag_runner,
                 )
+                view_era = True
             except DiagnosticSqlViolation:
                 # A LINT failure is a product defect, never an engine-
                 # generation skew — re-raise to the outer handler (review
@@ -2433,6 +2436,39 @@ def _check_migration_state(
             ],
             warn=True,
         ))
+
+    # nexus-z5j0t: legacy-debt observability over the CHECK-less chash
+    # bearers (topic_assignments.doc_id, frecency/relevance_log.chunk_id).
+    # Non-gating BY DESIGN: no width CHECK exists on these tables, so a
+    # non-32 value cannot crash-loop a VALIDATE — it silently degrades topic
+    # membership / frecency ranking instead (converged by the remap cascade /
+    # RDR-180 Item6 ETL). Only runs when the view path proved live; a stale
+    # (pre-z5j0t 5-leg) view yields NULL sums (empty psql lines) → unknown,
+    # logged at debug, never a WARN and never a false clean-or-poisoned.
+    if view_era:
+        try:
+            debt_counts = run_diagnostic_sql(
+                debt_chash_conformance_statements(), diag_creds,
+                psql_bin=psql_bin, psql_runner=diag_runner,
+            )
+            debt = sum(int(c) for c in debt_counts)
+        except (RuntimeError, DiagnosticSqlViolation, ValueError) as exc:
+            _log.debug("chash_debt_probe_unavailable", error=str(exc)[:200])
+            debt = -1
+        if debt > 0:
+            results.append(HealthResult(
+                label="Chash legacy debt",
+                ok=False,
+                detail=(
+                    f"{debt} row(s) across topic_assignments/frecency/"
+                    "relevance_log carry a non-32-char chash reference. "
+                    "NON-GATING (no CHECK constraint exists on these tables), "
+                    "but the rows silently miss their joins against the chunk "
+                    "tables — the remap cascade / RDR-180 Item6 ETL converges "
+                    "them."
+                ),
+                warn=True,
+            ))
 
     results.append(HealthResult(
         label="Schema migrations",

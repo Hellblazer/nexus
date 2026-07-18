@@ -19,7 +19,6 @@ import httpx
 import pytest
 
 from nexus.db import chash_tables
-from nexus.db.chash_tables import CHASH_BEARING_TABLES
 
 from nexus.health import (
     HealthResult,
@@ -1142,7 +1141,10 @@ class TestChashProbeViewFallback:
     defect and must surface as the WARN, never a silent legacy retry."""
 
     def test_view_failure_falls_back_to_legacy_and_counts(self, tmp_path):
-        n = len(CHASH_BEARING_TABLES)
+        # Poison subset only: the gate statements (and their legacy fallback)
+        # deliberately exclude the nexus-z5j0t debt tables, and the debt
+        # probe is skipped entirely when the view path failed.
+        n = len(chash_tables.POISON_CHASH_TABLES)
         state = {"i": 0}
 
         def runner(argv, env):

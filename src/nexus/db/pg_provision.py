@@ -807,7 +807,7 @@ def _provision_diag_conformance_view(bins: PgBinaries, port: int, os_user: str) 
         # hand-typed sentinel here could drift from the table set). The view
         # references EVERY chash table, so require all of them.
         rel_list = ", ".join(
-            f"'{t.split('.', 1)[1]}'" for t in CHASH_BEARING_TABLES
+            f"'{t.table.split('.', 1)[1]}'" for t in CHASH_BEARING_TABLES
         )
         _psql(
             bins, port, NEXUS_DB_NAME, os_user,

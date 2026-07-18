@@ -6,6 +6,11 @@ diag_connection choke point) to counts-by-construction: a superuser-owned
 view over the chash-bearing tables, with direct table SELECT revoked by the
 view-era grants changeset. These tests pin every coupling the design leans
 on so no surface can drift from the others.
+
+nexus-z5j0t extends the authoritative set with column-name-aware entries:
+poison tables (width-CHECK-bearing, upgrade-gating) vs legacy-debt tables
+(CHECK-less soft references, observed-only). The gate statements stay
+poison-only so deployed 5-leg views keep satisfying the gate unchanged.
 """
 from __future__ import annotations
 
@@ -14,8 +19,11 @@ from pathlib import Path
 
 from nexus.db.chash_tables import (
     CHASH_BEARING_TABLES,
+    DEBT_CHASH_TABLES,
     DIAG_CONFORMANCE_VIEW,
+    POISON_CHASH_TABLES,
     chash_conformance_statements,
+    debt_chash_conformance_statements,
     diag_conformance_view_ddl,
     legacy_chash_conformance_statements,
 )
@@ -24,27 +32,72 @@ from nexus.remediation.sql_lint import assert_read_only_diagnostics
 _REPO = Path(__file__).resolve().parents[1]
 
 
+def test_the_authoritative_set_is_column_aware_and_complete():
+    """nexus-z5j0t: the RDR-185 .13 audit gaps are IN the set, with their
+    real column names (the chunk_id-naming blind spot), and the poison
+    subset is exactly the pre-z5j0t five (the gate must not grow)."""
+    by_table = {t.table: t for t in CHASH_BEARING_TABLES}
+    assert by_table["nexus.topic_assignments"].column == "doc_id"
+    assert by_table["nexus.frecency"].column == "chunk_id"
+    assert by_table["nexus.relevance_log"].column == "chunk_id"
+    assert not by_table["nexus.topic_assignments"].poison
+    assert not by_table["nexus.frecency"].poison
+    assert not by_table["nexus.relevance_log"].poison
+    assert tuple(t.table for t in POISON_CHASH_TABLES) == (
+        "nexus.chunks_384",
+        "nexus.chunks_768",
+        "nexus.chunks_1024",
+        "nexus.chash_index",
+        "nexus.catalog_document_chunks",
+    )
+    assert all(t.column == "chash" for t in POISON_CHASH_TABLES)
+    assert set(CHASH_BEARING_TABLES) == set(POISON_CHASH_TABLES) | set(DEBT_CHASH_TABLES)
+
+
 def test_view_ddl_covers_exactly_the_chash_tables():
     ddl = diag_conformance_view_ddl()
     for t in CHASH_BEARING_TABLES:
-        assert f"'{t}' AS table_name" in ddl
-        assert f"FROM {t} WHERE length(chash) <> 32" in ddl
+        assert f"'{t.table}' AS table_name" in ddl
+        assert f"FROM {t.table} WHERE length({t.column}) <> 32" in ddl
     # One UNION arm per table, no extras.
     assert ddl.count("UNION ALL") == len(CHASH_BEARING_TABLES) - 1
 
 
-def test_statements_one_per_table_against_the_view():
+def test_gate_statements_are_poison_only_against_the_view():
+    """The install-binary gate's statements must be invariant across view
+    generations: poison-only, so a deployed 5-leg view still answers every
+    one of them (a debt-table statement against that view would NULL out)."""
     stmts = chash_conformance_statements()
-    assert len(stmts) == len(CHASH_BEARING_TABLES)
-    for stmt, t in zip(stmts, CHASH_BEARING_TABLES):
+    assert len(stmts) == len(POISON_CHASH_TABLES)
+    for stmt, t in zip(stmts, POISON_CHASH_TABLES):
         assert DIAG_CONFORMANCE_VIEW in stmt
-        assert f"table_name = '{t}'" in stmt
+        assert f"table_name = '{t.table}'" in stmt
+    for t in DEBT_CHASH_TABLES:
+        assert all(t.table not in s for s in stmts)
+
+
+def test_debt_statements_cover_the_debt_tables_against_the_view():
+    stmts = debt_chash_conformance_statements()
+    assert len(stmts) == len(DEBT_CHASH_TABLES)
+    for stmt, t in zip(stmts, DEBT_CHASH_TABLES):
+        assert DIAG_CONFORMANCE_VIEW in stmt
+        assert f"table_name = '{t.table}'" in stmt
+
+
+def test_legacy_statements_are_poison_only_direct_counts():
+    """Pre-A6 engines predate the telemetry-001 debt tables — a direct debt
+    count there would fail on a missing relation and poison the fallback."""
+    stmts = legacy_chash_conformance_statements()
+    assert len(stmts) == len(POISON_CHASH_TABLES)
+    for stmt, t in zip(stmts, POISON_CHASH_TABLES):
+        assert f"FROM {t.table} WHERE length({t.column}) <> 32" in stmt
 
 
 def test_view_statements_pass_the_diagnostic_lint():
     """The whole point: the emitted shape must clear the fail-closed
     aggregate-only lint (nexus.* target => aggregate select list)."""
     assert_read_only_diagnostics(chash_conformance_statements())
+    assert_read_only_diagnostics(debt_chash_conformance_statements())
     assert_read_only_diagnostics(legacy_chash_conformance_statements())
 
 
@@ -74,6 +127,23 @@ def test_docs_rendered_copy_matches_the_generator():
         "nexus.db.chash_tables.diag_conformance_view_ddl() - regenerate the "
         "docs block"
     )
+
+
+def test_cascade_covers_every_debt_table():
+    """nexus-z5j0t's completeness link: every legacy-debt entry must have a
+    remap-cascade implementation (same table + same column), so the set that
+    OBSERVES debt and the machinery that CONVERGES it cannot drift."""
+    from nexus.migration.remap_cascade import _STORE_COLUMNS
+
+    cascade = {
+        (f"nexus.{table}", column)
+        for (_db, table, column) in _STORE_COLUMNS.values()
+    }
+    for t in DEBT_CHASH_TABLES:
+        assert (t.table, t.column) in cascade, (
+            f"{t.table}.{t.column} is observed as chash legacy debt but has "
+            "no remap-cascade implementation - extend CASCADE_STORES"
+        )
 
 
 def test_grants_changeset_view_era_revokes_tables():
