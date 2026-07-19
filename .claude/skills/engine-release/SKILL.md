@@ -51,7 +51,7 @@ The Java CI (`service-ci.yml`) is **advisory** — it does not block auto-merge 
 tests/e2e/migration-rehearsal/run.sh --guided      # local -Ob native build → nx guided-upgrade MVV
 ```
 
-Must end `GUIDED-UPGRADE MVV PASSED`.
+Must end `GUIDED LAND-THEN-TRANSFORM GATE PASSED` (marker renamed at the RDR-180 gate rewrite, nexus-jxizy.10.10).
 
 **Optional but recommended when the cut carries CLI-visible or concurrency-relevant service changes**: also run the candidate shakeout — the full CLI-verb matrix + incremental-index + concurrent-load journey against the SAME locally-built candidate (nexus-h8rf6; born from the 2026-07-03 post-release shakeout, whose findings were all locally discoverable):
 

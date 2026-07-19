@@ -91,8 +91,11 @@ jobs:
           set -euo pipefail
           tests/e2e/migration-rehearsal/run.sh --guided 2>&1 | tee guided-mvv.log
           # Belt on the harness's own exit code: the success marker must be
-          # present (a truncated/killed run must not read as green).
-          grep -q "GUIDED-UPGRADE MVV PASSED" guided-mvv.log
+          # present (a truncated/killed run must not read as green). Marker
+          # renamed with the RDR-180 land-then-transform gate rewrite
+          # (nexus-jxizy.10.10) — the in-container run PASSED on 296cf85e
+          # while this grep still expected the old string.
+          grep -q "GUIDED LAND-THEN-TRANSFORM GATE PASSED" guided-mvv.log
 
       - name: Upload run log
         if: always()
