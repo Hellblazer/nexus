@@ -126,7 +126,16 @@ export NEXUS_SERVICE_TAG="$OLD_ENGINE_TAG"   # already installed: ensure-binary 
 if nx init --service --embedder bge-768 --yes 2>&1 | tail -15 | sed 's/^/       /'; then
   ok "nx init --service (provisioned PG + $OLD_ENGINE_TAG + started)"
 else
-  bad "nx init --service failed"; say "ABORT (provision failed)"; exit 1
+  bad "nx init --service failed"
+  # Surface the supervisor's own log — the init summary says only "did not
+  # become ready within 60s", which is undiagnosable from outside the box.
+  for f in "$HOME/.config/nexus/logs/storage_service.log" "$HOME/.config/nexus/logs/service_supervisor.log"; do
+    if [ -f "$f" ]; then
+      say "---- $(basename "$f") (last 40 lines) ----"
+      tail -40 "$f" | sed 's/^/       /'
+    fi
+  done
+  say "ABORT (provision failed)"; exit 1
 fi
 unset NEXUS_SERVICE_TAG NX_SERVICE_TAG 2>/dev/null || true
 export NX_STORAGE_BACKEND=service
