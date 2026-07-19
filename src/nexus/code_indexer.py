@@ -388,11 +388,12 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
 
     for i, chunk in enumerate(chunks):
         title = f"{rel_path}:{chunk['line_start']}-{chunk['line_end']}"
-        # ``chunk_chroma_id`` is the per-chunk Chroma natural-id:
-        # ``chunk_text_hash[:32]`` per RDR-108 D1 (nexus-kmb6).
-        # Identical chunk text in the same collection collapses to one
-        # T3 record; the catalog manifest preserves position via
-        # ``(doc_id, position)`` pointing at the shared chash.
+        # ``chunk_chroma_id`` is the per-chunk natural id — the FULL
+        # ``chunk_text_hash`` via the chunk_identity boundary (RDR-180;
+        # the RDR-108 [:32] truncation is retired). Identical chunk text
+        # in the same collection collapses to one T3 record; the catalog
+        # manifest preserves position via ``(doc_id, position)`` pointing
+        # at the shared chash.
         chunk_text_hash_full = _hl.sha256(chunk["text"].encode()).hexdigest()
         chunk_chroma_id = _chunk_id_from_hash(chunk_text_hash_full)  # nexus-4pvho
         class_ctx, method_ctx = _extract_context(

@@ -265,13 +265,13 @@ class TestPutBehavior:
             ttl_days=0, catalog_doc_id='') -> str
 
     The HTTP wire call is /v1/vectors/store-put. The request body must carry:
-      - doc_id: sha256(content)[:32]
+      - doc_id: full sha256(content) hexdigest (RDR-180)
       - content: the raw content
       - metadata: every key make_chunk_metadata() produces (the same factory
         T3Database.put uses — parity by construction, not by duplication)
 
     T3Database.put is single-chunk: fail_on_oversized=True. HttpVectorClient.put
-    must NOT multi-chunk. The doc_id is sha256(content)[:32].
+    must NOT multi-chunk. The doc_id is full sha256(content) hexdigest (RDR-180).
     """
 
     @staticmethod
@@ -282,13 +282,13 @@ class TestPutBehavior:
         return fake
 
     def test_put_returns_chash_doc_id(self, monkeypatch):
-        """put() must return sha256(content)[:32]."""
+        """put() must return full sha256(content) hexdigest (RDR-180)."""
         client = HttpVectorClient()
         calls: list = []
         monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
 
         content = "Hello MCP store_put content"
-        expected_doc_id = hashlib.sha256(content.encode()).hexdigest()[:32]
+        expected_doc_id = hashlib.sha256(content.encode()).hexdigest()
 
         returned = client.put(
             collection="knowledge__nexus__minilm-l6-v2-384__v1",
@@ -300,17 +300,17 @@ class TestPutBehavior:
             catalog_doc_id="",
         )
         assert returned == expected_doc_id, (
-            f"put() must return sha256(content)[:32]; got {returned!r}"
+            f"put() must return full sha256(content) hexdigest (RDR-180); got {returned!r}"
         )
 
     def test_put_sends_chash_as_doc_id_in_body(self, monkeypatch):
-        """The HTTP body must carry doc_id = sha256(content)[:32]."""
+        """The HTTP body must carry doc_id = full sha256(content) hexdigest (RDR-180)."""
         client = HttpVectorClient()
         calls: list = []
         monkeypatch.setattr("nexus.db.http_vector_client._post", self._fake_post_capture(calls))
 
         content = "content for doc_id derivation test"
-        expected_doc_id = hashlib.sha256(content.encode()).hexdigest()[:32]
+        expected_doc_id = hashlib.sha256(content.encode()).hexdigest()
 
         client.put(
             collection="knowledge__nexus__minilm-l6-v2-384__v1",

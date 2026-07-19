@@ -896,7 +896,8 @@ class HttpVectorClient:
         """Upsert *content* into *collection*. Returns the document ID.
 
         Drop-in parity with ``T3Database.put`` (nexus-7zuzz): same parameter
-        list, same doc_id derivation (sha256(content)[:32]), and metadata built
+        list, same doc_id derivation (the FULL ``sha256(content).hexdigest()``,
+        RDR-180 / nexus-jxizy.3), and metadata built
         via the SAME :func:`nexus.metadata_schema.make_chunk_metadata` factory
         that T3Database.put uses — parity by construction, not by duplication.
 
@@ -923,8 +924,14 @@ class HttpVectorClient:
         )
         from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
 
+        # RDR-180 (nexus-p78a0 rehearsal catch, run 4): the natural id is the
+        # FULL digest — this mirror kept the retired [:32] truncation after
+        # T3Database.put was converted, so every service-mode store_put wrote
+        # a 16-byte key and 409'd on the cohort engine's octet CHECK
+        # (chunks_*_chash_octet_check, sqlstate 23514). Parity with
+        # T3Database.put is pinned by test_store_put_id_is_the_full_digest.
         content_hash = hashlib.sha256(content.encode()).hexdigest()
-        doc_id = content_hash[:32]
+        doc_id = content_hash
         now_iso = datetime.now(UTC).isoformat()
 
         # Derive content_type from collection prefix — mirrors T3Database.put

@@ -834,8 +834,9 @@ class T3Database:
         via :func:`nexus.metadata_schema.is_expired` from
         ``indexed_at + ttl_days``; no separate ``expires_at`` field.
 
-        Note (RDR-108 D1 / nexus-kmb6): The document ID is the
-        content-derived natural ID ``sha256(content).hexdigest()[:32]``.
+        Note (RDR-108 D1 / nexus-kmb6; width per RDR-180): The document ID
+        is the content-derived natural ID — the FULL
+        ``sha256(content).hexdigest()``.
         Identical content under any title in this collection collapses
         to one T3 record. Title is metadata only and does not influence
         identity. The second ``put`` of the same content with a

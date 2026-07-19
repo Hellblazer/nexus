@@ -24,11 +24,18 @@ _REPO = Path(__file__).resolve().parents[2]
 
 
 class _Report:
-    def __init__(self) -> None:
-        self.steps: list[str] = []
+    """Conforms to ProgressReporter — ``emit(event, **fields)``, NOTHING
+    else. The first fake here grew a ``step()`` method the real protocol
+    never had, and the rung drifted onto it: every production ``nx
+    upgrade`` then crashed with 'StructlogReporter has no attribute step'
+    (caught live by the nexus-p78a0 rehearsal, run 2). Keep this fake
+    interface-minimal so drift fails HERE first."""
 
-    def step(self, rung: str, detail: str) -> None:
-        self.steps.append(detail)
+    def __init__(self) -> None:
+        self.events: list[str] = []
+
+    def emit(self, event: str, **fields: object) -> None:
+        self.events.append(event)
 
 
 def _counts(residual: int = 0, **extra) -> dict:
@@ -78,6 +85,22 @@ class TestDetect:
         rung, _ = _rung(detect_probe_fn=lambda: 7)
         assert "7" in rung.detect().pending_detail
 
+    def test_validated_checks_report_converged(self):
+        """nexus-p78a0 rehearsal catch: doctor / --dry-run / the transition
+        callout are RAW detect() sweeps (never the completion ledger), so
+        detect must see convergence from the DATA or a rekeyed store reads
+        as pending forever. The convalidated octet CHECKs are that marker —
+        only the rung's own VALIDATE (or the managed operator's) sets them."""
+        rung, _ = _rung(detect_probe_fn=lambda: 0, validated_probe_fn=lambda: True)
+        st = rung.detect()
+        assert st.applicable and st.converged
+
+    def test_unvalidated_checks_stay_pending(self):
+        for v in (False, None):
+            rung, _ = _rung(detect_probe_fn=lambda: 0, validated_probe_fn=lambda v=v: v)
+            st = rung.detect()
+            assert st.applicable and not st.converged
+
 
 class TestConverge:
     def test_happy_path_freezes_rekeys_validates_restores(self):
@@ -89,6 +112,18 @@ class TestConverge:
         assert calls["policy"] == "drop"
         assert "rekeyed=5" in result.detail
         assert "validated=yes" in result.detail
+
+    def test_converge_conforms_to_the_real_runner_reporter(self):
+        """The interface pin (nexus-p78a0 run-2 catch): converge must run
+        against the runner's ACTUAL default reporter, not just this file's
+        fake — structural drift between the two is a production crash on
+        every `nx upgrade`."""
+        from nexus.upgrade_ladder.runner import StructlogReporter
+
+        rung, calls = _rung()
+        result = rung.converge(StructlogReporter())
+        assert result.outcome is ConvergeOutcome.COMPLETED
+        assert calls["frozen"] and calls["restored"]
 
     def test_orphan_policy_flag_flows_through(self):
         rung, calls = _rung()

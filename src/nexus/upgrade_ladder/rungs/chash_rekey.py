@@ -88,6 +88,14 @@ class ChashRekeyRung:
       width-non-conformant poison rows (the diag path), ``None`` when
       unknowable (managed / no diag creds). Drives ``detect`` only; the
       idempotent rekey is the actual convergence mechanism.
+    - ``validated_probe_fn() -> bool | None`` — READ-ONLY: are all five
+      octet CHECKs convalidated? This is the DATA-SIDE completion marker
+      (nexus-p78a0): boot never VALIDATEs, only this rung's own VALIDATE
+      step (or the managed operator's choreography) does — so ``True``
+      means the rekey provably completed. Without it, the raw ``detect()``
+      surfaces (``nx doctor``, ``nx upgrade --dry-run``, the transition
+      callout — none of which open the completion ledger) would report a
+      rekeyed store as pending forever. ``None`` = unknowable → pending.
     """
 
     name = RUNG_CHASH_REKEY
@@ -100,6 +108,7 @@ class ChashRekeyRung:
         reprovision_fn: Callable[[], None] | None = None,
         freeze_fn: Callable[[], Callable[[], None]] | None = None,
         detect_probe_fn: Callable[[], int | None] | None = None,
+        validated_probe_fn: Callable[[], bool | None] | None = None,
         applicable_fn: Callable[[], bool] | None = None,
         orphan_policy: str = "drop",
     ) -> None:
@@ -108,6 +117,7 @@ class ChashRekeyRung:
         self._reprovision_fn = reprovision_fn if reprovision_fn is not None else (lambda: None)
         self._freeze_fn = freeze_fn if freeze_fn is not None else _sentinel_freeze
         self._detect_probe_fn = detect_probe_fn if detect_probe_fn is not None else (lambda: None)
+        self._validated_probe_fn = validated_probe_fn if validated_probe_fn is not None else (lambda: None)
         self._applicable_fn = applicable_fn if applicable_fn is not None else (lambda: True)
         if orphan_policy not in ("drop", "synthesize"):
             raise ValueError(
@@ -119,10 +129,15 @@ class ChashRekeyRung:
     # ── Rung protocol ────────────────────────────────────────────────────────
 
     def detect(self) -> RungStatus:
-        """READ-ONLY. The runner consults the completion ledger first, so
-        this runs only while the rung is unproven. A countable-zero probe
-        (local diag path) reports converged-pending-verify; unknown
-        (managed) reports applies — the idempotent rekey settles it."""
+        """READ-ONLY. The RUNNER consults the completion ledger, but the
+        read-only surfaces (``nx doctor``'s pending sweep, ``nx upgrade
+        --dry-run``, ``pending_data_rung_callout``) call this RAW — so
+        convergence must be visible from the DATA (nexus-p78a0): all five
+        octet CHECKs convalidated is the unforgeable completion marker
+        (only this rung's VALIDATE, or the managed operator's, sets it).
+        Below that: a countable-zero probe (local diag path) reports
+        converged-pending-verify; unknown (managed) reports applies — the
+        idempotent rekey settles it."""
         if not self._applicable_fn():
             # Managed-cloud install: this box does not own the store's admin
             # path — the cloud-side rekey is the operator's deploy
@@ -134,6 +149,12 @@ class ChashRekeyRung:
                 "chash rekey is the operator's cloud deploy choreography on "
                 "managed installs — nothing for this box to converge"
             ))
+        if self._validated_probe_fn():
+            # Validated checks can only exist AFTER a clean rekey (converge
+            # raises before VALIDATE on any residual; VALIDATE itself scans
+            # every row) — the store has provably converged, regardless of
+            # what any ledger says.
+            return RungStatus(applicable=True, converged=True)
         probe = self._detect_probe_fn()
         if probe == 0:
             return RungStatus(applicable=True, converged=False, pending_detail=(
@@ -150,10 +171,10 @@ class ChashRekeyRung:
         ))
 
     def converge(self, report: ProgressReporter) -> ConvergeResult:
-        report.step(self.name, "freezing writers (migration sentinel)")
+        report.emit("chash_rekey_freeze", rung=self.name)
         restore = self._freeze_fn()
         try:
-            report.step(self.name, f"rekey (orphan_policy={self._orphan_policy})")
+            report.emit("chash_rekey_rekey", rung=self.name, orphan_policy=self._orphan_policy)
             counts = self._rekey_fn(self._orphan_policy)
             self._last_counts = counts
             residual = int(counts.get("residual_mismatched", -1))
@@ -163,9 +184,9 @@ class ChashRekeyRung:
                     f"rekey left {residual} mismatched content row(s) — "
                     "refusing to record completion (no dual-width window)"
                 )
-            report.step(self.name, "validating octet CHECKs")
+            report.emit("chash_rekey_validate", rung=self.name)
             validated = self._validate_fn()
-            report.step(self.name, "re-provisioning diag view")
+            report.emit("chash_rekey_reprovision", rung=self.name)
             self._reprovision_fn()
             detail = (
                 f"rekeyed={counts.get('rehashed', 0)} "
@@ -244,6 +265,36 @@ def default_chash_rekey_rung() -> "ChashRekeyRung":
 
         return run_admin_sql(validate_statements())
 
+    def _validated_probe() -> bool | None:
+        # The data-side completion marker (see the class docstring): all
+        # five octet CHECKs convalidated. pg_constraint is a metadata
+        # target under the diag lint, so this rides the same read-only
+        # choke point as the poison probe.
+        try:
+            from nexus.db.diag_connection import resolve_diag_credentials, run_diagnostic_sql  # noqa: PLC0415 — deferred
+
+            creds = resolve_diag_credentials(None)
+            if creds is None:
+                return None
+            names = ", ".join(f"'{n}'" for _, n in OCTET_CHECKS)
+            # Schema-qualified via conrelid (critic S2): a same-named
+            # constraint in another schema must not inflate the count.
+            # (Miscount fails SAFE — not-converged — but exactness is
+            # cheap.)
+            counts = run_diagnostic_sql(
+                (
+                    "SELECT count(*) FROM pg_catalog.pg_constraint c "
+                    "JOIN pg_catalog.pg_class t ON t.oid = c.conrelid "
+                    "JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace "
+                    f"WHERE n.nspname = 'nexus' AND c.conname IN ({names}) "
+                    "AND c.convalidated",
+                ),
+                creds,
+            )
+            return int(counts[0]) == len(OCTET_CHECKS)
+        except Exception:  # noqa: BLE001 — probe unknowable ≠ converged; detect degrades to pending
+            return None
+
     def _reprovision() -> None:
         from nexus.db.pg_provision import reprovision_diag_view_best_effort  # noqa: PLC0415 — deferred
 
@@ -266,6 +317,7 @@ def default_chash_rekey_rung() -> "ChashRekeyRung":
         validate_fn=_validate,
         reprovision_fn=_reprovision,
         detect_probe_fn=_detect_probe,
+        validated_probe_fn=_validated_probe,
         applicable_fn=_locally_actionable,
     )
 

@@ -74,7 +74,7 @@ class ChunkRef:
     """One T3 chunk awaiting a catalog Document."""
 
     cid: str  #: Chroma natural ID
-    chash: str  #: chunk_text_hash[:32]; falls back to cid[:32]
+    chash: str  #: the FULL chunk_text_hash (RDR-180); falls back to cid (itself the full chash)
     chunk_index: int = 0
 
 

@@ -271,8 +271,13 @@ class TestSearch:
 
 
 class TestPut:
-    def test_post_to_store_put(self, monkeypatch):
-        """put() now matches T3Database.put() contract: doc_id derived from content."""
+    def test_store_put_id_is_the_full_digest(self, monkeypatch):
+        """put() matches T3Database.put(): doc_id is the FULL
+        sha256(content) hexdigest (RDR-180 / nexus-jxizy.3). The
+        nexus-p78a0 rehearsal (run 4) caught this mirror still slicing
+        [:32] — every service-mode store_put then wrote a 16-byte key and
+        409'd on the cohort engine's octet CHECK. This test previously
+        EXPECTED the truncation, pinning the bug in place."""
         import hashlib
         client = HttpVectorClient()
         calls = []
@@ -281,7 +286,8 @@ class TestPut:
             return {"id": body.get("doc_id", "fallback")}
         monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
         content = "content here"
-        expected_doc_id = hashlib.sha256(content.encode()).hexdigest()[:32]
+        expected_doc_id = hashlib.sha256(content.encode()).hexdigest()
+        assert len(expected_doc_id) == 64
         returned_id = client.put("col", content, title="my-title")
         path, body = calls[0]
         assert path == "/v1/vectors/store-put"

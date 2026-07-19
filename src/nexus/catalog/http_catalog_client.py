@@ -100,9 +100,9 @@ def _manifest_row_from_dict(d: dict) -> ManifestRow:
     """
     return ManifestRow(
         position=int(d.get("position", 0)),
-        # Defensive [:32]: the catalog chash is the 32-char natural ID; keep the read
-        # path consistent with the write path and every other chash site.
-        chash=(d.get("chash") or "")[:32],
+        # RDR-180: the wire value is authoritative — full 64-hex for rekeyed
+        # rows, 32-hex for not-yet-rekeyed legacy rows. Never truncate.
+        chash=d.get("chash") or "",
         chunk_index=d.get("chunk_index"),
         line_start=d.get("line_start"),
         line_end=d.get("line_end"),
@@ -1108,6 +1108,15 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         Non-``chash:`` spans (line-range, chunk:char) are out of scope for
         service mode — return ``None`` so callers fall back gracefully.
         ``t3`` is a local-mode artefact; accepted for conformance, ignored.
+
+        CAVEAT (review 2026-07-19, pre-existing): the returned
+        ``chunk_hash`` echoes the CALLER's requested width — a legacy
+        32-hex span that resolves via the engine's alias route is NOT
+        rewritten to the canonical 64-hex identity here (unlike
+        ``catalog_spans.resolve_chash_globally``, which rewrites). Both
+        current callers only null-check the result; a future caller that
+        trusts ``chunk_hash`` as canonical must rewrite it itself or go
+        through ``resolve_chash``.
         """
         if not span.startswith("chash:"):
             return None
@@ -1116,9 +1125,14 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         except ValueError:
             return None
         try:
+            # RDR-180: pass the citation's own width through — 64-hex resolves
+            # directly; a legacy 32-hex reference rides the engine's alias
+            # route. Truncating a canonical citation to 32 would force EVERY
+            # resolution through the legacy path and dangle for post-cutover
+            # content (which has no alias row).
             result = self._get(
                 "/resolve_span",
-                span_chash=hex_chash[:32],
+                span_chash=hex_chash,
                 collection=physical_collection,
             )
         except httpx.HTTPStatusError as exc:
@@ -1156,7 +1170,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             hex_chash, char_range = parse_chash_span(chash)
         except ValueError:
             return None
-        params: dict[str, Any] = {"chash": hex_chash[:32]}
+        # RDR-180: full-width pass-through (see resolve_span's width note).
+        params: dict[str, Any] = {"chash": hex_chash}
         if prefer_collection:
             params["prefer_collection"] = prefer_collection
         try:
@@ -1720,19 +1735,21 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
 
     @staticmethod
     def _manifest_rows(chunks: list[dict]) -> list[dict]:
-        """Normalize manifest rows for the wire: chash to the 32-char natural ID.
+        """Normalize manifest rows for the wire: chash passes through FULL width.
 
-        The catalog chash is ``chunk_text_hash[:32]`` (RDR-108 D1 — the Chroma natural
-        ID). The local Catalog truncates at the write layer (catalog_writes.py); callers
-        pass the full 64-char ``chunk_text_hash`` (e.g. the manifest post-store hook), so
-        the service client MUST truncate too or the Postgres
-        ``catalog_document_chunks_chash_len_check`` (length == 32) rejects the insert
-        (RDR-168 nexus-njrcn.6 layer 2).
+        RDR-180 (nexus-p78a0 rehearsal catch): the catalog chash IS the full
+        64-hex ``chunk_text_hash`` — the local Catalog stores it verbatim
+        (catalog_writes.py write_manifest, "store the full chash") and the
+        engine's converted ``catalog_document_chunks`` enforces
+        ``octet_length(chash) = 32`` BYTES (rdr180-001), which a truncated
+        32-hex value (16 bytes) VIOLATES on every new write. The length==32
+        TEXT check this truncation once served (RDR-168 njrcn.6 layer 2)
+        was retired by the same changeset.
         """
         out: list[dict] = []
         for c in chunks:
             row = dict(c)
-            row["chash"] = (row.get("chash") or "")[:32]
+            row["chash"] = row.get("chash") or ""
             out.append(row)
         return out
 
@@ -1826,43 +1843,25 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         each row's chash against the requested set. Two round-trips total,
         regardless of how many chashes/docs are involved (no N-per-chash calls).
 
-        Mirrors the local implementation's input-form-preserving contract:
-        matching is normalized to the 32-char chash prefix (``chash[:32]``,
-        RDR-108 D1 natural-id form — matching ``_manifest_row_from_dict``'s
-        defensive truncation), but the RETURNED keys preserve whatever form
-        (32- or 64-char) the caller passed in ``chashes``. Chashes with no
-        manifest entries are omitted from the result, same as local.
+        Mirrors the local implementation's contract (RDR-180, nexus-p78a0
+        rehearsal catch): EXACT full-width matching — the [:32] prefix
+        grouping (and the engine-side 32-char column it matched) died with
+        the truncation era; local ``docs_for_chashes`` already matches the
+        caller's form verbatim. The RETURNED keys preserve whatever form
+        the caller passed in ``chashes``; chashes with no manifest entries
+        are omitted from the result, same as local. (History: nexus-h8rf6.12
+        established that the wire values must match the engine's EXACT-match
+        ``F_CHK_CHASH.in(chashes)`` semantics — that now means full width,
+        the same width the manifest stores.)
         """
         if not chashes:
             return {}
         prefix_to_inputs: dict[str, list[str]] = defaultdict(list)
         for c in chashes:
             if c:
-                prefix_to_inputs[c[:32]].append(c)
+                prefix_to_inputs[c].append(c)
         if not prefix_to_inputs:
             return {}
-        # nexus-h8rf6.12: the FIRST round-trip must send the 32-char
-        # prefixes, not the raw ``chashes`` input. ``CatalogRepository
-        # .docsForChashes`` (service/src/main/java/dev/nexus/service/db/
-        # CatalogRepository.java:1130-1136) does an EXACT-match
-        # ``F_CHK_CHASH.in(chashes)`` against ``catalog_document_chunks
-        # .chash`` — a 32-char RDR-108 D1 natural-id column — with no
-        # server-side normalization, unlike local ``Catalog
-        # .docs_for_chashes`` (catalog_writes.py:1145-1147) which
-        # normalizes BOTH sides via SQL ``substr(chash,1,32)``. Any
-        # caller passing full 64-char ``chunk_text_hash`` values (e.g.
-        # ``indexer_utils.build_staleness_cache``, which reads chunk
-        # metadata written as ``hashlib.sha256(...).hexdigest()`` —
-        # code_indexer.py:396, doc_indexer.py:1048/1136,
-        # prose_indexer.py:102/166) got zero matches on every call: the
-        # server never raised, it legitimately found no rows, so the
-        # h8rf6.3 shape-conformance test (built on manufactured
-        # pre-normalized 32-char fixtures) passed while every live
-        # service-mode ``nx index repo`` staleness-cache build returned
-        # empty. Sending the already-deduped ``prefix_to_inputs`` keys
-        # mirrors the local contract exactly (also gets the dedup for
-        # free: mixed 32-/64-char input colliding to the same prefix is
-        # now one wire entry, not N).
         result = self._post(
             "/manifest/docs_for_chashes", {"chashes": list(prefix_to_inputs.keys())}
         )

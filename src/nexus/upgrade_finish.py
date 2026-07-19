@@ -846,8 +846,17 @@ def check_version_transition(config_dir: Path) -> str | None:
         report = detect_stale_processes()
         actions = restart_stale(report)
     except Exception:  # noqa: BLE001 — the finish pass must never break CLI startup
+        # nexus-p78a0 rehearsal catch: this leg used to `return None`,
+        # silently aborting the WHOLE finish pass — on a ps-less box
+        # (minimal container, stripped host) engine convergence and the
+        # pending-data-rung callout never ran, exactly the independent-legs
+        # regression the nexus-cfgo9 comment below forbids for the other
+        # legs. Degrade THIS leg and continue.
         _log.warning("upgrade_finish_failed", exc_info=True)
-        return None
+        actions = [
+            "NOTE: process-skew detection unavailable on this box "
+            "(see logs); continuing with the remaining finish legs"
+        ]
     # nexus-cfgo9: engine convergence and the diag-view heal are two more
     # independent legs of the finish pass — each try/excepted on its own so
     # one leg's failure never swallows the actions already computed by the

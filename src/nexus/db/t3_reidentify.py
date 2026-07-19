@@ -2,7 +2,7 @@
 """RDR-108 Phase 2 (nexus-jc63): T3 chunk re-identification.
 
 Re-upserts every T3 chunk under a content-derived natural ID
-(``chunk_text_hash[:32]``), reusing the chunk's existing embedding so
+(the FULL ``chunk_text_hash``, RDR-180), reusing the chunk's existing embedding so
 the migration is free of Voyage calls. After all chunks for a
 collection have been re-upserted, the old chunk IDs are batch-deleted
 in groups of 300 (``nexus.db.limits.QUOTAS.MAX_RECORDS_PER_WRITE``).
@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING
 import structlog
 from chromadb.errors import NotFoundError as _ChromaNotFoundError
 
+from nexus.chunk_identity import chunk_id_from_hash as _chunk_id_from_hash
 from nexus.db.limits import QUOTAS
 from nexus.retry import _chroma_with_retry
 
@@ -94,7 +95,7 @@ def reidentify_collection(
     *,
     dry_run: bool = True,
 ) -> ReidentifyResult:
-    """Re-upsert every chunk in ``collection_name`` under chunk_text_hash[:32].
+    """Re-upsert every chunk in ``collection_name`` under the full chunk_text_hash (RDR-180).
 
     Two-pass per-collection loop:
 
@@ -103,7 +104,7 @@ def reidentify_collection(
 
       Pass 2 (process): for each batch of <=300 collected ids,
         a. ``col.get(ids=batch, include=[documents, embeddings, metadatas])``
-        b. Compute ``new_id = meta["chunk_text_hash"][:32]`` per chunk.
+        b. Compute ``new_id = meta["chunk_text_hash"]`` (full width) per chunk.
            Skip silently if ``cid == new_id`` (already migrated).
         c. Strip ``doc_id`` / ``chunk_index`` / ``chunk_count`` from
            metadata (catalog manifest is authoritative for those).
@@ -244,7 +245,12 @@ def reidentify_collection(
                     raise MissingChunkHashError(
                         chunk_id=cid, collection=collection_name
                     )
-                new_id = chash[:32]
+                # RDR-180 (tripwire catch, nexus-p78a0): the natural id is
+                # the FULL digest via the chunk_identity boundary. The old
+                # [:32] here would have RE-TRUNCATED every id on a converged
+                # store — the command's own help text already claimed
+                # full-width while this line still sliced.
+                new_id = _chunk_id_from_hash(chash)
                 if cid == new_id:
                     result.chunks_already_migrated += 1
                     continue

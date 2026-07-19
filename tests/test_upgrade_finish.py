@@ -228,7 +228,12 @@ class TestVersionTransition:
         self._tool.stop()
         assert "NEEDS HUMAN" in line and "6.7.0 -> 6.7.1" in line
 
-    def test_finish_failure_never_blocks_startup(self, tmp_path):
+    def test_finish_failure_degrades_one_leg_and_continues(self, tmp_path):
+        """nexus-p78a0 rehearsal catch (run 2): a broken process probe used
+        to abort the WHOLE finish pass with None — on a ps-less box engine
+        convergence and the pending-rung callout silently never ran. The
+        probe leg must degrade alone; the later legs (and their callout)
+        still fire."""
         (tmp_path / "last_seen_version").write_text("6.7.0\n")
         with patch(
             "nexus.upgrade_finish.install_mtime_and_version",
@@ -238,8 +243,16 @@ class TestVersionTransition:
             side_effect=RuntimeError("ps exploded"),
         ), patch(
             "nexus.upgrade_finish.running_from_tool_install", return_value=True,
+        ), patch(
+            "nexus.upgrade_finish.pending_data_rung_callout",
+            return_value=["chash-rekey PENDING — test marker"],
         ):
-            assert check_version_transition(tmp_path) is None
+            line = check_version_transition(tmp_path)
+        assert line is not None and "6.7.0 -> 6.7.1" in line
+        assert "process-skew detection unavailable" in line
+        # The later legs really ran: the callout line made it into the
+        # summary despite the first leg's failure.
+        assert "chash-rekey PENDING" in line
         # Stamp still advanced: the transition is consumed, not retried
         # forever against a broken probe.
         assert (tmp_path / "last_seen_version").read_text().strip() == "6.7.1"

@@ -232,7 +232,7 @@ class TestReidentifyConcurrentWrites:
                 col.get(ids=pre_ids, include=["metadatas"])["metadatas"],
             )
         }
-        pre_target_ids = {h[:32] for h in pre_chashes_full.values()}
+        pre_target_ids = set(pre_chashes_full.values())  # RDR-180: full-width ids
 
         stop = threading.Event()
         writer = _writer_thread(
@@ -264,7 +264,7 @@ class TestReidentifyConcurrentWrites:
 
         # Invariant 2: idempotent re-run sweeps the concurrent-write
         # tail. After the second run there should be NO chunks under
-        # synthetic ids (every cid == chunk_text_hash[:32]).
+        # synthetic ids (every cid == the full chunk_text_hash, RDR-180).
         result2 = reidentify_collection(
             t3_db, coll_name, dry_run=False,
         )
@@ -278,7 +278,7 @@ class TestReidentifyConcurrentWrites:
                 break
             for cid, meta in zip(ids, metas):
                 chash = (meta or {}).get("chunk_text_hash") or ""
-                if chash and cid != chash[:32]:
+                if chash and cid != chash:
                     non_content_derived += 1
             if len(ids) < _PAGE:
                 break
