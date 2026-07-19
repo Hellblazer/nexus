@@ -2839,6 +2839,19 @@ public final class PgVectorRepository {
     /** Precompiled hex pattern for chunk_text_hash validation (fix #M1-cr: length+charset). */
     private static final Pattern HEX64 = Pattern.compile("[0-9a-f]{64}");
 
+    /** Legacy pre-RDR-180 chunk id shape: 32 lowercase hex (the [:32] truncation era). */
+    private static final Pattern HEX32 = Pattern.compile("[0-9a-f]{32}");
+
+    /**
+     * True when {@code s} is a legacy 32-lowercase-hex chunk id — the shape every
+     * pre-RDR-180 row carries (as a 16-byte key post-conversion) until the
+     * chash-rekey rung runs. Read paths tolerate this width in the auto-converge
+     * window; WRITE boundaries reject it ({@link dev.nexus.service.db.Chash}).
+     */
+    private static boolean isLegacyHex32(String s) {
+        return s != null && HEX32.matcher(s).matches();
+    }
+
     /**
      * Compute a span string from chunk metadata (RDR-169 G5, bead nexus-jkv85).
      *
@@ -2914,12 +2927,24 @@ public final class PgVectorRepository {
         }
         for (Map<String, Object> row : rows) {
             Object idVal = row.get("id");
-            // Fail loud if id is not the canonical 64-hex chash (RDR-180) —
-            // document-level callers must not reach here.
-            if (!(idVal instanceof String chashStr) || chashStr.length() != 64) {
+            // Fail loud if id is not chash-shaped (RDR-180) — document-level
+            // callers (tumbler ids) must not reach here. LEGACY 32-hex ids
+            // are chunk rows too (nexus-p78a0 rehearsal catch, run 3): in the
+            // auto-converge window — cohort engine booted, chash-rekey rung
+            // not yet run — every pre-existing row still carries its 16-byte
+            // legacy key, and a hard 64-only guard here 422'd EVERY search of
+            // pre-existing content, making an un-rekeyed store unreadable.
+            // The window contract is degrade-per-row, never fail-the-read:
+            // serve the row (chash = the legacy hex; the client's dual-width
+            // read seam resolves it via the alias route once rekeyed); the
+            // span still derives from metadata chunk_text_hash, which has
+            // carried the FULL 64-hex in every era.
+            if (!(idVal instanceof String chashStr)
+                    || !(chashStr.length() == 64 || isLegacyHex32(chashStr))) {
                 throw new IllegalStateException(
-                    "enrichSearchRows: id '" + idVal + "' is not a 64-hex chash — "
-                    + "only chunk-level search rows may be enriched");
+                    "enrichSearchRows: id '" + idVal + "' is not a 64-hex chash "
+                    + "(or a legacy 32-hex window row) — only chunk-level search "
+                    + "rows may be enriched");
             }
             row.put("chash", chashStr);
             if (includeSourceUri) {
