@@ -629,6 +629,12 @@ class TestHermeticOracle:
         cloud_landed = _landed_chunks(staging, cname)
         assert len(cloud_landed) == 4
         assert {r["legacy_ref"] for r in cloud_landed} == set(cids)
+        # critic-p2 M3: two collections in ONE run must resolve to two
+        # DIFFERENT target dims — the misrouted-leg class RDR-180 exists to
+        # kill had no end-to-end tripwire after the old dims assertion was
+        # dropped in the driver-test conversion.
+        assert {r["dim"] for r in local_landed} == {768}
+        assert {r["dim"] for r in cloud_landed} == {1024}
         assert sorted(staging.promote_calls) == sorted([lname, cname])
         assert read_state() is None
 

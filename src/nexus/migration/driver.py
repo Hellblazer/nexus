@@ -582,6 +582,11 @@ def run_guided_upgrade(
             )
             assert_disk_headroom(estimated_bytes=estimated, pg_path=_resolve_pg_path())
 
+        # Mutated by _land, read by the success-path ValidationOutcome below
+        # (critic-p2 M4: 'operator-visible' means the CLI's advisory_notes —
+        # migrate_cmd prints those — not a bigger structlog payload).
+        land_advisories: list[str] = []
+
         def _land() -> dict[str, int]:
             landed: dict[str, int] = {}
             catalog_conn = _open_source_ro(sources.catalog_db_path)
@@ -590,11 +595,14 @@ def run_guided_upgrade(
                 for store in _POINTER_STORES:
                     rows = pointer_store_rows(store, catalog_conn, memory_conn)
                     landed[store] = _staging().load(store, rows)
-                # reviewer-p2 Medium: orphaned-FK assignments the landing
-                # skipped must be OPERATOR-visible, not just a log line.
                 orphans = topic_assignment_orphans(memory_conn)
                 if orphans:
                     landed["topic_assignments_orphaned_skipped"] = orphans
+                    land_advisories.append(
+                        f"{orphans} topic assignment(s) referenced a topic row "
+                        "that no longer exists in the source and were skipped "
+                        "(orphaned FK; nothing to resolve them to)"
+                    )
             finally:
                 catalog_conn.close()
                 memory_conn.close()
@@ -759,7 +767,16 @@ def run_guided_upgrade(
             manifest_orphan_count=0,
             manifest_vacuous=False,
             stale_aspects=stale_aspects_count,
-            advisory_notes=(),
+            # critic-p2 M4 + L5: the CLI prints advisory_notes (and ONLY
+            # advisory_notes — never the raw stale_aspects count), so both
+            # the landing's orphan-skip note and the stale-aspects hint must
+            # travel here to actually reach an operator.
+            advisory_notes=tuple(land_advisories) + (
+                (
+                    f"{stale_aspects_count} stale document_aspects row(s) — "
+                    "run `nx enrich aspects <collection>` to refresh them",
+                ) if stale_aspects_count else ()
+            ),
             rollback_available=False,
         )
     else:
