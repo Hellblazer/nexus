@@ -65,7 +65,7 @@ RELEASE_PROPS="service/src/main/resources/META-INF/nexus/release.properties"
 # stale default fail-closes the --cold MVV at the version gate. Kept literal (it
 # names a PUBLISHED release tag, which need not equal the floor) but bumped to
 # track it; override via NEXUS_SERVICE_TAG. (nexus-v0zmv)
-COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.47}"
+COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.49}"
 # nexus-cfgo9: the PACKAGE-UPGRADE leg's starting point — a REAL, already
 # published PyPI release + the engine tag ITS OWN PINNED_SERVICE_TAG
 # resolves to (see CHANGELOG.md's "[6.9.0]" entry: "Ships with (and
