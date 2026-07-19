@@ -939,7 +939,9 @@ public final class PgVectorRepository {
         float[] queryVec = embedResult.embeddings().get(0);
 
         StringBuilder sql = new StringBuilder()
-            .append("SELECT chash, chunk_text, collection, metadata::text AS metadata_json,")
+            // RDR-180: bytea storage — hex at the SQL seam (raw-SQL twin of
+            // the ChashHex converted type the jOOQ paths use).
+            .append("SELECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::text AS metadata_json,")
             .append(" (embedding <=> ?::vector) AS distance")
             .append(" FROM ").append(chunksTable(dim))
             .append(" WHERE collection IN (").append(placeholders(collectionNames.size())).append(")");
@@ -1234,7 +1236,8 @@ public final class PgVectorRepository {
             PgSession.setLocal(ctx, "pg_trgm.word_similarity_threshold", "0.6");
 
             List<String> gateChashes = rawVectorFetch(
-                ctx, "SELECT chash FROM " + table + gateSql + " LIMIT ?", probeBinds.toArray())
+                ctx, "SELECT encode(chash, 'hex') AS chash FROM " + table + gateSql + " LIMIT ?",
+                probeBinds.toArray())
                 .map(r -> r.get("chash", String.class));
 
             if (gateChashes.size() <= selectiveGateMax) {
@@ -1258,9 +1261,9 @@ public final class PgVectorRepository {
                 // AFTER the size-based dispatch so the selective/non-selective boundary stays
                 // identical to the old per-row COUNT(*).
                 List<String> inChashes = gateChashes.stream().distinct().toList();
-                String sql = "SELECT chash, chunk_text, collection, metadata::text AS metadata_json,"
+                String sql = "SELECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::text AS metadata_json,"
                     + " (embedding <=> ?::vector) AS distance FROM " + table + scopeSql
-                    + " AND chash IN (" + placeholders(inChashes.size()) + ")"
+                    + " AND chash IN (" + decodePlaceholders(inChashes.size()) + ")"
                     + " ORDER BY distance ASC, chash ASC LIMIT ?";
                 List<Object> b = new ArrayList<>();
                 b.add(vecLit);
@@ -1271,7 +1274,7 @@ public final class PgVectorRepository {
             }
             // HNSW-first for a dense gate: keep HNSW scanning past ef_search.
             PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
-            String sql = "SELECT chash, chunk_text, collection, metadata::text AS metadata_json,"
+            String sql = "SELECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::text AS metadata_json,"
                 + " (embedding <=> ?::vector) AS distance FROM " + table + gateSql
                 + " ORDER BY distance ASC, chash ASC LIMIT ?";
             List<Object> b = new ArrayList<>();
@@ -2542,6 +2545,16 @@ public final class PgVectorRepository {
         return String.join(",", java.util.Collections.nCopies(n, "?"));
     }
 
+    /** RDR-180: hex-string binds against the bytea chash column. */
+    private static String decodePlaceholders(int n) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < n; i++) {
+            if (i > 0) sb.append(",");
+            sb.append("decode(?, 'hex')");
+        }
+        return sb.toString();
+    }
+
     /**
      * Translate one metadata {@code where} entry into a SQL predicate appended to
      * {@code sql}, with its binds added to {@code binds} in placeholder order
@@ -2901,10 +2914,11 @@ public final class PgVectorRepository {
         }
         for (Map<String, Object> row : rows) {
             Object idVal = row.get("id");
-            // Fail loud if id is not a 32-hex chash — document-level callers must not reach here.
-            if (!(idVal instanceof String chashStr) || chashStr.length() != 32) {
+            // Fail loud if id is not the canonical 64-hex chash (RDR-180) —
+            // document-level callers must not reach here.
+            if (!(idVal instanceof String chashStr) || chashStr.length() != 64) {
                 throw new IllegalStateException(
-                    "enrichSearchRows: id '" + idVal + "' is not a 32-char chash — "
+                    "enrichSearchRows: id '" + idVal + "' is not a 64-hex chash — "
                     + "only chunk-level search rows may be enriched");
             }
             row.put("chash", chashStr);
