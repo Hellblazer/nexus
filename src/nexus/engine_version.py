@@ -105,7 +105,16 @@ from __future__ import annotations
 #: has NO local fallback for any of them (pipeline.db/ladder.db deleted),
 #: so a client at this release against an older engine cannot index PDFs
 #: or record ladder completions — the floor IS the fix-delivery vehicle.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 47)
+#: -> (0,1,49) 2026-07-19: the RDR-180 cohort. The client's chash cutover
+#: (64-hex producers, bytea serving, guided land-then-transform, rekey rung)
+#: hard-depends on the cohort schema (27+1 rdr180 changesets) and the
+#: /v1/remap/rekey + staging endpoints; and v0.1.49 carries
+#: rdr180-16-analyze-rewritten-tables, the BUG-0148 stale-planner-stats
+#: product fix — a boot that applies the ALTER TYPE rewrite un-ANALYZEd
+#: degrades sparse-gate hybrid search to zero rows with every health probe
+#: green (conexus-xpg7). Deployed + per-query-diff cloud-gated 2026-07-19
+#: (parity 104/113 == baseline, recall AC3 12/12, xpg7 probes 3/3 J=1.0).
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 49)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:
