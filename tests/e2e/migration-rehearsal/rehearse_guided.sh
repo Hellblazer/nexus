@@ -519,6 +519,11 @@ expect_sql "content rows: shortid (GH #1408 population MIGRATED)" \
   "SELECT count(*) FROM nexus.chunks_768 WHERE collection='$SHORTID' AND chunk_text <> ''" "$((SEED_N+1))"
 expect_sql "no empty-text row promoted anywhere" \
   "SELECT count(*) FROM nexus.chunks_768 WHERE chunk_text = ''" "0"
+# RDR-086 metadata parity (gate run 3 catch): promoted rows must be
+# indistinguishable from serving-path writes — the citation resolver's
+# where-filter reads metadata chunk_text_hash, so promote stamps it.
+expect_sql "metadata chunk_text_hash mirrors the chash on every promoted row" \
+  "SELECT count(*) FROM nexus.chunks_768 WHERE metadata->>'chunk_text_hash' IS DISTINCT FROM encode(chash,'hex')" "0"
 
 # The alias map, exactly (4n+3: every distinct legacy content ref, the shared
 # cross-collection ref counted ONCE).

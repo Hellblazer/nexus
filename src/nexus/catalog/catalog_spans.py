@@ -131,6 +131,22 @@ def resolve_span_in_t3(
     return out
 
 
+def _t3_collection_names(t3: "ClientAPI") -> list[str]:
+    """Collection names across BOTH T3 client shapes.
+
+    Chroma clients return objects with ``.name``; the service-mode
+    ``HttpVectorClient.list_collections()`` returns plain dicts (--guided
+    gate run 3 catch, nexus-jxizy.10.10 — the object-only ``c.name`` read
+    crashed every service-mode fallback scan, and made the chash-index
+    self-heal a permanent skip-with-warning). May raise — callers keep
+    their existing degradation contracts.
+    """
+    return [
+        c.get("name") if isinstance(c, dict) else c.name
+        for c in t3.list_collections()
+    ]
+
+
 def fallback_chash_scan(
     *,
     hex_chash: str,
@@ -150,7 +166,7 @@ def fallback_chash_scan(
     global _chash_fallback_warned
 
     try:
-        all_cols = [c.name for c in t3.list_collections()]
+        all_cols = _t3_collection_names(t3)
     except Exception:  # noqa: BLE001 — best-effort fallback scan; T3 list failure is logged and degrades to no-match, must not crash caller
         _log.debug("chash_fallback_list_collections_failed", exc_info=True)
         return None
@@ -321,7 +337,7 @@ def resolve_chash_globally(
         # strictly safer than fail-quiet-and-purge: log at WARNING
         # and return without touching the index.
         try:
-            live = {c.name for c in t3.list_collections()}
+            live = set(_t3_collection_names(t3))
             list_failed = False
         except Exception:  # noqa: BLE001 — transient T3 list failure must not purge the chash index (nexus-8g79.3); logged at WARNING, self-heal skipped this pass
             _log.warning(

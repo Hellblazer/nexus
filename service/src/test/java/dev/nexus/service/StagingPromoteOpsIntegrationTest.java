@@ -183,6 +183,19 @@ class StagingPromoteOpsIntegrationTest {
         assertThat(count("SELECT count(*) FROM nexus.chash_alias "
             + "WHERE old_ref = '" + legacy32 + "' AND encode(new_chash,'hex') = '"
             + digestHex(TEXT_1) + "'")).isEqualTo(1);
+        // RDR-086 metadata parity (--guided gate run 3 catch, nexus-
+        // jxizy.10.10): serving-path writes stamp chunk_text_hash into
+        // metadata client-side; the citation resolver's final hop
+        // (/v1/vectors/get where={"chunk_text_hash": ...}) filters on it.
+        // Promoted rows must be indistinguishable from serving-path writes,
+        // so promote stamps the digest hex at INSERT — a verbatim
+        // chunk_meta copy leaves every migrated chunk invisible to
+        // citations.
+        assertThat(count("SELECT count(*) FROM nexus.chunks_768 "
+            + "WHERE collection = '" + COLL_A + "' "
+            + "AND metadata->>'chunk_text_hash' IS DISTINCT FROM encode(chash,'hex')"))
+            .as("every promoted row's metadata chunk_text_hash mirrors its chash")
+            .isEqualTo(0);
     }
 
     // ── Order 2: collapse pair (M1) — one row, both refs aliased ─────────────

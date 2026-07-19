@@ -98,6 +98,37 @@ def test_unmapped_legacy_reference_is_dangling_not_an_error():
     assert ref is None
 
 
+class _ServiceShapedT3(_FakeT3):
+    """The service-mode client shape: ``list_collections()`` returns DICTS
+    (HttpVectorClient), not objects with ``.name``. --guided gate run 3
+    catch (nexus-jxizy.10.10): the object-only read crashed every
+    service-mode fallback scan and made the chash-index self-heal a
+    permanent skip."""
+
+    def list_collections(self):
+        return [{"name": _FakeCollection.name, "count": 1}]
+
+
+def test_resolver_survives_dict_shaped_list_collections_service_mode():
+    # T2 path (self-heal consults list_collections): must resolve, not
+    # skip-with-warning, when the client returns dict rows.
+    ref = resolve_chash_globally(f"chash:{FULL}", _ServiceShapedT3(), _FakeChashIndex())
+    assert ref is not None
+    assert ref["chunk_text"] == TEXT
+
+
+def test_fallback_scan_survives_dict_shaped_list_collections_service_mode():
+    # Fallback path (empty chash index): the scan must enumerate dict rows
+    # and find the chunk, not crash to a silent None.
+    class _EmptyIndex(_FakeChashIndex):
+        def lookup(self, chash: str):
+            return []
+
+    ref = resolve_chash_globally(f"chash:{FULL}", _ServiceShapedT3(), _EmptyIndex())
+    assert ref is not None
+    assert ref["chunk_text"] == TEXT
+
+
 def test_64_hex_citation_resolves_to_the_stored_chunk():
     """The Test Plan's resolver proof: a chash:<64hex> citation resolves to
     a stored chunk whose natural id IS that digest."""

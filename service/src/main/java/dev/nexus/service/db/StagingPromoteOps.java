@@ -198,13 +198,22 @@ public final class StagingPromoteOps {
             // (5) content INSERT for the collection's dim table. DISTINCT ON
             // digest with the M1 deterministic tiebreak; DO NOTHING against
             // live rows (idempotent resume; populated-target legal).
+            // Metadata gains the RDR-086 chunk_text_hash stamp (--guided
+            // gate run 3 catch, nexus-jxizy.10.10): serving-path writes
+            // stamp it client-side and the citation resolver's final hop
+            // (/v1/vectors/get where-filter) reads it — a verbatim
+            // chunk_meta copy left every migrated chunk invisible to
+            // citations. Promoted rows must be indistinguishable from
+            // serving-path writes; the digest is computed here anyway.
             String chunkTable = "nexus.chunks_" + impliedDim;
             int promoted = ctx.execute(
                 "INSERT INTO " + chunkTable + " (tenant_id, collection, chash, chunk_text, embedding, metadata) "
                 + "SELECT DISTINCT ON (" + S_DIGEST + ") "
                 + "       current_setting('nexus.tenant', true), s.collection, "
                 + "       " + S_DIGEST + ", s.chunk_text, "
-                + "       s.embedding::vector(" + impliedDim + "), s.chunk_meta "
+                + "       s.embedding::vector(" + impliedDim + "), "
+                + "       coalesce(s.chunk_meta, '{}'::jsonb) "
+                + "         || jsonb_build_object('chunk_text_hash', encode(" + S_DIGEST + ", 'hex')) "
                 + "FROM staging.chunks s "
                 + "WHERE s.collection = ? AND s.chunk_text <> '' "
                 + "ORDER BY " + S_DIGEST + ", "
@@ -293,7 +302,11 @@ public final class StagingPromoteOps {
                     "INSERT INTO nexus.chunks_768 (tenant_id, collection, chash, chunk_text, embedding, metadata) "
                     + "SELECT current_setting('nexus.tenant', true), s.collection, a.new_chash, '', "
                     + "       s.embedding::vector(768), "
-                    + "       coalesce(s.chunk_meta, '{}'::jsonb) || jsonb_build_object('chash_origin', 'synthetic') "
+                    // chunk_text_hash mirrors the SURROGATE chash (RDR-086
+                    // metadata parity, same rationale as the content INSERT).
+                    + "       coalesce(s.chunk_meta, '{}'::jsonb) || jsonb_build_object("
+                    + "         'chash_origin', 'synthetic', "
+                    + "         'chunk_text_hash', encode(a.new_chash, 'hex')) "
                     + "FROM staging.chunks s JOIN nexus.chash_alias a "
                     + "  ON a.old_ref = s.legacy_ref AND a.source = 'staging:synthetic' "
                     + "WHERE s.chunk_text = '' AND s.dim = 768 AND s.embedding IS NOT NULL "
