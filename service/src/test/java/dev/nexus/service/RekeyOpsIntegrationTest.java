@@ -312,6 +312,18 @@ class RekeyOpsIntegrationTest {
         // (c) orphan row GONE and pointers CASCADED — no dangling scan hits
         assertThat(count("SELECT count(*) FROM nexus.chunks_384 WHERE tenant_id='" + TA
             + "' AND chash = decode('" + "f".repeat(32) + "', 'hex')")).isZero();
+        // RDR-086 metadata parity (critic-1010, nexus-jxizy.10.10): every
+        // row the rekey touched must carry metadata.chunk_text_hash
+        // mirroring its (new) chash — the citation resolver's where-filter
+        // reads it; the seeded rows here deliberately carry NO metadata, so
+        // this fails unless the rekey statements stamp it (backfill +
+        // invariant-by-construction, parity with StagingPromoteOps).
+        for (String t : new String[] {"nexus.chunks_768", "nexus.chunks_384"}) {
+            assertThat(count("SELECT count(*) FROM " + t + " WHERE tenant_id='" + TA
+                + "' AND metadata->>'chunk_text_hash' IS DISTINCT FROM encode(chash,'hex')"))
+                .as("rekeyed rows in " + t + " mirror their chash into metadata chunk_text_hash")
+                .isZero();
+        }
         assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks WHERE tenant_id='" + TA
             + "' AND octet_length(chash) <> 32")).isZero();
         assertThat(count("SELECT count(*) FROM nexus.chash_index WHERE tenant_id='" + TA

@@ -83,12 +83,23 @@ public final class ChashSqlIdioms {
     /**
      * Phase-B content rekey for one chunk table: survivors whose key
      * mismatches their digest. Verbatim RekeyOps step (4) phase B.
+     *
+     * <p>ALSO re-stamps {@code metadata.chunk_text_hash} to mirror the new
+     * key (critic-1010, nexus-jxizy.10.10): the citation resolver's
+     * where-filter reads that RDR-086 metadata field. Producers have always
+     * stamped the FULL 64-hex there, so for serving-path rows this is a
+     * value-identical no-op — the stamp's real work is BACKFILLING rows
+     * that never carried one (pre-RDR-086 writers) and guaranteeing the
+     * mirror invariant by construction, keeping the in-store rekey path
+     * indistinguishable from {@link StagingPromoteOps}' promote output.
      */
     public static String contentRekeyUpdate(String table) {
-        return "UPDATE " + table + " c SET chash = "
-            + DIGEST.replace("chunk_text", "c.chunk_text") + " "
+        String digest = DIGEST.replace("chunk_text", "c.chunk_text");
+        return "UPDATE " + table + " c SET chash = " + digest + ", "
+            + "metadata = coalesce(c.metadata, '{}'::jsonb) "
+            + "  || jsonb_build_object('chunk_text_hash', encode(" + digest + ", 'hex')) "
             + "WHERE c.chunk_text <> '' "
-            + "  AND c.chash IS DISTINCT FROM " + DIGEST.replace("chunk_text", "c.chunk_text");
+            + "  AND c.chash IS DISTINCT FROM " + digest;
     }
 
     /**

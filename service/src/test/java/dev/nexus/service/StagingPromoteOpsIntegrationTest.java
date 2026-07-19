@@ -523,4 +523,52 @@ class StagingPromoteOpsIntegrationTest {
             .isEqualTo(1);
         assertThat(fin.get("residual_mismatched")).isEqualTo(0);
     }
+
+    // ── Order 12: MUTATION FALSIFICATION — alias-build is load-bearing at the
+    // WRITE path (critic-1010, nexus-jxizy.10.10 item 5). The rehearsal's
+    // Phase-5 falsification proves the READ path (citation resolution)
+    // depends on the alias map persisting; this proves the FINALIZE path
+    // depends on it at execution time: in the world where the alias-build
+    // statement never ran (its entire effect — the alias rows — removed),
+    // the resolvable-only manifest promote MUST leave the legacy pointer
+    // staged. Then the idempotent resume (re-promote rebuilds the facts,
+    // re-finalize converges) proves recovery.
+
+    @Test
+    @Order(12)
+    void finalizeWithAliasMapRemoved_cannotResolveLegacyPointers_resumeConverges() {
+        String collM = "knowledge__mutation__bge-base-en-v15-768__v1";
+        String text = "mutation falsification content";
+        String ref = legacy32(text);
+        landChunk(collM, 768, ref, text, vec(768));
+        ops.promoteCollection(T1, collM, 768);
+        scope.withTenant(T1, ctx -> {
+            ctx.execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) "
+                + "VALUES (?, '1.1.9', 'mutation-doc') ON CONFLICT DO NOTHING", T1);
+            ctx.execute("INSERT INTO staging.document_chunks "
+                + "(tenant_id, doc_id, position, chash) VALUES (?, '1.1.9', 0, ?) "
+                + "ON CONFLICT DO NOTHING", T1, ref);
+            // THE MUTATION: remove the alias-build's entire effect (RLS scopes
+            // this to the test tenant).
+            ctx.execute("DELETE FROM nexus.chash_alias");
+            return null;
+        });
+
+        Map<String, Object> fin = ops.finalizeTenant(T1, false);
+        assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
+            + "WHERE doc_id = '1.1.9'"))
+            .as("with the alias map gone the legacy manifest pointer CANNOT promote "
+                + "(resolvable-only) — finalize is load-bearing on alias-build")
+            .isZero();
+        assertThat((int) fin.get("manifest_unresolved")).isGreaterThanOrEqualTo(1);
+
+        // Resume: re-promote rebuilds the alias facts from the retained
+        // staging rows; re-finalize converges the pointer.
+        ops.promoteCollection(T1, collM, 768);
+        ops.finalizeTenant(T1, false);
+        assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
+            + "WHERE doc_id = '1.1.9' AND encode(chash,'hex') = '" + digestHex(text) + "'"))
+            .as("idempotent resume converges the pointer once the alias facts return")
+            .isEqualTo(1);
+    }
 }

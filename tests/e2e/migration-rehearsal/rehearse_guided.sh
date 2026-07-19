@@ -361,6 +361,16 @@ say "Phase 1 — lost-response pre-stage: land + promote _SHORTID, then converge
 # counts; a false C1 409 on the resume would fail the success run loud.
 # Doubles as the item-1 wire-contract proof for the PROMOTE envelope: field
 # names + exact counts over real HTTP+JSON against the real engine.
+#
+# SCOPE, stated honestly (critic-1010 finding 4, ACCEPTED as-is): this is
+# the checklist item-2 class proven at its deterministic core — a completed-
+# but-unrecorded promote that the next full run must converge over, which is
+# what "lost response" means when landing and promote are both idempotent
+# and there is deliberately NO stateful resume protocol to interrupt
+# (design Q6: every crash cell recovers by re-run). A kill-mid-orchestration
+# variant would exercise the same idempotence with nondeterministic timing;
+# the engine-side crash matrix cells are covered by the promote/finalize
+# ITs.
 if svc_py - "$SEED_JSON" "$CHROMA_LOCAL" <<'PY'; then ok "pre-stage landed + promoted with exact envelope (lost-response fixture armed)"; else bad "pre-stage land/promote failed"; fi
 import json, sys
 import chromadb
@@ -641,10 +651,19 @@ for i, t in enumerate(texts1024):
 rows.append({"collection": D768, "dim": 768, "legacy_ref": orphan_ref,
              "chunk_text": "", "model": "bge-base-en-v15-768", "chunk_meta": None,
              "embedding": [9.0] + [1.0] * 767})
+# The reference-only row (critic-1010 finding 3): empty text whose ref IS a
+# content row's ref in the OTHER collection — the alias built by promote(D768)
+# must classify it reference_only_resolved, and asserting the ENVELOPE value
+# here is what makes the disposition classification non-vacuous (the guided
+# run's verify arithmetic alone cannot tell reference_only=1,dropped=1 from
+# reference_only=0,dropped=2).
+ref_only_ref = sha(texts768[0])[:32]
+rows.append({"collection": D1024, "dim": 1024, "legacy_ref": ref_only_ref,
+             "chunk_text": "", "model": "voyage-context-3", "chunk_meta": None})
 
 store = HttpStagingStore()
 landed = store.load("chunks", rows)
-assert landed == 7, f"landed {landed}, want 7"
+assert landed == 8, f"landed {landed}, want 8"
 
 fill = store.embed_fill(D768)
 assert fill.get("filled") == 3 and fill.get("remaining") == 0, f"embed_fill: {fill}"
@@ -663,13 +682,16 @@ f1 = store.finalize()  # policy: drop (the guided default)
 for field in ("reference_only_resolved", "orphans_dropped", "orphans_synthesized",
               "residual_mismatched", "dangling_manifest"):
     assert field in f1, f"finalize envelope missing {field!r} (wire contract drift)"
+# The exact three-way split: 1 reference-only (aliased ref) + 1 orphan
+# (unaliased) — a misclassification (e.g. 0/2) fails HERE, at the envelope.
 assert f1["orphans_dropped"] == 1 and f1["orphans_synthesized"] == 0 \
-    and f1["reference_only_resolved"] == 0, f"finalize(drop): {f1}"
+    and f1["reference_only_resolved"] == 1, f"finalize(drop): {f1}"
 assert f1["residual_mismatched"] == 0 and f1["dangling_manifest"] == 0, f1
 print(f"       finalize(drop): {json.dumps(f1)}")
 
 f2 = store.finalize(orphan_policy="synthesize")  # idempotent re-finalize, new policy
 assert f2["orphans_synthesized"] == 1 and f2["orphans_dropped"] == 0, f"finalize(synthesize): {f2}"
+assert f2["reference_only_resolved"] == 1, f"ref-only stays counted on re-finalize: {f2}"
 print(f"       finalize(synthesize): {json.dumps(f2)}")
 
 store.clear()
@@ -690,8 +712,46 @@ expect_sql "synthetic surrogate row (chash_origin=synthetic)" \
   "SELECT count(*) FROM nexus.chunks_768 WHERE collection='knowledge__direct-emb__bge-base-en-v15-768__v1' AND chunk_text = '' AND metadata->>'chash_origin' = 'synthetic'" "1"
 expect_sql "synthetic alias recorded (source=staging:synthetic)" \
   "SELECT count(*) FROM nexus.chash_alias WHERE source = 'staging:synthetic'" "1"
+# reviewer-1010 Low: the SECOND stamp site (synthesize INSERT) gets its own
+# exact-value pin — the surrogate's metadata chunk_text_hash must mirror its
+# surrogate chash, same RDR-086 parity as the content INSERT.
+expect_sql "synthetic surrogate metadata chunk_text_hash mirrors its chash" \
+  "SELECT count(*) FROM nexus.chunks_768 WHERE metadata->>'chash_origin' = 'synthetic' AND metadata->>'chunk_text_hash' IS DISTINCT FROM encode(chash,'hex')" "0"
 expect_sql "1024 leg promoted (passthrough vectors, 32-byte keys)" \
   "SELECT count(*) FROM nexus.chunks_1024 WHERE collection='knowledge__direct-pass__voyage-context-3__v1' AND octet_length(chash) = 32" "3"
+
+# ── Phase 4b (item 8, engine half): census falsification differential ────────
+say "Phase 4b — engine census falsification (plant residue ⇒ finalize aborts)"
+# critic-1010 finding 5: the finalize-fatal ChashCensus was only proven
+# INDIRECTLY (clean unlock implies it passed). Direct differential: plant a
+# 32-char legacy value in a censused nexus TEXT column -> finalize MUST
+# abort; remove it -> finalize passes again. The pass/fail FLIP on exactly
+# the residue row is the non-vacuity proof.
+RESIDUE_REF="$(python -c "import hashlib; print(hashlib.sha256(b'census residue probe').hexdigest()[:32])")"
+if sql "INSERT INTO nexus.frecency (tenant_id, chunk_id, frecency_score, miss_count, embedded_at, last_hit_at, ttl_days) SELECT tenant_id, '$RESIDUE_REF', 0, 0, now(), now(), 0 FROM nexus.frecency LIMIT 1" | grep -q "INSERT"; then
+  ok "planted a 32-char legacy residue row in nexus.frecency"
+else
+  bad "could not plant the census-residue row"
+fi
+if svc_py - <<'PY' >/dev/null 2>&1
+from nexus.migration.staging_land import HttpStagingStore
+HttpStagingStore().finalize()
+PY
+then
+  bad "CENSUS FALSIFICATION FAILED: finalize reported clean with legacy residue present — the engine census is vacuous"
+else
+  ok "finalize ABORTED with residue present — the finalize-fatal census is load-bearing"
+fi
+sql "DELETE FROM nexus.frecency WHERE chunk_id = '$RESIDUE_REF'" >/dev/null
+if svc_py - <<'PY' >/dev/null 2>&1
+from nexus.migration.staging_land import HttpStagingStore
+HttpStagingStore().finalize()
+PY
+then
+  ok "finalize clean again after residue removal (the differential isolates the census)"
+else
+  bad "finalize still failing after residue removal — probe left the store dirty"
+fi
 
 # ── Phase 5 (item 5): MUTATION FALSIFICATION — the alias asserts must bite ───
 say "Phase 5 — mutation falsification: alias-build disabled ⇒ the asserts MUST fail"

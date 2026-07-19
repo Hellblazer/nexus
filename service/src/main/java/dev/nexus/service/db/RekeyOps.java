@@ -132,7 +132,11 @@ public final class RekeyOps {
             int orphansSynthesized = 0;
             for (String t : CHUNK_TABLES) {
                 refResolved += ctx.execute(
-                    "UPDATE " + t + " c SET chash = a.new_chash "
+                    // chunk_text_hash mirrors the resolved key (same RDR-086
+                    // parity as contentRekeyUpdate — critic-1010).
+                    "UPDATE " + t + " c SET chash = a.new_chash, "
+                    + "metadata = coalesce(c.metadata, '{}'::jsonb) "
+                    + "  || jsonb_build_object('chunk_text_hash', encode(a.new_chash, 'hex')) "
                     + "FROM nexus.chash_alias a "
                     + "WHERE c.chunk_text = '' "
                     + "  AND a.old_bytes = c.chash "
@@ -188,8 +192,11 @@ public final class RekeyOps {
                     orphansSynthesized += ctx.execute(
                         "UPDATE " + t + " c SET "
                         + "  chash = a.new_chash, "
+                        // chunk_text_hash mirrors the SURROGATE key (RDR-086
+                        // parity, critic-1010 — same as the staging synthesize).
                         + "  metadata = coalesce(c.metadata, '{}'::jsonb) "
-                        + "             || jsonb_build_object('chash_origin', 'synthetic') "
+                        + "             || jsonb_build_object('chash_origin', 'synthetic', "
+                        + "                  'chunk_text_hash', encode(a.new_chash, 'hex')) "
                         + "FROM nexus.chash_alias a "
                         + "WHERE c.chunk_text = '' AND a.old_bytes = c.chash "
                         + "  AND a.source = '" + t + ":synthetic' "
