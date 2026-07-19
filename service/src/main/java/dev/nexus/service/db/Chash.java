@@ -75,9 +75,10 @@ public final class Chash {
         }
         if (hex.length() != HEX_LENGTH) {
             String hint = hex.length() == 32
-                ? " — a legacy 32-hex (pre-RDR-180 half-digest) chunk id? it is"
-                    + " NOT truncatable/paddable into a canonical chash; resolve"
-                    + " it through the chash_alias map first"
+                ? " — a legacy 32-hex (pre-RDR-180 half-digest) chunk id? for a"
+                    + " READ, resolve it through the chash_alias map first; for a"
+                    + " WRITE, the sending client predates RDR-180 — upgrade it"
+                    + " (never truncate or pad)"
                 : "";
             throw new IllegalArgumentException(
                 "invalid chash: expected " + HEX_LENGTH

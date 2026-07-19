@@ -202,6 +202,8 @@ class TestVersionTransition:
         ), patch(
             "nexus.upgrade_finish.detect_stale_processes",
             return_value=SkewReport(installed_version="6.7.1"),
+        ), patch(
+            "nexus.upgrade_finish.pending_data_rung_callout", return_value=[],
         ):
             line = check_version_transition(tmp_path)
         self._tool.stop()
@@ -613,6 +615,8 @@ class TestCheckVersionTransitionEngineConvergence:
         ), patch(
             "nexus.upgrade_finish.heal_diag_view", return_value=[],
         ), patch(
+            "nexus.upgrade_finish.pending_data_rung_callout", return_value=[],
+        ), patch(
             "nexus.config.is_local_mode", return_value=True,
         ), patch(
             "nexus.daemon.binary_lifecycle.read_installed_provenance",
@@ -641,6 +645,8 @@ class TestCheckVersionTransitionEngineConvergence:
         ), patch(
             "nexus.upgrade_finish.converge_engine",
             side_effect=RuntimeError("boom"),
+        ), patch(
+            "nexus.upgrade_finish.pending_data_rung_callout", return_value=[],
         ):
             line = check_version_transition(tmp_path)
         assert line == "upgraded 6.7.0 -> 6.7.1; no stale processes"
@@ -748,6 +754,8 @@ class TestCheckVersionTransitionDiagViewHeal:
         ), patch(
             "nexus.upgrade_finish.heal_diag_view",
             side_effect=RuntimeError("boom"),
+        ), patch(
+            "nexus.upgrade_finish.pending_data_rung_callout", return_value=[],
         ):
             line = check_version_transition(tmp_path)
         assert line == "upgraded 6.7.0 -> 6.7.1; no stale processes"
@@ -891,6 +899,51 @@ class TestUnloadStaleT2Launchagent:
         assert actions == []
 
 
+class TestPendingDataRungCallout:
+    """critic-180-cohort finding 2: the auto-converge summary must surface a
+    pending chash-rekey rung with its user-facing consequence, not leave it
+    to nx doctor alone."""
+
+    def test_chash_rekey_pending_names_the_citation_consequence(self):
+        from nexus.upgrade_finish import pending_data_rung_callout
+
+        class _Pending:
+            name = "chash-rekey"
+
+            def detect(self):
+                from nexus.upgrade_ladder.protocol import RungStatus
+                return RungStatus(applicable=True, converged=False,
+                                  pending_detail="pending")
+
+        class _NA:
+            name = "t2-schema"
+
+            def detect(self):
+                from nexus.upgrade_ladder.protocol import RungStatus
+                return RungStatus(applicable=False, converged=False)
+
+        with patch("nexus.upgrade_ladder.registry.default_registry",
+                   return_value=[_NA(), _Pending()]):
+            lines = pending_data_rung_callout()
+        assert len(lines) == 1
+        assert "chash-rekey PENDING" in lines[0]
+        assert "citations" in lines[0]
+        assert "nx upgrade" in lines[0]
+
+    def test_detect_crash_degrades_to_no_callout(self):
+        from nexus.upgrade_finish import pending_data_rung_callout
+
+        class _Boom:
+            name = "chash-rekey"
+
+            def detect(self):
+                raise RuntimeError("probe exploded")
+
+        with patch("nexus.upgrade_ladder.registry.default_registry",
+                   return_value=[_Boom()]):
+            assert pending_data_rung_callout() == []
+
+
 class TestCheckVersionTransitionLaunchagentUnload:
     """check_version_transition's finish pass also runs the T2 LaunchAgent
     unload (nexus-c0vby), independently try/excepted from the other legs."""
@@ -909,6 +962,8 @@ class TestCheckVersionTransitionLaunchagentUnload:
             "nexus.upgrade_finish.converge_engine", return_value=[],
         ), patch(
             "nexus.upgrade_finish.heal_diag_view", return_value=[],
+        ), patch(
+            "nexus.upgrade_finish.pending_data_rung_callout", return_value=[],
         ), patch(
             "nexus.upgrade_finish.unload_stale_t2_launchagent",
             return_value=["removed the stray com.nexus.t2 LaunchAgent: /x.plist"],
@@ -931,8 +986,12 @@ class TestCheckVersionTransitionLaunchagentUnload:
         ), patch(
             "nexus.upgrade_finish.heal_diag_view", return_value=[],
         ), patch(
+            "nexus.upgrade_finish.pending_data_rung_callout", return_value=[],
+        ), patch(
             "nexus.upgrade_finish.unload_stale_t2_launchagent",
             side_effect=RuntimeError("boom"),
+        ), patch(
+            "nexus.upgrade_finish.pending_data_rung_callout", return_value=[],
         ):
             line = check_version_transition(tmp_path)
         assert line == "upgraded 6.10.0 -> 6.10.1; no stale processes"
@@ -955,6 +1014,8 @@ class TestCheckVersionTransitionLaunchagentUnload:
         ), patch(
             "nexus.upgrade_finish.unload_stale_t2_launchagent",
             side_effect=RuntimeError("boom"),
+        ), patch(
+            "nexus.upgrade_finish.pending_data_rung_callout", return_value=[],
         ):
             line = check_version_transition(tmp_path)
         assert "healed: nexus_diag lacked SELECT" in line

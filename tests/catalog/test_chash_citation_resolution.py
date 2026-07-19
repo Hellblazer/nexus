@@ -58,13 +58,44 @@ class _FakeChashIndex:
         return []
 
 
-def test_grammar_accepts_the_full_digest_and_nothing_shorter():
+def test_grammar_accepts_canonical_and_legacy_reference_widths():
     hex_chash, char_range = parse_chash_span(f"chash:{FULL}")
     assert hex_chash == FULL and char_range is None
     hex_chash, char_range = parse_chash_span(f"chash:{FULL}:5-12")
     assert char_range == (5, 12)
+    # RDR-180 Failure Modes: legacy 32-hex REFERENCES parse (they resolve
+    # via the chash_alias route) — only truly-malformed widths reject.
+    hex_chash, char_range = parse_chash_span(f"chash:{FULL[:32]}")
+    assert hex_chash == FULL[:32]
     with pytest.raises(ValueError):
-        parse_chash_span(f"chash:{FULL[:32]}")  # legacy width is NOT grammar-legal
+        parse_chash_span("chash:" + "a" * 40)
+
+
+def test_legacy_32_hex_citation_resolves_via_the_alias_route():
+    """The Failure-Modes promise end-to-end (critic-180-cohort finding 1):
+    a 32-hex reference from an old bead comment / T2 memory resolves —
+    the engine lookup alias-chains and echoes the canonical, the client
+    rewrites and fetches by the canonical identity."""
+    class _AliasAwareIndex(_FakeChashIndex):
+        def lookup(self, chash: str):
+            self.lookups.append(chash)
+            if chash == FULL[:32]:  # legacy ref: engine echoes canonical
+                return [{"collection": _FakeCollection.name,
+                         "created_at": "2026-07-18T00:00:00Z", "chash": FULL}]
+            if chash == FULL:
+                return [{"collection": _FakeCollection.name,
+                         "created_at": "2026-07-18T00:00:00Z", "chash": FULL}]
+            return []
+
+    ref = resolve_chash_globally(f"chash:{FULL[:32]}", _FakeT3(), _AliasAwareIndex())
+    assert ref is not None
+    assert ref["chunk_text"] == TEXT
+    assert ref["chunk_hash"] == FULL  # rewritten to the canonical identity
+
+
+def test_unmapped_legacy_reference_is_dangling_not_an_error():
+    ref = resolve_chash_globally(f"chash:{'0' * 32}", _FakeT3(), _FakeChashIndex())
+    assert ref is None
 
 
 def test_64_hex_citation_resolves_to_the_stored_chunk():

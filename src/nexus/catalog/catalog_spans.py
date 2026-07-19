@@ -66,6 +66,16 @@ def parse_chash_span(span: str) -> tuple[str, tuple[int, int] | None]:
         return m.group(1), (int(m.group(2)), int(m.group(3)))
     if re.fullmatch(r"[0-9a-f]{64}", body):
         return body, None
+    # RDR-180 Failure Modes: legacy 32-hex references (old bead comments,
+    # T2 memories, prose citations) stay RESOLVABLE — accepted here as a
+    # legacy reference; the resolution layer routes them through the
+    # chash_alias map (the engine lookup echoes the canonical identity).
+    # WRITE grammars (catalog.py link spans) remain strictly 64-hex.
+    m = re.match(r"^([0-9a-f]{32}):(\d+)-(\d+)$", body)
+    if m:
+        return m.group(1), (int(m.group(2)), int(m.group(3)))
+    if re.fullmatch(r"[0-9a-f]{32}", body):
+        return body, None
     raise ValueError(f"malformed chash span: {span!r}")
 
 
@@ -263,6 +273,19 @@ def resolve_chash_globally(
     Accepts the same input forms as :func:`parse_chash_span`.
     """
     hex_chash, char_range = parse_chash_span(chash)
+
+    if len(hex_chash) == 32:
+        # Legacy reference (RDR-180): the chash_index lookup alias-chains
+        # engine-side and echoes the resolved CANONICAL 64-hex — rewrite
+        # and resolve canonically. An unmapped legacy ref is dangling:
+        # no T3 fallback scan can succeed at the retired width.
+        legacy_rows = chash_index.lookup(hex_chash)
+        canonical = next(
+            (r.get("chash") for r in legacy_rows or [] if r.get("chash")), None,
+        )
+        if canonical is None or len(canonical) != 64:
+            return None
+        hex_chash = canonical
 
     # Reconstruct the span form that resolve_span_in_t3 expects.
     span = f"chash:{hex_chash}"

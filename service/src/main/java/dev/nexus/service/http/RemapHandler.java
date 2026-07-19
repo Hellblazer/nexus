@@ -57,9 +57,11 @@ import java.util.Map;
  * record_batch call — the chroma_quotas MAX_RECORDS_PER_WRITE heritage cap;
  * oversized batches get 400, matching the client's existing paging contract.
  *
- * <p>new_chash normalization mirrors {@code ChashHandler}: a 64-char
- * chunk_text_hash IS the fact's canonical form (RDR-180 full digest; the id
- * convention, RDR-108 D1); any other non-32 length is rejected 400.
+ * <p>new_chash validation (RDR-180, nexus-jxizy.7): the FULL 64-hex digest
+ * is the canonical fact form, parsed through {@code Chash.requireCanonical}
+ * — nothing is truncated; any other width is rejected 400. Pre-flip 32-hex
+ * era facts already persisted stay readable (widened DB CHECK + the
+ * remap_membership alias chain).
  *
  * <p>All endpoints require {@code Authorization: Bearer} (enforced by
  * {@link AuthFilter}) and {@code X-Nexus-Tenant}.

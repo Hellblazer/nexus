@@ -161,7 +161,17 @@ class HttpChashIndex(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         Returns ``[]`` when ``chash`` is unknown.
         """
         data = self._get("/v1/chash/lookup", params={"chash": chash})
-        return (data or {}).get("rows", [])
+        rows = (data or {}).get("rows", [])
+        # RDR-180: the engine echoes the CANONICAL 64-hex it resolved
+        # (identity-mapped for canonical input; alias-resolved for legacy
+        # 32-hex refs) — surfaced per-row so the citation resolver can
+        # rewrite a legacy reference to its canonical identity.
+        canonical = (data or {}).get("chash")
+        if canonical:
+            for r in rows:
+                if isinstance(r, dict):
+                    r.setdefault("chash", canonical)
+        return rows
 
     # ── delete_collection ──────────────────────────────────────────────────────
 

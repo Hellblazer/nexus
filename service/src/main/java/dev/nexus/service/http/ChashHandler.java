@@ -190,7 +190,12 @@ public final class ChashHandler implements HttpHandler {
             }
         }
         var rows = repo.lookup(tenant, chash);
-        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("rows", rows)));
+        // The canonical 64-hex is echoed so a LEGACY-ref caller learns the
+        // resolved identity (the client citation resolver then fetches the
+        // chunk by ITS canonical hash — RDR-180 Failure Modes: resolvers
+        // accept 32-hex via alias lookup and 64-hex directly).
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
+            Map.of("rows", rows, "chash", chash.toHex())));
     }
 
     // ── POST /v1/chash/delete_collection ─────────────────────────────────────

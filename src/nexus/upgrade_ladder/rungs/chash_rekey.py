@@ -191,7 +191,15 @@ class ChashRekeyRung:
                 )
             return ConvergeResult(outcome=ConvergeOutcome.COMPLETED, detail=detail)
         finally:
-            restore()
+            # critic-180-cohort finding 3: a restore() failure must NEVER
+            # mask the root-cause rekey exception (Python replaces the
+            # propagating exception with the finally's). Log-and-suppress:
+            # a stuck sentinel fails SAFE (writers stay frozen, doctor
+            # shows migrating) and is trivially operator-clearable.
+            try:
+                restore()
+            except Exception:  # noqa: BLE001 — deliberate: root cause wins
+                _log.error("chash_rekey_freeze_restore_failed", exc_info=True)
 
     def verify(self) -> bool:
         """READ-ONLY where possible: the diag probe must count zero. Where
