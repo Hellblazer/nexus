@@ -224,6 +224,28 @@ public final class ChashRepository {
         }));
     }
 
+    // ── legacy-reference resolution (RDR-180 Item3 read seam) ─────────────────
+
+    /**
+     * Resolve a LEGACY reference (pre-RDR-180 32-hex chunk id, or an ETL-era
+     * external id) to its canonical chash via the permanent
+     * ``nexus.chash_alias`` map (nexus-jxizy.6). Returns null when the map
+     * holds no fact for *oldRef* — the caller treats that as chash-not-found
+     * (empty rows), never an error: the alias map is the collision-free
+     * resolver, and an unmapped legacy reference is simply dangling.
+     */
+    public Chash resolveLegacyRef(String tenant, String oldRef) {
+        if (oldRef == null || oldRef.isBlank()) return null;
+        return tenantScope.withTenant(tenant, ctx -> {
+            var row = ctx.select(dev.nexus.service.jooq.nexus.Tables.CHASH_ALIAS.NEW_CHASH)
+                         .from(dev.nexus.service.jooq.nexus.Tables.CHASH_ALIAS)
+                         .where(dev.nexus.service.jooq.nexus.Tables.CHASH_ALIAS.OLD_REF.eq(oldRef))
+                         .fetchOne();
+            if (row == null || row.value1() == null) return null;
+            return Chash.fromSha256Bytes(row.value1());
+        });
+    }
+
     // ── lookup ─────────────────────────────────────────────────────────────────
 
     /**

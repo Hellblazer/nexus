@@ -133,41 +133,64 @@ public final class RekeyOps {
                     + "WHERE c.chunk_text = '' AND a.old_bytes = c.chash "
                     + "  AND EXISTS (SELECT 1 FROM " + t + " k "
                     + "        WHERE k.collection = c.collection AND k.chash = a.new_chash)");
+                // ORPHAN CRITERION (width-free — the same 32-byte-ASCII
+                // blindspot fix as the rekey predicate): an empty-text row is
+                // an orphan when NO alias fact covers its key AND no
+                // content-bearing row anywhere shares that key (a same-key
+                // content sibling makes it a legitimate reference — either
+                // already-canonical, needing no change, or legacy, resolved
+                // via the alias above).
+                String orphanCond =
+                    "c.chunk_text = '' "
+                    + "  AND NOT EXISTS (SELECT 1 FROM nexus.chash_alias a "
+                    + "        WHERE a.old_bytes = c.chash) "
+                    // a row already AT an aliased NEW key is a reference the
+                    // step-3a resolve just produced (content rows still hold
+                    // their OLD keys until step 4) — never an orphan.
+                    + "  AND NOT EXISTS (SELECT 1 FROM nexus.chash_alias a2 "
+                    + "        WHERE a2.new_chash = c.chash) "
+                    + "  AND NOT EXISTS (SELECT 1 FROM nexus.chunks_384 k "
+                    + "        WHERE k.chash = c.chash AND k.chunk_text <> '') "
+                    + "  AND NOT EXISTS (SELECT 1 FROM nexus.chunks_768 k "
+                    + "        WHERE k.chash = c.chash AND k.chunk_text <> '') "
+                    + "  AND NOT EXISTS (SELECT 1 FROM nexus.chunks_1024 k "
+                    + "        WHERE k.chash = c.chash AND k.chunk_text <> '')";
                 if (synthesizeOrphans) {
-                    orphansSynthesized += ctx.execute(
-                        "UPDATE " + t + " c SET "
-                        + "  chash = sha256(convert_to("
+                    // Alias the surrogates FIRST so the step-5 cascade
+                    // repoints their surviving pointers (RDR-180 Failure
+                    // Modes: a preserved pointer must follow the surrogate,
+                    // never dangle at the old key).
+                    ctx.execute(
+                        "INSERT INTO nexus.chash_alias (tenant_id, old_ref, old_bytes, new_chash, source) "
+                        + "SELECT current_setting('nexus.tenant', true), "
+                        + String.format(OLD_REF, "c.chash") + ", c.chash, "
+                        + "  sha256(convert_to("
                         + "    'nexus:synthetic-chash:v1|' || current_setting('nexus.tenant', true) "
                         + "    || '|' || c.collection || '|' || " + String.format(OLD_REF, "c.chash")
-                        + "    , 'UTF8')), "
+                        + "    , 'UTF8')), '" + t + ":synthetic' "
+                        + "FROM " + t + " c WHERE " + orphanCond + " "
+                        + "ON CONFLICT (tenant_id, old_ref) DO NOTHING");
+                    orphansSynthesized += ctx.execute(
+                        "UPDATE " + t + " c SET "
+                        + "  chash = a.new_chash, "
                         + "  metadata = coalesce(c.metadata, '{}'::jsonb) "
                         + "             || jsonb_build_object('chash_origin', 'synthetic') "
-                        + "WHERE c.chunk_text = '' "
-                        + "  AND NOT EXISTS (SELECT 1 FROM nexus.chash_alias a "
-                        + "        WHERE a.old_bytes = c.chash) "
-                        + "  AND octet_length(c.chash) <> 32");
+                        + "FROM nexus.chash_alias a "
+                        + "WHERE c.chunk_text = '' AND a.old_bytes = c.chash "
+                        + "  AND a.source = '" + t + ":synthetic' "
+                        + "  AND c.chash IS DISTINCT FROM a.new_chash");
                 } else {
                     // drop: cascade the manifest + chash_index pointers FIRST
                     // (same transaction — RDR-180 Failure Modes: dangling
                     // manifest pointer), then the orphan rows.
                     ctx.execute(
                         "DELETE FROM nexus.catalog_document_chunks m USING " + t + " c "
-                        + "WHERE c.chunk_text = '' AND m.chash = c.chash "
-                        + "  AND NOT EXISTS (SELECT 1 FROM nexus.chash_alias a "
-                        + "        WHERE a.old_bytes = c.chash) "
-                        + "  AND octet_length(c.chash) <> 32");
+                        + "WHERE m.chash = c.chash AND " + orphanCond);
                     ctx.execute(
                         "DELETE FROM nexus.chash_index i USING " + t + " c "
-                        + "WHERE c.chunk_text = '' AND i.chash = c.chash "
-                        + "  AND NOT EXISTS (SELECT 1 FROM nexus.chash_alias a "
-                        + "        WHERE a.old_bytes = c.chash) "
-                        + "  AND octet_length(c.chash) <> 32");
+                        + "WHERE i.chash = c.chash AND " + orphanCond);
                     orphansDropped += ctx.execute(
-                        "DELETE FROM " + t + " c "
-                        + "WHERE c.chunk_text = '' "
-                        + "  AND NOT EXISTS (SELECT 1 FROM nexus.chash_alias a "
-                        + "        WHERE a.old_bytes = c.chash) "
-                        + "  AND octet_length(c.chash) <> 32");
+                        "DELETE FROM " + t + " c WHERE " + orphanCond);
                 }
             }
             counts.put("reference_only_resolved", refResolved);

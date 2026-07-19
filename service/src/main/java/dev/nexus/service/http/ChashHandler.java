@@ -172,7 +172,24 @@ public final class ChashHandler implements HttpHandler {
             HttpUtil.send(exchange, 400, "{\"error\":\"chash query param required\"}");
             return;
         }
-        var rows = repo.lookup(tenant, parseChash(raw, "'chash'"));
+        // RDR-180 Item3 read seam: the canonical 64-hex parses through the
+        // type; anything else is treated as a LEGACY REFERENCE (pre-flip
+        // 32-hex chunk id, ETL-era external id) and resolved through the
+        // permanent chash_alias map. An unmapped legacy ref answers empty
+        // rows — same contract as an unknown canonical chash (the alias map
+        // is the collision-free resolver; a miss is dangling, not an error).
+        Chash chash;
+        if (raw.length() == Chash.HEX_LENGTH) {
+            chash = parseChash(raw, "'chash'");
+        } else {
+            chash = repo.resolveLegacyRef(tenant, raw);
+            if (chash == null) {
+                HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
+                    Map.of("rows", List.of(), "legacy_ref_unresolved", true)));
+                return;
+            }
+        }
+        var rows = repo.lookup(tenant, chash);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("rows", rows)));
     }
 
