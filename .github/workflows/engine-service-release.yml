@@ -98,16 +98,22 @@ jobs:
         # Both linux boxes report ~16GB (5632m showed as 31% of system memory) and
         # were heap-starved at the pom default (1208/2519 GCs); 11g = ~69%, leaving
         # room for the observed ~1.7GB native-image RSS overhead above heap.
-        # mac-arm64 stays at the pom default: its log shows peak RSS (4.55GB) never
-        # reached the 5.25GB heap — the 8GB box itself is the constraint there, and
-        # a larger heap would deepen the swap pressure behind its 25%-GC-time build.
+        # mac-arm64 UPGRADED to the paid xlarge runner (Hal, 2026-07-19, at the
+        # v0.1.48 cut): the standard macos-14 box (3 vCPU / ~7GB) had become the
+        # constraint as the cohort image grew — 23,375 reachable types, analysis
+        # peaking 4.11GB against a 5632m heap, 61% of the universe stage in GC
+        # (was 25% at the v0.1.40 measurement), ~2x wall time. The xlarge class
+        # (M-series, 6 vCPU / 14GB) bills ~$0.16/min but only ever runs on tag
+        # pushes (a few $/tag; CI-cost directive: premium macOS only for
+        # release-artifact builds — this is that). 10g ≈ 71% of 14GB, the same
+        # headroom ratio as the linux 11g/16GB tuning.
         target:
           - { arch: linux-amd64, runner: ubuntu-latest,    smoke: true,  maxheap: 11g }
           - { arch: linux-arm64, runner: ubuntu-24.04-arm, smoke: true,  maxheap: 11g }
           # mac-arm64: build + publish, but UNSMOKED. native-smoke.sh needs Docker
           # (throwaway pgvector) which GH macOS lacks; macOS runtime correctness is
           # covered by the mac-arm64 CA-3 gate + the lp2qo native-serving spike.
-          - { arch: mac-arm64,   runner: macos-14,          smoke: false, maxheap: 5632m }
+          - { arch: mac-arm64,   runner: macos-14-xlarge,   smoke: false, maxheap: 10g }
     env:
       ASSET: nexus-service-${{ matrix.target.arch }}
 
