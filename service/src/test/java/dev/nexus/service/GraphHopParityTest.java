@@ -219,13 +219,16 @@ class GraphHopParityTest {
             "  (tenant_id, tumbler, title, author, year, content_type, corpus, physical_collection) " +
             "SELECT '" + TENANT_A + "', 'ex'||g, 'Doc '||g, 'exauthor', 2024, 'paper', 'research', '" +
             COLL_EXPLAIN + "' FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
+        // RDR-180: chash is bytea(32) now — the lpad'd decimal string is still valid
+        // hex (digits 0-9 only), padded to the full 64-hex canonical width and
+        // decoded at the seam.
         su.createStatement().execute(
             "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
-            "SELECT '" + TENANT_A + "', 'ex'||g, 0, lpad(g::text, 32, '0'), '" + COLL_EXPLAIN + "' " +
+            "SELECT '" + TENANT_A + "', 'ex'||g, 0, decode(lpad(g::text, 64, '0'), 'hex'), '" + COLL_EXPLAIN + "' " +
             "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
         su.createStatement().execute(
             "INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) " +
-            "SELECT '" + TENANT_A + "', '" + COLL_EXPLAIN + "', lpad(g::text, 32, '0'), 'ex'||g, " +
+            "SELECT '" + TENANT_A + "', '" + COLL_EXPLAIN + "', decode(lpad(g::text, 64, '0'), 'hex'), 'ex'||g, " +
             "('[' || ((g % 100)::float8 / 100.0) || ',1' || repeat(',0', 1022) || ']')::vector " +
             "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
         // edges exseed --cites--> ex1..exN
@@ -387,7 +390,7 @@ class GraphHopParityTest {
             // no earlier test passes p_where or reads chunk metadata.
             su.createStatement().execute(
                 "UPDATE nexus.chunks_1024 SET metadata = '{\"lang\": \"java\"}'::jsonb " +
-                "WHERE collection = '" + COLL_G + "' AND chash = '" + validChash("g1") + "'");
+                "WHERE collection = '" + COLL_G + "' AND chash = decode('" + validChash("g1") + "', 'hex')");
 
             // NULL where: unfiltered — the pre-catalog-012 behavior is preserved.
             assertThat(callGraph(su, 1024, COLL_G, "g0", "cites", 1, "out", null, 10))
@@ -659,12 +662,12 @@ class GraphHopParityTest {
             "'paper', 'research', '" + collection + "') ON CONFLICT (tenant_id, tumbler) DO NOTHING");
         su.createStatement().execute(
             "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
-            "VALUES ('" + tenant + "', '" + tumbler + "', 0, '" + chash + "', '" + collection + "') " +
+            "VALUES ('" + tenant + "', '" + tumbler + "', 0, decode('" + chash + "', 'hex'), '" + collection + "') " +
             "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
         su.createStatement().execute(
             "INSERT INTO nexus.chunks_" + dim +
             " (tenant_id, collection, chash, chunk_text, embedding) VALUES ('" +
-            tenant + "', '" + collection + "', '" + chash + "', '" + tumbler + "', " +
+            tenant + "', '" + collection + "', decode('" + chash + "', 'hex'), '" + tumbler + "', " +
             vec2(dim, x, y) + "::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
     }
 
@@ -717,16 +720,10 @@ class GraphHopParityTest {
         return v == null ? "NULL" : "'" + v.replace("'", "''") + "'";
     }
 
-    /** Length-32 lowercase-hex chash deterministically derived from seed (catalog-002 CHECK). */
+    /** Full 64-lowercase-hex chash deterministically derived from seed (RDR-180: the
+     *  full sha256 digest is the canonical chash — the pre-flip [:32] truncation is
+     *  retired). */
     private static String validChash(String seed) {
-        try {
-            byte[] h = java.security.MessageDigest.getInstance("SHA-256")
-                .digest(seed.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder(64);
-            for (byte b : h) sb.append(String.format("%02x", b));
-            return sb.substring(0, 32);
-        } catch (java.security.NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 unavailable", e);
-        }
+        return dev.nexus.service.db.Chash.ofText(seed).toHex();
     }
 }

@@ -86,6 +86,10 @@ class RemapMembershipFunctionTest {
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.chash_remap TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT SELECT ON nexus.chunks_384, nexus.chunks_768, nexus.chunks_1024 TO " + SVC_ROLE);
+            // RDR-180: remap_membership() now chains through chash_alias to resolve
+            // legacy-era facts against a rekeyed store (rdr180-002 comment).
+            su.createStatement().execute(
+                "GRANT SELECT ON nexus.chash_alias TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT EXECUTE ON FUNCTION nexus.remap_membership(text, text) TO " + SVC_ROLE);
             su.createStatement().execute(
@@ -176,7 +180,7 @@ class RemapMembershipFunctionTest {
             su.setAutoCommit(true);
             su.createStatement().execute(
                 "DELETE FROM nexus.chunks_1024 WHERE tenant_id = '" + TENANT + "' " +
-                "AND collection = '" + tgt + "' AND chash = '" + chash("t2map3") + "'");
+                "AND collection = '" + tgt + "' AND chash = decode('" + chash("t2map3") + "', 'hex')");
         }
 
         long[] after = membership(src, tgt);
@@ -233,7 +237,7 @@ class RemapMembershipFunctionTest {
             insertMapRow(su, TENANT, src, "legacy-id-1", chash("t4map1"), tgt);
             su.createStatement().execute(
                 "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding) " +
-                "VALUES ('" + TENANT + "', '" + tgt + "', '" + chash("t4map1") + "', 'text', " +
+                "VALUES ('" + TENANT + "', '" + tgt + "', decode('" + chash("t4map1") + "', 'hex'), 'text', " +
                 "('[1" + ",0".repeat(383) + "]')::vector)");
         }
 
@@ -315,18 +319,12 @@ class RemapMembershipFunctionTest {
         return new com.zaxxer.hikari.HikariDataSource(config);
     }
 
-    /** Deterministic 32-hex chash from a seed string (sha256(seed)[:32], the
-     *  same derivation shape as the production chash convention). */
+    /** Deterministic 64-hex chash from a seed string — the FULL sha256
+     *  digest (RDR-180: the pre-flip [:16-byte] truncation is retired; live
+     *  chunk-table keys are bytea(32), so map facts must decode to the same
+     *  32 bytes to converge without going through chash_alias). */
     private static String chash(String seed) {
-        try {
-            var md = java.security.MessageDigest.getInstance("SHA-256");
-            byte[] digest = md.digest(seed.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder(32);
-            for (int i = 0; i < 16; i++) sb.append(String.format("%02x", digest[i]));
-            return sb.toString();
-        } catch (java.security.NoSuchAlgorithmException e) {
-            throw new IllegalStateException(e);
-        }
+        return dev.nexus.service.db.Chash.ofText(seed).toHex();
     }
 
     private void stampGuc(Connection conn, String tenant) throws Exception {
@@ -358,7 +356,7 @@ class RemapMembershipFunctionTest {
                                  String chash) throws Exception {
         su.createStatement().execute(
             "INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) " +
-            "VALUES ('" + tenant + "', '" + collection + "', '" + chash + "', 'text', " +
+            "VALUES ('" + tenant + "', '" + collection + "', decode('" + chash + "', 'hex'), 'text', " +
             "('[1" + ",0".repeat(1023) + "]')::vector) " +
             "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
     }

@@ -63,6 +63,11 @@ class VectorHybridHttpTest {
     private static final String COL = "knowledge__httph__voyage-context-3__v1";
     private static final String Q   = "tenant isolation policy";
 
+    /** Canonical 64-hex chash fixtures (RDR-180: full digest, not a hand-padded id). */
+    private static final String HH_C1 = dev.nexus.service.db.Chash.ofText("hh-c1").toHex();
+    private static final String HH_C2 = dev.nexus.service.db.Chash.ofText("hh-c2").toHex();
+    private static final String HH_C3 = dev.nexus.service.db.Chash.ofText("hh-c3").toHex();
+
     PostgreSQLContainer<?> pg;
     HikariDataSource svcDs;
     TenantScope tenantScope;
@@ -123,7 +128,7 @@ class VectorHybridHttpTest {
         embedder.register("quantum entanglement spectroscopy experiment", 0.995f, 0.0998749f);
         pgRepo = new PgVectorRepository(tenantScope, embedder, embedder);
         pgRepo.upsertChunks(TENANT_A, COL,
-            List.of("hh-c1000000000000000000000000000", "hh-c2000000000000000000000000000", "hh-c3000000000000000000000000000"),
+            List.of(HH_C1, HH_C2, HH_C3),
             List.of("the tenant isolation policy guards every row",
                     "tenant isolation policy enforcement in postgres",
                     "quantum entanglement spectroscopy experiment"),
@@ -169,7 +174,7 @@ class VectorHybridHttpTest {
         assertThat(rows.stream().map(r -> r.get("id")).toList())
             .as("text-gated rows ranked by distance; the no-text-signal row hh-c3 "
                 + "(vector-closer than hh-c2) is excluded")
-            .containsExactly("hh-c1000000000000000000000000000", "hh-c2000000000000000000000000000");
+            .containsExactly(HH_C1, HH_C2);
         assertThat(rows.get(0).get("kind"))
             .as("metadata flattens into HTTP rows exactly like /search")
             .isEqualTo("hh");

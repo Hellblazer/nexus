@@ -127,7 +127,7 @@ class PgVectorEmbedSkipIntegrationTest {
     @Test
     void updateMetadata_returnsAffectedRowCount_existingRowIsOne_missingRowIsZero() throws Exception {
         String col = "code__embedskip-updatemeta__voyage-code-3__v1";
-        String chash = "ums10000000000000000000000000000";
+        String chash = dev.nexus.service.db.Chash.ofText("ums1").toHex();
         repo.upsertChunks(TENANT_A, col, List.of(chash), List.of("hello world"), List.of(Map.of("v", "1")));
 
         int affected = repo.updateMetadata(TENANT_A, col, List.of(chash), List.of(Map.of("v", "2")));
@@ -138,7 +138,7 @@ class PgVectorEmbedSkipIntegrationTest {
         // returns 0 rather than silently no-op'ing — the caller in upsertChunksInternal
         // reroutes a 0 result into the need-embed set instead of dropping the chash.
         int affectedMissing = repo.updateMetadata(TENANT_A, col,
-                List.of("doesnotexist000000000000000000000"), List.of(Map.of("v", "x")));
+                List.of(dev.nexus.service.db.Chash.ofText("doesnotexist").toHex()), List.of(Map.of("v", "x")));
         assertThat(affectedMissing).as("metadata-only UPDATE on a nonexistent row affects 0 rows")
                 .isEqualTo(0);
     }
@@ -150,7 +150,7 @@ class PgVectorEmbedSkipIntegrationTest {
     @Test
     void upsertChunks_sameChashTwice_secondCallSkipsEmbed_metadataRefreshed_vectorUnchanged() throws Exception {
         String col = "code__embedskip-parity__voyage-code-3__v1";
-        String chash = "eskp1000000000000000000000000000";
+        String chash = dev.nexus.service.db.Chash.ofText("eskp1").toHex();
 
         // CountingEmbedder is a shared @TestInstance(PER_CLASS) field, so its counter
         // is cumulative across every test method in this class — assert on the DELTA
@@ -199,9 +199,9 @@ class PgVectorEmbedSkipIntegrationTest {
     @Test
     void upsertChunks_mixedBatch_onlyNewChashEmbedded_haveVectorRowsUntouchedAndCorrectlyAligned() throws Exception {
         String col = "code__embedskip-mixed__voyage-code-3__v1";
-        String chashOld1 = "mob10000000000000000000000000000";
-        String chashOld2 = "mob20000000000000000000000000000";
-        String chashNew  = "mob30000000000000000000000000000";
+        String chashOld1 = dev.nexus.service.db.Chash.ofText("mob1").toHex();
+        String chashOld2 = dev.nexus.service.db.Chash.ofText("mob2").toHex();
+        String chashNew  = dev.nexus.service.db.Chash.ofText("mob3").toHex();
 
         repo.upsertChunks(TENANT_A, col, List.of(chashOld1, chashOld2),
                 List.of("old text one", "old text two"),
@@ -270,7 +270,7 @@ class PgVectorEmbedSkipIntegrationTest {
     @Test
     void upsertChunks_chashDeletedThenReupserted_recreatedNotSilentlyDropped() throws Exception {
         String col = "code__embedskip-selfheal__voyage-code-3__v1";
-        String chash = "shl10000000000000000000000000000";
+        String chash = dev.nexus.service.db.Chash.ofText("shl1").toHex();
 
         repo.upsertChunks(TENANT_A, col, List.of(chash), List.of("will be deleted"), List.of(Map.of("v", "1")));
         assertThat(superuserCount(col)).isEqualTo(1L);
@@ -302,8 +302,8 @@ class PgVectorEmbedSkipIntegrationTest {
     @Test
     void resolveNeedEmbedIdx_haveVectorUpdateCommitsBeforeEmbedIsInvoked() throws Exception {
         String col = "code__embedskip-order__voyage-code-3__v1";
-        String chashHaveVector = "ordr1000000000000000000000000000"; // pre-existing, have-vector this call
-        String chashNeedEmbed  = "ordr2000000000000000000000000000"; // new, needs embed this call
+        String chashHaveVector = dev.nexus.service.db.Chash.ofText("ordr1").toHex(); // pre-existing, have-vector this call
+        String chashNeedEmbed  = dev.nexus.service.db.Chash.ofText("ordr2").toHex(); // new, needs embed this call
 
         repo.upsertChunks(TENANT_A, col, List.of(chashHaveVector), List.of("have vector text"),
                 List.of(Map.of("v", "old")));
@@ -350,7 +350,7 @@ class PgVectorEmbedSkipIntegrationTest {
     @Test
     void forceReEmbed_true_skipsExistenceSelectEntirely_noExistenceCheckIssued() throws Exception {
         String col = "code__embedskip-force-noselect__voyage-code-3__v1";
-        String chash = "frc10000000000000000000000000000";
+        String chash = dev.nexus.service.db.Chash.ofText("frc1").toHex();
 
         // Seed the chash normally (forceReEmbed=false): this DOES run the existence
         // partition (a fresh chash still probes the — empty — table).
@@ -377,7 +377,7 @@ class PgVectorEmbedSkipIntegrationTest {
     @Test
     void forceReEmbed_true_reEmbedsEveryChunkEvenWhenChashAlreadyHasAStoredVector() throws Exception {
         String col = "code__embedskip-force-reembed__voyage-code-3__v1";
-        String chash = "frc20000000000000000000000000000";
+        String chash = dev.nexus.service.db.Chash.ofText("frc2").toHex();
 
         repo.upsertChunks(TENANT_A, col, List.of(chash), List.of("stable text"),
                 List.of(Map.of("v", "1")));
@@ -415,7 +415,7 @@ class PgVectorEmbedSkipIntegrationTest {
         // the passthrough's existing "always skip the embedder, always skip the
         // existence check" behavior, even when the chash already has a row.
         String col = "code__embedskip-force-passthrough__voyage-code-3__v1";
-        String chash = "frc30000000000000000000000000000";
+        String chash = dev.nexus.service.db.Chash.ofText("frc3").toHex();
 
         repo.upsertChunks(TENANT_A, col, List.of(chash), List.of("original text"),
                 List.of(Map.of("v", "1")));
@@ -456,7 +456,7 @@ class PgVectorEmbedSkipIntegrationTest {
     @Test
     void resolveNeedEmbedIdx_existenceSelectConnectionFails_failSafeEmbedsEverythingAndWrites() throws Exception {
         String col = "code__embedskip-failsafe__voyage-code-3__v1";
-        String chash = "flsf1000000000000000000000000000";
+        String chash = dev.nexus.service.db.Chash.ofText("flsf1").toHex();
 
         // Fails only the FIRST getConnection() call on this DataSource instance —
         // resolveNeedEmbedIdx's own tenantScope.withTenant call is the first DB
@@ -569,7 +569,7 @@ class PgVectorEmbedSkipIntegrationTest {
     @Test
     void upsertChunks_cceCollection_sameChashTwice_secondCallSkipsEmbed_metadataRefreshed() throws Exception {
         String col = "knowledge__embedskip-cce__voyage-context-3__v1";
-        String chash = "cce10000000000000000000000000000";
+        String chash = dev.nexus.service.db.Chash.ofText("cce1").toHex();
 
         int callsBefore = embedder.callCount();
         repo.upsertChunks(TENANT_A, col, List.of(chash), List.of("cce stable text"),
@@ -623,7 +623,7 @@ class PgVectorEmbedSkipIntegrationTest {
              PreparedStatement ps = su.prepareStatement(
                  "SELECT embedding::text FROM nexus.chunks_1024 WHERE collection = ? AND chash = ?")) {
             ps.setString(1, collection);
-            ps.setString(2, chash);
+            ps.setBytes(2, java.util.HexFormat.of().parseHex(chash));
             try (ResultSet rs = ps.executeQuery()) {
                 assertThat(rs.next()).as("row %s/%s must exist", collection, chash).isTrue();
                 return rs.getString(1);
@@ -637,7 +637,7 @@ class PgVectorEmbedSkipIntegrationTest {
              PreparedStatement ps = su.prepareStatement(
                  "SELECT metadata->>'v' FROM nexus.chunks_1024 WHERE collection = ? AND chash = ?")) {
             ps.setString(1, collection);
-            ps.setString(2, chash);
+            ps.setBytes(2, java.util.HexFormat.of().parseHex(chash));
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) return null;
                 return rs.getString(1);

@@ -409,10 +409,10 @@ class MigrationHandlerIngestCloudTest {
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
-    /** Collision-free 32-char chash id: 4-char tag field + 28-digit index. */
+    /** Collision-free full 64-hex chash id, deterministically derived from
+     *  (tag, i) (RDR-180: chunks_&lt;dim&gt; chash column is bytea(32)). */
     private static String chash(String tag, int i) {
-        String t = (tag + "xxxx").substring(0, 4);
-        return t + String.format("%028d", i);  // exactly 32 chars, unique per i
+        return dev.nexus.service.db.Chash.ofText(tag + "-" + i).toHex();
     }
 
     /** Legacy 2-arg form: defaults sync=true, preserving every pre-nexus-melvx test's contract. */

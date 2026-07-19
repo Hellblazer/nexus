@@ -51,6 +51,13 @@ class CatalogRepositoryTest {
     private static final String SVC_ROLE  = "svc_catalog_test";
     private static final String SVC_PASS  = "svc_catalog_test_pass";
 
+    /** Canonical 64-hex chash deterministically derived from a seed (RDR-180: the
+     *  full sha256 digest is the canonical chash — hand-padded 32-char literals
+     *  are retired since the storage column is now bytea(32)). */
+    private static String ch(String seed) {
+        return dev.nexus.service.db.Chash.ofText(seed).toHex();
+    }
+
     PostgreSQLContainer<?> pg;
     TenantScope tenantScope;
     CatalogRepository repo;
@@ -805,17 +812,17 @@ class CatalogRepositoryTest {
             "content_type", "paper", "corpus", "knowledge"));
 
         var rows = List.of(
-            Map.<String, Object>of("position", 0, "chash", "aaaa0000000000000000000000000000", "chunk_index", 0,
+            Map.<String, Object>of("position", 0, "chash", ch("aaaa"), "chunk_index", 0,
                 "line_start", 1, "line_end", 10, "char_start", 0, "char_end", 100),
-            Map.<String, Object>of("position", 1, "chash", "bbbb1111000000000000000000000000", "chunk_index", 1,
+            Map.<String, Object>of("position", 1, "chash", ch("bbbb"), "chunk_index", 1,
                 "line_start", 11, "line_end", 20, "char_start", 100, "char_end", 200)
         );
         repo.writeManifest(TENANT_A, "mfst.1", rows);
 
         var got = repo.getManifest(TENANT_A, "mfst.1");
         assertThat(got).hasSize(2);
-        assertThat(got.get(0).get("chash")).isEqualTo("aaaa0000000000000000000000000000");
-        assertThat(got.get(1).get("chash")).isEqualTo("bbbb1111000000000000000000000000");
+        assertThat(got.get(0).get("chash")).isEqualTo(ch("aaaa"));
+        assertThat(got.get(1).get("chash")).isEqualTo(ch("bbbb"));
     }
 
     @Test @Order(51)
@@ -824,17 +831,17 @@ class CatalogRepositoryTest {
             "content_type", "paper", "corpus", "knowledge"));
         // Write initial
         repo.writeManifest(TENANT_A, "mfst.2", List.of(
-            Map.<String, Object>of("position", 0, "chash", "old00000000000000000000000000000", "chunk_index", 0)
+            Map.<String, Object>of("position", 0, "chash", ch("old"), "chunk_index", 0)
         ));
         // Replace with new set
         repo.writeManifest(TENANT_A, "mfst.2", List.of(
-            Map.<String, Object>of("position", 0, "chash", "new00000000000000000000000000000", "chunk_index", 0),
-            Map.<String, Object>of("position", 1, "chash", "new11110000000000000000000000000", "chunk_index", 1)
+            Map.<String, Object>of("position", 0, "chash", ch("new0"), "chunk_index", 0),
+            Map.<String, Object>of("position", 1, "chash", ch("new1"), "chunk_index", 1)
         ));
         var got = repo.getManifest(TENANT_A, "mfst.2");
         assertThat(got).hasSize(2);
         assertThat(got.stream().map(r -> (String) r.get("chash")).toList())
-            .containsExactlyInAnyOrder("new00000000000000000000000000000", "new11110000000000000000000000000");
+            .containsExactlyInAnyOrder(ch("new0"), ch("new1"));
     }
 
     @Test @Order(52)
@@ -842,7 +849,7 @@ class CatalogRepositoryTest {
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.3", "title", "Purge Doc",
             "content_type", "paper", "corpus", "knowledge"));
         repo.writeManifest(TENANT_A, "mfst.3", List.of(
-            Map.<String, Object>of("position", 0, "chash", "purge000000000000000000000000000", "chunk_index", 0)
+            Map.<String, Object>of("position", 0, "chash", ch("purge"), "chunk_index", 0)
         ));
         assertThat(repo.getManifest(TENANT_A, "mfst.3")).hasSize(1);
         int deleted = repo.purgeManifest(TENANT_A, "mfst.3");
@@ -856,11 +863,11 @@ class CatalogRepositoryTest {
             "content_type", "paper", "corpus", "knowledge",
             "physical_collection", "knowledge__chash_test"));
         repo.writeManifest(TENANT_A, "mfst.4", List.of(
-            Map.<String, Object>of("position", 0, "chash", "cfccc000000000000000000000000000", "chunk_index", 0),
-            Map.<String, Object>of("position", 1, "chash", "cfccc111000000000000000000000000", "chunk_index", 1)
+            Map.<String, Object>of("position", 0, "chash", ch("cfccc0"), "chunk_index", 0),
+            Map.<String, Object>of("position", 1, "chash", ch("cfccc1"), "chunk_index", 1)
         ));
         Set<String> chashes = repo.chashesForCollection(TENANT_A, "knowledge__chash_test");
-        assertThat(chashes).containsExactlyInAnyOrder("cfccc000000000000000000000000000", "cfccc111000000000000000000000000");
+        assertThat(chashes).containsExactlyInAnyOrder(ch("cfccc0"), ch("cfccc1"));
     }
 
     @Test @Order(54)
@@ -868,9 +875,9 @@ class CatalogRepositoryTest {
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.5", "title", "Resync Doc",
             "content_type", "paper", "corpus", "knowledge", "chunk_count", 0));
         repo.writeManifest(TENANT_A, "mfst.5", List.of(
-            Map.<String, Object>of("position", 0, "chash", "rsync000000000000000000000000000", "chunk_index", 0),
-            Map.<String, Object>of("position", 1, "chash", "rsync111000000000000000000000000", "chunk_index", 1),
-            Map.<String, Object>of("position", 2, "chash", "rsync222000000000000000000000000", "chunk_index", 2)
+            Map.<String, Object>of("position", 0, "chash", ch("rsync0"), "chunk_index", 0),
+            Map.<String, Object>of("position", 1, "chash", ch("rsync1"), "chunk_index", 1),
+            Map.<String, Object>of("position", 2, "chash", ch("rsync2"), "chunk_index", 2)
         ));
         repo.resyncChunkCount(TENANT_A, "mfst.5");
         var doc = repo.getDocument(TENANT_A, "mfst.5");
@@ -885,13 +892,13 @@ class CatalogRepositoryTest {
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "gmm.1", "title", "GMM Doc1",
             "content_type", "paper", "corpus", "knowledge"));
         repo.writeManifest(TENANT_A, "gmm.1", List.of(
-            Map.<String, Object>of("position", 0, "chash", "gmm1aa00000000000000000000000000", "chunk_index", 0),
-            Map.<String, Object>of("position", 1, "chash", "gmm1bb00000000000000000000000000", "chunk_index", 1)
+            Map.<String, Object>of("position", 0, "chash", ch("gmm1aa"), "chunk_index", 0),
+            Map.<String, Object>of("position", 1, "chash", ch("gmm1bb"), "chunk_index", 1)
         ));
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "gmm.2", "title", "GMM Doc2",
             "content_type", "paper", "corpus", "knowledge"));
         repo.writeManifest(TENANT_A, "gmm.2", List.of(
-            Map.<String, Object>of("position", 0, "chash", "gmm2cc00000000000000000000000000", "chunk_index", 0)
+            Map.<String, Object>of("position", 0, "chash", ch("gmm2cc"), "chunk_index", 0)
         ));
 
         var result = repo.getManifestMany(TENANT_A, List.of("gmm.1", "gmm.2", "gmm.nonexistent"));
@@ -901,9 +908,9 @@ class CatalogRepositoryTest {
         assertThat(result.get("gmm.1")).hasSize(2);
         assertThat(result.get("gmm.2")).hasSize(1);
         // Ordered by position within each doc
-        assertThat(result.get("gmm.1").get(0).get("chash")).isEqualTo("gmm1aa00000000000000000000000000");
-        assertThat(result.get("gmm.1").get(1).get("chash")).isEqualTo("gmm1bb00000000000000000000000000");
-        assertThat(result.get("gmm.2").get(0).get("chash")).isEqualTo("gmm2cc00000000000000000000000000");
+        assertThat(result.get("gmm.1").get(0).get("chash")).isEqualTo(ch("gmm1aa"));
+        assertThat(result.get("gmm.1").get(1).get("chash")).isEqualTo(ch("gmm1bb"));
+        assertThat(result.get("gmm.2").get(0).get("chash")).isEqualTo(ch("gmm2cc"));
     }
 
     @Test @Order(56)
@@ -921,7 +928,7 @@ class CatalogRepositoryTest {
         repo.upsertDocument(TENANT_B, Map.of("tumbler", "gmmiso.1", "title", "Tenant B Doc",
             "content_type", "paper", "corpus", "knowledge"));
         repo.writeManifest(TENANT_B, "gmmiso.1", List.of(
-            Map.<String, Object>of("position", 0, "chash", "gmmisob000000000000000000000000a", "chunk_index", 0)
+            Map.<String, Object>of("position", 0, "chash", ch("gmmisob"), "chunk_index", 0)
         ));
         var result = repo.getManifestMany(TENANT_A, List.of("gmmiso.1"));
         assertThat(result).isEmpty();
@@ -1218,9 +1225,10 @@ class CatalogRepositoryTest {
             "content_type", "paper", "corpus", "knowledge"
         ));
 
-        // chash must be exactly 32 hex chars (catalog-002-2-chash-checks constraint)
-        String chashV1 = "aaa1aaa1aaa1aaa1aaa1aaa1aaa1aaa1"; // 32 chars
-        String chashV2 = "bbb2bbb2bbb2bbb2bbb2bbb2bbb2bbb2"; // 32 chars, different
+        // chash must be the full 64-hex canonical digest (RDR-180: chunks_*/manifest
+        // columns are bytea(32) now, CHECK octet_length=32)
+        String chashV1 = ch("chashV1");
+        String chashV2 = ch("chashV2"); // different
 
         // Initial chunk import
         repo.importChunk(etlTenant, docId, Map.of(
@@ -1253,7 +1261,7 @@ class CatalogRepositoryTest {
             "content_type", "paper", "corpus", "knowledge"
         ));
 
-        String chashStable = "ccc3ccc3ccc3ccc3ccc3ccc3ccc3ccc3"; // 32 chars
+        String chashStable = ch("chashStable"); // full 64-hex canonical digest
         Map<String, Object> chunk = Map.of(
             "position", 0, "chash", chashStable, "chunk_index", 0,
             "line_start", 5, "line_end", 15, "char_start", 10, "char_end", 300
@@ -2344,7 +2352,7 @@ class CatalogRepositoryTest {
         ));
         repo.writeManifest(TENANT_MIG, "mforph.1", List.of(
             Map.<String, Object>of(
-                "position", 0, "chash", "f00d0000000000000000000000000000",
+                "position", 0, "chash", ch("f00d"),
                 "chunk_index", 0)
         ));
         // The write-time stamp is the new contract:
@@ -2419,8 +2427,8 @@ class CatalogRepositoryTest {
     // ══════════════════════════════════════════════════════════════════════════
 
     private static final String SPAN_TENANT     = "span-tenant-a";
-    // 32-char hex chash — catalog-002-2-chash-checks constraint (RDR-108 D1)
-    private static final String SPAN_CHASH      = "abcd1234abcd1234abcd1234abcd1234";
+    // Full 64-hex canonical chash (RDR-180: chunks_*/manifest columns are bytea(32))
+    private static final String SPAN_CHASH      = ch("span-chash");
     private static final String SPAN_COLLECTION = "knowledge__span__bge-768__v1";
     private static final String SPAN_DOC_ID     = "span.1";
 
@@ -2460,7 +2468,8 @@ class CatalogRepositoryTest {
             );
             ps.setString(1, SPAN_TENANT);
             ps.setString(2, SPAN_COLLECTION);
-            ps.setString(3, SPAN_CHASH);
+            // chash column is bytea(32) now (RDR-180) — bind the decoded digest, not the hex text.
+            ps.setBytes(3, java.util.HexFormat.of().parseHex(SPAN_CHASH));
             ps.setString(4, "hello span text");
             ps.setString(5, zeroVec);
             ps.setString(6, "{\"lang\":\"en\"}");
@@ -2698,9 +2707,9 @@ class CatalogRepositoryTest {
         repo.importDocument(tenant, Map.of("tumbler", docId, "title", "Batch Chunk Doc",
             "content_type", "paper", "corpus", "knowledge"));
 
-        String chashV1 = "aaa1aaa1aaa1aaa1aaa1aaa1aaa1aaa1"; // 32 hex chars
-        String chashV2 = "bbb2bbb2bbb2bbb2bbb2bbb2bbb2bbb2"; // 32 hex chars
-        String chashV3 = "ccc3ccc3ccc3ccc3ccc3ccc3ccc3ccc3"; // 32 hex chars
+        String chashV1 = ch("bchV1");
+        String chashV2 = ch("bchV2");
+        String chashV3 = ch("bchV3");
 
         int n = repo.importChunksBatch(tenant, docId, List.of(
             Map.of("position", 0, "chash", chashV1, "chunk_index", 0,
@@ -2778,10 +2787,10 @@ class CatalogRepositoryTest {
 
         var result = repo.writeManifestMany(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "wmm.1", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", "wmm1aa00000000000000000000000000", "chunk_index", 0),
-                Map.<String, Object>of("position", 1, "chash", "wmm1bb00000000000000000000000000", "chunk_index", 1))),
+                Map.<String, Object>of("position", 0, "chash", ch("wmm1aa"), "chunk_index", 0),
+                Map.<String, Object>of("position", 1, "chash", ch("wmm1bb"), "chunk_index", 1))),
             Map.<String, Object>of("doc_id", "wmm.2", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", "wmm2aa00000000000000000000000000", "chunk_index", 0)))));
+                Map.<String, Object>of("position", 0, "chash", ch("wmm2aa"), "chunk_index", 0)))));
 
         assertThat(result.get("docs")).isEqualTo(2);
         assertThat(result.get("rows")).isEqualTo(3);
@@ -2790,8 +2799,8 @@ class CatalogRepositoryTest {
         // Equal to two independent writeManifest calls: positions + chashes intact.
         var m1 = repo.getManifest(TENANT_A, "wmm.1");
         assertThat(m1).hasSize(2);
-        assertThat(m1.get(0).get("chash")).isEqualTo("wmm1aa00000000000000000000000000");
-        assertThat(m1.get(1).get("chash")).isEqualTo("wmm1bb00000000000000000000000000");
+        assertThat(m1.get(0).get("chash")).isEqualTo(ch("wmm1aa"));
+        assertThat(m1.get(1).get("chash")).isEqualTo(ch("wmm1bb"));
         assertThat(repo.getManifest(TENANT_A, "wmm.2")).hasSize(1);
 
         // chunk_count folded into the same per-doc transaction.
@@ -2806,24 +2815,24 @@ class CatalogRepositoryTest {
         // Seed 5 rows.
         repo.writeManifestMany(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "wmm.3", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", "wmm3a000000000000000000000000000", "chunk_index", 0),
-                Map.<String, Object>of("position", 1, "chash", "wmm3b000000000000000000000000000", "chunk_index", 1),
-                Map.<String, Object>of("position", 2, "chash", "wmm3c000000000000000000000000000", "chunk_index", 2),
-                Map.<String, Object>of("position", 3, "chash", "wmm3d000000000000000000000000000", "chunk_index", 3),
-                Map.<String, Object>of("position", 4, "chash", "wmm3e000000000000000000000000000", "chunk_index", 4)))));
+                Map.<String, Object>of("position", 0, "chash", ch("wmm3a"), "chunk_index", 0),
+                Map.<String, Object>of("position", 1, "chash", ch("wmm3b"), "chunk_index", 1),
+                Map.<String, Object>of("position", 2, "chash", ch("wmm3c"), "chunk_index", 2),
+                Map.<String, Object>of("position", 3, "chash", ch("wmm3d"), "chunk_index", 3),
+                Map.<String, Object>of("position", 4, "chash", ch("wmm3e"), "chunk_index", 4)))));
         assertThat(repo.getManifest(TENANT_A, "wmm.3")).hasSize(5);
         assertThat(repo.getDocument(TENANT_A, "wmm.3").get("chunk_count")).isEqualTo(5);
 
         // Replace with only 2 rows — REPLACE shrinks; exactly 2 remain, chunk_count 2.
         repo.writeManifestMany(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "wmm.3", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", "wmm3new0000000000000000000000000", "chunk_index", 0),
-                Map.<String, Object>of("position", 1, "chash", "wmm3new1000000000000000000000000", "chunk_index", 1)))));
+                Map.<String, Object>of("position", 0, "chash", ch("wmm3new0"), "chunk_index", 0),
+                Map.<String, Object>of("position", 1, "chash", ch("wmm3new1"), "chunk_index", 1)))));
 
         var got = repo.getManifest(TENANT_A, "wmm.3");
         assertThat(got).hasSize(2);
         assertThat(got.stream().map(r -> (String) r.get("chash")).toList())
-            .containsExactlyInAnyOrder("wmm3new0000000000000000000000000", "wmm3new1000000000000000000000000");
+            .containsExactlyInAnyOrder(ch("wmm3new0"), ch("wmm3new1"));
         assertThat(repo.getDocument(TENANT_A, "wmm.3").get("chunk_count")).isEqualTo(2);
     }
 
@@ -2842,7 +2851,7 @@ class CatalogRepositoryTest {
 
         var result = repo.writeManifestMany(TENANT_A, List.of(
             Map.<String, Object>of("doc_id", "wmm.good", "rows", List.<Map<String, Object>>of(
-                Map.<String, Object>of("position", 0, "chash", "wmmgood0000000000000000000000000", "chunk_index", 0))),
+                Map.<String, Object>of("position", 0, "chash", ch("wmmgood"), "chunk_index", 0))),
             Map.<String, Object>of("doc_id", "wmm.bad", "rows", List.<Map<String, Object>>of(badRow))));
 
         assertThat(result.get("docs")).isEqualTo(1);
@@ -2891,16 +2900,24 @@ class CatalogRepositoryTest {
         // nexus-fhhwf acceptance: a doc violating the chash CHECK gets a
         // structured reason naming the constraint + sqlstate 23514, not a
         // bare id. Repo-level deliberately: the HTTP boundary now 400s a
-        // 64-char chash before any txn (nexus-z4skl), so the DB CHECK is
-        // the belt for writers that bypass the handler.
+        // non-canonical chash before any txn (nexus-z4skl), so the DB CHECK
+        // is the belt for writers that bypass the handler.
+        //
+        // POLARITY NOTE (RDR-180, nexus-jxizy.2): this file used length(chash)=32
+        // TEXT — "a".repeat(32) (32 hex chars) was the GOOD case and
+        // "b".repeat(64) was the CHECK-violating BAD case. The column is bytea(32)
+        // now with CHECK octet_length(chash)=32 (32 BYTES): "a".repeat(32) decodes
+        // to 16 bytes (now the violator) and "b".repeat(64) decodes to the full
+        // 32-byte canonical digest (now the passing case) — the two fixtures swap
+        // roles, not just their chash literals.
         String prefix = "fhhwf-check";
         var tumblers = repo.registerDocumentMany(TENANT_A, prefix, List.of(
             regDoc("ok doc", "ok.py"), regDoc("bad doc", "bad.py")));
         var result = repo.writeManifestMany(TENANT_A, List.of(
             Map.of("doc_id", tumblers.get(0), "rows", List.of(
-                Map.of("position", 0, "chash", "a".repeat(32)))),
+                Map.of("position", 0, "chash", "b".repeat(64)))),
             Map.of("doc_id", tumblers.get(1), "rows", List.of(
-                Map.of("position", 0, "chash", "b".repeat(64))))));
+                Map.of("position", 0, "chash", "a".repeat(32))))));
         assertThat(result.get("docs")).isEqualTo(1);
         assertThat(result.get("failed_doc_ids")).isEqualTo(List.of(tumblers.get(1)));
         @SuppressWarnings("unchecked")

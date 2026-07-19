@@ -90,10 +90,19 @@ class PgVectorServingContractTest {
     private static final String TENANT_A = "p4a-tenant-a";
     private static final String TENANT_B = "p4a-tenant-b";
 
-    // Chunk IDs are chosen so lexicographic chash order matches the expected
-    // sequences in the ordered assertions: 'p4a-c1' < 'p4a-c2' < 'p4a-c3' < 'p4a-put1'.
     private static final String COL = "knowledge__p4aserve__voyage-context-3__v1";
     private static final String Q   = "tenant isolation policy";
+
+    // Full 64-hex canonical chash ids (RDR-180: chunks_<dim>.chash is bytea(32) —
+    // the full sha256 digest, not a hand-padded 32-char shape). Explicit literal
+    // prefixes (not content-derived hashes) so lexicographic chash order is
+    // KNOWN and matches the expected sequences in the ordered assertions below:
+    // C1 < C2 < C3 < PUT1 < B1.
+    private static final String C1   = "10" + "0".repeat(62);
+    private static final String C2   = "20" + "0".repeat(62);
+    private static final String C3   = "30" + "0".repeat(62);
+    private static final String PUT1 = "40" + "0".repeat(62);
+    private static final String B1   = "50" + "0".repeat(62);
 
     PostgreSQLContainer<?> pg;
     HikariDataSource svcDs;
@@ -216,7 +225,7 @@ class PgVectorServingContractTest {
     void upsertChunks_servesFromPgvector() throws Exception {
         Map<String, Object> resp = postOk("/v1/vectors/upsert-chunks", TOKEN_A, Map.of(
             "collection", COL,
-            "ids",        List.of("p4a-c100000000000000000000000000", "p4a-c200000000000000000000000000", "p4a-c300000000000000000000000000"),
+            "ids",        List.of(C1, C2, C3),
             "documents",  List.of(
                 "the tenant isolation policy guards every row",
                 "tenant isolation policy enforcement in postgres",
@@ -245,19 +254,27 @@ class PgVectorServingContractTest {
 
     @Test
     @Order(2)
-    void upsertChunks_full64Id_returns400WithIndex() throws Exception {
-        // nexus-e0hd2: the classic full-sha256 id now 400s at the boundary
-        // (with its index + the truncate hint) instead of dying reason-poor
-        // at the chunks CHECK inside the transaction. Non-hex 32-char ids
-        // (like this suite's own fixtures) remain contract-legal.
+    void upsertChunks_legacy32CharId_returns400WithIndex() throws Exception {
+        // POLARITY INVERSION (RDR-180, nexus-jxizy.7/.8): pre-flip a FULL
+        // sha256 hex id was the anomaly that 400'd at the boundary (with its
+        // index + a truncate hint) — the byte[16]-era length-only tolerance
+        // accepted 32-char ids, hex or not (this suite's OWN C1/C2/C3 fixtures
+        // used to be exactly that shape). Post-flip ONE strict tier: the full
+        // 64-hex digest IS the canonical id — proved accepted by
+        // upsertChunks_servesFromPgvector above — and a bare 32-char value is
+        // a legacy reference that must resolve through chash_alias, never
+        // accepted fresh here. This is the NAMED regression gate for that
+        // collapse (bead nexus-jxizy.7): it now proves the REJECTION of the
+        // old tolerated shape.
         var resp = post("/v1/vectors/upsert-chunks", TOKEN_A, Map.of(
             "collection", COL,
-            "ids",        List.of("a".repeat(64)),
+            "ids",        List.of("a".repeat(32)),
             "documents",  List.of("doomed")));
         assertThat(resp.statusCode()).isEqualTo(400);
         assertThat(resp.body())
             .contains("ids[0]")
-            .contains("got 64 chars");
+            .contains("got 32 chars")
+            .contains("legacy 32-hex");
     }
 
     @Test
@@ -272,7 +289,7 @@ class PgVectorServingContractTest {
         List<Map<String, Object>> rows = MAPPER.readValue(resp.body(), List.class);
         assertThat(rows.stream().map(r -> r.get("id")).toList())
             .as("cosine-ranked flat rows: distances 0.0, 0.2, 0.4 exactly")
-            .containsExactly("p4a-c100000000000000000000000000", "p4a-c200000000000000000000000000", "p4a-c300000000000000000000000000");
+            .containsExactly(C1, C2, C3);
         assertThat(rows.get(0).get("lang"))
             .as("metadata flattens into rows, same envelope as the Chroma path")
             .isEqualTo("java");
@@ -283,12 +300,12 @@ class PgVectorServingContractTest {
     void storePut_singleChunk() throws Exception {
         Map<String, Object> resp = postOk("/v1/vectors/store-put", TOKEN_A, Map.of(
             "collection", COL,
-            "doc_id",     "p4a-put1000000000000000000000000",
+            "doc_id",     PUT1,
             "content",    "single put chunk about tenant isolation policy",
             "metadata",   Map.of("kind", "put")));
         assertThat(resp.get("id"))
             .as("store-put envelope {\"id\": ...} preserved")
-            .isEqualTo("p4a-put1000000000000000000000000");
+            .isEqualTo(PUT1);
     }
 
     @Test
@@ -296,11 +313,11 @@ class PgVectorServingContractTest {
     void storeGet_byIds_chromaEnvelope() throws Exception {
         Map<String, Object> resp = postOk("/v1/vectors/store-get", TOKEN_A, Map.of(
             "collection", COL,
-            "ids",        List.of("p4a-c100000000000000000000000000", "p4a-put1000000000000000000000000")));
+            "ids",        List.of(C1, PUT1)));
 
         assertThat((List<Object>) resp.get("ids"))
             .as("store-get envelope: ids aligned ascending by chash")
-            .containsExactly("p4a-c100000000000000000000000000", "p4a-put1000000000000000000000000");
+            .containsExactly(C1, PUT1);
         assertThat((List<Object>) resp.get("documents"))
             .containsExactly(
                 "the tenant isolation policy guards every row",
@@ -321,7 +338,7 @@ class PgVectorServingContractTest {
         assertThat((List<Object>) resp.get("ids"))
             .as("plain-equality where filter (the incremental-sync staleness "
                 + "check's shape) returns exactly the matching chunk")
-            .containsExactly("p4a-c200000000000000000000000000");
+            .containsExactly(C2);
     }
 
     @Test
@@ -341,8 +358,8 @@ class PgVectorServingContractTest {
         // the py chunk is excluded, both java chunks are kept.
         assertThat(rows.stream().map(r -> r.get("id")).toList())
             .as("{lang:{$ne:py}} drops the lang=py chunk, keeps the lang=java chunks")
-            .contains("p4a-c100000000000000000000000000", "p4a-c300000000000000000000000000")
-            .doesNotContain("p4a-c200000000000000000000000000");
+            .contains(C1, C3)
+            .doesNotContain(C2);
     }
 
     @Test
@@ -369,7 +386,7 @@ class PgVectorServingContractTest {
 
         assertThat((List<Object>) resp.get("ids"))
             .as("store-list paginates in chash order")
-            .containsExactly("p4a-c100000000000000000000000000", "p4a-c200000000000000000000000000");
+            .containsExactly(C1, C2);
         assertThat((List<?>) resp.get("metadatas"))
             .as("metadatas aligned with the page of ids")
             .hasSize(2);
@@ -380,7 +397,7 @@ class PgVectorServingContractTest {
     void updateMetadata_metadataOnly_textAndVectorUntouched() throws Exception {
         Map<String, Object> resp = postOk("/v1/vectors/update-metadata", TOKEN_A, Map.of(
             "collection", COL,
-            "ids",        List.of("p4a-c100000000000000000000000000"),
+            "ids",        List.of(C1),
             "metadatas",  List.of(Map.of("lang", "java", "frecency_score", 0.75))));
         assertThat(((Number) resp.get("updated")).intValue()).isEqualTo(1);
 
@@ -390,7 +407,8 @@ class PgVectorServingContractTest {
                  "SELECT chunk_text, metadata->>'frecency_score' FROM nexus.chunks_1024"
                  + " WHERE collection = ? AND chash = ?")) {
             ps.setString(1, COL);
-            ps.setString(2, "p4a-c100000000000000000000000000");
+            // chash is bytea(32) now (RDR-180) — bind the decoded digest, not hex text.
+            ps.setBytes(2, java.util.HexFormat.of().parseHex(C1));
             try (var rs = ps.executeQuery()) {
                 assertThat(rs.next()).isTrue();
                 assertThat(rs.getString(1))
@@ -481,14 +499,14 @@ class PgVectorServingContractTest {
     void storeDelete_tenantIsolated_thenOwnerDeletes() throws Exception {
         // Foreign tenant deletes exactly 0 of tenant-a's rows.
         Map<String, Object> foreign = postOk("/v1/vectors/store-delete", TOKEN_B, Map.of(
-            "collection", COL, "ids", List.of("p4a-c100000000000000000000000000", "p4a-c200000000000000000000000000")));
+            "collection", COL, "ids", List.of(C1, C2)));
         assertThat(((Number) foreign.get("deleted")).intValue())
             .as("cross-tenant delete affects exactly 0 rows under RLS")
             .isEqualTo(0);
 
         // Owner deletes for real.
         Map<String, Object> owner = postOk("/v1/vectors/store-delete", TOKEN_A, Map.of(
-            "collection", COL, "ids", List.of("p4a-c300000000000000000000000000", "p4a-put1000000000000000000000000")));
+            "collection", COL, "ids", List.of(C3, PUT1)));
         assertThat(((Number) owner.get("deleted")).intValue()).isEqualTo(2);
 
         try (Connection su = pg.createConnection("");
@@ -513,7 +531,7 @@ class PgVectorServingContractTest {
         // tenant-B's partition and tenant-A's rows must be untouched.
         Map<String, Object> resp = postOk("/v1/vectors/upsert-chunks", TOKEN_B, Map.of(
             "collection", COL,
-            "ids",        List.of("p4a-b100000000000000000000000000"),
+            "ids",        List.of(B1),
             "documents",  List.of("the tenant isolation policy guards every row"),
             "metadatas",  List.of(Map.of("owner", "b"))));
         assertThat(((Number) resp.get("upserted")).intValue()).isEqualTo(1);

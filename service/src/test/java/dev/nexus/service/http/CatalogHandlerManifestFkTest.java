@@ -114,7 +114,7 @@ class CatalogHandlerManifestFkTest {
     void manifestWrite_unregisteredDocId_returns409_withSqlstate() throws Exception {
         CapturingExchange ex = post("/v1/catalog/manifest/write",
             "{\"doc_id\":\"unregistered-tumbler-zzz\",\"rows\":[{\"position\":0,"
-            + "\"chash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]}");
+            + "\"chash\":\"" + "a".repeat(64) + "\"}]}");
         handleWithTenant(ex);
         assertThat(ex.status)
             .as("a non-blank UNREGISTERED doc_id violates the chunks FK → typed 409, not 500")
@@ -129,7 +129,7 @@ class CatalogHandlerManifestFkTest {
     void manifestAppend_unregisteredDocId_returns409_withSqlstate() throws Exception {
         CapturingExchange ex = post("/v1/catalog/manifest/append",
             "{\"doc_id\":\"unregistered-tumbler-yyy\",\"rows\":[{\"position\":0,"
-            + "\"chash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}]}");
+            + "\"chash\":\"" + "b".repeat(64) + "\"}]}");
         handleWithTenant(ex);
         assertThat(ex.status).isEqualTo(409);
         assertThat(ex.bodyString()).contains("\"sqlstate\":\"23503\"");
@@ -144,35 +144,53 @@ class CatalogHandlerManifestFkTest {
             "corpus", "knowledge", "physical_collection", "knowledge__fk__v1"));
         CapturingExchange ex = post("/v1/catalog/manifest/write",
             "{\"doc_id\":\"5.1\",\"rows\":[{\"position\":0,"
-            + "\"chash\":\"cccccccccccccccccccccccccccccccc\"}]}");
+            + "\"chash\":\"" + "c".repeat(64) + "\"}]}");
         handleWithTenant(ex);
         assertThat(ex.status).as("registered doc_id: manifest write succeeds").isEqualTo(200);
     }
 
-    // ── chash boundary validation (nexus-z4skl) ─────────────────────────────
+    // ── chash boundary validation (nexus-z4skl, inverted by RDR-180 nexus-jxizy.8) ──
 
     @Test
-    void manifestWrite_full64Chash_returns400_withOffendingLength() throws Exception {
-        // The classic mistake: a FULL sha256 hex. Pre-fix this passed the
-        // handler and died reason-less at the DB CHECK inside the txn (3
-        // deploy-gate iterations on the v0.1.24 probe). Now: uniform 400 at
-        // the boundary carrying the actual length.
+    void manifestWrite_full64Chash_accepted200() throws Exception {
+        // POLARITY INVERSION (RDR-180): pre-flip a FULL sha256 hex was the classic
+        // mistake — canon was 32 chars, so 64 chars died reason-less at the DB CHECK
+        // (or, post-z4skl, 400'd at the boundary). Post-flip the FULL 64-hex digest
+        // IS the canonical chash — this must now succeed, not 400.
+        repo.upsertDocument(TENANT, java.util.Map.of(
+            "tumbler", "5.1b", "title", "full64 accept doc", "content_type", "paper",
+            "corpus", "knowledge", "physical_collection", "knowledge__fk__v1"));
         String full64 = "a".repeat(64);
         CapturingExchange ex = post("/v1/catalog/manifest/write",
-            "{\"doc_id\":\"5.1\",\"rows\":[{\"position\":0,"
+            "{\"doc_id\":\"5.1b\",\"rows\":[{\"position\":0,"
             + "\"chash\":\"" + full64 + "\"}]}");
+        handleWithTenant(ex);
+        assertThat(ex.status).isEqualTo(200);
+    }
+
+    @Test
+    void manifestWrite_legacy32CharChash_rejected400() throws Exception {
+        // THE INVERSION: a bare 32-hex value was the canonical accept pre-flip;
+        // it is now a legacy reference that must resolve through chash_alias,
+        // never accepted fresh at this boundary.
+        CapturingExchange ex = post("/v1/catalog/manifest/write",
+            "{\"doc_id\":\"5.1\",\"rows\":[{\"position\":0,"
+            + "\"chash\":\"" + "a".repeat(32) + "\"}]}");
         handleWithTenant(ex);
         assertThat(ex.status).isEqualTo(400);
         assertThat(ex.bodyString())
-            .contains("got 64 chars")
+            .contains("got 32 chars")
+            .contains("legacy 32-hex")
             .contains("rows[0]");
     }
 
     @Test
     void manifestAppend_uppercaseChash_returns400() throws Exception {
+        // Must be the FULL 64-char width so the rejection actually exercises the
+        // lowercase check, not the (now unrelated) legacy-32-hex length branch.
         CapturingExchange ex = post("/v1/catalog/manifest/append",
             "{\"doc_id\":\"5.1\",\"rows\":[{\"position\":0,"
-            + "\"chash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}]}");
+            + "\"chash\":\"" + "A".repeat(64) + "\"}]}");
         handleWithTenant(ex);
         assertThat(ex.status).isEqualTo(400);
         assertThat(ex.bodyString()).contains("LOWERCASE");
@@ -188,14 +206,17 @@ class CatalogHandlerManifestFkTest {
         repo.upsertDocument(TENANT, java.util.Map.of(
             "tumbler", "5.3", "title", "batch doc b", "content_type", "paper",
             "corpus", "knowledge", "physical_collection", "knowledge__fk__v1"));
+        // doc 0 carries a VALID full-64-hex chash; doc 1 carries a legacy 32-hex
+        // value (the now-invalid shape, RDR-180 inversion) — proves BOTH docs
+        // are validated up front, before any per-doc transaction.
         CapturingExchange ex = post("/v1/catalog/manifest/write_many",
             "{\"docs\":[{\"doc_id\":\"5.2\",\"rows\":[{\"position\":0,"
-            + "\"chash\":\"dddddddddddddddddddddddddddddddd\"}]},"
+            + "\"chash\":\"" + "d".repeat(64) + "\"}]},"
             + "{\"doc_id\":\"5.3\",\"rows\":[{\"position\":0,"
-            + "\"chash\":\"" + "e".repeat(64) + "\"}]}]}");
+            + "\"chash\":\"" + "e".repeat(32) + "\"}]}]}");
         handleWithTenant(ex);
         assertThat(ex.status).isEqualTo(400);
-        assertThat(ex.bodyString()).contains("docs[1]").contains("got 64 chars");
+        assertThat(ex.bodyString()).contains("docs[1]").contains("got 32 chars").contains("legacy 32-hex");
         // Doc 0's manifest must be untouched (validation ran before ANY txn).
         assertThat(repo.getManifest(TENANT, "5.2")).isEmpty();
     }
@@ -233,7 +254,7 @@ class CatalogHandlerManifestFkTest {
         // now carries {failed:[{doc_id, reason, sqlstate}]} alongside.
         CapturingExchange ex = post("/v1/catalog/manifest/write_many",
             "{\"docs\":[{\"doc_id\":\"never-registered-zz\",\"rows\":[{\"position\":0,"
-            + "\"chash\":\"ffffffffffffffffffffffffffffffff\"}]}]}");
+            + "\"chash\":\"" + "f".repeat(64) + "\"}]}]}");
         handleWithTenant(ex);
         assertThat(ex.status).isEqualTo(200);
         String body = ex.bodyString();
@@ -255,7 +276,7 @@ class CatalogHandlerManifestFkTest {
             "corpus", "knowledge", "physical_collection", "knowledge__fk__v1"));
         CapturingExchange ex = post("/v1/catalog/manifest/write_many",
             "{\"docs\":[{\"doc_id\":\"5.4\",\"rows\":[{\"position\":-1,"
-            + "\"chash\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}]}]}");
+            + "\"chash\":\"" + "e".repeat(64) + "\"}]}]}");
         handleWithTenant(ex);
         assertThat(ex.status).isEqualTo(200);
         String body = ex.bodyString();

@@ -61,9 +61,10 @@ class BridgeAddressFieldsTest {
     private static final String QUERY   = "address triple test query";
 
     // Two chunks: one WITH a catalog document+manifest row (has source_uri),
-    // one WITHOUT (graceful-null path). Must be exactly 32 chars (chash_len_check).
-    private static final String CHASH_WITH_URI    = "g5c10000000000000000000000000001";
-    private static final String CHASH_WITHOUT_URI = "g5c20000000000000000000000000002";
+    // one WITHOUT (graceful-null path). Full 64-hex canonical chash (RDR-180:
+    // chunks_*/manifest columns are bytea(32), CHECK octet_length=32).
+    private static final String CHASH_WITH_URI    = dev.nexus.service.db.Chash.ofText("g5c1").toHex();
+    private static final String CHASH_WITHOUT_URI = dev.nexus.service.db.Chash.ofText("g5c2").toHex();
     private static final String SOURCE_URI        = "file:///vault/notes/g5-test.md";
     // Full sha256 stored in chunk metadata (chunk_text_hash field)
     private static final String FULL_HASH_1 =
@@ -174,7 +175,7 @@ class BridgeAddressFieldsTest {
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_document_chunks"
                 + " (tenant_id, doc_id, position, chash, chunk_index)"
-                + " VALUES ('" + TENANT + "', 'g5addr.1', 0, '" + CHASH_WITH_URI + "', 0)"
+                + " VALUES ('" + TENANT + "', 'g5addr.1', 0, decode('" + CHASH_WITH_URI + "', 'hex'), 0)"
                 + " ON CONFLICT DO NOTHING");
 
             // H2 isolation: TENANT2 owns the SAME tumbler string 'g5addr.1' with a DIFFERENT
@@ -193,7 +194,7 @@ class BridgeAddressFieldsTest {
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_document_chunks"
                 + " (tenant_id, doc_id, position, chash, chunk_index)"
-                + " VALUES ('" + TENANT2 + "', 'g5addr.1', 0, '" + CHASH_WITH_URI + "', 0)"
+                + " VALUES ('" + TENANT2 + "', 'g5addr.1', 0, decode('" + CHASH_WITH_URI + "', 'hex'), 0)"
                 + " ON CONFLICT DO NOTHING");
         }
 

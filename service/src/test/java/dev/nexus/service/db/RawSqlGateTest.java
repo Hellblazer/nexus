@@ -94,6 +94,15 @@ class RawSqlGateTest {
             // `SHOW CONFIG` is a PgBouncer admin-console meta-command, not SQL against any
             // table/schema — no jOOQ DSL form exists (no bind params, no fixed column set).
             "fetchShowConfig"),
+        "RekeyOps.java", java.util.Set.of(
+            // SANCTIONED RAW (nexus-jxizy.6): the RDR-180 per-tenant rekey is
+            // deliberately server-side SQL — sha256() over chunk_text, ctid
+            // keeper selection via array_agg ORDER BY, reversibility-lemma
+            // CASE expressions, and multi-table cascades under one
+            // transaction. No jOOQ DSL form exists for the ctid/array_agg
+            // keeper idiom, and the statements are one-shot migration ops,
+            // not serving-path queries.
+            "rekey", "unionAllContentRows"),
         "SchemaMigrator.java", java.util.Set.of(
             // nexus-c4143 root fix: pg_constraint is a Postgres SYSTEM CATALOG (jOOQ
             // codegen only covers the nexus/t1 application schemas, no generated table

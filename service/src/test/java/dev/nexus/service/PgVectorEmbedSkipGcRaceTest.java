@@ -82,9 +82,9 @@ class PgVectorEmbedSkipGcRaceTest {
     private static final String TENANT   = "gcrace-tenant";
 
     private static final String COLLECTION = "code__gcrace__voyage-code-3__v1";
-    // 32-hex-char chash (chunks_1024_chash_len_check: length(chash) = 32) — the
-    // shared chash H referenced by both docs A and B.
-    private static final String CHASH_H = String.format("%032x", 0xABCDEF01L);
+    // Full 64-hex-char chash (RDR-180: chunks_1024_chash_octet_check, octet_length=32
+    // — the full sha256 digest) — the shared chash H referenced by both docs A and B.
+    private static final String CHASH_H = String.format("%064x", 0xABCDEF01L);
     private static final String SHARED_TEXT = "shared chunk text referenced by docs A and B";
 
     private static final String TUMBLER_A = "9.2.1";
@@ -283,7 +283,7 @@ class PgVectorEmbedSkipGcRaceTest {
              PreparedStatement ps = su.prepareStatement(
                  "SELECT count(*) FROM nexus.chunks_1024 WHERE collection = ? AND chash = ?")) {
             ps.setString(1, COLLECTION);
-            ps.setString(2, CHASH_H);
+            ps.setBytes(2, java.util.HexFormat.of().parseHex(CHASH_H));
             try (ResultSet rs = ps.executeQuery()) {
                 rs.next();
                 return rs.getLong(1);
@@ -310,7 +310,7 @@ class PgVectorEmbedSkipGcRaceTest {
             ps.setString(1, TENANT);
             ps.setString(2, tumbler);
             ps.setInt(3, position);
-            ps.setString(4, chash);
+            ps.setBytes(4, java.util.HexFormat.of().parseHex(chash));
             ps.setString(5, COLLECTION);
             ps.executeUpdate();
         }

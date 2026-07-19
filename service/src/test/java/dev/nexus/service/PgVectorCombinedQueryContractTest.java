@@ -315,7 +315,7 @@ class PgVectorCombinedQueryContractTest {
                                        String collection) throws Exception {
         su.createStatement().execute(
             "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
-            + "VALUES ('" + tenant + "', '" + docId + "', 0, '" + chash + "', '" + collection + "') "
+            + "VALUES ('" + tenant + "', '" + docId + "', 0, decode('" + chash + "', 'hex'), '" + collection + "') "
             + "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
     }
 
@@ -323,7 +323,7 @@ class PgVectorCombinedQueryContractTest {
                                     String chash, String text, double x, double y) throws Exception {
         su.createStatement().execute(
             "INSERT INTO nexus.chunks_" + dim + " (tenant_id, collection, chash, chunk_text, embedding) "
-            + "VALUES ('" + tenant + "', '" + collection + "', '" + chash + "', '" + text + "', "
+            + "VALUES ('" + tenant + "', '" + collection + "', decode('" + chash + "', 'hex'), '" + text + "', "
             + vec2(dim, x, y) + "::vector) ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
     }
 
@@ -345,15 +345,10 @@ class PgVectorCombinedQueryContractTest {
         return sb.append("]'").toString();
     }
 
+    /** Full 64-lowercase-hex chash deterministically derived from seed (RDR-180: the
+     *  full sha256 digest is the canonical chash — the pre-flip [:32] truncation is
+     *  retired). */
     private static String chashOf(String seed) {
-        try {
-            byte[] h = java.security.MessageDigest.getInstance("SHA-256")
-                .digest(seed.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder(64);
-            for (byte b : h) sb.append(String.format("%02x", b));
-            return sb.substring(0, 32);
-        } catch (java.security.NoSuchAlgorithmException e) {
-            throw new IllegalStateException(e);
-        }
+        return dev.nexus.service.db.Chash.ofText(seed).toHex();
     }
 }

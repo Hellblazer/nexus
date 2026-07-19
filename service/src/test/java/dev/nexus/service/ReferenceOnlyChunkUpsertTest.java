@@ -52,10 +52,10 @@ class ReferenceOnlyChunkUpsertTest {
 
     static final String TENANT     = "t-refonly-test";
     static final String COL        = "knowledge__refonly-owner__voyage-context-3__v1";
-    // 32-char chash with full-content chunk (used for full→ref guard test)
-    static final String FULL_CHASH = "rfull000000000000000000000000001";
-    // 32-char chash for the gate-short-circuit test (no existing row)
-    static final String NEW_CHASH  = "rnew0000000000000000000000000001";
+    // Full 64-hex chash with full-content chunk (used for full→ref guard test)
+    static final String FULL_CHASH = dev.nexus.service.db.Chash.ofText("rfull").toHex();
+    // Full 64-hex chash for the gate-short-circuit test (no existing row)
+    static final String NEW_CHASH  = dev.nexus.service.db.Chash.ofText("rnew").toHex();
 
     PostgreSQLContainer<?> pg;
     HikariDataSource       ds;

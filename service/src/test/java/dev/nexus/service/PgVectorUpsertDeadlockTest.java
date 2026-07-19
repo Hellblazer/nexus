@@ -176,10 +176,11 @@ class PgVectorUpsertDeadlockTest {
     private static List<String> sharedIds() {
         List<String> ids = new ArrayList<>(SHARED_CHASHES);
         for (int i = 0; i < SHARED_CHASHES; i++) {
-            // 32-hex-char chash (the chunks_<dim>_chash_len CHECK: length(chash)=32,
-            // the chunk_text_hash[:32] natural ID). Distinct per index, shared across
+            // Full 64-hex-char chash (RDR-180: the chunks_<dim> chash column is
+            // bytea(32), CHECK octet_length=32 — the full sha256 digest, not the
+            // pre-flip [:32] half-digest). Distinct per index, shared across
             // threads so the two workers contend on the same rows.
-            ids.add(String.format("%032x", i + 1));
+            ids.add(String.format("%064x", i + 1));
         }
         return ids;
     }

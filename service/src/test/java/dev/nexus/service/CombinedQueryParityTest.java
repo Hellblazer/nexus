@@ -310,20 +310,25 @@ class CombinedQueryParityTest {
             "  (tenant_id, tumbler, title, author, year, content_type, corpus, physical_collection) " +
             "SELECT '" + TENANT_A + "', 'ex'||g, 'Doc '||g, 'exauthor', 2024, 'paper', 'research', '" +
             COLL_EXPLAIN + "' FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
+        // RDR-180: chash is bytea(32) now — the lpad'd decimal string is still valid
+        // hex (digits 0-9 only), padded to the full 64-hex canonical width and
+        // decoded at the seam. topic_assignments.doc_id stays TEXT (mixed identity
+        // space) but is padded to the SAME 64-hex width so it matches
+        // encode(c.chash,'hex') at topic-scoped join time.
         su.createStatement().execute(
             "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) " +
-            "SELECT '" + TENANT_A + "', 'ex'||g, 0, lpad(g::text, 32, '0'), '" + COLL_EXPLAIN + "' " +
+            "SELECT '" + TENANT_A + "', 'ex'||g, 0, decode(lpad(g::text, 64, '0'), 'hex'), '" + COLL_EXPLAIN + "' " +
             "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
         // Embedding: 2-D direction (g%100/100, 1) padded to 1024 — varied enough that
         // HNSW is exercised, dense in the (x,1) plane.
         su.createStatement().execute(
             "INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) " +
-            "SELECT '" + TENANT_A + "', '" + COLL_EXPLAIN + "', lpad(g::text, 32, '0'), 'ex'||g, " +
+            "SELECT '" + TENANT_A + "', '" + COLL_EXPLAIN + "', decode(lpad(g::text, 64, '0'), 'hex'), 'ex'||g, " +
             "('[' || ((g % 100)::float8 / 100.0) || ',1' || repeat(',0', 1022) || ']')::vector " +
             "FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
         su.createStatement().execute(
             "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, source_collection, assigned_at) " +
-            "SELECT '" + TENANT_A + "', lpad(g::text, 32, '0'), " + topicId + ", '" + COLL_EXPLAIN + "', " +
+            "SELECT '" + TENANT_A + "', lpad(g::text, 64, '0'), " + topicId + ", '" + COLL_EXPLAIN + "', " +
             "'2026-01-01T00:00:00+00'::timestamptz FROM generate_series(1, " + EXPLAIN_ROWS + ") g");
     }
 
@@ -925,10 +930,10 @@ class CombinedQueryParityTest {
     private List<String> stitchedTopicOracle(Connection conn, int dim, String collection,
                                              String topicLabel) throws Exception {
         String sql =
-            "SELECT c.chash AS id " +
+            "SELECT encode(c.chash, 'hex') AS id " +
             "  FROM nexus.chunks_" + dim + " c " +
             "  JOIN nexus.topic_assignments ta " +
-            "    ON ta.tenant_id = c.tenant_id AND ta.doc_id = c.chash " +
+            "    ON ta.tenant_id = c.tenant_id AND ta.doc_id = encode(c.chash, 'hex') " +
             "  JOIN nexus.topics t " +
             "    ON t.tenant_id = ta.tenant_id AND t.id = ta.topic_id " +
             " WHERE c.collection = '" + collection + "' " +
@@ -977,7 +982,7 @@ class CombinedQueryParityTest {
         insertManifestRow(su, tenant, tumbler, 0, chash, collection);
         su.createStatement().execute(
             "INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding, metadata)"
-            + " VALUES ('" + tenant + "', '" + collection + "', '" + chash + "', '" + tumbler + "', "
+            + " VALUES ('" + tenant + "', '" + collection + "', decode('" + chash + "', 'hex'), '" + tumbler + "', "
             + vec2(1024, x, y) + "::vector, '" + metaJson.replace("'", "''") + "'::jsonb)"
             + " ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
     }
@@ -1030,7 +1035,7 @@ class CombinedQueryParityTest {
         su.createStatement().execute(
             "INSERT INTO nexus.catalog_document_chunks " +
             "  (tenant_id, doc_id, position, chash, collection) " +
-            "VALUES ('" + tenantId + "', '" + docId + "', " + position + ", '" + chash + "', '" +
+            "VALUES ('" + tenantId + "', '" + docId + "', " + position + ", decode('" + chash + "', 'hex'), '" +
             collection + "') ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
     }
 
@@ -1064,7 +1069,7 @@ class CombinedQueryParityTest {
         su.createStatement().execute(
             "INSERT INTO nexus.chunks_" + dim +
             " (tenant_id, collection, chash, chunk_text, embedding) VALUES ('" +
-            tenantId + "', '" + collection + "', '" + chash + "', '" +
+            tenantId + "', '" + collection + "', decode('" + chash + "', 'hex'), '" +
             chunkText.replace("'", "''") + "', " + vec2(dim, x, y) + "::vector) " +
             "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
     }
@@ -1114,23 +1119,17 @@ class CombinedQueryParityTest {
     }
 
     /**
-     * Length-32 lowercase-hex chash deterministically derived from seed (catalog-002
-     * CHECK). SHA-256-based so distinct tumblers get distinct chashes — a naive
-     * char-substitution derivation collapses e.g. "m2" and "t2" to the same value, and
-     * because chunks are content-addressed (the live-chunk predicate is chash-scoped,
-     * NOT collection-scoped), a collision lets a live doc in one collection keep a
-     * tombstoned doc's shared chash alive in another.
+     * Full 64-lowercase-hex chash deterministically derived from seed (RDR-180:
+     * the full sha256 digest is the canonical chash — the pre-flip [:32] half-
+     * digest truncation is retired). SHA-256-based so distinct tumblers get
+     * distinct chashes — a naive char-substitution derivation collapses e.g.
+     * "m2" and "t2" to the same value, and because chunks are content-addressed
+     * (the live-chunk predicate is chash-scoped, NOT collection-scoped), a
+     * collision lets a live doc in one collection keep a tombstoned doc's
+     * shared chash alive in another.
      */
     private static String validChash(String seed) {
-        try {
-            byte[] h = java.security.MessageDigest.getInstance("SHA-256")
-                .digest(seed.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder(64);
-            for (byte b : h) sb.append(String.format("%02x", b));
-            return sb.substring(0, 32);
-        } catch (java.security.NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 unavailable", e);
-        }
+        return dev.nexus.service.db.Chash.ofText(seed).toHex();
     }
 
     /**
