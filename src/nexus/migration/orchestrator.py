@@ -257,6 +257,117 @@ def build_store_etls(sources: EtlSources) -> list[StoreEtl]:
     ]
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# RDR-180 land-then-transform (nexus-jxizy.10.7): the guided-path T2 store
+# split. The land+promote+finalize flow (sequencer.py) now owns the
+# CHASH-BEARING pointer tables directly (staging.* -> promote, alias-resolved,
+# server-side) — running the legacy per-store T2 ETL for those same tables
+# would write a SECOND, un-resolved copy keyed on the legacy id, corrupting
+# the target (the exact missed-leg/stale-reference bug class this RDR
+# retires). Two stores are ENTIRELY superseded (their one table is fully
+# chash-bearing, see LANDING_MANIFEST in staging_land.py) and are excluded
+# WHOLESALE via the existing ``skip_stores`` seam (RDR-178 Gap 7):
+#
+#   * "chash"         — chash_index (the whole store, one table).
+#   * "aspects_queue" — aspect_extraction_queue (the whole store, one table).
+#
+# The "aspects" store is MIXED: document_aspects is now a landed pointer
+# store, but document_highlights / aspect_promotion_log carry no chash-shaped
+# identity column and are NOT landed — build_guided_store_etls swaps in a
+# non-chash-only runner for exactly that slot (see _aspects_non_chash).
+#
+# KNOWN RESIDUAL (documented, not silently dropped — nexus-jxizy.10.7 final
+# report): "taxonomy" (topics + topic_assignments + topic_links + meta),
+# "telemetry" (frecency + relevance_log are chash-bearing; the other four
+# tables are not), and "catalog" (document_chunks is chash-bearing; owners/
+# documents/collections/links are not) are MONOLITHIC single-function ETLs
+# with no public per-table entry point (unlike aspects_etl.py's separate
+# migrate_highlights/migrate_promotion_log/migrate_aspects/migrate_queue).
+# Splitting them requires touching db/t2/taxonomy_etl.py,
+# db/t2/telemetry_etl.py, and db/t2/catalog_etl.py, which sit outside this
+# bead's file boundary (src/nexus/migration/** + db/t2/__init__.py only).
+# These three stores therefore still run their FULL legacy ETL under the
+# guided path today — topics/catalog-documents/telemetry-non-chash land
+# correctly (satisfying the obligations-ledger requirement that they precede
+# finalize), but their chash-bearing sibling tables (topic_assignments,
+# frecency, relevance_log, document_chunks) get a SECOND, legacy-id write
+# alongside the land+promote path. Tracked as a fast-follow: add
+# ``skip_tables``-shaped parameters to the three _etl.py modules (or extract
+# their non-chash sub-tables into public functions, mirroring aspects_etl.py)
+# so this split can be completed at true table granularity.
+GUIDED_LAND_EXCLUDED_STORES: frozenset[str] = frozenset({"chash", "aspects_queue"})
+
+
+def _aspects_non_chash(s: EtlSources, collector: Any) -> dict:
+    """The guided-path ``aspects`` slot: document_highlights +
+    aspect_promotion_log ONLY — document_aspects is now landed (staging
+    pointer store) and promoted/resolved server-side, so it is deliberately
+    NOT migrated here (that would be the same stale-legacy-id double-write
+    this whole split exists to avoid)."""
+    from nexus.db.t2.aspects_etl import migrate_highlights, migrate_promotion_log  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.db.t2.http_document_aspects_store import (  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        HttpDocumentAspectsStore,
+    )
+    from nexus.db.t2.http_document_highlights_store import (  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        HttpDocumentHighlightsStore,
+    )
+
+    aspects = HttpDocumentAspectsStore()
+    highlights = HttpDocumentHighlightsStore()
+    try:
+        highlights_result = migrate_highlights(s.sqlite_path, highlights, collector=collector)
+        # migrate_highlights records its own collector.count_read/written;
+        # migrate_promotion_log does not (mirrors its own behavior when
+        # called standalone) — record it here so the guided report's
+        # per-table counts are accurate.
+        promotion_result = migrate_promotion_log(s.sqlite_path, aspects, collector=collector)
+        if collector is not None:
+            imported = promotion_result.get("imported", 0)
+            skipped = promotion_result.get("skipped", 0)
+            errors = promotion_result.get("errors", 0)
+            collector.count_read("aspects", "aspect_promotion_log", imported + skipped + errors)
+            collector.count_written("aspects", "aspect_promotion_log", imported)
+        return {
+            "document_highlights": highlights_result,
+            "aspect_promotion_log": promotion_result,
+        }
+    finally:
+        for st in (aspects, highlights):
+            with contextlib.suppress(Exception):
+                st.close()
+
+
+def build_guided_store_etls(sources: EtlSources) -> list[StoreEtl]:
+    """The guided land-then-transform T2 store-ETL list (nexus-jxizy.10.7).
+
+    Identical to :func:`build_store_etls` except the ``aspects`` slot runs
+    :func:`_aspects_non_chash` instead of the full document_aspects+
+    highlights+promotion_log runner. Callers additionally pass
+    :data:`GUIDED_LAND_EXCLUDED_STORES` as ``skip_stores`` so ``chash`` and
+    ``aspects_queue`` never run at all (see the module-level comment above
+    for the full guided-path store-exclusion rationale).
+    """
+    etls = build_store_etls(sources)
+    return [
+        StoreEtl("aspects", _aspects_non_chash) if e.store == "aspects" else e
+        for e in etls
+    ]
+
+
+def migrate_all_guided(sources: EtlSources, **kwargs: Any) -> dict[str, Any]:
+    """:func:`migrate_all` wired for the guided land-then-transform path
+    (nexus-jxizy.10.7): the non-chash-only ``aspects`` slot
+    (:func:`build_guided_store_etls`) plus :data:`GUIDED_LAND_EXCLUDED_STORES`
+    folded into ``skip_stores`` (union with any caller-supplied
+    ``skip_stores``, e.g. an already-migrated pre-flight's set). This is the
+    sequencer's default ``run_t2`` — see ``sequencer.run_sequenced_migration``.
+    """
+    skip_stores = GUIDED_LAND_EXCLUDED_STORES | frozenset(kwargs.pop("skip_stores", frozenset()))
+    return migrate_all(
+        sources, etls=build_guided_store_etls(sources), skip_stores=skip_stores, **kwargs,
+    )
+
+
 def _written_by_table(report: dict[str, Any]) -> dict[str, int]:
     """Sum the report's written counts per verify-mapped PG relation.
 
@@ -1475,6 +1586,7 @@ def migrate_all(
     migration_id: str | None = None,
     skip_stores: frozenset[str] = frozenset(),
     verify_fill: bool = False,
+    etls: "list[StoreEtl] | None" = None,
 ) -> dict[str, Any]:
     """Run ALL eight store migrations in RDR-152 ladder order and return ONE
     RDR-153 report dict (with the verification verdict folded in).
@@ -1556,8 +1668,15 @@ def migrate_all(
     Every store's outer verdicts feed ``report["verify_fill"]`` (present
     only when ``verify_fill=True``) — see :func:`dedup_convergence_notes`
     for why a dedup table can legitimately parity below its source count.
+
+    ``etls`` (RDR-180 land-then-transform, nexus-jxizy.10.7): an override for
+    the store-ETL list, defaulting to ``None`` -> the unchanged
+    ``ordered(build_store_etls(sources))``. The guided land-then-transform
+    path passes :func:`build_guided_store_etls` here so its ``aspects`` slot
+    runs the non-chash-only runner (see :func:`migrate_all_guided`) — every
+    other existing caller is unaffected (fully backward compatible).
     """
-    etls = ordered(build_store_etls(sources))
+    etls = ordered(build_store_etls(sources)) if etls is None else ordered(etls)
     cs = count_source or ServiceCountSource()
     verify_fill_outer: dict[str, dict[str, Any]] = {}
     verify_fill_results: dict[str, Any] = {}

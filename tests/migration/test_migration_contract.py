@@ -272,5 +272,11 @@ def test_orchestrator_surface():
         # Additive + backward compatible — default False reproduces the
         # prior unconditional full-re-send behavior exactly.
         "verify_fill",
+        # RDR-180 land-then-transform (nexus-jxizy.10.7): store-ETL list
+        # override. Additive + backward compatible — default None reproduces
+        # the prior unconditional ``ordered(build_store_etls(sources))``
+        # exactly. Consumed by ``orchestrator.migrate_all_guided`` (the
+        # guided-path ``run_t2``), not directly by the veneer.
+        "etls",
     }
     assert _fields(EtlSources) == {"sqlite_path", "catalog_db_path"}
