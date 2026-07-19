@@ -77,17 +77,21 @@ svc_py() (
 )
 
 # Superuser SQL over the bundled PG (trust auth for local TCP, initdb
-# --username <os-user> — pg_provision.bootstrap_superuser). Harness
-# measurement plumbing, same posture as rehearse_chash_window.sh's diag_sql:
-# these are content-reading probes of the REAL store, not product surface.
+# --username per pg_provision.bootstrap_superuser — USER/LOGNAME env, else
+# 'postgres'; resolved via the SAME function so the harness can never drift
+# from what provision actually created — gate run 2 lesson: `id -un` is NOT
+# that identity when USER is unset in the container). Harness measurement
+# plumbing, same posture as rehearse_chash_window.sh's diag_sql: these are
+# content-reading probes of the REAL store, not product surface.
 PSQL_BIN=""
+PG_SUPERUSER=""
 sql() (
   set -a
   # shellcheck disable=SC1091
   . "$HOME/.config/nexus/pg_credentials" 2>/dev/null || true
   set +a
   "$PSQL_BIN" -h 127.0.0.1 -p "${PG_PORT:?pg_credentials must define PG_PORT}" \
-    -U "$(id -un)" -d nexus -tA -c "$1" 2>&1
+    -U "$PG_SUPERUSER" -d nexus -tA -c "$1" 2>&1
 )
 expect_sql() {  # label, sql, want — EXACT equality (the exact-number teeth)
   local got
@@ -490,6 +494,12 @@ if [ -x "$PSQL_BIN" ]; then
   ok "bundled psql resolved ($PSQL_BIN)"
 else
   bad "cannot resolve the bundled psql (got: '$PSQL_BIN')"; say "ABORT (no SQL teeth)"; exit 1
+fi
+PG_SUPERUSER="$(python -c 'from nexus.db.pg_provision import bootstrap_superuser; print(bootstrap_superuser())' 2>/dev/null | tail -1)"
+if SQL_PROBE="$(sql 'SELECT 1')" && [ "$SQL_PROBE" = "1" ]; then
+  ok "superuser SQL path live (role $PG_SUPERUSER, trust auth)"
+else
+  bad "superuser SQL probe failed as role '$PG_SUPERUSER': $SQL_PROBE"; say "ABORT (no SQL teeth)"; exit 1
 fi
 
 # Staging fully cleared (the clean run's TRUNCATE-equivalent; also proves the

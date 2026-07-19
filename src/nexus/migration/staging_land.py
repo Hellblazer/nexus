@@ -296,14 +296,21 @@ def pointer_store_rows(
                 "timestamp FROM relevance_log")
         ]
     if store == "document_aspects":
-        # RDR-096 P5.2 (dev-driver-rewire catch): migrated T2 stores DROP
-        # the source_path column (migrate_drop_source_path_column, 4.31.0)
-        # — the staging wire's source_path (the engine PK's third leg) then
-        # derives from the surviving identity: source_uri, else doc_id
-        # (never '' — an all-empty PK leg would collide across rows).
+        # document_aspects has TWO schema eras — the landing probes the
+        # actual columns and adapts to either:
+        # * RDR-096 P5.2 MIGRATED era (dev-driver-rewire catch): source_path
+        #   DROPPED (migrate_drop_source_path_column, 4.31.0), doc_id
+        #   present — the staging wire's source_path (the engine PK's third
+        #   leg) derives from the surviving identity: source_uri, else
+        #   doc_id (never '' — an all-empty PK leg would collide);
+        # * FRESH current-schema era (--guided gate run 2 catch,
+        #   nexus-jxizy.10.10): source_path present, doc_id ABSENT (it only
+        #   arrives with the P5.2 doc-id PK switch) — the wire doc_id leg
+        #   is an honest empty string.
         cols = {r[1] for r in memory_conn.execute("PRAGMA table_info(document_aspects)")}
         sp_expr = ("source_path" if "source_path" in cols
                    else "COALESCE(NULLIF(source_uri, ''), doc_id)")
+        did_expr = "COALESCE(doc_id, '')" if "doc_id" in cols else "''"
         return [
             {"doc_id": r[0], "collection": r[1], "source_path": r[2],
              "problem_formulation": r[3], "proposed_method": r[4],
@@ -312,7 +319,7 @@ def pointer_store_rows(
              "extracted_at": r[10], "model_version": r[11], "extractor_name": r[12],
              "source_uri": r[13]}
             for r in memory_conn.execute(
-                f"SELECT COALESCE(doc_id, ''), collection, {sp_expr}, "
+                f"SELECT {did_expr}, collection, {sp_expr}, "
                 "problem_formulation, proposed_method, experimental_datasets, "
                 "experimental_baselines, experimental_results, extras, confidence, "
                 "extracted_at, model_version, extractor_name, source_uri "

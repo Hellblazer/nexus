@@ -166,6 +166,31 @@ class TestPointerStoreRows:
         assert rows[0]["source_path"] == "file:///p.pdf"
         assert rows[1]["source_path"] == "1.2.4", "doc_id fallback — never an empty PK leg"
 
+    def test_document_aspects_survives_the_pre_rdr096_fresh_schema(self):
+        # --guided gate run 2 catch (nexus-jxizy.10.10): document_aspects has
+        # TWO schema eras. A FRESH current-schema T2 (T2Database
+        # run_migrations=True, catalog-absent) has source_path but NO doc_id
+        # — doc_id only arrives with the RDR-096 P5.2 doc-id PK switch. The
+        # landing SELECT must probe BOTH columns; an unconditional doc_id
+        # read crashes every fresh-era source with 'no such column: doc_id'.
+        mem = _memory_db()
+        mem.executescript(
+            "CREATE TABLE document_aspects (collection TEXT NOT NULL DEFAULT '', "
+            "source_path TEXT NOT NULL DEFAULT '', problem_formulation TEXT, "
+            "proposed_method TEXT, experimental_datasets TEXT, "
+            "experimental_baselines TEXT, experimental_results TEXT, extras TEXT, "
+            "confidence REAL, extracted_at TEXT NOT NULL DEFAULT '', "
+            "model_version TEXT NOT NULL DEFAULT '', extractor_name TEXT NOT NULL DEFAULT '', "
+            "source_uri TEXT, salient_sentences TEXT);")
+        mem.execute("INSERT INTO document_aspects (collection, source_path, source_uri, "
+                    "extracted_at, model_version, extractor_name) "
+                    "VALUES ('col', '/p.pdf', 'file:///p.pdf', "
+                    "'2026-07-01T00:00:00Z', 'm', 'x')")
+        rows = pointer_store_rows("document_aspects", None, mem)
+        assert rows[0]["source_path"] == "/p.pdf"
+        assert rows[0]["doc_id"] == "", "fresh era has no doc_id column — wire an empty leg"
+        assert rows[0]["source_uri"] == "file:///p.pdf"
+
     def test_relevance_log_maps_rowid_and_ts(self):
         mem = _memory_db()
         mem.execute("INSERT INTO relevance_log (query, chunk_id, action, timestamp) "
