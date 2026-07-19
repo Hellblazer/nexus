@@ -34,12 +34,17 @@ import pytest
 
 from nexus.migration.detection import CollectionClassification
 from nexus.migration.pregate import (
+    NX_STAGING_DISK_OVERRIDE_ENV,
     LiveServiceWiredModels,
     ModelPreGateBlocked,
+    StagingDiskPreflightBlocked,
     WiredModelSource,
+    assert_disk_headroom,
     assert_models_supported,
     ensure_service_stack,
+    estimate_staging_source_bytes,
     is_fresh_user,
+    landing_width_manifest,
     resolve_wired_models,
 )
 
@@ -356,9 +361,12 @@ def test_wired_model_source_is_a_protocol() -> None:
 
 
 # --------------------------------------------------------------------------
-# GH #1390 / nexus-sot7v: legacy non-32-char chunk ids block at the pre-gate
-# regardless of model support (a supported-model NAME must not let a
-# legacy-id collection pass — the canon-chat chunks_768 case).
+# RDR-180 land-then-transform (nexus-jxizy.10.8): the legacy non-32/64-char
+# chunk id BLOCK (GH #1390 / nexus-sot7v) is RETIRED — such a collection now
+# MIGRATES (chunk_text is rehashed server-side into the canonical chash,
+# GH #1408). These tests used to pin the block; they now pin the INVERSE —
+# a legacy-id collection passes the pre-gate on its model-support merits
+# alone, exactly like any other collection.
 # --------------------------------------------------------------------------
 
 
@@ -377,40 +385,249 @@ def _legacy_cls(collection: str, model: str) -> CollectionClassification:
     )
 
 
-def test_legacy_ids_block_even_with_supported_model_name():
+def test_legacy_ids_no_longer_block_with_supported_model_name():
     """The canon-chat shape: a bge-768 (supported, wired) collection that
-    ALSO holds legacy short ids. The model recomputation would pass it; the
-    legacy_ids flag must block it, with the actionable detection reason."""
+    ALSO holds legacy short ids. Under land-then-transform this MIGRATES —
+    the retired width block must not fire on ``legacy_ids`` alone."""
     classifications = [_legacy_cls("code__owner__bge-base-en-v15-768__v1", _ONNX)]
+    # Must NOT raise — legacy_ids is no longer a pre-gate blocking signal.
+    assert_models_supported(
+        classifications,
+        voyage_key_present=False,
+        source=_FixedSource(_WIRED_ONNX_ONLY),
+    )
+
+
+def test_legacy_ids_still_block_when_the_model_itself_is_unsupported():
+    """legacy_ids no longer contributes a block of its own, but a legacy-id
+    collection is not exempt from the ORDINARY model-support gate either —
+    an unsupported model still blocks it, on the model diagnostic, not the
+    retired width diagnostic."""
+    classifications = [_legacy_cls("docs__legacy__minilm-l6-v2-384__v1", _LEGACY_384)]
     with pytest.raises(ModelPreGateBlocked) as exc:
         assert_models_supported(
             classifications,
-            voyage_key_present=False,
-            source=_FixedSource(_WIRED_ONNX_ONLY),
+            voyage_key_present=True,
+            source=_FixedSource(_WIRED_WITH_VOYAGE),
         )
     msg = str(exc.value)
-    assert "code__owner__bge-base-en-v15-768__v1" in msg
-    assert "Do NOT drop" in msg
+    assert "re-index" in msg.lower()
+    assert "Do NOT drop" not in msg  # the retired width diagnostic, not this one
 
 
-def test_legacy_ids_block_takes_precedence_over_exempt():
-    """Defense-in-depth: even if a legacy-id collection somehow appears in the
-    cross-model exempt set, it must still block (remap keeps ids verbatim)."""
-    name = "code__owner__bge-base-en-v15-768__v1"
-    with pytest.raises(ModelPreGateBlocked):
-        assert_models_supported(
-            [_legacy_cls(name, _ONNX)],
-            voyage_key_present=False,
-            source=_FixedSource(_WIRED_ONNX_ONLY),
-            exempt=frozenset({name}),
-        )
+def test_legacy_ids_exempt_now_passes():
+    """A legacy-id collection in the cross-model ``exempt`` set now migrates
+    (re-embedded, ids rehashed) — the old defense-in-depth block that fired
+    even under exempt is gone."""
+    name = "docs__legacy__minilm-l6-v2-384__v1"
+    assert_models_supported(
+        [_legacy_cls(name, _LEGACY_384)],
+        voyage_key_present=True,
+        source=_FixedSource(_WIRED_WITH_VOYAGE),
+        exempt=frozenset({name}),
+    )
 
 
 def test_conformant_supported_collection_still_passes():
     """Regression pin: a supported collection WITHOUT legacy ids is not
-    blocked by the new check."""
+    blocked."""
     assert_models_supported(
         [_cls("code__owner__bge-base-en-v15-768__v1", _ONNX)],
         voyage_key_present=False,
         source=_FixedSource(_WIRED_ONNX_ONLY),
     )
+
+
+# --------------------------------------------------------------------------
+# RDR-180 Q4 residual (nexus-jxizy.10.8): a collection with NO chunk text at
+# all is still genuinely blocked — nothing to rehash from.
+# --------------------------------------------------------------------------
+
+
+def test_no_text_collection_blocks_with_honest_message():
+    name = "code__owner__bge-base-en-v15-768__v1"
+    with pytest.raises(ModelPreGateBlocked) as exc:
+        assert_models_supported(
+            [_cls(name, _ONNX)],
+            voyage_key_present=False,
+            source=_FixedSource(_WIRED_ONNX_ONLY),
+            no_text=frozenset({name}),
+        )
+    msg = str(exc.value)
+    assert name in msg
+    assert "no chunk text" in msg
+    assert "re-index" in msg.lower()
+
+
+def test_no_text_blocks_regardless_of_exempt():
+    """Defense-in-depth, same precedence the retired legacy-id block held:
+    a no-text collection blocks even when it is also in the cross-model
+    exempt set — there is nothing to re-embed from."""
+    name = "docs__legacy__minilm-l6-v2-384__v1"
+    with pytest.raises(ModelPreGateBlocked) as exc:
+        assert_models_supported(
+            [_legacy_cls(name, _LEGACY_384)],
+            voyage_key_present=True,
+            source=_FixedSource(_WIRED_WITH_VOYAGE),
+            exempt=frozenset({name}),
+            no_text=frozenset({name}),
+        )
+    assert exc.value.collections == [name]
+
+
+def test_no_text_blocks_regardless_of_supported_model():
+    """A no-text collection blocks even when its model is fully supported —
+    the model-support recomputation cannot see this data property."""
+    name = "code__owner__bge-base-en-v15-768__v1"
+    with pytest.raises(ModelPreGateBlocked):
+        assert_models_supported(
+            [_cls(name, _ONNX)],
+            voyage_key_present=False,
+            source=_FixedSource(_WIRED_ONNX_ONLY),
+            no_text=frozenset({name}),
+        )
+
+
+def test_no_text_empty_collection_is_not_gated():
+    """no_text naming a collection with no data is moot — has_data gates
+    first, same as every other check."""
+    name = "knowledge__art__voyage-context-3__v1"
+    assert_models_supported(
+        [_cls(name, _VOYAGE, has_data=False)],
+        voyage_key_present=False,
+        source=_FixedSource(_WIRED_ONNX_ONLY),
+        no_text=frozenset({name}),
+    )
+
+
+def test_no_text_default_is_empty_and_does_not_block():
+    """Regression pin: omitting ``no_text`` (the default) never blocks a
+    collection that would otherwise pass."""
+    assert_models_supported(
+        [_cls("code__owner__bge-base-en-v15-768__v1", _ONNX)],
+        voyage_key_present=False,
+        source=_FixedSource(_WIRED_ONNX_ONLY),
+    )
+
+
+# --------------------------------------------------------------------------
+# landing_width_manifest — RDR-180 Q4 item 3: the width classification the
+# retired block used, repurposed as landing-manifest input.
+# --------------------------------------------------------------------------
+
+
+def test_landing_width_manifest_collects_per_collection_era():
+    classifications = [
+        _cls("code__a__bge-base-en-v15-768__v1", _ONNX),
+        _cls("code__b__bge-base-en-v15-768__v1", _ONNX),
+    ]
+    probed = {
+        "code__a__bge-base-en-v15-768__v1": "canonical-64",
+        "code__b__bge-base-en-v15-768__v1": "legacy-16",
+    }
+    manifest = landing_width_manifest(
+        classifications, probe=lambda c: probed[c.collection]
+    )
+    assert manifest == probed
+
+
+def test_landing_width_manifest_skips_empty_collections():
+    classifications = [_cls("code__a__bge-base-en-v15-768__v1", _ONNX, has_data=False)]
+    manifest = landing_width_manifest(classifications, probe=lambda c: "canonical-64")
+    assert manifest == {}
+
+
+def test_landing_width_manifest_omits_unknown_probe_result():
+    """A probe returning None (probe failure / empty sample) is OMITTED, not
+    guessed at — the manifest is a set of KNOWN eras only."""
+    classifications = [_cls("code__a__bge-base-en-v15-768__v1", _ONNX)]
+    manifest = landing_width_manifest(classifications, probe=lambda c: None)
+    assert manifest == {}
+
+
+def test_landing_width_manifest_reports_mixed():
+    classifications = [_cls("code__a__bge-base-en-v15-768__v1", _ONNX)]
+    manifest = landing_width_manifest(classifications, probe=lambda c: "mixed")
+    assert manifest == {"code__a__bge-base-en-v15-768__v1": "mixed"}
+
+
+# --------------------------------------------------------------------------
+# Disk-headroom preflight (RDR-180 design R6, nexus-jxizy.10.8)
+# --------------------------------------------------------------------------
+
+
+class _FakeDiskUsage:
+    def __init__(self, free: int) -> None:
+        self.free = free
+
+
+def test_estimate_staging_source_bytes_sums_sqlite_files(tmp_path):
+    a = tmp_path / "catalog.db"
+    a.write_bytes(b"x" * 100)
+    b = tmp_path / "memory.db"
+    b.write_bytes(b"y" * 250)
+    missing = tmp_path / "nope.db"  # never written — must not raise
+    assert estimate_staging_source_bytes([a, b, missing]) == 350
+
+
+def test_estimate_staging_source_bytes_includes_chroma_dir(tmp_path):
+    a = tmp_path / "catalog.db"
+    a.write_bytes(b"x" * 100)
+    chroma = tmp_path / "chroma"
+    chroma.mkdir()
+    (chroma / "data.bin").write_bytes(b"z" * 400)
+    (chroma / "sub").mkdir()
+    (chroma / "sub" / "nested.bin").write_bytes(b"w" * 50)
+    assert estimate_staging_source_bytes([a], chroma_dir=chroma) == 550
+
+
+def test_estimate_staging_source_bytes_missing_chroma_dir_contributes_zero(tmp_path):
+    a = tmp_path / "catalog.db"
+    a.write_bytes(b"x" * 100)
+    assert estimate_staging_source_bytes([a], chroma_dir=tmp_path / "nope") == 100
+
+
+def test_disk_preflight_blocks_when_free_is_short(tmp_path, monkeypatch):
+    monkeypatch.delenv(NX_STAGING_DISK_OVERRIDE_ENV, raising=False)
+    with pytest.raises(StagingDiskPreflightBlocked) as exc:
+        assert_disk_headroom(
+            estimated_bytes=1_000_000,
+            pg_path=tmp_path,
+            disk_usage=lambda p: _FakeDiskUsage(free=500_000),
+        )
+    msg = str(exc.value)
+    assert "1,000,000" in msg
+    assert "500,000" in msg
+    assert NX_STAGING_DISK_OVERRIDE_ENV in msg
+
+
+def test_disk_preflight_passes_when_headroom_sufficient(tmp_path, monkeypatch):
+    monkeypatch.delenv(NX_STAGING_DISK_OVERRIDE_ENV, raising=False)
+    # Must NOT raise.
+    assert_disk_headroom(
+        estimated_bytes=1_000_000,
+        pg_path=tmp_path,
+        disk_usage=lambda p: _FakeDiskUsage(free=2_000_000),
+    )
+
+
+def test_disk_preflight_override_bypasses_the_block(tmp_path, monkeypatch):
+    monkeypatch.setenv(NX_STAGING_DISK_OVERRIDE_ENV, "1")
+    # Must NOT raise even though free < estimated — the escape hatch.
+    assert_disk_headroom(
+        estimated_bytes=1_000_000,
+        pg_path=tmp_path,
+        disk_usage=lambda p: _FakeDiskUsage(free=1),
+    )
+
+
+def test_disk_preflight_override_only_matches_exact_value(tmp_path, monkeypatch):
+    """``NX_STAGING_DISK_OVERRIDE=true`` (or anything other than the literal
+    ``"1"``) does NOT bypass — no silent widening of the escape hatch."""
+    monkeypatch.setenv(NX_STAGING_DISK_OVERRIDE_ENV, "true")
+    with pytest.raises(StagingDiskPreflightBlocked):
+        assert_disk_headroom(
+            estimated_bytes=1_000_000,
+            pg_path=tmp_path,
+            disk_usage=lambda p: _FakeDiskUsage(free=500_000),
+        )

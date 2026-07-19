@@ -1332,3 +1332,129 @@ class TestLegacyChunkIds:
         report = classify_collections(local_client=client, voyage_key_present=False)
         (c,) = report.classifications
         assert c.legacy_ids is False
+
+
+# ---------------------------------------------------------------------------
+# RDR-180 land-then-transform (nexus-jxizy.10.8): the width-era + text-
+# presence probes the pre-gate's ``landing_width_manifest`` / ``no_text``
+# check are built on. Standalone read-only probes over a live-shaped
+# collection object — NOT wired into ``_classify_leg`` (the existing
+# legacy_ids / support / measured_dim pipeline above is untouched by this
+# bead), so these are pinned directly against the probe functions.
+# ---------------------------------------------------------------------------
+
+
+class _WidthProbeCollection:
+    """Minimal collection double for ``probe_width_era`` — models only the
+    ``include=[]`` ids-only sample the probe issues."""
+
+    def __init__(self, name: str, ids: list[str] | None = None, boom: bool = False) -> None:
+        self.name = name
+        self._ids = ids
+        self._boom = boom
+
+    def get(self, limit: int = 300, include: list | None = None) -> dict:
+        assert include == []
+        if self._boom:
+            raise RuntimeError("collection unreachable")
+        return {"ids": self._ids if self._ids is not None else []}
+
+
+class _TextProbeCollection:
+    """Minimal collection double for ``probe_has_text`` — models only the
+    ``include=["documents"]`` sample the probe issues."""
+
+    def __init__(
+        self,
+        name: str,
+        ids: list[str] | None = None,
+        documents: list[str | None] | None = None,
+        boom: bool = False,
+        omit_documents_key: bool = False,
+    ) -> None:
+        self.name = name
+        self._ids = ids
+        self._documents = documents
+        self._boom = boom
+        self._omit_documents_key = omit_documents_key
+
+    def get(self, limit: int = 300, include: list | None = None) -> dict:
+        assert include == ["documents"]
+        if self._boom:
+            raise RuntimeError("collection unreachable")
+        out: dict = {"ids": self._ids if self._ids is not None else []}
+        if not self._omit_documents_key:
+            out["documents"] = self._documents
+        return out
+
+
+class TestProbeWidthEra:
+    def test_all_canonical_64(self):
+        from nexus.migration.detection import probe_width_era
+
+        col = _WidthProbeCollection("c", ids=["a" * 64, "b" * 64])
+        assert probe_width_era(col) == "canonical-64"
+
+    def test_all_legacy_32(self):
+        from nexus.migration.detection import probe_width_era
+
+        col = _WidthProbeCollection("c", ids=["a" * 32, "b" * 32])
+        assert probe_width_era(col) == "legacy-32"
+
+    def test_all_legacy_16(self):
+        from nexus.migration.detection import probe_width_era
+
+        col = _WidthProbeCollection("c", ids=["b" * 16, "c" * 18])
+        assert probe_width_era(col) == "legacy-16"
+
+    def test_mixed_widths(self):
+        from nexus.migration.detection import probe_width_era
+
+        col = _WidthProbeCollection("c", ids=["a" * 64, "b" * 32])
+        assert probe_width_era(col) == "mixed"
+
+    def test_empty_sample_is_unknown(self):
+        from nexus.migration.detection import probe_width_era
+
+        col = _WidthProbeCollection("c", ids=[])
+        assert probe_width_era(col) is None
+
+    def test_probe_failure_is_unknown_not_raised(self):
+        from nexus.migration.detection import probe_width_era
+
+        col = _WidthProbeCollection("c", boom=True)
+        assert probe_width_era(col) is None
+
+
+class TestProbeHasText:
+    def test_some_nonblank_text_is_true(self):
+        from nexus.migration.detection import probe_has_text
+
+        col = _TextProbeCollection("c", ids=["a" * 64, "b" * 64], documents=["hello", ""])
+        assert probe_has_text(col) is True
+
+    def test_all_blank_is_false(self):
+        from nexus.migration.detection import probe_has_text
+
+        col = _TextProbeCollection("c", ids=["a" * 64, "b" * 64], documents=["", None])
+        assert probe_has_text(col) is False
+
+    def test_empty_sample_is_unknown(self):
+        from nexus.migration.detection import probe_has_text
+
+        col = _TextProbeCollection("c", ids=[], documents=[])
+        assert probe_has_text(col) is None
+
+    def test_missing_documents_key_is_unknown_not_false(self):
+        """A backend that doesn't return ``documents`` degrades to unknown —
+        never a false positive no-text finding."""
+        from nexus.migration.detection import probe_has_text
+
+        col = _TextProbeCollection("c", ids=["a" * 64], omit_documents_key=True)
+        assert probe_has_text(col) is None
+
+    def test_probe_failure_is_unknown_not_raised(self):
+        from nexus.migration.detection import probe_has_text
+
+        col = _TextProbeCollection("c", boom=True)
+        assert probe_has_text(col) is None
