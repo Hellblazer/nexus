@@ -293,12 +293,12 @@ def _chash_poison_forensics(store_state: StoreState) -> Playbook:
             "rows silently missing their chunk-table joins; an empty (NULL) "
             "result means the deployed view predates these entries — report "
             "it as unknown, not clean (nexus-z5j0t)",
-            "check constraint state: unvalidated chk_% constraints indicate "
+            "check constraint state: unvalidated *_chash_*_check constraints indicate "
             "an earlier forced upgrade",
         ),
         deliverable=(
             "Report back: the per-table non-conformant counts, the "
-            "chk_% constraint validation states, and a recommendation — "
+            "chash width-constraint validation states, and a recommendation — "
             "clean (no action) or proceed to remediate:chash-poison."
         ),
         escape=(
@@ -327,7 +327,10 @@ def _chash_poison_forensics(store_state: StoreState) -> Playbook:
         # cannot drift.
         diagnostic_sql=_chash_statements() + _debt_statements() + (
             "SELECT conname, convalidated FROM pg_constraint "
-            "WHERE conname LIKE 'chk_%'",
+            # critic-180-foundation finding 3: the historical LIKE 'chk_%'
+            # matched ZERO constraints (real names end in _check) — a dead
+            # diagnostic since inception. Match both eras' real names.
+            "WHERE conname LIKE '%\\_chash\\_%\\_check'",
         ),
     )
 

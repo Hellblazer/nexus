@@ -1171,6 +1171,60 @@ class TestChashProbeViewFallback:
         assert "10 chunk row(s)" in chash[0].detail  # 2 per table via LEGACY
         assert state["i"] == 1 + n  # one failed view call + the full legacy set
 
+    def test_debt_over_zero_emits_nongating_warn(self, tmp_path):
+        """critic-180-foundation finding 1 coverage: a positive debt count
+        surfaces as a WARN under its own label, never gating."""
+        # 5 poison statements return 0 (clean), then 3 debt statements
+        # return 2 each -> debt 6.
+        counts = [0] * 5 + [2, 2, 2]
+        state = {"i": 0}
+
+        def runner(argv, env):
+            i = state["i"]; state["i"] += 1
+            val = counts[i] if i < len(counts) else 0
+            return subprocess.CompletedProcess(argv, 0, stdout=f"{val}\n", stderr="")
+
+        creds = _make_creds_file(tmp_path)
+        results = _check_migration_state(
+            creds_path=creds,
+            psql_bin=Path("/fake/psql"),
+            psql_runner=_psql_runner_ok(160),
+            diag_runner=runner,
+        )
+        debt = [r for r in results if r.label == "Chash legacy debt"]
+        assert len(debt) == 1
+        assert debt[0].ok is False and debt[0].warn is True and debt[0].fatal is False
+        assert "6" in debt[0].detail
+        # the poison gate result must stay clean/absent (no cross-count)
+        poison = [r for r in results if r.label == "Chunk chash conformance"]
+        assert not poison  # zero poison rows -> no poison result emitted
+
+    def test_debt_probe_failure_surfaces_unknown_never_silent(self, tmp_path):
+        """critic-180-foundation finding 1: a stale 5-leg view NULLs the debt
+        sums (empty psql lines -> int('') ValueError). That must surface as
+        an explicit UNKNOWN warn — absence would read as clean."""
+        counts_ok = ["0"] * 5  # poison statements fine
+        state = {"i": 0}
+
+        def runner(argv, env):
+            i = state["i"]; state["i"] += 1
+            if i < 5:
+                return subprocess.CompletedProcess(argv, 0, stdout="0\n", stderr="")
+            return subprocess.CompletedProcess(argv, 0, stdout="\n", stderr="")  # NULL sum
+
+        creds = _make_creds_file(tmp_path)
+        results = _check_migration_state(
+            creds_path=creds,
+            psql_bin=Path("/fake/psql"),
+            psql_runner=_psql_runner_ok(160),
+            diag_runner=runner,
+        )
+        debt = [r for r in results if r.label == "Chash legacy debt"]
+        assert len(debt) == 1
+        assert debt[0].warn is True
+        assert "UNKNOWN" in debt[0].detail
+        assert "clean" in debt[0].detail  # the do-not-read-as-clean instruction
+
     def test_lint_violation_is_never_retried_against_legacy(self, tmp_path, monkeypatch):
         # A content-reading statement: fails the fail-closed lint pre-DB.
         monkeypatch.setattr(

@@ -2459,18 +2459,35 @@ def _check_migration_state(
         except (RuntimeError, DiagnosticSqlViolation, ValueError) as exc:
             _log.debug("chash_debt_probe_unavailable", error=str(exc)[:200])
             debt = -1
+        if debt == -1:
+            # critic-180-foundation finding 1: unknown must SURFACE, never
+            # read as clean by omission. The common cause is a deployed view
+            # predating the debt legs — the chash-rekey rung's re-provision
+            # closes that window at the next nx upgrade.
+            results.append(HealthResult(
+                label="Chash legacy debt",
+                ok=False,
+                detail=(
+                    "legacy-debt conformance UNKNOWN — the debt probe could "
+                    "not run (deployed diag view predates the debt legs, or "
+                    "probe failure). Do NOT read this as clean; `nx upgrade` "
+                    "re-provisions the view."
+                ),
+                warn=True,
+            ))
         if debt > 0:
             results.append(HealthResult(
                 label="Chash legacy debt",
                 ok=False,
                 detail=(
-                    f"{debt} row(s) across topic_assignments/frecency/"
-                    "relevance_log carry a width-non-conformant chash "
-                    "reference (octet_length <> 32). "
-                    "NON-GATING (no CHECK constraint exists on these tables), "
-                    "but the rows silently miss their joins against the chunk "
-                    "tables — the remap cascade / RDR-180 Item6 ETL converges "
-                    "them."
+                    f"{debt} hex-shaped chash reference(s) across "
+                    "topic_assignments/frecency/relevance_log miss every "
+                    "chunk-table join (dangling content references). "
+                    "NON-GATING (no CHECK constraint exists on these tables); "
+                    "alias-mapped rows converge via the RDR-180 rekey "
+                    "cascade, and residual danglers are relic references "
+                    "(title-keyed and other non-hex identities are excluded "
+                    "— they are not chash debt)."
                 ),
                 warn=True,
             ))

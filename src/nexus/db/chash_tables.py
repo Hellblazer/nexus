@@ -15,7 +15,8 @@ whether the table carries a width CHECK constraint that a Liquibase
 ``VALIDATE CONSTRAINT`` will run on the next engine upgrade:
 
 - **poison** (``chunks_{384,768,1024}``, ``chash_index``,
-  ``catalog_document_chunks``): these carry ``chk_%`` length constraints
+  ``catalog_document_chunks``): these carry ``*_chash_len_check`` /
+  ``*_chash_octet_check`` width constraints
   (catalog-002/catalog-013), so a non-conformant row crash-loops the next
   upgrade (GH #1390 / nexus-pnwu0). Counts here GATE ``install-binary``.
 - **legacy debt** (``topic_assignments.doc_id``, ``frecency.chunk_id``,
