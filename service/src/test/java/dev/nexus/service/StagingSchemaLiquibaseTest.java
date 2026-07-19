@@ -189,6 +189,49 @@ class StagingSchemaLiquibaseTest {
     }
 
     @Test
+    void chashOldBytesFn_isTheCanonicalMapping_consistentWithTheLemma() throws Exception {
+        // Reconciliation H2 (nexus-jxizy.10.2): ONE string->bytes mapping for
+        // chash_alias.old_bytes, shared by RekeyOps and StagingPromoteOps.
+        // Mirrors rdr180-001's conversion CASE; round-trips the in-store
+        // recovery lemma on its constrained domain.
+        try (Connection su = pg.createConnection("")) {
+            // 32-hex (the RDR-108 era) decodes to 16 bytes.
+            ResultSet r1 = su.createStatement().executeQuery(
+                "SELECT octet_length(nexus.chash_old_bytes('0123456789abcdef0123456789abcdef')), "
+                + "nexus.chash_old_bytes('0123456789abcdef0123456789abcdef') = "
+                + "decode('0123456789abcdef0123456789abcdef','hex')");
+            r1.next();
+            assertThat(r1.getInt(1)).isEqualTo(16);
+            assertThat(r1.getBoolean(2)).isTrue();
+            // 16-char (pre-RDR-108) decodes to 8 bytes.
+            ResultSet r2 = su.createStatement().executeQuery(
+                "SELECT octet_length(nexus.chash_old_bytes('b46c7915c303245f'))");
+            r2.next();
+            assertThat(r2.getInt(1)).isEqualTo(8);
+            // Non-hex ETL-era ids carry as UTF-8 bytes.
+            ResultSet r3 = su.createStatement().executeQuery(
+                "SELECT nexus.chash_old_bytes('era-note:alpha!') = convert_to('era-note:alpha!','UTF8')");
+            r3.next();
+            assertThat(r3.getBoolean(1)).isTrue();
+            // Round-trip vs the in-store recovery lemma, on its constrained
+            // domain: a converted 16-byte hex-origin value's recovered string
+            // maps back to the SAME bytes; a >=32-byte UTF8-origin value too.
+            ResultSet r4 = su.createStatement().executeQuery(
+                "SELECT nexus.chash_old_bytes(encode(b, 'hex')) = b FROM "
+                + "(SELECT decode('00112233445566778899aabbccddeeff','hex') AS b) s");
+            r4.next();
+            assertThat(r4.getBoolean(1))
+                .as("lemma round-trip: hex-origin bytes").isTrue();
+            ResultSet r5 = su.createStatement().executeQuery(
+                "SELECT nexus.chash_old_bytes(convert_from(v, 'UTF8')) = v FROM "
+                + "(SELECT convert_to('a-32-char-legacy-nonhex-id-00001','UTF8') AS v) s");
+            r5.next();
+            assertThat(r5.getBoolean(1))
+                .as("lemma round-trip: UTF8-origin bytes").isTrue();
+        }
+    }
+
+    @Test
     void svcRole_canTruncate_theClearSemantics() {
         tenantScope.withTenant(T_A, ctx -> {
             ctx.execute("INSERT INTO staging.frecency (tenant_id, chunk_id) VALUES (?, 'x1')", T_A);

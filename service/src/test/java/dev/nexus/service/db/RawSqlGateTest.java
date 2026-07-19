@@ -103,6 +103,15 @@ class RawSqlGateTest {
             // keeper idiom, and the statements are one-shot migration ops,
             // not serving-path queries.
             "rekey", "unionAllContentRows"),
+        "ChashSqlIdioms.java", java.util.Set.of(
+            // SANCTIONED RAW (nexus-jxizy.10.2): the SHARED fragments of the
+            // two one-shot chash movers (RekeyOps in-store rekey +
+            // StagingPromoteOps land-then-transform promote) — same sanction
+            // rationale as RekeyOps, single-homed so the two writers of the
+            // shared tables cannot drift. Never serving-path.
+            "contentCollapseDelete", "contentRekeyUpdate",
+            "frecencyAliasAggregate", "residualMismatchCount",
+            "danglingManifestCount", "chashOldBytes"),
         "SchemaMigrator.java", java.util.Set.of(
             // nexus-c4143 root fix: pg_constraint is a Postgres SYSTEM CATALOG (jOOQ
             // codegen only covers the nexus/t1 application schemas, no generated table

@@ -509,4 +509,28 @@ $fn$;
         <rollback/>
     </changeSet>
 
+    <changeSet id="rdr180-20-chash-old-bytes-fn" author="nexus-jxizy.10.2">
+        <comment>THE canonical string-to-bytes mapping for chash_alias.old_bytes
+            (land-then-transform reconciliation H2): one shared IMMUTABLE
+            function used by EVERY alias writer (RekeyOps recovers old_ref
+            in-store and StagingPromoteOps carries it from staging; both
+            derive old_bytes HERE) so two writers of the shared permanent
+            table cannot diverge. The CASE mirrors rdr180-001's bytea
+            conversion exactly: even-length lowercase-hex decodes, anything
+            else carries as UTF-8 bytes.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.chash_old_bytes(ref text)
+RETURNS bytea
+LANGUAGE sql
+IMMUTABLE PARALLEL SAFE
+AS $fn$
+    SELECT CASE WHEN ref ~ '^[0-9a-f]+$' AND length(ref) % 2 = 0
+                THEN decode(ref, 'hex')
+                ELSE convert_to(ref, 'UTF8')
+           END
+$fn$;
+        </sql>
+        <rollback>DROP FUNCTION IF EXISTS nexus.chash_old_bytes(text)</rollback>
+    </changeSet>
+
 </databaseChangeLog>

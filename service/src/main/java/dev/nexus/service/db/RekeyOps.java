@@ -55,15 +55,15 @@ public final class RekeyOps {
 
     private static final Logger log = LoggerFactory.getLogger(RekeyOps.class);
 
-    private static final List<String> CHUNK_TABLES =
-        List.of("nexus.chunks_384", "nexus.chunks_768", "nexus.chunks_1024");
+    // Shared with StagingPromoteOps via ChashSqlIdioms (nexus-jxizy.10.2):
+    // the digest formula, lemma, collapse keeper, frecency merge and verify
+    // scans are single-homed there so the two chash movers cannot drift.
+    private static final List<String> CHUNK_TABLES = ChashSqlIdioms.CHUNK_TABLES;
 
     /** Reversibility-lemma rendering of a converted key's original string. */
-    private static final String OLD_REF =
-        "CASE WHEN octet_length(%1$s) = 16 THEN encode(%1$s, 'hex') "
-        + "ELSE convert_from(%1$s, 'UTF8') END";
+    private static final String OLD_REF = ChashSqlIdioms.OLD_REF_LEMMA;
 
-    private static final String DIGEST = "sha256(convert_to(chunk_text, 'UTF8'))";
+    private static final String DIGEST = ChashSqlIdioms.DIGEST;
 
     private final TenantScope tenantScope;
 
@@ -209,21 +209,9 @@ public final class RekeyOps {
             for (String t : CHUNK_TABLES) {
                 // phase A: delete collapse-losers. Keeper per (collection,
                 // digest): a row already AT the digest key wins, else min ctid.
-                collapsed += ctx.execute(
-                    "DELETE FROM " + t + " c USING ("
-                    + "  SELECT collection, " + DIGEST + " AS d, "
-                    + "         (array_agg(ctid ORDER BY (chash = " + DIGEST + ") DESC, ctid))[1] AS keep "
-                    + "  FROM " + t + " WHERE chunk_text <> '' "
-                    + "  GROUP BY collection, " + DIGEST + " HAVING count(*) > 1"
-                    + ") k "
-                    + "WHERE c.collection = k.collection AND c.chunk_text <> '' "
-                    + "  AND " + DIGEST.replace("chunk_text", "c.chunk_text") + " = k.d "
-                    + "  AND c.ctid <> k.keep");
+                collapsed += ctx.execute(ChashSqlIdioms.contentCollapseDelete(t));
                 // phase B: rekey survivors whose key mismatches their digest.
-                rekeyed += ctx.execute(
-                    "UPDATE " + t + " c SET chash = " + DIGEST.replace("chunk_text", "c.chunk_text") + " "
-                    + "WHERE c.chunk_text <> '' "
-                    + "  AND c.chash IS DISTINCT FROM " + DIGEST.replace("chunk_text", "c.chunk_text"));
+                rekeyed += ctx.execute(ChashSqlIdioms.contentRekeyUpdate(t));
             }
             counts.put("collapsed_duplicates", collapsed);
             counts.put("rehashed", rekeyed);
@@ -283,13 +271,7 @@ public final class RekeyOps {
             // keeper keyed by min(chunk_id), NOT ctid: an UPDATE rewrites
             // the row and changes its ctid, so ctid-based keeper selection
             // goes stale across statements (the 3c "expected 5 was 2" catch).
-            String frecencyAgg =
-                "(SELECT a.new_chash, min(o.chunk_id) AS keep_id, "
-                + "        max(o.frecency_score) AS fs, max(o.miss_count) AS mc, "
-                + "        max(o.last_hit_at) AS lh, max(o.embedded_at) AS ea, "
-                + "        max(o.ttl_days) AS td "
-                + "   FROM nexus.frecency o JOIN nexus.chash_alias a "
-                + "     ON o.chunk_id = a.old_ref GROUP BY a.new_chash) g";
+            String frecencyAgg = ChashSqlIdioms.frecencyAliasAggregate();
             // (i) an existing row AT the target absorbs the whole group.
             ctx.execute(
                 "UPDATE nexus.frecency t SET "
@@ -331,16 +313,11 @@ public final class RekeyOps {
             int residual = 0;
             for (String t : CHUNK_TABLES) {
                 residual += ctx.fetchOne(
-                    "SELECT count(*) FROM " + t + " WHERE chunk_text <> '' "
-                    + "AND chash IS DISTINCT FROM " + DIGEST).get(0, Integer.class);
+                    ChashSqlIdioms.residualMismatchCount(t)).get(0, Integer.class);
             }
             counts.put("residual_mismatched", residual);
             counts.put("dangling_manifest", ctx.fetchOne(
-                "SELECT count(*) FROM nexus.catalog_document_chunks m "
-                + "WHERE NOT EXISTS (SELECT 1 FROM nexus.chunks_384 c WHERE c.chash = m.chash) "
-                + "  AND NOT EXISTS (SELECT 1 FROM nexus.chunks_768 c WHERE c.chash = m.chash) "
-                + "  AND NOT EXISTS (SELECT 1 FROM nexus.chunks_1024 c WHERE c.chash = m.chash)")
-                .get(0, Integer.class));
+                ChashSqlIdioms.danglingManifestCount()).get(0, Integer.class));
             return counts;
         });
         log.info("event=rekey_complete tenant={} counts={}", tenant, out);
