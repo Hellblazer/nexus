@@ -103,6 +103,13 @@ class RawSqlGateTest {
             // keeper idiom, and the statements are one-shot migration ops,
             // not serving-path queries.
             "rekey", "unionAllContentRows"),
+        "StagingPromoteOps.java", java.util.Set.of(
+            // SANCTIONED RAW (nexus-jxizy.10.3): the land-then-transform
+            // promote/finalize — one-shot migration statements composing the
+            // ChashSqlIdioms fragments in the INSERT-into-populated-target
+            // shape (DISTINCT ON keepers, alias joins, GREATEST-merge,
+            // anti-join dedupes). Never serving-path.
+            "promoteCollection", "finalizeTenant"),
         "ChashSqlIdioms.java", java.util.Set.of(
             // SANCTIONED RAW (nexus-jxizy.10.2): the SHARED fragments of the
             // two one-shot chash movers (RekeyOps in-store rekey +
