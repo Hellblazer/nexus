@@ -256,6 +256,54 @@ def count_source_rows(source_db_path: Path) -> dict[str, int]:
         conn.close()
 
 
+def _open_taxonomy_ro(source_db_path: Path) -> sqlite3.Connection:
+    """Open the SQLite taxonomy source read-only. Copy-not-move guarantee."""
+    uri = f"file:{source_db_path}?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+    except sqlite3.OperationalError as exc:
+        raise RuntimeError(
+            f"Cannot open SQLite source for reading: {source_db_path}: {exc}"
+        ) from exc
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _table_names(conn: sqlite3.Connection) -> set[str]:
+    return {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+
+
+def _load_topic_rows(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Whole-load + topo-sort of the topics table (parent-before-child).
+
+    This is an O(N_topics) residual (see the historical note in
+    :func:`migrate_topics`'s caller); topics is small relative to
+    topic_assignments so whole-loading it (even from a caller that does not
+    itself migrate topics, e.g. :func:`migrate_topic_assignments`'s orphan
+    filter) is not the memory concern the streaming reads elsewhere target.
+    """
+    if "topics" not in _table_names(conn):
+        return []
+    avail = _available_columns(conn, "topics")
+    sel = ", ".join(c for c in _TOPIC_COLUMNS if c in avail)
+    topic_rows = [
+        dict(r) for r in conn.execute(f"SELECT {sel} FROM topics ORDER BY id ASC").fetchall()
+    ]
+    # Root nodes (parent_id IS NULL) first, then children. Stable sort
+    # handles shallow SQLite hierarchies; parent.id may exceed child.id.
+    topic_rows.sort(key=lambda r: (0 if r.get("parent_id") is None else 1, r.get("id", 0)))
+    return topic_rows
+
+
+def _valid_topic_ids(topic_rows: list[dict[str, Any]]) -> set[int]:
+    return {int(r["id"]) for r in topic_rows if r.get("id") is not None}
+
+
 def _available_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
@@ -293,10 +341,48 @@ def _iter_table(
         offset += page_size
 
 
-# ── Main migration function ────────────────────────────────────────────────────
+# ── Per-table migration functions (RDR-180 nexus-jxizy.10.7 split) ─────────────
+#
+# Each function below migrates exactly ONE SQLite taxonomy table and opens its
+# own read-only connection (copy-not-move; mirrors aspects_etl.py's per-table
+# shape). topic_assignments and topic_links both need the SOURCE topics
+# loaded (read-only) to orphan-filter against — topics are NOT written by
+# either of them; only migrate_topics() writes the topics table.
+#
+# topic_assignments is the CHASH-BEARING table (doc_id is a chash, RDR-180):
+# the guided land-then-transform path lands + promotes it server-side, so
+# migrate_taxonomy_without_assignments() composes the other three and
+# deliberately excludes it.
 
 
-def migrate_taxonomy_rows(
+def migrate_topics(
+    source_db_path: Path,
+    store: Any,
+    *,
+    batch_log_every: int = 100,
+    collector: Any = None,
+    breaker: EtlCircuitBreaker | None = None,
+) -> dict[str, int]:
+    """Migrate ONLY the topics table.
+
+    Whole-load (parent_id self-FK needs a parent-before-child topo-sort over
+    the full set). See :func:`_load_topic_rows` for the O(N_topics) memory
+    note.
+    """
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
+    conn = _open_taxonomy_ro(source_db_path)
+    try:
+        topic_rows = _load_topic_rows(conn)
+        return _migrate_table(
+            rows=topic_rows, transform_fn=_transform_topic, store=store,
+            kind="topic", table="topics", batch_log_every=batch_log_every,
+            collector=collector, total=len(topic_rows), breaker=breaker,
+        )
+    finally:
+        conn.close()
+
+
+def migrate_topic_assignments(
     source_db_path: Path,
     store: Any,
     *,
@@ -304,100 +390,35 @@ def migrate_taxonomy_rows(
     collector: Any = None,
     read_page: int = _READ_PAGE,
     breaker: EtlCircuitBreaker | None = None,
-) -> dict[str, Any]:
-    """Copy all rows from the four SQLite taxonomy tables into Postgres via *store*.
+) -> dict[str, int]:
+    """Migrate ONLY topic_assignments — the CHASH-BEARING table (doc_id is a
+    chash, RDR-180). Streams page-by-page (nexus-lbolo) so a 190k-row table
+    never materializes whole; orphan rows (topic_id referencing a deleted
+    topic) are skipped-and-recorded via *collector*, per RDR-153 §Decision 2.
 
-    Migration order: topics first (assignments/links reference topic.id by
-    value; the Java service preserves ids via BIGSERIAL explicit insert),
-    then assignments, then links, then meta.
-
-    Args:
-        source_db_path: Path to the SQLite T2 database file.
-        store: An ``HttpTaxonomyStore`` (or duck-typed compatible) instance
-               connected to the Postgres service.
-        batch_log_every: Emit a progress log line every N rows.
-
-    Returns:
-        ``{"topics": {"read": N, "written": M}, "assignments": ..., "links": ..., "meta": ...}``
-
-    Copy-not-move guarantee: opens the SQLite source in ``?mode=ro``.
+    Topics are loaded (read-only) ONLY to build the orphan-filter's valid-id
+    set — they are NOT written here; see :func:`migrate_topics`.
     """
     breaker = breaker if breaker is not None else EtlCircuitBreaker()
-    uri = f"file:{source_db_path}?mode=ro"
+    conn = _open_taxonomy_ro(source_db_path)
     try:
-        conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
-    except sqlite3.OperationalError as exc:
-        raise RuntimeError(
-            f"Cannot open SQLite source for reading: {source_db_path}: {exc}"
-        ) from exc
-
-    try:
-        conn.row_factory = sqlite3.Row
-        tables = {
-            row[0]
-            for row in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        }
-
-        # ── Topics: whole-load (parent_id self-FK needs a parent-before-child
-        # topo-sort over the full set, and the orphan filter below needs the
-        # full id set in memory). This is an O(N_topics) residual, NOT O(1):
-        # topic_rows (~600 B/dict) + valid_topic_ids (~28 B/int). It is not the
-        # memory concern nexus-lbolo targets because topics is small relative to
-        # assignments — production T2 taxonomies run hundreds–low-thousands of
-        # topics (≈single-digit MB) against the 190k-row topic_assignments leg
-        # that this change streams. If a future install ever drives topics into
-        # the 6-figure range, replace valid_topic_ids with an
-        # ``IN (SELECT id FROM topics)`` existence check and page topics too. ──
-        topic_rows: list[dict[str, Any]] = []
-        if "topics" in tables:
-            avail = _available_columns(conn, "topics")
-            sel = ", ".join(c for c in _TOPIC_COLUMNS if c in avail)
-            topic_rows = [dict(r) for r in conn.execute(
-                f"SELECT {sel} FROM topics ORDER BY id ASC"
-            ).fetchall()]
-            # Root nodes (parent_id IS NULL) first, then children. Stable sort
-            # handles shallow SQLite hierarchies; parent.id may exceed child.id.
-            topic_rows.sort(key=lambda r: (0 if r.get("parent_id") is None else 1, r.get("id", 0)))
-
-        valid_topic_ids = {int(r["id"]) for r in topic_rows if r.get("id") is not None}
-
+        tables = _table_names(conn)
+        topic_rows = _load_topic_rows(conn) if "topics" in tables else []
+        valid_topic_ids = _valid_topic_ids(topic_rows)
         assign_total = _count_table(conn, "topic_assignments") if "topic_assignments" in tables else 0
-        link_total = _count_table(conn, "topic_links") if "topic_links" in tables else 0
-        meta_total = _count_table(conn, "taxonomy_meta") if "taxonomy_meta" in tables else 0
 
-        _log.info(
-            "taxonomy_etl.start", source=str(source_db_path),
-            topics=len(topic_rows), assignments=assign_total,
-            links=link_total, meta=meta_total,
-        )
-
-        results: dict[str, Any] = {}
-
-        # 1. Topics first — assignments/links reference topic.id.
-        results["topics"] = _migrate_table(
-            rows=topic_rows, transform_fn=_transform_topic, store=store,
-            kind="topic", table="topics", batch_log_every=batch_log_every,
-            collector=collector, total=len(topic_rows), breaker=breaker,
-        )
-
-        # ── RDR-153 §Decision 2 orphan policy, now STREAMED page-by-page
+        # ── RDR-153 §Decision 2 orphan policy, STREAMED page-by-page
         # (nexus-lbolo) so a 190k assignments table never materializes whole.
-        # The valid set is the SOURCE topics (whole-loaded above); a row whose
-        # parent is absent is skipped-and-recorded with its composite-key
-        # sample, exactly as the prior fetchall-then-filter pass did.
         #
-        # Failure-path note (vs the old eager pre-pass): orphans are now recorded
-        # DURING the stream, so if _migrate_table raises mid-table (e.g. the store
-        # is down and _etl_with_retry exhausts its bound), orphans on not-yet-read
-        # pages are NOT recorded and the post-call count_read is skipped — the
-        # orphan report for that run is partial. That is acceptable: such a run
-        # fails the total_failed==0 gate (it is not "done"), and the idempotent
-        # re-run re-reads from the top and records every orphan once the store is
-        # back. Eager pre-collection would re-read the whole table just to make a
-        # FAILED run's advisory complete — not worth the extra full scan. ──
-        orphans = {"assignments": 0, "links": 0}
+        # Failure-path note: orphans are recorded DURING the stream, so if
+        # _migrate_table raises mid-table (e.g. the store is down and
+        # _etl_with_retry exhausts its bound), orphans on not-yet-read pages
+        # are NOT recorded and the post-call count_read is skipped — the
+        # orphan report for that run is partial. That is acceptable: such a
+        # run fails the total_failed==0 gate (it is not "done"), and the
+        # idempotent re-run re-reads from the top and records every orphan
+        # once the store is back. ──
+        orphans = {"assignments": 0}
 
         def _valid_assignments() -> Iterator[dict[str, Any]]:
             for r in _iter_table(conn, "topic_assignments", _ASSIGNMENT_COLUMNS, read_page):
@@ -415,6 +436,63 @@ def migrate_taxonomy_rows(
                         )
                     continue
                 yield r
+
+        # identity_mismatch is a once-per-run DECISION record (doc_id is a chash,
+        # not a tumbler — FK deliberately not registered, nexus-sa14p), not a
+        # per-row anomaly. Fire it once if the source has any assignment rows.
+        if collector is not None and assign_total:
+            collector.record_event(
+                "taxonomy", "topic_assignments",
+                issue_class="identity_mismatch",
+                constraint="topic_assignments.doc_id",
+                reason="doc_id is a chash (opaque identity), not a catalog "
+                       "tumbler — FK deliberately not registered "
+                       "(schema corrected, nexus-sa14p)",
+                action="schema_corrected",
+            )
+
+        result = _migrate_table(
+            rows=_valid_assignments(), transform_fn=_transform_assignment,
+            store=store, kind="assignment", table="topic_assignments",
+            batch_log_every=batch_log_every, collector=collector, total=assign_total,
+            breaker=breaker,
+        )
+        # The orphan count is final once _migrate_table has drained the filter
+        # generator. Record it into the collector so the reported read ==
+        # source cardinality (valid + orphan); count_read accumulates.
+        if collector is not None and orphans["assignments"]:
+            collector.count_read("taxonomy", "topic_assignments", orphans["assignments"])
+        elif collector is None and orphans["assignments"]:
+            _log.warning(
+                "taxonomy_etl.orphans_skipped_unrecorded",
+                table="topic_assignments", count=orphans["assignments"],
+                hint="pass collector= to record these in the migration report",
+            )
+        return result
+    finally:
+        conn.close()
+
+
+def migrate_topic_links(
+    source_db_path: Path,
+    store: Any,
+    *,
+    batch_log_every: int = 100,
+    collector: Any = None,
+    read_page: int = _READ_PAGE,
+    breaker: EtlCircuitBreaker | None = None,
+) -> dict[str, int]:
+    """Migrate ONLY topic_links. Topics are loaded (read-only) ONLY to build
+    the orphan-filter's valid-id set — they are NOT written here; see
+    :func:`migrate_topics`."""
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
+    conn = _open_taxonomy_ro(source_db_path)
+    try:
+        tables = _table_names(conn)
+        topic_rows = _load_topic_rows(conn) if "topics" in tables else []
+        valid_topic_ids = _valid_topic_ids(topic_rows)
+        link_total = _count_table(conn, "topic_links") if "topic_links" in tables else 0
+        orphans = {"links": 0}
 
         def _valid_links() -> Iterator[dict[str, Any]]:
             for r in _iter_table(conn, "topic_links", _LINK_COLUMNS, read_page):
@@ -434,69 +512,144 @@ def migrate_taxonomy_rows(
                     continue
                 yield r
 
-        # identity_mismatch is a once-per-run DECISION record (doc_id is a chash,
-        # not a tumbler — FK deliberately not registered, nexus-sa14p), not a
-        # per-row anomaly. Fire it once if the source has any assignment rows.
-        if collector is not None and assign_total:
-            collector.record_event(
-                "taxonomy", "topic_assignments",
-                issue_class="identity_mismatch",
-                constraint="topic_assignments.doc_id",
-                reason="doc_id is a chash (opaque identity), not a catalog "
-                       "tumbler — FK deliberately not registered "
-                       "(schema corrected, nexus-sa14p)",
-                action="schema_corrected",
-            )
-
-        # 2. Assignments (streamed; orphans skipped-and-recorded in the filter).
-        results["assignments"] = _migrate_table(
-            rows=_valid_assignments(), transform_fn=_transform_assignment,
-            store=store, kind="assignment", table="topic_assignments",
-            batch_log_every=batch_log_every, collector=collector, total=assign_total,
-            breaker=breaker,
-        )
-        # The orphan count is final once _migrate_table has drained the filter
-        # generator. Record it into the collector so the reported read ==
-        # source cardinality (valid + orphan), matching the prior pre_skipped
-        # contract (count_read accumulates).
-        if collector is not None and orphans["assignments"]:
-            collector.count_read("taxonomy", "topic_assignments", orphans["assignments"])
-
-        # 3. Links (streamed).
-        results["links"] = _migrate_table(
+        result = _migrate_table(
             rows=_valid_links(), transform_fn=_transform_link, store=store,
             kind="link", table="topic_links", batch_log_every=batch_log_every,
             collector=collector, total=link_total, breaker=breaker,
         )
         if collector is not None and orphans["links"]:
             collector.count_read("taxonomy", "topic_links", orphans["links"])
+        elif collector is None and orphans["links"]:
+            _log.warning(
+                "taxonomy_etl.orphans_skipped_unrecorded",
+                table="topic_links", count=orphans["links"],
+                hint="pass collector= to record these in the migration report",
+            )
+        return result
+    finally:
+        conn.close()
 
-        # 4. Meta (streamed; no parent FK to check).
-        results["meta"] = _migrate_table(
+
+def migrate_taxonomy_meta(
+    source_db_path: Path,
+    store: Any,
+    *,
+    batch_log_every: int = 100,
+    collector: Any = None,
+    read_page: int = _READ_PAGE,
+    breaker: EtlCircuitBreaker | None = None,
+) -> dict[str, int]:
+    """Migrate ONLY taxonomy_meta (no parent FK to check)."""
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
+    conn = _open_taxonomy_ro(source_db_path)
+    try:
+        meta_total = _count_table(conn, "taxonomy_meta") if "taxonomy_meta" in _table_names(conn) else 0
+        return _migrate_table(
             rows=_iter_table(conn, "taxonomy_meta", _META_COLUMNS, read_page),
             transform_fn=_transform_meta, store=store, kind="meta",
             table="taxonomy_meta", batch_log_every=batch_log_every,
             collector=collector, total=meta_total, breaker=breaker,
         )
-
-        if collector is None and (orphans["assignments"] or orphans["links"]):
-            _log.warning(
-                "taxonomy_etl.orphans_skipped_unrecorded",
-                assignments=orphans["assignments"], links=orphans["links"],
-                hint="pass collector= to record these in the migration report",
-            )
-
-        _log.info(
-            "taxonomy_etl.complete",
-            topics_read=results["topics"]["read"], topics_written=results["topics"]["written"],
-            assignments_read=results["assignments"]["read"], assignments_written=results["assignments"]["written"],
-            links_read=results["links"]["read"], links_written=results["links"]["written"],
-            meta_read=results["meta"]["read"], meta_written=results["meta"]["written"],
-        )
-
-        return results
     finally:
         conn.close()
+
+
+# ── Composition entry points ────────────────────────────────────────────────
+
+
+def migrate_taxonomy_without_assignments(
+    source_db_path: Path,
+    store: Any,
+    *,
+    batch_log_every: int = 100,
+    collector: Any = None,
+    read_page: int = _READ_PAGE,
+    breaker: EtlCircuitBreaker | None = None,
+) -> dict[str, Any]:
+    """topics + topic_links + taxonomy_meta — NOT topic_assignments.
+
+    RDR-180 (nexus-jxizy.10.7): topic_assignments carries chash identity
+    (doc_id) and is landed + promoted server-side by the guided
+    land-then-transform path; running it here too would double-write a
+    stale, unresolved legacy-id copy alongside the resolved one. The guided
+    ``taxonomy`` store slot calls this instead of :func:`migrate_taxonomy_rows`.
+    """
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
+    return {
+        "topics": migrate_topics(
+            source_db_path, store, batch_log_every=batch_log_every,
+            collector=collector, breaker=breaker,
+        ),
+        "links": migrate_topic_links(
+            source_db_path, store, batch_log_every=batch_log_every,
+            collector=collector, read_page=read_page, breaker=breaker,
+        ),
+        "meta": migrate_taxonomy_meta(
+            source_db_path, store, batch_log_every=batch_log_every,
+            collector=collector, read_page=read_page, breaker=breaker,
+        ),
+    }
+
+
+def migrate_taxonomy_rows(
+    source_db_path: Path,
+    store: Any,
+    *,
+    batch_log_every: int = 100,
+    collector: Any = None,
+    read_page: int = _READ_PAGE,
+    breaker: EtlCircuitBreaker | None = None,
+) -> dict[str, Any]:
+    """Copy all rows from the four SQLite taxonomy tables into Postgres via *store*.
+
+    Thin composition of the four per-table entry points (RDR-180
+    nexus-jxizy.10.7 split): topics first (assignments/links reference
+    topic.id by value; the Java service preserves ids via BIGSERIAL explicit
+    insert), then assignments, then links, then meta — the exact order the
+    prior monolithic implementation used, so batch call ordering and
+    collector accounting are unchanged for existing callers.
+
+    Args:
+        source_db_path: Path to the SQLite T2 database file.
+        store: An ``HttpTaxonomyStore`` (or duck-typed compatible) instance
+               connected to the Postgres service.
+        batch_log_every: Emit a progress log line every N rows.
+
+    Returns:
+        ``{"topics": {"read": N, "written": M}, "assignments": ..., "links": ..., "meta": ...}``
+
+    Copy-not-move guarantee: each per-table function opens the SQLite source
+    in ``?mode=ro``.
+    """
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
+    results: dict[str, Any] = {
+        "topics": migrate_topics(
+            source_db_path, store, batch_log_every=batch_log_every,
+            collector=collector, breaker=breaker,
+        ),
+    }
+    results["assignments"] = migrate_topic_assignments(
+        source_db_path, store, batch_log_every=batch_log_every,
+        collector=collector, read_page=read_page, breaker=breaker,
+    )
+    results["links"] = migrate_topic_links(
+        source_db_path, store, batch_log_every=batch_log_every,
+        collector=collector, read_page=read_page, breaker=breaker,
+    )
+    results["meta"] = migrate_taxonomy_meta(
+        source_db_path, store, batch_log_every=batch_log_every,
+        collector=collector, read_page=read_page, breaker=breaker,
+    )
+
+    _log.info(
+        "taxonomy_etl.complete",
+        topics_read=results["topics"]["read"], topics_written=results["topics"]["written"],
+        assignments_read=results["assignments"]["read"], assignments_written=results["assignments"]["written"],
+        links_read=results["links"]["read"], links_written=results["links"]["written"],
+        meta_read=results["meta"]["read"], meta_written=results["meta"]["written"],
+    )
+
+    return results
 
 
 def _migrate_table(

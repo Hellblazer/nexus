@@ -1007,6 +1007,72 @@ class TestGuidedT2ExclusionSplit:
         aspects_etl = next(e for e in etls if e.store == "aspects")
         assert aspects_etl.run is _aspects_non_chash
 
+    def test_guided_taxonomy_slot_is_non_chash_runner(self) -> None:
+        """RDR-180 nexus-jxizy.10.7 completion pass: taxonomy's guided slot
+        now excludes topic_assignments (chash-bearing) at table grain."""
+        from nexus.migration.etl_registry import EtlSources
+        from nexus.migration.orchestrator import _taxonomy_non_chash, build_guided_store_etls
+
+        etls = build_guided_store_etls(
+            EtlSources(sqlite_path=None, catalog_db_path=None),  # type: ignore[arg-type]
+        )
+        taxonomy_etl = next(e for e in etls if e.store == "taxonomy")
+        assert taxonomy_etl.run is _taxonomy_non_chash
+
+    def test_guided_telemetry_slot_is_non_chash_runner(self) -> None:
+        """RDR-180 nexus-jxizy.10.7 completion pass: telemetry's guided slot
+        now excludes relevance_log + frecency (chash-bearing) at table grain."""
+        from nexus.migration.etl_registry import EtlSources
+        from nexus.migration.orchestrator import _telemetry_non_chash, build_guided_store_etls
+
+        etls = build_guided_store_etls(
+            EtlSources(sqlite_path=None, catalog_db_path=None),  # type: ignore[arg-type]
+        )
+        telemetry_etl = next(e for e in etls if e.store == "telemetry")
+        assert telemetry_etl.run is _telemetry_non_chash
+
+    def test_guided_catalog_slot_is_non_chash_runner(self) -> None:
+        """RDR-180 nexus-jxizy.10.7 completion pass: catalog's guided slot
+        now excludes document_chunks (chash-bearing manifest) at table grain."""
+        from nexus.migration.etl_registry import EtlSources
+        from nexus.migration.orchestrator import _catalog_non_chash, build_guided_store_etls
+
+        etls = build_guided_store_etls(
+            EtlSources(sqlite_path=None, catalog_db_path=None),  # type: ignore[arg-type]
+        )
+        catalog_etl = next(e for e in etls if e.store == "catalog")
+        assert catalog_etl.run is _catalog_non_chash
+
+    def test_guided_non_chash_runners_pinned_exact_set(self) -> None:
+        """A future store addition to LADDER_ORDER must be deliberately
+        classified into _GUIDED_NON_CHASH_RUNNERS or
+        GUIDED_LAND_EXCLUDED_STORES — never silently left running its full
+        legacy ETL (and therefore double-writing a stale legacy-id copy)
+        under the guided path."""
+        from nexus.migration.orchestrator import _GUIDED_NON_CHASH_RUNNERS
+
+        assert set(_GUIDED_NON_CHASH_RUNNERS) == {
+            "aspects", "taxonomy", "telemetry", "catalog",
+        }
+
+    def test_guided_slots_cover_every_chash_bearing_ladder_store(self) -> None:
+        """Every LADDER_ORDER store that carries a chash-bearing table is
+        EITHER wholesale-excluded (GUIDED_LAND_EXCLUDED_STORES) OR runs a
+        non-chash-only runner (_GUIDED_NON_CHASH_RUNNERS) — no such store is
+        silently left on the full legacy ETL under the guided path (the
+        residual this completion pass closes). "memory" and "plans" are the
+        only LADDER_ORDER stores with NO chash-bearing table and correctly
+        run their normal legacy ETL unmodified under the guided path."""
+        from nexus.migration.etl_registry import LADDER_ORDER
+        from nexus.migration.orchestrator import (
+            GUIDED_LAND_EXCLUDED_STORES,
+            _GUIDED_NON_CHASH_RUNNERS,
+        )
+
+        classified = GUIDED_LAND_EXCLUDED_STORES | set(_GUIDED_NON_CHASH_RUNNERS)
+        unclassified = set(LADDER_ORDER) - classified
+        assert unclassified == {"memory", "plans"}
+
     def test_migrate_all_guided_folds_excluded_stores_into_skip_stores(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from nexus.migration import orchestrator as orch
         from nexus.migration.etl_registry import EtlSources, LADDER_ORDER

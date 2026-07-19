@@ -620,3 +620,144 @@ class TestReadRowsForFill:
         finally:
             conn.close()
         assert rows == []
+
+
+# ── Per-table split (RDR-180 nexus-jxizy.10.7) ─────────────────────────────────
+# Each new public entry point migrates ONLY its own table; the other five
+# tables' rows must never reach the store, even when the source DB has all
+# six tables populated (proven via the store's per-kind batch calls).
+
+
+def _seeded_all_six_db(tmp_path: Path) -> Path:
+    db_path = tmp_path / "t2.db"
+    _seed_full_telemetry_db(
+        db_path,
+        relevance=[{"query": "q1", "chunk_id": "c1", "action": "store_put",
+                     "timestamp": "2024-01-01T00:00:00Z"}],
+        search=[{"ts": "2024-01-01T00:00:00Z", "query_hash": "h1", "collection": "c"}],
+        tier=[{"session_id": "s1", "ts": "2024-01-01T00:00:00Z", "tool": "t", "tier": "T2"}],
+        nx=[{"question": "q", "created_at": "2024-01-01T00:00:00Z"}],
+        hooks=[{"hook_name": "h", "occurred_at": "2024-01-01T00:00:00Z"}],
+        frecency=[{"chunk_id": "chunk-1"}],
+    )
+    return db_path
+
+
+class TestPerTableSplit:
+    def test_migrate_relevance_log_writes_only_relevance_log(self, tmp_path: Path) -> None:
+        from nexus.db.t2.telemetry_etl import migrate_relevance_log
+
+        db_path = _seeded_all_six_db(tmp_path)
+        store = _batch_mock_store()
+        result = migrate_relevance_log(db_path, store)
+
+        assert result["read"] == 1
+        assert result["written"] == 1
+        tables = {c.args[0] for c in store.import_rows_batch.call_args_list}
+        assert tables == {"relevance_log"}, f"only relevance_log must be sent, got {tables}"
+
+    def test_migrate_search_telemetry_writes_only_search_telemetry(self, tmp_path: Path) -> None:
+        from nexus.db.t2.telemetry_etl import migrate_search_telemetry
+
+        db_path = _seeded_all_six_db(tmp_path)
+        store = _batch_mock_store()
+        result = migrate_search_telemetry(db_path, store)
+
+        assert result["read"] == 1
+        assert result["written"] == 1
+        tables = {c.args[0] for c in store.import_rows_batch.call_args_list}
+        assert tables == {"search_telemetry"}
+
+    def test_migrate_tier_writes_writes_only_tier_writes(self, tmp_path: Path) -> None:
+        from nexus.db.t2.telemetry_etl import migrate_tier_writes
+
+        db_path = _seeded_all_six_db(tmp_path)
+        store = _batch_mock_store()
+        result = migrate_tier_writes(db_path, store)
+
+        assert result["read"] == 1
+        assert result["written"] == 1
+        tables = {c.args[0] for c in store.import_rows_batch.call_args_list}
+        assert tables == {"tier_writes"}
+
+    def test_migrate_nx_answer_runs_writes_only_nx_answer_runs(self, tmp_path: Path) -> None:
+        from nexus.db.t2.telemetry_etl import migrate_nx_answer_runs
+
+        db_path = _seeded_all_six_db(tmp_path)
+        store = _batch_mock_store()
+        result = migrate_nx_answer_runs(db_path, store)
+
+        assert result["read"] == 1
+        assert result["written"] == 1
+        tables = {c.args[0] for c in store.import_rows_batch.call_args_list}
+        assert tables == {"nx_answer_runs"}
+
+    def test_migrate_hook_failures_writes_only_hook_failures(self, tmp_path: Path) -> None:
+        from nexus.db.t2.telemetry_etl import migrate_hook_failures
+
+        db_path = _seeded_all_six_db(tmp_path)
+        store = _batch_mock_store()
+        result = migrate_hook_failures(db_path, store)
+
+        assert result["read"] == 1
+        assert result["written"] == 1
+        tables = {c.args[0] for c in store.import_rows_batch.call_args_list}
+        assert tables == {"hook_failures"}
+
+    def test_migrate_frecency_writes_only_frecency(self, tmp_path: Path) -> None:
+        from nexus.db.t2.telemetry_etl import migrate_frecency
+
+        db_path = _seeded_all_six_db(tmp_path)
+        store = _batch_mock_store()
+        result = migrate_frecency(db_path, store)
+
+        assert result["read"] == 1
+        assert result["written"] == 1
+        tables = {c.args[0] for c in store.import_rows_batch.call_args_list}
+        assert tables == {"frecency"}
+
+    def test_migrate_telemetry_without_chash_excludes_relevance_and_frecency(
+        self, tmp_path: Path,
+    ) -> None:
+        """The guided-path entry point: search_telemetry/tier_writes/
+        nx_answer_runs/hook_failures land; the chash-bearing relevance_log
+        and frecency tables are NEVER written."""
+        from nexus.db.t2.telemetry_etl import migrate_telemetry_without_chash
+
+        db_path = _seeded_all_six_db(tmp_path)
+        store = _batch_mock_store()
+        result = migrate_telemetry_without_chash(db_path, store)
+
+        assert set(result) == {
+            "search_telemetry", "tier_writes", "nx_answer_runs", "hook_failures",
+        }
+        for table in result.values():
+            assert table["written"] == 1
+        tables = {c.args[0] for c in store.import_rows_batch.call_args_list}
+        assert "relevance_log" not in tables and "frecency" not in tables, (
+            f"relevance_log/frecency must NEVER be written by the guided-path "
+            f"non-chash entry point, got batch tables {tables}"
+        )
+        assert tables == {"search_telemetry", "tier_writes", "nx_answer_runs", "hook_failures"}
+
+    def test_migrate_telemetry_rows_composition_matches_monolithic_result(
+        self, tmp_path: Path,
+    ) -> None:
+        """The thin composition must still migrate all six tables (byte-
+        identical behavior for existing callers)."""
+        db_path = _seeded_all_six_db(tmp_path)
+        store = _batch_mock_store()
+        result = migrate_telemetry_rows(db_path, store)
+
+        assert set(result) == {
+            "relevance_log", "search_telemetry", "tier_writes",
+            "nx_answer_runs", "hook_failures", "frecency",
+        }
+        for table in result.values():
+            assert table["read"] == 1
+            assert table["written"] == 1
+        tables = {c.args[0] for c in store.import_rows_batch.call_args_list}
+        assert tables == {
+            "relevance_log", "search_telemetry", "tier_writes",
+            "nx_answer_runs", "hook_failures", "frecency",
+        }

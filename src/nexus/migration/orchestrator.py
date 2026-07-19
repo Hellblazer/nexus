@@ -271,30 +271,34 @@ def build_store_etls(sources: EtlSources) -> list[StoreEtl]:
 #   * "chash"         — chash_index (the whole store, one table).
 #   * "aspects_queue" — aspect_extraction_queue (the whole store, one table).
 #
-# The "aspects" store is MIXED: document_aspects is now a landed pointer
-# store, but document_highlights / aspect_promotion_log carry no chash-shaped
-# identity column and are NOT landed — build_guided_store_etls swaps in a
-# non-chash-only runner for exactly that slot (see _aspects_non_chash).
+# The "aspects", "taxonomy", "telemetry", and "catalog" stores are MIXED:
+# each has exactly one (or two) chash-bearing table(s) landed + promoted
+# server-side, and one or more non-chash tables that still need the legacy
+# per-store T2 ETL. build_guided_store_etls swaps in a non-chash-only
+# runner for each of these four slots:
 #
-# KNOWN RESIDUAL (documented, not silently dropped — nexus-jxizy.10.7 final
-# report): "taxonomy" (topics + topic_assignments + topic_links + meta),
-# "telemetry" (frecency + relevance_log are chash-bearing; the other four
-# tables are not), and "catalog" (document_chunks is chash-bearing; owners/
-# documents/collections/links are not) are MONOLITHIC single-function ETLs
-# with no public per-table entry point (unlike aspects_etl.py's separate
-# migrate_highlights/migrate_promotion_log/migrate_aspects/migrate_queue).
-# Splitting them requires touching db/t2/taxonomy_etl.py,
-# db/t2/telemetry_etl.py, and db/t2/catalog_etl.py, which sit outside this
-# bead's file boundary (src/nexus/migration/** + db/t2/__init__.py only).
-# These three stores therefore still run their FULL legacy ETL under the
-# guided path today — topics/catalog-documents/telemetry-non-chash land
-# correctly (satisfying the obligations-ledger requirement that they precede
-# finalize), but their chash-bearing sibling tables (topic_assignments,
-# frecency, relevance_log, document_chunks) get a SECOND, legacy-id write
-# alongside the land+promote path. Tracked as a fast-follow: add
-# ``skip_tables``-shaped parameters to the three _etl.py modules (or extract
-# their non-chash sub-tables into public functions, mirroring aspects_etl.py)
-# so this split can be completed at true table granularity.
+#   * "aspects"   — document_highlights / aspect_promotion_log ONLY
+#                   (document_aspects is landed; _aspects_non_chash).
+#   * "taxonomy"  — topics / topic_links / taxonomy_meta ONLY
+#                   (topic_assignments.doc_id is a chash, landed;
+#                   _taxonomy_non_chash).
+#   * "telemetry" — search_telemetry / tier_writes / nx_answer_runs /
+#                   hook_failures ONLY (relevance_log.chunk_id and
+#                   frecency.chunk_id are chash-bearing, landed;
+#                   _telemetry_non_chash).
+#   * "catalog"   — owners / documents / collections / links ONLY
+#                   (document_chunks is the chash-bearing manifest, landed;
+#                   _catalog_non_chash).
+#
+# RESOLVED (nexus-jxizy.10.7 completion pass): the per-table entry points
+# these four runners call now live in db/t2/{aspects,taxonomy,telemetry,
+# catalog}_etl.py (migrate_taxonomy_without_assignments,
+# migrate_telemetry_without_chash, migrate_catalog_without_chunks — mirroring
+# aspects_etl.py's original migrate_highlights/migrate_promotion_log split).
+# Every LADDER_ORDER store's guided slot now excludes its chash-bearing
+# table(s) at true table granularity; no store still runs its full legacy
+# ETL (and therefore double-writes a stale legacy-id copy) under the guided
+# path.
 GUIDED_LAND_EXCLUDED_STORES: frozenset[str] = frozenset({"chash", "aspects_queue"})
 
 
@@ -337,19 +341,81 @@ def _aspects_non_chash(s: EtlSources, collector: Any) -> dict:
                 st.close()
 
 
+def _taxonomy_non_chash(s: EtlSources, collector: Any) -> dict:
+    """The guided-path ``taxonomy`` slot: topics + topic_links +
+    taxonomy_meta ONLY — topic_assignments.doc_id is a chash and is landed
+    (staging pointer store) + promoted/resolved server-side, so it is
+    deliberately NOT migrated here (RDR-180 nexus-jxizy.10.7)."""
+    from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.db.t2.taxonomy_etl import migrate_taxonomy_without_assignments  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    store = HttpTaxonomyStore()
+    try:
+        return migrate_taxonomy_without_assignments(s.sqlite_path, store, collector=collector)
+    finally:
+        store.close()
+
+
+def _telemetry_non_chash(s: EtlSources, collector: Any) -> dict:
+    """The guided-path ``telemetry`` slot: search_telemetry + tier_writes +
+    nx_answer_runs + hook_failures ONLY — relevance_log.chunk_id and
+    frecency.chunk_id are chash-bearing and landed + promoted server-side,
+    so they are deliberately NOT migrated here (RDR-180 nexus-jxizy.10.7)."""
+    from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.db.t2.telemetry_etl import migrate_telemetry_without_chash  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    store = HttpTelemetryStore()
+    try:
+        return migrate_telemetry_without_chash(s.sqlite_path, store, collector=collector)
+    finally:
+        store.close()
+
+
+def _catalog_non_chash(s: EtlSources, collector: Any) -> dict:
+    """The guided-path ``catalog`` slot: owners + documents + collections +
+    links ONLY — document_chunks is the chash-bearing manifest, landed +
+    promoted server-side, so it is deliberately NOT migrated here (RDR-180
+    nexus-jxizy.10.7)."""
+    from nexus.catalog.factory import make_catalog_client_for_migration  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.db.t2.catalog_etl import migrate_catalog_without_chunks  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    # RDR-176 P2 (Gap 3): no-arg → config-first URL+token resolution (NOT
+    # env-only); matches the CLI migrate subcommands and ServiceCountSource.
+    client = make_catalog_client_for_migration()
+    try:
+        return migrate_catalog_without_chunks(s.catalog_db_path, client, collector=collector)
+    finally:
+        client.close()
+
+
+#: store -> the guided-path non-chash runner that replaces its full legacy
+#: ETL (RDR-180 nexus-jxizy.10.7). A future store addition to LADDER_ORDER
+#: must be deliberately classified here (or added to
+#: GUIDED_LAND_EXCLUDED_STORES) — never silently left running its full
+#: legacy ETL under the guided path.
+_GUIDED_NON_CHASH_RUNNERS: dict[str, Callable[[EtlSources, Any], dict]] = {
+    "aspects": _aspects_non_chash,
+    "taxonomy": _taxonomy_non_chash,
+    "telemetry": _telemetry_non_chash,
+    "catalog": _catalog_non_chash,
+}
+
+
 def build_guided_store_etls(sources: EtlSources) -> list[StoreEtl]:
     """The guided land-then-transform T2 store-ETL list (nexus-jxizy.10.7).
 
-    Identical to :func:`build_store_etls` except the ``aspects`` slot runs
-    :func:`_aspects_non_chash` instead of the full document_aspects+
-    highlights+promotion_log runner. Callers additionally pass
+    Identical to :func:`build_store_etls` except the ``aspects``,
+    ``taxonomy``, ``telemetry``, and ``catalog`` slots each run their
+    non-chash-only runner (:data:`_GUIDED_NON_CHASH_RUNNERS`) instead of the
+    full legacy ETL. Callers additionally pass
     :data:`GUIDED_LAND_EXCLUDED_STORES` as ``skip_stores`` so ``chash`` and
     ``aspects_queue`` never run at all (see the module-level comment above
     for the full guided-path store-exclusion rationale).
     """
     etls = build_store_etls(sources)
     return [
-        StoreEtl("aspects", _aspects_non_chash) if e.store == "aspects" else e
+        StoreEtl(e.store, _GUIDED_NON_CHASH_RUNNERS[e.store])
+        if e.store in _GUIDED_NON_CHASH_RUNNERS else e
         for e in etls
     ]
 
