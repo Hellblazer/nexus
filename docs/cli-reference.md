@@ -1027,7 +1027,7 @@ echo "# Cache Strategy" | nx store put - --collection knowledge --title "decisio
 | Subcommand | Description |
 |------------|-------------|
 | `put FILE_OR_DASH` | Store document (use `-` for stdin) |
-| `get DOC_ID` | Retrieve entry by 32-char hex ID (from `nx store list`) |
+| `get DOC_ID` | Retrieve entry by 64-char hex ID (from `nx store list`) |
 | `list` | List stored entries |
 | `delete` | Delete a single entry by ID or title |
 | `export [COLLECTION]` | Export a collection to portable `.nxexp` backup |
@@ -1058,11 +1058,11 @@ echo "# Cache Strategy" | nx store put - --collection knowledge --title "decisio
 | Flag | Description |
 |------|-------------|
 | `-c` / `--collection NAME` | Collection name (required) |
-| `--id ID` | Exact 32-char document ID from `nx store list` |
+| `--id ID` | Exact 64-char document ID from `nx store list` |
 | `--title TITLE` | Exact title metadata match (deletes all matching chunks) |
 | `-y` / `--yes` | Skip confirmation prompt |
 
-Note: IDs shown by `nx store list` are 32 hex chars (`sha256(text)[:32]`). `--title` delete is paginated and safe for multi-chunk documents. To delete an entire collection use `nx collection delete`.
+Note: IDs shown by `nx store list` are 64 hex chars (the full `sha256(text)` digest — RDR-180; pre-cohort 32-hex IDs resolve via the permanent `chash_alias` route). `--title` delete is paginated and safe for multi-chunk documents. To delete an entire collection use `nx collection delete`.
 
 **`get` flags:**
 
@@ -1089,9 +1089,10 @@ Note: IDs shown by `nx store list` are 32 hex chars (`sha256(text)[:32]`). `--ti
 | `--assume-model MODEL` | Override the export header's declared embedding model. Pre-migration `.nxexp` files can carry a wrong label (GH #1370); use this to supply the true model instead of trusting the header |
 | `--skip-existing` | Skip records whose id already exists in the target collection, instead of overwriting. Useful for resuming a partial import |
 
-Non-conformant legacy chunk ids (16-char pre-migration ids that fail the
-service backend's `chash` length constraint) are re-hashed to 32-char
-content-derived ids automatically; the CLI reports how many were re-hashed.
+Non-conformant legacy chunk ids (16- or 32-char pre-migration ids that fail
+the service backend's `chash` length constraint) are re-hashed to full 64-char
+content-derived ids automatically (RDR-180); the CLI reports how many were
+re-hashed.
 
 **Restoring a pre-migration (Chroma-era) backup:**
 
