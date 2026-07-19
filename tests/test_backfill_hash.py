@@ -329,8 +329,8 @@ class TestBackfillPopulatesT2ChashIndex:
             alpha = hashlib.sha256(b"alpha code").hexdigest()
             beta = hashlib.sha256(b"beta code").hexdigest()
             assert rows == sorted([
-                (alpha[:32], "code__pop_new"),
-                (beta[:32], "code__pop_new"),
+                (alpha, "code__pop_new"),
+                (beta, "code__pop_new"),
             ])
         finally:
             store.close()
@@ -364,8 +364,8 @@ class TestBackfillPopulatesT2ChashIndex:
             gamma = hashlib.sha256(b"gamma code").hexdigest()
             delta = hashlib.sha256(b"delta code").hexdigest()
             assert rows == sorted([
-                (gamma[:32], "code__pop_existing"),
-                (delta[:32], "code__pop_existing"),
+                (gamma, "code__pop_existing"),
+                (delta, "code__pop_existing"),
             ])
         finally:
             store.close()

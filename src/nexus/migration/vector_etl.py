@@ -340,24 +340,25 @@ def cross_model_target_name(source: str, target_model: str) -> str:
 
 
 def _nonconformant_id(ids: list[str]) -> str | None:
-    """First id violating the 32-char chash identity, else ``None``.
+    """First id violating the canonical chash identity, else ``None``.
 
-    GH #1390 / nexus-sot7v: pre-RDR-108-era Chroma stores hold 16/18-char
-    chunk ids. The pgvector side keys on ``sha256(chunk_text)[:32]`` and the
-    server never recomputes chash from text, so a verbatim copy of such ids
-    409s on the chash length CHECK per upsert — the wall that pushed an
-    autonomous session into dropping the constraints. This guard fails the
-    collection CLEANLY, client-side, before the batch is ever sent.
+    GH #1390 / nexus-sot7v lineage: this guard fails a collection CLEANLY,
+    client-side, before any batch is sent — never a mid-transaction CHECK
+    409 (the wall that once pushed an autonomous session into dropping the
+    constraints). RDR-180 (nexus-jxizy.3): the conformant id is the FULL
+    64-hex sha256 (``wire_reid.derive_wire_chash`` output); the pre-flip
+    ``len != 32`` spelling would reject every correctly re-id'd batch.
     """
-    return next((i for i in ids if len(i) != 32), None)
+    return next((i for i in ids if len(i) != 64), None)
 
 
 def _legacy_id_failure_reason(collection: str, example: str) -> str:
     """The actionable (and agent-facing) failure text for a legacy-id hit."""
     return (
-        f"legacy non-32-char chunk id {example!r} in {collection!r} "
-        "(pre-RDR-108 era) — the pgvector chash identity is "
-        "sha256(chunk_text)[:32] and the migration will NOT rewrite ids. "
+        f"non-canonical chunk id {example!r} in {collection!r} "
+        "(pre-RDR-108 era, or a truncated derivation) — the pgvector chash "
+        "identity is the FULL sha256(chunk_text) hexdigest (RDR-180) and "
+        "the migration will NOT guess ids. "
         "Re-index this collection from its source content, then re-run the "
         "migration. Do NOT drop or weaken the chash length constraints to "
         "force the upserts through: that silently corrupts the store and "

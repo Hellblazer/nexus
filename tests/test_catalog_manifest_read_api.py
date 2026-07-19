@@ -1067,8 +1067,8 @@ class TestManifestWriteBatchHook:
             f"{[(r.position, r.chash[:1]) for r in rows]}"
         )
         # New chashes wholly replace the old ones.
-        assert rows[0].chash == "p" * 32
-        assert rows[2].chash == "r" * 32
+        assert rows[0].chash == "p" * 64
+        assert rows[2].chash == "r" * 64
         # And the chunk_count cache reflects the new shape.
         chunk_count = cat._db.execute(
             "SELECT chunk_count FROM documents WHERE tumbler=?", ("1.1.1",),

@@ -100,6 +100,7 @@ class ChashRekeyRung:
         reprovision_fn: Callable[[], None] | None = None,
         freeze_fn: Callable[[], Callable[[], None]] | None = None,
         detect_probe_fn: Callable[[], int | None] | None = None,
+        applicable_fn: Callable[[], bool] | None = None,
         orphan_policy: str = "drop",
     ) -> None:
         self._rekey_fn = rekey_fn
@@ -107,6 +108,7 @@ class ChashRekeyRung:
         self._reprovision_fn = reprovision_fn if reprovision_fn is not None else (lambda: None)
         self._freeze_fn = freeze_fn if freeze_fn is not None else _sentinel_freeze
         self._detect_probe_fn = detect_probe_fn if detect_probe_fn is not None else (lambda: None)
+        self._applicable_fn = applicable_fn if applicable_fn is not None else (lambda: True)
         if orphan_policy not in ("drop", "synthesize"):
             raise ValueError(
                 f"orphan_policy must be 'drop' or 'synthesize', got {orphan_policy!r}"
@@ -121,6 +123,17 @@ class ChashRekeyRung:
         this runs only while the rung is unproven. A countable-zero probe
         (local diag path) reports converged-pending-verify; unknown
         (managed) reports applies — the idempotent rekey settles it."""
+        if not self._applicable_fn():
+            # Managed-cloud install: this box does not own the store's admin
+            # path — the cloud-side rekey is the operator's deploy
+            # choreography (design record: T2 nexus_rdr/180-engine-cohort-
+            # design), so `nx upgrade` is NOT the remedy here and doctor
+            # must not report a pending rung it cannot act on (the same
+            # detect-and-skip shape as the t2-schema rung in service mode).
+            return RungStatus(applicable=False, converged=False, pending_detail=(
+                "chash rekey is the operator's cloud deploy choreography on "
+                "managed installs — nothing for this box to converge"
+            ))
         probe = self._detect_probe_fn()
         if probe == 0:
             return RungStatus(applicable=True, converged=False, pending_detail=(
@@ -228,11 +241,24 @@ def default_chash_rekey_rung() -> "ChashRekeyRung":
 
         reprovision_diag_view_best_effort()
 
+    def _locally_actionable() -> bool:
+        # This box owns the rekey choreography only when it holds the local
+        # admin path (pg_credentials — the bundled/local-service install
+        # class). Managed-cloud clients skip: the operator drives the
+        # cloud-side rekey at engine deploy.
+        try:
+            from nexus.db.admin_sql import resolve_admin_credentials  # noqa: PLC0415 — deferred
+
+            return resolve_admin_credentials(None) is not None
+        except Exception:  # noqa: BLE001 — unreadable creds = not actionable here
+            return False
+
     return ChashRekeyRung(
         rekey_fn=_rekey,
         validate_fn=_validate,
         reprovision_fn=_reprovision,
         detect_probe_fn=_detect_probe,
+        applicable_fn=_locally_actionable,
     )
 
 

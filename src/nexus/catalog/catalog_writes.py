@@ -1190,17 +1190,18 @@ class _WriteOps:
         return result
 
     def chashes_for_collection(self, physical_collection: str) -> set[str]:
-        """Return the set of chunk natural IDs (chash[:32]) referenced by
-        the manifest for documents in ``physical_collection`` (RDR-108
-        Phase 4 / nexus-dyxe).
+        """Return the set of chunk natural IDs (the FULL chash, RDR-180 /
+        nexus-jxizy.3) referenced by the manifest for documents in
+        ``physical_collection`` (RDR-108 Phase 4 / nexus-dyxe lineage).
 
-        ``document_chunks.chash`` accepts either the full 64-char
-        ``chunk_text_hash`` (the canonical write path via
-        ``manifest_write_batch_hook``) or the truncated 32-char form
-        (used by some backfill flows); ``substr(chash, 1, 32)``
-        normalizes both shapes so the returned set is always
-        32-char-keyed and can be compared directly against
-        ``chunk_text_hash[:32]`` (the natural ID under RDR-108 D1).
+        The manifest write path (``manifest_write_batch_hook``) records the
+        full 64-char ``chunk_text_hash`` and the chunk natural id IS that
+        full digest now — the pre-flip ``substr(chash, 1, 32)``
+        normalization is retired (it silently truncated the referenced set
+        while the GC compared full-width metadata, quarantining 100% of
+        freshly indexed content — the client-fixture-sweep Bug-1 class).
+        Era rows still holding 32-char values are the remap cascade's to
+        converge, never this read's to reinterpret.
 
         Used by the GC rewrite (``indexer._prune_deleted_files``) to
         identify orphan T3 chunks: anything in the collection whose
@@ -1209,7 +1210,7 @@ class _WriteOps:
         """
         cat = self._cat
         rows = cat._db.execute(
-            "SELECT DISTINCT substr(dc.chash, 1, 32) "
+            "SELECT DISTINCT dc.chash "
             "FROM document_chunks dc "
             "JOIN documents d ON d.tumbler = dc.doc_id "
             "WHERE d.physical_collection = ?",
@@ -1255,10 +1256,13 @@ class _WriteOps:
         # single 32-char prefix may correspond to multiple 64-char
         # input variants (when the caller mixes representations);
         # all such input forms get the same doc list back.
+        # RDR-180: exact full-width matching — the prefix grouping (and its
+        # substr() scan) died with the [:32] era (same Bug-1 truncation class
+        # as chashes_for_collection above).
         prefix_to_inputs: dict[str, list[str]] = defaultdict(list)
         for c in chashes:
             if c:
-                prefix_to_inputs[c[:32]].append(c)
+                prefix_to_inputs[c].append(c)
         if not prefix_to_inputs:
             return {}
         prefix_to_docs: dict[str, list[str]] = defaultdict(list)
@@ -1268,8 +1272,8 @@ class _WriteOps:
             batch = unique_prefixes[i : i + _BATCH]
             placeholders = ", ".join(["?"] * len(batch))
             rows = cat._db.execute(
-                f"SELECT substr(chash, 1, 32), doc_id FROM document_chunks "
-                f"WHERE substr(chash, 1, 32) IN ({placeholders})",
+                f"SELECT chash, doc_id FROM document_chunks "
+                f"WHERE chash IN ({placeholders})",
                 batch,
             ).fetchall()
             for prefix, doc_id in rows:

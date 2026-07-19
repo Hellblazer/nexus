@@ -53,8 +53,9 @@ from tests.migration.test_vector_etl import (  # noqa: PLC2701 — shared test f
 
 
 def _chash(text: str) -> str:
-    """Chunk natural ID: sha256(text)[:32] (the repo-wide chash convention)."""
-    return hashlib.sha256(text.encode()).hexdigest()[:32]
+    """Chunk natural ID: the FULL sha256(text) hexdigest (RDR-180; the
+    repo-wide chash convention post-truncation-retirement)."""
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 # ═══════════════════════════════════════════════════════════════════════════

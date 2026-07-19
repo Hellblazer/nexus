@@ -266,10 +266,10 @@ class TestChunkerLoop:
         for dropped in ("source_path", "store_type", "corpus", "git_meta"):
             assert dropped not in meta
         assert "indexed_at" in meta
-        # RDR-108 D1 (nexus-kmb6): chunk_id is chunk_text_hash[:32].
+        # RDR-180 (nexus-jxizy.3): chunk_id is the FULL chunk_text_hash.
         import hashlib as _hl
-        expected_0 = _hl.sha256(b"chunk 0 text").hexdigest()[:32]
-        expected_1 = _hl.sha256(b"chunk 1 text").hexdigest()[:32]
+        expected_0 = _hl.sha256(b"chunk 0 text").hexdigest()
+        expected_1 = _hl.sha256(b"chunk 1 text").hexdigest()
         assert out[0]["chunk_id"] == expected_0
         assert out[1]["chunk_id"] == expected_1
 

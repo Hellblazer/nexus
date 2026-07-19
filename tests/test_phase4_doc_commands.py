@@ -179,11 +179,12 @@ class TestCheckExtensionsResolvesChashToDocId:
         assert captured, "chunk_grounded_in was never called"
         seen_doc_id, _, _ = captured[0]
         # Critical: the DocId passed must be the resolved doc_id, NOT the
-        # raw chash hex. RDR-108 Phase 4b (nexus-kosc): doc_id is now
-        # ``chash[:32]`` (the chunk natural ID under D1) rather than the
-        # legacy chash_index.chunk_chroma_id column.
-        assert seen_doc_id == chash[:32], (
-            f"expected resolved doc_id (chash[:32]={chash[:32]!r}), "
+        # raw chash hex incidentally matching. RDR-108 Phase 4b
+        # (nexus-kosc) made doc_id the chunk natural ID; RDR-180 inverts
+        # that natural ID to the FULL chash (no truncation) rather than
+        # the legacy chash_index.chunk_chroma_id column.
+        assert seen_doc_id == chash, (
+            f"expected resolved doc_id (chash={chash!r}), "
             f"got {seen_doc_id!r}"
         )
 

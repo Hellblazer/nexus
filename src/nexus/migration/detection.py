@@ -104,11 +104,16 @@ def _probe_actual_dim(col: Any) -> int | None:
 
 
 def _probe_legacy_ids(col: Any) -> str | None:
-    """Sample the FIRST page of chunk ids for a legacy non-32-char id.
+    """Sample the FIRST page of chunk ids for a truly-legacy id.
+
+    RDR-180 (nexus-jxizy.3): the CONFORMANT widths are now a SET — 32-char
+    era ids (pre-flip sources, re-derived to the full digest on the wire by
+    ``wire_reid``) AND 64-char full digests (the canonical identity, and
+    what post-flip sources carry). Truly legacy = everything else.
 
     GH #1390 root cause (nexus-sot7v): pre-RDR-108-era Chroma stores hold
-    16/18-char chunk ids; the pgvector chash identity is
-    ``sha256(chunk_text)[:32]`` and the migration NEVER rewrites ids
+    16/18-char chunk ids; the pgvector chash identity is the full
+    ``sha256(chunk_text)`` and the migration NEVER guesses ids
     (rewriting would sever the catalog-manifest chash join, which carries
     the same legacy values but no text to recompute from, and would break
     ``rollback_collections``' source-chash-set matching). Such a collection
@@ -136,7 +141,7 @@ def _probe_legacy_ids(col: Any) -> str | None:
         return None
     ids = sample.get("ids") if isinstance(sample, dict) else None
     for chunk_id in ids or []:
-        if len(chunk_id) != 32:
+        if len(chunk_id) not in (32, 64):
             return chunk_id
     return None
 
@@ -414,7 +419,7 @@ def _classify_leg(
         # the measurement, not the label, decides (the read-side twin of the
         # RDR-109 write-side honest-naming fix). Probe failure propagates
         # LOUD, same as the count probe above.
-        # GH #1390 / nexus-sot7v: legacy non-32-char chunk ids hard-block the
+        # GH #1390 / nexus-sot7v: truly-legacy (non-32/64-char) chunk ids hard-block the
         # migration BEFORE model classification is even interesting — the ids
         # are the identity the pgvector side keys on, and no migration path
         # (verbatim copy OR cross-model re-embed) rewrites them. Checked for
@@ -428,13 +433,14 @@ def _classify_leg(
                 legacy_ids = True
                 support = "unsupported"
                 reason = (
-                    f"collection holds legacy non-32-char chunk ids (e.g. "
+                    f"collection holds legacy chunk ids (e.g. "
                     f"{bad_id!r}; pre-RDR-108 era) — the pgvector chash "
-                    "identity is sha256(chunk_text)[:32] and the migration "
-                    "will not rewrite ids; re-index this collection from its "
-                    "source content before migrating. Do NOT drop or weaken "
-                    "the chash length constraints to force the upserts "
-                    "through (GH #1390)."
+                    "identity is the full sha256(chunk_text) hexdigest "
+                    "(RDR-180) and the migration will not guess ids; "
+                    "re-index this collection from its source content "
+                    "before migrating. Do NOT drop or weaken the chash "
+                    "width constraints to force the upserts through "
+                    "(GH #1390)."
                 )
         # nexus-x7t5y (GH follow-on to nb7hr): a voyage-NAMED collection with
         # a local NX_VOYAGE_API_KEY present short-circuits classify_model_support

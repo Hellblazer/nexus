@@ -284,10 +284,10 @@ def test_store_put_registers_in_catalog(tmp_path, monkeypatch):
     hook now runs BEFORE the T3 write (so the chunk can carry the
     catalog tumbler as ``doc_id``). The catalog's legacy
     ``meta.doc_id`` lookup field is populated with the deterministic
-    ``chunk_chroma_id`` that ``T3Database.put`` derives. RDR-108 D1
-    (nexus-kmb6) standardises the derivation as
-    ``sha256(content)[:32]`` so single-chunk MCP docs land directly
-    under their content-addressed natural ID.
+    ``chunk_chroma_id`` that ``T3Database.put`` derives. RDR-180
+    inverts the RDR-108 D1 truncation: the derivation is now the FULL
+    ``sha256(content)`` hexdigest, so single-chunk MCP docs land
+    directly under their content-addressed natural ID.
     """
     import hashlib as _hl
     from nexus.mcp_server import _reset_singletons, store_put
@@ -310,7 +310,7 @@ def test_store_put_registers_in_catalog(tmp_path, monkeypatch):
     assert "Stored" in result
     # The catalog stores the deterministic chunk_chroma_id derived from
     # content (the natural ID per RDR-108 D1).
-    expected_chunk_chroma_id = _hl.sha256(content.encode()).hexdigest()[:32]
+    expected_chunk_chroma_id = _hl.sha256(content.encode()).hexdigest()
     entry = Catalog(catalog_dir, catalog_dir / ".catalog.db").by_doc_id(
         expected_chunk_chroma_id,
     )
@@ -402,8 +402,8 @@ class TestChashSpan:
             expected = hashlib.sha256(doc_text.encode()).hexdigest()
             assert meta["chunk_text_hash"] == expected
             assert meta["chunk_text_hash"] != meta["content_hash"]
-            # RDR-108 D1 (nexus-kmb6): chunk natural ID is content-derived.
-            assert chunk_id == expected[:32]
+            # RDR-180 (nexus-jxizy.3): chunk natural ID is the FULL digest.
+            assert chunk_id == expected
 
     def test_audit_and_resolve_roundtrip(self, indexed_catalog):
         cat, local_t3 = indexed_catalog

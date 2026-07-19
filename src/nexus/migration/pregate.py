@@ -168,7 +168,7 @@ def assert_models_supported(
     for c in classifications:
         if not c.has_data:
             continue
-        # GH #1390 / nexus-sot7v: legacy non-32-char chunk ids block BEFORE
+        # GH #1390 / nexus-sot7v: truly-legacy (non-32/64-char) chunk ids block BEFORE
         # the model-support check and REGARDLESS of exempt — the ids are the
         # identity the pgvector side keys on, no migration path (verbatim copy
         # OR cross-model re-embed) rewrites them, and the failure is a data

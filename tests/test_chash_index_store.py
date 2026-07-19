@@ -534,13 +534,13 @@ class TestDualWriteHelper:
         finally:
             store.close()
 
-    def test_dual_write_truncates_full_sha256_to_chunk_id(self, tmp_path: Path) -> None:
-        # nexus-e0hd2 (critic finding): chunk metadata carries the FULL
-        # 64-char chunk_text_hash; the chash_index key is its [:32] form
-        # (RDR-108 D1). Pre-fix the producer upserted 64-char values
-        # verbatim — which catalog-013's CHECK(length=32) would now reject,
-        # silently stalling chash_index growth behind the best-effort
-        # catches. The producer must truncate at the source.
+    def test_dual_write_passes_full_sha256_through_verbatim(self, tmp_path: Path) -> None:
+        # RDR-180 (nexus-jxizy.3) polarity inversion of the former
+        # nexus-e0hd2 truncate-at-source fix: the chash_index key IS the
+        # full 64-char chunk_text_hash now (the engine boundary REJECTS
+        # 32-hex as a legacy reference, resolvable only via chash_alias).
+        # The producer must pass the full digest through verbatim, never
+        # truncate.
         from nexus.db.t2.chash_index import dual_write_chash_index
 
         calls: list = []
@@ -553,8 +553,8 @@ class TestDualWriteHelper:
         dual_write_chash_index(
             _Rec(), "code__x", ["d1"], [{"chunk_text_hash": full}]
         )
-        assert calls == [([full[:32]], "code__x")]
-        assert all(len(c) == 32 for c in calls[0][0])
+        assert calls == [([full], "code__x")]
+        assert all(len(c) == 64 for c in calls[0][0])
 
     def test_dual_write_is_noop_when_chash_index_is_none(self, tmp_path: Path) -> None:
         """Tests + pre-Phase-1.2 call sites with no T2 plumbed must not error."""

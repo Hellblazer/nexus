@@ -133,11 +133,11 @@ def test_voyage_embedding_fn_selects_model(mock_chromadb, collection, expected_m
 def test_store_put_permanent_returns_id(mock_db):
     db, mock_col, _ = mock_db
     doc_id = db.put(collection="knowledge__security", content="text", title="sec.md", tags="security,audit")
-    # nexus-oe2i: exact == 32 per RDR-108 D1 (chunk_text_hash[:32]).
+    # nexus-oe2i: exact == 64 per RDR-180 (the full chunk_text_hash digest).
     # The pre-D1 assertion `len > 0` predated content-derived natural
     # IDs and would silently pass any non-empty string.
     assert isinstance(doc_id, str)
-    assert len(doc_id) == 32
+    assert len(doc_id) == 64
 
 
 def test_store_put_permanent_metadata(mock_db):
@@ -496,9 +496,9 @@ def test_list_collections_skips_failed_count(mock_chromadb):
     ("code__repo", "snippet a", "snippet b", False),
 ])
 def test_put_deterministic_id_keys_on_content(mock_db, col, c1, c2, expect_same):
-    """Per RDR-108 D1 (nexus-kmb6) the natural ID is
-    ``chunk_text_hash[:32]``. Identical content collapses to one ID;
-    distinct content gets distinct IDs."""
+    """Per RDR-108 D1 (nexus-kmb6), inverted by RDR-180, the natural ID
+    is the full ``chunk_text_hash``. Identical content collapses to one
+    ID; distinct content gets distinct IDs."""
     db, mock_col, _ = mock_db
     id1 = db.put(collection=col, content=c1, title="t1")
     id2 = db.put(collection=col, content=c2, title="t2")
@@ -614,8 +614,8 @@ def test_put_under_cap_still_succeeds(mock_db):
     doc_id = db.put(
         collection="knowledge__sec", content="small body", title="ok.md",
     )
-    # RDR-108 D1: natural ID is chunk_text_hash[:32] (32 hex chars).
-    assert isinstance(doc_id, str) and len(doc_id) == 32
+    # RDR-180: natural ID is the full chunk_text_hash (64 hex chars).
+    assert isinstance(doc_id, str) and len(doc_id) == 64
     mock_col.upsert.assert_called_once()
 
 
@@ -844,13 +844,14 @@ def _stub_catalog(chashes: list[str]):
 
 @pytest.mark.parametrize("col,doc_id,chashes,present_ids", [
     ("code__myrepo", "ART-deadbeef", ["a" * 64, "b" * 64, "c" * 64],
-     [("a" * 64)[:32], ("b" * 64)[:32], ("c" * 64)[:32]]),
-    ("knowledge__wiki", "ART-cafe1234", ["d" * 64], [("d" * 64)[:32]]),
+     ["a" * 64, "b" * 64, "c" * 64]),
+    ("knowledge__wiki", "ART-cafe1234", ["d" * 64], ["d" * 64]),
     ("code__myrepo", "ART-nonexistent", [], []),
 ])
 def test_ids_for_doc_id(mock_db, col, doc_id, chashes, present_ids):
     """``ids_for_doc_id`` consults the catalog manifest (RDR-108 Phase 4b)
-    and verifies T3 presence via ``col.get(ids=...)``."""
+    and verifies T3 presence via ``col.get(ids=...)``. RDR-180: the T3
+    natural id is the full chash (no truncation)."""
     db, mock_col, _ = mock_db
     mock_col.get.return_value = {"ids": present_ids}
     cat = _stub_catalog(chashes)
@@ -862,7 +863,7 @@ def test_ids_for_doc_id(mock_db, col, doc_id, chashes, present_ids):
     if chashes:
         # The T3 verification leg must look up by ``ids=``, not ``where=``.
         kwargs = mock_col.get.call_args.kwargs
-        assert kwargs["ids"] == [c[:32] for c in chashes]
+        assert kwargs["ids"] == chashes
         assert "where" not in kwargs
     else:
         mock_col.get.assert_not_called()
@@ -881,8 +882,8 @@ def test_ids_for_doc_id_paginates_over_300_record_quota(mock_db):
     the candidate-id list."""
     db, mock_col, _ = mock_db
     chashes = [f"{i:064x}" for i in range(450)]
-    page1 = {"ids": [c[:32] for c in chashes[:300]]}
-    page2 = {"ids": [c[:32] for c in chashes[300:]]}
+    page1 = {"ids": chashes[:300]}
+    page2 = {"ids": chashes[300:]}
     mock_col.get.side_effect = [page1, page2]
     cat = _stub_catalog(chashes)
 
@@ -891,8 +892,8 @@ def test_ids_for_doc_id_paginates_over_300_record_quota(mock_db):
     assert len(result) == 450
     assert mock_col.get.call_count == 2
     # First batch is the first 300 candidates; second is the remainder.
-    assert mock_col.get.call_args_list[0].kwargs["ids"] == [c[:32] for c in chashes[:300]]
-    assert mock_col.get.call_args_list[1].kwargs["ids"] == [c[:32] for c in chashes[300:]]
+    assert mock_col.get.call_args_list[0].kwargs["ids"] == chashes[:300]
+    assert mock_col.get.call_args_list[1].kwargs["ids"] == chashes[300:]
 
 
 @pytest.mark.parametrize("col,doc_id,chashes,present_ids,expect_delete", [
@@ -1173,9 +1174,9 @@ def test_t3_context_manager_works_end_to_end(mock_chromadb):
     mock_client.get_or_create_collection.return_value = mock_col
     with T3Database(tenant="t", database="d", api_key="k", _client=mock_client) as db:
         doc_id = db.put(collection="knowledge__cm_test", content="context manager test", title="cm.md")
-        # nexus-oe2i: RDR-108 D1 natural id is chunk_text_hash[:32].
+        # nexus-oe2i: RDR-180 natural id is the full chunk_text_hash.
         assert isinstance(doc_id, str)
-        assert len(doc_id) == 32
+        assert len(doc_id) == 64
 
 
 # ── local_t3: retrieval quality ─────────────────────────────────────────────

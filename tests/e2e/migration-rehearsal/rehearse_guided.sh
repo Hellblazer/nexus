@@ -160,9 +160,9 @@ printf '%s\n' "$GB_OUT" | sed 's/^/       /'
 printf '%s' "$GB_OUT" | grep -q "not four-segment conformant" \
   && ok "shape (i) nonconformant-name diagnostic rendered" \
   || bad "shape (i) diagnostic missing ('not four-segment conformant')"
-printf '%s' "$GB_OUT" | grep -q "legacy non-32-char chunk ids" \
+printf '%s' "$GB_OUT" | grep -q "holds legacy chunk ids" \
   && ok "shape (ii) legacy-id diagnostic rendered" \
-  || bad "shape (ii) diagnostic missing ('legacy non-32-char chunk ids')"
+  || bad "shape (ii) diagnostic missing ('holds legacy chunk ids')"
 printf '%s' "$GB_OUT" | grep -q "(GH #1390)" \
   && ok "shape (ii) GH #1390 pointer rendered" \
   || bad "shape (ii) GH #1390 pointer missing"

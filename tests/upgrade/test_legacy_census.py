@@ -612,4 +612,5 @@ def test_census_is_not_its_own_walk_rung() -> None:
     than registering a second census rung."""
     names = [r.name for r in default_registry()]
     assert all(r.name != "legacy-id-census" for r in default_registry())
-    assert names == ["t2-schema", "substrate-etl"]
+    # RDR-180 .6 (nexus-jxizy.6) added the chash-rekey rung to the ladder.
+    assert names == ["t2-schema", "substrate-etl", "chash-rekey"]

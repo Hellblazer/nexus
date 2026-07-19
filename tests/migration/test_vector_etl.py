@@ -105,8 +105,9 @@ def _coll(owner: str, *, model: str = _MODEL_384, version: int = 1) -> str:
 
 
 def _chash(text: str) -> str:
-    """Chunk natural ID: sha256(text)[:32] (the repo-wide chash convention)."""
-    return hashlib.sha256(text.encode()).hexdigest()[:32]
+    """Chunk natural ID: the FULL sha256(text) hexdigest (RDR-180; the
+    repo-wide chash convention post-truncation-retirement)."""
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 # ── Fake vector client (HttpVectorClient surface subset) ─────────────────────
@@ -240,8 +241,9 @@ def _seed_source(
 ) -> list[str]:
     """Seed *n* chunks into a Chroma collection; returns the chash ids.
 
-    Ids follow the chash convention (sha256(text)[:32]) so the migrated
-    pgvector ``chash`` column round-trips the natural ID verbatim. Explicit
+    Ids follow the chash convention (the full sha256(text) hexdigest,
+    RDR-180) so the migrated pgvector ``chash`` column round-trips the
+    natural ID verbatim. Explicit
     tiny embeddings: on the RE-EMBED paths the SOURCE vectors are never read
     by the ETL (decision (a)), so their dimension is deliberately nonsensical
     (2) by default. ``dims``: the SAME-MODEL passthrough (nexus-hxry2) DOES
@@ -2564,7 +2566,7 @@ class TestNulByteBoundary:
     FakeVectorClient deliberately does NOT sanitize: this suite pins the
     ETL's own obligation (send verbatim), not the service's storage
     behavior. Consequence on the real side, by design: for NUL-bearing
-    chunks sha256(stored_text)[:32] != chash — the chash is carried as the
+    chunks sha256(stored_text) != chash — the chash is carried as the
     caller's identity and never recomputed from stored text.
     """
 

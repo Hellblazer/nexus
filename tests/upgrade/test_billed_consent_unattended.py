@@ -445,7 +445,7 @@ def test_the_free_shape_converges_unattended_with_zero_spend(
     assert target.embed_calls == 0, "a passthrough leg asked the service to embed — that bills"
     assert all(r["embedding"] is not None for r in target.rows.values())
     # ...and the ids landed CONFORMANT (the wire re-id did its job en route).
-    assert all(len(cid) == 32 for cid in target.rows)
+    assert all(len(cid) == 64 for cid in target.rows)
 
 
 def _proc(returncode: int, stderr: str) -> subprocess.CompletedProcess[str]:

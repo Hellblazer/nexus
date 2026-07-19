@@ -136,9 +136,10 @@ def test_rung_satisfies_the_protocol() -> None:
 
 
 def test_registered_in_the_default_registry_after_t2_schema() -> None:
-    """The RQ2 hard edge, live: t2-schema precedes substrate-etl."""
+    """The RQ2 hard edge, live: t2-schema precedes substrate-etl, which
+    precedes the RDR-180 .6 chash-rekey rung."""
     names = [r.name for r in default_registry()]
-    assert names == ["t2-schema", RUNG_SUBSTRATE_ETL]
+    assert names == ["t2-schema", RUNG_SUBSTRATE_ETL, "chash-rekey"]
 
 
 # ── detect ───────────────────────────────────────────────────────────────────

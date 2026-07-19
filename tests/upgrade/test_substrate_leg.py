@@ -164,7 +164,7 @@ class RecordingTarget:
 
 def test_execute_reid_leg_maps_and_lands_conformant(tmp_path: pathlib.Path) -> None:
     text = "note text"
-    new_chash = hashlib.sha256(text.encode()).hexdigest()[:32]
+    new_chash = hashlib.sha256(text.encode()).hexdigest()
     source = OneBatchSource([{"id": "legacy-16-chars!", "document": text, "metadata": {}}])
     target = RecordingTarget()
     leg = LegPlan(
@@ -187,7 +187,7 @@ def test_execute_cross_model_leg_targets_remapped_collection(
     (server re-embeds from stored text — no embeddings sent) and the map
     records target_collection for every re-id'd row (audit C2)."""
     text = "prose"
-    new_chash = hashlib.sha256(text.encode()).hexdigest()[:32]
+    new_chash = hashlib.sha256(text.encode()).hexdigest()
     source = OneBatchSource([{"id": "legacy-16-chars!", "document": text, "metadata": {}}])
     target = RecordingTarget()
     leg = LegPlan(
@@ -234,7 +234,7 @@ def test_reid_only_leg_passes_through_stored_vectors(tmp_path: pathlib.Path) -> 
     with ChashRemapStore(tmp_path / "chash_remap.db") as store:
         result = execute_leg(leg, source, target, map_store=store, page=10, provenance="p")
         assert result.ok
-        new_chash = hashlib.sha256(text.encode()).hexdigest()[:32]
+        new_chash = hashlib.sha256(text.encode()).hexdigest()
         assert target.rows[new_chash]["embeddings"] == [[0.1, 0.2]]  # passthrough, no bill
 
 
@@ -282,7 +282,7 @@ def test_mis_provenanced_vector_falls_back_to_reembed_when_it_is_free(
     with ChashRemapStore(tmp_path / "chash_remap.db") as store:
         result = execute_leg(leg, source, target, map_store=store, page=10, provenance="p")
         assert result.ok
-        new_chash = hashlib.sha256(text.encode()).hexdigest()[:32]
+        new_chash = hashlib.sha256(text.encode()).hexdigest()
         assert target.rows[new_chash]["embeddings"] is None  # dropped → server re-embed
 
 
@@ -323,7 +323,7 @@ def test_standing_consent_allows_the_billed_fallback(
     with ChashRemapStore(tmp_path / "chash_remap.db") as store:
         result = execute_leg(leg, source, target, map_store=store, page=10, provenance="p")
         assert result.ok
-        new_chash = hashlib.sha256(text.encode()).hexdigest()[:32]
+        new_chash = hashlib.sha256(text.encode()).hexdigest()
         assert target.rows[new_chash]["embeddings"] is None  # consented → re-embed
 
 
@@ -334,7 +334,7 @@ def test_pure_reembed_leg_rolls_back_via_plan_target_names(
     ids, wrong model) writes ZERO map entries — its rollback works only
     through SubstratePlan.target_names(), chained here plan→execute→rollback."""
     text = "conformant text"
-    cid = hashlib.sha256(text.encode()).hexdigest()[:32]
+    cid = hashlib.sha256(text.encode()).hexdigest()
     src = "knowledge__notes__all-minilm-l6-v2__v1"
     dst = "knowledge__notes__voyage-context-3__v1"
     plan = plan_substrate_legs(
@@ -438,7 +438,7 @@ def test_execute_leg_resumes_from_watermark(tmp_path: pathlib.Path) -> None:
 
 def test_execute_conformant_leg_needs_no_map_entries(tmp_path: pathlib.Path) -> None:
     text = "fine"
-    cid = hashlib.sha256(text.encode()).hexdigest()[:32]
+    cid = hashlib.sha256(text.encode()).hexdigest()
     source = OneBatchSource([{"id": cid, "document": text, "metadata": {}}])
     target = RecordingTarget()
     leg = LegPlan("c", "c", needs_reid=False, needs_reembed=False)

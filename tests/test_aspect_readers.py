@@ -344,18 +344,18 @@ class TestReadChromaUri:
     def test_manifest_ids_select_chunks_when_doc_id_metadata_absent(self, t3_client):
         """nexus-m8a7: post-RDR-108 Phase 3, chunks have no ``doc_id``
         in metadata. The reader must select chunks by their natural
-        Chroma id (chash[:32]) from the manifest instead of relying on
-        ``where={doc_id: ...}`` which returns zero rows.
+        Chroma id (the full chash, RDR-180) from the manifest instead of
+        relying on ``where={doc_id: ...}`` which returns zero rows.
         """
         from nexus.aspect_readers import ReadOk, _read_chroma_uri
 
         col_name = "knowledge__phase3-no-doc-id"
         col = t3_client.get_or_create_collection(col_name)
         # Seed chunks with NO doc_id and NO source_path metadata — the
-        # exact shape DT-indexed PDFs land with. Chroma id == chash[:32].
+        # exact shape DT-indexed PDFs land with. Chroma id == full chash.
         chashes = ["a" * 64, "b" * 64, "c" * 64]
         col.upsert(
-            ids=[c[:32] for c in chashes],
+            ids=chashes,
             documents=["first", "second", "third"],
             metadatas=[
                 {"chunk_text_hash": chashes[0], "title": "paper"},

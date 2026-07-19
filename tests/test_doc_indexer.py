@@ -1386,17 +1386,17 @@ def test_index_threads_on_progress(indexer, sample_pdf, sample_md, monkeypatch, 
 
 
 def test_stale_chunk_pruning_deletes_old_ids(sample_md, monkeypatch, voyage_client, cloud_mode):
-    """RDR-108 D1 (nexus-kmb6): chunk natural ID is
-    ``chunk_text_hash[:32]``. Stale-chunk pruning deletes T3 chunks
+    """RDR-180 (nexus-jxizy.3): chunk natural ID is the full
+    ``chunk_text_hash`` digest. Stale-chunk pruning deletes T3 chunks
     whose ID is no longer in the current upsert set (i.e. their text
     no longer appears in this document)."""
     set_credentials(monkeypatch)
     new_chunk_texts = [f"chunk text {i}" for i in range(3)]
     new_ids = {
-        hashlib.sha256(t.encode()).hexdigest()[:32] for t in new_chunk_texts
+        hashlib.sha256(t.encode()).hexdigest() for t in new_chunk_texts
     }
     stale_ids = {
-        hashlib.sha256(f"old text {i}".encode()).hexdigest()[:32]
+        hashlib.sha256(f"old text {i}".encode()).hexdigest()
         for i in range(2)
     }
     mock_col = MagicMock()
