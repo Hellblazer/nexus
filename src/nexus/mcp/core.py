@@ -2957,10 +2957,11 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
         col_name = t3_collection_name(collection, t3=t3)
         entry = t3.get_by_id(col_name, doc_id)
         if entry is None:
-            # Title fallback: 32 lowercase hex chars looks like a hash
-            # (chunk_text_hash[:32] per RDR-108 D1); anything else, try
-            # treating it as an exact title.
-            looks_like_hash = len(doc_id) == 32 and all(c in "0123456789abcdef" for c in doc_id)
+            # Title fallback: 64 lowercase hex chars is the canonical id
+            # (RDR-180 full digest); 32 is a legacy half-digest reference
+            # (resolvable via chash_alias, still hash-shaped — never a
+            # title). Anything else, try treating it as an exact title.
+            looks_like_hash = len(doc_id) in (32, 64) and all(c in "0123456789abcdef" for c in doc_id)
             if not looks_like_hash:
                 ids = t3.find_ids_by_title(col_name, doc_id)
                 if len(ids) == 1:
@@ -3221,7 +3222,7 @@ def store_list(
         lines: list[str] = [f"{col_name}  (showing {offset + 1}-{offset + len(page)} of {total})"]
         from datetime import datetime, timedelta  # noqa: PLC0415 — stdlib deferred to call site (datetime)
         for e in page:
-            doc_id = e.get("id", "")[:32]
+            doc_id = e.get("id", "")  # RDR-180: full id — the list->get handle must round-trip
             title = (e.get("title") or "")[:40]
             tags = e.get("tags") or ""
             ttl_days = e.get("ttl_days", 0)
@@ -3279,10 +3280,9 @@ def _store_list_docs(t3, col_name: str, total: int) -> str:
     # normalize() so the read always returned empty. Removed in nexus-59j0.
     lines = [f"{col_name}  ({len(docs)} documents, {total} chunks)"]
     for i, (h, d) in enumerate(docs, 1):
-        # 32-char content-hash (chunk_text_hash[:32], RDR-108 D1) is the
-        # doc_id that store_get accepts. Surfaced here so the list -> get
-        # flow has a usable handle.
-        doc_id = (d.get("id") or h)[:32]
+        # The full content-hash (RDR-180) is the doc_id that store_get
+        # accepts. Surfaced whole so the list -> get flow round-trips.
+        doc_id = d.get("id") or h
         title = (d.get("title") or "untitled")[:50]
         chunks = chunks_by_hash.get(h, "?")
         indexed = (d.get("indexed_at") or "")[:10]

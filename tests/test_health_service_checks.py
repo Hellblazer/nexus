@@ -686,6 +686,7 @@ _ALL_TENANT_TABLES = [
     "nexus.catalog_collections",
     "nexus.catalog_document_chunks",
     "nexus.catalog_documents",
+    "nexus.chash_alias",
     "nexus.catalog_links",
     "nexus.catalog_meta",
     "nexus.catalog_owners",
@@ -1161,6 +1162,7 @@ class TestChashProbeViewFallback:
         creds = _make_creds_file(tmp_path)
         results = _check_migration_state(
             creds_path=creds,
+            psql_bin=Path("/fake/psql"),  # hermetic: never ambient discovery
             psql_runner=_psql_runner_ok(160),
             diag_runner=runner,
         )
@@ -1184,6 +1186,7 @@ class TestChashProbeViewFallback:
         creds = _make_creds_file(tmp_path)
         results = _check_migration_state(
             creds_path=creds,
+            psql_bin=Path("/fake/psql"),  # hermetic: never ambient discovery
             psql_runner=_psql_runner_ok(160),
             diag_runner=runner,
         )

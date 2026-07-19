@@ -111,13 +111,47 @@ def diag_conformance_view_ddl() -> str:
     premature 64-hex text write counts as poison today, and a leftover
     16-byte legacy value counts as poison after the BYTEA cutover. The
     32-vs-64 units ambiguity (hex chars vs bytes) cannot recur in this
-    predicate by construction.
+    predicate for DIGEST-SHAPED values (always ASCII hex, bytes==chars).
+    Known asymmetry (reviewer-180-foundation, accepted): a corrupt value
+    whose multi-byte UTF-8 chars happen to sum to exactly 32 octets with
+    length()<32 would have been flagged under the old spelling and passes
+    under this one — width conformance is a byte property here, and the
+    upgrade-crash-loop risk this gate exists for (VALIDATE of the byte
+    CHECKs) tracks octets, not chars. Deliberately NO hex-charset leg:
+    ETL-era non-hex 32-char ids are contract-legal pre-rekey and must not
+    fire the install gate.
+
+    DEBT LEGS ARE ANTI-JOINS (RDR-180 .6 amendment 1): the debt columns
+    stay TEXT (mixed identity space — chunk chashes AND memory-note titles
+    in ``topic_assignments.doc_id``), so a width predicate mismeasures them
+    across eras (64-hex text = 64 octets; titles always flagged). The
+    honest, era-independent debt definition is SEMANTIC: a hex-shaped
+    reference that misses its chunk-table join. Titles and other non-hex
+    identities are excluded by the hex guard — they are not chash debt.
+    NOTE: the debt legs decode() against the bytea chunk keys, so this view
+    only CREATEs against a post-rdr180 (bytea) engine schema — on an older
+    text-era store the CREATE fails and provisioning's best-effort catch
+    degrades the probe to legacy statements (the converged-pair floor makes
+    that window transient).
     """
-    union = "\nUNION ALL\n".join(
+    poison_legs = [
         f"SELECT '{t.table}' AS table_name, count(*) AS non_conformant "
         f"FROM {t.table} WHERE octet_length({t.column}) <> 32"
-        for t in CHASH_BEARING_TABLES
+        for t in POISON_CHASH_TABLES
+    ]
+    chunk_anti_join = " AND ".join(
+        f"NOT EXISTS (SELECT 1 FROM nexus.chunks_{dim} c "
+        f"WHERE c.chash = decode(t.{{col}}, 'hex'))"
+        for dim in (384, 768, 1024)
     )
+    debt_legs = [
+        f"SELECT '{t.table}' AS table_name, count(*) AS non_conformant "
+        f"FROM {t.table} t "
+        f"WHERE t.{t.column} ~ '^[0-9a-f]+$' AND length(t.{t.column}) % 2 = 0 "
+        f"AND " + chunk_anti_join.format(col=t.column)
+        for t in DEBT_CHASH_TABLES
+    ]
+    union = "\nUNION ALL\n".join(poison_legs + debt_legs)
     return f"CREATE OR REPLACE VIEW {DIAG_CONFORMANCE_VIEW} AS\n{union}"
 
 

@@ -862,11 +862,11 @@ class T3Database:
         from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
 
         # MCP-stored docs are single-chunk: chunk_text == content, so the
-        # natural ID (chunk_text_hash[:32], per RDR-108 D1 / nexus-kmb6)
-        # equals content_hash[:32]. Identical content under any title in
+        # natural ID (the FULL chunk_text_hash, RDR-180 / nexus-jxizy.3)
+        # equals content_hash. Identical content under any title in
         # this collection collapses to one T3 record by design.
         content_hash = hashlib.sha256(content.encode()).hexdigest()
-        doc_id = content_hash[:32]
+        doc_id = content_hash
         now_iso = datetime.now(UTC).isoformat()
 
         # Determine whether this collection uses CCE.  When a voyage_api_key
@@ -1458,7 +1458,7 @@ class T3Database:
         Resolves via the catalog's ``document_chunks`` manifest:
         ``Catalog.get_chunk_chashes(doc_id)`` returns the ordered chashes
         that compose the document; each chunk's natural ID is
-        ``chash[:32]`` per RDR-108 D1. ``col.get(ids=...)`` filters the
+        the full chash hex (RDR-180). ``col.get(ids=...)`` filters the
         list to chunks actually present in T3 (so a stale manifest entry
         for a since-deleted chunk does not surface). Returns empty list
         if the collection does not exist or the manifest has no rows.
@@ -1474,7 +1474,7 @@ class T3Database:
         chashes = catalog.get_chunk_chashes(doc_id)
         if not chashes:
             return []
-        candidate_ids = [c[:32] for c in chashes]
+        candidate_ids = list(chashes)  # RDR-180: the full chash IS the id
         # ChromaDB ``get(ids=...)`` returns only ids actually present in
         # the collection. Page in MAX_RECORDS_PER_WRITE batches so large
         # documents stay within the per-request quota.

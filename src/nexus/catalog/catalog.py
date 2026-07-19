@@ -1839,7 +1839,7 @@ class Catalog:
         return self._writes.docs_for_chashes(chashes)
 
     def chashes_for_collection(self, physical_collection: str) -> set[str]:
-        """Return chunk natural IDs (chash[:32]) referenced by the manifest
+        """Return chunk natural IDs (the full chash, RDR-180) referenced by the manifest
         for documents in ``physical_collection`` (RDR-108 Phase 4 / nexus-dyxe).
         Used by GC to identify orphan T3 chunks."""
         return self._writes.chashes_for_collection(physical_collection)

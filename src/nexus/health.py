@@ -1697,6 +1697,7 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     "nexus.catalog_links",
     "nexus.catalog_meta",
     "nexus.catalog_owners",
+    "nexus.chash_alias",
     "nexus.chash_index",
     "nexus.chash_remap",
     "nexus.claude_assisted_remediation_consents",

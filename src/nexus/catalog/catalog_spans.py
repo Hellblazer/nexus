@@ -347,14 +347,14 @@ def resolve_chash_globally(
                 span_res = None
             if span_res is None:
                 continue
-            # RDR-108 Phase 4b / nexus-kosc: T3 chunk natural ID equals
-            # ``hex_chash[:32]`` (RDR-108 D1). Derive doc_id directly
-            # from the resolved chash rather than reading the
-            # ``chunk_chroma_id`` column from chash_index (the column
-            # is dropped in nexus-mmf5).
+            # RDR-180 / nexus-jxizy.3: the T3 chunk natural ID IS the
+            # full chash (the RDR-108 [:32] derivation is retired).
+            # Derive doc_id directly from the resolved chash rather than
+            # reading the ``chunk_chroma_id`` column from chash_index
+            # (the column is dropped in nexus-mmf5).
             return _build_ref(
                 coll=row["collection"],
-                doc_id=hex_chash[:32],
+                doc_id=hex_chash,
                 span_result=span_res,
             )
 
@@ -455,7 +455,7 @@ def resolve_span_text_for_entry(
                     None,
                 )
                 if row is not None and row.chash:
-                    natural_id = row.chash[:32]
+                    natural_id = row.chash  # RDR-180: full digest
                     fetched = col.get(
                         ids=[natural_id],
                         include=["documents"],

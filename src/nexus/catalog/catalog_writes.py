@@ -910,7 +910,7 @@ class _WriteOps:
                             # downstream joins (chashes_for_collection,
                             # docs_for_chashes) carried a substr(chash, 1,
                             # 32) workaround to bridge the mismatch.
-                            (c["chash"] or "")[:32],
+                            (c["chash"] or ""),  # RDR-180: store the full chash
                             c.get("chunk_index"),
                             c.get("line_start"),
                             c.get("line_end"),
@@ -1019,7 +1019,7 @@ class _WriteOps:
                                 # nexus-gaa3: chash stored as 32-char
                                 # for uniformity with write_manifest /
                                 # append_manifest_chunks.
-                                (c["chash"] or "")[:32],
+                                (c["chash"] or ""),  # RDR-180: store the full chash
                                 c.get("chunk_index"),
                                 c.get("line_start"),
                                 c.get("line_end"),
@@ -1095,7 +1095,7 @@ class _WriteOps:
                             c["position"],
                             # nexus-gaa3: normalize to 32-char; see
                             # write_manifest above for rationale.
-                            (c["chash"] or "")[:32],
+                            (c["chash"] or ""),  # RDR-180: store the full chash
                             c.get("chunk_index"),
                             c.get("line_start"),
                             c.get("line_end"),

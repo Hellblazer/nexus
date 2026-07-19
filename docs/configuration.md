@@ -223,11 +223,11 @@ run:
    UNION ALL
    SELECT 'nexus.catalog_document_chunks' AS table_name, count(*) AS non_conformant FROM nexus.catalog_document_chunks WHERE octet_length(chash) <> 32
    UNION ALL
-   SELECT 'nexus.topic_assignments' AS table_name, count(*) AS non_conformant FROM nexus.topic_assignments WHERE octet_length(doc_id) <> 32
+   SELECT 'nexus.topic_assignments' AS table_name, count(*) AS non_conformant FROM nexus.topic_assignments t WHERE t.doc_id ~ '^[0-9a-f]+$' AND length(t.doc_id) % 2 = 0 AND NOT EXISTS (SELECT 1 FROM nexus.chunks_384 c WHERE c.chash = decode(t.doc_id, 'hex')) AND NOT EXISTS (SELECT 1 FROM nexus.chunks_768 c WHERE c.chash = decode(t.doc_id, 'hex')) AND NOT EXISTS (SELECT 1 FROM nexus.chunks_1024 c WHERE c.chash = decode(t.doc_id, 'hex'))
    UNION ALL
-   SELECT 'nexus.frecency' AS table_name, count(*) AS non_conformant FROM nexus.frecency WHERE octet_length(chunk_id) <> 32
+   SELECT 'nexus.frecency' AS table_name, count(*) AS non_conformant FROM nexus.frecency t WHERE t.chunk_id ~ '^[0-9a-f]+$' AND length(t.chunk_id) % 2 = 0 AND NOT EXISTS (SELECT 1 FROM nexus.chunks_384 c WHERE c.chash = decode(t.chunk_id, 'hex')) AND NOT EXISTS (SELECT 1 FROM nexus.chunks_768 c WHERE c.chash = decode(t.chunk_id, 'hex')) AND NOT EXISTS (SELECT 1 FROM nexus.chunks_1024 c WHERE c.chash = decode(t.chunk_id, 'hex'))
    UNION ALL
-   SELECT 'nexus.relevance_log' AS table_name, count(*) AS non_conformant FROM nexus.relevance_log WHERE octet_length(chunk_id) <> 32;
+   SELECT 'nexus.relevance_log' AS table_name, count(*) AS non_conformant FROM nexus.relevance_log t WHERE t.chunk_id ~ '^[0-9a-f]+$' AND length(t.chunk_id) % 2 = 0 AND NOT EXISTS (SELECT 1 FROM nexus.chunks_384 c WHERE c.chash = decode(t.chunk_id, 'hex')) AND NOT EXISTS (SELECT 1 FROM nexus.chunks_768 c WHERE c.chash = decode(t.chunk_id, 'hex')) AND NOT EXISTS (SELECT 1 FROM nexus.chunks_1024 c WHERE c.chash = decode(t.chunk_id, 'hex'));
    GRANT SELECT ON nexus.diag_chash_conformance TO nexus_diag;
    ```
 

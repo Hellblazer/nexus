@@ -39,6 +39,10 @@ from nexus.upgrade_ladder.protocol import Rung
 RUNG_T2_SCHEMA = "t2-schema"
 #: Substrate ETL rung (Chroma→pgvector with wire re-id; lands in P2).
 RUNG_SUBSTRATE_ETL = "substrate-etl"
+#: RDR-180 chash rekey rung (nexus-jxizy.6): the freeze-gated full-digest
+#: cutover — runs AFTER the substrate ETL (its input is the pgvector store)
+#: and after the ENGINE precondition (needs the bytea schema + /v1/remap/rekey).
+RUNG_CHASH_REKEY = "chash-rekey"
 
 #: Stateless preconditions — NOT rungs (see module docstring).
 PRECONDITION_PACKAGE = "precondition:package"
@@ -52,14 +56,16 @@ ALL_RUNGS = "*"
 #: here (with their edges in :data:`HARD_EDGES`) — the order is validated
 #: against the edges at import/construction time, so an inconsistent insert
 #: fails immediately rather than walking in a wrong order.
-RUNG_ORDER: tuple[str, ...] = (RUNG_T2_SCHEMA, RUNG_SUBSTRATE_ETL)
+RUNG_ORDER: tuple[str, ...] = (RUNG_T2_SCHEMA, RUNG_SUBSTRATE_ETL, RUNG_CHASH_REKEY)
 
 #: RQ2 hard edges as ``(before, after)`` pairs; ``after == ALL_RUNGS`` means
 #: the source precedes every rung. Edges 4–5 are in CO_RESIDENT_AXES.
 HARD_EDGES: tuple[tuple[str, str], ...] = (
     (PRECONDITION_PACKAGE, ALL_RUNGS),
     (PRECONDITION_ENGINE, RUNG_SUBSTRATE_ETL),
+    (PRECONDITION_ENGINE, RUNG_CHASH_REKEY),
     (RUNG_T2_SCHEMA, ALL_RUNGS),
+    (RUNG_SUBSTRATE_ETL, RUNG_CHASH_REKEY),
 )
 
 #: RQ2 edges 4–5: axes that live INSIDE a rung as in-flight transforms.
@@ -192,12 +198,14 @@ def default_registry(
     live install's ``memory.db``; ``None`` uses the production config-dir
     default (correct for ``nx doctor``'s read-only detect sweep).
     """
+    from nexus.upgrade_ladder.rungs.chash_rekey import default_chash_rekey_rung  # noqa: PLC0415 — deferred to avoid import cycle
     from nexus.upgrade_ladder.rungs.substrate_etl import SubstrateEtlRung  # noqa: PLC0415 — deferred to avoid import cycle
     from nexus.upgrade_ladder.rungs.t2_schema import T2SchemaRung  # noqa: PLC0415 — deferred to avoid import cycle
 
     kwargs: dict[str, object] = {"apply_attempted": t2_apply_attempted}
     if db_path_fn is not None:
         kwargs["db_path_fn"] = db_path_fn
-    # RQ2 hard edge, live: t2-schema precedes substrate-etl (P4.0 nexus-x3z00
-    # assembled the rung; the registry's own validator enforces the order).
-    return LadderRegistry((T2SchemaRung(**kwargs), SubstrateEtlRung()))  # type: ignore[arg-type]
+    # RQ2 hard edge, live: t2-schema precedes substrate-etl; the RDR-180
+    # chash-rekey rung walks LAST (its input is the migrated pgvector store
+    # and the cohort engine — the registry validator enforces the order).
+    return LadderRegistry((T2SchemaRung(**kwargs), SubstrateEtlRung(), default_chash_rekey_rung()))  # type: ignore[arg-type]

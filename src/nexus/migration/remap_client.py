@@ -119,6 +119,14 @@ class HttpRemapStore(RefreshableHttpStoreMixin):
 
     # ── leg operations ──────────────────────────────────────────────────────
 
+    def rekey(self, orphan_policy: str = "drop") -> dict:
+        """RDR-180 Item6 (nexus-jxizy.6): drive the per-tenant full-digest
+        rekey. Idempotent engine-side (digest-mismatch predicate); returns
+        the disposition + per-table counts envelope. A legacy-id collision
+        (one old id, two digests) surfaces as the transport's HTTP-409
+        error — never resolved silently."""
+        return dict(self._post("/v1/remap/rekey", {"orphan_policy": orphan_policy}))
+
     def clear_leg(self, source_collection: str, target_collection: str) -> int:
         """Clear ONE leg's rows — the (source, target) PAIR is required by
         the endpoint (a wide clear would delete a co-resident sibling leg's

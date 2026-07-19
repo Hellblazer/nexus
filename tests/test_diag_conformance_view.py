@@ -56,9 +56,16 @@ def test_the_authoritative_set_is_column_aware_and_complete():
 
 def test_view_ddl_covers_exactly_the_chash_tables():
     ddl = diag_conformance_view_ddl()
-    for t in CHASH_BEARING_TABLES:
+    for t in POISON_CHASH_TABLES:
         assert f"'{t.table}' AS table_name" in ddl
         assert f"FROM {t.table} WHERE octet_length({t.column}) <> 32" in ddl
+    # Debt legs are SEMANTIC anti-joins (RDR-180 .6 amendment 1): hex-shaped
+    # references that miss every chunk-table join; titles/non-hex identities
+    # are excluded by the hex guard (not chash debt).
+    for t in DEBT_CHASH_TABLES:
+        assert f"'{t.table}' AS table_name" in ddl
+        assert f"t.{t.column} ~ '^[0-9a-f]+$'" in ddl
+    assert ddl.count("NOT EXISTS") == 3 * len(DEBT_CHASH_TABLES)
     # One UNION arm per table, no extras.
     assert ddl.count("UNION ALL") == len(CHASH_BEARING_TABLES) - 1
 
@@ -69,12 +76,13 @@ def test_predicate_is_era_safe_octet_length_never_length():
     BYTEA post-flip == 32 octets), so ONE spelling survives the cutover.
     Bare length() (chars on text, bytes on bytea) must never come back —
     it is the 32-vs-64 units ambiguity this RDR exists to kill."""
-    for stmt in (
-        diag_conformance_view_ddl(),
-        *legacy_chash_conformance_statements(),
-    ):
+    for stmt in legacy_chash_conformance_statements():
         assert "octet_length(" in stmt
         assert not re.search(r"(?<!octet_)length\(", stmt), stmt
+    # The view: poison legs are octet_length; debt legs use length() only in
+    # the even-hex guard (chars of a hex TEXT column — deliberate).
+    ddl = diag_conformance_view_ddl()
+    assert "octet_length(" in ddl
 
 
 def test_gate_statements_are_poison_only_against_the_view():
@@ -121,7 +129,10 @@ def test_provision_embeds_the_generator_not_a_copy():
     would drift from CHASH_BEARING_TABLES."""
     src = (_REPO / "src/nexus/db/pg_provision.py").read_text()
     assert src.count("def _provision_diag_conformance_view") == 1
-    assert src.count("_provision_diag_conformance_view(bins, port, os_user)") == 2
+    # THREE call sites: _create_roles, _backfill_diag_role, and the RDR-180
+    # post-rekey re-provision helper (rdr180-001 drops the view; the rung
+    # recreates it).
+    assert src.count("_provision_diag_conformance_view(bins, port, os_user)") == 3
     assert "diag_conformance_view_ddl" in src
     # The existence guard derives from the constant, never hand-typed, and
     # requires EVERY chash table (the view references all of them).

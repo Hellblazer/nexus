@@ -46,7 +46,7 @@ def single_chunk_manifest_metadata(content: str) -> tuple[str, list[dict]]:
     hit the same ``metadatas`` guard.
     """
     content_hash = hashlib.sha256(content.encode()).hexdigest()
-    doc_id = content_hash[:32]
+    doc_id = content_hash  # RDR-180: the full digest IS the natural id
     metadata = {
         "chunk_text_hash": content_hash,
         "chunk_start_char": 0,

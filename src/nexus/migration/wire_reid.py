@@ -53,13 +53,13 @@ import structlog
 
 _log = structlog.get_logger(__name__)
 
-_HEX32 = 32
+_HEX_LEN = 64  # RDR-180: the full digest IS the id (was 32 pre-flip)
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS chash_remap (
     tenant_id         TEXT NOT NULL DEFAULT '',
     source_collection TEXT NOT NULL,
     old_id            TEXT NOT NULL,
-    new_chash         TEXT NOT NULL CHECK (length(new_chash) = 32),
+    new_chash         TEXT NOT NULL CHECK (length(new_chash) IN (32, 64)),
     target_collection TEXT NOT NULL,
     created_at        TEXT NOT NULL,
     provenance        TEXT NOT NULL,
@@ -96,9 +96,9 @@ class RemapEntry:
 def derive_wire_chash(chunk: dict[str, Any]) -> str:
     """The correct content address for *chunk*, derived on the wire.
 
-    Primary: ``sha256(document)[:32]`` over the RAW carried text — the
-    ``chunk_identity.chunk_id`` / ``chunk_text_hash[:32]`` ecosystem
-    convention. Fallback: recorded ``chunk_text_hash[:32]`` metadata
+    Primary: the FULL ``sha256(document)`` hexdigest over the RAW carried
+    text — the ``chunk_identity.chunk_id`` convention (RDR-180 full
+    digest). Fallback: recorded ``chunk_text_hash`` metadata
     (reference-only rows carry no document). A recorded hash that
     disagrees with the carried text is tolerated with a warning — the
     text wins.
@@ -118,18 +118,28 @@ def derive_wire_chash(chunk: dict[str, Any]) -> str:
     meta = chunk.get("metadata") or {}
     recorded = meta.get("chunk_text_hash") or ""
     if document:
-        derived = hashlib.sha256(document.encode("utf-8")).hexdigest()[:_HEX32]
-        if recorded and recorded[:_HEX32] != derived:
+        derived = hashlib.sha256(document.encode("utf-8")).hexdigest()
+        if recorded and recorded[:_HEX_LEN] != derived:
             _log.warning(
                 "wire_reid_metadata_hash_mismatch",
                 chunk_id=chunk.get("id"),
-                recorded=recorded[:_HEX32],
+                recorded=recorded[:_HEX_LEN],
                 derived=derived,
-                note="carried text wins — target keys on sha256(stored_text)[:32]",
+                note="carried text wins — target keys on the full sha256(stored_text)",
             )
         return derived
     if recorded:
-        return recorded[:_HEX32]
+        if len(recorded) < _HEX_LEN:
+            # RDR-180: a truncated recorded hash cannot yield the canonical
+            # full digest — refusing to emit a half-digest id (GH #1390:
+            # correct addresses only; pre-flip metadata always carried the
+            # full 64-char chunk_text_hash, so this is a relic/corruption).
+            raise WireReidError(
+                f"cannot derive full chash for chunk {chunk.get('id')!r}: no "
+                f"document text and recorded chunk_text_hash is only "
+                f"{len(recorded)} chars (need {_HEX_LEN})"
+            )
+        return recorded[:_HEX_LEN]
     raise WireReidError(
         f"cannot derive chash for chunk {chunk.get('id')!r}: no document text "
         "and no recorded chunk_text_hash — refusing to guess (GH #1390: "

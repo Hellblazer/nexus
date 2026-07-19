@@ -518,7 +518,7 @@ class TestServiceModeExport:
         silently diverge between backends."""
         from unittest.mock import patch
         collection_name = "code__svc__voyage-code-3__v1"
-        ids = [f"{i:032x}" for i in range(2)]
+        ids = [f"{i:064x}" for i in range(2)]  # RDR-180: canonical 64-hex ids
         documents = [f"document {i}" for i in range(2)]
         metadatas = [{"source_path": f"/repo/file_{i}.py"} for i in range(2)]
         rng = np.random.default_rng(seed=11)
@@ -997,9 +997,9 @@ class TestChashRehash:
         got = col.get(include=["documents", "metadatas"])
         assert len(got["ids"]) == 1
         new_id = got["ids"][0]
-        expected_id = hashlib.sha256(doc_text.encode()).hexdigest()[:32]
+        expected_id = hashlib.sha256(doc_text.encode()).hexdigest()
         assert new_id == expected_id
-        assert len(new_id) == 32
+        assert len(new_id) == 64
         assert new_id != legacy_id
         assert got["documents"][0] == doc_text
         # chunk_text_hash metadata stays consistent with the new id
@@ -1024,7 +1024,7 @@ class TestChashRehash:
 
         col = ephemeral_db._client_for("code__vec_legacy").get_collection("code__vec_legacy")
         got = col.get(include=[])
-        expected_id = hashlib.sha256(legacy_id.encode()).hexdigest()[:32]
+        expected_id = hashlib.sha256(legacy_id.encode()).hexdigest()
         assert got["ids"] == [expected_id]
 
     def test_taxonomy_collections_ids_not_rehashed(
@@ -1053,11 +1053,12 @@ class TestChashRehash:
     def test_conformant_32char_id_left_unchanged(
         self, ephemeral_db: T3Database, tmp_path: Path,
     ):
-        """An id that's already 32 chars (the common case, post-RDR-108
-        exports) is never rehashed -- it round-trips verbatim."""
+        """An id that's already canonical (RDR-180: the full 64-hex
+        digest) is never rehashed -- it round-trips verbatim. A 32-char
+        pre-RDR-180 id now counts as non-conformant and rehashes."""
         out = tmp_path / "conformant.nxexp"
         doc_text = "already conformant chunk"
-        conformant_id = hashlib.sha256(doc_text.encode()).hexdigest()[:32]
+        conformant_id = hashlib.sha256(doc_text.encode()).hexdigest()
         self._write_legacy_nxexp(out, "code__conformant", [
             {"id": conformant_id, "document": doc_text, "metadata": {}},
         ])

@@ -289,7 +289,7 @@ def _gather_chroma_chunks_by_field(
     use_manifest_ids = bool(chash_position) and identity_field == "doc_id"
     try:
         if use_manifest_ids:
-            ids = [chash[:32] for chash in chash_position]
+            ids = list(chash_position)  # RDR-180: the full chash IS the id
             for batch_start in range(0, len(ids), page_limit):
                 page = coll.get(
                     ids=ids[batch_start : batch_start + page_limit],

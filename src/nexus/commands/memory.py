@@ -315,7 +315,7 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
         # identity — same regression class as nexus-zq79 / nexus-lf8f.
         import hashlib  # noqa: PLC0415 — deliberate function-local import: only needed on promote path
         from nexus.catalog.store_hook import catalog_store_hook  # noqa: PLC0415 — deliberate function-local import: catalog dep deferred, branch-local
-        chunk_chroma_id = hashlib.sha256(entry["content"].encode()).hexdigest()[:32]
+        chunk_chroma_id = hashlib.sha256(entry["content"].encode()).hexdigest()  # RDR-180: full digest
         catalog_doc_id = catalog_store_hook(
             title=entry["title"],
             doc_id=chunk_chroma_id,
