@@ -41,7 +41,10 @@ public final class DimTables {
                 t,
                 t.field("tenant_id", String.class),
                 t.field("collection", String.class),
-                t.field("chash", String.class),
+                // RDR-180: bytea column carried as hex in Java — the
+                // ChashHex converted type binds/fetches through the codec,
+                // so every repository site stays hex-string-shaped.
+                dev.nexus.service.db.ChashHex.hex(t, "chash"),
                 t.field("chunk_text", String.class),
                 (Field<Vector>) t.field("embedding"),
                 t.field("metadata", JSONB.class));

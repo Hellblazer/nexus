@@ -4,6 +4,7 @@ package dev.nexus.service.vectors;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.nexus.service.db.ChashHex;
 import dev.nexus.service.db.CollectionRegistry;
 import dev.nexus.service.db.DeadlockRetry;
 import dev.nexus.service.db.PgSession;
@@ -385,15 +386,15 @@ public final class PgVectorRepository {
                                         List<Map<String, Object>> metadatas) {
         // nexus-e0hd2 review F2: this is the server-to-server ingest path
         // (MigrationHandler /ingest-cloud) — ids arrive from an EXTERNAL
-        // ChromaCloud response with no HTTP-boundary validation. Validate
-        // here so a malformed id fails loud with its index BEFORE the batch
-        // transaction, not reason-poor at the chunks CHECK. Length-only
-        // (the vector-id contract); NO truncation — unlike chash_index,
-        // 64-char ids on THIS path have always hard-failed, and the
-        // completed production migration proves conformant sources.
+        // source with no HTTP-boundary validation. Validate here so a
+        // malformed id fails loud with its index BEFORE the batch
+        // transaction, not reason-poor at the chunks CHECK. RDR-180
+        // (nexus-jxizy.7): ONE strict tier — the full-digest 64-hex is the
+        // only accepted id shape (the byte[16]-era length-only tolerance is
+        // retired; PgVectorServingContractTest pins the rejection).
         if (ids != null) {
             for (int i = 0; i < ids.size(); i++) {
-                dev.nexus.service.db.Chash.requireLength32(ids.get(i), "ids[" + i + "]");
+                dev.nexus.service.db.Chash.requireCanonical(ids.get(i), "ids[" + i + "]");
             }
         }
         if (embeddings == null || embeddings.size() != ids.size()) {
@@ -2360,7 +2361,7 @@ public final class PgVectorRepository {
 
             // 2. Manifest rows in position order.
             var manifest = ctx.select(CATALOG_DOCUMENT_CHUNKS.POSITION,
-                                      CATALOG_DOCUMENT_CHUNKS.CHASH,
+                                      ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH),
                                       CATALOG_DOCUMENT_CHUNKS.COLLECTION)
                               .from(CATALOG_DOCUMENT_CHUNKS)
                               .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(tumbler))
@@ -2804,13 +2805,13 @@ public final class PgVectorRepository {
             // Note: last-writer-wins when a chash appears in multiple catalog_document_chunks
             // rows (shared chunk text across documents) — non-determinism accepted for now.
             var result = tenantScope.withTenant(tenant, ctx ->
-                ctx.select(CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENTS.SOURCE_URI)
+                ctx.select(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH), CATALOG_DOCUMENTS.SOURCE_URI)
                    .from(CATALOG_DOCUMENT_CHUNKS)
                    .join(CATALOG_DOCUMENTS)
                    .on(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)
                        .and(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)))
                    .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
-                       .and(CATALOG_DOCUMENT_CHUNKS.CHASH.in(batch)))
+                       .and(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH).in(batch)))
                    .fetch());
 
             for (var rec : result) {

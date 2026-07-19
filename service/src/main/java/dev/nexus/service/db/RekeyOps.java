@@ -1,0 +1,291 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+package dev.nexus.service.db;
+
+import org.jooq.DSLContext;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * RDR-180 Item6, engine half (nexus-jxizy.6): the per-tenant full-digest
+ * rekey. Executed INSIDE the freeze window by the client rung via
+ * {@code POST /v1/remap/rekey}; runs as nexus_svc under
+ * {@link TenantScope#withTenant} (per-tenant RLS — the reason this is an
+ * endpoint and not Liquibase DML, which silently sees zero rows under
+ * FORCE RLS as the non-BYPASSRLS owner).
+ *
+ * <p>PREDICATE (design amendment 2, T2 nexus_rdr/180-engine-cohort-design-
+ * amendments): a row needs rekeying when {@code chash IS DISTINCT FROM
+ * sha256(chunk_text)} — digest-mismatch, NOT width. A width predicate
+ * would miss 32-ASCII-char legacy ids that converted to exactly 32 bytes.
+ * Idempotent by construction: a second run finds every content row equal
+ * to its digest and no-ops.
+ *
+ * <p>ORDER, one transaction per tenant (single atomic cutover — RDR-180
+ * Failure Modes: no dual-width window within a tenant):
+ * <ol>
+ *   <li>Conflict pre-check: one recovered old_ref mapping to two distinct
+ *       digests fails LOUD (realized 128-bit collision / corpus
+ *       corruption — mirrors the client build_content_map refusal).</li>
+ *   <li>chash_alias build: (old_ref per the reversibility lemma,
+ *       old_bytes, new digest) for every mismatched content row.</li>
+ *   <li>Item8 disposition for empty-text rows: reference-only rows
+ *       resolve through the alias built from content siblings; orphans
+ *       get the per-run policy (drop cascades their manifest/chash_index
+ *       pointers in the same transaction; synthesize mints the
+ *       deterministic surrogate and stamps
+ *       {@code metadata.chash_origin='synthetic'}).</li>
+ *   <li>Two-phase chunk rekey per dim (RDR-185 PK-collision-under-
+ *       collapse): keep one row per (collection, digest) — preferring a
+ *       row already AT the digest key — delete the rest (all aliased),
+ *       then UPDATE survivors.</li>
+ *   <li>Cascade via the alias: manifest (plain — chash not in its PK),
+ *       chash_index (two-phase on its (tenant, chash, collection) PK),
+ *       topic_assignments (TEXT doc_id via old_ref match, two-phase),
+ *       frecency (GREATEST-merge on collapse), relevance_log (plain).</li>
+ * </ol>
+ * VALIDATE of the octet CHECKs is deliberately NOT here: the client rung
+ * runs it via the local admin connection after count-verify (table owner,
+ * RLS-exempt scan).
+ */
+public final class RekeyOps {
+
+    private static final Logger log = LoggerFactory.getLogger(RekeyOps.class);
+
+    private static final List<String> CHUNK_TABLES =
+        List.of("nexus.chunks_384", "nexus.chunks_768", "nexus.chunks_1024");
+
+    /** Reversibility-lemma rendering of a converted key's original string. */
+    private static final String OLD_REF =
+        "CASE WHEN octet_length(%1$s) = 16 THEN encode(%1$s, 'hex') "
+        + "ELSE convert_from(%1$s, 'UTF8') END";
+
+    private static final String DIGEST = "sha256(convert_to(chunk_text, 'UTF8'))";
+
+    private final TenantScope tenantScope;
+
+    public RekeyOps(TenantScope tenantScope) {
+        this.tenantScope = tenantScope;
+    }
+
+    /** Thrown when one legacy id maps to two distinct content digests. */
+    public static final class RekeyConflictException extends RuntimeException {
+        public RekeyConflictException(String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * Run the full rekey for *tenant*. {@code synthesizeOrphans} selects the
+     * Item8 policy for orphaned empty-text rows (default caller: drop).
+     * Returns the disposition + per-table counts (the auditable envelope).
+     */
+    public Map<String, Object> rekey(String tenant, boolean synthesizeOrphans) {
+        Map<String, Object> out = tenantScope.withTenant(tenant, ctx -> {
+            Map<String, Object> counts = new LinkedHashMap<>();
+
+            // (1) conflict pre-check across all dims: same old_ref, two digests.
+            Integer conflicts = ctx.fetchOne(
+                "SELECT count(*) FROM ("
+                + "  SELECT old_ref FROM ("
+                + unionAllContentRows()
+                + "  ) u GROUP BY old_ref HAVING count(DISTINCT new_chash) > 1"
+                + ") q").get(0, Integer.class);
+            if (conflicts != null && conflicts > 0) {
+                throw new RekeyConflictException(
+                    conflicts + " legacy id(s) map to more than one content digest "
+                    + "(realized 128-bit collision or corpus corruption) — refusing "
+                    + "to pick silently (GH #1390: correct addresses only)");
+            }
+
+            // (2) alias facts for every mismatched CONTENT row (all dims).
+            int aliased = ctx.execute(
+                "INSERT INTO nexus.chash_alias (tenant_id, old_ref, old_bytes, new_chash, source) "
+                + "SELECT current_setting('nexus.tenant', true), old_ref, old_bytes, new_chash, source "
+                + "FROM (" + unionAllContentRows() + ") u "
+                + "ON CONFLICT (tenant_id, old_ref) DO NOTHING");
+            counts.put("alias_rows", aliased);
+
+            // (3) Item8: empty-text rows. Reference-only rows resolve through
+            // the alias just built from content-bearing siblings; the rest are
+            // orphans under the per-run policy.
+            int refResolved = 0;
+            int orphansDropped = 0;
+            int orphansSynthesized = 0;
+            for (String t : CHUNK_TABLES) {
+                refResolved += ctx.execute(
+                    "UPDATE " + t + " c SET chash = a.new_chash "
+                    + "FROM nexus.chash_alias a "
+                    + "WHERE c.chunk_text = '' "
+                    + "  AND a.old_bytes = c.chash "
+                    + "  AND c.chash IS DISTINCT FROM a.new_chash "
+                    // two-phase guard: skip if the resolved key already exists
+                    // in this collection (shared-content collapse — the row is
+                    // a duplicate reference; delete instead below).
+                    + "  AND NOT EXISTS (SELECT 1 FROM " + t + " k "
+                    + "        WHERE k.collection = c.collection AND k.chash = a.new_chash)");
+                // duplicate reference rows whose resolved key already exists
+                ctx.execute(
+                    "DELETE FROM " + t + " c USING nexus.chash_alias a "
+                    + "WHERE c.chunk_text = '' AND a.old_bytes = c.chash "
+                    + "  AND EXISTS (SELECT 1 FROM " + t + " k "
+                    + "        WHERE k.collection = c.collection AND k.chash = a.new_chash)");
+                if (synthesizeOrphans) {
+                    orphansSynthesized += ctx.execute(
+                        "UPDATE " + t + " c SET "
+                        + "  chash = sha256(convert_to("
+                        + "    'nexus:synthetic-chash:v1|' || current_setting('nexus.tenant', true) "
+                        + "    || '|' || c.collection || '|' || " + String.format(OLD_REF, "c.chash")
+                        + "    , 'UTF8')), "
+                        + "  metadata = coalesce(c.metadata, '{}'::jsonb) "
+                        + "             || jsonb_build_object('chash_origin', 'synthetic') "
+                        + "WHERE c.chunk_text = '' "
+                        + "  AND NOT EXISTS (SELECT 1 FROM nexus.chash_alias a "
+                        + "        WHERE a.old_bytes = c.chash) "
+                        + "  AND octet_length(c.chash) <> 32");
+                } else {
+                    // drop: cascade the manifest + chash_index pointers FIRST
+                    // (same transaction — RDR-180 Failure Modes: dangling
+                    // manifest pointer), then the orphan rows.
+                    ctx.execute(
+                        "DELETE FROM nexus.catalog_document_chunks m USING " + t + " c "
+                        + "WHERE c.chunk_text = '' AND m.chash = c.chash "
+                        + "  AND NOT EXISTS (SELECT 1 FROM nexus.chash_alias a "
+                        + "        WHERE a.old_bytes = c.chash) "
+                        + "  AND octet_length(c.chash) <> 32");
+                    ctx.execute(
+                        "DELETE FROM nexus.chash_index i USING " + t + " c "
+                        + "WHERE c.chunk_text = '' AND i.chash = c.chash "
+                        + "  AND NOT EXISTS (SELECT 1 FROM nexus.chash_alias a "
+                        + "        WHERE a.old_bytes = c.chash) "
+                        + "  AND octet_length(c.chash) <> 32");
+                    orphansDropped += ctx.execute(
+                        "DELETE FROM " + t + " c "
+                        + "WHERE c.chunk_text = '' "
+                        + "  AND NOT EXISTS (SELECT 1 FROM nexus.chash_alias a "
+                        + "        WHERE a.old_bytes = c.chash) "
+                        + "  AND octet_length(c.chash) <> 32");
+                }
+            }
+            counts.put("reference_only_resolved", refResolved);
+            counts.put("orphans_dropped", orphansDropped);
+            counts.put("orphans_synthesized", orphansSynthesized);
+
+            // (4) two-phase content rekey per dim.
+            int collapsed = 0;
+            int rekeyed = 0;
+            for (String t : CHUNK_TABLES) {
+                // phase A: delete collapse-losers. Keeper per (collection,
+                // digest): a row already AT the digest key wins, else min ctid.
+                collapsed += ctx.execute(
+                    "DELETE FROM " + t + " c USING ("
+                    + "  SELECT collection, " + DIGEST + " AS d, "
+                    + "         (array_agg(ctid ORDER BY (chash = " + DIGEST + ") DESC, ctid))[1] AS keep "
+                    + "  FROM " + t + " WHERE chunk_text <> '' "
+                    + "  GROUP BY collection, " + DIGEST + " HAVING count(*) > 1"
+                    + ") k "
+                    + "WHERE c.collection = k.collection AND c.chunk_text <> '' "
+                    + "  AND " + DIGEST.replace("chunk_text", "c.chunk_text") + " = k.d "
+                    + "  AND c.ctid <> k.keep");
+                // phase B: rekey survivors whose key mismatches their digest.
+                rekeyed += ctx.execute(
+                    "UPDATE " + t + " c SET chash = " + DIGEST.replace("chunk_text", "c.chunk_text") + " "
+                    + "WHERE c.chunk_text <> '' "
+                    + "  AND c.chash IS DISTINCT FROM " + DIGEST.replace("chunk_text", "c.chunk_text"));
+            }
+            counts.put("collapsed_duplicates", collapsed);
+            counts.put("rehashed", rekeyed);
+
+            // (5) cascades via the alias map.
+            // manifest: chash not in its PK — plain rewrite.
+            counts.put("manifest_repointed", ctx.execute(
+                "UPDATE nexus.catalog_document_chunks m SET chash = a.new_chash "
+                + "FROM nexus.chash_alias a "
+                + "WHERE m.chash = a.old_bytes AND m.chash IS DISTINCT FROM a.new_chash"));
+            // chash_index: (tenant, chash, collection) PK — two-phase.
+            ctx.execute(
+                "DELETE FROM nexus.chash_index i USING nexus.chash_alias a "
+                + "WHERE i.chash = a.old_bytes "
+                + "  AND EXISTS (SELECT 1 FROM nexus.chash_index k "
+                + "        WHERE k.physical_collection = i.physical_collection "
+                + "          AND k.chash = a.new_chash)");
+            counts.put("chash_index_repointed", ctx.execute(
+                "UPDATE nexus.chash_index i SET chash = a.new_chash "
+                + "FROM nexus.chash_alias a "
+                + "WHERE i.chash = a.old_bytes AND i.chash IS DISTINCT FROM a.new_chash"));
+            // topic_assignments: TEXT doc_id matches old_ref; PK
+            // (tenant, doc_id, topic_id) — two-phase on collapse.
+            ctx.execute(
+                "DELETE FROM nexus.topic_assignments ta USING nexus.chash_alias a "
+                + "WHERE ta.doc_id = a.old_ref "
+                + "  AND EXISTS (SELECT 1 FROM nexus.topic_assignments k "
+                + "        WHERE k.topic_id = ta.topic_id "
+                + "          AND k.doc_id = encode(a.new_chash, 'hex'))");
+            counts.put("topic_assignments_repointed", ctx.execute(
+                "UPDATE nexus.topic_assignments ta SET doc_id = encode(a.new_chash, 'hex') "
+                + "FROM nexus.chash_alias a WHERE ta.doc_id = a.old_ref"));
+            // frecency: PK (tenant, chunk_id) — GREATEST-merge on collapse
+            // (the RDR-185 _FRECENCY_MERGE_SQL semantics, PG port).
+            ctx.execute(
+                "UPDATE nexus.frecency f SET "
+                + "  frecency_score = GREATEST(f.frecency_score, o.frecency_score), "
+                + "  miss_count     = GREATEST(f.miss_count,     o.miss_count), "
+                + "  last_hit_at    = GREATEST(f.last_hit_at,    o.last_hit_at), "
+                + "  embedded_at    = GREATEST(f.embedded_at,    o.embedded_at), "
+                + "  ttl_days       = GREATEST(f.ttl_days,       o.ttl_days) "
+                + "FROM nexus.frecency o, nexus.chash_alias a "
+                + "WHERE o.chunk_id = a.old_ref "
+                + "  AND f.chunk_id = encode(a.new_chash, 'hex')");
+            ctx.execute(
+                "DELETE FROM nexus.frecency f USING nexus.chash_alias a "
+                + "WHERE f.chunk_id = a.old_ref "
+                + "  AND EXISTS (SELECT 1 FROM nexus.frecency k "
+                + "        WHERE k.chunk_id = encode(a.new_chash, 'hex'))");
+            counts.put("frecency_repointed", ctx.execute(
+                "UPDATE nexus.frecency f SET chunk_id = encode(a.new_chash, 'hex') "
+                + "FROM nexus.chash_alias a WHERE f.chunk_id = a.old_ref"));
+            counts.put("relevance_log_repointed", ctx.execute(
+                "UPDATE nexus.relevance_log r SET chunk_id = encode(a.new_chash, 'hex') "
+                + "FROM nexus.chash_alias a WHERE r.chunk_id = a.old_ref"));
+
+            // (6) verification scans, same transaction: residual mismatched
+            // content rows and dangling pointers — MUST all be zero.
+            int residual = 0;
+            for (String t : CHUNK_TABLES) {
+                residual += ctx.fetchOne(
+                    "SELECT count(*) FROM " + t + " WHERE chunk_text <> '' "
+                    + "AND chash IS DISTINCT FROM " + DIGEST).get(0, Integer.class);
+            }
+            counts.put("residual_mismatched", residual);
+            counts.put("dangling_manifest", ctx.fetchOne(
+                "SELECT count(*) FROM nexus.catalog_document_chunks m "
+                + "WHERE NOT EXISTS (SELECT 1 FROM nexus.chunks_384 c WHERE c.chash = m.chash) "
+                + "  AND NOT EXISTS (SELECT 1 FROM nexus.chunks_768 c WHERE c.chash = m.chash) "
+                + "  AND NOT EXISTS (SELECT 1 FROM nexus.chunks_1024 c WHERE c.chash = m.chash)")
+                .get(0, Integer.class));
+            return counts;
+        });
+        log.info("event=rekey_complete tenant={} counts={}", tenant, out);
+        return out;
+    }
+
+    /** UNION ALL of mismatched content rows across dims with recovered old_ref. */
+    private static String unionAllContentRows() {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < CHUNK_TABLES.size(); i++) {
+            if (i > 0) sb.append(" UNION ALL ");
+            String t = CHUNK_TABLES.get(i);
+            sb.append("SELECT ")
+              .append(String.format(OLD_REF, "chash")).append(" AS old_ref, ")
+              .append("chash AS old_bytes, ")
+              .append(DIGEST).append(" AS new_chash, ")
+              .append("'").append(t).append("' AS source ")
+              .append("FROM ").append(t)
+              .append(" WHERE chunk_text <> '' AND chash IS DISTINCT FROM ").append(DIGEST);
+        }
+        return sb.toString();
+    }
+}

@@ -13,6 +13,7 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -35,6 +36,11 @@ import java.util.Set;
  *
  * <p>Thread safety: all writes go through TenantScope which uses a
  * connection pool; each withTenant call gets its own connection.
+ *
+ * <p>RDR-180 (nexus-jxizy.7): {@code chash} is stored as 32 raw bytes
+ * ({@code bytea}); this repository takes {@link Chash} values (already
+ * boundary-validated by the handler) and binds {@code toBytes()}, and
+ * every read encodes back to the 64-hex interchange form.
  */
 public final class ChashRepository {
 
@@ -141,8 +147,8 @@ public final class ChashRepository {
      *
      * @throws IllegalArgumentException if chash or collection is blank
      */
-    public void upsert(String tenant, String chash, String collection) {
-        if (chash == null || chash.isBlank()) throw new IllegalArgumentException("chash must not be empty");
+    public void upsert(String tenant, Chash chash, String collection) {
+        if (chash == null) throw new IllegalArgumentException("chash must not be null");
         if (collection == null || collection.isBlank()) throw new IllegalArgumentException("collection must not be empty");
 
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
@@ -152,7 +158,7 @@ public final class ChashRepository {
         tenantScope.withTenant(tenant, ctx -> {
             ctx.insertInto(CHASH_INDEX,
                             CHASH_INDEX.TENANT_ID, CHASH_INDEX.CHASH, CHASH_INDEX.PHYSICAL_COLLECTION, CHASH_INDEX.CREATED_AT)
-               .values(tenant, chash, collection, now)
+               .values(tenant, chash.toBytes(), collection, now)
                .onConflict(CHASH_INDEX.TENANT_ID, CHASH_INDEX.CHASH, CHASH_INDEX.PHYSICAL_COLLECTION)
                .doUpdate()
                .set(CHASH_INDEX.CREATED_AT, DSL.field("EXCLUDED.created_at", OffsetDateTime.class))
@@ -168,7 +174,7 @@ public final class ChashRepository {
      * Blank/null entries in {@code chashes} are skipped. Empty collection raises
      * {@link IllegalArgumentException}. An empty (or all-blank) chashes list is a no-op.
      */
-    public void upsertMany(String tenant, List<String> chashes, String collection) {
+    public void upsertMany(String tenant, List<Chash> chashes, String collection) {
         if (collection == null || collection.isBlank()) throw new IllegalArgumentException("collection must not be empty");
         if (chashes == null || chashes.isEmpty()) return;
 
@@ -188,10 +194,12 @@ public final class ChashRepository {
         // when the same chash appears twice in one statement, and real files emit
         // duplicate chunk text (nexus-85z0y). Dedup is semantics-free: a chash is a
         // content hash, so every occurrence is identical.
-        List<String> valid = chashes.stream()
-                .filter(c -> c != null && !c.isBlank())
+        // Sorting by hex preserves the global lock order (lowercase-hex
+        // lexicographic order == unsigned byte order of the stored key).
+        List<Chash> valid = chashes.stream()
+                .filter(java.util.Objects::nonNull)
                 .distinct()
-                .sorted()
+                .sorted(java.util.Comparator.comparing(Chash::toHex))
                 .toList();
         if (valid.isEmpty()) return;
 
@@ -204,9 +212,9 @@ public final class ChashRepository {
         DeadlockRetry.run(collection, () -> tenantScope.withTenant(tenant, ctx -> {
             var insert = ctx.insertInto(CHASH_INDEX,
                                         CHASH_INDEX.TENANT_ID, CHASH_INDEX.CHASH, CHASH_INDEX.PHYSICAL_COLLECTION, CHASH_INDEX.CREATED_AT);
-            var step = insert.values(tenant, valid.get(0), collection, now);
+            var step = insert.values(tenant, valid.get(0).toBytes(), collection, now);
             for (int i = 1; i < valid.size(); i++) {
-                step = step.values(tenant, valid.get(i), collection, now);
+                step = step.values(tenant, valid.get(i).toBytes(), collection, now);
             }
             step.onConflict(CHASH_INDEX.TENANT_ID, CHASH_INDEX.CHASH, CHASH_INDEX.PHYSICAL_COLLECTION)
                 .doUpdate()
@@ -224,11 +232,11 @@ public final class ChashRepository {
      * <p>Returns an empty list when {@code chash} is unknown.
      * Mirrors {@code ChashIndex.lookup}.
      */
-    public List<Map<String, String>> lookup(String tenant, String chash) {
+    public List<Map<String, String>> lookup(String tenant, Chash chash) {
         return tenantScope.withTenant(tenant, ctx -> {
             var rows = ctx.select(CHASH_INDEX.PHYSICAL_COLLECTION, CHASH_INDEX.CREATED_AT)
                           .from(CHASH_INDEX)
-                          .where(CHASH_INDEX.CHASH.eq(chash))
+                          .where(CHASH_INDEX.CHASH.eq(chash.toBytes()))
                           .fetch();
             List<Map<String, String>> result = new ArrayList<>(rows.size());
             for (var r : rows) {
@@ -320,10 +328,10 @@ public final class ChashRepository {
      * <p>Mirrors {@code ChashIndex.delete_stale}. Returns 0 when the PK was absent
      * (idempotent under concurrent self-heal invocations).
      */
-    public int deleteStale(String tenant, String chash, String collection) {
+    public int deleteStale(String tenant, Chash chash, String collection) {
         return tenantScope.withTenant(tenant, ctx ->
                 ctx.deleteFrom(CHASH_INDEX)
-                   .where(CHASH_INDEX.CHASH.eq(chash).and(CHASH_INDEX.PHYSICAL_COLLECTION.eq(collection)))
+                   .where(CHASH_INDEX.CHASH.eq(chash.toBytes()).and(CHASH_INDEX.PHYSICAL_COLLECTION.eq(collection)))
                    .execute());
     }
 
@@ -361,11 +369,13 @@ public final class ChashRepository {
     // ── registered_chashes_for_collection ─────────────────────────────────────
 
     /**
-     * Return every distinct {@code chash[:32]} registered for {@code collection}.
+     * Return every distinct registered chash for {@code collection}, hex-encoded.
      *
-     * <p>Mirrors {@code ChashIndex.registered_chashes_for_collection}: returns
-     * the set of {@code substr(chash, 1, 32)} values so callers can intersect
-     * directly with Chroma chunk IDs (RDR-108 §D1: natural ID = {@code chash[:32]}).
+     * <p>RDR-180: the natural chunk ID is the FULL digest, so the pre-flip
+     * {@code substr(chash, 1, 32)} compensation is retired — values encode to
+     * 64-hex (canonical rows) while not-yet-rekeyed legacy rows naturally
+     * encode to their shorter legacy hex, which callers treat as legacy
+     * references.
      *
      * <p>Used by the collection-audit coverage probe
      * ({@code collection_audit.py}): one set-difference against T3 chunk IDs
@@ -373,7 +383,7 @@ public final class ChashRepository {
      *
      * @param tenant     tenant principal (sets RLS GUC)
      * @param collection physical collection name to query
-     * @return set of 32-char chash prefixes; empty when collection is unknown
+     * @return set of hex-encoded chashes; empty when collection is unknown
      */
     public Set<String> registeredChashesForCollection(String tenant, String collection) {
         if (collection == null || collection.isBlank()) {
@@ -386,10 +396,9 @@ public final class ChashRepository {
                           .fetch();
             Set<String> result = new HashSet<>(rows.size());
             for (var r : rows) {
-                String ch = r.value1();
-                if (ch != null && !ch.isBlank()) {
-                    // substr(chash, 1, 32) — Chroma natural ID shape (RDR-108 D1)
-                    result.add(ch.length() > 32 ? ch.substring(0, 32) : ch);
+                byte[] ch = r.value1();
+                if (ch != null && ch.length > 0) {
+                    result.add(HexFormat.of().formatHex(ch));
                 }
             }
             return result;
@@ -409,8 +418,8 @@ public final class ChashRepository {
      *
      * @param createdAtIso UTC ISO-8601 string (e.g. "2025-06-01T10:30:00Z")
      */
-    public void doImport(String tenant, String chash, String collection, String createdAtIso) {
-        if (chash == null || chash.isBlank()) throw new IllegalArgumentException("chash must not be empty");
+    public void doImport(String tenant, Chash chash, String collection, String createdAtIso) {
+        if (chash == null) throw new IllegalArgumentException("chash must not be null");
         if (collection == null || collection.isBlank()) throw new IllegalArgumentException("collection must not be empty");
 
         OffsetDateTime createdAt;
@@ -428,7 +437,7 @@ public final class ChashRepository {
         tenantScope.withTenant(tenant, ctx -> {
             ctx.insertInto(CHASH_INDEX,
                             CHASH_INDEX.TENANT_ID, CHASH_INDEX.CHASH, CHASH_INDEX.PHYSICAL_COLLECTION, CHASH_INDEX.CREATED_AT)
-               .values(tenant, chash, collection, ts)
+               .values(tenant, chash.toBytes(), collection, ts)
                .onConflict(CHASH_INDEX.TENANT_ID, CHASH_INDEX.CHASH, CHASH_INDEX.PHYSICAL_COLLECTION)
                .doUpdate()
                .set(CHASH_INDEX.CREATED_AT, DSL.field("EXCLUDED.created_at", OffsetDateTime.class))
@@ -438,7 +447,7 @@ public final class ChashRepository {
     }
 
     /** One row of a batched ETL import (see {@link #doImportBatch}). */
-    public record ImportRow(String chash, String collection, String createdAtIso) {}
+    public record ImportRow(Chash chash, String collection, String createdAtIso) {}
 
     /**
      * Batched ETL import: land the WHOLE batch in ONE multi-row
@@ -469,11 +478,11 @@ public final class ChashRepository {
         // Dedupe on (chash, collection), last wins. LinkedHashMap keeps batch order.
         var unique = new java.util.LinkedHashMap<String, ImportRow>(rows.size());
         for (ImportRow r : rows) {
-            if (r.chash() == null || r.chash().isBlank()
+            if (r.chash() == null
                     || r.collection() == null || r.collection().isBlank()) {
                 throw new IllegalArgumentException("chash and collection must not be empty");
             }
-            unique.put(r.chash() + "::" + r.collection(), r);
+            unique.put(r.chash().toHex() + "::" + r.collection(), r);
         }
         final List<ImportRow> deduped = List.copyOf(unique.values());
 
@@ -495,7 +504,7 @@ public final class ChashRepository {
                     log.warn("event=chash_import_bad_created_at chash={} raw={} fallback=now",
                              r.chash(), r.createdAtIso());
                 }
-                insert = insert.values(tenant, r.chash(), r.collection(), ts);
+                insert = insert.values(tenant, r.chash().toBytes(), r.collection(), ts);
             }
             insert.onConflict(CHASH_INDEX.TENANT_ID, CHASH_INDEX.CHASH, CHASH_INDEX.PHYSICAL_COLLECTION)
                   .doUpdate()

@@ -11,35 +11,42 @@ import java.util.Arrays;
 import java.util.HexFormat;
 
 /**
- * Content address of a chunk — parse-don't-validate newtype (nexus-z4skl).
+ * Content address of a chunk — parse-don't-validate newtype (nexus-z4skl,
+ * inverted to the full digest by RDR-180 / nexus-jxizy.7).
  *
- * <p>The canonical chash today is {@code sha256(chunk_text)[:32]} rendered as
- * 32 LOWERCASE hex chars (128 bits). It is load-bearing across five tables
- * (catalog_document_chunks, chunks_384/768/1024, chash_index) yet was modelled
- * everywhere as a bare {@code String}, so nothing at the HTTP boundary
- * distinguished a content hash from arbitrary text. The most natural caller
- * mistake — passing the FULL 64-char sha256 hex — sailed through every handler
- * and only tripped the DB {@code CHECK(length(chash)=32)} deep inside a
- * per-row transaction, where batch writers swallowed it into
- * {@code failed_doc_ids} with no reason (cost 3 deploy-gate iterations on the
- * v0.1.24 batch-endpoint probe, 2026-07-04).
- *
- * <p>This type's factories are the sole enforcement point: parse at the
+ * <p>A chash IS the 32-byte SHA-256 digest of the chunk text — the FULL
+ * digest, never truncated. Binary is the storage form ({@code bytea},
+ * {@code CHECK (octet_length(chash) = 32)}); 64 lowercase hex chars are the
+ * interchange form (JSON wire values, {@code chash:<hex>} citations). This
+ * type is the single encode/decode seam on the engine side: parse at the
  * boundary, get a uniform 400 with the offending length BEFORE any
  * transaction; the DB CHECK demotes to belt-and-suspenders.
  *
- * <p>Representation: {@code byte[16]} — the type holds bytes, the world sees
- * hex ({@link #toHex()} / {@code @JsonValue}). RDR-180 (draft) proposes moving
- * storage to the full 32-byte digest; when that is blessed, this type's width
- * constants flip 16→32 and {@link #fromSha256Hex} stops truncating — callers
- * are already insulated.
+ * <p>HISTORY (why the polarity here is an INVERSION, not a widen): until
+ * RDR-180 the stored chash was {@code sha256(text)[:32]} — 32 hex chars =
+ * 128 bits = HALF the digest — while the citation grammar advertised the
+ * full 64. This type was byte[16]-backed and its hints steered callers to
+ * truncate deliberately. Post-flip that advice is actively wrong: 64-hex is
+ * the canonical accept, and a bare 32-hex value is a LEGACY REFERENCE that
+ * must be resolved through the persisted {@code nexus.chash_alias} map
+ * (RDR-180 Item6) — never silently truncated, padded, or guessed. The
+ * type itself never consults the DB, so {@link #fromHex} REJECTS 32-hex
+ * with a message that names the alias-resolution path; read seams that
+ * accept legacy references do the alias lookup first and construct the
+ * Chash from the resolved value.
+ *
+ * <p>The former two-tier boundary ({@code requireLength32}'s length-only
+ * tolerance for Chroma-era non-hex 32-char ids) is COLLAPSED: post-rekey
+ * every surviving row id is a real 32-byte digest, so the type constructor
+ * is the one strict tier ({@code PgVectorServingContractTest} proves the
+ * ETL-era tolerance is retired).
  */
 public final class Chash {
 
-    /** Canonical interchange width: 32 lowercase hex chars (128 bits). */
-    public static final int HEX_LENGTH = 32;
-    /** Internal width: 16 bytes. */
-    public static final int BYTE_LENGTH = 16;
+    /** Canonical interchange width: 64 lowercase hex chars (256 bits). */
+    public static final int HEX_LENGTH = 64;
+    /** Internal/storage width: 32 bytes — the full SHA-256 digest. */
+    public static final int BYTE_LENGTH = 32;
 
     private static final HexFormat HEX = HexFormat.of();  // lowercase by default
 
@@ -50,9 +57,11 @@ public final class Chash {
     }
 
     /**
-     * Parse the canonical 32-lowercase-hex form. The single validation
-     * chokepoint — error messages carry the ACTUAL length so the classic
-     * 64-char (full sha256) mistake is self-diagnosing at the boundary.
+     * Parse the canonical 64-lowercase-hex form. The single validation
+     * chokepoint — error messages carry the ACTUAL length, and the classic
+     * legacy mistake (a 32-hex pre-RDR-180 chunk id) is self-diagnosing:
+     * it names the chash_alias resolution path instead of inviting
+     * truncation or padding.
      *
      * @throws IllegalArgumentException on null, wrong length, uppercase or
      *         non-hex input.
@@ -62,16 +71,17 @@ public final class Chash {
         if (hex == null) {
             throw new IllegalArgumentException(
                 "invalid chash: expected " + HEX_LENGTH
-                + " lowercase hex chars (sha256[:32] content address), got null");
+                + " lowercase hex chars (the full sha256 content address), got null");
         }
         if (hex.length() != HEX_LENGTH) {
-            String hint = hex.length() == 64
-                ? " — a full sha256 hex? the canonical chash is its [:32] prefix"
-                    + " (use Chash.fromSha256Hex to truncate deliberately)"
+            String hint = hex.length() == 32
+                ? " — a legacy 32-hex (pre-RDR-180 half-digest) chunk id? it is"
+                    + " NOT truncatable/paddable into a canonical chash; resolve"
+                    + " it through the chash_alias map first"
                 : "";
             throw new IllegalArgumentException(
                 "invalid chash: expected " + HEX_LENGTH
-                + " lowercase hex chars (sha256[:32] content address), got "
+                + " lowercase hex chars (the full sha256 content address), got "
                 + hex.length() + " chars" + hint);
         }
         // LOAD-BEARING, not redundant with parseHex below: HexFormat.parseHex
@@ -90,36 +100,47 @@ public final class Chash {
     }
 
     /**
-     * The named home for the {@code [:32]} truncation: accept a FULL 64-char
-     * sha256 hex and derive the canonical chash from its prefix. Existence of
-     * this factory is what removes the implicit-truncation ambiguity that
-     * spawns bare-64 callers.
+     * The identity constructor for a full sha256 hex (RDR-180: it no longer
+     * truncates — the full digest IS the chash). Retained as the named
+     * migration point so pre-flip call sites keep compiling and now do the
+     * right thing; lowercases for convenience since digest renderers vary.
      */
     public static Chash fromSha256Hex(String fullSha256Hex) {
-        if (fullSha256Hex == null || fullSha256Hex.length() != 64) {
+        if (fullSha256Hex == null || fullSha256Hex.length() != HEX_LENGTH) {
             throw new IllegalArgumentException(
-                "fromSha256Hex expects the FULL 64-char sha256 hex, got "
+                "fromSha256Hex expects the FULL " + HEX_LENGTH + "-char sha256 hex, got "
                 + (fullSha256Hex == null ? "null" : fullSha256Hex.length() + " chars"));
         }
-        return fromHex(fullSha256Hex.substring(0, HEX_LENGTH).toLowerCase());
+        return fromHex(fullSha256Hex.toLowerCase());
     }
 
-    /** Compute the canonical chash of chunk text (sha256 over UTF-8, [:32]). */
+    /** Wrap a raw 32-byte SHA-256 digest (defensive copy). */
+    public static Chash fromSha256Bytes(byte[] digest) {
+        if (digest == null || digest.length != BYTE_LENGTH) {
+            throw new IllegalArgumentException(
+                "fromSha256Bytes expects exactly " + BYTE_LENGTH + " bytes, got "
+                + (digest == null ? "null" : digest.length + " bytes"));
+        }
+        return new Chash(Arrays.copyOf(digest, BYTE_LENGTH));
+    }
+
+    /** Compute the canonical chash of chunk text (FULL sha256 over UTF-8). */
     public static Chash ofText(String chunkText) {
         try {
             MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] digest = md.digest(chunkText.getBytes(StandardCharsets.UTF_8));
-            return new Chash(Arrays.copyOf(digest, BYTE_LENGTH));
+            return new Chash(md.digest(chunkText.getBytes(StandardCharsets.UTF_8)));
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 unavailable", e);  // JVM-guaranteed algorithm
         }
     }
 
     /**
-     * Boundary convenience (nexus-e0hd2): parse-don't-validate *value* and
-     * return its canonical hex, prefixing *label* into the rejection message
-     * so a 400 names the offending field/position. The Chash type stays the
-     * sole enforcement point; handlers call this instead of hand-rolling.
+     * Boundary convenience (nexus-e0hd2 lineage): parse-don't-validate
+     * *value* and return its canonical hex, prefixing *label* into the
+     * rejection message so a 400 names the offending field/position. The
+     * Chash type stays the sole enforcement point; handlers call this
+     * instead of hand-rolling. (The former {@code requireLength32}
+     * permissive tier is gone — RDR-180 Item3's one-strict-tier collapse.)
      */
     public static String requireCanonical(String value, String label) {
         try {
@@ -129,28 +150,12 @@ public final class Chash {
         }
     }
 
-    /**
-     * Length-only boundary guard (nexus-e0hd2) for the seams whose enforced
-     * contract is the DB's CHECK(length=32) — vector chunk ids and their
-     * chash_index mirror — where ids are chashes BY CONVENTION but non-hex
-     * 32-char ids are contract-legal (PgVectorServingContractTest upserts
-     * them). Carries the same self-diagnosing full-64 hint as
-     * {@link #fromHex}. Use {@link #requireCanonical} only where sha256
-     * provenance IS the contract (catalog_document_chunks writers).
-     */
-    public static String requireLength32(String value, String label) {
-        if (value == null || value.length() != 32) {
-            String hint = (value != null && value.length() == 64)
-                ? " — a full sha256 hex? the canonical chash is its [:32] prefix"
-                : "";
-            throw new IllegalArgumentException(
-                label + ": expected a 32-char chash, got "
-                + (value == null ? "null" : value.length() + " chars") + hint);
-        }
-        return value;
+    /** The raw 32-byte storage form (defensive copy) — the jOOQ bind value. */
+    public byte[] toBytes() {
+        return Arrays.copyOf(bytes, bytes.length);
     }
 
-    /** Canonical 32-char lowercase hex rendering (the wire/storage form). */
+    /** Canonical 64-char lowercase hex rendering (the wire form). */
     @JsonValue
     public String toHex() {
         return HEX.formatHex(bytes);

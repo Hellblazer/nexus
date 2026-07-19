@@ -278,8 +278,10 @@ public final class NexusService {
         chashCtx.getFilters().addAll(authFilter);
 
         // /v1/remap/* — chash_remap endpoints (RDR-186 nexus-146xx.4: wire re-id
-        // map write-through + per-leg clear + live membership counts)
-        var remapCtx = server.createContext("/v1/remap", new RemapHandler(remapRepo));
+        // map write-through + per-leg clear + live membership counts) + the
+        // RDR-180 per-tenant full-digest rekey (nexus-jxizy.6)
+        var remapCtx = server.createContext("/v1/remap",
+                new RemapHandler(remapRepo, new dev.nexus.service.db.RekeyOps(tenantScope)));
         remapCtx.getFilters().addAll(authFilter);
 
         // /v1/ladder/* — upgrade-ladder completion bookkeeping (RDR-186

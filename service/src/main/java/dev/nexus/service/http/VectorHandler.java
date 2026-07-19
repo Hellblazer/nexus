@@ -253,17 +253,15 @@ public final class VectorHandler implements HttpHandler {
         Map<String, Object> body = readBody(ex);
         String collection           = requireString(body, "collection");
         List<String> ids            = requireStringList(body, "ids");
-        // nexus-e0hd2: chunk ids are chashes BY CONVENTION but the enforced
-        // ecosystem contract is LENGTH 32, not sha256-hex — the serving
-        // contract test itself upserts non-hex 32-char ids
-        // (PgVectorServingContractTest "p4a-c1..."), and the DB CHECK is
-        // length-only. Validate the length here (with the classic full-64
-        // sha256 hint) so a wrong-width id 400s with its index BEFORE the
-        // embed + transaction, instead of dying reason-poor at the CHECK.
-        // Hex-strictness stays at the sha256-provenance seams (manifest,
-        // chash_index) where Chash.fromHex is the contract.
+        // RDR-180 (nexus-jxizy.7/.8): ONE strict tier — chunk ids ARE
+        // chashes, the full-digest 64-hex form, parsed through the type so a
+        // wrong-width id 400s with its index BEFORE the embed + transaction.
+        // The byte[16]-era length-only tolerance (Chroma-era arbitrary
+        // 32-char external ids) is retired: post-rekey every surviving row
+        // id is a real 32-byte digest, and PgVectorServingContractTest now
+        // proves the REJECTION of the old tolerated shape.
         for (int i = 0; i < ids.size(); i++) {
-            dev.nexus.service.db.Chash.requireLength32(ids.get(i), "ids[" + i + "]");
+            dev.nexus.service.db.Chash.requireCanonical(ids.get(i), "ids[" + i + "]");
         }
         List<String> documents      = requireStringList(body, "documents");
         List<Map<String, Object>> metadatas = optMetadataList(body, "metadatas", ids.size());

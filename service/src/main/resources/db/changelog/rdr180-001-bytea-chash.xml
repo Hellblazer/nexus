@@ -1,0 +1,317 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-180 (bead nexus-jxizy.2) — chash becomes what it always claimed to be:
+    the 32-BYTE SHA-256 content address, stored as BYTEA. Hex is interchange.
+
+    WHAT CONVERTS: the FIVE poison (width-CHECK-bearing) columns —
+      chunks_384/768/1024.chash, catalog_document_chunks.chash,
+      chash_index.chash.
+    WHAT DOES NOT (decided during this bead, correcting the earlier .5
+    design note): the legacy-debt columns (topic_assignments.doc_id,
+    frecency/relevance_log.chunk_id) STAY TEXT. topic_assignments.doc_id is
+    a MIXED identity space — chunk chashes for T3 collections AND memory
+    note TITLES (TaxonomyRepository.purgeAssignmentsForDoc binds a title) —
+    so a bytea conversion would make 16-byte values ambiguous (32-hex-era
+    chash vs a 16-byte title) and lose the title rendering on read. The
+    chash-shaped values in those columns stay hex TEXT (64-hex once the
+    converged producers flip); SQL joins against the bytea chunk keys go
+    through encode(c.chash,'hex') at the function seam (see
+    rdr180-002's topic_scoped port).
+
+    CONVERSION EXPRESSION: hex values decode to their bytes; anything else
+    (ETL-era external ids, historic tumblers in topic_assignments) carries
+    over as its UTF-8 bytes — lossless, distinct-preserving. REVERSIBILITY
+    LEMMA (why the original string form is recoverable WITHOUT any
+    pre-conversion DML): the poison tables' pre-flip CHECK guarantees every
+    value was exactly 32 chars; 32-hex decodes to 16 bytes while ANY
+    non-hex 32-char string is >= 32 UTF-8 bytes, so
+    octet_length = 16 <=> hex-decoded <=> original = encode(v,'hex'),
+    else original = convert_from(v,'UTF8'). The /v1/remap/rekey endpoint
+    leans on this to build chash_alias old_ref values.
+
+    MID-MIGRATION STATE IS EXPECTED: after these changesets and BEFORE the
+    per-tenant rekey (client rung driving /v1/remap/rekey), rows hold
+    16-byte decoded legacy values — the new octet_length CHECKs are
+    deliberately NOT VALID and are VALIDATEd by the client rung via the
+    admin connection AFTER count-verify (a boot-time VALIDATE here would
+    crash-loop every un-rekeyed store: the GH #1390 shape; and an
+    RLS-subject precondition count is the nexus-vounk false-zero trap).
+    This whole engine generation deploys only inside the RDR-180 freeze
+    window (nx upgrade rung locally; operator choreography in the cloud).
+
+    NO DML IN THIS FILE by design: Liquibase runs as nexus_admin, a
+    policy-subject role under FORCE RLS whose DML silently sees zero rows
+    (recorded trap: T2 force-rls-migration-dml-noop). ALTER TABLE is DDL
+    and rewrites every row regardless of RLS. The rekey (real DML) runs as
+    nexus_svc under withTenant, per tenant, via the endpoint.
+
+    DEPENDENT OBJECTS handled here: nexus.live_chunks (projects chash — a
+    hard column dependency; dropped, recreated verbatim post-ALTER) and the
+    client-provisioned nexus.diag_chash_conformance (dropped IF EXISTS;
+    pg_provision recreates it with the era-safe predicate on the next
+    provision pass — the health probe falls back to legacy statements
+    meanwhile, by design). SQL functions are not column-dependency-tracked
+    but their bodies break at call time where they PROJECT chash into a
+    declared text output — those are re-created below with
+    encode(chash,'hex') at the projection seam (hex-at-the-boundary,
+    RDR-180 Item1). Functions whose bodies only JOIN on chash
+    (document_text, manifest_backfill, purge_trash, document_trash,
+    document_restore) stay valid: both join sides flip together.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="rdr180-1-drop-dependent-views" author="nexus-jxizy.2">
+        <comment>Drop the views holding column dependencies on chash: collection_vector_stats (depends on live_chunks; recreated below), live_chunks (recreated below), and the client-provisioned diag counts view (re-provisioned client-side)</comment>
+        <sql splitStatements="true" stripComments="false">
+DROP VIEW IF EXISTS nexus.diag_chash_conformance;
+DROP VIEW IF EXISTS nexus.collection_vector_stats;
+DROP VIEW IF EXISTS nexus.live_chunks;
+        </sql>
+        <rollback/>
+    </changeSet>
+
+    <changeSet id="rdr180-2-drop-text-length-checks" author="nexus-jxizy.2">
+        <comment>Drop the five length(chash)=32 text-era CHECKs (catalog-002-2 x4, catalog-013-0) — they would reject the bytea conversion values</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chunks_384  DROP CONSTRAINT IF EXISTS chunks_384_chash_len_check;
+ALTER TABLE nexus.chunks_768  DROP CONSTRAINT IF EXISTS chunks_768_chash_len_check;
+ALTER TABLE nexus.chunks_1024 DROP CONSTRAINT IF EXISTS chunks_1024_chash_len_check;
+ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS catalog_document_chunks_chash_len_check;
+ALTER TABLE nexus.chash_index DROP CONSTRAINT IF EXISTS chash_index_chash_len_check;
+        </sql>
+        <rollback/>
+    </changeSet>
+
+    <changeSet id="rdr180-3-convert-chunks-384" author="nexus-jxizy.2">
+        <comment>chunks_384.chash text -> bytea (hex decodes; non-hex carries as UTF-8 bytes). ALTER TYPE is DDL: rewrites all rows, RLS-exempt, PK rebuilt in place</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.chunks_384
+    ALTER COLUMN chash TYPE bytea
+    USING CASE WHEN chash ~ '^[0-9a-f]+$' AND length(chash) % 2 = 0
+               THEN decode(chash, 'hex')
+               ELSE convert_to(chash, 'UTF8') END;
+        </sql>
+        <rollback/>
+    </changeSet>
+
+    <changeSet id="rdr180-4-convert-chunks-768" author="nexus-jxizy.2">
+        <comment>chunks_768.chash text -> bytea</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.chunks_768
+    ALTER COLUMN chash TYPE bytea
+    USING CASE WHEN chash ~ '^[0-9a-f]+$' AND length(chash) % 2 = 0
+               THEN decode(chash, 'hex')
+               ELSE convert_to(chash, 'UTF8') END;
+        </sql>
+        <rollback/>
+    </changeSet>
+
+    <changeSet id="rdr180-5-convert-chunks-1024" author="nexus-jxizy.2">
+        <comment>chunks_1024.chash text -> bytea</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.chunks_1024
+    ALTER COLUMN chash TYPE bytea
+    USING CASE WHEN chash ~ '^[0-9a-f]+$' AND length(chash) % 2 = 0
+               THEN decode(chash, 'hex')
+               ELSE convert_to(chash, 'UTF8') END;
+        </sql>
+        <rollback/>
+    </changeSet>
+
+    <changeSet id="rdr180-6-convert-manifest" author="nexus-jxizy.2">
+        <comment>catalog_document_chunks.chash text -> bytea</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.catalog_document_chunks
+    ALTER COLUMN chash TYPE bytea
+    USING CASE WHEN chash ~ '^[0-9a-f]+$' AND length(chash) % 2 = 0
+               THEN decode(chash, 'hex')
+               ELSE convert_to(chash, 'UTF8') END;
+        </sql>
+        <rollback/>
+    </changeSet>
+
+    <changeSet id="rdr180-7-convert-chash-index" author="nexus-jxizy.2">
+        <comment>chash_index.chash text -> bytea</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.chash_index
+    ALTER COLUMN chash TYPE bytea
+    USING CASE WHEN chash ~ '^[0-9a-f]+$' AND length(chash) % 2 = 0
+               THEN decode(chash, 'hex')
+               ELSE convert_to(chash, 'UTF8') END;
+        </sql>
+        <rollback/>
+    </changeSet>
+
+    <changeSet id="rdr180-11-octet-checks-not-valid" author="nexus-jxizy.2">
+        <comment>The five poison-table width CHECKs return, in bytes: octet_length(chash)=32, NOT VALID (existing rows are 16-byte legacy until the rekey; new writes enforce immediately). VALIDATE is the client rung's post-rekey act via the admin connection — deliberately NOT a boot changeset</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chunks_384
+    ADD CONSTRAINT chunks_384_chash_octet_check CHECK (octet_length(chash) = 32) NOT VALID;
+ALTER TABLE nexus.chunks_768
+    ADD CONSTRAINT chunks_768_chash_octet_check CHECK (octet_length(chash) = 32) NOT VALID;
+ALTER TABLE nexus.chunks_1024
+    ADD CONSTRAINT chunks_1024_chash_octet_check CHECK (octet_length(chash) = 32) NOT VALID;
+ALTER TABLE nexus.catalog_document_chunks
+    ADD CONSTRAINT catalog_document_chunks_chash_octet_check CHECK (octet_length(chash) = 32) NOT VALID;
+ALTER TABLE nexus.chash_index
+    ADD CONSTRAINT chash_index_chash_octet_check CHECK (octet_length(chash) = 32) NOT VALID;
+        </sql>
+        <rollback>
+ALTER TABLE nexus.chash_index DROP CONSTRAINT IF EXISTS chash_index_chash_octet_check;
+ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS catalog_document_chunks_chash_octet_check;
+ALTER TABLE nexus.chunks_1024 DROP CONSTRAINT IF EXISTS chunks_1024_chash_octet_check;
+ALTER TABLE nexus.chunks_768  DROP CONSTRAINT IF EXISTS chunks_768_chash_octet_check;
+ALTER TABLE nexus.chunks_384  DROP CONSTRAINT IF EXISTS chunks_384_chash_octet_check;
+        </rollback>
+    </changeSet>
+
+    <changeSet id="rdr180-12-chash-alias" author="nexus-jxizy.2">
+        <comment>The PERMANENT legacy-reference resolver (RDR-180 Item6): old_ref is the original string form (32-hex chunk ids, ETL-era external ids), old_bytes its byte carrier (the cascade join key), new_chash the canonical 32-byte digest. Survives forever — bead comments, T2 memories, plan_json step ids and prose citations hold old refs that are not remappable in place. Prefix-match only BUILDS maps; THIS resolves them, collision-free. FORCE RLS like every tenant table</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE nexus.chash_alias (
+    tenant_id  TEXT  NOT NULL DEFAULT '',
+    old_ref    TEXT  NOT NULL,
+    old_bytes  BYTEA NOT NULL,
+    new_chash  BYTEA NOT NULL,
+    source     TEXT  NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chash_alias_pk PRIMARY KEY (tenant_id, old_ref),
+    CONSTRAINT chash_alias_new_octet_check CHECK (octet_length(new_chash) = 32)
+);
+CREATE INDEX idx_chash_alias_old_bytes ON nexus.chash_alias (tenant_id, old_bytes);
+CREATE INDEX idx_chash_alias_new ON nexus.chash_alias (tenant_id, new_chash);
+ALTER TABLE nexus.chash_alias ENABLE ROW LEVEL SECURITY;
+ALTER TABLE nexus.chash_alias FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON nexus.chash_alias
+    USING (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>DROP TABLE IF EXISTS nexus.chash_alias</rollback>
+    </changeSet>
+
+    <changeSet id="rdr180-13-widen-remap-new-chash" author="nexus-jxizy.2">
+        <comment>chash_remap.new_chash accepts both the 32-hex era facts and post-flip 64-hex facts (RDR-180 Item6a: old_id stays free-form by design)</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chash_remap DROP CONSTRAINT IF EXISTS chash_remap_new_chash_len_32;
+ALTER TABLE nexus.chash_remap
+    ADD CONSTRAINT chash_remap_new_chash_len CHECK (length(new_chash) IN (32, 64));
+        </sql>
+        <rollback>
+ALTER TABLE nexus.chash_remap DROP CONSTRAINT IF EXISTS chash_remap_new_chash_len;
+ALTER TABLE nexus.chash_remap
+    ADD CONSTRAINT chash_remap_new_chash_len_32 CHECK (length(new_chash) = 32);
+        </rollback>
+    </changeSet>
+
+    <changeSet id="rdr180-14-recreate-live-chunks" author="nexus-jxizy.2">
+        <comment>live_chunks returns, verbatim catalog-003-6 semantics — its chash column is now bytea (internal serving view; Java encodes at the wire boundary)</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE VIEW nexus.live_chunks
+    WITH (security_invoker = true)
+AS
+SELECT c.tenant_id,
+       c.collection,
+       c.chash,
+       c.chunk_text,
+       c.embedding,
+       c.chunk_tsv,
+       c.metadata,
+       c.created_at,
+       384 AS dim
+  FROM nexus.chunks_384 c
+ WHERE (NOT EXISTS (
+     SELECT 1 FROM nexus.catalog_document_chunks m
+      WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+ ))
+ OR EXISTS (
+     SELECT 1
+       FROM nexus.catalog_document_chunks m
+       JOIN nexus.catalog_documents d
+         ON d.tenant_id = m.tenant_id
+        AND d.tumbler   = m.doc_id
+      WHERE m.tenant_id  = c.tenant_id
+        AND m.chash       = c.chash
+        AND d.deleted_at IS NULL
+ )
+UNION ALL
+SELECT c.tenant_id,
+       c.collection,
+       c.chash,
+       c.chunk_text,
+       c.embedding,
+       c.chunk_tsv,
+       c.metadata,
+       c.created_at,
+       768 AS dim
+  FROM nexus.chunks_768 c
+ WHERE (NOT EXISTS (
+     SELECT 1 FROM nexus.catalog_document_chunks m
+      WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+ ))
+ OR EXISTS (
+     SELECT 1
+       FROM nexus.catalog_document_chunks m
+       JOIN nexus.catalog_documents d
+         ON d.tenant_id = m.tenant_id
+        AND d.tumbler   = m.doc_id
+      WHERE m.tenant_id  = c.tenant_id
+        AND m.chash       = c.chash
+        AND d.deleted_at IS NULL
+ )
+UNION ALL
+SELECT c.tenant_id,
+       c.collection,
+       c.chash,
+       c.chunk_text,
+       c.embedding,
+       c.chunk_tsv,
+       c.metadata,
+       c.created_at,
+       1024 AS dim
+  FROM nexus.chunks_1024 c
+ WHERE (NOT EXISTS (
+     SELECT 1 FROM nexus.catalog_document_chunks m
+      WHERE m.tenant_id = c.tenant_id AND m.chash = c.chash
+ ))
+ OR EXISTS (
+     SELECT 1
+       FROM nexus.catalog_document_chunks m
+       JOIN nexus.catalog_documents d
+         ON d.tenant_id = m.tenant_id
+        AND d.tumbler   = m.doc_id
+      WHERE m.tenant_id  = c.tenant_id
+        AND m.chash       = c.chash
+        AND d.deleted_at IS NULL
+ );
+        </sql>
+        <sql splitStatements="true" stripComments="false">
+GRANT SELECT ON nexus.live_chunks TO PUBLIC;
+        </sql>
+        <rollback/>
+    </changeSet>
+
+    <changeSet id="rdr180-15-recreate-collection-vector-stats" author="nexus-jxizy.2">
+        <comment>collection_vector_stats returns, verbatim catalog-005 semantics (counts only — no chash projection; dropped solely for its live_chunks dependency), with its PUBLIC grant</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE VIEW nexus.collection_vector_stats
+    WITH (security_invoker = true)
+AS
+SELECT lc.tenant_id,
+       lc.collection,
+       lc.dim,
+       count(*)           AS chunk_count,
+       max(lc.created_at) AS last_write
+  FROM nexus.live_chunks lc
+ GROUP BY lc.tenant_id, lc.collection, lc.dim;
+        </sql>
+        <sql splitStatements="true" stripComments="false">
+GRANT SELECT ON nexus.collection_vector_stats TO PUBLIC;
+        </sql>
+        <rollback/>
+    </changeSet>
+
+</databaseChangeLog>
