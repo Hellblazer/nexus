@@ -178,6 +178,8 @@ CROSS_CANON="$(jget "['rdr180']['cross']['canonical']")"
 T_CROSS_A="$(jget "['rdr180']['cross']['targets'][0]")"
 T_CROSS_B="$(jget "['rdr180']['cross']['targets'][1]")"
 ORPHAN_REF="$(jget "['rdr180']['orphan_ref']")"
+REF_ONLY="$(jget "['rdr180']['ref_only_ref']")"
+REF_ONLY_CANON="$(jget "['rdr180']['ref_only_canonical']")"
 SHORTID="$(jget "['rdr180']['shortid']")"
 T_MINILM="$(jget "['cross_model']['knowledge__rehearsal__minilm-l6-v2-384__v1']")"
 T_NOTE="$(jget "['cross_model']['knowledge__rehearsal-note__minilm-l6-v2-384__v1']")"
@@ -550,10 +552,10 @@ expect_sql "cross-collection SHARED ref: exactly ONE alias fact (C1 idempotent p
   "SELECT count(*) FROM nexus.chash_alias WHERE old_ref = '$CROSS_REF'" "1"
 
 # Item 7 (guided half) — the drop policy's dispositions, post-hoc: the
-# reference-only ref aliases (via _SHORTID's content); the orphan never
+# reference-only ref aliases (via _MINILM's content); the orphan never
 # entered the alias map or nexus (and its staged row cleared above).
-expect_sql "reference-only ref aliased to the citation canonical" \
-  "SELECT count(*) FROM nexus.chash_alias WHERE old_ref = '$N16' AND new_chash = decode('$CANON64','hex')" "1"
+expect_sql "reference-only ref aliased to its content canonical" \
+  "SELECT count(*) FROM nexus.chash_alias WHERE old_ref = '$REF_ONLY' AND new_chash = decode('$REF_ONLY_CANON','hex')" "1"
 expect_sql "orphan ref never aliased" \
   "SELECT count(*) FROM nexus.chash_alias WHERE old_ref = '$ORPHAN_REF'" "0"
 

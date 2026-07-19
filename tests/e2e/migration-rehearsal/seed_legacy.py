@@ -568,16 +568,23 @@ def main() -> int:
         # (d) Item8 empty-text dispositions, riding _MISLABEL (mixed with
         #     text rows so probe_has_text stays True; every vector 768-dim
         #     so the measured-dim override still classifies it):
-        #     - reference-only: EMPTY text, ref == _SHORTID's first chunk's
-        #       16-char id — the alias built by _SHORTID's promote resolves
-        #       it (finalize counts reference_only_resolved);
+        #     - reference-only: EMPTY text, ref == _MINILM's first chunk's
+        #       32-char id — the alias built by _MINILM's promote resolves
+        #       it (finalize counts reference_only_resolved). The ref MUST
+        #       be 32-char here: ANY non-32/64-char id in a voyage-NAMED
+        #       collection sets legacy_ids=True, which SUPPRESSES the
+        #       measured-dim override probe (detection._classify_leg) and
+        #       reclassifies the mislabel as genuinely-voyage-unsupported —
+        #       guided-upgrade's step-2a voyage-capability gate then fires
+        #       before either Phase-0 guard under test (gate run 1 field
+        #       lesson, 2026-07-19);
         #     - orphan: EMPTY text, a ref nothing resolves — the guided
         #       drop policy counts it (orphans_dropped) and it never
         #       reaches nexus.
-        ref16 = _sha_full("short id chunk 0000")[:16]
+        ref_only = _sha_full("onnx chunk 0000")[:32]
         orphan32 = _sha_full("rdr180 orphan reference")[:32]
         client.get_collection(_MISLABEL).add(
-            ids=[c32, ref16, orphan32],
+            ids=[c32, ref_only, orphan32],
             documents=[_CROSS_TEXT, "", ""],
             metadatas=[{"position": n, "tag": "rehearsal"},
                        {"position": n + 1, "tag": "rehearsal"},
@@ -585,7 +592,7 @@ def main() -> int:
             embeddings=[[103.0] + [1.0] * 767, [104.0] + [1.0] * 767,
                         [105.0] + [1.0] * 767],
         )
-        chashes[_MISLABEL] = chashes[_MISLABEL] + [c32, ref16, orphan32]
+        chashes[_MISLABEL] = chashes[_MISLABEL] + [c32, ref_only, orphan32]
     t2 = _seed_t2_and_catalog(
         chashes,
         rdr180_pointer_ids=chashes[_SHORTID] if rdr180 else None,
@@ -682,7 +689,8 @@ def main() -> int:
                 "targets": [t_minilm, t_mislabel],
             },
             "orphan_ref": _sha_full("rdr180 orphan reference")[:32],
-            "ref_only_ref": _sha_full("short id chunk 0000")[:16],
+            "ref_only_ref": _sha_full("onnx chunk 0000")[:32],
+            "ref_only_canonical": _sha_full("onnx chunk 0000"),
             "shortid": _SHORTID,
             "shortid_staged": n + 2,
             "shortid_promoted": n + 1,
