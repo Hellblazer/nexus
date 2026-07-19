@@ -1762,14 +1762,14 @@ public final class CatalogRepository {
      *
      * <p>Queries {@code nexus.chunks_768}, {@code nexus.chunks_384}, and
      * {@code nexus.chunks_1024} in sequence (first match wins). The chash
-     * must be the 32-char natural ID (chunk_text_hash[:32]) — the same
+     * must be the full-digest natural ID (chunk_text_hash, RDR-180) — the same
      * convention used by the catalog_document_chunks manifest (RDR-108 D1).
      *
      * <p>RLS auto-scopes to the caller's tenant via {@code TenantScope.withTenant}.
      *
      * @param tenant     tenant identifier
      * @param collection physical collection name (e.g. {@code knowledge__o__bge-768__v1})
-     * @param chash      32-char hex chash (chunk_text_hash[:32])
+     * @param chash      64-hex chash (the full chunk_text_hash, RDR-180)
      * @return {@code {chunk_text, metadata, chunk_hash}} or {@code null} on miss
      */
     public Map<String, Object> resolveSpan(String tenant, String collection, String chash) {
@@ -1809,7 +1809,7 @@ public final class CatalogRepository {
      * <p>RLS auto-scopes to the caller's tenant via {@code TenantScope.withTenant}.
      *
      * @param tenant            tenant identifier
-     * @param chash             32-char hex chash
+     * @param chash             64-hex chash (the full digest, RDR-180)
      * @param preferCollection  preferred collection name (may be null)
      * @return {@code {chash, chunk_hash, physical_collection, doc_id, chunk_text,
      *         metadata}} or {@code null} on miss

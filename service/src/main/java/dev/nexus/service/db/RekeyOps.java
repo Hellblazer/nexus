@@ -234,7 +234,19 @@ public final class RekeyOps {
                 "UPDATE nexus.catalog_document_chunks m SET chash = a.new_chash "
                 + "FROM nexus.chash_alias a "
                 + "WHERE m.chash = a.old_bytes AND m.chash IS DISTINCT FROM a.new_chash"));
-            // chash_index: (tenant, chash, collection) PK — two-phase.
+            // chash_index: (tenant, chash, collection) PK — two-phase, in TWO
+            // collapse directions (the RekeyOpsIntegrationTest 3c catch):
+            // (i) among the OLD rows themselves — two old keys mapping to one
+            // new key with NO row at the target yet would both UPDATE into
+            // the same PK; keep the min-ctid one per (collection, target).
+            ctx.execute(
+                "DELETE FROM nexus.chash_index i "
+                + "USING nexus.chash_index j, nexus.chash_alias ai, nexus.chash_alias aj "
+                + "WHERE ai.old_bytes = i.chash AND aj.old_bytes = j.chash "
+                + "  AND ai.new_chash = aj.new_chash "
+                + "  AND i.physical_collection = j.physical_collection "
+                + "  AND j.ctid < i.ctid");
+            // (ii) against a row already AT the target key.
             ctx.execute(
                 "DELETE FROM nexus.chash_index i USING nexus.chash_alias a "
                 + "WHERE i.chash = a.old_bytes "
@@ -246,7 +258,15 @@ public final class RekeyOps {
                 + "FROM nexus.chash_alias a "
                 + "WHERE i.chash = a.old_bytes AND i.chash IS DISTINCT FROM a.new_chash"));
             // topic_assignments: TEXT doc_id matches old_ref; PK
-            // (tenant, doc_id, topic_id) — two-phase on collapse.
+            // (tenant, doc_id, topic_id) — two-phase in both collapse
+            // directions (see the chash_index note above).
+            ctx.execute(
+                "DELETE FROM nexus.topic_assignments ta "
+                + "USING nexus.topic_assignments tb, nexus.chash_alias aa, nexus.chash_alias ab "
+                + "WHERE aa.old_ref = ta.doc_id AND ab.old_ref = tb.doc_id "
+                + "  AND aa.new_chash = ab.new_chash "
+                + "  AND ta.topic_id = tb.topic_id "
+                + "  AND tb.ctid < ta.ctid");
             ctx.execute(
                 "DELETE FROM nexus.topic_assignments ta USING nexus.chash_alias a "
                 + "WHERE ta.doc_id = a.old_ref "
@@ -257,22 +277,48 @@ public final class RekeyOps {
                 "UPDATE nexus.topic_assignments ta SET doc_id = encode(a.new_chash, 'hex') "
                 + "FROM nexus.chash_alias a WHERE ta.doc_id = a.old_ref"));
             // frecency: PK (tenant, chunk_id) — GREATEST-merge on collapse
-            // (the RDR-185 _FRECENCY_MERGE_SQL semantics, PG port).
+            // (the RDR-185 _FRECENCY_MERGE_SQL semantics, PG port), covering
+            // BOTH collapse directions via a per-target group aggregate over
+            // every matching old row (3c catch: two olds, no target row).
+            // keeper keyed by min(chunk_id), NOT ctid: an UPDATE rewrites
+            // the row and changes its ctid, so ctid-based keeper selection
+            // goes stale across statements (the 3c "expected 5 was 2" catch).
+            String frecencyAgg =
+                "(SELECT a.new_chash, min(o.chunk_id) AS keep_id, "
+                + "        max(o.frecency_score) AS fs, max(o.miss_count) AS mc, "
+                + "        max(o.last_hit_at) AS lh, max(o.embedded_at) AS ea, "
+                + "        max(o.ttl_days) AS td "
+                + "   FROM nexus.frecency o JOIN nexus.chash_alias a "
+                + "     ON o.chunk_id = a.old_ref GROUP BY a.new_chash) g";
+            // (i) an existing row AT the target absorbs the whole group.
             ctx.execute(
-                "UPDATE nexus.frecency f SET "
-                + "  frecency_score = GREATEST(f.frecency_score, o.frecency_score), "
-                + "  miss_count     = GREATEST(f.miss_count,     o.miss_count), "
-                + "  last_hit_at    = GREATEST(f.last_hit_at,    o.last_hit_at), "
-                + "  embedded_at    = GREATEST(f.embedded_at,    o.embedded_at), "
-                + "  ttl_days       = GREATEST(f.ttl_days,       o.ttl_days) "
-                + "FROM nexus.frecency o, nexus.chash_alias a "
-                + "WHERE o.chunk_id = a.old_ref "
-                + "  AND f.chunk_id = encode(a.new_chash, 'hex')");
+                "UPDATE nexus.frecency t SET "
+                + "  frecency_score = GREATEST(t.frecency_score, g.fs), "
+                + "  miss_count     = GREATEST(t.miss_count,     g.mc), "
+                + "  last_hit_at    = GREATEST(t.last_hit_at,    g.lh), "
+                + "  embedded_at    = GREATEST(t.embedded_at,    g.ea), "
+                + "  ttl_days       = GREATEST(t.ttl_days,       g.td) "
+                + "FROM " + frecencyAgg + " "
+                + "WHERE t.chunk_id = encode(g.new_chash, 'hex')");
             ctx.execute(
                 "DELETE FROM nexus.frecency f USING nexus.chash_alias a "
                 + "WHERE f.chunk_id = a.old_ref "
                 + "  AND EXISTS (SELECT 1 FROM nexus.frecency k "
                 + "        WHERE k.chunk_id = encode(a.new_chash, 'hex'))");
+            // (ii) no target row: the min-ctid keeper absorbs the group,
+            // the other olds are deleted (the keeper is renamed below).
+            ctx.execute(
+                "UPDATE nexus.frecency f SET "
+                + "  frecency_score = g.fs, miss_count = g.mc, "
+                + "  last_hit_at = g.lh, embedded_at = g.ea, ttl_days = g.td "
+                + "FROM " + frecencyAgg + ", nexus.chash_alias a2 "
+                + "WHERE a2.old_ref = f.chunk_id AND a2.new_chash = g.new_chash "
+                + "  AND f.chunk_id = g.keep_id");
+            ctx.execute(
+                "DELETE FROM nexus.frecency f "
+                + "USING " + frecencyAgg + ", nexus.chash_alias a2 "
+                + "WHERE a2.old_ref = f.chunk_id AND a2.new_chash = g.new_chash "
+                + "  AND f.chunk_id <> g.keep_id");
             counts.put("frecency_repointed", ctx.execute(
                 "UPDATE nexus.frecency f SET chunk_id = encode(a.new_chash, 'hex') "
                 + "FROM nexus.chash_alias a WHERE f.chunk_id = a.old_ref"));

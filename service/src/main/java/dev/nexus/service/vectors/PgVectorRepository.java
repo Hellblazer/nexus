@@ -313,7 +313,7 @@ public final class PgVectorRepository {
      *
      * @param tenant     tenant principal for RLS scoping
      * @param collection four-segment conformant collection name (drives dim dispatch)
-     * @param ids        chunk natural IDs (sha256(text)[:32] - the chash)
+     * @param ids        chunk natural IDs (the full sha256 hexdigest — the chash (RDR-180))
      * @param documents  chunk texts (embedded server-side)
      * @param metadatas  per-chunk metadata maps (stored as JSONB; may contain nulls)
      */
@@ -785,7 +785,7 @@ public final class PgVectorRepository {
      *
      * @param tenant     tenant principal for RLS scoping
      * @param collection four-segment conformant collection name
-     * @param chash      32-char content-addressed chunk ID (sha256(text)[:32])
+     * @param chash      64-hex content-addressed chunk ID (the full sha256, RDR-180)
      * @param embedding  precomputed vector (non-null, non-empty) — dim must match collection
      * @param metadata   chunk metadata (may be empty, not null)
      * @throws IllegalArgumentException if {@code embedding} is null/empty or dim mismatches
@@ -2449,7 +2449,7 @@ public final class PgVectorRepository {
      *
      * @param tenant     the requesting tenant principal
      * @param collection four-segment conformant collection name (drives dim dispatch)
-     * @param chash      the chunk's natural ID ({@code sha256(text)[:32]})
+     * @param chash      the chunk's natural ID (the full sha256 hexdigest, RDR-180)
      * @return the stored {@code chunk_text}, or {@code null} if none
      */
     public String fetchChunkText(String tenant, String collection, String chash) {

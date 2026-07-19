@@ -728,7 +728,7 @@ public final class CatalogHandler implements HttpHandler {
     /**
      * GET /v1/catalog/resolve_span?span_chash=<hex32>&collection=<name>  (nexus-njrcn.4)
      *
-     * <p>Resolves a 32-char chunk chash within a specific collection to its text and
+     * <p>Resolves a chunk chash (64-hex canonical; legacy 32-hex via chash_alias) within a specific collection to its text and
      * metadata. The client parses the full span string client-side and sends only the
      * truncated chash + collection so the server does a simple keyed lookup.
      *
@@ -752,7 +752,7 @@ public final class CatalogHandler implements HttpHandler {
     /**
      * GET /v1/catalog/resolve_chash?chash=<hex32>[&prefer_collection=<name>]  (nexus-njrcn.4)
      *
-     * <p>Globally resolves a 32-char chunk chash (across all dim tables) to its text,
+     * <p>Globally resolves a chunk chash (64-hex canonical, RDR-180; across all dim tables) to its text,
      * metadata, owning collection, and doc_id. Tie-breaks by prefer_collection (if
      * provided) then newest created_at.
      *
@@ -1465,11 +1465,13 @@ public final class CatalogHandler implements HttpHandler {
 
     /**
      * Parse-don't-validate every row's {@code chash} at the HTTP boundary
-     * (nexus-z4skl). A malformed chash — classically the FULL 64-char sha256
-     * hex instead of the canonical [:32] form — previously sailed through the
-     * handlers and only tripped the DB CHECK deep inside a per-row
-     * transaction, where batch writers swallowed it reason-less into
-     * failed_doc_ids (3 deploy-gate iterations on the v0.1.24 probe). Now it
+     * (nexus-z4skl lineage, polarity inverted by RDR-180): the canonical
+     * form is the FULL 64-hex sha256 digest; a bare 32-hex value is a
+     * legacy (pre-flip) reference that must resolve via chash_alias, never
+     * write. Historically a malformed chash sailed through the handlers and
+     * only tripped the DB CHECK deep inside a per-row transaction, where
+     * batch writers swallowed it reason-less into failed_doc_ids (3
+     * deploy-gate iterations on the v0.1.24 probe). Now it
      * is a uniform 400 carrying the offending length, BEFORE any transaction.
      * The parsed value is written back canonically; repositories downstream
      * see only validated chashes.

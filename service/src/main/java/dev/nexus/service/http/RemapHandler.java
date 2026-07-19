@@ -58,7 +58,7 @@ import java.util.Map;
  * oversized batches get 400, matching the client's existing paging contract.
  *
  * <p>new_chash normalization mirrors {@code ChashHandler}: a 64-char
- * chunk_text_hash form is normalized to its [:32] prefix (the ecosystem id
+ * chunk_text_hash IS the fact's canonical form (RDR-180 full digest; the id
  * convention, RDR-108 D1); any other non-32 length is rejected 400.
  *
  * <p>All endpoints require {@code Authorization: Bearer} (enforced by

@@ -414,6 +414,88 @@ class RekeyOpsIntegrationTest {
         assertThat(repo.resolveLegacyRef(TC, legacyAHex)).isNull();
     }
 
+    // ── Test 3c: cascade COLLAPSE branches — two old refs, one new key ───────
+
+    @Test
+    @Order(3)
+    void rekey_cascadeCollapse_frecencyMerges_assignmentsAndIndexTwoPhase() throws Exception {
+        // Two distinct legacy ids carrying the SAME text (they collapse to
+        // one digest), each with its own frecency / topic_assignments /
+        // chash_index rows — exercising the GREATEST-merge and the
+        // two-phase delete branches of the cascades, which test 1 only
+        // reached in their no-pre-existing-target shape.
+        String tenant = "t-rekey-collapse";
+        String text = "collapse cascade text";
+        byte[] old1 = legacyKey(text);
+        byte[] old2 = HexFormat.of().parseHex("0".repeat(30) + "99");
+        String old1Ref = HexFormat.of().formatHex(old1);
+        String old2Ref = HexFormat.of().formatHex(old2);
+        String newHex = HexFormat.of().formatHex(sha256(text));
+
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            exec(su, "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES "
+                + "('" + tenant + "', 'code__m') ON CONFLICT DO NOTHING");
+            withChecksDropped(su, () -> {
+                insertChunk(su, tenant, "nexus.chunks_768", 768, "code__m", old1, text);
+                insertChunk(su, tenant, "nexus.chunks_768", 768, "code__m", old2, text);
+                try {
+                    for (byte[] key : new byte[][] {old1, old2}) {
+                        try (PreparedStatement ps = su.prepareStatement(
+                            "INSERT INTO nexus.chash_index "
+                            + "(tenant_id, chash, physical_collection, created_at) VALUES ('"
+                            + tenant + "', ?, 'code__m', now())")) {
+                            ps.setBytes(1, key);
+                            ps.executeUpdate();
+                        }
+                    }
+                    exec(su, "INSERT INTO nexus.topics (tenant_id, id, collection, label, created_at) "
+                        + "VALUES ('" + tenant + "', 992, 'code__m', 'topic-m', now()) ON CONFLICT DO NOTHING");
+                    exec(su, "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id) VALUES "
+                        + "('" + tenant + "', '" + old1Ref + "', 992), "
+                        + "('" + tenant + "', '" + old2Ref + "', 992)");
+                    // frecency: distinct stats per old id — the survivor must
+                    // carry the GREATEST of each column.
+                    exec(su, "INSERT INTO nexus.frecency (tenant_id, chunk_id, frecency_score, "
+                        + "miss_count, last_hit_at, embedded_at, ttl_days) VALUES "
+                        + "('" + tenant + "', '" + old1Ref + "', 5.0, 1, now() - interval '2 days', now(), 10), "
+                        + "('" + tenant + "', '" + old2Ref + "', 2.0, 7, now(), now(), 30)");
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            });
+        }
+
+        Map<String, Object> counts = rekeyOps.rekey(tenant, false);
+        assertThat((int) counts.get("collapsed_duplicates")).isEqualTo(1);
+        assertThat((int) counts.get("residual_mismatched")).isZero();
+
+        // chunks collapsed to ONE row at the digest key
+        assertThat(count("SELECT count(*) FROM nexus.chunks_768 WHERE tenant_id='" + tenant + "'"))
+            .isEqualTo(1);
+        // chash_index two-phase: both old rows converge to ONE new-key row
+        assertThat(count("SELECT count(*) FROM nexus.chash_index WHERE tenant_id='" + tenant + "'"))
+            .isEqualTo(1);
+        assertThat(count("SELECT count(*) FROM nexus.chash_index WHERE tenant_id='" + tenant
+            + "' AND chash = decode('" + newHex + "', 'hex')")).isEqualTo(1);
+        // topic_assignments two-phase: one surviving assignment at the 64-hex
+        assertThat(count("SELECT count(*) FROM nexus.topic_assignments WHERE tenant_id='" + tenant + "'"))
+            .isEqualTo(1);
+        assertThat(scalar("SELECT doc_id FROM nexus.topic_assignments WHERE tenant_id='" + tenant + "'"))
+            .isEqualTo(newHex);
+        // frecency GREATEST-merge: one survivor carrying max of each column
+        assertThat(count("SELECT count(*) FROM nexus.frecency WHERE tenant_id='" + tenant + "'"))
+            .isEqualTo(1);
+        assertThat(scalar("SELECT chunk_id FROM nexus.frecency WHERE tenant_id='" + tenant + "'"))
+            .isEqualTo(newHex);
+        assertThat(scalar("SELECT frecency_score::text FROM nexus.frecency WHERE tenant_id='" + tenant + "'"))
+            .isEqualTo("5");
+        assertThat(scalar("SELECT miss_count::text FROM nexus.frecency WHERE tenant_id='" + tenant + "'"))
+            .isEqualTo("7");
+        assertThat(scalar("SELECT ttl_days::text FROM nexus.frecency WHERE tenant_id='" + tenant + "'"))
+            .isEqualTo("30");
+    }
+
     // ── Test 4: collision refusal on tenant TC ───────────────────────────────
 
     @Test
