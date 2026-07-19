@@ -94,6 +94,44 @@ class RawSqlGateTest {
             // `SHOW CONFIG` is a PgBouncer admin-console meta-command, not SQL against any
             // table/schema — no jOOQ DSL form exists (no bind params, no fixed column set).
             "fetchShowConfig"),
+        "RekeyOps.java", java.util.Set.of(
+            // SANCTIONED RAW (nexus-jxizy.6): the RDR-180 per-tenant rekey is
+            // deliberately server-side SQL — sha256() over chunk_text, ctid
+            // keeper selection via array_agg ORDER BY, reversibility-lemma
+            // CASE expressions, and multi-table cascades under one
+            // transaction. No jOOQ DSL form exists for the ctid/array_agg
+            // keeper idiom, and the statements are one-shot migration ops,
+            // not serving-path queries.
+            "rekey", "unionAllContentRows"),
+        "StagingHandler.java", java.util.Set.of(
+            // SANCTIONED RAW (nexus-jxizy.10.4): the landing surface is
+            // dynamic-by-store (8 staging tables, per-store column lists,
+            // multi-row VALUES with ::vector/::jsonb casts) — one-shot
+            // migration plumbing over tables jOOQ codegen deliberately
+            // does not model (staging is transient landing state).
+            "handleLoad", "handleEmbedFill", "handleClear", "handleCounts"),
+        "ChashCensus.java", java.util.Set.of(
+            // SANCTIONED RAW (nexus-jxizy.10.5): the census is dynamic BY
+            // CONSTRUCTION — columns enumerated from information_schema at
+            // run time; no generated jOOQ table can exist for a column the
+            // census exists to DISCOVER. Read-only counts, never serving-path.
+            "columns", "scan", "danglingPointers", "assertDiscoversKnownInventory"),
+        "StagingPromoteOps.java", java.util.Set.of(
+            // SANCTIONED RAW (nexus-jxizy.10.3): the land-then-transform
+            // promote/finalize — one-shot migration statements composing the
+            // ChashSqlIdioms fragments in the INSERT-into-populated-target
+            // shape (DISTINCT ON keepers, alias joins, GREATEST-merge,
+            // anti-join dedupes). Never serving-path.
+            "promoteCollection", "finalizeTenant"),
+        "ChashSqlIdioms.java", java.util.Set.of(
+            // SANCTIONED RAW (nexus-jxizy.10.2): the SHARED fragments of the
+            // two one-shot chash movers (RekeyOps in-store rekey +
+            // StagingPromoteOps land-then-transform promote) — same sanction
+            // rationale as RekeyOps, single-homed so the two writers of the
+            // shared tables cannot drift. Never serving-path.
+            "contentCollapseDelete", "contentRekeyUpdate",
+            "frecencyAliasAggregate", "residualMismatchCount",
+            "danglingManifestCount", "chashOldBytes"),
         "SchemaMigrator.java", java.util.Set.of(
             // nexus-c4143 root fix: pg_constraint is a Postgres SYSTEM CATALOG (jOOQ
             // codegen only covers the nexus/t1 application schemas, no generated table

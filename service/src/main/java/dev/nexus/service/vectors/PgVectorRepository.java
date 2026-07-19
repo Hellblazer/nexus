@@ -4,6 +4,7 @@ package dev.nexus.service.vectors;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.nexus.service.db.ChashHex;
 import dev.nexus.service.db.CollectionRegistry;
 import dev.nexus.service.db.DeadlockRetry;
 import dev.nexus.service.db.PgSession;
@@ -312,7 +313,7 @@ public final class PgVectorRepository {
      *
      * @param tenant     tenant principal for RLS scoping
      * @param collection four-segment conformant collection name (drives dim dispatch)
-     * @param ids        chunk natural IDs (sha256(text)[:32] - the chash)
+     * @param ids        chunk natural IDs (the full sha256 hexdigest — the chash (RDR-180))
      * @param documents  chunk texts (embedded server-side)
      * @param metadatas  per-chunk metadata maps (stored as JSONB; may contain nulls)
      */
@@ -385,15 +386,15 @@ public final class PgVectorRepository {
                                         List<Map<String, Object>> metadatas) {
         // nexus-e0hd2 review F2: this is the server-to-server ingest path
         // (MigrationHandler /ingest-cloud) — ids arrive from an EXTERNAL
-        // ChromaCloud response with no HTTP-boundary validation. Validate
-        // here so a malformed id fails loud with its index BEFORE the batch
-        // transaction, not reason-poor at the chunks CHECK. Length-only
-        // (the vector-id contract); NO truncation — unlike chash_index,
-        // 64-char ids on THIS path have always hard-failed, and the
-        // completed production migration proves conformant sources.
+        // source with no HTTP-boundary validation. Validate here so a
+        // malformed id fails loud with its index BEFORE the batch
+        // transaction, not reason-poor at the chunks CHECK. RDR-180
+        // (nexus-jxizy.7): ONE strict tier — the full-digest 64-hex is the
+        // only accepted id shape (the byte[16]-era length-only tolerance is
+        // retired; PgVectorServingContractTest pins the rejection).
         if (ids != null) {
             for (int i = 0; i < ids.size(); i++) {
-                dev.nexus.service.db.Chash.requireLength32(ids.get(i), "ids[" + i + "]");
+                dev.nexus.service.db.Chash.requireCanonical(ids.get(i), "ids[" + i + "]");
             }
         }
         if (embeddings == null || embeddings.size() != ids.size()) {
@@ -784,7 +785,7 @@ public final class PgVectorRepository {
      *
      * @param tenant     tenant principal for RLS scoping
      * @param collection four-segment conformant collection name
-     * @param chash      32-char content-addressed chunk ID (sha256(text)[:32])
+     * @param chash      64-hex content-addressed chunk ID (the full sha256, RDR-180)
      * @param embedding  precomputed vector (non-null, non-empty) — dim must match collection
      * @param metadata   chunk metadata (may be empty, not null)
      * @throws IllegalArgumentException if {@code embedding} is null/empty or dim mismatches
@@ -938,7 +939,9 @@ public final class PgVectorRepository {
         float[] queryVec = embedResult.embeddings().get(0);
 
         StringBuilder sql = new StringBuilder()
-            .append("SELECT chash, chunk_text, collection, metadata::text AS metadata_json,")
+            // RDR-180: bytea storage — hex at the SQL seam (raw-SQL twin of
+            // the ChashHex converted type the jOOQ paths use).
+            .append("SELECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::text AS metadata_json,")
             .append(" (embedding <=> ?::vector) AS distance")
             .append(" FROM ").append(chunksTable(dim))
             .append(" WHERE collection IN (").append(placeholders(collectionNames.size())).append(")");
@@ -1233,7 +1236,8 @@ public final class PgVectorRepository {
             PgSession.setLocal(ctx, "pg_trgm.word_similarity_threshold", "0.6");
 
             List<String> gateChashes = rawVectorFetch(
-                ctx, "SELECT chash FROM " + table + gateSql + " LIMIT ?", probeBinds.toArray())
+                ctx, "SELECT encode(chash, 'hex') AS chash FROM " + table + gateSql + " LIMIT ?",
+                probeBinds.toArray())
                 .map(r -> r.get("chash", String.class));
 
             if (gateChashes.size() <= selectiveGateMax) {
@@ -1257,9 +1261,9 @@ public final class PgVectorRepository {
                 // AFTER the size-based dispatch so the selective/non-selective boundary stays
                 // identical to the old per-row COUNT(*).
                 List<String> inChashes = gateChashes.stream().distinct().toList();
-                String sql = "SELECT chash, chunk_text, collection, metadata::text AS metadata_json,"
+                String sql = "SELECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::text AS metadata_json,"
                     + " (embedding <=> ?::vector) AS distance FROM " + table + scopeSql
-                    + " AND chash IN (" + placeholders(inChashes.size()) + ")"
+                    + " AND chash IN (" + decodePlaceholders(inChashes.size()) + ")"
                     + " ORDER BY distance ASC, chash ASC LIMIT ?";
                 List<Object> b = new ArrayList<>();
                 b.add(vecLit);
@@ -1270,7 +1274,7 @@ public final class PgVectorRepository {
             }
             // HNSW-first for a dense gate: keep HNSW scanning past ef_search.
             PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
-            String sql = "SELECT chash, chunk_text, collection, metadata::text AS metadata_json,"
+            String sql = "SELECT encode(chash, 'hex') AS chash, chunk_text, collection, metadata::text AS metadata_json,"
                 + " (embedding <=> ?::vector) AS distance FROM " + table + gateSql
                 + " ORDER BY distance ASC, chash ASC LIMIT ?";
             List<Object> b = new ArrayList<>();
@@ -2360,7 +2364,7 @@ public final class PgVectorRepository {
 
             // 2. Manifest rows in position order.
             var manifest = ctx.select(CATALOG_DOCUMENT_CHUNKS.POSITION,
-                                      CATALOG_DOCUMENT_CHUNKS.CHASH,
+                                      ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH),
                                       CATALOG_DOCUMENT_CHUNKS.COLLECTION)
                               .from(CATALOG_DOCUMENT_CHUNKS)
                               .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(tumbler))
@@ -2445,7 +2449,7 @@ public final class PgVectorRepository {
      *
      * @param tenant     the requesting tenant principal
      * @param collection four-segment conformant collection name (drives dim dispatch)
-     * @param chash      the chunk's natural ID ({@code sha256(text)[:32]})
+     * @param chash      the chunk's natural ID (the full sha256 hexdigest, RDR-180)
      * @return the stored {@code chunk_text}, or {@code null} if none
      */
     public String fetchChunkText(String tenant, String collection, String chash) {
@@ -2539,6 +2543,16 @@ public final class PgVectorRepository {
             throw new IllegalArgumentException("placeholders requires n >= 1, got " + n);
         }
         return String.join(",", java.util.Collections.nCopies(n, "?"));
+    }
+
+    /** RDR-180: hex-string binds against the bytea chash column. */
+    private static String decodePlaceholders(int n) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < n; i++) {
+            if (i > 0) sb.append(",");
+            sb.append("decode(?, 'hex')");
+        }
+        return sb.toString();
     }
 
     /**
@@ -2804,13 +2818,13 @@ public final class PgVectorRepository {
             // Note: last-writer-wins when a chash appears in multiple catalog_document_chunks
             // rows (shared chunk text across documents) — non-determinism accepted for now.
             var result = tenantScope.withTenant(tenant, ctx ->
-                ctx.select(CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENTS.SOURCE_URI)
+                ctx.select(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH), CATALOG_DOCUMENTS.SOURCE_URI)
                    .from(CATALOG_DOCUMENT_CHUNKS)
                    .join(CATALOG_DOCUMENTS)
                    .on(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)
                        .and(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)))
                    .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
-                       .and(CATALOG_DOCUMENT_CHUNKS.CHASH.in(batch)))
+                       .and(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH).in(batch)))
                    .fetch());
 
             for (var rec : result) {
@@ -2824,6 +2838,19 @@ public final class PgVectorRepository {
 
     /** Precompiled hex pattern for chunk_text_hash validation (fix #M1-cr: length+charset). */
     private static final Pattern HEX64 = Pattern.compile("[0-9a-f]{64}");
+
+    /** Legacy pre-RDR-180 chunk id shape: 32 lowercase hex (the [:32] truncation era). */
+    private static final Pattern HEX32 = Pattern.compile("[0-9a-f]{32}");
+
+    /**
+     * True when {@code s} is a legacy 32-lowercase-hex chunk id — the shape every
+     * pre-RDR-180 row carries (as a 16-byte key post-conversion) until the
+     * chash-rekey rung runs. Read paths tolerate this width in the auto-converge
+     * window; WRITE boundaries reject it ({@link dev.nexus.service.db.Chash}).
+     */
+    private static boolean isLegacyHex32(String s) {
+        return s != null && HEX32.matcher(s).matches();
+    }
 
     /**
      * Compute a span string from chunk metadata (RDR-169 G5, bead nexus-jkv85).
@@ -2900,11 +2927,24 @@ public final class PgVectorRepository {
         }
         for (Map<String, Object> row : rows) {
             Object idVal = row.get("id");
-            // Fail loud if id is not a 32-hex chash — document-level callers must not reach here.
-            if (!(idVal instanceof String chashStr) || chashStr.length() != 32) {
+            // Fail loud if id is not chash-shaped (RDR-180) — document-level
+            // callers (tumbler ids) must not reach here. LEGACY 32-hex ids
+            // are chunk rows too (nexus-p78a0 rehearsal catch, run 3): in the
+            // auto-converge window — cohort engine booted, chash-rekey rung
+            // not yet run — every pre-existing row still carries its 16-byte
+            // legacy key, and a hard 64-only guard here 422'd EVERY search of
+            // pre-existing content, making an un-rekeyed store unreadable.
+            // The window contract is degrade-per-row, never fail-the-read:
+            // serve the row (chash = the legacy hex; the client's dual-width
+            // read seam resolves it via the alias route once rekeyed); the
+            // span still derives from metadata chunk_text_hash, which has
+            // carried the FULL 64-hex in every era.
+            if (!(idVal instanceof String chashStr)
+                    || !(chashStr.length() == 64 || isLegacyHex32(chashStr))) {
                 throw new IllegalStateException(
-                    "enrichSearchRows: id '" + idVal + "' is not a 32-char chash — "
-                    + "only chunk-level search rows may be enriched");
+                    "enrichSearchRows: id '" + idVal + "' is not a 64-hex chash "
+                    + "(or a legacy 32-hex window row) — only chunk-level search "
+                    + "rows may be enriched");
             }
             row.put("chash", chashStr);
             if (includeSourceUri) {

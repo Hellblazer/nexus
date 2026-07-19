@@ -1,0 +1,47 @@
+# syntax=docker/dockerfile:1
+# nexus-p78a0 — RDR-180 CHASH-WINDOW rehearsal box.
+#
+# Same quarantine posture as Dockerfile.cold (no system PostgreSQL, no
+# pre-staged engine, no ONNX model), with TWO deliberate differences:
+#
+#   1. NO pre-installed conexus AT ALL — the driver `uv tool install`s the
+#      last pre-cohort release from real PyPI at runtime, then swaps to the
+#      staged worktree wheel. A TOOL install (not a venv) because
+#      running_from_tool_install() gates the version-transition finish pass
+#      whose [upgrade-finish] callout line is the surface under test.
+#   2. The locally-built COHORT engine binary travels in under native/ —
+#      the cohort tag is unpublished pre-cutover, so the driver swaps it in
+#      by hand (documented there as the harness's only engine supply).
+FROM debian:trixie-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    PYTHONUNBUFFERED=1
+
+# ca-certificates (PyPI + GitHub release + HF downloads), git (Catalog.init),
+# python for the /version JSON probe helper + uv bootstrap, libgomp1 (the
+# native binary's bundled ONNX runtime dlopens OpenMP). NO postgresql — the
+# relocatable PG bundle is cold-acquired + provisioned by nx itself.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl git \
+        python3 python3-venv python3-pip \
+        libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-root user — initdb (run by `nx init --service`) refuses to run as root.
+RUN useradd -m -s /bin/bash nexus
+# ~/.local/bin is where `uv tool install` links the nx executable.
+ENV PATH="/home/nexus/.local/bin:${PATH}"
+
+RUN pip3 install --no-cache-dir --break-system-packages uv
+
+USER nexus
+WORKDIR /home/nexus
+
+# The staged cohort engine (nexus-service + the -Ob build's .so siblings),
+# the worktree wheel (real PEP 427 name preserved), and the driver.
+COPY --chown=nexus:nexus native/ /home/nexus/native/
+COPY --chown=nexus:nexus worktree-wheel/ /home/nexus/worktree-wheel/
+COPY --chown=nexus:nexus rehearse_chash_window.sh /home/nexus/rehearse_chash_window.sh
+
+ENTRYPOINT ["/bin/bash", "/home/nexus/rehearse_chash_window.sh"]

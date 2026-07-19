@@ -300,11 +300,10 @@ class HybridSelectiveGateTest {
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
-    /** 32-char chunk id: prefix + zero-padded index (chunks_<dim>.chash is 32 chars). */
+    /** Full 64-hex chunk id deterministically derived from prefix + index (RDR-180:
+     *  chunks_&lt;dim&gt;.chash is bytea(32) — the full sha256 digest). */
     private static String chash(String prefix, int i) {
-        String body = prefix + i;
-        if (body.length() > 32) throw new IllegalStateException("prefix too long");
-        return body + "0".repeat(32 - body.length());
+        return dev.nexus.service.db.Chash.ofText(prefix + i).toHex();
     }
 
     /** 1024-dim pgvector literal with first two components (x, y), rest 0. */

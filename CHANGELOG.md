@@ -6,6 +6,48 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.14.0] - 2026-07-19
+
+Ships with (and requires) engine-service-v0.1.49.
+
+### Changed
+
+- **chash is now the full 32-byte SHA-256, stored as raw bytes** (RDR-180,
+  epic nexus-jxizy): the chunk content address was historically
+  `sha256(text)[:32]` — half the digest as hex text — while the citation
+  grammar advertised the full 64-hex. The producer now emits the full
+  digest, the engine stores `bytea` with `CHECK (octet_length(chash)=32)`,
+  and hex (64 lowercase chars) is strictly the interchange form. Requires
+  the paired RDR-180 engine generation; `nx upgrade`'s new `chash-rekey`
+  ladder rung performs the freeze-gated per-store cutover (rehash from
+  stored text, no re-embed) and records every legacy id in the permanent
+  `chash_alias` map so old 32-hex references stay resolvable forever.
+  The 32-vs-64 width bug class is structurally eliminated; content
+  citations (`chash:<64hex>`) now resolve at the full 256 bits they
+  always claimed.
+- **Guided migration is LAND-THEN-TRANSFORM** (RDR-180, nexus-jxizy.10):
+  the guided upgrade bulk-loads the legacy source into a PG staging schema,
+  then performs ONE transactional in-DB re-identification + promote —
+  retiring the per-leg in-flight rewrite class. The pregate width block is
+  gone: 16-char (GH #1408) and 32-hex legacy stores migrate; a disk
+  preflight and exact landing manifest run up front; promoted and rekeyed
+  rows carry `chunk_text_hash` metadata parity at every touch site, so
+  migrated chunks are immediately citable.
+
+### Fixed
+
+- **A table-rewriting migration now ANALYZEs what it rewrote, in the same
+  changelog pass** (engine-service-v0.1.49, BUG-0148/conexus-xpg7): the
+  RDR-180 `ALTER TYPE` boot conversion silently reset planner statistics —
+  and a rewritten table looks fresh to autovacuum, so autoanalyze may never
+  re-trigger — degrading sparse-text-gate hybrid queries to ZERO rows while
+  every health probe stayed green (observed live in the managed cloud,
+  2026-07-19). The engine floor bump is the delivery vehicle: this is why
+  6.14.0 requires v0.1.49. Related, benign: any table rewrite rebuilds the
+  HNSW indexes (graph construction is insertion-order dependent), so
+  borderline approximate-rank orderings can shift permanently after the
+  migration — re-baseline external oracles against post-migration serving.
+
 ## [6.13.1] - 2026-07-18
 
 Ships with (and requires) engine-service-v0.1.47 (unchanged from 6.13.0).

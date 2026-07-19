@@ -107,11 +107,12 @@ class CollectionRegistryFkTest {
     private static final List<String> ALL_FIVE_FK_NAMES = List.of(
             FK_CHUNKS_384, FK_CHUNKS_768, FK_CHUNKS_1024, FK_CHASH_INDEX, FK_TOPIC_ASSIGN);
 
-    // CHECK constraint names
-    private static final String CHK_384_CHASH  = "chunks_384_chash_len_check";
-    private static final String CHK_768_CHASH  = "chunks_768_chash_len_check";
-    private static final String CHK_1024_CHASH = "chunks_1024_chash_len_check";
-    private static final String CHK_MANIFEST_CHASH = "catalog_document_chunks_chash_len_check";
+    // CHECK constraint names (RDR-180: TEXT length(chash)=32 checks were dropped and
+    // replaced by bytea octet_length(chash)=32 checks — rdr180-001-bytea-chash.xml)
+    private static final String CHK_384_CHASH  = "chunks_384_chash_octet_check";
+    private static final String CHK_768_CHASH  = "chunks_768_chash_octet_check";
+    private static final String CHK_1024_CHASH = "chunks_1024_chash_octet_check";
+    private static final String CHK_MANIFEST_CHASH = "catalog_document_chunks_chash_octet_check";
     private static final String CHK_MANIFEST_POS   = "catalog_document_chunks_position_check";
 
     private static final int[] DIMS = {384, 768, 1024};
@@ -982,7 +983,7 @@ class CollectionRegistryFkTest {
 
             // upsert a chunk batch for an UNREGISTERED conformant collection
             repo.upsertChunks(tenant, conformantCol,
-                List.of(validChash("autoreg-384")),
+                List.of(dev.nexus.service.db.Chash.ofText("autoreg-384").toHex()),
                 List.of("auto-reg chunk text"),
                 List.of(Map.of()));
         }

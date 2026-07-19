@@ -4,6 +4,13 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.14.0] - 2026-07-19
+
+- Plugin version aligned with conexus 6.14.0. No plugin-side changes. Root
+  CHANGELOG: chash is the full 32-byte SHA-256 (RDR-180); guided migration
+  is land-then-transform; engine pair v0.1.49 ANALYZEs rewritten tables in
+  the migration pass (BUG-0148).
+
 ## [6.13.1] - 2026-07-18
 
 - Plugin version aligned with conexus 6.13.1. No plugin-side changes. Root

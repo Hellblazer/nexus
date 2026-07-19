@@ -104,11 +104,16 @@ def _probe_actual_dim(col: Any) -> int | None:
 
 
 def _probe_legacy_ids(col: Any) -> str | None:
-    """Sample the FIRST page of chunk ids for a legacy non-32-char id.
+    """Sample the FIRST page of chunk ids for a truly-legacy id.
+
+    RDR-180 (nexus-jxizy.3): the CONFORMANT widths are now a SET — 32-char
+    era ids (pre-flip sources, re-derived to the full digest on the wire by
+    ``wire_reid``) AND 64-char full digests (the canonical identity, and
+    what post-flip sources carry). Truly legacy = everything else.
 
     GH #1390 root cause (nexus-sot7v): pre-RDR-108-era Chroma stores hold
-    16/18-char chunk ids; the pgvector chash identity is
-    ``sha256(chunk_text)[:32]`` and the migration NEVER rewrites ids
+    16/18-char chunk ids; the pgvector chash identity is the full
+    ``sha256(chunk_text)`` and the migration NEVER guesses ids
     (rewriting would sever the catalog-manifest chash join, which carries
     the same legacy values but no text to recompute from, and would break
     ``rollback_collections``' source-chash-set matching). Such a collection
@@ -136,9 +141,107 @@ def _probe_legacy_ids(col: Any) -> str | None:
         return None
     ids = sample.get("ids") if isinstance(sample, dict) else None
     for chunk_id in ids or []:
-        if len(chunk_id) != 32:
+        if len(chunk_id) not in (32, 64):
             return chunk_id
     return None
+
+
+#: RDR-180 land-then-transform (nexus-jxizy.10.8): the width era a chunk id
+#: sample can land in. The legacy-id BLOCK that used to fire on a non-32/64
+#: id (see the now-retired check in ``pregate.assert_models_supported``) is
+#: repurposed under land-then-transform into LANDING-MANIFEST input — the
+#: sequencer's landing phase and the rehearsal's non-vacuity asserts need to
+#: know WHICH width era a data-bearing collection carries, not whether to
+#: block it (chunk_text is rehashed server-side regardless of source width).
+WidthEra = Literal["canonical-64", "legacy-32", "legacy-16", "mixed"]
+
+
+def _id_width_era(chunk_id: str) -> WidthEra:
+    """Bucket one chunk id by length.
+
+    64 = the canonical full ``sha256(chunk_text)`` digest (RDR-180); 32 =
+    the pre-flip / RDR-108-era width; anything else (typically 16-char) is
+    the pre-RDR-108 legacy population land-then-transform now migrates by
+    rehash (GH #1408) instead of blocking.
+    """
+    n = len(chunk_id)
+    if n == 64:
+        return "canonical-64"
+    if n == 32:
+        return "legacy-32"
+    return "legacy-16"
+
+
+def probe_width_era(col: Any) -> WidthEra | None:
+    """Sample the FIRST page of chunk ids and classify the width era(s) observed.
+
+    Same sampling mechanics as :func:`_probe_legacy_ids` (up to 300 ids,
+    ``include=[]``) and the same best-effort failure contract: a probe
+    failure or an empty sample returns ``None`` (unknown — the caller
+    degrades gracefully; this must never abort detection). ``"mixed"`` when
+    the sample spans more than one width era.
+
+    Exposed (not underscore-prefixed, unlike the probe helpers above) so the
+    pre-gate's landing-manifest builder
+    (:func:`nexus.migration.pregate.landing_width_manifest`) and the
+    sequencer's landing phase can call it directly against a live-opened
+    collection — RDR-180 design Q4 item 3, nexus-jxizy.10.8.
+    """
+    try:
+        sample = col.get(limit=300, include=[])
+    except Exception as exc:  # noqa: BLE001 — best-effort probe; never abort detection
+        _log.warning(
+            "migration_width_era_probe_failed",
+            collection=getattr(col, "name", "?"),
+            error=str(exc),
+        )
+        return None
+    ids = sample.get("ids") if isinstance(sample, dict) else None
+    if not ids:
+        return None
+    eras = {_id_width_era(i) for i in ids}
+    if len(eras) > 1:
+        return "mixed"
+    return eras.pop()
+
+
+def probe_has_text(col: Any) -> bool | None:
+    """Sample the FIRST page of chunk documents for ANY non-blank text.
+
+    RDR-180 land-then-transform derives the canonical chash by rehashing
+    ``chunk_text`` server-side (nexus_rdr/180-land-transform-design Q3 step
+    1) — a collection whose sampled chunks carry NO text at all has nothing
+    to rehash from and stays genuinely blocked at the pre-gate
+    (:func:`nexus.migration.pregate.assert_models_supported`'s ``no_text``
+    check), unlike the retired legacy-id width block (nexus-jxizy.10.8).
+    Same best-effort sampling mechanics as :func:`_probe_legacy_ids` /
+    :func:`probe_width_era` (up to 300 rows), with an honest three-way
+    result:
+
+    * ``True`` — at least one sampled chunk has non-blank text;
+    * ``False`` — every sampled chunk's document is empty/blank (the
+      genuine no-text signal that blocks);
+    * ``None`` — the probe could not be run or returned nothing usable
+      (unreachable collection, a backend without ``documents`` support) —
+      inconclusive, NEVER treated as a positive no-text finding.
+    """
+    try:
+        sample = col.get(limit=300, include=["documents"])
+    except Exception as exc:  # noqa: BLE001 — best-effort probe; never abort detection
+        _log.warning(
+            "migration_text_presence_probe_failed",
+            collection=getattr(col, "name", "?"),
+            error=str(exc),
+        )
+        return None
+    ids = sample.get("ids") if isinstance(sample, dict) else None
+    if not ids:
+        return None
+    docs = sample.get("documents") if isinstance(sample, dict) else None
+    if docs is None:
+        return None
+    return any((d or "").strip() for d in docs)
+
 
 #: The voyage models (``_VOYAGE_MODELS``) are imported from ``vector_etl`` (single
 #: source) so this module's billing decision and vector_etl's passthrough
@@ -414,7 +517,7 @@ def _classify_leg(
         # the measurement, not the label, decides (the read-side twin of the
         # RDR-109 write-side honest-naming fix). Probe failure propagates
         # LOUD, same as the count probe above.
-        # GH #1390 / nexus-sot7v: legacy non-32-char chunk ids hard-block the
+        # GH #1390 / nexus-sot7v: truly-legacy (non-32/64-char) chunk ids hard-block the
         # migration BEFORE model classification is even interesting — the ids
         # are the identity the pgvector side keys on, and no migration path
         # (verbatim copy OR cross-model re-embed) rewrites them. Checked for
@@ -428,13 +531,14 @@ def _classify_leg(
                 legacy_ids = True
                 support = "unsupported"
                 reason = (
-                    f"collection holds legacy non-32-char chunk ids (e.g. "
+                    f"collection holds legacy chunk ids (e.g. "
                     f"{bad_id!r}; pre-RDR-108 era) — the pgvector chash "
-                    "identity is sha256(chunk_text)[:32] and the migration "
-                    "will not rewrite ids; re-index this collection from its "
-                    "source content before migrating. Do NOT drop or weaken "
-                    "the chash length constraints to force the upserts "
-                    "through (GH #1390)."
+                    "identity is the full sha256(chunk_text) hexdigest "
+                    "(RDR-180) and the migration will not guess ids; "
+                    "re-index this collection from its source content "
+                    "before migrating. Do NOT drop or weaken the chash "
+                    "width constraints to force the upserts through "
+                    "(GH #1390)."
                 )
         # nexus-x7t5y (GH follow-on to nb7hr): a voyage-NAMED collection with
         # a local NX_VOYAGE_API_KEY present short-circuits classify_model_support

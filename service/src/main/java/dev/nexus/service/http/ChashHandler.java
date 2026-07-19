@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
+import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ChashRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,7 +35,7 @@ import java.util.Map;
  *   GET    /v1/chash/is_empty             true when no rows exist
  *   GET    /v1/chash/count_for_collection  count rows for collection=
  *   POST   /v1/chash/import               fidelity-preserving ETL import
- *   GET    /v1/chash/registered_chashes   set of chash[:32] for collection= (audit)
+ *   GET    /v1/chash/registered_chashes   set of hex chashes for collection= (audit)
  * </pre>
  *
  * <p>All endpoints require {@code Authorization: Bearer <token>} (enforced by
@@ -106,18 +107,13 @@ public final class ChashHandler implements HttpHandler {
     private void handleUpsert(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
-        // nexus-e0hd2: guard at the boundary — a malformed chash previously
-        // rode into the INSERT and PERSISTED (chash_index had NO length
-        // CHECK until catalog-013). The LIVE producer (dual_write_chash_index)
-        // historically sent the FULL 64-char chunk_text_hash; the index keys
-        // on its [:32] form (RDR-108 D1 — what registeredChashesForCollection
-        // substr's on read). NORMALIZE the 64-shape rather than reject it:
-        // clients older than the producer-side truncation fix keep working
-        // through the deploy window (critic finding — a reject here would
-        // have silently stalled chash_index growth for every service-mode
-        // tenant behind two best-effort catches). Any other non-32 length
-        // is genuinely malformed.
-        String chash      = normalizeChash((String) body.get("chash"), "'chash'");
+        // RDR-180 (nexus-jxizy.7/.8): ONE strict tier — the boundary parses
+        // through the Chash type (64 lowercase hex), yielding a uniform 400
+        // with the offending length BEFORE any transaction. The pre-flip
+        // 64->32 truncating normalization is retired: the full digest IS the
+        // key now, and a bare 32-hex is a legacy reference the client-side
+        // resolver maps through chash_alias before calling here.
+        Chash chash       = parseChash((String) body.get("chash"), "'chash'");
         String collection = (String) body.get("collection");
         repo.upsert(tenant, chash, collection);
         HttpUtil.send(exchange, 200, "{\"ok\":true}");
@@ -138,7 +134,7 @@ public final class ChashHandler implements HttpHandler {
         // nexus-e0hd2: strict, not silent-drop — a non-string element used to
         // vanish here (the castRows disease), and a malformed chash rode
         // through to the DB (chash_index had no length CHECK pre-catalog-013).
-        List<String> chashes = new ArrayList<>();
+        List<Chash> chashes = new ArrayList<>();
         List<?> rawList = (List<?>) rawChashes;
         for (int i = 0; i < rawList.size(); i++) {
             Object item = rawList.get(i);
@@ -147,38 +143,59 @@ public final class ChashHandler implements HttpHandler {
                     "chashes[" + i + "]: must be a string, got "
                     + (item == null ? "null" : item.getClass().getSimpleName()));
             }
-            chashes.add(normalizeChash(s, "chashes[" + i + "]"));
+            chashes.add(parseChash(s, "chashes[" + i + "]"));
         }
         repo.upsertMany(tenant, chashes, collection);
         HttpUtil.send(exchange, 200, "{\"ok\":true,\"count\":" + chashes.size() + "}");
     }
 
     /**
-     * Normalize an incoming chash to the [:32] chunk-id key (nexus-e0hd2).
-     * The 64-char full-sha256 shape is the live producer's historical output
-     * and the SQLite-era stored form — truncate it (mirroring
-     * catalog-013-0's one-time DB normalization and the read side's substr);
-     * anything else must already be 32 chars or 400s with the offending
-     * length.
+     * Parse an incoming chash through the type — the sole enforcement point
+     * (RDR-180 one-strict-tier). 64 lowercase hex or a labeled 400; a 32-hex
+     * legacy reference gets the self-diagnosing alias-resolution hint from
+     * {@link Chash#fromHex}.
      */
-    private static String normalizeChash(String value, String label) {
-        if (value != null && value.length() == 64) {
-            value = value.substring(0, 32);
+    private static Chash parseChash(String value, String label) {
+        try {
+            return Chash.fromHex(value);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException(label + ": " + e.getMessage());
         }
-        return dev.nexus.service.db.Chash.requireLength32(value, label);
     }
 
     // ── GET /v1/chash/lookup?chash=<hex> ─────────────────────────────────────
 
     private void handleLookup(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
-        String chash = queryParam(exchange, "chash");
-        if (chash == null || chash.isBlank()) {
+        String raw = queryParam(exchange, "chash");
+        if (raw == null || raw.isBlank()) {
             HttpUtil.send(exchange, 400, "{\"error\":\"chash query param required\"}");
             return;
         }
+        // RDR-180 Item3 read seam: the canonical 64-hex parses through the
+        // type; anything else is treated as a LEGACY REFERENCE (pre-flip
+        // 32-hex chunk id, ETL-era external id) and resolved through the
+        // permanent chash_alias map. An unmapped legacy ref answers empty
+        // rows — same contract as an unknown canonical chash (the alias map
+        // is the collision-free resolver; a miss is dangling, not an error).
+        Chash chash;
+        if (raw.length() == Chash.HEX_LENGTH) {
+            chash = parseChash(raw, "'chash'");
+        } else {
+            chash = repo.resolveLegacyRef(tenant, raw);
+            if (chash == null) {
+                HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
+                    Map.of("rows", List.of(), "legacy_ref_unresolved", true)));
+                return;
+            }
+        }
         var rows = repo.lookup(tenant, chash);
-        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("rows", rows)));
+        // The canonical 64-hex is echoed so a LEGACY-ref caller learns the
+        // resolved identity (the client citation resolver then fetches the
+        // chunk by ITS canonical hash — RDR-180 Failure Modes: resolvers
+        // accept 32-hex via alias lookup and 64-hex directly).
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
+            Map.of("rows", rows, "chash", chash.toHex())));
     }
 
     // ── POST /v1/chash/delete_collection ─────────────────────────────────────
@@ -223,13 +240,13 @@ public final class ChashHandler implements HttpHandler {
     private void handleDeleteStale(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
-        String chash      = (String) body.get("chash");
+        String rawChash   = (String) body.get("chash");
         String collection = (String) body.get("collection");
-        if (chash == null || collection == null) {
+        if (rawChash == null || collection == null) {
             HttpUtil.send(exchange, 400, "{\"error\":\"'chash' and 'collection' required\"}");
             return;
         }
-        int deleted = repo.deleteStale(tenant, chash, collection);
+        int deleted = repo.deleteStale(tenant, parseChash(rawChash, "'chash'"), collection);
         HttpUtil.send(exchange, 200, "{\"deleted\":" + deleted + "}");
     }
 
@@ -277,19 +294,20 @@ public final class ChashHandler implements HttpHandler {
             Object item = rawList.get(rowIdx);
             if (!(item instanceof Map)) continue;
             Map<String, Object> row = (Map<String, Object>) item;
-            // /import is the MIGRATION route: the SQLite-era chash_index could
-            // hold FULL 64-char chashes (copied verbatim by migrate_chash_rows)
-            // — normalize those to the [:32] chunk-id form here (mirroring
-            // catalog-013-0's one-time DB normalization) instead of rejecting,
-            // or legacy tenants could never re-run their migration. Any other
-            // non-32 length is genuinely malformed and 400s.
+            // /import is the MIGRATION route. RDR-180: on a converged
+            // client/engine pair the substrate rung derives the FULL digest
+            // on the wire (wire_reid), so imports arrive 64-hex; the pre-flip
+            // 64->32 truncating normalization is retired with the [:32] era.
+            // A 32-hex arrival means a pre-RDR-180 client against this engine
+            // — the pair must converge first (ONE engine per release), so it
+            // 400s with the alias hint rather than silently truncating.
             // Index off the INPUT position, not rows.size() — skipped
             // elements would shift every later error index (review F1).
-            String chash      = normalizeChash(
-                (String) row.get("chash"), "rows[" + rowIdx + "].chash");
+            String rawChash   = (String) row.get("chash");
             String collection = (String) row.get("collection");
             String createdAt  = (String) row.get("created_at");
-            if (chash == null || chash.isBlank() || collection == null || collection.isBlank()) continue;
+            if (rawChash == null || rawChash.isBlank() || collection == null || collection.isBlank()) continue;
+            Chash chash = parseChash(rawChash, "rows[" + rowIdx + "].chash");
             if (createdAt == null || createdAt.isBlank()) createdAt = "1970-01-01T00:00:00Z";
             rows.add(new ChashRepository.ImportRow(chash, collection, createdAt));
         }
@@ -300,14 +318,13 @@ public final class ChashHandler implements HttpHandler {
     // ── GET /v1/chash/registered_chashes?collection=<name> ───────────────────
 
     /**
-     * Return the set of {@code chash[:32]} values registered for {@code collection}.
+     * Return the set of registered chashes for {@code collection}, hex-encoded.
      *
-     * <p>Mirrors {@code ChashIndex.registered_chashes_for_collection}: the 32-char
-     * prefix matches Chroma natural-ID shape (RDR-108 §D1) and is used by the
-     * collection-audit coverage probe to produce the set-difference against T3
-     * chunk IDs.
+     * <p>RDR-180: full-digest natural IDs — canonical rows encode to 64-hex;
+     * not-yet-rekeyed legacy rows encode to their shorter legacy hex, which
+     * the audit caller treats as legacy references.
      *
-     * <p>Response: {@code {"chashes": ["<hex32>", ...]}}
+     * <p>Response: {@code {"chashes": ["<hex>", ...]}}
      */
     private void handleRegisteredChashes(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }

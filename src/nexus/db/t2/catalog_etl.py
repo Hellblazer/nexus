@@ -399,131 +399,105 @@ def count_source_rows(catalog_db_path: Path) -> dict[str, int]:
     return counts
 
 
-def migrate_catalog(
-    catalog_db_path: Path,
-    client: Any,
-    *,
-    batch_log_every: int = 50,
-    collector: Any = None,
-    breaker: EtlCircuitBreaker | None = None,
-) -> dict[str, dict[str, int]]:
-    """Copy all rows from a SQLite catalog into Postgres via *client*.
+# ── Per-table entry points (RDR-180 nexus-jxizy.10.7 split) ────────────────────
+#
+# Each function migrates exactly ONE SQLite catalog table (or, for links, one
+# table plus a read-only reference read of documents for the soft-dangler
+# check) and opens its own read-only connection (copy-not-move; mirrors
+# aspects_etl.py's per-table shape), self-recording collector counts so it
+# is usable standalone.
+#
+# document_chunks is the CHASH-BEARING manifest (RDR-180): the guided
+# land-then-transform path lands + promotes it server-side, so
+# migrate_catalog_without_chunks() composes the other four (plus the meta
+# skip-note and next_seq reconcile, neither of which touches chunks) and
+# deliberately excludes it.
 
-    Uses ``HttpCatalogClient`` import endpoints:
-      - POST /v1/catalog/import/owner
-      - POST /v1/catalog/import/document
-      - POST /v1/catalog/import/collection
-      - POST /v1/catalog/import/chunk
-      - POST /v1/catalog/import/link
 
-    Insertion order respects FK constraints:
-      owners -> documents -> collections -> document_chunks -> links
+def migrate_owners(
+    catalog_db_path: Path, client: Any, *, batch_log_every: int = 50,
+    collector: Any = None, breaker: EtlCircuitBreaker | None = None,
+) -> dict[str, int]:
+    """Migrate ONLY the owners table."""
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
+    conn = _open_ro(catalog_db_path)
+    try:
+        owners_rows = _fetch_all(conn, "owners")
+    finally:
+        conn.close()
+    result = _import_table(
+        table="owners", rows=owners_rows, transform=_transform_owner,
+        import_fn=lambda rows: client._post("/import/owner", {"rows": rows}),
+        batch_log_every=batch_log_every, collector=collector, breaker=breaker,
+    )
+    if collector is not None:
+        collector.count_read("catalog", "owners", result["read"])
+        collector.count_written("catalog", "owners", result["written"])
+    return result
 
-    After importing all documents, reconciles ``next_seq`` on each owner by
-    re-POSTing ``/v1/catalog/import/owner`` with ``next_seq`` floored at the max
-    migrated document sequence.  The service GREATEST-merges ``next_seq`` on
-    conflict, so this is idempotent and never downgrades a live-advanced counter.
-    See ``_reconcile_next_seq``.
 
-    Args:
-        catalog_db_path: Path to the SQLite ``.catalog.db`` file.
-        client:          An ``HttpCatalogClient`` (or duck-typed) instance
-                         connected to the Postgres service.
-        batch_log_every: Emit a progress log line every N rows.
-        breaker:         Shared :class:`~nexus.retry.EtlCircuitBreaker` for
-                         this whole catalog leg (RDR-178 Gap 3) — ONE
-                         instance spans owners/documents/collections/
-                         document_chunks/links/next_seq_reconcile so "N
-                         consecutive" reflects the leg's health, not a
-                         single table. Defaults to a fresh instance.
+def migrate_documents(
+    catalog_db_path: Path, client: Any, *, batch_log_every: int = 50,
+    collector: Any = None, breaker: EtlCircuitBreaker | None = None,
+) -> dict[str, int]:
+    """Migrate ONLY the documents table."""
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
+    conn = _open_ro(catalog_db_path)
+    try:
+        docs_rows = _fetch_all(conn, "documents")
+    finally:
+        conn.close()
+    result = _import_table(
+        table="documents", rows=docs_rows, transform=_transform_document,
+        import_fn=lambda rows: client._post("/import/document", {"rows": rows}),
+        batch_log_every=batch_log_every, collector=collector, breaker=breaker,
+    )
+    if collector is not None:
+        collector.count_read("catalog", "documents", result["read"])
+        collector.count_written("catalog", "documents", result["written"])
+    return result
 
-    Returns:
-        ``{"owners": {"read": N, "written": M}, "documents": {...}, ...}``
-        — always ``read == written`` for a healthy run.
 
-    Copy-not-move guarantee: ``_open_ro`` opens the file with ``?mode=ro``
-    so the SQLite source is read-only at the OS level.
+def migrate_collections(
+    catalog_db_path: Path, client: Any, *, batch_log_every: int = 50,
+    collector: Any = None, breaker: EtlCircuitBreaker | None = None,
+) -> dict[str, int]:
+    """Migrate ONLY the collections table."""
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
+    conn = _open_ro(catalog_db_path)
+    try:
+        collections_rows = _fetch_all(conn, "collections")
+    finally:
+        conn.close()
+    result = _import_table(
+        table="collections", rows=collections_rows, transform=_transform_collection,
+        import_fn=lambda rows: client._post("/import/collection", {"rows": rows}),
+        batch_log_every=batch_log_every, collector=collector, breaker=breaker,
+    )
+    if collector is not None:
+        collector.count_read("catalog", "collections", result["read"])
+        collector.count_written("catalog", "collections", result["written"])
+    return result
+
+
+def migrate_document_chunks(
+    catalog_db_path: Path, client: Any, *, batch_log_every: int = 50,
+    collector: Any = None, breaker: EtlCircuitBreaker | None = None,
+) -> dict[str, int]:
+    """Migrate ONLY document_chunks — the CHASH-BEARING manifest import.
+
+    RDR-180 (nexus-jxizy.10.7): this is the table the guided
+    land-then-transform path lands + promotes separately (chunks carry
+    chash identity); the guided ``catalog`` slot excludes exactly this
+    function (see :func:`migrate_catalog_without_chunks`).
     """
     breaker = breaker if breaker is not None else EtlCircuitBreaker()
     conn = _open_ro(catalog_db_path)
     try:
-        owners_rows    = _fetch_all(conn, "owners")
-        docs_rows      = _fetch_all(conn, "documents")
-        links_rows     = _fetch_all(conn, "links")
-        collections_rows = _fetch_all(conn, "collections")
-        chunks_rows    = _fetch_all(conn, "document_chunks")
-        meta_rows      = _fetch_all(conn, "_meta")
+        chunks_rows = _fetch_all(conn, "document_chunks")
     finally:
         conn.close()
 
-    results: dict[str, dict[str, int]] = {}
-
-    # RDR-153 soft-dangler policy: links carry NO enforced endpoint FK —
-    # rows referencing missing documents IMPORT (the graph edge is event
-    # data) and each dangling edge is recorded as a flagged advisory.
-    if collector is not None:
-        live_tumblers = {r.get("tumbler") for r in docs_rows}
-        for r in links_rows:
-            if (
-                r.get("from_tumbler") not in live_tumblers
-                or r.get("to_tumbler") not in live_tumblers
-            ):
-                collector.record(
-                    "catalog", "links",
-                    issue_class="soft_dangler",
-                    constraint="links.(from|to)_tumbler -> documents.tumbler "
-                               "(not enforced)",
-                    reason="link endpoint references a missing document; row "
-                           "imports; sample ids are <from_tumbler>:<to_tumbler>",
-                    action="flagged",
-                    sample_id=f"{r.get('from_tumbler')}:{r.get('to_tumbler')}",
-                )
-
-    _log.info(
-        "catalog_etl.start",
-        source=str(catalog_db_path),
-        owners=len(owners_rows),
-        documents=len(docs_rows),
-        links=len(links_rows),
-        collections=len(collections_rows),
-        chunks=len(chunks_rows),
-        meta=len(meta_rows),
-    )
-
-    # ── 1. owners ──────────────────────────────────────────────────────────────
-    results["owners"] = _import_table(
-        table="owners",
-        rows=owners_rows,
-        transform=_transform_owner,
-        import_fn=lambda rows: client._post("/import/owner", {"rows": rows}),
-        batch_log_every=batch_log_every,
-        collector=collector,
-        breaker=breaker,
-    )
-
-    # ── 2. documents (depends on owners) ───────────────────────────────────────
-    results["documents"] = _import_table(
-        table="documents",
-        rows=docs_rows,
-        transform=_transform_document,
-        import_fn=lambda rows: client._post("/import/document", {"rows": rows}),
-        batch_log_every=batch_log_every,
-        collector=collector,
-        breaker=breaker,
-    )
-
-    # ── 3. collections (independent of docs, but after owners) ─────────────────
-    results["collections"] = _import_table(
-        table="collections",
-        rows=collections_rows,
-        transform=_transform_collection,
-        import_fn=lambda rows: client._post("/import/collection", {"rows": rows}),
-        batch_log_every=batch_log_every,
-        collector=collector,
-        breaker=breaker,
-    )
-
-    # ── 4. document_chunks (depends on documents) ──────────────────────────────
     chunk_read = 0
     chunk_written = 0
     # Group chunks by doc_id for the envelope format {"doc_id": ..., "rows": [...]}
@@ -583,22 +557,83 @@ def migrate_catalog(
                 read=chunk_read,
                 written=chunk_written,
             )
-    results["document_chunks"] = {"read": chunk_read, "written": chunk_written}
     _log.info("catalog_etl.table_done", table="document_chunks",
               read=chunk_read, written=chunk_written)
+    if collector is not None:
+        collector.count_read("catalog", "document_chunks", chunk_read)
+        collector.count_written("catalog", "document_chunks", chunk_written)
+    return {"read": chunk_read, "written": chunk_written}
 
-    # ── 5. links (last: soft-FK on both endpoints) ─────────────────────────────
-    results["links"] = _import_table(
-        table="links",
-        rows=links_rows,
-        transform=_transform_link,
+
+def migrate_links(
+    catalog_db_path: Path, client: Any, *, batch_log_every: int = 50,
+    collector: Any = None, breaker: EtlCircuitBreaker | None = None,
+) -> dict[str, int]:
+    """Migrate ONLY the links table.
+
+    RDR-153 soft-dangler policy: links carry NO enforced endpoint FK — rows
+    referencing missing documents IMPORT (the graph edge is event data) and
+    each dangling edge is recorded as a flagged advisory. documents are
+    read (read-only) ONLY to build that advisory check — they are NOT
+    written here; see :func:`migrate_documents`.
+    """
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
+    conn = _open_ro(catalog_db_path)
+    try:
+        links_rows = _fetch_all(conn, "links")
+        docs_rows = _fetch_all(conn, "documents")
+    finally:
+        conn.close()
+
+    if collector is not None:
+        live_tumblers = {r.get("tumbler") for r in docs_rows}
+        for r in links_rows:
+            if (
+                r.get("from_tumbler") not in live_tumblers
+                or r.get("to_tumbler") not in live_tumblers
+            ):
+                collector.record(
+                    "catalog", "links",
+                    issue_class="soft_dangler",
+                    constraint="links.(from|to)_tumbler -> documents.tumbler "
+                               "(not enforced)",
+                    reason="link endpoint references a missing document; row "
+                           "imports; sample ids are <from_tumbler>:<to_tumbler>",
+                    action="flagged",
+                    sample_id=f"{r.get('from_tumbler')}:{r.get('to_tumbler')}",
+                )
+
+    result = _import_table(
+        table="links", rows=links_rows, transform=_transform_link,
         import_fn=lambda rows: client._post("/import/link", {"rows": rows}),
-        batch_log_every=batch_log_every,
-        collector=collector,
-        breaker=breaker,
+        batch_log_every=batch_log_every, collector=collector, breaker=breaker,
     )
+    if collector is not None:
+        collector.count_read("catalog", "links", result["read"])
+        collector.count_written("catalog", "links", result["written"])
+    return result
 
-    # ── 6. _meta — SKIPPED intentionally ──────────────────────────────────────
+
+def _catalog_meta_and_next_seq(
+    catalog_db_path: Path, client: Any, results: dict[str, dict[str, int]],
+    *, collector: Any = None, breaker: EtlCircuitBreaker | None = None,
+) -> dict[str, dict[str, int]]:
+    """Append the _meta skip-note + next_seq reconcile bookkeeping entries
+    (shared by :func:`migrate_catalog` and :func:`migrate_catalog_without_chunks`
+    — neither touches document_chunks) into *results*, then log totals.
+
+    Mutates and returns *results*.
+    """
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
+    conn = _open_ro(catalog_db_path)
+    try:
+        owners_rows = _fetch_all(conn, "owners")
+        docs_rows   = _fetch_all(conn, "documents")
+        meta_rows   = _fetch_all(conn, "_meta")
+    finally:
+        conn.close()
+
+    # ── _meta — SKIPPED intentionally ──────────────────────────────────────
     # The SQLite ``_meta`` table stores SQLite-projection consistency markers
     # (``last_applied_event_offset``, etc.).  These are SQLite rebuild artifacts
     # and have no meaning in Postgres (Postgres is always consistent).  The PG
@@ -609,12 +644,16 @@ def migrate_catalog(
         reason="SQLite projection markers not applicable to PG",
     )
     results["catalog_meta"] = {"read": 0, "written": 0, "skipped": len(meta_rows)}
+    if collector is not None:
+        collector.count_read("catalog", "catalog_meta", 0)
+        collector.count_written("catalog", "catalog_meta", 0)
 
-    # ── 7. Reconcile next_seq on owners ────────────────────────────────────────
+    # ── Reconcile next_seq on owners ────────────────────────────────────────
     # Floor each owner's next_seq so future server-side tumbler allocation cannot
     # collide with -- or REUSE -- a migrated tumbler. The authoritative high-water
     # mark is owners.jsonl (never decremented on delete); max(surviving doc seq) is
     # only a lower bound and would reuse deleted slots on a compacted catalog.
+    # Independent of document_chunks — safe to run whether or not chunks migrated.
     doc_tumblers = [r["tumbler"] for r in docs_rows]
     high_water = _read_owner_high_water(catalog_db_path)
     reconcile = _reconcile_next_seq(client, owners_rows, doc_tumblers, high_water, breaker=breaker)
@@ -623,6 +662,9 @@ def migrate_catalog(
         "written": reconcile["reconciled"],
         "failed": reconcile["failed"],
     }
+    if collector is not None:
+        collector.count_read("catalog", "next_seq_reconcile", 0)
+        collector.count_written("catalog", "next_seq_reconcile", reconcile["reconciled"])
 
     # Totals cover the genuine per-table imports only. catalog_meta (intentional
     # skip) and next_seq_reconcile (second-pass owner re-imports with no source
@@ -637,12 +679,128 @@ def migrate_catalog(
         total_written=total_written,
         by_table={k: v for k, v in results.items()},
     )
-    if collector is not None:
-        for table, counts in results.items():
-            collector.count_read("catalog", table, counts.get("read", 0))
-            collector.count_written("catalog", table, counts.get("written", 0))
-
     return results
+
+
+# ── Composition entry points ────────────────────────────────────────────────
+
+
+def migrate_catalog_without_chunks(
+    catalog_db_path: Path,
+    client: Any,
+    *,
+    batch_log_every: int = 50,
+    collector: Any = None,
+    breaker: EtlCircuitBreaker | None = None,
+) -> dict[str, dict[str, int]]:
+    """owners + documents + collections + links + catalog_meta skip-note +
+    next_seq reconcile — NOT document_chunks.
+
+    RDR-180 (nexus-jxizy.10.7): document_chunks is the chash-bearing
+    manifest, landed + promoted server-side by the guided land-then-transform
+    path; running it here too would double-write a stale, unresolved
+    legacy-id copy. The guided ``catalog`` store slot calls this instead of
+    :func:`migrate_catalog`. FK insertion order (owners -> documents ->
+    collections -> links) is preserved; next_seq reconcile depends only on
+    documents, never on chunks.
+    """
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
+    results: dict[str, dict[str, int]] = {
+        "owners": migrate_owners(
+            catalog_db_path, client, batch_log_every=batch_log_every,
+            collector=collector, breaker=breaker,
+        ),
+        "documents": migrate_documents(
+            catalog_db_path, client, batch_log_every=batch_log_every,
+            collector=collector, breaker=breaker,
+        ),
+        "collections": migrate_collections(
+            catalog_db_path, client, batch_log_every=batch_log_every,
+            collector=collector, breaker=breaker,
+        ),
+        "links": migrate_links(
+            catalog_db_path, client, batch_log_every=batch_log_every,
+            collector=collector, breaker=breaker,
+        ),
+    }
+    return _catalog_meta_and_next_seq(
+        catalog_db_path, client, results, collector=collector, breaker=breaker,
+    )
+
+
+def migrate_catalog(
+    catalog_db_path: Path,
+    client: Any,
+    *,
+    batch_log_every: int = 50,
+    collector: Any = None,
+    breaker: EtlCircuitBreaker | None = None,
+) -> dict[str, dict[str, int]]:
+    """Copy all rows from a SQLite catalog into Postgres via *client*.
+
+    Thin composition of the five per-table entry points (RDR-180
+    nexus-jxizy.10.7 split), in the exact order the prior monolithic
+    implementation used. Uses ``HttpCatalogClient`` import endpoints:
+      - POST /v1/catalog/import/owner
+      - POST /v1/catalog/import/document
+      - POST /v1/catalog/import/collection
+      - POST /v1/catalog/import/chunk
+      - POST /v1/catalog/import/link
+
+    Insertion order respects FK constraints:
+      owners -> documents -> collections -> document_chunks -> links
+
+    After importing all documents, reconciles ``next_seq`` on each owner by
+    re-POSTing ``/v1/catalog/import/owner`` with ``next_seq`` floored at the max
+    migrated document sequence.  The service GREATEST-merges ``next_seq`` on
+    conflict, so this is idempotent and never downgrades a live-advanced counter.
+    See ``_reconcile_next_seq``.
+
+    Args:
+        catalog_db_path: Path to the SQLite ``.catalog.db`` file.
+        client:          An ``HttpCatalogClient`` (or duck-typed) instance
+                         connected to the Postgres service.
+        batch_log_every: Emit a progress log line every N rows.
+        breaker:         Shared :class:`~nexus.retry.EtlCircuitBreaker` for
+                         this whole catalog leg (RDR-178 Gap 3) — ONE
+                         instance spans owners/documents/collections/
+                         document_chunks/links/next_seq_reconcile so "N
+                         consecutive" reflects the leg's health, not a
+                         single table. Defaults to a fresh instance.
+
+    Returns:
+        ``{"owners": {"read": N, "written": M}, "documents": {...}, ...}``
+        — always ``read == written`` for a healthy run.
+
+    Copy-not-move guarantee: ``_open_ro`` opens the file with ``?mode=ro``
+    so the SQLite source is read-only at the OS level.
+    """
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
+    results: dict[str, dict[str, int]] = {
+        "owners": migrate_owners(
+            catalog_db_path, client, batch_log_every=batch_log_every,
+            collector=collector, breaker=breaker,
+        ),
+        "documents": migrate_documents(
+            catalog_db_path, client, batch_log_every=batch_log_every,
+            collector=collector, breaker=breaker,
+        ),
+        "collections": migrate_collections(
+            catalog_db_path, client, batch_log_every=batch_log_every,
+            collector=collector, breaker=breaker,
+        ),
+        "document_chunks": migrate_document_chunks(
+            catalog_db_path, client, batch_log_every=batch_log_every,
+            collector=collector, breaker=breaker,
+        ),
+        "links": migrate_links(
+            catalog_db_path, client, batch_log_every=batch_log_every,
+            collector=collector, breaker=breaker,
+        ),
+    }
+    return _catalog_meta_and_next_seq(
+        catalog_db_path, client, results, collector=collector, breaker=breaker,
+    )
 
 
 def _import_table(

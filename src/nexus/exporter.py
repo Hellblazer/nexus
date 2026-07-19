@@ -56,11 +56,12 @@ MAX_SUPPORTED_FORMAT_VERSION: int = 1
 #: Pipeline version tag embedded in every export header.
 _PIPELINE_VERSION: str = "nexus-1"
 
-#: Content-addressed chunk id length (``chunk_text_hash[:32]``, RDR-108 D1).
-#: The Postgres ``chunks_<dim>`` tables enforce
-#: ``CHECK (length(chash) = 32)`` -- any export record whose id doesn't
-#: satisfy this on import must be re-derived (GH #1370 D1).
-_CHASH_LEN: int = 32
+#: Content-addressed chunk id length in hex interchange form (the FULL
+#: sha256, RDR-180). The Postgres ``chunks_<dim>`` tables enforce
+#: ``CHECK (octet_length(chash) = 32)`` (32 bytes = 64 hex) -- any export
+#: record whose id doesn't satisfy this on import must be re-derived
+#: (GH #1370 D1 lineage).
+_CHASH_LEN: int = 64
 
 #: Known embedding-model -> vector-dimension table (GH #1370 D2). Reused
 #: from the local-mode table (``nexus.db.local_ef``) rather than
@@ -89,7 +90,7 @@ def _rehash_nonconformant_id(rec_id: str, doc: str) -> tuple[str, str]:
     """
     basis = doc if doc else rec_id
     full_hash = hashlib.sha256(basis.encode()).hexdigest()
-    return full_hash[:_CHASH_LEN], full_hash
+    return full_hash, full_hash  # RDR-180: the full digest IS the id
 
 
 #: Substrings that indicate an upsert failure is a chash/constraint

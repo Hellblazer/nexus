@@ -43,8 +43,10 @@ def _fail(msg: str) -> "int":
 
 
 def _chash(i: int) -> str:
-    """Collision-free 32-char chunk id."""
-    return f"ingestgate{i:022d}"[:32].ljust(32, "0")
+    """Collision-free canonical chunk id (RDR-180: full 64-hex digest —
+    the boundary now rejects non-hex/legacy-width ids)."""
+    import hashlib
+    return hashlib.sha256(f"ingestgate{i:022d}".encode()).hexdigest()
 
 
 def main() -> int:

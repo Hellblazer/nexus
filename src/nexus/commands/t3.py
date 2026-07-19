@@ -356,7 +356,7 @@ def gc_cmd(
 
     \b
     A chunk is an orphan when:
-      - its ``meta.chunk_text_hash[:32]`` is NOT referenced by any
+      - its full ``meta.chunk_text_hash`` is NOT referenced by any
         manifest entry in the catalog ``document_chunks`` table for
         ``--collection``, AND
       - its ``indexed_at`` predates ``--orphan-window`` (default 30d).
@@ -447,7 +447,7 @@ def gc_cmd(
         raise click.exceptions.Exit(1)
 
     for chunk_id, meta in chunks:
-        chash = (meta.get("chunk_text_hash") or "")[:32]
+        chash = meta.get("chunk_text_hash") or ""  # RDR-180: full digest — the truncation was the quarantine-class bug
         if not chash:
             # Pre-RDR-053 relic: no content hash to compare against
             # the manifest. Skip with operator-visible count. Same
@@ -839,7 +839,7 @@ def reidentify_cmd(
 
     \b
     Per collection, paginates T3 chunks (300/op), computes a new natural
-    ID from chunk_text_hash[:32], and re-upserts each chunk under the new
+    ID from the full chunk_text_hash (RDR-180), and re-upserts each chunk under the new
     ID using the existing embedding (no Voyage call). Document-level
     metadata fields (doc_id, chunk_index, chunk_count) are stripped at
     re-upsert; the catalog manifest table is now authoritative for those.

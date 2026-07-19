@@ -164,7 +164,7 @@ class TestBuildStalenessCacheConsumesRealHttpClient:
         col.get.return_value = {
             "ids": ["c1"],
             "metadatas": [{
-                "chunk_text_hash": CHUNK_SHA_A,  # full 64-char form: exercises the [:32] wire normalization
+                "chunk_text_hash": CHUNK_SHA_A,  # full 64-char form — the wire width since RDR-180
                 "content_hash": "hash-a",
                 "embedding_model": "voyage-code-3",
             }],

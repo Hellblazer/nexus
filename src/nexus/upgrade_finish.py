@@ -486,10 +486,12 @@ def _poison_playbook(config_dir: Path):  # noqa: ANN201 — returns nexus.remedi
         from nexus.health import _check_migration_state  # noqa: PLC0415 — deferred, CLI startup cost
 
         creds_path = config_dir / CREDENTIALS_FILENAME
+        from nexus.db.chash_tables import POISON_DETAIL_TOKEN  # noqa: PLC0415 — deferred, circular-dep avoidance
+
         poison = [
             r for r in _check_migration_state(creds_path=creds_path)
             if r.label == "Chunk chash conformance"
-            and not r.ok and "non-32-char chash" in r.detail
+            and not r.ok and POISON_DETAIL_TOKEN in r.detail
         ]
     except Exception:  # noqa: BLE001 — the gate must never block a valid convergence on an unrelated error
         return None
@@ -751,6 +753,34 @@ def unload_stale_t2_launchagent(config_dir: Path) -> list[str]:
     return actions
 
 
+def pending_data_rung_callout() -> list[str]:
+    """One summary line per pending DATA rung after an engine auto-converge
+    (RDR-180 / critic-180-cohort finding 2). The chash-rekey rung gets an
+    explicit consequence statement — its not-yet-run state silently breaks
+    citation resolution for pre-existing content, unlike earlier rungs
+    whose unconverted rows were merely inert. Best-effort and read-only:
+    detect() failures degrade to no callout (doctor remains the backstop).
+    """
+    from nexus.upgrade_ladder.registry import default_registry  # noqa: PLC0415 — deferred, CLI startup cost
+
+    lines: list[str] = []
+    for rung in default_registry():
+        try:
+            status = rung.detect()
+        except Exception:  # noqa: BLE001 — callout is best-effort; doctor is the backstop
+            continue
+        if not status.pending:
+            continue
+        if rung.name == "chash-rekey":
+            lines.append(
+                "chash-rekey PENDING — chash citations for existing content "
+                "will not resolve until `nx upgrade` runs the rekey"
+            )
+        else:
+            lines.append(f"data rung '{rung.name}' pending — run `nx upgrade`")
+    return lines
+
+
 def check_version_transition(config_dir: Path) -> str | None:
     """Version-stamp auto-trigger. Returns a one-line summary when a
     version transition was detected and the safe finish pass ran; None
@@ -816,8 +846,17 @@ def check_version_transition(config_dir: Path) -> str | None:
         report = detect_stale_processes()
         actions = restart_stale(report)
     except Exception:  # noqa: BLE001 — the finish pass must never break CLI startup
+        # nexus-p78a0 rehearsal catch: this leg used to `return None`,
+        # silently aborting the WHOLE finish pass — on a ps-less box
+        # (minimal container, stripped host) engine convergence and the
+        # pending-data-rung callout never ran, exactly the independent-legs
+        # regression the nexus-cfgo9 comment below forbids for the other
+        # legs. Degrade THIS leg and continue.
         _log.warning("upgrade_finish_failed", exc_info=True)
-        return None
+        actions = [
+            "NOTE: process-skew detection unavailable on this box "
+            "(see logs); continuing with the remaining finish legs"
+        ]
     # nexus-cfgo9: engine convergence and the diag-view heal are two more
     # independent legs of the finish pass — each try/excepted on its own so
     # one leg's failure never swallows the actions already computed by the
@@ -834,6 +873,16 @@ def check_version_transition(config_dir: Path) -> str | None:
         actions = actions + unload_stale_t2_launchagent(config_dir)
     except Exception:  # noqa: BLE001 — the finish pass must never break CLI startup
         _log.warning("t2_launchagent_unload_failed", exc_info=True)
+    # critic-180-cohort finding 2: engine convergence swaps the binary (and
+    # boot applies the RDR-180 schema) but does NOT walk the ladder — a box
+    # can sit engine-converged-but-never-rekeyed, with citations for
+    # PRE-EXISTING content silently unresolvable until `nx upgrade` runs the
+    # chash-rekey rung. Surface that state in THIS summary, loudly, instead
+    # of leaving it to nx doctor alone.
+    try:
+        actions = actions + pending_data_rung_callout()
+    except Exception:  # noqa: BLE001 — the finish pass must never break CLI startup
+        _log.warning("pending_rung_callout_failed", exc_info=True)
     _log.info(
         "upgrade_finish_ran",
         from_version=seen, to_version=version, actions=actions,

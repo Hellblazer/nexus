@@ -142,6 +142,48 @@ def test_sequencer_surface():
     }
 
 
+def test_land_then_transform_sequencer_surface():
+    """RDR-180 (nexus-jxizy.10.7): the guided path's replacement sequencer —
+    ``driver.run_guided_upgrade`` drives this, not ``run_sequenced_migration``
+    (retired-from-guided, still pinned above for its surviving non-guided
+    callers)."""
+    from nexus.migration.sequencer import (
+        LandThenTransformOutcome,
+        run_land_then_transform_migration,
+    )
+
+    assert _params(run_land_then_transform_migration) == {
+        "detection",
+        "sources",
+        "census_check",
+        "land",
+        "embed_fill",
+        "promote",
+        "finalize",
+        "verify",
+        "clear_staging",
+        "voyage_key_present",
+        "run_t2",
+        "quiesce_check",
+        "model_gate",
+        "on_progress",
+        "started_at",
+        "cross_model_targets",
+    }
+    assert _fields(LandThenTransformOutcome) == {
+        "ok",
+        "phase",
+        "collections_total",
+        "collections_done",
+        "t2_total_failed",
+        "collections_attempted",
+        "collections_ok",
+        "blocked_reason",
+        "t2_report",
+        "finalize_report",
+    }
+
+
 # ── Validation + unlock/rollback (P3) ──────────────────────────────────────
 
 
@@ -272,5 +314,11 @@ def test_orchestrator_surface():
         # Additive + backward compatible — default False reproduces the
         # prior unconditional full-re-send behavior exactly.
         "verify_fill",
+        # RDR-180 land-then-transform (nexus-jxizy.10.7): store-ETL list
+        # override. Additive + backward compatible — default None reproduces
+        # the prior unconditional ``ordered(build_store_etls(sources))``
+        # exactly. Consumed by ``orchestrator.migrate_all_guided`` (the
+        # guided-path ``run_t2``), not directly by the veneer.
+        "etls",
     }
     assert _fields(EtlSources) == {"sqlite_path", "catalog_db_path"}

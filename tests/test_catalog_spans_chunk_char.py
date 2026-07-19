@@ -8,7 +8,7 @@ metadata. RDR-108 Phase 3 removed both fields; the where-filter
 matched nothing for Phase-3 chunks and the function silently returned
 None. Post-fix: the catalog manifest stores (doc_id, position, chash)
 so we resolve position -> chash, then look up the chunk in T3 by its
-content-addressed natural id (chash[:32]).
+content-addressed natural id (the full chash, RDR-180).
 """
 from __future__ import annotations
 
@@ -59,7 +59,7 @@ def test_chunk_char_span_resolves_via_manifest(t3_db, catalog) -> None:
 
     # Seed: one Document with two chunks. Phase-3 metadata: only
     # chunk_text_hash (no chunk_index, no doc_id). The chunks are
-    # written with chash[:32] as the chroma natural id (RDR-108 D1).
+    # written with the full chash as the chroma natural id (RDR-180).
     coll_name = "docs__hjd6-test__voyage-context-3__v1"
     chunk_a_text = "alpha alpha alpha alpha alpha alpha"
     chunk_b_text = "beta beta beta beta beta beta beta beta"
@@ -68,7 +68,7 @@ def test_chunk_char_span_resolves_via_manifest(t3_db, catalog) -> None:
 
     col = t3_db._client.get_or_create_collection(coll_name)
     col.upsert(
-        ids=[chash_a[:32], chash_b[:32]],
+        ids=[chash_a, chash_b],
         documents=[chunk_a_text, chunk_b_text],
         metadatas=[
             {"chunk_text_hash": chash_a},
@@ -107,7 +107,7 @@ def test_chunk_char_span_resolves_via_manifest(t3_db, catalog) -> None:
         text = catalog.resolve_span_text(tumbler, "0:0-5")
         assert text == "alpha", (
             f"chunk:char resolution must return slice; got {text!r}. "
-            "Manifest lookup or chash[:32] T3 read regressed."
+            "Manifest lookup or full-chash T3 read regressed."
         )
 
         # chunk 1, chars 0-4 -> "beta"
@@ -136,7 +136,7 @@ def test_chunk_char_span_returns_none_when_position_out_of_range(
     chash = _hl.sha256(chunk_text.encode()).hexdigest()
     col = t3_db._client.get_or_create_collection(coll_name)
     col.upsert(
-        ids=[chash[:32]], documents=[chunk_text],
+        ids=[chash], documents=[chunk_text],
         metadatas=[{"chunk_text_hash": chash}],
     )
 

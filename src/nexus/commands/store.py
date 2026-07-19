@@ -180,7 +180,7 @@ def list_cmd(collection: str, limit: int, offset: int, docs: bool) -> None:
     click.echo(f"{col_name}  (showing {shown_start}-{shown_end} of {total})\n")
     from datetime import datetime, timedelta  # noqa: PLC0415  — stdlib deferred to call site (datetime)
     for e in entries:
-        doc_id = e.get("id", "")[:32]
+        doc_id = e.get("id", "")  # RDR-180: full id — the list->get handle must round-trip
         title = (e.get("title") or "")[:40]
         tags = e.get("tags") or ""
         ttl_days = e.get("ttl_days", 0)

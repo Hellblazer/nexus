@@ -147,11 +147,16 @@ class VectorHandlerEmbeddingModeTest {
     // boots the FULL NexusService (all handlers registered), and the chash
     // routes need exactly that.
 
+    // POLARITY NOTE (RDR-180, nexus-jxizy.7/.8): pre-flip the migration/upsert
+    // routes NORMALIZED an incoming 64-char row to its [:32] key (the SQLite-era
+    // full-hash shape). Post-flip the FULL 64-hex digest IS the canonical chash —
+    // never truncated — and a bare 32-hex value is a legacy reference that must
+    // resolve through nexus.chash_alias, never accepted fresh at these seams.
+    // These tests REPLACE the pre-flip truncation-contract tests (inverted, not
+    // deleted, mirroring ChashTypeTest / PgVectorServingContractTest).
+
     @Test
-    void chashImport_legacy64CharRow_normalizedTo32() throws Exception {
-        // The migration route must NORMALIZE the SQLite-era full-64 shape
-        // ([:32], mirroring catalog-013-0's one-time DB normalization), not
-        // reject it — legacy tenants re-run migrations (guided-upgrade).
+    void chashImport_full64CharRow_storedAsIs() throws Exception {
         String full = "e".repeat(64);
         var resp = post("/v1/chash/import", Map.of(
             "rows", List.of(Map.of(
@@ -159,10 +164,10 @@ class VectorHandlerEmbeddingModeTest {
                 "collection", "code__legacy64",
                 "created_at", "2025-01-01T00:00:00Z"))));
         assertThat(resp.statusCode()).isEqualTo(200);
-        // The row must be findable under its TRUNCATED id (GET /v1/chash/lookup).
+        // The row must be findable under its FULL 64-hex id (GET /v1/chash/lookup).
         var req = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + service.getPort()
-                + "/v1/chash/lookup?chash=" + full.substring(0, 32)))
+                + "/v1/chash/lookup?chash=" + full))
             .header("Authorization", "Bearer " + TOKEN)
             .GET().build();
         var lookup = http.send(req, HttpResponse.BodyHandlers.ofString());
@@ -171,29 +176,38 @@ class VectorHandlerEmbeddingModeTest {
     }
 
     @Test
+    void chashImport_legacy32CharRow_rejected400() throws Exception {
+        var resp = post("/v1/chash/import", Map.of(
+            "rows", List.of(Map.of(
+                "chash", "e".repeat(32),
+                "collection", "code__legacy32",
+                "created_at", "2025-01-01T00:00:00Z"))));
+        assertThat(resp.statusCode()).isEqualTo(400);
+        assertThat(resp.body()).contains("chash").contains("legacy 32-hex");
+    }
+
+    @Test
     void chashUpsertMany_nonStringElement_400WithIndex() throws Exception {
         // nexus-e0hd2: the old loop silently DROPPED non-string elements
-        // (the castRows disease) — now a loud 400 naming the index.
+        // (the castRows disease) — now a loud 400 naming the index. Index 0
+        // must be a VALID canonical chash so the assertion actually reaches
+        // index 1's type violation (a non-canonical index 0 would 400 first
+        // on its own, masking this test's intent).
         var resp = post("/v1/chash/upsert_many", Map.of(
-            "chashes", java.util.Arrays.asList("a".repeat(32), 42),
+            "chashes", java.util.Arrays.asList("a".repeat(64), 42),
             "collection", "code__strict"));
         assertThat(resp.statusCode()).isEqualTo(400);
         assertThat(resp.body()).contains("chashes[1]").contains("must be a string");
     }
 
     @Test
-    void chashUpsert_full64_normalizedTo32_notRejected() throws Exception {
-        // Critic finding: the LIVE producer (dual_write_chash_index)
-        // historically sends the FULL 64-char chunk_text_hash — a reject
-        // here would silently stall chash_index growth for every
-        // service-mode tenant behind two best-effort catches. The upsert
-        // seams NORMALIZE the 64-shape to the [:32] key instead.
+    void chashUpsert_full64CharRow_storedAsIs() throws Exception {
         var resp = post("/v1/chash/upsert", Map.of(
             "chash", "b".repeat(64), "collection", "code__norm64"));
         assertThat(resp.statusCode()).isEqualTo(200);
         var req = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + service.getPort()
-                + "/v1/chash/lookup?chash=" + "b".repeat(32)))
+                + "/v1/chash/lookup?chash=" + "b".repeat(64)))
             .header("Authorization", "Bearer " + TOKEN)
             .GET().build();
         var lookup = http.send(req, HttpResponse.BodyHandlers.ofString());
@@ -202,9 +216,17 @@ class VectorHandlerEmbeddingModeTest {
     }
 
     @Test
+    void chashUpsert_legacy32CharRow_rejected400() throws Exception {
+        var resp = post("/v1/chash/upsert", Map.of(
+            "chash", "b".repeat(32), "collection", "code__legacy32"));
+        assertThat(resp.statusCode()).isEqualTo(400);
+        assertThat(resp.body()).contains("legacy 32-hex").contains("chash_alias");
+    }
+
+    @Test
     void chashUpsert_otherBadLength_still400() throws Exception {
-        // Only the known legacy 64-shape normalizes; anything else is
-        // genuinely malformed and 400s with the offending length.
+        // Any non-32, non-64 length is genuinely malformed and 400s with the
+        // offending length.
         var resp = post("/v1/chash/upsert", Map.of(
             "chash", "c".repeat(40), "collection", "code__strict"));
         assertThat(resp.statusCode()).isEqualTo(400);
@@ -215,7 +237,7 @@ class VectorHandlerEmbeddingModeTest {
     void upsertChunks_voyageCollectionInOnnxMode_is422_withActionableBody() throws Exception {
         var resp = post("/v1/vectors/upsert-chunks", Map.of(
             "collection", "knowledge__nexus__voyage-context-3__v1",
-            "ids",        List.of("pebfx2-c100000000000000000000000"),
+            "ids",        List.of(dev.nexus.service.db.Chash.ofText("pebfx2-c1").toHex()),
             "documents",  List.of("some text"),
             "metadatas",  List.of(Map.of())));
         assertThat(resp.statusCode())
@@ -240,7 +262,7 @@ class VectorHandlerEmbeddingModeTest {
         vec.set(1, 0.75f);
         var resp = post("/v1/vectors/upsert-chunks", Map.of(
             "collection", "knowledge__pebfx2__minilm-l6-v2-384__v1",
-            "ids",        List.of("pthttp3840000000000000000000000a"),
+            "ids",        List.of(dev.nexus.service.db.Chash.ofText("pthttp384").toHex()),
             "documents",  List.of("passthrough over http"),
             "metadatas",  List.of(Map.of()),
             "embeddings", List.of(vec)));
@@ -256,7 +278,7 @@ class VectorHandlerEmbeddingModeTest {
         // loud at the HTTP boundary — never silently stored or re-embedded.
         var resp = post("/v1/vectors/upsert-chunks", Map.of(
             "collection", "knowledge__pebfx2__minilm-l6-v2-384__v1",
-            "ids",        List.of("ptbaddimhttp00000000000000000000"),
+            "ids",        List.of(dev.nexus.service.db.Chash.ofText("ptbaddimhttp").toHex()),
             "documents",  List.of("bad dim over http"),
             "metadatas",  List.of(Map.of()),
             "embeddings", List.of(List.of(1.0f, 0.0f))));  // 2-dim, not 384
@@ -284,7 +306,7 @@ class VectorHandlerEmbeddingModeTest {
         // the request" — collapsing them re-opens the silent-misconfig trap.
         var resp = post("/v1/vectors/upsert-chunks", Map.of(
             "collection", "not-a-conformant-name",
-            "ids",        List.of("x"),
+            "ids",        List.of(dev.nexus.service.db.Chash.ofText("x").toHex()),
             "documents",  List.of("y"),
             "metadatas",  List.of(Map.of())));
         assertThat(resp.statusCode()).isEqualTo(400);
@@ -324,16 +346,19 @@ class VectorHandlerEmbeddingModeTest {
         // nexus-pebfx.7: the search engine fetches result vectors post-search
         // (contradiction check + Ward clustering); the endpoint returns stored
         // pgvector rows, request order, missing ids omitted (Chroma parity).
+        String embA = dev.nexus.service.db.Chash.ofText("emb-a").toHex();
+        String embB = dev.nexus.service.db.Chash.ofText("emb-b").toHex();
+        String embMissing = dev.nexus.service.db.Chash.ofText("emb-missing").toHex();
         var up = post("/v1/vectors/upsert-chunks", Map.of(
             "collection", "knowledge__pebfx7__minilm-l6-v2-384__v1",
-            "ids",        List.of("emb-b000000000000000000000000000", "emb-a000000000000000000000000000"),
+            "ids",        List.of(embB, embA),
             "documents",  List.of("second text", "first text"),
             "metadatas",  List.of(Map.of(), Map.of())));
         assertThat(up.statusCode()).isEqualTo(200);
 
         var resp = post("/v1/vectors/get-embeddings", Map.of(
             "collection", "knowledge__pebfx7__minilm-l6-v2-384__v1",
-            "ids",        List.of("emb-a000000000000000000000000000", "emb-b000000000000000000000000000", "emb-missing000000000000000000000")));
+            "ids",        List.of(embA, embB, embMissing)));
         assertThat(resp.statusCode()).isEqualTo(200);
         @SuppressWarnings("unchecked")
         Map<String, Object> body = MAPPER.readValue(resp.body(), Map.class);
@@ -341,7 +366,7 @@ class VectorHandlerEmbeddingModeTest {
         List<String> ids = (List<String>) body.get("ids");
         @SuppressWarnings("unchecked")
         List<List<Number>> embeddings = (List<List<Number>>) body.get("embeddings");
-        assertThat(ids).containsExactly("emb-a000000000000000000000000000", "emb-b000000000000000000000000000");   // request order, missing omitted
+        assertThat(ids).containsExactly(embA, embB);   // request order, missing omitted
         assertThat(embeddings).hasSize(2);
         assertThat(embeddings.get(0)).hasSize(384);
         assertThat(embeddings.get(1)).hasSize(384);
@@ -353,7 +378,7 @@ class VectorHandlerEmbeddingModeTest {
     void minilmCollectionInOnnxMode_stillServes200() throws Exception {
         var resp = post("/v1/vectors/upsert-chunks", Map.of(
             "collection", "knowledge__pebfx2__minilm-l6-v2-384__v1",
-            "ids",        List.of("pebfx2-ok10000000000000000000000"),
+            "ids",        List.of(dev.nexus.service.db.Chash.ofText("pebfx2-ok1").toHex()),
             "documents",  List.of("a servable chunk"),
             "metadatas",  List.of(Map.of())));
         assertThat(resp.statusCode())

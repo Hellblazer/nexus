@@ -61,8 +61,10 @@ from nexus.indexer_utils import build_staleness_cache
 # chunk metadata's ``chunk_text_hash`` field at index time.
 _FULL_CHASH = hashlib.sha256(b"def process_payment(order):\n    return order.total\n").hexdigest()
 assert len(_FULL_CHASH) == 64
-# The RDR-108 D1 natural-id form actually stored server-side.
-_STORED_PREFIX = _FULL_CHASH[:32]
+# RDR-180 (nexus-p78a0): the server stores the FULL 64-hex chash — the
+# 32-char natural-id era (and this fixture's _STORED_CHASH = [:32]) is
+# retired; exact-match semantics now operate at full width.
+_STORED_CHASH = _FULL_CHASH
 _TUMBLER = "1.1.1"
 
 
@@ -72,10 +74,11 @@ class _ExactMatchCatalogHandler(BaseHTTPRequestHandler):
     Unlike ``tests/catalog/test_http_catalog_client.py::FakeCatalogHandler``
     (which returns a canned response regardless of the request body), this
     handler actually inspects the posted ``chashes`` list and only
-    "matches" an exact string equal to ``_STORED_PREFIX`` -- exactly what
+    "matches" an exact string equal to ``_STORED_CHASH`` -- exactly what
     ``CatalogRepository.docsForChashes``'s ``F_CHK_CHASH.in(chashes)`` does
-    against the 32-char stored column. A request carrying the un-truncated
-    64-char ``_FULL_CHASH`` will NOT match here, same as production.
+    against the stored column (FULL 64-hex since RDR-180). A request
+    carrying a [:32]-truncated value will NOT match here, same as
+    production.
     """
 
     last_docs_for_chashes_body: dict[str, Any] = {}
@@ -104,7 +107,7 @@ class _ExactMatchCatalogHandler(BaseHTTPRequestHandler):
             requested = body.get("chashes", [])
             # EXACT string match only — mirrors F_CHK_CHASH.in(chashes)
             # against the 32-char stored column. No substr/normalization.
-            if _STORED_PREFIX in requested:
+            if _STORED_CHASH in requested:
                 self._send_json({"tumblers": [_TUMBLER]})
             else:
                 self._send_json({"tumblers": []})
@@ -113,7 +116,7 @@ class _ExactMatchCatalogHandler(BaseHTTPRequestHandler):
             manifests = {}
             if _TUMBLER in doc_ids:
                 manifests[_TUMBLER] = [
-                    {"position": 0, "chash": _STORED_PREFIX, "line_start": 1, "line_end": 3}
+                    {"position": 0, "chash": _STORED_CHASH, "line_start": 1, "line_end": 3}
                 ]
             self._send_json({"manifests": manifests})
         else:
@@ -148,25 +151,27 @@ class TestDocsForChashesSendsNormalizedRequest:
     def test_full_64char_chash_resolves_against_exact_match_server(
         self, http_client: HttpCatalogClient,
     ) -> None:
-        """The regression itself: passing a real 64-char chash must still
-        resolve, because the client must normalize the OUTGOING request to
-        the 32-char prefix before the server's exact-match filter sees it.
-
-        Pre-fix (raw ``chashes`` sent as-is): the exact-match fake server
-        never sees ``_STORED_PREFIX`` in the request, returns empty
-        tumblers, and this assertion fails with ``{}``.
+        """Passing a real 64-char chash resolves against the exact-match
+        server: since RDR-180 the stored column IS full-width, so the
+        client passes the caller's value through VERBATIM (the h8rf6.12
+        32-char normalization is retired with the column it matched).
         """
         result = http_client.docs_for_chashes([_FULL_CHASH])
         assert result == {_FULL_CHASH: [_TUMBLER]}
 
-    def test_request_payload_is_32char_normalized(
+    def test_request_payload_is_full_width(
         self, http_client: HttpCatalogClient,
     ) -> None:
-        """Direct wire-content assertion: what actually left the client."""
+        """Direct wire-content assertion: what actually left the client.
+
+        RDR-180 (nexus-p78a0): the wire carries the FULL 64-hex chash —
+        a [:32]-truncated payload would exact-match NOTHING against the
+        full-width stored column (the inverse of the original h8rf6.12
+        truncation bug, same mechanism)."""
         http_client.docs_for_chashes([_FULL_CHASH])
         sent = _ExactMatchCatalogHandler.last_docs_for_chashes_body.get("chashes", [])
-        assert sent == [_STORED_PREFIX]
-        assert all(len(c) == 32 for c in sent)
+        assert sent == [_STORED_CHASH]
+        assert all(len(c) == 64 for c in sent)
 
 
 class TestBuildStalenessCacheLiveContent:

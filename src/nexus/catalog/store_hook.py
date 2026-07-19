@@ -26,10 +26,11 @@ def single_chunk_manifest_metadata(content: str) -> tuple[str, list[dict]]:
     single-chunk store event (MCP ``store_put`` / CLI ``nx store put``).
 
     Mirrors ``T3Database.put``'s single-chunk derivation (RDR-108 D1 /
-    nexus-kmb6): the T3 natural id is ``sha256(content)[:32]``.
-    ``manifest_write_batch_hook`` (GH #1371) needs the FULL hex under
-    ``chunk_text_hash`` (it truncates to 32 chars itself at write time,
-    matching every other indexer's chunk metadata shape). Both MCP
+    nexus-kmb6; width per RDR-180): the T3 natural id is the FULL
+    ``sha256(content).hexdigest()``. ``manifest_write_batch_hook``
+    (GH #1371) gets the same full hex under ``chunk_text_hash``
+    (stored verbatim — the [:32] write-time truncation is retired).
+    Both MCP
     ``store_put`` and CLI ``nx store put`` are single-chunk by
     construction, so ``chunk_start_char=0`` / ``chunk_end_char=len(content)``
     span the whole document and position defaults to 0 (the batch's only
@@ -46,7 +47,7 @@ def single_chunk_manifest_metadata(content: str) -> tuple[str, list[dict]]:
     hit the same ``metadatas`` guard.
     """
     content_hash = hashlib.sha256(content.encode()).hexdigest()
-    doc_id = content_hash[:32]
+    doc_id = content_hash  # RDR-180: the full digest IS the natural id
     metadata = {
         "chunk_text_hash": content_hash,
         "chunk_start_char": 0,
@@ -106,8 +107,8 @@ def catalog_store_hook(
     Returns ``""`` when the catalog is absent or an error occurs —
     the schema funnel drops empty ``doc_id`` at the boundary.
 
-    ``doc_id`` here is the T3 chunk natural-id (RDR-108 D1 / nexus-kmb6:
-    ``sha256(content)[:32]``). It is consulted for legacy
+    ``doc_id`` here is the T3 chunk natural-id (RDR-108 D1 / nexus-kmb6;
+    the FULL ``sha256(content)`` hex per RDR-180). It is consulted for legacy
     ``meta.doc_id`` dedup via ``cat.by_doc_id``: catalog entries
     written before Phase 4 stored the legacy 16-char sha256-of-
     collection-and-title under ``meta.doc_id``, so this lookup misses

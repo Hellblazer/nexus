@@ -88,6 +88,7 @@ DDL_CENSUS: dict[str, int] = {
 ALTER_CENSUS: dict[str, int] = {
     "src/nexus/aspect_promotion.py": 5,           # 1 real + 4 prose self-mentions
     "src/nexus/commands/enrich.py": 1,            # docstring mirror of aspect_promotion's DDL (censused there) — not own debt
+    "src/nexus/db/admin_sql.py": 2,                # RDR-180 .6: PG `ALTER TABLE ... VALIDATE CONSTRAINT` allowlist regex + docstring — not SQLite debt
     "src/nexus/db/migrations.py": 36,             # 27 real + 9 prose self-mentions
     "src/nexus/db/t2/aspect_extraction_queue.py": 2,
     "src/nexus/db/t2/catalog.py": 9,              # 8 real + 1 self-referential SQL comment
@@ -96,6 +97,7 @@ ALTER_CENSUS: dict[str, int] = {
     "src/nexus/db/t2/plan_library.py": 1,         # comment mirror of migrations.py DDL (censused there) — not own debt
     "src/nexus/health.py": 1,                     # PG/Liquibase RLS syntax in a comment (health.py:1673) — not SQLite debt
     "src/nexus/plans/repair.py": 1,               # docstring mention only; module runs NO DDL — not own debt
+    "src/nexus/upgrade_ladder/rungs/chash_rekey.py": 1,  # RDR-180 .6: PG `ALTER TABLE ... VALIDATE CONSTRAINT` statement text — not SQLite debt
 }
 
 #: 2026-07-18 census — per-file counts of ``# epsilon-allow:`` overrides.
@@ -134,6 +136,11 @@ EPSILON_CENSUS: dict[str, int] = {
     "src/nexus/mcp_infra.py": 4,
     "src/nexus/merge_candidates.py": 2,
     "src/nexus/migration/chroma_read.py": 2,
+    # RDR-180 land-then-transform (nexus-jxizy.10.7, Hal-directed design):
+    # the guided driver's ONE read-only migration-SOURCE connect
+    # (file:...?mode=ro URI) feeding pre-land census + landing — the
+    # sanctioned remap_cascade class, never a destination.
+    "src/nexus/migration/driver.py": 1,
     "src/nexus/migration/guided_upgrade.py": 1,
     "src/nexus/migration/orchestrator.py": 1,
     "src/nexus/migration/remap_cascade.py": 1,

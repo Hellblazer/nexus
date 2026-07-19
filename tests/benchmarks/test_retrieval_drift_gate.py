@@ -216,11 +216,12 @@ def seeded_client(java_service):
 
     client = HttpVectorClient(tenant=_TENANT)
     corpus = json.loads((_BENCH_DIR / "corpus.json").read_text())
-    # chunks tables CHECK(length(chash)=32): ids must be the canonical
-    # sha256[:32] content address. Keep chash -> judged doc_id for scoring.
+    # RDR-180 strict boundary (octet_length(chash)=32 bytes): ids must be
+    # the canonical FULL 64-hex sha256 content address. Keep chash ->
+    # judged doc_id for scoring.
     ids, docs, chash_to_doc = [], [], {}
     for d in corpus:
-        chash = hashlib.sha256(d["content"].encode("utf-8")).hexdigest()[:32]
+        chash = hashlib.sha256(d["content"].encode("utf-8")).hexdigest()
         ids.append(chash)
         docs.append(d["content"])
         chash_to_doc[chash] = d["id"]

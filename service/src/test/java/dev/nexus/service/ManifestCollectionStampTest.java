@@ -42,8 +42,9 @@ class ManifestCollectionStampTest {
 
     private static final String TENANT = "mcs-tenant";
     private static final String COLL   = "knowledge__mcs__voyage-context-3__v1";
-    private static final String CH_A   = "a".repeat(32);
-    private static final String CH_B   = "b".repeat(32);
+    // Full 64-hex canonical chashes (RDR-180: chunks_*/manifest columns are bytea(32))
+    private static final String CH_A   = "a".repeat(64);
+    private static final String CH_B   = "b".repeat(64);
 
     PostgreSQLContainer<?> pg;
     com.zaxxer.hikari.HikariDataSource ds;
@@ -82,7 +83,7 @@ class ManifestCollectionStampTest {
             st.execute("INSERT INTO nexus.catalog_collections (tenant_id, name) "
                 + "VALUES ('" + TENANT + "', '" + COLL + "') ON CONFLICT DO NOTHING");
             st.execute("INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) "
-                + "VALUES ('" + TENANT + "', '" + COLL + "', '" + CH_A + "', 'alpha text', "
+                + "VALUES ('" + TENANT + "', '" + COLL + "', decode('" + CH_A + "', 'hex'), 'alpha text', "
                 + "('[' || repeat('0.1,', 1023) || '0.1]')::vector)");
         }
     }
@@ -97,7 +98,7 @@ class ManifestCollectionStampTest {
         try (Connection su = pg.createConnection(""); Statement st = su.createStatement();
              ResultSet rs = st.executeQuery(
                  "SELECT collection FROM nexus.catalog_document_chunks "
-                 + "WHERE tenant_id = '" + TENANT + "' AND chash = '" + chash + "'")) {
+                 + "WHERE tenant_id = '" + TENANT + "' AND chash = decode('" + chash + "', 'hex')")) {
             return rs.next() ? rs.getString(1) : null;
         }
     }
@@ -143,8 +144,8 @@ class ManifestCollectionStampTest {
 
         // The catalog-ETL path (the shape every migrated tenant's rows took).
         repo.importChunksBatch(TENANT, docTumbler, List.of(
-            Map.of("position", 2, "chash", "c".repeat(32))));
-        assertThat(collectionOf("c".repeat(32)))
+            Map.of("position", 2, "chash", "c".repeat(64))));
+        assertThat(collectionOf("c".repeat(64)))
             .as("ETL import stamps too — migrated tenants stop regressing")
             .isEqualTo(COLL);
     }
@@ -181,12 +182,12 @@ class ManifestCollectionStampTest {
         // (written by a pre-fix writer), then replay catalog-014 as a
         // production-shaped NOSUPERUSER NOBYPASSRLS owner — the nexus-1wjmq
         // class demands the changeset's NO FORCE toggle actually works.
-        String chNull = "d".repeat(32);
+        String chNull = "d".repeat(64);
         try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
             st.execute("ALTER TABLE nexus.catalog_document_chunks NO FORCE ROW LEVEL SECURITY");
             st.execute("INSERT INTO nexus.catalog_document_chunks "
                 + "(tenant_id, doc_id, position, chash, collection) "
-                + "VALUES ('" + TENANT + "', '" + docTumbler + "', 99, '" + chNull + "', NULL)");
+                + "VALUES ('" + TENANT + "', '" + docTumbler + "', 99, decode('" + chNull + "', 'hex'), NULL)");
             st.execute("ALTER TABLE nexus.catalog_document_chunks FORCE ROW LEVEL SECURITY");
             st.execute("DELETE FROM public.databasechangelog WHERE id = 'catalog-014-0'");
             st.execute("DO $$ BEGIN "

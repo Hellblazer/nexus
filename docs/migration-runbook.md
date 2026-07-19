@@ -599,14 +599,15 @@ addresses.
 
 ### 8.1 Recovering a store that already migrated legacy ids (nexus-pnwu0)
 
-A box that completed a migration with non-32-char chashes in pgvector
-(pre-guard, or because constraints were dropped) **must not upgrade its
-engine** until remediated: `catalog-013-3` VALIDATEs any present chash
+A box that completed a migration with width-non-conformant chashes in
+pgvector (pre-guard, or because constraints were dropped) **must not
+upgrade its engine** until remediated: `catalog-013-3` VALIDATEs any present chash
 length CHECK against real rows and a violating row crash-loops the boot
 (it guards *missing constraints*, not *violating rows*).
 
-`nx doctor` detects this proactively — it counts non-32-char chash rows
-across the chunk tables and emits a `Chunk chash conformance` **warning**
+`nx doctor` detects this proactively — it counts width-non-conformant
+chash rows (octet_length <> 32) across the chunk tables and emits a
+`Chunk chash conformance` **warning**
 (never fatal; the current engine serves fine) with a pointer back here. Run
 it before any engine upgrade on a box whose store predates RDR-108 or ever
 had its chash constraints touched.

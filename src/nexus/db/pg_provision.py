@@ -807,7 +807,7 @@ def _provision_diag_conformance_view(bins: PgBinaries, port: int, os_user: str) 
         # hand-typed sentinel here could drift from the table set). The view
         # references EVERY chash table, so require all of them.
         rel_list = ", ".join(
-            f"'{t.split('.', 1)[1]}'" for t in CHASH_BEARING_TABLES
+            f"'{t.table.split('.', 1)[1]}'" for t in CHASH_BEARING_TABLES
         )
         _psql(
             bins, port, NEXUS_DB_NAME, os_user,
@@ -824,6 +824,33 @@ def _provision_diag_conformance_view(bins: PgBinaries, port: int, os_user: str) 
         _log.info("pg_diag_conformance_view_provisioned")
     except Exception as exc:  # noqa: BLE001 — best-effort; absent view = probe falls back to legacy statements
         _log.warning("pg_diag_view_best_effort_failed", error=str(exc))
+
+
+def reprovision_diag_view_best_effort() -> None:
+    """RDR-180 (nexus-jxizy.6): recreate ``nexus.diag_chash_conformance``
+    after the rekey — the rdr180-001 changeset DROPPED it (it held a column
+    dependency on the converted chash columns), and the generator's
+    era-safe predicate makes the recreation correct on the bytea store.
+    Local-bundle only; managed/BYO deployments re-run the docs DDL
+    (docs/configuration.md §3). Best-effort by design: an absent view only
+    degrades the probe to legacy statements, never correctness."""
+    try:
+        from nexus.config import is_local_mode, nexus_config_dir  # noqa: PLC0415 — deferred, circular-dep avoidance
+
+        if not is_local_mode():
+            return
+        creds_path = nexus_config_dir() / CREDENTIALS_FILENAME
+        if not creds_path.exists():
+            return
+        creds = _read_credentials(creds_path)
+        port = int(creds.get("PG_PORT", 0) or 0)
+        if port <= 0:
+            return
+        bins = discover_pg_binaries()
+        os_user = bootstrap_superuser()
+        _provision_diag_conformance_view(bins, port, os_user)
+    except Exception as exc:  # noqa: BLE001 — best-effort; probe falls back to legacy statements
+        _log.warning("pg_diag_view_reprovision_failed", error=str(exc))
 
 
 def _create_roles(

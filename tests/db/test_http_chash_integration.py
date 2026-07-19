@@ -50,13 +50,13 @@ from tests.db._service_fixture import SERVICE_ROLES_SQL, create_tenant_token, pg
 
 
 def _ch(seed: str) -> str:
-    """Canonical 32-lowercase-hex chash for fixtures. The z4skl/mzvwa.9/e0hd2
-    boundary guards reject non-canonical ids (manifest seams: exactly 32
-    lowercase hex; chash_index seams: length 32, with legacy 64 normalized) —
-    the old free-form literals now 400 at the HTTP boundary."""
+    """Canonical chash for fixtures: the FULL 64-lowercase-hex sha256
+    (RDR-180 — the strict engine boundary rejects the pre-cohort 32-hex
+    half-digest with a 400; free-form literals were already rejected by
+    the z4skl/mzvwa.9/e0hd2 guards)."""
     import hashlib
 
-    return hashlib.sha256(seed.encode()).hexdigest()[:32]
+    return hashlib.sha256(seed.encode()).hexdigest()
 
 
 # ── Prerequisite paths ────────────────────────────────────────────────────────
@@ -498,10 +498,10 @@ class TestChashMVV:
         )
 
     def test_m_registered_chashes_for_collection(self, chash_store):
-        """m) registered_chashes_for_collection returns chash[:32] set for collection.
+        """m) registered_chashes_for_collection returns the full-hex chash set.
 
-        Mirrors ChashIndex.registered_chashes_for_collection: 32-char prefix
-        matches Chroma natural-ID shape (RDR-108 D1). Exercises the new
+        RDR-180: the natural chunk ID is the FULL 64-hex digest; the server
+        retired the pre-flip substr(chash,1,32) compensation. Exercises the
         GET /v1/chash/registered_chashes endpoint end-to-end.
         """
         # Insert rows for col_reg

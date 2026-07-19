@@ -889,7 +889,10 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # read client routes it to the cloud leg + that distinct dims (384, 1024)
     # are extracted. The engine is fully mocked; no embedder runs and no
     # mode-dependent path executes ("string-literal-as-name" class).
-    "tests/migration/test_driver.py::test_two_leg_composes_collections_and_dims",
+    # (renamed test_two_leg_composes_collections_and_dims -> _reopens_both_legs_
+    # for_landing in the RDR-180 land-then-transform rewrite, nexus-jxizy.10.7 —
+    # same fully-mocked engine, same string-literal-as-name rationale.)
+    "tests/migration/test_driver.py::test_two_leg_reopens_both_legs_for_landing",
     #
     # nexus-gc2ze + nexus-c9xr2/u37lw wave (2026-07-04): all
     # "string-literal-as-name" — a REAL HttpCatalogClient/HttpVectorClient
@@ -949,7 +952,10 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # no embedder runs and no mode-dependent path executes
     # ("string-literal-as-name" class, same rationale as test_driver.py's
     # existing exclusions above).
-    "tests/migration/test_driver.py::test_target_name_collision_blocked_before_sequence",
+    # (renamed ..._blocked_before_sequence -> ..._before_land_then_transform in
+    # the RDR-180 rewrite, nexus-jxizy.10.7 — voyage_key pinned False, engine
+    # fully mocked.)
+    "tests/migration/test_driver.py::test_target_name_collision_blocked_before_land_then_transform",
     "tests/migration/test_driver.py::test_target_name_collision_between_two_remapped_collections",
     "tests/migration/test_driver.py::test_target_name_no_collision_when_targets_distinct",
     "tests/migration/test_driver.py::test_target_name_collision_three_way",

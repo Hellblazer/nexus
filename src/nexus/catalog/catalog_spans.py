@@ -66,6 +66,16 @@ def parse_chash_span(span: str) -> tuple[str, tuple[int, int] | None]:
         return m.group(1), (int(m.group(2)), int(m.group(3)))
     if re.fullmatch(r"[0-9a-f]{64}", body):
         return body, None
+    # RDR-180 Failure Modes: legacy 32-hex references (old bead comments,
+    # T2 memories, prose citations) stay RESOLVABLE — accepted here as a
+    # legacy reference; the resolution layer routes them through the
+    # chash_alias map (the engine lookup echoes the canonical identity).
+    # WRITE grammars (catalog.py link spans) remain strictly 64-hex.
+    m = re.match(r"^([0-9a-f]{32}):(\d+)-(\d+)$", body)
+    if m:
+        return m.group(1), (int(m.group(2)), int(m.group(3)))
+    if re.fullmatch(r"[0-9a-f]{32}", body):
+        return body, None
     raise ValueError(f"malformed chash span: {span!r}")
 
 
@@ -121,6 +131,22 @@ def resolve_span_in_t3(
     return out
 
 
+def _t3_collection_names(t3: "ClientAPI") -> list[str]:
+    """Collection names across BOTH T3 client shapes.
+
+    Chroma clients return objects with ``.name``; the service-mode
+    ``HttpVectorClient.list_collections()`` returns plain dicts (--guided
+    gate run 3 catch, nexus-jxizy.10.10 — the object-only ``c.name`` read
+    crashed every service-mode fallback scan, and made the chash-index
+    self-heal a permanent skip-with-warning). May raise — callers keep
+    their existing degradation contracts.
+    """
+    return [
+        c.get("name") if isinstance(c, dict) else c.name
+        for c in t3.list_collections()
+    ]
+
+
 def fallback_chash_scan(
     *,
     hex_chash: str,
@@ -140,7 +166,7 @@ def fallback_chash_scan(
     global _chash_fallback_warned
 
     try:
-        all_cols = [c.name for c in t3.list_collections()]
+        all_cols = _t3_collection_names(t3)
     except Exception:  # noqa: BLE001 — best-effort fallback scan; T3 list failure is logged and degrades to no-match, must not crash caller
         _log.debug("chash_fallback_list_collections_failed", exc_info=True)
         return None
@@ -264,6 +290,19 @@ def resolve_chash_globally(
     """
     hex_chash, char_range = parse_chash_span(chash)
 
+    if len(hex_chash) == 32:
+        # Legacy reference (RDR-180): the chash_index lookup alias-chains
+        # engine-side and echoes the resolved CANONICAL 64-hex — rewrite
+        # and resolve canonically. An unmapped legacy ref is dangling:
+        # no T3 fallback scan can succeed at the retired width.
+        legacy_rows = chash_index.lookup(hex_chash)
+        canonical = next(
+            (r.get("chash") for r in legacy_rows or [] if r.get("chash")), None,
+        )
+        if canonical is None or len(canonical) != 64:
+            return None
+        hex_chash = canonical
+
     # Reconstruct the span form that resolve_span_in_t3 expects.
     span = f"chash:{hex_chash}"
     if char_range:
@@ -298,7 +337,7 @@ def resolve_chash_globally(
         # strictly safer than fail-quiet-and-purge: log at WARNING
         # and return without touching the index.
         try:
-            live = {c.name for c in t3.list_collections()}
+            live = set(_t3_collection_names(t3))
             list_failed = False
         except Exception:  # noqa: BLE001 — transient T3 list failure must not purge the chash index (nexus-8g79.3); logged at WARNING, self-heal skipped this pass
             _log.warning(
@@ -347,14 +386,14 @@ def resolve_chash_globally(
                 span_res = None
             if span_res is None:
                 continue
-            # RDR-108 Phase 4b / nexus-kosc: T3 chunk natural ID equals
-            # ``hex_chash[:32]`` (RDR-108 D1). Derive doc_id directly
-            # from the resolved chash rather than reading the
-            # ``chunk_chroma_id`` column from chash_index (the column
-            # is dropped in nexus-mmf5).
+            # RDR-180 / nexus-jxizy.3: the T3 chunk natural ID IS the
+            # full chash (the RDR-108 [:32] derivation is retired).
+            # Derive doc_id directly from the resolved chash rather than
+            # reading the ``chunk_chroma_id`` column from chash_index
+            # (the column is dropped in nexus-mmf5).
             return _build_ref(
                 coll=row["collection"],
-                doc_id=hex_chash[:32],
+                doc_id=hex_chash,
                 span_result=span_res,
             )
 
@@ -455,7 +494,7 @@ def resolve_span_text_for_entry(
                     None,
                 )
                 if row is not None and row.chash:
-                    natural_id = row.chash[:32]
+                    natural_id = row.chash  # RDR-180: full digest
                     fetched = col.get(
                         ids=[natural_id],
                         include=["documents"],

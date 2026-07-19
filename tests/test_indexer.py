@@ -608,7 +608,7 @@ def test_prune_deleted_files_orphan_chunk_deleted(tmp_path):
                        ("orphan-id-synthetic", orphan_chash)],
         "docs__repo": [],
     })
-    catalog = _gc_catalog({"code__repo": {live_chash[:32]}, "docs__repo": set()})
+    catalog = _gc_catalog({"code__repo": {live_chash}, "docs__repo": set()})
 
     _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
 
@@ -627,7 +627,7 @@ def test_prune_deleted_files_preserves_live_synthetic_id(tmp_path):
     chash = "a" * 64
     synthetic_id = "0123456789abcdef" * 2  # 32 hex chars unrelated to chash
     db, cols = _gc_db({"code__repo": [(synthetic_id, chash)], "docs__repo": []})
-    catalog = _gc_catalog({"code__repo": {chash[:32]}, "docs__repo": set()})
+    catalog = _gc_catalog({"code__repo": {chash}, "docs__repo": set()})
 
     _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
 
@@ -705,7 +705,7 @@ def test_prune_deleted_files_idempotent(tmp_path):
     """Re-running with no new orphans is a no-op (zero deletes)."""
     from nexus.indexer import _prune_deleted_files
     chash = "a" * 64
-    catalog = _gc_catalog({"code__repo": {chash[:32]}, "docs__repo": set()})
+    catalog = _gc_catalog({"code__repo": {chash}, "docs__repo": set()})
 
     db, cols = _gc_db({"code__repo": [("live-id", chash)], "docs__repo": []})
     _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
@@ -846,8 +846,8 @@ def test_prune_misclassified_uses_catalog_manifest_for_phase3_chunks(tmp_path):
     from types import SimpleNamespace
     """nexus-7zcv (RDR-108 Phase 4 review D-H4): when chunks have no
     doc_id metadata (Phase 3 removed it), the prune must resolve
-    each doc_id's chashes via the catalog manifest and delete by
-    chash[:32] (the RDR-108 D1 natural id), not via where={doc_id}.
+    each doc_id's chashes via the catalog manifest and delete by the
+    full chash (RDR-180 natural id), not via where={doc_id}.
 
     Reverting the manifest path makes this test fail because the
     chunks have no doc_id metadata and the legacy where-filter
@@ -862,10 +862,10 @@ def test_prune_misclassified_uses_catalog_manifest_for_phase3_chunks(tmp_path):
     chash_b = "b" * 64
 
     # docs collection contains the misclassified chunks (Phase-3 shape:
-    # natural id = chash[:32], no doc_id in metadata).
+    # natural id = full chash, no doc_id in metadata).
     docs_col = MagicMock()
     docs_col.get.return_value = {
-        "ids": [chash_a[:32], chash_b[:32]],
+        "ids": [chash_a, chash_b],
     }
 
     db = MagicMock()
@@ -901,15 +901,15 @@ def test_prune_misclassified_uses_catalog_manifest_for_phase3_chunks(tmp_path):
     # per-doc serial path was NOT taken on the happy path.
     catalog.get_manifests.assert_any_call(["1.1.5"])
     catalog.get_manifest.assert_not_called()
-    # docs col was queried with the chash[:32] IDs.
+    # docs col was queried with the full-chash IDs.
     get_calls = docs_col.get.call_args_list
     assert any(
-        set(call.kwargs.get("ids", [])) == {chash_a[:32], chash_b[:32]}
+        set(call.kwargs.get("ids", [])) == {chash_a, chash_b}
         for call in get_calls
-    ), f"docs col.get must receive chash[:32] IDs; got {get_calls!r}"
+    ), f"docs col.get must receive full-chash IDs; got {get_calls!r}"
     # Both chunks deleted from the wrong collection.
     deleted = _deleted_ids(docs_col)
-    assert set(deleted) == {chash_a[:32], chash_b[:32]}
+    assert set(deleted) == {chash_a, chash_b}
 
 
 def test_prune_misclassified_batch_fetch_and_absent_doc(tmp_path):
@@ -1127,8 +1127,8 @@ def test_prune_deleted_files_per_collection_orphan_isolation(tmp_path):
         ],
     })
     catalog = _gc_catalog({
-        "code__repo": {code_live[:32]},
-        "docs__repo": {docs_live[:32]},
+        "code__repo": {code_live},
+        "docs__repo": {docs_live},
     })
 
     _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
@@ -1168,7 +1168,7 @@ def test_prune_deleted_files_sweeps_rdr_collection_when_passed(tmp_path):
     })
     catalog = _gc_catalog({
         "code__repo": set(), "docs__repo": set(),
-        "rdr__repo": {rdr_live[:32]},
+        "rdr__repo": {rdr_live},
     })
 
     _prune_deleted_files(
@@ -1189,7 +1189,7 @@ def test_prune_deleted_files_rdr_collection_none_is_safe(tmp_path):
     col = _gc_col([("live-id", live_chash)])
     db = MagicMock(); db.get_or_create_collection.return_value = col
     db.get_collection.return_value = col
-    catalog = _gc_catalog({"code__repo": {live_chash[:32]}, "docs__repo": set()})
+    catalog = _gc_catalog({"code__repo": {live_chash}, "docs__repo": set()})
 
     # Must not raise, and must not call chashes_for_collection for a
     # collection name that was never passed.
@@ -1760,9 +1760,9 @@ def test_prune_deleted_files_paginates(tmp_path, monkeypatch):
     from nexus.indexer import _prune_deleted_files
     live = [(f"live-{i:03d}", f"a{i:03d}" + "0" * 60) for i in range(200)]
     orphan = [(f"orphan-{i:03d}", f"b{i:03d}" + "0" * 60) for i in range(110)]
-    live_chashes_32 = {r[1][:32] for r in live}
+    live_chashes = {r[1] for r in live}
     db, cols = _gc_db({"code__repo": live + orphan, "docs__repo": []})
-    catalog = _gc_catalog({"code__repo": live_chashes_32, "docs__repo": set()})
+    catalog = _gc_catalog({"code__repo": live_chashes, "docs__repo": set()})
 
     _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
 
@@ -2107,7 +2107,7 @@ class TestQuarantineLifecycle:
     @staticmethod
     def _setup(n_total=200, n_live=20, name="code__repo"):
         rows = [(f"id-{i:04d}", f"{i:032d}" + "f" * 32) for i in range(n_total)]
-        live = {r[1][:32] for r in rows[:n_live]}
+        live = {r[1] for r in rows[:n_live]}
         db, cols = _gc_db({name: rows, "docs__repo": []})
         catalog = _gc_catalog({name: live, "docs__repo": set()})
         return rows, live, db, cols, catalog
@@ -2148,7 +2148,7 @@ class TestQuarantineLifecycle:
         assert len(cols["quarantine-code__repo"]._rows) == 180
         # The manifest now references EVERYTHING (heal healed the gap).
         catalog2 = _gc_catalog({
-            "code__repo": {r[1][:32] for r in rows}, "docs__repo": set(),
+            "code__repo": {r[1] for r in rows}, "docs__repo": set(),
         })
         _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog2)
         assert len(cols["code__repo"]._rows) == 200
@@ -2213,8 +2213,8 @@ class TestQuarantineLifecycle:
         docs_rows = [("d-live", "a" * 64), ("d-orphan", "b" * 64)]
         db, cols = _gc_db({"code__repo": code_rows, "docs__repo": docs_rows})
         catalog = _gc_catalog({
-            "code__repo": {r[1][:32] for r in code_rows[:10]},
-            "docs__repo": {("a" * 64)[:32]},
+            "code__repo": {r[1] for r in code_rows[:10]},
+            "docs__repo": {"a" * 64},
         })
         _prune_deleted_files("code__repo", "docs__repo", db, catalog=catalog)
         assert len(cols["code__repo"]._rows) == 10
@@ -2248,7 +2248,7 @@ def test_quarantine_siblings_distinct_for_shared_owner_and_chash(monkeypatch):
         rdr: [("r-live", "b" * 64), ("r-1", shared)],
     })
     catalog2 = _gc_catalog({
-        docs: {("a" * 64)[:32]}, rdr: {("b" * 64)[:32]},
+        docs: {"a" * 64}, rdr: {"b" * 64},
     })
     _prune_deleted_files(docs, rdr, db2, catalog=catalog2)
     qd = cols2[quarantine_collection_name(docs)]._rows

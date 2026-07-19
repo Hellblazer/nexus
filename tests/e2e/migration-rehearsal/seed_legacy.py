@@ -15,7 +15,7 @@ ETL), metadata = {position, tag}. Two conformant collections:
   knowledge__rehearsal__minilm-l6-v2-384__v1   (ONNX leg — re-embedded locally)
   knowledge__rehearsal__voyage-context-3__v1   (cloud leg — re-embedded via Voyage)
 
-Usage: seed_legacy.py <chroma_path> [--with-cloud] [--era-hop] [--n N]
+Usage: seed_legacy.py <chroma_path> [--with-cloud] [--era-hop] [--rdr180] [--n N]
        seed_legacy.py <chroma_path> --blocking=collision|pregate [--n N]
        seed_legacy.py <chroma_path> --remove-blocking[=collision|pregate]
 
@@ -28,6 +28,22 @@ store_put-only note that has no source content to re-index. The ladder's
 substrate rung must converge these on the wire, so the manifest gains
 legacy_ids (what must no longer exist), expected_reid (the exact conformant
 chashes the wire transform must produce) and sourceless.
+
+--rdr180 (nexus-jxizy.10.10) layers the LAND-THEN-TRANSFORM gate shapes onto
+the main seed — OPT-IN so the other legs' exact-parity contracts (service
+count == raw seeded count) stay intact. It (a) INVERTS blocking shape (ii):
+_SHORTID (supported bge-768 name, pre-RDR-108 16-char ids) becomes a FULL
+CITIZEN that must land+promote+resolve (the GH #1408 population — the
+pregate's legacy-id width block is RETIRED, nexus-jxizy.10.8); (b) adds an
+identical-text collapse pair in BOTH directions (same-collection: two eras
+of the same text in _SHORTID; cross-collection: the same (ref, text) in
+_MINILM and _MISLABEL — the C1 same-ref-same-digest idempotent pass);
+(c) adds the Item8 empty-text dispositions (a reference-only row whose ref
+aliases via _SHORTID's content, and an orphan the drop policy must count);
+(d) seeds chash_index / frecency / relevance_log rows keyed by the 16-char
+ids so the pointer-store cascade is falsifiable; and (e) emits an
+``rdr180`` manifest block with the EXACT expected post-migration numbers so
+the gate asserts values, not shapes.
 """
 from __future__ import annotations
 
@@ -70,24 +86,37 @@ _NOTE = "knowledge__rehearsal-note__minilm-l6-v2-384__v1"
 # this shape MIGRATES (success phase), unlike the --blocking shapes below.
 _MISLABEL = "knowledge__rehearsal-mislabel__voyage-context-3__v1"
 
-# nexus-itme7 pre-write BLOCK shapes (GH #667/#1381/#1390 field classes).
-# Seeded ONLY via --blocking=<group>; NEVER entered into the chashes dict, so
-# _seed_t2_and_catalog never sees them (the guards fire at classification /
-# collision-audit time, before any catalog row would matter).
-#   (i)  token-less 2-segment name: dim MUST NOT be 768 (the measured-dim
-#        override would rescue it into a remap) and ids MUST be 32-char
-#        (16-char would mis-attribute the block to legacy_ids).
-#   (ii) SUPPORTED-model name with pre-RDR-108 16-char chunk ids (the
-#        canon-chat shape): the legacy-id probe blocks BEFORE model support.
-#   (iv) collision pair: the stale voyage-named half MUST hold real 768-dim
-#        vectors — the measured-dim override remaps it onto the honest
-#        sibling's name (target-name collision). A non-768 half would instead
-#        trip guided-upgrade's step-2a voyage-capability gate and exit with
-#        the wrong diagnostic.
+# nexus-itme7 pre-write BLOCK shapes (GH #667/#1381 field classes), evolved
+# for RDR-180 (nexus-jxizy.10.10). Seeded ONLY via --blocking=<group>; NEVER
+# entered into the chashes dict, so _seed_t2_and_catalog never sees them (the
+# guards fire at classification / collision-audit time, before any catalog
+# row would matter).
+#   (i)   token-less 2-segment name: dim MUST NOT be 768 (the measured-dim
+#         override would rescue it into a remap) and ids MUST be 32-char
+#         (16-char would mis-attribute the block to legacy_ids).
+#   (ii)  RETIRED AS A BLOCK (nexus-jxizy.10.8): the SUPPORTED-model name
+#         with pre-RDR-108 16-char chunk ids now MIGRATES (land-then-
+#         transform rehashes chunk_text server-side) — _SHORTID moved to the
+#         --rdr180 MAIN seed as a positive fixture (GH #1408 population).
+#   (iii) its Phase-0 slot: _NOTEXT — a conformant, supported-model name
+#         whose sampled chunks carry NO TEXT AT ALL. Nothing to rehash from
+#         (un-derivable) — the RDR-180 Q4 residual honest block (P2.3).
+#   (iv)  collision pair: the stale voyage-named half MUST hold real 768-dim
+#         vectors — the measured-dim override remaps it onto the honest
+#         sibling's name (target-name collision). A non-768 half would
+#         instead trip guided-upgrade's step-2a voyage-capability gate and
+#         exit with the wrong diagnostic.
 _LEGACYBARE = "knowledge__legacybare"
 _SHORTID = "knowledge__rehearsal-shortid__bge-base-en-v15-768__v1"
+_NOTEXT = "knowledge__rehearsal-notext__bge-base-en-v15-768__v1"
 _PAIR_HONEST = "knowledge__rehearsal-pair__bge-base-en-v15-768__v1"
 _PAIR_STALE = "knowledge__rehearsal-pair__voyage-context-3__v1"
+
+# RDR-180 --rdr180 collapse/disposition shapes (nexus-jxizy.10.10). The texts
+# are constants so the expected canonical digests are derivable here AND
+# assertable exactly in the gate.
+_PAIR_TEXT = "rdr180 same-collection collapse twin"
+_CROSS_TEXT = "rdr180 cross-collection collapse twin"
 
 # RDR-185 P4.3 (nexus-n7u38.30): the ERA-HOP shapes — the 2026-07-16
 # work-instance (GH #1408) footprint, which the LADDER converges rather than
@@ -120,21 +149,25 @@ _ERA_NOTE = "knowledge__rehearsal-era-note__minilm-l6-v2-384__v1"
 #: silently applying to only one of them.
 _SOURCELESS: frozenset[str] = frozenset({_NOTE, _ERA_NOTE})
 
-#: blocking collection -> (seed text prefix, vector dim, chunk-id length)
-_BLOCKING_SPEC: dict[str, tuple[str, int, int]] = {
-    _LEGACYBARE: ("bare legacy chunk", 2, 32),
-    _SHORTID: ("short id chunk", 2, 16),
-    _PAIR_HONEST: ("pair honest chunk", 2, 32),
-    _PAIR_STALE: ("pair stale chunk", 768, 32),
+#: blocking collection -> (seed text prefix, vector dim, chunk-id length,
+#: empty_text). ``empty_text=True`` seeds distinct ids (derived from the
+#: prefix strings) but EMPTY documents — the probe_has_text=False shape.
+_BLOCKING_SPEC: dict[str, tuple[str, int, int, bool]] = {
+    _LEGACYBARE: ("bare legacy chunk", 2, 32, False),
+    _NOTEXT: ("notext chunk", 2, 32, True),
+    _PAIR_HONEST: ("pair honest chunk", 2, 32, False),
+    _PAIR_STALE: ("pair stale chunk", 768, 32, False),
 }
 
 #: --blocking group -> collections. Per-shape granularity (plan-audit F1): the
 #: collision guard fires BEFORE the sequencer pregate, so one guided-upgrade
 #: run can emit only ONE of the two block types — Phase 0 seeds them in
-#: SEPARATE sub-runs.
+#: SEPARATE sub-runs. RDR-180: the pregate group is (i) nonconformant name +
+#: (iii) no-text; the retired (ii) legacy-id shape now rides the --rdr180
+#: MAIN seed instead.
 _BLOCKING_GROUPS: dict[str, tuple[str, ...]] = {
     "collision": (_PAIR_HONEST, _PAIR_STALE),
-    "pregate": (_LEGACYBARE, _SHORTID),
+    "pregate": (_LEGACYBARE, _NOTEXT),
 }
 
 # The model the cross-model migrate re-embeds the minilm sources into. This is
@@ -158,8 +191,14 @@ def _chash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:32]
 
 
+def _sha_full(text: str) -> str:
+    """The FULL sha256 hexdigest — the canonical RDR-180 chash identity."""
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
 def _seed(
-    client, name: str, n: int, *, prefix: str, dim: int = 2, id_len: int = 32
+    client, name: str, n: int, *, prefix: str, dim: int = 2, id_len: int = 32,
+    empty_text: bool = False,
 ) -> list[str]:
     """Seed a legacy Chroma collection; return the chunk chashes (ids).
 
@@ -172,23 +211,33 @@ def _seed(
     ("embedder produced a 2-dim vector ... dispatches to chunks_1024"). Values are
     irrelevant (parity asserts COUNT, not similarity) — only the dim matters.
 
-    ``id_len`` (nexus-itme7): shape (ii) seeds pre-RDR-108 16-char chunk ids
-    (``sha256[:16]``, the GH #1390 canon-chat era) so the legacy-id pregate
-    block fires. Everything else keeps the 32-char chash identity.
+    ``id_len`` (nexus-itme7 / RDR-180): 16 seeds pre-RDR-108 16-char chunk
+    ids (``sha256[:16]``, the GH #1390 canon-chat era). Under land-then-
+    transform these MIGRATE by server-side rehash (nexus-jxizy.10.8) — the
+    --rdr180 main seed uses this for the positive GH #1408 fixture.
+    Everything else keeps the 32-char chash identity.
+
+    ``empty_text`` (nexus-jxizy.10.10): ids stay derived from the prefix
+    strings (distinct), but the stored documents are EMPTY — the
+    probe_has_text=False shape behind the RDR-180 residual honest block
+    (nothing to rehash from, un-derivable).
     """
     texts = [f"{prefix} {i:04d}" for i in range(n)]
     ids = [_chash(t)[:id_len] for t in texts]
     col = client.get_or_create_collection(name)
     col.add(
         ids=ids,
-        documents=texts,
+        documents=["" for _ in texts] if empty_text else texts,
         metadatas=[{"position": i, "tag": "rehearsal"} for i in range(n)],
         embeddings=[[float(i)] + [1.0] * (dim - 1) for i in range(n)],
     )
     return ids
 
 
-def _seed_t2_and_catalog(collections: dict[str, list[str]]) -> dict[str, int]:
+def _seed_t2_and_catalog(
+    collections: dict[str, list[str]],
+    rdr180_pointer_ids: list[str] | None = None,
+) -> dict[str, int]:
     """Build the legacy T2 memory.db (one note) + a catalog-CONSISTENT footprint.
 
     migrate-to-service sequences T2 → catalog → T3. The validation gate refuses
@@ -197,6 +246,13 @@ def _seed_t2_and_catalog(collections: dict[str, list[str]]) -> dict[str, int]:
     document and write its document_chunks manifest referencing the SAME chashes,
     making the post-migration orphan scan (catalog manifest ⨝ pgvector chash)
     meaningful. Returns {"t2_notes": N, "catalog_docs": M}.
+
+    ``rdr180_pointer_ids`` (nexus-jxizy.10.10): when given (the _SHORTID
+    chunk ids, 16-char era incl. the collapse pair), ALSO seeds
+    chash_index / frecency / relevance_log rows keyed by those legacy ids —
+    the chash-bearing pointer stores the landing must carry and the promote
+    /finalize must re-point through the alias. Without these the pointer
+    cascade would be vacuously green (nothing legacy-keyed to converge).
     """
     from nexus.config import nexus_config_dir
     from nexus.db.t2 import T2Database
@@ -238,6 +294,34 @@ def _seed_t2_and_catalog(collections: dict[str, list[str]]) -> dict[str, int]:
             (collections[note_coll][0], topic_id, note_coll),
         )
         tax.conn.commit()
+
+    # RDR-180 pointer stores keyed by the 16-char era (nexus-jxizy.10.10).
+    # Timestamps ISO-8601 (validate_timestamp_fields pre-land guard);
+    # relevance_log queries distinct per ref so the anti-join dedupe keeps
+    # every row (the collapse pair's two refs converge to ONE frecency /
+    # chash_index row but TWO relevance rows — exact numbers in main()).
+    if rdr180_pointer_ids:
+        conn = db.taxonomy.conn
+        iso = "2026-06-18T00:00:00Z"
+        for ch in rdr180_pointer_ids:
+            conn.execute(
+                "INSERT OR IGNORE INTO chash_index "
+                "(chash, physical_collection, created_at) VALUES (?, ?, ?)",
+                (ch, _SHORTID, iso),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO frecency "
+                "(chunk_id, embedded_at, ttl_days, frecency_score, miss_count, "
+                "last_hit_at) VALUES (?, ?, 30, 0.5, 0, ?)",
+                (ch, iso, iso),
+            )
+            conn.execute(
+                "INSERT INTO relevance_log "
+                "(query, chunk_id, collection, action, session_id, timestamp) "
+                "VALUES (?, ?, ?, 'hit', 'rehearsal', ?)",
+                (f"rehearsal query {ch}", ch, _SHORTID, iso),
+            )
+        conn.commit()
 
     from nexus.catalog.catalog import Catalog
 
@@ -335,7 +419,7 @@ def main() -> int:
     args = sys.argv[1:]
     if not args:
         print(
-            "usage: seed_legacy.py <chroma_path> [--with-cloud] [--era-hop] [--n N]\n"
+            "usage: seed_legacy.py <chroma_path> [--with-cloud] [--era-hop] [--rdr180] [--n N]\n"
             "       seed_legacy.py <chroma_path> --blocking=collision|pregate [--n N]\n"
             "       seed_legacy.py <chroma_path> --remove-blocking[=collision|pregate]",
             file=sys.stderr,
@@ -344,12 +428,20 @@ def main() -> int:
     path = args[0]
     with_cloud = "--with-cloud" in args
     era_hop = "--era-hop" in args
+    rdr180 = "--rdr180" in args
     if era_hop and with_cloud:
         # The era shapes are seeded 768/384-dim local content whose remap target
         # is always the bge-768 name; a voyage-only service has no bge embedder
         # and 422s the leg (the same incoherence _MISLABEL documents above).
         print("--era-hop and --with-cloud are incoherent (era shapes remap onto "
               "the local bge-768 target; cloud is voyage-only)", file=sys.stderr)
+        return 2
+    if rdr180 and (with_cloud or era_hop):
+        # --rdr180 is the --guided gate's shape set: local bge-768 targets
+        # (same incoherence with cloud as era-hop), and the era-hop drives a
+        # DIFFERENT journey (the RDR-185 ladder) — keep the matrix small.
+        print("--rdr180 combines with neither --with-cloud nor --era-hop "
+              "(it is the local --guided gate's shape set)", file=sys.stderr)
         return 2
     n = 12
     if "--n" in args:
@@ -372,9 +464,10 @@ def main() -> int:
     if blocking is not None:
         seeded_blocking: dict[str, int] = {}
         for bname in blocking:
-            prefix, dim, id_len = _BLOCKING_SPEC[bname]
+            prefix, dim, id_len, empty_text = _BLOCKING_SPEC[bname]
             seeded_blocking[bname] = len(
-                _seed(client, bname, n, prefix=prefix, dim=dim, id_len=id_len)
+                _seed(client, bname, n, prefix=prefix, dim=dim, id_len=id_len,
+                      empty_text=empty_text)
             )
         print(json.dumps({"blocking": seeded_blocking}))
         return 0
@@ -432,7 +525,78 @@ def main() -> int:
         # 1024-dim source vectors: the voyage same-model passthrough COPIES them
         # (no re-embed) into chunks_1024 (nexus-pi3s3).
         chashes[_VOYAGE] = _seed(client, _VOYAGE, n, prefix="voyage chunk", dim=1024)
-    t2 = _seed_t2_and_catalog(chashes)
+    # RDR-180 --rdr180 (nexus-jxizy.10.10): the land-then-transform gate
+    # shapes. See the module docstring; every count is derivable, so the
+    # ``rdr180`` manifest block below carries EXACT expected numbers.
+    if rdr180:
+        # (a) Shape-(ii) INVERSION: _SHORTID as a FULL CITIZEN. Supported
+        #     bge-768 name, REAL 768-dim vectors (same-model reuse stages
+        #     them verbatim; a stub dim would fail the ::vector(768) cast at
+        #     promote), pre-RDR-108 16-char ids. The retired pregate width
+        #     block used to REFUSE exactly this; it must now MIGRATE.
+        chashes[_SHORTID] = _seed(
+            client, _SHORTID, n, prefix="short id chunk", dim=768, id_len=16,
+        )
+        shortid_col = client.get_collection(_SHORTID)
+        # (b) Same-collection collapse pair: the SAME text under a 16-char
+        #     AND a 32-char id (two eras of one chunk). Promote's DISTINCT
+        #     ON digest + M1 tiebreak must collapse them to ONE content row
+        #     with BOTH refs aliased to the one canonical.
+        p16, p32 = _sha_full(_PAIR_TEXT)[:16], _sha_full(_PAIR_TEXT)[:32]
+        shortid_col.add(
+            ids=[p16, p32],
+            documents=[_PAIR_TEXT, _PAIR_TEXT],
+            metadatas=[{"position": n, "tag": "rehearsal"},
+                       {"position": n + 1, "tag": "rehearsal"}],
+            embeddings=[[100.0] + [1.0] * 767, [101.0] + [1.0] * 767],
+        )
+        chashes[_SHORTID] = chashes[_SHORTID] + [p16, p32]
+
+        # (c) Cross-collection collapse pair: the SAME (ref, text) in
+        #     _MINILM and _MISLABEL. Different targets promote their own
+        #     content rows; the SHARED 32-char ref must yield exactly ONE
+        #     chash_alias row (C1 same-ref-same-digest = the idempotent
+        #     pass, never a 409).
+        c32 = _sha_full(_CROSS_TEXT)[:32]
+        client.get_collection(_MINILM).add(
+            ids=[c32], documents=[_CROSS_TEXT],
+            metadatas=[{"position": n, "tag": "rehearsal"}],
+            embeddings=[[102.0, 1.0]],
+        )
+        chashes[_MINILM] = chashes[_MINILM] + [c32]
+
+        # (d) Item8 empty-text dispositions, riding _MISLABEL (mixed with
+        #     text rows so probe_has_text stays True; every vector 768-dim
+        #     so the measured-dim override still classifies it):
+        #     - reference-only: EMPTY text, ref == _MINILM's first chunk's
+        #       32-char id — the alias built by _MINILM's promote resolves
+        #       it (finalize counts reference_only_resolved). The ref MUST
+        #       be 32-char here: ANY non-32/64-char id in a voyage-NAMED
+        #       collection sets legacy_ids=True, which SUPPRESSES the
+        #       measured-dim override probe (detection._classify_leg) and
+        #       reclassifies the mislabel as genuinely-voyage-unsupported —
+        #       guided-upgrade's step-2a voyage-capability gate then fires
+        #       before either Phase-0 guard under test (gate run 1 field
+        #       lesson, 2026-07-19);
+        #     - orphan: EMPTY text, a ref nothing resolves — the guided
+        #       drop policy counts it (orphans_dropped) and it never
+        #       reaches nexus.
+        ref_only = _sha_full("onnx chunk 0000")[:32]
+        orphan32 = _sha_full("rdr180 orphan reference")[:32]
+        client.get_collection(_MISLABEL).add(
+            ids=[c32, ref_only, orphan32],
+            documents=[_CROSS_TEXT, "", ""],
+            metadatas=[{"position": n, "tag": "rehearsal"},
+                       {"position": n + 1, "tag": "rehearsal"},
+                       {"position": n + 2, "tag": "rehearsal"}],
+            embeddings=[[103.0] + [1.0] * 767, [104.0] + [1.0] * 767,
+                        [105.0] + [1.0] * 767],
+        )
+        chashes[_MISLABEL] = chashes[_MISLABEL] + [c32, ref_only, orphan32]
+    t2 = _seed_t2_and_catalog(
+        chashes,
+        rdr180_pointer_ids=chashes[_SHORTID] if rdr180 else None,
+    )
     seeded = {name: len(ids) for name, ids in chashes.items()}
     # cross_model: source -> the target the migrate re-embeds into, MODE-AWARE
     # (nexus-pi3s3). voyage_key_present (== with_cloud here) decides the target
@@ -478,6 +642,59 @@ def main() -> int:
             _ERA_NOTE: [_chash(f"era note chunk {i:04d}") for i in range(n)],
         }
         out["sourceless"] = sorted(_SOURCELESS)
+    if rdr180:
+        # The EXACT expected post-migration numbers (nexus-jxizy.10.10) —
+        # the gate asserts values, never shapes. Derivation (n = --n):
+        #   staged chunks   = (n+1) minilm + n note + (n+3) mislabel
+        #                     + (n+2) shortid                       = 4n+6
+        #   content rows    = staged - reference_only(1) - orphan(1) = 4n+4,
+        #                     collapsing to n+1 per target except note (n):
+        #                     shortid's same-collection pair is ONE row.
+        #   alias rows      = one per DISTINCT legacy content ref: (n+1) +
+        #                     n + (n+1) + (n+2) minus the SHARED cross ref = 4n+3
+        #   manifest rows   = (n+1) + (n+2) + (n+2): the orphan's manifest
+        #                     entry stays unresolved (resolvable-only
+        #                     promote) and clears with staging        = 3n+5
+        #   chash_index     = n+2 staged 16-char keys -> n+1 canonicals
+        #   frecency        = n+2 staged -> GREATEST-merge -> n+1 rows
+        #   relevance_log   = n+2 rows (distinct queries survive dedupe)
+        t_minilm = _remap_model(_MINILM, _BGE_MODEL)
+        t_note = _remap_model(_NOTE, _BGE_MODEL)
+        t_mislabel = _remap_model(_MISLABEL, _BGE_MODEL)
+        out["rdr180"] = {
+            "staged_total": 4 * n + 6,
+            "expected_content": {
+                t_minilm: n + 1,
+                t_note: n,
+                t_mislabel: n + 1,
+                _SHORTID: n + 1,
+            },
+            "alias_total": 4 * n + 3,
+            "manifest_total": 3 * n + 5,
+            "chash_index_rows": n + 1,
+            "frecency_rows": n + 1,
+            "relevance_rows": n + 2,
+            "citation16": _sha_full("short id chunk 0000")[:16],
+            "citation_canonical": _sha_full("short id chunk 0000"),
+            "note_doc_canonical": _sha_full("note chunk 0000"),
+            "pair": {
+                "p16": _sha_full(_PAIR_TEXT)[:16],
+                "p32": _sha_full(_PAIR_TEXT)[:32],
+                "canonical": _sha_full(_PAIR_TEXT),
+                "text": _PAIR_TEXT,
+            },
+            "cross": {
+                "ref": _sha_full(_CROSS_TEXT)[:32],
+                "canonical": _sha_full(_CROSS_TEXT),
+                "targets": [t_minilm, t_mislabel],
+            },
+            "orphan_ref": _sha_full("rdr180 orphan reference")[:32],
+            "ref_only_ref": _sha_full("onnx chunk 0000")[:32],
+            "ref_only_canonical": _sha_full("onnx chunk 0000"),
+            "shortid": _SHORTID,
+            "shortid_staged": n + 2,
+            "shortid_promoted": n + 1,
+        }
     print(json.dumps(out))
     return 0
 

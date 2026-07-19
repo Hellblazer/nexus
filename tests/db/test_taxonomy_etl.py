@@ -446,3 +446,113 @@ class TestMigrateTaxonomyRows:
         # Should succeed (read-only is fine for the ETL)
         result = migrate_taxonomy_rows(db, store)
         assert result["topics"]["read"] == 1
+
+
+# ── Per-table split (RDR-180 nexus-jxizy.10.7) ─────────────────────────────────
+# Each new public entry point migrates ONLY its own table(s); the other
+# tables' rows must never reach the store, even when the source DB has all
+# four tables populated (proven via the store's per-kind batch calls).
+
+
+class TestPerTableSplit:
+    def _make_store(self) -> MagicMock:
+        store = MagicMock()
+        store.import_rows_batch.side_effect = lambda kind, rows: len(rows)
+        return store
+
+    def _seeded_db(self, tmp_path: Path) -> Path:
+        db = tmp_path / "t.db"
+        _make_taxonomy_db(
+            db,
+            topics=[{"id": 1, "label": "ml", "collection": "c", "created_at": "ts"}],
+            assignments=[{"doc_id": "d1", "topic_id": 1}],
+            links=[{"from_topic_id": 1, "to_topic_id": 1}],
+            meta=[{"collection": "c", "last_discover_doc_count": 1}],
+        )
+        return db
+
+    def test_migrate_topics_writes_only_topics(self, tmp_path: Path) -> None:
+        from nexus.db.t2.taxonomy_etl import migrate_topics
+
+        db = self._seeded_db(tmp_path)
+        store = self._make_store()
+        result = migrate_topics(db, store)
+
+        assert result["read"] == 1
+        assert result["written"] == 1
+        kinds = {c.args[0] for c in store.import_rows_batch.call_args_list}
+        assert kinds == {"topic"}, f"only 'topic' batches must be sent, got {kinds}"
+
+    def test_migrate_topic_assignments_writes_only_assignments(self, tmp_path: Path) -> None:
+        from nexus.db.t2.taxonomy_etl import migrate_topic_assignments
+
+        db = self._seeded_db(tmp_path)
+        store = self._make_store()
+        result = migrate_topic_assignments(db, store)
+
+        assert result["read"] == 1
+        assert result["written"] == 1
+        kinds = {c.args[0] for c in store.import_rows_batch.call_args_list}
+        assert kinds == {"assignment"}, (
+            f"topics must be read for orphan-filtering but never WRITTEN, got {kinds}"
+        )
+
+    def test_migrate_topic_links_writes_only_links(self, tmp_path: Path) -> None:
+        from nexus.db.t2.taxonomy_etl import migrate_topic_links
+
+        db = self._seeded_db(tmp_path)
+        store = self._make_store()
+        result = migrate_topic_links(db, store)
+
+        assert result["read"] == 1
+        assert result["written"] == 1
+        kinds = {c.args[0] for c in store.import_rows_batch.call_args_list}
+        assert kinds == {"link"}, (
+            f"topics must be read for orphan-filtering but never WRITTEN, got {kinds}"
+        )
+
+    def test_migrate_taxonomy_meta_writes_only_meta(self, tmp_path: Path) -> None:
+        from nexus.db.t2.taxonomy_etl import migrate_taxonomy_meta
+
+        db = self._seeded_db(tmp_path)
+        store = self._make_store()
+        result = migrate_taxonomy_meta(db, store)
+
+        assert result["read"] == 1
+        assert result["written"] == 1
+        kinds = {c.args[0] for c in store.import_rows_batch.call_args_list}
+        assert kinds == {"meta"}
+
+    def test_migrate_taxonomy_without_assignments_excludes_assignments(self, tmp_path: Path) -> None:
+        """The guided-path entry point: topics + links + meta land; the
+        chash-bearing topic_assignments table is NEVER written."""
+        from nexus.db.t2.taxonomy_etl import migrate_taxonomy_without_assignments
+
+        db = self._seeded_db(tmp_path)
+        store = self._make_store()
+        result = migrate_taxonomy_without_assignments(db, store)
+
+        assert set(result) == {"topics", "links", "meta"}
+        assert result["topics"]["written"] == 1
+        assert result["links"]["written"] == 1
+        assert result["meta"]["written"] == 1
+        kinds = {c.args[0] for c in store.import_rows_batch.call_args_list}
+        assert "assignment" not in kinds, (
+            f"topic_assignments must NEVER be written by the guided-path "
+            f"non-chash entry point, got batch kinds {kinds}"
+        )
+        assert kinds == {"topic", "link", "meta"}
+
+    def test_migrate_taxonomy_rows_composition_matches_monolithic_result(self, tmp_path: Path) -> None:
+        """The thin composition must still migrate all four tables (byte-
+        identical behavior for existing callers)."""
+        db = self._seeded_db(tmp_path)
+        store = self._make_store()
+        result = migrate_taxonomy_rows(db, store)
+
+        assert set(result) == {"topics", "assignments", "links", "meta"}
+        for table in result.values():
+            assert table["read"] == 1
+            assert table["written"] == 1
+        kinds = {c.args[0] for c in store.import_rows_batch.call_args_list}
+        assert kinds == {"topic", "assignment", "link", "meta"}

@@ -2,12 +2,12 @@
 """nexus-jc63: T3 chunk re-identification (RDR-108 Phase 2).
 
 Re-upserts every T3 chunk under a content-derived natural ID
-(``chunk_text_hash[:32]``), reusing the chunk's existing embedding
+(the FULL ``chunk_text_hash``, RDR-180), reusing the chunk's existing embedding
 so the migration is free of Voyage calls. After re-upsert, the
 old chunk IDs are batch-deleted.
 
 Tests cover:
-  - basic happy path: chunks migrate from old IDs to ``chunk_text_hash[:32]``
+  - basic happy path: chunks migrate from old IDs to the full ``chunk_text_hash``
   - idempotent: re-running on a fully-migrated collection performs zero writes
   - resumable: a partial run can be re-invoked safely (un-deleted old IDs swept)
   - embedding reuse: byte-identical embeddings before and after migration
@@ -105,7 +105,7 @@ class TestReidentifyCollection:
     """Tests for the core re-identification function."""
 
     def test_migrates_to_chunk_text_hash_prefix(self, t3_db):
-        """Chunks are re-upserted under chunk_text_hash[:32] natural IDs."""
+        """Chunks are re-upserted under full chunk_text_hash natural IDs (RDR-180)."""
         from nexus.db.t3_reidentify import reidentify_collection
 
         coll = _unique_coll()
@@ -119,7 +119,7 @@ class TestReidentifyCollection:
 
         assert result.chunks_migrated == 1
         assert result.chunks_deleted == 1
-        assert "a" * 32 in _ids_in(t3_db, coll)
+        assert "a" * 64 in _ids_in(t3_db, coll)
         assert "legacy-id-1" not in _ids_in(t3_db, coll)
 
     def test_normalizes_metadata_to_canonical_schema(self, t3_db):
@@ -149,7 +149,7 @@ class TestReidentifyCollection:
         reidentify_collection(t3_db, coll, dry_run=False)
 
         col = t3_db._client.get_or_create_collection(coll)
-        result = col.get(ids=["b" * 32], include=["metadatas"])
+        result = col.get(ids=["b" * 64], include=["metadatas"])
         meta = result["metadatas"][0]
         # RDR-108 Phase 3 fields dropped (the original strip target).
         assert "doc_id" not in meta
@@ -200,7 +200,7 @@ class TestReidentifyCollection:
         reidentify_collection(t3_db, coll, dry_run=False)
 
         col = t3_db._client.get_or_create_collection(coll)
-        result = col.get(ids=["c" * 32], include=["metadatas"])
+        result = col.get(ids=["c" * 64], include=["metadatas"])
         meta = result["metadatas"][0]
         # The hash is preserved (the chunk migrated).
         assert meta["chunk_text_hash"] == "c" * 64
@@ -245,7 +245,7 @@ class TestReidentifyCollection:
         # First run migrates.
         reidentify_collection(t3_db, coll, dry_run=False)
         ids_after_first = _ids_in(t3_db, coll)
-        assert ids_after_first == {"c" * 32}
+        assert ids_after_first == {"c" * 64}
 
         # Second run is a no-op.
         result2 = reidentify_collection(t3_db, coll, dry_run=False)
@@ -276,7 +276,7 @@ class TestReidentifyCollection:
         # Simulate the partial state: new IDs already added, old IDs
         # still present (a crash before Phase 2b delete fires).
         _seed_chunk(
-            t3_db, collection=coll, chunk_id="d" * 32,
+            t3_db, collection=coll, chunk_id="d" * 64,
             content="hello", chunk_text_hash="d" * 64,
         )
 
@@ -284,8 +284,8 @@ class TestReidentifyCollection:
 
         # legacy-1 collected as old (its new_id "ddd...32" already exists,
         # idempotent overwrite). legacy-2 fully migrated.
-        assert "d" * 32 in _ids_in(t3_db, coll)
-        assert "e" * 32 in _ids_in(t3_db, coll)
+        assert "d" * 64 in _ids_in(t3_db, coll)
+        assert "e" * 64 in _ids_in(t3_db, coll)
         assert "legacy-1" not in _ids_in(t3_db, coll)
         assert "legacy-2" not in _ids_in(t3_db, coll)
         # Both old IDs collected and deleted.
@@ -309,7 +309,7 @@ class TestReidentifyCollection:
         reidentify_collection(t3_db, coll, dry_run=False)
 
         after = col.get(
-            ids=["f" * 32], include=["embeddings"]
+            ids=["f" * 64], include=["embeddings"]
         )["embeddings"][0]
 
         # numpy-array equality at the byte level. Voyage was never called;
@@ -376,7 +376,7 @@ class TestReidentifyCollection:
         result = reidentify_collection(t3_db, coll, dry_run=False)
 
         ids = _ids_in(t3_db, coll)
-        assert ids == {"1" * 32}
+        assert ids == {"1" * 64}
         # Both old cids deleted (collapse-path doesn't skip cleanup).
         assert result.chunks_deleted == 2
 
@@ -403,14 +403,14 @@ class TestReidentifyCollection:
         reidentify_collection(t3_db, coll_a, dry_run=False)
         reidentify_collection(t3_db, coll_b, dry_run=False)
 
-        assert "2" * 32 in _ids_in(t3_db, coll_a)
-        assert "2" * 32 in _ids_in(t3_db, coll_b)
+        assert "2" * 64 in _ids_in(t3_db, coll_a)
+        assert "2" * 64 in _ids_in(t3_db, coll_b)
 
         # Documents stay independent.
         col_a = t3_db._client.get_or_create_collection(coll_a)
         col_b = t3_db._client.get_or_create_collection(coll_b)
-        assert col_a.get(ids=["2" * 32])["documents"] == ["shared text"]
-        assert col_b.get(ids=["2" * 32])["documents"] == ["shared text"]
+        assert col_a.get(ids=["2" * 64])["documents"] == ["shared text"]
+        assert col_b.get(ids=["2" * 64])["documents"] == ["shared text"]
 
     def test_dry_run_does_not_write_or_delete(self, t3_db):
         """--dry-run does not write new IDs and does not delete old IDs."""
@@ -429,7 +429,7 @@ class TestReidentifyCollection:
         # But actually nothing was written or deleted
         ids = _ids_in(t3_db, coll)
         assert "legacy-1" in ids
-        assert "3" * 32 not in ids
+        assert "3" * 64 not in ids
 
     def test_absent_collection_returns_empty_result(self, t3_db):
         """An unknown T3 collection returns an empty result, not an error."""
@@ -462,7 +462,7 @@ class TestReidentifyCollection:
             result = reidentify_collection(t3_db, coll, dry_run=False)
 
         ids = _ids_in(t3_db, coll)
-        assert ids == {"d" * 32}
+        assert ids == {"d" * 64}
         # All three old cids deleted, even though only one upsert fired.
         assert result.chunks_deleted == 3
         assert result.chunks_migrated == 1
@@ -535,13 +535,13 @@ class TestReidentifyPagination:
         from nexus.db.t3_reidentify import reidentify_collection
 
         coll = _unique_coll()
-        # Hashes vary in the FIRST 32 chars so chunk_text_hash[:32] is
+        # Hashes vary in the FIRST 32 chars so the full chunk_text_hash is
         # distinct per chunk. Pattern: digit i repeated 32 times, then
         # zeros to pad to 64 chars.
         new_ids_expected = []
         for i in range(7):
             chash = (str(i) * 32) + ("0" * 32)
-            new_ids_expected.append(chash[:32])
+            new_ids_expected.append(chash)
             _seed_chunk(
                 t3_db, collection=coll, chunk_id=f"legacy-{i}",
                 content=f"content-{i}", chunk_text_hash=chash,
@@ -791,7 +791,7 @@ class TestReidentifyCLI:
         # default is dry-run — old ID still present, new ID absent
         ids = _ids_in(t3_db, coll)
         assert "legacy-1" in ids
-        assert "5" * 32 not in ids
+        assert "5" * 64 not in ids
 
     def test_cli_no_dry_run_migrates(self, t3_db, runner):
         """--no-dry-run actually migrates chunks."""
@@ -811,7 +811,7 @@ class TestReidentifyCLI:
         assert result.exit_code == 0, result.output
         ids = _ids_in(t3_db, coll)
         assert "legacy-1" not in ids
-        assert "6" * 32 in ids
+        assert "6" * 64 in ids
 
     def test_cli_all_collections_iterates(self, t3_db, runner):
         """--all-collections iterates every T3 collection.
@@ -850,8 +850,8 @@ class TestReidentifyCLI:
                 ["t3", "reidentify", "--all-collections", "--no-dry-run"],
             )
         assert result.exit_code == 0, result.output
-        assert "7" * 32 in _ids_in(t3_db, coll_a)
-        assert "8" * 32 in _ids_in(t3_db, coll_b)
+        assert "7" * 64 in _ids_in(t3_db, coll_a)
+        assert "8" * 64 in _ids_in(t3_db, coll_b)
 
     def test_cli_taxonomy_skipped_in_output(self, t3_db, runner):
         """taxonomy__* collections are reported as skipped in output."""
@@ -1103,7 +1103,7 @@ class TestReidentifyCLI:
 
         assert result.exit_code != 0  # error present
         # Valid collection migrated despite the bad one's error
-        assert "9" * 32 in _ids_in(t3_db, coll_valid)
+        assert "9" * 64 in _ids_in(t3_db, coll_valid)
         # Taxonomy reported skipped
         assert "skip" in result.output.lower()
         # Bad collection surfaced the structured error

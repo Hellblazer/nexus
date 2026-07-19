@@ -24,7 +24,7 @@ public interface ChunkTextFetcher {
      *
      * @param tenant     requesting tenant (stamps RLS GUC via TenantScope)
      * @param collection four-segment conformant collection name
-     * @param chash      chunk natural ID ({@code sha256(text)[:32]})
+     * @param chash      chunk natural ID (the full sha256 hexdigest, RDR-180)
      * @return stored chunk text, or {@code null} if the row is absent or
      *         {@code chunk_text} is NULL (reference-only retention, RDR-169 G1)
      */

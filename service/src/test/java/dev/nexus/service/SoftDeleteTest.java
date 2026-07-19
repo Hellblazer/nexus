@@ -518,7 +518,7 @@ class SoftDeleteTest {
 
             // The surviving chunk must be chash_shared
             ResultSet rsChunk = su.createStatement().executeQuery(
-                "SELECT chash FROM nexus.chunks_384 " +
+                "SELECT encode(chash, 'hex') AS chash FROM nexus.chunks_384 " +
                 "WHERE tenant_id = '" + TENANT_A + "' AND collection = '" + COLLECTION_A + "'");
             assertThat(rsChunk.next()).isTrue();
             assertThat(rsChunk.getString("chash"))
@@ -685,7 +685,7 @@ class SoftDeleteTest {
                 "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
             ResultSet rs = svc.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM " + VIEW_LIVE_CHUNKS +
-                " WHERE chash = '" + chashOrphan + "'");
+                " WHERE chash = decode('" + chashOrphan + "', 'hex')");
             rs.next();
             assertThat(rs.getInt(1))
                 .as("orphan chunk (only tombstoned doc X references it) must be ABSENT from live_chunks")
@@ -698,7 +698,7 @@ class SoftDeleteTest {
                 "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
             ResultSet rs = svc.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM " + VIEW_LIVE_CHUNKS +
-                " WHERE chash = '" + chashLive + "'");
+                " WHERE chash = decode('" + chashLive + "', 'hex')");
             rs.next();
             assertThat(rs.getInt(1))
                 .as("shared chunk (live doc Y references it) must be PRESENT in live_chunks")
@@ -834,7 +834,7 @@ class SoftDeleteTest {
         try (Connection su = pg.createConnection("")) {
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM nexus.chunks_384 " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND chash = '" + manifestlessChash + "'");
+                "WHERE tenant_id = '" + TENANT_A + "' AND chash = decode('" + manifestlessChash + "', 'hex')");
             rs.next();
             assertThat(rs.getInt(1))
                 .as("precondition: manifest-less chunk must exist before purge")
@@ -842,7 +842,7 @@ class SoftDeleteTest {
 
             ResultSet mf = su.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM nexus.catalog_document_chunks " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND chash = '" + manifestlessChash + "'");
+                "WHERE tenant_id = '" + TENANT_A + "' AND chash = decode('" + manifestlessChash + "', 'hex')");
             mf.next();
             assertThat(mf.getInt(1))
                 .as("precondition: no manifest rows for this chash")
@@ -861,7 +861,7 @@ class SoftDeleteTest {
         try (Connection su = pg.createConnection("")) {
             ResultSet rs = su.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM nexus.chunks_384 " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND chash = '" + manifestlessChash + "'");
+                "WHERE tenant_id = '" + TENANT_A + "' AND chash = decode('" + manifestlessChash + "', 'hex')");
             rs.next();
             assertThat(rs.getInt(1))
                 .as("manifest-less chunk must survive purge_trash " +
@@ -887,7 +887,7 @@ class SoftDeleteTest {
                 "SELECT set_config('nexus.tenant', '" + TENANT_A + "', false)");
             ResultSet rs = svc.createStatement().executeQuery(
                 "SELECT COUNT(*) FROM " + VIEW_LIVE_CHUNKS + " " +
-                "WHERE tenant_id = '" + TENANT_A + "' AND chash = '" + manifestlessChash + "'");
+                "WHERE tenant_id = '" + TENANT_A + "' AND chash = decode('" + manifestlessChash + "', 'hex')");
             rs.next();
             assertThat(rs.getInt(1))
                 .as("manifest-less chunk must appear in live_chunks " +
@@ -1111,7 +1111,7 @@ class SoftDeleteTest {
                                            int position, String chash) throws Exception {
         su.createStatement().execute(
             "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash) " +
-            "VALUES ('" + tenantId + "', '" + docId + "', " + position + ", '" + chash + "') " +
+            "VALUES ('" + tenantId + "', '" + docId + "', " + position + ", decode('" + chash + "', 'hex')) " +
             "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
     }
 
@@ -1142,7 +1142,7 @@ class SoftDeleteTest {
                                         String chash, String chunkText) throws Exception {
         su.createStatement().execute(
             "INSERT INTO nexus.chunks_384 (tenant_id, collection, chash, chunk_text, embedding) " +
-            "VALUES ('" + tenantId + "', '" + collection + "', '" + chash + "', " +
+            "VALUES ('" + tenantId + "', '" + collection + "', decode('" + chash + "', 'hex'), " +
             "'" + chunkText + "', " + vectorLiteral(384) + "::vector) " +
             "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
     }
@@ -1195,11 +1195,11 @@ class SoftDeleteTest {
     }
 
     /**
-     * Return a valid 32-character hex chash deterministically derived from {@code seed}.
-     * Matches the pattern from CollectionRegistryFkTest.validChash().
+     * Full 64-lowercase-hex chash deterministically derived from a seed (RDR-180:
+     * chunks_&lt;dim&gt;/manifest columns are bytea(32) now, CHECK octet_length=32 —
+     * the pre-flip 32-char TEXT scheme is retired).
      */
     private static String validChash(String seed) {
-        String hex = (seed.replaceAll("[^0-9a-f]", "a") + "0".repeat(32)).substring(0, 32);
-        return hex;
+        return dev.nexus.service.db.Chash.ofText(seed).toHex();
     }
 }

@@ -76,7 +76,7 @@ public final class VectorRepository {
      * the service embeds + validates quota + writes to Chroma.
      *
      * @param collection collection name (four-segment conformant)
-     * @param ids        chunk natural IDs (sha256(text)[:32])
+     * @param ids        chunk natural IDs (Chroma-era [:32] form — this legacy Chroma path predates RDR-180)
      * @param documents  chunk texts (to be embedded server-side)
      * @param metadatas  per-chunk metadata maps
      */
@@ -170,7 +170,7 @@ public final class VectorRepository {
     /**
      * Single-document MCP put: embed + upsert one chunk.
      *
-     * @return the chunk ID (sha256(content)[:32])
+     * @return the chunk ID (Chroma-era [:32] form — this legacy Chroma path predates RDR-180)
      */
     public String put(String collection, String docId, String content,
                       Map<String, Object> metadata) {

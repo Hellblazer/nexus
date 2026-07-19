@@ -1697,6 +1697,7 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     "nexus.catalog_links",
     "nexus.catalog_meta",
     "nexus.catalog_owners",
+    "nexus.chash_alias",
     "nexus.chash_index",
     "nexus.chash_remap",
     "nexus.claude_assisted_remediation_consents",
@@ -2311,7 +2312,8 @@ def _check_migration_state(
             fatal=True,
         )]
 
-    # Query 4 (nexus-pnwu0 / GH #1390): non-32-char chash rows across the
+    # Query 4 (nexus-pnwu0 / GH #1390): width-non-conformant chash rows
+    # (octet_length <> 32, era-safe — see chash_tables.py) across the
     # chunk tables. A box that migrated legacy short ids pre-guard (or had
     # its chash CHECK constraints dropped out-of-band — the GH #1390 shape)
     # runs FINE on its current engine, but catalog-013-3's VALIDATE
@@ -2332,7 +2334,9 @@ def _check_migration_state(
     # diagnostic role (pre-P2.1 install) or a probe failure degrades to a
     # WARN, never a false "clean".
     from nexus.db.chash_tables import (  # noqa: PLC0415 — deferred to avoid circular import
+        POISON_DETAIL_TOKEN,
         chash_conformance_statements,
+        debt_chash_conformance_statements,
         legacy_chash_conformance_statements,
     )
     from nexus.db.diag_connection import (  # noqa: PLC0415 — deferred to avoid circular import
@@ -2342,6 +2346,7 @@ def _check_migration_state(
     from nexus.remediation.sql_lint import DiagnosticSqlViolation  # noqa: PLC0415 — deferred to avoid circular import
 
     results: list[HealthResult] = []
+    view_era = False  # nexus-z5j0t: debt probe only runs where the view path proved live
     diag_creds = diag_credentials if diag_credentials is not None \
         else resolve_diag_credentials(creds_path)
     if diag_creds is None:
@@ -2370,6 +2375,7 @@ def _check_migration_state(
                     chash_conformance_statements(), diag_creds,
                     psql_bin=psql_bin, psql_runner=diag_runner,
                 )
+                view_era = True
             except DiagnosticSqlViolation:
                 # A LINT failure is a product defect, never an engine-
                 # generation skew — re-raise to the outer handler (review
@@ -2414,11 +2420,12 @@ def _check_migration_state(
             label="Chunk chash conformance",
             ok=False,
             detail=(
-                f"{nonconforming} chunk row(s) have a non-32-char chash "
-                "(legacy pre-RDR-108 ids, or chash CHECK constraints were "
-                "dropped out-of-band). The current engine serves fine, but "
-                "an engine UPGRADE will crash-loop on catalog-013-3's "
-                "VALIDATE CONSTRAINT (GH #1390 / nexus-pnwu0)."
+                f"{nonconforming} chunk row(s) have a {POISON_DETAIL_TOKEN} "
+                "(octet_length <> 32 — legacy pre-RDR-108 ids, or chash "
+                "CHECK constraints were dropped out-of-band). The current "
+                "engine serves fine, but an engine UPGRADE will crash-loop "
+                "on catalog-013-3's VALIDATE CONSTRAINT (GH #1390 / "
+                "nexus-pnwu0)."
             ),
             fix_suggestions=[
                 "Do NOT upgrade the engine binary until remediated "
@@ -2433,6 +2440,57 @@ def _check_migration_state(
             ],
             warn=True,
         ))
+
+    # nexus-z5j0t: legacy-debt observability over the CHECK-less chash
+    # bearers (topic_assignments.doc_id, frecency/relevance_log.chunk_id).
+    # Non-gating BY DESIGN: no width CHECK exists on these tables, so a
+    # non-32 value cannot crash-loop a VALIDATE — it silently degrades topic
+    # membership / frecency ranking instead (converged by the remap cascade /
+    # RDR-180 Item6 ETL). Only runs when the view path proved live; a stale
+    # (pre-z5j0t 5-leg) view yields NULL sums (empty psql lines) → unknown,
+    # logged at debug, never a WARN and never a false clean-or-poisoned.
+    if view_era:
+        try:
+            debt_counts = run_diagnostic_sql(
+                debt_chash_conformance_statements(), diag_creds,
+                psql_bin=psql_bin, psql_runner=diag_runner,
+            )
+            debt = sum(int(c) for c in debt_counts)
+        except (RuntimeError, DiagnosticSqlViolation, ValueError) as exc:
+            _log.debug("chash_debt_probe_unavailable", error=str(exc)[:200])
+            debt = -1
+        if debt == -1:
+            # critic-180-foundation finding 1: unknown must SURFACE, never
+            # read as clean by omission. The common cause is a deployed view
+            # predating the debt legs — the chash-rekey rung's re-provision
+            # closes that window at the next nx upgrade.
+            results.append(HealthResult(
+                label="Chash legacy debt",
+                ok=False,
+                detail=(
+                    "legacy-debt conformance UNKNOWN — the debt probe could "
+                    "not run (deployed diag view predates the debt legs, or "
+                    "probe failure). Do NOT read this as clean; `nx upgrade` "
+                    "re-provisions the view."
+                ),
+                warn=True,
+            ))
+        if debt > 0:
+            results.append(HealthResult(
+                label="Chash legacy debt",
+                ok=False,
+                detail=(
+                    f"{debt} hex-shaped chash reference(s) across "
+                    "topic_assignments/frecency/relevance_log miss every "
+                    "chunk-table join (dangling content references). "
+                    "NON-GATING (no CHECK constraint exists on these tables); "
+                    "alias-mapped rows converge via the RDR-180 rekey "
+                    "cascade, and residual danglers are relic references "
+                    "(title-keyed and other non-hex identities are excluded "
+                    "— they are not chash debt)."
+                ),
+                warn=True,
+            ))
 
     results.append(HealthResult(
         label="Schema migrations",

@@ -273,7 +273,7 @@ class ChunksRlsBehavioralTest {
             tenantScope.withTenant(TENANT_A, ctx -> {
                 ctx.execute(
                     "INSERT INTO " + table + " (tenant_id, collection, chash, chunk_text, embedding) " +
-                    "VALUES (?, ?, ?, ?, ?::vector)",
+                    "VALUES (?, ?, decode(?, 'hex'), ?, ?::vector)",
                     TENANT_B, col, padChash("chash-wc-cross-" + dim), "cross-tenant inject", vec);
                 return null;
             })
@@ -315,7 +315,7 @@ class ChunksRlsBehavioralTest {
         assertThatThrownBy(() ->
             tenantScope.withTenant(TENANT_A, ctx -> {
                 ctx.execute(
-                    "UPDATE " + table + " SET tenant_id = ? WHERE chash = ? AND collection = ?",
+                    "UPDATE " + table + " SET tenant_id = ? WHERE chash = decode(?, 'hex') AND collection = ?",
                     TENANT_B, padChash("chash-wcu-own-" + dim), col);
                 return null;
             })
@@ -428,7 +428,7 @@ class ChunksRlsBehavioralTest {
 
         // tenant-b attempts to delete tenant-a's row: RLS USING hides it, 0 affected.
         int deleted = tenantScope.withTenant(TENANT_B, ctx ->
-            ctx.execute("DELETE FROM " + table + " WHERE chash = ? AND collection = ?",
+            ctx.execute("DELETE FROM " + table + " WHERE chash = decode(?, 'hex') AND collection = ?",
                         padChash("chash-del-own-" + dim), col));
         assertThat(deleted)
             .as("cross-tenant DELETE must affect exactly 0 rows (RLS makes the row invisible)")
@@ -441,7 +441,7 @@ class ChunksRlsBehavioralTest {
 
         // The owner can delete its own row: exactly 1 affected.
         int ownDelete = tenantScope.withTenant(TENANT_A, ctx ->
-            ctx.execute("DELETE FROM " + table + " WHERE chash = ? AND collection = ?",
+            ctx.execute("DELETE FROM " + table + " WHERE chash = decode(?, 'hex') AND collection = ?",
                         padChash("chash-del-own-" + dim), col));
         assertThat(ownDelete)
             .as("owner DELETE must affect exactly 1 row")
@@ -456,14 +456,12 @@ class ChunksRlsBehavioralTest {
     // ---------------------------------------------------------------------------
 
     /**
-     * RDR-156 P0.2: pad a test chash to exactly 32 characters to satisfy
-     * the {@code chunks_<dim>_chash_len_check} constraint.
-     * Strips non-alphanumeric characters and pads with '0'.
+     * Full 64-lowercase-hex chash deterministically derived from a seed (RDR-180:
+     * the chunks_&lt;dim&gt; chash column is bytea(32) now, CHECK octet_length=32 —
+     * the pre-flip pad-to-32-char TEXT scheme is retired).
      */
     private static String padChash(String raw) {
-        String stripped = raw.replaceAll("[^a-z0-9A-Z]", "");
-        if (stripped.length() >= 32) return stripped.substring(0, 32);
-        return stripped + "0".repeat(32 - stripped.length());
+        return dev.nexus.service.db.Chash.ofText(raw).toHex();
     }
 
     /**
@@ -495,7 +493,7 @@ class ChunksRlsBehavioralTest {
             ctx.execute(
                 "INSERT INTO " + table +
                 " (tenant_id, collection, chash, chunk_text, embedding)" +
-                " VALUES (?, ?, ?, ?, ?::vector)" +
+                " VALUES (?, ?, decode(?, 'hex'), ?, ?::vector)" +
                 " ON CONFLICT (tenant_id, collection, chash) DO NOTHING",
                 tenant, collection, paddedChash, chunkText, vec);
             return null;

@@ -468,7 +468,7 @@ def test_map_batch_posts_to_engine_strictly_before_target_write():
     )
 
     assert not result.ok, "the target write crashed"
-    expected = hashlib.sha256(b"alpha").hexdigest()[:32]
+    expected = hashlib.sha256(b"alpha").hexdigest()
     assert len(posts) == 1, "the map batch reached the engine BEFORE the crash"
     assert posts[0]["entries"][0] == {
         "old_id": "legacy-a",

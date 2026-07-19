@@ -96,6 +96,10 @@ class RemapHandlerTest {
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus.chash_remap TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT SELECT ON nexus.chunks_384, nexus.chunks_768, nexus.chunks_1024 TO " + SVC_ROLE);
+            // RDR-180: remap_membership() now chains through chash_alias to resolve
+            // legacy-era facts against a rekeyed store (rdr180-002 comment).
+            su.createStatement().execute(
+                "GRANT SELECT ON nexus.chash_alias TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT EXECUTE ON FUNCTION nexus.remap_membership(text, text) TO " + SVC_ROLE);
             su.createStatement().execute(
@@ -300,17 +304,25 @@ class RemapHandlerTest {
         }
     }
 
-    // ── Test 6: chash normalization — 64 truncates, malformed rejected ───────
+    // ── Test 6: chash validation — full 64-hex stored as-is, legacy 32-hex
+    //            rejected, malformed rejected ────────────────────────────────
+    //
+    // POLARITY NOTE: pre-RDR-180 a 64-char chunk_text_hash form normalized to
+    // its [:32] prefix (RDR-108 D1) and bare 32-hex was the canonical accept.
+    // RDR-180 inverts that: new_chash is validated through Chash.requireCanonical
+    // (nexus-jxizy.7), so only the FULL 64-lowercase-hex digest is a valid NEW
+    // fact — never truncated — and a bare 32-hex value is a legacy reference
+    // that must be resolved through nexus.chash_alias, not minted fresh.
 
     @Test
-    void recordBatch_64CharChash_normalizedTo32() throws Exception {
+    void recordBatch_full64CharChash_storedAsIs() throws Exception {
         String src = "legacy__h6__src";
         String tgt = "knowledge__h6__tgt";
-        String full64 = chash("h6full") + chash("h6full2");  // 64 hex chars
+        String full = chash("h6full");
         var resp = post("/v1/remap/record_batch", TOKEN, TENANT, """
             {"source_collection":"%s","entries":[
               {"old_id":"legacy-1","new_chash":"%s","target_collection":"%s","provenance":"test"}
-            ]}""".formatted(src, full64, tgt));
+            ]}""".formatted(src, full, tgt));
         assertThat(resp.statusCode()).isEqualTo(200);
 
         try (Connection su = pg.createConnection("")) {
@@ -319,9 +331,22 @@ class RemapHandlerTest {
                 "AND source_collection = '" + src + "'");
             assertThat(rs.next()).isTrue();
             assertThat(rs.getString("new_chash"))
-                .as("64-char chunk_text_hash form normalizes to [:32] (RDR-108 D1)")
-                .isEqualTo(full64.substring(0, 32));
+                .as("RDR-180: the full 64-hex digest is the canonical chash — no [:32] truncation")
+                .isEqualTo(full);
         }
+    }
+
+    @Test
+    void recordBatch_legacy32CharChash_rejected400() throws Exception {
+        // THE INVERSION: pre-flip a bare 32-hex value was the canonical accept;
+        // post-flip it is a legacy reference — never truncatable/paddable/mintable
+        // as a new fact.
+        var resp = post("/v1/remap/record_batch", TOKEN, TENANT, """
+            {"source_collection":"legacy__h6b__src","entries":[
+              {"old_id":"legacy-1","new_chash":"%s","target_collection":"t","provenance":"test"}
+            ]}""".formatted(chash("h6full").substring(0, 32)));
+        assertThat(resp.statusCode()).isEqualTo(400);
+        assertThat(resp.body()).contains("new_chash");
     }
 
     @Test
@@ -521,24 +546,17 @@ class RemapHandlerTest {
             for (int i = 1; i <= count; i++) {
                 su.createStatement().execute(
                     "INSERT INTO nexus.chunks_1024 (tenant_id, collection, chash, chunk_text, embedding) " +
-                    "VALUES ('" + TENANT + "', '" + collection + "', '" + chash(seedPrefix + i) + "', " +
+                    "VALUES ('" + TENANT + "', '" + collection + "', decode('" + chash(seedPrefix + i) + "', 'hex'), " +
                     "'text', ('[1" + ",0".repeat(1023) + "]')::vector) " +
                     "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
             }
         }
     }
 
-    /** Deterministic 32-hex chash from a seed string (sha256(seed)[:32]). */
+    /** Deterministic 64-hex chash from a seed string — the FULL sha256
+     *  digest (RDR-180: the pre-flip [:16-byte] truncation is retired). */
     private static String chash(String seed) {
-        try {
-            var md = java.security.MessageDigest.getInstance("SHA-256");
-            byte[] digest = md.digest(seed.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder(32);
-            for (int i = 0; i < 16; i++) sb.append(String.format("%02x", digest[i]));
-            return sb.toString();
-        } catch (java.security.NoSuchAlgorithmException e) {
-            throw new IllegalStateException(e);
-        }
+        return dev.nexus.service.db.Chash.ofText(seed).toHex();
     }
 
     private HttpResponse<String> post(String path, String token, String tenant, String body) throws Exception {

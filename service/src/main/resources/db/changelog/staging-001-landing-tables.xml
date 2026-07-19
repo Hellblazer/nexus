@@ -1,0 +1,270 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  RDR-180 LAND-THEN-TRANSFORM (nexus-jxizy.10.1): the width-free landing zone.
+
+  Design of record: T2 nexus_rdr/180-land-transform-design (+ -reconciliation).
+  The guided migration lands the legacy source VERBATIM here (any id width,
+  TEXT columns mirroring the source shapes), then StagingPromoteOps re-ids
+  transactionally in-DB and promotes into the strict nexus schema. Staging is
+  where width-freedom lives; the nexus write boundary stays ONE strict tier.
+
+  Tables are Liquibase-managed PERMANENT objects; ROWS are transient
+  (TRUNCATE-after-verify via /v1/staging/clear). No ANN index on the staged
+  vector column — staging is never searched. NO DML in this changeset
+  (FORCE-RLS no-op trap); all data movement is engine-side under
+  TenantScope.withTenant (nexus_svc).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.20.xsd">
+
+    <changeSet id="staging-1-schema" author="nexus-jxizy.10.1">
+        <comment>The landing schema — width-free by design (RDR-180 land-then-transform)</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE SCHEMA IF NOT EXISTS staging;
+        </sql>
+        <rollback>DROP SCHEMA IF EXISTS staging CASCADE</rollback>
+    </changeSet>
+
+    <changeSet id="staging-2-chunks" author="nexus-jxizy.10.1">
+        <comment>ONE polymorphic staged-chunk table: legacy_ref carries ANY id width
+            verbatim; collection is the HONEST target name (land-time classification,
+            reconciliation H1); dim is a VALUE (promote routes by it and asserts it
+            against the name-implied dim); embedding is UNTYPED vector (mixed dims
+            legal, no ANN index — never searched)</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE staging.chunks (
+    tenant_id  TEXT NOT NULL DEFAULT '',
+    collection TEXT NOT NULL,
+    dim        INTEGER NOT NULL,
+    legacy_ref TEXT NOT NULL,
+    chunk_text TEXT NOT NULL DEFAULT '',
+    embedding  vector,
+    model      TEXT NOT NULL DEFAULT '',
+    chunk_meta JSONB,
+    landed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT staging_chunks_pk PRIMARY KEY (tenant_id, collection, legacy_ref)
+);
+ALTER TABLE staging.chunks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE staging.chunks FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON staging.chunks
+    USING (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>DROP TABLE IF EXISTS staging.chunks</rollback>
+    </changeSet>
+
+    <changeSet id="staging-3-pointer-stores" author="nexus-jxizy.10.1">
+        <comment>Width-free TEXT siblings mirroring the SOURCE shapes verbatim — the
+            remap_cascade CASCADE_STORES inventory (document_chunks manifest,
+            chash_index, topic_assignments, frecency, relevance_log,
+            document_aspects, aspect_extraction_queue). Timestamps land as TEXT
+            (verbatim); promote/finalize parse as needed. Every table: FORCE RLS +
+            tenant policy identical to the nexus tables</comment>
+        <sql splitStatements="true" stripComments="false">
+CREATE TABLE staging.document_chunks (
+    tenant_id   TEXT NOT NULL DEFAULT '',
+    doc_id      TEXT NOT NULL,
+    position    INTEGER NOT NULL,
+    chash       TEXT NOT NULL,
+    chunk_index INTEGER,
+    line_start  INTEGER,
+    line_end    INTEGER,
+    char_start  INTEGER,
+    char_end    INTEGER,
+    CONSTRAINT staging_document_chunks_pk PRIMARY KEY (tenant_id, doc_id, position)
+);
+CREATE TABLE staging.chash_index (
+    tenant_id           TEXT NOT NULL DEFAULT '',
+    chash               TEXT NOT NULL,
+    physical_collection TEXT NOT NULL,
+    created_at          TEXT NOT NULL DEFAULT '',
+    CONSTRAINT staging_chash_index_pk PRIMARY KEY (tenant_id, chash, physical_collection)
+);
+CREATE TABLE staging.topic_assignments (
+    tenant_id TEXT NOT NULL DEFAULT '',
+    doc_id    TEXT NOT NULL,
+    topic_id  INTEGER NOT NULL,
+    CONSTRAINT staging_topic_assignments_pk PRIMARY KEY (tenant_id, doc_id, topic_id)
+);
+CREATE TABLE staging.frecency (
+    tenant_id      TEXT NOT NULL DEFAULT '',
+    chunk_id       TEXT NOT NULL,
+    embedded_at    TEXT NOT NULL DEFAULT '',
+    ttl_days       INTEGER NOT NULL DEFAULT 0,
+    frecency_score DOUBLE PRECISION NOT NULL DEFAULT 0,
+    miss_count     INTEGER NOT NULL DEFAULT 0,
+    last_hit_at    TEXT NOT NULL DEFAULT '',
+    CONSTRAINT staging_frecency_pk PRIMARY KEY (tenant_id, chunk_id)
+);
+CREATE TABLE staging.relevance_log (
+    tenant_id  TEXT NOT NULL DEFAULT '',
+    id         BIGINT NOT NULL,
+    query      TEXT NOT NULL DEFAULT '',
+    chunk_id   TEXT NOT NULL,
+    collection TEXT,
+    action     TEXT NOT NULL DEFAULT '',
+    session_id TEXT,
+    ts         TEXT NOT NULL DEFAULT '',
+    CONSTRAINT staging_relevance_log_pk PRIMARY KEY (tenant_id, id)
+);
+CREATE TABLE staging.document_aspects (
+    tenant_id              TEXT NOT NULL DEFAULT '',
+    doc_id                 TEXT NOT NULL DEFAULT '',
+    collection             TEXT NOT NULL DEFAULT '',
+    source_path            TEXT NOT NULL DEFAULT '',
+    problem_formulation    TEXT,
+    proposed_method        TEXT,
+    experimental_datasets  TEXT,
+    experimental_baselines TEXT,
+    experimental_results   TEXT,
+    extras                 TEXT,
+    confidence             DOUBLE PRECISION,
+    extracted_at           TEXT NOT NULL DEFAULT '',
+    model_version          TEXT NOT NULL DEFAULT '',
+    extractor_name         TEXT NOT NULL DEFAULT '',
+    source_uri             TEXT,
+    CONSTRAINT staging_document_aspects_pk PRIMARY KEY (tenant_id, collection, source_path)
+);
+CREATE TABLE staging.aspect_extraction_queue (
+    tenant_id       TEXT NOT NULL DEFAULT '',
+    collection      TEXT NOT NULL DEFAULT '',
+    source_path     TEXT NOT NULL DEFAULT '',
+    doc_id          TEXT NOT NULL DEFAULT '',
+    content_hash    TEXT NOT NULL DEFAULT '',
+    content         TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'pending',
+    retry_count     INTEGER NOT NULL DEFAULT 0,
+    enqueued_at     TEXT NOT NULL DEFAULT '',
+    last_attempt_at TEXT,
+    last_error      TEXT,
+    CONSTRAINT staging_aspect_queue_pk PRIMARY KEY (tenant_id, collection, source_path)
+);
+ALTER TABLE staging.document_chunks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE staging.document_chunks FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON staging.document_chunks
+    USING (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+ALTER TABLE staging.chash_index ENABLE ROW LEVEL SECURITY;
+ALTER TABLE staging.chash_index FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON staging.chash_index
+    USING (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+ALTER TABLE staging.topic_assignments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE staging.topic_assignments FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON staging.topic_assignments
+    USING (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+ALTER TABLE staging.frecency ENABLE ROW LEVEL SECURITY;
+ALTER TABLE staging.frecency FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON staging.frecency
+    USING (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+ALTER TABLE staging.relevance_log ENABLE ROW LEVEL SECURITY;
+ALTER TABLE staging.relevance_log FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON staging.relevance_log
+    USING (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+ALTER TABLE staging.document_aspects ENABLE ROW LEVEL SECURITY;
+ALTER TABLE staging.document_aspects FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON staging.document_aspects
+    USING (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+ALTER TABLE staging.aspect_extraction_queue ENABLE ROW LEVEL SECURITY;
+ALTER TABLE staging.aspect_extraction_queue FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON staging.aspect_extraction_queue
+    USING (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </sql>
+        <rollback>
+DROP TABLE IF EXISTS staging.aspect_extraction_queue;
+DROP TABLE IF EXISTS staging.document_aspects;
+DROP TABLE IF EXISTS staging.relevance_log;
+DROP TABLE IF EXISTS staging.frecency;
+DROP TABLE IF EXISTS staging.topic_assignments;
+DROP TABLE IF EXISTS staging.chash_index;
+DROP TABLE IF EXISTS staging.document_chunks;
+        </rollback>
+    </changeSet>
+
+    <changeSet id="staging-5-topic-identity" author="nexus-jxizy.10.5">
+        <comment>critic-p1-staging CRITICAL: legacy SQLite topic ids are
+            BIGSERIAL-local and can never FK into nexus.topics(id) — topic
+            identity across stores is (label, collection), the SAME key the
+            existing topic ETL resolves by. The landing carries both so
+            finalize can resolve the TARGET id; the verbatim legacy id stays
+            for audit only.</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE staging.topic_assignments
+    ADD COLUMN topic_label      TEXT NOT NULL DEFAULT '',
+    ADD COLUMN topic_collection TEXT NOT NULL DEFAULT '';
+        </sql>
+        <rollback>
+ALTER TABLE staging.topic_assignments
+    DROP COLUMN IF EXISTS topic_collection,
+    DROP COLUMN IF EXISTS topic_label;
+        </rollback>
+    </changeSet>
+
+    <changeSet id="staging-4-svc-grants" author="nexus-jxizy.10.1" runAlways="true">
+        <comment>nexus_svc drives land/promote/finalize/clear under withTenant —
+            needs full DML + TRUNCATE on staging (runAlways: self-healing like
+            grants-nexus-svc-1). OWNERSHIP-GUARDED per-relation loop (the
+            nexus-46yy3 / grants-nexus-svc idiom, caught by
+            ChangelogBulkGrantConformanceTest + the Catalog013 replay: a
+            bulk GRANT ... ON ALL TABLES hard-errors when a replay runs as a
+            non-owner of a schema a prior run's owner created — skip with a
+            NOTICE instead; the owning run's grants already stand).</comment>
+        <sql splitStatements="false" stripComments="false">
+DO $$
+DECLARE
+    rel RECORD;
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_namespace n
+        WHERE n.nspname = 'staging'
+          AND pg_get_userbyid(n.nspowner) = current_user
+    ) THEN
+        RAISE NOTICE 'staging svc grants skipped: schema staging not owned by % (the owning migration run granted)', current_user;
+        RETURN;
+    END IF;
+    EXECUTE 'GRANT USAGE ON SCHEMA staging TO nexus_svc';
+    FOR rel IN
+        SELECT c.relname
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'staging'
+          AND c.relkind IN ('r', 'p')
+          AND pg_get_userbyid(c.relowner) = current_user
+    LOOP
+        EXECUTE format(
+            'GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON staging.%I TO nexus_svc',
+            rel.relname);
+    END LOOP;
+END $$;
+        </sql>
+        <rollback>
+DO $$
+DECLARE
+    rel RECORD;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'staging') THEN
+        RETURN;
+    END IF;
+    FOR rel IN
+        SELECT c.relname
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'staging' AND c.relkind IN ('r', 'p')
+          AND pg_get_userbyid(c.relowner) = current_user
+    LOOP
+        EXECUTE format('REVOKE ALL ON staging.%I FROM nexus_svc', rel.relname);
+    END LOOP;
+    REVOKE USAGE ON SCHEMA staging FROM nexus_svc;
+END $$;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

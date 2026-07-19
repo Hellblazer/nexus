@@ -494,25 +494,25 @@ class SchemaMigratorIntegrationTest {
                     .as("migration must not crash-loop when a chash-length CHECK is missing on an aged box")
                     .doesNotThrowAnyException();
 
-                // Phase E: the four constraints that DO exist must end up
-                // VALIDATED; the missing one must simply stay absent (never
-                // silently re-added, never fatal).
+                // Phase E (RDR-180 era): the migration chain now ALSO carries
+                // rdr180-2 (drops every len_check, the divergence included —
+                // DROP IF EXISTS tolerates the aged box) and rdr180-11 (the
+                // octet successors, NOT VALID at boot by design). End-state:
+                // uniform across all five tables regardless of the divergence.
                 try (Connection conn = agedDs.getConnection()) {
-                    assertThat(constraintValidated(conn, "chunks_768_chash_len_check"))
-                        .as("chunks_768_chash_len_check must be validated despite chunks_384's divergence")
-                        .isTrue();
-                    assertThat(constraintValidated(conn, "chunks_1024_chash_len_check"))
-                        .as("chunks_1024_chash_len_check must be validated despite chunks_384's divergence")
-                        .isTrue();
-                    assertThat(constraintValidated(conn, "catalog_document_chunks_chash_len_check"))
-                        .as("catalog_document_chunks_chash_len_check must be validated despite chunks_384's divergence")
-                        .isTrue();
-                    assertThat(constraintValidated(conn, "chash_index_chash_len_check"))
-                        .as("chash_index_chash_len_check must be validated despite chunks_384's divergence")
-                        .isTrue();
-                    assertThat(constraintExists(conn, "chunks_384_chash_len_check"))
-                        .as("the dropped chunks_384_chash_len_check must remain absent, not silently re-added")
-                        .isFalse();
+                    for (String t : new String[] {
+                        "chunks_384", "chunks_768", "chunks_1024",
+                        "catalog_document_chunks", "chash_index"}) {
+                        assertThat(constraintExists(conn, t + "_chash_len_check"))
+                            .as("%s_chash_len_check gone post-rdr180-2 (aged divergence tolerated)", t)
+                            .isFalse();
+                        assertThat(constraintExists(conn, t + "_chash_octet_check"))
+                            .as("%s_chash_octet_check present post-rdr180-11", t)
+                            .isTrue();
+                        assertThat(constraintValidated(conn, t + "_chash_octet_check"))
+                            .as("%s octet CHECK stays NOT VALID at boot (client rung validates)", t)
+                            .isFalse();
+                    }
 
                     // Phase F (nexus-boz39 round-2 gap): prove catalog-013-2 was
                     // MARK_RAN, not soft-failed-and-still-pending -- the property
@@ -624,24 +624,24 @@ class SchemaMigratorIntegrationTest {
                     .as("migration must not crash-loop when chash_index_chash_len_check is missing on an aged box")
                     .doesNotThrowAnyException();
 
-                // Phase E: the four constraints that DO exist must end up VALIDATED;
-                // the missing one must simply stay absent (never silently re-added).
+                // Phase E (RDR-180 era): the chain now also carries rdr180-2
+                // (drops every len_check — the divergence included, via DROP
+                // IF EXISTS) and rdr180-11 (octet successors, NOT VALID at
+                // boot). Uniform end-state regardless of the divergence.
                 try (Connection conn = agedDs.getConnection()) {
-                    assertThat(constraintValidated(conn, "chunks_384_chash_len_check"))
-                        .as("chunks_384_chash_len_check must be validated despite chash_index's divergence")
-                        .isTrue();
-                    assertThat(constraintValidated(conn, "chunks_768_chash_len_check"))
-                        .as("chunks_768_chash_len_check must be validated despite chash_index's divergence")
-                        .isTrue();
-                    assertThat(constraintValidated(conn, "chunks_1024_chash_len_check"))
-                        .as("chunks_1024_chash_len_check must be validated despite chash_index's divergence")
-                        .isTrue();
-                    assertThat(constraintValidated(conn, "catalog_document_chunks_chash_len_check"))
-                        .as("catalog_document_chunks_chash_len_check must be validated despite chash_index's divergence")
-                        .isTrue();
-                    assertThat(constraintExists(conn, "chash_index_chash_len_check"))
-                        .as("the dropped chash_index_chash_len_check must remain absent, not silently re-added")
-                        .isFalse();
+                    for (String t : new String[] {
+                        "chunks_384", "chunks_768", "chunks_1024",
+                        "catalog_document_chunks", "chash_index"}) {
+                        assertThat(constraintExists(conn, t + "_chash_len_check"))
+                            .as("%s_chash_len_check gone post-rdr180-2 (divergence tolerated)", t)
+                            .isFalse();
+                        assertThat(constraintExists(conn, t + "_chash_octet_check"))
+                            .as("%s_chash_octet_check present post-rdr180-11", t)
+                            .isTrue();
+                        assertThat(constraintValidated(conn, t + "_chash_octet_check"))
+                            .as("%s octet CHECK stays NOT VALID at boot (client rung validates)", t)
+                            .isFalse();
+                    }
 
                     // Phase F (nexus-boz39 round-2 gap): same MARK_RAN proof as test 5.
                     assertThat(changesetExecType(conn, "catalog-013-2", "nexus-e0hd2",
@@ -659,23 +659,26 @@ class SchemaMigratorIntegrationTest {
     // ── Test 7: happy path — fresh box validates all five chash constraints ──
 
     /**
-     * Verification gate 3 (nexus-4m6i0.1): the defensive re-validate in
-     * {@code catalog-013-3} must not change happy-path behavior. On a fresh box
-     * where all five constraints exist (the {@link #adminDs} fixture, already
-     * migrated end-to-end by {@code @Order(1)}), every constraint must end up
-     * {@code convalidated = true}.
+     * Verification gate 3 (nexus-4m6i0.1 lineage, RDR-180 era): the happy
+     * path on a fresh box. The TEXT-era len_check lifecycle (added, then
+     * VALIDATEd by catalog-013) is retired by rdr180-2; the octet
+     * successors exist NOT VALID (validated only by the client rung's
+     * admin connection, post-rekey — never at boot). A defensive
+     * re-migrate stays idempotent.
      */
     @Test
     @Order(7)
-    void freshBox_allFiveChashConstraints_endUpValidated() throws Exception {
+    void freshBox_allFiveChashConstraints_octetEra_endState() throws Exception {
         SchemaMigrator.migrate(adminDs); // defensive re-migrate; idempotent
 
         try (Connection conn = adminDs.getConnection()) {
-            assertThat(constraintValidated(conn, "chunks_384_chash_len_check")).isTrue();
-            assertThat(constraintValidated(conn, "chunks_768_chash_len_check")).isTrue();
-            assertThat(constraintValidated(conn, "chunks_1024_chash_len_check")).isTrue();
-            assertThat(constraintValidated(conn, "catalog_document_chunks_chash_len_check")).isTrue();
-            assertThat(constraintValidated(conn, "chash_index_chash_len_check")).isTrue();
+            for (String t : new String[] {
+                "chunks_384", "chunks_768", "chunks_1024",
+                "catalog_document_chunks", "chash_index"}) {
+                assertThat(constraintExists(conn, t + "_chash_len_check")).isFalse();
+                assertThat(constraintExists(conn, t + "_chash_octet_check")).isTrue();
+                assertThat(constraintValidated(conn, t + "_chash_octet_check")).isFalse();
+            }
         }
     }
 
@@ -1056,6 +1059,61 @@ class SchemaMigratorIntegrationTest {
         } finally {
             agedPg.stop();
         }
+    }
+
+    // ── Test 11: RDR-180 rewrite leaves planner statistics FRESH (BUG-0148) ──
+
+    /**
+     * BUG-0148 (conexus-xpg7, 2026-07-19): the rdr180-3/-7 {@code ALTER TABLE ...
+     * ALTER COLUMN chash TYPE bytea} conversions REWRITE their tables, which resets
+     * planner statistics — and a rewritten table looks "fresh" to autovacuum, so
+     * autoanalyze may never re-trigger on a read-mostly store. The cloud boot
+     * applied the rewrite and never ANALYZEd: the stale-stats planner flipped
+     * sparse-text-gate hybrid queries off the GIN-bitmap plan onto the
+     * budget-bounded HNSW plan, which shed rows to ZERO while every health check,
+     * /version probe, and the aggregate cloud gate stayed green. Remediation was a
+     * manual {@code ANALYZE} (conexus, 2026-07-19T18:25Z).
+     *
+     * <p>This pins the product fix (rdr180-16): a boot that applies the RDR-180
+     * rewrite changesets must leave the rewritten tables ANALYZEd, so upgrading
+     * local installs — where nobody is standing by to run ANALYZE — never re-live
+     * the incident.
+     *
+     * <p>Cumulative stats reporting is asynchronous (shared memory since PG 15),
+     * so poll briefly instead of asserting a single read.
+     */
+    @Test
+    @Order(11)
+    void rdr180Rewrite_leavesPlannerStatsFresh() throws Exception {
+        SchemaMigrator.migrate(adminDs);  // defensive; idempotent
+
+        Set<String> expected = Set.of(
+            "chunks_384", "chunks_768", "chunks_1024",
+            "catalog_document_chunks", "chash_index");
+
+        Set<String> analyzed = new HashSet<>();
+        long deadline = System.nanoTime() + java.time.Duration.ofSeconds(10).toNanos();
+        while (System.nanoTime() < deadline) {
+            analyzed.clear();
+            try (Connection conn = adminDs.getConnection()) {
+                ResultSet rs = conn.createStatement().executeQuery(
+                    "SELECT relname FROM pg_stat_user_tables "
+                    + "WHERE schemaname = 'nexus' AND last_analyze IS NOT NULL");
+                while (rs.next()) {
+                    analyzed.add(rs.getString("relname"));
+                }
+            }
+            if (analyzed.containsAll(expected)) {
+                break;
+            }
+            Thread.sleep(200);
+        }
+
+        assertThat(analyzed)
+            .as("the RDR-180-rewritten tables must have fresh planner statistics after "
+                + "migration (last_analyze stamped) — a rewrite silently resets stats and "
+                + "degrades sparse-gate hybrid queries to zero rows (BUG-0148)")
+            .containsAll(expected);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

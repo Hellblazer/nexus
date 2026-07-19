@@ -74,7 +74,7 @@ class ChunkRef:
     """One T3 chunk awaiting a catalog Document."""
 
     cid: str  #: Chroma natural ID
-    chash: str  #: chunk_text_hash[:32]; falls back to cid[:32]
+    chash: str  #: the FULL chunk_text_hash (RDR-180); falls back to cid (itself the full chash)
     chunk_index: int = 0
 
 
@@ -142,7 +142,7 @@ def gather_titled_chunks(
                 meta = {}
             t = str(meta.get("title") or "").strip()
             t = re.sub(r":[A-Za-z0-9\-]+$", "", t).strip()
-            chash = str(meta.get("chunk_text_hash") or cid[:32])
+            chash = str(meta.get("chunk_text_hash") or cid)  # RDR-180: cid IS the full chash
             chunk_index = int(meta.get("chunk_index", 0) or 0)
             by_title[t].append(ChunkRef(
                 cid=cid, chash=chash, chunk_index=chunk_index,
@@ -669,7 +669,7 @@ def link_by_content_hash(
             if not isinstance(meta, dict):
                 meta = {}
             content_hash = str(meta.get("content_hash") or "")
-            chash = str(meta.get("chunk_text_hash") or cid[:32])
+            chash = str(meta.get("chunk_text_hash") or cid)  # RDR-180: cid IS the full chash
             chunk_index = int(meta.get("chunk_index", 0) or 0)
             if content_hash and content_hash in by_head:
                 by_hash[content_hash].append(ChunkRef(

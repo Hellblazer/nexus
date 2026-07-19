@@ -203,7 +203,7 @@ def restore_rereferenced(
     rows = _paginated_get(qcol, include=["metadatas"])
     back_ids = [
         cid for cid, m in zip(rows.get("ids") or [], rows.get("metadatas") or [])
-        if ((m or {}).get("chunk_text_hash") or cid)[:32] in referenced
+        if ((m or {}).get("chunk_text_hash") or cid) in referenced  # RDR-180: full-width match
         and (m or {}).get("origin_collection", collection_name) == collection_name
     ]
     if not back_ids:

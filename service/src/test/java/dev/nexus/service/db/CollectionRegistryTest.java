@@ -65,8 +65,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 class CollectionRegistryTest {
 
     /** Pad to the catalog-013 CHECK(length(chash)=32) contract. */
-    private static String ch(String seed) {
-        return (seed + "0".repeat(32)).substring(0, 32);
+    private static dev.nexus.service.db.Chash ch(String seed) {
+        return dev.nexus.service.db.Chash.ofText(seed);
     }
 
 

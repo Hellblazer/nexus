@@ -2,9 +2,10 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """Indexer fixtures with realistic-duplicate chunk content (nexus-xdny).
 
-After nexus-kmb6 (RDR-108 D1) retargeted the indexer write path to use
-``chunk_text_hash[:32]`` as the Chroma natural id, identical chunk text
-within a batch -> identical id -> ``DuplicateIDError``. nexus-1ljk
+After nexus-kmb6 (RDR-108 D1, inverted by RDR-180) retargeted the
+indexer write path to use ``chunk_text_hash`` (the full sha256 digest)
+as the Chroma natural id, identical chunk text within a batch ->
+identical id -> ``DuplicateIDError``. nexus-1ljk
 patched ``T3Database._write_batch`` to dedupe; this file locks the
 end-to-end contract by exercising the indexer with fixtures real
 corpora generate naturally:
@@ -120,8 +121,8 @@ def _do_index(
 
 
 def _chash32(text: str) -> str:
-    """Mirror RDR-108 D1: Chroma natural id is sha256(text)[:32]."""
-    return _hl.sha256(text.encode()).hexdigest()[:32]
+    """Mirror RDR-180: Chroma natural id is the full sha256(text) hexdigest."""
+    return _hl.sha256(text.encode()).hexdigest()
 
 
 # ── (1) code__: two .py files with identical content (copied module) ───────
@@ -132,7 +133,7 @@ def _chash32(text: str) -> str:
 # another and kept it byte-identical. Tree-sitter / CodeSplitter emit a
 # single AST chunk per file (small file, below CodeSplitter's internal
 # split threshold), so both files share the exact same chunk text and
-# therefore the same ``chunk_text_hash[:32]``.
+# therefore the same ``chunk_text_hash`` (RDR-180: the full digest).
 _SHARED_MODULE = (
     '"""Shared utility module duplicated across tools."""\n'
     "\n"
@@ -161,7 +162,7 @@ def duplicate_code_repo(tmp_path: Path) -> Path:
     # the catalog (which dedupes by ``head_hash + title``) registers
     # both as distinct Documents. Title is the basename, so the two
     # filenames produce two Documents; chunk text is content-only and
-    # therefore byte-identical -> shared ``chunk_text_hash[:32]``.
+    # therefore byte-identical -> shared ``chunk_text_hash`` (full digest).
     (repo / "utils_alpha.py").write_text(_SHARED_MODULE, encoding="utf-8")
     (repo / "utils_beta.py").write_text(_SHARED_MODULE, encoding="utf-8")
     _git(repo, "init", "-b", "main")
@@ -240,7 +241,7 @@ def test_code_indexer_collapses_duplicate_module_across_files(
     for path_key in ("utils_alpha.py", "utils_beta.py"):
         rows = cat.get_manifest(by_path[path_key])
         assert rows, f"expected manifest rows for {path_key}"
-        manifest_chashes[path_key] = {r.chash[:32] for r in rows}
+        manifest_chashes[path_key] = {r.chash for r in rows}
     assert manifest_chashes["utils_alpha.py"] == manifest_chashes["utils_beta.py"], (
         "byte-identical files must produce identical manifest chash sets; "
         f"alpha={manifest_chashes['utils_alpha.py']!r} "
@@ -355,9 +356,9 @@ def test_prose_indexer_collapses_shared_paragraph_across_files(
     for filename in ("GUIDE_A.md", "GUIDE_B.md"):
         rows = cat.get_manifest(by_path[filename])
         assert rows, f"expected manifest rows for {filename}"
-        assert any(r.chash[:32] == shared_chroma_id for r in rows), (
+        assert any(r.chash == shared_chroma_id for r in rows), (
             f"shared paragraph chash missing from manifest of {filename}; "
-            f"manifest chashes: {[r.chash[:32] for r in rows]!r}"
+            f"manifest chashes: {[r.chash for r in rows]!r}"
         )
 
 
@@ -371,7 +372,7 @@ def repeated_paragraph_repo(tmp_path: Path) -> Path:
     spec / user guide that legitimately restates a notice in different
     sections. The semantic markdown chunker emits the repeated block
     as two distinct chunks with byte-identical text -> identical
-    ``chunk_text_hash[:32]`` -> ``DuplicateIDError`` pre-nexus-1ljk.
+    ``chunk_text_hash`` (full digest) -> ``DuplicateIDError`` pre-nexus-1ljk.
     """
     repo = tmp_path / "repeated-md-repo"
     repo.mkdir()
@@ -413,7 +414,7 @@ def test_prose_indexer_handles_within_file_duplicate_paragraph(
     """A single .md file whose chunker emits two byte-identical chunks
     must index without ``DuplicateIDError`` (this is the within-batch
     case that nexus-1ljk fixed). T3 collapses to one row at the shared
-    chash[:32]; the manifest preserves both positions pointing at it.
+    chash (full digest); the manifest preserves both positions pointing at it.
     """
     registry = RepoRegistry(tmp_path / "repos.json")
     registry.add(repeated_paragraph_repo)
@@ -458,7 +459,7 @@ def test_prose_indexer_handles_within_file_duplicate_paragraph(
         f"expected exactly one catalog Document; got {documents!r}"
     )
     manifest = cat.get_manifest(documents[0][0])
-    notice_positions = [r for r in manifest if r.chash[:32] == notice_chroma_id]
+    notice_positions = [r for r in manifest if r.chash == notice_chroma_id]
     assert len(notice_positions) == 2, (
         "manifest must record both positions of the duplicate paragraph; "
         f"got positions={[r.position for r in notice_positions]!r}"
@@ -582,13 +583,13 @@ def test_pdf_indexer_handles_duplicate_chunks_within_document(
         f"{result!r}"
     )
 
-    # T3 must collapse to one row at the shared chash[:32].
+    # T3 must collapse to one row at the shared chash (RDR-180: the full digest).
     expected_chash = _hl.sha256(duplicate_text.encode()).hexdigest()
-    expected_id = expected_chash[:32]
+    expected_id = expected_chash
     docs_col = local_t3.get_collection(pinned_collection)
     res = docs_col.get(include=["metadatas"])
     assert res["ids"] == [expected_id], (
-        "expected exactly one T3 row at the shared chash[:32]; "
+        "expected exactly one T3 row at the shared chash; "
         f"got ids={res['ids']!r}"
     )
 
@@ -606,7 +607,7 @@ def test_pdf_indexer_handles_duplicate_chunks_within_document(
         "manifest must preserve both positions even though T3 collapsed; "
         f"got {[(r.position, r.chash[:8]) for r in manifest]!r}"
     )
-    assert {r.chash[:32] for r in manifest} == {expected_id}, (
+    assert {r.chash for r in manifest} == {expected_id}, (
         "both manifest rows must point at the shared chash; "
-        f"got {[r.chash[:32] for r in manifest]!r}"
+        f"got {[r.chash for r in manifest]!r}"
     )

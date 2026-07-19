@@ -7,39 +7,85 @@ import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.Statement;
+import java.util.HexFormat;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * nexus-1wjmq — replay of the 2026-07-08 v0.1.33 cloud-deploy incident
- * (conexus-ml1z): catalog-013-2's VALIDATE failed in production because
- * catalog-013-0's normalization DML silently no-op'd — the Liquibase role
- * (nexus_admin) is the table OWNER but has NO BYPASSRLS, and chash-001 put
- * FORCE ROW LEVEL SECURITY on chash_index, so the DELETE/UPDATE saw zero
- * rows while VALIDATE (DDL, never row-filtered) saw the un-normalized
- * legacy 64-char rows. Every other Liquibase test runs as the container
- * superuser (implicit BYPASSRLS), which is exactly why the suite was green
- * while production failed.
+ * nexus-1wjmq lineage — the FORCE-RLS Liquibase-DML blindness class, in the
+ * RDR-180 era.
  *
- * <p>This test reconstructs the production wall precisely: full changelog
- * applied, then the cloud's pre-fix chash_index state (legacy 64-char rows
- * present, the length CHECK re-added NOT VALID as 013-1 left it, changesets
- * catalog-013-1b/013-2 pending), then Liquibase re-run as a
- * production-shaped role — NOSUPERUSER, NOBYPASSRLS, owner of the nexus
- * tables. The fix changeset (013-1b: FORCE toggled off around the
- * idempotent re-normalization) must let 013-2's VALIDATE pass.
+ * <p>HISTORY: the 2026-07-08 v0.1.33 cloud incident (conexus-ml1z) was
+ * catalog-013-0's normalization DML silently no-op'ing — the Liquibase role
+ * (nexus_admin) is the table OWNER but has NO BYPASSRLS, and FORCE ROW LEVEL
+ * SECURITY hid every row from its DELETE/UPDATE while 013-2's VALIDATE (DDL,
+ * never row-filtered) saw them all and crash-looped. The original form of
+ * this test replayed that incident against the TEXT-era
+ * {@code chash_index_chash_len_check} lifecycle.
+ *
+ * <p>RDR-180 (rdr180-001-bytea-chash.xml) RETIRES that incident class BY
+ * DESIGN rather than by fix: the cohort changesets contain NO DML at all —
+ * ALTER TABLE type conversions are DDL (RLS-exempt, rewrite every row), and
+ * the real row rekey runs as nexus_svc under withTenant via
+ * {@code /v1/remap/rekey}. The old length-CHECK lifecycle this test replayed
+ * no longer exists (dropped by rdr180-2; the octet CHECKs are validated by
+ * the client rung, never at boot). What this test now guards:
+ *
+ * <ol>
+ *   <li>The no-DML design invariant itself — a static scan proving the
+ *       rdr180 changelogs contain no data-modifying statements (the exact
+ *       hazard class the incident taught; a future edit adding DML to these
+ *       files would silently reintroduce it).</li>
+ *   <li>The RLS-blindness ground truth that motivated the design: FORCE RLS
+ *       hides every row from the non-BYPASSRLS owner (superuser sees N,
+ *       owner sees 0).</li>
+ *   <li>The changelog replays cleanly as the production-shaped role WITH
+ *       not-yet-rekeyed legacy rows present (16-byte decoded pre-RDR-180
+ *       values — the mid-migration state every upgraded store passes
+ *       through), and the replay leaves those rows byte-untouched (no
+ *       hidden DML, no boot-time VALIDATE of the NOT VALID octet CHECKs).</li>
+ * </ol>
  */
 class Catalog013RlsReplayTest {
 
     private static final String ADMIN_ROLE = "nexus_admin_replay";
     private static final String ADMIN_PASS = "nexus_admin_replay_pw";
 
+    /** Mutating statement scan — mirrors the client-side diagnostic lint's
+     *  keyword class, scoped to real SQL (XML comments stripped). */
+    private static final Pattern DML_RE = Pattern.compile(
+        "\\b(INSERT\\s+INTO|UPDATE\\s+nexus\\.|DELETE\\s+FROM|MERGE\\s+INTO|TRUNCATE)\\b",
+        Pattern.CASE_INSENSITIVE);
+
     @Test
-    void changelogReplaysCleanly_asNonBypassRlsOwner_withLegacy64Rows() throws Exception {
+    void rdr180Changelogs_containNoDml_theIncidentClassIsRetiredByDesign() throws Exception {
+        for (String name : new String[] {
+            "rdr180-001-bytea-chash.xml", "rdr180-002-hex-boundary-functions.xml"}) {
+            Path p = Path.of("src/main/resources/db/changelog/" + name);
+            String xml = Files.readString(p);
+            // Strip XML comments and the function bodies' SELECTs are fine —
+            // only data-modifying keywords are hazardous under FORCE RLS.
+            String noComments = xml.replaceAll("(?s)<!--.*?-->", "");
+            Matcher m = DML_RE.matcher(noComments);
+            assertThat(m.find())
+                .as("%s must contain NO DML (the nexus-1wjmq FORCE-RLS "
+                    + "blindness class: Liquibase runs as the non-BYPASSRLS "
+                    + "owner and silently sees zero rows). Found: %s",
+                    name, m.find(0) ? m.group() : "")
+                .isFalse();
+        }
+    }
+
+    @Test
+    void changelogReplaysCleanly_asNonBypassRlsOwner_withLegacyByteaRows() throws Exception {
         try (var pg = PgContainerHelper.start();
              Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
@@ -51,27 +97,18 @@ class Catalog013RlsReplayTest {
                 + "    CREATE ROLE nexus_svc LOGIN PASSWORD 'nexus_svc_pass'; "
                 + "  END IF; "
                 + "END $$");
-
-            // Production-shaped migration role — created up front (mirrors
-            // the peer tests' ordering; the DBA bootstraps roles before any
-            // migration runs in production too).
             exec(su, "CREATE ROLE " + ADMIN_ROLE + " LOGIN PASSWORD '"
                 + ADMIN_PASS + "' NOSUPERUSER NOBYPASSRLS");
 
-            // 1. Full changelog as superuser — the state every tenant reached
-            //    through normal deploys (constraint present + validated).
+            // 1. Full changelog as superuser — post-RDR-180 schema (bytea).
             liquibaseUpdate(pg.getJdbcUrl(),
                 PgContainerHelper.USERNAME, PgContainerHelper.PASSWORD);
 
-            // 2. Reconstruct the cloud pre-fix state on chash_index:
-            //    legacy 64-char rows (the SQLite-era verbatim ETL copies) and
-            //    the CHECK exactly as 013-1 left it: present, NOT VALID.
-            exec(su, "ALTER TABLE nexus.chash_index "
-                + "DROP CONSTRAINT chash_index_chash_len_check");
-            // chash_index carries an FK to catalog_collections
-            // (tenant_id, physical_collection) — register the parents first.
+            // 2. Seed the REAL mid-migration legacy state: 16-byte decoded
+            //    pre-RDR-180 values (what the type conversion leaves before
+            //    the per-tenant rekey runs). FK parents first.
             for (String[] tc : new String[][] {
-                {"t1", "code__x"}, {"t1", "code__y"}, {"t2", "code__z"}}) {
+                {"t1", "code__x"}, {"t2", "code__z"}}) {
                 try (var ps = su.prepareStatement(
                     "INSERT INTO nexus.catalog_collections (tenant_id, name) "
                     + "VALUES (?, ?) ON CONFLICT DO NOTHING")) {
@@ -80,29 +117,22 @@ class Catalog013RlsReplayTest {
                     ps.executeUpdate();
                 }
             }
-            String p32 = "a".repeat(32);
-            // dedupe class 1: a 64-char row whose [:32] collides with an
-            // existing 32-char row on the natural key
-            seedRow(su, "t1", p32, "code__x");
-            seedRow(su, "t1", p32 + "b".repeat(32), "code__x");
-            // dedupe class 2: two 64-char rows sharing a [:32] prefix
-            String p32c = "c".repeat(32);
-            seedRow(su, "t1", p32c + "d".repeat(32), "code__y");
-            seedRow(su, "t1", p32c + "e".repeat(32), "code__y");
-            // plain legacy row, second tenant (cross-tenant coverage: RLS
-            // would hide BOTH tenants from a GUC-less non-bypass role)
-            String p32f = "f".repeat(32);
-            seedRow(su, "t2", p32f + "0".repeat(32), "code__z");
+            // The octet CHECK is NOT VALID — which ENFORCES NEW WRITES by
+            // design (only pre-existing rows escape validation). The real
+            // mid-migration state arises from the type conversion of rows
+            // that predate rdr180; reconstruct it the same way the pre-flip
+            // incident tests did — drop, seed, re-add NOT VALID.
             exec(su, "ALTER TABLE nexus.chash_index "
-                + "ADD CONSTRAINT chash_index_chash_len_check "
-                + "CHECK (length(chash) = 32) NOT VALID");
-            // Make 013-1b + 013-2 pending, as they are on the failed tenant
-            // (013-2 failed = never recorded; 013-1b is new in this release).
-            exec(su, "DELETE FROM public.databasechangelog "
-                + "WHERE id IN ('catalog-013-1b', 'catalog-013-2')");
+                + "DROP CONSTRAINT chash_index_chash_octet_check");
+            byte[] legacyA = HexFormat.of().parseHex("a".repeat(32));  // 16 bytes
+            byte[] legacyC = HexFormat.of().parseHex("c".repeat(32));
+            seedRow(su, "t1", legacyA, "code__x");
+            seedRow(su, "t2", legacyC, "code__z");
+            exec(su, "ALTER TABLE nexus.chash_index "
+                + "ADD CONSTRAINT chash_index_chash_octet_check "
+                + "CHECK (octet_length(chash) = 32) NOT VALID");
 
-            // 3. Make the role production-shaped: OWNER of the nexus/t1
-            //    tables (as nexus_admin is in prod), changelog-table access.
+            // 3. Production-shaped ownership for the replay role.
             exec(su, "GRANT USAGE, CREATE ON SCHEMA nexus, t1, public TO " + ADMIN_ROLE);
             exec(su,
                 "DO $$ DECLARE r record; BEGIN "
@@ -123,46 +153,35 @@ class Catalog013RlsReplayTest {
             String url = pg.getJdbcUrl();
             try (Connection admin = DriverManager.getConnection(url, ADMIN_ROLE, ADMIN_PASS)) {
                 admin.setAutoCommit(true);
-
-                // 4. Lock in conexus Finding 2 — the incident's diagnostic
-                //    trap: with FORCE RLS and no tenant GUC, the non-bypass
-                //    OWNER sees ZERO rows on a table that superuser sees 5 in.
+                // 4. The RLS-blindness ground truth that motivated the
+                //    no-DML design: FORCE RLS + no tenant GUC hides every
+                //    row from the non-BYPASSRLS owner.
                 assertThat(count(su, "SELECT count(*) FROM nexus.chash_index"))
-                    .as("superuser ground truth").isEqualTo(5);
+                    .as("superuser ground truth").isEqualTo(2);
                 assertThat(count(admin, "SELECT count(*) FROM nexus.chash_index"))
                     .as("FORCE RLS hides every row from the non-BYPASSRLS owner "
-                        + "— the reason 013-0 no-op'd AND the documented remedy "
-                        + "query returned a false all-clear")
+                        + "— any DML in a changeset would silently no-op here")
                     .isEqualTo(0);
-
             }
 
-            // 5. THE REPLAY: run Liquibase as the production-shaped role.
-            //    Pre-fix (no 013-1b) this reproduces the incident verbatim:
-            //    VALIDATE fails on the rows the role cannot see. With
-            //    013-1b the run must complete.
+            // 5. THE REPLAY: re-run Liquibase as the production-shaped role
+            //    (runAlways changesets re-execute). Must complete: the
+            //    octet CHECKs are NOT VALID (no boot-time VALIDATE exists to
+            //    crash-loop on the legacy rows), and no changeset carries
+            //    DML that RLS could silently blind.
             liquibaseUpdate(url, ADMIN_ROLE, ADMIN_PASS);
 
-            // 6. Post-conditions (superuser view = ground truth):
-            //    every row normalized to 32, dedupe classes collapsed,
-            //    constraint VALIDATED.
+            // 6. The legacy rows are byte-untouched (rekey belongs to
+            //    /v1/remap/rekey under withTenant, never to Liquibase).
             assertThat(count(su,
-                "SELECT count(*) FROM nexus.chash_index WHERE length(chash) <> 32"))
-                .isEqualTo(0);
-            // class 1 collapsed onto the pre-existing 32-char row; class 2
-            // kept one of two; plain row truncated: 32a/code__x, 32c/code__y,
-            // 32f/code__z = 3 rows.
-            assertThat(count(su, "SELECT count(*) FROM nexus.chash_index")).isEqualTo(3);
+                "SELECT count(*) FROM nexus.chash_index WHERE octet_length(chash) = 16"))
+                .as("mid-migration legacy rows survive the replay unmodified")
+                .isEqualTo(2);
+            // The octet CHECK exists and remains NOT VALID (validated only
+            // by the client rung's admin connection, post-rekey).
             assertThat(count(su,
                 "SELECT count(*) FROM pg_constraint "
-                + "WHERE conname = 'chash_index_chash_len_check' AND convalidated"))
-                .as("013-2's VALIDATE must have run and stuck")
-                .isEqualTo(1);
-            // The FORCE toggle must be restored by 013-1b itself.
-            assertThat(count(su,
-                "SELECT count(*) FROM pg_class "
-                + "WHERE oid = 'nexus.chash_index'::regclass AND relforcerowsecurity"))
-                .as("FORCE ROW LEVEL SECURITY restored after the normalization")
+                + "WHERE conname = 'chash_index_chash_octet_check' AND NOT convalidated"))
                 .isEqualTo(1);
         }
     }
@@ -187,13 +206,13 @@ class Catalog013RlsReplayTest {
         }
     }
 
-    private static void seedRow(Connection c, String tenant, String chash,
+    private static void seedRow(Connection c, String tenant, byte[] chash,
                                 String collection) throws Exception {
         try (var ps = c.prepareStatement(
             "INSERT INTO nexus.chash_index (tenant_id, chash, physical_collection, created_at) "
             + "VALUES (?, ?, ?, now())")) {
             ps.setString(1, tenant);
-            ps.setString(2, chash);
+            ps.setBytes(2, chash);
             ps.setString(3, collection);
             ps.executeUpdate();
         }

@@ -128,7 +128,7 @@ class VectorHandlerTokenUsageTest {
         // Seed one chunk so /search returns a non-empty result (header is set regardless
         // of result count, but seeding gives a deterministic happy-path).
         pgRepo.upsertChunks(TENANT, COL,
-            List.of("tokc1000000000000000000000000000"),
+            List.of(dev.nexus.service.db.Chash.ofText("tokc1").toHex()),
             List.of("hello world"),
             List.of(Map.of()));
 
@@ -237,7 +237,7 @@ class VectorHandlerTokenUsageTest {
         zeroEmbedder.register("hello world");
         var zeroRepo = new PgVectorRepository(new TenantScope(svcDs), zeroEmbedder, zeroEmbedder);
         zeroRepo.upsertChunks(TENANT, COL,
-            List.of("tokz1000000000000000000000000000"),
+            List.of(dev.nexus.service.db.Chash.ofText("tokz1").toHex()),
             List.of("hello world"),
             List.of(Map.of()));
 

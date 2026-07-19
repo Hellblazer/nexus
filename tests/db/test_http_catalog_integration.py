@@ -491,12 +491,13 @@ def cat_b(service):
 
 
 def _ch(seed: str) -> str:
-    """Canonical 32-lowercase-hex chash for fixtures. The mzvwa.9 manifest
-    boundary guards require EXACTLY 32 lowercase hex chars (Chash.fromHex) —
-    the old underscore literals now 400 at /v1/catalog/manifest/write."""
+    """Canonical chash for fixtures: the FULL 64-lowercase-hex sha256
+    (RDR-180). The manifest boundary guards (mzvwa.9, Chash.fromHex) now
+    require the full digest — 32-hex half-digests and the old underscore
+    literals both 400 at /v1/catalog/manifest/write."""
     import hashlib
 
-    return hashlib.sha256(seed.encode()).hexdigest()[:32]
+    return hashlib.sha256(seed.encode()).hexdigest()
 
 
 class TestCatalogServiceHealth:
@@ -783,35 +784,32 @@ class TestManifest:
     def test_docs_for_chashes_resolves_full_64char_chunk_text_hash(
         self, cat, doc_with_manifest,
     ) -> None:
-        """nexus-h8rf6.12: LIVE, real-Java-service proof that a genuine
-        64-char ``chunk_text_hash`` (what code_indexer.py / doc_indexer.py /
-        prose_indexer.py actually write into chunk metadata via
-        ``hashlib.sha256(...).hexdigest()``) resolves against a manifest
-        row stored with the 32-char RDR-108 D1 natural id.
+        """nexus-h8rf6.12, updated for RDR-180: LIVE, real-Java-service proof
+        that a genuine 64-char ``chunk_text_hash`` (what code_indexer.py /
+        doc_indexer.py / prose_indexer.py write via
+        ``hashlib.sha256(...).hexdigest()``) resolves against the manifest.
 
-        Root cause this guards: ``CatalogRepository.docsForChashes``
-        (service/.../CatalogRepository.java) does an EXACT-match
-        ``chash IN (?)`` against the stored 32-char column — no
-        server-side substr/normalization. Pre-fix, ``HttpCatalogClient
-        .docs_for_chashes`` forwarded the caller's raw (64-char) input
-        straight into that exact-match query, so every real
-        ``build_staleness_cache`` call against this real service returned
-        zero matches despite the manifest genuinely containing the chunk
-        — reproducing the shakeout's "code: 0 docs, docs: 0 docs (0.0s)"
-        symptom against a real Postgres-backed catalog, not a fixture.
-        The existing ``test_docs_for_chashes_reverse_lookup`` above could
-        not catch this: it queries with the SAME 32-char form the fixture
-        wrote, so client-side truncation is a no-op there.
+        History this pins: pre-RDR-108-D1-retirement the manifest stored a
+        32-char natural id and ``HttpCatalogClient.docs_for_chashes`` had to
+        truncate 64-char callers' input to match (the "code: 0 docs" shakeout
+        symptom when it didn't). RDR-180 killed the truncation era wholesale:
+        the stored chash IS the full digest and matching is EXACT full-width
+        on both client and server. The second assert makes the era's death
+        explicit — a 32-char prefix query must resolve NOTHING (any substr
+        compensation creeping back in is a regression toward the collision
+        class RDR-180 eliminated).
         """
         t, _ = doc_with_manifest
         stored_chash = _ch("chunk_hash_000000000000000000000")
-        assert len(stored_chash) == 32
-        # A full 64-char form whose 32-char prefix matches the stored
-        # chash exactly, mirroring real chunk_text_hash -> chash[:32].
-        full_form = stored_chash + "0" * 32
-        assert len(full_form) == 64
-        result = cat.docs_for_chashes([full_form])
-        assert result == {full_form: [str(t)]}
+        assert len(stored_chash) == 64
+        # RDR-180: EXACT full-width matching. The stored manifest chash IS
+        # the full chunk_text_hash; querying with it resolves directly.
+        result = cat.docs_for_chashes([stored_chash])
+        assert result == {stored_chash: [str(t)]}
+        # The truncation era is DEAD: a 32-char prefix query must NOT
+        # match (no client- or server-side substr compensation remains).
+        prefix_form = stored_chash[:32]
+        assert cat.docs_for_chashes([prefix_form]) == {}
 
     def test_purge_manifest(self, cat) -> None:
         t = cat.register(
@@ -1652,6 +1650,7 @@ class TestServiceModeIndexMVV:
             f"manifest empty for {code_doc.tumbler} — catalog_document_chunks not "
             "populated (Chunks == 0): the manifest hook did not reach the service catalog."
         )
-        assert all(len(row.chash) == 32 for row in manifest), (
-            "manifest chash must be the 32-char natural ID (catalog_document_chunks_chash_len_check)"
+        assert all(len(row.chash) == 64 for row in manifest), (
+            "manifest chash must be the FULL 64-hex natural ID (RDR-180 "
+            "catalog_document_chunks_chash_octet_check)"
         )

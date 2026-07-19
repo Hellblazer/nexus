@@ -34,9 +34,11 @@ def _chunk(cid: str, doc: str = "text") -> dict[str, Any]:
     return {"id": cid, "document": doc, "metadata": {"k": "v"}}
 
 
-HEX32_A = "a" * 32
-HEX32_B = "b" * 32
-HEX32_C = "c" * 32
+# RDR-180: the conformant chash width is the full 64-hex sha256 digest
+# (names kept as HEX32_* to minimize churn across this file's call sites).
+HEX32_A = "a" * 64
+HEX32_B = "b" * 64
+HEX32_C = "c" * 64
 
 
 @dataclass

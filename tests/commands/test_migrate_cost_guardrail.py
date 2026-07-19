@@ -398,8 +398,12 @@ class TestRunMigrationCollisionGuard:
             driver, "open_read_legs", lambda local_path=None: (object(), object())
         )
         monkeypatch.setattr(driver, "classify_collections", lambda **_k: detection)
+        # nexus-jxizy.10.7: the guided driver now runs the land-then-transform
+        # sequencer; the wrap-behavior under test (FileNotFoundError -> loud
+        # ClickException) fires in the reopen-for-landing step before this
+        # fake would matter.
         monkeypatch.setattr(
-            driver, "run_sequenced_migration", lambda _det, **_k: sequence
+            driver, "run_land_then_transform_migration", lambda *_a, **_k: sequence
         )
         monkeypatch.setattr(driver, "voyage_key_available", lambda: True)
 

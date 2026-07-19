@@ -228,6 +228,21 @@
          always derived, never stored). Standalone table; before grants. -->
     <include file="db/changelog/ladder-001-baseline.xml"/>
 
+    <!-- RDR-180 (bead nexus-jxizy.2): chash becomes the full 32-byte SHA-256
+         stored as BYTEA — eight column conversions, octet_length CHECKs
+         (NOT VALID until the per-tenant rekey), the permanent chash_alias
+         resolver, and the hex-at-the-boundary function re-creations. Runs
+         AFTER every chash-bearing baseline (vectors, chash, catalog,
+         taxonomy, telemetry, remap); before grants. This engine generation
+         deploys only inside the RDR-180 freeze window. -->
+    <include file="db/changelog/rdr180-001-bytea-chash.xml"/>
+    <include file="db/changelog/rdr180-002-hex-boundary-functions.xml"/>
+
+    <!-- RDR-180 LAND-THEN-TRANSFORM (nexus-jxizy.10): the width-free landing
+         zone the guided migration bulk-loads VERBATIM before the in-DB
+         promote. Own runAlways grants (staging-4) mirror grants-nexus-svc. -->
+    <include file="db/changelog/staging-001-landing-tables.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

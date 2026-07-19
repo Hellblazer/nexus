@@ -2,8 +2,8 @@
 """RDR-185 P2.2 (nexus-n7u38.15): wire re-id + persisted old→new map.
 
 The incident fix (GH #1408 / Gap-3): legacy-id chunks get their CORRECT
-content address computed ON THE WIRE (sha256(chunk_text)[:32] from the
-text being carried — no re-embed, no source files, Chroma source
+content address computed ON THE WIRE (the full sha256(chunk_text) digest,
+RDR-180, from the text being carried — no re-embed, no source files, Chroma source
 byte-untouched), with every old→new pair persisted to the chash_remap
 store BEFORE the target row lands (gate r2 commit ordering, by
 construction: the transform persists its map batch, and the .14 seam
@@ -34,8 +34,11 @@ from nexus.migration.wire_reid import (
 )
 
 
+# RDR-180: the wire-reid natural id is the FULL sha256 digest (no
+# truncation) — the helper name predates the flip but is kept to
+# minimize churn across this file's many call sites.
 def _sha32(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _legacy_chunk(cid: str, text: str, *, with_hash: bool = True) -> dict[str, Any]:
@@ -61,10 +64,10 @@ def test_derives_from_carried_text() -> None:
 
 def test_text_derivation_agrees_with_metadata_hash() -> None:
     """When chunk_text_hash metadata is present and consistent, both routes
-    agree — and both equal t3_reidentify's meta[chunk_text_hash][:32]
+    agree — and both equal t3_reidentify's meta[chunk_text_hash] full-digest
     derivation (the REUSE-OR-SUPERSEDE equivalence pin)."""
     chunk = _legacy_chunk("legacy-16-chars!", "same text")
-    assert derive_wire_chash(chunk) == chunk["metadata"]["chunk_text_hash"][:32]
+    assert derive_wire_chash(chunk) == chunk["metadata"]["chunk_text_hash"]
 
 
 def test_metadata_hash_used_when_document_absent() -> None:
@@ -72,13 +75,13 @@ def test_metadata_hash_used_when_document_absent() -> None:
     only identity source."""
     full = hashlib.sha256(b"recorded text").hexdigest()
     chunk = {"id": "legacy", "document": None, "metadata": {"chunk_text_hash": full}}
-    assert derive_wire_chash(chunk) == full[:32]
+    assert derive_wire_chash(chunk) == full
 
 
 def test_mismatched_metadata_hash_prefers_carried_text() -> None:
-    """The target keys on sha256(stored_text)[:32]; the wire carries what
-    will be stored, so the TEXT derivation is self-consistent. A stale
-    metadata hash is tolerated with the text winning (warn-only)."""
+    """The target keys on the full sha256(stored_text); the wire carries
+    what will be stored, so the TEXT derivation is self-consistent. A
+    stale metadata hash is tolerated with the text winning (warn-only)."""
     chunk = _legacy_chunk("legacy", "actual text")
     chunk["metadata"]["chunk_text_hash"] = hashlib.sha256(b"different text").hexdigest()
     assert derive_wire_chash(chunk) == _sha32("actual text")
@@ -92,7 +95,7 @@ def test_nul_bearing_text_hashes_raw_matching_ecosystem_identity() -> None:
     text = "before\x00after"
     chunk = _legacy_chunk("legacy", text)
     assert derive_wire_chash(chunk) == _sha32(text)  # raw, not stripped
-    assert derive_wire_chash(chunk) == chunk["metadata"]["chunk_text_hash"][:32]
+    assert derive_wire_chash(chunk) == chunk["metadata"]["chunk_text_hash"]
     assert derive_wire_chash(chunk) != _sha32("beforeafter")  # not the stripped form
 
 

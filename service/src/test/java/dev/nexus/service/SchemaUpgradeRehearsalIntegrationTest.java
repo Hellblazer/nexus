@@ -213,13 +213,25 @@ class SchemaUpgradeRehearsalIntegrationTest {
                             + "on the old->HEAD hop, exactly as it is on the fresh-DB path")
                         .isEqualTo("MARK_RAN");
 
-                    assertThat(constraintValidated(conn, "chunks_768_chash_len_check")).isTrue();
-                    assertThat(constraintValidated(conn, "chunks_1024_chash_len_check")).isTrue();
-                    assertThat(constraintValidated(conn, "catalog_document_chunks_chash_len_check")).isTrue();
-                    assertThat(constraintValidated(conn, "chash_index_chash_len_check")).isTrue();
-                    assertThat(constraintExists(conn, "chunks_384_chash_len_check"))
-                        .as("the dropped chunks_384_chash_len_check must remain absent, not silently re-added")
-                        .isFalse();
+                    // RDR-180 era end-state: the TEXT-era len_checks are gone
+                    // (rdr180-2 drops all five — the injected divergence is
+                    // tolerated via DROP IF EXISTS), replaced by the octet
+                    // CHECKs added NOT VALID (validated ONLY by the client
+                    // rung's admin connection post-rekey, never at boot —
+                    // the GH #1390 crash-loop class, retired by design).
+                    for (String t : new String[] {
+                        "chunks_384", "chunks_768", "chunks_1024",
+                        "catalog_document_chunks", "chash_index"}) {
+                        assertThat(constraintExists(conn, t + "_chash_len_check"))
+                            .as("%s_chash_len_check must be gone post-rdr180-2", t)
+                            .isFalse();
+                        assertThat(constraintExists(conn, t + "_chash_octet_check"))
+                            .as("%s_chash_octet_check must exist post-rdr180-11", t)
+                            .isTrue();
+                        assertThat(constraintValidated(conn, t + "_chash_octet_check"))
+                            .as("%s octet CHECK stays NOT VALID at boot (rung validates)", t)
+                            .isFalse();
+                    }
 
                     assertThat(tablesInSchema(conn, "nexus"))
                         .as("core catalog/chunk tables must exist after the old-tag->HEAD hop")
@@ -384,21 +396,31 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 // ── Ground truth as superuser: the DML took EFFECT (rows changed),
                 // not merely "the migration didn't crash". ───────────────────────
                 try (Connection su = pg.createConnection("")) {
-                    // catalog-013 (013-1b) leg: normalized, deduped, validated.
-                    assertThat(count(su,
-                        "SELECT count(*) FROM nexus.chash_index WHERE length(chash) <> 32"))
-                        .as("013-1b must have normalized every legacy 64-char chash row")
-                        .isEqualTo(0);
-                    // class 1 collapsed onto the pre-existing 32-char row; class 2
-                    // kept one of two (lowest-ctid tie-break — either survivor
-                    // truncates to the same [:32] value); plain row truncated.
+                    // catalog-013 (013-1b) leg STILL RUNS on this hop (it
+                    // precedes rdr180 in the same update): normalized +
+                    // deduped on the text schema, THEN rdr180-7 converted
+                    // the column to bytea (32-hex decodes to 16 bytes — the
+                    // mid-migration legacy state the /v1/remap/rekey rung
+                    // later rekeys). Composition proof:
                     assertThat(count(su, "SELECT count(*) FROM nexus.chash_index"))
                         .as("dedupe semantics: 5 seeded rows must collapse to exactly 3")
                         .isEqualTo(3);
                     assertThat(count(su,
+                        "SELECT count(*) FROM nexus.chash_index WHERE octet_length(chash) = 16"))
+                        .as("013-1b normalized to 32-hex, then rdr180-7 decoded to 16-byte "
+                            + "legacy bytea — both legs must have taken effect for the "
+                            + "NOBYPASSRLS owner")
+                        .isEqualTo(3);
+                    // RDR-180 era: the len_check lifecycle is retired — the
+                    // constraint is GONE (rdr180-2), its octet successor
+                    // present and deliberately NOT VALID at boot.
+                    assertThat(count(su,
                         "SELECT count(*) FROM pg_constraint "
-                        + "WHERE conname = 'chash_index_chash_len_check' AND convalidated"))
-                        .as("catalog-013-2's VALIDATE must have run against REAL rows and stuck")
+                        + "WHERE conname = 'chash_index_chash_len_check'"))
+                        .isEqualTo(0);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_constraint "
+                        + "WHERE conname = 'chash_index_chash_octet_check' AND NOT convalidated"))
                         .isEqualTo(1);
 
                     // catalog-014-0 leg: every seeded manifest row stamped with the

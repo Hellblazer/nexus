@@ -92,10 +92,16 @@ public final class RemapRepository {
             requireNonBlank(e.oldId(), "old_id");
             requireNonBlank(e.targetCollection(), "target_collection");
             requireNonBlank(e.provenance(), "provenance");
-            if (e.newChash() == null || e.newChash().length() != 32) {
+            // RDR-180 (nexus-jxizy.7): 64-hex is the canonical fact width;
+            // 32-hex era facts remain readable (DB CHECK length IN (32,64)).
+            // The HTTP boundary (RemapHandler.normalizeChash) already
+            // enforces 64 for NEW facts; this repo-level guard mirrors the
+            // DB CHECK as belt-and-suspenders.
+            int len = e.newChash() == null ? -1 : e.newChash().length();
+            if (len != 32 && len != 64) {
                 throw new IllegalArgumentException(
-                    "new_chash must be exactly 32 hex chars, got: "
-                    + (e.newChash() == null ? "null" : e.newChash().length() + " chars"));
+                    "new_chash must be 64 hex chars (or a 32-hex era fact), got: "
+                    + (e.newChash() == null ? "null" : len + " chars"));
             }
         }
 

@@ -276,10 +276,10 @@ def test_frecency_service_mode_update_lands_in_service_chroma(
     # Choose a unique collection name for this test run
     collection = "code__frecency-enehl-test__bge-base-en-v15-768__v1"
     chunk_text = "def frecency_score_test(): return 42"
-    # RDR-156 chunks_768_chash_len_check: chunk ids are content-derived
-    # 32-char chashes — an arbitrary literal id violates the CHECK constraint.
+    # RDR-180 strict boundary: chunk ids are the content-derived FULL
+    # 64-hex sha256 — 32-hex half-digests and arbitrary literals both 400.
     import hashlib
-    chunk_id = hashlib.sha256(chunk_text.encode()).hexdigest()[:32]
+    chunk_id = hashlib.sha256(chunk_text.encode()).hexdigest()
 
     # Step 1: Seed a chunk directly into the service's Chroma
     upsert_result = _svc_post(base_url, token, "/v1/vectors/upsert-chunks", {

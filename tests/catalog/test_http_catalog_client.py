@@ -28,15 +28,14 @@ from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.db.service_endpoint import resolve_service_config as _resolve_config
 
 # Wave review (the h8rf6.3 -> 49523e16 lesson): fixture chashes must be
-# REPRESENTATIVE -- 32-char catalog prefixes of real 64-char sha256 digests.
-# The original short literals ("abc123") made [:32] truncation a structural
-# no-op, so a wrong-length wire payload was invisible to every test here.
-# CHUNK_SHA_* are the full 64-char forms for fixtures standing in for T3
-# chunk_text_hash metadata; CHASH_* are their catalog-side 32-char prefixes.
+# REPRESENTATIVE -- real 64-char sha256 digests, never short literals that
+# make width bugs a structural no-op. RDR-180 (nexus-p78a0): the catalog
+# chash IS the full digest — CHASH_* equal CHUNK_SHA_* now; the 32-char
+# prefix era (and its [:32] wire normalization) is retired.
 CHUNK_SHA_A = "2ccea837b4713a233eea0914ad7adda8bcbbbeccd9ac45e217cab14843229eb2"  # sha256("fake-chunk-A")
 CHUNK_SHA_B = "6756d390c50dd95257ad481c8ab3669f93838ed7e8f3cf334a8bbf1281d8e3b2"  # sha256("fake-chunk-B")
-CHASH_A = CHUNK_SHA_A[:32]
-CHASH_B = CHUNK_SHA_B[:32]
+CHASH_A = CHUNK_SHA_A
+CHASH_B = CHUNK_SHA_B
 from nexus.daemon.catalog_write_shim import CATALOG_WRITE_OPS
 
 
@@ -335,13 +334,15 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             params = self._query_params()
             chash = params.get("span_chash", "")
             coll  = params.get("collection", "")
-            if chash == "deadbeef" * 4 and coll == "knowledge__o__bge-768__v1":
+            # RDR-180 (nexus-p78a0): the client sends the citation's FULL
+            # width — the fake routes key on the 64-hex wire values.
+            if chash == "deadbeef" * 8 and coll == "knowledge__o__bge-768__v1":
                 self._send_json({
                     "chunk_text": "hello span world",
                     "metadata":   {"lang": "en"},
                     "chunk_hash": chash,
                 })
-            elif chash == "feeded00" * 4:  # _MISSING_32
+            elif chash == "feeded00" * 8:  # _MISSING_CHASH
                 self.send_response(404)
                 self.end_headers()
             else:
@@ -353,7 +354,7 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
         elif op == "/resolve_chash":
             params = self._query_params()
             chash = params.get("chash", "")
-            if chash == "00000000" * 4:
+            if chash == "00000000" * 8:  # _MISS_GLOBAL_FULL (RDR-180 full width)
                 self.send_response(404)
                 self.end_headers()
             else:
@@ -1496,9 +1497,10 @@ class TestResolveChash:
         """char_range slices chunk_text and is included in output.
 
         The span form ``chash:<hex>:<start>-<end>`` passes start/end to the
-        client which parses them via parse_chash_span; the client then sends
-        only chash[:32] to the server and slices the returned text locally.
-        Server returns "resolved chunk body"; slice [9:14] == "chunk".
+        client which parses them via parse_chash_span; the client sends the
+        FULL-width chash to the server (RDR-180) and slices the returned
+        text locally. Server returns "resolved chunk body"; slice [9:14]
+        == "chunk".
         """
         server, base_url = start_fake_server()
         try:

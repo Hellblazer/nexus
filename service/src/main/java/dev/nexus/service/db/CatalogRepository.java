@@ -190,6 +190,12 @@ public final class CatalogRepository {
 
     private static final Field<String>  EX_META_VAL   = DSL.field("EXCLUDED.value",       String.class);
     private static final Field<String>  EX_CHK_CHASH  = DSL.field("EXCLUDED.chash",       String.class);
+    // RDR-180 (nexus-jxizy.7): bytea chash columns carried as hex in Java —
+    // the ChashHex converted type binds/fetches through the codec uniformly.
+    private static final Field<String>  CHK_CHASH_HEX   = ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH);
+    private static final Field<String>  C384_CHASH_HEX  = ChashHex.hex(CHUNKS_384.CHASH);
+    private static final Field<String>  C768_CHASH_HEX  = ChashHex.hex(CHUNKS_768.CHASH);
+    private static final Field<String>  C1024_CHASH_HEX = ChashHex.hex(CHUNKS_1024.CHASH);
     private static final Field<String>  EX_CHK_COLL   = DSL.field("EXCLUDED.collection",  String.class);
     private static final Field<Integer> EX_CHK_IDX   = DSL.field("EXCLUDED.chunk_index",  Integer.class);
     private static final Field<Integer> EX_CHK_LST   = DSL.field("EXCLUDED.line_start",   Integer.class);
@@ -1473,7 +1479,7 @@ public final class CatalogRepository {
         String coll = physicalCollectionOf(ctx, tenant, docId);
         for (var row : rows) {
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
-                    CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
+                    CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CHK_CHASH_HEX, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
                     CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END,
                     CATALOG_DOCUMENT_CHUNKS.COLLECTION)
                .values(tenant, docId, i(row,"position"), s(row,"chash"), i(row,"chunk_index"),
@@ -1606,7 +1612,7 @@ public final class CatalogRepository {
             String coll = physicalCollectionOf(ctx, tenant, docId);
             for (var row : rows) {
                 ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
-                        CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
+                        CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CHK_CHASH_HEX, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
                         CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END,
                         CATALOG_DOCUMENT_CHUNKS.COLLECTION)
                    .values(tenant, docId, i(row,"position"), s(row,"chash"), i(row,"chunk_index"),
@@ -1614,7 +1620,7 @@ public final class CatalogRepository {
                            coll)
                    .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
                    .doUpdate()
-                   .set(CATALOG_DOCUMENT_CHUNKS.CHASH, EX_CHK_CHASH)
+                   .set(CHK_CHASH_HEX, EX_CHK_CHASH)
                    .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, EX_CHK_COLL)
                    .execute();
             }
@@ -1625,7 +1631,7 @@ public final class CatalogRepository {
     /** Get manifest rows for docId, ordered by position. */
     public List<Map<String, Object>> getManifest(String tenant, String docId) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
+            ctx.select(CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CHK_CHASH_HEX, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
                        CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END)
                .from(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId)).orderBy(CATALOG_DOCUMENT_CHUNKS.POSITION)
                .fetch().map(r -> {
@@ -1653,7 +1659,7 @@ public final class CatalogRepository {
     /** Get chashes for a physical_collection via manifest join. */
     public Set<String> chashesForCollection(String tenant, String collection) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.selectDistinct(CATALOG_DOCUMENT_CHUNKS.CHASH)
+            var rows = ctx.selectDistinct(CHK_CHASH_HEX)
                           .from(CATALOG_DOCUMENT_CHUNKS)
                           .join(CATALOG_DOCUMENTS).on(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(CATALOG_DOCUMENTS.TENANT_ID)
                                            .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(CATALOG_DOCUMENTS.TUMBLER)))
@@ -1670,7 +1676,7 @@ public final class CatalogRepository {
         if (chashes.isEmpty()) return List.of();
         return tenantScope.withTenant(tenant, ctx ->
             ctx.selectDistinct(CATALOG_DOCUMENT_CHUNKS.DOC_ID).from(CATALOG_DOCUMENT_CHUNKS)
-               .where(CATALOG_DOCUMENT_CHUNKS.CHASH.in(chashes)).fetch().map(r -> r.value1())
+               .where(CHK_CHASH_HEX.in(chashes)).fetch().map(r -> r.value1())
         );
     }
 
@@ -1687,7 +1693,7 @@ public final class CatalogRepository {
     public Map<String, List<Map<String, Object>>> getManifestMany(String tenant, List<String> docIds) {
         if (docIds == null || docIds.isEmpty()) return Map.of();
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.select(CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
+            var rows = ctx.select(CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CHK_CHASH_HEX, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
                                   CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END)
                           .from(CATALOG_DOCUMENT_CHUNKS)
                           .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.in(docIds))
@@ -1756,14 +1762,14 @@ public final class CatalogRepository {
      *
      * <p>Queries {@code nexus.chunks_768}, {@code nexus.chunks_384}, and
      * {@code nexus.chunks_1024} in sequence (first match wins). The chash
-     * must be the 32-char natural ID (chunk_text_hash[:32]) — the same
+     * must be the full-digest natural ID (chunk_text_hash, RDR-180) — the same
      * convention used by the catalog_document_chunks manifest (RDR-108 D1).
      *
      * <p>RLS auto-scopes to the caller's tenant via {@code TenantScope.withTenant}.
      *
      * @param tenant     tenant identifier
      * @param collection physical collection name (e.g. {@code knowledge__o__bge-768__v1})
-     * @param chash      32-char hex chash (chunk_text_hash[:32])
+     * @param chash      64-hex chash (the full chunk_text_hash, RDR-180)
      * @return {@code {chunk_text, metadata, chunk_hash}} or {@code null} on miss
      */
     public Map<String, Object> resolveSpan(String tenant, String collection, String chash) {
@@ -1773,19 +1779,19 @@ public final class CatalogRepository {
             // selects with early-return is cleaner and avoids cross-table JOIN complexity.
             var r768 = ctx.select(CHUNKS_768.CHUNK_TEXT, CHUNKS_768.METADATA)
                           .from(CHUNKS_768)
-                          .where(CHUNKS_768.COLLECTION.eq(collection).and(CHUNKS_768.CHASH.eq(chash)))
+                          .where(CHUNKS_768.COLLECTION.eq(collection).and(C768_CHASH_HEX.eq(chash)))
                           .limit(1).fetchOne();
             if (r768 != null) return chunkRow(chash, r768.value1(), r768.value2());
 
             var r384 = ctx.select(CHUNKS_384.CHUNK_TEXT, CHUNKS_384.METADATA)
                           .from(CHUNKS_384)
-                          .where(CHUNKS_384.COLLECTION.eq(collection).and(CHUNKS_384.CHASH.eq(chash)))
+                          .where(CHUNKS_384.COLLECTION.eq(collection).and(C384_CHASH_HEX.eq(chash)))
                           .limit(1).fetchOne();
             if (r384 != null) return chunkRow(chash, r384.value1(), r384.value2());
 
             var r1024 = ctx.select(CHUNKS_1024.CHUNK_TEXT, CHUNKS_1024.METADATA)
                            .from(CHUNKS_1024)
-                           .where(CHUNKS_1024.COLLECTION.eq(collection).and(CHUNKS_1024.CHASH.eq(chash)))
+                           .where(CHUNKS_1024.COLLECTION.eq(collection).and(C1024_CHASH_HEX.eq(chash)))
                            .limit(1).fetchOne();
             if (r1024 != null) return chunkRow(chash, r1024.value1(), r1024.value2());
             return null;
@@ -1803,7 +1809,7 @@ public final class CatalogRepository {
      * <p>RLS auto-scopes to the caller's tenant via {@code TenantScope.withTenant}.
      *
      * @param tenant            tenant identifier
-     * @param chash             32-char hex chash
+     * @param chash             64-hex chash (the full digest, RDR-180)
      * @param preferCollection  preferred collection name (may be null)
      * @return {@code {chash, chunk_hash, physical_collection, doc_id, chunk_text,
      *         metadata}} or {@code null} on miss
@@ -1817,13 +1823,13 @@ public final class CatalogRepository {
             String pref = preferCollection != null ? preferCollection : "";
 
             var sub = ctx.select(CHUNKS_768.COLLECTION, CHUNKS_768.CHUNK_TEXT, CHUNKS_768.METADATA, CHUNKS_768.CREATED_AT)
-                          .from(CHUNKS_768).where(CHUNKS_768.CHASH.eq(chash))
+                          .from(CHUNKS_768).where(C768_CHASH_HEX.eq(chash))
                        .unionAll(
                           ctx.select(CHUNKS_384.COLLECTION, CHUNKS_384.CHUNK_TEXT, CHUNKS_384.METADATA, CHUNKS_384.CREATED_AT)
-                             .from(CHUNKS_384).where(CHUNKS_384.CHASH.eq(chash)))
+                             .from(CHUNKS_384).where(C384_CHASH_HEX.eq(chash)))
                        .unionAll(
                           ctx.select(CHUNKS_1024.COLLECTION, CHUNKS_1024.CHUNK_TEXT, CHUNKS_1024.METADATA, CHUNKS_1024.CREATED_AT)
-                             .from(CHUNKS_1024).where(CHUNKS_1024.CHASH.eq(chash)))
+                             .from(CHUNKS_1024).where(C1024_CHASH_HEX.eq(chash)))
                        .asTable("sub");
 
             Field<String>         col       = sub.field("collection", String.class);
@@ -1849,7 +1855,7 @@ public final class CatalogRepository {
             // deterministic winner when a chash is referenced by multiple docs (dedup).
             String docId = "";
             var docRow = ctx.select(CATALOG_DOCUMENT_CHUNKS.DOC_ID).from(CATALOG_DOCUMENT_CHUNKS)
-                            .where(CATALOG_DOCUMENT_CHUNKS.CHASH.eq(chash))
+                            .where(CHK_CHASH_HEX.eq(chash))
                             .orderBy(CATALOG_DOCUMENT_CHUNKS.DOC_ID.asc()).limit(1).fetchOne();
             if (docRow != null) docId = docRow.value1();
 
@@ -2890,7 +2896,7 @@ public final class CatalogRepository {
             for (int start = 0; start < deduped.size(); start += chunkSize) {
                 var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
                 var insert = ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
-                        CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
+                        CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CHK_CHASH_HEX, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
                         CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END,
                         CATALOG_DOCUMENT_CHUNKS.COLLECTION);
                 for (var row : batch) {
@@ -2900,7 +2906,7 @@ public final class CatalogRepository {
                 }
                 insert.onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
                       .doUpdate()
-                      .set(CATALOG_DOCUMENT_CHUNKS.CHASH, EX_CHK_CHASH)
+                      .set(CHK_CHASH_HEX, EX_CHK_CHASH)
                       .set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,   EX_CHK_IDX)
                       .set(CATALOG_DOCUMENT_CHUNKS.LINE_START,   EX_CHK_LST)
                       .set(CATALOG_DOCUMENT_CHUNKS.LINE_END,   EX_CHK_LEN)
@@ -2916,7 +2922,7 @@ public final class CatalogRepository {
     private void doImportChunk(DSLContext ctx, String tenant, String docId, Map<String, Object> row) {
         String coll = physicalCollectionOf(ctx, tenant, docId);
         ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
-                CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
+                CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CHK_CHASH_HEX, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
                 CATALOG_DOCUMENT_CHUNKS.LINE_START, CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START, CATALOG_DOCUMENT_CHUNKS.CHAR_END,
                 CATALOG_DOCUMENT_CHUNKS.COLLECTION)
            .values(tenant, docId, i(row,"position"), s(row,"chash"), i(row,"chunk_index"),
@@ -2925,7 +2931,7 @@ public final class CatalogRepository {
            .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
            .doUpdate()
            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, EX_CHK_COLL)
-           .set(CATALOG_DOCUMENT_CHUNKS.CHASH, EX_CHK_CHASH)
+           .set(CHK_CHASH_HEX, EX_CHK_CHASH)
            .set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,   EX_CHK_IDX)
            .set(CATALOG_DOCUMENT_CHUNKS.LINE_START,   EX_CHK_LST)
            .set(CATALOG_DOCUMENT_CHUNKS.LINE_END,   EX_CHK_LEN)

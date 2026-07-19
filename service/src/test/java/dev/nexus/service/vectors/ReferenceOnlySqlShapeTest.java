@@ -28,7 +28,8 @@ class ReferenceOnlySqlShapeTest {
     void referenceOnlyInsertQuery_hasNullChunkTextAndRetentionColumn() {
         DSLContext ctx = DSL.using(SQLDialect.POSTGRES);
         String sql = PgVectorRepository.referenceOnlyInsertQuery(
-                ctx, 1024, "t", "code__x__voyage-code-3__v1", "chash0000",
+                ctx, 1024, "t", "code__x__voyage-code-3__v1",
+                dev.nexus.service.db.Chash.ofText("chash0000").toHex(),
                 new float[1024], "{}")
             .getSQL(ParamType.INLINED)
             .toLowerCase();

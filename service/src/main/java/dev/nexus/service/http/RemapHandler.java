@@ -22,6 +22,7 @@ import java.util.Map;
  *
  * <p>Routes (all under {@code /v1/remap/}):
  * <pre>
+ *   POST /v1/remap/rekey          RDR-180 per-tenant full-digest rekey (nexus-jxizy.6)
  *   POST /v1/remap/record_batch   persist a batch of old-id → new-chash facts
  *                                 {source_collection, entries:[{old_id, new_chash,
  *                                  target_collection, provenance}]} → {recorded}
@@ -56,9 +57,11 @@ import java.util.Map;
  * record_batch call — the chroma_quotas MAX_RECORDS_PER_WRITE heritage cap;
  * oversized batches get 400, matching the client's existing paging contract.
  *
- * <p>new_chash normalization mirrors {@code ChashHandler}: a 64-char
- * chunk_text_hash form is normalized to its [:32] prefix (the ecosystem id
- * convention, RDR-108 D1); any other non-32 length is rejected 400.
+ * <p>new_chash validation (RDR-180, nexus-jxizy.7): the FULL 64-hex digest
+ * is the canonical fact form, parsed through {@code Chash.requireCanonical}
+ * — nothing is truncated; any other width is rejected 400. Pre-flip 32-hex
+ * era facts already persisted stay readable (widened DB CHECK + the
+ * remap_membership alias chain).
  *
  * <p>All endpoints require {@code Authorization: Bearer} (enforced by
  * {@link AuthFilter}) and {@code X-Nexus-Tenant}.
@@ -73,9 +76,11 @@ public final class RemapHandler implements HttpHandler {
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
 
     private final RemapRepository repo;
+    private final dev.nexus.service.db.RekeyOps rekeyOps;
 
-    public RemapHandler(RemapRepository repo) {
+    public RemapHandler(RemapRepository repo, dev.nexus.service.db.RekeyOps rekeyOps) {
         this.repo = repo;
+        this.rekeyOps = rekeyOps;
     }
 
     @Override
@@ -92,6 +97,7 @@ public final class RemapHandler implements HttpHandler {
 
         try {
             switch (op) {
+                case "/rekey"              -> handleRekey(exchange, tenant, method);
                 case "/record_batch"       -> handleRecordBatch(exchange, tenant, method);
                 case "/clear_leg"          -> handleClearLeg(exchange, tenant, method);
                 case "/membership"         -> handleMembership(exchange, tenant, method);
@@ -110,6 +116,34 @@ public final class RemapHandler implements HttpHandler {
                         op, tenant, e.getMessage(), e);
                 HttpUtil.send(exchange, 500, "{\"error\":\"internal server error\"}");
             }
+        }
+    }
+
+    // ── POST /v1/remap/rekey ─────────────────────────────────────────────────
+
+    /**
+     * RDR-180 per-tenant full-digest rekey (nexus-jxizy.6) — see
+     * {@link dev.nexus.service.db.RekeyOps}. Body (optional):
+     * {@code {"orphan_policy": "drop"|"synthesize"}} (default drop).
+     * Runs INSIDE the freeze window, driven by the client rung; returns
+     * the disposition + per-table counts envelope. A legacy-id collision
+     * (one old id, two digests) returns 409 — never resolved silently.
+     */
+    private void handleRekey(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        String policy = body.get("orphan_policy") instanceof String s ? s : "drop";
+        if (!"drop".equals(policy) && !"synthesize".equals(policy)) {
+            HttpUtil.send(exchange, 400,
+                "{\"error\":\"orphan_policy must be 'drop' or 'synthesize'\"}");
+            return;
+        }
+        try {
+            Map<String, Object> counts = rekeyOps.rekey(tenant, "synthesize".equals(policy));
+            HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(counts));
+        } catch (dev.nexus.service.db.RekeyOps.RekeyConflictException e) {
+            HttpUtil.send(exchange, 409,
+                "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
         }
     }
 
@@ -236,18 +270,18 @@ public final class RemapHandler implements HttpHandler {
     }
 
     /**
-     * Normalize a chash to its 32-char form (mirrors ChashHandler): the 64-char
-     * chunk_text_hash form is truncated to [:32] (RDR-108 D1 — new_chash ==
-     * chunk_text_hash[:32] by construction); everything else goes through
-     * {@link dev.nexus.service.db.Chash#requireLength32} — the sole enforcement
-     * point for the 32-char boundary check.
+     * Validate a new_chash fact (RDR-180, nexus-jxizy.7): the canonical
+     * 64-hex full digest, parsed through the Chash type — the pre-flip
+     * 64->32 truncation is retired with the [:32] era. Legacy 32-hex facts
+     * already persisted by pre-cohort migrations stay readable (the widened
+     * chash_remap CHECK + remap_membership's alias chain cover them); NEW
+     * facts on a converged pair always carry the full digest.
      */
     private static String normalizeChash(String chash) {
         if (chash == null || chash.isBlank()) {
             throw new IllegalArgumentException("'new_chash' is required");
         }
-        if (chash.length() == 64) return chash.substring(0, 32);
-        return dev.nexus.service.db.Chash.requireLength32(chash, "'new_chash'");
+        return dev.nexus.service.db.Chash.requireCanonical(chash, "'new_chash'");
     }
 
     private static String requireString(Map<String, Object> body, String field) {

@@ -161,7 +161,7 @@ class CatalogFtsFilenameSearchTest {
         assertThat(indexedAtOf(doc)).isEqualTo("2026-07-09T17:42:10+00:00");
 
         repo.appendManifestChunks(TENANT, doc, List.of(Map.of(
-            "position", 0, "chash", "c".repeat(32), "chunk_index", 0,
+            "position", 0, "chash", "c".repeat(64), "chunk_index", 0,
             "line_start", 1, "line_end", 10, "char_start", 0, "char_end", 100)));
         String after = indexedAtOf(doc);
         assertThat(after)
@@ -182,7 +182,7 @@ class CatalogFtsFilenameSearchTest {
         assertThat(indexedAtOf(doc)).isEqualTo("2026-07-09T17:42:10+00:00");
 
         repo.writeManifest(TENANT, doc, List.of(Map.of(
-            "position", 0, "chash", "d".repeat(32), "chunk_index", 0,
+            "position", 0, "chash", "d".repeat(64), "chunk_index", 0,
             "line_start", 1, "line_end", 5, "char_start", 0, "char_end", 50)));
         assertThat(indexedAtOf(doc)).isNotEqualTo("2026-07-09T17:42:10+00:00");
     }

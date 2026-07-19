@@ -52,7 +52,18 @@ class TestRequiredEngineVersion:
         # indexing / ladder completion recording have no fallback. Cut +
         # published + cold-validated 2026-07-18; cloud deploy = Hal's relay
         # (release Step 0's floor gate blocks the cut until confirmed).
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 47)
+        # ->(0,1,49) 2026-07-19: hard dependency — the RDR-180 cohort. The
+        # client's chash cutover (64-hex producers, guided land-then-
+        # transform, chash-rekey rung) requires the bytea schema (rdr180
+        # changesets) + /v1/remap/rekey + staging endpoints; and v0.1.49
+        # carries rdr180-16-analyze-rewritten-tables, the BUG-0148
+        # stale-planner-stats fix — an un-ANALYZEd ALTER TYPE rewrite
+        # degrades sparse-gate hybrid search to ZERO rows with all health
+        # probes green (conexus-xpg7). Fix-delivery rule applied: the floor
+        # is the only vehicle for local installs. Deployed + per-query-diff
+        # cloud-gated 2026-07-19 (parity 104/113 == baseline, recall AC3
+        # 12/12 real values, xpg7 probes 3/3 J=1.0).
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 49)
 
 
 class TestParseEngineVersion:

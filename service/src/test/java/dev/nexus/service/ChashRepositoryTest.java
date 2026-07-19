@@ -55,11 +55,11 @@ class ChashRepositoryTest {
     ChashRepository repo;
     com.zaxxer.hikari.HikariDataSource svcDs;
 
-    /** Pad a readable seed to the contract length — catalog-013 added
-     *  CHECK(length(chash)=32) to chash_index, so fixtures must be 32 chars
-     *  (any chars: the contract is length-only, not hex). */
-    private static String ch(String seed) {
-        return (seed + "0".repeat(32)).substring(0, 32);
+    /** Deterministic canonical chash per seed (RDR-180: full 32-byte
+     *  digest; the pre-flip pad-to-32-chars fixture shape died with the
+     *  length-only contract). */
+    private static dev.nexus.service.db.Chash ch(String seed) {
+        return dev.nexus.service.db.Chash.ofText(seed);
     }
 
     @BeforeAll
@@ -167,7 +167,10 @@ class ChashRepositoryTest {
     @Test
     @Order(3)
     void upsertMany_insertsAllValid_skipsBlank() {
-        repo.upsertMany(TENANT_A, List.of(ch("chash_m1"), ch("chash_m2"), "", "  ", ch("chash_m3")), "code__batch");
+        // null entries (the pre-flip blank-string shape) are skipped
+        repo.upsertMany(TENANT_A,
+                java.util.Arrays.asList(ch("chash_m1"), ch("chash_m2"), null, ch("chash_m3")),
+                "code__batch");
 
         var m1 = repo.lookup(TENANT_A, ch("chash_m1"));
         var m2 = repo.lookup(TENANT_A, ch("chash_m2"));
@@ -176,9 +179,6 @@ class ChashRepositoryTest {
         assertThat(m2).hasSize(1);
         assertThat(m3).hasSize(1);
 
-        // blank entries not inserted
-        var blank = repo.lookup(TENANT_A, "");
-        assertThat(blank).isEmpty();
     }
 
     // ── Test 3b: upsertMany tolerates in-batch duplicate chashes ─────────────
@@ -206,7 +206,7 @@ class ChashRepositoryTest {
     @Test
     @Order(4)
     void lookup_returnsAllCollections_forSameChash() {
-        String multiChash = ch("multi_coll_chash_001");
+        var multiChash = ch("multi_coll_chash_001");
         repo.upsert(TENANT_A, multiChash, "knowledge__delos");
         repo.upsert(TENANT_A, multiChash, "knowledge__delos_docling");
 
@@ -337,7 +337,7 @@ class ChashRepositoryTest {
     @Order(11)
     void doImport_fidelity_idempotentRerun() {
         String importTenant = "chash-import-tenant";
-        String importChash  = ch("import_chash_ff00ff");
+        var importChash  = ch("import_chash_ff00ff");
         String importColl   = "knowledge__imported";
         String createdAt    = "2025-03-15T08:00:00Z";
 
@@ -451,7 +451,7 @@ class ChashRepositoryTest {
     @Test
     @Order(12)
     void rls_isolation_tenantAInvisibleToTenantB() {
-        String chashA = ch("rls_iso_chashA_001");
+        var chashA = ch("rls_iso_chashA_001");
         repo.upsert(TENANT_A, chashA, "rls__collA");
 
         // TENANT_B lookup returns empty
@@ -477,7 +477,7 @@ class ChashRepositoryTest {
             var ex = assertThrows(PSQLException.class, () -> {
                 conn.createStatement().execute(
                     "INSERT INTO nexus.chash_index (tenant_id, chash, physical_collection, created_at) " +
-                    "VALUES ('" + TENANT_B + "', 'with_check_chash', 'with_check_coll', now())");
+                    "VALUES ('" + TENANT_B + "', decode('deadbeef', 'hex'), 'with_check_coll', now())");
             });
             assertThat(ex.getMessage()).containsIgnoringCase("violates row-level security");
             conn.rollback();
@@ -510,25 +510,18 @@ class ChashRepositoryTest {
 
     @Test
     @Order(15)
-    void registeredChashesForCollection_returnsPrefixSet() {
-        // catalog-013 (nexus-e0hd2): chash_index now carries
-        // CHECK(length(chash)=32) — a 64-char chash can no longer PERSIST
-        // (pre-013 it did, and the read side compensated with a
-        // substr(chash,1,32) truncation that is now vestigial defense).
-        // Assert the belt fires at the repo layer:
-        String longChash = "a".repeat(64);
-        org.assertj.core.api.Assertions.assertThatThrownBy(
-                () -> repo.upsert(TENANT_A, longChash, "reg__coll"))
-            .hasMessageContaining("chash_index_chash_len_check");
-
+    void registeredChashesForCollection_returnsFullHexSet() {
+        // RDR-180 (nexus-jxizy.7): the natural chunk id is the FULL digest —
+        // the pre-flip [:32] prefix compensation is retired; the set carries
+        // 64-hex renderings of the stored 32-byte keys.
         repo.upsert(TENANT_A, ch("short_ch_001"),  "reg__coll");
         repo.upsert(TENANT_A, ch("other_ch_001"), "other__coll");
 
         Set<String> result = repo.registeredChashesForCollection(TENANT_A, "reg__coll");
-        assertThat(result).contains(ch("short_ch_001"));
-        // other__coll chash must NOT appear; neither must the rejected 64-char.
-        assertThat(result).doesNotContain(ch("other_ch_001"));
-        assertThat(result).doesNotContain("a".repeat(32));
+        assertThat(result).contains(ch("short_ch_001").toHex());
+        assertThat(result.iterator().next()).hasSize(64);
+        // other__coll chash must NOT appear.
+        assertThat(result).doesNotContain(ch("other_ch_001").toHex());
     }
 
     @Test
@@ -545,7 +538,7 @@ class ChashRepositoryTest {
         repo.upsert(TENANT_A, ch("rls_reg_chash_001"), "rls__reg__coll");
 
         Set<String> resultA = repo.registeredChashesForCollection(TENANT_A, "rls__reg__coll");
-        assertThat(resultA).contains(ch("rls_reg_chash_001"));
+        assertThat(resultA).contains(ch("rls_reg_chash_001").toHex());
 
         Set<String> resultB = repo.registeredChashesForCollection(TENANT_B, "rls__reg__coll");
         assertThat(resultB).isEmpty();

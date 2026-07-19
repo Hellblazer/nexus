@@ -39,6 +39,12 @@ _ALLOWED_READ_OBJECTS = {
     # than the raw tables above — it exposes ONLY (table_name, count), so
     # content projection is impossible by construction, not just by lint.
     "nexus.diag_chash_conformance",
+    # nexus-z5j0t legacy-debt legs: these names appear ONLY as table_name
+    # string literals filtering the counts view (the object-reference regex
+    # below cannot tell a literal from a FROM target); the statements read
+    # the view, and even a direct count over them would be aggregate-only
+    # metadata (chash-reference lengths, never content).
+    "nexus.topic_assignments", "nexus.frecency", "nexus.relevance_log",
 }
 #: Column tokens that would indicate CONTENT projection (must never appear
 #: as a bare projected column in a diagnostic statement).

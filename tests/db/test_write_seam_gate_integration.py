@@ -136,8 +136,13 @@ def _stop_service(proc: subprocess.Popen) -> None:
 
 
 def _chunk_id(text: str) -> str:
-    """sha256(text)[:32] — matches HttpVectorClient.chunk_id()."""
-    return hashlib.sha256(text.encode()).hexdigest()[:32]
+    """The canonical FULL sha256 hexdigest (RDR-180) — delegates to the REAL
+    producer derivation so this gate can never drift from it again (the
+    retired [:32] form went red against the cohort engine's strict 64-hex
+    write boundary the moment the source-tree JAR flipped, 2026-07-19)."""
+    from nexus.chunk_identity import chunk_id
+
+    return chunk_id(text)
 
 
 # ── Module-scoped Docker pgvector fixture ─────────────────────────────────────

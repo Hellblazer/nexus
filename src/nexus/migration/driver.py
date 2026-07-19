@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""RDR-159 P4 (nexus-ue6g7.24): the guided-upgrade engine entry point.
+"""RDR-159 P4 (nexus-ue6g7.24) / RDR-180 (nexus-jxizy.10.7): the guided-upgrade
+engine entry point.
 
 ``run_guided_upgrade`` is the ONE function both surfaces call — the nexus CLI
 (``nx migrate-to-service``) and the deferred conexus veneer (``conexus
@@ -8,16 +9,30 @@ upgrade``). It owns the full lifecycle that wraps the P0-P3 primitives in the
 single survivable order, so neither surface re-derives the seam:
 
   1. DETECT     open the Chroma read legs, classify the footprint, then CLOSE
-                them BEFORE any ETL (the local leg is WAL single-opener — the
-                ETL must be the only opener, so detection cannot still hold it);
-  2. SEQUENCE   ``run_sequenced_migration`` drives quiesce → pre-gate → T2 →
-                T3-per-leg, leaving the sentinel ``migrated`` (or
-                ``migrated-failed`` on any block / partial leg);
-  3. VALIDATE   on a clean ``migrated``, REOPEN the data-bearing read legs and
-                run the non-vacuous validation gate (taxonomy floor + counts +
-                manifest-orphans); clean → unlock (clear sentinel), block →
-                leave ``migrated-failed`` + offer rollback. Reopened read legs
-                are closed in a ``finally``.
+                them BEFORE any landing (the local leg is WAL single-opener —
+                the landing read must be the only opener, so detection cannot
+                still hold it);
+  2. LAND-THEN-TRANSFORM  reopen the data-bearing read legs (now for LANDING,
+                not validation) and drive
+                :func:`nexus.migration.sequencer.run_land_then_transform_migration`:
+                quiesce -> model gate -> pre-land source census + disk
+                preflight -> land (pointer stores verbatim + chunk content,
+                honest land-time classification) -> non-chash T2 -> per
+                collection (embed_fill, promote) -> finalize (once per wave)
+                -> verify (count-parity reconciliation) -> clear staging ->
+                mark_migrated. Reopened read legs are closed in a
+                ``finally``.
+
+RDR-180 retires the old three-phase DETECT / SEQUENCE / VALIDATE shape (the
+per-leg in-flight rewrite class it produced — eight missed-leg bugs, see
+``tests/test_no_chash_truncation.py``'s history) in favor of the
+staging-schema land-then-transform design (nexus_rdr/180-land-transform-design
+Q3-Q5): the client's role collapses to CENSUS the source, LAND it verbatim,
+drive ``embed_fill -> promote`` per collection and ``finalize`` per wave,
+VERIFY counts, CLEAR. The server-side ``StagingPromoteOps`` (Java) owns the
+transactional re-id/promote pass and the reference re-point (catalog
+manifest, topic assignments) via the in-DB ``chash_alias`` join — there is no
+more client-side ``remap_refs`` seam to inject.
 
 The engine touches NO data of its own and adds NO orchestration beyond
 sequencing + lifecycle: every ETL / state / validation primitive is the proven
@@ -27,6 +42,7 @@ without a live service / Chroma (the existing nexus CLI-wiring test idiom).
 """
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -40,28 +56,49 @@ from nexus.migration.detection import (
     close_read_client,
     cross_model_remappable,
     is_measured_dim_override,
-    remap_target_model,
     open_read_legs,
+    probe_has_text,
+    remap_target_model,
+    resolve_default_local_leg,
     voyage_key_available,
 )
 from nexus.migration.orchestrator import EtlSources
-from nexus.migration.sequencer import SequenceOutcome, run_sequenced_migration
-from nexus.migration.state import mark_failed
-from nexus.migration.validation import (
-    ValidationOutcome,
-    compose_validation_checks,
-    validate_migration,
+from nexus.migration.pregate import (
+    assert_disk_headroom,
+    assert_models_supported,
+    estimate_staging_source_bytes,
 )
-from nexus.migration.vector_etl import (
-    MigrationReport,
-    _dim_for_collection,
-    cross_model_target_name,
-    is_never_written,
-    migrate_cloud,
-    migrate_local,
+from nexus.migration.sequencer import (
+    LandThenTransformOutcome,
+    SequenceOutcome,
+    run_land_then_transform_migration,
 )
+from nexus.migration.staging_land import (
+    HttpStagingStore,
+    chunk_rows,
+    pointer_store_rows,
+    source_census,
+    topic_assignment_orphans,
+)
+from nexus.migration.state import clear_state
+from nexus.migration.validation import ValidationOutcome
+from nexus.migration.vector_etl import _dim_for_collection, cross_model_target_name, is_never_written
 
 _log = structlog.get_logger(__name__)
+
+#: The seven non-``chunks`` staging stores landed verbatim from SQLite —
+#: mirrors the engine's ``StagingHandler.STORES`` minus ``"chunks"``, which
+#: lands from the Chroma source instead (see ``_land`` inside
+#: :func:`run_guided_upgrade`).
+_POINTER_STORES: tuple[str, ...] = (
+    "document_chunks",
+    "chash_index",
+    "topic_assignments",
+    "frecency",
+    "relevance_log",
+    "document_aspects",
+    "aspect_extraction_queue",
+)
 
 
 @dataclass(frozen=True)
@@ -69,21 +106,41 @@ class GuidedUpgradeResult:
     """The verdict of one guided-upgrade run + the evidence behind it.
 
     ``ok`` is the single user-facing success bit: True only on a fresh-user
-    no-op OR a sequence that reached ``migrated`` AND validated clean (unlocked).
-    ``validation`` is ``None`` when the sequence never reached validation (a
-    fresh-user no-op, or a sequence block/partial-leg that left the sentinel
-    ``migrated-failed`` before any validation could run).
+    no-op OR a land-then-transform run that reached a verified, staging-cleared
+    ``migrated``. ``validation`` is ``None`` when nothing was verified (a
+    fresh-user no-op, or ANY block along the census / land / T2 / promote /
+    finalize / verify / clear chain) — RDR-180 folds the old separate VALIDATE
+    phase into the sequence's own ``verify`` step, so there is no longer a
+    "T3 copy done but validation failed" middle state to represent; a run is
+    either fully verified (``ok=True``, ``validation.unlocked=True``) or it
+    never completed (``validation=None``).
+
+    ``sequence`` carries a :class:`~nexus.migration.sequencer.LandThenTransformOutcome`
+    for a real run (the field name is retained from the pre-RDR-180 shape for
+    caller compatibility — ``migrate_cmd.py``'s ``_render_result`` and the
+    cross-repo signature pin in ``test_migration_contract.py`` both consume it
+    by duck-typed attribute, not by import type); it stays typed to accept the
+    retired :class:`~nexus.migration.sequencer.SequenceOutcome` too so a test
+    double built against either shape remains valid.
     """
 
     detection: DetectionReport
-    sequence: SequenceOutcome
+    sequence: SequenceOutcome | LandThenTransformOutcome
     validation: ValidationOutcome | None
     ok: bool
 
     @property
     def rollback_available(self) -> bool:
-        """Whether a rollback is offered (a validated block left a pgvector copy
-        the user can undo to return to the immutable Chroma source)."""
+        """Whether a rollback is offered.
+
+        Always ``False`` under land-then-transform: RDR-180 design Q4
+        "rollback: SIMPLIFIED — staging makes it trivial (nothing promoted on
+        abort => drop/truncate staging, nexus never touched)". Recovery from
+        any block is re-run (landing + promote are idempotent), never an
+        explicit ``nx storage migrate vectors --rollback`` command — there is
+        no separate pgvector copy to unwind, only staging rows retained for
+        resume.
+        """
         return self.validation is not None and self.validation.rollback_available
 
 
@@ -171,7 +228,10 @@ def build_cross_model_target_names(
     reconstructs the historical target-name map with the SAME policy chain
     (``cross_model_remappable`` → ``remap_target_model`` →
     ``cross_model_target_name``) the migration itself uses — a drifted
-    reimplementation would audit a map no run ever produced.
+    reimplementation would audit a map no run ever produced. RDR-180: this is
+    ALSO the land-time honest-target derivation ``_land`` (inside
+    :func:`run_guided_upgrade`) resolves chunk rows against — the same
+    reconciliation H1 the sequencer's own docstring names.
     """
     return {
         c.collection: cross_model_target_name(
@@ -235,7 +295,8 @@ def _assert_no_target_name_collisions(
     ``taxonomy__centroids`` present with data on both legs maps to its own
     literal name on each leg — a naive grouping would see two distinct
     sources claiming one target and block a migration that would otherwise
-    succeed cleanly (the ETL silently skips both and writes neither).
+    succeed cleanly (land-then-transform silently skips both and lands
+    neither, same as the retired per-leg ETL).
 
     ``is_never_written`` is the ONE shared predicate this guard calls, so it
     can never drift from ``vector_etl``'s own disposition logic on "will
@@ -247,9 +308,9 @@ def _assert_no_target_name_collisions(
     this guard always runs in a default-enumeration context.
 
     This is a pure read-only check over already-computed classification +
-    remap-target data; it MUST run before ``_run_leg``/the sequencer is ever
-    invoked so a collision is caught before any write, never discovered
-    mid-ETL or after.
+    remap-target data; it MUST run before the land-then-transform sequence is
+    ever invoked so a collision is caught before any write, never discovered
+    mid-land or after.
     """
     collisions = group_colliding_targets(classifications, target_names)
     if collisions:
@@ -259,11 +320,12 @@ def _assert_no_target_name_collisions(
 class _CompositeReadClient:
     """A read client routing ``get_collection`` to the leg that holds the name.
 
-    ``verify_counts`` (the P3 count leg) takes ONE read client + a collection
-    list, but a migration can span both legs. This composite preserves the
-    single-read-client seam ``compose_validation_checks`` pins: it maps each
-    collection name to the reopened read client for its source leg, so a
-    two-leg validation reuses the unchanged seam instead of forking it.
+    RDR-180: the landing phase reads chunk content + probes text presence
+    across a migration that can span both legs; this composite preserves the
+    single-read-client seam it shares with the (now-retired-from-guided)
+    validation count leg — it maps each collection name to the reopened read
+    client for its source leg, so a two-leg landing reuses one composite
+    instead of forking per-leg logic.
     """
 
     def __init__(self, by_collection: dict[str, Any]) -> None:
@@ -281,10 +343,11 @@ class _CompositeReadClient:
 
 
 def _default_reopen_leg(leg: str, local_path: str | Path | None) -> Any:
-    """Reopen one source read leg for the validation count check.
+    """Reopen one source read leg for landing.
 
-    The ETL opened + closed its own read client per leg; validation needs a
-    FRESH read client (the detection clients were closed before the ETL ran).
+    The detection phase opened + closed its own read client per leg; landing
+    needs a FRESH read client (the detection clients were closed before this
+    function is invoked).
     """
     from nexus.migration.chroma_read import (  # noqa: PLC0415  — command-local import (nexus.migration.chroma_read)
         open_cloud_read_client,
@@ -297,6 +360,41 @@ def _default_reopen_leg(leg: str, local_path: str | Path | None) -> Any:
     # default inside open_local_read_client (this fallback used to hardcode
     # the never-written <config>/chroma).
     return open_local_read_client(local_path)
+
+
+def _open_source_ro(path: Path) -> sqlite3.Connection:
+    """Open a migration SOURCE SQLite file read-only.
+
+    The ONE sanctioned ``sqlite3.connect`` shape in this module (AGENTS.md's
+    NO-SQLITE hot rule): an immutable land-then-transform SOURCE, read-only,
+    never a new SQLite destination. Mirrors the house idiom
+    (``nexus.db.t2.taxonomy_etl.count_source_rows`` et al.):
+    ``file:<path>?mode=ro`` URI form + ``check_same_thread=False``.
+    """
+    uri = f"file:{path}?mode=ro"
+    try:
+        return sqlite3.connect(uri, uri=True, check_same_thread=False)  # epsilon-allow: read-only migration SOURCE (land-then-transform census+landing, nexus-jxizy.10.7); never a destination
+    except sqlite3.OperationalError as exc:
+        raise RuntimeError(
+            f"cannot open SQLite source for reading: {path}: {exc}"
+        ) from exc
+
+
+def _resolve_pg_path() -> Path:
+    """Best-effort local filesystem path backing the disk-headroom preflight.
+
+    Local mode's bundled PG data directory (``nexus_config_dir() / "postgres"``,
+    see ``nexus.db.pg_provision.provision``) when it exists; otherwise the
+    config dir itself — a reasonable client-side proxy for "the machine
+    issuing this migration" under managed/cloud mode, where the real PG disk
+    lives on a remote server this client cannot introspect.
+    ``NX_STAGING_DISK_OVERRIDE_ENV`` remains the escape hatch when this proxy
+    does not fit a deployment.
+    """
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — command-local import (nexus.config)
+
+    pg_dir = nexus_config_dir() / "postgres"
+    return pg_dir if pg_dir.exists() else nexus_config_dir()
 
 
 def run_guided_upgrade(
@@ -313,35 +411,57 @@ def run_guided_upgrade(
     reopen_leg: Callable[[str], Any] | None = None,
     run_t2: Callable[[Any], dict[str, Any]] | None = None,
 ) -> GuidedUpgradeResult:
-    """Run the full detect → sequence → validate guided upgrade.
+    """Run the full detect → land-then-transform guided upgrade.
 
-    ``sources`` (T2 + catalog SQLite paths) drives the T2 ``migrate all``;
-    ``vector_client`` is the pgvector write client; ``catalog_client`` backs the
-    manifest-orphan validation leg; ``t2_db_path`` is the source SQLite the
-    taxonomy floor reads. ``voyage_key_present`` defaults to the deployment-mode
-    probe. ``on_progress(done, total)`` / ``on_leg_result(result)`` are pure
-    progress sinks (the CLI wires ``click.echo``).
+    ``sources`` (T2 + catalog SQLite paths) drives BOTH the pre-land census /
+    pointer-store landing AND the non-chash T2 ``migrate all``.
+    ``voyage_key_present`` defaults to the deployment-mode probe.
+    ``on_progress(done, total)`` fires per successfully-promoted collection
+    (the CLI wires ``click.echo``).
+
+    ``vector_client`` / ``catalog_client`` / ``t2_db_path`` are ACCEPTED but
+    UNUSED under RDR-180 land-then-transform — kept in the signature only for
+    caller compatibility (the cross-repo contract pin in
+    ``test_migration_contract.py`` and ``migrate_cmd.py``'s existing wiring).
+    The pgvector write that used to go through ``vector_client`` now happens
+    server-side inside ``StagingPromoteOps`` (reached via
+    :class:`~nexus.migration.staging_land.HttpStagingStore`'s ``/v1/staging``
+    calls, constructed internally here); the catalog-orphan validation leg
+    that used to consume ``catalog_client`` is retired (the catalog documents
+    ETL runs inside ``run_t2`` and reference re-pointing happens server-side
+    via the in-DB ``chash_alias`` join); the taxonomy floor that used to read
+    ``t2_db_path`` directly is likewise retired (``run_t2``'s taxonomy-topics
+    leg reads ``sources.sqlite_path``, the same file in every known caller).
+
+    ``on_leg_result`` is likewise ACCEPTED but no longer INVOKED: the retired
+    per-leg :class:`~nexus.migration.vector_etl.CollectionResult` granularity
+    it was built for no longer exists under land-then-transform (there is no
+    more per-leg vector-ETL pass to report on) — ``on_progress`` remains the
+    live per-collection progress signal.
 
     ``run_t2`` (RDR-178 Gap 7, nexus-1sx01): an override for the T2
-    ``migrate all`` step, threaded straight to
-    :func:`nexus.migration.sequencer.run_sequenced_migration`'s own
+    non-chash ``migrate all`` step, threaded straight to
+    :func:`nexus.migration.sequencer.run_land_then_transform_migration`'s own
     ``run_t2`` seam. The guided-upgrade CLI uses this to pass
     ``functools.partial(migrate_all, skip_stores=...)`` once its
     already-migrated pre-flight (:func:`detect_already_migrated`) has
     identified stores with no newer local writes since a clean report.
     ``None`` (the default) preserves the prior behavior exactly — the
-    sequencer's own default (``migrate_all`` unconditionally) applies.
+    sequencer's own default (:func:`nexus.migration.orchestrator.migrate_all_guided`)
+    applies.
 
     Returns a :class:`GuidedUpgradeResult`. The sentinel is left ``migrated``
     only on a clean unlock-failure window that cannot occur here: a clean run
-    clears it, any block leaves ``migrated-failed`` with rollback offered.
+    clears it, any block leaves ``migrated-failed`` with staging retained for
+    an idempotent re-run (RDR-180: there is no separate rollback command —
+    see :attr:`GuidedUpgradeResult.rollback_available`).
     """
     key_present = (
         voyage_key_available() if voyage_key_present is None else voyage_key_present
     )
 
-    # 1. DETECT — open read legs, classify, then CLOSE before any ETL (the local
-    #    leg is a WAL single-opener; the ETL reopens it and must be the sole
+    # 1. DETECT — open read legs, classify, then CLOSE before any landing (the
+    #    local leg is a WAL single-opener; the landing reopen must be the sole
     #    opener).
     local, cloud = open_read_legs(local_path)
     try:
@@ -358,8 +478,9 @@ def run_guided_upgrade(
     # name (e.g. minilm-384 after RDR-160) is auto-migrated by re-embedding its
     # STORED chunk text into a model-remapped target — not blocked with the
     # re-index diagnostic. Policy lives here (the orchestrator), not in the ETL:
-    # build the source→target map, pass it down, and the sequencer exempts these
-    # from the pre-gate and re-points their references after they verify.
+    # build the source→target map, pass it down; RDR-180's ``_land`` resolves
+    # every data-bearing collection's honest land-time target from this SAME
+    # map (reconciliation H1 — the classification must happen once, here).
     # nexus-gilf2: the target model is mode + content-type aware (voyage models
     # in cloud mode, bge-768 in local) so the MIXED migrant (ran local, migrates
     # onto a voyage-mode service) re-embeds into a WIRED model instead of hitting
@@ -374,135 +495,304 @@ def run_guided_upgrade(
     # honest, non-remapped sibling collection's own name (or with a second
     # remap target) — BLOCK before any write, never discover it via a
     # confusing post-write count mismatch (or worse, a silent cross-collection
-    # merge). Must run before `_run_leg` is even defined.
+    # merge). Must run before landing is ever reopened.
     _assert_no_target_name_collisions(detection.classifications, target_names)
 
-    # 2. SEQUENCE — quiesce → pre-gate → T2 → T3-per-leg. The per-leg ETL opens
-    #    + closes its OWN read client internally (we closed ours above).
-    def _run_leg(leg: str) -> MigrationReport:
-        if leg == "cloud":
-            return migrate_cloud(
-                vector_client, on_result=on_leg_result, target_names=target_names,
-            )
-        return migrate_local(
-            local_path, vector_client, on_result=on_leg_result,
-            target_names=target_names,
-        )
-
-    # Only pass run_t2 through when explicitly given — omitting the kwarg
-    # entirely when it is None preserves the exact prior call shape for
-    # every existing caller/test (the sequencer's own default applies).
-    _seq_kwargs: dict[str, Any] = {}
-    if run_t2 is not None:
-        _seq_kwargs["run_t2"] = run_t2
-
-    sequence = run_sequenced_migration(
-        detection,
-        sources=sources,
-        run_leg=_run_leg,
-        voyage_key_present=key_present,
-        on_progress=on_progress,
-        cross_model_targets=target_names,
-        **_seq_kwargs,
-    )
-
-    # A fresh-user no-op (nothing data-bearing) is a clean success with no
-    # migration and no validation to run.
-    if sequence.phase == "not-migrating":
-        return GuidedUpgradeResult(detection, sequence, validation=None, ok=True)
-
-    # A block / partial-leg left the sentinel migrated-failed BEFORE T3
-    # completed — there is nothing validated to gate; rollback is the per-leg
-    # ETL's concern, surfaced via the dry-run/CLI, not this gate.
-    if not sequence.ok:
-        return GuidedUpgradeResult(detection, sequence, validation=None, ok=False)
-
-    # 3. VALIDATE — reopen ONLY the data-bearing legs, build a composite read
-    #    client routing each migrated collection to its source leg, run the
-    #    gate, and always close the reopened legs.
+    # 2. LAND-THEN-TRANSFORM — reopen ONLY the data-bearing legs (now for
+    #    LANDING, not validation), wire the real staging/census/land/promote
+    #    collaborators, and drive the sequencer. Reopened legs are always
+    #    closed, even on a raise.
     legs = sorted(detection.legs_with_data)
-    migrated_collections = [c.collection for c in detection.classifications if c.has_data]
-    # RDR-162 P2: a cross-model collection's chunks landed in its bge-768 TARGET,
-    # so its validation dim is the TARGET dim (768), not the source dim (384).
-    # The count check (below, via target_names) reads the source Chroma count and
-    # the TARGET pgvector count; the taxonomy/manifest legs see the remapped refs.
-    dims = tuple(
-        sorted(
-            {
-                _dim_for_collection(target_names.get(c.collection, c.collection))[0]
-                or c.dim
-                for c in detection.classifications
-                if c.has_data and (c.dim or c.collection in target_names)
-            }
-        )
-    )
     reopen = reopen_leg or (lambda leg: _default_reopen_leg(leg, local_path))
 
     opened: dict[str, Any] = {}
-    by_collection: dict[str, Any] = {}
     try:
         try:
             for leg in legs:
                 opened[leg] = reopen(leg)
+        except Exception as exc:  # noqa: BLE001 — wrapped for the CLI's `except RuntimeError` (mirrors the historical validation-reopen guard)
+            raise RuntimeError(
+                f"could not open source read leg for landing: {exc}"
+            ) from exc
+
+        by_collection = {
+            c.collection: opened[c.leg]
+            for c in detection.classifications
+            if c.has_data
+        }
+        composite = _CompositeReadClient(by_collection)
+
+        # RDR-180 Q4 residual (nexus-jxizy.10.8): the no-text set — sampled
+        # BEFORE any row lands, over every data-bearing collection this run
+        # would actually land (never-written derived/ephemeral collections
+        # have nothing to rehash from and are excluded from the probe, same
+        # as they are excluded from landing itself).
+        no_text: set[str] = set()
+        for c in detection.classifications:
+            if not c.has_data:
+                continue
+            target = target_names.get(c.collection, c.collection)
+            if is_never_written(c.collection, target):
+                continue
+            col = composite.get_collection(c.collection)
+            if probe_has_text(col) is False:
+                no_text.add(c.collection)
+
+        def _model_gate(
+            classifications: Any, *, voyage_key_present: bool, exempt: Any
+        ) -> None:
+            assert_models_supported(
+                classifications,
+                voyage_key_present=voyage_key_present,
+                exempt=exempt,
+                no_text=frozenset(no_text),
+            )
+
+        # Constructed LAZILY (only on first actual use, inside the closures
+        # below) — ``HttpStagingStore()`` resolves a live service endpoint at
+        # construction time, and a fresh-user no-op (``total == 0`` inside
+        # :func:`run_land_then_transform_migration`) never reaches
+        # ``census_check``/``land``/etc., so it must never be forced eagerly.
+        _staging_cache: list[HttpStagingStore] = []
+
+        def _staging() -> HttpStagingStore:
+            if not _staging_cache:
+                _staging_cache.append(HttpStagingStore())
+            return _staging_cache[0]
+
+        promote_reports: dict[str, dict[str, Any]] = {}
+
+        def _census_check() -> None:
+            catalog_conn = _open_source_ro(sources.catalog_db_path)
+            memory_conn = _open_source_ro(sources.sqlite_path)
+            try:
+                source_census({"catalog": catalog_conn, "memory": memory_conn})
+            finally:
+                catalog_conn.close()
+                memory_conn.close()
+
+            chroma_dir: Path | None = None
+            if "local" in legs:
+                chroma_dir = (
+                    Path(local_path) if local_path is not None
+                    else resolve_default_local_leg()
+                )
+            estimated = estimate_staging_source_bytes(
+                (sources.sqlite_path, sources.catalog_db_path), chroma_dir=chroma_dir,
+            )
+            assert_disk_headroom(estimated_bytes=estimated, pg_path=_resolve_pg_path())
+
+        # Mutated by _land, read by the success-path ValidationOutcome below
+        # (critic-p2 M4: 'operator-visible' means the CLI's advisory_notes —
+        # migrate_cmd prints those — not a bigger structlog payload).
+        land_advisories: list[str] = []
+
+        def _land() -> dict[str, int]:
+            landed: dict[str, int] = {}
+            catalog_conn = _open_source_ro(sources.catalog_db_path)
+            memory_conn = _open_source_ro(sources.sqlite_path)
+            try:
+                for store in _POINTER_STORES:
+                    rows = pointer_store_rows(store, catalog_conn, memory_conn)
+                    landed[store] = _staging().load(store, rows)
+                orphans = topic_assignment_orphans(memory_conn)
+                if orphans:
+                    landed["topic_assignments_orphaned_skipped"] = orphans
+                    land_advisories.append(
+                        f"{orphans} topic assignment(s) referenced a topic row "
+                        "that no longer exists in the source and were skipped "
+                        "(orphaned FK; nothing to resolve them to)"
+                    )
+            finally:
+                catalog_conn.close()
+                memory_conn.close()
+
             for c in detection.classifications:
-                if c.has_data:
-                    by_collection[c.collection] = opened[c.leg]
-            read_client = _CompositeReadClient(by_collection)
-            checks = compose_validation_checks(
-                t2_db_path=t2_db_path,
-                read_client=read_client,
-                vector_client=vector_client,
-                catalog_client=catalog_client,
-                collections=migrated_collections,
-                dims=dims,
-                target_names=target_names,
+                if not c.has_data:
+                    continue
+                target = target_names.get(c.collection, c.collection)
+                if is_never_written(c.collection, target):
+                    continue
+                target_dim, reason = _dim_for_collection(target)
+                if target_dim is None:
+                    raise RuntimeError(
+                        f"land: {c.collection!r} resolves to target {target!r} "
+                        f"which cannot dim-dispatch: {reason}"
+                    )
+                source_collection = composite.get_collection(c.collection)
+                count = 0
+                for batch in chunk_rows(
+                    source_collection,
+                    target_name=target,
+                    target_model=target.split("__")[2],
+                    target_dim=target_dim,
+                    source_model=c.model,
+                ):
+                    count += _staging().load("chunks", batch)
+                landed[c.collection] = count
+            return landed
+
+        def _embed_fill(collection: str) -> dict[str, Any]:
+            target = target_names.get(collection, collection)
+            if is_never_written(collection, target):
+                return {}
+            return _staging().embed_fill(target)
+
+        def _promote(collection: str) -> dict[str, Any]:
+            target = target_names.get(collection, collection)
+            if is_never_written(collection, target):
+                return {}
+            report = _staging().promote(target)
+            promote_reports[collection] = report
+            return report
+
+        def _verify(finalize_report: dict[str, Any]) -> None:
+            staged = _staging().counts()
+            staged_chunks = int(staged.get("chunks", 0))
+            expected_chunks = sum(
+                c.source_count
+                for c in detection.classifications
+                if c.has_data
+                and not is_never_written(
+                    c.collection, target_names.get(c.collection, c.collection)
+                )
             )
-            validation = validate_migration(
-                taxonomy_check=checks.taxonomy_check,
-                count_check=checks.count_check,
-                manifest_orphan_check=checks.manifest_orphan_check,
-                stale_aspects_count=stale_aspects_count,
+            if staged_chunks != expected_chunks:
+                raise RuntimeError(
+                    f"count parity: staged chunks={staged_chunks} != detected "
+                    f"source chunks={expected_chunks} (pre-clear "
+                    "/v1/staging/counts)"
+                )
+
+            total_promoted = sum(
+                int(r.get("promoted", 0)) for r in promote_reports.values()
             )
-        except Exception as exc:  # noqa: BLE001 — recorded to the sentinel, never silent
-            # The T3 copy is done (sentinel == `migrated`) but a validation-leg
-            # SETUP step raised (e.g. a reopened read leg vanished, or the gate
-            # itself crashed). Leaving the sentinel `migrated` would strand an
-            # UNVALIDATED migration looking clean — the P2/P3 CRITICAL-1 class.
-            # Transition to `migrated-failed` (degraded-LOUD, rollback offered)
-            # before re-raising so the operator gets the recovery path.
-            reason = f"validation could not be performed: {exc}"
-            _log.error("guided_upgrade_validation_setup_raised", error=str(exc))
-            mark_failed(reason)
-            # nexus-5b9v0 round-3 Fix D (bead nexus-rndvq, CRITICAL): this used
-            # to be a bare `raise`, re-propagating *exc*'s ORIGINAL type
-            # unchanged. In production the reopen most commonly raises
-            # FileNotFoundError (chroma_read.open_local_read_client, when the
-            # local Chroma store vanished between the ETL write and this
-            # reopen) — NOT a RuntimeError, so migrate_cmd.py's
-            # `except RuntimeError` CLI wrapper could never catch it and a
-            # raw traceback still reached the operator for this exact failure
-            # mode. Wrap at the origin, matching every sibling guard in this
-            # module (ModelPreGateBlocked, MigrationQuiesceBlocked,
-            # EtlPreflightFailed, ValidationCheckVacuous,
-            # TargetNameCollisionBlocked are all RuntimeError subclasses) —
-            # any current or future `except RuntimeError` caller now covers
-            # this path unconditionally. `from exc` preserves the original
-            # exception as `__cause__` for a caller that needs to recover it.
-            raise RuntimeError(reason) from exc
+            total_staged_content = sum(
+                int(r.get("staged_content", 0)) for r in promote_reports.values()
+            )
+            # reviewer-p2 CRITICAL: the engine's staged_content counts
+            # chunk_text <> '' rows ONLY (empty-text rows deliberately wait
+            # for finalize's Item8 disposition), while /counts counts EVERY
+            # landed row — the reconciliation must fold the finalize
+            # envelope's dispositions in, or any tenant with one empty-text
+            # chunk false-positive-blocks here.
+            disposed = (
+                int(finalize_report.get("reference_only_resolved", 0))
+                + int(finalize_report.get("orphans_dropped", 0))
+                + int(finalize_report.get("orphans_synthesized", 0))
+            )
+            if total_staged_content + disposed != staged_chunks:
+                raise RuntimeError(
+                    "count parity: sum of per-collection staged_content="
+                    f"{total_staged_content} + finalize-disposed={disposed} "
+                    f"!= staged chunks={staged_chunks}"
+                )
+            collapsed = total_staged_content - total_promoted
+            if collapsed < 0:
+                raise RuntimeError(
+                    f"count parity: promoted={total_promoted} exceeds "
+                    f"staged_content={total_staged_content} for the promoted "
+                    "collections — impossible, promote overcounted"
+                )
+            residual_mismatched = int(finalize_report.get("residual_mismatched", 0))
+            dangling_manifest = int(finalize_report.get("dangling_manifest", 0))
+            if residual_mismatched != 0 or dangling_manifest != 0:
+                raise RuntimeError(
+                    "finalize in-txn verify failed: "
+                    f"residual_mismatched={residual_mismatched} "
+                    f"dangling_manifest={dangling_manifest}"
+                )
+            _log.info(
+                "guided_upgrade_verify_reconciled",
+                staged_chunks=staged_chunks,
+                promoted=total_promoted,
+                collapsed=collapsed,
+                orphans_dropped=int(finalize_report.get("orphans_dropped", 0)),
+                orphans_synthesized=int(finalize_report.get("orphans_synthesized", 0)),
+            )
+
+        # Only pass run_t2 through when explicitly given — omitting the kwarg
+        # entirely when it is None preserves the exact prior call shape for
+        # every existing caller/test (the sequencer's own default applies).
+        _seq_kwargs: dict[str, Any] = {}
+        if run_t2 is not None:
+            _seq_kwargs["run_t2"] = run_t2
+
+        outcome = run_land_then_transform_migration(
+            detection,
+            sources=sources,
+            census_check=_census_check,
+            land=_land,
+            embed_fill=_embed_fill,
+            promote=_promote,
+            finalize=lambda: _staging().finalize(),
+            verify=_verify,
+            clear_staging=lambda: _staging().clear(),
+            voyage_key_present=key_present,
+            model_gate=_model_gate,
+            on_progress=on_progress,
+            cross_model_targets=target_names,
+            **_seq_kwargs,
+        )
     finally:
         for client in opened.values():
             _close_quietly(client)
 
+    # A fresh user (nothing data-bearing) is a clean success with no migration
+    # and no validation to run — preserved from the pre-RDR-180 contract.
+    if outcome.phase == "not-migrating":
+        validation: ValidationOutcome | None = None
+    elif outcome.ok:
+        # RDR-180: ``verify`` (above) IS the validation gate now — reaching
+        # ok=True already means census/land/T2/promote/finalize/verify all
+        # passed and staging was cleared. ``run_land_then_transform_migration``
+        # itself only calls ``mark_migrated()`` (leaving the sentinel at the
+        # terminal ``migrated`` phase, mirroring the pre-RDR-180 sequencer);
+        # the OLD flow's separate VALIDATE phase then called ``clear_state()``
+        # on a clean unlock (its ``validate_migration``'s ``unlock`` callback,
+        # defaulting to ``clear_state``) — the actual UNLOCK, restoring normal
+        # (non-degraded) reads. That step has no home under land-then-
+        # transform's folded verify, so it belongs here: a genuine clean
+        # completion clears the sentinel, exactly as before.
+        clear_state()
+        # Synthesize the ValidationOutcome shape callers
+        # (``migrate_cmd._render_result``) still consume.
+        validation = ValidationOutcome(
+            unlocked=True,
+            verdict="verified",
+            blocking_reasons=(),
+            taxonomy_orphans=(),
+            count_mismatches=(),
+            count_indeterminate=False,
+            manifest_orphan_count=0,
+            manifest_vacuous=False,
+            stale_aspects=stale_aspects_count,
+            # critic-p2 M4 + L5: the CLI prints advisory_notes (and ONLY
+            # advisory_notes — never the raw stale_aspects count), so both
+            # the landing's orphan-skip note and the stale-aspects hint must
+            # travel here to actually reach an operator.
+            advisory_notes=tuple(land_advisories) + (
+                (
+                    f"{stale_aspects_count} stale document_aspects row(s) — "
+                    "run `nx enrich aspects <collection>` to refresh them",
+                ) if stale_aspects_count else ()
+            ),
+            rollback_available=False,
+        )
+    else:
+        # Any block (census / land / dirty-T2 / a failed collection / finalize
+        # / verify / clear-staging) — nothing was validated to gate; staging
+        # is retained for an idempotent resume, never an explicit rollback.
+        validation = None
+
     _log.info(
         "guided_upgrade_complete",
-        sequence_ok=sequence.ok,
-        unlocked=validation.unlocked,
-        legs=legs,
-        collections=len(migrated_collections),
+        ok=outcome.ok,
+        phase=outcome.phase,
+        collections_total=outcome.collections_total,
+        collections_done=outcome.collections_done,
     )
-    return GuidedUpgradeResult(
-        detection, sequence, validation, ok=validation.unlocked
-    )
+    return GuidedUpgradeResult(detection, outcome, validation, ok=outcome.ok)
 
 
 def _close_quietly(client: Any | None) -> None:

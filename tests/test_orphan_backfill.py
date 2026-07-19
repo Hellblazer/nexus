@@ -338,14 +338,15 @@ class TestGatherTitledChunks:
         assert groups[0].title == ""
         assert len(groups[0].chunks) == 2
 
-    def test_chash_falls_back_to_cid_prefix_when_metadata_missing(
+    def test_chash_falls_back_to_full_cid_when_metadata_missing(
         self,
     ) -> None:
+        # RDR-180: the cid IS the full chash — no truncation on fallback.
         t3 = _FakeT3({
             "x": [{"id": "abcdefghij" * 4, "meta": {"title": "T"}}],
         })
         groups = ob.gather_titled_chunks(t3, "x")
-        assert groups[0].chunks[0].chash == ("abcdefghij" * 4)[:32]
+        assert groups[0].chunks[0].chash == "abcdefghij" * 4
 
 
 def test_content_type_inferred_from_collection_prefix() -> None:

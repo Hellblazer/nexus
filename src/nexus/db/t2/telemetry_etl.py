@@ -208,6 +208,157 @@ def count_source_rows(source_db_path: Path) -> dict[str, int]:
         conn.close()
 
 
+# ── Per-table entry points (RDR-180 nexus-jxizy.10.7 split) ────────────────────
+#
+# Each function migrates exactly ONE SQLite telemetry table and opens its own
+# read-only connection (copy-not-move; mirrors aspects_etl.py's per-table
+# shape), self-recording collector counts so it is usable standalone.
+#
+# frecency.chunk_id and relevance_log.chunk_id carry CHASH identity (RDR-180):
+# the guided land-then-transform path lands + promotes them server-side, so
+# migrate_telemetry_without_chash() composes the other four and deliberately
+# excludes them.
+
+
+def migrate_relevance_log(
+    source_db_path: Path, store: Any, *, batch_log_every: int = 100,
+    collector: Any = None, breaker: EtlCircuitBreaker | None = None,
+) -> dict[str, int]:
+    """Migrate ONLY relevance_log — CHASH-BEARING (chunk_id is a chash)."""
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
+    conn = _open_ro(source_db_path)
+    try:
+        result = _migrate_relevance_log(conn, store, batch_log_every, collector=collector, breaker=breaker)
+    finally:
+        conn.close()
+    if collector is not None:
+        collector.count_read("telemetry", "relevance_log", result["read"])
+        collector.count_written("telemetry", "relevance_log", result["written"])
+    return result
+
+
+def migrate_search_telemetry(
+    source_db_path: Path, store: Any, *, batch_log_every: int = 100,
+    collector: Any = None, breaker: EtlCircuitBreaker | None = None,
+) -> dict[str, int]:
+    """Migrate ONLY search_telemetry."""
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
+    conn = _open_ro(source_db_path)
+    try:
+        result = _migrate_search_telemetry(conn, store, batch_log_every, collector=collector, breaker=breaker)
+    finally:
+        conn.close()
+    if collector is not None:
+        collector.count_read("telemetry", "search_telemetry", result["read"])
+        collector.count_written("telemetry", "search_telemetry", result["written"])
+    return result
+
+
+def migrate_tier_writes(
+    source_db_path: Path, store: Any, *, batch_log_every: int = 100,
+    collector: Any = None, breaker: EtlCircuitBreaker | None = None,
+) -> dict[str, int]:
+    """Migrate ONLY tier_writes."""
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
+    conn = _open_ro(source_db_path)
+    try:
+        result = _migrate_tier_writes(conn, store, batch_log_every, collector=collector, breaker=breaker)
+    finally:
+        conn.close()
+    if collector is not None:
+        collector.count_read("telemetry", "tier_writes", result["read"])
+        collector.count_written("telemetry", "tier_writes", result["written"])
+    return result
+
+
+def migrate_nx_answer_runs(
+    source_db_path: Path, store: Any, *, batch_log_every: int = 100,
+    collector: Any = None, breaker: EtlCircuitBreaker | None = None,
+) -> dict[str, int]:
+    """Migrate ONLY nx_answer_runs."""
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
+    conn = _open_ro(source_db_path)
+    try:
+        result = _migrate_nx_answer_runs(conn, store, batch_log_every, collector=collector, breaker=breaker)
+    finally:
+        conn.close()
+    if collector is not None:
+        collector.count_read("telemetry", "nx_answer_runs", result["read"])
+        collector.count_written("telemetry", "nx_answer_runs", result["written"])
+    return result
+
+
+def migrate_hook_failures(
+    source_db_path: Path, store: Any, *, batch_log_every: int = 100,
+    collector: Any = None, breaker: EtlCircuitBreaker | None = None,
+) -> dict[str, int]:
+    """Migrate ONLY hook_failures."""
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
+    conn = _open_ro(source_db_path)
+    try:
+        result = _migrate_hook_failures(conn, store, batch_log_every, collector=collector, breaker=breaker)
+    finally:
+        conn.close()
+    if collector is not None:
+        collector.count_read("telemetry", "hook_failures", result["read"])
+        collector.count_written("telemetry", "hook_failures", result["written"])
+    return result
+
+
+def migrate_frecency(
+    source_db_path: Path, store: Any, *, batch_log_every: int = 100,
+    collector: Any = None, breaker: EtlCircuitBreaker | None = None,
+) -> dict[str, int]:
+    """Migrate ONLY frecency — CHASH-BEARING (chunk_id is a chash)."""
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
+    conn = _open_ro(source_db_path)
+    try:
+        result = _migrate_frecency(conn, store, batch_log_every, collector=collector, breaker=breaker)
+    finally:
+        conn.close()
+    if collector is not None:
+        collector.count_read("telemetry", "frecency", result["read"])
+        collector.count_written("telemetry", "frecency", result["written"])
+    return result
+
+
+# ── Composition entry points ────────────────────────────────────────────────
+
+
+def migrate_telemetry_without_chash(
+    source_db_path: Path, store: Any, *, batch_log_every: int = 100,
+    collector: Any = None, breaker: EtlCircuitBreaker | None = None,
+) -> dict[str, Any]:
+    """search_telemetry + tier_writes + nx_answer_runs + hook_failures — NOT
+    relevance_log or frecency.
+
+    RDR-180 (nexus-jxizy.10.7): relevance_log.chunk_id and frecency.chunk_id
+    carry chash identity and are landed + promoted server-side by the guided
+    land-then-transform path; running them here too would double-write a
+    stale, unresolved legacy-id copy. The guided ``telemetry`` store slot
+    calls this instead of :func:`migrate_telemetry_rows`.
+    """
+    breaker = breaker if breaker is not None else EtlCircuitBreaker()
+    return {
+        "search_telemetry": migrate_search_telemetry(
+            source_db_path, store, batch_log_every=batch_log_every,
+            collector=collector, breaker=breaker,
+        ),
+        "tier_writes": migrate_tier_writes(
+            source_db_path, store, batch_log_every=batch_log_every,
+            collector=collector, breaker=breaker,
+        ),
+        "nx_answer_runs": migrate_nx_answer_runs(
+            source_db_path, store, batch_log_every=batch_log_every,
+            collector=collector, breaker=breaker,
+        ),
+        "hook_failures": migrate_hook_failures(
+            source_db_path, store, batch_log_every=batch_log_every,
+            collector=collector, breaker=breaker,
+        ),
+    }
+
+
 def migrate_telemetry_rows(
     source_db_path: Path,
     store: Any,
@@ -218,10 +369,12 @@ def migrate_telemetry_rows(
 ) -> dict[str, Any]:
     """Copy all telemetry rows from SQLite into Postgres via *store*.
 
-    Calls ``POST /v1/telemetry/import`` for each table, which writes timestamp
-    columns VERBATIM (fidelity-preserving import path). Do NOT substitute the
-    live write methods (``log_relevance``, etc.) here — they stamp ``now()``
-    for the timestamp columns.
+    Thin composition of the six per-table entry points (RDR-180
+    nexus-jxizy.10.7 split). Calls ``POST /v1/telemetry/import`` for each
+    table, which writes timestamp columns VERBATIM (fidelity-preserving
+    import path). Do NOT substitute the live write methods
+    (``log_relevance``, etc.) here — they stamp ``now()`` for the timestamp
+    columns.
 
     Args:
         source_db_path:  Path to the SQLite T2 database file.
@@ -235,50 +388,32 @@ def migrate_telemetry_rows(
         ``{"table": {"read": N, "written": M}, ...}`` for each of the six tables.
     """
     breaker = breaker if breaker is not None else EtlCircuitBreaker()
-    conn = _open_ro(source_db_path)
-    try:
-        return _migrate_all(
-            conn, store, batch_log_every=batch_log_every, collector=collector,
-            breaker=breaker,
-        )
-    finally:
-        conn.close()
-
-
-def _migrate_all(
-    conn: sqlite3.Connection,
-    store: Any,
-    *,
-    batch_log_every: int,
-    collector: Any = None,
-    breaker: EtlCircuitBreaker | None = None,
-) -> dict[str, Any]:
-    breaker = breaker if breaker is not None else EtlCircuitBreaker()
-    results: dict[str, Any] = {}
-
-    results["relevance_log"]    = _migrate_relevance_log(
-        conn, store, batch_log_every, collector=collector, breaker=breaker,
-    )
-    results["search_telemetry"] = _migrate_search_telemetry(
-        conn, store, batch_log_every, collector=collector, breaker=breaker,
-    )
-    results["tier_writes"]      = _migrate_tier_writes(
-        conn, store, batch_log_every, collector=collector, breaker=breaker,
-    )
-    results["nx_answer_runs"]   = _migrate_nx_answer_runs(
-        conn, store, batch_log_every, collector=collector, breaker=breaker,
-    )
-    results["hook_failures"]    = _migrate_hook_failures(
-        conn, store, batch_log_every, collector=collector, breaker=breaker,
-    )
-    results["frecency"]         = _migrate_frecency(
-        conn, store, batch_log_every, collector=collector, breaker=breaker,
-    )
-
-    if collector is not None:
-        for table, counts in results.items():
-            collector.count_read("telemetry", table, counts["read"])
-            collector.count_written("telemetry", table, counts["written"])
+    results: dict[str, Any] = {
+        "relevance_log": migrate_relevance_log(
+            source_db_path, store, batch_log_every=batch_log_every,
+            collector=collector, breaker=breaker,
+        ),
+        "search_telemetry": migrate_search_telemetry(
+            source_db_path, store, batch_log_every=batch_log_every,
+            collector=collector, breaker=breaker,
+        ),
+        "tier_writes": migrate_tier_writes(
+            source_db_path, store, batch_log_every=batch_log_every,
+            collector=collector, breaker=breaker,
+        ),
+        "nx_answer_runs": migrate_nx_answer_runs(
+            source_db_path, store, batch_log_every=batch_log_every,
+            collector=collector, breaker=breaker,
+        ),
+        "hook_failures": migrate_hook_failures(
+            source_db_path, store, batch_log_every=batch_log_every,
+            collector=collector, breaker=breaker,
+        ),
+        "frecency": migrate_frecency(
+            source_db_path, store, batch_log_every=batch_log_every,
+            collector=collector, breaker=breaker,
+        ),
+    }
 
     total_read    = sum(v["read"]    for v in results.values())
     total_written = sum(v["written"] for v in results.values())

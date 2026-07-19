@@ -1581,7 +1581,7 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
                     manifest = _cat.get_manifest(doc_id)
                 except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
                     manifest = []
-                natural_ids = [r.chash[:32] for r in manifest if r.chash]
+                natural_ids = [r.chash for r in manifest if r.chash]  # RDR-180: full digest
                 if natural_ids:
                     try:
                         present = col.get(
@@ -2118,7 +2118,7 @@ def _prune_misclassified_in_collection(
                     continue
                 for row in rows:
                     if row.chash:
-                        natural_id_set.add(row.chash[:32])
+                        natural_id_set.add(row.chash)  # RDR-180: full digest
         else:
             for did in doc_ids:
                 try:
@@ -2135,7 +2135,7 @@ def _prune_misclassified_in_collection(
                     continue
                 for row in manifest:
                     if row.chash:
-                        natural_id_set.add(row.chash[:32])
+                        natural_id_set.add(row.chash)  # RDR-180: full digest
         all_natural_ids: list[str] = list(natural_id_set)
         # Batched ``col.get`` to fetch the present subset, then batched
         # delete. _CHROMA_PAGE_SIZE caps the ids list per call.
@@ -2416,7 +2416,7 @@ def _prune_deleted_files(
         orphan_sample: list[dict] = []
         unsafe_skipped = 0
         for chunk_id, meta in zip(all_chunks["ids"], all_chunks["metadatas"]):
-            chash = (meta.get("chunk_text_hash") or "")[:32]
+            chash = meta.get("chunk_text_hash") or ""  # RDR-180: manifest carries the full digest
             if not chash:
                 # Pre-RDR-053 relics carry no ``chunk_text_hash`` in
                 # metadata, so the manifest cannot prove them live or

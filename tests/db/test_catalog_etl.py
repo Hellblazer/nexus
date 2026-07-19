@@ -702,7 +702,7 @@ class TestMigrateCatalogMocked:
             owners=[{"tumbler_prefix": "1.1", "name": "r", "owner_type": "repo"}],
             documents=[{"tumbler": "1.1.1", "title": "d"}],
             chunks=[
-                {"doc_id": "1.1.1", "position": 0, "chash": "a" * 32},
+                {"doc_id": "1.1.1", "position": 0, "chash": "a" * 64},
             ],
         )
         client = self._make_mock_client()
@@ -779,9 +779,9 @@ class TestMigrateCatalogMocked:
             owners=[{"tumbler_prefix": "1.1", "name": "r", "owner_type": "repo"}],
             documents=[{"tumbler": "1.1.1", "title": "d"}],
             chunks=[
-                {"doc_id": "1.1.1", "position": 0, "chash": "a" * 32},
-                {"doc_id": "1.1.1", "position": 1, "chash": "b" * 32},
-                {"doc_id": "1.1.1", "position": 2, "chash": "c" * 32},
+                {"doc_id": "1.1.1", "position": 0, "chash": "a" * 64},
+                {"doc_id": "1.1.1", "position": 1, "chash": "b" * 64},
+                {"doc_id": "1.1.1", "position": 2, "chash": "c" * 64},
             ],
         )
         client = self._make_mock_client()
@@ -818,7 +818,7 @@ class TestMigrateCatalogMocked:
         db_path = _make_source_catalog(
             owners=[{"tumbler_prefix": "1.1", "name": "r", "owner_type": "repo"}],
             documents=[{"tumbler": "1.1.1", "title": "d"}],
-            chunks=[{"doc_id": "1.1.1", "position": 0, "chash": "a" * 32}],
+            chunks=[{"doc_id": "1.1.1", "position": 0, "chash": "a" * 64}],
         )
 
         attempts = {"n": 0}
@@ -866,6 +866,127 @@ class TestMigrateCatalogMocked:
         assert owner_count == 1, f"owners count changed: expected 1, got {owner_count}"
         assert doc_count == 2, f"docs count changed: expected 2, got {doc_count}"
         assert link_count == 1, f"links count changed: expected 1, got {link_count}"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Per-table split (RDR-180 nexus-jxizy.10.7)
+#
+# Each new public entry point migrates ONLY its own table; the other tables'
+# rows must never reach the store (via /import/<other>), even when the
+# source DB has all five tables populated — proven via the mock client's
+# per-path call log.
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestPerTableSplit:
+    def _make_mock_client(self) -> MagicMock:
+        client = MagicMock()
+        client._post.return_value = None
+        return client
+
+    def _seeded_db(self) -> Path:
+        return _make_source_catalog(
+            owners=[{"tumbler_prefix": "1.1", "name": "r", "owner_type": "repo"}],
+            documents=[{"tumbler": "1.1.1", "title": "d"}],
+            links=[{"from_tumbler": "1.1.1", "to_tumbler": "1.1.1", "link_type": "cites"}],
+            collections=[{"name": "code__r__voyage-code-3__v1"}],
+            chunks=[{"doc_id": "1.1.1", "position": 0, "chash": "a" * 64}],
+        )
+
+    @staticmethod
+    def _paths(client: MagicMock) -> list[str]:
+        return [c.args[0] if c.args else c.kwargs.get("path", "") for c in client._post.call_args_list]
+
+    def test_migrate_owners_writes_only_owners(self) -> None:
+        from nexus.db.t2.catalog_etl import migrate_owners
+
+        db_path = self._seeded_db()
+        client = self._make_mock_client()
+        result = migrate_owners(db_path, client)
+
+        assert result["read"] == 1
+        assert result["written"] == 1
+        assert self._paths(client) == ["/import/owner"]
+
+    def test_migrate_documents_writes_only_documents(self) -> None:
+        from nexus.db.t2.catalog_etl import migrate_documents
+
+        db_path = self._seeded_db()
+        client = self._make_mock_client()
+        result = migrate_documents(db_path, client)
+
+        assert result["read"] == 1
+        assert result["written"] == 1
+        assert self._paths(client) == ["/import/document"]
+
+    def test_migrate_collections_writes_only_collections(self) -> None:
+        from nexus.db.t2.catalog_etl import migrate_collections
+
+        db_path = self._seeded_db()
+        client = self._make_mock_client()
+        result = migrate_collections(db_path, client)
+
+        assert result["read"] == 1
+        assert result["written"] == 1
+        assert self._paths(client) == ["/import/collection"]
+
+    def test_migrate_document_chunks_writes_only_chunks(self) -> None:
+        from nexus.db.t2.catalog_etl import migrate_document_chunks
+
+        db_path = self._seeded_db()
+        client = self._make_mock_client()
+        result = migrate_document_chunks(db_path, client)
+
+        assert result["read"] == 1
+        assert result["written"] == 1
+        assert self._paths(client) == ["/import/chunk"]
+
+    def test_migrate_links_writes_only_links(self) -> None:
+        from nexus.db.t2.catalog_etl import migrate_links
+
+        db_path = self._seeded_db()
+        client = self._make_mock_client()
+        result = migrate_links(db_path, client)
+
+        assert result["read"] == 1
+        assert result["written"] == 1
+        # documents are read (read-only) for the soft-dangler check but
+        # never WRITTEN — only /import/link must appear.
+        assert self._paths(client) == ["/import/link"]
+
+    def test_migrate_catalog_without_chunks_excludes_document_chunks(self) -> None:
+        """The guided-path entry point: owners/documents/collections/links
+        land; the chash-bearing document_chunks manifest is NEVER written."""
+        from nexus.db.t2.catalog_etl import migrate_catalog_without_chunks
+
+        db_path = self._seeded_db()
+        client = self._make_mock_client()
+        results = migrate_catalog_without_chunks(db_path, client)
+
+        assert "document_chunks" not in results
+        for key in ("owners", "documents", "collections", "links"):
+            assert results[key]["written"] == 1
+        paths = self._paths(client)
+        assert "/import/chunk" not in paths, (
+            f"document_chunks must NEVER be written by the guided-path "
+            f"non-chash entry point, got paths {paths}"
+        )
+        # next_seq reconcile still ran (independent of chunks).
+        assert results["next_seq_reconcile"]["written"] == 1
+
+    def test_migrate_catalog_composition_matches_monolithic_result(self) -> None:
+        """The thin composition must still migrate all five tables (byte-
+        identical behavior for existing callers)."""
+        from nexus.db.t2.catalog_etl import migrate_catalog
+
+        db_path = self._seeded_db()
+        client = self._make_mock_client()
+        results = migrate_catalog(db_path, client)
+
+        for key in ("owners", "documents", "collections", "document_chunks", "links"):
+            assert results[key]["written"] == 1
+        paths = self._paths(client)
+        assert "/import/chunk" in paths
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1183,9 +1304,9 @@ class TestCatalogEtlIntegration:
                 {"tumbler": "1.6.2", "title": "idem-doc-2"},
             ],
             chunks=[
-                {"doc_id": "1.6.1", "position": 0, "chash": "c" * 32,
+                {"doc_id": "1.6.1", "position": 0, "chash": "c" * 64,
                  "chunk_index": 0, "line_start": 1, "line_end": 40},
-                {"doc_id": "1.6.1", "position": 1, "chash": "d" * 32,
+                {"doc_id": "1.6.1", "position": 1, "chash": "d" * 64,
                  "chunk_index": 1, "line_start": 41, "line_end": 80},
             ],
             links=[
@@ -1218,7 +1339,7 @@ class TestCatalogEtlIntegration:
             f"Expected 2 manifest rows for 1.6.1 after 2 ETL runs, got {len(manifest)} — "
             "chunk idempotency broken"
         )
-        assert {r.chash for r in manifest} == {"c" * 32, "d" * 32}
+        assert {r.chash for r in manifest} == {"c" * 64, "d" * 64}
 
         # Links visible once
         links = cat_etl_client.links_from("1.6.1", link_type="relates")
@@ -1310,9 +1431,9 @@ class TestCatalogEtlIntegration:
                 {"tumbler": "1.9.1", "title": "chunked-doc", "chunk_count": 2},
             ],
             chunks=[
-                {"doc_id": "1.9.1", "position": 0, "chash": "a" * 32,
+                {"doc_id": "1.9.1", "position": 0, "chash": "a" * 64,
                  "chunk_index": 0, "line_start": 1, "line_end": 50},
-                {"doc_id": "1.9.1", "position": 1, "chash": "b" * 32,
+                {"doc_id": "1.9.1", "position": 1, "chash": "b" * 64,
                  "chunk_index": 1, "line_start": 51, "line_end": 100},
             ],
         )
@@ -1326,8 +1447,8 @@ class TestCatalogEtlIntegration:
             f"Expected 2 manifest rows for doc 1.9.1, got {len(manifest)}"
         )
         chashes = {r.chash for r in manifest}
-        assert "a" * 32 in chashes
-        assert "b" * 32 in chashes
+        assert "a" * 64 in chashes
+        assert "b" * 64 in chashes
 
     def test_meta_table_skipped_in_catalog_meta(self, cat_etl_client):
         """The _meta table is skipped; catalog_meta stays empty."""

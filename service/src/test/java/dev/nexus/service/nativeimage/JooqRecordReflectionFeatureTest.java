@@ -54,7 +54,9 @@ class JooqRecordReflectionFeatureTest {
     // generates a record type for the table-valued function's RETURNS TABLE shape.
     // 57 -> 60: nexus-146xx.16 added the engine-hosted streaming-PDF buffer
     // (nexus.pdf_pipeline, nexus.pdf_pages, nexus.pdf_chunks).
-    private static final int EXPECTED_RECORD_TYPES = 60;
+    // 60 -> 61: RDR-180 (nexus-jxizy.2) added nexus.chash_alias (the legacy-id
+    // resolution map for the bytea-chash rekey).
+    private static final int EXPECTED_RECORD_TYPES = 61;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {
