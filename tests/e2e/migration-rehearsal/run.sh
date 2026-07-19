@@ -6,6 +6,7 @@
 #   tests/e2e/migration-rehearsal/run.sh --no-build   # reuse existing wheel/JAR
 #   tests/e2e/migration-rehearsal/run.sh --hole-punch # verify-fill delta-fill proof (nexus-s3dd4.7)
 #   tests/e2e/migration-rehearsal/run.sh --era-hop    # RDR-185 era-spanning hop: ancient install -> current via `nx upgrade` ALONE (nexus-n7u38.30)
+#   tests/e2e/migration-rehearsal/run.sh --chash-window # RDR-180 pre-cutover window: cohort engine boots (bytea conversion) BEFORE the chash-rekey rung runs (nexus-p78a0)
 #
 # Builds the wheel on the host and the LINUX native nexus-service binary in a
 # GraalVM container (RDR-161: the native binary is the sole launch artifact; the
@@ -37,6 +38,7 @@ HOLE_PUNCH=0
 SHAKEOUT=0
 PACKAGE_UPGRADE=0
 ERA_HOP=0
+CHASH_WINDOW=0
 # RDR-002 ez5.13: the release_version the guided MVV stamps into the binary so
 # its /version reports >= the guided-upgrade version-pin floor and PASSES.
 # Derived from the product constant (engine_version.REQUIRED_ENGINE_VERSION —
@@ -87,6 +89,18 @@ PREV_ENGINE_TAG="${NEXUS_PREV_ENGINE_TAG:-engine-service-v0.1.44}"
 # construction.
 ERA_RELEASE="${NEXUS_ERA_RELEASE:-6.0.0}"
 ERA_ENGINE_TAG="${NEXUS_ERA_ENGINE_TAG:-engine-service-v0.1.11}"
+# nexus-p78a0 (RDR-180): the CHASH-WINDOW leg's starting point — the last
+# PRE-COHORT (legacy 32-hex TEXT chash) release + engine pair. The engine tag
+# defaults to the FLOOR tag (derived below from REQUIRED_ENGINE_VERSION):
+# pre-cutover that IS the last pre-cohort engine, AND it must equal the floor
+# so converge_engine (which reads the install-binary provenance sidecar)
+# no-ops over the harness's swapped-in cohort binary instead of re-downloading
+# the published tag over it — see the guard past the arg loop. Post-cutover
+# (floor bumped to the cohort tag) the leg's premise inverts; the DRIVER's
+# era guard then fails loud against the real store (chash already bytea) with
+# redesign instructions rather than grading a window that never opened.
+CHASH_OLD_RELEASE="${NEXUS_CHASH_OLD_RELEASE:-6.13.1}"
+CHASH_OLD_ENGINE_TAG="${NEXUS_CHASH_OLD_ENGINE_TAG:-engine-service-v${GUIDED_STAMP_VERSION}}"
 # The NEW required engine — derived from the SAME constant COLD_TAG's
 # default and GUIDED_STAMP_VERSION are, so this leg tracks a floor bump
 # automatically (nexus-b6qlf: one source of truth).
@@ -104,6 +118,7 @@ for a in "$@"; do
     --shakeout)   SHAKEOUT=1 ;;          # standalone: CANDIDATE shakeout — CLI verb matrix + incremental index + concurrent load against the locally-built -Ob binary (nexus-h8rf6)
     --package-upgrade) PACKAGE_UPGRADE=1 ;;  # standalone: nexus-cfgo9 ONE-engine convergence MVV — package-only upgrade from a real previous release, engine acquired for real by the product, never supplied by this harness
     --era-hop)    ERA_HOP=1 ;;           # standalone: RDR-185 nexus-n7u38.30 — ancient install (old release + old engine + pre-RDR-108 ids + Chroma substrate) -> current via `nx upgrade` ALONE, unattended
+    --chash-window) CHASH_WINDOW=1 ;;    # standalone: RDR-180 nexus-p78a0 — pre-cohort store -> locally-built cohort engine boot (window: loud + safe) -> nx upgrade rekey (window closed)
     *) echo "unknown arg: $a" >&2; exit 2 ;;
   esac
 done
@@ -121,7 +136,7 @@ done
 # trap below so a later `trap ... EXIT` does not clobber it). Defined + armed
 # BEFORE the stamp mutation so a signal in the stamp window still restores it.
 _guided_restore() {
-  [ "$GUIDED" = 1 ] || return 0
+  { [ "$GUIDED" = 1 ] || [ "$CHASH_WINDOW" = 1 ]; } || return 0
   rm -f "$RELEASE_PROPS.tmp" 2>/dev/null || true
   git checkout -- "$RELEASE_PROPS" 2>/dev/null || true
 }
@@ -167,6 +182,19 @@ trap '_guided_restore' EXIT
   echo "FATAL: ERA_ENGINE_TAG ($ERA_ENGINE_TAG) already equals the current REQUIRED_ENGINE_VERSION ($GUIDED_STAMP_VERSION) — there is no era to span and the hop's convergence asserts would be vacuous. Fix NEXUS_ERA_RELEASE/NEXUS_ERA_ENGINE_TAG in run.sh." >&2
   exit 2
 }
+# --chash-window is a standalone journey (nexus-p78a0): stamped native build
+# of the working tree (the cohort engine, like --guided) PLUS runtime
+# acquisition of the pre-cohort pair — never combined.
+[ "$CHASH_WINDOW" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ] || [ "$WITH_CLOUD" = 1 ] || [ "$COMPREHENSIVE" = 1 ] || [ "$STRESS" = 1 ] || [ "$FULLSTACK" = 1 ] || [ "$HOLE_PUNCH" = 1 ] || [ "$SHAKEOUT" = 1 ] || [ "$PACKAGE_UPGRADE" = 1 ] || [ "$ERA_HOP" = 1 ]; } && { echo "--chash-window is a standalone window rehearsal (its own entrypoint); do not combine with other legs" >&2; exit 2; }
+[ "$CHASH_WINDOW" = 1 ] && [ "$DO_BUILD" = 0 ] && { echo "--chash-window requires a fresh STAMPED native build of the cohort engine; drop --no-build" >&2; exit 2; }
+# The window's premise: the pre-cohort engine's provenance sidecar satisfies
+# the floor, so converge_engine NO-OPS over the harness's swapped-in cohort
+# binary. An old tag below the floor would make the transition re-download
+# the published floor tag OVER the swap and silently collapse the window.
+[ "$CHASH_WINDOW" = 1 ] && [ "${CHASH_OLD_ENGINE_TAG#engine-service-v}" != "$GUIDED_STAMP_VERSION" ] && {
+  echo "FATAL: CHASH_OLD_ENGINE_TAG ($CHASH_OLD_ENGINE_TAG) != the floor (v$GUIDED_STAMP_VERSION) — converge_engine would re-download the floor tag over the swapped cohort binary and the window would collapse. The leg requires old-tag == floor (the pre-cutover premise)." >&2
+  exit 2
+}
 
 # RDR-184 P0.2 (nexus-ccs9v.2): serialize on the machine-global fixed
 # resources this harness mutates — the fixed docker tag ($IMAGE) and the
@@ -206,11 +234,14 @@ echo "[rdr-184] lock acquired: $LOCKDIR (pid $$)" >&2
 # No-op — unset in every normal invocation.
 [[ -n "${NX_E2E_LOCK_SELFTEST:-}" ]] && exit 0
 
-if [ "$GUIDED" = 1 ]; then
-  # --guided force-rebuilds the native binary with the stamp baked in, so it is
-  # incompatible with --no-build (which would reuse a stale/unstamped binary).
-  [ "$DO_BUILD" = 0 ] && { echo "--guided requires a fresh native build; drop --no-build" >&2; exit 2; }
-  echo "[guided] stamping $RELEASE_PROPS release_version=$GUIDED_STAMP_VERSION (restored on exit)…"
+if [ "$GUIDED" = 1 ] || [ "$CHASH_WINDOW" = 1 ]; then
+  # --guided / --chash-window force-rebuild the native binary with the stamp
+  # baked in, so both are incompatible with --no-build (which would reuse a
+  # stale/unstamped binary). For --chash-window the stamp matters for the
+  # same reason as --guided: an unstamped binary reports release_version=null
+  # and every version-shaped surface degrades to "unknown".
+  [ "$DO_BUILD" = 0 ] && { echo "--guided/--chash-window require a fresh native build; drop --no-build" >&2; exit 2; }
+  echo "[stamp] stamping $RELEASE_PROPS release_version=$GUIDED_STAMP_VERSION (restored on exit)…"
   grep -v '^release_version=' "$RELEASE_PROPS" > "$RELEASE_PROPS.tmp"
   printf 'release_version=%s\n' "$GUIDED_STAMP_VERSION" >> "$RELEASE_PROPS.tmp"
   mv "$RELEASE_PROPS.tmp" "$RELEASE_PROPS"
@@ -306,6 +337,20 @@ if [ "$ERA_HOP" = 1 ]; then
   cp "$(ls -t dist/conexus-*.whl | head -1)" "$STAGE/worktree-wheel/"
   cp "$HERE/Dockerfile.era-hop" "$STAGE/Dockerfile"
   cp "$HERE/rehearse_era_hop.sh" "$HERE/seed_legacy.py" "$STAGE/"
+elif [ "$CHASH_WINDOW" = 1 ]; then
+  # nexus-p78a0: the STAMPED cohort native build travels in (the unpublished
+  # cohort engine the driver swaps in by hand — its only engine supply, see
+  # the driver header) + the worktree wheel under its own subdirectory (real
+  # PEP 427 name preserved; the driver tool-installs the OLD release from
+  # real PyPI first) + the driver.
+  mkdir -p "$STAGE/native" "$STAGE/worktree-wheel"
+  cp service/target/nexus-service "$STAGE/native/"
+  if compgen -G "service/target/*.so" > /dev/null; then
+    cp service/target/*.so "$STAGE/native/"
+  fi
+  cp "$(ls -t dist/conexus-*.whl | head -1)" "$STAGE/worktree-wheel/"
+  cp "$HERE/Dockerfile.chash-window" "$STAGE/Dockerfile"
+  cp "$HERE/rehearse_chash_window.sh" "$STAGE/"
 elif [ "$PACKAGE_UPGRADE" = 1 ]; then
   # nexus-cfgo9: the WORKING-TREE wheel travels in under its OWN subdirectory
   # (its real PEP 427 filename preserved — pip/uv parse the filename strictly
@@ -381,6 +426,9 @@ fi
 if [ "$ERA_HOP" = 1 ]; then
   run_env+=(-e "ERA_RELEASE=$ERA_RELEASE" -e "ERA_ENGINE_TAG=$ERA_ENGINE_TAG" -e "NEW_ENGINE_TAG=$NEW_ENGINE_TAG")
 fi
+if [ "$CHASH_WINDOW" = 1 ]; then
+  run_env+=(-e "OLD_RELEASE=$CHASH_OLD_RELEASE" -e "OLD_ENGINE_TAG=$CHASH_OLD_ENGINE_TAG" -e "FLOOR_VERSION=$GUIDED_STAMP_VERSION")
+fi
 if [ "$WITH_CLOUD" = 1 ]; then
   # Forward the Voyage key from .env (export VOYAGE_API_KEY=…) under both names
   # the code probes. Never echoed.
@@ -423,6 +471,10 @@ elif [ "$PACKAGE_UPGRADE" = 1 ]; then
 elif [ "$ERA_HOP" = 1 ]; then
   # nexus-n7u38.30: Dockerfile.era-hop's default entrypoint IS
   # rehearse_era_hop.sh.
+  docker run --rm "${run_env[@]}" "$IMAGE"
+elif [ "$CHASH_WINDOW" = 1 ]; then
+  # nexus-p78a0: Dockerfile.chash-window's default entrypoint IS
+  # rehearse_chash_window.sh.
   docker run --rm "${run_env[@]}" "$IMAGE"
 elif [ "$COLD" = 1 ]; then
   # nexus-4mm24: Dockerfile.cold's default entrypoint IS rehearse_cold.sh.
