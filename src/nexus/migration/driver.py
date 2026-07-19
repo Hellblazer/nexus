@@ -73,7 +73,13 @@ from nexus.migration.sequencer import (
     SequenceOutcome,
     run_land_then_transform_migration,
 )
-from nexus.migration.staging_land import HttpStagingStore, chunk_rows, pointer_store_rows, source_census
+from nexus.migration.staging_land import (
+    HttpStagingStore,
+    chunk_rows,
+    pointer_store_rows,
+    source_census,
+    topic_assignment_orphans,
+)
 from nexus.migration.state import clear_state
 from nexus.migration.validation import ValidationOutcome
 from nexus.migration.vector_etl import _dim_for_collection, cross_model_target_name, is_never_written
@@ -584,6 +590,11 @@ def run_guided_upgrade(
                 for store in _POINTER_STORES:
                     rows = pointer_store_rows(store, catalog_conn, memory_conn)
                     landed[store] = _staging().load(store, rows)
+                # reviewer-p2 Medium: orphaned-FK assignments the landing
+                # skipped must be OPERATOR-visible, not just a log line.
+                orphans = topic_assignment_orphans(memory_conn)
+                if orphans:
+                    landed["topic_assignments_orphaned_skipped"] = orphans
             finally:
                 catalog_conn.close()
                 memory_conn.close()
@@ -651,10 +662,22 @@ def run_guided_upgrade(
             total_staged_content = sum(
                 int(r.get("staged_content", 0)) for r in promote_reports.values()
             )
-            if total_staged_content != staged_chunks:
+            # reviewer-p2 CRITICAL: the engine's staged_content counts
+            # chunk_text <> '' rows ONLY (empty-text rows deliberately wait
+            # for finalize's Item8 disposition), while /counts counts EVERY
+            # landed row — the reconciliation must fold the finalize
+            # envelope's dispositions in, or any tenant with one empty-text
+            # chunk false-positive-blocks here.
+            disposed = (
+                int(finalize_report.get("reference_only_resolved", 0))
+                + int(finalize_report.get("orphans_dropped", 0))
+                + int(finalize_report.get("orphans_synthesized", 0))
+            )
+            if total_staged_content + disposed != staged_chunks:
                 raise RuntimeError(
                     "count parity: sum of per-collection staged_content="
-                    f"{total_staged_content} != staged chunks={staged_chunks}"
+                    f"{total_staged_content} + finalize-disposed={disposed} "
+                    f"!= staged chunks={staged_chunks}"
                 )
             collapsed = total_staged_content - total_promoted
             if collapsed < 0:

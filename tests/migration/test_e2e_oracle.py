@@ -129,17 +129,25 @@ class _FakeStagingStore:
         return {"filled": 0}
 
     def promote(self, collection: str) -> dict[str, Any]:
+        # reviewer-p2 CRITICAL (test-honesty): the REAL engine's
+        # staged_content counts chunk_text <> '' rows ONLY — empty-text
+        # rows wait for finalize's Item8 disposition. The fake MUST model
+        # that filter or driver._verify's reconciliation arithmetic goes
+        # untested against the real field semantics.
         self.promote_calls.append(collection)
-        rows = [r for r in self.loaded.get("chunks", []) if r["collection"] == collection]
+        rows = [r for r in self.loaded.get("chunks", [])
+                if r["collection"] == collection and r.get("chunk_text")]
         distinct_texts = {r["chunk_text"] for r in rows}
         return {"promoted": len(distinct_texts), "staged_content": len(rows)}
 
     def finalize(self, orphan_policy: str = "drop") -> dict[str, Any]:
         self.finalize_calls += 1
+        empty = [r for r in self.loaded.get("chunks", []) if not r.get("chunk_text")]
         return {
             "residual_mismatched": self._finalize_residual_mismatched,
             "dangling_manifest": 0,
-            "orphans_dropped": 0,
+            "reference_only_resolved": 0,
+            "orphans_dropped": len(empty),
             "orphans_synthesized": 0,
         }
 
@@ -387,6 +395,41 @@ class TestHermeticOracle:
         assert staging.promote_calls == [name]
         assert staging.finalize_calls == 1
         # Sentinel cleared on a clean unlock (serving normal again).
+        assert staging.cleared is True
+        assert read_state() is None
+
+    def test_scenario2b_empty_text_chunk_reconciles_not_blocks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """reviewer-p2 CRITICAL regression: the engine's staged_content
+        counts content rows ONLY (empty-text rows wait for finalize's Item8
+        disposition) while /counts counts every landed row — the verify
+        reconciliation must fold the finalize dispositions in. Pre-fix,
+        ONE empty-text chunk false-positive-blocked the whole migration
+        with a spurious count-parity error."""
+        store = tmp_path / "chroma"
+        name = _coll("oracle-empty", model=_MODEL_ONNX)
+        _seed_local_store(store, {name: 4})
+        client = chromadb.PersistentClient(path=str(store))
+        client.get_collection(name).add(
+            ids=["deadbeef" * 4], documents=[""],
+            embeddings=[[0.0, 0.0]], metadatas=[{"position": 99, "tag": "etl"}])
+        t2_path, catalog_path = _make_source_dbs(tmp_path)
+
+        result, staging = _drive(
+            monkeypatch,
+            local_path=store,
+            t2_path=t2_path,
+            catalog_path=catalog_path,
+            voyage_key_present=False,
+        )
+
+        assert result.ok is True, (
+            f"an empty-text chunk must reconcile through the finalize "
+            f"dispositions, never block: {result.sequence.blocked_reason}"
+        )
+        landed = _landed_chunks(staging, name)
+        assert len(landed) == 5, "all 5 rows land, incl. the empty-text one"
         assert staging.cleared is True
         assert read_state() is None
 

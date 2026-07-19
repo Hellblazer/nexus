@@ -237,13 +237,21 @@ def topic_assignment_rows(memory_conn: sqlite3.Connection) -> list[dict[str, Any
             "SELECT ta.doc_id, ta.topic_id, t.label, t.collection "
             "FROM topic_assignments ta JOIN topics t ON t.id = ta.topic_id")
     ]
-    orphaned = memory_conn.execute(
-        "SELECT count(*) FROM topic_assignments ta "
-        "WHERE NOT EXISTS (SELECT 1 FROM topics t WHERE t.id = ta.topic_id)"
-    ).fetchone()[0]
+    orphaned = topic_assignment_orphans(memory_conn)
     if orphaned:
         _log.warning("staging_land_topic_orphans_skipped", count=orphaned)
     return rows
+
+
+def topic_assignment_orphans(memory_conn: sqlite3.Connection) -> int:
+    """Source assignments whose topic row is GONE (orphaned FK) — skipped by
+    the landing; surfaced in the driver's landed summary so the operator
+    SEES the count (reviewer-p2 Medium: a structlog line is not 'loudly
+    counted')."""
+    return memory_conn.execute(
+        "SELECT count(*) FROM topic_assignments ta "
+        "WHERE NOT EXISTS (SELECT 1 FROM topics t WHERE t.id = ta.topic_id)"
+    ).fetchone()[0]
 
 
 def pointer_store_rows(
