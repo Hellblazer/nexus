@@ -318,6 +318,16 @@ public final class RekeyOps {
             counts.put("residual_mismatched", residual);
             counts.put("dangling_manifest", ctx.fetchOne(
                 ChashSqlIdioms.danglingManifestCount()).get(0, Integer.class));
+            // Census (nexus-jxizy.10.5): REPORTED here, fatal only on the
+            // staging-finalize path — the shipped in-store rekey keeps its
+            // contract while the envelope gains the every-column visibility
+            // (critic-C3: the old verify saw 2 of ~6 surfaces).
+            Map<String, Integer> census = ChashCensus.scan(ctx);
+            counts.put("census_residue_columns", census.size());
+            if (!census.isEmpty()) {
+                counts.put("census_residue", census.toString());
+                log.warn("event=rekey_census_residue tenant-scope residue={}", census);
+            }
             return counts;
         });
         log.info("event=rekey_complete tenant={} counts={}", tenant, out);

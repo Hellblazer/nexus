@@ -310,12 +310,18 @@ public final class StagingPromoteOps {
 
             // (3) topic_assignments: alias-repoint chash-shaped doc_ids,
             //     verbatim pass-through for memory titles (mixed identity).
+            //     RESOLVABLE-ONLY (census discipline, nexus-jxizy.10.5): a
+            //     legacy-shaped doc_id with NO alias yet stays STAGED — a
+            //     later finalize converges it once its content collection
+            //     promotes; verbatim legacy ids never enter nexus.
             counts.put("topic_assignments_promoted", ctx.execute(
                 "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id) "
                 + "SELECT DISTINCT current_setting('nexus.tenant', true), "
                 + "       COALESCE(encode(a.new_chash, 'hex'), s.doc_id), s.topic_id "
                 + "FROM staging.topic_assignments s "
                 + "LEFT JOIN nexus.chash_alias a ON a.old_ref = s.doc_id "
+                + "WHERE a.new_chash IS NOT NULL "
+                + "   OR s.doc_id !~ '^([0-9a-f]{16}|[0-9a-f]{32})$' "
                 + "ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING"));
 
             // (4) frecency: GREATEST-merge from the staged rows through the
@@ -328,7 +334,9 @@ public final class StagingPromoteOps {
                 + "        max(COALESCE(NULLIF(s.embedded_at, '')::timestamptz, now())) AS ea, "
                 + "        max(s.ttl_days) AS td "
                 + "   FROM staging.frecency s LEFT JOIN nexus.chash_alias a "
-                + "     ON s.chunk_id = a.old_ref GROUP BY 1) g";
+                + "     ON s.chunk_id = a.old_ref "
+                + "   WHERE a.new_chash IS NOT NULL OR s.chunk_id ~ '^[0-9a-f]{64}$' "
+                + "   GROUP BY 1) g";
             ctx.execute(
                 "UPDATE nexus.frecency t SET "
                 + "  frecency_score = GREATEST(t.frecency_score, g.fs), "
@@ -352,7 +360,8 @@ public final class StagingPromoteOps {
                 + "       COALESCE(NULLIF(s.ts, '')::timestamptz, now()) "
                 + "FROM staging.relevance_log s "
                 + "LEFT JOIN nexus.chash_alias a ON a.old_ref = s.chunk_id "
-                + "WHERE NOT EXISTS (SELECT 1 FROM nexus.relevance_log t "
+                + "WHERE (a.new_chash IS NOT NULL OR s.chunk_id ~ '^[0-9a-f]{64}$') "
+                + "AND NOT EXISTS (SELECT 1 FROM nexus.relevance_log t "
                 + "  WHERE t.query = s.query "
                 + "    AND t.chunk_id = COALESCE(encode(a.new_chash, 'hex'), s.chunk_id) "
                 + "    AND t.action = s.action "
@@ -399,6 +408,19 @@ public final class StagingPromoteOps {
             if (residual != 0) {
                 throw new IllegalStateException(
                     "finalize left " + residual + " digest-mismatched content row(s) — aborting");
+            }
+            // (8) THE COLUMN CENSUS (nexus-jxizy.10.5, Hal directive): every
+            // TEXT/BYTEA column in schema nexus, schema-derived, must scan
+            // clean of legacy residue outside the justified allowlist — the
+            // mechanical missed-leg killer. FATAL here: a finalize that
+            // leaves residue in nexus has left the migration incomplete.
+            ChashCensus.assertDiscoversKnownInventory(ctx);
+            Map<String, Integer> census = ChashCensus.scan(ctx);
+            counts.put("census_residue_columns", census.size());
+            if (!census.isEmpty()) {
+                throw new IllegalStateException(
+                    "census found legacy residue in nexus columns after finalize: "
+                    + census + " — a migration leg missed these; refusing to report clean");
             }
             return counts;
         });

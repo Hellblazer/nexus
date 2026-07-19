@@ -352,6 +352,51 @@ class StagingPromoteOpsIntegrationTest {
     // ── Order 8: C2 — a LATE collection promotes + re-finalize covers it ─────
 
     @Test
+    @Order(9)
+    void census_discoversKnownInventory_andFlagsANovelColumn() throws Exception {
+        // Non-vacuity: the schema-derived enumeration rediscovers the known
+        // chash-bearing inventory (a census that can't see its inventory is
+        // broken) and every allowlist entry exists.
+        scope.withTenant(T1, ctx -> {
+            dev.nexus.service.db.ChashCensus.assertDiscoversKnownInventory(ctx);
+            return null;
+        });
+        // THE missed-leg killer proof (Hal directive): seed legacy residue in
+        // a NOVEL column no hand list has ever named — the census must find
+        // it with zero code changes.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "CREATE TABLE nexus.census_canary (tenant_id TEXT NOT NULL DEFAULT '', "
+                + "mystery_ref TEXT)");
+            su.createStatement().execute(
+                "GRANT SELECT ON nexus.census_canary TO " + SVC_ROLE);
+            su.createStatement().execute(
+                "INSERT INTO nexus.census_canary (tenant_id, mystery_ref) "
+                + "VALUES ('" + T1 + "', '0123456789abcdef0123456789abcdef')");
+        }
+        try {
+            Map<String, Integer> residue = scope.withTenant(T1, ctx ->
+                dev.nexus.service.db.ChashCensus.scan(ctx));
+            assertThat(residue)
+                .as("a legacy-shaped value in a column NO hand list names must "
+                    + "be discovered — the census is schema-derived or it is nothing")
+                .containsEntry("census_canary.mystery_ref", 1);
+        } finally {
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                su.createStatement().execute("DROP TABLE nexus.census_canary");
+            }
+        }
+        // Post-cleanup the migrated store scans clean.
+        Map<String, Integer> clean = scope.withTenant(T1, ctx ->
+            dev.nexus.service.db.ChashCensus.scan(ctx));
+        assertThat(clean)
+            .as("the promoted store must scan clean of legacy residue")
+            .isEmpty();
+    }
+
+    @Test
     @Order(8)
     void lateCollection_afterFinalize_reFinalizePromotesItsPointers() {
         String lateRef = "eeee4444eeee4444eeee4444eeee4444";

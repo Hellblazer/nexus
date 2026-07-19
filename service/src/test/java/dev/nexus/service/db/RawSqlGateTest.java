@@ -103,6 +103,19 @@ class RawSqlGateTest {
             // keeper idiom, and the statements are one-shot migration ops,
             // not serving-path queries.
             "rekey", "unionAllContentRows"),
+        "StagingHandler.java", java.util.Set.of(
+            // SANCTIONED RAW (nexus-jxizy.10.4): the landing surface is
+            // dynamic-by-store (8 staging tables, per-store column lists,
+            // multi-row VALUES with ::vector/::jsonb casts) — one-shot
+            // migration plumbing over tables jOOQ codegen deliberately
+            // does not model (staging is transient landing state).
+            "handleLoad", "handleEmbedFill", "handleClear", "handleCounts"),
+        "ChashCensus.java", java.util.Set.of(
+            // SANCTIONED RAW (nexus-jxizy.10.5): the census is dynamic BY
+            // CONSTRUCTION — columns enumerated from information_schema at
+            // run time; no generated jOOQ table can exist for a column the
+            // census exists to DISCOVER. Read-only counts, never serving-path.
+            "columns", "scan", "danglingPointers", "assertDiscoversKnownInventory"),
         "StagingPromoteOps.java", java.util.Set.of(
             // SANCTIONED RAW (nexus-jxizy.10.3): the land-then-transform
             // promote/finalize — one-shot migration statements composing the
