@@ -373,7 +373,7 @@ def _open_source_ro(path: Path) -> sqlite3.Connection:
     """
     uri = f"file:{path}?mode=ro"
     try:
-        return sqlite3.connect(uri, uri=True, check_same_thread=False)
+        return sqlite3.connect(uri, uri=True, check_same_thread=False)  # epsilon-allow: read-only migration SOURCE (land-then-transform census+landing, nexus-jxizy.10.7); never a destination
     except sqlite3.OperationalError as exc:
         raise RuntimeError(
             f"cannot open SQLite source for reading: {path}: {exc}"

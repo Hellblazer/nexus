@@ -592,7 +592,12 @@ def test_lint_baseline_unchanged_after_voyageai_extension():
     # (kept in lockstep with test_storage_boundary_lint's copy — same number,
     # same commit; the derive-don't-paste note above still stands).
     # 24 -> 23: RDR-186 .16 retired pipeline_buffer.py's pipeline.db connect.
-    assert result.epsilon_allow_connects == 23, (
+    # 24 = +1 for RDR-180 land-then-transform (nexus-jxizy.10.7):
+    # migration/driver.py _open_source_ro — READ-ONLY (mode=ro URI)
+    # migration-SOURCE reads for the pre-land census + landing legs;
+    # never a destination (same migration-machinery class as
+    # remap_cascade._connect above).
+    assert result.epsilon_allow_connects == 24, (
         f"epsilon_allow_connects baseline changed: {result.epsilon_allow_connects}"
     )
     # RDR-152 nexus-fjwxh: 31 -> 33 (CLI t2_handle + MCP t2_index_write service-

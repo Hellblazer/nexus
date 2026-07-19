@@ -514,7 +514,12 @@ def test_dual_population_baseline_locked():
     # 23 = -1 for RDR-186 .16: pipeline_buffer.py's pipeline.db epsilon
     # connect retired with PipelineDB (buffer moved to nexus.pdf_pipeline
     # in PG; shrink-side ratchet, same commit).
-    assert result.epsilon_allow_connects == 23, (
+    # 24 = +1 for RDR-180 land-then-transform (nexus-jxizy.10.7):
+    # migration/driver.py _open_source_ro — READ-ONLY (mode=ro URI)
+    # migration-SOURCE reads for the pre-land census + landing legs;
+    # never a destination (same migration-machinery class as
+    # remap_cascade._connect above).
+    assert result.epsilon_allow_connects == 24, (
         f"raw-connect epsilon-allow baseline moved: {result.epsilon_allow_connects}"
     )
     # P3 endpoint: ZERO un-annotated direct T2Database constructions outside

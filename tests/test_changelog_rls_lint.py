@@ -138,27 +138,27 @@ _DOLLAR_QUOTE_RE = re.compile(r"\$(\w*)\$(.*?)\$\1\$", re.DOTALL)
 _STRING_LITERAL_RE = re.compile(r"'(?:[^']|'')*'")
 
 _FORCE_TOGGLE_RE = re.compile(
-    r"ALTER\s+TABLE\s+(nexus|t1)\.(\w+)\s+(NO\s+)?FORCE\s+ROW\s+LEVEL\s+SECURITY",
+    r"ALTER\s+TABLE\s+(nexus|t1|staging)\.(\w+)\s+(NO\s+)?FORCE\s+ROW\s+LEVEL\s+SECURITY",
     re.IGNORECASE,
 )
 _DML_TARGET_RE = re.compile(
-    r"^(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+(nexus|t1)\.(\w+)",
+    r"^(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+(nexus|t1|staging)\.(\w+)",
     re.IGNORECASE,
 )
 _ADD_CONSTRAINT_RE = re.compile(
-    r"ALTER\s+TABLE\s+(nexus|t1)\.(\w+)\s+ADD\s+CONSTRAINT\s+\w+\s+"
+    r"ALTER\s+TABLE\s+(nexus|t1|staging)\.(\w+)\s+ADD\s+CONSTRAINT\s+\w+\s+"
     r"(?:FOREIGN\s+KEY|UNIQUE)",
     re.IGNORECASE,
 )
 _UNIQUE_INDEX_RE = re.compile(
-    r"CREATE\s+UNIQUE\s+INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?\S+\s+ON\s+(nexus|t1)\.(\w+)",
+    r"CREATE\s+UNIQUE\s+INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?\S+\s+ON\s+(nexus|t1|staging)\.(\w+)",
     re.IGNORECASE,
 )
 _VALIDATE_CONSTRAINT_RE = re.compile(
-    r"ALTER\s+TABLE\s+(nexus|t1)\.(\w+)\s+VALIDATE\s+CONSTRAINT",
+    r"ALTER\s+TABLE\s+(nexus|t1|staging)\.(\w+)\s+VALIDATE\s+CONSTRAINT",
     re.IGNORECASE,
 )
-_TABLE_MENTION_RE = re.compile(r"\b(nexus|t1)\.(\w+)\b(?!\s*\()", re.IGNORECASE)
+_TABLE_MENTION_RE = re.compile(r"\b(nexus|t1|staging)\.(\w+)\b(?!\s*\()", re.IGNORECASE)
 
 # FIX 5(c): CREATE SCHEMA tripwire. The analyzer's schema scope is hardcoded to
 # nexus/t1 everywhere; a third schema would otherwise be silently invisible. The
@@ -166,7 +166,7 @@ _TABLE_MENTION_RE = re.compile(r"\b(nexus|t1)\.(\w+)\b(?!\s*\()", re.IGNORECASE)
 _CREATE_SCHEMA_RE = re.compile(
     r"CREATE\s+SCHEMA\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)", re.IGNORECASE
 )
-_KNOWN_SCHEMAS = frozenset({"nexus", "t1"})
+_KNOWN_SCHEMAS = frozenset({"nexus", "t1", "staging"})  # staging: RDR-180 land-then-transform landing zone (nexus-jxizy.10.1) — FORCE RLS + tenant policy on every table, no DML in changesets
 
 # FIX 3: Liquibase element kinds this analyzer cannot see into at all (only
 # <sql> children of <changeSet> are scanned). Zero current usage in the real
