@@ -6,6 +6,22 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **chash is now the full 32-byte SHA-256, stored as raw bytes** (RDR-180,
+  epic nexus-jxizy): the chunk content address was historically
+  `sha256(text)[:32]` — half the digest as hex text — while the citation
+  grammar advertised the full 64-hex. The producer now emits the full
+  digest, the engine stores `bytea` with `CHECK (octet_length(chash)=32)`,
+  and hex (64 lowercase chars) is strictly the interchange form. Requires
+  the paired RDR-180 engine generation; `nx upgrade`'s new `chash-rekey`
+  ladder rung performs the freeze-gated per-store cutover (rehash from
+  stored text, no re-embed) and records every legacy id in the permanent
+  `chash_alias` map so old 32-hex references stay resolvable forever.
+  The 32-vs-64 width bug class is structurally eliminated; content
+  citations (`chash:<64hex>`) now resolve at the full 256 bits they
+  always claimed.
+
 ### Fixed
 
 - **CLI T3 verbs no longer demand legacy Chroma credentials on migrated /
