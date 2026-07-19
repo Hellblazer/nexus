@@ -192,14 +192,59 @@ DROP TABLE IF EXISTS staging.document_chunks;
     <changeSet id="staging-4-svc-grants" author="nexus-jxizy.10.1" runAlways="true">
         <comment>nexus_svc drives land/promote/finalize/clear under withTenant —
             needs full DML + TRUNCATE on staging (runAlways: self-healing like
-            grants-nexus-svc)</comment>
-        <sql splitStatements="true" stripComments="false">
-GRANT USAGE ON SCHEMA staging TO nexus_svc;
-GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON ALL TABLES IN SCHEMA staging TO nexus_svc;
+            grants-nexus-svc-1). OWNERSHIP-GUARDED per-relation loop (the
+            nexus-46yy3 / grants-nexus-svc idiom, caught by
+            ChangelogBulkGrantConformanceTest + the Catalog013 replay: a
+            bulk GRANT ... ON ALL TABLES hard-errors when a replay runs as a
+            non-owner of a schema a prior run's owner created — skip with a
+            NOTICE instead; the owning run's grants already stand).</comment>
+        <sql splitStatements="false" stripComments="false">
+DO $$
+DECLARE
+    rel RECORD;
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_namespace n
+        WHERE n.nspname = 'staging'
+          AND pg_get_userbyid(n.nspowner) = current_user
+    ) THEN
+        RAISE NOTICE 'staging svc grants skipped: schema staging not owned by % (the owning migration run granted)', current_user;
+        RETURN;
+    END IF;
+    EXECUTE 'GRANT USAGE ON SCHEMA staging TO nexus_svc';
+    FOR rel IN
+        SELECT c.relname
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'staging'
+          AND c.relkind IN ('r', 'p')
+          AND pg_get_userbyid(c.relowner) = current_user
+    LOOP
+        EXECUTE format(
+            'GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON staging.%I TO nexus_svc',
+            rel.relname);
+    END LOOP;
+END $$;
         </sql>
         <rollback>
-REVOKE ALL ON ALL TABLES IN SCHEMA staging FROM nexus_svc;
-REVOKE USAGE ON SCHEMA staging FROM nexus_svc;
+DO $$
+DECLARE
+    rel RECORD;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'staging') THEN
+        RETURN;
+    END IF;
+    FOR rel IN
+        SELECT c.relname
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'staging' AND c.relkind IN ('r', 'p')
+          AND pg_get_userbyid(c.relowner) = current_user
+    LOOP
+        EXECUTE format('REVOKE ALL ON staging.%I FROM nexus_svc', rel.relname);
+    END LOOP;
+    REVOKE USAGE ON SCHEMA staging FROM nexus_svc;
+END $$;
         </rollback>
     </changeSet>
 
