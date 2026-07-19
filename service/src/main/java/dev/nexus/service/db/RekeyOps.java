@@ -83,6 +83,12 @@ public final class RekeyOps {
      * Item8 policy for orphaned empty-text rows (default caller: drop).
      * Returns the disposition + per-table counts (the auditable envelope).
      */
+    // SANCTIONED RAW (nexus-jxizy.6, RawSqlGateTest allowlist): the rekey is
+    // deliberately server-side SQL — sha256() over chunk_text, the
+    // ctid/array_agg keeper idiom for two-phase collapse, and the
+    // reversibility-lemma CASE expressions have no jOOQ DSL form; these are
+    // one-shot freeze-window migration statements, never serving-path
+    // queries.
     public Map<String, Object> rekey(String tenant, boolean synthesizeOrphans) {
         Map<String, Object> out = tenantScope.withTenant(tenant, ctx -> {
             Map<String, Object> counts = new LinkedHashMap<>();
