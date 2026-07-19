@@ -136,6 +136,11 @@ EPSILON_CENSUS: dict[str, int] = {
     "src/nexus/mcp_infra.py": 4,
     "src/nexus/merge_candidates.py": 2,
     "src/nexus/migration/chroma_read.py": 2,
+    # RDR-180 land-then-transform (nexus-jxizy.10.7, Hal-directed design):
+    # the guided driver's ONE read-only migration-SOURCE connect
+    # (file:...?mode=ro URI) feeding pre-land census + landing — the
+    # sanctioned remap_cascade class, never a destination.
+    "src/nexus/migration/driver.py": 1,
     "src/nexus/migration/guided_upgrade.py": 1,
     "src/nexus/migration/orchestrator.py": 1,
     "src/nexus/migration/remap_cascade.py": 1,
