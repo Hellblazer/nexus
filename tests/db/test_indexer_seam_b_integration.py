@@ -425,7 +425,7 @@ def test_store_put_get_roundtrip_ij9hg(
         "(the nexus-7zuzz live-broken class)"
     )
     doc_id = put_result.removeprefix("Stored: ").split(" -> ", 1)[0].strip()
-    assert len(doc_id) == 32, f"unexpected doc_id from store_put: {doc_id!r}"
+    assert len(doc_id) == 64, f"unexpected doc_id from store_put: {doc_id!r}"
 
     # 2) store_get MUST return the original content — put-succeeds-but-not-
     #    findable is the exact incident. Content fidelity is the pin.

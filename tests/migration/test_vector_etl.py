@@ -2297,14 +2297,14 @@ class TestVectorEtlIntegration:
         assert rows == ["5"]
         # (b) chash verbatim — pgvector chash set == source Chroma id set.
         chashes = _psql_rows(
-            pg, f"SELECT chash FROM nexus.chunks_768 WHERE collection = '{name}'"
+            pg, f"SELECT encode(chash, 'hex') FROM nexus.chunks_768 WHERE collection = '{name}'"
         )
         assert sorted(chashes) == sorted(ids)
         # (b) text byte-identical for a spot chunk.
         text = _psql_rows(
             pg,
             "SELECT chunk_text FROM nexus.chunks_768"
-            f" WHERE collection = '{name}' AND chash = '{ids[3]}'",
+            f" WHERE collection = '{name}' AND chash = decode('{ids[3]}', 'hex')",
         )
         assert text == [texts[3]]
         # Collection name verbatim and tenant stamping.
@@ -2442,7 +2442,7 @@ class TestManifestFkIntegration:
                 pg,
                 "INSERT INTO nexus.catalog_document_chunks"
                 " (tenant_id, doc_id, position, chash)"
-                f" VALUES ('default', '9000.1', {pos}, '{chash}')",
+                f" VALUES ('default', '9000.1', {pos}, decode('{chash}', 'hex'))",
             )
 
         migrate_local(store, vec_etl_vector_client)
@@ -2483,13 +2483,13 @@ class TestManifestFkIntegration:
             pg,
             "INSERT INTO nexus.catalog_document_chunks"
             " (tenant_id, doc_id, position, chash, collection)"
-            f" VALUES ('default', '9000.2', 0, '{chash384}', '{name384}')",
+            f" VALUES ('default', '9000.2', 0, decode('{chash384}', 'hex'), '{name384}')",
         )
         _psql_exec(
             pg,
             "INSERT INTO nexus.chunks_384"
             " (tenant_id, collection, chash, chunk_text, embedding)"
-            f" VALUES ('default', '{name384}', '{chash384}',"
+            f" VALUES ('default', '{name384}', decode('{chash384}', 'hex'),"
             f" 'a 384-lane chunk', '{vec384}')",
         )
         assert _psql_rows(pg, manifest_orphan_sql(768)) == []
@@ -2498,12 +2498,12 @@ class TestManifestFkIntegration:
         # Deliberate orphan: a manifest row whose chash was never migrated
         # MUST be detected (non-vacuous validation) — in the migrated bge-768
         # collection, so it surfaces at dim 768.
-        bogus = "feedfacefeedfacefeedfacefeedface"
+        bogus = "feedface" * 8  # full 64-hex: the octet CHECK enforces new writes
         _psql_exec(
             pg,
             "INSERT INTO nexus.catalog_document_chunks"
             " (tenant_id, doc_id, position, chash, collection)"
-            f" VALUES ('default', '9000.1', 99, '{bogus}', '{name}')",
+            f" VALUES ('default', '9000.1', 99, decode('{bogus}', 'hex'), '{name}')",
         )
         orphans = _psql_rows(pg, manifest_orphan_sql(768))
         assert len(orphans) == 1
@@ -2513,12 +2513,12 @@ class TestManifestFkIntegration:
         # lane MUST be detected at dim 384 — proving 384 orphan detection is
         # non-vacuous (the other half of cross-dim scoping), not just that 384
         # ignores 768-lane rows.
-        bogus384 = "0123456789abcdef0123456789abcdef"
+        bogus384 = "0123456789abcdef" * 4  # full 64-hex
         _psql_exec(
             pg,
             "INSERT INTO nexus.catalog_document_chunks"
             " (tenant_id, doc_id, position, chash, collection)"
-            f" VALUES ('default', '9000.2', 99, '{bogus384}', '{name384}')",
+            f" VALUES ('default', '9000.2', 99, decode('{bogus384}', 'hex'), '{name384}')",
         )
         orphans384 = _psql_rows(pg, manifest_orphan_sql(384))
         assert len(orphans384) == 1

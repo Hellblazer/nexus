@@ -279,6 +279,18 @@ set +e
 # ~/.config/nexus/config.yml from inside the "fully isolated" gate — a
 # dead voyage credential there hard-failed the voyage subset even with
 # the env key masked, and any credential there can leak into gate runs.
+# NEXUS_PG_BIN pinned to the scratch bundle (2026-07-19): tests that
+# provision their OWN throwaway cluster (test_pg_provision, the rdr182
+# forensics MVV, nexus_diag) override NEXUS_CONFIG_DIR to a tmp dir, which
+# makes bundle discovery (config-dir-relative, pg_provision step 1.5) lose
+# sight of the gate's extracted bundle. On a bundle-only box (no system PG
+# — the shipped configuration) that family silently depended on ambient
+# Homebrew PG. Export the gate's own bundle explicitly: self-provisioning,
+# never ambient.
+GATE_PG_BIN="$SCRATCH/pg-bundle/bundle/bin"
+if [ -x "$GATE_PG_BIN/initdb" ]; then
+  export NEXUS_PG_BIN="$GATE_PG_BIN"
+fi   # else: host-PG / dev mode — fall through to auto-discovery
 NX_SERVICE_HOST=127.0.0.1 NX_SERVICE_PORT="$SERVICE_PORT" NX_SERVICE_TOKEN="$SERVICE_TOKEN" \
   NEXUS_CONFIG_DIR="$SCRATCH" \
   uv run pytest -m "integration and not lived_in" -q "$@" 2>&1 | tee "$SCRATCH/pytest.out"

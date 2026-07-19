@@ -702,7 +702,7 @@ class TestMigrateCatalogMocked:
             owners=[{"tumbler_prefix": "1.1", "name": "r", "owner_type": "repo"}],
             documents=[{"tumbler": "1.1.1", "title": "d"}],
             chunks=[
-                {"doc_id": "1.1.1", "position": 0, "chash": "a" * 32},
+                {"doc_id": "1.1.1", "position": 0, "chash": "a" * 64},
             ],
         )
         client = self._make_mock_client()
@@ -779,9 +779,9 @@ class TestMigrateCatalogMocked:
             owners=[{"tumbler_prefix": "1.1", "name": "r", "owner_type": "repo"}],
             documents=[{"tumbler": "1.1.1", "title": "d"}],
             chunks=[
-                {"doc_id": "1.1.1", "position": 0, "chash": "a" * 32},
-                {"doc_id": "1.1.1", "position": 1, "chash": "b" * 32},
-                {"doc_id": "1.1.1", "position": 2, "chash": "c" * 32},
+                {"doc_id": "1.1.1", "position": 0, "chash": "a" * 64},
+                {"doc_id": "1.1.1", "position": 1, "chash": "b" * 64},
+                {"doc_id": "1.1.1", "position": 2, "chash": "c" * 64},
             ],
         )
         client = self._make_mock_client()
@@ -818,7 +818,7 @@ class TestMigrateCatalogMocked:
         db_path = _make_source_catalog(
             owners=[{"tumbler_prefix": "1.1", "name": "r", "owner_type": "repo"}],
             documents=[{"tumbler": "1.1.1", "title": "d"}],
-            chunks=[{"doc_id": "1.1.1", "position": 0, "chash": "a" * 32}],
+            chunks=[{"doc_id": "1.1.1", "position": 0, "chash": "a" * 64}],
         )
 
         attempts = {"n": 0}
@@ -890,7 +890,7 @@ class TestPerTableSplit:
             documents=[{"tumbler": "1.1.1", "title": "d"}],
             links=[{"from_tumbler": "1.1.1", "to_tumbler": "1.1.1", "link_type": "cites"}],
             collections=[{"name": "code__r__voyage-code-3__v1"}],
-            chunks=[{"doc_id": "1.1.1", "position": 0, "chash": "a" * 32}],
+            chunks=[{"doc_id": "1.1.1", "position": 0, "chash": "a" * 64}],
         )
 
     @staticmethod
@@ -1304,9 +1304,9 @@ class TestCatalogEtlIntegration:
                 {"tumbler": "1.6.2", "title": "idem-doc-2"},
             ],
             chunks=[
-                {"doc_id": "1.6.1", "position": 0, "chash": "c" * 32,
+                {"doc_id": "1.6.1", "position": 0, "chash": "c" * 64,
                  "chunk_index": 0, "line_start": 1, "line_end": 40},
-                {"doc_id": "1.6.1", "position": 1, "chash": "d" * 32,
+                {"doc_id": "1.6.1", "position": 1, "chash": "d" * 64,
                  "chunk_index": 1, "line_start": 41, "line_end": 80},
             ],
             links=[
@@ -1339,7 +1339,7 @@ class TestCatalogEtlIntegration:
             f"Expected 2 manifest rows for 1.6.1 after 2 ETL runs, got {len(manifest)} — "
             "chunk idempotency broken"
         )
-        assert {r.chash for r in manifest} == {"c" * 32, "d" * 32}
+        assert {r.chash for r in manifest} == {"c" * 64, "d" * 64}
 
         # Links visible once
         links = cat_etl_client.links_from("1.6.1", link_type="relates")
@@ -1431,9 +1431,9 @@ class TestCatalogEtlIntegration:
                 {"tumbler": "1.9.1", "title": "chunked-doc", "chunk_count": 2},
             ],
             chunks=[
-                {"doc_id": "1.9.1", "position": 0, "chash": "a" * 32,
+                {"doc_id": "1.9.1", "position": 0, "chash": "a" * 64,
                  "chunk_index": 0, "line_start": 1, "line_end": 50},
-                {"doc_id": "1.9.1", "position": 1, "chash": "b" * 32,
+                {"doc_id": "1.9.1", "position": 1, "chash": "b" * 64,
                  "chunk_index": 1, "line_start": 51, "line_end": 100},
             ],
         )
@@ -1447,8 +1447,8 @@ class TestCatalogEtlIntegration:
             f"Expected 2 manifest rows for doc 1.9.1, got {len(manifest)}"
         )
         chashes = {r.chash for r in manifest}
-        assert "a" * 32 in chashes
-        assert "b" * 32 in chashes
+        assert "a" * 64 in chashes
+        assert "b" * 64 in chashes
 
     def test_meta_table_skipped_in_catalog_meta(self, cat_etl_client):
         """The _meta table is skipped; catalog_meta stays empty."""

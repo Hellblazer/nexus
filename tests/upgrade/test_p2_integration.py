@@ -65,8 +65,10 @@ def chroma_source() -> Any:
         pass
     col = client.create_collection(COLL)
     # The incident shape: legacy 16-char ids (pre-RDR-108), one identical-text
-    # pair, plus one already-conformant row. Embeddings supplied explicitly so
-    # the fixture never invokes an embedder (deterministic, offline).
+    # pair, plus one 32-hex half-digest row (the pre-RDR-180 "conformant"
+    # shape — itself legacy since the full-digest cutover, so the transform
+    # re-maps it too). Embeddings supplied explicitly so the fixture never
+    # invokes an embedder (deterministic, offline).
     col.add(
         ids=["legacy-0000000001", "legacy-0000000002", "legacy-0000000003", _sha32(TEXT_CONF)],
         documents=[TEXT_DUP, TEXT_DUP, TEXT_UNIQ, TEXT_CONF],
@@ -142,15 +144,17 @@ def test_incident_shape_converges_end_to_end(
         assert result.source_count == 4
         assert result.written == 3  # the identical-text pair collapsed
 
-        assert set(target.rows) == {_sha32(TEXT_DUP), _sha32(TEXT_UNIQ), _sha32(TEXT_CONF)}
+        assert set(target.rows) == {_sha64(TEXT_DUP), _sha64(TEXT_UNIQ), _sha64(TEXT_CONF)}
         # Metadata (incl. chunk_text_hash) carried through to the new id.
-        assert target.rows[_sha32(TEXT_DUP)]["meta"]["chunk_text_hash"] == _sha64(TEXT_DUP)
+        assert target.rows[_sha64(TEXT_DUP)]["meta"]["chunk_text_hash"] == _sha64(TEXT_DUP)
 
-        # The map: exactly the three legacy ids, nothing for the conformant row.
+        # The map: all four source ids — the three 16-char legacies AND the
+        # 32-hex half-digest row (legacy since RDR-180's full-digest cutover).
         assert store.entries_for_collection(COLL) == {
-            "legacy-0000000001": _sha32(TEXT_DUP),
-            "legacy-0000000002": _sha32(TEXT_DUP),
-            "legacy-0000000003": _sha32(TEXT_UNIQ),
+            "legacy-0000000001": _sha64(TEXT_DUP),
+            "legacy-0000000002": _sha64(TEXT_DUP),
+            "legacy-0000000003": _sha64(TEXT_UNIQ),
+            _sha32(TEXT_CONF): _sha64(TEXT_CONF),
         }
 
     # Source byte-untouched (RDR-176): same ids, same count, same order.
@@ -183,11 +187,12 @@ def test_crash_ordering_resume_converges(
         assert result.ok is False
         assert "simulated crash" in result.reason
         written_before_crash = dict(crash_target.rows)
-        # INVARIANT: every target row's id is in the map or was conformant —
+        # INVARIANT: every target row's id is in the map (post-RDR-180 every
+        # seeded id re-maps, the 32-hex half-digest included) —
         # target-without-map is unrepresentable.
         mapped = set(store.entries_for_collection(COLL).values())
         for cid in written_before_crash:
-            assert cid in mapped or cid == _sha32(TEXT_CONF)
+            assert cid in mapped
 
     # Resume: fresh run, same map store, healthy target.
     with ChashRemapStore(map_path) as store:
@@ -200,12 +205,13 @@ def test_crash_ordering_resume_converges(
             source_collection=COLL, target_collection=COLL, page=2, transform=transform,
         )
         assert result.ok is True
-        assert set(target.rows) == {_sha32(TEXT_DUP), _sha32(TEXT_UNIQ), _sha32(TEXT_CONF)}
+        assert set(target.rows) == {_sha64(TEXT_DUP), _sha64(TEXT_UNIQ), _sha64(TEXT_CONF)}
         # Deterministic re-derivation: the map is unchanged by the resume.
         assert store.entries_for_collection(COLL) == {
-            "legacy-0000000001": _sha32(TEXT_DUP),
-            "legacy-0000000002": _sha32(TEXT_DUP),
-            "legacy-0000000003": _sha32(TEXT_UNIQ),
+            "legacy-0000000001": _sha64(TEXT_DUP),
+            "legacy-0000000002": _sha64(TEXT_DUP),
+            "legacy-0000000003": _sha64(TEXT_UNIQ),
+            _sha32(TEXT_CONF): _sha64(TEXT_CONF),
         }
 
 
@@ -301,12 +307,12 @@ def test_cascade_on_real_ddl_after_migration(
     conn.close()
     # Positions preserved; the collapsed pair points at ONE chash at two rows.
     assert manifest == [
-        (0, _sha32(TEXT_DUP)), (1, _sha32(TEXT_DUP)), (2, _sha32(TEXT_UNIQ)),
+        (0, _sha64(TEXT_DUP)), (1, _sha64(TEXT_DUP)), (2, _sha64(TEXT_UNIQ)),
     ]
     conn = sqlite3.connect(memory_db)
     topics = conn.execute("SELECT doc_id, topic_id FROM topic_assignments").fetchall()
     conn.close()
-    assert topics == [(_sha32(TEXT_DUP), 7)]
+    assert topics == [(_sha64(TEXT_DUP), 7)]
 
 
 def test_chained_plan_execute_cascade_rollback(
@@ -389,7 +395,7 @@ def test_chained_plan_execute_cascade_rollback(
 
     conn = sqlite3.connect(catalog_db)
     assert conn.execute("SELECT chash FROM document_chunks").fetchall() == [
-        (_sha32(TEXT_DUP),)
+        (_sha64(TEXT_DUP),)
     ]
     conn.close()
     # Source untouched through the entire chain.
