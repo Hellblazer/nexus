@@ -117,15 +117,15 @@ public final class ChashCensus {
         for (String[] col : columns(ctx, "text")) {
             if (excluded(TEXT_EXCLUSIONS, col[0], col[1])) continue;
             Integer n = ctx.fetchOne(
-                "SELECT count(*) FROM nexus." + col[0]
-                + " WHERE " + col[1] + " ~ '" + LEGACY_SHAPE + "'").get(0, Integer.class);
+                "SELECT count(*) FROM nexus.\"" + col[0] + "\""
+                + " WHERE \"" + col[1] + "\" ~ '" + LEGACY_SHAPE + "'").get(0, Integer.class);
             if (n != null && n > 0) residue.put(col[0] + "." + col[1], n);
         }
         for (String[] col : columns(ctx, "bytea")) {
             if (excluded(BYTEA_EXCLUSIONS, col[0], col[1])) continue;
             Integer n = ctx.fetchOne(
-                "SELECT count(*) FROM nexus." + col[0]
-                + " WHERE " + col[1] + " IS NOT NULL AND octet_length(" + col[1] + ") <> 32")
+                "SELECT count(*) FROM nexus.\"" + col[0] + "\""
+                + " WHERE \"" + col[1] + "\" IS NOT NULL AND octet_length(\"" + col[1] + "\") <> 32")
                 .get(0, Integer.class);
             if (n != null && n > 0) residue.put(col[0] + "." + col[1] + "[bytea]", n);
         }
@@ -161,6 +161,11 @@ public final class ChashCensus {
             + "  AND NOT EXISTS (SELECT 1 FROM nexus.chunks_1024 c WHERE c.chash = i.chash)")
             .get(0, Integer.class);
         if (idx != null && idx > 0) out.put("dangling.chash_index", idx);
+        // The manifest (review P1 Critical: the census backstop must cover
+        // catalog_document_chunks independently of the finalize call site).
+        Integer manifest = ctx.fetchOne(
+            ChashSqlIdioms.danglingManifestCount()).get(0, Integer.class);
+        if (manifest != null && manifest > 0) out.put("dangling.catalog_document_chunks", manifest);
         return out;
     }
 

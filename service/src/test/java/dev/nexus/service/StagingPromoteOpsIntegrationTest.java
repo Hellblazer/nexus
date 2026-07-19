@@ -352,6 +352,78 @@ class StagingPromoteOpsIntegrationTest {
     // ── Order 8: C2 — a LATE collection promotes + re-finalize covers it ─────
 
     @Test
+    @Order(10)
+    void unresolvableCanonicalManifestRow_staysStaged_neverDangles() {
+        // Review P1 Critical scenario: a canonical-shaped staged pointer
+        // whose content never landed (orphan-dropped upstream, or its
+        // collection not yet promoted) must stay STAGED — the direct-decode
+        // arm requires PROOF of content existence, so a dangling manifest
+        // row cannot be created by finalize.
+        String ghost = digestHex("content that never landed anywhere");
+        scope.withTenant(T1, ctx -> {
+            ctx.execute("INSERT INTO staging.document_chunks "
+                + "(tenant_id, doc_id, position, chash) VALUES (?, '1.1.1', 7, ?) "
+                + "ON CONFLICT DO NOTHING", T1, ghost);
+            return null;
+        });
+        Map<String, Object> fin = ops.finalizeTenant(T1, false);
+        assertThat(((Number) fin.get("manifest_unresolved")).intValue())
+            .as("the ghost pointer is counted unresolved, not promoted")
+            .isGreaterThanOrEqualTo(1);
+        assertThat(fin.get("dangling_manifest")).isEqualTo(0);
+        assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
+            + "WHERE encode(chash,'hex') = '" + ghost + "'"))
+            .as("no dangling manifest row was created").isEqualTo(0);
+        scope.withTenant(T1, ctx -> {
+            ctx.execute("DELETE FROM staging.document_chunks WHERE position = 7");
+            return null;
+        });
+    }
+
+    @Test
+    @Order(11)
+    void preExistingDanglingManifestRow_abortsFinalizeLoud() throws Exception {
+        // The fatal gate's falsification (review P1 Critical: the count was
+        // computed but never asserted — delete the throw and THIS fails).
+        String ghost = digestHex("pre-existing corruption ghost");
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash) "
+                + "VALUES ('" + T1 + "', '1.1.1', 88, decode('" + ghost + "', 'hex'))");
+        }
+        try {
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> ops.finalizeTenant(T1, false))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("dangling manifest");
+        } finally {
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                su.createStatement().execute(
+                    "DELETE FROM nexus.catalog_document_chunks WHERE position = 88");
+            }
+        }
+        // And the census backstop sees the same class independently.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash) "
+                + "VALUES ('" + T1 + "', '1.1.1', 89, decode('" + ghost + "', 'hex'))");
+        }
+        try {
+            Map<String, Integer> residue = scope.withTenant(T1, ctx ->
+                dev.nexus.service.db.ChashCensus.scan(ctx));
+            assertThat(residue).containsKey("dangling.catalog_document_chunks");
+        } finally {
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                su.createStatement().execute(
+                    "DELETE FROM nexus.catalog_document_chunks WHERE position = 89");
+            }
+        }
+    }
+
+    @Test
     @Order(9)
     void census_discoversKnownInventory_andFlagsANovelColumn() throws Exception {
         // Non-vacuity: the schema-derived enumeration rediscovers the known

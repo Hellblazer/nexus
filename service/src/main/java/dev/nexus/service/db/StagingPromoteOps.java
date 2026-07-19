@@ -116,6 +116,15 @@ public final class StagingPromoteOps {
         Map<String, Object> out = tenantScope.withTenant(tenant, ctx -> {
             Map<String, Object> counts = new LinkedHashMap<>();
 
+            // Per-tenant serialization (review P1 High: TOCTOU between the
+            // C1 guard SELECT and the alias INSERT under READ COMMITTED —
+            // a concurrent promote could commit a conflicting alias in the
+            // gap and the ON CONFLICT DO NOTHING would keep it SILENTLY).
+            // The xact-scoped advisory lock serializes every promote AND
+            // finalize for one tenant; released automatically at txn end.
+            ctx.execute("SELECT pg_advisory_xact_lock(hashtext('staging:' || "
+                + "current_setting('nexus.tenant', true)))");
+
             // (1) dim precheck — every staged content row must carry the
             // name-implied dim (land-time classification already renamed
             // mislabeled collections to their honest target).
@@ -246,6 +255,14 @@ public final class StagingPromoteOps {
         Map<String, Object> out = tenantScope.withTenant(tenant, ctx -> {
             Map<String, Object> counts = new LinkedHashMap<>();
 
+            // Same per-tenant serialization as promoteCollection: finalize
+            // must never run concurrently with an in-flight promote (review
+            // P1 Medium: Item8's tenant-wide visibility would miss an
+            // uncommitted promote's aliases and could drop a resolvable
+            // reference).
+            ctx.execute("SELECT pg_advisory_xact_lock(hashtext('staging:' || "
+                + "current_setting('nexus.tenant', true)))");
+
             // (1) Item8, tenant-wide (C4): staged empty-text rows.
             //     reference-only = the ref resolves through the alias (content
             //     landed in ANY collection) or is already-canonical for a live
@@ -291,22 +308,33 @@ public final class StagingPromoteOps {
 
             // (2) manifest promote through the alias (doc-scoped => finalize;
             //     canonical at INSERT so the octet CHECK holds by construction).
+            // RESOLVABLE-ONLY, review P1 Critical: the alias arm implies
+            // content exists (alias + content insert share one promote txn);
+            // the direct 64-hex arm must PROVE existence — a canonical-shaped
+            // staged pointer whose content was orphan-dropped or has not
+            // promoted yet stays STAGED (a later finalize converges it) so a
+            // dangling manifest row can never be CREATED here, which is what
+            // makes the fatal dangling gate below coherent mid-migration.
+            String canonExists =
+                "EXISTS (SELECT 1 FROM nexus.chunks_384 c WHERE c.chash = decode(s.chash, 'hex')) "
+                + "OR EXISTS (SELECT 1 FROM nexus.chunks_768 c WHERE c.chash = decode(s.chash, 'hex')) "
+                + "OR EXISTS (SELECT 1 FROM nexus.chunks_1024 c WHERE c.chash = decode(s.chash, 'hex'))";
             counts.put("manifest_promoted", ctx.execute(
                 "INSERT INTO nexus.catalog_document_chunks "
                 + "  (tenant_id, doc_id, position, chash, chunk_index, line_start, line_end, char_start, char_end) "
-                + "SELECT current_setting('nexus.tenant', true), s.doc_id, s.position, resolved.chash, "
+                + "SELECT current_setting('nexus.tenant', true), s.doc_id, s.position, "
+                + "       COALESCE(a.new_chash, decode(s.chash, 'hex')), "
                 + "       s.chunk_index, s.line_start, s.line_end, s.char_start, s.char_end "
                 + "FROM staging.document_chunks s "
-                + "JOIN LATERAL (SELECT COALESCE(a.new_chash, "
-                + "         CASE WHEN s.chash ~ '^[0-9a-f]{64}$' THEN decode(s.chash, 'hex') END) AS chash "
-                + "       FROM (SELECT 1) one "
-                + "       LEFT JOIN nexus.chash_alias a ON a.old_ref = s.chash) resolved ON true "
-                + "WHERE resolved.chash IS NOT NULL "
+                + "LEFT JOIN nexus.chash_alias a ON a.old_ref = s.chash "
+                + "WHERE a.new_chash IS NOT NULL "
+                + "   OR (s.chash ~ '^[0-9a-f]{64}$' AND (" + canonExists + ")) "
                 + "ON CONFLICT (tenant_id, doc_id, position) DO NOTHING"));
             counts.put("manifest_unresolved", ctx.fetchOne(
                 "SELECT count(*) FROM staging.document_chunks s "
                 + "WHERE NOT EXISTS (SELECT 1 FROM nexus.chash_alias a WHERE a.old_ref = s.chash) "
-                + "  AND s.chash !~ '^[0-9a-f]{64}$'").get(0, Integer.class));
+                + "  AND NOT (s.chash ~ '^[0-9a-f]{64}$' AND (" + canonExists + "))")
+                .get(0, Integer.class));
 
             // (3) topic_assignments: alias-repoint chash-shaped doc_ids,
             //     verbatim pass-through for memory titles (mixed identity).
@@ -403,11 +431,20 @@ public final class StagingPromoteOps {
                     ChashSqlIdioms.residualMismatchCount(t)).get(0, Integer.class);
             }
             counts.put("residual_mismatched", residual);
-            counts.put("dangling_manifest", ctx.fetchOne(
-                ChashSqlIdioms.danglingManifestCount()).get(0, Integer.class));
+            Integer danglingManifest = ctx.fetchOne(
+                ChashSqlIdioms.danglingManifestCount()).get(0, Integer.class);
+            counts.put("dangling_manifest", danglingManifest);
             if (residual != 0) {
                 throw new IllegalStateException(
                     "finalize left " + residual + " digest-mismatched content row(s) — aborting");
+            }
+            // Review P1 Critical: the class contract says BOTH counts MUST be
+            // zero — the resolvable-only manifest promote above means this can
+            // only fire on pre-existing corruption, which must abort loud.
+            if (danglingManifest != null && danglingManifest != 0) {
+                throw new IllegalStateException(
+                    "finalize found " + danglingManifest + " dangling manifest row(s) "
+                    + "(manifest chash with no content row in any dim) — aborting");
             }
             // (8) THE COLUMN CENSUS (nexus-jxizy.10.5, Hal directive): every
             // TEXT/BYTEA column in schema nexus, schema-derived, must scan
