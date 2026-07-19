@@ -1061,6 +1061,61 @@ class SchemaMigratorIntegrationTest {
         }
     }
 
+    // ── Test 11: RDR-180 rewrite leaves planner statistics FRESH (BUG-0148) ──
+
+    /**
+     * BUG-0148 (conexus-xpg7, 2026-07-19): the rdr180-3/-7 {@code ALTER TABLE ...
+     * ALTER COLUMN chash TYPE bytea} conversions REWRITE their tables, which resets
+     * planner statistics — and a rewritten table looks "fresh" to autovacuum, so
+     * autoanalyze may never re-trigger on a read-mostly store. The cloud boot
+     * applied the rewrite and never ANALYZEd: the stale-stats planner flipped
+     * sparse-text-gate hybrid queries off the GIN-bitmap plan onto the
+     * budget-bounded HNSW plan, which shed rows to ZERO while every health check,
+     * /version probe, and the aggregate cloud gate stayed green. Remediation was a
+     * manual {@code ANALYZE} (conexus, 2026-07-19T18:25Z).
+     *
+     * <p>This pins the product fix (rdr180-16): a boot that applies the RDR-180
+     * rewrite changesets must leave the rewritten tables ANALYZEd, so upgrading
+     * local installs — where nobody is standing by to run ANALYZE — never re-live
+     * the incident.
+     *
+     * <p>Cumulative stats reporting is asynchronous (shared memory since PG 15),
+     * so poll briefly instead of asserting a single read.
+     */
+    @Test
+    @Order(11)
+    void rdr180Rewrite_leavesPlannerStatsFresh() throws Exception {
+        SchemaMigrator.migrate(adminDs);  // defensive; idempotent
+
+        Set<String> expected = Set.of(
+            "chunks_384", "chunks_768", "chunks_1024",
+            "catalog_document_chunks", "chash_index");
+
+        Set<String> analyzed = new HashSet<>();
+        long deadline = System.nanoTime() + java.time.Duration.ofSeconds(10).toNanos();
+        while (System.nanoTime() < deadline) {
+            analyzed.clear();
+            try (Connection conn = adminDs.getConnection()) {
+                ResultSet rs = conn.createStatement().executeQuery(
+                    "SELECT relname FROM pg_stat_user_tables "
+                    + "WHERE schemaname = 'nexus' AND last_analyze IS NOT NULL");
+                while (rs.next()) {
+                    analyzed.add(rs.getString("relname"));
+                }
+            }
+            if (analyzed.containsAll(expected)) {
+                break;
+            }
+            Thread.sleep(200);
+        }
+
+        assertThat(analyzed)
+            .as("the RDR-180-rewritten tables must have fresh planner statistics after "
+                + "migration (last_analyze stamped) — a rewrite silently resets stats and "
+                + "degrades sparse-gate hybrid queries to zero rows (BUG-0148)")
+            .containsAll(expected);
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private Set<String> tablesInSchema(Connection conn, String schema) throws Exception {

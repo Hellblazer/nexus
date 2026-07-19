@@ -314,4 +314,25 @@ GRANT SELECT ON nexus.collection_vector_stats TO PUBLIC;
         <rollback/>
     </changeSet>
 
+    <changeSet id="rdr180-16-analyze-rewritten-tables" author="nexus-jxizy.2">
+        <comment>BUG-0148 (conexus-xpg7, 2026-07-19): the ALTER TYPE conversions above REWRITE
+            their tables, resetting planner statistics — and a rewritten table looks fresh to
+            autovacuum, so autoanalyze may never re-trigger on a read-mostly store. The cloud
+            boot applied the rewrite un-ANALYZEd and the stale-stats planner flipped
+            sparse-text-gate hybrid queries onto the budget-bounded HNSW plan, shedding rows
+            to ZERO while every health probe stayed green; remediation was a manual ANALYZE.
+            Invariant adopted: a migration that rewrites a table ANALYZEs it in the same
+            changelog pass. ANALYZE is transaction-safe, RLS-exempt (maintenance, runs as the
+            table owner), and idempotent — on stores that already remediated by hand (the
+            cloud) this is a cheap re-stamp.</comment>
+        <sql splitStatements="true" stripComments="false">
+ANALYZE nexus.chunks_384;
+ANALYZE nexus.chunks_768;
+ANALYZE nexus.chunks_1024;
+ANALYZE nexus.catalog_document_chunks;
+ANALYZE nexus.chash_index;
+        </sql>
+        <rollback/>
+    </changeSet>
+
 </databaseChangeLog>
