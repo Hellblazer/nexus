@@ -143,6 +143,29 @@ class TestPointerStoreRows:
             "doc_id": LEGACY32, "topic_id": 7,
             "topic_label": "quokkas", "topic_collection": "knowledge__k__m__v1"}]
 
+    def test_document_aspects_survives_the_rdr096_source_path_drop(self):
+        # dev-driver-rewire catch: migrated T2 stores DROP source_path
+        # (migrate_drop_source_path_column, 4.31.0) — the landing derives
+        # the wire value from source_uri, else doc_id, never ''.
+        mem = _memory_db()
+        mem.executescript(
+            "CREATE TABLE document_aspects (doc_id TEXT NOT NULL DEFAULT '', "
+            "collection TEXT NOT NULL DEFAULT '', problem_formulation TEXT, "
+            "proposed_method TEXT, experimental_datasets TEXT, "
+            "experimental_baselines TEXT, experimental_results TEXT, extras TEXT, "
+            "confidence REAL, extracted_at TEXT NOT NULL DEFAULT '', "
+            "model_version TEXT NOT NULL DEFAULT '', extractor_name TEXT NOT NULL DEFAULT '', "
+            "source_uri TEXT);")
+        mem.execute("INSERT INTO document_aspects (doc_id, collection, source_uri, "
+                    "extracted_at, model_version, extractor_name) "
+                    "VALUES ('1.2.3', 'col', 'file:///p.pdf', '2026-07-01T00:00:00Z', 'm', 'x')")
+        mem.execute("INSERT INTO document_aspects (doc_id, collection, source_uri, "
+                    "extracted_at, model_version, extractor_name) "
+                    "VALUES ('1.2.4', 'col', '', '2026-07-01T00:00:00Z', 'm', 'x')")
+        rows = pointer_store_rows("document_aspects", None, mem)
+        assert rows[0]["source_path"] == "file:///p.pdf"
+        assert rows[1]["source_path"] == "1.2.4", "doc_id fallback — never an empty PK leg"
+
     def test_relevance_log_maps_rowid_and_ts(self):
         mem = _memory_db()
         mem.execute("INSERT INTO relevance_log (query, chunk_id, action, timestamp) "

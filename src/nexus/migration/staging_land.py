@@ -288,6 +288,14 @@ def pointer_store_rows(
                 "timestamp FROM relevance_log")
         ]
     if store == "document_aspects":
+        # RDR-096 P5.2 (dev-driver-rewire catch): migrated T2 stores DROP
+        # the source_path column (migrate_drop_source_path_column, 4.31.0)
+        # — the staging wire's source_path (the engine PK's third leg) then
+        # derives from the surviving identity: source_uri, else doc_id
+        # (never '' — an all-empty PK leg would collide across rows).
+        cols = {r[1] for r in memory_conn.execute("PRAGMA table_info(document_aspects)")}
+        sp_expr = ("source_path" if "source_path" in cols
+                   else "COALESCE(NULLIF(source_uri, ''), doc_id)")
         return [
             {"doc_id": r[0], "collection": r[1], "source_path": r[2],
              "problem_formulation": r[3], "proposed_method": r[4],
@@ -296,7 +304,7 @@ def pointer_store_rows(
              "extracted_at": r[10], "model_version": r[11], "extractor_name": r[12],
              "source_uri": r[13]}
             for r in memory_conn.execute(
-                "SELECT COALESCE(doc_id, ''), collection, source_path, "
+                f"SELECT COALESCE(doc_id, ''), collection, {sp_expr}, "
                 "problem_formulation, proposed_method, experimental_datasets, "
                 "experimental_baselines, experimental_results, extras, confidence, "
                 "extracted_at, model_version, extractor_name, source_uri "

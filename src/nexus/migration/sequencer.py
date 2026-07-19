@@ -87,6 +87,15 @@ def run_sequenced_migration(
 ) -> SequenceOutcome:
     """Drive the T2-then-T3 sequence for a detected Chroma footprint.
 
+    RETIRED-from-guided (RDR-180, nexus-jxizy.10.7): ``driver.run_guided_upgrade``
+    no longer calls this — the guided (``nx guided-upgrade`` / ``nx
+    migrate-to-service``) path now drives :func:`run_land_then_transform_migration`
+    exclusively. This function is KEPT (never deleted) for any non-guided
+    caller and the RDR-185 in-store cascade legs, which still need the
+    per-leg T2-then-T3 shape. Do not extend this docstring's promises to the
+    guided path; see :func:`run_land_then_transform_migration` for the
+    current guided contract.
+
     ``run_leg(leg)`` runs one leg's vector ETL (the caller wires the real
     ``vector_etl.migrate_local`` / ``migrate_cloud`` with clients + creds) and
     returns its :class:`MigrationReport`. ``run_t2(sources)`` runs the T2

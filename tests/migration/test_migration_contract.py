@@ -142,6 +142,48 @@ def test_sequencer_surface():
     }
 
 
+def test_land_then_transform_sequencer_surface():
+    """RDR-180 (nexus-jxizy.10.7): the guided path's replacement sequencer —
+    ``driver.run_guided_upgrade`` drives this, not ``run_sequenced_migration``
+    (retired-from-guided, still pinned above for its surviving non-guided
+    callers)."""
+    from nexus.migration.sequencer import (
+        LandThenTransformOutcome,
+        run_land_then_transform_migration,
+    )
+
+    assert _params(run_land_then_transform_migration) == {
+        "detection",
+        "sources",
+        "census_check",
+        "land",
+        "embed_fill",
+        "promote",
+        "finalize",
+        "verify",
+        "clear_staging",
+        "voyage_key_present",
+        "run_t2",
+        "quiesce_check",
+        "model_gate",
+        "on_progress",
+        "started_at",
+        "cross_model_targets",
+    }
+    assert _fields(LandThenTransformOutcome) == {
+        "ok",
+        "phase",
+        "collections_total",
+        "collections_done",
+        "t2_total_failed",
+        "collections_attempted",
+        "collections_ok",
+        "blocked_reason",
+        "t2_report",
+        "finalize_report",
+    }
+
+
 # ── Validation + unlock/rollback (P3) ──────────────────────────────────────
 
 
