@@ -75,7 +75,11 @@ public final class StagingHandler implements HttpHandler {
             List.of("chash", "physical_collection", "created_at"),
             "ON CONFLICT (tenant_id, chash, physical_collection) DO NOTHING"),
         "topic_assignments", new StoreSpec("staging.topic_assignments",
-            List.of("doc_id", "topic_id"),
+            // topic_label + topic_collection are the CROSS-STORE topic
+            // identity (critic-p1 Critical): the landing client sends the
+            // SQLite topic_assignments JOIN topics projection; the legacy
+            // integer id is audit-only (BIGSERIAL spaces never align).
+            List.of("doc_id", "topic_id", "topic_label", "topic_collection"),
             "ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING"),
         "frecency", new StoreSpec("staging.frecency",
             List.of("chunk_id", "embedded_at", "ttl_days", "frecency_score", "miss_count", "last_hit_at"),

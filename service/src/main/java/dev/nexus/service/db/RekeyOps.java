@@ -93,6 +93,15 @@ public final class RekeyOps {
         Map<String, Object> out = tenantScope.withTenant(tenant, ctx -> {
             Map<String, Object> counts = new LinkedHashMap<>();
 
+            // Cross-path mutual exclusion (critic-p1 High): this writer and
+            // StagingPromoteOps touch the SAME tables (chash_alias, chunks_*,
+            // pointer stores) — sharing the 'staging:'||tenant advisory-lock
+            // namespace serializes a mis-sequenced concurrent rekey against
+            // any in-flight promote/finalize instead of interleaving under
+            // READ COMMITTED (the GH #1390 class via a cross-endpoint path).
+            ctx.execute("SELECT pg_advisory_xact_lock(hashtext('staging:' || "
+                + "current_setting('nexus.tenant', true)))");
+
             // (1) conflict pre-check across all dims: same old_ref, two digests.
             Integer conflicts = ctx.fetchOne(
                 "SELECT count(*) FROM ("

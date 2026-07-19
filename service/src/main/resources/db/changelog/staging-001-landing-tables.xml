@@ -189,6 +189,25 @@ DROP TABLE IF EXISTS staging.document_chunks;
         </rollback>
     </changeSet>
 
+    <changeSet id="staging-5-topic-identity" author="nexus-jxizy.10.5">
+        <comment>critic-p1-staging CRITICAL: legacy SQLite topic ids are
+            BIGSERIAL-local and can never FK into nexus.topics(id) — topic
+            identity across stores is (label, collection), the SAME key the
+            existing topic ETL resolves by. The landing carries both so
+            finalize can resolve the TARGET id; the verbatim legacy id stays
+            for audit only.</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE staging.topic_assignments
+    ADD COLUMN topic_label      TEXT NOT NULL DEFAULT '',
+    ADD COLUMN topic_collection TEXT NOT NULL DEFAULT '';
+        </sql>
+        <rollback>
+ALTER TABLE staging.topic_assignments
+    DROP COLUMN IF EXISTS topic_collection,
+    DROP COLUMN IF EXISTS topic_label;
+        </rollback>
+    </changeSet>
+
     <changeSet id="staging-4-svc-grants" author="nexus-jxizy.10.1" runAlways="true">
         <comment>nexus_svc drives land/promote/finalize/clear under withTenant —
             needs full DML + TRUNCATE on staging (runAlways: self-healing like

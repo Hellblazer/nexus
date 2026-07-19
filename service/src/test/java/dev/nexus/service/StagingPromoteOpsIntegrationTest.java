@@ -283,14 +283,24 @@ class StagingPromoteOpsIntegrationTest {
                 + "(tenant_id, chash, physical_collection, created_at) "
                 + "VALUES (?, ?, ?, '2026-07-01T00:00:00Z') ON CONFLICT DO NOTHING",
                 T1, legacy32, COLL_A);
-            // FK parent for the assignment, then the assignment (chash-keyed).
+            // THE CROSS-ID-SPACE SCENARIO (critic-p1 Critical): the staged
+            // assignment carries a LEGACY integer id (424242 — some SQLite
+            // BIGSERIAL value that can never exist in nexus.topics) plus the
+            // (label, collection) identity; the target topic has its OWN
+            // serial id. Finalize must resolve by identity, never by the
+            // legacy integer.
             ctx.execute("INSERT INTO nexus.topics "
                 + "(tenant_id, label, collection, created_at) VALUES (?, 'topic-x', ?, now())",
                 T1, COLL_A);
-            Long topicId = ctx.fetchOne(
-                "SELECT id FROM nexus.topics WHERE label = 'topic-x'").get(0, Long.class);
-            ctx.execute("INSERT INTO staging.topic_assignments (tenant_id, doc_id, topic_id) "
-                + "VALUES (?, ?, ?) ON CONFLICT DO NOTHING", T1, legacy32, topicId);
+            ctx.execute("INSERT INTO staging.topic_assignments "
+                + "(tenant_id, doc_id, topic_id, topic_label, topic_collection) "
+                + "VALUES (?, ?, 424242, 'topic-x', ?) ON CONFLICT DO NOTHING",
+                T1, legacy32, COLL_A);
+            // And one whose topic has NOT landed: stays staged, counted.
+            ctx.execute("INSERT INTO staging.topic_assignments "
+                + "(tenant_id, doc_id, topic_id, topic_label, topic_collection) "
+                + "VALUES (?, ?, 424243, 'topic-never-landed', ?) ON CONFLICT DO NOTHING",
+                T1, legacy32, COLL_A);
             // Frecency + relevance keyed by the legacy ref.
             ctx.execute("INSERT INTO staging.frecency (tenant_id, chunk_id, frecency_score) "
                 + "VALUES (?, ?, 7.5) ON CONFLICT DO NOTHING", T1, legacy32);
@@ -320,8 +330,17 @@ class StagingPromoteOpsIntegrationTest {
         assertThat(count("SELECT count(*) FROM nexus.chash_index "
             + "WHERE encode(chash,'hex') = '" + canon1 + "' AND physical_collection = '" + COLL_A + "'"))
             .isEqualTo(1);
-        assertThat(count("SELECT count(*) FROM nexus.topic_assignments WHERE doc_id = '" + canon1 + "'"))
-            .as("assignment repointed to the canonical hex").isEqualTo(1);
+        assertThat(count("SELECT count(*) FROM nexus.topic_assignments ta "
+            + "JOIN nexus.topics t ON t.id = ta.topic_id "
+            + "WHERE ta.doc_id = '" + canon1 + "' AND t.label = 'topic-x'"))
+            .as("assignment repointed to the canonical hex AND resolved to the "
+                + "TARGET topic's own serial id via (label, collection) — never "
+                + "the legacy integer").isEqualTo(1);
+        assertThat(count("SELECT count(*) FROM nexus.topic_assignments WHERE topic_id = 424242"))
+            .as("the legacy integer id never enters nexus").isEqualTo(0);
+        assertThat(((Number) fin.get("topic_assignments_unresolved")).intValue())
+            .as("the not-yet-landed topic's assignment stays staged, counted")
+            .isEqualTo(1);
         assertThat(count("SELECT count(*) FROM nexus.frecency WHERE chunk_id = '" + canon1 + "'"))
             .isEqualTo(1);
         assertThat(count("SELECT count(*) FROM nexus.relevance_log WHERE chunk_id = '" + canon1 + "'"))

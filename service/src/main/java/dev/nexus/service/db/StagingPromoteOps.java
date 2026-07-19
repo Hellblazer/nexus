@@ -342,15 +342,29 @@ public final class StagingPromoteOps {
             //     legacy-shaped doc_id with NO alias yet stays STAGED — a
             //     later finalize converges it once its content collection
             //     promotes; verbatim legacy ids never enter nexus.
+            // TOPIC IDENTITY (critic-p1 Critical): the staged legacy integer
+            // id is BIGSERIAL-local and can NEVER reference nexus.topics(id).
+            // Resolution rides (label, collection) — the SAME key the topic
+            // ETL upserts by — so the promoted row carries the TARGET store's
+            // own id. Resolvable-only on BOTH axes: an assignment whose topic
+            // has not landed (topics ETL pending) or whose chash-shaped
+            // doc_id has no alias yet stays STAGED for a later finalize.
             counts.put("topic_assignments_promoted", ctx.execute(
                 "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id) "
                 + "SELECT DISTINCT current_setting('nexus.tenant', true), "
-                + "       COALESCE(encode(a.new_chash, 'hex'), s.doc_id), s.topic_id "
+                + "       COALESCE(encode(a.new_chash, 'hex'), s.doc_id), t.id "
                 + "FROM staging.topic_assignments s "
+                + "JOIN nexus.topics t "
+                + "  ON t.label = s.topic_label AND t.collection = s.topic_collection "
                 + "LEFT JOIN nexus.chash_alias a ON a.old_ref = s.doc_id "
                 + "WHERE a.new_chash IS NOT NULL "
                 + "   OR s.doc_id !~ '^([0-9a-f]{16}|[0-9a-f]{32})$' "
                 + "ON CONFLICT (tenant_id, doc_id, topic_id) DO NOTHING"));
+            counts.put("topic_assignments_unresolved", ctx.fetchOne(
+                "SELECT count(*) FROM staging.topic_assignments s "
+                + "WHERE NOT EXISTS (SELECT 1 FROM nexus.topics t "
+                + "  WHERE t.label = s.topic_label AND t.collection = s.topic_collection)")
+                .get(0, Integer.class));
 
             // (4) frecency: GREATEST-merge from the staged rows through the
             //     alias — staging-sourced twin of ChashSqlIdioms'
