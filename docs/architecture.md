@@ -223,13 +223,14 @@ stored chunk id was `sha256(chunk_text).hexdigest()[:32]` — 32 *hex chars* =
 and bytes in another. The canonical definition above makes the two subsystems
 agree at the full 256 bits, by construction.
 
-**Migration status:** stored chashes are legacy 32-hex until the RDR-180
-freeze-gated ETL (epic `nexus-jxizy`, Item6) rekeys them. For every rehashable
+**Migration status:** the flip is IN this tree (epic `nexus-jxizy`): the
+producer emits the full digest, the engine stores bytea, and the
+`chash-rekey` ladder rung rekeys existing stores inside the freeze window. For every rehashable
 row the legacy 32-hex is the strict prefix of the new 64-hex (same text, same
 digest); the persisted `chash_alias` table is the collision-free resolver for
 legacy references thereafter (prefix matching only *builds* the map, it is not
 the resolver). The table below describes **current** (pre-flip) producer
-behavior where it says `[:32]`.
+behavior.
 
 ### Metadata field semantics (chunk vs document level)
 
@@ -239,7 +240,7 @@ Two hash fields look similar but mean very different things. Confusing them prod
 |---|---|---|---|---|
 | `content_hash` | document | `sha256(file_bytes)` | every indexer at register time (`indexer.py:1198`) | document-level dedup; staleness comparison; backup-snapshot identity |
 | `chunk_text_hash` | chunk | `sha256(chunk_text)` (full 64 chars) | every indexer per chunk; healed on an upgraded store by the ladder (`nx upgrade`) | content-addressed link spans (`chash:<hex>`); `nx t3 reidentify` natural-ID source (first 32 chars); cross-collection chunk dedup |
-| `chunk_text_hash[:32]` | chunk | first 32 chars of the SHA | `nx t3 reidentify` upsert ([RDR-108](rdr/rdr-108-graph-identity-normalization.md) Phase 2) | Chroma natural ID for the chunk; the join key from `document_chunks.chash`. **Legacy width** — retired by the [RDR-180](rdr/rdr-180-content-address-chash-binary-32byte.md) full-digest flip (see § Chunk identity above) |
+| `chunk_text_hash` (as chunk id) | chunk | the full SHA (RDR-180) | every indexer via `chunk_identity.chunk_id` | the chunk natural ID and the `document_chunks.chash` join key; the pre-RDR-180 `[:32]` truncation is retired (legacy 32-hex references resolve via `chash_alias`) |
 | `source_uri` | document | `file://...` or `x-devonthink-item://<uuid>` etc. | indexer / MCP write paths | persistent URI identity; aspect-extraction routing; audit-membership home detection |
 | `source_path` | document | absolute or repo-relative file path | indexer | display + grep targets; legacy path predating `source_uri` |
 | `chunk_start_char` / `chunk_end_char` | chunk | char offsets in the source file | indexer per chunk | `chunk:char` span resolution; UI highlight |
