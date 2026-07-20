@@ -1,28 +1,4 @@
 {
-  "hooks": {
-    "SubagentStart": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "NX_ORCH_STOP_GUARD=\"${NX_ORCH_STOP_GUARD:-block}\" bash \"$CLAUDE_PROJECT_DIR/conexus/hooks/scripts/subagent-start-stamp.sh\"",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "SubagentStop": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "NX_ORCH_STOP_GUARD=\"${NX_ORCH_STOP_GUARD:-block}\" bash \"$CLAUDE_PROJECT_DIR/conexus/hooks/scripts/subagent-stop.sh\"",
-            "timeout": 15
-          }
-        ]
-      }
-    ]
-  }
+  "_comment": "The orchestration hooks (subagent-start-stamp.sh, subagent-stop.sh) are registered by conexus/hooks/hooks.json and MUST NOT be re-registered here. See nexus-3h0u6: RDR-184 .16 armed repo sessions from this file as interim instrumentation, explicitly 'without waiting for a plugin release'. That release has shipped (conexus 6.14.0 registers both), so both surfaces fired and every hook-written START/REPORTED row was duplicated, inflating the nexus-ccs9v.11 census 2x against 1x EXPECT rows. Behaviour is unchanged by the removal: both scripts already default NX_ORCH_STOP_GUARD to block internally, which is what the P1.G flip (nexus-ccs9v.15) set, and NX_ORCH_STOP_GUARD=off still opts out per session. Enforced by tests/hooks/test_subagent_start_stamp.py::test_orchestration_hooks_are_registered_exactly_once.",
+  "hooks": {}
 }

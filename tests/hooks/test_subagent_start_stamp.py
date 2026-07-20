@@ -80,12 +80,37 @@ def test_block_mode_stamps_too(tmp_path: Path) -> None:
 
 
 def test_idempotent_per_agent_id(tmp_path: Path) -> None:
-    """Plugin hooks.json + project settings.json can BOTH register the stamp
-    in a repo session — two invocations must yield exactly one START row."""
+    """Two invocations for one agent_id must yield exactly one START row."""
     _run(_payload(), tmp_path, mode="observe")
     _run(_payload(), tmp_path, mode="observe")
     content = _expfile(tmp_path).read_text()
     assert content.count(f"\tSTART\t{AGENT_ID}\t") == 1
+
+
+def test_idempotent_under_CONCURRENT_invocation(tmp_path: Path) -> None:
+    """The shape that actually broke (nexus-3h0u6).
+
+    The sequential test above passed throughout, while production wrote
+    duplicate START rows with identical timestamps — because the guard was a
+    check-then-append and the two registrations fired at the same instant.
+    Sequential invocation cannot reproduce a TOCTOU, so it certified nothing
+    about the case the guard existed for. This one launches the invocations
+    simultaneously.
+    """
+    import concurrent.futures
+
+    payload = _payload()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [
+            pool.submit(_run, payload, tmp_path, mode="observe") for _ in range(8)
+        ]
+        for f in futures:
+            assert f.result().returncode == 0
+
+    content = _expfile(tmp_path).read_text()
+    assert content.count(f"\tSTART\t{AGENT_ID}\t") == 1, (
+        f"8 concurrent stamps must compose to ONE row, got:\n{content}"
+    )
 
 
 def test_distinct_agents_each_get_a_row(tmp_path: Path) -> None:
@@ -112,26 +137,51 @@ def test_registered_in_plugin_hooks_json() -> None:
     assert any("subagent-start-stamp.sh" in c for c in commands)
 
 
-def test_project_settings_arm_block_by_default() -> None:
-    """Option-(b) instrumentation (bead .11): repo sessions run the stop
-    hook + stamp from project settings, defaulting to block since the
-    P1.G flip (env can override), via $CLAUDE_PROJECT_DIR."""
+def test_orchestration_hooks_are_registered_exactly_once() -> None:
+    """ONE registration surface, mechanically enforced (nexus-3h0u6).
+
+    RDR-184 .16 armed repo sessions from .claude/settings.json as interim
+    instrumentation, explicitly "without waiting for a plugin release", and
+    relied on the stamp's per-agent_id idempotence to make the two surfaces
+    "compose to one row". They did not: the guard was racy, and once the
+    plugin release shipped (conexus 6.14.0 registers both hooks) every
+    hook-written START and REPORTED row was duplicated — inflating the
+    nexus-ccs9v.11 census 2x on hook rows against 1x EXPECT rows, which is
+    precisely the measurement that bead exists to take.
+
+    The stamp is now genuinely atomic, but single-registration is the real
+    guarantee, because REPORTED has no idempotence at all and legitimately
+    repeats across multiple stops — nothing could dedupe it per event. So
+    the invariant is enforced here rather than left to convention.
+
+    Behaviour is unchanged by removal: both scripts default
+    NX_ORCH_STOP_GUARD to block internally (the P1.G flip, .15), and
+    NX_ORCH_STOP_GUARD=off still opts out per session.
+    """
     settings = json.loads((REPO_ROOT / ".claude" / "settings.json").read_text())
-    stop_cmds = [
-        h["command"]
-        for entry in settings["hooks"]["SubagentStop"]
-        for h in entry["hooks"]
+    project_cmds = [
+        h.get("command", "")
+        for event in settings.get("hooks", {}).values()
+        for entry in event
+        for h in entry.get("hooks", [])
     ]
-    start_cmds = [
-        h["command"]
-        for entry in settings["hooks"]["SubagentStart"]
-        for h in entry["hooks"]
+    for script in ("subagent-start-stamp.sh", "subagent-stop.sh"):
+        offenders = [c for c in project_cmds if script in c]
+        assert not offenders, (
+            f"{script} is registered in BOTH conexus/hooks/hooks.json and "
+            f".claude/settings.json; both fire, so every row it writes is "
+            f"doubled and the .11 census is corrupted. Remove the project-"
+            f"settings copy — the plugin already ships it. Found: {offenders}"
+        )
+
+    hooks = json.loads((REPO_ROOT / "conexus" / "hooks" / "hooks.json").read_text())
+    plugin_cmds = [
+        h.get("command", "")
+        for event in hooks["hooks"].values()
+        for entry in event
+        for h in entry.get("hooks", [])
     ]
-    assert any(
-        "subagent-stop.sh" in c and "${NX_ORCH_STOP_GUARD:-block}" in c and "$CLAUDE_PROJECT_DIR" in c
-        for c in stop_cmds
-    )
-    assert any(
-        "subagent-start-stamp.sh" in c and "${NX_ORCH_STOP_GUARD:-block}" in c and "$CLAUDE_PROJECT_DIR" in c
-        for c in start_cmds
-    )
+    for script in ("subagent-start-stamp.sh", "subagent-stop.sh"):
+        assert sum(script in c for c in plugin_cmds) == 1, (
+            f"{script} must be registered exactly once in the plugin"
+        )

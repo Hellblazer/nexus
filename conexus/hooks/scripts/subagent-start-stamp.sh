@@ -49,11 +49,48 @@ print("\t".join(f.replace("\t", " ").replace("\n", " ") for f in fields))
 
 FILE="$(expectations_file "$SESSION_ID" 2>/dev/null)" || exit 0
 
-# Idempotence: one START row per agent_id, however many registrations fire.
-if [[ -r "$FILE" ]] && awk -F'\t' -v id="$AGENT_ID" \
-    '$2 == "START" && $3 == id { found = 1 } END { exit !found }' "$FILE" 2>/dev/null; then
-    exit 0
-fi
+# Idempotence: one START row per agent_id.
+#
+# This was a bare check-then-append, which is a TOCTOU: two registrations
+# firing concurrently for the same SubagentStart both read the file, neither
+# saw a row, and both appended. That is exactly what happened in production
+# (nexus-3h0u6) — every START row doubled, with IDENTICAL timestamps, while
+# the sequential unit test stayed green because sequential invocation cannot
+# reproduce a race. The duplicate registration that caused it is gone, but
+# the guard now actually holds under concurrency rather than only appearing
+# to, so re-introducing a second surface degrades the census instead of
+# silently corrupting it.
+#
+# Fail-open throughout: if the lock cannot be taken we stamp anyway. A
+# duplicate row is a census nuisance; a missing START row breaks the
+# declaration-completeness audit, which is the worse failure.
+_stamp_if_absent() {
+    if [[ -r "$FILE" ]] && awk -F'\t' -v id="$AGENT_ID" \
+        '$2 == "START" && $3 == id { found = 1 } END { exit !found }' "$FILE" 2>/dev/null; then
+        return 0
+    fi
+    expectations_start "$SESSION_ID" "$AGENT_ID" "$AGENT_TYPE" >/dev/null 2>&1
+}
 
-expectations_start "$SESSION_ID" "$AGENT_ID" "$AGENT_TYPE" >/dev/null 2>&1
+# mkdir is the atomic test-and-set: it fails if the directory exists, so
+# exactly one concurrent invocation enters the critical section. The RDR-184
+# P0 lock primitive (tests/e2e/lib/lock.sh) is the heavier, stale-detecting
+# tool for long-held harness locks; this section is a file scan plus one
+# append, so a bounded wait and a fail-open fallback are the proportionate
+# shape and keep the plugin free of a 400-line vendored dependency.
+LOCKDIR="${FILE}.stamp.lock"
+_held=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if mkdir "$LOCKDIR" 2>/dev/null; then
+        _held=1
+        break
+    fi
+    sleep 0.1
+done
+
+_stamp_if_absent
+
+# A stale lockdir (holder killed mid-section) degrades to the pre-existing
+# behaviour — a possible duplicate row — never to a missing one.
+[[ -n "$_held" ]] && rmdir "$LOCKDIR" 2>/dev/null
 exit 0
