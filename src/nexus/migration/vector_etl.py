@@ -841,6 +841,7 @@ def _verify_fill_one(
 
     source_count = 0
     missing_count = 0
+    degraded_pages = 0
     filled_count = 0
     try:
         for batch in _iter_id_pages(read_client, name, page, include_embeddings=passthrough):
@@ -861,7 +862,25 @@ def _verify_fill_one(
                     name, source_count, filled_count, "failed", reason,
                     target_collection=target if is_cross_model else None,
                 )
-            present = vector_client.existing_ids(target, ids)
+            try:
+                present = vector_client.existing_ids(target, ids)
+            except Exception as exc:  # noqa: BLE001 — unreachable page; treated as an anomaly, not as absence
+                # nexus-ou4tb: existing_ids no longer degrades to the empty
+                # set, so an unreachable page is now DISTINGUISHABLE from a
+                # genuinely-absent one. This docstring's own closing note said
+                # per-page detection "would need existing_ids itself to
+                # distinguish 'empty' from 'unreachable'" — it does now, so
+                # the page is recorded as degraded rather than silently
+                # counted as missing. The chunks are still re-sent (idempotent
+                # upsert), exactly as before; what changes is that the anomaly
+                # is no longer invisible at page granularity.
+                degraded_pages += 1
+                _log.warning(
+                    "vector_etl_verify_fill_page_unreachable",
+                    collection=name, target=target, page_ids=len(ids),
+                    degraded_pages=degraded_pages, error=str(exc),
+                )
+                present = set()
             missing_idx = [i for i, _id in enumerate(ids) if _id not in present]
             if not missing_idx:
                 continue
@@ -933,12 +952,31 @@ def _verify_fill_one(
     # held data BEFORE this run, yet EVERY source id read back "missing" —
     # the rollback_collections "swallowed error" signature. Flag it even
     # though the writes landed correctly (idempotent, verified above).
-    suspicious = (
+    # nexus-ou4tb: a page that could not be probed at all makes the delta
+    # untrustworthy regardless of the all-missing signature, and is now
+    # detectable per-page rather than only collection-wide.
+    suspicious = degraded_pages > 0 or (
         target_count_before > 0
         and source_count > 0
         and missing_count == source_count
     )
     if suspicious:
+        if degraded_pages:
+            reason = (
+                f"{degraded_pages} probe page(s) were UNREACHABLE (not empty) "
+                "— the presence delta for this collection cannot be trusted; "
+                "writes already landed and are idempotent, but re-run the "
+                "verify-fill once the service is healthy before relying on it"
+            )
+            _log.warning(
+                "vector_etl_verify_fill_indeterminate",
+                collection=name, target=target, degraded_pages=degraded_pages,
+            )
+            return CollectionResult(
+                name, source_count, filled_count, "indeterminate", reason,
+                target_collection=target if is_cross_model else None,
+                missing_count=missing_count, filled_count=filled_count,
+            )
         reason = (
             f"existing_ids probe reported ALL {source_count} source id(s) "
             f"missing despite the target already holding {target_count_before} "

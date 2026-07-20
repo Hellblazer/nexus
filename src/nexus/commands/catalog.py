@@ -1499,6 +1499,15 @@ def backfill_cmd(
                     click.echo(f"  {target}: skipped ({exc.message})")
                     continue
                 raise
+            except Exception as exc:  # noqa: BLE001 — nexus-ou4tb: per-collection isolation in the --all sweep
+                # A degraded read raises now instead of reading empty. In the
+                # --all sweep that must skip ONE collection, matching what the
+                # two sibling backfill passes already do; on a single explicit
+                # target it still fails loud, because the user named that one.
+                if from_t3_all:
+                    click.echo(f"  {target}: skipped (unreadable: {exc})")
+                    continue
+                raise
         mode = "dry-run" if dry_run else "complete"
         click.echo(f"\nFrom-T3 recovery {mode}: {total_registered} row(s).")
         return

@@ -220,22 +220,67 @@ def _probe_source(
     """Return ``(probed, present, source_id_set)`` for one source vs target.
 
     Absence is verdict-bearing (it can flip ``merged`` to ``single-source``/
-    ``partial``), and ``existing_ids`` swallows per-page transport failures
-    into the empty set — so ids that read absent on the first pass are
-    RE-CHECKED once before they count as missing (substantive-critic
-    Significant on the first cut). A transient one-page degradation heals
-    here; only ids absent on BOTH passes count against the source.
+    ``partial``), so ids that read absent on the first pass are RE-CHECKED
+    once before they count as missing (substantive-critic Significant on the
+    first cut). A transient one-page degradation heals here; only ids absent
+    on BOTH passes count against the source.
+
+    nexus-ou4tb: that healing used to rest on ``existing_ids`` silently
+    swallowing per-page transport failures into the empty set. It no longer
+    does — a silent empty there meant "all of these are MISSING" to callers
+    like ``nx catalog verify``, which reported every expected document as a
+    ghost whenever the service was degraded. The tolerance this function
+    genuinely wants is now EXPLICIT and local: the first pass catches
+    per-page failures itself, counts them, and lets the existing re-check
+    heal them. The second pass does NOT catch — an id that could not be
+    probed twice is a could-not-tell, and returning it as "present" or
+    "missing" would both be guesses.
+
+    The re-check is guarded too, but for a different reason than the first
+    pass. If BOTH passes fail, the probe resolves nothing — and the audit
+    already has the right answer for that: a non-empty target with zero
+    resolved source ids reads as INDETERMINATE, the never-blind-fill mirror
+    (nexus-r0esi), "an anomaly, never evidence of anything". Raising there
+    would have destroyed a designed safety verdict and replaced an honest
+    could-not-tell with a crash.
+
+    So this is the one place in the vector-client surface where degrading is
+    legitimate, and it satisfies the bead's clause exactly: the return is
+    distinguishable from empty (INDETERMINATE, not "absent"), and it is
+    counted rather than silent via ``event=collision_audit_page_degraded``.
     """
     probed = 0
+    degraded_pages = 0
     all_ids: set[str] = set()
     present_ids: set[str] = set()
     for ids in _iter_source_id_pages(read_client, source):
         probed += len(ids)
         all_ids.update(ids)
-        present_ids.update(vector_client.existing_ids(target, ids))
+        try:
+            present_ids.update(vector_client.existing_ids(target, ids))
+        except Exception as exc:  # noqa: BLE001 — transient per-page failure; the re-check below is the heal
+            degraded_pages += 1
+            _log.warning(
+                "collision_audit_page_degraded",
+                source=source, target=target, page_ids=len(ids),
+                degraded_pages=degraded_pages, error=str(exc),
+            )
     missing = sorted(all_ids - present_ids)
     if missing:
-        present_ids.update(vector_client.existing_ids(target, missing))
+        try:
+            present_ids.update(vector_client.existing_ids(target, missing))
+        except Exception as exc:  # noqa: BLE001 — heal failed too; INDETERMINATE is the designed answer
+            degraded_pages += 1
+            _log.warning(
+                "collision_audit_page_degraded",
+                source=source, target=target, page_ids=len(missing),
+                degraded_pages=degraded_pages, phase="recheck", error=str(exc),
+            )
+    if degraded_pages:
+        _log.warning(
+            "collision_audit_probe_degraded",
+            source=source, target=target, degraded_pages=degraded_pages,
+        )
     return probed, len(present_ids & all_ids), all_ids
 
 

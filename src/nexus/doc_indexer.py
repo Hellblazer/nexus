@@ -1570,27 +1570,48 @@ def index_pdf(
 
     # Prune stale chunks (nexus-dcym: doc_id-keyed when catalog has the
     # entry; first-time indexes harmlessly use source_path).
-    prune_where = _identity_where(str(pdf_path), corpus)
-    current_ids_set = set(ids)
-    stale_ids: list[str] = []
-    offset = 0
-    while True:
-        batch = _chroma_with_retry(
-            col.get,
-            where=prune_where,
-            include=[],
-            limit=300,
-            offset=offset,
+    # nexus-ou4tb: the prune reads and deletes through the vector client,
+    # which now RAISES on a degraded service instead of reading empty. That is
+    # the right client contract, but this prune sits between two commits that
+    # have already happened — the new chunks are upserted and
+    # hooks.fire_document has fired — and BEFORE catalog registration. Letting
+    # it propagate would leave a document whose chunks are live and whose
+    # catalog registration never ran: a NEW partial-commit state that the old
+    # silent swallow happened to hide.
+    #
+    # Registration is the more important of the two (an unregistered document
+    # is invisible to every catalog-routed query; a stale chunk left one cycle
+    # longer is a duplicate that the next successful prune removes). So the
+    # prune is isolated and registration always runs. The failure is logged
+    # loudly rather than swallowed — the point of the bead is that nobody
+    # finds out silently, not that nothing may ever degrade.
+    try:
+        prune_where = _identity_where(str(pdf_path), corpus)
+        current_ids_set = set(ids)
+        stale_ids: list[str] = []
+        offset = 0
+        while True:
+            batch = _chroma_with_retry(
+                col.get,
+                where=prune_where,
+                include=[],
+                limit=300,
+                offset=offset,
+            )
+            batch_ids = batch.get("ids", [])
+            stale_ids.extend(eid for eid in batch_ids if eid not in current_ids_set)
+            if len(batch_ids) < 300:
+                break
+            offset += 300
+        if stale_ids:
+            # Batch deletes at MAX_RECORDS_PER_WRITE=300 (indexing review I4).
+            for i in range(0, len(stale_ids), 300):
+                _chroma_with_retry(col.delete, ids=stale_ids[i:i + 300])
+    except Exception:  # noqa: BLE001 — prune must not strand catalog registration
+        _log.warning(
+            "stale_chunk_prune_failed_registration_still_running",
+            pdf=str(pdf_path), collection=col_name, exc_info=True,
         )
-        batch_ids = batch.get("ids", [])
-        stale_ids.extend(eid for eid in batch_ids if eid not in current_ids_set)
-        if len(batch_ids) < 300:
-            break
-        offset += 300
-    if stale_ids:
-        # Batch deletes at MAX_RECORDS_PER_WRITE=300 (indexing review I4).
-        for i in range(0, len(stale_ids), 300):
-            _chroma_with_retry(col.delete, ids=stale_ids[i:i + 300])
 
     _register_in_catalog(metadatas_list, len(metadatas_list))
 

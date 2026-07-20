@@ -1614,9 +1614,21 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
                     {"doc_id": doc_id} if doc_id
                     else {"source_path": str(file)}
                 )
-                existing = _paginated_get(
-                    col, include=["metadatas"], where=where,
-                )
+                try:
+                    existing = _paginated_get(
+                        col, include=["metadatas"], where=where,
+                    )
+                except Exception:  # noqa: BLE001 — nexus-ou4tb: isolate this FILE, not the run
+                    # The client fails loud now (a degraded service no longer
+                    # reads as an empty collection), but one file's failed
+                    # staleness lookup must not abort the whole repo's
+                    # frecency pass. Skip this file; the next run retries it.
+                    _log.warning(
+                        "frecency_staleness_lookup_failed_skipping_file",
+                        file=str(file), collection=getattr(col, "name", "?"),
+                        exc_info=True,
+                    )
+                    continue
 
             if not existing["ids"]:
                 continue  # not yet indexed — needs full nx index repo
@@ -2218,14 +2230,24 @@ def _prune_misclassified_in_collection(
     # bounded by the number of files indexed before catalog backfill,
     # which on a repo that has been on a recent nexus is typically zero.
     for src in legacy_paths:
-        existing = _paginated_get(col, include=[], where={"source_path": src})
-        if existing["ids"]:
-            _batched_delete(col, existing["ids"])
-            pruned += len(existing["ids"])
-            _log.debug(
-                f"pruned misclassified chunks from {kind} collection (legacy)",
-                count=len(existing["ids"]),
-                source_path=src,
+        # nexus-ou4tb: isolate per source_path — the guarded sibling loop
+        # above already does this, and one path's degrade must not abort the
+        # remaining prune work.
+        try:
+            existing = _paginated_get(col, include=[], where={"source_path": src})
+            if existing["ids"]:
+                _batched_delete(col, existing["ids"])
+                pruned += len(existing["ids"])
+                _log.debug(
+                    f"pruned misclassified chunks from {kind} collection (legacy)",
+                    count=len(existing["ids"]),
+                    source_path=src,
+                )
+        except Exception:  # noqa: BLE001 — one path's failure must not abort the prune
+            _log.warning(
+                "legacy_prune_failed_skipping_source_path",
+                source_path=src, collection=getattr(col, "name", "?"),
+                exc_info=True,
             )
 
     return pruned
@@ -2401,7 +2423,20 @@ def _prune_deleted_files(
                          exc_info=True)
             restored = 0
 
-        all_chunks = _paginated_get(col, include=["metadatas"])
+        # nexus-ou4tb: isolate per collection. A degraded read now raises
+        # instead of reading as an empty collection — which is the right
+        # client contract (an empty read here would have looked like "no
+        # chunks", and GC on a false-empty is how you delete nothing while
+        # believing you swept). But it must skip THIS collection, not abort
+        # the sweep for every collection after it.
+        try:
+            all_chunks = _paginated_get(col, include=["metadatas"])
+        except Exception:  # noqa: BLE001 — one collection's degrade must not end the sweep
+            _log.warning(
+                "gc_sweep_read_failed_skipping_collection",
+                collection=collection_name, exc_info=True,
+            )
+            continue
         if not all_chunks["ids"]:
             continue
         # nexus-oqku: when the catalog manifest has zero referenced

@@ -577,52 +577,54 @@ class _ServiceCollectionStub:
         include=["metadatas"])``). When ``ids`` is provided the request is
         routed to ``/v1/vectors/store-get``; when ``where`` is provided it
         is routed to ``/v1/vectors/get`` (staleness-check path).
+
+        nexus-ou4tb: raises :class:`VectorServiceError` rather than degrading
+        to an empty result. A silent empty is INDISTINGUISHABLE from
+        "collection has 0 chunks", which is the staleness-check answer that
+        makes a caller re-embed everything — the degraded service is charged
+        to the re-embed budget and nobody is told. This adopts the contract
+        :meth:`count` and :meth:`get_all_metadata` already document in this
+        same class ("the caller owns the boundary"); those two named ``get``
+        and ``delete`` as the inconsistent holdouts, and this closes that.
         """
-        try:
-            if ids is not None:
-                # Manifest-based lookup: fetch specific chunk IDs
-                body: dict[str, Any] = {
-                    "collection": self._name,
-                    "ids": ids,
-                    "limit": limit,
-                    "offset": offset,
-                }
-                if include_source_uri:
-                    body["include_source_uri"] = True
-                result = _post("/v1/vectors/store-get", body, tenant=self._tenant)
-            else:
-                # Where-filter lookup (incremental-sync staleness check)
-                body = {
-                    "collection": self._name,
-                    "limit": limit,
-                    "offset": offset,
-                }
-                if where:
-                    body["where"] = where
-                if include:
-                    body["include"] = include
-                if include_source_uri:
-                    body["include_source_uri"] = True
-                result = _post("/v1/vectors/get", body, tenant=self._tenant)
-            # Normalise to Chroma shape: {ids, documents, metadatas}.
-            # RDR-169 G5 (nexus-jkv85): chashes + spans always present when service is G5+.
-            # source_uris present only when include_source_uri=True was forwarded.
-            out: dict[str, Any] = {
-                "ids":       result.get("ids", []),
-                "documents": result.get("documents", []),
-                "metadatas": result.get("metadatas", []),
+        if ids is not None:
+            # Manifest-based lookup: fetch specific chunk IDs
+            body: dict[str, Any] = {
+                "collection": self._name,
+                "ids": ids,
+                "limit": limit,
+                "offset": offset,
             }
-            for key in ("chashes", "source_uris", "spans"):
-                if key in result:
-                    out[key] = result[key]
-            return out
-        except VectorServiceError as exc:
-            _log.warning(
-                "service_collection_get_failed",
-                collection=self._name,
-                error=str(exc),
-            )
-            return {"ids": [], "documents": [], "metadatas": []}
+            if include_source_uri:
+                body["include_source_uri"] = True
+            result = _post("/v1/vectors/store-get", body, tenant=self._tenant)
+        else:
+            # Where-filter lookup (incremental-sync staleness check)
+            body = {
+                "collection": self._name,
+                "limit": limit,
+                "offset": offset,
+            }
+            if where:
+                body["where"] = where
+            if include:
+                body["include"] = include
+            if include_source_uri:
+                body["include_source_uri"] = True
+            result = _post("/v1/vectors/get", body, tenant=self._tenant)
+        # Normalise to Chroma shape: {ids, documents, metadatas}.
+        # RDR-169 G5 (nexus-jkv85): chashes + spans always present when service is G5+.
+        # source_uris present only when include_source_uri=True was forwarded.
+        out: dict[str, Any] = {
+            "ids":       result.get("ids", []),
+            "documents": result.get("documents", []),
+            "metadatas": result.get("metadatas", []),
+        }
+        for key in ("chashes", "source_uris", "spans"):
+            if key in result:
+                out[key] = result[key]
+        return out
+
 
     @property
     def name(self) -> str:
@@ -675,22 +677,22 @@ class _ServiceCollectionStub:
         }
 
     def delete(self, ids: list[str]) -> None:
-        """Delete chunks by ID from the service."""
+        """Delete chunks by ID from the service.
+
+        nexus-ou4tb: raises :class:`VectorServiceError` rather than logging and
+        returning. A silently-failed prune leaves stale chunks that every later
+        read treats as live — the caller believes it pruned, search does not
+        agree, and the divergence is permanent until something else happens to
+        rewrite them. Same "caller owns the boundary" contract as
+        :meth:`count` / :meth:`get_all_metadata`.
+        """
         if not ids:
             return
-        try:
-            _post(
-                "/v1/vectors/store-delete",
-                {"collection": self._name, "ids": ids},
-                tenant=self._tenant,
-            )
-        except VectorServiceError as exc:
-            _log.warning(
-                "service_collection_delete_failed",
-                collection=self._name,
-                count=len(ids),
-                error=str(exc),
-            )
+        _post(
+            "/v1/vectors/store-delete",
+            {"collection": self._name, "ids": ids},
+            tenant=self._tenant,
+        )
 
 
 # ── HttpVectorClient ─────────────────────────────────────────────────────────
@@ -1298,30 +1300,33 @@ class HttpVectorClient:
         """Return the subset of *ids* present in *collection*.
 
         T3Database parity (``nx catalog verify`` / gc paths). Pages at 300
-        ids per request to mirror the historical batch shape; a missing or
-        unreachable collection resolves to the empty set, matching
-        ``T3Database.existing_ids``.
+        ids per request to mirror the historical batch shape.
+
+        nexus-ou4tb: raises :class:`VectorServiceError` rather than resolving
+        an unreachable collection to the empty set. Empty here does not mean
+        "nothing present" to any caller — it means "everything you asked about
+        is MISSING", and the callers act on that: ``nx catalog verify``
+        reports every expected document as a ghost, the migration ETL
+        concludes nothing landed and rewrites it, and ``--skip-existing``
+        silently skips nothing. A degraded service must not be able to produce
+        a clean-looking integrity report.
+
+        ``doc_indexer`` already wraps this call and degrades explicitly to a
+        full upsert, which is the shape a caller that genuinely can tolerate
+        the failure should use.
         """
         if not ids:
             return set()
         found: set[str] = set()
         page = 300
-        try:
-            for start in range(0, len(ids), page):
-                batch = ids[start : start + page]
-                result = _post(
-                    "/v1/vectors/store-get",
-                    {"collection": collection, "ids": batch, "limit": len(batch)},
-                    tenant=self._tenant,
-                )
-                found.update(result.get("ids") or [])
-        except VectorServiceError as exc:
-            _log.warning(
-                "http_vector_existing_ids_failed",
-                collection=collection,
-                error=str(exc),
+        for start in range(0, len(ids), page):
+            batch = ids[start : start + page]
+            result = _post(
+                "/v1/vectors/store-get",
+                {"collection": collection, "ids": batch, "limit": len(batch)},
+                tenant=self._tenant,
             )
-            return set()
+            found.update(result.get("ids") or [])
         return found
 
     def update_chunks(

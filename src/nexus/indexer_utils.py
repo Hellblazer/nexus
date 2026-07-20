@@ -377,15 +377,20 @@ def build_staleness_cache(col: object) -> StalenessCache:
             )
             return cache
 
-    # nexus-441p5 critique (HIGH): in service mode the fallback rides
-    # ``HttpVectorClient.get()``, which swallows ``VectorServiceError`` to an
-    # EMPTY page (logging only ``service_collection_get_failed``) — so a
-    # degraded fallback is indistinguishable here from a genuinely empty
-    # collection and the except arm above never fires. We cannot tell the two
-    # apart at this layer, but "fast path failed AND the fallback saw zero
-    # chunks" is exactly the suspicious shape: warn loudly so an operator can
-    # correlate with the client-layer log line instead of silently losing
-    # incremental indexing (a spuriously empty cache re-processes every file).
+    # nexus-441p5 critique (HIGH) — RESOLVED by nexus-ou4tb, comment kept
+    # because it records why this warning exists at all. In service mode the
+    # fallback rides ``HttpVectorClient.get()``, which USED TO swallow
+    # ``VectorServiceError`` into an EMPTY page, making a degraded fallback
+    # indistinguishable here from a genuinely empty collection; the except arm
+    # above could never fire. ``get()`` now raises, so that arm DOES fire and
+    # a degraded fallback returns early with
+    # ``build_staleness_cache_paginated_get_failed`` instead of reaching here.
+    #
+    # This check therefore no longer covers a degraded service — it now means
+    # what it literally says: the fast path failed AND the collection really
+    # is empty. Still worth a warning (that combination re-processes every
+    # file), but it is no longer the only signal an operator has, so the hint
+    # no longer points at a log event that no longer exists.
     if _fast_path_failed and not (all_chunks.get("ids") or []):
         import structlog  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
@@ -393,10 +398,12 @@ def build_staleness_cache(col: object) -> StalenessCache:
             "build_staleness_cache_fallback_empty_after_fast_path_failure",
             collection=getattr(col, "name", "<unknown>"),
             hint=(
-                "either the collection is genuinely empty, or the paginated "
-                "fallback ALSO degraded (see any preceding "
-                "service_collection_get_failed log line) — staleness cache is "
-                "empty, so this run will re-process every file"
+                "the fast path failed and the paginated fallback found zero "
+                "chunks; since nexus-ou4tb a degraded fallback raises instead "
+                "of reading empty (see build_staleness_cache_paginated_get_"
+                "failed), so this most likely means the collection is "
+                "genuinely empty — staleness cache is empty either way, so "
+                "this run will re-process every file"
             ),
         )
 

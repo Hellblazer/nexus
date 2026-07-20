@@ -24,8 +24,11 @@ import os
 from typing import TYPE_CHECKING
 
 import click
+import structlog
 
 from nexus.catalog.tumbler import Tumbler
+
+_log = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
     from nexus.catalog.catalog import Catalog  # noqa: F401 — used in _heal_ghosts annotation (PEP 563 deferred)
@@ -455,6 +458,24 @@ def _source_uri_home_key(uri: str) -> str:
     return f"{p.scheme}://{p.netloc}"
 
 
+def _exit_incomplete_if_unreadable(unreadable: list[str]) -> None:
+    """Fail the command when part of the store could not be verified.
+
+    nexus-ou4tb. Ghosts found is a SUCCESSFUL verification with findings and
+    keeps exit 0 (unchanged). Collections that could not be read mean the
+    verification is INCOMPLETE, which is a different thing, and a script that
+    only parses the ghosts map would otherwise read "no ghosts" as "clean".
+    The exit code is the one channel that carries this without changing the
+    documented stdout shape.
+    """
+    if unreadable:
+        raise click.ClickException(
+            f"verification INCOMPLETE: {len(unreadable)} collection(s) could "
+            f"not be read ({', '.join(sorted(unreadable))}). The results above "
+            "cover only the collections that could be probed."
+        )
+
+
 @click.command("verify")
 @click.option(
     "--heal",
@@ -476,6 +497,7 @@ def _source_uri_home_key(uri: str) -> str:
     default=False,
     help="Emit machine-readable JSON: {collection: [{tumbler, title, doc_id}]}.",
 )
+
 def verify_cmd(heal: bool, collection: str, json_out: bool) -> None:
     """Reconcile catalog tumblers against their T3 collection.
 
@@ -551,9 +573,24 @@ def verify_cmd(heal: bool, collection: str, json_out: bool) -> None:
 
     t3 = _cat_cmd._make_t3()
     ghosts_by_collection: dict[str, list[dict]] = {}
+    unreadable: list[str] = []
     for coll, tumblers in sorted(by_collection.items()):
         expected_ids = [doc_id for _, _, doc_id in tumblers]
-        present = t3.existing_ids(coll, expected_ids)
+        # nexus-ou4tb: existing_ids raises now instead of returning the empty
+        # set, which is what stops this command reporting EVERY expected
+        # document as a ghost whenever the service is degraded. But a verify
+        # over many collections must still report the ones it could read —
+        # so an unreadable collection is recorded as unreadable and skipped,
+        # never silently folded in as "all ghosts".
+        try:
+            present = t3.existing_ids(coll, expected_ids)
+        except Exception as exc:  # noqa: BLE001 — per-collection isolation; reported, not swallowed
+            unreadable.append(coll)
+            _log.warning(
+                "catalog_verify_collection_unreadable",
+                collection=coll, expected=len(expected_ids), error=str(exc),
+            )
+            continue
         ghosts = [
             {"tumbler": t, "title": title, "doc_id": doc_id}
             for t, title, doc_id in tumblers
@@ -562,13 +599,35 @@ def verify_cmd(heal: bool, collection: str, json_out: bool) -> None:
         if ghosts:
             ghosts_by_collection[coll] = ghosts
 
+    if unreadable:
+        # nexus-ou4tb: a verify that could not read part of the store must say
+        # so. Reporting "0 ghosts" over collections it never managed to probe
+        # is exactly the confident-but-blind verdict this bead exists to kill.
+        #
+        # To STDERR, always. --json's stdout is a documented machine-parseable
+        # collection->ghosts map (test_verify_json_output); writing this to
+        # stdout would corrupt the JSON, and nesting the map under a new key
+        # to make room would break every existing parser. The shape stays; the
+        # warning goes where it cannot interfere.
+        click.echo(
+            f"WARNING: {len(unreadable)} collection(s) could not be read and "
+            f"were SKIPPED (not verified): {', '.join(sorted(unreadable))}",
+            err=True,
+        )
+
     if json_out:
         click.echo(_json.dumps(ghosts_by_collection, indent=2))
+        _exit_incomplete_if_unreadable(unreadable)
         return
 
     total_ghosts = sum(len(v) for v in ghosts_by_collection.values())
     if not ghosts_by_collection:
-        click.echo(f"Summary: 0 ghosts / {total_tumblers} tumblers. All good.")
+        verdict = "All good." if not unreadable else (
+            "No ghosts among the collections that COULD be read — "
+            "the skipped ones above are unverified."
+        )
+        click.echo(f"Summary: 0 ghosts / {total_tumblers} tumblers. {verdict}")
+        _exit_incomplete_if_unreadable(unreadable)
         return
 
     for coll, ghosts in sorted(ghosts_by_collection.items()):
