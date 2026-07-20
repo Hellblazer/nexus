@@ -1165,6 +1165,21 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
 
         ``t3`` and ``chash_index`` are local-mode artefacts; accepted for
         conformance, ignored. The service resolves via its own internal index.
+
+        On a miss, retries once through the alias-aware route (nexus-84tr4).
+        ``/resolve_chash`` has no alias fallback — that lives on
+        ``/v1/chash/lookup`` — so this used to MISS on a legacy 32-hex ref
+        while ``resolve_chash_globally`` RESOLVED the same ref, two functions
+        disagreeing about the same identifier space. Harmless on a fully
+        rekeyed store, where every caller reads 64-hex manifest chashes, but a
+        user pasting a legacy citation into an ``nx doc`` path, or any
+        un-rekeyed or partially-rekeyed store, got a silent MISS.
+
+        The retry costs one extra request only on a miss, and only when the
+        alias route reports a different canonical identity. The returned
+        ``chash``/``chunk_hash`` is then the CANONICAL hex, not the legacy ref
+        that was passed in, so a caller comparing against a 64-char citation
+        matches — the same rewrite the citation resolver performs.
         """
         try:
             hex_chash, char_range = parse_chash_span(chash)
@@ -1174,12 +1189,14 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         params: dict[str, Any] = {"chash": hex_chash}
         if prefer_collection:
             params["prefer_collection"] = prefer_collection
-        try:
-            result = self._get("/resolve_chash", **params)
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 404:
-                return None
-            raise
+        result = self._resolve_chash_once(params)
+        if not result:
+            canonical = self._canonical_chash(hex_chash)
+            if canonical and canonical != hex_chash:
+                params["chash"] = canonical
+                result = self._resolve_chash_once(params)
+                if result:
+                    hex_chash = canonical
         if not result:
             return None
         chunk_text: str = result.get("chunk_text", "")
@@ -1199,6 +1216,33 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         if char_range:
             out["char_range"] = char_range
         return out
+
+    def _resolve_chash_once(self, params: dict[str, Any]) -> Any:
+        """One ``/resolve_chash`` GET; 404 is a miss, other errors propagate."""
+        try:
+            return self._get("/resolve_chash", **params)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+
+    def _canonical_chash(self, hex_chash: str) -> str | None:
+        """Alias-resolve *hex_chash* to its canonical identity (nexus-84tr4).
+
+        ``/v1/chash/lookup`` echoes the canonical 64-hex it resolved —
+        identity-mapped for canonical input, alias-chained for a legacy 32-hex
+        ref. Best-effort by design: this runs only after the primary lookup
+        already missed, so a failure here returns exactly the ``None`` the
+        caller was going to get anyway. It cannot mask a real error, because
+        a non-404 from the primary path propagates before we get here.
+        """
+        try:
+            data = super()._get("/v1/chash/lookup", params={"chash": hex_chash})
+        except Exception as exc:  # noqa: BLE001 — supplementary lookup; primary miss already stands
+            _log.debug("resolve_chash_alias_lookup_failed", chash=hex_chash, error=str(exc))
+            return None
+        canonical = (data or {}).get("chash")
+        return canonical if isinstance(canonical, str) and canonical else None
 
     def resolve_chunk(self, tumbler: Tumbler | str) -> dict | None:
         """Resolve a 4-segment chunk tumbler to its document + chunk metadata.
