@@ -109,6 +109,46 @@ def test_extract_bundle_is_idempotent_no_reextract(tmp_path, make_pg_bundle_txz)
     assert sentinel.read_text() == "MUTATED-BY-TEST\n", "re-extract clobbered an existing tree"
 
 
+def test_extract_bundle_reextracts_when_handed_a_DIFFERENT_archive(
+    tmp_path, make_pg_bundle_txz
+) -> None:
+    """nexus-b878d sibling nexus-xzop6: the marker must carry archive identity.
+
+    It previously recorded only ``source=<path>`` and nothing ever read it, so
+    ``is_bundle_extracted`` returned True for any complete prior tree and a
+    NEW archive was silently ignored — the old binaries stayed in place and
+    'pg_bundle_already_extracted' was logged. Latent only because PG_VERSION
+    has been 17.5 for the whole shipped history; the first bundle bump would
+    have left every existing install on the old PostgreSQL.
+    """
+    extract_root = tmp_path / "cache"
+    first = make_pg_bundle_txz(tmp_path, "nexus-pg-first.txz")
+    bin_dir = pg_bundle.extract_bundle(first, extract_root)
+    (bin_dir / "initdb").write_text("FROM-FIRST-ARCHIVE\n")
+
+    # A genuinely different archive: distinct file, distinct content.
+    second = make_pg_bundle_txz(tmp_path / "second", "nexus-pg-second.txz")
+    again = pg_bundle.extract_bundle(second, extract_root)
+
+    assert again == bin_dir
+    assert (bin_dir / "initdb").read_text() != "FROM-FIRST-ARCHIVE\n", (
+        "a different archive must re-extract, not return the old binaries"
+    )
+
+
+def test_extract_bundle_records_archive_identity_in_the_marker(
+    tmp_path, make_pg_bundle_txz
+) -> None:
+    """The marker is the thing that makes the re-extract decision possible."""
+    archive = make_pg_bundle_txz(tmp_path)
+    extract_root = tmp_path / "cache"
+    pg_bundle.extract_bundle(archive, extract_root)
+    marker = (extract_root / pg_bundle._EXTRACT_MARKER).read_text()
+    stat = archive.stat()
+    assert f"size={stat.st_size}" in marker
+    assert f"mtime_ns={stat.st_mtime_ns}" in marker
+
+
 def test_extract_bundle_incomplete_tree_fails_loud(tmp_path) -> None:
     """A .txz missing required binaries must raise, not return a broken bin dir."""
     staging = tmp_path / "_bad"
