@@ -2,7 +2,8 @@
 title: "Retire chash_index: the Chunks Tables Are the Chash-Keyed Store — Drop the Router Remnant of the Split-Store Architecture"
 id: RDR-187
 type: Architecture
-status: draft
+status: accepted
+accepted_date: 2026-07-20
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
