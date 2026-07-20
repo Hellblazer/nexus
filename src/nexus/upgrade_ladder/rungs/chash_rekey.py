@@ -198,6 +198,18 @@ class ChashRekeyRung:
                 f"dangling_manifest={dangling} "
                 f"validated={'yes' if validated else 'operator-step (managed)' if validated is None else 'FAILED'}"
             )
+            # rdr180-17 / F2: the engine ANALYZEs chash_alias inside the rekey
+            # transaction so the planner can see the alias rows it just wrote.
+            # Postgres silently SKIPS that for a role without MAINTAIN (PG17+),
+            # so the engine reports whether it took effect. Surface a FALSE —
+            # the rekey is still correct, but a multi-tenant store planned it
+            # blind, which cost 101 minutes vs 461 seconds in production.
+            if counts.get("alias_stats_refreshed") is False:
+                detail += (
+                    " | NOTE: alias planner statistics were NOT refreshed "
+                    "(engine lacks MAINTAIN on nexus.chash_alias, or PostgreSQL "
+                    "predates 17) — correct, but a multi-tenant rekey may be slow"
+                )
             _log.info(
                 "chash_rekey_converged",
                 counts=counts,

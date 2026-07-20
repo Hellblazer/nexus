@@ -124,6 +124,32 @@ public final class RekeyOps {
                 + "ON CONFLICT (tenant_id, old_ref) DO NOTHING");
             counts.put("alias_rows", aliased);
 
+            // (2a) UN-BLIND THE PLANNER before anything joins the rows we just
+            // wrote. F2, production 2026-07-20: autoanalyze fires the moment
+            // tenant 1 commits and freezes chash_alias statistics at "100%
+            // tenant 1" (most_common_vals={t1}, freqs=[1.0], n_distinct=1).
+            // Tenant 2's alias rows are inserted INSIDE this transaction and
+            // are therefore invisible to the planner, so `tenant_id = 't2'`
+            // estimates ONE row and Postgres picks a triple nested loop
+            // against ~134k x 466k actual: 101 MINUTES, versus 461 seconds
+            // once the estimate is right. An in-transaction ANALYZE samples
+            // this transaction's own uncommitted rows, which is exactly the
+            // property needed and the reason this cannot be deferred to a
+            // post-commit maintenance pass.
+            //
+            // Every step below (Item8 disposition, the two-phase rekey, and
+            // above all the step-5 cascades) joins chash_alias, so this sits
+            // immediately after the INSERT rather than just before the
+            // cascades.
+            //
+            // Requires MAINTAIN on the table for nexus_svc (grants-nexus-svc,
+            // PG17+): Postgres does NOT error when a non-owner analyzes — it
+            // WARNs and SKIPS, so an ungranted ANALYZE is a silent no-op that
+            // leaves the planner exactly as blind. The outcome therefore rides
+            // the envelope instead of being assumed; RekeyOpsIntegrationTest
+            // asserts the resulting statistics, never the statement.
+            counts.put("alias_stats_refreshed", ChashSqlIdioms.refreshAliasStats(ctx));
+
             // (3) Item8: empty-text rows. Reference-only rows resolve through
             // the alias just built from content-bearing siblings; the rest are
             // orphans under the per-run policy.

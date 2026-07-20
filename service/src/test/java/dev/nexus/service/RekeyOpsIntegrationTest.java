@@ -117,6 +117,15 @@ class RekeyOpsIntegrationTest {
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA nexus TO " + SVC_ROLE);
+            // Mirror grants-nexus-svc's MAINTAIN grant onto this test's stand-in
+            // for nexus_svc, so the rekey's in-transaction ANALYZE is exercised
+            // under the SAME privilege it holds in production (rdr180-17 / F2).
+            // That the CHANGESET grants this to the real nexus_svc is a separate
+            // contract, asserted in SchemaMigratorIntegrationTest — this fixture
+            // must not be the only thing standing between the grant and a silent
+            // no-op in production.
+            su.createStatement().execute(
+                "GRANT MAINTAIN ON nexus.chash_alias TO " + SVC_ROLE);
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
         }
@@ -531,5 +540,103 @@ class RekeyOpsIntegrationTest {
             + "' AND chash = decode('" + "d".repeat(32) + "', 'hex')")).isEqualTo(2);
         assertThat(count("SELECT count(*) FROM nexus.chash_alias WHERE tenant_id='" + TC + "'"))
             .isZero();
+    }
+
+    // ── Test 5: the rekey leaves chash_alias with FRESH planner stats ────────
+
+    /**
+     * F2, production 2026-07-20 (bus [20980]): the second tenant's rekey ran
+     * 101 MINUTES and had to be cancelled. Root cause was not the work — the
+     * same work took 461s once the planner was un-blinded. Autoanalyze fired
+     * the instant tenant 1 committed and froze {@code chash_alias} statistics
+     * at "this table is 100% tenant 1" ({@code most_common_vals={t1}},
+     * {@code freqs=[1.0]}, {@code n_distinct=1}). Tenant 2's ~134k alias rows
+     * are inserted INSIDE its own transaction and are therefore invisible to
+     * the planner, so {@code tenant_id = 't2'} estimated ONE row and Postgres
+     * chose a triple nested loop against ~134k x 466k actual.
+     *
+     * <p>The fix is one statement — ANALYZE {@code chash_alias} inside the
+     * rekey transaction, after the alias INSERT — because an in-transaction
+     * ANALYZE samples its own uncommitted rows.
+     *
+     * <p><strong>The trap this test exists to catch:</strong> the rekey runs as
+     * {@code nexus_svc}, which holds DML grants only and does NOT own the
+     * table. Postgres does not ERROR when a non-owner analyzes — it emits a
+     * WARNING and SKIPS the table. A naive fix therefore looks applied, logs
+     * nothing a caller sees, and leaves the planner exactly as blind as before.
+     * So this asserts the OBSERVABLE EFFECT (statistics exist and describe the
+     * rows this transaction wrote), never the mere presence of the statement.
+     *
+     * <p>Autovacuum is disabled on the table for the duration so the ONLY
+     * possible source of statistics is the rekey itself — without that, a
+     * passing assertion could be autoanalyze's work rather than ours.
+     */
+    @Test
+    @Order(5)
+    void rekey_leavesFreshPlannerStatsOnChashAlias() throws Exception {
+        final String tenant = "t-rekey-stats";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            // ONLY the rekey may produce statistics for this table.
+            exec(su, "ALTER TABLE nexus.chash_alias SET (autovacuum_enabled = false)");
+            exec(su, "DELETE FROM pg_statistic WHERE starelid = 'nexus.chash_alias'::regclass");
+            exec(su, "INSERT INTO nexus.catalog_collections (tenant_id, name) "
+                + "VALUES ('" + tenant + "', 'code__stats') ON CONFLICT DO NOTHING");
+            withChecksDropped(su, () -> {
+                for (int i = 0; i < 40; i++) {
+                    String text = "stats fixture chunk " + i;
+                    insertChunk(su, tenant, "nexus.chunks_768", 768, "code__stats",
+                        legacyKeyOf(text), text);
+                }
+            });
+        }
+        // Precondition: genuinely no statistics before the rekey. Without this
+        // the assertion below could pass on stale rows and prove nothing.
+        assertThat(count("SELECT count(*) FROM pg_stats WHERE schemaname='nexus' "
+            + "AND tablename='chash_alias' AND attname='tenant_id'"))
+            .as("fixture must start with NO chash_alias statistics")
+            .isZero();
+
+        Map<String, Object> counts = rekeyOps.rekey(tenant, false);
+        assertThat(((Number) counts.get("alias_rows")).intValue())
+            .as("the fixture must actually write alias rows, or the ANALYZE has nothing to see")
+            .isEqualTo(40);
+
+        // THE ASSERTION: the rekey's own transaction left usable statistics.
+        // Pre-fix this is 0 (no ANALYZE at all); with a permission-skipped
+        // ANALYZE it is ALSO 0 — which is exactly why the effect, not the
+        // statement, is what gets asserted.
+        assertThat(count("SELECT count(*) FROM pg_stats WHERE schemaname='nexus' "
+            + "AND tablename='chash_alias' AND attname='tenant_id'"))
+            .as("the rekey must leave FRESH planner statistics on chash_alias — an "
+                + "in-transaction ANALYZE that Postgres silently skipped for want of "
+                + "ownership/MAINTAIN leaves the planner blind (F2: 101min vs 461s)")
+            .isEqualTo(1);
+
+        // And they must DESCRIBE this tenant's rows, not merely exist: the
+        // production failure was statistics that were present but described a
+        // different tenant entirely.
+        assertThat(scalar("SELECT most_common_vals::text FROM pg_stats WHERE schemaname='nexus' "
+            + "AND tablename='chash_alias' AND attname='tenant_id'"))
+            .as("statistics must describe the rows this transaction wrote")
+            .contains(tenant);
+
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            exec(su, "ALTER TABLE nexus.chash_alias RESET (autovacuum_enabled)");
+        }
+    }
+
+    /** The pre-RDR-180 32-hex half-digest of {@code text}, as raw bytes. */
+    private static byte[] legacyKeyOf(String text) {
+        try {
+            byte[] full = MessageDigest.getInstance("SHA-256")
+                .digest(text.getBytes(StandardCharsets.UTF_8));
+            byte[] half = new byte[16];
+            System.arraycopy(full, 0, half, 0, 16);
+            return half;
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 }

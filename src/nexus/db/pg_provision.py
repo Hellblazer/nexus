@@ -39,18 +39,36 @@ IDEMPOTENCY:
       service's env configuration.
 
 BINARY DISCOVERY:
-  The provisioner requires system-installed PostgreSQL 17 (or 16/15) binaries.
-  Search order:
-    1. ``NEXUS_PG_BIN`` env var override (tests + custom installs).
-    2. ``/opt/homebrew/opt/postgresql@17/bin`` (macOS Homebrew PG 17).
-    3. ``/opt/homebrew/opt/postgresql@15/bin`` (macOS Homebrew PG 15).
-    4. ``initdb`` on PATH (Linux; ``shutil.which`` → parent directory).
-    5. ``/usr/lib/postgresql/17/bin`` (Debian/Ubuntu system install).
-    6. ``/usr/lib/postgresql/15/bin`` (Debian/Ubuntu PG 15 fallback).
+  **In LOCAL-service mode nexus ALWAYS installs its own signed PostgreSQL
+  bundle (17.x) and never adopts a host PostgreSQL.** Bring-your-own PG is not
+  a supported mode: environment-dependent provisioning creates support
+  dead-ends and untestable behaviour matrices, so the deterministic install
+  wins over detection (policy locked 2026-07-07, GH #1381 arc).
 
-  Fails loudly with a platform-appropriate install hint when no binaries
-  are found.  Bundling/embedded Postgres is a future option (not this
-  bead).
+  "Always install" means always OUR PostgreSQL — it does NOT mean re-download
+  or re-extract on every run. Acquisition and extraction are both idempotent:
+  an already-downloaded archive is reused, and a complete prior extraction is
+  a cheap no-op (``is_bundle_extracted``). A given install fetches the bundle
+  once and keeps it.
+
+  In MANAGED/cloud mode no PostgreSQL is provisioned here at all — the engine
+  runs against a provider-managed server, so nothing in this module applies.
+
+  The search order below therefore describes where an ALREADY-PROVISIONED
+  bundle is found — plus two explicit operator carve-outs, which are
+  deliberate overrides rather than a fallback chain:
+    1. ``NEXUS_PG_BIN`` env var override (tests + operator override).
+    2. The extracted ship-alongside bundle under the config dir.
+    3..n. Fixed system paths, retained ONLY so an operator who has taken
+       carve-out 1 or 2 lands somewhere legible; not a supported install mode.
+
+  Fails loudly with a platform-appropriate hint when no binaries are found —
+  never a silent fallback.
+
+  NOTE: this docstring previously described host-PG discovery as the norm and
+  called bundling "a future option". That predated RDR-157, which shipped the
+  bundle; the stale text misled a reader into designing for a BYO substrate
+  that does not exist (2026-07-20).
 
 OUTPUT FILES (all under ``nexus_config_dir()``):
   postgres/          — initdb cluster data directory.

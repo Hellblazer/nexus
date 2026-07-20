@@ -1116,6 +1116,48 @@ class SchemaMigratorIntegrationTest {
             .containsAll(expected);
     }
 
+    // ── Test 12: nexus_svc can actually ANALYZE chash_alias (rdr180-17) ──────
+
+    /**
+     * F2 (production 2026-07-20): the rekey and staging-promote paths ANALYZE
+     * {@code nexus.chash_alias} inside their own transaction so the planner can
+     * see the alias rows they just wrote — without it, a multi-tenant store's
+     * second tenant is planned against statistics frozen at "100% tenant 1"
+     * and the cascade degrades from 461 seconds to 101 minutes.
+     *
+     * <p>This asserts the PRIVILEGE half of that fix, which is the half that
+     * fails silently: {@code nexus_svc} holds DML grants only and does not own
+     * the table, and Postgres does not ERROR when a non-owner analyzes — it
+     * WARNs and SKIPS. So an engine shipped without this grant would run the
+     * ANALYZE, log nothing the caller sees, and leave the planner blind.
+     * {@code RekeyOpsIntegrationTest} proves the rekey produces statistics
+     * given the privilege; this proves the migration actually grants it to the
+     * role production uses.
+     */
+    @Test
+    @Order(12)
+    void chashAlias_isAnalyzableByNexusSvc() throws Exception {
+        SchemaMigrator.migrate(adminDs);  // defensive; idempotent
+
+        try (Connection conn = adminDs.getConnection()) {
+            // No version assumption: nexus always installs its own PostgreSQL
+            // bundle (17.x) and never adopts a host server, so MAINTAIN is
+            // always available. A server that cannot satisfy this is an
+            // unsupported substrate and SHOULD fail here rather than be
+            // skipped past.
+            ResultSet rs = conn.createStatement().executeQuery(
+                "SELECT pg_catalog.has_table_privilege('nexus_svc', "
+                + "'nexus.chash_alias', 'MAINTAIN')");
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getBoolean(1))
+                .as("grants-nexus-svc must grant MAINTAIN on nexus.chash_alias to "
+                    + "nexus_svc — without it the rekey's in-transaction ANALYZE is a "
+                    + "SILENT no-op (Postgres warns and skips for a non-owner) and the "
+                    + "F2 planner blindness returns unnoticed")
+                .isTrue();
+        }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private Set<String> tablesInSchema(Connection conn, String schema) throws Exception {

@@ -181,6 +181,16 @@ public final class StagingPromoteOps {
                 + "ON CONFLICT (tenant_id, old_ref) DO NOTHING",
                 collection));
 
+            // (3a) Un-blind the planner before the promote/collapse joins read
+            // the rows just written — the same F2 exposure RekeyOps carries
+            // (production 2026-07-20): alias rows inserted in THIS transaction
+            // are invisible to a planner working from statistics autoanalyze
+            // froze at the previous tenant's distribution, which turns the
+            // alias joins below into nested loops over the full pointer tables.
+            // Silent no-op without MAINTAIN (grants-nexus-svc, PG17+), so the
+            // outcome rides the envelope rather than being assumed.
+            counts.put("alias_stats_refreshed", ChashSqlIdioms.refreshAliasStats(ctx));
+
             // (4) collection registration stub — the chunks tables carry a
             // (tenant, collection) FK to catalog_collections (RDR-156
             // schema-enforced integrity: the FK that mechanically catches a

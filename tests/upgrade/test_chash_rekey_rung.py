@@ -234,3 +234,26 @@ class TestRegistry:
 
         assert RUNG_ORDER[-1] == RUNG_CHASH_REKEY
         assert [r.name for r in default_registry()] == list(RUNG_ORDER)
+
+
+def test_unrefreshed_alias_stats_are_surfaced_not_swallowed():
+    """rdr180-17 / F2: the engine reports whether its in-transaction ANALYZE of
+    chash_alias actually took effect — Postgres SILENTLY skips it for a role
+    without MAINTAIN (PG17+). A False must reach the operator: the rekey is
+    still correct, but a multi-tenant store just planned it blind, which
+    measured 101 minutes versus 461 seconds in production."""
+    rung, _ = _rung(
+        rekey_fn=lambda policy: _counts(alias_stats_refreshed=False),
+    )
+    result = rung.converge(_Report())
+    assert "alias planner statistics were NOT refreshed" in (result.detail or ""), (
+        "an unrefreshed-stats engine response must be surfaced in the converge "
+        f"detail, not swallowed; got: {result.detail!r}"
+    )
+
+
+def test_refreshed_alias_stats_stay_quiet():
+    """The happy path must not add noise — the NOTE appears only on False."""
+    rung, _ = _rung(rekey_fn=lambda policy: _counts(alias_stats_refreshed=True))
+    result = rung.converge(_Report())
+    assert "NOT refreshed" not in (result.detail or "")
