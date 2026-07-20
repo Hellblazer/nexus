@@ -1564,3 +1564,65 @@ class TestDimProbeRunsDespiteLegacyIds:
         assert "NX_VOYAGE_API_KEY" not in (c.reason or ""), (
             "the diagnostic must not demand a voyage key for never-voyage content"
         )
+
+
+class TestDryRunAgreesWithTheRunItPreviews:
+    """nexus-leunq follow-up, found by substantive-critic.
+
+    The first fix threaded rehashes_ids into the live guided path only, so the
+    dry-run preview kept the old answer. For the bead's own field case that
+    rendered "BLOCKED ... must be resolved first" beside the collection's own
+    reason "auto-remapped at migration ... no Voyage key or re-index needed" —
+    two contradictory statements in one line, about a collection the real run
+    migrates fine. And migrate_cmd exits non-zero on preview.unsupported, so a
+    script gating on the dry run blocked on nothing.
+    """
+
+    def _report(self):
+        from nexus.migration.detection import classify_collections
+
+        name = "knowledge__o__voyage-context-3__v1"
+        client = _FakeChromaClient(
+            {name: 12},
+            stored_dims={name: 768},
+            chunk_ids={name: ["16charlegacyid0"]},
+        )
+        return classify_collections(
+            local_client=client, cloud_client=None, voyage_key_present=False
+        )
+
+    def test_preview_does_not_block_what_the_run_will_migrate(self):
+        from nexus.migration.detection import build_dry_run_preview
+
+        report = self._report()
+        preview = build_dry_run_preview(report, rehashes_ids=True)
+        assert preview.unsupported == (), (
+            "the run migrates this collection, so the preview must not call it "
+            f"BLOCKED; got {[c.collection for c in preview.unsupported]}"
+        )
+
+    def test_the_rendered_preview_is_not_self_contradictory(self):
+        from nexus.migration.detection import (
+            build_dry_run_preview,
+            render_dry_run_preview,
+        )
+
+        text = render_dry_run_preview(
+            build_dry_run_preview(self._report(), rehashes_ids=True)
+        )
+        if "BLOCKED" in text:
+            assert "no Voyage key or re-index needed" not in text, (
+                "the preview claims BLOCKED and auto-remapped-no-action in the "
+                f"same output:\n{text}"
+            )
+
+    def test_a_verbatim_id_caller_still_sees_it_blocked(self):
+        """The default is unchanged — a preview for a path that COPIES ids
+        must still report the collection as blocked, because for that path it
+        genuinely is."""
+        from nexus.migration.detection import build_dry_run_preview
+
+        preview = build_dry_run_preview(self._report())
+        assert [c.collection for c in preview.unsupported] == [
+            "knowledge__o__voyage-context-3__v1"
+        ]

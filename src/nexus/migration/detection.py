@@ -857,13 +857,27 @@ def _throughput_for_support(support: Support) -> float:
     return _EST_ONNX_CHUNKS_PER_SEC
 
 
-def build_dry_run_preview(report: DetectionReport) -> DryRunPreview:
+def build_dry_run_preview(
+    report: DetectionReport, *, rehashes_ids: bool = False
+) -> DryRunPreview:
     """Roll a :class:`DetectionReport` into a per-leg/per-model dry-run preview.
 
     Supported groups contribute token-volume + time estimates; unsupported
     collections are surfaced separately (their re-index / key diagnostics) and
     contribute nothing to the migratable totals — they would be BLOCKED, not
     migrated.
+
+    ``rehashes_ids`` must match what the REAL run will do, and is forwarded to
+    :func:`cross_model_remappable`. A preview that answers differently from the
+    run it previews is worse than no preview: nexus-leunq's first fix threaded
+    the flag into the live guided path only, leaving this one at the default,
+    so a legacy-id measured-bge collection rendered as
+    "BLOCKED ... must be resolved first" directly beside its own reason text
+    "auto-remapped at migration ... no Voyage key or re-index needed" — two
+    contradictory statements in one line, about a collection the real run
+    migrates fine. Worse than cosmetic, because ``migrate_cmd`` exits non-zero
+    on ``preview.unsupported``, so a script gating on the dry run blocked on a
+    collection that was never actually blocked.
     """
     # RDR-162 P2: a cross-model-remappable collection is migratable (re-embed),
     # not blocked. nexus-gilf2: bucket cross-model groups by their RESOLVED
@@ -872,7 +886,7 @@ def build_dry_run_preview(report: DetectionReport) -> DryRunPreview:
     # would otherwise name only one of them. ``target`` is None for non-cross-
     # model classifications, keeping supported/blocked buckets unchanged.
     def _cross_target(c: CollectionClassification) -> str | None:
-        if not cross_model_remappable(c):
+        if not cross_model_remappable(c, rehashes_ids=rehashes_ids):
             return None
         return remap_target_model(
             c, voyage_key_present=report.voyage_key_present
@@ -942,7 +956,8 @@ def build_dry_run_preview(report: DetectionReport) -> DryRunPreview:
     # Only GENUINELY-blocked collections remain in unsupported — cross-model
     # collections are migratable and must not gate the dry-run exit.
     blocked = tuple(
-        c for c in report.unsupported if not cross_model_remappable(c)
+        c for c in report.unsupported
+        if not cross_model_remappable(c, rehashes_ids=rehashes_ids)
     )
     return DryRunPreview(
         groups=tuple(groups),

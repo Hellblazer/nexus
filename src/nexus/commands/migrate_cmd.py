@@ -149,7 +149,10 @@ def _run_dry_run(local_path: str | None) -> None:
             cloud_client=cloud,
             voyage_key_present=voyage_key_available(),
         )
-        preview = build_dry_run_preview(report)
+        # The real run this previews is run_guided_upgrade -> land-then-
+        # transform, which rehashes ids server-side. The preview must answer
+        # the same question the run will (nexus-leunq follow-up).
+        preview = build_dry_run_preview(report, rehashes_ids=True)
         click.echo(render_dry_run_preview(preview))
         if preview.unsupported:
             # Unsupported collections would BLOCK a real run — make the
@@ -258,7 +261,9 @@ def _run_migration(
                 local_client=local_read,
                 cloud_client=cloud_read,
                 voyage_key_present=voyage_key_available(),
-            )
+            ),
+            # Same path as the run below (land-then-transform).
+            rehashes_ids=True,
         )
     finally:
         for client in (local_read, cloud_read):
