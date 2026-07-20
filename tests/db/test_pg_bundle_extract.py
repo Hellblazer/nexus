@@ -149,6 +149,80 @@ def test_extract_bundle_records_archive_identity_in_the_marker(
     assert f"mtime_ns={stat.st_mtime_ns}" in marker
 
 
+def test_a_failed_reextract_leaves_the_WORKING_bundle_intact(
+    tmp_path, make_pg_bundle_txz
+) -> None:
+    """The highest-traffic path in the whole change, and the dangerous one.
+
+    Every pre-xzop6 install carries the old marker format (source=<path> with
+    no size=), which cannot be compared and so counts as a mismatch — meaning
+    the ENTIRE existing fleet takes the re-extract branch once, on first
+    upgrade, with a byte-identical archive. If that branch deleted the
+    known-good tree before proving the replacement, any failure (truncated
+    archive, disk full, permissions) would leave the install with no
+    PostgreSQL at all.
+    """
+    extract_root = tmp_path / "cache"
+    good = make_pg_bundle_txz(tmp_path, "nexus-pg-good.txz")
+    bin_dir = pg_bundle.extract_bundle(good, extract_root)
+    (bin_dir / "initdb").write_text("THE-WORKING-BUNDLE\n")
+
+    # Simulate a pre-xzop6 install: marker with no comparable identity.
+    (extract_root / pg_bundle._EXTRACT_MARKER).write_text(f"source={good}\n")
+
+    # A corrupt archive: extraction must fail...
+    corrupt = tmp_path / "nexus-pg-corrupt.txz"
+    corrupt.write_bytes(b"not a tarball at all")
+    with pytest.raises(Exception):
+        pg_bundle.extract_bundle(corrupt, extract_root)
+
+    # ...and the bundle that was working before the call must still be there.
+    assert pg_bundle.is_bundle_extracted(extract_root), (
+        "a failed re-extract destroyed the working bundle"
+    )
+    assert (bin_dir / "initdb").read_text() == "THE-WORKING-BUNDLE\n"
+
+
+def test_an_incomplete_replacement_archive_also_leaves_the_bundle_intact(
+    tmp_path, make_pg_bundle_txz
+) -> None:
+    """Same guarantee for a well-formed tarball that is not a real bundle."""
+    extract_root = tmp_path / "cache"
+    good = make_pg_bundle_txz(tmp_path, "nexus-pg-good2.txz")
+    bin_dir = pg_bundle.extract_bundle(good, extract_root)
+    (bin_dir / "initdb").write_text("THE-WORKING-BUNDLE\n")
+    (extract_root / pg_bundle._EXTRACT_MARKER).write_text(f"source={good}\n")
+
+    no_prefix = make_pg_bundle_txz(
+        tmp_path / "noprefix", "nexus-pg-noprefix2.txz", with_build_prefix=False
+    )
+    with pytest.raises(RuntimeError, match="build_prefix|relocation"):
+        pg_bundle.extract_bundle(no_prefix, extract_root)
+
+    assert pg_bundle.is_bundle_extracted(extract_root)
+    assert (bin_dir / "initdb").read_text() == "THE-WORKING-BUNDLE\n"
+
+
+def test_a_pre_xzop6_marker_upgrades_in_place_without_losing_the_bundle(
+    tmp_path, make_pg_bundle_txz
+) -> None:
+    """The benign fleet-wide case: same archive, old marker → adopt the new
+    format, keep serving."""
+    extract_root = tmp_path / "cache"
+    archive = make_pg_bundle_txz(tmp_path)
+    pg_bundle.extract_bundle(archive, extract_root)
+    (extract_root / pg_bundle._EXTRACT_MARKER).write_text(f"source={archive}\n")
+
+    bin_dir = pg_bundle.extract_bundle(archive, extract_root)
+
+    assert PgBinaries.from_dir(bin_dir).all_present()
+    marker = (extract_root / pg_bundle._EXTRACT_MARKER).read_text()
+    assert f"size={archive.stat().st_size}" in marker, "marker upgraded to the new format"
+    # No staging or backup residue left behind.
+    assert not (extract_root.parent / (extract_root.name + ".incoming")).exists()
+    assert not (extract_root.parent / (extract_root.name + ".replaced")).exists()
+
+
 def test_extract_bundle_incomplete_tree_fails_loud(tmp_path) -> None:
     """A .txz missing required binaries must raise, not return a broken bin dir."""
     staging = tmp_path / "_bad"
