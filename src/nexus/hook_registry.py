@@ -474,6 +474,31 @@ def _record_batch_hook_failure(
     )
 
 
+def record_catalog_hook_failure(
+    *,
+    source_path: str,
+    collection: str,
+    hook_name: str,
+    error: str,
+) -> None:
+    """Public entry point for the CATALOG post-store hooks (nexus-ou4tb).
+
+    The catalog registration hooks live outside this module (``indexer``,
+    ``catalog.store_hook``, ``pipeline_stages``) but fail in exactly the shape
+    :func:`_record_document_hook_failure` records, and their failures were
+    previously logged at DEBUG and nowhere else — so a document could land in
+    T3 and never be registered in the catalog, with no doc_id, no manifest and
+    no links, and nobody told. Only a rebuild recovers it.
+
+    Best-effort by construction: recording a failure must never turn a
+    degraded-but-working index run into a crash.
+    """
+    _record_document_hook_failure(
+        source_path=source_path, collection=collection,
+        hook_name=hook_name, error=error,
+    )
+
+
 def _record_document_hook_failure(
     *,
     source_path: str,

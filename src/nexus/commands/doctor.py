@@ -49,6 +49,47 @@ def _check_line(label: str, ok: bool, detail: str = "") -> str:
     return msg
 
 
+#: Hook names the catalog registration path records under (nexus-ou4tb).
+_CATALOG_HOOK_NAMES: tuple[str, ...] = (
+    "catalog_index_hook",
+    "catalog_store_hook",
+    "catalog_pdf_hook",
+    "catalog_link_generation",
+)
+
+
+def _catalog_hook_failure_lines(conn, tables: set[str]) -> list[str]:
+    """Surface un-cataloged documents from the ``hook_failures`` audit table.
+
+    Returns a single OK line when there is nothing outstanding, or a WARN line
+    naming the count, the oldest occurrence, and the recovery command. Silent
+    (empty) when the table is absent — a not-yet-migrated T2 must not render a
+    scary unknown.
+    """
+    if "hook_failures" not in tables:
+        return []
+    placeholders = ",".join("?" * len(_CATALOG_HOOK_NAMES))
+    try:
+        row = conn.execute(
+            f"SELECT count(*), min(occurred_at) FROM hook_failures "
+            f"WHERE hook_name IN ({placeholders})",
+            _CATALOG_HOOK_NAMES,
+        ).fetchone()
+    except Exception:  # noqa: BLE001 — boundary catch: a doctor check must never crash the report
+        return []
+    count = int(row[0] or 0) if row else 0
+    if not count:
+        return [_check_line("Catalog registration", True, "no un-cataloged documents")]
+    since = (row[1] or "unknown") if row else "unknown"
+    return [
+        _check_line(
+            "Catalog registration",
+            False,
+            f"{count} document(s) indexed but NOT cataloged since {since} "
+            f"— run 'nx catalog rebuild'",
+        )
+    ]
+
 def _fix(lines: list[str], *fix_lines: str) -> None:
     """Append indented Fix: lines after a failure entry."""
     first = True
@@ -126,6 +167,13 @@ def _run_check_schema() -> None:
         lines.append(_check_line(f"FTS5 table {fts}", ok))
         if not ok:
             all_ok = False
+
+    # nexus-ou4tb: documents that reached T3 but never reached the catalog.
+    # These used to be logged at DEBUG and nowhere else, so an index run
+    # reported success while leaving documents with no doc_id, no manifest and
+    # no links — recoverable only by a rebuild nobody knew to run. The audit
+    # rows now exist; this is where a user finds out.
+    lines.extend(_catalog_hook_failure_lines(conn, tables))
 
     index_names = {
         r[0]

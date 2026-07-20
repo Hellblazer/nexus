@@ -184,8 +184,17 @@ def catalog_store_hook(
             meta={"doc_id": doc_id},
         )
         return str(tumbler)
-    except Exception:  # noqa: BLE001 - best-effort post-store catalog hook must not crash caller; logged via log.debug
-        _log.debug("catalog_store_hook_failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 - best-effort post-store catalog hook must not crash caller; logged + audited
+        # nexus-ou4tb: the "" return is indistinguishable from "no tumbler
+        # assigned", so at DEBUG this was a silent non-registration. WARNING +
+        # audit row so nx doctor can say how many documents are affected.
+        _log.warning("catalog_store_hook_failed", exc_info=True)
+        from nexus.hook_registry import record_catalog_hook_failure  # noqa: PLC0415 — deferred, avoids an import cycle
+
+        record_catalog_hook_failure(
+            source_path=doc_id or title or "", collection=collection_name or "",
+            hook_name="catalog_store_hook", error=str(exc),
+        )
         return ""
     finally:
         if writer is not None:

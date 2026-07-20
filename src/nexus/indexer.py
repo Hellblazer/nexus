@@ -31,6 +31,7 @@ from nexus._locking import lock_file, unlock_file
 from nexus.corpus import index_model_for_collection
 from nexus.retry import _chroma_with_retry, _voyage_with_retry  # noqa: F401 — re-exported for any existing imports
 from nexus.errors import CredentialsMissingError  # re-exported for backward compatibility
+from nexus.hook_registry import record_catalog_hook_failure
 from nexus.indexer_utils import (
     build_doc_id_resolver,
     build_staleness_cache,
@@ -1177,8 +1178,14 @@ def _catalog_hook(
                     filepath=fp_count, prose=prose_count, pdf=pdf_count,
                     repo=repo_name,
                 )
-        except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
-            _log.debug("catalog_link_generation_failed", exc_info=True)
+        except Exception as exc:  # noqa: BLE001 — best-effort path; error surfaced via log + audit, must not crash caller
+            # nexus-ou4tb: links missing is a quieter loss than missing
+            # registration, but still silent at DEBUG.
+            _log.warning("catalog_link_generation_failed", exc_info=True)
+            record_catalog_hook_failure(
+                source_path=str(repo), collection="",
+                hook_name="catalog_link_generation", error=str(exc),
+            )
 
         _stage_s["linking"] = time.monotonic() - _stage_mark
         _stage_mark = time.monotonic()
@@ -1199,8 +1206,16 @@ def _catalog_hook(
             links=links_created,
         )
         _progress(f"  Catalog: done ({len(new_tumblers)} new, {links_created} links)\n")
-    except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
-        _log.debug("catalog_hook_failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — best-effort path; error surfaced via log + audit, must not crash caller
+        # nexus-ou4tb: WARNING, not DEBUG, and audited. A failure here means
+        # documents landed in T3 and were never registered in the catalog — no
+        # doc_id, no manifest, no links — and only a rebuild recovers them.
+        # At DEBUG that was invisible: the run reported success.
+        _log.warning("catalog_hook_failed", exc_info=True)
+        record_catalog_hook_failure(
+            source_path=str(repo), collection="",
+            hook_name="catalog_index_hook", error=str(exc),
+        )
     finally:
         if writer is not None:
             writer.close()
