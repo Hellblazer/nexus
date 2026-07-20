@@ -197,14 +197,61 @@ and the engine/client live paths only.
 
 ## Research
 
-- [ ] Verify chunks_<dim> timestamp column semantics for design question 1
-      (upsert-refresh vs first-insert; live schema + jOOQ record).
-- [ ] Inventory every jOOQ CHASH_INDEX reference in the engine
-      (NexusService, StagingPromoteOps, RekeyOps, SchemaMigrator,
-      CatalogRepository) — the compile surface for the drop.
+- [x] Verify chunks_<dim> timestamp column semantics for design question 1
+      → finding 1, VERIFIED: design question 1 closes, no weakening.
+- [x] Inventory every CHASH_INDEX reference in the engine (jOOQ AND raw
+      SQL) — the compile surface for the drop → finding 2, VERIFIED.
 - [ ] Conexus round-trip: diag view legs referencing chash_index, and
-      whether any of their tooling reads the table directly.
-- [ ] Perf sanity: lookup-by-chash via 3-table UNION with the new indexes
-      vs the router (expect parity or better; measure, don't assert).
-- [ ] Mixed-window matrix: old-client/new-engine and new-client/old-engine
-      for every kept endpoint.
+      whether any of their tooling reads the table directly → finding 5,
+      ASKED ([20994]), awaiting reply.
+- [ ] Perf sanity: lookup-by-chash via 3-table probe with the new indexes
+      vs the router → finding 4, ASSUMED; measure during Approach step
+      1/2 in the rehearsal container, gate step 2 on it.
+- [x] Mixed-window matrix: old-client/new-engine and new-client/old-engine
+      for every kept endpoint → finding 3, VERIFIED (one hazard
+      direction; three no-op shapes).
+
+## Research Findings
+
+### Key Discoveries
+
+- **✅ Verified** (source search) — `chunks_<dim>.created_at` is
+  `TIMESTAMPTZ NOT NULL DEFAULT now()` and BOTH upsert `ON CONFLICT`
+  set-lists exclude it (regular `:683-688`, reference-only `:745-749`) —
+  first-insert-per-`(tenant_id, collection, chash)`, semantically
+  identical to `chash_index.created_at`. Span-resolution ordering
+  reroutes with the SAME contract. Design question 1 closes.
+  *Source: vectors-001-baseline.xml:72-81; PgVectorRepository.java:683-688,745-749*
+- **✅ Verified** (source search) — Full compile surface: jOOQ
+  `CHASH_INDEX` in ChashRepository (44 refs — the class dies) +
+  CatalogRepository (3: two cascade legs that simply drop); raw SQL in
+  ChashCensus (1 leg), RekeyOps (6 — the drop runs at boot before any
+  rung, so the rekey legs are removed, not skipped), StagingPromoteOps
+  (1 finalize count + fixtures), CatalogRepository (1). Client: 11
+  http_chash_index methods, the dual-write hook, catalog_spans (3
+  lookups + self-heal), collection_health, collection_audit,
+  commands/doc, migration/orchestrator (2 ETL legs), t2_daemon RPC
+  registry. The SQLite twin is P4b scope, untouched here.
+  *Source: exhaustive grep, engine + client, recorded in T2 187-research-2*
+- **✅ Verified** (source search) — Mixed-version window reduces to ONE
+  hazard direction: old client + new engine fires exactly three removed
+  write shapes (`upsert`/`upsert_many` from the dual-write hook every
+  index run; `delete_stale` rarely; `import` mid-migration only). Those
+  three 200-and-no-op for one release (b878d precedent), then 410. New
+  client + old engine touches only kept reads the old engine serves
+  fine. The dual-write hook is best-effort-swallow, so even the 410 era
+  cannot break old-client indexing — it would only spam the RDR-129
+  drop counter, which is itself the argument for the no-op window.
+  *Source: caller inventory (finding 2); mcp_infra.py hook contract*
+- **❓ Assumed** (pending spike) — 3-table probe with the new
+  `(tenant_id, chash)` indexes performs at parity or better than the
+  router lookup. Measure via EXPLAIN ANALYZE on the populated rehearsal
+  store during Approach step 1/2; the conformance test doubles as the
+  correctness gate. Gates step 2, not the RDR.
+  *Source: to be measured in the migration-rehearsal container*
+- **⚠️ Documented** (bus, awaiting reply) — Conexus coordination:
+  their diag view's chash_index legs die with the table (they own the
+  deployed DDL, conexus-3ilh); asked them to flag any direct
+  `nexus.chash_index` readers ([20994]). Each reported reader becomes a
+  named migration item in Approach step 4.
+  *Source: T2 conexus [20994], [20987]*
