@@ -213,6 +213,16 @@ class ChashRekeyRung:
             # fails loud. A blanket "these two tables do not gate" would wave a
             # future rekey's brand-new orphans through as merely observed —
             # the silent-scope-reduction shape wearing a different hat.
+            #
+            # WHY THE CEILING IS RUN-LOCAL rather than persisted across runs:
+            # the only cross-run store available to a rung is the completion
+            # record, whose `detail` field protocol.py documents as
+            # "observability-only and accepted lossy (RF-186-2)". A gate that
+            # decides whether a constraint may be skipped is load-bearing, and
+            # load-bearing state must not ride a field its own contract says
+            # may be lost. Measuring before-versus-after within the run needs
+            # no storage and catches the same class: orphans this rekey
+            # created. Pre-existing debt is, by construction, what remains.
             debt_after = self._pointer_debt_fn()
             debt_note = ""
             if debt_after is None:
