@@ -21,6 +21,7 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.sql.Connection;
+import java.sql.ResultSet;
 import java.util.HexFormat;
 import java.util.Map;
 
@@ -570,5 +571,145 @@ class StagingPromoteOpsIntegrationTest {
             + "WHERE doc_id = '1.1.9' AND encode(chash,'hex') = '" + digestHex(text) + "'"))
             .as("idempotent resume converges the pointer once the alias facts return")
             .isEqualTo(1);
+    }
+
+    // ── nexus-kmd5b: the dangling census must see LEGACY-WIDTH pointers ──────
+
+    /**
+     * The dangling-pointer legs gated on the CONFORMANT width, which excludes
+     * exactly the population they exist to find: a pointer the cascade could
+     * NOT repoint is, by definition, still at its legacy width. Production
+     * 2026-07-20 measured the consequence — the chash_index leg reported
+     * <strong>1</strong> against <strong>292,230</strong> actual orphans,
+     * five orders of magnitude low, while the manifest leg (which carries no
+     * width precondition) reported 426 against 426 actual.
+     *
+     * <p>Same structural shape as nexus-vounk: a check that cannot see the
+     * thing it is checking for. Its "all clear" was not evidence of a clean
+     * store, it was evidence of a blind query.
+     *
+     * <p>Seeds one dangling pointer per affected leg at LEGACY width — 16-byte
+     * bytea for chash_index, 32-hex text for the three debt columns — with no
+     * chash_alias entry, so none is resolvable by any route. Every leg must
+     * report it. Pre-fix all four are silently invisible.
+     */
+    @Test
+    @Order(13)
+    void census_seesDanglingPointersAtLegacyWidth() throws Exception {
+        final String legacyHex = "b".repeat(32);   // 16 bytes decoded
+        long topicId;
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
+                + T1 + "', 'code__kmd5b') ON CONFLICT DO NOTHING");
+            // Model production exactly: the row PREDATES the octet CHECK, which
+            // is NOT VALID and therefore gates only new writes. Drop, seed, restore.
+            su.createStatement().execute(
+                "ALTER TABLE nexus.chash_index DROP CONSTRAINT chash_index_chash_octet_check");
+            su.createStatement().execute(
+                "INSERT INTO nexus.chash_index (tenant_id, chash, physical_collection, created_at) "
+                + "VALUES ('" + T1 + "', decode('" + legacyHex + "', 'hex'), 'code__kmd5b', now())");
+            su.createStatement().execute(
+                "ALTER TABLE nexus.chash_index ADD CONSTRAINT chash_index_chash_octet_check "
+                + "CHECK (octet_length(chash) = 32) NOT VALID");
+            try (ResultSet rs = su.createStatement().executeQuery(
+                    "INSERT INTO nexus.topics (tenant_id, label, collection, created_at) "
+                    + "VALUES ('" + T1 + "', 'kmd5b', 'code__kmd5b', now()) RETURNING id")) {
+                rs.next();
+                topicId = rs.getLong(1);
+            }
+            su.createStatement().execute(
+                "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by) "
+                + "VALUES ('" + T1 + "', '" + legacyHex + "', " + topicId + ", 'kmd5b')");
+            su.createStatement().execute(
+                "INSERT INTO nexus.relevance_log (tenant_id, query, chunk_id, action, timestamp) "
+                + "VALUES ('" + T1 + "', 'kmd5b', '" + legacyHex + "', 'view', now())");
+        }
+        try {
+            Map<String, Integer> residue = scope.withTenant(T1, ctx ->
+                dev.nexus.service.db.ChashCensus.scan(ctx));
+            assertThat(residue)
+                .as("a 16-byte chash_index pointer resolving to NO chunk and carrying NO "
+                    + "alias entry is dangling — the width precondition made this leg "
+                    + "blind to its own target (reported 1 vs 292,230 in production)")
+                .containsKey("dangling.chash_index");
+            assertThat(residue)
+                .as("the 32-hex debt columns are the same bug shape: a legacy-width "
+                    + "pointer the cascade missed is excluded by a 64-hex-only filter")
+                .containsKeys("dangling.topic_assignments", "dangling.relevance_log");
+        } finally {
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                su.createStatement().execute(
+                    "DELETE FROM nexus.chash_index WHERE physical_collection = 'code__kmd5b'");
+                su.createStatement().execute(
+                    "DELETE FROM nexus.topic_assignments WHERE assigned_by = 'kmd5b'");
+                su.createStatement().execute(
+                    "DELETE FROM nexus.topics WHERE label = 'kmd5b'");
+                su.createStatement().execute(
+                    "DELETE FROM nexus.relevance_log WHERE query = 'kmd5b'");
+            }
+        }
+    }
+
+    /**
+     * The other half of the kmd5b contract: widening the legs must not turn
+     * every LEGACY-BUT-RESOLVABLE pointer into a false orphan. A legacy-width
+     * pointer WITH a chash_alias entry pointing at a live chunk resolves fine
+     * — that is exactly what the permanent alias map is for (RDR-180: legacy
+     * references stay resolvable forever) — so it must NOT be reported.
+     * Without this, the fix would trade a blind check for a screaming one and
+     * the census would flag the entire pre-rekey era.
+     */
+    @Test
+    @Order(14)
+    void census_doesNotFlagLegacyPointersTheAliasStillResolves() throws Exception {
+        final String legacyHex = "c".repeat(32);
+        final String text = "kmd5b alias-resolvable chunk";
+        final String liveHex = digestHex(text);
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
+                + T1 + "', 'code__kmd5b2') ON CONFLICT DO NOTHING");
+            su.createStatement().execute(
+                "INSERT INTO nexus.chunks_768 (tenant_id, collection, chash, chunk_text, embedding) "
+                + "VALUES ('" + T1 + "', 'code__kmd5b2', decode('" + liveHex + "', 'hex'), '"
+                + text + "', '" + vec(768) + "'::vector)");
+            su.createStatement().execute(
+                "INSERT INTO nexus.chash_alias (tenant_id, old_ref, old_bytes, new_chash, source) "
+                + "VALUES ('" + T1 + "', '" + legacyHex + "', decode('" + legacyHex + "', 'hex'), "
+                + "decode('" + liveHex + "', 'hex'), 'kmd5b2')");
+            su.createStatement().execute(
+                "ALTER TABLE nexus.chash_index DROP CONSTRAINT chash_index_chash_octet_check");
+            su.createStatement().execute(
+                "INSERT INTO nexus.chash_index (tenant_id, chash, physical_collection, created_at) "
+                + "VALUES ('" + T1 + "', decode('" + legacyHex + "', 'hex'), 'code__kmd5b2', now())");
+            su.createStatement().execute(
+                "ALTER TABLE nexus.chash_index ADD CONSTRAINT chash_index_chash_octet_check "
+                + "CHECK (octet_length(chash) = 32) NOT VALID");
+            su.createStatement().execute(
+                "INSERT INTO nexus.relevance_log (tenant_id, query, chunk_id, action, timestamp) "
+                + "VALUES ('" + T1 + "', 'kmd5b2', '" + legacyHex + "', 'view', now())");
+        }
+        try {
+            Map<String, Integer> residue = scope.withTenant(T1, ctx ->
+                dev.nexus.service.db.ChashCensus.scan(ctx));
+            assertThat(residue)
+                .as("a legacy pointer the alias map RESOLVES to a live chunk is not "
+                    + "dangling — widening the leg must not flag the whole legacy era")
+                .doesNotContainKeys("dangling.chash_index", "dangling.relevance_log");
+        } finally {
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                su.createStatement().execute(
+                    "DELETE FROM nexus.chash_index WHERE physical_collection = 'code__kmd5b2'");
+                su.createStatement().execute("DELETE FROM nexus.relevance_log WHERE query = 'kmd5b2'");
+                su.createStatement().execute("DELETE FROM nexus.chash_alias WHERE source = 'kmd5b2'");
+                su.createStatement().execute(
+                    "DELETE FROM nexus.chunks_768 WHERE collection = 'code__kmd5b2'");
+            }
+        }
     }
 }

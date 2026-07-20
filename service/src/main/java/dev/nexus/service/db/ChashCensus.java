@@ -135,12 +135,44 @@ public final class ChashCensus {
         return residue;
     }
 
+    /**
+     * Dangling-pointer legs (nexus-kmd5b).
+     *
+     * <p>These previously gated on the CONFORMANT width — {@code
+     * octet_length = 32} for chash_index, {@code ~ '^[0-9a-f]{64}$'} for the
+     * three TEXT debt columns — which excluded exactly the population they
+     * exist to find: a pointer the cascade could NOT repoint is, by
+     * definition, still at its LEGACY width. Production 2026-07-20 measured
+     * the consequence: the chash_index leg reported <strong>1</strong> against
+     * <strong>292,230</strong> actual orphans, while the manifest leg (no
+     * width precondition) reported 426 against 426. Same structural shape as
+     * nexus-vounk — a check that structurally cannot see the thing it checks
+     * for, whose "all clear" is evidence of a blind query, not a clean store.
+     *
+     * <p>DANGLING now means what it says: the pointer resolves to a live chunk
+     * by NO route — neither directly nor through the permanent {@code
+     * chash_alias} map, which is the whole point of that map (RDR-180: legacy
+     * references stay resolvable forever). A legacy-width pointer WITH an
+     * alias entry is therefore resolvable and not counted; one without is
+     * genuine debt and is.
+     *
+     * <p>The TEXT columns keep a shape filter, but widened to "a chash of
+     * EITHER era" (32- or 64-hex): {@code topic_assignments.doc_id} is a mixed
+     * identity space that also holds memory-note titles (RDR-180 Item2), and
+     * dropping the filter entirely would flag every title as dangling.
+     */
     private static Map<String, Integer> danglingPointers(DSLContext ctx) {
         Map<String, Integer> out = new LinkedHashMap<>();
-        String noContent =
+        // Resolves-by-no-route, for a hex-TEXT pointer of either era.
+        String unresolvableHex =
             "NOT EXISTS (SELECT 1 FROM nexus.chunks_384 c WHERE c.chash = decode(%1$s, 'hex')) "
             + "AND NOT EXISTS (SELECT 1 FROM nexus.chunks_768 c WHERE c.chash = decode(%1$s, 'hex')) "
-            + "AND NOT EXISTS (SELECT 1 FROM nexus.chunks_1024 c WHERE c.chash = decode(%1$s, 'hex'))";
+            + "AND NOT EXISTS (SELECT 1 FROM nexus.chunks_1024 c WHERE c.chash = decode(%1$s, 'hex')) "
+            + "AND NOT EXISTS (SELECT 1 FROM nexus.chash_alias a "
+            + "                 WHERE a.old_ref = %1$s "
+            + "                   AND (EXISTS (SELECT 1 FROM nexus.chunks_384 k WHERE k.chash = a.new_chash) "
+            + "                     OR EXISTS (SELECT 1 FROM nexus.chunks_768 k WHERE k.chash = a.new_chash) "
+            + "                     OR EXISTS (SELECT 1 FROM nexus.chunks_1024 k WHERE k.chash = a.new_chash)))";
         Map<String, String> hexKeyed = Map.of(
             "topic_assignments", "doc_id",
             "frecency", "chunk_id",
@@ -149,16 +181,23 @@ public final class ChashCensus {
             String col = e.getValue();
             Integer n = ctx.fetchOne(
                 "SELECT count(*) FROM nexus." + e.getKey() + " p "
-                + "WHERE p." + col + " ~ '^[0-9a-f]{64}$' AND "
-                + String.format(noContent, "p." + col)).get(0, Integer.class);
+                // EITHER era's chash shape — the 64-only filter was the blindness.
+                + "WHERE p." + col + " ~ '^([0-9a-f]{32}|[0-9a-f]{64})$' AND "
+                + String.format(unresolvableHex, "p." + col)).get(0, Integer.class);
             if (n != null && n > 0) out.put("dangling." + e.getKey(), n);
         }
         Integer idx = ctx.fetchOne(
             "SELECT count(*) FROM nexus.chash_index i "
-            + "WHERE octet_length(i.chash) = 32 "
-            + "  AND NOT EXISTS (SELECT 1 FROM nexus.chunks_384 c WHERE c.chash = i.chash) "
+            // NO width precondition: a legacy 16-byte key that resolves to
+            // nothing is precisely the orphan this leg must report.
+            + "WHERE NOT EXISTS (SELECT 1 FROM nexus.chunks_384 c WHERE c.chash = i.chash) "
             + "  AND NOT EXISTS (SELECT 1 FROM nexus.chunks_768 c WHERE c.chash = i.chash) "
-            + "  AND NOT EXISTS (SELECT 1 FROM nexus.chunks_1024 c WHERE c.chash = i.chash)")
+            + "  AND NOT EXISTS (SELECT 1 FROM nexus.chunks_1024 c WHERE c.chash = i.chash) "
+            + "  AND NOT EXISTS (SELECT 1 FROM nexus.chash_alias a "
+            + "                   WHERE a.old_bytes = i.chash "
+            + "                     AND (EXISTS (SELECT 1 FROM nexus.chunks_384 k WHERE k.chash = a.new_chash) "
+            + "                       OR EXISTS (SELECT 1 FROM nexus.chunks_768 k WHERE k.chash = a.new_chash) "
+            + "                       OR EXISTS (SELECT 1 FROM nexus.chunks_1024 k WHERE k.chash = a.new_chash)))")
             .get(0, Integer.class);
         if (idx != null && idx > 0) out.put("dangling.chash_index", idx);
         // The manifest (review P1 Critical: the census backstop must cover
