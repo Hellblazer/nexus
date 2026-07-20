@@ -173,6 +173,11 @@ and the engine/client live paths only.
    endpoint (unchanged shape = no client protocol change).
 4. Census/doctor/forensics: delete the chash_index legs; update the
    fixture expectations; coordinate the diag-view change with conexus.
+   Conexus-side lockstep items (inventoried, [21000], all theirs, all
+   mechanical): conformance-view leg in bootstrap-engine-db.sh +
+   provision_diag_path.py, rekey driver CHECK_TABLES/conformance SQL +
+   grandfathered ceiling, restore_rowcount.sql leg, rdr164 cascade
+   EXPLAIN probe retarget, two backend-switch doc copy-edits.
 5. Drop `nexus.chash_index` + its octet CHECK via Liquibase (with the
    catalog-013 precondition discipline: sqlCheck-gated, MARK_RAN-safe).
    The 292,230 orphans die here — record the count in the changeset
@@ -201,9 +206,10 @@ and the engine/client live paths only.
       → finding 1, VERIFIED: design question 1 closes, no weakening.
 - [x] Inventory every CHASH_INDEX reference in the engine (jOOQ AND raw
       SQL) — the compile surface for the drop → finding 2, VERIFIED.
-- [ ] Conexus round-trip: diag view legs referencing chash_index, and
+- [x] Conexus round-trip: diag view legs referencing chash_index, and
       whether any of their tooling reads the table directly → finding 5,
-      ASKED ([20994]), awaiting reply.
+      VERIFIED ([21000]): five direct readers, all conexus-owned, all
+      mechanical, landed in lockstep with the view-changelog change.
 - [ ] Perf sanity: lookup-by-chash via 3-table probe with the new indexes
       vs the router → finding 4, ASSUMED; measure during Approach step
       1/2 in the rehearsal container, gate step 2 on it.
@@ -249,9 +255,19 @@ and the engine/client live paths only.
   store during Approach step 1/2; the conformance test doubles as the
   correctness gate. Gates step 2, not the RDR.
   *Source: to be measured in the migration-rehearsal container*
-- **⚠️ Documented** (bus, awaiting reply) — Conexus coordination:
-  their diag view's chash_index legs die with the table (they own the
-  deployed DDL, conexus-3ilh); asked them to flag any direct
-  `nexus.chash_index` readers ([20994]). Each reported reader becomes a
-  named migration item in Approach step 4.
-  *Source: T2 conexus [20994], [20987]*
+- **✅ Verified** (conexus grepped inventory, [21000]) — Five direct
+  `nexus.chash_index` readers on the conexus side, all theirs, all
+  mechanical: the restore-rowcount leg, the rekey driver's conformance
+  SQL + read_counts (whose GRANDFATHERED 292,230 debt ceiling
+  evaporates with the table — "the cleanest possible resolution of that
+  debt"), the diag-view DDL in two provisioning paths, and the RDR-164
+  cascade EXPLAIN probe. Three of these are the SAME conformance object
+  seen three ways (their driver SQL is a generator-pinned copy of the
+  view definition) — a three-call-site lockstep edit, each dropping one
+  UNION-ALL leg, landed with our view-changelog change. Their
+  `cutover_smoke.py` goes via `/v1/chash/` and survives by design.
+  Their probe finding also cross-confirms the cascade edit is in scope:
+  `CatalogRepository.deleteCollection`/`rename` lose their chash_index
+  leg (already in finding 2), and their EXPLAIN probe retargets in
+  lockstep. Named conexus-side migration item recorded on their side.
+  *Source: T2 conexus [21000]; cross-checked against finding 2*
