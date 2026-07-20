@@ -559,6 +559,162 @@ class TestErrorHandling:
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
     @pytest.mark.asyncio
+    async def test_nonzero_exit_surfaces_stdout_when_stderr_is_empty(self) -> None:
+        """A diagnostic on stdout must reach the error (GH #1414).
+
+        ``claude -p --output-format json`` reports its errors on STDOUT, so
+        building the message from stderr alone produced the literal
+        ``claude -p exited 1:`` with nothing after the colon — twice, for
+        nx_plan_audit, with nothing in mcp.log either. The subprocess said
+        why; we threw it away.
+        """
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        proc = _make_proc(
+            stdout=b'{"type":"result","subtype":"error_during_execution"}',
+            returncode=1,
+            stderr=b'',
+        )
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorError, match="error_during_execution"):
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+    @pytest.mark.asyncio
+    async def test_nonzero_exit_reports_both_streams_when_both_spoke(self) -> None:
+        """Neither stream is dropped when both carry text."""
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        proc = _make_proc(
+            stdout=b'stdout-diagnosis',
+            returncode=2,
+            stderr=b'stderr-diagnosis',
+        )
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorError) as exc:
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        assert "stdout-diagnosis" in str(exc.value)
+        assert "stderr-diagnosis" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_nonzero_exit_says_so_when_the_subprocess_was_silent(self) -> None:
+        """Silence must read as silence, not as a truncated message.
+
+        A bare trailing colon is indistinguishable from 'we dropped the
+        output' — which is precisely the ambiguity GH #1414 spent a session
+        resolving by hand.
+        """
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        proc = _make_proc(stdout=b'', returncode=1, stderr=b'')
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorError, match="no output on stdout or stderr"):
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+    @pytest.mark.asyncio
+    async def test_nonzero_exit_logs_a_durable_event(self) -> None:
+        """A non-zero exit must leave a record, not only an exception.
+
+        GH #1414 searched a May-July mcp.log and found nothing for the
+        failure. Of the 17 claude_dispatch call sites, 13 propagate bare
+        with no logging on at least one real invocation path, and three
+        (nx_plan_audit, nx_tidy, nx_enrich_beads) have no covered path at
+        all — FastMCP's handler returns str(e) to the client without
+        logging. So the record has to be written HERE, at the one choke
+        point every caller passes through.
+        """
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        proc = _make_proc(
+            stdout=b'stdout-diagnosis', returncode=7, stderr=b'stderr-diagnosis',
+        )
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with patch("nexus.operators.dispatch._log") as mock_log:
+                with pytest.raises(OperatorError):
+                    await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        assert mock_log.warning.called, "non-zero exit left no durable record"
+        event, kwargs = mock_log.warning.call_args[0], mock_log.warning.call_args[1]
+        assert event[0] == "operator_dispatch_failed"
+        assert kwargs["returncode"] == 7
+        assert "stdout-diagnosis" in kwargs["stdout"]
+        assert "stderr-diagnosis" in kwargs["stderr"]
+
+    @pytest.mark.asyncio
+    async def test_nonzero_exit_log_carries_more_than_the_exception(self) -> None:
+        """The log is the durable channel; it must not inherit the 300-char
+        exception cap.
+
+        nexus-1at5's actual lesson was durable persistence independent of
+        the exception-text channel, not a bigger snippet in the message. A
+        JSON error payload with a stack summary exceeds 300 chars easily,
+        and truncating the log to the message's cap would lose it again.
+        """
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        long_diagnostic = ("E" * 900) + "TAIL-MARKER"
+        proc = _make_proc(
+            stdout=long_diagnostic.encode(), returncode=1, stderr=b'',
+        )
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with patch("nexus.operators.dispatch._log") as mock_log:
+                with pytest.raises(OperatorError) as exc:
+                    await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        assert "TAIL-MARKER" not in str(exc.value), "exception should stay capped"
+        logged = mock_log.warning.call_args[1]["stdout"]
+        assert "TAIL-MARKER" in logged, "the durable record lost the diagnostic tail"
+
+    @pytest.mark.asyncio
+    async def test_logged_stream_marks_its_own_truncation(self) -> None:
+        """A capped field must say it was capped.
+
+        Without a marker, a field of exactly _LOG_STREAM_CAP chars is
+        indistinguishable from a diagnostic that happened to be exactly
+        that long — the same "silence must read as silence" ambiguity this
+        module designs out of the exception text, one field over, in the
+        branch whose whole job is preserving diagnostics.
+        """
+        from nexus.operators.dispatch import (
+            claude_dispatch, OperatorError, _LOG_STREAM_CAP,
+        )
+
+        oversized = "D" * (_LOG_STREAM_CAP + 500)
+        proc = _make_proc(stdout=oversized.encode(), returncode=1, stderr=b'')
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with patch("nexus.operators.dispatch._log") as mock_log:
+                with pytest.raises(OperatorError):
+                    await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        logged = mock_log.warning.call_args[1]["stdout"]
+        assert logged.endswith("...[truncated]"), "capped field does not admit it"
+
+    @pytest.mark.asyncio
+    async def test_logged_stream_at_the_cap_is_not_marked(self) -> None:
+        """The marker must mean something: no marker when nothing was cut."""
+        from nexus.operators.dispatch import (
+            claude_dispatch, OperatorError, _LOG_STREAM_CAP,
+        )
+
+        exact = "D" * _LOG_STREAM_CAP
+        proc = _make_proc(stdout=exact.encode(), returncode=1, stderr=b'')
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with patch("nexus.operators.dispatch._log") as mock_log:
+                with pytest.raises(OperatorError):
+                    await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        logged = mock_log.warning.call_args[1]["stdout"]
+        assert "truncated" not in logged
+        assert len(logged) == _LOG_STREAM_CAP
+
+    @pytest.mark.asyncio
     async def test_malformed_json_raises_operator_output_error(self) -> None:
         """Unparseable stdout raises OperatorOutputError."""
         from nexus.operators.dispatch import claude_dispatch, OperatorOutputError
