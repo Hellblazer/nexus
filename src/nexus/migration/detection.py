@@ -331,8 +331,18 @@ def is_measured_dim_override(c: "CollectionClassification") -> bool:
     return c.support == "unsupported" and c.measured_dim == _ONNX_DIM
 
 
-def cross_model_remappable(c: "CollectionClassification") -> bool:
+def cross_model_remappable(
+    c: "CollectionClassification", *, rehashes_ids: bool = False
+) -> bool:
     """Whether *c* is a legacy collection the cross-model migrate can re-embed.
+
+    ``rehashes_ids`` (nexus-leunq) declares that the CALLER's migration path
+    derives chunk ids by rehashing ``chunk_text`` server-side rather than
+    copying them verbatim — true under RDR-180 land-then-transform. It relaxes
+    only the legacy-id exclusion, which exists solely because a verbatim copy
+    would carry a non-conformant id into the target. Defaults to False so
+    every existing caller, including the historical reconstruction in
+    :mod:`nexus.migration.collision_audit`, keeps its current answer.
 
     RDR-162 P2: a collection is auto-migratable via stored-text re-embed (rather
     than blocked with the re-index diagnostic) iff ALL hold:
@@ -364,8 +374,16 @@ def cross_model_remappable(c: "CollectionClassification") -> bool:
     # GH #1390 / nexus-sot7v: the cross-model remap re-embeds stored TEXT but
     # keeps the chunk ids VERBATIM — a legacy-id collection would violate the
     # chash identity in the remapped target exactly as in a same-name copy.
-    # Never remappable; the pre-gate blocks it with the re-index diagnostic.
-    if c.legacy_ids:
+    #
+    # ...on a path that copies ids. Under RDR-180 land-then-transform the ids
+    # are REHASHED server-side from chunk_text, so the verbatim-preservation
+    # premise does not hold and the exclusion is stale there (nexus-leunq).
+    # Opt-in rather than a policy change, for two reasons: paths that still
+    # copy ids verbatim must keep the exclusion, and
+    # build_cross_model_target_names is ALSO how collision_audit reconstructs
+    # HISTORICAL target maps — flipping the default would have it audit maps
+    # no past run ever produced, the precise drift its docstring warns about.
+    if c.legacy_ids and not rehashes_ids:
         return False
     # nexus-nb7hr measured-dim override: a stored vector PROVED the content
     # is local bge/ONNX (768-dim), so the name-based exclusions below do not
@@ -551,7 +569,19 @@ def _classify_leg(
         # Probe that case too — scoped to voyage-named collections only
         # (not a blanket enable-for-everything) since that is the one
         # shape a key's presence can hide.
-        should_probe_dim = not legacy_ids and source_count > 0 and (
+        # nexus-leunq: legacy ids used to suppress this probe, which made a
+        # single non-conformant id enough to hide what the vectors ARE. A
+        # pre-RDR-109 voyage-NAMED collection holding measured-bge 768 vectors
+        # plus one 16-char-id row then classified as genuinely-voyage-
+        # unsupported, and guided-upgrade blocked the whole run with
+        # "Configure voyage on the service (NX_VOYAGE_API_KEY)" — wrong twice
+        # over: the content is bge, so configuring voyage would bill a
+        # re-embed of never-voyage vectors; and under land-then-transform the
+        # ids are rehashed server-side, so they were never the obstacle.
+        #
+        # Id shape and vector dimension are independent facts. Measuring one
+        # has never depended on the other; the coupling was the bug.
+        should_probe_dim = source_count > 0 and (
             support == "unsupported"
             or (support == "supported-voyage-1024" and model in _VOYAGE_MODELS)
         )

@@ -1296,9 +1296,20 @@ class TestLegacyChunkIds:
 
         assert cross_model_remappable(replace(c, legacy_ids=False)) is True
 
-    def test_legacy_probe_short_circuits_the_dim_probe(self):
-        """A legacy-id hit must not proceed to measured-dim remapping —
-        measured_dim stays unprobed (None)."""
+    def test_legacy_probe_no_longer_short_circuits_the_dim_probe(self):
+        """REVERSED by nexus-leunq — this used to assert measured_dim is None.
+
+        The short-circuit was written as a deliberate contract ("a legacy-id
+        hit must not proceed to measured-dim remapping"), but it made a single
+        non-conformant id enough to hide what the vectors ARE. The field
+        consequence: a voyage-NAMED collection holding measured-bge 768
+        vectors plus one legacy id classified as genuinely-voyage-unsupported,
+        and guided-upgrade blocked the run demanding NX_VOYAGE_API_KEY — which
+        would have billed a re-embed of never-voyage content.
+
+        Both facts are now recorded. The flag still drives re-id downstream;
+        the measured dim is no longer suppressed by it.
+        """
         from nexus.migration.detection import classify_collections
 
         client = _FakeChromaClient(
@@ -1309,7 +1320,7 @@ class TestLegacyChunkIds:
         report = classify_collections(local_client=client, voyage_key_present=False)
         (c,) = report.classifications
         assert c.legacy_ids is True
-        assert c.measured_dim is None
+        assert c.measured_dim == 768
 
     def test_conformant_ids_do_not_flag(self):
         from nexus.migration.detection import classify_collections
@@ -1458,3 +1469,98 @@ class TestProbeHasText:
 
         col = _TextProbeCollection("c", boom=True)
         assert probe_has_text(col) is None
+
+
+# ── nexus-leunq: a legacy id must not hide what the vectors ARE ──────────────
+
+
+def _mislabeled_voyage_with_legacy_id(**over):
+    """The field case: a pre-RDR-109 voyage-NAMED collection whose stored
+    vectors measure 768 (local bge/ONNX), carrying one non-conformant id."""
+    kwargs = dict(
+        collection="knowledge__o__voyage-context-3__v1",
+        leg="local",
+        model="voyage-context-3",
+        dim=1024,
+        support="unsupported",
+        source_count=12,
+        has_data=True,
+        measured_dim=768,
+        legacy_ids=True,
+    )
+    kwargs.update(over)
+    return CollectionClassification(**kwargs)
+
+
+class TestLegacyIdsDoesNotHideMeasuredDim:
+    """nexus-leunq.
+
+    A single non-conformant chunk id used to suppress the measured-dim probe,
+    so a mislabeled voyage-named collection holding bge vectors classified as
+    genuinely-voyage-unsupported and guided-upgrade blocked the run with
+    "Configure voyage on the service (NX_VOYAGE_API_KEY)" — wrong twice over:
+    the content is bge, so configuring voyage would bill a re-embed of
+    never-voyage vectors, and under land-then-transform the ids are rehashed
+    server-side so they were never the obstacle.
+    """
+
+    def test_verbatim_id_paths_still_exclude_legacy_ids(self):
+        """The default is unchanged — a path that COPIES ids keeps the guard.
+
+        This is what protects the retired per-leg paths and, just as
+        importantly, collision_audit's historical reconstruction: past runs
+        excluded these collections, and auditing them back in would rebuild a
+        target map no run ever produced.
+        """
+        c = _mislabeled_voyage_with_legacy_id()
+        assert cross_model_remappable(c) is False
+
+    def test_rehashing_paths_may_remap_a_legacy_id_collection(self):
+        """Land-then-transform derives ids from chunk_text, so the
+        verbatim-preservation premise the exclusion rests on does not hold."""
+        c = _mislabeled_voyage_with_legacy_id()
+        assert cross_model_remappable(c, rehashes_ids=True) is True
+
+    def test_legacy_ids_alone_does_not_make_a_genuine_voyage_collection_remappable(self):
+        """The relaxation is scoped to the id axis ONLY.
+
+        A genuine voyage collection (no measured-dim override) must stay
+        excluded even on a rehashing path — re-embedding voyage text into bge
+        would silently change recall, which is the credential case, not a
+        model switch.
+        """
+        c = _mislabeled_voyage_with_legacy_id(measured_dim=None)
+        assert cross_model_remappable(c, rehashes_ids=True) is False
+
+
+class TestDimProbeRunsDespiteLegacyIds:
+    def test_probe_measures_dim_even_when_a_legacy_id_is_present(self) -> None:
+        """Id shape and vector dimension are independent facts; measuring one
+        never depended on the other, and the coupling was the bug.
+
+        The fixture is the field case exactly: a voyage-NAMED collection whose
+        stored vector measures 768 (local bge/ONNX), holding one 16-char
+        pre-RDR-108 id.
+        """
+        name = "knowledge__o__voyage-context-3__v1"
+        local = _FakeChromaClient(
+            {name: 12},
+            stored_dims={name: 768},
+            chunk_ids={name: ["16charlegacyid0"]},
+        )
+        report = classify_collections(
+            local_client=local, cloud_client=None, voyage_key_present=True
+        )
+        (c,) = report.classifications
+        assert c.legacy_ids is True, "the flag is KEPT — it drives re-id downstream"
+        assert c.measured_dim == 768, (
+            "a legacy id must not suppress the dim probe (nexus-leunq)"
+        )
+        from nexus.migration.detection import is_measured_dim_override
+
+        assert is_measured_dim_override(c), (
+            "with the dim measured this is the mislabel case, not genuine voyage"
+        )
+        assert "NX_VOYAGE_API_KEY" not in (c.reason or ""), (
+            "the diagnostic must not demand a voyage key for never-voyage content"
+        )

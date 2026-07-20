@@ -219,7 +219,10 @@ class TargetNameCollisionBlocked(RuntimeError):
 
 
 def build_cross_model_target_names(
-    detection: "DetectionReport", *, voyage_key_present: bool
+    detection: "DetectionReport",
+    *,
+    voyage_key_present: bool,
+    rehashes_ids: bool = False,
 ) -> dict[str, str]:
     """The source→target remap map exactly as the guided upgrade builds it.
 
@@ -232,6 +235,14 @@ def build_cross_model_target_names(
     ALSO the land-time honest-target derivation ``_land`` (inside
     :func:`run_guided_upgrade`) resolves chunk rows against — the same
     reconciliation H1 the sequencer's own docstring names.
+
+    ``rehashes_ids`` (nexus-leunq) is forwarded to
+    :func:`cross_model_remappable`. The LIVE guided upgrade passes True — it
+    runs land-then-transform, which rehashes ids server-side. The historical
+    reconstruction in :mod:`nexus.migration.collision_audit` must NOT: past
+    runs excluded legacy-id collections, and auditing them back in would
+    reconstruct a map no run ever produced, which is the drift this
+    function was extracted to prevent.
     """
     return {
         c.collection: cross_model_target_name(
@@ -241,7 +252,7 @@ def build_cross_model_target_names(
             remap_target_model(c, voyage_key_present=voyage_key_present),
         )
         for c in detection.classifications
-        if cross_model_remappable(c)
+        if cross_model_remappable(c, rehashes_ids=rehashes_ids)
     }
 
 
@@ -486,7 +497,16 @@ def run_guided_upgrade(
     # onto a voyage-mode service) re-embeds into a WIRED model instead of hitting
     # the pebfx.2 fail-loud guard.
     target_names = build_cross_model_target_names(
-        detection, voyage_key_present=key_present
+        detection,
+        voyage_key_present=key_present,
+        # nexus-leunq: this run IS land-then-transform, which rehashes chunk
+        # ids server-side from chunk_text. The legacy-id exclusion in
+        # cross_model_remappable guards verbatim-id copies, so it does not
+        # apply here — and applying it anyway is what made a single
+        # non-conformant id block a measured-bge collection behind a
+        # "configure voyage" remedy that would have billed a re-embed of
+        # never-voyage vectors.
+        rehashes_ids=True,
     )
     if target_names:
         _log.info("guided_upgrade_cross_model_targets", targets=target_names)
