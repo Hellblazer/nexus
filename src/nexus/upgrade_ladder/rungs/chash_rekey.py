@@ -38,6 +38,7 @@ from typing import Any
 
 import structlog
 
+from nexus.migration.remap_client import RekeyJobLostError
 from nexus.upgrade_ladder.protocol import (
     ConvergeOutcome,
     ConvergeResult,
@@ -190,6 +191,35 @@ class ChashRekeyRung:
             f"{probe} width-non-conformant poison row(s) pending rekey"
         ))
 
+    def _rekey_with_restart_retry(self, report: ProgressReporter) -> dict[str, Any]:
+        """Drive the rekey, retrying ONCE if the engine restarted under it.
+
+        nexus-sfgqi. ``HttpRemapStore.rekey`` distinguishes three outcomes, but
+        the ladder runner wraps ``converge()`` in a blanket
+        ``except Exception -> RungOutcome.FAILED``, so a could-not-tell landed
+        as a hard rung failure identical to a genuine one. For
+        ``RekeyJobLostError`` specifically that is the wrong answer available:
+        the rekey is idempotent, so the correct response is to run it again —
+        over an already-rekeyed store it reports all-zero counts and converges,
+        and over a rolled-back one it does the work.
+
+        Deliberately narrow. Only the engine-restarted case retries, and only
+        once. A timeout is NOT retried: the original transaction may still be
+        in flight, and starting a second rekey against a live one would queue
+        behind the per-tenant advisory lock rather than resolve anything. A
+        genuine failure is not retried at all. Anything the retry does not
+        cover still propagates, so the runner's FAILED remains the default.
+        """
+        try:
+            return self._rekey_fn(self._orphan_policy)
+        except RekeyJobLostError as exc:
+            report.emit(
+                "chash_rekey_lost_to_restart_retrying",
+                rung=self.name,
+                detail=str(exc),
+            )
+            return self._rekey_fn(self._orphan_policy)
+
     def converge(self, report: ProgressReporter) -> ConvergeResult:
         report.emit("chash_rekey_freeze", rung=self.name)
         restore = self._freeze_fn()
@@ -197,7 +227,7 @@ class ChashRekeyRung:
             # Ceiling baseline: pointer debt as it stood BEFORE this rekey.
             debt_before = self._pointer_debt_fn()
             report.emit("chash_rekey_rekey", rung=self.name, orphan_policy=self._orphan_policy)
-            counts = self._rekey_fn(self._orphan_policy)
+            counts = self._rekey_with_restart_retry(report)
             self._last_counts = counts
             residual = int(counts.get("residual_mismatched", -1))
             dangling = int(counts.get("dangling_manifest", -1))

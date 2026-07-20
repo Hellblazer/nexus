@@ -13,6 +13,11 @@ from pathlib import Path
 
 import pytest
 
+from nexus.migration.remap_client import (
+    RekeyJobFailedError,
+    RekeyJobLostError,
+    RekeyJobTimeoutError,
+)
 from nexus.upgrade_ladder.protocol import ConvergeOutcome
 from nexus.upgrade_ladder.rungs.chash_rekey import (
     OCTET_CHECKS,
@@ -162,6 +167,79 @@ class TestConverge:
         rung, calls = _rung(rekey_fn=boom)
         with pytest.raises(RuntimeError, match="collision"):
             rung.converge(_Report())
+        assert calls["restored"]
+
+
+class TestRestartRetry:
+    """nexus-sfgqi: the ONE could-not-tell with a correct automatic answer.
+
+    HttpRemapStore.rekey distinguishes known-failed from two could-not-tell
+    outcomes, but the ladder runner collapses every exception from converge()
+    into RungOutcome.FAILED. For an engine restart specifically that is the
+    wrong answer available: the rekey is idempotent, so re-running resolves
+    it — all-zero counts over an already-rekeyed store, real work over a
+    rolled-back one.
+    """
+
+    def test_lost_to_restart_retries_once_and_converges(self):
+        attempts = []
+
+        def flaky(policy):
+            attempts.append(policy)
+            if len(attempts) == 1:
+                raise RekeyJobLostError("job abc was lost to an engine restart")
+            return _counts()
+
+        rung, calls = _rung(rekey_fn=flaky)
+        result = rung.converge(_Report())
+        assert result.outcome is ConvergeOutcome.COMPLETED
+        assert len(attempts) == 2, "the idempotent rekey must be re-run exactly once"
+        assert calls["restored"]
+
+    def test_the_retry_is_bounded_at_one(self):
+        """A store that keeps losing the job must fail, not spin."""
+        attempts = []
+
+        def always_lost(policy):
+            attempts.append(policy)
+            raise RekeyJobLostError("lost again")
+
+        rung, calls = _rung(rekey_fn=always_lost)
+        with pytest.raises(RekeyJobLostError):
+            rung.converge(_Report())
+        assert len(attempts) == 2, "one retry, then give up"
+        assert calls["restored"]
+
+    def test_timeout_is_NOT_retried(self):
+        """A timeout means the transaction may still be running.
+
+        Starting a second rekey against a live one would queue behind the
+        per-tenant advisory lock rather than resolve anything, so this case
+        propagates untouched — could-not-tell, for a human to settle.
+        """
+        attempts = []
+
+        def timed_out(policy):
+            attempts.append(policy)
+            raise RekeyJobTimeoutError("still running after 3600s")
+
+        rung, calls = _rung(rekey_fn=timed_out)
+        with pytest.raises(RekeyJobTimeoutError):
+            rung.converge(_Report())
+        assert len(attempts) == 1, "a possibly-live transaction must not be re-driven"
+        assert calls["restored"]
+
+    def test_known_failure_is_NOT_retried(self):
+        attempts = []
+
+        def failed(policy):
+            attempts.append(policy)
+            raise RekeyJobFailedError("legacy id maps to two digests")
+
+        rung, calls = _rung(rekey_fn=failed)
+        with pytest.raises(RekeyJobFailedError):
+            rung.converge(_Report())
+        assert len(attempts) == 1, "a known failure is not made better by repetition"
         assert calls["restored"]
 
 
