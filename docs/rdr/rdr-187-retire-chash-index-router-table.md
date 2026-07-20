@@ -149,9 +149,18 @@ paths only.
    hook in the same release) or the server absorbs no-op calls during the
    mixed-version window. `delete_stale` and the catalog_spans self-heal
    are deleted outright — with no derived copy there is nothing to heal.
-3. **rename_collection.** Today it must touch both stores; after the drop
-   it touches only chunks (and the manifest's collection column — verify
-   who owns that today, RDR-164 cascade or caller).
+3. **rename_collection — RESOLVED at re-gate.** The RDR-164 engine
+   cascade (`CatalogRepository.renameCollection`) re-homes
+   `chunks_384/768/1024` (`:2154-2156`) AND `chash_index` (`:2158`) AND
+   the manifest's collection column (`:2163`, nexus-x6kdz) in ONE
+   transaction — verified. The client's separate direct
+   `/v1/chash/rename_collection` call (`db/t2/__init__.py:800-814`,
+   fired on T3 collection rename) is belt-and-suspenders: today it
+   matches 0 rows when the cascade already re-homed. Post-drop the
+   endpoint is KEPT and rerouted to rename `chunks_<dim>.collection`
+   rows — idempotent under either topology (no-op when the cascade did
+   the work, real work only if a cascade-less caller exists). Same
+   shape, same semantics, no new window case.
 4. **Mixed-version window.** An old client against a new engine fires
    FOUR removed write shapes (corrected at gate): `upsert`/`upsert_many`
    (dual-write hook, every index run), `delete_stale` (rare),
@@ -234,9 +243,16 @@ paths only.
    `chash_index` entry and the `staging.chash_index` table for one
    release as an accepted dead sink (an old client mid-guided-upgrade
    must not 400 on its landing calls — same window discipline as the
-   write endpoints); remove the client `LANDING_MANIFEST` entry and
-   update its census in the client release that pairs with the engine
-   tag; update `rehearse_guided.sh` (:392 promote-count field list,
+   write endpoints); in the paired client release, MOVE the
+   `LANDING_MANIFEST` entry to `CENSUS_EXCLUSIONS` with a justification
+   ("no longer landed post-RDR-187, router retired") — do NOT just
+   delete the tuple: `source_census()` (`staging_land.py:113-150`)
+   raises `StagingCensusError` for any chash-shaped source column
+   neither claimed nor excluded, and every pre-RDR-187 local install
+   still HAS the source `chash_index` table, so a bare deletion trips
+   the census on essentially all real upgrades (re-gate Significant 1;
+   fails loud in rehearsal, worded here so nobody makes that round
+   trip); update `rehearse_guided.sh` (:392 promote-count field list,
    :588-591 direct `nexus.chash_index` SQL asserts — these ERROR
    post-drop, they do not soft-fail).
 6. Drop `nexus.chash_index` + its octet CHECK via Liquibase (with the
