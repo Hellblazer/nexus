@@ -60,12 +60,28 @@ OCTET_CHECKS: tuple[tuple[str, str], ...] = (
 )
 
 
-def validate_statements() -> tuple[str, ...]:
+#: The three CONTENT tables. Their octet CHECK is the RDR-180 contract —
+#: every chunk's identity IS its 32-byte digest — and a clean rekey always
+#: leaves them conformant, so these VALIDATE unconditionally.
+CONTENT_OCTET_CHECKS: tuple[tuple[str, str], ...] = OCTET_CHECKS[:3]
+
+#: The two POINTER tables. A lived-in store can carry orphan pointers whose
+#: content stopped existing long before the cutover (production 2026-07-20:
+#: 292,230 chash_index + 426 catalog_document_chunks, created 2026-04-18..07-06,
+#: none with a chash_alias entry). VALIDATE is table-grain, so it cannot
+#: succeed while they exist — that is arithmetic, not judgement — and failing
+#: the whole upgrade over pre-existing debt would strand every such install.
+POINTER_OCTET_CHECKS: tuple[tuple[str, str], ...] = OCTET_CHECKS[3:]
+
+
+def validate_statements(
+    checks: tuple[tuple[str, str], ...] = OCTET_CHECKS,
+) -> tuple[str, ...]:
     """The admin-connection VALIDATE statements (SHARE UPDATE EXCLUSIVE —
     online, no write block)."""
     return tuple(
         f"ALTER TABLE {table} VALIDATE CONSTRAINT {name}"
-        for table, name in OCTET_CHECKS
+        for table, name in checks
     )
 
 
@@ -104,7 +120,8 @@ class ChashRekeyRung:
         self,
         *,
         rekey_fn: Callable[[str], dict[str, Any]],
-        validate_fn: Callable[[], bool | None] | None = None,
+        validate_fn: Callable[..., bool | None] | None = None,
+        pointer_debt_fn: Callable[[], dict[str, int] | None] | None = None,
         reprovision_fn: Callable[[], None] | None = None,
         freeze_fn: Callable[[], Callable[[], None]] | None = None,
         detect_probe_fn: Callable[[], int | None] | None = None,
@@ -113,7 +130,10 @@ class ChashRekeyRung:
         orphan_policy: str = "drop",
     ) -> None:
         self._rekey_fn = rekey_fn
-        self._validate_fn = validate_fn if validate_fn is not None else (lambda: None)
+        self._validate_fn = validate_fn if validate_fn is not None else (lambda _checks=None: None)
+        self._pointer_debt_fn = (
+            pointer_debt_fn if pointer_debt_fn is not None else (lambda: None)
+        )
         self._reprovision_fn = reprovision_fn if reprovision_fn is not None else (lambda: None)
         self._freeze_fn = freeze_fn if freeze_fn is not None else _sentinel_freeze
         self._detect_probe_fn = detect_probe_fn if detect_probe_fn is not None else (lambda: None)
@@ -174,6 +194,8 @@ class ChashRekeyRung:
         report.emit("chash_rekey_freeze", rung=self.name)
         restore = self._freeze_fn()
         try:
+            # Ceiling baseline: pointer debt as it stood BEFORE this rekey.
+            debt_before = self._pointer_debt_fn()
             report.emit("chash_rekey_rekey", rung=self.name, orphan_policy=self._orphan_policy)
             counts = self._rekey_fn(self._orphan_policy)
             self._last_counts = counts
@@ -185,7 +207,47 @@ class ChashRekeyRung:
                     "refusing to record completion (no dual-width window)"
                 )
             report.emit("chash_rekey_validate", rung=self.name)
-            validated = self._validate_fn()
+            # nexus-noa8d: pointer-table debt decides WHICH checks validate.
+            # THE CEILING (never a table exemption): debt measured BEFORE the
+            # rekey is grandfathered; any growth is damage this run caused and
+            # fails loud. A blanket "these two tables do not gate" would wave a
+            # future rekey's brand-new orphans through as merely observed —
+            # the silent-scope-reduction shape wearing a different hat.
+            debt_after = self._pointer_debt_fn()
+            debt_note = ""
+            if debt_after is None:
+                checks = OCTET_CHECKS  # unknowable (managed): unchanged behaviour
+            else:
+                if debt_before is not None:
+                    grown = {
+                        t: (n, debt_before.get(t, 0))
+                        for t, n in debt_after.items()
+                        if n > debt_before.get(t, 0)
+                    }
+                    if grown:
+                        raise RuntimeError(
+                            "rekey created NEW non-conformant pointer rows — "
+                            + ", ".join(
+                                f"{t}: {before} -> {after}"
+                                for t, (after, before) in grown.items()
+                            )
+                            + " — the amnesty covers PRE-EXISTING debt only; "
+                            "refusing to record completion"
+                        )
+                outstanding = {t: n for t, n in debt_after.items() if n > 0}
+                if outstanding:
+                    checks = CONTENT_OCTET_CHECKS
+                    debt_note = (
+                        " | pointer-table CHECKs left NOT VALID over "
+                        + ", ".join(f"{t}={n}" for t, n in sorted(outstanding.items()))
+                        + " PRE-EXISTING orphan pointer(s) (content absent before this "
+                        "rekey). Chunk identity IS enforced; new writes to the pointer "
+                        "tables are enforced too (NOT VALID gates existing rows only). "
+                        "Clean the orphans, then re-run to validate the remaining two."
+                    )
+                else:
+                    checks = OCTET_CHECKS
+            validated = self._validate_fn(checks)
             report.emit("chash_rekey_reprovision", rung=self.name)
             self._reprovision_fn()
             detail = (
@@ -197,6 +259,7 @@ class ChashRekeyRung:
                 f"orphans_synthesized={counts.get('orphans_synthesized', 0)} "
                 f"dangling_manifest={dangling} "
                 f"validated={'yes' if validated else 'operator-step (managed)' if validated is None else 'FAILED'}"
+                + debt_note
             )
             # rdr180-17 / F2: the engine ANALYZEs chash_alias inside the rekey
             # transaction so the planner can see the alias rows it just wrote.
@@ -220,7 +283,7 @@ class ChashRekeyRung:
                 raise RuntimeError(
                     "octet CHECK VALIDATE failed after a clean rekey — "
                     "investigate before re-running (constraint names: "
-                    + ", ".join(n for _, n in OCTET_CHECKS)
+                    + ", ".join(n for _, n in checks)
                 )
             return ConvergeResult(outcome=ConvergeOutcome.COMPLETED, detail=detail)
         finally:
@@ -272,10 +335,36 @@ def default_chash_rekey_rung() -> "ChashRekeyRung":
         except Exception:  # noqa: BLE001 — probe unknowable ≠ rung failure; converge is idempotent
             return None
 
-    def _validate() -> bool | None:
+    def _pointer_debt() -> dict[str, int] | None:
+        """Per-table non-conformant counts for the two POINTER tables
+        (nexus-noa8d). Read-only, via the same diag choke point as the poison
+        probe. ``None`` = unknowable (managed mode / no diag creds), which
+        leaves the pre-existing all-five VALIDATE behaviour untouched rather
+        than guessing a store is clean."""
+        try:
+            from nexus.db.diag_connection import resolve_diag_credentials, run_diagnostic_sql  # noqa: PLC0415 — deferred
+
+            creds = resolve_diag_credentials(None)
+            if creds is None:
+                return None
+            out: dict[str, int] = {}
+            for table, _name in POINTER_OCTET_CHECKS:
+                rows = run_diagnostic_sql(
+                    (
+                        f"SELECT count(*) FROM {table} "
+                        f"WHERE octet_length(chash) <> 32",
+                    ),
+                    creds,
+                )
+                out[table] = sum(int(r) for r in rows)
+            return out
+        except Exception:  # noqa: BLE001 — unknowable ≠ failure; all-five behaviour stands
+            return None
+
+    def _validate(checks: tuple[tuple[str, str], ...] = OCTET_CHECKS) -> bool | None:
         from nexus.db.admin_sql import run_admin_sql  # noqa: PLC0415 — deferred
 
-        return run_admin_sql(validate_statements())
+        return run_admin_sql(validate_statements(checks))
 
     def _validated_probe() -> bool | None:
         # The data-side completion marker (see the class docstring): all
@@ -327,6 +416,7 @@ def default_chash_rekey_rung() -> "ChashRekeyRung":
     return ChashRekeyRung(
         rekey_fn=_rekey,
         validate_fn=_validate,
+        pointer_debt_fn=_pointer_debt,
         reprovision_fn=_reprovision,
         detect_probe_fn=_detect_probe,
         validated_probe_fn=_validated_probe,

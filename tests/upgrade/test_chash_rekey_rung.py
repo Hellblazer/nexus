@@ -61,7 +61,10 @@ def _rung(**over) -> tuple[ChashRekeyRung, dict]:
 
     kwargs = dict(
         rekey_fn=lambda policy: calls.setdefault("policy", policy) and _counts() or _counts(),
-        validate_fn=lambda: True,
+        validate_fn=lambda checks=None: calls.__setitem__(
+            'validated_statements',
+            list(validate_statements(checks)) if checks is not None else [],
+        ) or True,
         reprovision_fn=lambda: calls.setdefault("reprovisioned", True),
         freeze_fn=freeze,
         detect_probe_fn=lambda: None,
@@ -142,13 +145,13 @@ class TestConverge:
         assert calls["restored"], "the freeze must be released on failure"
 
     def test_validate_failure_raises_after_clean_rekey(self):
-        rung, calls = _rung(validate_fn=lambda: False)
+        rung, calls = _rung(validate_fn=lambda checks=None: False)
         with pytest.raises(RuntimeError, match="VALIDATE failed"):
             rung.converge(_Report())
         assert calls["restored"]
 
     def test_managed_mode_validate_none_is_honest_not_fatal(self):
-        rung, _ = _rung(validate_fn=lambda: None)
+        rung, _ = _rung(validate_fn=lambda checks=None: None)
         result = rung.converge(_Report())
         assert result.outcome is ConvergeOutcome.COMPLETED
         assert "operator-step" in result.detail
@@ -257,3 +260,57 @@ def test_refreshed_alias_stats_stay_quiet():
     rung, _ = _rung(rekey_fn=lambda policy: _counts(alias_stats_refreshed=True))
     result = rung.converge(_Report())
     assert "NOT refreshed" not in (result.detail or "")
+
+
+class TestPointerDebtValidatePolicy:
+    """nexus-noa8d: a lived-in store carrying PRE-EXISTING orphan pointers
+    cannot VALIDATE the two pointer-table octet CHECKs — the constraint is
+    table-grain, so 292,656 dangling rows (production, 2026-07-20) make it
+    arithmetically impossible. The rung must still VALIDATE the three CONTENT
+    tables (the RDR-180 contract) and report the debt, instead of failing the
+    whole upgrade.
+
+    The amnesty is a CEILING, never a table exemption (conexus correction,
+    Hal-caught): 'these two tables do not gate' would wave a FUTURE rekey's
+    brand-new orphans through as `observed`. The ceiling here is measured
+    within the run — pointer debt before the rekey versus after — so growth
+    caused by this rekey FAILS loud while pre-existing debt is grandfathered.
+    """
+
+    def test_pre_existing_debt_validates_content_and_reports_pointers(self):
+        rung, calls = _rung(
+            pointer_debt_fn=lambda: {"nexus.chash_index": 292230,
+                                     "nexus.catalog_document_chunks": 426},
+        )
+        result = rung.converge(_Report())
+        assert result.outcome is ConvergeOutcome.COMPLETED, (
+            "pre-existing pointer debt must NOT fail the upgrade"
+        )
+        detail = result.detail or ""
+        assert "292230" in detail and "426" in detail, (
+            f"the skipped debt must be REPORTED with counts, not silent: {detail!r}"
+        )
+        stmts = calls.get("validated_statements") or []
+        joined = " ".join(stmts)
+        assert "chunks_384" in joined and "chunks_768" in joined and "chunks_1024" in joined, (
+            f"the three CONTENT octet CHECKs must still be VALIDATEd: {stmts!r}"
+        )
+        assert "chash_index" not in joined and "catalog_document_chunks" not in joined, (
+            f"pointer-table CHECKs must be SKIPPED while debt exists: {stmts!r}"
+        )
+
+    def test_zero_debt_validates_all_five(self):
+        rung, calls = _rung(pointer_debt_fn=lambda: {})
+        rung.converge(_Report())
+        joined = " ".join(calls.get("validated_statements") or [])
+        for name in ("chunks_384", "chunks_768", "chunks_1024",
+                     "catalog_document_chunks", "chash_index"):
+            assert name in joined, f"a clean store must VALIDATE all five; missing {name}"
+
+    def test_debt_GROWN_by_this_rekey_fails_loud(self):
+        """THE CEILING. Debt measured before the rekey is grandfathered; any
+        INCREASE is damage this run caused and must never be waved through."""
+        seq = iter([{"nexus.chash_index": 100}, {"nexus.chash_index": 150}])
+        rung, _ = _rung(pointer_debt_fn=lambda: next(seq))
+        with pytest.raises(RuntimeError, match="NEW"):
+            rung.converge(_Report())
