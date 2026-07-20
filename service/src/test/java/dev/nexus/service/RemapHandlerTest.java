@@ -102,6 +102,16 @@ class RemapHandlerTest {
                 "GRANT SELECT ON nexus.chash_alias TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT EXECUTE ON FUNCTION nexus.remap_membership(text, text) TO " + SVC_ROLE);
+            // nexus-b878d: the async rekey tests below drive a REAL rekey through
+            // the endpoint, so this role needs what RekeyOps needs — the same
+            // write set and the MAINTAIN that its in-transaction ANALYZE uses
+            // (rdr180-17 / F2). Without these the job would land FAILED on a
+            // privilege error and the poll assertions would be testing the error
+            // path while appearing to test the happy one.
+            su.createStatement().execute(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA nexus TO " + SVC_ROLE);
+            su.createStatement().execute(
+                "GRANT MAINTAIN ON nexus.chash_alias TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT SELECT ON nexus.service_tokens, nexus.session_tokens TO " + SVC_ROLE);
             su.createStatement().execute(
@@ -551,6 +561,140 @@ class RemapHandlerTest {
                     "ON CONFLICT (tenant_id, collection, chash) DO NOTHING");
             }
         }
+    }
+
+    // ── nexus-b878d: the rekey is submitted and polled, never awaited ────────
+
+    /**
+     * The submission contract: 202 with a job id, immediately, and NOT the
+     * envelope. The synchronous form could not survive the tls sidecar's ~120s
+     * proxy_read_timeout at production scale (gate-xr789: 504 at 120.3s over a
+     * transaction that committed 88s later), so no request is held open for the
+     * duration of a rekey any more.
+     */
+    @Test
+    void rekeySubmit_returns202WithAJobId_notTheEnvelope() throws Exception {
+        HttpResponse<String> submit = post("/v1/remap/rekey", TOKEN, TENANT, "{}");
+        assertThat(submit.statusCode()).isEqualTo(202);
+
+        Map<String, Object> body = mapper.readValue(submit.body(), MAP_T);
+        assertThat(body).containsEntry("status", "running").containsKey("job_id");
+        assertThat(body)
+            .as("the envelope is fetched by poll, never returned by the submit")
+            .doesNotContainKey("envelope");
+
+        String jobId = (String) body.get("job_id");
+        assertThat((String) body.get("poll")).isEqualTo("/v1/remap/rekey/" + jobId);
+
+        Map<String, Object> done = pollToTerminal(jobId, TOKEN, TENANT);
+        assertThat(done).containsEntry("status", "succeeded");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> envelope = (Map<String, Object>) done.get("envelope");
+        assertThat(envelope)
+            .as("the poll carries the RekeyOps counts envelope through unchanged")
+            .containsKeys("rehashed", "collapsed_duplicates", "residual_mismatched");
+    }
+
+    /**
+     * A job id minted by a previous engine instance must not read as "never
+     * existed" — but it must ALSO not claim the store is unchanged.
+     *
+     * <p>The commit happens inside TenantScope and the registry marks the job
+     * SUCCEEDED only after the call returns, so a death between the two leaves
+     * a committed rekey with no SUCCEEDED record. An engine that answered
+     * "store unchanged" there would be telling an operator nothing happened
+     * when something did — the exact failure the 504 produced and this endpoint
+     * was rebuilt to remove. So the response reports the outcome as UNKNOWN and
+     * names what settles it.
+     */
+    @Test
+    void pollingAJobFromAPriorEngineInstance_reportsUnknownNotUnchanged() throws Exception {
+        HttpResponse<String> res = get("/v1/remap/rekey/0000dead-"
+            + java.util.UUID.randomUUID(), TOKEN, TENANT);
+        assertThat(res.statusCode())
+            .as("410, not 404 — the id was real, it just predates this instance")
+            .isEqualTo(410);
+
+        Map<String, Object> body = mapper.readValue(res.body(), MAP_T);
+        assertThat(body).containsEntry("status", "lost");
+        assertThat(body)
+            .as("the one thing this response must never assert is that the store is clean")
+            .containsEntry("store_changed", "unknown");
+
+        String error = (String) body.get("error");
+        assertThat(error).contains("previous engine instance");
+        assertThat(error)
+            .as("says outright that the claim is not guaranteed")
+            .contains("NOT guaranteed");
+        assertThat(error)
+            .as("points at the authoritative record")
+            .contains("event=rekey_complete");
+        assertThat(error)
+            .as("and at the safe recovery, which is what an operator actually needs")
+            .contains("idempotent");
+        assertThat(error)
+            .as("must not assert the store is unchanged")
+            .doesNotContain("the store is unchanged");
+    }
+
+    @Test
+    void pollingAnUnknownOrMalformedJobId_isDistinguished() throws Exception {
+        // Our epoch, no such job.
+        HttpResponse<String> unknown = get("/v1/remap/rekey/"
+            + currentEpoch() + "-" + java.util.UUID.randomUUID(), TOKEN, TENANT);
+        assertThat(unknown.statusCode()).isEqualTo(404);
+
+        HttpResponse<String> malformed = get("/v1/remap/rekey/nodash", TOKEN, TENANT);
+        assertThat(malformed.statusCode()).isEqualTo(400);
+    }
+
+    /** Holding a job id is not a way to observe another tenant's rekey. */
+    @Test
+    void aJobIdIsTenantScopedOnPoll() throws Exception {
+        HttpResponse<String> submit = post("/v1/remap/rekey", TOKEN, TENANT, "{}");
+        assertThat(submit.statusCode()).isEqualTo(202);
+        String jobId = (String) mapper.readValue(submit.body(), MAP_T).get("job_id");
+        pollToTerminal(jobId, TOKEN, TENANT);
+
+        HttpResponse<String> crossTenant = get("/v1/remap/rekey/" + jobId, OTHER_TOKEN, OTHER_TENANT);
+        assertThat(crossTenant.statusCode())
+            .as("another tenant's job reads as unknown, not as an envelope")
+            .isEqualTo(404);
+        assertThat(crossTenant.body()).doesNotContain("envelope");
+    }
+
+    @Test
+    void rekeySubmitRejectsABadOrphanPolicyBeforeStartingAnything() throws Exception {
+        HttpResponse<String> res = post("/v1/remap/rekey", TOKEN, TENANT,
+            "{\"orphan_policy\":\"invent-one\"}");
+        assertThat(res.statusCode()).isEqualTo(400);
+        assertThat(res.body()).doesNotContain("job_id");
+    }
+
+    @Test
+    void pollRouteRejectsNonGet() throws Exception {
+        HttpResponse<String> res = post("/v1/remap/rekey/" + currentEpoch() + "-x", TOKEN, TENANT, "{}");
+        assertThat(res.statusCode()).isEqualTo(405);
+    }
+
+    /** The engine epoch as seen from outside: the prefix of a freshly minted id. */
+    private String currentEpoch() throws Exception {
+        HttpResponse<String> submit = post("/v1/remap/rekey", TOKEN, TENANT, "{}");
+        String jobId = (String) mapper.readValue(submit.body(), MAP_T).get("job_id");
+        pollToTerminal(jobId, TOKEN, TENANT);
+        return jobId.substring(0, jobId.indexOf('-'));
+    }
+
+    private Map<String, Object> pollToTerminal(String jobId, String token, String tenant)
+            throws Exception {
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(60);
+        while (System.nanoTime() < deadline) {
+            HttpResponse<String> res = get("/v1/remap/rekey/" + jobId, token, tenant);
+            Map<String, Object> body = mapper.readValue(res.body(), MAP_T);
+            if (!"running".equals(body.get("status"))) return body;
+            Thread.sleep(10);
+        }
+        throw new AssertionError("rekey job " + jobId + " never reached a terminal state");
     }
 
     /** Deterministic 64-hex chash from a seed string — the FULL sha256

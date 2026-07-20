@@ -627,6 +627,57 @@ class RekeyOpsIntegrationTest {
         }
     }
 
+    // ── Test 6: the server-side envelope log is the authoritative record ─────
+
+    /**
+     * nexus-b878d contract-to-keep: {@code RekeyOps} logs {@code
+     * event=rekey_complete} carrying the FULL envelope, server-side, after the
+     * transaction commits.
+     *
+     * <p>This is not decorative logging. During the RDR-180 production cutover
+     * the tls sidecar 504'd at 120.3s while the transaction committed 88s
+     * later, so the client never received its envelope — and this log line is
+     * what recovered it. nexus-b878d removes the long-held request that caused
+     * that, but the log stays the authoritative record of what a rekey did, and
+     * degrading it to a summary would re-open the same recovery gap.
+     *
+     * <p>Asserts the envelope's CONTENT, not merely that a line was emitted: it
+     * pins the formatted message against the returned map, so dropping any
+     * single count from the log fails this test.
+     */
+    @Test
+    @Order(6)
+    void rekeyComplete_logsTheFullEnvelopeServerSide() {
+        ch.qos.logback.classic.Logger root =
+            (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(
+                org.slf4j.Logger.ROOT_LOGGER_NAME);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs =
+            new ch.qos.logback.core.read.ListAppender<>();
+        logs.start();
+        root.addAppender(logs);
+        try {
+            Map<String, Object> counts = rekeyOps.rekey(TA, false);
+
+            var envelopeLines = logs.list.stream()
+                .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                .filter(m -> m.startsWith("event=rekey_complete"))
+                .toList();
+
+            assertThat(envelopeLines)
+                .as("exactly one rekey_complete line per rekey")
+                .hasSize(1);
+            assertThat(envelopeLines.getFirst())
+                .as("the line names the tenant it applies to")
+                .contains("tenant=" + TA);
+            assertThat(envelopeLines.getFirst())
+                .as("the line carries the FULL envelope, not a summary of it")
+                .contains("counts=" + counts);
+        } finally {
+            root.detachAppender(logs);
+            logs.stop();
+        }
+    }
+
     /** The pre-RDR-180 32-hex half-digest of {@code text}, as raw bytes. */
     private static byte[] legacyKeyOf(String text) {
         try {
