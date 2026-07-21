@@ -234,10 +234,12 @@ catalog tables produces a vacuous pass.
 nx storage migrate all [--report PATH]
 ```
 
-Runs all eight store ETLs in the RDR-152 ladder order
+Runs all seven store ETLs in the RDR-152 ladder order
 (`LADDER_ORDER` in `src/nexus/migration/etl_registry.py`):
-`memory, plans, telemetry, taxonomy, aspects, chash, catalog,
-aspects_queue`. Memory is first (smallest, fastest validation); catalog
+`memory, plans, telemetry, taxonomy, aspects, catalog,
+aspects_queue`. (The former `chash` leg was retired by RDR-187 — the
+router table is dropped; chash registration rides the chunk store, so
+migrating content registers every chash.) Memory is first (smallest, fastest validation); catalog
 is second-to-last because it is graph-heavy: every other store's FK
 targets must exist before its links land. `aspects_queue` runs AFTER
 catalog: `fk_aspect_queue_catalog_doc` requires `catalog_documents`

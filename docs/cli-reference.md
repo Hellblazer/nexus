@@ -2370,9 +2370,11 @@ List service tokens: 12-char id prefix, tenant, status (`active`/`expired`/`revo
 nx storage migrate all [--report PATH] [--db PATH] [--catalog-db PATH] [--service-url URL] [--verify-fill]
 ```
 
-Run ALL eight T2 store migrations in the RDR-152 ladder order (memory →
-plans → telemetry → taxonomy → aspects → chash → catalog →
-aspects_queue — the last two trail so FK targets exist) with one
+Run ALL seven T2 store migrations in the RDR-152 ladder order (memory →
+plans → telemetry → taxonomy → aspects → catalog → aspects_queue —
+the last two trail so FK targets exist; the former `chash` leg was
+retired by RDR-187: the router table is dropped, and chash registration
+rides the chunk store itself) with one
 shared issue collector, and emit ONE RDR-153 migration report (default:
 `~/.config/nexus/migration-reports/migration-<id>.json` — a run always
 produces an artifact). Prints a per-store progress line as each store
@@ -2397,12 +2399,12 @@ standalone command; it runs only via `migrate all`.
 `--verify-fill` (RDR-178 wave-2): a re-run to patch a small hole no
 longer re-sends the whole run. Retention-swept tables (`relevance_log`, 90-day TTL) are verified only within the retention window: source rows older than the horizon are the sweep's legitimate deletion domain (re-importing them would resurrect expired data), so once every source row has aged out the table reports `expired_unverifiable` — by design, and never dressed as verified parity. Per store:
 
-- `chash` / `catalog` — the outer count-diff decides parity (zero writes)
-  vs. divergent (send ONLY the rows genuinely missing from the target,
-  per `physical_collection` for chash; owners/collections/document_chunks
-  independently for catalog). Catalog's `documents`/`links` tables have
-  no delta-fill surface yet — if either diverges, the whole catalog store
-  falls back to the full ETL (never a partial/incoherent write).
+- `catalog` — the outer count-diff decides parity (zero writes) vs.
+  divergent (send ONLY the rows genuinely missing from the target;
+  owners/collections/document_chunks independently). Catalog's
+  `documents`/`links` tables have no delta-fill surface yet — if either
+  diverges, the whole catalog store falls back to the full ETL (never a
+  partial/incoherent write).
 - `memory` / `plans` / `telemetry` / `taxonomy` — outer-verify only (no
   delta-fill surface yet): a store already at parity is **skipped
   entirely** (folded into `report["skipped_stores"]`, same signal as an
@@ -2441,10 +2443,16 @@ Storage migration ETLs (RDR-152 T2 stores; RDR-155 vectors). Every ETL is copy-n
 ### nx storage migrate
 
 ```
-nx storage migrate memory|plans|telemetry|taxonomy|chash|catalog [--db PATH] [--service-url URL] [--dry-run] [--verify-fill]
+nx storage migrate memory|plans|telemetry|taxonomy|catalog [--db PATH] [--service-url URL] [--dry-run] [--verify-fill]
 ```
 
 Migrate a T2 SQLite store into the Postgres service tier through the validated HTTP seam. `--verify-fill` (RDR-178 wave-2) runs the delta path instead of the unconditional full re-send — see `nx storage migrate all` above for the per-store semantics (a single-store invocation applies the same store's rule in isolation). Every per-store command's report always carries a populated `"verification"` verdict now (not just `migrate all`'s), and `target.service_url` records the RESOLVED endpoint, never a `"(lease)"` placeholder.
+
+`nx storage migrate chash` is RETIRED (RDR-187): the `chash_index` router
+table is dropped — chash registration rides the chunk store itself, so
+migrating your content registers every chash. The subcommand still parses
+but fails loud with this explanation instead of silently "succeeding"
+against the deprecation-window no-op endpoint.
 
 ### nx storage migrate vectors
 

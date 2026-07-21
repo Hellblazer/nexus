@@ -42,7 +42,7 @@ def _fake_etls(order_sink: list[str], *, fail_store: str | None = None):
     # deliberately shuffled — orchestrator must impose ladder order
     return [
         StoreEtl(s, _runner(s))
-        for s in ("catalog", "memory", "chash", "plans", "taxonomy",
+        for s in ("catalog", "memory", "plans", "taxonomy",
                   "telemetry", "aspects", "aspects_queue")
     ]
 
@@ -71,6 +71,15 @@ def _sources(tmp_path) -> EtlSources:
 # ── Orchestration ────────────────────────────────────────────────────────────
 
 
+def test_chash_store_retired_from_the_etl_registry():
+    """RDR-187 (nexus-piwya.10): the legacy --cold chash ETL leg is GONE —
+    the router is dropped; /v1/chash/import accept-and-no-ops; running the
+    leg would waste ETL time and report misleading migrated-row counts.
+    The chunks migration IS the chash registration."""
+    from nexus.migration.etl_registry import LADDER_ORDER
+    assert "chash" not in LADDER_ORDER
+
+
 class TestMigrateAll:
     def test_runs_in_exact_ladder_order(self, tmp_path, monkeypatch) -> None:
         order: list[str] = []
@@ -82,7 +91,7 @@ class TestMigrateAll:
         )
         assert order == [
             "memory", "plans", "telemetry", "taxonomy",
-            "aspects", "chash", "catalog", "aspects_queue",
+            "aspects", "catalog", "aspects_queue",
         ]
 
     def test_returns_report_dict_with_rollup_and_id(
@@ -97,8 +106,8 @@ class TestMigrateAll:
         )
         assert report["schema_version"] == "1"
         assert report["migration_id"]
-        assert report["summary"]["total_read"] == 80  # 8 stores × 10
-        assert report["summary"]["total_written"] == 80
+        assert report["summary"]["total_read"] == 70  # 7 stores × 10 (chash retired, RDR-187)
+        assert report["summary"]["total_written"] == 70
         assert report["summary"]["total_failed"] == 0
 
     def test_on_store_callback_fires_per_store_in_order(
@@ -114,7 +123,7 @@ class TestMigrateAll:
         )
         assert seen == [
             "memory", "plans", "telemetry", "taxonomy",
-            "aspects", "chash", "catalog", "aspects_queue",
+            "aspects", "catalog", "aspects_queue",
         ]
 
     def test_store_crash_recorded_not_raised(self, tmp_path, monkeypatch) -> None:
@@ -175,7 +184,7 @@ class TestSkipStores:
         assert "catalog" not in order
         assert order == [
             "memory", "plans", "telemetry", "taxonomy",
-            "aspects", "chash", "aspects_queue",
+            "aspects", "aspects_queue",
         ]
 
     def test_skipped_store_gets_no_callbacks(self, tmp_path, monkeypatch) -> None:
@@ -200,9 +209,8 @@ class TestSkipStores:
             skip_stores=frozenset({"memory", "plans"}),
         )
         assert report["skipped_stores"] == ["memory", "plans"]
-        # 6 remaining stores x 10 read/written each (see _fake_etls)
-        assert report["summary"]["total_read"] == 60
-        assert report["summary"]["total_written"] == 60
+        assert report["summary"]["total_read"] == 50  # 5 run stores × 10 (7-store registry post-RDR-187, 2 skipped)
+        assert report["summary"]["total_written"] == 50
         assert report["summary"]["total_failed"] == 0
 
     def test_no_skip_stores_key_when_nothing_skipped(
@@ -420,7 +428,7 @@ class TestMigrateAllPreflight:
         )
         assert order == [
             "memory", "plans", "telemetry", "taxonomy",
-            "aspects", "chash", "catalog", "aspects_queue",
+            "aspects", "catalog", "aspects_queue",
         ]
         assert report["summary"]["total_failed"] == 0
 

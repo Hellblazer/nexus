@@ -28,8 +28,9 @@ from nexus.migration.etl_registry import EtlSources, StoreEtl
 
 
 def _fake_etls(order_sink: list[str], *, fail_store: str | None = None):
-    """Eight fake StoreEtls that record execution order and feed the shared
-    collector realistic per-store data."""
+    """Seven fake StoreEtls (chash retired, RDR-187/nexus-piwya.10) that
+    record execution order and feed the shared collector realistic
+    per-store data."""
 
     def _runner(store: str):
         def run(sources: EtlSources, collector) -> dict:
@@ -60,7 +61,7 @@ def _fake_etls(order_sink: list[str], *, fail_store: str | None = None):
 
     return [
         StoreEtl(s, _runner(s))
-        for s in ("catalog", "memory", "chash", "plans",
+        for s in ("catalog", "memory", "plans",
                   "taxonomy", "telemetry", "aspects",
                   "aspects_queue")  # deliberately shuffled
     ]
@@ -104,7 +105,7 @@ class TestMigrateAll:
         assert result.exit_code == 0, result.output
         assert order == [
             "memory", "plans", "telemetry", "taxonomy",
-            "aspects", "chash", "catalog", "aspects_queue",
+            "aspects", "catalog", "aspects_queue",
         ]
 
     def test_single_merged_report_with_rollup(self, runner, tmp_path: Path) -> None:
@@ -119,11 +120,11 @@ class TestMigrateAll:
         stores = {s["store"] for s in report["stores"]}
         assert stores == {
             "memory", "plans", "telemetry", "taxonomy",
-            "aspects", "chash", "catalog", "aspects_queue",
+            "aspects", "catalog", "aspects_queue",
         }
-        # 8 stores x 10 rows each = 80
-        assert report["summary"]["total_read"] == 80
-        assert report["summary"]["total_written"] == 80
+        # 7 stores x 10 rows each = 70 (chash retired, RDR-187)
+        assert report["summary"]["total_read"] == 70
+        assert report["summary"]["total_written"] == 70
         assert report["summary"]["by_action"]["skipped"] == 1
         assert report["summary"]["total_failed"] == 0
         assert report["summary"]["max_severity"] == 3

@@ -597,7 +597,11 @@ def test_lint_baseline_unchanged_after_voyageai_extension():
     # migration-SOURCE reads for the pre-land census + landing legs;
     # never a destination (same migration-machinery class as
     # remap_cascade._connect above).
-    assert result.epsilon_allow_connects == 24, (
+    # 24 -> 22: RDR-187 (nexus-piwya.10) retired the two chash ETL connect
+    # sites — storage_cmd.py migrate_chash_cmd's source count and
+    # orchestrator.py's chash-rows-by-collection read (lockstep with
+    # test_storage_boundary_lint's copy; derive-don't-paste still stands).
+    assert result.epsilon_allow_connects == 22, (
         f"epsilon_allow_connects baseline changed: {result.epsilon_allow_connects}"
     )
     # RDR-152 nexus-fjwxh: 31 -> 33 (CLI t2_handle + MCP t2_index_write service-

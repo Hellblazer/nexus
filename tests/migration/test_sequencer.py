@@ -986,7 +986,7 @@ class TestGuidedT2ExclusionSplit:
 
         # A future store addition to LADDER_ORDER must be deliberately
         # classified landed-vs-not here, never silently included/excluded.
-        assert GUIDED_LAND_EXCLUDED_STORES == frozenset({"chash", "aspects_queue"})
+        assert GUIDED_LAND_EXCLUDED_STORES == frozenset({"aspects_queue"})
 
     def test_guided_store_etls_covers_every_ladder_store(self) -> None:
         from nexus.migration.etl_registry import EtlSources, LADDER_ORDER
@@ -1087,7 +1087,7 @@ class TestGuidedT2ExclusionSplit:
         sources = EtlSources(sqlite_path=None, catalog_db_path=None)  # type: ignore[arg-type]
         orch.migrate_all_guided(sources)
 
-        assert captured["skip_stores"] == frozenset({"chash", "aspects_queue"})
+        assert captured["skip_stores"] == frozenset({"aspects_queue"})
         assert {e.store for e in captured["etls"]} == set(LADDER_ORDER)
 
     def test_migrate_all_guided_unions_caller_skip_stores(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1104,7 +1104,7 @@ class TestGuidedT2ExclusionSplit:
         sources = EtlSources(sqlite_path=None, catalog_db_path=None)  # type: ignore[arg-type]
         orch.migrate_all_guided(sources, skip_stores=frozenset({"memory"}))
 
-        assert captured["skip_stores"] == frozenset({"chash", "aspects_queue", "memory"})
+        assert captured["skip_stores"] == frozenset({"aspects_queue", "memory"})
 
 
 def test_ltt_default_run_t2_is_migrate_all_guided() -> None:

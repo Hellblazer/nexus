@@ -48,7 +48,8 @@ LADDER_ORDER: tuple[str, ...] = (
     "telemetry",
     "taxonomy",
     "aspects",
-    "chash",
+    # "chash" retired (RDR-187/nexus-piwya.10): the router table is dropped;
+    # /v1/chash/import accept-and-no-ops; the chunks ETL IS the registration.
     "catalog",
     "aspects_queue",
 )

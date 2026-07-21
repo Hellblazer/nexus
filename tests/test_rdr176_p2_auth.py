@@ -120,8 +120,10 @@ def test_every_migrate_subcommand_exposes_service_url() -> None:
     """`--service-url` must be available on EVERY migrate subcommand, including
     `all` (today it has none). Excludes non-network helper subcommands."""
     migrate_group = storage_cmd.migrate_group
+    # "chash" removed (RDR-187/nexus-piwya.10): the subcommand is retired —
+    # it fails loud with no options at all, so it has no network surface.
     network_subcommands = {
-        "memory", "plans", "telemetry", "taxonomy", "chash", "catalog",
+        "memory", "plans", "telemetry", "taxonomy", "catalog",
         "vectors", "all",
     }
     missing: list[str] = []
