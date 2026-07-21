@@ -3147,8 +3147,9 @@ def _run_index(
             )
 
         # nexus-duoak follow-up: split "file" into its 3 constituent calls
-        # for diagnosis. manifest_write_batch_hook/taxonomy_assign_batch_hook/
-        # chash_dual_write_batch_hook are ALL flush-grain (nexus-u2kwq) so
+        # for diagnosis. manifest_write_batch_hook/taxonomy_assign_batch_hook
+        # are flush-grain (nexus-u2kwq; the chash dual-write hook was too,
+        # until RDR-187/nexus-piwya.4 retired it) so
         # fire_batch(grain="file") matches zero registered hooks by default —
         # the file-grain bucket's cost, if any, is fire_single (no default
         # consumers) or fire_document (aspect_extraction_enqueue_hook, which

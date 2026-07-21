@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """RDR-129 B4 (nexus-uq8a4): meter for dropped best-effort T2 writes.
 
-A *drop* is an **unrecovered** best-effort write: a chash dual-write the
-daemon could not commit because ``memory.db``'s single WAL writer slot was
-held by another process, and which exhausted any retry. Before this module
-those failures were swallowed at debug in ``chash_dual_write_batch_hook``
-(``mcp_infra.py``), so the completeness gap was invisible without log
+A *drop* is an **unrecovered** best-effort write: one the daemon could
+not commit because ``memory.db``'s single WAL writer slot was held by
+another process, and which exhausted any retry. The founding consumer was
+the chash dual-write hook (retired by RDR-187 / nexus-piwya.4 — the
+chunks tables are the chash store now, so that writer no longer exists);
+before this module its failures were swallowed at debug in
+``mcp_infra.py``, so the completeness gap was invisible without log
 spelunking (RDR-129 Gap 4). The meter turns each drop into an appended
-record that ``nx doctor`` aggregates into a number.
+record that ``nx doctor`` aggregates into a number; historical records
+naming the retired hook remain readable data.
 
 Design mirrors :mod:`nexus.routing_stats`: a JSONL append log under
 ``~/.config/nexus`` (env-overridable), aggregated for CLI reporting.
@@ -51,6 +54,12 @@ class DropSummary:
 
 def record_drop(*, hook: str, collection: str, rows: int, error: str) -> None:
     """Append one dropped-best-effort-write record. Never raises.
+
+    NO CURRENT PRODUCERS (RDR-187 / nexus-piwya.4): the founding caller —
+    the chash dual-write hook — is retired. Kept as the generic
+    best-effort-write meter (RDR-129 B4): a future best-effort writer
+    that can drop under lock contention should call this and restore the
+    soft-WARN posture in health._check_t2_dropped_writes for its records.
 
     *rows* is the number of records in the dropped batch (so the meter can
     report rows lost, not just call sites). *error* is the originating

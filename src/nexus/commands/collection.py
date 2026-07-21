@@ -990,9 +990,9 @@ def _reembed_collection(
             # invariant 'every CLI T3 write also fires the chain'
             # (test_every_cli_t3_write_function_fires_store_chains)
             # holds. Re-embed preserves doc_id / chash / manifest
-            # position, so the chain's hooks (chash_dual_write,
-            # taxonomy_assign, manifest_write) re-touch existing rows
-            # idempotently.
+            # position, so the chain's hooks (taxonomy_assign,
+            # manifest_write; the chash dual-write hook was retired by
+            # RDR-187/nexus-piwya.4) re-touch existing rows idempotently.
             if hooks is None:
                 from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
                 hooks = HookRegistry()

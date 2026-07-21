@@ -153,18 +153,26 @@ def chash_reconcile_cmd(apply: bool) -> None:
     """Sweep stale ``chash_index`` rows pointing at deleted T3 collections.
 
     \b
-    The T2 ``chash_index`` is the routing table that resolves
+    SCOPE (RDR-187 / nexus-piwya.4): this verb operates on the LOCAL
+    SQLite ``chash_index`` ONLY — it opens the T2 db file directly, so
+    it is meaningful solely on pre-migration installs whose SQLite
+    router still routes (frozen migration source, RDR-158). On a
+    migrated (service-mode) install there is no local router to sweep:
+    the verb exits at the ``No T2 db`` guard, and the PG-side router is
+    retired outright by RDR-187 (its ghosts die with the table at the
+    DROP) — server-side, "which collections hold chunks" is answered
+    from the chunks tables themselves, which cannot go stale.
+
+    \b
+    The SQLite ``chash_index`` is the routing table that resolves
     ``chash:<hex>`` link spans to the (collection, chunk) they live
     in. Rows accumulate over time: when a collection is deleted from
     T3 (``nx collection delete`` or operator-driven cleanup), the
-    chash_index rows for that collection are NOT cascaded today, so
-    they remain as ghosts pointing at a non-existent collection.
-
-    \b
-    ``Catalog.resolve_chash`` self-heals on access (drops a stale row
-    when it tries to look up a chash and finds the collection
-    missing in T3), but that's a per-access correction, not a sweep.
-    This verb is the bulk equivalent.
+    chash_index rows for that collection are NOT cascaded, so they
+    remain as ghosts pointing at a non-existent collection. (The
+    per-access delete_stale self-heal that complemented this sweep was
+    retired by RDR-187; on the SQLite path this verb is now the only
+    reconciliation.)
 
     \b
     Default is dry-run: reports per-collection ghost counts without

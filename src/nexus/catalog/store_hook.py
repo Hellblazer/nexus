@@ -42,9 +42,10 @@ def single_chunk_manifest_metadata(content: str) -> tuple[str, list[dict]]:
     here ``manifest_write_batch_hook`` short-circuits on
     ``if not metadatas: return`` and no ``catalog_document_chunks``
     manifest row (nor the ``documents.chunk_count`` update) is ever
-    written for these two callers (GH #1370 Defect 4b). As a side
-    effect this also unblocks ``chash_dual_write_batch_hook``, which
-    hit the same ``metadatas`` guard.
+    written for these two callers (GH #1370 Defect 4b). (Historically
+    this also unblocked the chash dual-write hook, which hit the same
+    ``metadatas`` guard — that hook was retired by RDR-187 /
+    nexus-piwya.4.)
     """
     content_hash = hashlib.sha256(content.encode()).hexdigest()
     doc_id = content_hash  # RDR-180: the full digest IS the natural id

@@ -157,9 +157,16 @@ class TestResolveChashT2Hit:
 
 
 class TestResolveChashSelfHeal:
-    def test_stale_t2_row_removed_when_collection_missing(self, resolve_env):
-        """T2 row points at a collection that has been deleted — delete the row
-        and fall through to other candidates.
+    def test_stale_row_survives_resolution_selfheal_retired(self, resolve_env):
+        """RDR-187 (nexus-piwya.4): the delete_stale self-heal is RETIRED —
+        the resolver no longer holds delete authority over the store. A row
+        pointing at a vanished collection simply fails per-candidate
+        resolution and the resolver falls through to a live candidate; the
+        row itself is left untouched (on the frozen SQLite path it is
+        migration-source data, RDR-158; in service mode staleness cannot
+        occur — lookup is chunk-backed). Inverts the pre-.4 removal
+        assertion; the resurrection direction is additionally pinned by
+        tests/catalog/test_chash_citation_resolution.py with a fatal fake.
         """
         cat, t3, chash_index = resolve_env
         h = "e" * 64
@@ -170,18 +177,18 @@ class TestResolveChashSelfHeal:
 
         ref = cat.resolve_chash(h, t3, chash_index)
 
-        # Should have fallen through to the live collection.
+        # Falls through to the live collection exactly as before...
         assert ref is not None
         assert ref["physical_collection"] == "code__live"
         assert ref["chunk_text"] == "real text"
 
-        # And the stale row must be gone.
+        # ...but the stale row is NOT deleted (no self-heal).
         remaining = chash_index.conn.execute(
             "SELECT physical_collection FROM chash_index WHERE chash = ?",
             (h,),
         ).fetchall()
         cols = {r[0] for r in remaining}
-        assert "code__deleted" not in cols
+        assert "code__deleted" in cols
         assert "code__live" in cols
 
 

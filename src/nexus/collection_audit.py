@@ -374,14 +374,25 @@ def _open_catalog_conn() -> sqlite3.Connection | None:
 
 
 def compute_chash_coverage(collection: str) -> ChashCoverage | None:
-    """Report chash_index coverage for *collection*.
+    """Report chash coverage for *collection*.
 
-    Composes (1) ``COUNT(*) FROM chash_index WHERE physical_collection = ?``
-    for indexed rows, (2) ``col.count()`` on the T3 collection for total
-    chunks, (3) a best-effort sampled T3 ``get(where={'chunk_text_hash':
-    ...})`` walk to produce up to 5 IDs whose hash is not registered in
-    T2 — observable "run backfill" evidence without chunk-by-chunk
-    inspection.
+    ⚠ SERVICE MODE: this ratio is a TAUTOLOGY BY DESIGN post-RDR-187
+    (nexus-piwya.3/.4). ``count_for_collection`` is now served from the
+    same ``chunks_<dim>`` tables that ``col.count()`` reads, so both
+    sides of the ratio count the identical rows: the ratio is pinned at
+    1.0 and ``missing_sample`` stays empty. That is the RDR's correct
+    end-state — with the router retired there is no derived copy left to
+    drift, so there is nothing for this probe to catch. Do NOT "fix"
+    this as a bug, and do not treat a service-mode 1.0 as evidence
+    during a real ingest gap (it cannot see one). The ratio remains a
+    genuine drift signal only on pre-migration SQLite installs
+    (RDR-158), where the router and T3 are still distinct stores.
+
+    Composes (1) the chash-store count for *collection*, (2)
+    ``col.count()`` on the T3 collection for total chunks, (3) a
+    best-effort sampled T3 ``get(where={'chunk_text_hash': ...})`` walk
+    producing up to 5 IDs whose hash is not registered — "run backfill"
+    evidence on the SQLite path.
 
     Returns ``None`` when either side of the ratio is unreachable
     (T2 file missing, T3 unavailable); calling code treats this

@@ -1383,11 +1383,15 @@ def _check_t2_integrity() -> list[HealthResult]:
 def _check_t2_dropped_writes() -> list[HealthResult]:
     """Surface the dropped-best-effort-write meter (RDR-129 B4, nexus-uq8a4).
 
-    A nonzero count is a SOFT WARN, never a hard fail: pre-single-daemon-
-    enforcement, a drop under heavy concurrent indexing is expected, and the
-    whole point of the meter is to keep the completeness gap observable rather
-    than lose it to a red X. Post-enforcement a growing count complements the
-    A3 daemon-census hard error (it means a writer is bypassing the daemon).
+    RDR-187 (nexus-piwya.4): the meter's only-ever producer — the chash
+    dual-write hook — is retired, so the count can no longer grow. A
+    nonzero count is therefore HISTORICAL evidence (drops that happened
+    before the writer was retired), reported ok=True with the number
+    visible: a frozen soft-WARN whose last_ts can never advance would
+    nag forever about a writer that no longer exists, and a permanently
+    green "no drops" would silently hide the history. If a future
+    best-effort writer adopts record_drop(), restore the soft-WARN
+    posture for its records.
     """
     from nexus.dropped_writes import count_drops  # noqa: PLC0415 — deferred to avoid circular import
 
@@ -1404,21 +1408,16 @@ def _check_t2_dropped_writes() -> list[HealthResult]:
         )]
 
     detail = (
-        f"{summary.total} dropped under lock contention "
-        f"({summary.rows} rows)"
+        f"{summary.total} historical drop(s) under lock contention "
+        f"({summary.rows} rows) from the retired chash dual-write hook "
+        f"(writer retired by RDR-187; count frozen)"
     )
     if summary.last_ts:
         detail += f", last {summary.last_ts}"
     return [HealthResult(
         label="T2 best-effort writes",
-        ok=False,
-        warn=True,
+        ok=True,
         detail=detail,
-        fix_suggestions=[
-            "transient under heavy concurrent indexing (RDR-129 B4); a "
-            "persistent or growing count means the T2 daemon is down or a "
-            "writer is bypassing it. Check `nx daemon t2 status`",
-        ],
     )]
 
 

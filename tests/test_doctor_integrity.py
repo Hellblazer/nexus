@@ -219,7 +219,11 @@ class TestCheckT2DroppedWrites:
         assert r.warn is False
         assert "no drops" in r.detail.lower()
 
-    def test_recorded_drops_are_soft_warn(self, tmp_path, monkeypatch):
+    def test_recorded_drops_are_historical_informational(self, tmp_path, monkeypatch):
+        """RDR-187 (nexus-piwya.4): the meter's only-ever producer (the chash
+        dual-write hook) is retired, so existing drop records are HISTORICAL
+        — reported ok=True with the count and the retirement visible, never
+        a frozen soft-WARN whose last_ts can never advance."""
         from nexus import dropped_writes
 
         monkeypatch.setenv(
@@ -233,10 +237,11 @@ class TestCheckT2DroppedWrites:
         )
         results = _check_t2_dropped_writes()
         r = results[0]
-        assert r.ok is False
-        assert r.warn is True
-        assert r.fatal is False  # never a hard fail — the metric must survive
-        assert "1" in r.detail
+        assert r.ok is True
+        assert r.warn is False
+        assert "1" in r.detail           # the count stays visible
+        assert "historical" in r.detail.lower()
+        assert "retired" in r.detail.lower()
 
 
 # ── T2 daemon singleton / multiplicity (RDR-129 A3, nexus-exa2p) ────────────

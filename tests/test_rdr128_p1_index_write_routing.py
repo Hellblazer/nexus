@@ -225,24 +225,7 @@ def test_dual_write_calls_upsert_many_exactly_once() -> None:
     assert spy.seen == (["h0", "h1", "h2", "h3", "h4"], "code__c")
 
 
-def test_chash_hook_delegates_to_t2_index_write(monkeypatch) -> None:
-    """chash_dual_write_batch_hook routes through t2_index_write (the daemon
-    path), not a raw t2_ctx/T2Database open."""
-    import nexus.mcp_infra as mi
-
-    calls: list[object] = []
-    monkeypatch.setattr(mi, "t2_index_write", lambda write_fn: calls.append(write_fn))
-    monkeypatch.setattr(
-        mi, "t2_ctx",
-        lambda: pytest.fail("hook must route via t2_index_write, not t2_ctx"),
-    )
-
-    mi.chash_dual_write_batch_hook(
-        doc_ids=["d1"],
-        collection="code__c",
-        contents=["x"],
-        embeddings=None,
-        metadatas=[{"chunk_text_hash": "h1"}],
-    )
-
-    assert len(calls) == 1, "chash hook must delegate exactly one write to t2_index_write"
+# RDR-187 (nexus-piwya.4): test_chash_hook_delegates_to_t2_index_write is
+# GONE with its subject — the chash dual-write hook is retired (the chunks
+# tables are the chash store). The store-level dual_write_chash_index test
+# above stays: the SQLite twin is frozen migration source (RDR-158).

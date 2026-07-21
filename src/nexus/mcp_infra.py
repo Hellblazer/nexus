@@ -1001,67 +1001,14 @@ def _fetch_or_embed(
 # ── Chash dual-write (RDR-086 Phase 1.2; migrated to batch hook in RDR-095) ──
 
 
-def chash_dual_write_batch_hook(
-    doc_ids: list[str],
-    collection: str,
-    contents: list[str],
-    embeddings: list[list[float]] | None,
-    metadatas: list[dict] | None,
-    *,
-    catalog_doc_id: str = "",
-) -> None:
-    """Registered batch hook (RDR-095): best-effort dual-write of
-    ``chash_index`` rows after a T3 upsert.
-
-    Called via ``HookRegistry.fire_batch`` from every CLI indexing
-    path immediately after ``t3.upsert_chunks_with_embeddings(...)``.
-    Reads ``metadatas``; ignores ``contents`` and ``embeddings``. Opens a
-    fresh T2Database (matching ``taxonomy_assign_batch_hook``'s
-    lifecycle), delegates to the store-level
-    ``dual_write_chash_index`` helper, and closes. Logs at debug level
-    on any outer failure: a T2 failure must never abort the enclosing
-    T3 write path.
-
-    Wired by :func:`nexus.hook_registry.install_default_hooks` onto every
-    runtime-constructed registry.
-    """
-    if not doc_ids or not metadatas:
-        return
-    try:
-        from nexus.db.t2.chash_index import dual_write_chash_index  # noqa: PLC0415 — deferred to avoid circular import (db.t2.chash_index)
-
-        # RDR-128 P1 (kg8sj): route through the daemon so the indexer does
-        # not hold memory.db's writer lock; dual_write batches to one RPC.
-        t2_index_write(
-            lambda db: dual_write_chash_index(
-                db.chash_index, collection, doc_ids, metadatas
-            )
-        )
-    except Exception as exc:  # noqa: BLE001 — chash dual-write hook best-effort; logged + metered, never propagates
-        import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
-
-        # RDR-129 B4 (nexus-uq8a4): a ``database is locked`` / ``busy`` failure
-        # here is an *unrecovered* best-effort write — the daemon could not
-        # commit the chash dual-write because memory.db's single WAL writer
-        # slot was held. Meter it so the completeness gap is a number
-        # ``nx doctor`` surfaces, not an invisible debug line (RDR-129 Gap 4).
-        # A write that an inner retry recovers never reaches this except, so
-        # the counter only ever counts true drops. Non-lock failures are a
-        # different bug class and stay unmetered debug.
-        msg = str(exc).lower()
-        if "locked" in msg or "busy" in msg:
-            try:
-                from nexus.dropped_writes import record_drop  # noqa: PLC0415 — deferred to avoid circular import (dropped_writes)
-
-                record_drop(
-                    hook="chash_dual_write_batch_hook",
-                    collection=collection,
-                    rows=len(doc_ids),
-                    error=str(exc),
-                )
-            except Exception:  # noqa: BLE001 — drop metering must never break the best-effort hook
-                pass  # metering must never break the best-effort hook
-        structlog.get_logger().debug("chash_dual_write_batch_failed", exc_info=True)
+# RDR-187 (nexus-piwya.4): chash_dual_write_batch_hook is RETIRED. The chunks
+# tables ARE the chash-keyed store (the /v1/chash/* reads are served from
+# them, nexus-piwya.3), so there is no derived copy left to dual-write —
+# and no dual-write means the orphan-leak class (292,656 dangling router
+# rows in production) structurally cannot recur. The engine's write
+# endpoints remain accept-and-no-op for one release (old clients in the
+# mixed-version window), and tests/test_hook_drift_guard.py pins that the
+# hook name never reappears in src.
 
 
 # nexus-duoak.7: file-agnostic consumers run once per upload flush in the
@@ -1069,7 +1016,6 @@ def chash_dual_write_batch_hook(
 # their cost is round-trip-dominated, not row-dominated. Default-grain
 # callers (grain="all") still fire them exactly as before.
 taxonomy_assign_batch_hook.batch_grain = "flush"
-chash_dual_write_batch_hook.batch_grain = "flush"
 # manifest joined the flush grain in nexus-u2kwq: the batched indexer's
 # aggregate call carries per-chunk doc_id + file-local chunk_index
 # (injected by _fire_flush_grain_hooks), so by_doc grouping and position

@@ -2,7 +2,7 @@
 """Grain-aware batch-hook dispatch (nexus-duoak.7).
 
 The duoak-2C batched indexer fires per-file batch hooks AND per-flush
-aggregate batch hooks. File-agnostic consumers (taxonomy, chash) declare
+aggregate batch hooks. File-agnostic consumers (taxonomy) declare
 ``batch_grain = "flush"`` and run once per upload batch; consumers that
 need per-file identity (manifest, keyed on catalog_doc_id) stay at the
 default file grain. Callers that don't pass ``grain`` fire everything —
@@ -61,12 +61,10 @@ class TestGrainDispatch:
 class TestDefaultConsumersDeclareGrain:
     def test_default_consumers_grain_declarations(self) -> None:
         from nexus.mcp_infra import (
-            chash_dual_write_batch_hook,
             manifest_write_batch_hook,
             taxonomy_assign_batch_hook,
         )
         assert getattr(taxonomy_assign_batch_hook, "batch_grain", "file") == "flush"
-        assert getattr(chash_dual_write_batch_hook, "batch_grain", "file") == "flush"
         # nexus-u2kwq: manifest joined flush grain — the batched indexer's
         # aggregate call injects per-chunk doc_id + file-local chunk_index
         # so by_doc grouping/positions stay correct; grain="all" callers

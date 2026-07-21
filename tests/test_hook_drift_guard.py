@@ -28,8 +28,32 @@ SRC_ROOT = PROJECT_ROOT / "src" / "nexus"
 
 GUARDED_NAMES = frozenset({
     "taxonomy_assign_batch_hook",
+})
+
+# RDR-187 (nexus-piwya.4): the chash dual-write hook is RETIRED — the chunks
+# tables ARE the chash-keyed store, so there is no derived copy left to
+# dual-write. The name must not reappear anywhere in src (a reintroduction
+# would silently resurrect the orphan-leak class the RDR closed). String
+# literals are allowed (dropped-writes / hook_failures records carry the
+# historical hook name as data).
+RETIRED_HOOK_NAMES = frozenset({
     "chash_dual_write_batch_hook",
 })
+
+
+def test_retired_chash_dual_write_hook_is_gone_from_src() -> None:
+    offenders: list[str] = []
+    for path in sorted(SRC_ROOT.rglob("*.py")):
+        rel = path.relative_to(PROJECT_ROOT).as_posix()
+        for name in RETIRED_HOOK_NAMES:
+            for ref in _scan_file_for_hook_refs(
+                    path, guarded_names=frozenset({name})):
+                offenders.append(f"{rel}: {ref}")
+    assert offenders == [], (
+        "RDR-187 retired the chash dual-write hook — the chunks tables are "
+        "the chash store; do not reintroduce a derived-copy writer: "
+        + ", ".join(offenders)
+    )
 
 ALLOWED_FILES = frozenset({
     "src/nexus/mcp_infra.py",      # the definitions
