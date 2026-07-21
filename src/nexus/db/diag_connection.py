@@ -166,11 +166,17 @@ def run_diagnostic_sql(
             "-U", creds.user, "-d", creds.dbname,
             "-v", "ON_ERROR_STOP=1", "-tAc", stmt,
         ]
-        env = dict(
-            os.environ,
-            PGPASSWORD=creds.password,
-            PGOPTIONS="-c default_transaction_read_only=on",
-        )
+        # nexus-iytd3 loader guard (GH #1414 era-hop, review round 3): the
+        # published PG bundles ship psql without an RPATH, so a bare env
+        # exits 127 (libpq.so.5 unresolvable) — and THIS is the leg the
+        # chash-conformance label (the tri-state poison gate's key) runs
+        # through, so an unguarded env here re-creates the permanent
+        # convergence defer one level below the health._run_psql fix.
+        from nexus.db.pg_provision import _bundle_lib_env  # noqa: PLC0415 — circular-dep avoidance (nexus.db.pg_provision)
+
+        env = _bundle_lib_env(argv, None)
+        env["PGPASSWORD"] = creds.password
+        env["PGOPTIONS"] = "-c default_transaction_read_only=on"
         proc = runner(argv, env)
         if proc.returncode != 0:
             _log.warning(

@@ -197,3 +197,56 @@ class TestLiveStoreDetailLocalOnly:
             )
         assert "live diagnostic results" in text
         assert "SELECT 1; = 42" in text
+
+
+class TestBundleLibLoaderGuard:
+    """GH #1414 era-hop, review round 3 (2026-07-21): run_diagnostic_sql is
+    the leg the chash-conformance label (the tri-state poison gate's key)
+    actually runs through, so ITS psql env — not just health._run_psql's —
+    must carry the nexus-iytd3 _bundle_lib_env loader guard. Without it, an
+    RPATH-less bundled psql exits 127 (libpq.so.5 unresolvable), the probe
+    reads UNKNOWN, and converge_engine defers permanently one level below
+    the health-leg fix."""
+
+    def _bundle_psql(self, tmp_path: Path) -> Path:
+        (tmp_path / "bundle" / "bin").mkdir(parents=True)
+        (tmp_path / "bundle" / "lib").mkdir(parents=True)
+        psql = tmp_path / "bundle" / "bin" / "psql"
+        psql.write_text("")
+        return psql
+
+    def test_diag_env_carries_bundle_lib_path(self, tmp_path):
+        import os as _os
+
+        runner = _RecordingRunner()
+        psql = self._bundle_psql(tmp_path)
+        run_diagnostic_sql(
+            ["SELECT count(*) FROM nexus.chunks_768"],
+            _CREDS, psql_bin=psql, psql_runner=runner,
+        )
+        env = runner.envs[0]
+        lib = str(tmp_path / "bundle" / "lib")
+        assert env.get("LD_LIBRARY_PATH", "").split(_os.pathsep)[0] == lib, (
+            "diagnostic psql must get the bundle's sibling lib/ on the "
+            "loader path (same guard as pg_provision's own calls)"
+        )
+        # The read-only + auth env survives the guard:
+        assert env["PGPASSWORD"] == "pw"
+        assert env["PGOPTIONS"] == "-c default_transaction_read_only=on"
+
+    def test_non_bundle_layout_keeps_plain_env(self, tmp_path):
+        import os as _os
+
+        runner = _RecordingRunner()
+        (tmp_path / "bin").mkdir()
+        psql = tmp_path / "bin" / "psql"  # no sibling lib/
+        psql.write_text("")
+        run_diagnostic_sql(
+            ["SELECT count(*) FROM nexus.chunks_768"],
+            _CREDS, psql_bin=psql, psql_runner=runner,
+        )
+        env = runner.envs[0]
+        assert env["PGPASSWORD"] == "pw"
+        assert "LD_LIBRARY_PATH" not in env or (
+            env["LD_LIBRARY_PATH"] == _os.environ.get("LD_LIBRARY_PATH")
+        )
