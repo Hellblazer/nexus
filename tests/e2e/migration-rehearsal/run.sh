@@ -72,8 +72,8 @@ COLD_TAG="${NEXUS_SERVICE_TAG:-engine-service-v0.1.51}"
 # requires) engine-service-v0.1.42"). Kept literal (like COLD_TAG) but
 # bumped alongside REQUIRED_ENGINE_VERSION so the scenario never silently
 # stops being "stale" — the guard below fails loud if it does.
-PREV_RELEASE="${NEXUS_PREV_RELEASE:-6.13.1}"
-PREV_ENGINE_TAG="${NEXUS_PREV_ENGINE_TAG:-engine-service-v0.1.47}"
+PREV_RELEASE="${NEXUS_PREV_RELEASE:-6.14.0}"
+PREV_ENGINE_TAG="${NEXUS_PREV_ENGINE_TAG:-engine-service-v0.1.49}"
 # RDR-185 P4.3 (nexus-n7u38.30): the ERA-HOP's starting point. Deliberately NOT
 # "one release back" like PREV_RELEASE — this leg's whole claim is that an
 # ANCIENT install converges, so the default is the OLDEST install the product

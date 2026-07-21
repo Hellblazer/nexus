@@ -114,7 +114,13 @@ from __future__ import annotations
 #: degrades sparse-gate hybrid search to zero rows with every health probe
 #: green (conexus-xpg7). Deployed + per-query-diff cloud-gated 2026-07-19
 #: (parity 104/113 == baseline, recall AC3 12/12, xpg7 probes 3/3 J=1.0).
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 49)
+#: -> (0,1,51) 2026-07-21: the RDR-187 conformance tail. v0.1.50 carries the
+#: chash_index DROP migration prerequisites; v0.1.51 delivers the 339xv/
+#: kmd5b/b878d fixes (planner blind-spot on just-written rows) and validated
+#: every octet CHECK on the conformance arc close ([21020]). Deployed to
+#: api.conexus-nexus.com + cloud-gated GREEN 2026-07-21. One-engine-per-
+#: release: v0.1.51 is the exact engine this release was tested with.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 51)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:
