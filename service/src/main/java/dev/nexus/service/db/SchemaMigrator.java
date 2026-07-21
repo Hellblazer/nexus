@@ -131,6 +131,15 @@ public final class SchemaMigrator {
         CHASH_LEN_CONSTRAINTS.put("chunks_768_chash_len_check", "chunks_768");
         CHASH_LEN_CONSTRAINTS.put("chunks_1024_chash_len_check", "chunks_1024");
         CHASH_LEN_CONSTRAINTS.put("catalog_document_chunks_chash_len_check", "catalog_document_chunks");
+        // chash_index entry KEPT past the RDR-187 DROP — deliberately, and
+        // contrary to the .5 pin's first reading: an AGED box upgrading to
+        // head still crosses catalog-013 (VALIDATE) with the table present
+        // en route to the rdr187-2 drop, and a genuinely-violating row there
+        // must fail CLEAN at this preflight (named table/count/runbook), not
+        // crash-loop at VALIDATE. The preflight is existence-gated, so on
+        // modern boxes (constraint validated) and post-drop boxes (table
+        // gone) it is a no-op. Pinned by SchemaMigratorIntegrationTest's
+        // presentButViolating scenario.
         CHASH_LEN_CONSTRAINTS.put("chash_index_chash_len_check", "chash_index");
     }
 

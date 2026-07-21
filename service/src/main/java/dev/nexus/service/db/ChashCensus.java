@@ -81,8 +81,10 @@ public final class ChashCensus {
             "the byte carrier of old_ref — any width by design"));
 
     /** The known chash-bearing inventory the enumeration MUST rediscover. */
+    // chash_index.chash left the inventory WITH the table (RDR-187 DROP,
+    // nexus-piwya.9) — the schema-derived enumeration no longer discovers it.
     static final Set<String> KNOWN_INVENTORY = Set.of(
-        "catalog_document_chunks.chash", "chash_index.chash",
+        "catalog_document_chunks.chash",
         "topic_assignments.doc_id", "frecency.chunk_id", "relevance_log.chunk_id",
         "chunks_384.chash", "chunks_768.chash", "chunks_1024.chash");
 
@@ -192,10 +194,10 @@ public final class ChashCensus {
         // dies, and its orphan population (292,230 measured in production,
         // post-kmd5b) dies AT the DROP rather than being reported forever.
         // The manifest leg below and the TEXT debt-column legs above remain
-        // the census's dangling surface. KNOWN_INVENTORY still lists
-        // chash_index.chash deliberately: the enumeration is schema-derived,
-        // so the column is genuinely discovered until the DROP removes it —
-        // the .9 commit deletes that entry together with the table.
+        // the census's dangling surface. (KNOWN_INVENTORY's chash_index.chash
+        // entry left with the table in the same commit as the rdr187-2 DROP —
+        // the enumeration is schema-derived, and the two stayed in lockstep
+        // exactly as planned at .5.)
         // The manifest (review P1 Critical: the census backstop must cover
         // catalog_document_chunks independently of the finalize call site).
         Integer manifest = ctx.fetchOne(

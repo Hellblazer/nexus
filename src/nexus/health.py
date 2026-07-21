@@ -1697,7 +1697,13 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     "nexus.catalog_meta",
     "nexus.catalog_owners",
     "nexus.chash_alias",
-    "nexus.chash_index",
+    # "nexus.chash_index" REMOVED (RDR-187/nexus-piwya.9, .9 review High):
+    # the table is dropped, and _check_rls_present LEFT-JOINs this list
+    # against live pg_class — a listed-but-dropped table is a PERMANENT
+    # false FATAL. (The earlier "likely permanent" note on the bead covered
+    # only the XML cross-walk, which reads immutable history; the live
+    # check is the consumer that matters. The completeness guard carries a
+    # matching dropped-tables exemption.)
     "nexus.chash_remap",
     "nexus.claude_assisted_remediation_consents",
     "nexus.document_aspects",

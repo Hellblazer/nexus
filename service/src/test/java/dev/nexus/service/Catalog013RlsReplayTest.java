@@ -29,7 +29,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * SECURITY hid every row from its DELETE/UPDATE while 013-2's VALIDATE (DDL,
  * never row-filtered) saw them all and crash-looped. The original form of
  * this test replayed that incident against the TEXT-era
- * {@code chash_index_chash_len_check} lifecycle.
+ * {@code chash_index_chash_len_check} lifecycle (that table was dropped by
+ * RDR-187/nexus-piwya.9; the vehicle is now the manifest,
+ * {@code catalog_document_chunks} — same FORCE-RLS + NOT-VALID-octet shape).
  *
  * <p>RDR-180 (rdr180-001-bytea-chash.xml) RETIRES that incident class BY
  * DESIGN rather than by fix: the cohort changesets contain NO DML at all —
@@ -122,14 +124,14 @@ class Catalog013RlsReplayTest {
             // mid-migration state arises from the type conversion of rows
             // that predate rdr180; reconstruct it the same way the pre-flip
             // incident tests did — drop, seed, re-add NOT VALID.
-            exec(su, "ALTER TABLE nexus.chash_index "
-                + "DROP CONSTRAINT chash_index_chash_octet_check");
+            exec(su, "ALTER TABLE nexus.catalog_document_chunks "
+                + "DROP CONSTRAINT catalog_document_chunks_chash_octet_check");
             byte[] legacyA = HexFormat.of().parseHex("a".repeat(32));  // 16 bytes
             byte[] legacyC = HexFormat.of().parseHex("c".repeat(32));
             seedRow(su, "t1", legacyA, "code__x");
             seedRow(su, "t2", legacyC, "code__z");
-            exec(su, "ALTER TABLE nexus.chash_index "
-                + "ADD CONSTRAINT chash_index_chash_octet_check "
+            exec(su, "ALTER TABLE nexus.catalog_document_chunks "
+                + "ADD CONSTRAINT catalog_document_chunks_chash_octet_check "
                 + "CHECK (octet_length(chash) = 32) NOT VALID");
 
             // 3. Production-shaped ownership for the replay role.
@@ -156,9 +158,9 @@ class Catalog013RlsReplayTest {
                 // 4. The RLS-blindness ground truth that motivated the
                 //    no-DML design: FORCE RLS + no tenant GUC hides every
                 //    row from the non-BYPASSRLS owner.
-                assertThat(count(su, "SELECT count(*) FROM nexus.chash_index"))
+                assertThat(count(su, "SELECT count(*) FROM nexus.catalog_document_chunks"))
                     .as("superuser ground truth").isEqualTo(2);
-                assertThat(count(admin, "SELECT count(*) FROM nexus.chash_index"))
+                assertThat(count(admin, "SELECT count(*) FROM nexus.catalog_document_chunks"))
                     .as("FORCE RLS hides every row from the non-BYPASSRLS owner "
                         + "— any DML in a changeset would silently no-op here")
                     .isEqualTo(0);
@@ -174,14 +176,14 @@ class Catalog013RlsReplayTest {
             // 6. The legacy rows are byte-untouched (rekey belongs to
             //    /v1/remap/rekey under withTenant, never to Liquibase).
             assertThat(count(su,
-                "SELECT count(*) FROM nexus.chash_index WHERE octet_length(chash) = 16"))
+                "SELECT count(*) FROM nexus.catalog_document_chunks WHERE octet_length(chash) = 16"))
                 .as("mid-migration legacy rows survive the replay unmodified")
                 .isEqualTo(2);
             // The octet CHECK exists and remains NOT VALID (validated only
             // by the client rung's admin connection, post-rekey).
             assertThat(count(su,
                 "SELECT count(*) FROM pg_constraint "
-                + "WHERE conname = 'chash_index_chash_octet_check' AND NOT convalidated"))
+                + "WHERE conname = 'catalog_document_chunks_chash_octet_check' AND NOT convalidated"))
                 .isEqualTo(1);
         }
     }
@@ -208,12 +210,26 @@ class Catalog013RlsReplayTest {
 
     private static void seedRow(Connection c, String tenant, byte[] chash,
                                 String collection) throws Exception {
+        // Manifest vehicle (RDR-187: the chash_index original was dropped):
+        // parent doc first, then the chunk-pointer row carrying the legacy
+        // 16-byte chash.
         try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.chash_index (tenant_id, chash, physical_collection, created_at) "
-            + "VALUES (?, ?, ?, now())")) {
+            "INSERT INTO nexus.catalog_documents "
+            + "(tenant_id, tumbler, title, author, year, content_type, corpus, physical_collection) "
+            + "VALUES (?, ?, 'replay doc', 'a', 2026, 'paper', 'research', ?) "
+            + "ON CONFLICT DO NOTHING")) {
             ps.setString(1, tenant);
-            ps.setBytes(2, chash);
+            ps.setString(2, "replay-" + tenant);
             ps.setString(3, collection);
+            ps.executeUpdate();
+        }
+        try (var ps = c.prepareStatement(
+            "INSERT INTO nexus.catalog_document_chunks (tenant_id, doc_id, position, chash, collection) "
+            + "VALUES (?, ?, 0, ?, ?)")) {
+            ps.setString(1, tenant);
+            ps.setString(2, "replay-" + tenant);
+            ps.setBytes(3, chash);
+            ps.setString(4, collection);
             ps.executeUpdate();
         }
     }

@@ -56,7 +56,10 @@ class JooqRecordReflectionFeatureTest {
     // (nexus.pdf_pipeline, nexus.pdf_pages, nexus.pdf_chunks).
     // 60 -> 61: RDR-180 (nexus-jxizy.2) added nexus.chash_alias (the legacy-id
     // resolution map for the bytea-chash rekey).
-    private static final int EXPECTED_RECORD_TYPES = 61;
+    // 61 -> 60: RDR-187 (nexus-piwya.9) DROPPED nexus.chash_index — the router
+    // remnant of the split-store architecture; its generated record left with
+    // the table (codegen derives from the changelog-booted schema).
+    private static final int EXPECTED_RECORD_TYPES = 60;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

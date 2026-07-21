@@ -53,6 +53,10 @@ _log = structlog.get_logger(__name__)
 #: this tuple against the audit's literal store list.
 CASCADE_STORES: tuple[str, ...] = (
     "document_chunks",
+    # "chash_index" here is the LOCAL SQLITE twin (the RDR-185 mid-migration
+    # rewrite of the frozen migration SOURCE) — NOT the PG router that
+    # RDR-187 dropped. Deliberately kept: it rides RDR-158's retirement,
+    # and pre-migration sources still carry the table (.9 critique Minor).
     "chash_index",
     "topic_assignments",
     "frecency",

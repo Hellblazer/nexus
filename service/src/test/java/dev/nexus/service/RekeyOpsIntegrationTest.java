@@ -38,12 +38,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * half): (a) rehashable row → {@code sha256(chunk_text)}; (b) reference-only
  * row whose old chash has a content sibling → remapped to the sibling's new
  * key, NOT dropped; (c) orphaned row under {@code drop} → row GONE and its
- * manifest/chash_index pointers CASCADED (no dangling scan hit); (d)
+ * manifest pointers CASCADED (no dangling scan hit; the chash_index twin
+ * died with the router, RDR-187); (d)
  * orphaned row under {@code synthesize} → surrogate 32-byte key present
  * WITH {@code metadata.chash_origin='synthetic'}, pointer preserved (and
  * repointed to the surrogate — never dangling at the old key). Disposition
  * counts logged and asserted. Plus: two-phase duplicate collapse, the
- * ETL-era 32-byte-ASCII id class, full cascade (manifest, chash_index,
+ * ETL-era 32-byte-ASCII id class, full cascade (manifest,
  * topic_assignments, frecency, relevance_log), idempotency, and the
  * collision refusal.
  */
@@ -157,8 +158,6 @@ class RekeyOpsIntegrationTest {
             "ALTER TABLE nexus.chunks_384 DROP CONSTRAINT chunks_384_chash_octet_check");
         su.createStatement().execute(
             "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT catalog_document_chunks_chash_octet_check");
-        su.createStatement().execute(
-            "ALTER TABLE nexus.chash_index DROP CONSTRAINT chash_index_chash_octet_check");
         try {
             seed.run();
         } finally {
@@ -170,9 +169,6 @@ class RekeyOpsIntegrationTest {
                 + "CHECK (octet_length(chash) = 32) NOT VALID");
             su.createStatement().execute(
                 "ALTER TABLE nexus.catalog_document_chunks ADD CONSTRAINT catalog_document_chunks_chash_octet_check "
-                + "CHECK (octet_length(chash) = 32) NOT VALID");
-            su.createStatement().execute(
-                "ALTER TABLE nexus.chash_index ADD CONSTRAINT chash_index_chash_octet_check "
                 + "CHECK (octet_length(chash) = 32) NOT VALID");
         }
     }
@@ -249,7 +245,8 @@ class RekeyOpsIntegrationTest {
                 // (c) orphan: empty text, no content sibling anywhere
                 insertChunk(su, TA, "nexus.chunks_384", 384, "code__k", orphanKey, "");
                 try {
-                    // pointers at the orphan key (manifest + chash_index) — must cascade on drop
+                    // pointers at the orphan key (manifest; the chash_index
+                    // twin died with the router, RDR-187) — must cascade on drop
                     try (PreparedStatement ps = su.prepareStatement(
                         "INSERT INTO nexus.catalog_document_chunks "
                         + "(tenant_id, doc_id, position, chash, collection) VALUES ('"
@@ -261,20 +258,6 @@ class RekeyOpsIntegrationTest {
                         "INSERT INTO nexus.catalog_document_chunks "
                         + "(tenant_id, doc_id, position, chash, collection) VALUES ('"
                         + TA + "', '1.1', 1, ?, 'code__k')")) {
-                        ps.setBytes(1, legacyA);
-                        ps.executeUpdate();
-                    }
-                    try (PreparedStatement ps = su.prepareStatement(
-                        "INSERT INTO nexus.chash_index "
-                        + "(tenant_id, chash, physical_collection, created_at) VALUES ('"
-                        + TA + "', ?, 'code__k', now())")) {
-                        ps.setBytes(1, orphanKey);
-                        ps.executeUpdate();
-                    }
-                    try (PreparedStatement ps = su.prepareStatement(
-                        "INSERT INTO nexus.chash_index "
-                        + "(tenant_id, chash, physical_collection, created_at) VALUES ('"
-                        + TA + "', ?, 'code__k', now())")) {
                         ps.setBytes(1, legacyA);
                         ps.executeUpdate();
                     }
@@ -334,8 +317,6 @@ class RekeyOpsIntegrationTest {
                 .isZero();
         }
         assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks WHERE tenant_id='" + TA
-            + "' AND octet_length(chash) <> 32")).isZero();
-        assertThat(count("SELECT count(*) FROM nexus.chash_index WHERE tenant_id='" + TA
             + "' AND octet_length(chash) <> 32")).isZero();
         // alias facts: the 16-byte era row's old_ref is its 32-hex; the
         // ETL-era row's old_ref is its raw ASCII id (reversibility lemma)
@@ -441,8 +422,8 @@ class RekeyOpsIntegrationTest {
     @Order(3)
     void rekey_cascadeCollapse_frecencyMerges_assignmentsAndIndexTwoPhase() throws Exception {
         // Two distinct legacy ids carrying the SAME text (they collapse to
-        // one digest), each with its own frecency / topic_assignments /
-        // chash_index rows — exercising the GREATEST-merge and the
+        // one digest), each with its own frecency / topic_assignments
+        // rows — exercising the GREATEST-merge and the
         // two-phase delete branches of the cascades, which test 1 only
         // reached in their no-pre-existing-target shape.
         String tenant = "t-rekey-collapse";
@@ -461,15 +442,9 @@ class RekeyOpsIntegrationTest {
                 insertChunk(su, tenant, "nexus.chunks_768", 768, "code__m", old1, text);
                 insertChunk(su, tenant, "nexus.chunks_768", 768, "code__m", old2, text);
                 try {
-                    for (byte[] key : new byte[][] {old1, old2}) {
-                        try (PreparedStatement ps = su.prepareStatement(
-                            "INSERT INTO nexus.chash_index "
-                            + "(tenant_id, chash, physical_collection, created_at) VALUES ('"
-                            + tenant + "', ?, 'code__m', now())")) {
-                            ps.setBytes(1, key);
-                            ps.executeUpdate();
-                        }
-                    }
+                    // (chash_index seeds removed — RDR-187/nexus-piwya.9: the
+                    // router and its two-phase repoint died; topic_assignments
+                    // below carries the two-phase collapse coverage.)
                     exec(su, "INSERT INTO nexus.topics (tenant_id, id, collection, label, created_at) "
                         + "VALUES ('" + tenant + "', 992, 'code__m', 'topic-m', now()) ON CONFLICT DO NOTHING");
                     exec(su, "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id) VALUES "
@@ -494,11 +469,6 @@ class RekeyOpsIntegrationTest {
         // chunks collapsed to ONE row at the digest key
         assertThat(count("SELECT count(*) FROM nexus.chunks_768 WHERE tenant_id='" + tenant + "'"))
             .isEqualTo(1);
-        // chash_index two-phase: both old rows converge to ONE new-key row
-        assertThat(count("SELECT count(*) FROM nexus.chash_index WHERE tenant_id='" + tenant + "'"))
-            .isEqualTo(1);
-        assertThat(count("SELECT count(*) FROM nexus.chash_index WHERE tenant_id='" + tenant
-            + "' AND chash = decode('" + newHex + "', 'hex')")).isEqualTo(1);
         // topic_assignments two-phase: one surviving assignment at the 64-hex
         assertThat(count("SELECT count(*) FROM nexus.topic_assignments WHERE tenant_id='" + tenant + "'"))
             .isEqualTo(1);

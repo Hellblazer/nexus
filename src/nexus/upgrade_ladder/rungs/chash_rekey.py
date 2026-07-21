@@ -57,7 +57,14 @@ OCTET_CHECKS: tuple[tuple[str, str], ...] = (
     ("nexus.chunks_768", "chunks_768_chash_octet_check"),
     ("nexus.chunks_1024", "chunks_1024_chash_octet_check"),
     ("nexus.catalog_document_chunks", "catalog_document_chunks_chash_octet_check"),
-    ("nexus.chash_index", "chash_index_chash_octet_check"),
+    # ("nexus.chash_index", ...) REMOVED — RDR-187/nexus-piwya.9 (.9 critique
+    # Critical 1): the router table is dropped by the paired engine's
+    # rdr187-2 changeset. Left in place, this rung would VALIDATE against a
+    # missing relation on EVERY nx upgrade forever (RuntimeError from
+    # run_admin_sql), _pointer_debt would silently degrade to unknowable,
+    # and _validated_probe could never count to five again — permanently
+    # un-converged. Boxes that converged pre-drop stay converged: the probe
+    # counts THESE four names, and all four survive the drop.
 )
 
 
@@ -66,11 +73,13 @@ OCTET_CHECKS: tuple[tuple[str, str], ...] = (
 #: leaves them conformant, so these VALIDATE unconditionally.
 CONTENT_OCTET_CHECKS: tuple[tuple[str, str], ...] = OCTET_CHECKS[:3]
 
-#: The two POINTER tables. A lived-in store can carry orphan pointers whose
-#: content stopped existing long before the cutover (production 2026-07-20:
-#: 292,230 chash_index + 426 catalog_document_chunks, created 2026-04-18..07-06,
-#: none with a chash_alias entry). VALIDATE is table-grain, so it cannot
-#: succeed while they exist — that is arithmetic, not judgement — and failing
+#: The POINTER table (the manifest — since RDR-187 dropped the chash_index
+#: router, the only one left). A lived-in store can carry orphan pointers
+#: whose content stopped existing long before the cutover (production
+#: 2026-07-20: 292,230 chash_index — died with the table — + 426
+#: catalog_document_chunks, none with a chash_alias entry; the manifest's
+#: are nexus-uu4ue's remaining scope). VALIDATE is table-grain, so it
+#: cannot succeed while they exist — that is arithmetic, not judgement — and failing
 #: the whole upgrade over pre-existing debt would strand every such install.
 POINTER_OCTET_CHECKS: tuple[tuple[str, str], ...] = OCTET_CHECKS[3:]
 

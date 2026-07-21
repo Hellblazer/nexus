@@ -114,7 +114,7 @@ class CatalogRenameCollectionTest {
         assertThat(c.get("chunks_384")).as("chunks_384").isEqualTo(2);
         assertThat(c.get("chunks_768")).as("chunks_768").isEqualTo(1);
         assertThat(c.get("chunks_1024")).as("chunks_1024").isEqualTo(1);
-        assertThat(c.get("chash_index")).as("chash_index").isEqualTo(2);
+        assertThat(c).as("RDR-187: no chash_index leg in the cascade").doesNotContainKey("chash_index");
         assertThat(c.get("topic_assignments")).as("topic_assignments (by source_collection)").isEqualTo(2);
         assertThat(c.get("topics")).as("topics").isEqualTo(1);
         assertThat(c.get("taxonomy_meta")).as("taxonomy_meta (RESTRICT child)").isEqualTo(1);
@@ -144,8 +144,6 @@ class CatalogRenameCollectionTest {
             }
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.hook_failures WHERE tenant_id='" + TENANT_A
                 + "' AND collection='" + OLD + "'")).as("hook_failures orphans").isZero();
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.chash_index WHERE tenant_id='" + TENANT_A
-                + "' AND physical_collection='" + OLD + "'")).as("chash_index orphans").isZero();
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.topic_assignments WHERE tenant_id='" + TENANT_A
                 + "' AND source_collection='" + OLD + "'")).as("assignment orphans").isZero();
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_documents WHERE tenant_id='" + TENANT_A
@@ -172,8 +170,6 @@ class CatalogRenameCollectionTest {
                 + "' AND collection='" + NEW + "'")).as("centroids_384 under NEW").isEqualTo(1);
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.topic_assignments WHERE tenant_id='" + TENANT_A
                 + "' AND source_collection='" + NEW + "'")).as("topic_assignments under NEW").isEqualTo(2);
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.chash_index WHERE tenant_id='" + TENANT_A
-                + "' AND physical_collection='" + NEW + "'")).as("chash_index under NEW").isEqualTo(2);
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.relevance_log WHERE tenant_id='" + TENANT_A
                 + "' AND collection='" + NEW + "'")).as("relevance_log under NEW").isEqualTo(2);
         }
@@ -319,11 +315,7 @@ class CatalogRenameCollectionTest {
         st.execute(chunkInsert(tenant, coll, "chunks_384", 384, "rn384b"));
         st.execute(chunkInsert(tenant, coll, "chunks_768", 768, "rn768a"));
         st.execute(chunkInsert(tenant, coll, "chunks_1024", 1024, "rn1024a"));
-        // chash_index: 2
-        st.execute("INSERT INTO nexus.chash_index (tenant_id, chash, physical_collection, created_at) "
-            + "VALUES ('" + tenant + "', '" + chash("rnci1") + "', '" + coll + "', NOW())");
-        st.execute("INSERT INTO nexus.chash_index (tenant_id, chash, physical_collection, created_at) "
-            + "VALUES ('" + tenant + "', '" + chash("rnci2") + "', '" + coll + "', NOW())");
+        // (chash_index seeds removed — RDR-187/nexus-piwya.9: router dropped)
         // topics: 1 (explicit id)
         long topicId = Math.abs((long) (tenant + coll).hashCode());
         st.execute("INSERT INTO nexus.topics (id, tenant_id, label, collection, doc_count, created_at, review_status) "

@@ -262,7 +262,9 @@ class TestVerify:
 class TestValidateStatements:
     def test_statements_shape(self):
         stmts = validate_statements()
-        assert len(stmts) == 5
+        # 5 -> 4: the chash_index entry died with its table (RDR-187/
+        # nexus-piwya.9); the four survivors are the whole VALIDATE surface.
+        assert len(stmts) == 4
         for s in stmts:
             assert s.startswith("ALTER TABLE nexus.")
             assert "VALIDATE CONSTRAINT" in s
@@ -356,16 +358,17 @@ class TestPointerDebtValidatePolicy:
     """
 
     def test_pre_existing_debt_validates_content_and_reports_pointers(self):
+        # Post-RDR-187 the debt probe iterates only the manifest (the router
+        # died with its 292,230); the amnesty semantics are unchanged.
         rung, calls = _rung(
-            pointer_debt_fn=lambda: {"nexus.chash_index": 292230,
-                                     "nexus.catalog_document_chunks": 426},
+            pointer_debt_fn=lambda: {"nexus.catalog_document_chunks": 426},
         )
         result = rung.converge(_Report())
         assert result.outcome is ConvergeOutcome.COMPLETED, (
             "pre-existing pointer debt must NOT fail the upgrade"
         )
         detail = result.detail or ""
-        assert "292230" in detail and "426" in detail, (
+        assert "426" in detail, (
             f"the skipped debt must be REPORTED with counts, not silent: {detail!r}"
         )
         stmts = calls.get("validated_statements") or []
@@ -377,18 +380,22 @@ class TestPointerDebtValidatePolicy:
             f"pointer-table CHECKs must be SKIPPED while debt exists: {stmts!r}"
         )
 
-    def test_zero_debt_validates_all_five(self):
+    def test_zero_debt_validates_all_four(self):
         rung, calls = _rung(pointer_debt_fn=lambda: {})
         rung.converge(_Report())
         joined = " ".join(calls.get("validated_statements") or [])
         for name in ("chunks_384", "chunks_768", "chunks_1024",
-                     "catalog_document_chunks", "chash_index"):
-            assert name in joined, f"a clean store must VALIDATE all five; missing {name}"
+                     "catalog_document_chunks"):
+            assert name in joined, f"a clean store must VALIDATE all four; missing {name}"
+        # RDR-187 (nexus-piwya.9): the router's VALIDATE must NEVER be issued
+        # again — against a dropped table it is a guaranteed RuntimeError on
+        # every upgrade (the .9 critique Critical 1).
+        assert "chash_index" not in joined
 
     def test_debt_GROWN_by_this_rekey_fails_loud(self):
         """THE CEILING. Debt measured before the rekey is grandfathered; any
         INCREASE is damage this run caused and must never be waved through."""
-        seq = iter([{"nexus.chash_index": 100}, {"nexus.chash_index": 150}])
+        seq = iter([{"nexus.catalog_document_chunks": 100}, {"nexus.catalog_document_chunks": 150}])
         rung, _ = _rung(pointer_debt_fn=lambda: next(seq))
         with pytest.raises(RuntimeError, match="NEW"):
             rung.converge(_Report())

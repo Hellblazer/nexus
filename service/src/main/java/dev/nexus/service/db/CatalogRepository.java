@@ -10,7 +10,6 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_LINKS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_META;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_STATS;
-import static dev.nexus.service.jooq.nexus.Tables.CHASH_INDEX;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_1024;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_384;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS_768;
@@ -1995,8 +1994,9 @@ public final class CatalogRepository {
             counts.put("chunks_384",  ctx.deleteFrom(CHUNKS_384).where(CHUNKS_384.COLLECTION.eq(name)).execute());
             counts.put("chunks_768",  ctx.deleteFrom(CHUNKS_768).where(CHUNKS_768.COLLECTION.eq(name)).execute());
             counts.put("chunks_1024", ctx.deleteFrom(CHUNKS_1024).where(CHUNKS_1024.COLLECTION.eq(name)).execute());
-            // 2. chash index (physical_collection; fk-002-4 RESTRICT).
-            counts.put("chash_index", ctx.deleteFrom(CHASH_INDEX).where(CHASH_INDEX.PHYSICAL_COLLECTION.eq(name)).execute());
+            // 2. (chash_index leg RETIRED — RDR-187/nexus-piwya.9: the router
+            //    table is dropped; conexus's rdr164 cascade EXPLAIN probe
+            //    retargets in lockstep with this removal.)
             // 3. taxonomy: projection assignments by source_collection (fk-002-5 RESTRICT),
             //    then topics (fk-003 RESTRICT) — deleting topics cascades any remaining
             //    assignments via topic_assignments.topic_id -> topics(id) ON DELETE CASCADE.
@@ -2154,8 +2154,7 @@ public final class CatalogRepository {
             counts.put("chunks_384",  ctx.update(CHUNKS_384).set(CHUNKS_384.COLLECTION, newName).where(CHUNKS_384.COLLECTION.eq(oldName)).execute());
             counts.put("chunks_768",  ctx.update(CHUNKS_768).set(CHUNKS_768.COLLECTION, newName).where(CHUNKS_768.COLLECTION.eq(oldName)).execute());
             counts.put("chunks_1024", ctx.update(CHUNKS_1024).set(CHUNKS_1024.COLLECTION, newName).where(CHUNKS_1024.COLLECTION.eq(oldName)).execute());
-            //    chash index (physical_collection; fk-002-4 RESTRICT).
-            counts.put("chash_index", ctx.update(CHASH_INDEX).set(CHASH_INDEX.PHYSICAL_COLLECTION, newName).where(CHASH_INDEX.PHYSICAL_COLLECTION.eq(oldName)).execute());
+            //    (chash_index leg RETIRED — RDR-187/nexus-piwya.9.)
             // nexus-x6kdz: the manifest's denormalized collection (the
             // combined-query join key) must re-home too — rename was the
             // second door back into the silently-empty-join state.

@@ -690,7 +690,8 @@ _ALL_TENANT_TABLES = [
     "nexus.catalog_links",
     "nexus.catalog_meta",
     "nexus.catalog_owners",
-    "nexus.chash_index",
+    # ("nexus.chash_index" removed — RDR-187/nexus-piwya.9: dropped table,
+    # mirrors health._RLS_TENANT_TABLES)
     "nexus.chash_remap",
     "nexus.claude_assisted_remediation_consents",
     "nexus.document_aspects",
@@ -1007,7 +1008,15 @@ class TestRlsTableCompleteness:
             text = xml_path.read_text(encoding="utf-8")
             for m in pattern.finditer(text):
                 found.add(m.group(1))
-        return frozenset(found)
+        # Tables DROPPED by a later changeset: the ENABLE ROW LEVEL SECURITY
+        # line is immutable history, but the live _check_rls_present probe
+        # must not expect a dropped table (a listed-but-dropped table is a
+        # permanent false FATAL — RDR-187 .9 review High). One entry per
+        # retirement, with the dropping changeset named.
+        dropped = {
+            "nexus.chash_index",  # rdr187-001-drop-chash-index.xml (RDR-187)
+        }
+        return frozenset(found - dropped)
 
     def test_rls_tenant_tables_matches_changelogs(self):
         """_RLS_TENANT_TABLES equals the set of RLS tables found in XMLs.

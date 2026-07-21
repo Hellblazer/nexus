@@ -251,6 +251,16 @@
          promote. Own runAlways grants (staging-4) mirror grants-nexus-svc. -->
     <include file="db/changelog/staging-001-landing-tables.xml"/>
 
+    <!-- RDR-187 (bead nexus-piwya.9): DROP nexus.chash_index — the router
+         remnant of the split-store architecture. The chunks tables are the
+         chash-keyed store (probe indexes: vectors-003; reroute:
+         nexus-piwya.3). Runs AFTER every changeset that ever touched the
+         table (chash-001, fk-002, catalog-013, rdr180) — those remain
+         immutable history and, on fresh installs, still create/validate the
+         table before this drops it. staging.chash_index (the dead-sink
+         landing surface) survives until the N+1 release. Before grants. -->
+    <include file="db/changelog/rdr187-001-drop-chash-index.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

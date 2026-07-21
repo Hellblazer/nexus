@@ -343,13 +343,13 @@ class StagingPromoteOpsIntegrationTest {
         assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
             + "WHERE doc_id = '1.1.1' AND encode(chash,'hex') = '" + canon1 + "'"))
             .as("the legacy manifest pointer promoted CANONICAL").isEqualTo(1);
-        assertThat(count("SELECT count(*) FROM nexus.chash_index "
-            + "WHERE encode(chash,'hex') = '" + canon1 + "' AND physical_collection = '" + COLL_A + "'"))
-            .as("RDR-187 (nexus-piwya.7): the staging chash promote leg is RETIRED — "
-                + "the landed staging.chash_index row (seeded above, deliberately kept: "
-                + "old clients mid-guided-upgrade still land it) must be accepted as a "
-                + "DEAD SINK and never promoted into the router. A resurrected promote "
-                + "leg fails this. The chunks promote (4) is the registration now.")
+        assertThat(count("SELECT count(*) FROM information_schema.tables "
+            + "WHERE table_schema = 'nexus' AND table_name = 'chash_index'"))
+            .as("RDR-187 (nexus-piwya.7/.9): the staging chash promote leg is RETIRED "
+                + "and the router TABLE is dropped — the landed staging.chash_index "
+                + "row (seeded above, deliberately kept: old clients mid-guided-upgrade "
+                + "still land it) is a DEAD SINK with no possible destination. The "
+                + "chunks promote (4) is the registration.")
             .isZero();
         assertThat(count("SELECT count(*) FROM nexus.topic_assignments ta "
             + "JOIN nexus.topics t ON t.id = ta.topic_id "
@@ -610,16 +610,10 @@ class StagingPromoteOpsIntegrationTest {
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
                 + T1 + "', 'code__kmd5b') ON CONFLICT DO NOTHING");
-            // Model production exactly: the row PREDATES the octet CHECK, which
-            // is NOT VALID and therefore gates only new writes. Drop, seed, restore.
-            su.createStatement().execute(
-                "ALTER TABLE nexus.chash_index DROP CONSTRAINT chash_index_chash_octet_check");
-            su.createStatement().execute(
-                "INSERT INTO nexus.chash_index (tenant_id, chash, physical_collection, created_at) "
-                + "VALUES ('" + T1 + "', decode('" + legacyHex + "', 'hex'), 'code__kmd5b', now())");
-            su.createStatement().execute(
-                "ALTER TABLE nexus.chash_index ADD CONSTRAINT chash_index_chash_octet_check "
-                + "CHECK (octet_length(chash) = 32) NOT VALID");
+            // (nexus.chash_index seed removed — RDR-187/nexus-piwya.9: the
+            // router table is dropped; the doesNotContainKey pin below now
+            // guards against a resurrected LEG against a resurrected TABLE
+            // both, and the debt-column legs remain the live subjects.)
             try (ResultSet rs = su.createStatement().executeQuery(
                     "INSERT INTO nexus.topics (tenant_id, label, collection, created_at) "
                     + "VALUES ('" + T1 + "', 'kmd5b', 'code__kmd5b', now()) RETURNING id")) {
@@ -653,8 +647,6 @@ class StagingPromoteOpsIntegrationTest {
         } finally {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
-                su.createStatement().execute(
-                    "DELETE FROM nexus.chash_index WHERE physical_collection = 'code__kmd5b'");
                 su.createStatement().execute(
                     "DELETE FROM nexus.topic_assignments WHERE assigned_by = 'kmd5b'");
                 su.createStatement().execute(
@@ -693,14 +685,9 @@ class StagingPromoteOpsIntegrationTest {
                 "INSERT INTO nexus.chash_alias (tenant_id, old_ref, old_bytes, new_chash, source) "
                 + "VALUES ('" + T1 + "', '" + legacyHex + "', decode('" + legacyHex + "', 'hex'), "
                 + "decode('" + liveHex + "', 'hex'), 'kmd5b2')");
-            su.createStatement().execute(
-                "ALTER TABLE nexus.chash_index DROP CONSTRAINT chash_index_chash_octet_check");
-            su.createStatement().execute(
-                "INSERT INTO nexus.chash_index (tenant_id, chash, physical_collection, created_at) "
-                + "VALUES ('" + T1 + "', decode('" + legacyHex + "', 'hex'), 'code__kmd5b2', now())");
-            su.createStatement().execute(
-                "ALTER TABLE nexus.chash_index ADD CONSTRAINT chash_index_chash_octet_check "
-                + "CHECK (octet_length(chash) = 32) NOT VALID");
+            // (nexus.chash_index seed removed — RDR-187/nexus-piwya.9: the
+            // router is dropped; relevance_log carries the alias-resolvable
+            // not-flagged proof.)
             su.createStatement().execute(
                 "INSERT INTO nexus.relevance_log (tenant_id, query, chunk_id, action, timestamp) "
                 + "VALUES ('" + T1 + "', 'kmd5b2', '" + legacyHex + "', 'view', now())");
@@ -711,12 +698,10 @@ class StagingPromoteOpsIntegrationTest {
             assertThat(residue)
                 .as("a legacy pointer the alias map RESOLVES to a live chunk is not "
                     + "dangling — widening the leg must not flag the whole legacy era")
-                .doesNotContainKeys("dangling.chash_index", "dangling.relevance_log");
+                .doesNotContainKeys("dangling.relevance_log");
         } finally {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
-                su.createStatement().execute(
-                    "DELETE FROM nexus.chash_index WHERE physical_collection = 'code__kmd5b2'");
                 su.createStatement().execute("DELETE FROM nexus.relevance_log WHERE query = 'kmd5b2'");
                 su.createStatement().execute("DELETE FROM nexus.chash_alias WHERE source = 'kmd5b2'");
                 su.createStatement().execute(

@@ -34,7 +34,7 @@ import java.util.Map;
  *       old_bytes, new digest) for every mismatched content row.</li>
  *   <li>Item8 disposition for empty-text rows: reference-only rows
  *       resolve through the alias built from content siblings; orphans
- *       get the per-run policy (drop cascades their manifest/chash_index
+ *       get the per-run policy (drop cascades their manifest
  *       pointers in the same transaction; synthesize mints the
  *       deterministic surrogate and stamps
  *       {@code metadata.chash_origin='synthetic'}).</li>
@@ -43,7 +43,6 @@ import java.util.Map;
  *       row already AT the digest key — delete the rest (all aliased),
  *       then UPDATE survivors.</li>
  *   <li>Cascade via the alias: manifest (plain — chash not in its PK),
- *       chash_index (two-phase on its (tenant, chash, collection) PK),
  *       topic_assignments (TEXT doc_id via old_ref match, two-phase),
  *       frecency (GREATEST-merge on collapse), relevance_log (plain).</li>
  * </ol>
@@ -228,15 +227,15 @@ public final class RekeyOps {
                         + "  AND a.source = '" + t + ":synthetic' "
                         + "  AND c.chash IS DISTINCT FROM a.new_chash");
                 } else {
-                    // drop: cascade the manifest + chash_index pointers FIRST
+                    // drop: cascade the manifest pointers FIRST
                     // (same transaction — RDR-180 Failure Modes: dangling
                     // manifest pointer), then the orphan rows.
                     ctx.execute(
                         "DELETE FROM nexus.catalog_document_chunks m USING " + t + " c "
                         + "WHERE m.chash = c.chash AND " + orphanCond);
-                    ctx.execute(
-                        "DELETE FROM nexus.chash_index i USING " + t + " c "
-                        + "WHERE i.chash = c.chash AND " + orphanCond);
+                    // (chash_index cascade RETIRED — RDR-187/nexus-piwya.9:
+                    // the router table is dropped at boot, before any rung
+                    // runs; there is no router row left to cascade.)
                     orphansDropped += ctx.execute(
                         "DELETE FROM " + t + " c WHERE " + orphanCond);
                 }
@@ -264,32 +263,14 @@ public final class RekeyOps {
                 "UPDATE nexus.catalog_document_chunks m SET chash = a.new_chash "
                 + "FROM nexus.chash_alias a "
                 + "WHERE m.chash = a.old_bytes AND m.chash IS DISTINCT FROM a.new_chash"));
-            // chash_index: (tenant, chash, collection) PK — two-phase, in TWO
-            // collapse directions (the RekeyOpsIntegrationTest 3c catch):
-            // (i) among the OLD rows themselves — two old keys mapping to one
-            // new key with NO row at the target yet would both UPDATE into
-            // the same PK; keep the min-ctid one per (collection, target).
-            ctx.execute(
-                "DELETE FROM nexus.chash_index i "
-                + "USING nexus.chash_index j, nexus.chash_alias ai, nexus.chash_alias aj "
-                + "WHERE ai.old_bytes = i.chash AND aj.old_bytes = j.chash "
-                + "  AND ai.new_chash = aj.new_chash "
-                + "  AND i.physical_collection = j.physical_collection "
-                + "  AND j.ctid < i.ctid");
-            // (ii) against a row already AT the target key.
-            ctx.execute(
-                "DELETE FROM nexus.chash_index i USING nexus.chash_alias a "
-                + "WHERE i.chash = a.old_bytes "
-                + "  AND EXISTS (SELECT 1 FROM nexus.chash_index k "
-                + "        WHERE k.physical_collection = i.physical_collection "
-                + "          AND k.chash = a.new_chash)");
-            counts.put("chash_index_repointed", ctx.execute(
-                "UPDATE nexus.chash_index i SET chash = a.new_chash "
-                + "FROM nexus.chash_alias a "
-                + "WHERE i.chash = a.old_bytes AND i.chash IS DISTINCT FROM a.new_chash"));
+            // (chash_index two-phase repoint RETIRED — RDR-187/nexus-piwya.9:
+            // the router table is dropped at boot, before any rung runs.
+            // The two-collapse-direction idiom it pioneered — the
+            // RekeyOpsIntegrationTest 3c catch — lives on in the
+            // topic_assignments block below.)
             // topic_assignments: TEXT doc_id matches old_ref; PK
             // (tenant, doc_id, topic_id) — two-phase in both collapse
-            // directions (see the chash_index note above).
+            // directions (the RekeyOpsIntegrationTest 3c idiom).
             ctx.execute(
                 "DELETE FROM nexus.topic_assignments ta "
                 + "USING nexus.topic_assignments tb, nexus.chash_alias aa, nexus.chash_alias ab "
