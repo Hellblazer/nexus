@@ -302,17 +302,22 @@ fi
 # When reclaimable build cache exceeds the threshold, prune — with headroom
 # generous enough to KEEP the hot layers (v0.1.21 lesson: an aggressive
 # --reserved-space 6GB evicted the freshly-unreferenced 692MB bge model layer
-# and forced a full re-download on the next build; 12GB spares it). Old
-# dangling image generations are pruned by age so the current lineage stays.
-# Prune only touches unused entries, so this is safe even with other builds up.
+# and forced a full re-download on the next build). Raised 12GB->40GB and
+# trigger 10GB->40GB on 2026-07-21 (Hal authorized the disk): the split-install
+# dependency layer is ~5GB and was being LRU-evicted between same-day builds
+# at the old budgets (alongside Docker Desktop's own defaultKeepStorage, raised
+# 20GB->80GB in ~/.docker/daemon.json the same day) — evicting it re-costs
+# ~2.5-7 min per rehearsal launch, which defeats the split. Old dangling image
+# generations are pruned by age so the current lineage stays. Prune only
+# touches unused entries, so this is safe even with other builds up.
 preflight_docker_prune() {
   local reclaimable_gb
   reclaimable_gb="$(docker system df --format '{{.Type}} {{.Reclaimable}}' 2>/dev/null \
     | awk '/^Build Cache/ {v=$3+0; if ($3 ~ /TB/) v=v*1024; else if ($3 !~ /GB/) v=0; print int(v)}')"
   reclaimable_gb="${reclaimable_gb:-0}"
-  if [ "${reclaimable_gb:-0}" -gt 10 ] 2>/dev/null; then
-    echo "[preflight] Docker build cache reclaimable ~${reclaimable_gb}GB (>10GB) — pruning (reserved-space 12GB keeps hot layers incl. the bge model)…"
-    docker builder prune -f --reserved-space 12GB 2>/dev/null | tail -1 || true
+  if [ "${reclaimable_gb:-0}" -gt 40 ] 2>/dev/null; then
+    echo "[preflight] Docker build cache reclaimable ~${reclaimable_gb}GB (>40GB) — pruning (reserved-space 40GB keeps hot layers incl. the bge model + the split deps layer)…"
+    docker builder prune -f --reserved-space 40GB 2>/dev/null | tail -1 || true
     # Belt: drop dangling (untagged) image generations older than a day —
     # this is what actually releases superseded rehearsal-image layers.
     docker image prune -f --filter 'until=24h' 2>/dev/null | tail -1 || true
@@ -327,6 +332,19 @@ echo "[stage] Staging a minimal build context + building image (COLD=$COLD HOLE_
 STAGE="$(mktemp -d)"
 trap '_guided_restore; rm -rf "$STAGE"; lock_release "$LOCKDIR" 2>/dev/null || true' EXIT
 cp "$(ls -t dist/conexus-*.whl | head -1)"            "$STAGE/"   # keep real PEP 427 name
+# Lock-derived dependency manifest for the split install layer (Dockerfile /
+# .cold / .fullstack): the wheel's bytes churn every build (embedded mtimes),
+# so a deps-install layer keyed on the wheel re-ran its full 5-7 min closure
+# install every run (measured 2026-07-21: 430s). Keying it on uv.lock content
+# instead makes it a cache hit until dependencies actually change; the wheel
+# itself installs --no-deps in a later cheap layer. stdout redirect, NOT -o:
+# uv embeds the -o path in the header comment, and $STAGE is a fresh mktemp
+# every run — that alone would bust the layer cache. --locked fails loud on a
+# stale uv.lock instead of exporting a closure the wheel does not match.
+# Runs unconditionally for every leg: era-hop/package-upgrade/chash-window
+# never COPY it (they install deps at runtime from real PyPI — that is those
+# scenarios' point), so for them it is a 1ms offline no-op in the context dir.
+uv export --locked --no-dev --no-emit-project --no-hashes -q > "$STAGE/requirements.txt"
 if [ "$ERA_HOP" = 1 ]; then
   # nexus-n7u38.30: same posture as --package-upgrade (working-tree wheel in its
   # own subdirectory, real PEP 427 name preserved, no engine artifact staged at
