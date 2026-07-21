@@ -86,13 +86,18 @@ from nexus.migration.vector_etl import _dim_for_collection, cross_model_target_n
 
 _log = structlog.get_logger(__name__)
 
-#: The seven non-``chunks`` staging stores landed verbatim from SQLite —
-#: mirrors the engine's ``StagingHandler.STORES`` minus ``"chunks"``, which
-#: lands from the Chroma source instead (see ``_land`` inside
-#: :func:`run_guided_upgrade`).
+#: The non-``chunks`` staging stores this client lands verbatim from SQLite
+#: (``chunks`` lands from the Chroma source instead — see ``_land`` inside
+#: :func:`run_guided_upgrade`). DELIBERATELY NOT a mirror of the engine's
+#: ``StagingHandler.STORES`` since RDR-187: STORES keeps ``chash_index`` as
+#: a dead-sink acceptance for OLD clients mid-upgrade; this tuple governs
+#: what THIS client lands, and it no longer lands router rows.
 _POINTER_STORES: tuple[str, ...] = (
     "document_chunks",
-    "chash_index",
+    # "chash_index" retired (RDR-187/nexus-piwya.8): the router is being
+    # dropped; the chunks this same upgrade lands ARE the chash registration.
+    # The engine keeps accepting old-client chash_index landings as a dead
+    # sink for one release (StagingHandler.STORES, nexus-piwya.7).
     "topic_assignments",
     "frecency",
     "relevance_log",

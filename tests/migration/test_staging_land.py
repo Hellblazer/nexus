@@ -89,8 +89,33 @@ class TestSourceCensus:
         assert not any(f.table == "notes" for f in report.findings)
 
     def test_manifest_and_exclusions_are_wellformed(self):
-        assert ("memory", "chash_index", "chash") in LANDING_MANIFEST
+        # RDR-187 (nexus-piwya.8): the router landing leg is retired — the
+        # entry MOVED to CENSUS_EXCLUSIONS (never bare-deleted: every
+        # pre-RDR-187 source still HAS the table, and an unclaimed
+        # chash-bearing column trips StagingCensusError on real upgrades).
+        assert ("memory", "chash_index", "chash") not in LANDING_MANIFEST
+        assert any(e[:3] == ("memory", "chash_index", "chash")
+                   for e in CENSUS_EXCLUSIONS), (
+            "chash_index must be a JUSTIFIED exclusion, not silently dropped")
         assert all(len(e) == 4 for e in CENSUS_EXCLUSIONS)
+
+    def test_new_client_no_longer_lands_chash_index(self):
+        # RDR-187 (nexus-piwya.8): the paired-release client stops
+        # participating in the chash staging pipeline — landing is driven by
+        # driver._POINTER_STORES (NOT the census manifest; .7 critique
+        # correction), so the retirement must happen THERE. Old clients
+        # still land; the engine keeps the dead-sink acceptance one release.
+        from nexus.migration.driver import _POINTER_STORES
+        assert "chash_index" not in _POINTER_STORES
+
+    def test_census_still_rediscovers_excluded_chash_index(self):
+        # The exclusion must not blind the census: the column is still
+        # FOUND (chash-bearing), just justified — unclaimed stays empty.
+        mem = _memory_db()
+        _seed_chash_index(mem)
+        report = source_census({"memory": mem})
+        assert any(f.table == "chash_index" for f in report.findings)
+        assert report.unclaimed == []
 
 
 class TestTimestampGuard:

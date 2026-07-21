@@ -69,7 +69,6 @@ class StagedTimestampError(ValueError):
 #: this set + the justified exclusions below.
 LANDING_MANIFEST: frozenset[tuple[str, str, str]] = frozenset({
     ("catalog", "document_chunks", "chash"),
-    ("memory", "chash_index", "chash"),
     ("memory", "topic_assignments", "doc_id"),
     ("memory", "frecency", "chunk_id"),
     ("memory", "relevance_log", "chunk_id"),
@@ -83,6 +82,20 @@ CENSUS_EXCLUSIONS: frozenset[tuple[str, str, str, str]] = frozenset({
      "sha256 of source CONTENT (document identity, not a chunk pointer)"),
     ("memory", "document_aspects", "source_path",
      "paths/URIs; chash appears only embedded in URI strings, rewritten at read"),
+    # RDR-187 (nexus-piwya.8): MOVED from LANDING_MANIFEST, never bare-deleted
+    # — every pre-RDR-187 source still HAS this table, and an unclaimed
+    # chash-bearing column trips StagingCensusError on essentially all real
+    # upgrades (re-gate Significant 1). The client no longer lands it
+    # (driver._POINTER_STORES); the engine accepts old-client landings as a
+    # dead sink for one release; nothing RESOLVABLE is lost — every live
+    # router fact is derivable from the chunks the SAME upgrade lands (the
+    # chunks promote IS the chash registration, nexus-piwya.7), while
+    # orphan pointers (the class the RDR exists to kill) are deliberately
+    # abandoned — counted at census time, see source_census's excluded-
+    # column log.
+    ("memory", "chash_index", "chash",
+     "chunk-location router rows; router retired by RDR-187 — the chunks "
+     "promote is the registration, and the same upgrade lands the chunks"),
 })
 
 
@@ -140,6 +153,17 @@ def source_census(conns: dict[str, sqlite3.Connection]) -> CensusReport:
                 report.findings.append(finding)
                 if (db, table, column) not in claimed and (db, table, column) not in excluded:
                     report.unclaimed.append(finding)
+                elif (db, table, column) in excluded:
+                    # Audit-trail parity with the RDR-187 DROP discipline (the
+                    # PG-side drop records its orphan count): excluded columns
+                    # are deliberately NOT landed — say how many rows each
+                    # install walks away from, per source, instead of
+                    # abandoning them invisibly.
+                    total = conn.execute(
+                        f'SELECT count(*) FROM "{table}" WHERE "{column}" '
+                        f"IS NOT NULL AND \"{column}\" <> ''").fetchone()[0]
+                    _log.info("census_excluded_column_not_landed",
+                              db=db, table=table, column=column, rows=total)
     if report.unclaimed:
         raise StagingCensusError(
             "chash-bearing source column(s) the landing manifest does not "
@@ -271,12 +295,8 @@ def pointer_store_rows(
                 "char_start, char_end FROM document_chunks")
         ]
     assert memory_conn is not None
-    if store == "chash_index":
-        return [
-            {"chash": r[0], "physical_collection": r[1], "created_at": r[2]}
-            for r in memory_conn.execute(
-                "SELECT chash, physical_collection, created_at FROM chash_index")
-        ]
+    # ("chash_index" branch removed — RDR-187/nexus-piwya.8: the new client
+    # does not land router rows; driver._POINTER_STORES no longer names it.)
     if store == "topic_assignments":
         return topic_assignment_rows(memory_conn)
     if store == "frecency":

@@ -170,7 +170,13 @@ NOTE_CANON="$(jget "['rdr180']['note_doc_canonical']")"
 STAGED_TOTAL="$(jget "['rdr180']['staged_total']")"
 ALIAS_TOTAL="$(jget "['rdr180']['alias_total']")"
 MANIFEST_TOTAL="$(jget "['rdr180']['manifest_total']")"
-CHASHIDX_ROWS="$(jget "['rdr180']['chash_index_rows']")"
+# CHASHIDX_ROWS (rdr180.chash_index_rows, the n+1 post-dedup canonical
+# count) retired with the promote leg — nothing to compare it against once
+# nothing canonicalizes into the router.
+# RDR-187 (.8): the paired-release client does NOT land chash_index at all
+# (driver._POINTER_STORES retired the store; the census carries a justified
+# exclusion). The dead-sink window is for OLD clients only — this rehearsal
+# drives the CURRENT client, so the landed count is exactly zero.
 FRECENCY_ROWS="$(jget "['rdr180']['frecency_rows']")"
 RELEVANCE_ROWS="$(jget "['rdr180']['relevance_rows']")"
 P16="$(jget "['rdr180']['pair']['p16']")"
@@ -389,8 +395,13 @@ for batch in chunk_rows(col, target_name=shortid, target_model=model,
 assert landed == r["shortid_staged"], f"landed {landed}, want {r['shortid_staged']}"
 env = store.promote(shortid)
 print(f"       promote envelope: {json.dumps(env)}")
-for field in ("staged_content", "promoted", "alias_rows", "chash_index_promoted"):
+# RDR-187 (nexus-piwya.7): chash_index_promoted left the envelope with the
+# retired staging promote leg — and must NOT come back (dead-sink contract).
+for field in ("staged_content", "promoted", "alias_rows"):
     assert field in env, f"promote envelope missing field {field!r} (wire contract drift)"
+assert "chash_index_promoted" not in env, (
+    "promote envelope grew chash_index_promoted back - the RDR-187 dead-sink "
+    "contract says landed staging.chash_index rows are never promoted")
 assert env["staged_content"] == r["shortid_staged"], env
 assert env["promoted"] == r["shortid_promoted"], (
     f"promoted={env['promoted']}, want {r['shortid_promoted']} "
@@ -584,11 +595,15 @@ expect_sql "reference-only ref aliased to its content canonical" \
 expect_sql "orphan ref never aliased" \
   "SELECT count(*) FROM nexus.chash_alias WHERE old_ref = '$ORPHAN_REF'" "0"
 
-# The pointer-store cascade (16-char keys MUST have converged via the alias).
-expect_sql "chash_index promoted (n+1 canonicals, pair deduped)" \
-  "SELECT count(*) FROM nexus.chash_index WHERE physical_collection = '$SHORTID'" "$CHASHIDX_ROWS"
-expect_sql "chash_index keys all 32-byte" \
-  "SELECT count(*) FROM nexus.chash_index WHERE octet_length(chash) <> 32" "0"
+# RDR-187 (nexus-piwya.7/.8): the router promote leg is retired engine-side
+# AND the current client no longer lands router rows (old clients still do;
+# the engine accepts them as a dead sink one release — STORES entry kept).
+# This drive uses the CURRENT client, so staging.chash_index stays EMPTY for
+# the collection; chash resolution rides the chunks tables, proven by the
+# citation-resolution checks below. Deliberately NO nexus.chash_index
+# reference here: these lines must survive the .9 DROP.
+expect_sql "staging chash_index not landed by the current client (store retired)" \
+  "SELECT count(*) FROM staging.chash_index WHERE physical_collection = '$SHORTID'" "0"
 expect_sql "frecency promoted (GREATEST-merge, pair converged)" \
   "SELECT count(*) FROM nexus.frecency" "$FRECENCY_ROWS"
 expect_sql "frecency zero legacy-width residue" \
