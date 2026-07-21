@@ -412,7 +412,11 @@ fi
 BUILD_ARGS=()
 [ -n "${NEXUS_BGE_MODEL_URL:-}" ] && BUILD_ARGS+=(--build-arg "BGE_MODEL_URL=$NEXUS_BGE_MODEL_URL")
 [ -n "${NEXUS_BGE_TOKENIZER_URL:-}" ] && BUILD_ARGS+=(--build-arg "BGE_TOKENIZER_URL=$NEXUS_BGE_TOKENIZER_URL")
-docker build -q ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} -f "$STAGE/Dockerfile" -t "$IMAGE" "$STAGE" >/dev/null
+# Progress streams deliberately (no -q): the image build is the longest quiet
+# stage of a run (14-18 min uncached, measured 2026-07-21) and -q made a slow
+# build indistinguishable from a hang. The step timings it prints are also the
+# evidence base for the layer-caching work (nexus-imkxs).
+docker build ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} -f "$STAGE/Dockerfile" -t "$IMAGE" "$STAGE"
 
 run_env=(-e "WITH_CLOUD=$WITH_CLOUD" -e "COMPREHENSIVE=$COMPREHENSIVE" -e "STRESS=$STRESS")
 if [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ]; then
