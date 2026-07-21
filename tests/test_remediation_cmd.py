@@ -171,7 +171,7 @@ class TestRemediateCmd:
         result = runner.invoke(remediate_cmd, ["chash-poison"], input="y\n")
         assert result.exit_code != 0
         assert consent_recorder.rows == []
-        assert "roll back the poisoned pgvector target" not in result.output
+        assert "the substrate-etl rung converges" not in result.output
         assert "opt-in" in result.output or "nx config set" in result.output
         # The describe stage still printed (ungated display):
         assert _URL in result.output
@@ -183,7 +183,7 @@ class TestRemediateCmd:
         assert consent_recorder.rows == []
         assert _URL in result.output  # runbook URL remains on screen
         # The recovery steps were NOT released:
-        assert "roll back the poisoned pgvector target" not in result.output
+        assert "the substrate-etl rung converges" not in result.output
 
     def test_accepted_confirm_records_consent_and_releases(
         self, runner, enabled_config, no_diag, consent_recorder
@@ -194,7 +194,7 @@ class TestRemediateCmd:
         row = consent_recorder.rows[0]
         assert row["scope"] == "remediate:chash-poison"
         assert row["granted"] is True
-        assert "roll back the poisoned pgvector target" in result.output
+        assert "the substrate-etl rung converges" in result.output
 
     def test_non_interactive_aborts_without_consent(
         self, runner, enabled_config, no_diag, consent_recorder
@@ -203,7 +203,7 @@ class TestRemediateCmd:
         result = runner.invoke(remediate_cmd, ["chash-poison"])  # no input
         assert result.exit_code != 0
         assert consent_recorder.rows == []
-        assert "roll back the poisoned pgvector target" not in result.output
+        assert "the substrate-etl rung converges" not in result.output
 
     def test_audit_unavailable_refuses_release(
         self, runner, enabled_config, no_diag, monkeypatch
@@ -224,7 +224,7 @@ class TestRemediateCmd:
         result = runner.invoke(remediate_cmd, ["chash-poison"], input="y\n")
         assert result.exit_code != 0
         assert "nexus-ng2sy" in result.output
-        assert "roll back the poisoned pgvector target" not in result.output
+        assert "the substrate-etl rung converges" not in result.output
 
     def test_unknown_topic_fails_loud(self, runner, isolated_config, consent_recorder):
         result = runner.invoke(remediate_cmd, ["nope"], input="y\n")
@@ -256,7 +256,7 @@ class TestRemediateCmd:
         assert result.exit_code != 0
         assert "unaudited" in result.output.lower()
         assert "disk full" in result.output
-        assert "roll back the poisoned pgvector target" not in result.output
+        assert "the substrate-etl rung converges" not in result.output
 
     def test_history_prints_the_audit_trail(
         self, runner, isolated_config, monkeypatch

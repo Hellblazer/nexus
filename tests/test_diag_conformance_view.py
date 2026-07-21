@@ -175,21 +175,25 @@ def test_cascade_covers_every_debt_table():
 
 
 def test_poison_detail_token_couples_probe_and_gates():
-    """The install-binary gate (daemon.py) and the convergence gate
-    (upgrade_finish.py) distinguish REAL poison from probe-degraded WARNs
-    by substring-matching the health detail. All three sides must use the
-    ONE constant — a hand-typed phrase on any side silently disarms the
-    gate (nexus-jxizy.5)."""
+    """The convergence gate (upgrade_finish.py) distinguishes REAL poison
+    from probe-degraded WARNs by substring-matching the health detail
+    against the ONE constant — a hand-typed phrase silently disarms the
+    gate (nexus-jxizy.5). Since fc24123c (nexus-pgdcv) the install-binary
+    gate (daemon.py) no longer matches the token itself: it couples
+    through the shared tri-state ``_poison_probe`` classifier, so the two
+    gates cannot diverge on the unknown state either."""
     from nexus.db.chash_tables import POISON_DETAIL_TOKEN
 
     for rel in (
         "src/nexus/health.py",
-        "src/nexus/commands/daemon.py",
         "src/nexus/upgrade_finish.py",
     ):
         src = (_REPO / rel).read_text()
         assert "POISON_DETAIL_TOKEN" in src, rel
         assert '"non-32-char chash" in r.detail' not in src, rel
+    daemon_src = (_REPO / "src/nexus/commands/daemon.py").read_text()
+    assert "_poison_probe" in daemon_src  # shared classifier, not a re-match
+    assert '"non-32-char chash" in r.detail' not in daemon_src
     assert POISON_DETAIL_TOKEN  # non-empty, importable
 
 
