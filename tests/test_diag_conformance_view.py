@@ -192,7 +192,14 @@ def test_poison_detail_token_couples_probe_and_gates():
         assert "POISON_DETAIL_TOKEN" in src, rel
         assert '"non-32-char chash" in r.detail' not in src, rel
     daemon_src = (_REPO / "src/nexus/commands/daemon.py").read_text()
-    assert "_poison_probe" in daemon_src  # shared classifier, not a re-match
+    # Require the CALL SITE, not a bare identifier mention (critic 2026-07-21:
+    # a docstring reference alone must not satisfy the coupling tripwire).
+    import re
+
+    assert re.search(r"=\s*_poison_probe\(", daemon_src), (
+        "daemon.py's install-binary gate must CALL the shared _poison_probe "
+        "classifier (not merely mention it) — nexus-jxizy.5 / nexus-pgdcv"
+    )
     assert '"non-32-char chash" in r.detail' not in daemon_src
     assert POISON_DETAIL_TOKEN  # non-empty, importable
 
