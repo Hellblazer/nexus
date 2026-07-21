@@ -629,17 +629,18 @@ def main() -> int:
     if era_hop:
         # The driver asserts the CONVERGENCE, so it needs the before-state: the
         # exact legacy ids that must no longer exist anywhere post-walk, and the
-        # text they were derived from (the rung recomputes sha256(text)[:32] on
-        # the wire, so the expected new id is derivable here too — that is the
-        # whole point of wire re-id, and it makes the assertion exact rather
-        # than a "looks 32-char" shape check).
+        # text they were derived from (the rung recomputes the FULL
+        # sha256(text) hexdigest on the wire — the RDR-180 canonical identity;
+        # nexus-i5rbk widened the transform to the 32-hex era class too — so
+        # the expected new id is derivable here, and it makes the assertion
+        # exact rather than a "looks conformant" shape check).
         out["legacy_ids"] = {
             _ERA_LEGACY: chashes[_ERA_LEGACY],
             _ERA_NOTE: chashes[_ERA_NOTE],
         }
         out["expected_reid"] = {
-            _ERA_LEGACY: [_chash(f"era legacy chunk {i:04d}") for i in range(n)],
-            _ERA_NOTE: [_chash(f"era note chunk {i:04d}") for i in range(n)],
+            _ERA_LEGACY: [_sha_full(f"era legacy chunk {i:04d}") for i in range(n)],
+            _ERA_NOTE: [_sha_full(f"era note chunk {i:04d}") for i in range(n)],
         }
         out["sourceless"] = sorted(_SOURCELESS)
     if rdr180:
