@@ -156,7 +156,11 @@ class VectorHandlerEmbeddingModeTest {
     // deleted, mirroring ChashTypeTest / PgVectorServingContractTest).
 
     @Test
-    void chashImport_full64CharRow_storedAsIs() throws Exception {
+    void chashImport_full64CharRow_acceptedAsDeprecatedNoOp() throws Exception {
+        // RDR-187 (nexus-piwya.3): the router is retired — /v1/chash/import
+        // ACCEPTS the canonical 64-hex shape (boundary validation unchanged,
+        // the point of this test) but persists nothing during the one-release
+        // no-op window. The full wire contract lives in ChashHandlerRerouteTest.
         String full = "e".repeat(64);
         var resp = post("/v1/chash/import", Map.of(
             "rows", List.of(Map.of(
@@ -164,7 +168,9 @@ class VectorHandlerEmbeddingModeTest {
                 "collection", "code__legacy64",
                 "created_at", "2025-01-01T00:00:00Z"))));
         assertThat(resp.statusCode()).isEqualTo(200);
-        // The row must be findable under its FULL 64-hex id (GET /v1/chash/lookup).
+        assertThat(resp.body()).contains("\"deprecated\":true").contains("\"imported\":0");
+        // Nothing stored: the lookup answers from the chunks tables, which
+        // this import never touched.
         var req = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + service.getPort()
                 + "/v1/chash/lookup?chash=" + full))
@@ -172,7 +178,7 @@ class VectorHandlerEmbeddingModeTest {
             .GET().build();
         var lookup = http.send(req, HttpResponse.BodyHandlers.ofString());
         assertThat(lookup.statusCode()).isEqualTo(200);
-        assertThat(lookup.body()).contains("code__legacy64");
+        assertThat(lookup.body()).contains("\"rows\":[]");
     }
 
     @Test
@@ -201,10 +207,13 @@ class VectorHandlerEmbeddingModeTest {
     }
 
     @Test
-    void chashUpsert_full64CharRow_storedAsIs() throws Exception {
+    void chashUpsert_full64CharRow_acceptedAsDeprecatedNoOp() throws Exception {
+        // RDR-187 (nexus-piwya.3): same window contract as the import test
+        // above — 64-hex ACCEPTED at the boundary, nothing persisted.
         var resp = post("/v1/chash/upsert", Map.of(
             "chash", "b".repeat(64), "collection", "code__norm64"));
         assertThat(resp.statusCode()).isEqualTo(200);
+        assertThat(resp.body()).contains("\"deprecated\":true");
         var req = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + service.getPort()
                 + "/v1/chash/lookup?chash=" + "b".repeat(64)))
@@ -212,7 +221,7 @@ class VectorHandlerEmbeddingModeTest {
             .GET().build();
         var lookup = http.send(req, HttpResponse.BodyHandlers.ofString());
         assertThat(lookup.statusCode()).isEqualTo(200);
-        assertThat(lookup.body()).contains("code__norm64");
+        assertThat(lookup.body()).contains("\"rows\":[]");
     }
 
     @Test

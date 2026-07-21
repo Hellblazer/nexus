@@ -77,6 +77,14 @@ class RawSqlGateTest {
      * DSL cannot express that specific site — see the referenced classes.
      */
     private static final Map<String, java.util.Set<String>> SANCTIONED_METHODS = Map.of(
+        "ChashRepository.java", java.util.Set.of(
+            // SANCTIONED RAW (nexus-piwya.3): lookup executes PROBE_SQL, the
+            // PUBLISHED probe constant that ChashProbePlanShapeTest EXPLAINs
+            // verbatim to pin index usage at 255k-row scale — executed SQL
+            // and tested SQL must be the same string by construction; a DSL
+            // rendering would decouple them. Every other ChashRepository
+            // method uses typed DSL (DimTables).
+            "lookup"),
         "PgVectorRepository.java", java.util.Set.of(
             // pgvector `<=>` ordered off a bind-parameter vector literal, combined with a
             // dynamic-arity metadata WHERE and (hybridSearch) a selectivity-dependent plan

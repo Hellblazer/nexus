@@ -29,65 +29,50 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * RDR-187 bead nexus-piwya.2 — the superset-conformance harness that GATES the
- * step-2 reroute (nexus-piwya.3): before /v1/chash/* lookups may be
- * reimplemented over the chunks tables, the 3-table probe must be proven to
- * agree with the router on everything the router knows that is REAL, and to
- * strictly improve on what the router never knew.
+ * step-2 reroute (nexus-piwya.3): {@link ChashRepository#lookup} (the
+ * production lookup path serving {@code /v1/chash/lookup}) must agree with the
+ * {@code chash_index} router table on everything the router knows that is
+ * REAL, and strictly improve on what the router never knew.
+ *
+ * <p>The old truth is read DIRECTLY from the seeded {@code chash_index} table
+ * (superuser side), so this harness stays meaningful across the reroute: it
+ * compared old-vs-new before nexus-piwya.3 landed, and afterwards it pins the
+ * rerouted implementation against the router table's contents until the table
+ * dies at nexus-piwya.9 (this class dies with it — the .9 inverse-grep catches
+ * it; that is by design).
  *
  * <p>The contract, row-level (NOT chash-level — production carries
  * partial-orphan chashes that are live in one collection with a dangling
  * router row in another):
  * <ol>
  *   <li><b>Exact agreement on live rows</b>: for every chash the router
- *       returns, the probe's {@code (collection, created_at)} rows equal the
+ *       returns, the lookup's {@code (collection, created_at)} rows equal the
  *       router's rows restricted to collections where the chunk actually
  *       exists.</li>
  *   <li><b>Expected divergence on orphan rows</b>: router rows with no
  *       backing chunk (the 292,230-row class that dies at the DROP,
- *       nexus-piwya.9) are NOT resolved by the probe — asserted explicitly,
- *       with exact counts, so the divergence is a documented property rather
- *       than a silent one.</li>
+ *       nexus-piwya.9) are NOT resolved — asserted explicitly, with exact
+ *       counts, so the divergence is a documented property rather than a
+ *       silent one.</li>
  *   <li><b>Strict superset on reference-only chunks</b>: RDR-169
  *       reference-only chunks land in {@code chunks_<dim>} via the engine
- *       bridge with no dual-write router row. The probe resolves them, the
- *       router cannot — asserted as an improvement, which is why the reroute
- *       conformance claim is SUPERSET, deliberately not identity.</li>
+ *       bridge with no dual-write router row. The rerouted lookup resolves
+ *       them, the router cannot — asserted as an improvement, which is why
+ *       the reroute conformance claim is SUPERSET, deliberately not
+ *       identity.</li>
  *   <li><b>created_at agreement</b>: chunks.created_at is
  *       first-insert-per-(tenant,collection,chash) — both upsert ON CONFLICT
  *       set-lists exclude it — so it carries the identical "when this chash
  *       entered this collection" semantics as router.created_at
  *       (RDR-187 research finding 1).</li>
- *   <li><b>Tenant isolation</b>: the probe under RLS sees only the probing
+ *   <li><b>Tenant isolation</b>: the lookup under RLS sees only the probing
  *       tenant's rows.</li>
  * </ol>
- *
- * <p>PROBE_SQL below is the contract shape nexus-piwya.3 implements
- * engine-side. This whole class necessarily references {@code chash_index}
- * (it compares against the router), so it is retired WITH the router at
- * nexus-piwya.9 — the .9 inverse-grep gate will catch it; that is by design.
  *
  * <p>Hermetic: Testcontainers pgvector, requires Docker.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ChashRerouteConformanceTest {
-
-    /**
-     * The reroute probe: which collections hold this chash for the current
-     * tenant, with the first-insert timestamp. Three PK-disjoint tables, so
-     * UNION ALL (a collection lives in exactly one dim table; no duplicate
-     * (collection, chash) pairs are possible across legs). Runs under
-     * TenantScope RLS; the explicit tenant_id predicate binds the leading
-     * column of idx_chunks_<dim>_tenant_chash (nexus-piwya.1).
-     */
-    private static final String PROBE_SQL =
-        "SELECT collection, created_at FROM nexus.chunks_384 " +
-        " WHERE tenant_id = current_setting('nexus.tenant', true) AND chash = ? " +
-        "UNION ALL " +
-        "SELECT collection, created_at FROM nexus.chunks_768 " +
-        " WHERE tenant_id = current_setting('nexus.tenant', true) AND chash = ? " +
-        "UNION ALL " +
-        "SELECT collection, created_at FROM nexus.chunks_1024 " +
-        " WHERE tenant_id = current_setting('nexus.tenant', true) AND chash = ?";
 
     private static final String TENANT_A = "conf-tenant-a";
     private static final String TENANT_B = "conf-tenant-b";
@@ -115,7 +100,7 @@ class ChashRerouteConformanceTest {
 
     PostgreSQLContainer<?> pg;
     TenantScope tenantScope;
-    ChashRepository router;
+    ChashRepository repo;
     com.zaxxer.hikari.HikariDataSource svcDs;
 
     @BeforeAll
@@ -148,7 +133,7 @@ class ChashRerouteConformanceTest {
         cfg.setAutoCommit(true);
         svcDs = new com.zaxxer.hikari.HikariDataSource(cfg);
         tenantScope = new TenantScope(svcDs);
-        router = new ChashRepository(tenantScope);
+        repo = new ChashRepository(tenantScope);
 
         seedFixtures();
     }
@@ -210,25 +195,25 @@ class ChashRerouteConformanceTest {
     // ── 1 + 2. Row-level agreement over the router's whole universe ─────────
 
     @Test
-    void probeAgreesExactlyOnLiveRowsAndDropsExactlyTheOrphanRows() {
-        // Enumerate EVERY router row for tenant A (superuser side), probe each
-        // distinct chash, and classify row-by-row. No sampling: the whole
-        // seeded universe is walked and the counts are exact.
+    void lookupAgreesExactlyOnLiveRowsAndDropsExactlyTheOrphanRows() {
+        // Enumerate EVERY router row for tenant A (superuser side), look up
+        // each distinct chash through the production path, and classify
+        // row-by-row. No sampling: the whole seeded universe is walked and
+        // the counts are exact.
         List<String[]> routerRows = allRouterRows(TENANT_A);
         assertThat(routerRows).hasSize(9); // 6 live + 2 full-orphan + 1 partial-orphan leg
 
         Set<String> liveRows = new TreeSet<>();
         Set<String> orphanRows = new TreeSet<>();
-        Set<String> probedChashes = new HashSet<>();
+        Set<String> lookedUp = new HashSet<>();
         for (String[] row : routerRows) {
             String chashHex = row[0];
-            if (!probedChashes.add(chashHex)) continue;
-            Set<String> probe = probeRows(TENANT_A, chashHex);
-            List<Map<String, String>> viaRouter =
-                router.lookup(TENANT_A, Chash.fromHex(chashHex));
-            for (Map<String, String> r : viaRouter) {
-                String key = chashHex + "|" + r.get("collection") + "|" + r.get("created_at");
-                if (probe.contains(r.get("collection") + "|" + r.get("created_at"))) {
+            if (!lookedUp.add(chashHex)) continue;
+            Set<String> resolved = lookupRows(TENANT_A, chashHex);
+            for (String[] r : routerRows) {
+                if (!r[0].equals(chashHex)) continue;
+                String key = chashHex + "|" + r[1] + "|" + r[2];
+                if (resolved.contains(r[1] + "|" + r[2])) {
                     liveRows.add(key);
                 } else {
                     orphanRows.add(key);
@@ -237,10 +222,10 @@ class ChashRerouteConformanceTest {
         }
 
         assertThat(liveRows)
-            .as("live router rows (chunk exists) — probe must return every one")
+            .as("live router rows (chunk exists) — the rerouted lookup must return every one")
             .hasSize(6);
         assertThat(orphanRows)
-            .as("orphan router rows — probe must NOT resolve them; they die at nexus-piwya.9")
+            .as("orphan router rows — the rerouted lookup must NOT resolve them; they die at nexus-piwya.9")
             .containsExactlyInAnyOrder(
                 H5 + "|" + COLL_384_A + "|" + fmt(ts(6)),
                 H6 + "|" + COLL_768_A + "|" + fmt(ts(7)),
@@ -248,49 +233,56 @@ class ChashRerouteConformanceTest {
     }
 
     @Test
-    void probeMatchesRouterExactlyForFullyLiveChashes() {
+    void lookupMatchesRouterExactlyForFullyLiveChashes() {
+        List<String[]> routerRows = allRouterRows(TENANT_A);
         for (String chashHex : List.of(H1, H2, H3, H4)) {
-            Set<String> viaRouter = new TreeSet<>();
-            for (Map<String, String> r : router.lookup(TENANT_A, Chash.fromHex(chashHex))) {
-                viaRouter.add(r.get("collection") + "|" + r.get("created_at"));
+            Set<String> viaRouterTable = new TreeSet<>();
+            for (String[] r : routerRows) {
+                if (r[0].equals(chashHex)) viaRouterTable.add(r[1] + "|" + r[2]);
             }
-            assertThat(probeRows(TENANT_A, chashHex))
-                .as("probe == router for fully-live chash %s", chashHex)
-                .isEqualTo(viaRouter);
+            assertThat(viaRouterTable).isNotEmpty();
+            assertThat(lookupRows(TENANT_A, chashHex))
+                .as("lookup == router-table rows for fully-live chash %s", chashHex)
+                .isEqualTo(viaRouterTable);
         }
     }
 
     @Test
     void partialOrphanChashResolvesOnlyItsLiveCollection() {
-        assertThat(probeRows(TENANT_A, H9))
+        assertThat(lookupRows(TENANT_A, H9))
             .as("partial-orphan chash: live 384 row kept, dangling 768 row dropped")
             .containsExactly(COLL_384_A + "|" + fmt(ts(10)));
-        assertThat(router.lookup(TENANT_A, Chash.fromHex(H9)))
-            .as("router still returns both rows (the dangling one included)")
-            .hasSize(2);
+        long routerRowsForH9 = allRouterRows(TENANT_A).stream()
+            .filter(r -> r[0].equals(H9)).count();
+        assertThat(routerRowsForH9)
+            .as("the router table still carries both rows (the dangling one included)")
+            .isEqualTo(2);
     }
 
     // ── 3. Strict superset: reference-only chunks resolve post-reroute ──────
 
     @Test
-    void probeResolvesReferenceOnlyChunksTheRouterNeverKnew() {
-        assertThat(router.lookup(TENANT_A, Chash.fromHex(H7))).isEmpty();
-        assertThat(router.lookup(TENANT_A, Chash.fromHex(H8))).isEmpty();
-        assertThat(probeRows(TENANT_A, H7))
+    void lookupResolvesReferenceOnlyChunksTheRouterNeverKnew() {
+        Set<String> routerChashes = new HashSet<>();
+        for (String[] r : allRouterRows(TENANT_A)) routerChashes.add(r[0]);
+        assertThat(routerChashes)
+            .as("reference-only chashes must be absent from the router table (fixture sanity)")
+            .doesNotContain(H7, H8);
+        assertThat(lookupRows(TENANT_A, H7))
             .containsExactly(COLL_768_A + "|" + fmt(ts(8)));
-        assertThat(probeRows(TENANT_A, H8))
+        assertThat(lookupRows(TENANT_A, H8))
             .containsExactly(COLL_1024_A + "|" + fmt(ts(9)));
     }
 
     @Test
-    void probeCompletenessOverEveryChunkRow() {
-        // Every chunk row for tenant A must be reachable through the probe —
-        // this is the assertion that fails if a UNION leg goes missing.
+    void lookupCompletenessOverEveryChunkRow() {
+        // Every chunk row for tenant A must be reachable through the lookup —
+        // this is the assertion that fails if a probe leg goes missing.
         int walked = 0;
         for (int dim : new int[] {384, 768, 1024}) {
             for (String[] row : allChunkRows(TENANT_A, dim)) {
-                assertThat(probeRows(TENANT_A, row[0]))
-                    .as("chunks_%d row (%s, %s) must be probe-reachable", dim, row[0], row[1])
+                assertThat(lookupRows(TENANT_A, row[0]))
+                    .as("chunks_%d row (%s, %s) must be lookup-reachable", dim, row[0], row[1])
                     .contains(row[1] + "|" + row[2]);
                 walked++;
             }
@@ -301,30 +293,25 @@ class ChashRerouteConformanceTest {
     // ── 5. Tenant isolation under RLS ───────────────────────────────────────
 
     @Test
-    void probeIsTenantIsolated() {
-        assertThat(probeRows(TENANT_A, H1))
+    void lookupIsTenantIsolated() {
+        assertThat(lookupRows(TENANT_A, H1))
             .containsExactly(COLL_384_A + "|" + fmt(ts(1)));
-        assertThat(probeRows(TENANT_B, H1))
+        assertThat(lookupRows(TENANT_B, H1))
             .containsExactly(COLL_384_B + "|" + fmt(ts(12)));
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────
 
-    /** Probe under RLS via TenantScope; rows as "collection|created_at". */
-    private Set<String> probeRows(String tenant, String chashHex) {
-        byte[] bytes = Chash.fromHex(chashHex).toBytes();
-        return tenantScope.withTenant(tenant, ctx -> {
-            Set<String> out = new TreeSet<>();
-            for (var r : ctx.resultQuery(PROBE_SQL, bytes, bytes, bytes).fetch()) {
-                OffsetDateTime t = r.get("created_at", OffsetDateTime.class);
-                out.add(r.get("collection", String.class) + "|"
-                        + ChashRepository.UTC_SECOND.format(t));
-            }
-            return out;
-        });
+    /** The production lookup path under RLS; rows as "collection|created_at". */
+    private Set<String> lookupRows(String tenant, String chashHex) {
+        Set<String> out = new TreeSet<>();
+        for (Map<String, String> r : repo.lookup(tenant, Chash.fromHex(chashHex))) {
+            out.add(r.get("collection") + "|" + r.get("created_at"));
+        }
+        return out;
     }
 
-    /** All router rows for a tenant, superuser-side: [chashHex, collection, created_at]. */
+    /** All router-table rows for a tenant, superuser-side: [chashHex, collection, created_at]. */
     private List<String[]> allRouterRows(String tenant) {
         return rows("SELECT encode(chash, 'hex'), physical_collection, created_at " +
                     "FROM nexus.chash_index WHERE tenant_id = '" + tenant + "'");
