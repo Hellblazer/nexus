@@ -283,10 +283,13 @@ def _chash_poison_forensics(store_state: StoreState) -> Playbook:
             "run the diagnostic SQL below (each statement is lint-verified "
             "read-only; the nexus_diag path executes them in a read-only "
             "session)",
-            "interpret: any non-zero count in the first five statements "
-            "(chunks_384/768/1024, chash_index, catalog_document_chunks) "
-            "means POISON rows exist in that table and a future engine "
-            "upgrade would crash-loop on VALIDATE",
+            "interpret: any non-zero count in the first four statements "
+            "(chunks_384/768/1024, catalog_document_chunks) means POISON "
+            "rows exist in that table and a future engine upgrade would "
+            "crash-loop on VALIDATE (the chash_index statement was retired "
+            "by RDR-187 — the router table is being dropped; until the DROP "
+            "lands, a violating chash_index row is still hard-blocked "
+            "engine-side by SchemaMigrator's preflight)",
             "interpret: the next three statements (topic_assignments, "
             "frecency, relevance_log) are LEGACY DEBT — non-gating "
             "(no CHECK constraint exists there), but non-zero counts mean "

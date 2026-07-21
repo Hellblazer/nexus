@@ -186,20 +186,16 @@ public final class ChashCensus {
                 + String.format(unresolvableHex, "p." + col)).get(0, Integer.class);
             if (n != null && n > 0) out.put("dangling." + e.getKey(), n);
         }
-        Integer idx = ctx.fetchOne(
-            "SELECT count(*) FROM nexus.chash_index i "
-            // NO width precondition: a legacy 16-byte key that resolves to
-            // nothing is precisely the orphan this leg must report.
-            + "WHERE NOT EXISTS (SELECT 1 FROM nexus.chunks_384 c WHERE c.chash = i.chash) "
-            + "  AND NOT EXISTS (SELECT 1 FROM nexus.chunks_768 c WHERE c.chash = i.chash) "
-            + "  AND NOT EXISTS (SELECT 1 FROM nexus.chunks_1024 c WHERE c.chash = i.chash) "
-            + "  AND NOT EXISTS (SELECT 1 FROM nexus.chash_alias a "
-            + "                   WHERE a.old_bytes = i.chash "
-            + "                     AND (EXISTS (SELECT 1 FROM nexus.chunks_384 k WHERE k.chash = a.new_chash) "
-            + "                       OR EXISTS (SELECT 1 FROM nexus.chunks_768 k WHERE k.chash = a.new_chash) "
-            + "                       OR EXISTS (SELECT 1 FROM nexus.chunks_1024 k WHERE k.chash = a.new_chash)))")
-            .get(0, Integer.class);
-        if (idx != null && idx > 0) out.put("dangling.chash_index", idx);
+        // RDR-187 (nexus-piwya.5): the dangling.chash_index leg is RETIRED
+        // ahead of the table DROP (nexus-piwya.9) — a leg reading
+        // nexus.chash_index errors on the missing relation once the router
+        // dies, and its orphan population (292,230 measured in production,
+        // post-kmd5b) dies AT the DROP rather than being reported forever.
+        // The manifest leg below and the TEXT debt-column legs above remain
+        // the census's dangling surface. KNOWN_INVENTORY still lists
+        // chash_index.chash deliberately: the enumeration is schema-derived,
+        // so the column is genuinely discovered until the DROP removes it —
+        // the .9 commit deletes that entry together with the table.
         // The manifest (review P1 Critical: the census backstop must cover
         // catalog_document_chunks independently of the finalize call site).
         Integer manifest = ctx.fetchOne(

@@ -35,7 +35,9 @@ _REPO = Path(__file__).resolve().parents[1]
 def test_the_authoritative_set_is_column_aware_and_complete():
     """nexus-z5j0t: the RDR-185 .13 audit gaps are IN the set, with their
     real column names (the chunk_id-naming blind spot), and the poison
-    subset is exactly the pre-z5j0t five (the gate must not grow)."""
+    subset is exactly the four survivors (the gate must not grow;
+    nexus.chash_index retired by RDR-187 / nexus-piwya.5 ahead of the
+    table DROP)."""
     by_table = {t.table: t for t in CHASH_BEARING_TABLES}
     assert by_table["nexus.topic_assignments"].column == "doc_id"
     assert by_table["nexus.frecency"].column == "chunk_id"
@@ -47,9 +49,10 @@ def test_the_authoritative_set_is_column_aware_and_complete():
         "nexus.chunks_384",
         "nexus.chunks_768",
         "nexus.chunks_1024",
-        "nexus.chash_index",
         "nexus.catalog_document_chunks",
     )
+    # RDR-187 pin: the retired router must not reappear in the registry.
+    assert "nexus.chash_index" not in {t.table for t in CHASH_BEARING_TABLES}
     assert all(t.column == "chash" for t in POISON_CHASH_TABLES)
     assert set(CHASH_BEARING_TABLES) == set(POISON_CHASH_TABLES) | set(DEBT_CHASH_TABLES)
 

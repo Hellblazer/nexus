@@ -1168,15 +1168,18 @@ class TestChashProbeViewFallback:
         )
         chash = [r for r in results if "chash" in r.label.lower()]
         assert chash and chash[0].ok is False and chash[0].warn is True
-        assert "10 chunk row(s)" in chash[0].detail  # 2 per table via LEGACY
+        assert "8 chunk row(s)" in chash[0].detail  # 2 per table via LEGACY (4 poison tables post-RDR-187)
         assert state["i"] == 1 + n  # one failed view call + the full legacy set
 
     def test_debt_over_zero_emits_nongating_warn(self, tmp_path):
         """critic-180-foundation finding 1 coverage: a positive debt count
         surfaces as a WARN under its own label, never gating."""
-        # 5 poison statements return 0 (clean), then 3 debt statements
-        # return 2 each -> debt 6.
-        counts = [0] * 5 + [2, 2, 2]
+        # 4 poison statements return 0 (clean; post-RDR-187 set), then 3
+        # debt statements return 2 each -> debt 6. Deriving the mock-call
+        # count from the registry is ALIGNMENT MECHANICS only — the
+        # cardinality pin itself is hardcoded in test_diag_conformance_view
+        # (explicit 4-tuple + chash_index-never-returns assertion).
+        counts = [0] * len(chash_tables.POISON_CHASH_TABLES) + [2, 2, 2]
         state = {"i": 0}
 
         def runner(argv, env):
@@ -1203,12 +1206,14 @@ class TestChashProbeViewFallback:
         """critic-180-foundation finding 1: a stale 5-leg view NULLs the debt
         sums (empty psql lines -> int('') ValueError). That must surface as
         an explicit UNKNOWN warn — absence would read as clean."""
-        counts_ok = ["0"] * 5  # poison statements fine
+        # Mock-alignment mechanics, not the cardinality pin (that lives
+        # hardcoded in test_diag_conformance_view).
+        n_poison = len(chash_tables.POISON_CHASH_TABLES)  # poison statements fine
         state = {"i": 0}
 
         def runner(argv, env):
             i = state["i"]; state["i"] += 1
-            if i < 5:
+            if i < n_poison:
                 return subprocess.CompletedProcess(argv, 0, stdout="0\n", stderr="")
             return subprocess.CompletedProcess(argv, 0, stdout="\n", stderr="")  # NULL sum
 

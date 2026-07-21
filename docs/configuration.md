@@ -219,8 +219,6 @@ run:
    UNION ALL
    SELECT 'nexus.chunks_1024' AS table_name, count(*) AS non_conformant FROM nexus.chunks_1024 WHERE octet_length(chash) <> 32
    UNION ALL
-   SELECT 'nexus.chash_index' AS table_name, count(*) AS non_conformant FROM nexus.chash_index WHERE octet_length(chash) <> 32
-   UNION ALL
    SELECT 'nexus.catalog_document_chunks' AS table_name, count(*) AS non_conformant FROM nexus.catalog_document_chunks WHERE octet_length(chash) <> 32
    UNION ALL
    SELECT 'nexus.topic_assignments' AS table_name, count(*) AS non_conformant FROM nexus.topic_assignments t WHERE t.doc_id ~ '^[0-9a-f]+$' AND length(t.doc_id) % 2 = 0 AND NOT EXISTS (SELECT 1 FROM nexus.chunks_384 c WHERE c.chash = decode(t.doc_id, 'hex')) AND NOT EXISTS (SELECT 1 FROM nexus.chunks_768 c WHERE c.chash = decode(t.doc_id, 'hex')) AND NOT EXISTS (SELECT 1 FROM nexus.chunks_1024 c WHERE c.chash = decode(t.doc_id, 'hex'))
@@ -235,11 +233,15 @@ run:
    `nexus_diag`'s direct table SELECT on its next boot — the diagnostic role
    then reads counts by construction, never row content. (This SQL is
    generated from `nexus.db.chash_tables.CHASH_BEARING_TABLES`; a drift test
-   pins this rendered copy to the generator.) DBAs who created the original
-   five-leg view: re-run the `CREATE OR REPLACE` above once — nexus-z5j0t
-   added three legacy-debt legs (`topic_assignments.doc_id`,
+   pins this rendered copy to the generator.) DBAs who created an earlier
+   view generation: re-run the `CREATE OR REPLACE` above once — nexus-z5j0t
+   added the three legacy-debt legs (`topic_assignments.doc_id`,
    `frecency.chunk_id`, `relevance_log.chunk_id`; observed-only, they do not
-   gate upgrades). Until then those counts report as unknown, never as clean.
+   gate upgrades), and RDR-187 (nexus-piwya.5) retired the
+   `nexus.chash_index` leg (the router table is being dropped; the gate
+   filters by table_name, so an older view with the extra leg still
+   satisfies it). Until re-created, debt counts report as unknown, never as
+   clean.
 
 ## Tuning Parameters
 

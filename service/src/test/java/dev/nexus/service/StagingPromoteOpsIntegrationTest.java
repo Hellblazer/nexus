@@ -630,10 +630,15 @@ class StagingPromoteOpsIntegrationTest {
             Map<String, Integer> residue = scope.withTenant(T1, ctx ->
                 dev.nexus.service.db.ChashCensus.scan(ctx));
             assertThat(residue)
-                .as("a 16-byte chash_index pointer resolving to NO chunk and carrying NO "
-                    + "alias entry is dangling — the width precondition made this leg "
-                    + "blind to its own target (reported 1 vs 292,230 in production)")
-                .containsKey("dangling.chash_index");
+                .as("RDR-187 (nexus-piwya.5): the dangling.chash_index census leg is "
+                    + "RETIRED ahead of the table DROP (nexus-piwya.9) — a leg reading "
+                    + "nexus.chash_index would error on the missing relation once the "
+                    + "router dies. The seeded orphan row is deliberately still here: "
+                    + "the census must NOT report it (a resurrected leg fails this). "
+                    + "The 292,230-orphan population this leg once counted dies at the "
+                    + "DROP itself; the manifest + debt-column legs below remain the "
+                    + "census's surface.")
+                .doesNotContainKey("dangling.chash_index");
             assertThat(residue)
                 .as("the 32-hex debt columns are the same bug shape: a legacy-width "
                     + "pointer the cascade missed is excluded by a 64-hex-only filter")
