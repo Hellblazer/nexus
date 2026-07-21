@@ -101,6 +101,16 @@ DEBT_CHASH_TABLES: tuple[ChashBearingTable, ...] = tuple(
 POISON_DETAIL_TOKEN: str = "width-non-conformant chash"
 
 
+#: The HealthResult label the chash-conformance probe reports under
+#: (nexus-pgdcv round-2 MEDIUM-1). ``health._check_migration_state`` appends
+#: every conformance outcome — poison, probe-couldn't-run WARN — under this
+#: label, and the two gates (``upgrade_finish._poison_probe``,
+#: ``commands/daemon.py`` install-binary) filter on it to classify the
+#: store. ONE constant so a label rename cannot silently collapse both
+#: filters to empty (which would misread a poisoned store as clean).
+CHASH_CONFORMANCE_LABEL: str = "Chunk chash conformance"
+
+
 #: RDR-182 Amendment A6 (nexus-9bufb): the structural content boundary. A
 #: superuser-owned counts view — the diagnostic role reads COUNTS BY
 #: CONSTRUCTION (definer semantics + RLS exemption via the superuser owner),

@@ -1843,42 +1843,44 @@ def service_start_cmd(
 def _emit_chash_poison_gate(config_dir: Path, *, force: bool) -> None:
     """nexus-pnwu0 / GH #1414 upgrade gate (see call site).
 
-    Detects width-non-conformant chash rows in the pgvector store via the SAME probe
-    `nx doctor` uses (:func:`nexus.health._check_migration_state`), and refuses
-    the install unless *force*. Emits a full clickable runbook URL AND a
-    ready-to-paste prompt the operator can hand to their own Claude — the
-    agent-runnable remediation pattern, in-product. A probe that cannot run
-    (PG down, not service mode) never blocks a legitimate install.
+    Classifies the store via the shared tri-state probe
+    (:func:`nexus.upgrade_finish._poison_probe`, the same classification
+    ``converge_engine``'s gate uses — nexus-pgdcv round-2 HIGH-1: the two
+    gates must not diverge on the unknown state):
+
+    - POISONED: refuse the install unless *force*. Emits the full clickable
+      runbook URL AND a ready-to-paste prompt the operator can hand to
+      their own Claude — the agent-runnable remediation pattern.
+    - UNKNOWN (probe could not verify — PG down, missing nexus_diag creds):
+      proceed WITH A LOUD WARNING, never silently. install-binary is the
+      designated recovery tool for the will-not-boot class where the store
+      is by definition unreachable, so unknown must not hard-block (the
+      load-bearing never-brick rule) — but the old silent fail-open was
+      the same bug class converge_engine's gate had.
+    - CLEAN: proceed quietly.
     """
-    try:
-        from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred, circular-dep
-        from nexus.health import _check_migration_state  # noqa: PLC0415 — deferred, CLI startup cost
+    from nexus.upgrade_finish import _poison_probe  # noqa: PLC0415 — deferred, CLI startup cost
 
-        creds_path = config_dir / CREDENTIALS_FILENAME
-        from nexus.db.chash_tables import POISON_DETAIL_TOKEN  # noqa: PLC0415 — deferred, circular-dep avoidance
-
-        poison = [
-            r for r in _check_migration_state(creds_path=creds_path)
-            if r.label == "Chunk chash conformance"
-            and not r.ok and POISON_DETAIL_TOKEN in r.detail
-        ]
-    except Exception as exc:  # noqa: BLE001 — the gate must never block a valid install on an unrelated error
-        click.echo(f"(chash-conformance pre-check skipped: {exc})", err=True)
+    probe = _poison_probe(config_dir)
+    if probe.unknown_reason is not None:
+        click.echo(
+            "WARNING: the chash-conformance pre-check could not verify this "
+            f"store ({probe.unknown_reason}) — proceeding, because "
+            "install-binary is the designated recovery path when the "
+            "service cannot boot. The store's conformance is UNVERIFIED: "
+            "run `nx doctor` after the service is up.",
+            err=True,
+        )
         return
-
-    if not poison:
+    if probe.playbook is None:
         return
 
     # RDR-182 P1.3 (nexus-ykzbj.7): guidance text lives in the shared
     # Playbook emitter — one source of truth for this gate AND the Phase-3
-    # MCP forensics/remediate tools. Byte-locked to the pre-hoist text by
-    # tests/remediation/test_playbook.py; this function keeps only the
-    # probe + flow control (force branch, exit code).
-    from nexus.remediation import StoreState, emit_playbook  # noqa: PLC0415 — deferred, CLI startup cost
-
-    playbook = emit_playbook(
-        "chash-poison", StoreState(detail=poison[0].detail)
-    )
+    # MCP forensics/remediate tools. Locked to the nexus-o513u ladder-first
+    # contract by tests/remediation/test_playbook.py; this function keeps
+    # only the probe + flow control (force branch, exit code).
+    playbook = probe.playbook
     if force:
         click.echo(playbook.force_override_warning(), err=True)
         return

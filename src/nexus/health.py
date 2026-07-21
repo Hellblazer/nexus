@@ -2344,6 +2344,7 @@ def _check_migration_state(
     # diagnostic role (pre-P2.1 install) or a probe failure degrades to a
     # WARN, never a false "clean".
     from nexus.db.chash_tables import (  # noqa: PLC0415 — deferred to avoid circular import
+        CHASH_CONFORMANCE_LABEL,
         POISON_DETAIL_TOKEN,
         chash_conformance_statements,
         debt_chash_conformance_statements,
@@ -2361,7 +2362,7 @@ def _check_migration_state(
         else resolve_diag_credentials(creds_path)
     if diag_creds is None:
         results.append(HealthResult(
-            label="Chunk chash conformance",
+            label=CHASH_CONFORMANCE_LABEL,
             ok=False,
             detail=(
                 "no nexus_diag diagnostic credentials (pre-P2.1 install) — "
@@ -2416,7 +2417,7 @@ def _check_migration_state(
             # or non-numeric output — a WARN, never a false poison-clean.
             nonconforming = -1
             results.append(HealthResult(
-                label="Chunk chash conformance",
+                label=CHASH_CONFORMANCE_LABEL,
                 ok=False,
                 detail=(
                     "could not probe chash length across chunk tables via the "
@@ -2427,7 +2428,7 @@ def _check_migration_state(
             ))
     if nonconforming > 0:
         results.append(HealthResult(
-            label="Chunk chash conformance",
+            label=CHASH_CONFORMANCE_LABEL,
             ok=False,
             detail=(
                 f"{nonconforming} chunk row(s) have a {POISON_DETAIL_TOKEN} "

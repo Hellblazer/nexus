@@ -522,41 +522,105 @@ def detect_engine_convergence(config_dir: Path) -> EngineConvergence:
     )
 
 
-def _poison_playbook(config_dir: Path):  # noqa: ANN201 — returns nexus.remediation.Playbook | None, deferred import
-    """The chash-poison Playbook when the store is poisoned, else ``None``.
+@dataclass(frozen=True)
+class PoisonProbe:
+    """Tri-state chash-poison gate verdict (nexus-pgdcv, GH #1414).
 
-    Reuses the SAME probe ``nx daemon service install-binary``'s own gate
-    uses (:func:`nexus.health._check_migration_state`, nexus-pnwu0 / GH
-    #1414): width-non-conformant chash rows are unhealed upgrade-ladder
-    debt (v0.1.48+ engines tolerate them at boot — nexus-joima; only a
-    pre-v0.1.48 char-era engine can still crash-loop on VALIDATE).
-    Automated convergence must NEVER
-    install a new engine onto a store in that state — but it must also never
-    silently skip; the caller renders this Playbook's ``terminal_block()``
-    as a loud, actionable NEEDS-HUMAN line. A probe that cannot run (PG
-    down, not service mode, an unrelated error) returns ``None`` — it must
-    never block a legitimate convergence.
+    The predecessor collapsed "probe ran and the store is clean" and "the
+    probe could not run" into one ``None`` — and "probe cannot run because
+    the service/PG is not up yet" is the ORDINARY ordering on a box being
+    converged, so the gate was absent exactly when convergence was most
+    likely to fire (Steve Harris's box converged 0.1.35 -> 0.1.49 blind
+    over 35,477 poison rows that a later doctor then surfaced).
+
+    Exactly one of three states:
+    - POISONED: ``playbook`` is set (render its ``terminal_block()``).
+    - UNKNOWN: ``unknown_reason`` is set — the probe could not VERIFY the
+      store; the caller defers convergence loudly rather than proceeding
+      blind (and never hard-blocks: ``nx daemon service install-binary``
+      remains the explicit converge-now escape, with its own gate).
+    - CLEAN: both fields ``None`` — the probe ran to completion and found
+      zero width-non-conformant rows.
+    """
+
+    playbook: object | None = None
+    unknown_reason: str | None = None
+
+
+def _poison_probe(config_dir: Path) -> PoisonProbe:
+    """Classify the store via the SAME probe ``nx daemon service
+    install-binary``'s gate uses (:func:`nexus.health._check_migration_state`,
+    nexus-pnwu0 / GH #1414). Never raises.
+
+    Classification against the health contract:
+    - a "Chunk chash conformance" result carrying ``POISON_DETAIL_TOKEN``
+      -> POISONED (width-non-conformant rows counted; unhealed ladder debt
+      — v0.1.48+ engines tolerate them at boot per nexus-joima, but
+      automated convergence must not swap engines under an unhealed store);
+    - a token-less "Chunk chash conformance" WARN -> UNKNOWN (health.py's
+      explicit "the pre-upgrade poison check could NOT run" marker: missing
+      nexus_diag credentials or a probe failure);
+    - any ``fatal`` result -> UNKNOWN (``_check_migration_state``
+      early-returns before the chash leg when PG is unreachable — absence
+      of a conformance result must never read as clean);
+    - an exception -> UNKNOWN;
+    - otherwise -> CLEAN (the probe ran; a clean store appends nothing).
+
+    The non-gating "Chash legacy debt" label is deliberately ignored (no
+    CHECK constraint exists on those tables; nexus-z5j0t).
     """
     try:
         from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred, circular-dep avoidance
         from nexus.health import _check_migration_state  # noqa: PLC0415 — deferred, CLI startup cost
 
         creds_path = config_dir / CREDENTIALS_FILENAME
-        from nexus.db.chash_tables import POISON_DETAIL_TOKEN  # noqa: PLC0415 — deferred, circular-dep avoidance
+        from nexus.db.chash_tables import (  # noqa: PLC0415 — deferred, circular-dep avoidance
+            CHASH_CONFORMANCE_LABEL,
+            POISON_DETAIL_TOKEN,
+        )
 
-        poison = [
-            r for r in _check_migration_state(creds_path=creds_path)
-            if r.label == "Chunk chash conformance"
-            and not r.ok and POISON_DETAIL_TOKEN in r.detail
-        ]
-    except Exception:  # noqa: BLE001 — the gate must never block a valid convergence on an unrelated error
-        return None
-    if not poison:
-        return None
+        results = _check_migration_state(creds_path=creds_path)
+    except Exception as exc:  # noqa: BLE001 — an unverifiable store is UNKNOWN, never a crash and never a silent clean
+        return PoisonProbe(unknown_reason=f"{type(exc).__name__}: {exc}"[:200])
 
-    from nexus.remediation import StoreState, emit_playbook  # noqa: PLC0415 — deferred, CLI startup cost
+    poison = [
+        r for r in results
+        if r.label == CHASH_CONFORMANCE_LABEL
+        and not r.ok and POISON_DETAIL_TOKEN in r.detail
+    ]
+    if poison:
+        from nexus.remediation import StoreState, emit_playbook  # noqa: PLC0415 — deferred, CLI startup cost
 
-    return emit_playbook("chash-poison", StoreState(detail=poison[0].detail))
+        return PoisonProbe(
+            playbook=emit_playbook(
+                "chash-poison", StoreState(detail=poison[0].detail),
+            ),
+        )
+
+    probe_didnt_run = [
+        r for r in results
+        if r.label == CHASH_CONFORMANCE_LABEL and not r.ok
+    ]
+    if probe_didnt_run:
+        return PoisonProbe(unknown_reason=probe_didnt_run[0].detail[:200])
+
+    fatal = [r for r in results if r.fatal]
+    if fatal:
+        return PoisonProbe(unknown_reason=fatal[0].detail[:200])
+
+    # Defensive 4th arm (round-2 code-review Low): a not-ok "Schema
+    # migrations" result that is NOT fatal (e.g. the creds-absent "service
+    # mode not configured" warn) still means the chash leg never ran.
+    # Unreachable from converge_engine today (detect_engine_convergence
+    # pre-gates on the same creds file), but a second caller without that
+    # pre-gate must not read it as clean.
+    unverified = [
+        r for r in results if r.label == "Schema migrations" and not r.ok
+    ]
+    if unverified:
+        return PoisonProbe(unknown_reason=unverified[0].detail[:200])
+
+    return PoisonProbe()
 
 
 def converge_engine(config_dir: Path, *, dry_run: bool = False) -> list[str]:
@@ -585,8 +649,9 @@ def converge_engine(config_dir: Path, *, dry_run: bool = False) -> list[str]:
     # poison check ran only on the real (non-dry-run) path, so `--dry-run`
     # could report "would converge" against a store that would immediately
     # hit NEEDS-HUMAN on the real run.
-    playbook = _poison_playbook(config_dir)
-    if playbook is not None:
+    probe = _poison_probe(config_dir)
+    if probe.playbook is not None:
+        playbook = probe.playbook
         if dry_run:
             return [
                 f"would be BLOCKED by chash-poison gate ({got_s} -> {req_s}): "
@@ -597,6 +662,39 @@ def converge_engine(config_dir: Path, *, dry_run: bool = False) -> list[str]:
             f"chash-poisoned; installed engine stays at {got_s}, required "
             f"{req_s}. Remediate first, then re-run: "
             f"{playbook.terminal_block()}"
+        ]
+    if probe.unknown_reason is not None:
+        # nexus-pgdcv (GH #1414): the probe could not VERIFY the store —
+        # the ordinary state on a box being converged (service/PG not up
+        # yet). Defer loudly instead of converging blind; the next finish
+        # pass / doctor re-attempts once the store is reachable. NOT a
+        # NEEDS-HUMAN (nothing is broken) and NOT a hard block: the
+        # explicit converge-now escape is install-binary, whose own gate
+        # re-checks (and documents --force for the will-not-boot class).
+        if dry_run:
+            return [
+                f"would DEFER engine convergence ({got_s} -> {req_s}): "
+                f"store chash conformance unverifiable "
+                f"({probe.unknown_reason})"
+            ]
+        from nexus.daemon.binary_install import PINNED_SERVICE_TAG  # noqa: PLC0415 — deferred, CLI startup cost
+
+        # Round-2 critique HIGH-2/MEDIUM-2: lead with the VERIFIED
+        # convergence path (doctor / restart-stale re-run this same
+        # tri-state gate), and never promise a passive retry —
+        # check_version_transition stamps seen unconditionally, so the
+        # re-attempt is operator-driven. install-binary is named last,
+        # strictly for the will-not-boot class.
+        return [
+            f"DEFERRED: engine convergence ({got_s} -> {req_s}) held back — "
+            f"the chash-poison gate could not verify the store "
+            f"({probe.unknown_reason}). This is the ordinary ordering when "
+            "the service/PG is not up yet (GH #1414). Once the service is "
+            "up, run `nx doctor` (or `nx daemon restart-stale`) to "
+            "converge verified. Only if the service cannot come UP on the "
+            "current engine (the will-not-boot class): nx daemon service "
+            f"install-binary {PINNED_SERVICE_TAG or '<engine-service-tag>'} "
+            "(warns UNVERIFIED when it cannot probe the store)."
         ]
 
     if dry_run:

@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from nexus.engine_version import REQUIRED_ENGINE_VERSION
 from nexus.upgrade_finish import (
+    PoisonProbe,
     SkewReport,
     StaleProcess,
     _parse_etime,
@@ -435,7 +436,7 @@ class TestConvergeEngine:
         with patch("nexus.config.is_local_mode", return_value=True), \
                 self._mismatch(tmp_path), \
                 patch(
-                    "nexus.upgrade_finish._poison_playbook", return_value=None,
+                    "nexus.upgrade_finish._poison_probe", return_value=PoisonProbe(),
                 ), \
                 patch("nexus.daemon.binary_install.install_binary") as install, \
                 patch("nexus.upgrade_finish.subprocess.run") as sp:
@@ -460,8 +461,8 @@ class TestConvergeEngine:
         with patch("nexus.config.is_local_mode", return_value=True), \
                 self._mismatch(tmp_path), \
                 patch(
-                    "nexus.upgrade_finish._poison_playbook",
-                    return_value=_StubPlaybook(),
+                    "nexus.upgrade_finish._poison_probe",
+                    return_value=PoisonProbe(playbook=_StubPlaybook()),
                 ), \
                 patch("nexus.daemon.binary_install.install_binary") as install:
             actions = converge_engine(tmp_path, dry_run=True)
@@ -478,7 +479,7 @@ class TestConvergeEngine:
         with patch("nexus.config.is_local_mode", return_value=True), \
                 self._mismatch(tmp_path), \
                 patch(
-                    "nexus.upgrade_finish._poison_playbook", return_value=None,
+                    "nexus.upgrade_finish._poison_probe", return_value=PoisonProbe(),
                 ), \
                 patch(
                     "nexus.daemon.binary_install.install_binary",
@@ -505,8 +506,8 @@ class TestConvergeEngine:
         with patch("nexus.config.is_local_mode", return_value=True), \
                 self._mismatch(tmp_path), \
                 patch(
-                    "nexus.upgrade_finish._poison_playbook",
-                    return_value=_StubPlaybook(),
+                    "nexus.upgrade_finish._poison_probe",
+                    return_value=PoisonProbe(playbook=_StubPlaybook()),
                 ), \
                 patch("nexus.daemon.binary_install.install_binary") as install:
             actions = converge_engine(tmp_path)
@@ -522,7 +523,7 @@ class TestConvergeEngine:
         with patch("nexus.config.is_local_mode", return_value=True), \
                 self._mismatch(tmp_path), \
                 patch(
-                    "nexus.upgrade_finish._poison_playbook", return_value=None,
+                    "nexus.upgrade_finish._poison_probe", return_value=PoisonProbe(),
                 ), \
                 patch(
                     "nexus.daemon.binary_install.install_binary",
@@ -548,7 +549,7 @@ class TestConvergeEngine:
         with patch("nexus.config.is_local_mode", return_value=True), \
                 self._mismatch(tmp_path), \
                 patch(
-                    "nexus.upgrade_finish._poison_playbook", return_value=None,
+                    "nexus.upgrade_finish._poison_probe", return_value=PoisonProbe(),
                 ), \
                 patch(
                     "nexus.daemon.binary_install.install_binary",
@@ -568,7 +569,7 @@ class TestConvergeEngine:
         with patch("nexus.config.is_local_mode", return_value=True), \
                 self._mismatch(tmp_path), \
                 patch(
-                    "nexus.upgrade_finish._poison_playbook", return_value=None,
+                    "nexus.upgrade_finish._poison_probe", return_value=PoisonProbe(),
                 ), \
                 patch(
                     "nexus.daemon.binary_install.install_binary",
@@ -582,6 +583,180 @@ class TestConvergeEngine:
 
         assert any("converged engine" in a for a in actions)
         assert any("NEEDS HUMAN" in a for a in actions)
+
+    # ── nexus-pgdcv: the gate DEFERS when it cannot verify, never blind ──
+
+    def test_unknown_probe_defers_and_never_installs(self, tmp_path):
+        """nexus-pgdcv (GH #1414): 'probe cannot run because the service/PG
+        is not up yet' is the ORDINARY ordering on a box being converged —
+        the old fail-open converged the engine blind exactly then. An
+        UNKNOWN verdict now defers with a loud line instead."""
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                self._mismatch(tmp_path), \
+                patch(
+                    "nexus.upgrade_finish._poison_probe",
+                    return_value=PoisonProbe(
+                        unknown_reason="Cannot query databasechangelog (psql exit 2)",
+                    ),
+                ), \
+                patch("nexus.daemon.binary_install.install_binary") as install, \
+                patch("nexus.upgrade_finish.subprocess.run") as sp:
+            actions = converge_engine(tmp_path)
+
+        install.assert_not_called()
+        sp.assert_not_called()
+        assert len(actions) == 1
+        assert "DEFERRED" in actions[0]
+        assert "could not verify" in actions[0]
+        assert "Cannot query databasechangelog" in actions[0]
+        # Round-2 critique HIGH-2: the VERIFIED path (doctor/restart-stale,
+        # which re-run this same gate) leads; install-binary is named only
+        # for the will-not-boot class. And MEDIUM-2: no passive-retry
+        # promise (check_version_transition stamps seen unconditionally).
+        assert "nx doctor" in actions[0]
+        assert "nx daemon service install-binary" in actions[0]
+        assert actions[0].index("nx doctor") < actions[0].index(
+            "nx daemon service install-binary"
+        )
+        assert "re-attempts on the next pass" not in actions[0]
+        assert "NEEDS HUMAN" not in actions[0]  # a hold, not a human gate
+
+    def test_unknown_probe_dry_run_reports_would_defer(self, tmp_path):
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                self._mismatch(tmp_path), \
+                patch(
+                    "nexus.upgrade_finish._poison_probe",
+                    return_value=PoisonProbe(unknown_reason="service not up"),
+                ), \
+                patch("nexus.daemon.binary_install.install_binary") as install:
+            actions = converge_engine(tmp_path, dry_run=True)
+
+        install.assert_not_called()
+        assert len(actions) == 1
+        assert "would DEFER" in actions[0]
+        assert "would converge" not in actions[0]
+        assert "service not up" in actions[0]
+
+
+class TestPoisonProbe:
+    """nexus-pgdcv: _poison_probe's tri-state classification of
+    _check_migration_state's results — poisoned / clean / unknown must be
+    told apart; unknown must NEVER read as clean."""
+
+    def _result(self, label, detail, *, ok=False, fatal=False, warn=False):
+        from nexus.health import HealthResult
+        return HealthResult(label=label, ok=ok, detail=detail, fatal=fatal, warn=warn)
+
+    def _probe(self, tmp_path, results=None, raises=None):
+        from nexus.upgrade_finish import _poison_probe
+        if raises is not None:
+            cm = patch("nexus.health._check_migration_state", side_effect=raises)
+        else:
+            cm = patch("nexus.health._check_migration_state", return_value=results)
+        with cm:
+            return _poison_probe(tmp_path)
+
+    def test_poison_result_yields_playbook(self, tmp_path):
+        from nexus.db.chash_tables import POISON_DETAIL_TOKEN
+        probe = self._probe(tmp_path, results=[
+            self._result(
+                "Chunk chash conformance",
+                f"12 chunk row(s) have a {POISON_DETAIL_TOKEN} (…)",
+                warn=True,
+            ),
+            self._result("Schema migrations", "ok", ok=True),
+        ])
+        assert probe.playbook is not None
+        assert probe.unknown_reason is None
+
+    def test_probe_could_not_run_warn_is_unknown(self, tmp_path):
+        # The token-less conformance WARN is health.py's explicit "the
+        # pre-upgrade poison check could NOT run" marker.
+        probe = self._probe(tmp_path, results=[
+            self._result(
+                "Chunk chash conformance",
+                "no nexus_diag diagnostic credentials (pre-P2.1 install) — "
+                "the pre-upgrade poison check could NOT run.",
+                warn=True,
+            ),
+            self._result("Schema migrations", "ok", ok=True),
+        ])
+        assert probe.playbook is None
+        assert probe.unknown_reason is not None
+        assert "nexus_diag" in probe.unknown_reason
+
+    def test_fatal_early_return_is_unknown_not_clean(self, tmp_path):
+        # PG unreachable → _check_migration_state early-returns ONE fatal
+        # result and the chash leg never runs. Absence of a conformance
+        # result must NOT read as clean (the GH #1414 blind spot).
+        probe = self._probe(tmp_path, results=[
+            self._result(
+                "Schema migrations",
+                "Cannot query databasechangelog (psql exit 2): connection refused",
+                fatal=True,
+            ),
+        ])
+        assert probe.playbook is None
+        assert probe.unknown_reason is not None
+        assert "Cannot query databasechangelog" in probe.unknown_reason
+
+    def test_exception_is_unknown_never_raises(self, tmp_path):
+        probe = self._probe(tmp_path, raises=RuntimeError("probe exploded"))
+        assert probe.playbook is None
+        assert probe.unknown_reason is not None
+        assert "probe exploded" in probe.unknown_reason
+
+    def test_clean_run_is_clean(self, tmp_path):
+        probe = self._probe(tmp_path, results=[
+            self._result("Schema migrations", "42 applied", ok=True),
+        ])
+        assert probe.playbook is None
+        assert probe.unknown_reason is None
+
+    def test_nongating_debt_warn_does_not_defer(self, tmp_path):
+        # "Chash legacy debt" is a DIFFERENT label — non-gating by design
+        # (no CHECK constraint exists there); it must not hold convergence.
+        probe = self._probe(tmp_path, results=[
+            self._result(
+                "Chash legacy debt", "7 dangling reference(s)", warn=True,
+            ),
+            self._result("Schema migrations", "42 applied", ok=True),
+        ])
+        assert probe.playbook is None
+        assert probe.unknown_reason is None
+
+    def test_creds_absent_warn_is_unknown_not_clean(self, tmp_path):
+        # Round-2 code-review Low: the creds-absent early return is a
+        # not-ok, NON-fatal "Schema migrations" warn — a second caller
+        # without detect_engine_convergence's pre-gate must not read it
+        # as clean (the chash leg never ran).
+        probe = self._probe(tmp_path, results=[
+            self._result(
+                "Schema migrations",
+                "service mode not configured (pg_credentials absent)",
+                warn=True,
+            ),
+        ])
+        assert probe.playbook is None
+        assert probe.unknown_reason is not None
+        assert "service mode not configured" in probe.unknown_reason
+
+    def test_unknown_reason_is_truncated(self, tmp_path):
+        # Round-2 critique LOW-1: reasons longer than 200 chars are capped
+        # (they render inline in a single action line).
+        probe = self._probe(tmp_path, results=[
+            self._result("Schema migrations", "x" * 500, fatal=True),
+        ])
+        assert probe.unknown_reason is not None
+        assert len(probe.unknown_reason) <= 200
+
+    def test_label_constant_pins_the_health_wire_format(self):
+        # Round-2 critique MEDIUM-1: the label is now a shared constant;
+        # pin its VALUE so a rename cannot silently change the doctor's
+        # user-facing label (and so both gates and health.py stay coupled
+        # through chash_tables, the same home as POISON_DETAIL_TOKEN).
+        from nexus.db.chash_tables import CHASH_CONFORMANCE_LABEL
+        assert CHASH_CONFORMANCE_LABEL == "Chunk chash conformance"
 
 
 class TestCheckVersionTransitionEngineConvergence:
@@ -635,7 +810,7 @@ class TestCheckVersionTransitionEngineConvergence:
             "nexus.daemon.binary_lifecycle.read_installed_provenance",
             return_value={"version": _older_version_str()},
         ), patch(
-            "nexus.upgrade_finish._poison_playbook", return_value=None,
+            "nexus.upgrade_finish._poison_probe", return_value=PoisonProbe(),
         ), patch(
             "nexus.daemon.binary_install.install_binary",
             side_effect=OSError("disk full"),
