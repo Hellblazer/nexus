@@ -316,7 +316,8 @@ slow CCE batches, fixed by a 600s per-op upsert timeout; one on 62
 NUL-bearing chunks, fixed by service-side sanitization, PR #1152) and were
 re-run to a clean 49/49, EXIT=0. NUL delta: the service strips 0x00 bytes
 before embed+bind (event `upsert_nul_sanitized`), so for exactly those
-rows `sha256(stored_text)[:32] != chash`; the chash is carried source
+rows `sha256(stored_text)[:32] != chash` (pre-RDR-180 `[:32]`-era widths —
+historical record of that migration); the chash is carried source
 identity, never recomputed, so manifest joins, rollback, dedup, and
 re-migration are unaffected (affected-chash list: T2
 `nexus_rdr/155-nul-sanitization-delta`).
@@ -539,21 +540,35 @@ means it was killed, not that it chose to exit; check the jar log tail and
 interrupted command: both ETL families are idempotent, and a collection
 interrupted mid-upsert re-converges on `(tenant, collection, chash)`.
 
-## 8. Legacy chunk ids (pre-RDR-108 stores) — GH #1390
+## 8. Legacy chunk ids (pre-RDR-108 stores) — GH #1390 / GH #1414
 
-The pgvector chash identity is `sha256(chunk_text)[:32]` — exactly 32
-characters. Chroma stores written by pre-RDR-108-era releases can hold
-**16/18-char chunk ids**.
+The pgvector chash identity is the **full `sha256(chunk_text)` hexdigest** —
+64 hex characters on the wire, 32 raw bytes in storage (`bytea`,
+`octet_length(chash) = 32`; RDR-180). Two legacy id classes predate it:
+**16/18-char chunk ids** from pre-RDR-108-era releases, and **32-char
+`[:32]`-prefix ids** from the RDR-108 era (conformant until RDR-180 widened
+the identity).
 
-**`nx upgrade` converges these automatically — there is no user action.** The
-substrate rung recomputes the correct id ON THE WIRE from the chunk text it is
-already carrying (RDR-185): the id is a pure function of that text, so no
-re-index and no source file is required, including for `store_put`-only notes
-that have neither. The old→new mapping is persisted as a migration artifact and
-cascaded across every chash-bearing store (catalog manifests, chash-span links,
-chash-keyed aspects, topic assignments, `chash_index`), and rollback resolves
-through that map rather than by raw id equality. The Chroma source stays
-byte-untouched (RDR-176), so it remains a valid rollback target throughout.
+**For the 16/18-char class, `nx upgrade` converges automatically — no user
+action.** The substrate rung recomputes the correct id ON THE WIRE from the
+chunk text it is already carrying (RDR-185): the id is a pure function of
+that text, so no re-index and no source file is required, including for
+`store_put`-only notes that have neither. The old→new mapping is persisted
+as a migration artifact and cascaded across every chash-bearing store
+(catalog manifests, chash-span links, chash-keyed aspects, topic
+assignments), and rollback resolves through that map rather than by raw id
+equality. The Chroma source stays byte-untouched (RDR-176), so it remains a
+valid rollback target throughout.
+
+**For the 32-char RDR-108-era class, re-index FIRST** (verified GH #1414:
+the wire re-id deliberately fires only for ids it can classify as legacy —
+width outside {32, 64} — so a 32-char id reaches the strict full-width ETL
+guard and the run refuses with "migration will NOT guess ids" rather than
+guessing). The recovery is §8.1's ladder-first sequence: re-index the
+file-backed collections, then `nx upgrade` — the chash-rekey rung recomputes
+conformant ids from stored chunk text for everything else, `store_put`-only
+notes included (the same machinery that rekeyed 254,846 production rows on
+2026-07-20 with zero loss).
 
 > **This retires a rule that was true until RDR-185.** The old rationale —
 > "the migration NEVER rewrites ids", because rewriting would sever the
@@ -582,7 +597,7 @@ ladder) depends on the collection's source of truth:
 - **File-backed collections** (`code__`, `docs__`, `rdr__`, and any
   `knowledge__` indexed from a PDF/file): re-index from the source file
   (`nx index repo` / `nx index pdf`). Chunks and catalog manifests
-  regenerate with canonical `sha256(chunk_text)[:32]` chashes.
+  regenerate with canonical full-`sha256(chunk_text)` chashes.
 - **MCP-note collections** (`knowledge__` written via `store_put` with no
   `source_uri` — agent findings, notes): the Chroma document text is the
   ONLY copy. There is no automated re-index (`nx store export`/`import`
@@ -595,9 +610,10 @@ upserts through.** That is how GH #1390 happened: an autonomous session
 dropped four constraints to "unblock" a 409ing migration, silently corrupted
 the store, and crash-looped the next engine upgrade. If you are an agent
 reading this while blocked on chash-length errors: the correct action is the
-re-index remediation above, or STOP and report. Under RDR-185 the correct
-action is simpler still: run `nx upgrade` and let the rung compute the right
-addresses.
+re-index remediation above, or STOP and report. For the 16/18-char class the
+correct action is simpler still: run `nx upgrade` and let the rung compute
+the right addresses (for the 32-char class, re-index first — see the top of
+this section).
 
 ### 8.1 Recovering a store that already migrated legacy ids (nexus-pnwu0)
 

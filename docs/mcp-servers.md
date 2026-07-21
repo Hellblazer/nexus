@@ -4,18 +4,18 @@ Nexus ships two MCP servers, bundled in the Claude Code plugin and the Claude De
 
 For **when to use which retrieval interface**, see [Querying Guide](querying-guide.md). For conceptual background, see [Document Catalog](catalog.md) and [Storage Tiers](storage-tiers.md).
 
-## The three servers
+## The two servers
 
 | Server | Entry point | Tools | Purpose |
 |---|---|---|---|
-| `nexus` | `nx-mcp` | 35 | Storage tiers, retrieval, operators, orchestration |
+| `nexus` | `nx-mcp` | 38 | Storage tiers, retrieval, operators, orchestration, diagnostics |
 | `nexus-catalog` | `nx-mcp-catalog` | 10 | Document catalog, link graph, tumbler resolution |
 
 The `nexus` and `nexus-catalog` servers register automatically when you install the plugin (`/plugin install conexus@nexus-plugins`) or the `.mcpb` extension. No separate install.
 
 **Substrate dependency**: since RDR-155, every persistent tier (T2 + T3 storage/retrieval tools) routes through the native nexus-service (`nx daemon service`, Postgres 17 + pgvector), not a ChromaDB daemon. A single `nx init` provisions and starts it and offers to register the OS autostart unit so it survives reboots (RDR-174 collapsed flow). See [Getting Started](getting-started.md#first-time-setup-the-storage-backend) for the install walkthrough and [Container Integration](container-integration.md) for the multi-process / multi-host model. (The standalone SQLite T2 daemon — `nx daemon t2 install --autostart` — remains an explicit opt-in for `NX_STORAGE_BACKEND=sqlite`.)
 
-## `nexus` — retrieval + storage (35 tools)
+## `nexus` — retrieval + storage (38 tools)
 
 Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 
@@ -88,7 +88,16 @@ Inside `nx_answer` / `plan_run`, consecutive operator steps collapse into a sing
 | `nx_enrich_beads` | Enrich a bead with execution context (file paths, test commands, constraints) |
 | `nx_plan_audit` | Audit a plan for correctness and codebase alignment |
 
-All four `nx_*` tools are async with a configurable `timeout` (default 120s).
+The dispatching `nx_*` tools are async; `nx_tidy` and `nx_plan_audit`
+default their `timeout` to 600s, `nx_enrich_beads` to 300s (heavy analytical
+workloads — see the failure-modes section). `nx_answer` has no `timeout`
+parameter; its per-operator steps carry their own.
+
+Three further tools round out the server (RDR-126/182): `daemon_uninstall`
+(remove the background T2 daemon; destructive, `confirm=true` gated),
+`forensics` (read-only diagnostic playbook for upgrade-edge topics, opt-in
+gated), and `remediate` (consent-gated guided recovery playbook — describe
+first, `confirm=true` to release).
 
 ## `nexus-catalog` — document catalog (10 tools)
 

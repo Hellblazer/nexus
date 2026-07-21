@@ -66,7 +66,8 @@ With a healthy probe you are ready. There is no local index to build and no
 migration to run:
 
 ```bash
-nx store "my first managed note" --collection knowledge__<owner>__voyage-context-3__v1  # <owner>: your username or project name — any identifier works, it's just a namespace segment
+# <owner>: your username or project name — any identifier works, it's just a namespace segment
+echo "my first managed note" | nx store put - --title first-note --collection knowledge__<owner>__voyage-context-3__v1
 nx search "first note"
 ```
 

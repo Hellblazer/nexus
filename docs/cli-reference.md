@@ -727,7 +727,10 @@ Show linked RDRs for recently git-modified files. Default: last 24 hours. Useful
 nx catalog link-generate [--dry-run]
 ```
 
-Run the RDR filepath link generator over the full catalog. Use for initial setup or after bulk imports. Normal index runs are incremental. For citation links too, use `nx catalog generate-links`.
+**Deprecated alias** for `nx catalog generate-links` (nexus-2297) — prefer
+the canonical command below. Runs the RDR filepath link generator over the
+full catalog. Use for initial setup or after bulk imports. Normal index runs
+are incremental. For citation links too, use `nx catalog generate-links`.
 
 ### nx catalog generate-links
 
@@ -808,13 +811,20 @@ T3 chunks are NOT moved by this verb. Operators repopulate the target via `nx in
 ### nx catalog doctor
 
 ```
-nx catalog doctor [--replay-equality] [--t3-doc-id-coverage] [--collections-drift] [--json]
+nx catalog doctor [--replay-equality] [--t3-doc-id-coverage] [--collections-drift]
+                  [--strict-not-in-t3] [--chunk-size-distribution] [--chunk-text-dedup]
+                  [--t3-vs-catalog] [--name-vs-embed-dim] [--json]
 ```
 
 RDR-101 catalog doctor surface; pass at least one check flag.
 - `--replay-equality`: synthesizer + projector round-trip against live SQLite (Phase 1).
 - `--t3-doc-id-coverage`: every non-orphan T3 chunk carries a `doc_id` matching the event log (Phase 2).
 - `--collections-drift`: every T3 collection and every distinct `documents.physical_collection` has a row in the collections projection (Phase 6 release gate).
+- `--strict-not-in-t3` (modifier for `--t3-doc-id-coverage`): treat "event log claims a chunk T3 doesn't have" as a hard failure instead of a warning (warning is the default so legitimate deletions don't permanently red the doctor).
+- `--chunk-size-distribution`: per-collection chunk-size stats (p50/p95/p99/max); FAIL on any chunk over `MAX_DOCUMENT_BYTES`, WARN when >5% of chunks are micro-chunks (<100 bytes).
+- `--chunk-text-dedup`: chunk-text-hash duplication ratios — within-collection dupes >5% signal a chunker bug; >100 cross-collection dupes flag a cross-ingest investigation lead.
+- `--t3-vs-catalog`: projection-vs-T3 triage — T3 collections with no catalog documents (orphan), projected collections with 0 chunks (zombie), and catalog documents whose `physical_collection` is gone from T3.
+- `--name-vs-embed-dim`: samples one chunk per conformant collection and compares the actual embedding dimension to the one implied by the collection name's `__<model>__` segment; FAIL suggests `nx collection rename` (cosmetic, no re-embed).
 
 Returns non-zero on any check failure. `--json` emits the per-check result for CI consumption.
 
@@ -2060,8 +2070,13 @@ asset, its `.sha256`, and its `.sigstore.json` bundle are fetched and verified
 (sha256 + keyless Sigstore signature, pinned to the engine-service release
 workflow identity), then placed atomically. Verification **fails closed**:
 nothing is installed unless BOTH gates pass. One verified seam covers the
-binary and the PG bundle (RDR-161). `--no-pg-bundle` installs only the
-service binary (e.g. a cloud habitat with a managed Postgres).
+binary and the PG bundle (RDR-161).
+
+| Flag | Description |
+|------|-------------|
+| `--pg-bundle/--no-pg-bundle` | Also acquire + verify the relocatable PostgreSQL bundle from the same release (default on). `--no-pg-bundle` installs only the service binary (e.g. a cloud habitat with a managed Postgres). |
+| `--config-dir` | Config directory override. |
+| `--force` | Override the chash-poison pre-check (nexus-pnwu0 / GH #1414). The gate classifies the store first: width-non-conformant rows REFUSE the install (heal ladder-first per [migration-runbook §8.1](migration-runbook.md) before swapping engines); an unverifiable store (service/PG not up) proceeds with a loud UNVERIFIED warning — install-binary is the designated recovery tool for the will-not-boot class. Use `--force` ONLY after remediating. |
 
 ### nx daemon aspect-worker start
 

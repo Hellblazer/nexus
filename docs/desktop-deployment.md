@@ -13,9 +13,11 @@ Nexus runs in three Claude surfaces, all backed by shared host state so it round
 > copy you download from a GitHub release *page* in a browser is Gatekeeper-
 > blocked; clear it with `xattr -d com.apple.quarantine <file>`.
 >
-> **Two-process waypoint.** 6.0 runs the T2 (notes/plans) SQLite daemon **and**
-> the T3 nexus-service. That is transitional: RDR-152 moves T2 into the same
-> Postgres service and retires the SQLite daemon, converging on one service.
+> **One service.** T2 (notes/plans) and T3 both serve through the native
+> `nexus-service` (Postgres 17 + pgvector) — the RDR-152 hard default. The
+> SQLite T2 daemon still auto-starts as the opt-out/rollback path
+> (`NX_STORAGE_BACKEND=sqlite`) and is retired once the SQLite migration
+> window closes.
 
 ## Surface 1: Claude Code (terminal)
 
@@ -60,13 +62,13 @@ Note: Claude Code users who ALREADY have the conexus plugin should NOT also inst
 
 ## CLI coexistence
 
-`nx <verb>` commands run on the host shell. They talk to the same T2 daemon all three surfaces use. State is fully shared:
+`nx <verb>` commands run on the host shell. They route through the same `nexus-service` all three surfaces use (T2 hard-defaults to the service backend since RDR-152). State is fully shared:
 
 - `nx memory put -p X -t Y` → visible from Claude Code, Cowork, and Claude Desktop chat
 - `nx search foo` → searches the same T3 collections the MCP `search` tool sees
 - `nx index repo .` → indexes show up immediately in all surface tool results
 
-Daemon lifecycle: `nx daemon t2 status` / `nx daemon t2 start` / `nx daemon t2 install --autostart` are the canonical operations. Any of the three Claude surfaces auto-installs on first launch, but the CLI commands are always available for explicit lifecycle control.
+Service lifecycle: `nx daemon service status` / `start` / `stop` are the canonical operations (`nx init` provisions and offers the OS autostart unit). The SQLite-path T2 daemon commands (`nx daemon t2 status` / `start` / `install --autostart`) remain for the `NX_STORAGE_BACKEND=sqlite` opt-out; the Claude surfaces auto-start what they need on first launch either way.
 
 ## Drift detection
 

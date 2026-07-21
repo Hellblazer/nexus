@@ -251,13 +251,14 @@ def _list_documents(db: T3Database, col_name: str) -> None:
 def get_cmd(doc_id: str, collection: str, json_out: bool) -> None:
     """Retrieve a T3 knowledge entry by its document ID.
 
-    DOC_ID is the 32-char content-hash ID shown by 'nx store list'
-    (chunk_text_hash[:32] per RDR-108 D1).
+    DOC_ID is the 64-char content-hash ID shown by 'nx store list'
+    (the full sha256(chunk_text) hexdigest — RDR-180; pre-RDR-180
+    stores used the [:32] prefix form).
 
     \b
     Examples:
-      nx store get a1b2c3d4e5f6789012345678901234ab
-      nx store get a1b2c3d4e5f6789012345678901234ab --collection code__myrepo --json
+      nx store get a1b2c3d4e5f6789012345678901234abcdef0123456789abcdef0123456789ab
+      nx store get a1b2c3d4e5f6789012345678901234abcdef0123456789abcdef0123456789ab --collection code__myrepo --json
     """
     db = _t3()
     col_name = t3_collection_name(collection, t3=db)
@@ -320,7 +321,7 @@ def _reap_catalog_for_doc_ids(doc_ids: list[str]) -> None:
 @click.option("--collection", "-c", required=True,
               help="Collection name (required)")
 @click.option("--id", "doc_id", default=None,
-              help="Exact 32-char content-hash document ID from 'nx store list'")
+              help="Exact 64-char content-hash document ID from 'nx store list'")
 @click.option("--title", default=None,
               help="Exact title metadata match (deletes all matching chunks)")
 @click.option("--yes", "-y", is_flag=True, default=False,
@@ -331,8 +332,8 @@ def delete_cmd(collection: str, doc_id: str | None, title: str | None, yes: bool
     Use --id for a single known entry, --title to delete all chunks of a document.
     To remove an entire collection use: nx collection delete <name>
 
-    Note (RDR-108 D1): T3 chunk natural IDs are content-derived
-    (sha256(text)[:32]). Two documents with different titles but
+    Note (RDR-108 D1 / RDR-180): T3 chunk natural IDs are content-derived
+    (the full sha256(text) hexdigest). Two documents with different titles but
     identical content share one Chroma row; deleting one --title
     removes the shared row, which also removes the other title's
     content. If you need both titles to remain, store them under
@@ -553,5 +554,5 @@ def import_cmd(
     if result.get("rehashed_count"):
         click.echo(
             f"  Re-hashed {result['rehashed_count']} non-conformant legacy "
-            "chunk ids to 32-char content hashes."
+            "chunk ids to conformant content hashes."
         )

@@ -45,7 +45,7 @@ For the full deployment story across all three surfaces (install, daemon lifecyc
 
 ## What it does
 
-- **Persistent memory** — three storage tiers (T1 session scratch, T2 SQLite memory bank, T3 semantic knowledge store) so Claude remembers across conversations.
+- **Persistent memory** — three storage tiers (T1 session scratch, T2 memory bank, T3 semantic knowledge store, both persistent tiers served by the native Postgres-backed `nexus-service`) so Claude remembers across conversations.
 - **Semantic search** — index your code, docs, RDRs, and PDFs once; search by meaning afterward. Tree-sitter AST chunking across 23 languages, CCE prose chunking, PDF auto-routing.
 - **Typed document catalog** — Xanadu-inspired addressing with typed links (`cites`, `implements`, `supersedes`). Walk from a design doc to the code that implements it.
 - **RDR: Research-Design-Review** — write a spec before you code. Captures the problem, research, alternatives, and chosen approach. The corpus is searchable, so prior decisions surface during new design work.

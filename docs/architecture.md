@@ -69,8 +69,9 @@ CLI (cli.py)            MCP Server (mcp_server.py)
           T2: SQLite + FTS5 daemon ── nx daemon t2 start
                 Nine domain stores (eight share nexus.db + catalog) behind T2Database / T2Client
                 Transport: UDS (UID-gated) + 127.0.0.1 loopback TCP
-                memory · plans · chash_index · taxonomy · telemetry ·
-                document_aspects · aspect_queue · document_highlights · catalog
+                memory · plans · taxonomy · telemetry · document_aspects ·
+                aspect_queue · document_highlights · catalog
+                (chash_index RETIRED — table dropped by RDR-187, v0.1.51)
           T3: Postgres 17 + pgvector behind the native nexus-service ── nx daemon service start
               Same service in BOTH modes; embedding is server-side
               (bge-768 in local mode, Voyage in managed-cloud mode).
@@ -223,14 +224,14 @@ stored chunk id was `sha256(chunk_text).hexdigest()[:32]` — 32 *hex chars* =
 and bytes in another. The canonical definition above makes the two subsystems
 agree at the full 256 bits, by construction.
 
-**Migration status:** the flip is IN this tree (epic `nexus-jxizy`): the
-producer emits the full digest, the engine stores bytea, and the
-`chash-rekey` ladder rung rekeys existing stores inside the freeze window. For every rehashable
+**Migration status:** the flip SHIPPED (RDR-180 closed 2026-07-20; epic
+`nexus-jxizy`): the producer emits the full digest, the engine stores bytea,
+and the `chash-rekey` ladder rung rekeyed existing stores (254,846
+production rows, zero loss). For every rehashable
 row the legacy 32-hex is the strict prefix of the new 64-hex (same text, same
 digest); the persisted `chash_alias` table is the collision-free resolver for
 legacy references thereafter (prefix matching only *builds* the map, it is not
-the resolver). The table below describes **current** (pre-flip) producer
-behavior.
+the resolver).
 
 ### Metadata field semantics (chunk vs document level)
 
@@ -423,7 +424,7 @@ wait rather than a dropped write.
 | Plans             | `PlanLibrary`             | `db.plans`             | Plan templates, plan search, plan TTL                                      |
 | Taxonomy          | `CatalogTaxonomy`         | `db.taxonomy`          | HDBSCAN topic discovery, centroid ANN assignment, merge strategy, review workflow ([RDR-070](rdr/rdr-070-incremental-taxonomy-clustered-search.md)) |
 | Telemetry         | `Telemetry`               | `db.telemetry`         | Relevance log (query/chunk/action triples), retention-based expiry         |
-| Chash index       | `ChashIndex`              | `db.chash_index`       | Global chash → (collection, doc_id) lookup; populated via dual-write at every T3 upsert site ([RDR-086](rdr/rdr-086-chash-span-resolution.md) Phase 1) |
+| Chash index       | `ChashIndex`              | `db.chash_index`       | **RETIRED (RDR-187)**: the PG table `nexus.chash_index` is DROPPED as of engine v0.1.51 — it was the router remnant of the split-store architecture; `chash_alias` is the surviving resolver. The client store class remains only as a shim until the final `/v1/chash/*` 410 flip (nexus-piwya.11). Historical: global chash → (collection, doc_id) lookup, dual-written at every T3 upsert site ([RDR-086](rdr/rdr-086-chash-span-resolution.md) Phase 1) |
 | Document aspects  | `DocumentAspects`         | `db.document_aspects`  | Per-document structured aspects (problem, method, datasets, baselines, results, extras) keyed by `(collection, source_path)`; populated by the async aspect-extraction worker ([RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md) P1.1) |
 | Aspect queue      | `AspectExtractionQueue`   | `db.aspect_queue`      | Durable WAL buffer feeding the aspect-extraction worker; FIFO `claim_next` with cross-process compare-and-swap atomicity; `reclaim_stale` recovers rows from crashed workers ([RDR-089](rdr/rdr-089-structured-aspect-extraction-at-ingest.md) follow-up) |
 | Document highlights | `DocumentHighlights`    | `db.document_highlights` | Per-document DEVONthink highlight / mention markdown notes, keyed by catalog tumbler (`doc_id`); populated by `nx dt index --highlights` ([RDR-139](rdr/rdr-139-devonthink-mcp-semantic-linking-sync.md) Layer E). Deliberately separate from `document_aspects`: free-text highlights must not contend with the aspect worker's whole-row overwrite or its confidence gate |

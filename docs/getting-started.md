@@ -17,7 +17,7 @@ If you're on 3.14+, install 3.13 with `uv python install 3.13` — uv will use i
 
 ## Install
 
-See the [Quick Start in README.md](https://github.com/Hellblazer/nexus/blob/main/README.md#quick-start) for the full install walkthrough: `uv tool install conexus`, `nx init` (embedder choice, **nexus-service** provisioning — the native Postgres + pgvector backend that serves every persistent tier), updating, and verifying with `nx doctor`.
+See the [CLI quick-start in README.md](https://github.com/Hellblazer/nexus/blob/main/README.md#cli-quick-start) for the full install walkthrough: `uv tool install conexus`, `nx init` (embedder choice, **nexus-service** provisioning — the native Postgres + pgvector backend that serves every persistent tier), updating, and verifying with `nx doctor`.
 
 Once you have a working install, come back here for repo indexing, the storage-tier CLIs, and troubleshooting below. If you're upgrading an *existing* pre-6.0 install rather than installing fresh, skip to [Upgrading an existing install](#upgrading-an-existing-install-skip-this-if-this-is-your-first-install) at the end of this document.
 
@@ -79,7 +79,7 @@ See [Document Catalog](catalog.md) for details.
 
 ## Claude Code plugin (optional)
 
-The conexus plugin gives Claude Code agents access to all three storage tiers, 13 specialized agents, and 43 skills covering the RDR lifecycle, plan-centric retrieval, and development workflows.
+The conexus plugin gives Claude Code agents access to all three storage tiers, 13 specialized agents, and 45 skills covering the RDR lifecycle, plan-centric retrieval, and development workflows.
 
 **Plugin-only prerequisite: [Node.js](https://nodejs.org/).** The plugin's `sequential-thinking` and `context7` MCP servers are spawned via `npx -y …` and silently fail to start without `node`/`npm` on PATH. Install with `brew install node` (macOS) or your platform's installer before running the plugin commands below.
 

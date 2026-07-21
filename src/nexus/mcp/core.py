@@ -2946,7 +2946,7 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
     Use after store_list or search to read the complete document.
 
     Args:
-        doc_id: Exact 32-char content-hash document ID (from store_list / store_put / search),
+        doc_id: Exact 64-char content-hash document ID (from store_list / store_put / search),
                 OR an exact title (looked up via metadata).
         collection: Collection name or prefix (default: knowledge)
     """
@@ -2970,10 +2970,10 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
                     return (
                         f"Multiple documents with title {doc_id!r} in {col_name}: "
                         + ", ".join(ids[:5]) + (" …" if len(ids) > 5 else "")
-                        + ". Pass a 32-char content-hash to disambiguate."
+                        + ". Pass a 64-char content-hash to disambiguate."
                     )
         if entry is None:
-            return f"Not found: {doc_id!r} in {col_name} (pass a 32-char content-hash from store_list/store_put/search, or an exact title)"
+            return f"Not found: {doc_id!r} in {col_name} (pass a 64-char content-hash from store_list/store_put/search, or an exact title)"
         title = entry.get("title", "")
         tags = entry.get("tags", "")
         indexed_at = (entry.get("indexed_at") or "")[:10]

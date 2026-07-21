@@ -229,6 +229,20 @@ Every step below is **required**. Missing any one of them has caused problems in
 
 ### Step-by-step checklist
 
+0. **Engine-freshness gate (BLOCKING — run before everything else)**
+   ```bash
+   uv run python scripts/check_engine_release_floor.py
+   ```
+   Non-zero exit = STOP. Do not proceed with the PyPI release: cut, deploy,
+   and cloud-gate a fresh `engine-service-v*` tag first (the `engine-release`
+   skill / AGENTS.md § Engine-service release), bump
+   `REQUIRED_ENGINE_VERSION` in `src/nexus/engine_version.py` to that tag
+   (this alone also moves the fresh-install pin, `PINNED_SERVICE_TAG`), then
+   re-run the script until it exits 0. This is a command gate, not an
+   eyeball check — the prose version of this step was routinely skipped and
+   let releases ship against a stale, un-cloud-validated engine
+   (nexus-i5c2u).
+
 1. **Verify the full test suite passes (unit + integration)**
    ```bash
    uv run pytest tests/                    # unit tests (no API keys needed)
@@ -280,6 +294,19 @@ Every step below is **required**. Missing any one of them has caused problems in
    - `sn/.claude-plugin/plugin.json` — `version` (controls sn plugin cache refresh)
 
    Forgetting any one fails CI parity; forgetting `source.ref` ships a release that installed Claude Code users never receive.
+
+7b. **Run the sandbox smoke** (~2 min)
+   ```bash
+   ./tests/e2e/release-sandbox.sh smoke
+   ```
+   Required for any change touching `pyproject.toml`, `uv.lock`,
+   `src/nexus/db/migrations.py`, `src/nexus/mcp/**`, `conexus/**`,
+   `.claude-plugin/**`, or `src/nexus/commands/{doctor,upgrade}.py` — which
+   a release always does (the version bumps alone qualify). The reinstall it
+   drives is genuinely isolated and runs cleanly with live Claude Code
+   sessions/MCP servers active; if it ever refuses with a live-holder error,
+   suspect a step-ordering regression before reaching for `--force`
+   (AGENTS.md § Cutting a release, step 6).
 
 8. **Commit on a release branch and PR to `main`** (branch protection requires a PR; do NOT direct-push)
    ```bash
