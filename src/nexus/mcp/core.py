@@ -6642,6 +6642,15 @@ def main():
     # (e.g. a FastMCP-internals change) — an injection-failure recovery path,
     # not a per-surface channel. Best-effort; never blocks boot.
     install_banner_dispatch_hook(mcp)
+    # nexus-g6vb4 (GH #1414): staleness self-detection — an in-place
+    # `uv tool upgrade` replaces site-packages under this live process;
+    # the first deferred import then fails with an opaque ImportError.
+    # The hook warn-logs once and decorates import-shaped failures with
+    # a "stale MCP host — restart" note. Never refuses a call; best-effort,
+    # never blocks boot.
+    from nexus.mcp._stale_host import install_stale_host_hook  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
+
+    install_stale_host_hook(mcp)
     # RDR-144 P5b: surface the embedder advisory to plugin/Desktop/Cowork-first
     # users who never run the Claude Code SessionStart hook. The MCP server
     # cannot print (stdout is JSON-RPC), so the notice rides the server

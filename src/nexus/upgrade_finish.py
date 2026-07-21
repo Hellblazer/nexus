@@ -95,6 +95,49 @@ class SkewReport:
         return [p for p in self.stale if p.restartable]
 
 
+@dataclass(frozen=True)
+class SelfStaleness:
+    """Whether THIS process is executing code older than the install.
+
+    nexus-g6vb4 (GH #1414): ``detect_stale_processes()`` excludes
+    ``pid == me`` by construction (correct for ``nx doctor`` — don't report
+    yourself), which means the primitive that diagnoses upgrade skew can
+    never be pointed at the process suffering from it. This is the
+    self-directed complement: the long-lived host captures
+    ``install_mtime_and_version()`` once at startup and compares later.
+    """
+
+    stale: bool
+    started_version: str
+    installed_version: str
+
+
+def self_staleness(baseline: tuple[float, str]) -> SelfStaleness:
+    """Compare the installed distribution against a startup ``baseline``.
+
+    ``baseline`` is the ``install_mtime_and_version()`` tuple captured when
+    this process started. A newer dist-info mtime OR a changed version means
+    site-packages moved under us — the running module graph is old code.
+    Metadata resolution FAILING (venv replaced/removed under us) is itself a
+    disk-changed signal: reported as stale with ``installed_version=
+    "(unresolvable)"``, never an exception out of a per-tool-call hot path.
+    """
+    started_mtime, started_version = baseline
+    try:
+        mtime, version = install_mtime_and_version()
+    except Exception:  # noqa: BLE001 — resolution failure IS the stale signal here
+        return SelfStaleness(
+            stale=True,
+            started_version=started_version,
+            installed_version="(unresolvable)",
+        )
+    return SelfStaleness(
+        stale=mtime > started_mtime or version != started_version,
+        started_version=started_version,
+        installed_version=version,
+    )
+
+
 def _classify(command: str) -> str:
     if "aspect-worker" in command:
         return "aspect-worker"
@@ -120,11 +163,16 @@ def _parse_etime(etime: str) -> int:
     return ((days * 24 + h) * 60 + m) * 60 + s
 
 
-def install_mtime_and_version() -> tuple[float, str]:
-    """(mtime, version) of the installed conexus distribution.
+def install_dist_info() -> tuple[float, str, Path]:
+    """(mtime, version, dist-info path) of the installed conexus distribution.
 
     The dist-info directory's mtime is when the venv last changed — any
-    process started before it is executing old code.
+    process started before it is executing old code. The returned path lets
+    a long-lived host (nexus-g6vb4) re-check freshness with a single
+    ``stat`` instead of a full importlib.metadata resolution per tool call:
+    an upgrade either bumps the mtime (same-version reinstall) or replaces
+    the directory with a differently-named one (version change → stat
+    fails), so "path stats with an unchanged mtime" proves fresh.
     """
     import importlib.metadata as md  # noqa: PLC0415 — stdlib, deferred for startup cost
 
@@ -143,7 +191,13 @@ def install_mtime_and_version() -> tuple[float, str]:
             f"cannot locate conexus dist-info under {root} — "
             "process-skew detection unavailable in this environment"
         )
-    return dist_info.stat().st_mtime, version
+    return dist_info.stat().st_mtime, version, dist_info
+
+
+def install_mtime_and_version() -> tuple[float, str]:
+    """(mtime, version) of the installed conexus distribution."""
+    mtime, version, _ = install_dist_info()
+    return mtime, version
 
 
 def enumerate_processes(ps_output: str | None = None) -> list[tuple[int, int, str]]:
@@ -473,8 +527,10 @@ def _poison_playbook(config_dir: Path):  # noqa: ANN201 — returns nexus.remedi
 
     Reuses the SAME probe ``nx daemon service install-binary``'s own gate
     uses (:func:`nexus.health._check_migration_state`, nexus-pnwu0 / GH
-    #1390): a new engine boots a Liquibase VALIDATE CONSTRAINT that
-    crash-loops on non-32-char chash rows. Automated convergence must NEVER
+    #1414): width-non-conformant chash rows are unhealed upgrade-ladder
+    debt (v0.1.48+ engines tolerate them at boot — nexus-joima; only a
+    pre-v0.1.48 char-era engine can still crash-loop on VALIDATE).
+    Automated convergence must NEVER
     install a new engine onto a store in that state — but it must also never
     silently skip; the caller renders this Playbook's ``terminal_block()``
     as a loud, actionable NEEDS-HUMAN line. A probe that cannot run (PG
