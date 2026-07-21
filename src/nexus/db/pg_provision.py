@@ -871,6 +871,46 @@ def reprovision_diag_view_best_effort() -> None:
         _log.warning("pg_diag_view_reprovision_failed", error=str(exc))
 
 
+def backfill_diag_role_best_effort() -> bool:
+    """Idempotent ``nexus_diag`` backfill for the UNATTENDED path (GH #1414
+    era-hop regression, 2026-07-21).
+
+    A pre-P2.1 install has no diag credentials, so the tri-state
+    chash-poison probe reads UNKNOWN and ``converge_engine`` defers — with
+    ``nx doctor`` (the advertised re-attempt) failing identically, because
+    no step of the unattended ``nx upgrade`` walk ever ran the P2.1
+    backfill (it lived only in ``nx init --service``). This wrapper makes
+    :func:`_backfill_diag_role` reachable from the probe itself.
+
+    Resolution-first guards (the f2c07c58 lesson — gate on what actually
+    resolves, never a mode guess): a LIVE ``pg_credentials`` with a
+    positive ``PG_PORT`` is the signature of the locally-provisioned
+    bundled cluster (migrated-away boxes park the file), and those are the
+    only clusters the bootstrap superuser can reach. Returns True when the
+    backfill ran to completion; False on any guard miss or failure —
+    best-effort by design, the caller's probe then classifies UNKNOWN
+    exactly as before (defer semantics untouched).
+    """
+    try:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred, circular-dep avoidance
+
+        creds_path = nexus_config_dir() / CREDENTIALS_FILENAME
+        if not creds_path.exists():
+            return False
+        creds = _read_credentials(creds_path)
+        port = int(creds.get("PG_PORT", 0) or 0)
+        if port <= 0:
+            return False
+        bins = discover_pg_binaries()
+        os_user = bootstrap_superuser()
+        _backfill_diag_role(bins, port, os_user, creds_path)
+        _log.info("pg_diag_role_backfilled", via="poison_probe_self_heal")
+        return True
+    except Exception as exc:  # noqa: BLE001 — best-effort; the probe classifies UNKNOWN as before
+        _log.warning("pg_diag_role_backfill_best_effort_failed", error=str(exc))
+        return False
+
+
 def _create_roles(
     bins: PgBinaries,
     port: int,

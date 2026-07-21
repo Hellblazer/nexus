@@ -1207,3 +1207,139 @@ class TestCheckVersionTransitionLaunchagentUnload:
         ):
             line = check_version_transition(tmp_path)
         assert "healed: nexus_diag lacked SELECT" in line
+
+
+class TestPoisonProbeSelfBackfill:
+    """GH #1414 era-hop regression, part 2 (2026-07-21): a pre-P2.1 install
+    has no nexus_diag credentials, so the tri-state probe read UNKNOWN and
+    converge_engine deferred FOREVER on exactly the unattended-upgrade boxes
+    RDR-185 exists for — with `nx doctor` (the advertised re-attempt)
+    failing identically (no operator step in the walk ever backfills the
+    role). The probe now self-heals first: when the creds file carries no
+    NX_DB_DIAG_* keys, it invokes the idempotent RDR-182 P2.1 backfill
+    (best-effort, resolution-gated on the LIVE local cluster facts) before
+    classifying. Defer semantics are untouched — a store that STILL cannot
+    be verified after the backfill attempt remains UNKNOWN."""
+
+    def test_creds_absent_triggers_backfill_then_probes(self, tmp_path, monkeypatch):
+        from nexus import upgrade_finish as uf
+
+        calls: list[str] = []
+        (tmp_path / "pg_credentials").write_text("PG_PORT=5432\n")  # no NX_DB_DIAG_*
+
+        monkeypatch.setattr(
+            "nexus.db.diag_connection.resolve_diag_credentials",
+            lambda creds_path=None: None,
+        )
+        monkeypatch.setattr(
+            "nexus.db.pg_provision.backfill_diag_role_best_effort",
+            lambda: calls.append("backfill") or True,
+        )
+        monkeypatch.setattr(
+            "nexus.health._check_migration_state",
+            lambda creds_path=None: calls.append("probe") or [],
+        )
+
+        probe = uf._poison_probe(tmp_path)
+
+        assert calls == ["backfill", "probe"], (
+            "creds-absent must attempt the idempotent diag backfill BEFORE "
+            "the probe runs (unattended-convergence contract, RDR-185)"
+        )
+        assert probe.playbook is None and probe.unknown_reason is None  # CLEAN
+
+    def test_creds_present_skips_backfill(self, tmp_path, monkeypatch):
+        from nexus import upgrade_finish as uf
+
+        calls: list[str] = []
+
+        monkeypatch.setattr(
+            "nexus.db.diag_connection.resolve_diag_credentials",
+            lambda creds_path=None: object(),  # creds resolve fine
+        )
+        monkeypatch.setattr(
+            "nexus.db.pg_provision.backfill_diag_role_best_effort",
+            lambda: calls.append("backfill") or True,
+        )
+        monkeypatch.setattr(
+            "nexus.health._check_migration_state",
+            lambda creds_path=None: calls.append("probe") or [],
+        )
+
+        uf._poison_probe(tmp_path)
+        assert calls == ["probe"], "no backfill when diag creds already resolve"
+
+    def test_backfill_failure_still_probes_and_stays_unknown(self, tmp_path, monkeypatch):
+        """The backfill is best-effort: a failed attempt must not crash the
+        probe, and the creds-still-absent WARN keeps reading UNKNOWN (the
+        defer semantics stay intact when self-heal cannot help)."""
+        from nexus import upgrade_finish as uf
+        from nexus.db.chash_tables import CHASH_CONFORMANCE_LABEL
+        from nexus.health import HealthResult
+
+        monkeypatch.setattr(
+            "nexus.db.diag_connection.resolve_diag_credentials",
+            lambda creds_path=None: None,
+        )
+        monkeypatch.setattr(
+            "nexus.db.pg_provision.backfill_diag_role_best_effort",
+            lambda: False,
+        )
+        monkeypatch.setattr(
+            "nexus.health._check_migration_state",
+            lambda creds_path=None: [HealthResult(
+                label=CHASH_CONFORMANCE_LABEL, ok=False,
+                detail="no nexus_diag diagnostic credentials (pre-P2.1 install) — could NOT run",
+                warn=True,
+            )],
+        )
+
+        probe = uf._poison_probe(tmp_path)
+        assert probe.unknown_reason is not None
+        assert "nexus_diag" in probe.unknown_reason
+
+
+class TestBackfillDiagRoleBestEffort:
+    """Resolution-first guards (f2c07c58 lesson): gate on the LIVE local
+    cluster facts (creds file present + PG_PORT), never on a mode guess."""
+
+    def test_no_creds_file_returns_false(self, tmp_path, monkeypatch):
+        from nexus.db import pg_provision as pp
+
+        monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+        assert pp.backfill_diag_role_best_effort() is False
+
+    def test_no_port_returns_false(self, tmp_path, monkeypatch):
+        from nexus.db import pg_provision as pp
+
+        (tmp_path / "pg_credentials").write_text("NX_DB_ADMIN_USER=x\n")
+        monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+        assert pp.backfill_diag_role_best_effort() is False
+
+    def test_happy_path_calls_backfill_and_returns_true(self, tmp_path, monkeypatch):
+        from nexus.db import pg_provision as pp
+
+        (tmp_path / "pg_credentials").write_text("PG_PORT=54321\n")
+        monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+        monkeypatch.setattr(pp, "discover_pg_binaries", lambda: "BINS")
+        monkeypatch.setattr(pp, "bootstrap_superuser", lambda: "os_user")
+        seen: dict = {}
+
+        def _fake_backfill(bins, port, os_user, creds_path):
+            seen.update(bins=bins, port=port, os_user=os_user, creds_path=creds_path)
+
+        monkeypatch.setattr(pp, "_backfill_diag_role", _fake_backfill)
+        assert pp.backfill_diag_role_best_effort() is True
+        assert seen["port"] == 54321
+        assert seen["bins"] == "BINS"
+
+    def test_exception_is_swallowed_returns_false(self, tmp_path, monkeypatch):
+        from nexus.db import pg_provision as pp
+
+        (tmp_path / "pg_credentials").write_text("PG_PORT=54321\n")
+        monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+        monkeypatch.setattr(
+            pp, "discover_pg_binaries",
+            lambda: (_ for _ in ()).throw(RuntimeError("no bins")),
+        )
+        assert pp.backfill_diag_role_best_effort() is False

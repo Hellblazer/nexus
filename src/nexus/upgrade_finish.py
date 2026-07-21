@@ -579,6 +579,22 @@ def _poison_probe(config_dir: Path) -> PoisonProbe:
             POISON_DETAIL_TOKEN,
         )
 
+        # GH #1414 era-hop regression (2026-07-21): a pre-P2.1 install has
+        # no nexus_diag credentials, so the probe could never run there and
+        # every classification read UNKNOWN — permanently deferring engine
+        # convergence on exactly the unattended-upgrade boxes RDR-185
+        # serves, with `nx doctor` (the advertised re-attempt) failing the
+        # same way. Self-heal first: the idempotent RDR-182 P2.1 backfill,
+        # resolution-gated on the live local-cluster facts inside the
+        # wrapper. Best-effort — a box the backfill cannot help still
+        # classifies UNKNOWN below, defer semantics untouched.
+        import nexus.db.diag_connection as _diag_conn  # noqa: PLC0415 — deferred, circular-dep avoidance
+
+        if _diag_conn.resolve_diag_credentials(creds_path) is None:
+            import nexus.db.pg_provision as _pgp  # noqa: PLC0415 — deferred, circular-dep avoidance
+
+            _pgp.backfill_diag_role_best_effort()
+
         results = _check_migration_state(creds_path=creds_path)
     except Exception as exc:  # noqa: BLE001 — an unverifiable store is UNKNOWN, never a crash and never a silent clean
         return PoisonProbe(unknown_reason=f"{type(exc).__name__}: {exc}"[:200])
