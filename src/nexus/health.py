@@ -1946,7 +1946,17 @@ def _run_psql(
     if psql_runner is not None:
         # Injected runner (unit tests) — does not accept env kwarg.
         return psql_runner(cmd, capture_output=True, text=True, check=False)
-    env = {**os.environ, "PGPASSWORD": password}
+    # nexus-iytd3 loader guard (GH #1414 era-hop regression, 2026-07-21): the
+    # published PG bundles ship psql without an RPATH, so on a minimal Linux
+    # base a bare invocation exits 127 (libpq.so.5 unresolvable). pg_provision
+    # wraps its own psql calls in _bundle_lib_env; this probe must get the
+    # SAME guard — post-fc24123c a probe that cannot run reads as UNKNOWN to
+    # the tri-state chash-poison gate and permanently DEFERS engine
+    # convergence on exactly the era boxes the unattended upgrade serves.
+    from nexus.db.pg_provision import _bundle_lib_env  # noqa: PLC0415 — deferred to avoid circular import
+
+    env = _bundle_lib_env(cmd, None)
+    env["PGPASSWORD"] = password
     return subprocess.run(cmd, capture_output=True, text=True, check=False, env=env)
 
 

@@ -375,3 +375,69 @@ class TestCheckMigrationDivergence:
         _make_memory_db(memory_db, [("t1", "2030-01-01T00:00:00Z")])
         results = _check_migration_divergence(reports_dir=reports_dir, memory_db_path=memory_db)
         assert results[0].ok is True
+
+
+class TestRunPsqlBundleLibEnv:
+    """GH #1414 era-hop regression (2026-07-21): the health probe's psql
+    invocation must carry the same nexus-iytd3 bundle-lib loader guard that
+    pg_provision's own psql calls get. Without it, a bundle whose psql has
+    no RPATH (the published bundles) exits 127 (libpq.so.5 unresolvable) on
+    a minimal Linux base — and post-fc24123c that broken probe reads as
+    UNKNOWN to the tri-state chash-poison gate, permanently DEFERRING
+    engine convergence on exactly the era boxes the unattended `nx upgrade`
+    walk exists for (the RDR-185 era-hop MVV caught it: 0.1.11 -> 0.1.51
+    held back, /v1/remap 404s, 8 checks failed)."""
+
+    def _bundle_psql(self, tmp_path: Path) -> Path:
+        (tmp_path / "bundle" / "bin").mkdir(parents=True)
+        (tmp_path / "bundle" / "lib").mkdir(parents=True)
+        psql = tmp_path / "bundle" / "bin" / "psql"
+        psql.write_text("")
+        return psql
+
+    def test_real_subprocess_branch_carries_bundle_lib_env(self, tmp_path, monkeypatch):
+        import subprocess as _subprocess
+
+        from nexus.health import _run_psql
+
+        psql = self._bundle_psql(tmp_path)
+        captured: dict = {}
+
+        def _fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["env"] = kwargs.get("env")
+            return _subprocess.CompletedProcess(cmd, 0, stdout="0\n", stderr="")
+
+        monkeypatch.setattr("nexus.health.subprocess.run", _fake_run)
+        proc = _run_psql(psql, "127.0.0.1", 5432, "nexus", "u", "secret", "SELECT 1;")
+
+        assert proc.returncode == 0
+        env = captured["env"]
+        assert env is not None
+        assert env.get("PGPASSWORD") == "secret"
+        lib = str(tmp_path / "bundle" / "lib")
+        assert env.get("LD_LIBRARY_PATH", "").split(os.pathsep)[0] == lib, (
+            "probe psql must get the bundle's sibling lib/ on the loader path "
+            "(same _bundle_lib_env guard as pg_provision's own calls)"
+        )
+
+    def test_non_bundle_layout_still_gets_pgpassword(self, tmp_path, monkeypatch):
+        import subprocess as _subprocess
+
+        from nexus.health import _run_psql
+
+        (tmp_path / "bin").mkdir()
+        psql = tmp_path / "bin" / "psql"  # no sibling lib/ — system layout
+        psql.write_text("")
+        captured: dict = {}
+
+        def _fake_run(cmd, **kwargs):
+            captured["env"] = kwargs.get("env")
+            return _subprocess.CompletedProcess(cmd, 0, stdout="0\n", stderr="")
+
+        monkeypatch.setattr("nexus.health.subprocess.run", _fake_run)
+        _run_psql(psql, "127.0.0.1", 5432, "nexus", "u", "pw", "SELECT 1;")
+
+        env = captured["env"]
+        assert env.get("PGPASSWORD") == "pw"
+        assert "LD_LIBRARY_PATH" not in env or env["LD_LIBRARY_PATH"] == os.environ.get("LD_LIBRARY_PATH")
