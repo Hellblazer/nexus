@@ -458,10 +458,13 @@ class TestCheckMigrationState:
         assert "7" in r.detail
 
     def test_legacy_chash_rows_warn_not_fatal(self, tmp_path):
-        """nexus-pnwu0 / GH #1390: non-32-char chash rows -> a WARNING with
-        the do-not-upgrade + runbook remediation, plus the still-ok Schema
-        migrations result. Never fatal (the current engine serves fine).
-        The count is SUMMED across the chash-bearing tables via nexus_diag."""
+        """nexus-pnwu0 / GH #1414: width-non-conformant chash rows -> a
+        WARNING steering the upgrade-ladder heal (nexus-o513u ladder-first;
+        the old 'Do NOT upgrade the engine / will crash-loop' claim was
+        disproven for v0.1.48+ by nexus-joima), plus the still-ok Schema
+        migrations result. Never fatal (the serving engine tolerates the
+        rows). The count is SUMMED across the chash-bearing tables via
+        nexus_diag."""
         creds = _make_creds_file(tmp_path)
         results = _check_migration_state(
             creds_path=creds,
@@ -476,8 +479,13 @@ class TestCheckMigrationState:
         assert chash.warn is True
         assert chash.fatal is False
         assert "12" in chash.detail
-        assert any("Do NOT upgrade" in s for s in chash.fix_suggestions)
+        # nexus-o513u: ladder-first — heal steps lead; no unconditional
+        # do-not-upgrade gate; rollback only as the will-not-boot branch.
+        assert any("nx upgrade" in s for s in chash.fix_suggestions)
+        assert not any("Do NOT upgrade" in s for s in chash.fix_suggestions)
         assert any("§8.1" in s for s in chash.fix_suggestions)
+        rollback = [s for s in chash.fix_suggestions if "--rollback" in s]
+        assert rollback and all("will-not-boot" in s for s in rollback)
         # the migration result itself is still healthy (box works now)
         assert any(r.label == "Schema migrations" and r.ok for r in results)
 

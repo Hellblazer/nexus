@@ -361,8 +361,9 @@ def _legacy_id_failure_reason(collection: str, example: str) -> str:
         "the migration will NOT guess ids. "
         "Re-index this collection from its source content, then re-run the "
         "migration. Do NOT drop or weaken the chash length constraints to "
-        "force the upserts through: that silently corrupts the store and "
-        "crash-loops a later engine upgrade (GH #1390)."
+        "force the upserts through: that silently corrupts the store "
+        "(GH #1390 — and on a pre-v0.1.48 char-era engine it also "
+        "crash-loops the next boot)."
     )
 
 

@@ -2317,23 +2317,28 @@ def _check_migration_state(
             fatal=True,
         )]
 
-    # Query 4 (nexus-pnwu0 / GH #1390): width-non-conformant chash rows
+    # Query 4 (nexus-pnwu0 / GH #1414): width-non-conformant chash rows
     # (octet_length <> 32, era-safe — see chash_tables.py) across the
     # chunk tables. A box that migrated legacy short ids pre-guard (or had
-    # its chash CHECK constraints dropped out-of-band — the GH #1390 shape)
-    # runs FINE on its current engine, but catalog-013-3's VALIDATE
-    # CONSTRAINT will FAIL on any violating row on the NEXT engine upgrade
-    # and crash-loop the boot (013-3 guards MISSING constraints, not
-    # VIOLATING rows). Surface it as a WARNING before that upgrade, never a
-    # fatal on the current box.
+    # its chash CHECK constraints dropped out-of-band — the closed GH #1390
+    # shape) serves FINE, and v0.1.48+ engines tolerate the rows at BOOT
+    # too: rdr180-11 adds the octet-width CHECKs NOT VALID, and their
+    # VALIDATE is the client chash-rekey rung's post-heal act — no boot
+    # changeset VALIDATEs them (verified nexus-joima, T2 [21022]). The rows
+    # are unhealed upgrade-ladder debt: surface a WARNING steering the
+    # ladder heal (nexus-o513u ladder-first). Only a pre-v0.1.48 char-era
+    # engine can still crash-loop on catalog-013-3's first VALIDATE (it
+    # guards MISSING constraints, not VIOLATING rows). Never fatal on the
+    # current box.
     #
     # nexus-vounk: this MUST run on the nexus_diag path, NOT as nexus_admin.
     # Every chash-bearing table is ENABLE+FORCE RLS with the fail-closed
     # tenant_isolation policy, so a nexus_admin session with no nexus.tenant
     # GUC counts ZERO rows (demonstrated 0-vs-9 on a real store) — the probe
     # would report clean on the exact poisoned store the install-binary gate
-    # exists to block (the nexus-1wjmq asymmetry: Liquibase VALIDATE sees
-    # every row and crash-loops on the next upgrade). run_diagnostic_sql runs
+    # exists to block (the nexus-1wjmq asymmetry: any Liquibase VALIDATE that
+    # DOES run sees every row — on a pre-v0.1.48 char-era engine that
+    # crash-loops the boot). run_diagnostic_sql runs
     # as the SELECT-only BYPASSRLS nexus_diag role (no GUC), so integrity
     # counts see every tenant's rows — what VALIDATE sees. A missing
     # diagnostic role (pre-P2.1 install) or a probe failure degrades to a
@@ -2427,21 +2432,30 @@ def _check_migration_state(
             detail=(
                 f"{nonconforming} chunk row(s) have a {POISON_DETAIL_TOKEN} "
                 "(octet_length <> 32 — legacy pre-RDR-108 ids, or chash "
-                "CHECK constraints were dropped out-of-band). The current "
-                "engine serves fine, but an engine UPGRADE will crash-loop "
-                "on catalog-013-3's VALIDATE CONSTRAINT (GH #1390 / "
+                "CHECK constraints were dropped out-of-band). The engine "
+                "serves fine with these rows (the octet-width CHECKs stay "
+                "NOT VALID until the chash-rekey rung heals them), but "
+                "they are unhealed upgrade-ladder debt (GH #1414 / "
                 "nexus-pnwu0)."
             ),
             fix_suggestions=[
-                "Do NOT upgrade the engine binary until remediated "
-                "(`nx daemon service install-binary` now refuses without "
-                "--force on a poisoned store).",
+                "Step 1 — find each affected collection's repo: "
+                "`nx catalog owners list`",
+                "Step 2 — re-index the file-backed legacy collections: "
+                "`nx index repo <path>` (additive, per-collection; "
+                "store_put-only notes need nothing — the rekey rung "
+                "heals those from stored text)",
+                "Step 3 — run the ladder: `nx upgrade` (the chash-rekey "
+                "rung recomputes correct ids from stored chunk text)",
+                "Step 4 — re-run `nx doctor`; upgrade the engine once "
+                "this warning clears.",
                 "Do NOT drop the chash length constraints to 'unblock' "
                 "anything — that is what caused GH #1390.",
-                "Recovery playbook (clickable): "
+                "Rollback (`nx storage migrate vectors --rollback`) is "
+                "for the will-not-boot class ONLY (service crash-looping "
+                "at startup on a pre-v0.1.48 engine) — see §8.1 of "
                 "https://github.com/Hellblazer/nexus/blob/main/docs/"
-                "migration-runbook.md §8.1 (rollback -> re-index legacy "
-                "collections -> re-migrate).",
+                "migration-runbook.md",
             ],
             warn=True,
         ))

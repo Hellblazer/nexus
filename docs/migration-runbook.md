@@ -602,35 +602,46 @@ addresses.
 ### 8.1 Recovering a store that already migrated legacy ids (nexus-pnwu0)
 
 A box that completed a migration with width-non-conformant chashes in
-pgvector (pre-guard, or because constraints were dropped) **must not
-upgrade its engine** until remediated: `catalog-013-3` VALIDATEs any present chash
-length CHECK against real rows and a violating row crash-loops the boot
-(it guards *missing constraints*, not *violating rows*).
+pgvector (pre-guard, or because constraints were dropped) carries
+**unhealed upgrade-ladder debt**. On RDR-180-era engines (v0.1.48+) the
+store **boots and serves with these rows present** — the octet-width
+CHECKs are added `NOT VALID` and are VALIDATEd by the chash-rekey rung
+*after* it heals the rows, never by a boot changeset (verified:
+nexus-joima, 2026-07-21). Only a **pre-v0.1.48 char-era engine** can
+still crash-loop on boot: `catalog-013-3` VALIDATEs any *present*
+char-era length CHECK against real rows (it guards *missing
+constraints*, not *violating rows*) — the closed GH #1390 shape.
 
-`nx doctor` detects this proactively — it counts width-non-conformant
+`nx doctor` detects the debt proactively — it counts width-non-conformant
 chash rows (octet_length <> 32) across the chunk tables and emits a
-`Chunk chash conformance` **warning**
-(never fatal; the current engine serves fine) with a pointer back here. Run
-it before any engine upgrade on a box whose store predates RDR-108 or ever
-had its chash constraints touched.
+`Chunk chash conformance` **warning** (never fatal; the serving engine
+tolerates the rows) with a pointer back here.
 
-Recovery, in order:
+**Recovery, in order (ladder-first — do NOT roll back a serving store):**
 
-1. Stay on the current engine version (do not install a newer binary yet).
-2. `nx storage migrate vectors --rollback [--cloud]` — deletes from pgvector
-   exactly the chashes present in the Chroma source; because the poisoned
-   rows were copied verbatim, this removes them and returns serving to the
-   intact Chroma source (copy-not-move).
-3. Re-index the legacy-id collections from source content (fresh 32-char
-   chashes in both chunks and manifests). Under RDR-185 this step is
-   OPTIONAL for the re-migrate below — the rung recomputes the correct id
-   from the chunk text on the wire — and remains impossible for
-   `store_put`-only notes, which have no source content to re-index from.
-4. Re-run `nx upgrade` (the rung's wire re-id computes a conformant address
-   for every id that crosses, and the sot7v guards vouch for it).
-5. Only then upgrade the engine. If chash CHECK constraints were manually
-   dropped on the old target, they stay absent (the MARK_RAN freeze,
-   nexus-4m6i0.12) — re-adding them is a deliberate operator step:
-   `ALTER TABLE nexus.<t> ADD CONSTRAINT <t>_chash_len_check
-   CHECK (length(chash) = 32) NOT VALID;` followed by
-   `VALIDATE CONSTRAINT` once the data is proven clean.
+1. `nx catalog owners list` — resolve each affected legacy-id collection
+   to its repo path.
+2. `nx index repo <path>` — re-index the file-backed legacy collections
+   (additive, per-collection). `store_put`-only note collections have no
+   source to re-index; skip them — the rekey rung heals those from
+   stored text.
+3. `nx upgrade` — the substrate-etl rung converges the re-indexed
+   collections and the chash-rekey rung recomputes conformant ids from
+   stored chunk text for the rest (the same machinery that rekeyed
+   254,846 production rows on 2026-07-20 with zero loss).
+4. `nx doctor` — confirm the `Chunk chash conformance` warning has
+   cleared. Then upgrade the engine freely.
+
+**Rollback branch — ONLY if the service will not boot** (Liquibase
+crash-loop at startup on a pre-v0.1.48 char-era engine, the closed
+GH #1390 shape): `nx storage migrate vectors --rollback [--cloud]`
+deletes from pgvector exactly the chashes present in the Chroma source;
+because the poisoned rows were copied verbatim, this removes them and
+returns serving to the intact Chroma source (copy-not-move). Then
+re-index and re-run `nx upgrade` as above. If chash CHECK constraints
+were manually dropped on the old target, they stay absent (the MARK_RAN
+freeze, nexus-4m6i0.12) — re-adding them is a deliberate operator step
+using the current (bytea-era) constraint form:
+`ALTER TABLE nexus.<t> ADD CONSTRAINT <t>_chash_octet_check
+CHECK (octet_length(chash) = 32) NOT VALID;` followed by
+`VALIDATE CONSTRAINT` once the data is proven clean.

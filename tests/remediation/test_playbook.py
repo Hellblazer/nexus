@@ -4,9 +4,13 @@
 The Playbook is the single source of truth for remediation guidance text,
 consumed by BOTH the CLI gate (`_emit_chash_poison_gate` in
 src/nexus/commands/daemon.py) and, in Phase 3, the MCP `forensics`/`remediate`
-tools. The chash-poison topic is BYTE-LOCKED to the shipped install-binary
-gate payload: every expected string below is a literal copied from the
-pre-hoist daemon.py, so the refactor is provably behavior-preserving.
+tools. The chash-poison topic is LOCKED to the nexus-o513u ladder-first
+contract (GH #1414, 2026-07-21): the nexus-joima verification proved the
+pre-rewrite "a new engine would crash-loop on boot" premise FALSE for
+v0.1.48+ engines (octet-width CHECKs land NOT VALID; no boot-time VALIDATE
+exists), so the playbook steers the upgrade-ladder heal FIRST and reserves
+rollback for the will-not-boot class. Every expected string below pins that
+contract; changing it is a deliberate contract change, not a refactor.
 """
 from __future__ import annotations
 
@@ -16,21 +20,30 @@ _URL = "https://github.com/Hellblazer/nexus/blob/main/docs/migration-runbook.md"
 
 _DETAIL = "3 non-32-char chash row(s) in pgvector (worst: 'abc')."
 
-# The ready-to-paste agent prompt exactly as daemon.py shipped it (pre-hoist).
+# The ready-to-paste agent prompt (nexus-o513u ladder-first contract).
 _EXPECTED_PROMPT = (
-    "My conexus/nexus store has non-32-char chash rows in pgvector "
-    "(GH #1390 / nexus-pnwu0) and a new engine would crash-loop on boot. "
-    f"Walk me through the recovery in {_URL} section 8.1: roll back the "
-    "poisoned pgvector target (nx storage migrate vectors --rollback), "
-    "re-index the affected legacy-id collections from source, re-run nx "
-    "guided-upgrade, and only then let me upgrade the engine. Do NOT drop "
+    "My conexus/nexus store has width-non-conformant chash rows in "
+    "pgvector (octet_length <> 32 — legacy pre-RDR-108 ids; the GH #1414 "
+    "class). The serving engine tolerates them, but they are unhealed "
+    "debt the upgrade ladder should converge. "
+    f"Walk me through the recovery in {_URL} section 8.1: "
+    "resolve the affected legacy-id collections to their repos "
+    "(nx catalog owners list) and re-index the file-backed ones "
+    "(nx index repo <path> — additive, per-collection), "
+    "run nx upgrade — the substrate-etl rung converges the re-indexed "
+    "collections and the chash-rekey rung recomputes conformant ids "
+    "from stored chunk text for the rest (store_put-only notes "
+    "included), "
+    "re-run nx doctor and confirm the 'Chunk chash conformance' "
+    "warning has cleared, and only then let me upgrade the engine. Do NOT drop "
     "the chash length constraints."
 )
 
-# The refusal block exactly as daemon.py click.echo'd it (pre-hoist).
+# The refusal block (nexus-o513u ladder-first contract).
 _EXPECTED_TERMINAL = (
-    "\nRefusing to install (nexus-pnwu0 / GH #1390): booting a new engine "
-    "on this store would crash-loop.\n"
+    "\nRefusing to install (nexus-pnwu0 / GH #1414): this store has "
+    "width-non-conformant chash rows — heal them via the upgrade ladder "
+    "before swapping engine binaries.\n"
     f"  {_DETAIL}\n\n"
     "Remediate first — full recovery playbook (clickable):\n"
     f"  {_URL} §8.1\n\n"
@@ -43,11 +56,13 @@ _EXPECTED_TERMINAL = (
     "after you have remediated."
 )
 
-# The --force override warning exactly as daemon.py shipped it (pre-hoist).
+# The --force override warning (nexus-o513u ladder-first contract).
 _EXPECTED_FORCE = (
-    "WARNING (nexus-pnwu0): --force overrides the chash-poison gate. "
-    f"{_DETAIL} The new engine may crash-loop on boot unless you have "
-    "already remediated. Recovery: " + _URL + " §8.1."
+    "WARNING (nexus-pnwu0 / GH #1414): --force overrides the chash-poison "
+    f"gate. {_DETAIL} The rows stay unhealed debt: the chash-rekey rung's "
+    "VALIDATE will keep failing until they converge, and a pre-v0.1.48 "
+    "char-era engine can still crash-loop on boot. "
+    "Recovery: " + _URL + " §8.1."
 )
 
 
@@ -83,11 +98,16 @@ def test_structured_fields_carry_the_rdr_contract(chash_playbook):
     pb = chash_playbook
     assert pb.topic == "chash-poison"
     assert _DETAIL == pb.store_detail
-    assert pb.context.startswith("My conexus/nexus store has non-32-char")
+    assert pb.context.startswith("My conexus/nexus store has width-non-conformant")
     assert pb.constraints and all(c for c in pb.constraints)
     assert any("Do NOT drop the chash length constraints" in c for c in pb.constraints)
     assert len(pb.steps) == 3
-    assert pb.steps[0].startswith("roll back the poisoned pgvector target")
+    # nexus-o513u: ladder-first — the steps NEVER prescribe rollback; the
+    # rollback branch lives in the escape, conditioned on will-not-boot.
+    assert pb.steps[0].startswith("resolve the affected legacy-id collections")
+    assert all("--rollback" not in s for s in pb.steps)
+    assert "--rollback" in pb.escape
+    assert "will NOT BOOT" in pb.escape
     assert pb.deliverable  # structured-deliverable instruction is non-empty
     assert "gone" in pb.escape  # environment-gone escape present
 

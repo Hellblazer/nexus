@@ -1841,9 +1841,9 @@ def service_start_cmd(
 
 
 def _emit_chash_poison_gate(config_dir: Path, *, force: bool) -> None:
-    """nexus-pnwu0 / GH #1390 upgrade gate (see call site).
+    """nexus-pnwu0 / GH #1414 upgrade gate (see call site).
 
-    Detects non-32-char chash rows in the pgvector store via the SAME probe
+    Detects width-non-conformant chash rows in the pgvector store via the SAME probe
     `nx doctor` uses (:func:`nexus.health._check_migration_state`), and refuses
     the install unless *force*. Emits a full clickable runbook URL AND a
     ready-to-paste prompt the operator can hand to their own Claude — the
@@ -1907,9 +1907,11 @@ def _emit_chash_poison_gate(config_dir: Path, *, force: bool) -> None:
     "--force",
     is_flag=True,
     default=False,
-    help="Override the chash-poison pre-check (nexus-pnwu0). Use ONLY after "
-         "remediating per docs/migration-runbook.md §8.1 — a new engine will "
-         "crash-loop on boot if the store still holds non-32-char chash rows.",
+    help="Override the chash-poison pre-check (nexus-pnwu0 / GH #1414). Use "
+         "ONLY after healing per docs/migration-runbook.md §8.1 (ladder-first: "
+         "re-index legacy collections, nx upgrade, doctor clears). The rows "
+         "stay unhealed debt if you force past them; a pre-v0.1.48 char-era "
+         "engine can still crash-loop on boot.",
 )
 def service_install_binary_cmd(
     tag: str, config_dir_str: str | None, want_pg_bundle: bool, force: bool,
@@ -1943,13 +1945,19 @@ def service_install_binary_cmd(
     config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
     installed_by = f"conexus {_nx_version}"
 
-    # nexus-pnwu0 / GH #1390 upgrade gate: refuse to install a new engine onto a
-    # store whose pgvector target already holds non-32-char chash rows. Booting
-    # the new binary would crash-loop Liquibase's VALIDATE CONSTRAINT
-    # (catalog-013-3 has no guard against present-but-violating constraints, and
-    # the changelog cannot cleanly add one — the count query runs under FORCE RLS
-    # as the NOBYPASSRLS migration role and sees zero of the very rows VALIDATE
-    # then trips on). This is the actual gate the passive `nx doctor` probe could
+    # nexus-pnwu0 / GH #1414 upgrade gate: refuse to install a new engine onto a
+    # store whose pgvector target holds width-non-conformant chash rows. The
+    # rows are unhealed upgrade-ladder debt the operator should converge FIRST
+    # (nexus-o513u ladder-first: re-index legacy collections -> nx upgrade ->
+    # doctor clears); swapping engine binaries mid-debt just churns the boot
+    # path while the heal is pending. Note the original crash-loop premise was
+    # narrowed by nexus-joima (2026-07-21): v0.1.48+ engines tolerate the rows
+    # at boot (octet checks NOT VALID until the rekey rung); only a pre-v0.1.48
+    # char-era engine can still crash-loop on catalog-013-3's first VALIDATE
+    # (no guard against present-but-violating constraints, and the changelog
+    # cannot cleanly add one — the count query runs under FORCE RLS as the
+    # NOBYPASSRLS migration role and sees zero of the very rows VALIDATE then
+    # trips on). This is the actual gate the passive `nx doctor` probe could
     # not enforce. The probe reuses _check_migration_state's chash query so there
     # is one source of truth; a probe failure never blocks a legitimate install.
     _emit_chash_poison_gate(config_dir, force=force)
