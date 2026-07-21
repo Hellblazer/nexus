@@ -325,7 +325,9 @@ class StagingPromoteOpsIntegrationTest {
             return null;
         });
 
-        // The chash_index leg rides the per-collection promote.
+        // RDR-187 (nexus-piwya.7): the chash_index promote leg is retired —
+        // the per-collection promote must leave the landed rows unpromoted
+        // (asserted below).
         ops.promoteCollection(T1, COLL_A, 768);
         Map<String, Object> fin = ops.finalizeTenant(T1, false);
 
@@ -343,7 +345,12 @@ class StagingPromoteOpsIntegrationTest {
             .as("the legacy manifest pointer promoted CANONICAL").isEqualTo(1);
         assertThat(count("SELECT count(*) FROM nexus.chash_index "
             + "WHERE encode(chash,'hex') = '" + canon1 + "' AND physical_collection = '" + COLL_A + "'"))
-            .isEqualTo(1);
+            .as("RDR-187 (nexus-piwya.7): the staging chash promote leg is RETIRED — "
+                + "the landed staging.chash_index row (seeded above, deliberately kept: "
+                + "old clients mid-guided-upgrade still land it) must be accepted as a "
+                + "DEAD SINK and never promoted into the router. A resurrected promote "
+                + "leg fails this. The chunks promote (4) is the registration now.")
+            .isZero();
         assertThat(count("SELECT count(*) FROM nexus.topic_assignments ta "
             + "JOIN nexus.topics t ON t.id = ta.topic_id "
             + "WHERE ta.doc_id = '" + canon1 + "' AND t.label = 'topic-x'"))

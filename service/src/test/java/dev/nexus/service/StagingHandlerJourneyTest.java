@@ -233,8 +233,11 @@ class StagingHandlerJourneyTest {
             + "WHERE encode(chash,'hex') = '" + canon + "'")).isEqualTo(1);
         assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
             + "WHERE doc_id = '9.9.1' AND encode(chash,'hex') = '" + canon + "'")).isEqualTo(1);
+        // RDR-187 (nexus-piwya.7): the staging chash promote leg is retired —
+        // the landed staging.chash_index row is a dead sink; the chunks
+        // promote above IS the registration. A resurrected leg fails this.
         assertThat(count("SELECT count(*) FROM nexus.chash_index "
-            + "WHERE encode(chash,'hex') = '" + canon + "'")).isEqualTo(1);
+            + "WHERE encode(chash,'hex') = '" + canon + "'")).isZero();
     }
 
     @Test
