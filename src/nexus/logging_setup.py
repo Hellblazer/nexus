@@ -202,6 +202,24 @@ def _filtering_bound_logger_level(wrapper_class: type) -> int:
     return logging.NOTSET
 
 
+def active_log_file() -> Path | None:
+    """Path of this process's attached rotating log file, if any.
+
+    nexus-ri56e (GH #1414 follow-up): lets the dispatch choke point name
+    IN ITS EXCEPTION where the durable ``operator_dispatch_failed`` record
+    landed — the timeout branch has always named its artifact; the failure
+    branch previously required already knowing what to grep. ``None`` means
+    plain CLI mode (``configure_logging("cli")`` attaches no file handler)
+    or an ``open_run_log`` block that is not currently active — stderr is
+    the only record.
+    """
+    root = logging.getLogger()
+    for h in root.handlers:
+        if isinstance(h, logging.handlers.RotatingFileHandler):
+            return Path(h.baseFilename)
+    return None
+
+
 @contextmanager
 def open_run_log(name: str, config_dir: Path | None = None) -> Iterator[Path]:
     """Attach a per-run log file at ``<config_dir>/logs/<name>.log`` for

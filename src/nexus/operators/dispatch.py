@@ -11,13 +11,43 @@ surfaces naturally.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import os
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 import structlog
 
 _log = structlog.get_logger()
+
+#: nexus-l1qpj: fail-open BATCH callers (taxonomy discover/review) roll
+#: dispatch failures up into one summary line themselves — inside their
+#: scope the per-failure ``operator_dispatch_failed`` event demotes from
+#: WARNING to INFO so a bad run does not wall the terminal with one
+#: WARNING per failed batch. INFO still reaches any attached file handler
+#: (``open_run_log`` unlocks INFO for its file while pinning stderr
+#: quiet), so the per-failure record survives; only the stderr noise goes.
+_ROLLED_UP: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "dispatch_failures_rolled_up", default=False,
+)
+
+
+@contextmanager
+def rolled_up_dispatch_failures() -> Iterator[None]:
+    """Demote per-failure dispatch WARNINGs to INFO within this scope.
+
+    ONLY for callers that (a) are fail-open by contract AND (b) emit their
+    own end-of-batch rollup summary naming the failure count and where the
+    per-failure records went. Everyone else keeps the WARNING default —
+    the durable-record posture of nexus-q6830 is the point of the choke
+    point.
+    """
+    token = _ROLLED_UP.set(True)
+    try:
+        yield
+    finally:
+        _ROLLED_UP.reset(token)
 
 #: Per-stream cap on what the failure log records, in characters.
 #: Sized against the handler's real budget, not picked for feel: the log
@@ -38,6 +68,7 @@ _TRUNCATION_MARKER: str = "...[truncated]"
 
 __all__ = [
     "claude_dispatch",
+    "rolled_up_dispatch_failures",
     "OperatorError",
     "OperatorOutputError",
     "OperatorTimeoutError",
@@ -406,14 +437,32 @@ async def claude_dispatch(
         # handler is attached — stderr only. Those two go from 100% silent
         # to one stderr line per failure during the run, which is an
         # improvement and is NOT "something to grep afterward".
-        _log.warning(
+        emit = _log.info if _ROLLED_UP.get() else _log.warning
+        emit(
             "operator_dispatch_failed",
             returncode=proc.returncode,
             stdout=_capped(stdout),
             stderr=_capped(stderr),
         )
+        # nexus-ri56e: (a) origin unambiguity — a populated message now
+        # reads like an ordinary application error, but this is the
+        # DISPATCH HARNESS failing (the claude -p CLI exited non-zero);
+        # whoever hits it must not mistake the relayed error text for a
+        # model-level answer. (b) addressability — the timeout branch has
+        # always named its artifact in the exception; name ours too, or
+        # honestly say there is none (plain CLI mode).
+        from nexus.logging_setup import active_log_file  # noqa: PLC0415 — deferred: logging_setup is heavier than this hot-free error path needs at import time
+
+        log_file = active_log_file()
+        where = (
+            f"durable record: operator_dispatch_failed in {log_file}"
+            if log_file is not None
+            else "no log file attached (plain CLI mode) — this message is "
+                 "the only record"
+        )
         raise OperatorError(
-            f"claude -p exited {proc.returncode}: {detail}"
+            f"claude -p exited {proc.returncode} (dispatch-harness "
+            f"failure, not a model answer): {detail} [{where}]"
         )
 
     raw = stdout.decode(errors="replace").strip()

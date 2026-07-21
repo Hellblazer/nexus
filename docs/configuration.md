@@ -203,7 +203,10 @@ run:
    Optionally create `nexus_diag` (NOSUPERUSER NOCREATEDB NOCREATEROLE
    BYPASSRLS LOGIN) — the client-side diagnostic role for the pre-upgrade
    chash-poison probe and `nx forensics`; without it those checks degrade to a
-   loud WARN, never a false clean.
+   loud WARN, never a false clean. Note the client probe is **local-only by
+   design** (nexus-y3wuu): it reaches only a local Postgres via the local
+   `pg_credentials` file, so on a remote/managed store the role serves
+   server-side diagnostics run with your own credentials, not `nx forensics`.
 3. **Diagnostic counts view (RDR-182 Amendment A6).** After the first
    migration run has created the chunk tables, create the superuser-owned
    counts view and grant it to `nexus_diag` — under FORCE row-level security a

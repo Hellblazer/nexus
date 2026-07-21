@@ -2437,7 +2437,12 @@ def _check_migration_state(
                 "serves fine with these rows (the octet-width CHECKs stay "
                 "NOT VALID until the chash-rekey rung heals them), but "
                 "they are unhealed upgrade-ladder debt (GH #1414 / "
-                "nexus-pnwu0)."
+                "nexus-pnwu0). Re-indexing affected content HEALS these "
+                "rows in place and lowers this count (new conformant rows "
+                "are written before stale rows are pruned — nexus-2hklz "
+                "verified heal-by-replacement); deleting affected content "
+                "also lowers it, so read a falling count as healing only "
+                "where your content is intact."
             ),
             fix_suggestions=[
                 "Step 1 — find each affected collection's repo: "

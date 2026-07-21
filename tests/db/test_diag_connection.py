@@ -120,3 +120,63 @@ class TestCredentialResolution:
             assert resolve_diag_credentials(p) is None
         finally:
             p.chmod(0o600)
+
+
+class TestLiveStoreDetailLocalOnly:
+    """nexus-y3wuu (Hal decision 2026-07-20, option b): the diagnostic path
+    is LOCAL-ONLY BY DESIGN — no remote host/dbname/sslmode resolution
+    exists. On a non-local (managed/BYO service) deployment the leg must
+    refuse with the contract stated, not report 'no nexus_diag credentials'
+    (indistinguishable from 'not provisioned'; cost conexus a source-read
+    to discover)."""
+
+    def test_non_local_mode_refuses_naming_the_contract(self, monkeypatch):
+        from unittest.mock import patch
+
+        from nexus.db.diag_connection import live_store_detail
+
+        calls = {"resolve": 0, "run": 0}
+
+        def _resolve():
+            calls["resolve"] += 1
+
+        def _run(statements, creds):
+            calls["run"] += 1
+
+        with patch("nexus.config.is_local_mode", return_value=False):
+            text = live_store_detail(
+                ["SELECT COUNT(*) FROM nexus.chunks_768;"],
+                resolve=_resolve, run=_run,
+            )
+        assert "LOCAL-ONLY" in text
+        assert "by design" in text.lower()
+        assert "no nexus_diag credentials" not in text
+        # Zero diagnostic work on the refused path.
+        assert calls == {"resolve": 0, "run": 0}
+
+    def test_local_mode_no_creds_keeps_unavailable_message(self):
+        from unittest.mock import patch
+
+        from nexus.db.diag_connection import live_store_detail
+
+        with patch("nexus.config.is_local_mode", return_value=True):
+            text = live_store_detail(
+                ["SELECT 1;"], resolve=lambda: None, run=lambda s, c: [],
+            )
+        assert "UNAVAILABLE" in text
+        assert "no nexus_diag credentials" in text
+        assert "Do NOT interpret this as a clean store" in text
+
+    def test_local_mode_with_creds_renders_results(self):
+        from unittest.mock import patch
+
+        from nexus.db.diag_connection import live_store_detail
+
+        with patch("nexus.config.is_local_mode", return_value=True):
+            text = live_store_detail(
+                ["SELECT 1;"],
+                resolve=lambda: _CREDS,
+                run=lambda s, c: ["42"],
+            )
+        assert "live diagnostic results" in text
+        assert "SELECT 1; = 42" in text

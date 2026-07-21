@@ -32,6 +32,16 @@ run (the fast idempotency path backfills the role + keys on already-running
 clusters, so one re-run of ``nx init --service``/``guided-upgrade`` heals
 them) — so resolution returns ``None`` and callers degrade cleanly, same
 posture as the probe gates that consume this.
+
+LOCAL-ONLY BY DESIGN (nexus-y3wuu, Hal decision 2026-07-20): this path
+shells a LOCAL ``psql`` at the LOCAL bundle Postgres (``host=127.0.0.1``,
+``dbname=nexus`` — the ``DiagCredentials`` defaults, never overridden by
+resolution) reading the LOCAL ``pg_credentials`` file. There is deliberately
+NO remote reachability — no host/dbname/sslmode resolution, no credential
+lookup outside the local bundle. On a managed/BYO service deployment the
+diagnostics run server-side with the store operator's own credentials;
+:func:`live_store_detail` refuses there with the contract stated, so
+"local-only by design" is never mistaken for "not provisioned".
 """
 from __future__ import annotations
 
@@ -58,7 +68,13 @@ PsqlRunner = Callable[..., "subprocess.CompletedProcess[str]"]
 
 @dataclass(frozen=True)
 class DiagCredentials:
-    """Connection material for the nexus_diag diagnostic session."""
+    """Connection material for the nexus_diag diagnostic session.
+
+    ``host``/``dbname`` are ALWAYS the local-bundle defaults — resolution
+    never sets them (local-only by design, see the module docstring).
+    Adding remote fields here is a contract change, not a bug fix — it
+    requires an explicit Hal decision reversing nexus-y3wuu.
+    """
 
     port: int
     user: str
@@ -180,6 +196,30 @@ def live_store_detail(statements, *, resolve=None, run=None) -> str:
     """
     _resolve = resolve if resolve is not None else resolve_diag_credentials
     _run = run if run is not None else run_diagnostic_sql
+
+    # nexus-y3wuu (Hal decision 2026-07-20): local-only BY DESIGN. On a
+    # managed/BYO service deployment the local probe can only ever report
+    # missing credentials, which an operator cannot distinguish from "not
+    # provisioned" — refuse with the contract stated instead, BEFORE any
+    # resolution work. is_local_mode() is the same locality heuristic the
+    # engine-convergence gate keys on (round-3 critique MEDIUM-1: its
+    # legacy fallback reads embedder credentials, so a self-hosted local
+    # service that ALSO holds cloud embedder keys can classify non-local
+    # — a pre-existing edge of the shared heuristic, accepted for
+    # consistency, not a fresh contract here).
+    from nexus.config import is_local_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
+
+    if not is_local_mode():
+        return (
+            "live diagnostics REFUSED — this probe is LOCAL-ONLY by design "
+            "(nexus-y3wuu): it shells a local psql at the local bundle "
+            "Postgres (127.0.0.1) using the local pg_credentials file; no "
+            "remote host/credential resolution exists. This store is in "
+            "service/cloud mode, so there is nothing local to probe — this "
+            "is NOT a missing-credentials or unprovisioned condition. Run "
+            "the diagnostics server-side with the store operator's own "
+            "credentials instead."
+        )
 
     creds = _resolve()
     if creds is None:

@@ -479,6 +479,13 @@ class TestCheckMigrationState:
         assert chash.warn is True
         assert chash.fatal is False
         assert "12" in chash.detail
+        # nexus-2hklz (round-3 critique HIGH-1): the falling-count guidance
+        # must scope the healing claim to re-indexing — deletions also
+        # lower the count, so no blanket "shrinking = healing" claim.
+        assert "Re-indexing affected content HEALS" in chash.detail
+        assert "heal-by-replacement" in chash.detail
+        assert "deleting affected content also lowers it" in chash.detail
+        assert "not data loss" not in chash.detail
         # nexus-o513u: ladder-first — heal steps lead; no unconditional
         # do-not-upgrade gate; rollback only as the will-not-boot branch.
         assert any("nx upgrade" in s for s in chash.fix_suggestions)

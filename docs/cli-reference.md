@@ -2508,6 +2508,13 @@ surface (a shell-capable agent gets no more than the MCP transport does).
 When enabled, credentials absent or a probe failure render as an explicit
 "unavailable"/"unknown" note, never a silent all-clean.
 
+The live-diagnostics leg is **local-only by design** (nexus-y3wuu): it
+shells a local `psql` at the local bundle Postgres using the local
+`pg_credentials` file — there is deliberately no remote host or credential
+resolution. On a managed/BYO service deployment the leg refuses with that
+contract stated (it is not a missing-credentials condition); run the
+diagnostics server-side with the store operator's own credentials.
+
 ---
 
 ## nx remediate

@@ -1705,3 +1705,112 @@ class TestOperatorAggregate:
         assert len(result["aggregates"]) == 3
         keys = {a["key_value"] for a in result["aggregates"]}
         assert keys == {"alpha", "beta", "gamma"}
+
+
+class TestFailureRecordAddressability:
+    """nexus-ri56e (GH #1414 follow-ups): the failure branch must (a) make
+    its HARNESS origin unambiguous — a populated message reads like an
+    ordinary application error, but this is `claude -p` itself exiting
+    non-zero, not a model answer; and (b) name where the durable record
+    went (the timeout branch always has), or honestly say there is none."""
+
+    @pytest.mark.asyncio
+    async def test_message_states_harness_origin(self) -> None:
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        proc = _make_proc(stdout=b'model-ish error text', returncode=1, stderr=b'')
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorError) as exc:
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+        msg = str(exc.value)
+        assert "dispatch-harness failure, not a model answer" in msg
+        assert "model-ish error text" in msg  # original detail preserved
+
+    @pytest.mark.asyncio
+    async def test_message_names_the_log_file_when_one_is_attached(
+        self, tmp_path,
+    ) -> None:
+        import logging.handlers
+
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        handler = logging.handlers.RotatingFileHandler(tmp_path / "mcp.log")
+        logging.getLogger().addHandler(handler)
+        try:
+            proc = _make_proc(stdout=b'boom', returncode=1, stderr=b'')
+            with patch(
+                "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc),
+            ):
+                with pytest.raises(OperatorError) as exc:
+                    await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+        finally:
+            logging.getLogger().removeHandler(handler)
+            handler.close()
+        msg = str(exc.value)
+        assert "operator_dispatch_failed" in msg  # the event name to look for
+        assert str(tmp_path / "mcp.log") in msg   # ...and exactly where
+
+    @pytest.mark.asyncio
+    async def test_message_says_no_record_in_plain_cli_mode(self) -> None:
+        # No RotatingFileHandler attached (plain CLI): the exception must
+        # say the message IS the record, never imply a greppable file.
+        import logging.handlers
+
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        root = logging.getLogger()
+        assert not any(
+            isinstance(h, logging.handlers.RotatingFileHandler)
+            for h in root.handlers
+        ), "test precondition: no file handler attached"
+        proc = _make_proc(stdout=b'boom', returncode=1, stderr=b'')
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorError) as exc:
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+        assert "no log file attached" in str(exc.value)
+
+
+class TestRolledUpFailureDemotion:
+    """nexus-l1qpj: inside rolled_up_dispatch_failures() the per-failure
+    choke-point event demotes WARNING -> INFO (the batch caller emits its
+    own rollup); outside, the WARNING default stands."""
+
+    @pytest.mark.asyncio
+    async def test_demoted_inside_scope(self) -> None:
+        from nexus.operators.dispatch import (
+            claude_dispatch,
+            rolled_up_dispatch_failures,
+            OperatorError,
+        )
+
+        proc = _make_proc(stdout=b'x', returncode=1, stderr=b'')
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with patch("nexus.operators.dispatch._log") as mock_log:
+                with rolled_up_dispatch_failures():
+                    with pytest.raises(OperatorError):
+                        await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+        assert mock_log.info.called
+        assert not mock_log.warning.called
+
+    @pytest.mark.asyncio
+    async def test_warning_outside_scope(self) -> None:
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        proc = _make_proc(stdout=b'x', returncode=1, stderr=b'')
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with patch("nexus.operators.dispatch._log") as mock_log:
+                with pytest.raises(OperatorError):
+                    await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+        assert mock_log.warning.called
+        assert not mock_log.info.called
+
+    def test_scope_restores_on_exit(self) -> None:
+        from nexus.operators.dispatch import (
+            _ROLLED_UP,
+            rolled_up_dispatch_failures,
+        )
+
+        assert _ROLLED_UP.get() is False
+        with rolled_up_dispatch_failures():
+            assert _ROLLED_UP.get() is True
+        assert _ROLLED_UP.get() is False
