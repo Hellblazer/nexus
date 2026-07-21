@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-187 bead nexus-piwya.1 — (tenant_id, chash) probe indexes on the
+    chunk tables.
+
+    The chunks PK is (tenant_id, collection, chash) with collection leading
+    (vectors-001-baseline.xml), so a chash-only probe — "which collections
+    hold this chash for this tenant" — cannot seek past the tenant_id prefix:
+    the planner crawls every PK entry for the tenant. The census
+    (ChashCensus), alias resolution (chash_alias joins), and the RDR-187
+    step-2 reroute of /v1/chash/* over the chunks tables all issue exactly
+    that probe shape. These indexes are REQUIRED by the reroute and improve
+    the census/alias probes immediately (RDR-187 Verified Ground 1).
+
+    Per-dim DDL stays byte-identical modulo dim (locked RDR-155 invariant):
+    any changeset touching one chunks_<dim> table touches all three.
+
+    BUILD-WINDOW DECISION: plain CREATE INDEX, not CONCURRENTLY — deliberate,
+    but for a DIFFERENT reason than vectors-002 (which runs on pre-ETL empty
+    tables). This changeset ships to POPULATED stores (the cloud tenants
+    carry ~255k chunk rows post-RDR-180 rekey). Plain CREATE INDEX is still
+    right: Liquibase runs in the boot-time migration window before the engine
+    serves traffic, a narrow two-column btree over 10^5-10^6 rows builds in
+    seconds, and inside the changeset transaction the index is
+    valid-or-absent — CONCURRENTLY would require runInTransaction="false"
+    and can strand an INVALID index on failure. If a future store is ever
+    large enough to need CONCURRENTLY, build it manually outside Liquibase;
+    the precondition below then marks these changesets ran.
+
+    PRECONDITION DISCIPLINE (catalog-013 lineage): whole-changeset
+    <preConditions onFail="MARK_RAN"> gated on a sqlCheck. The check counts
+    only VALID indexes of the target name: a manually pre-built valid index
+    marks ran (one-time DATABASECHANGELOG row, never re-checked — the
+    documented MARK_RAN freeze semantics); an INVALID leftover (failed
+    out-of-band CONCURRENTLY build) does NOT satisfy the check, so the
+    CREATE INDEX runs, collides with the leftover's name, and halts the
+    migration loudly — an unusable index silently masked as done is exactly
+    the no-silent-fallbacks failure class. onError stays HALT (unset).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-003-1" author="nexus-piwya.1">
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="0">SELECT COUNT(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'nexus' AND c.relname = 'idx_chunks_384_tenant_chash' AND i.indisvalid</sqlCheck>
+        </preConditions>
+        <comment>(tenant_id, chash) probe index on chunks_384 — the PK leads with collection, a chash-only probe cannot use it (RDR-187 step 1)</comment>
+        <sql>
+CREATE INDEX idx_chunks_384_tenant_chash
+    ON nexus.chunks_384 (tenant_id, chash);
+        </sql>
+        <rollback>DROP INDEX IF EXISTS nexus.idx_chunks_384_tenant_chash</rollback>
+    </changeSet>
+
+    <changeSet id="vectors-003-2" author="nexus-piwya.1">
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="0">SELECT COUNT(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'nexus' AND c.relname = 'idx_chunks_768_tenant_chash' AND i.indisvalid</sqlCheck>
+        </preConditions>
+        <comment>(tenant_id, chash) probe index on chunks_768 — the PK leads with collection, a chash-only probe cannot use it (RDR-187 step 1)</comment>
+        <sql>
+CREATE INDEX idx_chunks_768_tenant_chash
+    ON nexus.chunks_768 (tenant_id, chash);
+        </sql>
+        <rollback>DROP INDEX IF EXISTS nexus.idx_chunks_768_tenant_chash</rollback>
+    </changeSet>
+
+    <changeSet id="vectors-003-3" author="nexus-piwya.1">
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="0">SELECT COUNT(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'nexus' AND c.relname = 'idx_chunks_1024_tenant_chash' AND i.indisvalid</sqlCheck>
+        </preConditions>
+        <comment>(tenant_id, chash) probe index on chunks_1024 — the PK leads with collection, a chash-only probe cannot use it (RDR-187 step 1)</comment>
+        <sql>
+CREATE INDEX idx_chunks_1024_tenant_chash
+    ON nexus.chunks_1024 (tenant_id, chash);
+        </sql>
+        <rollback>DROP INDEX IF EXISTS nexus.idx_chunks_1024_tenant_chash</rollback>
+    </changeSet>
+
+</databaseChangeLog>

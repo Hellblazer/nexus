@@ -238,6 +238,14 @@
     <include file="db/changelog/rdr180-001-bytea-chash.xml"/>
     <include file="db/changelog/rdr180-002-hex-boundary-functions.xml"/>
 
+    <!-- RDR-187 step 1 (bead nexus-piwya.1): (tenant_id, chash) probe index
+         per chunk table — the chunks PK leads with collection, so the
+         census/alias/reroute chash-only probes cannot use it. Placed AFTER
+         rdr180-001 so fresh installs build the btree on the bytea column
+         once, instead of building on TEXT and rebuilding through the
+         ALTER TYPE. Depends only on vectors-001 tables existing. -->
+    <include file="db/changelog/vectors-003-chash-probe-indexes.xml"/>
+
     <!-- RDR-180 LAND-THEN-TRANSFORM (nexus-jxizy.10): the width-free landing
          zone the guided migration bulk-loads VERBATIM before the in-DB
          promote. Own runAlways grants (staging-4) mirror grants-nexus-svc. -->
