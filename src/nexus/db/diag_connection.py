@@ -197,31 +197,31 @@ def live_store_detail(statements, *, resolve=None, run=None) -> str:
     _resolve = resolve if resolve is not None else resolve_diag_credentials
     _run = run if run is not None else run_diagnostic_sql
 
+    creds = _resolve()
     # nexus-y3wuu (Hal decision 2026-07-20): local-only BY DESIGN. On a
     # managed/BYO service deployment the local probe can only ever report
     # missing credentials, which an operator cannot distinguish from "not
-    # provisioned" — refuse with the contract stated instead, BEFORE any
-    # resolution work. is_local_mode() is the same locality heuristic the
-    # engine-convergence gate keys on (round-3 critique MEDIUM-1: its
-    # legacy fallback reads embedder credentials, so a self-hosted local
-    # service that ALSO holds cloud embedder keys can classify non-local
-    # — a pre-existing edge of the shared heuristic, accepted for
-    # consistency, not a fresh contract here).
-    from nexus.config import is_local_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
+    # provisioned" — when nothing resolves LOCALLY on a non-local box,
+    # state the contract instead. Ordering matters (arc-critique SIG-2):
+    # resolution runs FIRST, so a self-hosted box whose is_local_mode()
+    # heuristic reads non-local (e.g. cloud embedder keys present) but
+    # which genuinely has a local bundle + credentials keeps a WORKING
+    # probe — the contract message fires only where there is actually
+    # nothing local to probe.
+    if creds is None:
+        from nexus.config import is_local_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
 
-    if not is_local_mode():
-        return (
-            "live diagnostics REFUSED — this probe is LOCAL-ONLY by design "
-            "(nexus-y3wuu): it shells a local psql at the local bundle "
-            "Postgres (127.0.0.1) using the local pg_credentials file; no "
-            "remote host/credential resolution exists. This store is in "
-            "service/cloud mode, so there is nothing local to probe — this "
-            "is NOT a missing-credentials or unprovisioned condition. Run "
-            "the diagnostics server-side with the store operator's own "
-            "credentials instead."
-        )
-
-    creds = _resolve()
+        if not is_local_mode():
+            return (
+                "live diagnostics REFUSED — this probe is LOCAL-ONLY by "
+                "design (nexus-y3wuu): it shells a local psql at the local "
+                "bundle Postgres (127.0.0.1) using the local pg_credentials "
+                "file; no remote host/credential resolution exists. This "
+                "store is in service/cloud mode with nothing local to probe "
+                "— NOT a missing-credentials or unprovisioned condition. "
+                "Run the diagnostics server-side with the store operator's "
+                "own credentials instead."
+            )
     if creds is None:
         return (
             "live diagnostics UNAVAILABLE — no nexus_diag credentials "

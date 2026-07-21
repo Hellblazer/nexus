@@ -2493,7 +2493,8 @@ nx forensics [TOPIC]
 ```
 
 Print the read-only diagnostic playbook for an upgrade-edge TOPIC (default:
-`chash-poison`, the GH #1390 poisoned-store class) — RDR-182. Output includes
+`chash-poison`, the GH #1414 / nexus-pnwu0 width-non-conformant class; GH
+#1390 was the original, closed incident) — RDR-182. Output includes
 the full clickable recovery-runbook URL.
 
 The guidance TEXT is display-only and ungated: a human typing this command

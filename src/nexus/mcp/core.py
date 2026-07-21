@@ -6356,8 +6356,9 @@ def forensics(topic: str = "chash-poison") -> str:
 
     Args:
         topic: The diagnostic topic. Currently: ``chash-poison`` (the
-            GH #1390 poisoned-store class). Unknown topics list the known
-            set.
+            GH #1414 / nexus-pnwu0 width-non-conformant class; GH #1390
+            was the original, closed incident). Unknown topics list the
+            known set.
     """
     if not _remediation_opt_in():
         return _REMEDIATION_REFUSAL

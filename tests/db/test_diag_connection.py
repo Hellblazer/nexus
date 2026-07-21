@@ -130,15 +130,14 @@ class TestLiveStoreDetailLocalOnly:
     (indistinguishable from 'not provisioned'; cost conexus a source-read
     to discover)."""
 
-    def test_non_local_mode_refuses_naming_the_contract(self, monkeypatch):
+    def test_non_local_mode_with_nothing_local_refuses_naming_the_contract(
+        self, monkeypatch,
+    ):
         from unittest.mock import patch
 
         from nexus.db.diag_connection import live_store_detail
 
-        calls = {"resolve": 0, "run": 0}
-
-        def _resolve():
-            calls["resolve"] += 1
+        calls = {"run": 0}
 
         def _run(statements, creds):
             calls["run"] += 1
@@ -146,13 +145,31 @@ class TestLiveStoreDetailLocalOnly:
         with patch("nexus.config.is_local_mode", return_value=False):
             text = live_store_detail(
                 ["SELECT COUNT(*) FROM nexus.chunks_768;"],
-                resolve=_resolve, run=_run,
+                resolve=lambda: None, run=_run,
             )
         assert "LOCAL-ONLY" in text
         assert "by design" in text.lower()
         assert "no nexus_diag credentials" not in text
-        # Zero diagnostic work on the refused path.
-        assert calls == {"resolve": 0, "run": 0}
+        # No SQL runs on the refused path.
+        assert calls == {"run": 0}
+
+    def test_non_local_heuristic_with_real_local_creds_still_probes(self):
+        # Arc-critique SIG-2: is_local_mode() is a heuristic (a self-hosted
+        # local service holding cloud embedder keys reads non-local). A box
+        # whose LOCAL resolution genuinely succeeds must keep a WORKING
+        # probe — the contract refusal fires only when there is actually
+        # nothing local to probe.
+        from unittest.mock import patch
+
+        from nexus.db.diag_connection import live_store_detail
+
+        with patch("nexus.config.is_local_mode", return_value=False):
+            text = live_store_detail(
+                ["SELECT 1;"], resolve=lambda: _CREDS, run=lambda s, c: ["9"],
+            )
+        assert "live diagnostic results" in text
+        assert "SELECT 1; = 9" in text
+        assert "REFUSED" not in text
 
     def test_local_mode_no_creds_keeps_unavailable_message(self):
         from unittest.mock import patch

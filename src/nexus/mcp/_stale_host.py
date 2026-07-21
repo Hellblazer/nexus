@@ -57,8 +57,9 @@ def _stale_note(st: "upgrade_finish.SelfStaleness") -> str:
         f"{st.installed_version}. The running process is executing old "
         f"code and cannot safely import newly-installed modules — this "
         f"error is almost certainly upgrade skew, not a code defect. "
-        f"Restart the MCP host to clear it (restart your Claude "
-        f"session, or `nx daemon restart-stale` from a fresh shell)."
+        f"Restart your Claude session to clear it — MCP hosts are "
+        f"session-bound, so `nx daemon restart-stale` reports them but "
+        f"cannot cycle them; only the session owner can."
     )
 
 
