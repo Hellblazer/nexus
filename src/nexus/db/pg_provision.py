@@ -876,7 +876,7 @@ def backfill_diag_role_best_effort() -> bool:
     era-hop regression, 2026-07-21).
 
     A pre-P2.1 install has no diag credentials, so the tri-state
-    chash-poison probe reads UNKNOWN and ``converge_engine`` defers — with
+    chash-poison probe reads UNKNOWN and engine convergence defers — with
     ``nx doctor`` (the advertised re-attempt) failing identically, because
     no step of the unattended ``nx upgrade`` walk ever ran the P2.1
     backfill (it lived only in ``nx init --service``). This wrapper makes

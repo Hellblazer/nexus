@@ -146,6 +146,40 @@ def _probe_legacy_ids(col: Any) -> str | None:
     return None
 
 
+def _probe_id_conformance(col: Any) -> tuple[str | None, bool]:
+    """One-pass id conformance probe: ``(truly_legacy_example, era32_present)``.
+
+    nexus-i5rbk (Hal decision 2026-07-21, era-hop): the 32-hex era ids
+    (pre-RDR-180-flip pgvector half-digests) are a DISTINCT axis from
+    truly-legacy ids — they are exactly re-derivable on the wire
+    (``sha256(chunk_text)``, a recompute, not a guess), so they feed
+    ``needs_reid`` without widening ``legacy_ids`` (whose consumers carry
+    census display and collision_audit historical-map semantics) and
+    without flipping model support. Same sampling contract as
+    :func:`_probe_legacy_ids` (first page, quota-compliant 300; the ETL
+    seam guard is the complete backstop; probe failure returns clean).
+    """
+    try:
+        sample = col.get(limit=300, include=[])
+    except Exception as exc:  # noqa: BLE001 — best-effort probe; the ETL per-batch guard is the backstop
+        _log.warning(
+            "migration_id_conformance_probe_failed",
+            collection=getattr(col, "name", "?"),
+            error=str(exc),
+        )
+        return None, False
+    ids = sample.get("ids") if isinstance(sample, dict) else None
+    truly_legacy: str | None = None
+    era32 = False
+    for chunk_id in ids or []:
+        if len(chunk_id) == 32:
+            era32 = True
+        elif len(chunk_id) != 64 and truly_legacy is None:
+            truly_legacy = chunk_id
+    return truly_legacy, era32
+    return None
+
+
 #: RDR-180 land-then-transform (nexus-jxizy.10.8): the width era a chunk id
 #: sample can land in. The legacy-id BLOCK that used to fire on a non-32/64
 #: id (see the now-retired check in ``pregate.assert_models_supported``) is
@@ -479,6 +513,16 @@ class CollectionClassification:
     #: chash identity) and MUST NOT cross-model remap (remap re-embeds text
     #: but keeps ids). Blocked at the pre-gate with a re-index diagnostic.
     legacy_ids: bool = False
+    #: nexus-i5rbk (Hal decision 2026-07-21): the collection holds 32-hex
+    #: ERA ids (the pre-RDR-180-flip pgvector half-digest). A distinct axis
+    #: from ``legacy_ids``: re-derivable on the wire (sha256(chunk_text) is
+    #: a recompute, not a guess), it feeds the substrate rung's
+    #: ``needs_reid`` WITHOUT the census/remap semantics legacy_ids
+    #: carries and WITHOUT flipping model support. Post-flip the engine
+    #: boundary 400s non-64 ids, so an era-32 leg without the wire
+    #: transform can never land (the era-hop's
+    #: etl_seam_nonconformant_post_transform failure).
+    era32_ids: bool = False
 
 
 @dataclass(frozen=True)
@@ -542,9 +586,10 @@ def _classify_leg(
         # EVERY data-bearing collection (a conformant, supported-model name
         # can still hold legacy-era ids — the canon-chat store did).
         legacy_ids = False
+        era32_ids = False
         measured_dim: int | None = None
         if source_count > 0:
-            bad_id = _probe_legacy_ids(col)
+            bad_id, era32_ids = _probe_id_conformance(col)
             if bad_id is not None:
                 legacy_ids = True
                 support = "unsupported"
@@ -623,6 +668,7 @@ def _classify_leg(
                 reason=reason,
                 measured_dim=measured_dim,
                 legacy_ids=legacy_ids,
+                era32_ids=era32_ids,
             )
         )
     return out

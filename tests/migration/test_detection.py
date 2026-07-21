@@ -1626,3 +1626,47 @@ class TestDryRunAgreesWithTheRunItPreviews:
         assert [c.collection for c in preview.unsupported] == [
             "knowledge__o__voyage-context-3__v1"
         ]
+
+
+class TestEra32Classification:
+    """nexus-i5rbk (Hal decision 2026-07-21): 32-hex era ids are re-derivable
+    on the wire, so they classify on their OWN axis (era32_ids) feeding
+    needs_reid — WITHOUT widening legacy_ids (whose consumers carry census
+    display and collision_audit historical-map semantics) and WITHOUT
+    flipping support to unsupported (the model may be fine)."""
+
+    def _col(self, ids):
+        class _Col:
+            name = "knowledge__era__bge-base-en-v15-768__v1"
+
+            def count(self):
+                return len(ids)
+
+            def get(self, limit=300, include=None):
+                return {"ids": ids[:limit]}
+
+        return _Col()
+
+    def test_era32_ids_classify_on_their_own_axis(self):
+        from nexus.migration.detection import _probe_id_conformance
+
+        ids = ["a" * 32, "b" * 32]
+        truly_legacy, era32 = _probe_id_conformance(self._col(ids))
+        assert truly_legacy is None
+        assert era32 is True
+
+    def test_full_digest_ids_are_conformant_on_both_axes(self):
+        from nexus.migration.detection import _probe_id_conformance
+
+        ids = ["c" * 64]
+        truly_legacy, era32 = _probe_id_conformance(self._col(ids))
+        assert truly_legacy is None
+        assert era32 is False
+
+    def test_truly_legacy_still_reported_first_class(self):
+        from nexus.migration.detection import _probe_id_conformance
+
+        ids = ["short-id-16chars", "a" * 32]
+        truly_legacy, era32 = _probe_id_conformance(self._col(ids))
+        assert truly_legacy == "short-id-16chars"
+        assert era32 is True

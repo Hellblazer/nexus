@@ -39,6 +39,7 @@ def _cls(
     name: str,
     *,
     legacy: bool = False,
+    era32: bool = False,
     support: str = "supported-voyage-1024",
     model: str | None = "voyage-context-3",
     count: int = 10,
@@ -52,6 +53,7 @@ def _cls(
         source_count=count,
         has_data=count > 0,
         legacy_ids=legacy,
+        era32_ids=era32,
     )
 
 
@@ -446,3 +448,53 @@ def test_execute_conformant_leg_needs_no_map_entries(tmp_path: pathlib.Path) -> 
         result = execute_leg(leg, source, target, map_store=store, page=10, provenance="p")
         assert result.ok
         assert store.all_pairs() == []
+
+
+# ── era-32 re-id (nexus-i5rbk, Hal decision 2026-07-21: recompute during ────
+# re-embed) ──────────────────────────────────────────────────────────────────
+
+
+def test_era32_collection_plans_a_reid_leg() -> None:
+    """A 32-hex-id collection (the pre-RDR-180-flip pgvector era) must get
+    the wire re-id transform: post-flip the canonical id is the FULL 64-hex
+    digest and the engine boundary 400s anything else, so carrying 32-hex
+    ids verbatim can never land. The correct address is a RECOMPUTE from
+    the carried text (sha256(chunk_text)), not a guess — same principle as
+    the chash-rekey rung. Era-hop caught this: re-embed legs with era-32
+    ids refused at the seam (etl_seam_nonconformant_post_transform,
+    written=0) because needs_reid keyed on legacy_ids alone."""
+    plan = plan_substrate_legs(
+        [_cls("knowledge__rehearsal__minilm-l6-v2-384__v1",
+              era32=True, support="unsupported", model=None)],
+        prior_collections=frozenset(),
+        voyage_key_present=False,
+    )
+    (leg,) = plan.legs
+    assert leg.needs_reid is True, (
+        "era-32 ids must classify as needing wire re-id — without it the "
+        "re-embed leg carries 32-hex ids into the 64-only seam guard"
+    )
+    assert leg.needs_reembed is True
+
+
+def test_execute_era32_reembed_leg_recomputes_ids(tmp_path: pathlib.Path) -> None:
+    """The era-hop shape end-to-end at the leg level: 32-hex era ids +
+    carried text -> the target receives the recomputed FULL 64-hex ids and
+    the old->new pairs are mapped."""
+    text = "era chunk text"
+    old_id = hashlib.sha256(text.encode()).hexdigest()[:32]  # the pre-flip half-digest
+    new_id = hashlib.sha256(text.encode()).hexdigest()
+    source = OneBatchSource([{"id": old_id, "document": text, "metadata": {}}])
+    target = RecordingTarget()
+    leg = LegPlan(
+        source_collection="knowledge__rehearsal__minilm-l6-v2-384__v1",
+        target_collection="knowledge__rehearsal__bge-base-en-v15-768__v1",
+        needs_reid=True,
+        needs_reembed=True,
+    )
+    with ChashRemapStore(tmp_path / "chash_remap.db") as store:
+        result = execute_leg(leg, source, target, map_store=store, page=10, provenance="era32")
+        assert result.ok, result.reason
+        assert new_id in target.rows
+        assert old_id not in target.rows
+        assert (old_id, new_id) in store.all_pairs()

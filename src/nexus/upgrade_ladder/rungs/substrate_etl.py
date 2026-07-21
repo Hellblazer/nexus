@@ -179,7 +179,15 @@ def plan_substrate_legs(
         live_names.add(c.collection)
         if not c.has_data:
             continue
-        needs_reid = bool(c.legacy_ids)
+        # nexus-i5rbk (Hal decision 2026-07-21): BOTH id-nonconformance axes
+        # need the wire re-id — truly-legacy (16/18-char) AND the 32-hex era
+        # half-digests. Post-RDR-180 the engine boundary 400s any non-64 id,
+        # so a leg carrying era-32 ids verbatim can never land; the wire
+        # transform recomputes sha256(chunk_text) from the carried text (a
+        # recompute, not a guess — same principle as the chash-rekey rung).
+        # Era-hop caught the gap: re-embed legs with era-32 ids refused at
+        # the seam (etl_seam_nonconformant_post_transform, written=0).
+        needs_reid = bool(c.legacy_ids or c.era32_ids)
         # Model-based, NOT support-based: classification flips support to
         # "unsupported" for legacy ids too (detection.py:428), and legacy is
         # the co-resident RE-ID axis, not a re-embed reason. A voyage-model

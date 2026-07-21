@@ -115,6 +115,7 @@ def test_detection_surface():
         "reason",
         "measured_dim",  # nexus-nb7hr: ground-truth probe result
         "legacy_ids",  # nexus-sot7v / GH #1390: pre-RDR-108 short-id block
+        "era32_ids",  # nexus-i5rbk: 32-hex era half-digests — wire re-id axis
     }
 
 
