@@ -2,10 +2,11 @@
 title: "Server-Side Reranking: Retire the Last Client-Side Voyage Consumer So the Client Carries Zero Voyage Credentials"
 id: RDR-188
 type: Architecture
-status: draft
+status: accepted
+accepted_date: 2026-07-22
 priority: medium
 author: Hal Hildebrand
-reviewed-by: ""
+reviewed-by: self
 created: 2026-07-22
 related_issues: [nexus-r9c78, nexus-r5f3c]
 related: [RDR-152, RDR-155, RDR-156, RDR-160, RDR-166]
