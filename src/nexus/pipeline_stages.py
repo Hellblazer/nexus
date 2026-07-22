@@ -542,16 +542,17 @@ def _catalog_pdf_hook(
     reader = None
     writer = None
     try:
-        from nexus.catalog import Catalog  # noqa: PLC0415 - deferred to avoid circular import at module load
         from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 - deferred to avoid circular import at module load
-        from nexus.config import catalog_path  # noqa: PLC0415 - deferred to avoid circular import at module load
 
-        cat_path = catalog_path()
-        if not Catalog.is_initialized(cat_path):
-            _log.debug("catalog_pdf_hook_skipped", reason="catalog not initialized")
-            return
-
+        # nexus-e9ru2 (sibling of nexus-f1itv): presence semantics belong to
+        # the factory — in service mode the Java service owns the catalog and
+        # no local state exists; a local is_initialized pre-check silently
+        # skipped registration on every fresh box. make_catalog_reader()
+        # returns None only in the SQLite opt-out mode when uninitialised.
         reader = make_catalog_reader()
+        if reader is None:
+            _log.debug("catalog_pdf_hook_skipped", reason="catalog not initialized (sqlite opt-out mode)")
+            return
         writer = make_catalog_writer()
         effective_title = title or pdf_path.stem
         owner_name = corpus if corpus else "standalone-pdfs"

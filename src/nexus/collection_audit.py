@@ -363,7 +363,15 @@ def _open_catalog_conn() -> sqlite3.Connection | None:
     """
     from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.config import catalog_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
+    if storage_backend_for("catalog") == StorageBackend.SERVICE:
+        # nexus-e9ru2: in service mode the local .catalog.db is a FROZEN
+        # migration source — auditing against it reports stale orphans as
+        # live. Degrade the catalog legs (orphans=[]) instead, the same
+        # service-mode skip this module applies to taxonomy raw access
+        # (nexus-9613q.4). P5 catalog-collapse owns the service-side read.
+        return None
     path = catalog_path()
     if not Catalog.is_initialized(path):
         return None
