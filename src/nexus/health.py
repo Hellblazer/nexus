@@ -2785,6 +2785,86 @@ def _is_local_service_url(url: str) -> bool:
     return host in ("localhost", "127.0.0.1", "::1")
 
 
+#: First conexus plugin release whose hooks.json carries the RDR-184
+#: orchestration hook registrations (subagent-start-stamp + subagent-stop
+#: landed ~78bb02b6/d613f2e7, ancestors of v6.14.0; nexus-3h0u6 then made
+#: the plugin's hooks.json the ONLY registration surface). An installed
+#: plugin below this floor has ZERO orchestration-hook coverage —
+#: silently: no EXPECT/START rows, no stop guard (defeats the
+#: nexus-ccs9v.15 default-ON directive). The plugin cannot warn about
+#: this itself (a pre-floor plugin's hooks.json predates any warning hook
+#: we could add), so the CLI — which upgrades via PyPI independently of
+#: the plugin pin — carries the check (nexus-3xg21).
+_ORCH_HOOKS_PLUGIN_FLOOR: tuple[int, int, int] = (6, 14, 0)
+
+
+def _installed_conexus_plugin_versions(registry_path: Path | None = None) -> list[str] | None:
+    """Versions of the installed conexus plugin per Claude Code's
+    ``installed_plugins.json`` (v2 schema: ``"<plugin>@<marketplace>":
+    [{"installPath": ..., "version": ...}, ...]``). ``None`` when the
+    registry is absent/unreadable or carries no conexus entry — callers
+    treat that as "not a plugin box", never a failure."""
+    if registry_path is None:
+        registry_path = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
+    try:
+        data = json.loads(registry_path.read_text())
+    except (OSError, ValueError):
+        return None
+    plugins = data.get("plugins") if isinstance(data.get("plugins"), dict) else data
+    if not isinstance(plugins, dict):
+        return None
+    versions: list[str] = []
+    for key, entries in plugins.items():
+        if not (isinstance(key, str) and key.split("@")[0] == "conexus"):
+            continue
+        if isinstance(entries, dict):
+            entries = [entries]
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, dict) and isinstance(entry.get("version"), str):
+                versions.append(entry["version"])
+    return versions or None
+
+
+def _check_orchestration_hook_floor(registry_path: Path | None = None) -> list[HealthResult]:
+    """nexus-3xg21: warn when the installed conexus plugin predates the
+    RDR-184 orchestration hook registrations. Soft WARN, never fatal —
+    orchestration hooks are a multi-agent hygiene surface, and a box
+    without the plugin at all is simply not in scope (ok row)."""
+    label = "Orchestration hooks (plugin floor)"
+    from nexus.engine_version import parse_engine_version  # noqa: PLC0415 — generic X.Y.Z parser, deferred import
+
+    versions = _installed_conexus_plugin_versions(registry_path)
+    if versions is None:
+        return [HealthResult(
+            label=label, ok=True,
+            detail="no conexus plugin install detected — not applicable",
+        )]
+    parsed = [v for v in (parse_engine_version(s) for s in versions) if v is not None]
+    if not parsed:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=f"plugin version unparseable ({versions[:3]}) — cannot verify",
+        )]
+    newest = max(parsed)
+    floor_str = ".".join(str(p) for p in _ORCH_HOOKS_PLUGIN_FLOOR)
+    if newest >= _ORCH_HOOKS_PLUGIN_FLOOR:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=f"plugin v{'.'.join(str(p) for p in newest)} >= v{floor_str} (hooks present)",
+        )]
+    return [HealthResult(
+        label=label, ok=False, warn=True,
+        detail=(
+            f"installed conexus plugin v{'.'.join(str(p) for p in newest)} predates the "
+            f"RDR-184 orchestration hooks (v{floor_str}+): NO stop-guard, NO "
+            f"expectations ledger — multi-agent sessions run unguarded, silently"
+        ),
+        fix_suggestions=["/plugin update conexus (then restart the session)"],
+    )]
+
+
 def _check_stranded_install() -> list[HealthResult]:
     """nexus-gynt2: stranded-install detector (N+1 P4b prerequisite).
 
@@ -3304,6 +3384,18 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
         results.append(HealthResult(
             label="Stranded pre-PG install", ok=False, warn=True,
             detail=f"check failed ({exc}) — could not verify pre-PG data state",
+        ))
+
+    # nexus-3xg21: plugin-floor check for the RDR-184 orchestration hooks —
+    # the CLI is the only surface that can warn (a pre-floor plugin's own
+    # hooks.json predates any warning hook). Best-effort.
+    try:
+        results.extend(_check_orchestration_hook_floor())
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.warning("doctor_orch_hook_floor_check_failed", error=str(exc))
+        results.append(HealthResult(
+            label="Orchestration hooks (plugin floor)", ok=True,
+            detail="check failed (non-critical)",
         ))
 
     return results, _local
