@@ -18,10 +18,11 @@ related: [RDR-152, RDR-155, RDR-156, RDR-160, RDR-166]
 
 ## Problem Statement
 
-The reranker is the ONE remaining genuine runtime client-side Voyage
-consumer: `scoring.rerank_results` calls rerank-2.5 through
-`get_voyage_client`, so every client install that reranks must carry a
-live `VOYAGE_API_KEY`. Everything else already moved server-side — in
+#### Gap 1: The reranker is the last genuine runtime client-side Voyage consumer
+
+`scoring.rerank_results` calls rerank-2.5 through `get_voyage_client`,
+so every client install that reranks must carry a live
+`VOYAGE_API_KEY`. Everything else already moved server-side — in
 service mode (local and managed, post RDR-155 P4a Seam B) all embedding
 Voyage traffic is owned by the engine (`code_indexer._service_mode_stub`,
 the doc_indexer mirror, `pipeline_stages` streaming `embed_fn=None`,
@@ -30,12 +31,29 @@ vectors — the nexus-fsquc paid-Voyage-TWICE scar). The remaining
 client-side `voyage_client.embed` loops are Chroma-era migration-source
 legacies that die at RDR-155 P4b.
 
+#### Gap 2: Dead-key silent degradation — rerank quietly reverts to distance order
+
 The cost of the residual is not hypothetical: the 6.15.0 shakeout
 (2026-07-21) found Hal's shell exporting a DEAD `VOYAGE_API_KEY` that
 silently degraded reranking per tmux pane while everything else worked —
 a whole failure class (`nexus-r5f3c`'s other half) that exists ONLY
-because one code path still needs a client-side key. Hal's framing:
-"client-side Voyage anything is moot if the server owns it."
+because one code path still needs a client-side key. Research pinned
+the mechanism: `_rerank_cloud`'s broad `except Exception`
+(`scoring.py:460-462`) returns original order WARN-only, and
+`get_credential`'s env-over-config precedence means a stale shell key
+always beats a valid config.yml key. Hal's framing: "client-side
+Voyage anything is moot if the server owns it."
+
+#### Gap 3: Client behavior signals are inferred from key presence — retirement without replacement signals silently regresses
+
+Two client code paths infer behavior from `voyage_api_key` presence
+rather than from what the server actually does: `is_local_mode()`'s
+legacy fallback clause (mode inference) and
+`_voyage_thresholds_active()` (Voyage-calibrated distance-threshold
+gating). Blanking the client key without replacement signals would
+misclassify configured cloud installs as local and silently regress
+search thresholds — so credential retirement is a design problem, not
+a deletion.
 
 ## Context
 
@@ -58,15 +76,28 @@ because one code path still needs a client-side key. Hal's framing:
 
 ## Desired End State
 
-1. `voyage_api_key` leaves the CLIENT credential chain entirely: config
-   wizard, env plumbing (`r5f3c`'s supervisor pass-through), doctor
-   credential lines, and the shell-export dead-key degradation class all
-   become structurally impossible on the client.
+1. **Zero client Voyage CONSUMPTION** (the precise scope of the title's
+   shorthand): no client code path reads `voyage_api_key` to shape its
+   own behavior — rerank, mode inference, threshold gating, doctor
+   verdicts. The shell-export dead-key degradation class becomes
+   structurally impossible because no client code consumes the key.
+   The key MAY persist in `config.yml` on local-service installs solely
+   as engine-bootstrap material handed to the supervised engine's env
+   (`storage_service_daemon`'s plumb is the engine's embed-key delivery
+   wire, not a client consumer) — unless P3 lands the engine-owned
+   credential-source alternative, which would retire even that
+   (decided in-phase; both outcomes satisfy this end state).
 2. The engine owns all Voyage traffic (embed + rerank), reranking as a
    server-side stage of the search/query endpoints (optionally fused with
    RRF per RDR-156 P5.2 when that unblocks).
-3. Clients on older engines degrade LOUDLY per the one-engine-per-release
-   rule (floor bump delivers the feature; no silent no-rerank fallback).
+3. Older local engines CONVERGE, never refuse (one-engine doctrine,
+   `engine_version.py`): the `REQUIRED_ENGINE_VERSION` bump makes
+   rerank support part of the pinned dependency and existing
+   convergence machinery installs it before a search request ever
+   observes a mismatch. The only surviving floor-style check is the
+   managed-cloud handshake (`managed_endpoint.py`), where an
+   under-floor server surfaces a handshake-time signal — never a
+   per-search refusal or a silent no-rerank fallback.
 
 ## Research Findings
 
@@ -175,20 +206,56 @@ docstring says it exists solely for the reranker), doctor voyage lines
 **Ordering**: P1/P2 (engine stage + client repoint) retire (a)
 independently; (b) is P4b, do-not-start; (c) each needs its own design
 decision inside P3 — mode signal, threshold capability signal, and the
-supervisor-plumb scope call.
+supervisor-plumb scope call. P3 also sweeps `mcp/core.py:6563`'s
+`voyage_key_found` diagnostics boolean (not behavior-shaping, but its
+meaning changes once the client key is bootstrap-only material).
 
 Full agent reports: T1 scratch (tags `rdr-188,research`) + T3
 `rdr188-r2-r3-research-engine-rerank-placement-2026-07-22`.
 
 ## Proposed Solution
 
-(Locked at acceptance; sketch:) Add a rerank stage to the engine's
-search/query path (flagged per-request; model rerank-2.5 via the
-engine-held key), repoint `scoring.rerank_results` to consume server-side
-scores (or drop client rerank entirely where the endpoint composes it),
-then retire the client Voyage credential chain in a follow-up phase once
-no client code path reads the key. Engine floor bump delivers; the same
-conexus release ships the client repoint.
+(Locked at acceptance; research-informed:)
+
+1. **Fused rerank stage (R2 Option A)**: optional `rerank` /
+   `rerank_top_k` request fields on the existing `/v1/vectors/*` search
+   handlers. Rerank runs on rows already fetched under RLS inside
+   `tenantScope.withTenant` — one round trip preserved, no new tenancy
+   surface. `VoyageReranker` clones `VoyageEmbedder.callApi`'s
+   retry/backoff/auth shape against `POST /v1/rerank` (rerank-2.5);
+   bounded timeout; upstream failure degrades LOUD (structured error
+   field in the response, never a silent fallback to input order — the
+   client's current behavior is the anti-pattern, per
+   no-silent-fallbacks).
+2. **Client repoint**: `search_cmd` passes the rerank flag and consumes
+   server scores — and SURFACES the server's structured degraded-rerank
+   field to the user (Gap 2's defect was WARN-only invisibility; the
+   repoint must not recreate it one layer up). `scoring._rerank_cloud`
+   + `get_voyage_client` retire (category (a) of R5). Engine delivery
+   is the standard `REQUIRED_ENGINE_VERSION` bump: local installs
+   converge automatically per the one-engine doctrine (see Desired End
+   State 3) — no new mismatch-refusal path is built. **Scope: MCP
+   search/query and nx_answer do NOT gain rerank in this RDR** — they
+   never reranked (R1); the engine stage being available on all 5
+   endpoints makes their later opt-in a request-field flip (composes
+   with RDR-156 P5.2), tracked separately if ever wanted.
+3. **Local mode**: server-side cross-encoder in the engine, cloning the
+   `Bge768Embedder` DJL/ONNX pattern with the ~80MB
+   ms-marco-MiniLM-L-6-v2 model provisioned bge-768-style (R4);
+   client `cross_encoder.py` retires with it. Native-image smoke
+   confirms the already-bundled onnxruntime natives suffice.
+4. **Credential-chain retirement (the R5 category-(c) designs, own
+   phase)**: `is_local_mode()` loses its voyage-key inference clause
+   (mode comes from explicit config/service presence);
+   `_voyage_thresholds_active()` is replaced by a server-reported
+   capability signal (which embedder family served the query); the
+   `storage_service_daemon` supervisor plumb is explicitly re-scoped as
+   engine-bootstrap material — the key may persist in config.yml solely
+   to launch the local engine, with zero client code paths consuming
+   it (or moves to engine-owned config; decided in-phase).
+
+Engine floor bump delivers; the same conexus release ships the client
+repoint.
 
 ## Alternatives Considered
 
@@ -204,8 +271,12 @@ conexus release ships the client repoint.
 ## Trade-offs
 
 - Engine gains an outbound-Voyage rerank dependency in the serving path
-  (latency + rate-limit exposure inside a request); needs the R3 governor
-  answer and a bounded degrade (loud, per no-silent-fallbacks).
+  (latency + rate-limit exposure inside a request), bounded by a
+  timeout with a loud degrade (per no-silent-fallbacks). P1 ships
+  ACCEPTING the pre-existing engine-wide governor gap as-is (reactive
+  429/5xx retry only, no proactive limiter — R3): our top-N envelope
+  sits far under the 2000 RPM / 2M TPM ceilings, and the governor is
+  tracked as its own debt bead `nexus-rb67a`, not a blocker here.
 - Managed-cloud rerank cost accrues to the service operator rather than
   the client key holder — consistent with embeddings today.
 
@@ -222,7 +293,10 @@ cleanup + docs.)
   Voyage upstream; degrade-loud on upstream failure.
 - Client: parity test that search results with rerank enabled flow
   through the server path with zero client Voyage reads (credential-read
-  tripwire test); mode-lint sweep for retired voyage heuristics.
+  tripwire test); a test asserting the server's structured
+  degraded-rerank field is SURFACED to the user (rendered/warned) — the
+  Gap 2 invisibility class must not reappear at the repoint layer;
+  mode-lint sweep for retired voyage heuristics.
 - E2E: fresh-install MVV unchanged; rerank quality spot-check vs the
   client-side baseline (score-order parity on a fixed corpus).
 
@@ -249,3 +323,10 @@ discipline; engine work follows the engine-release skill.
 ## Revision History
 
 - 2026-07-22: Created from bead nexus-r9c78 (Hal elevation call).
+- 2026-07-22: Research findings recorded (R1-R5, two-agent sweep).
+- 2026-07-22: Gate round 1 BLOCKED (2 Criticals) — Desired End State
+  rescoped to zero-client-CONSUMPTION (supervisor plumb = engine
+  bootstrap material, both P3 outcomes valid); engine delivery reframed
+  from "loud floor degrade" to the one-engine CONVERGENCE doctrine;
+  MCP/nx_answer explicitly out of scope; degraded-field surfacing test
+  added; governor debt accepted with bead nexus-rb67a.
