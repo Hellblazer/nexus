@@ -15,9 +15,15 @@ inverse-grep must not flag), tripping LOUD with the literal two-hop
 redirect:
 
   hop 1 — install the pinned last migration-capable release and run
-  ``nx guided-upgrade`` (copy-not-move: the files stay behind as
-  rollback sources);
+  ``nx upgrade`` there (the RDR-185 ladder converges the pre-PG data
+  migration; copy-not-move — the files stay behind as rollback sources);
   hop 2 — upgrade back to this version.
+
+(The message says ``nx upgrade``, not ``guided-upgrade``: RDR-185 P4.1
+demoted the upgrade-ceremony verbs to hidden internal primitives — a
+user-facing remedy must name a verb the user can find in ``--help``,
+and on every release the pin can point at, the ladder carries the
+migration job. Enforced by tests/upgrade/test_verb_demotion.py.)
 
 Data deletion is a third, separately consented act — never part of the
 message, never performed here (Hal-confirmed two-hop contract,
@@ -26,7 +32,7 @@ message, never performed here (Hal-confirmed two-hop contract,
 **Armed by one constant.** :data:`LAST_MIGRATION_CAPABLE` is ``None`` on
 every migration-capable release — the detector is DISARMED and every
 entry point is a no-op, because on those releases ``memory.db`` /
-``.catalog.db`` are still LIVE stores and ``nx guided-upgrade`` exists
+``.catalog.db`` are still LIVE stores and the migration ladder exists
 in-place (tripping would false-positive every healthy box and the
 fresh-install MVV). Stamping the constant at N+1 cut time arms detection
 at every wired entry point (``nx init``, CLI startup, MCP startup,
@@ -94,7 +100,7 @@ class StrandedInstall:
             f"would look like an empty install, not data loss; nothing has been "
             f"touched. Two-hop upgrade: (1) install conexus=={pin} "
             f"(`uv tool install conexus=={pin}` or `pip install conexus=={pin}`), "
-            f"(2) run `nx guided-upgrade` to migrate, "
+            f"(2) run `nx upgrade` there to migrate the data, "
             f"(3) upgrade back to this version."
         )
 
@@ -115,8 +121,8 @@ def _has_verified_migration_report(config_dir: Path) -> bool:
     ``<config>/migration-reports/`` records ``verification=="verified"`` with
     zero failures. Anything else — mismatch, indeterminate, a pre-6.2 report
     with no verdict, an unreadable file — is NOT proof of migration: fail
-    closed (the nexus-r0esi never-silently-pass rule). Re-running
-    guided-upgrade on an actually-migrated box is a near-no-op re-verify;
+    closed (the nexus-r0esi never-silently-pass rule). Re-running the
+    migration ladder on an actually-migrated box is a near-no-op re-verify;
     staying silent on an unmigrated one is indistinguishable from data loss.
     """
     reports_dir = config_dir / _REPORTS_DIRNAME

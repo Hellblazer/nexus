@@ -9,8 +9,8 @@ indistinguishable from data loss. The detector trips LOUD with the
 literal two-hop instruction instead.
 
 The detector ships DISARMED in every migration-capable release
-(``LAST_MIGRATION_CAPABLE is None``): on those releases ``nx
-guided-upgrade`` exists in-place, ``memory.db``/``.catalog.db`` are
+(``LAST_MIGRATION_CAPABLE is None``): on those releases the migration
+ladder exists in-place, ``memory.db``/``.catalog.db`` are
 still LIVE stores, and tripping would false-positive every healthy box
 (and the fresh-install MVV). Stamping the constant at N+1 cut time arms
 every entry point at once — the same one-constant discipline as
@@ -189,7 +189,7 @@ class TestArmedDetection:
                                            total_failed: int) -> None:
         """Anything short of ``verification=="verified" && total_failed==0``
         is NOT proof of migration — fail closed (the nexus-r0esi
-        never-silently-pass rule). Re-running guided-upgrade on an
+        never-silently-pass rule). Re-running the ladder on an
         actually-migrated box is a near-no-op re-verify; silence on an
         unmigrated one is data loss."""
         config, chroma, catalog = dirs
@@ -229,7 +229,7 @@ class TestArmedDetection:
             f"would look like an empty install, not data loss; nothing has been "
             f"touched. Two-hop upgrade: (1) install conexus=={_PIN} "
             f"(`uv tool install conexus=={_PIN}` or `pip install conexus=={_PIN}`), "
-            f"(2) run `nx guided-upgrade` to migrate, "
+            f"(2) run `nx upgrade` there to migrate the data, "
             f"(3) upgrade back to this version."
         )
 

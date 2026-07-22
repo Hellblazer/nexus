@@ -2895,7 +2895,7 @@ def _check_stranded_install() -> list[HealthResult]:
         detail=stranded.message,
         fix_suggestions=[
             f"Install the last migration-capable release: uv tool install conexus=={stranded.pinned_release}",
-            "Run: nx guided-upgrade",
+            "Run: nx upgrade (the ladder converges the pre-PG data migration)",
             "Then upgrade back to this version",
         ],
     )]
