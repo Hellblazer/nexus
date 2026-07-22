@@ -135,7 +135,27 @@ def test_embedding_mode_probe_failure_returns_none_without_memoizing(client, mon
 
 def test_embedding_mode_garbage_version_body_is_unknown(client, monkeypatch):
     monkeypatch.setattr(hvc, "_get", lambda path, tenant=None: ["not", "a", "dict"])
+    client._embedding_mode_probe_failures = 0
     assert client.embedding_mode() is None
+    # Critic fold (T2 [21058]): a garbage body COUNTS as a probe failure.
+    assert client._embedding_mode_probe_failures == 1
+
+
+def test_embedding_mode_fieldless_version_settles_after_cap(client, monkeypatch):
+    """Critic fold (T2 [21058]): the CURRENT universal case pre-.10 — every
+    deployed engine answers /version without embedding_mode. Must settle
+    unknown after the cap, never re-probe per search forever."""
+    attempts: list[int] = []
+
+    def fieldless_get(path, tenant=None):
+        attempts.append(1)
+        return {"app_version": "1.0", "schema_changeset_count": 201}
+
+    monkeypatch.setattr(hvc, "_get", fieldless_get)
+    client._embedding_mode_probe_failures = 0
+    for _ in range(10):
+        assert client.embedding_mode() is None
+    assert len(attempts) == client._EMBEDDING_MODE_MAX_PROBES
 
 
 def test_embedding_mode_probe_settles_unknown_after_cap(client, monkeypatch):

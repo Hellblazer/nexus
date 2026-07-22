@@ -337,8 +337,11 @@ def search_cmd(
     diagnostics_out: list[SearchDiagnostics] = []
 
     # RDR-188 (nexus-9o6y2.8): server-side rerank rides the retrieval calls.
-    # Gate mirrors the historic client gate (multi-collection, not --no-rerank)
-    # plus the backend capability marker — legacy backends are never asked.
+    # Gate: multiple TARGET collections (request-time — a deliberate, slightly
+    # wider variant of the retired post-search result-diversity gate: rerank
+    # must be decided before retrieval now, and reranking a request whose
+    # extra corpora return empty is harmless), not --no-rerank, plus the
+    # backend capability marker — legacy backends are never asked.
     want_server_rerank = (
         not no_rerank
         and len(target_collections) > 1

@@ -1035,10 +1035,26 @@ class HttpVectorClient:
                 else:
                     _log.debug("embedding_mode_probe_failed", error=str(exc))
                 return None
-            self._embedding_mode_probe_failures = 0
             mode = info.get("embedding_mode") if isinstance(info, dict) else None
             if isinstance(mode, str) and mode:
+                self._embedding_mode_probe_failures = 0
                 self._embedding_mode_memo = mode
+            else:
+                # Critic fold (T2 [21058]): a REACHABLE /version without a
+                # usable embedding_mode — exactly what every pre-.10 engine
+                # returns — is a probe failure too. Counting only exceptions
+                # would reset the counter here and re-probe on every search
+                # for the process lifetime of the client singleton.
+                self._embedding_mode_probe_failures += 1
+                if self._embedding_mode_probe_failures >= self._EMBEDDING_MODE_MAX_PROBES:
+                    _log.warning(
+                        "embedding_mode_probe_settled_unknown",
+                        attempts=self._embedding_mode_probe_failures,
+                        reason="/version reachable but reports no embedding_mode "
+                               "(engine predates the field)",
+                        consequence="voyage-calibrated distance thresholds stay off "
+                                    "for this process",
+                    )
         return self._embedding_mode_memo
 
     def search(
