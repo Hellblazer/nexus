@@ -199,7 +199,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-181](rdr-181-server-side-embed-skip-on-reindex.md) | Server-Side Embed-Skip on Re-Index: Stop Re-Embedding Chunks Whose Vector the Store Already Holds | Technical Debt | Closed | 2026-07-05 |
 | [RDR-182](rdr-182-claude-assisted-upgrade-remediation.md) | Claude-Assisted Upgrade and Remediation: Opt-In, Consent-Gated Enlistment of the User's Own Agent Across CLI and Claude Desktop, with a Read-Only Diagnostic Trust Boundary | Architecture | Closed | 2026-07-10 |
 | [RDR-183](rdr-183-storage-service-supervisor-ownership-topology.md) | Storage-Service Supervisor Ownership Topology: Eliminate Session-Teardown Churn and launchd/Autostart Races | Architecture | Draft | 2026-07-15 |
-| [RDR-184](rdr-184-orchestration-protocol-hardening.md) | Multi-Agent Orchestration Protocol Hardening: Completion Reporting, Directive-Race Immunity, and Singleton-Resource Discipline | Process | Accepted | 2026-07-15 |
+| [RDR-184](rdr-184-orchestration-protocol-hardening.md) | Multi-Agent Orchestration Protocol Hardening: Completion Reporting, Directive-Race Immunity, and Singleton-Resource Discipline | Process | Closed | 2026-07-15 |
 | [RDR-185](rdr-185-single-ladder-convergent-upgrade.md) | Single-Ladder Convergent Upgrade: One Version, Auto-Applied Data Migrations, Delete the Upgrade Ceremony | Architecture | Closed | 2026-07-16 |
 | [RDR-186](rdr-186-client-persistence-closure-no-sqlite.md) | Client-Persistence Closure: PG in Every Mode — Retire Every SQLite Substrate Outside RDR-158's Seven-Domain Scope, and End Self-Granted Exemptions | Architecture | Accepted | 2026-07-18 |
 
