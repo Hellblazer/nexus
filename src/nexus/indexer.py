@@ -2078,6 +2078,8 @@ def _prune_misclassified_in_collection(
     that pre-date the catalog backfill keep getting cleaned up. The
     legacy set is typically small post-backfill.
     """
+    from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — circular-dep avoidance: nexus.db.http_vector_client
+
     doc_ids: list[str] = []
     legacy_paths: list[str] = []
     for path in target_paths:
@@ -2213,9 +2215,21 @@ def _prune_misclassified_in_collection(
                 existing = _paginated_get(
                     col, include=[], where={"doc_id": {"$in": batch}},
                 )
+            except VectorServiceError as exc:
+                # nexus-ou4tb walk: a degraded service is NOT "no legacy
+                # rows" — isolate the batch but say so (matches the sibling
+                # legacy source_path arm below). Prune stays best-effort.
+                _log.warning(
+                    "legacy_prune_in_query_failed",
+                    batch_size=len(batch),
+                    error=str(exc),
+                )
+                continue
             except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
                 # Some Chroma deployments reject ``$in`` on absent keys;
-                # treat as empty result.
+                # treat as empty result (logged for the nexus-ou4tb audit
+                # trail — this arm was fully silent before).
+                _log.debug("legacy_prune_in_query_rejected", exc_info=True)
                 continue
             if existing["ids"]:
                 _batched_delete(col, existing["ids"])

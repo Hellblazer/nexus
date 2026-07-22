@@ -12,6 +12,7 @@ import numpy as np
 import structlog
 
 from nexus.commands._helpers import default_db_path as _default_db_path
+from nexus.db.http_vector_client import VectorServiceError
 
 
 def _T2Database(path):
@@ -190,6 +191,67 @@ def _discover_via_service(
     if force:
         return taxonomy.rebuild_taxonomy(collection_name, doc_ids, embeddings, texts)
     return taxonomy.discover_topics(collection_name, doc_ids, embeddings, texts)
+
+
+def _run_discover_projection(
+    taxonomy: Any,
+    targets: list[str],
+    proj_handle: Any,
+    *,
+    threshold: float = 0.85,
+) -> None:
+    """The discover auto-projection pass, extracted so its failure arms are
+    behaviorally testable (ou4tb critique — the inline arms were pinned
+    only by source-text greps).
+
+    Best-effort by design (the topics themselves have already landed), but
+    never silent: a degraded vector service is an operator-visible skip
+    line + WARNING; a per-collection incomplete fetch is echoed and
+    skipped; any other failure logs at WARNING.
+    """
+    try:
+        proj_count = 0
+        for col_name in targets:
+            others = [c for c in targets if c != col_name]
+            if others:
+                result = taxonomy.project_against(
+                    col_name, others, proj_handle, threshold=threshold,
+                )
+                if result.get("incomplete_fetch"):
+                    click.echo(
+                        f"  Projection: skipped {col_name} (incomplete "
+                        "service embedding read; collection may be mid-index)"
+                    )
+                    continue
+                assignments = result.get("chunk_assignments", [])
+                if assignments:
+                    _persist_assignments(
+                        assignments, col_name, quiet=True,
+                    )
+                    proj_count += len(assignments)
+        if proj_count:
+            click.echo(f"  Projection: {proj_count} cross-collection assignments")
+            # Co-occurrence topic links (SC-5, SC-7)
+            # RDR-151 Phase 3: route via daemon.
+            from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred to avoid circular import at module load
+            cooc = t2_index_write(lambda db: db.taxonomy.generate_cooccurrence_links())
+            if cooc:
+                click.echo(f"  Links:      {cooc} co-occurrence topic links")
+    except VectorServiceError as exc:
+        # nexus-ou4tb: a degraded vector service must not read as
+        # "projection found nothing" while discover reports success.
+        # Still best-effort (the topics themselves landed) — but the
+        # skip is operator-visible, never a log-only warning.
+        click.echo(
+            f"  Projection: SKIPPED — vector service degraded "
+            f"({str(exc).splitlines()[0]})",
+            err=True,
+        )
+        _log.warning(
+            "discover_projection_skipped_service_degraded", error=str(exc),
+        )
+    except Exception:  # noqa: BLE001 - best-effort projection; logged via log.warning
+        _log.warning("discover_projection_failed", exc_info=True)
 
 
 def _progress(msg: str) -> None:
@@ -774,36 +836,7 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
         # HttpVectorClient (no ._client).
         _proj_handle = getattr(t3, "_client", t3)
         if total_topics and len(targets) > 1:
-            try:
-                proj_count = 0
-                for col_name in targets:
-                    others = [c for c in targets if c != col_name]
-                    if others:
-                        result = db.taxonomy.project_against(
-                            col_name, others, _proj_handle, threshold=0.85,
-                        )
-                        if result.get("incomplete_fetch"):
-                            click.echo(
-                                f"  Projection: skipped {col_name} (incomplete "
-                                "service embedding read; collection may be mid-index)"
-                            )
-                            continue
-                        assignments = result.get("chunk_assignments", [])
-                        if assignments:
-                            _persist_assignments(
-                                assignments, col_name, quiet=True,
-                            )
-                            proj_count += len(assignments)
-                if proj_count:
-                    click.echo(f"  Projection: {proj_count} cross-collection assignments")
-                    # Co-occurrence topic links (SC-5, SC-7)
-                    # RDR-151 Phase 3: route via daemon.
-                    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred to avoid circular import at module load
-                    cooc = t2_index_write(lambda db: db.taxonomy.generate_cooccurrence_links())
-                    if cooc:
-                        click.echo(f"  Links:      {cooc} co-occurrence topic links")
-            except Exception:  # noqa: BLE001 - best-effort projection; logged via log.warning
-                _log.warning("discover_projection_failed", exc_info=True)
+            _run_discover_projection(db.taxonomy, targets, _proj_handle)
 
         # Refresh L1 context cache after discovery
         if total_topics:

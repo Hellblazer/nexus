@@ -878,6 +878,7 @@ def _project_cross_collections(
     from nexus.commands.taxonomy_cmd import _persist_assignments  # noqa: PLC0415 — circular-dep avoidance: sibling commands module imported at call time
 
     total = 0
+    incomplete = 0
     for col_name in collections:
         others = [c for c in collections if c != col_name]
         if not others:
@@ -885,11 +886,71 @@ def _project_cross_collections(
         result = taxonomy.project_against(
             col_name, others, chroma_client, threshold=threshold,
         )
+        # nexus-ou4tb: project_against signals a partial source read via
+        # ``incomplete_fetch`` (count skew during pagination). The discover
+        # CLI has surfaced it since RDR-087; this auto-pass silently
+        # dropped it — count it so the caller can tell the operator.
+        if result.get("incomplete_fetch"):
+            incomplete += 1
         assignments = result.get("chunk_assignments", [])
         if assignments:
             _persist_assignments(assignments, col_name, quiet=True)
             total += len(assignments)
-    return total
+    return total, incomplete
+
+
+def _run_projection_pass(
+    taxonomy: Any,
+    collections: list[str],
+    chroma_client: Any,
+    say: Callable[[str], None],
+) -> None:
+    """The auto-index cross-collection projection pass, extracted so its
+    failure arms are behaviorally testable (ou4tb critique — the inline
+    version's except arms were pinned only by source-text greps, the same
+    weakness the nexus-g25dk extraction fixed for the persist call).
+
+    Best-effort by design (the index itself has already landed), but never
+    silent: a degraded vector service is a VISIBLE skip line + WARNING, a
+    partial source fetch is surfaced with its count, and any other failure
+    logs at WARNING.
+    """
+    from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred import — needed only on this branch
+
+    try:
+        _proj_t0 = time.monotonic()
+        proj_total, proj_incomplete = _project_cross_collections(
+            taxonomy, collections, chroma_client,
+        )
+        if proj_total:
+            say(
+                f"  Project:  {proj_total} cross-collection "
+                f"assignments ({time.monotonic() - _proj_t0:.1f}s)"
+            )
+        if proj_incomplete:
+            # nexus-ou4tb: partial source reads previously vanished
+            # here — the count-skew signal was computed and dropped.
+            say(
+                f"  Project:  WARNING — {proj_incomplete} collection(s) "
+                f"projected from an incomplete source fetch"
+            )
+            _log.warning(
+                "taxonomy_projection_incomplete_fetch",
+                collections=proj_incomplete,
+            )
+    except VectorServiceError as exc:
+        # nexus-ou4tb: a degraded vector service must not read as
+        # "projection found nothing" while the command reports
+        # success. Still best-effort — but visibly skipped, never silently.
+        say(
+            f"  Project:  SKIPPED — vector service degraded "
+            f"({str(exc).splitlines()[0]})"
+        )
+        _log.warning(
+            "taxonomy_projection_skipped_service_degraded", error=str(exc),
+        )
+    except Exception:  # noqa: BLE001 — best-effort cross-collection projection pass; failure logged (WARNING since nexus-ou4tb) and chain continues
+        _log.warning("taxonomy_projection_failed", exc_info=True)
 
 
 def _spawn_deferred_labeling() -> bool:
@@ -1031,18 +1092,9 @@ def run_collection_postprocessing(
                 # Cross-collection projection pass (RDR-075 SC-7). nexus-9pqoj:
                 # project_against handles both backends; pass the chroma client
                 # for a raw T3Database or the service handle itself.
-                try:
-                    _proj_t0 = _time.monotonic()
-                    proj_total = _project_cross_collections(
-                        db.taxonomy, collections, getattr(t3, "_client", t3),
-                    )
-                    if proj_total:
-                        _say(
-                            f"  Project:  {proj_total} cross-collection "
-                            f"assignments ({_time.monotonic() - _proj_t0:.1f}s)"
-                        )
-                except Exception:  # noqa: BLE001 — best-effort cross-collection projection pass; failure logged and chain continues
-                    _log.debug("taxonomy_projection_failed", exc_info=True)
+                _run_projection_pass(
+                    db.taxonomy, collections, getattr(t3, "_client", t3), _say,
+                )
 
                 # Co-occurrence topic links from projections (RDR-075 SC-5)
                 # RDR-151 Phase 3 (nexus-uzay8): route via daemon.

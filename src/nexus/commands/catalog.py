@@ -1018,6 +1018,7 @@ def _backfill_rdrs(cat: Catalog, t3: object, dry_run: bool, *, writer: object = 
     collections = t3.list_collections()
     rdr_cols = [c for c in collections if c["name"].startswith("rdr__") and c["count"] > 0]
     count = 0
+    unreadable: list[str] = []
 
     for col_info in rdr_cols:
         col_name = col_info["name"]
@@ -1131,7 +1132,18 @@ def _backfill_rdrs(cat: Catalog, t3: object, dry_run: bool, *, writer: object = 
         except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
             click.echo(f"  warning: {col_name} — {exc}")
             _log.debug("backfill_rdrs_error", col=col_name, exc_info=True)
+            unreadable.append(col_name)
 
+    if unreadable:
+        # nexus-ou4tb walk: the per-collection warnings scroll away and the
+        # final "RDRs: N" summary silently showed a smaller N. Aggregate,
+        # integrity.py-style, so under-registration is visible at the end.
+        click.echo(
+            f"  WARNING: {len(unreadable)} RDR collection(s) unreadable and "
+            f"skipped — registrations are INCOMPLETE; re-run after fixing: "
+            f"{', '.join(unreadable[:5])}"
+            + (" …" if len(unreadable) > 5 else "")
+        )
     return count
 
 
@@ -1159,6 +1171,8 @@ def _backfill_papers(
         title = col_name.replace("docs__", "")
         author = ""
         year = 0
+        from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred import; rare/branch-local path
+
         try:
             col = t3.get_or_create_collection(col_name)
             result = col.get(limit=1, include=["metadatas"])
@@ -1167,8 +1181,25 @@ def _backfill_papers(
                 title = meta.get("title", "") or title
                 author = meta.get("bib_authors", "") or meta.get("author", "")
                 year = int(meta.get("bib_year", 0) or 0)
-        except Exception:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
-            _log.debug("backfill_papers_metadata_error", col=col_name, exc_info=True)
+        except VectorServiceError as exc:
+            # nexus-ou4tb walk: registering a paper with DEFAULT metadata
+            # (collection name as title, no author, year 0) on a degraded
+            # read is proceed-as-success — skip it visibly instead; the
+            # backfill is re-runnable once the service is healthy.
+            click.echo(f"  warning: {col_name} skipped — vector service degraded ({exc})")
+            _log.warning(
+                "backfill_papers_skipped_service_degraded", col=col_name, error=str(exc),
+            )
+            continue
+        except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
+            # ou4tb critique: unified with _backfill_rdrs' posture —
+            # skip-and-report, re-runnable. The historical
+            # register-with-defaults path froze junk metadata forever:
+            # the `if not existing` idempotency guard below means a later
+            # healthy run never corrects a default-titled registration.
+            click.echo(f"  warning: {col_name} skipped — metadata unreadable ({exc}); re-run after fixing")
+            _log.warning("backfill_papers_metadata_error", col=col_name, exc_info=True)
+            continue
 
         if dry_run:
             click.echo(f"  [dry-run] Would register paper: {title} → {col_name}")

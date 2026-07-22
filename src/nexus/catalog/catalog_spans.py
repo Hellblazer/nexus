@@ -46,6 +46,24 @@ if TYPE_CHECKING:
 _log = structlog.get_logger(__name__)
 
 
+def _is_vector_service_error(exc: BaseException) -> bool:
+    """True iff *exc* is the service client's VectorServiceError.
+
+    nexus-ou4tb caller walk: this module's resolution paths deliberately
+    degrade to ``None`` ("span not found") on per-collection failures —
+    correct for a missing chunk, WRONG-silently for a degraded vector
+    service, which previously vanished into the same ``None``. The
+    import is deferred because ``nexus.db`` imports the catalog package
+    (a top-level import here would be circular); an ImportError degrades
+    to False (treated as a generic failure), never a crash.
+    """
+    try:
+        from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — circular-dep avoidance: nexus.db imports catalog
+    except ImportError:  # pragma: no cover — nexus.db always importable in practice
+        return False
+    return isinstance(exc, VectorServiceError)
+
+
 _CHASH_FALLBACK_CONCURRENCY: int = 10
 _CHASH_FALLBACK_DEADLINE_S: float = 30.0
 _chash_fallback_warned: bool = False
@@ -181,10 +199,23 @@ def fallback_chash_scan(
         )
         _chash_fallback_warned = True
 
-    def _probe(coll: str) -> dict | None:
+    #: Sentinel distinguishing "collection unreadable (degraded service)"
+    #: from a genuine miss (None). Returned by _probe instead of mutating a
+    #: shared counter — _probe runs on up to _CHASH_FALLBACK_CONCURRENCY
+    #: pool threads, and an unlocked closure `+=` there can lose increments
+    #: (review 2026-07-22); the single-threaded result loop below does the
+    #: counting instead, so there is no shared mutable state at all.
+    _svc_fail = object()
+    svc_failures = 0
+
+    def _probe(coll: str) -> dict | object | None:
         try:
             return resolve_span_in_t3(span, coll, t3)
-        except Exception:  # noqa: BLE001 — per-collection probe in parallel scan; a single collection failure must not abort the fan-out, treat as miss
+        except Exception as exc:  # noqa: BLE001 — per-collection probe in parallel scan; a single collection failure must not abort the fan-out, treat as miss
+            if _is_vector_service_error(exc):
+                # Aggregated below — a not-found verdict over a scan that
+                # COULDN'T read is reported, never silent (nexus-ou4tb).
+                return _svc_fail
             return None
 
     deadline = time.monotonic() + _CHASH_FALLBACK_DEADLINE_S
@@ -231,6 +262,9 @@ def fallback_chash_scan(
             for fut in done:
                 coll = in_flight.pop(fut)
                 span_res = fut.result()
+                if span_res is _svc_fail:
+                    svc_failures += 1  # single-threaded here — no race
+                    continue
                 if span_res is None:
                     continue
                 # Recover doc_id from the hit collection — for fallback
@@ -242,12 +276,29 @@ def fallback_chash_scan(
                         include=[],
                     )
                     doc_id = hit["ids"][0] if hit["ids"] else ""
-                except Exception:  # noqa: BLE001 — best-effort doc_id recovery on a confirmed hit; failure degrades to empty doc_id, the span text is still returned
+                except Exception as exc:  # noqa: BLE001 — best-effort doc_id recovery on a confirmed hit; failure degrades to empty doc_id, the span text is still returned
+                    if _is_vector_service_error(exc):
+                        _log.warning(
+                            "chash_fallback_doc_id_recovery_service_degraded",
+                            chash_prefix=hex_chash[:16],
+                            collection=coll,
+                            error=str(exc),
+                        )
                     doc_id = ""
                 return build_ref(
                     coll=coll, doc_id=doc_id, span_result=span_res,
                 )
 
+        if svc_failures:
+            # nexus-ou4tb: N collections were unreadable (degraded vector
+            # service), so this "no match" is an INCOMPLETE scan, not a
+            # clean not-found. Loud, with the count.
+            _log.warning(
+                "resolve_chash_fallback_incomplete_service_degraded",
+                chash_prefix=hex_chash[:16],
+                unreadable_collections=svc_failures,
+                scanned_collections=len(all_cols),
+            )
         return None
     finally:
         ex.shutdown(wait=False, cancel_futures=True)
@@ -345,7 +396,16 @@ def resolve_chash_globally(
         for row in sorted(rows, key=_sort_key):
             try:
                 span_res = resolve_span_in_t3(span, row["collection"], t3)
-            except Exception:  # noqa: BLE001 — per-candidate resolution failure falls through to the next survivor / T3 fallback, must not abort the loop
+            except Exception as exc:  # noqa: BLE001 — per-candidate resolution failure falls through to the next survivor / T3 fallback, must not abort the loop
+                if _is_vector_service_error(exc):
+                    # nexus-ou4tb: a degraded service is not "candidate
+                    # missing" — say so before falling through.
+                    _log.warning(
+                        "resolve_chash_candidate_service_degraded",
+                        chash_prefix=hex_chash[:16],
+                        collection=row["collection"],
+                        error=str(exc),
+                    )
                 span_res = None
             if span_res is None:
                 continue
@@ -484,7 +544,22 @@ def resolve_span_text_for_entry(
             if docs:
                 text = docs[0]
                 return text[char_start:char_end]
-        except Exception:  # noqa: BLE001 — chunk:char resolution is best-effort over T3/manifest; degrades to None rather than crashing the resolver
+        except Exception as exc:  # noqa: BLE001 — chunk:char resolution is best-effort over T3/manifest; degrades to None rather than crashing the resolver
+            if _is_vector_service_error(exc):
+                # nexus-ou4tb: user-facing transclusion text silently
+                # rendered "not found" on a degraded service — the ONLY
+                # fully-silent arm in this resolver (the chash: branch
+                # above already WARNs). Same degrade, now visible.
+                _log.warning(
+                    "resolve_span_chunk_char_service_degraded",
+                    span=span,
+                    collection=entry.physical_collection,
+                    error=str(exc),
+                )
+            else:
+                _log.debug(
+                    "resolve_span_chunk_char_failed", span=span, exc_info=True,
+                )
             return None
 
     return None

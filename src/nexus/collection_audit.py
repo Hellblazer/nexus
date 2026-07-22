@@ -168,12 +168,15 @@ def sample_live_distances(
     col = t3.get_or_create_collection(collection)
     try:
         got = col.get(limit=n, include=["embeddings"])
-    except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
-        # Review remediation (Reviewer B/S-1 + C/S-2): log at DEBUG so a
-        # quota-exceeded or timeout during sampling is recoverable via
-        # logs, rather than producing an "empty histogram" that looks
-        # identical to a genuinely empty collection.
-        _log.debug(
+    except Exception as _exc:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
+        # nexus-ou4tb walk: a degraded vector service gets a WARNING (the
+        # empty histogram it produces is otherwise identical to a genuinely
+        # empty collection); other sampling failures keep the original
+        # DEBUG posture (Reviewer B/S-1 + C/S-2).
+        from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred import; rare/branch-local path
+
+        _emit = _log.warning if isinstance(_exc, VectorServiceError) else _log.debug
+        _emit(
             "sample_live_distances_failed",
             collection=collection, n=n, exc_info=True,
         )
@@ -482,8 +485,14 @@ def compute_chash_coverage(collection: str) -> ChashCoverage | None:
                             missing.append(cid)
                         if len(missing) >= 5:
                             break
-            except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
-                _log.debug(
+            except Exception as _exc:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
+                from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred import; rare/branch-local path
+
+                # nexus-ou4tb walk: degraded-service reads WARN; other
+                # sampling failures keep DEBUG. Ratio stays meaningful
+                # either way (the hard-degrade case bailed at count()).
+                _emit = _log.warning if isinstance(_exc, VectorServiceError) else _log.debug
+                _emit(
                     "chash_coverage_missing_sample_failed",
                     collection=collection, exc_info=True,
                 )
