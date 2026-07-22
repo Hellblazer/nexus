@@ -2785,6 +2785,42 @@ def _is_local_service_url(url: str) -> bool:
     return host in ("localhost", "127.0.0.1", "::1")
 
 
+def _check_stranded_install() -> list[HealthResult]:
+    """nexus-gynt2: stranded-install detector (N+1 P4b prerequisite).
+
+    Disarmed (``LAST_MIGRATION_CAPABLE is None``) on every
+    migration-capable release — reported as an ok row so the check is
+    visibly wired. At N+1 the stamped constant arms it: unmigrated pre-PG
+    data (chroma.sqlite3 / t2.db / memory.db / .catalog.db present, no
+    verified migration report) is a FATAL ✗ carrying the literal two-hop
+    redirect. Pure file stats — see :mod:`nexus.stranded_install`.
+    """
+    label = "Stranded pre-PG install"
+    from nexus.config import detect_stranded_install_default  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.stranded_install import LAST_MIGRATION_CAPABLE  # noqa: PLC0415 — leaf module, deferred for symmetry
+
+    if LAST_MIGRATION_CAPABLE is None:
+        return [HealthResult(
+            label=label,
+            ok=True,
+            detail="detector disarmed — this release ships the migration tool",
+        )]
+    stranded = detect_stranded_install_default()
+    if stranded is None:
+        return [HealthResult(label=label, ok=True, detail="no unmigrated pre-PG data")]
+    return [HealthResult(
+        label=label,
+        ok=False,
+        fatal=True,
+        detail=stranded.message,
+        fix_suggestions=[
+            f"Install the last migration-capable release: uv tool install conexus=={stranded.pinned_release}",
+            "Run: nx guided-upgrade",
+            "Then upgrade back to this version",
+        ],
+    )]
+
+
 def _check_migration_reports(reports_dir: Path | None = None) -> list[HealthResult]:
     """RDR-178 Gap 1 (nexus-aigpt): read the newest migration report and
     fail loud when it recorded failures or an unverified run.
@@ -3254,6 +3290,20 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
         _log.warning("doctor_migration_divergence_check_failed", error=str(exc))
         results.append(HealthResult(
             label="Migration divergence (memory)", ok=True, detail="check failed (non-critical)",
+        ))
+
+    # nexus-gynt2: stranded-install detector (disarmed no-op until the N+1
+    # cut stamps LAST_MIGRATION_CAPABLE). A crash here must not take down
+    # `nx doctor` — but unlike the best-effort checks above, a check
+    # failure surfaces as a WARN, not a silent ok: this is the
+    # data-loss-shaped class (no silent fallbacks for correctness).
+    try:
+        results.extend(_check_stranded_install())
+    except Exception as exc:  # noqa: BLE001 — must not crash `nx doctor`; degraded to WARN, never silent-ok
+        _log.warning("doctor_stranded_install_check_failed", error=str(exc))
+        results.append(HealthResult(
+            label="Stranded pre-PG install", ok=False, warn=True,
+            detail=f"check failed ({exc}) — could not verify pre-PG data state",
         ))
 
     return results, _local

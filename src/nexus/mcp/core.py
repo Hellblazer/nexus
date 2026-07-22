@@ -6603,6 +6603,7 @@ def main():
     from nexus.mcp._first_run import (  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
         apply_embedder_notice,
         apply_first_run_banner_instructions,
+        apply_stranded_notice,
         ensure_installed_and_running,
         install_banner_dispatch_hook,
     )
@@ -6622,6 +6623,14 @@ def main():
     # .mcpb and a CLI simulation with the same credentials. See
     # _resolve_mode_diagnostics' docstring for the field evidence.
     log.info("mcp_server_mode_resolved", **_resolve_mode_diagnostics())
+    # nexus-gynt2: stranded-install detector. Disarmed (constant-check
+    # no-op) on every migration-capable release; at N+1 an MCP host booting
+    # over unmigrated pre-PG data logs the two-hop redirect at ERROR and
+    # surfaces it through the server `instructions` channel (the LOUD
+    # surface for MCP-only users — see apply_stranded_notice). Detection-
+    # only: the server still serves (the doctor check and `nx init`
+    # refusal carry the blocking surface).
+    apply_stranded_notice(mcp)
     # RDR-126 P2 (nexus-bsjro): ensure the host T2 daemon's OS-level
     # autostart unit is installed and the daemon is running before
     # serving any tools. Without this, a Claude-Desktop-only user who

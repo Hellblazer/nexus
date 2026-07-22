@@ -5,7 +5,10 @@ import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from nexus.stranded_install import StrandedInstall
 
 import click
 import structlog
@@ -548,6 +551,24 @@ def catalog_path() -> Path:
     if env:
         return Path(env)
     return nexus_config_dir() / "catalog"
+
+
+def detect_stranded_install_default() -> "StrandedInstall | None":
+    """Run the stranded-install detector (nexus-gynt2) against the real
+    path roots: config dir, local Chroma dir, catalog dir.
+
+    The single assembler every entry point (``nx init``, CLI startup, MCP
+    startup, ``nx doctor``) calls, so the path-resolution knowledge stays
+    here with the resolvers. Near-zero cost while the detector is
+    disarmed (``stranded_install.LAST_MIGRATION_CAPABLE is None`` — every
+    migration-capable release): the leaf short-circuits before touching
+    the filesystem.
+    """
+    from nexus.stranded_install import detect_stranded_install  # noqa: PLC0415 — leaf module, deferred to keep config import-light
+
+    return detect_stranded_install(
+        nexus_config_dir(), _default_local_path(), catalog_path()
+    )
 
 
 def is_local_mode() -> bool:

@@ -824,6 +824,20 @@ def init_cmd(
     ``--service`` is still accepted (it forces local provisioning) and is slated
     for a deprecation notice in P3.1.
     """
+    # nexus-gynt2: stranded-install refusal, FIRST — before any provisioning.
+    # Disarmed (constant-check no-op) on every migration-capable release; at
+    # N+1 an init on a box carrying unmigrated pre-PG data must refuse with
+    # the two-hop redirect rather than provision a fresh empty install
+    # beside it (indistinguishable from data loss). Deliberately NOT wrapped
+    # in try/except (unlike the CLI/MCP banner sites, which are advisory and
+    # fail open): a detector crash here must abort init loudly rather than
+    # fall through into provisioning — that fall-through IS the failure mode
+    # this guard exists to prevent.
+    stranded = _config.detect_stranded_install_default()
+    if stranded is not None:
+        click.echo(f"Refusing to initialize: {stranded.message}", err=True)
+        ctx.exit(1)
+
     # RDR-174 P2.4: ``--yes`` now accepts the service-autostart registration
     # non-interactively (the embedder picker that previously made it a no-op was
     # removed in P1.3). ``--no-autostart`` declines. The decision is made
