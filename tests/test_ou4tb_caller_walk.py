@@ -53,7 +53,7 @@ class _RaisingT3:
         return _RaisingCol()
 
     def list_collections(self):
-        return [{"name": "docs__papers__voyage-context-3__v1", "count": 3}]
+        return [{"name": "docs__papers__bge-base-en-v15-768__v1", "count": 3}]
 
     def get_embeddings(self, name, ids):  # pragma: no cover — get raises first
         raise _BOOM
@@ -85,7 +85,7 @@ class TestCatalogSpans:
         rendered 'not found' on a degraded service."""
         monkeypatch.setattr(_db, "make_t3", lambda: _RaisingT3())
         entry = SimpleNamespace(
-            physical_collection="docs__papers__voyage-context-3__v1",
+            physical_collection="docs__papers__bge-base-en-v15-768__v1",
             file_path="",
             meta={"doc_id": "d1"},
             tumbler="1.2.3",
@@ -106,7 +106,7 @@ class TestCatalogSpans:
 
         monkeypatch.setattr(_db, "make_t3", lambda: _T3())
         entry = SimpleNamespace(
-            physical_collection="docs__papers__voyage-context-3__v1",
+            physical_collection="docs__papers__bge-base-en-v15-768__v1",
             file_path="",
             meta={},
             tumbler="1.2.3",
@@ -174,7 +174,7 @@ class TestCatalogDoctorNameVsEmbedDim:
         assert report["checked"] == 0
         assert len(report["read_errors"]) == 1
         assert report["read_errors"][0]["collection"] == (
-            "docs__papers__voyage-context-3__v1"
+            "docs__papers__bge-base-en-v15-768__v1"
         )
         # Read errors are NOT mislabeled as unrecognized model tokens.
         assert report["unknown_token"] == []
@@ -239,7 +239,7 @@ class TestBackfillPapers:
 class TestCollectionAudit:
     def test_sample_live_distances_degraded_warns(self) -> None:
         with capture_logs() as logs:
-            out = sample_live_distances("docs__papers__voyage-context-3__v1", _RaisingT3(), n=5)
+            out = sample_live_distances("docs__papers__bge-base-en-v15-768__v1", _RaisingT3(), n=5)
         assert out == []
         entry = next(e for e in logs if e["event"] == "sample_live_distances_failed")
         assert entry["log_level"] == "warning"
@@ -331,7 +331,7 @@ class TestDoctorRetry:
                 return flaky
 
             def get_embeddings(self, name, ids):
-                return [[0.0] * 1024]
+                return [[0.0] * 768]
 
         monkeypatch.setattr(_db, "make_t3", lambda: _T3())
         report = _run_name_vs_embed_dim()
