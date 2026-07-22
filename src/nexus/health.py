@@ -2133,6 +2133,56 @@ def _check_t2_launchagent_stray() -> list[HealthResult]:
     )]
 
 
+def _check_service_launchagent_stray() -> list[HealthResult]:
+    """nexus-6bmph (RDR-183 residual; GH #1405 defect-3 family): the c0vby
+    sibling for the storage-SERVICE autostart unit.
+
+    A ``com.nexus.service`` unit on a NON-local install (managed/cloud mode)
+    launches the local engine against a config with no ``pg_credentials`` —
+    the process exits immediately and launchd's restart policy respawns it
+    every ``ThrottleInterval`` (30s) forever. Live evidence 2026-07-22: a
+    cloud-mode box accumulated 810 error lines in one morning from exactly
+    this loop. Soft warning naming the removal verb; silent on local mode
+    (the unit is legitimate there) and on any probe failure (best-effort,
+    must never break ``nx doctor``).
+    """
+    try:
+        from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
+
+        if is_local_mode():
+            return []
+
+        from nexus.commands.daemon import _service_autostart_unit_installed  # noqa: PLC0415 — deferred, CLI startup cost
+
+        unit_path = _service_autostart_unit_installed()
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_service_launchagent_check_failed", error=str(exc))
+        return []
+
+    if unit_path is None:
+        return [HealthResult(
+            label="Service autostart unit (non-local mode)",
+            ok=True,
+            detail="no stray storage-service autostart unit installed",
+        )]
+
+    return [HealthResult(
+        label="Service autostart unit (non-local mode)",
+        ok=False,
+        warn=True,
+        detail=(
+            f"a storage-service autostart unit is installed at {unit_path} but "
+            "this install resolves to managed/cloud mode — the unit launches a "
+            "local engine that exits immediately (no local pg_credentials) and "
+            "the OS restart policy respawns it every ~30s indefinitely "
+            "(log churn; GH #1405 defect-3 family)"
+        ),
+        fix_suggestions=[
+            "nx daemon service uninstall  # removes the stray autostart unit",
+        ],
+    )]
+
+
 def _check_migration_state(
     creds_path: Path | None = None,
     psql_bin: Path | None = None,
@@ -3390,6 +3440,7 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     results.extend(_check_storage_service_health())
     results.extend(_check_engine_convergence())
     results.extend(_check_t2_launchagent_stray())
+    results.extend(_check_service_launchagent_stray())
     results.extend(_check_migration_state())
     results.extend(_check_rls_present())
     # RDR-185 P0.4: read-only pending-rungs surface (degrades internally).

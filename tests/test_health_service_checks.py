@@ -27,6 +27,7 @@ from nexus.health import (
     _check_rls_present,
     _check_storage_service_health,
     _check_t2_launchagent_stray,
+    _check_service_launchagent_stray,
 )
 
 
@@ -277,6 +278,49 @@ class TestCheckEngineConvergence:
 
 
 # ── _check_t2_launchagent_stray (nexus-c0vby, GH #1405 defect 2) ────────────
+
+
+class TestCheckServiceLaunchagentStray:
+    """nexus-6bmph (RDR-183 residual): a com.nexus.service autostart unit on a
+    NON-local install launches the local engine against a config with no
+    pg_credentials — launchd respawns the exit-2 process every
+    ThrottleInterval forever (live evidence: 810 err lines in one morning on
+    a cloud-mode box, 2026-07-22). Doctor surfaces it with the removal verb;
+    the c0vby sibling for the SERVICE unit."""
+
+    def test_local_mode_yields_no_result(self):
+        with patch("nexus.config.is_local_mode", return_value=True), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed") as probe:
+            results = _check_service_launchagent_stray()
+        assert results == []
+        probe.assert_not_called()
+
+    def test_nonlocal_no_unit_returns_ok(self):
+        with patch("nexus.config.is_local_mode", return_value=False), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed",
+                   return_value=None):
+            results = _check_service_launchagent_stray()
+        assert len(results) == 1
+        assert results[0].ok is True
+        assert results[0].fatal is False
+
+    def test_nonlocal_with_unit_returns_soft_warn_naming_removal(self, tmp_path):
+        dest = tmp_path / "com.nexus.service.plist"
+        with patch("nexus.config.is_local_mode", return_value=False), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed",
+                   return_value=dest):
+            results = _check_service_launchagent_stray()
+        assert len(results) == 1
+        r = results[0]
+        assert r.ok is False
+        assert r.warn is True
+        assert r.fatal is False
+        assert str(dest) in r.detail
+        assert any("nx daemon service uninstall" in f for f in r.fix_suggestions)
+
+    def test_probe_failure_degrades_silently(self):
+        with patch("nexus.config.is_local_mode", side_effect=RuntimeError("boom")):
+            assert _check_service_launchagent_stray() == []
 
 
 class TestCheckT2LaunchagentStray:

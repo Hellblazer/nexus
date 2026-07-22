@@ -184,6 +184,19 @@ def _autostart_unit_installed() -> Path | None:
     return unit_path if unit_path.exists() else None
 
 
+def _service_autostart_unit_installed() -> Path | None:
+    """Return the unit-file Path if the storage-SERVICE autostart unit is
+    installed, else None. The service-tier sibling of
+    :func:`_autostart_unit_installed` (nexus-6bmph); same stubbing seams.
+    Platform-guarded: returns None on unsupported platforms without raising.
+    """
+    try:
+        unit_path = _autostart_install_dir() / _autostart_filename_service()
+    except click.ClickException:
+        return None
+    return unit_path if unit_path.exists() else None
+
+
 #: Hard ceiling on each launchctl/systemctl invocation. A hung supervisor
 #: command would otherwise block ensure-running forever and the Popen
 #: fallback could never fire (RF-4: never trade a working spawn path for
