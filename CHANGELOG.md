@@ -6,6 +6,101 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.15.0] - 2026-07-21
+
+Ships with (and requires) engine-service-v0.1.51.
+
+### The GH #1414 closure set
+
+- **Ladder-first chash-poison guidance** — the remediation playbooks, doctor
+  text, install gates, and runbook §8.1 now steer to the upgrade ladder
+  (`nx upgrade`) first; rollback is reserved for the will-not-boot class
+  (pre-v0.1.48 char-era engines). The pre-rewrite crash-loop premise was
+  disproven for v0.1.48+ engines (nexus-joima): the RDR-180 octet-width
+  CHECKs land NOT VALID and are validated by the chash-rekey rung post-heal.
+- **Stale-host self-detection (MCP)** — both MCP servers (core + catalog)
+  detect upgrade skew between the serving process and the installed package,
+  decorate responses, and warn. Decorated, not auto-healed, and never
+  refuses (session-bound hosts are the user's to cycle).
+- **Tri-state chash-poison gate** — `converge_engine` distinguishes
+  POISONED / UNKNOWN / CLEAN. An unverifiable store DEFERS convergence with
+  a loud, actionable line instead of converging blind (the reporter's box
+  converged 0.1.35 → 0.1.49 over 35,477 poison rows); install-binary
+  proceeds with an explicit UNVERIFIED warning (never bricks the
+  will-not-boot recovery path).
+- **Diagnostics cluster tail** — nexus_diag is LOCAL-ONLY by contract
+  (managed/BYO refuses with the contract stated, hybrid local boxes keep a
+  working probe via resolution-first gating); heal-by-reindex wording is
+  verified + scoped; dispatch failures carry an origin tag and a durable
+  record pointer; taxonomy rollup + run logs.
+
+### Unattended era upgrades restored (the era-hop recovery)
+
+The era-spanning MVV (6.0.0 + engine v0.1.11 + pre-RDR-108 ids + Chroma
+substrate → current via `nx upgrade` alone) is green again — red since the
+RDR-180 cutover. Four fixes:
+
+- **psql loader guard on all three invocation sites** (health probe,
+  nexus_diag choke point, admin VALIDATE path): the published PG bundles
+  ship psql without an RPATH; a bare env exits 127 (libpq.so.5) on minimal
+  Linux hosts, which the tri-state gate read as UNKNOWN — permanently
+  deferring engine convergence with `nx doctor` failing identically.
+- **The poison probe self-backfills the `nexus_diag` role** on pre-P2.1
+  installs (idempotent RDR-182 backfill, resolution-gated on the live local
+  cluster facts) — the unattended walk no longer depends on an operator
+  re-running `nx init --service`.
+- **Era-32 ids get the wire re-id** (nexus-i5rbk): collections holding
+  32-hex pre-RDR-180 half-digest ids are re-identified on the wire during
+  the substrate ETL — the canonical FULL sha256(chunk_text) is recomputed
+  from the carried text (a recompute, never a guess; GH #1390's no-guess
+  rule is about fabricating addresses). Previously these collections
+  refused with a re-index-first remedy that an era box cannot perform.
+- Era-hop harness assertions updated to the RDR-180 full-digest identity.
+
+### RDR-187: chash_index retired
+
+- `nexus.chash_index` (the router remnant of the split-store architecture)
+  is DROPPED; the chunks tables are the chash-keyed store. `/v1/chash/*`
+  reads derive from chunk rows; writes are honest deprecated no-ops;
+  `rename_collection` stays real; `chash_alias` is permanent. The HTTP
+  shape survives until the deprecation window closes (nexus-piwya.11).
+- Client: census/gate/forensics chash_index legs retired; the legacy --cold
+  chash ETL leg and staging chash landing removed; the integration MVV
+  family re-pinned to the post-RDR-187 contract.
+- Engine floor: `REQUIRED_ENGINE_VERSION` → v0.1.51 (fresh installs pin the
+  same tag; the floor is the fix-delivery vehicle for local installs).
+
+### RDR-180 tail
+
+- chash-rekey VALIDATE is gate-three/report-two with a run-local ceiling;
+  rekey retries once when the engine restarted under it; census dangling
+  legs see LEGACY-width pointers; ANALYZE inside the rekey/promote
+  transaction (planner blind-spot on just-written rows); alias-chained
+  legacy-width resolution in catalog resolve_chash.
+
+### Fixes
+
+- A degraded vector service no longer reads as an empty collection, and a
+  document that never reached the catalog is no longer silent (nexus-ou4tb).
+- The migration dry run answers what the run will answer; a legacy chunk id
+  no longer hides what the vectors are (nexus-leunq).
+- PG bundle: never delete a working bundle before the replacement is
+  proven; re-extract when handed a different archive (nexus-xzop6).
+- Failed `claude -p` operator dispatches say what happened and leave a
+  durable record (nexus-q6830).
+- One registration surface for the orchestration hooks (nexus-3h0u6).
+
+### Docs
+
+- Full user-facing doc audit (4-way parallel sweep): contributing.md release
+  checklist gained the blocking step-0 engine gate + sandbox smoke; runbook
+  §8 carries the code-verified wire re-id scope; storage-tiers /
+  desktop-deployment SQLite framing corrected; stale CLI/MCP help fixed.
+
+## [6.14.0] - 2026-07-19
+
+Ships with (and requires) engine-service-v0.1.49.
+
 ### Changed
 
 - **chash is now the full 32-byte SHA-256, stored as raw bytes** (RDR-180,
@@ -21,6 +116,32 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The 32-vs-64 width bug class is structurally eliminated; content
   citations (`chash:<64hex>`) now resolve at the full 256 bits they
   always claimed.
+- **Guided migration is LAND-THEN-TRANSFORM** (RDR-180, nexus-jxizy.10):
+  the guided upgrade bulk-loads the legacy source into a PG staging schema,
+  then performs ONE transactional in-DB re-identification + promote —
+  retiring the per-leg in-flight rewrite class. The pregate width block is
+  gone: 16-char (GH #1408) and 32-hex legacy stores migrate; a disk
+  preflight and exact landing manifest run up front; promoted and rekeyed
+  rows carry `chunk_text_hash` metadata parity at every touch site, so
+  migrated chunks are immediately citable.
+
+### Fixed
+
+- **A table-rewriting migration now ANALYZEs what it rewrote, in the same
+  changelog pass** (engine-service-v0.1.49, BUG-0148/conexus-xpg7): the
+  RDR-180 `ALTER TYPE` boot conversion silently reset planner statistics —
+  and a rewritten table looks fresh to autovacuum, so autoanalyze may never
+  re-trigger — degrading sparse-text-gate hybrid queries to ZERO rows while
+  every health probe stayed green (observed live in the managed cloud,
+  2026-07-19). The engine floor bump is the delivery vehicle: this is why
+  6.14.0 requires v0.1.49. Related, benign: any table rewrite rebuilds the
+  HNSW indexes (graph construction is insertion-order dependent), so
+  borderline approximate-rank orderings can shift permanently after the
+  migration — re-baseline external oracles against post-migration serving.
+
+## [6.13.1] - 2026-07-18
+
+Ships with (and requires) engine-service-v0.1.47 (unchanged from 6.13.0).
 
 ### Fixed
 
@@ -39,6 +160,103 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   void). A missing source credential surfaces from the migration command
   itself.
 
+## [6.13.0] - 2026-07-18
+
+Ships with (and requires) engine-service-v0.1.47.
+
+### Added
+
+- **Client persistence moved fully to the engine's Postgres — no SQLite in
+  any mode** ([RDR-186](docs/rdr/rdr-186-client-persistence-closure-no-sqlite.md)):
+  the chash re-identification map, upgrade-ladder completion records, and the
+  streaming-PDF pipeline buffer now live in the engine (`/v1/remap`,
+  `/v1/ladder`, `/v1/pipeline` — engine-service v0.1.45–v0.1.47) in BOTH
+  local and cloud modes. No user action: the re-id map is seeded once from
+  the local artifact then quarantined; completion records flush through with
+  durability-gated carry; pipeline rows are transient per-ingest state.
+- Streaming PDF ingest batches its buffer writes over the wire (pages/chunks
+  coalesced per flush with read-your-writes ordering), so large-PDF ingest
+  does not turn into per-page HTTP round-trips.
+
+### Fixed
+
+- **`nx upgrade` substrate migration now converges across embedder eras**
+  (nexus-tidtd): the drop-test compares live re-id membership instead of raw
+  count equality, so a target collection independently indexed to a
+  different count than its stale source no longer hard-fails the upgrade
+  forever. The same relaxation is applied to the legacy migration path's
+  post-write checks (nexus-83ld0).
+- **Rollback of a substrate migration leg is whole-leg and loss-proof**: the
+  store cascade must fully revert before the re-id map is cleared; a partial
+  revert now fails loudly with the map intact, and a rollback-cleared leg
+  can no longer be resurrected by a stale local re-seed.
+- `nx doctor --clean-pipelines` fails with a clean message instead of a
+  stack trace when the engine is unreachable.
+
+### Removed
+
+- The client-local SQLite substrates `pipeline.db`, `ladder.db`, and the
+  `_nexus_t3_steps` bookkeeping table are retired (their state lives in the
+  engine per RDR-186). Existing files are left in place and harmless; a
+  later release sweeps them.
+
+- **RDR-184 orchestration guard, default-ON** (nexus-ccs9v Phase 1+2): new
+  `SubagentStop` hook blocks a NAMED background teammate's idle exactly once
+  when it never sent its orchestrator a completion report, consulting a
+  session-scoped expectations file the orchestrator writes BEFORE dispatch.
+  Fail-open by construction: users who never write EXPECT rows can never be
+  blocked. A companion `SubagentStart` stamp records dispatch (START) rows to
+  `~/.local/state/nexus/orchestration/<session_id>.expectations` (0600,
+  swept after 7 days) — the only new behavior for users not using the
+  declaration convention is this small local state write. Opt out per
+  session with `NX_ORCH_STOP_GUARD=off`; `observe` mode records
+  would-block census rows without blocking. Three orchestration directive
+  rows (Completion / Inbox / Git) now ride the SubagentStart context
+  injection, and `/conexus:continuation` gained session-retro audits
+  (directive-diff, commit-pathspec, declaration-completeness).
+
+## [6.12.0] - 2026-07-17
+
+Ships with (and requires) engine-service-v0.1.44.
+
+### Added
+
+- **One convergent upgrade: `nx upgrade` walks a single ordered ladder**
+  ([RDR-185](docs/rdr/rdr-185-single-ladder-convergent-upgrade.md)). Upgrading
+  nexus is now: update the code, then run `nx upgrade`. That one trigger brings
+  the package, engine, and process preconditions current, then walks one ordered
+  ladder that auto-applies whichever data migrations your install actually needs
+  — T2 schema, the ChromaDB → Postgres+pgvector substrate move, pre-RDR-108
+  chunk identity (legacy non-32-char IDs rewritten in place to `sha256` chash,
+  content and embeddings preserved — closes GH #1408), and embedder era. Each
+  rung detects, converges, and verifies before recording completion; the whole
+  walk is resumable and idempotent, your existing store is left byte-untouched as
+  a rollback target, and a year-dormant install converges the same way a current
+  one no-ops. There is nothing to sequence by hand and no era to know.
+- **`nx doctor` reports pending ladder rungs read-only**, including a legacy
+  chunk-ID census that shows outstanding chunk-identity debt the day it exists.
+- **`nx upgrade --yes` / `NX_ASSUME_YES`** — the unattended channel for the one
+  decision the product cannot derive for you, a **billed Voyage re-embed**: a
+  cost preview prints before anything charges (silent when nothing bills), and
+  `--yes` pre-approves it for automation. A vanished source collection still
+  defers rather than guessing, and rollback is never automatic.
+- The upgrade-cycle verbs are demoted to one story, one verb: `nx upgrade` is the
+  single trigger; the older upgrade/migration commands remain but point at it.
+
+### Fixed
+
+- **Cloud-mode probe failures now heal instead of poisoning the session for its
+  lifetime** (nexus-5t1jp). A managed service that was unreachable at the first
+  T3 call used to leave every T3 operation cached-failed until the process
+  restarted. Unreachable-class failures (connect/TLS/DNS/timeout) are now cached
+  only within a bounded retry window, after which the next call re-probes and the
+  session recovers when the service returns; below-floor-engine (incompatible)
+  failures remain cached for the process lifetime, as before.
+- **The MCP server no longer crashes on startup when its T1 scratch session fails
+  to mint** (GH #1405). The mint is deferred and retried per-call; the server
+  starts and degrades T1 scratch honestly instead of failing the whole session.
+- `/conexus:upgrade` preamble tolerates the dry-run's by-design BLOCKED exit
+  (field incident 2026-07-16).
 
 ## [6.11.0] - 2026-07-16
 
