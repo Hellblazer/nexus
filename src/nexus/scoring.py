@@ -11,7 +11,6 @@ from nexus.types import SearchResult
 _log = structlog.get_logger()
 
 _EPSILON = 1e-9
-_RERANK_MODEL = "rerank-2.5"
 _FILE_SIZE_THRESHOLD = 30
 RG_FLOOR_SCORE = 0.5
 
@@ -368,73 +367,6 @@ def apply_topic_boost(
             r.distance = max(0.0, r.distance - _TOPIC_LINKED_BOOST)
 
     return results
-
-
-def rerank_results(
-    results: list[SearchResult],
-    query: str,
-    model: str = _RERANK_MODEL,
-    top_k: int | None = None,
-    *,
-    t3: Any = None,
-) -> list[SearchResult]:
-    """Rerank *results* by LOCAL cross-encoder relevance for *query*.
-
-    RDR-188 (bead nexus-9o6y2.9): the CLOUD branch is RETIRED — reranking
-    rides the server search request (`rerank=true` on the fused stage;
-    `search_cmd` consumes server scores), so client-side Voyage rerank no
-    longer exists. Calling this in cloud/service mode raises loudly to
-    catch zombie callers; the LOCAL branch survives only until bead
-    nexus-9o6y2.19 retires the client cross-encoder rerank usage too.
-
-    *model* and *t3* are retained for signature compatibility with the
-    surviving local-path tests; both are ignored on the local branch.
-    """
-    if not results:
-        return results
-
-    n = top_k or len(results)
-    documents = [r.content for r in results]
-
-    from nexus.config import is_local_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
-
-    if is_local_mode():
-        return _rerank_local(results, query, documents, n)
-    raise RuntimeError(
-        "client-side cloud rerank is retired (RDR-188): reranking runs "
-        "server-side via the search request's rerank=true field. This call "
-        "path should not exist — repoint the caller at the server envelope."
-    )
-
-
-def _rerank_local(
-    results: list[SearchResult],
-    query: str,
-    documents: list[str],
-    top_n: int,
-) -> list[SearchResult]:
-    """Local reranker via ONNX cross-encoder. Best-effort: model
-    download failures or missing optional deps fall back to the
-    original order."""
-    try:
-        from nexus.cross_encoder import get_local_cross_encoder  # noqa: PLC0415 — circular-dep avoidance (nexus.cross_encoder)
-        scores = get_local_cross_encoder().score(query, documents)
-    except Exception as exc:  # noqa: BLE001 — best-effort local rerank; model/dep failure logged, falls back to original order
-        _log.warning(
-            "local rerank failed, returning original order",
-            error=str(exc),
-        )
-        return results[:top_n]
-    pairs = sorted(
-        zip(results, scores, strict=True),
-        key=lambda p: p[1],
-        reverse=True,
-    )
-    reranked: list[SearchResult] = []
-    for r, s in pairs[:top_n]:
-        r.hybrid_score = float(s)
-        reranked.append(r)
-    return reranked
 
 
 def round_robin_interleave(

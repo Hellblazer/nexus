@@ -13,7 +13,6 @@ from nexus.scoring import (
     apply_quality_boost,
     min_max_normalize,
     quality_score,
-    rerank_results,
     round_robin_interleave,
 )
 from nexus.types import SearchResult
@@ -66,22 +65,6 @@ def test_hybrid_scoring_code_uses_frecency():
 def test_hybrid_score_weighted_sum():
     from nexus.scoring import hybrid_score
     assert hybrid_score(0.8, 0.5) == pytest.approx(0.71, abs=1e-6)
-
-
-# ── rerank_results ───────────────────────────────────────────────────────────
-
-def test_rerank_empty():
-    assert rerank_results([], "query") == []
-
-
-def test_rerank_results_cloud_branch_raises_retired(cloud_mode):
-    """RDR-188 (nexus-9o6y2.9) tombstone: the client-side cloud rerank path
-    is DELETED — reranking rides the server search request. Any zombie
-    caller reaching rerank_results in cloud/service mode must fail LOUD,
-    never silently fall back or quietly local-rerank. (This pin dies with
-    rerank_results itself in bead nexus-9o6y2.19.)"""
-    with pytest.raises(RuntimeError, match="retired"):
-        rerank_results([_r()], "query", top_k=1)
 
 
 # ── round_robin_interleave ───────────────────────────────────────────────────

@@ -2103,6 +2103,7 @@ def _collect_quota_report() -> dict:
     cross_encoder_info = {
         "available": cross_encoder_available(),
         "backend": "server-side (engine: voyage-rerank-2.5 or ms-marco cross-encoder, RDR-188)",
+        "client_role": "salience-only (nexus.salience; rerank caller retired, nexus-9o6y2.19)",
         "default_local_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
     }
 
@@ -2161,10 +2162,8 @@ def _format_quota_report(report: dict) -> str:
         lines.append(
             f"  {ce_status} Cross-encoder backend: {ce.get('backend', 'unknown')}"
         )
-        if ce.get("backend") == "onnx-local":
-            lines.append(
-                f"    default local model: {ce.get('default_local_model', '')}"
-            )
+        if ce.get("client_role"):
+            lines.append(f"    client substrate: {ce.get('client_role')}")
         lines.append("")
 
     # ── Retry accumulator ────────────────────────────────────────────────

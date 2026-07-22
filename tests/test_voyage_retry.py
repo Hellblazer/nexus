@@ -304,10 +304,8 @@ def test_index_code_file_embed_retries(tmp_path, cloud_mode) -> None:
     assert mock_voyage.embed.call_count >= 2
 
 
-# Note: test_reset_clears_singleton removed as part of the
-# _voyage_instance singleton elimination (nexus-12v7c). No singleton
-# to reset; tests construct stub T3 instances with a mocked
-# _voyage_client attribute and pass them explicitly to rerank_results.
+# Note: the rerank retry test retired with the client rerank path
+# (RDR-188 nexus-9o6y2.9/.19 — reranking runs server-side).
 
 
 # ── Integration: propagation and exhaustion ─────────────────────────────────

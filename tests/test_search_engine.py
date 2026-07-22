@@ -9,7 +9,6 @@ from nexus.scoring import (
     apply_hybrid_scoring,
     hybrid_score,
     min_max_normalize,
-    rerank_results,
     round_robin_interleave,
 )
 from nexus.search_engine import _attach_display_paths, search_cross_corpus
@@ -79,34 +78,6 @@ def test_hybrid_mixed_corpus_no_warning(capsys):
 
 
 # ── AC3: Cross-corpus reranking ───────────────────────────────────────────────
-
-def test_rerank_results_returns_unified_ranking(cloud_mode):
-    """rerank_results reorders results using the reranker model.
-
-    RDR-109 Phase 3: rerank_results dispatches by mode. This test
-    asserts the cloud (Voyage) path; the local path is exercised in
-    ``tests/test_cross_encoder.py``.
-    """
-    results = [
-        SearchResult(id="1", content="alpha", distance=0.5, collection="code__r", metadata={}),
-        SearchResult(id="2", content="beta", distance=0.2, collection="docs__d", metadata={}),
-        SearchResult(id="3", content="gamma", distance=0.8, collection="knowledge__k", metadata={}),
-    ]
-    mock_client = MagicMock()
-    mock_client.rerank.return_value = MagicMock(
-        results=[
-            MagicMock(index=2, relevance_score=0.9),
-            MagicMock(index=0, relevance_score=0.7),
-            MagicMock(index=1, relevance_score=0.3),
-        ]
-    )
-    stub_t3 = MagicMock()
-    stub_t3._voyage_client = mock_client
-    reranked = rerank_results(results, query="test", model="rerank-2.5", top_k=3, t3=stub_t3)
-    assert reranked[0].id == "3"
-    assert reranked[1].id == "1"
-    assert reranked[2].id == "2"
-
 
 def test_round_robin_interleave_no_rerank():
     """round_robin_interleave alternates results across collections."""
