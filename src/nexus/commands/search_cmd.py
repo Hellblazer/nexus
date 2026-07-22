@@ -18,7 +18,7 @@ from nexus.formatters import (
     format_plain_with_context,
     format_vimgrep,
 )
-from nexus.scoring import RG_FLOOR_SCORE, apply_hybrid_scoring, rerank_results, round_robin_interleave
+from nexus.scoring import RG_FLOOR_SCORE, apply_hybrid_scoring, round_robin_interleave
 from nexus.db.http_vector_client import VectorServiceError
 from nexus.search_engine import SearchDiagnostics, search_cross_corpus
 from nexus.types import SearchResult
@@ -315,7 +315,19 @@ def search_cmd(
         return
 
     config = load_config()
-    reranker_model = config["embeddings"]["rerankerModel"]
+    # nexus-7jvlv (RDR-188 P2): the client rerankerModel knob is RETIRED —
+    # reranking is server-side and the ENGINE picks the model (NX_RERANK_MODEL,
+    # default rerank-2.5). A user-set value must fail LOUD, never go silently
+    # inert: surface the migration whenever the knob deviates from the old
+    # default or the env override is present.
+    _knob = config.get("embeddings", {}).get("rerankerModel", "rerank-2.5")
+    if _knob != "rerank-2.5" or os.environ.get("NX_EMBEDDINGS_RERANKER_MODEL"):
+        click.echo(
+            "note: embeddings.rerankerModel / NX_EMBEDDINGS_RERANKER_MODEL no longer "
+            "selects the rerank model — reranking runs server-side (RDR-188). Set "
+            "NX_RERANK_MODEL in the engine's environment instead.",
+            err=True,
+        )
     tuning = get_tuning_config()
 
     # Apply per-project hybrid default if --hybrid was not explicitly passed
@@ -323,6 +335,16 @@ def search_cmd(
         hybrid = config.get("search", {}).get("hybrid_default", False)
 
     diagnostics_out: list[SearchDiagnostics] = []
+
+    # RDR-188 (nexus-9o6y2.8): server-side rerank rides the retrieval calls.
+    # Gate mirrors the historic client gate (multi-collection, not --no-rerank)
+    # plus the backend capability marker — legacy backends are never asked.
+    want_server_rerank = (
+        not no_rerank
+        and len(target_collections) > 1
+        and bool(getattr(db, "supports_server_rerank", False))
+    )
+    rerank_meta: dict[str, dict] = {}
 
     def _retrieve(q: str) -> list[SearchResult]:
         # Pass taxonomy for topic grouping + topic boost (RDR-070)
@@ -336,6 +358,8 @@ def search_cmd(
                 threshold_override=threshold_override,
                 diagnostics_out=diagnostics_out,
                 telemetry=_t2.telemetry,
+                rerank=want_server_rerank,
+                rerank_meta_out=rerank_meta,
             )
         if hybrid:
             # Scope ripgrep to matching caches when a single corpus is targeted
@@ -448,15 +472,36 @@ def search_cmd(
     from nexus.scoring import apply_quality_boost  # noqa: PLC0415 — deferred import; scoring only needed in this branch
     results = apply_quality_boost(results)
 
-    # Reranking (skipped in local mode — no Voyage AI reranker available)
-    from nexus.config import is_local_mode  # noqa: PLC0415 — deferred import; config only needed in this branch
-    if not no_rerank and not is_local_mode() and len(set(r.collection for r in results)) > 1:
-        try:
-            results = rerank_results(results, query=query, model=reranker_model, top_k=n, t3=db)
-        except Exception as exc:  # noqa: BLE001 — reranking optional; failure surfaced to user via stderr, raw order kept
-            click.echo(f"Warning: reranking failed ({exc}), using raw order", err=True)
+    # RDR-188 (nexus-9o6y2.8): consume SERVER rerank scores. The engine's
+    # fused stage scored the fan-out rows; scores are query-relevance values,
+    # comparable across collections. Gap-2 contract: any degrade is SURFACED
+    # on stderr — never WARN-only invisible, never a silent input-order
+    # fallback (the retired scoring._rerank_cloud anti-pattern).
+    _scored = [r for r in results if "rerank_score" in r.metadata] if want_server_rerank else []
+    if want_server_rerank:
+        _degraded = {c: m for c, m in rerank_meta.items() if m.get("degraded")}
+        if _degraded:
+            _reason = next(iter(_degraded.values())).get("error") or "unknown"
+            click.echo(
+                f"Warning: server rerank degraded "
+                f"({len(_degraded)}/{max(len(rerank_meta), len(_degraded))} collections): "
+                f"{_reason}",
+                err=True,
+            )
+    if _scored:
+        # Scored rows lead, ordered by server relevance (mirrors the retired
+        # client reranker: relevance becomes hybrid_score, list order is the
+        # display order). Unscored rows — degraded collections — cannot be
+        # compared on the same scale and follow in their boosted order.
+        for r in _scored:
+            r.hybrid_score = float(r.metadata["rerank_score"])
+        _scored.sort(key=lambda r: float(r.metadata["rerank_score"]), reverse=True)
+        _unscored = [r for r in results if "rerank_score" not in r.metadata]
+        results = (_scored + _unscored)[:n]
     else:
-        # Group by collection and interleave round-robin for even distribution
+        # No server scores (rerank off, single collection, legacy backend, or
+        # fully degraded — the degrade was surfaced above): group by
+        # collection and interleave round-robin for even distribution.
         groups: dict[str, list[SearchResult]] = {}
         for r in results:
             groups.setdefault(r.collection, []).append(r)

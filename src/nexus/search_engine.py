@@ -484,6 +484,8 @@ def search_cross_corpus(
     threshold_override: float | None = None,
     diagnostics_out: list[SearchDiagnostics] | None = None,
     telemetry: Any | None = None,
+    rerank: bool = False,
+    rerank_meta_out: dict[str, dict] | None = None,
 ) -> list[SearchResult]:
     """Query each collection independently, returning combined raw results.
 
@@ -516,6 +518,16 @@ def search_cross_corpus(
     instance summarising per-collection raw/dropped counts and threshold
     context. Used by the CLI to emit the silent-zero stderr note; the
     engine never emits stderr itself.
+
+    *rerank* (RDR-188, bead nexus-9o6y2.8): request the SERVER's fused
+    rerank stage on each per-collection call. Only honored when *t3*
+    carries the ``supports_server_rerank`` capability marker
+    (``HttpVectorClient``); legacy backends are never asked. Scored rows
+    carry ``rerank_score`` in ``SearchResult.metadata`` (rerank scores are
+    query-relevance values, comparable ACROSS collections regardless of
+    embedding family — that is what makes the cross-corpus merge sound).
+    Per-collection degrade state lands in *rerank_meta_out* keyed by
+    collection name; the CALLER must surface degrades (Gap 2).
 
     *telemetry* (RDR-087 Phase 2.2 / nexus-yi4b.2.2), when provided,
     receives one ``(ts, query_hash, collection, raw_count, kept_count,
@@ -600,6 +612,9 @@ def search_cross_corpus(
 
     from nexus.db.limits import QUOTAS  # noqa: PLC0415 — branch-local search helper import
 
+    # RDR-188: only a capability-marked backend is asked to rerank.
+    server_rerank = rerank and getattr(t3, "supports_server_rerank", False)
+
     def _search_one(col: str) -> dict:
         mult = _overfetch_multiplier(col)
         # Search review I-3: cap per_k at MAX_QUERY_RESULTS=300. Without
@@ -613,8 +628,13 @@ def search_cross_corpus(
             threshold = threshold_override
         else:
             threshold = _threshold_for_collection(col, cfg)
+        rerank_meta: dict = {}
         try:
-            raw = t3.search(query, [col], n_results=per_k, where=effective_where)
+            if server_rerank:
+                raw = t3.search(query, [col], n_results=per_k, where=effective_where,
+                                rerank=True, rerank_meta_out=rerank_meta)
+            else:
+                raw = t3.search(query, [col], n_results=per_k, where=effective_where)
         except VectorServiceError as exc:
             # nexus-pebfx.8: one unservable collection (embedding-space
             # mismatch → service-side HTTP 400) must not sink the whole
@@ -656,6 +676,7 @@ def search_cross_corpus(
             "threshold": threshold,
             "min_dropped_distance": min_dropped_distance,
             "min_raw_distance": min_raw_distance,
+            "rerank_meta": rerank_meta,
         }
 
     # ThreadPoolExecutor.map preserves input order and re-raises any
@@ -684,6 +705,8 @@ def search_cross_corpus(
             part["min_dropped_distance"],
         )
         min_raw_per_collection[col] = part["min_raw_distance"]
+        if rerank_meta_out is not None and part.get("rerank_meta"):
+            rerank_meta_out[col] = part["rerank_meta"]
         total_raw += part["raw_count"]
         total_dropped += part["dropped"]
         if part["dropped"]:

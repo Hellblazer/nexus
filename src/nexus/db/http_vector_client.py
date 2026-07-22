@@ -985,6 +985,12 @@ class HttpVectorClient:
 
     # ── Read path ────────────────────────────────────────────────────────────
 
+    #: RDR-188: this backend serves the fused rerank stage (P1.2 request
+    #: fields on /v1/vectors/search). Capability marker read by
+    #: ``search_engine.search_cross_corpus`` — legacy backends without it are
+    #: never asked to rerank.
+    supports_server_rerank: bool = True
+
     def search(
         self,
         query: str,
@@ -996,6 +1002,9 @@ class HttpVectorClient:
         threshold: float | None = None,
         structured: bool = False,
         include_source_uri: bool = False,
+        rerank: bool = False,
+        rerank_top_k: int | None = None,
+        rerank_meta_out: dict | None = None,
     ) -> list[dict] | dict:
         """Semantic search via the Java service.
 
@@ -1011,6 +1020,17 @@ class HttpVectorClient:
         When ``include_source_uri=True``, gates a catalog JOIN server-side to
         populate ``source_uri`` on each row (RDR-169 G5, bead nexus-jkv85).
         Default False — omits the field so default callers pay zero JOIN cost.
+
+        RDR-188 (bead nexus-9o6y2.8): ``rerank=True`` requests the server's
+        fused rerank stage. The response becomes an object envelope
+        ``{"results": [...], "rerank_degraded": ..., ...}``; scored rows carry
+        ``rerank_score``. The envelope's degrade state is written into
+        ``rerank_meta_out`` (``{"degraded", "error", "model"}``) — the caller
+        MUST surface a degrade to the user (Gap 2: WARN-only invisibility is
+        the retired defect). An engine predating the fused stage ignores the
+        unknown field and returns a bare array: reported as
+        ``degraded=True, stale_engine=True`` with the convergence remedy —
+        one-engine doctrine, never a refusal.
         """
         body: dict[str, Any] = {
             "query": query,
@@ -1021,9 +1041,36 @@ class HttpVectorClient:
             body["where"] = where
         if include_source_uri:
             body["include_source_uri"] = True
+        if rerank:
+            body["rerank"] = True
+            if rerank_top_k is not None:
+                body["rerank_top_k"] = rerank_top_k
 
         results = _post("/v1/vectors/search", body, tenant=self._tenant)
-        # results is a list of {id, content, distance, collection, ...}
+        # results is a list of {id, content, distance, collection, ...} — or,
+        # when rerank was requested against a rerank-capable engine, the
+        # RerankStage object envelope.
+
+        if rerank:
+            if isinstance(results, dict) and "results" in results:
+                meta = {
+                    "degraded": bool(results.get("rerank_degraded")),
+                    "error": results.get("rerank_error"),
+                    "model": results.get("rerank_model"),
+                }
+                results = results["results"]
+            else:
+                meta = {
+                    "degraded": True,
+                    "stale_engine": True,
+                    "error": (
+                        "engine predates server-side rerank; `nx upgrade` "
+                        "converges the local engine (managed cloud: server "
+                        "upgrade pending)"
+                    ),
+                }
+            if rerank_meta_out is not None:
+                rerank_meta_out.update(meta)
 
         if structured:
             # Return the plan-runner compatible structured form

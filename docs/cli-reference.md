@@ -20,7 +20,7 @@ nx search "authentication middleware" --corpus code --hybrid --n 20
 | `PATH` (positional, optional) | Scope search to files under that directory |
 | `--corpus NAME` | Collection prefix or full name (repeatable; default: `knowledge`, `code`, `docs`) |
 | `--hybrid` | Augment semantic results with frecency-weighted ranking and ripgrep keyword matches (0.7*vector + 0.3*frecency). Requires ripgrep |
-| `--no-rerank` | Disable cross-corpus reranking (use round-robin instead) |
+| `--no-rerank` | Disable cross-corpus reranking (use round-robin instead). Reranking runs SERVER-side (RDR-188): the engine scores candidates (Voyage rerank-2.5, or the local ms-marco cross-encoder without a Voyage key); a degraded rerank is reported on stderr and results fall back to distance order |
 | `--where KEY{op}VALUE` | Metadata filter (repeatable; multiple flags are ANDed). Operators: `=`, `>=`, `<=`, `>`, `<`, `!=`. Range operators (`>=`, `<=`, `>`, `<`) auto-coerce an unambiguous numeric literal to a number for ANY field (numeric compare; JSON-string metadata values will not match a numeric operand); quote the value (`--where "created>='2026-01-01'"`) to force an ordered-STRING compare (correct for ISO dates; beware `'9' > '10'` lexically). Equality/`!=` coerce only the known numeric fields (`bib_year`, `bib_citation_count`, `page_count`, `chunk_count`). Example: `--where bib_year>=2024 --where section_type!=references` |
 | `--max-file-chunks N` | Exclude chunks from files larger than N chunks (code corpora only; ANDs with `--where`) |
 | `-m` / `--n` / `--max-results NUM` | Max results (default 10) |
