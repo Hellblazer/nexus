@@ -184,7 +184,7 @@ groups, tags, and groups flow into Nexus indexing without manual
 UUID/path copying, and Nexus search results round-trip back to DT via
 `nx dt open`. Design rationale and acceptance criteria live in
 [RDR-099](rdr/rdr-099-devonthink-integration.md); the smart-rule recipe
-is in [`devonthink-smart-rules.md`](devonthink-smart-rules.md).
+is in [`devonthink-smart-rules.md`](integrations/devonthink-smart-rules.md).
 
 The substrate (`x-devonthink-item://` URI scheme,
 `meta.devonthink_uri` reverse-lookup) shipped in 4.17.0; `nx dt` is
@@ -759,10 +759,11 @@ Update catalog entry metadata. `TUMBLER` accepts a tumbler or title. Batch mode 
 ### nx catalog gc
 
 ```
-nx catalog gc [--dry-run]
+nx catalog gc                          # report-only (default is --dry-run)
+nx catalog gc --no-dry-run --confirm   # actually delete
 ```
 
-Remove orphan catalog entries (entries with `miss_count >= 2` — missed in 2 consecutive index runs). Use `--dry-run` to preview.
+Remove orphan catalog entries (entries with `miss_count >= 2` — missed in 2 consecutive index runs). Double-gated like `nx t3 gc`: it is report-only by default, and deleting requires **both** `--no-dry-run` **and** `--confirm` — `--no-dry-run` alone silently makes no changes.
 
 ### nx catalog link-density
 
@@ -1679,12 +1680,19 @@ The `--check-aspect-queue` flag (introduced 4.18.0, `nexus-1pfq`) reports the `a
 Plan library maintenance commands (RDR-092 Phase 0d).
 
 ```
-nx plan repair                   # Backfill dimensions on legacy rows + list low-conf entries
+nx plan repair all               # Run every repair pass in order (the usual entry point)
+nx plan repair dimensions        # Just the RDR-092 dimension backfill (below)
+nx plan repair scope-tags        # Backfill scope tags on legacy rows
+nx plan repair match-text        # Rebuild plan match-text from dimensional identity
+nx plan repair retire-legacy     # Retire pre-dimensional legacy plans
+nx plan repair builtin-bindings  # Refresh built-in plan bindings
 ```
 
-The `repair` subcommand (introduced 4.9.12, nexus-1kvj) re-runs the
-RDR-092 Phase 0d.1 plan-dimension backfill heuristic against the live
-T2 DB. On every run it:
+`nx plan repair` is a command group — run one of the subcommands above
+(bare `nx plan repair` just prints help). `nx plan repair all` runs them
+all in order; the rest target one pass. The `dimensions` pass
+(introduced 4.9.12, nexus-1kvj) re-runs the RDR-092 Phase 0d.1
+plan-dimension backfill heuristic against the live T2 DB. On every run it:
 
 - backfills `verb` / `name` / `dimensions` on any row where
   `dimensions IS NULL`, using a 20-rule verb-from-stem dictionary
@@ -1707,7 +1715,19 @@ nx plan disable PLAN_ID    # Soft-disable a plan without deleting it
 nx plan enable PLAN_ID     # Re-enable a previously disabled plan
 ```
 
-Introduced 4.18.0 (`nexus-mrzp`). `disable` flips `outcome=disabled` on the plan row so it drops out of `plan_match` results without losing its row id, telemetry counters, or T1 cache embedding. `enable` flips it back to `outcome=success`. Useful for triaging a plan whose match-text is misrouting traffic without committing to a delete + re-seed cycle. The pair operates on plan ids returned from `nx plan repair` or `plan_inspect_default`.
+Introduced 4.18.0 (`nexus-mrzp`). `disable` flips `outcome=disabled` on the plan row so it drops out of `plan_match` results without losing its row id, telemetry counters, or T1 cache embedding. `enable` flips it back to `outcome=success`. Useful for triaging a plan whose match-text is misrouting traffic without committing to a delete + re-seed cycle. The pair operates on plan ids returned from `nx plan list` or `nx plan repair`.
+
+### Inspecting and managing plans
+
+```
+nx plan list [--scope SCOPE] [--origin ORIGIN] [--name NAME] [--limit N]
+nx plan show ID_OR_NAME        # full record: json + dimensions + run metrics
+nx plan delete PLAN_ID         # delete one plan row (add --yes to skip the prompt)
+nx plan set-scope PLAN_ID [TAGS]   # set/override a plan's scope_tags
+nx plan reseed                 # re-run the four-tier plan-library seed loader
+```
+
+`list` shows the plan library (filter by scope, origin, or name; `--limit` defaults to 50). `show` prints one plan's full record by id or name. `delete` removes a single row by id. `set-scope` overrides the scope tags used for scope-aware matching. `reseed` re-runs the seed loader that populates built-in and template plans.
 
 ---
 
@@ -2145,6 +2165,7 @@ nx upgrade                        # Converge: preconditions, then every pending 
 nx upgrade --dry-run              # Report what is pending, read-only — changes nothing
 nx upgrade --force                # Reset the T2 version gate and re-run all migrations
 nx upgrade --auto                 # Quiet mode for hook invocation (exit 0 always)
+nx upgrade --yes                  # Unattended: pre-approve the billed re-embed (=NX_ASSUME_YES=1)
 ```
 
 | Flag | Description |
@@ -2153,6 +2174,7 @@ nx upgrade --auto                 # Quiet mode for hook invocation (exit 0 alway
 | `--force` | Reset the T2 version gate to 0.0.0 and re-run all migrations. Per-migration idempotency guards still apply |
 | `--auto` | Quiet mode for the SessionStart hook. T3 upgrade steps and the engine install are skipped (hook timeout budget); exit 0 always |
 | `--skip-t3` | Skip T3 upgrade steps for a fast T2-only run. Also suppresses the precondition stage's engine install and process cycle (verdicts are still reported) |
+| `--yes` | Assume yes to the **billed re-embed** consent prompt only (equivalent to `NX_ASSUME_YES=1`) — the unattended channel for a walk that would otherwise block on the cost preview. Not a blanket "say yes to everything": a vanished source still defers rather than guessing, and rollback is never automatic |
 
 **Ladder position is derived, never stored.** How far an install is from current has exactly two answers, by class: DATA-rung state comes solely from the ladder position derived from per-rung completion records; PRECONDITION freshness (package, engine, processes) comes solely from a fresh comparison of on-disk installed state against required, and is deliberately stateless — re-derived at every invocation, never recorded. A rung is recorded complete only when its own verify passed ([RDR-142](rdr/rdr-142-migration-completeness-vs-version-row.md)), so the position never advances past deferred or failed work.
 

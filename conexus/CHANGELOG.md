@@ -4,6 +4,37 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.15.0] - 2026-07-21
+
+Plugin version aligned with conexus 6.15.0. No plugin-side changes.
+
+## [6.14.0] - 2026-07-19
+
+- Plugin version aligned with conexus 6.14.0. No plugin-side changes. Root
+  CHANGELOG: chash is the full 32-byte SHA-256 (RDR-180); guided migration
+  is land-then-transform; engine pair v0.1.49 ANALYZEs rewritten tables in
+  the migration pass (BUG-0148).
+
+## [6.13.1] - 2026-07-18
+
+- Plugin version aligned with conexus 6.13.1. No plugin-side changes. Root
+  CHANGELOG: CLI T3 verbs and nx doctor no longer demand legacy Chroma
+  credentials on migrated/cloud installs (nexus-c7aj3, nexus-nmw3i).
+
+## [6.13.0] - 2026-07-18
+
+- Plugin version aligned with conexus 6.13.0. No plugin-side changes. See the
+  root CHANGELOG for the 6.13.0 headline: client persistence fully engine-hosted
+  (RDR-186 — no SQLite in any mode) and the cross-era upgrade convergence fix.
+
+## [6.12.0] - 2026-07-17
+
+- `/conexus:upgrade` preamble tolerates the dry-run's by-design BLOCKED exit
+  (field incident 2026-07-16), so the guided upgrade path no longer misreports
+  a clean preview as a failure.
+- Plugin version aligned with conexus 6.12.0. See the root CHANGELOG for the
+  6.12.0 headline: the single convergent `nx upgrade` ladder (RDR-185).
+
 ## [6.11.0] - 2026-07-16
 
 - SessionEnd hook timeout raised 3 s -> 10 s: the service-mode tier-write
