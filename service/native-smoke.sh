@@ -230,10 +230,13 @@ fi
 # ready to use with zero args, reading the same NX_SERVICE_HOST/PORT/TOKEN
 # env below. Reuses the SAME already-running native-smoke instance and the
 # SAME uv/Python CI wiring nexus-l8ybx already added for the T1 block above
-# -- no new CI plumbing needed. taxonomy/chash's smoke-tested endpoints
-# (topics, distinct_collections) are pure reads that 200 even against empty
-# state, so each seeds one row first (import_topic / upsert) to make the
-# "found" assertion meaningful, mirroring T1's own put-then-find shape.
+# -- no new CI plumbing needed. taxonomy's smoke-tested endpoints (topics)
+# are pure reads that 200 even against empty state, so it seeds one row
+# first (import_topic) to make the "found" assertion meaningful, mirroring
+# T1's own put-then-find shape. chash is the exception since RDR-187: writes
+# are accept-and-no-op and reads serve from the chunks tables, so
+# read-your-write is impossible BY DESIGN -- its assertions below pin that
+# contract (write acked, then NOT visible) instead of put-then-find.
 #
 # Deliberately a SEPARATE `uv run python -c` subprocess from the T1 block
 # above, not more assertions appended into that SAME block (nexus-rxqqd
@@ -289,10 +292,20 @@ tax.import_topic(
 topics = tax.get_all_topics(collection="native-smoke-py")
 assert any(t.get("label") == "native-smoke-topic" for t in topics), f"taxonomy.get_all_topics did not find the seeded topic: {topics}"
 
+# Post-RDR-187 (chash_index router table dropped): /v1/chash/* writes are
+# accept-and-no-op (deprecated window until the N+1 410 flip, nexus-piwya.11
+# -- at the flip this upsert leg starts 410ing and must be updated) and reads are
+# rerouted over the chunks tables. So the leg pins the reroute contract:
+# the upsert must be ACCEPTED (200, no client exception -- an old client
+# mid-window must not break), and the write must NOT become visible through
+# the rerouted read paths (nothing indexed chunks under this collection).
+# A read-your-write assert here would be asserting the retired router.
 chash = HttpChashIndex()
 chash.upsert(chash="deadbeef" * 8, collection="native-smoke-py")
 collections = chash.distinct_collections()
-assert "native-smoke-py" in collections, f"chash.distinct_collections missing native-smoke-py: {collections}"
+assert "native-smoke-py" not in collections, f"chash.upsert must be a no-op post-RDR-187, but the write is visible: {collections}"
+rows = chash.lookup("deadbeef" * 8)
+assert rows == [], f"chash.lookup must not surface the no-op write post-RDR-187: {rows}"
 
 if os.environ.get("NATIVE_SMOKE_CLEANUP_ROWS") == "1":
     # nexus-rxqqd review follow-up (substantive-critic): best-effort row

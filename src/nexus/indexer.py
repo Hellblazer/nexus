@@ -31,6 +31,7 @@ from nexus._locking import lock_file, unlock_file
 from nexus.corpus import index_model_for_collection
 from nexus.retry import _chroma_with_retry, _voyage_with_retry  # noqa: F401 — re-exported for any existing imports
 from nexus.errors import CredentialsMissingError  # re-exported for backward compatibility
+from nexus.hook_registry import record_catalog_hook_failure
 from nexus.indexer_utils import (
     build_doc_id_resolver,
     build_staleness_cache,
@@ -1177,8 +1178,14 @@ def _catalog_hook(
                     filepath=fp_count, prose=prose_count, pdf=pdf_count,
                     repo=repo_name,
                 )
-        except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
-            _log.debug("catalog_link_generation_failed", exc_info=True)
+        except Exception as exc:  # noqa: BLE001 — best-effort path; error surfaced via log + audit, must not crash caller
+            # nexus-ou4tb: links missing is a quieter loss than missing
+            # registration, but still silent at DEBUG.
+            _log.warning("catalog_link_generation_failed", exc_info=True)
+            record_catalog_hook_failure(
+                source_path=str(repo), collection="",
+                hook_name="catalog_link_generation", error=str(exc),
+            )
 
         _stage_s["linking"] = time.monotonic() - _stage_mark
         _stage_mark = time.monotonic()
@@ -1199,8 +1206,16 @@ def _catalog_hook(
             links=links_created,
         )
         _progress(f"  Catalog: done ({len(new_tumblers)} new, {links_created} links)\n")
-    except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
-        _log.debug("catalog_hook_failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — best-effort path; error surfaced via log + audit, must not crash caller
+        # nexus-ou4tb: WARNING, not DEBUG, and audited. A failure here means
+        # documents landed in T3 and were never registered in the catalog — no
+        # doc_id, no manifest, no links — and only a rebuild recovers them.
+        # At DEBUG that was invisible: the run reported success.
+        _log.warning("catalog_hook_failed", exc_info=True)
+        record_catalog_hook_failure(
+            source_path=str(repo), collection="",
+            hook_name="catalog_index_hook", error=str(exc),
+        )
     finally:
         if writer is not None:
             writer.close()
@@ -1599,9 +1614,21 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
                     {"doc_id": doc_id} if doc_id
                     else {"source_path": str(file)}
                 )
-                existing = _paginated_get(
-                    col, include=["metadatas"], where=where,
-                )
+                try:
+                    existing = _paginated_get(
+                        col, include=["metadatas"], where=where,
+                    )
+                except Exception:  # noqa: BLE001 — nexus-ou4tb: isolate this FILE, not the run
+                    # The client fails loud now (a degraded service no longer
+                    # reads as an empty collection), but one file's failed
+                    # staleness lookup must not abort the whole repo's
+                    # frecency pass. Skip this file; the next run retries it.
+                    _log.warning(
+                        "frecency_staleness_lookup_failed_skipping_file",
+                        file=str(file), collection=getattr(col, "name", "?"),
+                        exc_info=True,
+                    )
+                    continue
 
             if not existing["ids"]:
                 continue  # not yet indexed — needs full nx index repo
@@ -2203,14 +2230,24 @@ def _prune_misclassified_in_collection(
     # bounded by the number of files indexed before catalog backfill,
     # which on a repo that has been on a recent nexus is typically zero.
     for src in legacy_paths:
-        existing = _paginated_get(col, include=[], where={"source_path": src})
-        if existing["ids"]:
-            _batched_delete(col, existing["ids"])
-            pruned += len(existing["ids"])
-            _log.debug(
-                f"pruned misclassified chunks from {kind} collection (legacy)",
-                count=len(existing["ids"]),
-                source_path=src,
+        # nexus-ou4tb: isolate per source_path — the guarded sibling loop
+        # above already does this, and one path's degrade must not abort the
+        # remaining prune work.
+        try:
+            existing = _paginated_get(col, include=[], where={"source_path": src})
+            if existing["ids"]:
+                _batched_delete(col, existing["ids"])
+                pruned += len(existing["ids"])
+                _log.debug(
+                    f"pruned misclassified chunks from {kind} collection (legacy)",
+                    count=len(existing["ids"]),
+                    source_path=src,
+                )
+        except Exception:  # noqa: BLE001 — one path's failure must not abort the prune
+            _log.warning(
+                "legacy_prune_failed_skipping_source_path",
+                source_path=src, collection=getattr(col, "name", "?"),
+                exc_info=True,
             )
 
     return pruned
@@ -2386,7 +2423,20 @@ def _prune_deleted_files(
                          exc_info=True)
             restored = 0
 
-        all_chunks = _paginated_get(col, include=["metadatas"])
+        # nexus-ou4tb: isolate per collection. A degraded read now raises
+        # instead of reading as an empty collection — which is the right
+        # client contract (an empty read here would have looked like "no
+        # chunks", and GC on a false-empty is how you delete nothing while
+        # believing you swept). But it must skip THIS collection, not abort
+        # the sweep for every collection after it.
+        try:
+            all_chunks = _paginated_get(col, include=["metadatas"])
+        except Exception:  # noqa: BLE001 — one collection's degrade must not end the sweep
+            _log.warning(
+                "gc_sweep_read_failed_skipping_collection",
+                collection=collection_name, exc_info=True,
+            )
+            continue
         if not all_chunks["ids"]:
             continue
         # nexus-oqku: when the catalog manifest has zero referenced
@@ -3097,8 +3147,9 @@ def _run_index(
             )
 
         # nexus-duoak follow-up: split "file" into its 3 constituent calls
-        # for diagnosis. manifest_write_batch_hook/taxonomy_assign_batch_hook/
-        # chash_dual_write_batch_hook are ALL flush-grain (nexus-u2kwq) so
+        # for diagnosis. manifest_write_batch_hook/taxonomy_assign_batch_hook
+        # are flush-grain (nexus-u2kwq; the chash dual-write hook was too,
+        # until RDR-187/nexus-piwya.4 retired it) so
         # fire_batch(grain="file") matches zero registered hooks by default —
         # the file-grain bucket's cost, if any, is fire_single (no default
         # consumers) or fire_document (aspect_extraction_enqueue_hook, which

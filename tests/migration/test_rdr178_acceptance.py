@@ -27,9 +27,10 @@ Design (worked out via sequential-thinking before writing this module):
   instead of constructing live ``Http*Store`` clients against a real
   service. Two tiers of fake, matched to what each store's claim actually
   needs:
-    - chash / catalog / telemetry carry the bead's LOAD-BEARING claims
-      (the exact 2026-07-01 incident shape is chash+catalog; R4 is
-      telemetry-specific) — these get REAL ``migrate_*_rows`` / REAL
+    - catalog / telemetry carry the bead's LOAD-BEARING claims (the
+      2026-07-01 incident shape was chash+catalog; the chash leg retired
+      with the ETL store, RDR-187/nexus-piwya.10, and catalog carries the
+      incident vehicle alone; R4 is telemetry-specific) — these get REAL
       ``verify_fill_*`` functions driven against STATEFUL fakes (mirroring
       test_verify_fill_regression.py's non-tautology discipline: the same
       dict a fake's write path mutates is what its identity/count surface
@@ -41,10 +42,14 @@ Design (worked out via sequential-thinking before writing this module):
       the COMPOSED ladder still reaches them and that memory/plans/
       taxonomy's skip-on-parity fold-in (Gap 7) engages on the no-op
       re-run, without re-deriving their per-row transform correctness.
-* The T2 mid-run 5xx burst is injected on the chash leg's transport via
-  ``httpx.MockTransport`` (test_rdr178_gap3_circuit_breaker.py's own
-  idiom) — the canonical 2026-07-01 incident shape. Catalog and telemetry
-  are NOT separately fault-injected in the same run: the breaker mechanics
+* The T2 mid-run 5xx burst is injected on the CATALOG leg's import path
+  (a call-count burst window around the fake's ``_post``, raising
+  ``ConnectionError`` — the socket-error branch of the retryable
+  classification; the HTTP-status branch is exhaustively covered in
+  test_rdr178_gap3_circuit_breaker.py) — the 2026-07-01 incident's
+  mid-run-burst SHAPE; it moved here from the chash leg when RDR-187
+  (nexus-piwya.10) retired that store. Telemetry is NOT separately
+  fault-injected in the same run: the breaker mechanics
   themselves are exhaustively unit-tested once in
   test_rdr178_gap3_circuit_breaker.py and shared verbatim by every ETL
   call site (``_etl_batch_with_breaker``); re-instantiating the burst per
@@ -66,20 +71,19 @@ Design (worked out via sequential-thinking before writing this module):
 Out of scope (residual, tracked elsewhere): the 300-row pagination boundary
 of the vector/catalog identity-fetch FAKES specifically (they answer presence
 from in-memory dicts with no limit/offset walk — same disclosed boundary as
-test_verify_fill_regression.py; chash's REAL import path batches at 200 and
-IS exercised here, and the vector read path's real 300-cap paging IS crossed); the ``existing_ids`` fail-open fix itself
+test_verify_fill_regression.py; the vector read path's real 300-cap paging
+IS crossed; the chash 200-row batching axis retired with its store,
+RDR-187); the ``existing_ids`` fail-open fix itself
 (te885.6); the docker/live-service ``tests/e2e/migration-rehearsal`` journey
 (cloud-gated, a different test tier entirely).
 """
 from __future__ import annotations
 
-import json
 import sqlite3
 from pathlib import Path
 from typing import Any
 
 import chromadb
-import httpx
 import pytest
 
 import nexus.retry as retry
@@ -108,7 +112,6 @@ def _fast_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
 # against a named quantity instead of a magic number).
 # ═══════════════════════════════════════════════════════════════════════════
 
-_CHASH_PER_COLLECTION = 400  # x2 collections = 800 rows, forces multiple
                               # 200-row import batches per collection (the
                               # incident's "many pages" shape at fixture scale)
 _CATALOG_CHUNKS_PER_DOC = 70
@@ -130,7 +133,8 @@ _ASPECTS_QUEUE_N = 9
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# chash: real migrate_chash_rows / verify_fill_chash against an httpx-mocked,
+# (chash leg retired, RDR-187/nexus-piwya.10 — the burst vehicle below moved
+# to the catalog leg)
 # stateful store (the 2026-07-01 incident shape).
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -152,68 +156,9 @@ class _BurstWindow:
         return self.warmup < self.calls <= self.warmup + self.burst
 
 
-def _make_chash_transport(
-    registered: dict[str, set[str]], window: _BurstWindow,
-) -> httpx.MockTransport:
-    def handler(request: httpx.Request) -> httpx.Response:
-        if window.should_fail():
-            return httpx.Response(502, request=request, json={"detail": "bad gateway"})
-        payload = json.loads(request.content)
-        rows = payload.get("rows", [])
-        for row in rows:
-            registered.setdefault(row["collection"], set()).add(row["chash"])
-        return httpx.Response(200, request=request, json={"imported": len(rows)})
-
-    return httpx.MockTransport(handler)
-
-
-class _ChashFakeStore:
-    """Serves BOTH roles chash needs: ``import_rows`` for
-    ``migrate_chash_rows`` (pass 1, full ETL) and
-    ``registered_chashes_for_collection`` for ``verify_fill_chash`` (pass 2,
-    delta) — against the SAME ``registered`` dict the transport handler
-    mutates on a successful POST (non-tautology discipline).
-
-    nexus-f2qvx.3: ``import_rows`` is the public ``HttpChashIndex`` wrapper
-    ``chash_etl.py`` / ``migration/orchestrator.py`` now call (was a raw
-    ``self._client.post(...)`` reach-through pre-mixin-adoption). This fake
-    still drives the request through its own ``httpx.Client`` (backed by
-    the MockTransport fault-injection handler above) internally, so the
-    502-burst fault injection semantics are unchanged.
-    """
-
-    def __init__(self, client: httpx.Client, registered: dict[str, set[str]]) -> None:
-        self._client = client
-        self._registered = registered
-
-    def registered_chashes_for_collection(self, collection: str) -> set[str]:
-        return set(self._registered.get(collection, set()))
-
-    def import_rows(self, rows: list[dict[str, Any]]) -> int:
-        resp = self._client.post("/v1/chash/import", json={"rows": rows})
-        resp.raise_for_status()
-        return resp.json().get("imported", 0)
-
-    def close(self) -> None:
-        pass
-
-
-def _seed_chash_sqlite(db_path: Path, *, per_collection: int) -> None:
-    conn = sqlite3.connect(str(db_path))
-    conn.execute(
-        "CREATE TABLE chash_index (chash TEXT, physical_collection TEXT, created_at TEXT)"
-    )
-    rows: list[tuple[str, str]] = []
-    for coll, base in (("code__x", 0), ("code__y", 10_000)):
-        for i in range(per_collection):
-            rows.append((f"{base + i:032d}", coll))
-    conn.executemany(
-        "INSERT INTO chash_index (chash, physical_collection, created_at) "
-        "VALUES (?, ?, '2026-01-01T00:00:00Z')",
-        rows,
-    )
-    conn.commit()
-    conn.close()
+# _make_chash_transport / _ChashFakeStore / _seed_chash_sqlite RETIRED
+# (RDR-187/nexus-piwya.10) with the chash ETL store; the 5xx burst rides
+# the catalog leg now.
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -484,14 +429,12 @@ class _ComposedCountSource:
     def __init__(
         self,
         *,
-        chash_registered: dict[str, set[str]],
         catalog: _CatalogFakeClient,
         telemetry: _StatefulTelemetryTarget,
         memory_spy: _CountingSpy,
         plans_spy: _CountingSpy,
         taxonomy_spy: _TaxonomyCountingSpy,
     ) -> None:
-        self._chash_registered = chash_registered
         self._catalog = catalog
         self._telemetry = telemetry
         self._memory_spy = memory_spy
@@ -502,8 +445,6 @@ class _ComposedCountSource:
         return {r: self._resolve(r) for r in relations}
 
     def _resolve(self, relation: str) -> int:
-        if relation == "nexus.chash_index":
-            return sum(len(s) for s in self._chash_registered.values())
         if relation == "nexus.catalog_owners":
             return len(self._catalog.owners)
         if relation == "nexus.catalog_documents":
@@ -561,24 +502,28 @@ class _Corpus:
         self.sqlite_path = tmp_path / "t2.db"
         self.catalog_db = tmp_path / ".catalog.db"
 
-        _seed_chash_sqlite(self.sqlite_path, per_collection=_CHASH_PER_COLLECTION)
         _seed_telemetry_sqlite(self.sqlite_path)
         _seed_generic_sqlite_tables(self.sqlite_path)
         _seed_catalog_sqlite(self.catalog_db)
 
-        # ── chash ──────────────────────────────────────────────────────────
-        self.chash_registered: dict[str, set[str]] = {}
-        self.chash_window = _BurstWindow(
-            warmup=2, burst=9 if inject_burst else 0,
-        )
-        transport = _make_chash_transport(self.chash_registered, self.chash_window)
-        self.chash_http_client = httpx.Client(transport=transport, base_url="http://fake-chash-svc")
-        self.chash_store = _ChashFakeStore(self.chash_http_client, self.chash_registered)
-        self.chash_breaker = EtlCircuitBreaker()
-
-        # ── catalog ────────────────────────────────────────────────────────
+        # ── catalog (carries the 5xx-burst incident vehicle — RDR-187 moved
+        # it here from the retired chash leg) ──────────────────────────────
         self.catalog_fake = _CatalogFakeClient()
         self.catalog_breaker = EtlCircuitBreaker()
+        # burst sized past the breaker's consecutive-failure trip threshold
+        # (the retired chash vehicle used 9 for the same reason) so the trip
+        # is OBSERVED, then recovery follows.
+        self.catalog_window = _BurstWindow(
+            warmup=2, burst=9 if inject_burst else 0,
+        )
+        _orig_post = self.catalog_fake._post
+
+        def _burst_post(path: str, payload: dict) -> None:
+            if self.catalog_window.should_fail():
+                raise ConnectionError("simulated 5xx burst (catalog import)")
+            _orig_post(path, payload)
+
+        self.catalog_fake._post = _burst_post
 
         # ── telemetry ──────────────────────────────────────────────────────
         self.telemetry_target = _StatefulTelemetryTarget({})
@@ -597,7 +542,6 @@ class _Corpus:
         )
 
         self.count_source = _ComposedCountSource(
-            chash_registered=self.chash_registered,
             catalog=self.catalog_fake,
             telemetry=self.telemetry_target,
             memory_spy=self.memory_spy,
@@ -615,14 +559,6 @@ class _Corpus:
         corpus = self
 
         def _build_store_etls(_sources: EtlSources) -> list[StoreEtl]:
-            def _chash(sources: EtlSources, collector: Any) -> dict:
-                from nexus.db.t2.chash_etl import migrate_chash_rows  # noqa: PLC0415
-
-                return migrate_chash_rows(
-                    sources.sqlite_path, corpus.chash_store,
-                    collector=collector, breaker=corpus.chash_breaker,
-                )
-
             def _catalog(sources: EtlSources, collector: Any) -> dict:
                 from nexus.db.t2.catalog_etl import migrate_catalog  # noqa: PLC0415
 
@@ -645,13 +581,11 @@ class _Corpus:
                 StoreEtl("telemetry", _telemetry),
                 StoreEtl("taxonomy", corpus.taxonomy_spy.run),
                 StoreEtl("aspects", corpus.aspects_spy.run),
-                StoreEtl("chash", _chash),
                 StoreEtl("catalog", _catalog),
                 StoreEtl("aspects_queue", corpus.aspects_queue_spy.run),
             ]
 
         monkeypatch.setattr(orch, "build_store_etls", _build_store_etls)
-        monkeypatch.setattr(orch, "_open_chash_store", lambda: corpus.chash_store)
         monkeypatch.setattr(orch, "_open_catalog_client", lambda: corpus.catalog_fake)
         monkeypatch.setattr(orch, "_open_telemetry_store", lambda: corpus.telemetry_target)
 
@@ -684,12 +618,6 @@ class TestComposedUnattendedT2PassSurvivesBurst:
         assert corpus.aspects_spy.run_count == 1
         assert corpus.aspects_queue_spy.run_count == 1
 
-        # Corpus scale genuinely landed (chash: multi-page, 2 collections).
-        assert sum(len(s) for s in corpus.chash_registered.values()) == (
-            2 * _CHASH_PER_COLLECTION
-        )
-        assert len(corpus.chash_registered) == 2
-
         # Catalog: 2 docs, shared-chash collapse — distinct chashes are
         # 2*_CATALOG_CHUNKS_PER_DOC - _CATALOG_SHARED_CHASH_COUNT (dedup by
         # chash value, RDR-108 D1), never the raw row count.
@@ -711,8 +639,9 @@ class TestComposedUnattendedT2PassSurvivesBurst:
             assert len(corpus.telemetry_target.present_by_table.get(table, set())) == n
 
         # (6) the breaker was OBSERVED handling the burst — not bypassed.
-        assert corpus.chash_breaker.trip_count >= 1
-        assert corpus.chash_window.calls > corpus.chash_window.warmup + corpus.chash_window.burst
+        # (RDR-187: the burst rides the catalog leg now.)
+        assert corpus.catalog_breaker.trip_count >= 1
+        assert corpus.catalog_window.calls > corpus.catalog_window.warmup + corpus.catalog_window.burst
 
     def test_vectors_delta_pass_under_blip_preserves_write_safety(
         self, tmp_path: Path,
@@ -835,7 +764,6 @@ class TestComposedSecondPassIsFastNoop:
         assert report1["summary"]["total_failed"] == 0
 
         # Snapshot write-path activity BEFORE the second pass.
-        chash_calls_before = corpus.chash_window.calls
         catalog_posts_before = len(corpus.catalog_fake.posts)
         telemetry_imports_before = len(corpus.telemetry_target.import_calls)
 
@@ -851,12 +779,6 @@ class TestComposedSecondPassIsFastNoop:
         assert corpus.memory_spy.run_count == 1  # unchanged since pass 1
         assert corpus.plans_spy.run_count == 1
         assert corpus.taxonomy_spy.run_count == 1
-
-        # chash: real inner-fill wiring — outer parity means ZERO further
-        # HTTP calls (no re-probe even), never mind a re-send.
-        assert corpus.chash_window.calls == chash_calls_before
-        outer_chash = report2["verify_fill"]["outer"]["chash"]["chash_index"]
-        assert outer_chash["status"] == "parity"
 
         # catalog: all 5 mapped tables at parity -> zero further POSTs.
         assert len(corpus.catalog_fake.posts) == catalog_posts_before
@@ -886,7 +808,6 @@ class TestComposedSecondPassIsFastNoop:
         # Total telemetry FILL work this pass is genuinely zero (no drift
         # was introduced between passes in this scenario).
         assert report2["verify_fill"]["results"]["telemetry"]["total_filled"] == 0
-        assert report2["verify_fill"]["results"]["chash"]["total_filled"] == 0
         assert report2["verify_fill"]["results"]["catalog"]["total_filled"] == 0
 
 

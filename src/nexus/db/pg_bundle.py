@@ -134,56 +134,140 @@ def locate_bundle_archive(*, search_dirs: list[Path] | None = None) -> Path | No
     return None
 
 
+def _archive_identity(archive: Path) -> str:
+    """Cheap identity of *archive* for the extraction marker (nexus-xzop6).
+
+    Name plus size plus mtime, not a digest: this runs on the provisioning
+    path and a bundle is hundreds of megabytes, so hashing it on every call
+    would be a real cost to detect a case the download already gated. The
+    sha256 that matters is verified at download time by
+    ``binary_install`` and recorded in ``nexus-pg.meta.json``; this only has
+    to notice that the archive on disk is no longer the one that produced
+    the extracted tree.
+    """
+    stat = archive.stat()
+    return f"source={archive}\nname={archive.name}\nsize={stat.st_size}\nmtime_ns={stat.st_mtime_ns}\n"
+
+
 def extract_bundle(archive: Path, extract_root: Path) -> Path:
     """Idempotently extract *archive* to *extract_root*; return the ``bin/`` dir.
 
-    A complete prior extraction (marker + all binaries) is a no-op — the existing
+    A complete prior extraction of THE SAME archive is a no-op — the existing
     tree is preserved, so a user-modified or already-provisioned bundle is never
     clobbered on re-run. A bad archive (incomplete tree) raises ``RuntimeError``
     and leaves no marker.
+
+    Being handed a DIFFERENT archive re-extracts (nexus-xzop6). The marker
+    used to record ``source=`` and nothing ever read it, so any complete prior
+    tree satisfied the check and a new bundle was silently ignored — the old
+    binaries stayed and ``pg_bundle_already_extracted`` was logged. That was
+    latent only because ``PG_VERSION`` has been 17.5 for the whole shipped
+    history; the first bump would have left every existing install running the
+    old PostgreSQL with no signal.
+
+    NOTE the half this does NOT solve: a data directory initialised by PG N
+    cannot be started by PG N+1 binaries. Swapping the binaries under an
+    existing cluster surfaces as a loud PostgreSQL startup refusal, not
+    silent corruption, but a real major bump additionally needs pg_upgrade or
+    dump/restore. That is RDR-scale and deliberately out of scope here.
     """
     bin_dir = bundle_bin_dir(extract_root)
+    marker = extract_root / _EXTRACT_MARKER
+    identity = _archive_identity(archive)
     if is_bundle_extracted(extract_root):
-        _log.debug("pg_bundle_already_extracted", extract_root=str(extract_root))
-        return bin_dir
+        recorded = marker.read_text() if marker.is_file() else ""
+        if recorded == identity:
+            _log.debug("pg_bundle_already_extracted", extract_root=str(extract_root))
+            return bin_dir
+        # A pre-xzop6 marker carries only "source=..." and cannot be compared;
+        # treat it as a mismatch and re-extract once to adopt the new format.
+        _log.warning(
+            "pg_bundle_archive_changed_reextracting",
+            extract_root=str(extract_root),
+            archive=str(archive),
+            had_identity=bool(recorded and "size=" in recorded),
+            note=(
+                "extracting a different PG bundle over an existing tree; if this "
+                "is a major-version change, an existing data directory will need "
+                "pg_upgrade or dump/restore before the new binaries can start it"
+            ),
+        )
+        # NOT rmtree(extract_root) here. The existing tree is KNOWN-GOOD and
+        # the replacement is not proven yet; deleting first means any failure
+        # below (truncated archive, disk full, permission error) leaves the
+        # install with NO PostgreSQL at all. That is not a rare edge either —
+        # every pre-xzop6 install carries the old marker format, so the whole
+        # existing fleet takes this branch once on first upgrade, with a
+        # byte-identical archive. Extract to a staging tree, prove it, then
+        # swap.
+        staging = extract_root.parent / (extract_root.name + ".incoming")
+        shutil.rmtree(staging, ignore_errors=True)
+        _extract_and_validate(archive, staging)
 
-    extract_root.mkdir(parents=True, exist_ok=True)
-    _log.info("pg_bundle_extracting", archive=str(archive), extract_root=str(extract_root))
+        # Swap: move the old tree aside (fast rename), move the proven tree
+        # into place, then drop the old one. If the second rename fails the
+        # backup is restored, so the window where neither exists is a single
+        # rename wide and is recoverable.
+        backup = extract_root.parent / (extract_root.name + ".replaced")
+        shutil.rmtree(backup, ignore_errors=True)
+        extract_root.replace(backup)
+        try:
+            staging.replace(extract_root)
+        except Exception:
+            backup.replace(extract_root)
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        shutil.rmtree(backup, ignore_errors=True)
+    else:
+        # Nothing usable is present, so extracting in place risks nothing.
+        _extract_and_validate(archive, extract_root)
+
+    # Atomic marker: write to a temp file then rename, so a kill mid-write never
+    # leaves a truncated marker that a re-run would trust.
+    tmp = extract_root / (_EXTRACT_MARKER + ".tmp")
+    tmp.write_text(identity)
+    tmp.replace(marker)
+    _log.info("pg_bundle_extracted", bin_dir=str(bin_dir))
+    return bin_dir
+
+
+def _extract_and_validate(archive: Path, dest: Path) -> None:
+    """Extract *archive* into *dest* and prove the tree is a genuine bundle.
+
+    On ANY failure *dest* is removed and the error propagates, so a caller
+    either gets a complete bundle at *dest* or nothing there at all — which is
+    what lets the replace path above stage a candidate without risking the
+    tree already in service.
+    """
+    dest.mkdir(parents=True, exist_ok=True)
+    _log.info("pg_bundle_extracting", archive=str(archive), extract_root=str(dest))
     try:
         with tarfile.open(archive, "r:xz") as tf:
             # filter="data" (3.12+) blocks path traversal / unsafe members.
-            tf.extractall(extract_root, filter="data")
+            tf.extractall(dest, filter="data")
     except Exception:
         # Corrupt archive / disk-full / permission error mid-extract leaves a
         # partial tree. Remove it so a retry starts clean and a half-written tree
         # is never mistaken for a usable bundle (no marker is written).
-        shutil.rmtree(extract_root, ignore_errors=True)
+        shutil.rmtree(dest, ignore_errors=True)
         raise
 
+    bin_dir = bundle_bin_dir(dest)
     if not PgBinaries.from_dir(bin_dir).all_present():
         present = [p.name for p in bin_dir.glob("*")] if bin_dir.is_dir() else []
-        shutil.rmtree(extract_root, ignore_errors=True)
+        shutil.rmtree(dest, ignore_errors=True)
         raise RuntimeError(
             f"PG bundle '{archive}' extracted an incomplete tree: "
             f"missing one or more of initdb/pg_ctl/psql/createdb under "
             f"{bin_dir} (found: {present or 'none'})."
         )
-    if not _build_prefix_marker(extract_root).is_file():
-        shutil.rmtree(extract_root, ignore_errors=True)
+    if not _build_prefix_marker(dest).is_file():
+        shutil.rmtree(dest, ignore_errors=True)
         raise RuntimeError(
             f"PG bundle '{archive}' is missing its '{_BUILD_PREFIX_MARKER}' "
             "relocation marker — not a genuine nexus PG bundle "
             "(scripts/build_pg_bundle.sh stamps it at bundle/.build_prefix)."
         )
-
-    # Atomic marker: write to a temp file then rename, so a kill mid-write never
-    # leaves a truncated marker that a re-run would trust.
-    marker = extract_root / _EXTRACT_MARKER
-    tmp = extract_root / (_EXTRACT_MARKER + ".tmp")
-    tmp.write_text(f"source={archive}\n")
-    tmp.replace(marker)
-    _log.info("pg_bundle_extracted", bin_dir=str(bin_dir))
-    return bin_dir
 
 
 def extracted_bin_dir(config_dir: Path) -> Path | None:

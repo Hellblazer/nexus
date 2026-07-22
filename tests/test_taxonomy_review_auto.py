@@ -956,3 +956,89 @@ class TestReviewAutoCLI:
             "1 accepted, 1 renamed, 1 deleted, 1 merged, 0 skipped, 0 failed."
             in result.output
         )
+
+
+class TestDispatchFailureRollup:
+    """nexus-l1qpj: dispatch failures exercised against the REAL non-zero-
+    exit branch (patching ``asyncio.create_subprocess_exec`` one level
+    below, NOT ``claude_dispatch`` wholesale — every prior test patched the
+    dispatcher out, which is why the per-failure WARNING landed untested).
+    The batch functions fill the caller's ``failures`` collector while the
+    return contract stays byte-identical (all ``None``)."""
+
+    @staticmethod
+    def _failing_proc():
+        proc = AsyncMock()
+        proc.returncode = 1
+        proc.communicate = AsyncMock(
+            return_value=(b'{"type":"result","subtype":"error"}', b""),
+        )
+        return proc
+
+    @pytest.mark.asyncio
+    async def test_verdicts_batch_fills_collector_on_real_exit_1(self) -> None:
+        from nexus.commands.taxonomy_cmd import _generate_review_verdicts_batch
+
+        failures: list[str] = []
+        items = [(1, "label-a", ["term"], ["doc"], "coll")]
+        with patch(
+            "asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=self._failing_proc()),
+        ):
+            results = await _generate_review_verdicts_batch(
+                items, failures=failures,
+            )
+        assert results == [None]  # fail-open contract unchanged
+        assert len(failures) == 1
+        assert "dispatch-harness failure" in failures[0]
+
+    @pytest.mark.asyncio
+    async def test_labels_batch_fills_collector_on_real_exit_1(self) -> None:
+        from nexus.commands.taxonomy_cmd import _generate_labels_batch
+
+        failures: list[str] = []
+        items = [(["term-a"], ["doc-a"])]
+        with patch(
+            "asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=self._failing_proc()),
+        ):
+            results = await _generate_labels_batch(items, failures=failures)
+        assert results == [None]
+        assert len(failures) == 1
+
+    @pytest.mark.asyncio
+    async def test_real_failure_is_demoted_to_info_inside_batch(self) -> None:
+        # The choke-point event must arrive at INFO (rolled-up scope set by
+        # the batch function), keeping per-failure noise off the terminal
+        # while the run log still captures it.
+        from nexus.commands.taxonomy_cmd import _generate_review_verdicts_batch
+
+        items = [(1, "label-a", ["term"], ["doc"], "coll")]
+        with patch(
+            "asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=self._failing_proc()),
+        ):
+            with patch("nexus.operators.dispatch._log") as mock_log:
+                await _generate_review_verdicts_batch(items, failures=[])
+        assert mock_log.info.called
+        assert not mock_log.warning.called
+
+    @pytest.mark.asyncio
+    async def test_no_collector_still_fail_open_and_still_warns(self) -> None:
+        # Round-3 critique HIGH-2: callers on the failures=None convention
+        # keep the OLD visibility too — the choke-point event stays a
+        # WARNING (no rollup exists to compensate for a demotion), and the
+        # return contract stays fail-open. Asserting only the return value
+        # was false assurance.
+        from nexus.commands.taxonomy_cmd import _generate_review_verdicts_batch
+
+        items = [(1, "label-a", ["term"], ["doc"], "coll")]
+        with patch(
+            "asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=self._failing_proc()),
+        ):
+            with patch("nexus.operators.dispatch._log") as mock_log:
+                results = await _generate_review_verdicts_batch(items)
+        assert results == [None]
+        assert mock_log.warning.called
+        assert not mock_log.info.called

@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-187 (bead nexus-piwya.9) — DROP nexus.chash_index, the router
+    remnant of the split-store architecture.
+
+    The chunks tables ARE the chash-keyed store: /v1/chash/* reads serve
+    from them (nexus-piwya.3, conformance-gated as a strict SUPERSET of the
+    router's answers), the dual-write hook and delete_stale self-heal are
+    gone client-side (nexus-piwya.4), the census/gate/forensics legs are
+    retired (nexus-piwya.5), the staging promote/landing legs are retired
+    (nexus-piwya.7/.8), and the cold-path ETL leg is gone (nexus-piwya.10).
+    Conexus's five direct readers landed ahead of this DROP (their PR #176,
+    round-29 confirmation); their rdr164 cascade probe retargets in
+    lockstep with this tag's CatalogRepository cascade-leg removal.
+
+    AUDIT TRAIL — the orphan population dies HERE, by design: production
+    measured 292,230 nexus.chash_index rows resolving by NO route (neither
+    a chunks row nor a chash_alias fact — the post-kmd5b width-blind-fixed
+    census, 2026-07-20, both cloud tenants). They are pointers to chunks
+    deleted over the router's dual-write lifetime; every LIVE router fact
+    is answered by the chunks tables. Recorded here per the RDR's
+    audit-trail requirement (subsumes nexus-uu4ue step 2's DELETE — the
+    remaining uu4ue scope is the 426 manifest rows + the final VALIDATE).
+
+    DEPENDENT VIEW (rdr180-1 precedent, proven in the v0.1.49 production
+    deploy): a deployed diag_chash_conformance view older than the 7-leg
+    generation holds a hard dependency on this table — dropped IF EXISTS
+    first. The client re-provisions the 7-leg form on its next provision
+    pass (pg_provision auto-derives from CHASH_BEARING_TABLES, which lost
+    its chash_index entry at nexus-piwya.5); managed deployments
+    re-provision in the deploy window (conexus round-29). Meanwhile the
+    health probe's legacy fallback statements (4-table post-.5) cover the
+    view-absent window by design.
+
+    PRECONDITION (catalog-013 discipline): sqlCheck-gated, MARK_RAN-safe —
+    a store where the table is already gone (a future fresh-install
+    generation after this changeset's own baseline stops creating it, or
+    an out-of-band cleanup) marks ran instead of erroring.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="rdr187-1-drop-diag-view-dependency" author="nexus-piwya.9">
+        <comment>Drop a pre-7-leg diag counts view holding a dependency on chash_index (rdr180-1 precedent; re-provisioned client-side/managed-side with the 7-leg generator)</comment>
+        <sql>
+DROP VIEW IF EXISTS nexus.diag_chash_conformance;
+        </sql>
+        <rollback/>
+    </changeSet>
+
+    <changeSet id="rdr187-2-drop-chash-index" author="nexus-piwya.9">
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="1">SELECT count(*) FROM information_schema.tables WHERE table_schema = 'nexus' AND table_name = 'chash_index'</sqlCheck>
+        </preConditions>
+        <comment>DROP nexus.chash_index — the router is retired; the chunks tables are the chash store. The 292,230 orphaned pointers (post-kmd5b census, 2026-07-20) die here by design. Indexes, the octet CHECK, the collection FK, and the RLS policy die with the table.</comment>
+        <sql>
+DROP TABLE nexus.chash_index;
+        </sql>
+        <!-- The pre-image (292,230 orphans + the live rows' duplicate facts)
+             is not recoverable and never needs to be: live facts are the
+             chunks tables' rows; orphans are the bug class this RDR
+             retires. Rollback is a documented no-op. -->
+        <rollback/>
+    </changeSet>
+
+</databaseChangeLog>

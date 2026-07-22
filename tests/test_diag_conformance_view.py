@@ -35,7 +35,9 @@ _REPO = Path(__file__).resolve().parents[1]
 def test_the_authoritative_set_is_column_aware_and_complete():
     """nexus-z5j0t: the RDR-185 .13 audit gaps are IN the set, with their
     real column names (the chunk_id-naming blind spot), and the poison
-    subset is exactly the pre-z5j0t five (the gate must not grow)."""
+    subset is exactly the four survivors (the gate must not grow;
+    nexus.chash_index retired by RDR-187 / nexus-piwya.5 ahead of the
+    table DROP)."""
     by_table = {t.table: t for t in CHASH_BEARING_TABLES}
     assert by_table["nexus.topic_assignments"].column == "doc_id"
     assert by_table["nexus.frecency"].column == "chunk_id"
@@ -47,9 +49,10 @@ def test_the_authoritative_set_is_column_aware_and_complete():
         "nexus.chunks_384",
         "nexus.chunks_768",
         "nexus.chunks_1024",
-        "nexus.chash_index",
         "nexus.catalog_document_chunks",
     )
+    # RDR-187 pin: the retired router must not reappear in the registry.
+    assert "nexus.chash_index" not in {t.table for t in CHASH_BEARING_TABLES}
     assert all(t.column == "chash" for t in POISON_CHASH_TABLES)
     assert set(CHASH_BEARING_TABLES) == set(POISON_CHASH_TABLES) | set(DEBT_CHASH_TABLES)
 
@@ -172,21 +175,32 @@ def test_cascade_covers_every_debt_table():
 
 
 def test_poison_detail_token_couples_probe_and_gates():
-    """The install-binary gate (daemon.py) and the convergence gate
-    (upgrade_finish.py) distinguish REAL poison from probe-degraded WARNs
-    by substring-matching the health detail. All three sides must use the
-    ONE constant — a hand-typed phrase on any side silently disarms the
-    gate (nexus-jxizy.5)."""
+    """The convergence gate (upgrade_finish.py) distinguishes REAL poison
+    from probe-degraded WARNs by substring-matching the health detail
+    against the ONE constant — a hand-typed phrase silently disarms the
+    gate (nexus-jxizy.5). Since fc24123c (nexus-pgdcv) the install-binary
+    gate (daemon.py) no longer matches the token itself: it couples
+    through the shared tri-state ``_poison_probe`` classifier, so the two
+    gates cannot diverge on the unknown state either."""
     from nexus.db.chash_tables import POISON_DETAIL_TOKEN
 
     for rel in (
         "src/nexus/health.py",
-        "src/nexus/commands/daemon.py",
         "src/nexus/upgrade_finish.py",
     ):
         src = (_REPO / rel).read_text()
         assert "POISON_DETAIL_TOKEN" in src, rel
         assert '"non-32-char chash" in r.detail' not in src, rel
+    daemon_src = (_REPO / "src/nexus/commands/daemon.py").read_text()
+    # Require the CALL SITE, not a bare identifier mention (critic 2026-07-21:
+    # a docstring reference alone must not satisfy the coupling tripwire).
+    import re
+
+    assert re.search(r"=\s*_poison_probe\(", daemon_src), (
+        "daemon.py's install-binary gate must CALL the shared _poison_probe "
+        "classifier (not merely mention it) — nexus-jxizy.5 / nexus-pgdcv"
+    )
+    assert '"non-32-char chash" in r.detail' not in daemon_src
     assert POISON_DETAIL_TOKEN  # non-empty, importable
 
 

@@ -238,10 +238,28 @@
     <include file="db/changelog/rdr180-001-bytea-chash.xml"/>
     <include file="db/changelog/rdr180-002-hex-boundary-functions.xml"/>
 
+    <!-- RDR-187 step 1 (bead nexus-piwya.1): (tenant_id, chash) probe index
+         per chunk table — the chunks PK leads with collection, so the
+         census/alias/reroute chash-only probes cannot use it. Placed AFTER
+         rdr180-001 so fresh installs build the btree on the bytea column
+         once, instead of building on TEXT and rebuilding through the
+         ALTER TYPE. Depends only on vectors-001 tables existing. -->
+    <include file="db/changelog/vectors-003-chash-probe-indexes.xml"/>
+
     <!-- RDR-180 LAND-THEN-TRANSFORM (nexus-jxizy.10): the width-free landing
          zone the guided migration bulk-loads VERBATIM before the in-DB
          promote. Own runAlways grants (staging-4) mirror grants-nexus-svc. -->
     <include file="db/changelog/staging-001-landing-tables.xml"/>
+
+    <!-- RDR-187 (bead nexus-piwya.9): DROP nexus.chash_index — the router
+         remnant of the split-store architecture. The chunks tables are the
+         chash-keyed store (probe indexes: vectors-003; reroute:
+         nexus-piwya.3). Runs AFTER every changeset that ever touched the
+         table (chash-001, fk-002, catalog-013, rdr180) — those remain
+         immutable history and, on fresh installs, still create/validate the
+         table before this drops it. staging.chash_index (the dead-sink
+         landing surface) survives until the N+1 release. Before grants. -->
+    <include file="db/changelog/rdr187-001-drop-chash-index.xml"/>
 
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".

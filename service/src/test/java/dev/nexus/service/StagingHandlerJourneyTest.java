@@ -233,8 +233,14 @@ class StagingHandlerJourneyTest {
             + "WHERE encode(chash,'hex') = '" + canon + "'")).isEqualTo(1);
         assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
             + "WHERE doc_id = '9.9.1' AND encode(chash,'hex') = '" + canon + "'")).isEqualTo(1);
-        assertThat(count("SELECT count(*) FROM nexus.chash_index "
-            + "WHERE encode(chash,'hex') = '" + canon + "'")).isEqualTo(1);
+        // RDR-187 (nexus-piwya.7/.9): the staging chash promote leg is
+        // retired and the router TABLE is dropped — the landed
+        // staging.chash_index row (asserted above) is a dead sink with no
+        // possible destination; the chunks promote IS the registration.
+        assertThat(count("SELECT count(*) FROM information_schema.tables "
+            + "WHERE table_schema = 'nexus' AND table_name = 'chash_index'"))
+            .as("the router table stays dropped; a resurrected promote target fails here")
+            .isZero();
     }
 
     @Test

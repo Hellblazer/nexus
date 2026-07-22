@@ -559,6 +559,162 @@ class TestErrorHandling:
                 await claude_dispatch("prompt", _SIMPLE_SCHEMA)
 
     @pytest.mark.asyncio
+    async def test_nonzero_exit_surfaces_stdout_when_stderr_is_empty(self) -> None:
+        """A diagnostic on stdout must reach the error (GH #1414).
+
+        ``claude -p --output-format json`` reports its errors on STDOUT, so
+        building the message from stderr alone produced the literal
+        ``claude -p exited 1:`` with nothing after the colon — twice, for
+        nx_plan_audit, with nothing in mcp.log either. The subprocess said
+        why; we threw it away.
+        """
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        proc = _make_proc(
+            stdout=b'{"type":"result","subtype":"error_during_execution"}',
+            returncode=1,
+            stderr=b'',
+        )
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorError, match="error_during_execution"):
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+    @pytest.mark.asyncio
+    async def test_nonzero_exit_reports_both_streams_when_both_spoke(self) -> None:
+        """Neither stream is dropped when both carry text."""
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        proc = _make_proc(
+            stdout=b'stdout-diagnosis',
+            returncode=2,
+            stderr=b'stderr-diagnosis',
+        )
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorError) as exc:
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        assert "stdout-diagnosis" in str(exc.value)
+        assert "stderr-diagnosis" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_nonzero_exit_says_so_when_the_subprocess_was_silent(self) -> None:
+        """Silence must read as silence, not as a truncated message.
+
+        A bare trailing colon is indistinguishable from 'we dropped the
+        output' — which is precisely the ambiguity GH #1414 spent a session
+        resolving by hand.
+        """
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        proc = _make_proc(stdout=b'', returncode=1, stderr=b'')
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorError, match="no output on stdout or stderr"):
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+    @pytest.mark.asyncio
+    async def test_nonzero_exit_logs_a_durable_event(self) -> None:
+        """A non-zero exit must leave a record, not only an exception.
+
+        GH #1414 searched a May-July mcp.log and found nothing for the
+        failure. Of the 17 claude_dispatch call sites, 13 propagate bare
+        with no logging on at least one real invocation path, and three
+        (nx_plan_audit, nx_tidy, nx_enrich_beads) have no covered path at
+        all — FastMCP's handler returns str(e) to the client without
+        logging. So the record has to be written HERE, at the one choke
+        point every caller passes through.
+        """
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        proc = _make_proc(
+            stdout=b'stdout-diagnosis', returncode=7, stderr=b'stderr-diagnosis',
+        )
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with patch("nexus.operators.dispatch._log") as mock_log:
+                with pytest.raises(OperatorError):
+                    await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        assert mock_log.warning.called, "non-zero exit left no durable record"
+        event, kwargs = mock_log.warning.call_args[0], mock_log.warning.call_args[1]
+        assert event[0] == "operator_dispatch_failed"
+        assert kwargs["returncode"] == 7
+        assert "stdout-diagnosis" in kwargs["stdout"]
+        assert "stderr-diagnosis" in kwargs["stderr"]
+
+    @pytest.mark.asyncio
+    async def test_nonzero_exit_log_carries_more_than_the_exception(self) -> None:
+        """The log is the durable channel; it must not inherit the 300-char
+        exception cap.
+
+        nexus-1at5's actual lesson was durable persistence independent of
+        the exception-text channel, not a bigger snippet in the message. A
+        JSON error payload with a stack summary exceeds 300 chars easily,
+        and truncating the log to the message's cap would lose it again.
+        """
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        long_diagnostic = ("E" * 900) + "TAIL-MARKER"
+        proc = _make_proc(
+            stdout=long_diagnostic.encode(), returncode=1, stderr=b'',
+        )
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with patch("nexus.operators.dispatch._log") as mock_log:
+                with pytest.raises(OperatorError) as exc:
+                    await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        assert "TAIL-MARKER" not in str(exc.value), "exception should stay capped"
+        logged = mock_log.warning.call_args[1]["stdout"]
+        assert "TAIL-MARKER" in logged, "the durable record lost the diagnostic tail"
+
+    @pytest.mark.asyncio
+    async def test_logged_stream_marks_its_own_truncation(self) -> None:
+        """A capped field must say it was capped.
+
+        Without a marker, a field of exactly _LOG_STREAM_CAP chars is
+        indistinguishable from a diagnostic that happened to be exactly
+        that long — the same "silence must read as silence" ambiguity this
+        module designs out of the exception text, one field over, in the
+        branch whose whole job is preserving diagnostics.
+        """
+        from nexus.operators.dispatch import (
+            claude_dispatch, OperatorError, _LOG_STREAM_CAP,
+        )
+
+        oversized = "D" * (_LOG_STREAM_CAP + 500)
+        proc = _make_proc(stdout=oversized.encode(), returncode=1, stderr=b'')
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with patch("nexus.operators.dispatch._log") as mock_log:
+                with pytest.raises(OperatorError):
+                    await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        logged = mock_log.warning.call_args[1]["stdout"]
+        assert logged.endswith("...[truncated]"), "capped field does not admit it"
+
+    @pytest.mark.asyncio
+    async def test_logged_stream_at_the_cap_is_not_marked(self) -> None:
+        """The marker must mean something: no marker when nothing was cut."""
+        from nexus.operators.dispatch import (
+            claude_dispatch, OperatorError, _LOG_STREAM_CAP,
+        )
+
+        exact = "D" * _LOG_STREAM_CAP
+        proc = _make_proc(stdout=exact.encode(), returncode=1, stderr=b'')
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with patch("nexus.operators.dispatch._log") as mock_log:
+                with pytest.raises(OperatorError):
+                    await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+
+        logged = mock_log.warning.call_args[1]["stdout"]
+        assert "truncated" not in logged
+        assert len(logged) == _LOG_STREAM_CAP
+
+    @pytest.mark.asyncio
     async def test_malformed_json_raises_operator_output_error(self) -> None:
         """Unparseable stdout raises OperatorOutputError."""
         from nexus.operators.dispatch import claude_dispatch, OperatorOutputError
@@ -1549,3 +1705,112 @@ class TestOperatorAggregate:
         assert len(result["aggregates"]) == 3
         keys = {a["key_value"] for a in result["aggregates"]}
         assert keys == {"alpha", "beta", "gamma"}
+
+
+class TestFailureRecordAddressability:
+    """nexus-ri56e (GH #1414 follow-ups): the failure branch must (a) make
+    its HARNESS origin unambiguous — a populated message reads like an
+    ordinary application error, but this is `claude -p` itself exiting
+    non-zero, not a model answer; and (b) name where the durable record
+    went (the timeout branch always has), or honestly say there is none."""
+
+    @pytest.mark.asyncio
+    async def test_message_states_harness_origin(self) -> None:
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        proc = _make_proc(stdout=b'model-ish error text', returncode=1, stderr=b'')
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorError) as exc:
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+        msg = str(exc.value)
+        assert "dispatch-harness failure, not a model answer" in msg
+        assert "model-ish error text" in msg  # original detail preserved
+
+    @pytest.mark.asyncio
+    async def test_message_names_the_log_file_when_one_is_attached(
+        self, tmp_path,
+    ) -> None:
+        import logging.handlers
+
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        handler = logging.handlers.RotatingFileHandler(tmp_path / "mcp.log")
+        logging.getLogger().addHandler(handler)
+        try:
+            proc = _make_proc(stdout=b'boom', returncode=1, stderr=b'')
+            with patch(
+                "asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc),
+            ):
+                with pytest.raises(OperatorError) as exc:
+                    await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+        finally:
+            logging.getLogger().removeHandler(handler)
+            handler.close()
+        msg = str(exc.value)
+        assert "operator_dispatch_failed" in msg  # the event name to look for
+        assert str(tmp_path / "mcp.log") in msg   # ...and exactly where
+
+    @pytest.mark.asyncio
+    async def test_message_says_no_record_in_plain_cli_mode(self) -> None:
+        # No RotatingFileHandler attached (plain CLI): the exception must
+        # say the message IS the record, never imply a greppable file.
+        import logging.handlers
+
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        root = logging.getLogger()
+        assert not any(
+            isinstance(h, logging.handlers.RotatingFileHandler)
+            for h in root.handlers
+        ), "test precondition: no file handler attached"
+        proc = _make_proc(stdout=b'boom', returncode=1, stderr=b'')
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorError) as exc:
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+        assert "no log file attached" in str(exc.value)
+
+
+class TestRolledUpFailureDemotion:
+    """nexus-l1qpj: inside rolled_up_dispatch_failures() the per-failure
+    choke-point event demotes WARNING -> INFO (the batch caller emits its
+    own rollup); outside, the WARNING default stands."""
+
+    @pytest.mark.asyncio
+    async def test_demoted_inside_scope(self) -> None:
+        from nexus.operators.dispatch import (
+            claude_dispatch,
+            rolled_up_dispatch_failures,
+            OperatorError,
+        )
+
+        proc = _make_proc(stdout=b'x', returncode=1, stderr=b'')
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with patch("nexus.operators.dispatch._log") as mock_log:
+                with rolled_up_dispatch_failures():
+                    with pytest.raises(OperatorError):
+                        await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+        assert mock_log.info.called
+        assert not mock_log.warning.called
+
+    @pytest.mark.asyncio
+    async def test_warning_outside_scope(self) -> None:
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        proc = _make_proc(stdout=b'x', returncode=1, stderr=b'')
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with patch("nexus.operators.dispatch._log") as mock_log:
+                with pytest.raises(OperatorError):
+                    await claude_dispatch("prompt", _SIMPLE_SCHEMA)
+        assert mock_log.warning.called
+        assert not mock_log.info.called
+
+    def test_scope_restores_on_exit(self) -> None:
+        from nexus.operators.dispatch import (
+            _ROLLED_UP,
+            rolled_up_dispatch_failures,
+        )
+
+        assert _ROLLED_UP.get() is False
+        with rolled_up_dispatch_failures():
+            assert _ROLLED_UP.get() is True
+        assert _ROLLED_UP.get() is False

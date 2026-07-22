@@ -121,6 +121,46 @@ BEGIN
 END
 $$;
 
+-- MAINTAIN on chash_alias (rdr180-17 / F2, production 2026-07-20): the rekey and
+-- staging-promote paths ANALYZE this table INSIDE their own transaction, because a
+-- multi-tenant store's SECOND tenant onward is otherwise planned against statistics
+-- autoanalyze froze at "100% tenant 1" while the current tenant's alias rows are still
+-- uncommitted and invisible. Measured cost of the blindness: 101 minutes versus 461
+-- seconds for identical work.
+-- WHY A GRANT IS REQUIRED, not just the statement: nexus_svc holds DML only and does
+-- not own the table, and Postgres does NOT error when a non-owner analyzes — it emits a
+-- WARNING and SKIPS. Without MAINTAIN the ANALYZE is a SILENT no-op that leaves the
+-- planner exactly as blind.
+-- MAINTAIN is PostgreSQL 17+, and this changeset runs against substrates whose major
+-- version nexus does NOT choose:
+--   * MANAGED/cloud: no PostgreSQL is installed by us at all — the engine runs against
+--     a provider-managed server (Crunchy Bridge), whose major is theirs, not ours.
+--     Verified 2026-07-20: major_version 17, live 17.10 (170010) — so the grant DOES
+--     apply in production and F2's in-transaction ANALYZE is live there. Their major
+--     can still move without our say, which is why this stays a guard and not an
+--     assumption.
+--   * LOCAL service: we always install our own signed bundle (17.5, PG_VERSION in
+--     engine-service-release.yml) — never a host PostgreSQL, which is not a supported
+--     mode — BUT the explicit data-directory carve-out deliberately KEEPS the cluster
+--     an earlier, pre-bundle install created, and those can be older.
+-- This guard is therefore NOT a bring-your-own fallback and NOT detect-and-adapt about
+-- our own provisioning; it is a precondition on a statement that would otherwise
+-- CRASH-LOOP boot on a substrate we did not pick (the GH #1390 shape: never let a
+-- migration hard-fail a store it cannot fix). Where MAINTAIN is unavailable the
+-- in-transaction ANALYZE degrades to the no-op described above; the engine reports
+-- `alias_stats_refreshed` per run so that is auditable rather than assumed, and this
+-- NOTICE names it at boot rather than leaving it to be discovered as a slow rekey.
+DO $$
+BEGIN
+    IF current_setting('server_version_num')::int >= 170000 THEN
+        EXECUTE 'GRANT MAINTAIN ON nexus.chash_alias TO nexus_svc';
+    ELSE
+        RAISE NOTICE 'grants-nexus-svc: server % predates MAINTAIN (PG17+); the rekey/promote in-transaction ANALYZE of nexus.chash_alias will be SKIPPED by Postgres. Single-tenant stores are unaffected; a multi-tenant rekey may plan against stale statistics (F2, rekey cascade measured 101min vs 461s).',
+            current_setting('server_version');
+    END IF;
+END
+$$;
+
 -- Default privileges: future tables/sequences created by the schema owner automatically
 -- carry the same grants for nexus_svc (self-healing for new migrations).
 ALTER DEFAULT PRIVILEGES IN SCHEMA nexus GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES    TO nexus_svc;

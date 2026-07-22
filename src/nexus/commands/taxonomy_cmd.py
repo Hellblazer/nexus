@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
 import click
@@ -1495,6 +1496,7 @@ _LABEL_SCHEMA: dict = {
 async def _generate_labels_batch(
     items: list[tuple[list[str], list[str]]],
     glossary_text: str = "",
+    failures: list[str] | None = None,
 ) -> list[str | None]:
     """Generate labels for a batch of topics via ``claude_dispatch``.
 
@@ -1502,6 +1504,12 @@ async def _generate_labels_batch(
     labels — same length as ``items``, ``None`` at indices where the
     schema-enforced response either omitted an entry or returned one
     outside the 3–60 char window.
+
+    *failures* (nexus-l1qpj): optional collector — a dispatch failure
+    appends its message (capped) instead of vanishing into the fail-open
+    ``None`` results, so the caller can emit one end-of-run rollup.
+    ``list.append`` is atomic under the GIL, so the discover path's worker
+    threads share one list safely. Return contract unchanged.
 
     When *glossary_text* is supplied (via :func:`nexus.glossary.format_for_prompt`),
     it is prepended to the prompt so the LLM has project vocabulary
@@ -1532,10 +1540,25 @@ async def _generate_labels_batch(
 
     results: list[str | None] = [None] * len(items)
     try:
-        from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 - deferred to avoid circular import at module load
+        from nexus.operators.dispatch import (  # noqa: PLC0415 - deferred to avoid circular import at module load
+            claude_dispatch,
+            rolled_up_dispatch_failures,
+        )
 
-        payload = await claude_dispatch(prompt, _LABEL_SCHEMA, timeout=120.0)
-    except Exception:  # noqa: BLE001 - best-effort payload parse; degrades to current results
+        # nexus-l1qpj: demote the per-failure choke-point WARNING to INFO
+        # ONLY when the caller passed a rollup collector (round-3 critique
+        # HIGH-2: unconditional demotion made the failures=None convention
+        # silently lossy — no stderr, no collector, no rollup). A caller
+        # without a collector keeps the WARNING default.
+        _cm = (
+            rolled_up_dispatch_failures()
+            if failures is not None else nullcontext()
+        )
+        with _cm:
+            payload = await claude_dispatch(prompt, _LABEL_SCHEMA, timeout=120.0)
+    except Exception as exc:  # noqa: BLE001 - best-effort payload parse; degrades to current results
+        if failures is not None:
+            failures.append(str(exc)[:300])
         return results
 
     labels = payload.get("labels") if isinstance(payload, dict) else None
@@ -1584,12 +1607,14 @@ _REVIEW_VERDICT_SCHEMA: dict = {
 
 async def _generate_review_verdicts_batch(
     items: list[tuple[int, str, list[str], list[str], str]],
+    failures: list[str] | None = None,
 ) -> list[dict | None]:
     """Generate review verdicts for a batch of topics via ``claude_dispatch``.
 
     Each item is ``(topic_id, label, terms, sample_doc_ids, collection)``.
     Returns one verdict dict (or ``None``, fail-open) per item, in item
-    order. Verdict shapes:
+    order. *failures* is the nexus-l1qpj rollup collector — same contract
+    as :func:`_generate_labels_batch`. Verdict shapes:
 
     - ``{"action": "accept"}``
     - ``{"action": "rename", "label": <3-60 chars, stripped>}``
@@ -1648,10 +1673,24 @@ async def _generate_review_verdicts_batch(
 
     results: list[dict | None] = [None] * len(items)
     try:
-        from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 - deferred to avoid circular import at module load
+        from nexus.operators.dispatch import (  # noqa: PLC0415 - deferred to avoid circular import at module load
+            claude_dispatch,
+            rolled_up_dispatch_failures,
+        )
 
-        payload = await claude_dispatch(prompt, _REVIEW_VERDICT_SCHEMA, timeout=180.0)
-    except Exception:  # noqa: BLE001 - best-effort payload parse; degrades to current results
+        # Round-3 critique HIGH-2: demotion only WITH a rollup collector —
+        # see _generate_labels_batch for the rationale.
+        _cm = (
+            rolled_up_dispatch_failures()
+            if failures is not None else nullcontext()
+        )
+        with _cm:
+            payload = await claude_dispatch(
+                prompt, _REVIEW_VERDICT_SCHEMA, timeout=180.0,
+            )
+    except Exception as exc:  # noqa: BLE001 - best-effort payload parse; degrades to current results
+        if failures is not None:
+            failures.append(str(exc)[:300])
         return results
 
     verdicts = payload.get("verdicts") if isinstance(payload, dict) else None
@@ -1741,6 +1780,7 @@ def _review_auto(
     from guard-dropped skips and reported in the summary line.
     """
     from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred to avoid circular import at module load
+    from nexus.logging_setup import open_run_log  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     topics = db.taxonomy.get_unreviewed_topics(collection=collection, limit=limit)
     if not topics:
@@ -1754,46 +1794,68 @@ def _review_auto(
     skipped = 0
     candidate_deletes: list[dict[str, Any]] = []
     candidate_merges: list[dict[str, Any]] = []
+    # nexus-ri56e/l1qpj: CLI mode attaches no file handler, so without the
+    # run log a dispatch failure leaves no persisted record at all; with it,
+    # the demoted per-failure INFO events land in the file while the
+    # terminal gets one rollup line at the end.
+    dispatch_failures: list[str] = []
+    n_batches = (len(topics) + batch_size - 1) // batch_size
 
-    for start in range(0, len(topics), batch_size):
-        batch = topics[start : start + batch_size]
-        items: list[tuple[int, str, list[str], list[str], str]] = []
-        for t in batch:
-            try:
-                terms = json.loads(t["terms"]) if t.get("terms") else []
-            except (json.JSONDecodeError, TypeError):
-                terms = []
-            doc_ids = db.taxonomy.get_topic_doc_ids(t["id"], limit=3)
-            items.append((t["id"], t["label"], terms, doc_ids, t["collection"]))
+    with open_run_log("taxonomy-review") as run_log_path:
+        for start in range(0, len(topics), batch_size):
+            batch = topics[start : start + batch_size]
+            items: list[tuple[int, str, list[str], list[str], str]] = []
+            for t in batch:
+                try:
+                    terms = json.loads(t["terms"]) if t.get("terms") else []
+                except (json.JSONDecodeError, TypeError):
+                    terms = []
+                doc_ids = db.taxonomy.get_topic_doc_ids(t["id"], limit=3)
+                items.append((t["id"], t["label"], terms, doc_ids, t["collection"]))
 
-        verdicts = asyncio.run(_generate_review_verdicts_batch(items))
+            verdicts = asyncio.run(
+                _generate_review_verdicts_batch(items, failures=dispatch_failures)
+            )
 
-        for topic, verdict in zip(batch, verdicts):
-            if verdict is None:
-                skipped += 1
-                continue
-            action = verdict["action"]
-            if action == "accept":
-                if not dry_run:
-                    _tid = topic["id"]
-                    t2_index_write(lambda db, _t=_tid: db.taxonomy.mark_topic_reviewed(_t, "accepted"))
-                accepted += 1
-            elif action == "rename":
-                if not dry_run:
-                    _tid = topic["id"]
-                    _lbl = verdict["label"]
-                    t2_index_write(lambda db, _t=_tid, _l=_lbl: db.taxonomy.rename_topic(_t, _l))
-                renamed += 1
-            elif action == "delete":
-                candidate_deletes.append({**topic, "_reason": verdict.get("reason", "")})
-            elif action == "merge":
-                candidate_merges.append(
-                    {
-                        **topic,
-                        "_target_id": verdict.get("target_id"),
-                        "_reason": verdict.get("reason", ""),
-                    }
-                )
+            for topic, verdict in zip(batch, verdicts):
+                if verdict is None:
+                    skipped += 1
+                    continue
+                action = verdict["action"]
+                if action == "accept":
+                    if not dry_run:
+                        _tid = topic["id"]
+                        t2_index_write(lambda db, _t=_tid: db.taxonomy.mark_topic_reviewed(_t, "accepted"))
+                    accepted += 1
+                elif action == "rename":
+                    if not dry_run:
+                        _tid = topic["id"]
+                        _lbl = verdict["label"]
+                        t2_index_write(lambda db, _t=_tid, _l=_lbl: db.taxonomy.rename_topic(_t, _l))
+                    renamed += 1
+                elif action == "delete":
+                    candidate_deletes.append({**topic, "_reason": verdict.get("reason", "")})
+                elif action == "merge":
+                    candidate_merges.append(
+                        {
+                            **topic,
+                            "_target_id": verdict.get("target_id"),
+                            "_reason": verdict.get("reason", ""),
+                        }
+                    )
+
+        # nexus-l1qpj: ONE rollup line instead of a WARNING per failed
+        # batch; the per-failure records are in the run log (demoted to
+        # INFO at the choke point, captured by open_run_log's file).
+        if dispatch_failures:
+            click.echo(
+                f"WARNING: {len(dispatch_failures)} of {n_batches} verdict "
+                "batches failed at claude -p dispatch (harness-level, not "
+                "model verdicts); their topics stay pending. Per-failure "
+                f"details: {run_log_path}. First: "
+                f"{dispatch_failures[0][:200]}",
+                err=True,
+            )
 
     # Second pass: validate merges only once the full delete- and
     # merge-source sets are known. Guard order (any violation: skipped += 1,
@@ -1989,6 +2051,12 @@ def relabel_topics(
 
     count = 0
     batches_done = 0
+    # nexus-ri56e/l1qpj: worker threads share ONE failure collector
+    # (list.append is atomic under the GIL); the run log gives CLI mode a
+    # persisted per-failure record (the choke-point event demotes to INFO
+    # inside the batch functions — captured by the file, off the terminal),
+    # and the single rollup below replaces one WARNING per failed batch.
+    dispatch_failures: list[str] = []
 
     def _label_batch(batch: list) -> list[tuple[int, str | None]]:
         items = [(w[2], w[3]) for w in batch]  # (terms, doc_ids)
@@ -2007,28 +2075,42 @@ def relabel_topics(
                 "_label_batch called from an async context — "
                 "use loop.run_until_complete or refactor caller."
             )
-        labels = asyncio.run(_generate_labels_batch(items, glossary_text=glossary_text))
+        labels = asyncio.run(_generate_labels_batch(
+            items, glossary_text=glossary_text, failures=dispatch_failures,
+        ))
         return [(w[0], lbl) for w, lbl in zip(batch, labels)]
 
     from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred to avoid circular import at module load
+    from nexus.logging_setup import open_run_log  # noqa: PLC0415 - deferred to avoid circular import at module load
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(_label_batch, b): b for b in batches}
-        for future in as_completed(futures):
-            batches_done += 1
-            for tid, label in future.result():
-                if label:
-                    # GitHub #241 Item 3: use update_topic_label rather than
-                    # rename_topic so review_status stays 'pending'. The
-                    # human-driven ``nx taxonomy review`` is where topics
-                    # transition pending → accepted; batch LLM labeling
-                    # should not short-circuit that step.
-                    # RDR-151 Phase 3 (nexus-uzay8): route via daemon.
-                    _tid = tid  # capture for lambda
-                    _lbl = label
-                    t2_index_write(lambda db, _t=_tid, _l=_lbl: db.taxonomy.update_topic_label(_t, _l))
-                    count += 1
-            _progress(f"    batch {batches_done}/{len(batches)} done ({count} renamed)")
+    with open_run_log("taxonomy-label") as run_log_path:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_label_batch, b): b for b in batches}
+            for future in as_completed(futures):
+                batches_done += 1
+                for tid, label in future.result():
+                    if label:
+                        # GitHub #241 Item 3: use update_topic_label rather than
+                        # rename_topic so review_status stays 'pending'. The
+                        # human-driven ``nx taxonomy review`` is where topics
+                        # transition pending → accepted; batch LLM labeling
+                        # should not short-circuit that step.
+                        # RDR-151 Phase 3 (nexus-uzay8): route via daemon.
+                        _tid = tid  # capture for lambda
+                        _lbl = label
+                        t2_index_write(lambda db, _t=_tid, _l=_lbl: db.taxonomy.update_topic_label(_t, _l))
+                        count += 1
+                _progress(f"    batch {batches_done}/{len(batches)} done ({count} renamed)")
+
+    if dispatch_failures:
+        click.echo(
+            f"WARNING: {len(dispatch_failures)} of {len(batches)} label "
+            "batches failed at claude -p dispatch (harness-level, not "
+            "model labels); affected topics keep their existing labels. "
+            f"Per-failure details: {run_log_path}. First: "
+            f"{dispatch_failures[0][:200]}",
+            err=True,
+        )
 
     return count
 

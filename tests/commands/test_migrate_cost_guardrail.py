@@ -107,7 +107,11 @@ class TestRunMigrationGate:
         monkeypatch.setattr(mc, "classify_collections", lambda **k: object())
         monkeypatch.setattr(mc, "voyage_key_available", lambda: True)
         monkeypatch.setattr(
-            mc, "build_dry_run_preview", lambda r: _preview(cost=cost, tokens=tokens)
+            mc,
+            "build_dry_run_preview",
+            # nexus-leunq follow-up: the preview takes rehashes_ids so it
+            # answers the same question the run it previews will answer.
+            lambda r, **kw: _preview(cost=cost, tokens=tokens),
         )
         monkeypatch.setattr(mc, "_close_quietly", lambda c: None)
         # endpoint preflight + client construction
@@ -179,7 +183,11 @@ class TestRunMigrationEngineFloorGate:
         monkeypatch.setattr(mc, "classify_collections", lambda **k: object())
         monkeypatch.setattr(mc, "voyage_key_available", lambda: True)
         monkeypatch.setattr(
-            mc, "build_dry_run_preview", lambda r: _preview(cost=cost, tokens=tokens)
+            mc,
+            "build_dry_run_preview",
+            # nexus-leunq follow-up: the preview takes rehashes_ids so it
+            # answers the same question the run it previews will answer.
+            lambda r, **kw: _preview(cost=cost, tokens=tokens),
         )
         monkeypatch.setattr(mc, "_close_quietly", lambda c: None)
         monkeypatch.setattr(
@@ -247,7 +255,11 @@ class TestRunMigrationCollisionGuard:
         monkeypatch.setattr(mc, "classify_collections", lambda **k: object())
         monkeypatch.setattr(mc, "voyage_key_available", lambda: True)
         monkeypatch.setattr(
-            mc, "build_dry_run_preview", lambda r: _preview(cost=cost, tokens=tokens)
+            mc,
+            "build_dry_run_preview",
+            # nexus-leunq follow-up: the preview takes rehashes_ids so it
+            # answers the same question the run it previews will answer.
+            lambda r, **kw: _preview(cost=cost, tokens=tokens),
         )
         monkeypatch.setattr(mc, "_close_quietly", lambda c: None)
         monkeypatch.setattr(

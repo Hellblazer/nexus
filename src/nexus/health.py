@@ -1383,11 +1383,15 @@ def _check_t2_integrity() -> list[HealthResult]:
 def _check_t2_dropped_writes() -> list[HealthResult]:
     """Surface the dropped-best-effort-write meter (RDR-129 B4, nexus-uq8a4).
 
-    A nonzero count is a SOFT WARN, never a hard fail: pre-single-daemon-
-    enforcement, a drop under heavy concurrent indexing is expected, and the
-    whole point of the meter is to keep the completeness gap observable rather
-    than lose it to a red X. Post-enforcement a growing count complements the
-    A3 daemon-census hard error (it means a writer is bypassing the daemon).
+    RDR-187 (nexus-piwya.4): the meter's only-ever producer — the chash
+    dual-write hook — is retired, so the count can no longer grow. A
+    nonzero count is therefore HISTORICAL evidence (drops that happened
+    before the writer was retired), reported ok=True with the number
+    visible: a frozen soft-WARN whose last_ts can never advance would
+    nag forever about a writer that no longer exists, and a permanently
+    green "no drops" would silently hide the history. If a future
+    best-effort writer adopts record_drop(), restore the soft-WARN
+    posture for its records.
     """
     from nexus.dropped_writes import count_drops  # noqa: PLC0415 — deferred to avoid circular import
 
@@ -1404,21 +1408,16 @@ def _check_t2_dropped_writes() -> list[HealthResult]:
         )]
 
     detail = (
-        f"{summary.total} dropped under lock contention "
-        f"({summary.rows} rows)"
+        f"{summary.total} historical drop(s) under lock contention "
+        f"({summary.rows} rows) from the retired chash dual-write hook "
+        f"(writer retired by RDR-187; count frozen)"
     )
     if summary.last_ts:
         detail += f", last {summary.last_ts}"
     return [HealthResult(
         label="T2 best-effort writes",
-        ok=False,
-        warn=True,
+        ok=True,
         detail=detail,
-        fix_suggestions=[
-            "transient under heavy concurrent indexing (RDR-129 B4); a "
-            "persistent or growing count means the T2 daemon is down or a "
-            "writer is bypassing it. Check `nx daemon t2 status`",
-        ],
     )]
 
 
@@ -1698,7 +1697,13 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     "nexus.catalog_meta",
     "nexus.catalog_owners",
     "nexus.chash_alias",
-    "nexus.chash_index",
+    # "nexus.chash_index" REMOVED (RDR-187/nexus-piwya.9, .9 review High):
+    # the table is dropped, and _check_rls_present LEFT-JOINs this list
+    # against live pg_class — a listed-but-dropped table is a PERMANENT
+    # false FATAL. (The earlier "likely permanent" note on the bead covered
+    # only the XML cross-walk, which reads immutable history; the live
+    # check is the consumer that matters. The completeness guard carries a
+    # matching dropped-tables exemption.)
     "nexus.chash_remap",
     "nexus.claude_assisted_remediation_consents",
     "nexus.document_aspects",
@@ -1941,7 +1946,17 @@ def _run_psql(
     if psql_runner is not None:
         # Injected runner (unit tests) — does not accept env kwarg.
         return psql_runner(cmd, capture_output=True, text=True, check=False)
-    env = {**os.environ, "PGPASSWORD": password}
+    # nexus-iytd3 loader guard (GH #1414 era-hop regression, 2026-07-21): the
+    # published PG bundles ship psql without an RPATH, so on a minimal Linux
+    # base a bare invocation exits 127 (libpq.so.5 unresolvable). pg_provision
+    # wraps its own psql calls in _bundle_lib_env; this probe must get the
+    # SAME guard — post-fc24123c a probe that cannot run reads as UNKNOWN to
+    # the tri-state chash-poison gate and permanently DEFERS engine
+    # convergence on exactly the era boxes the unattended upgrade serves.
+    from nexus.db.pg_provision import _bundle_lib_env  # noqa: PLC0415 — deferred to avoid circular import
+
+    env = _bundle_lib_env(cmd, None)
+    env["PGPASSWORD"] = password
     return subprocess.run(cmd, capture_output=True, text=True, check=False, env=env)
 
 
@@ -2312,28 +2327,34 @@ def _check_migration_state(
             fatal=True,
         )]
 
-    # Query 4 (nexus-pnwu0 / GH #1390): width-non-conformant chash rows
+    # Query 4 (nexus-pnwu0 / GH #1414): width-non-conformant chash rows
     # (octet_length <> 32, era-safe — see chash_tables.py) across the
     # chunk tables. A box that migrated legacy short ids pre-guard (or had
-    # its chash CHECK constraints dropped out-of-band — the GH #1390 shape)
-    # runs FINE on its current engine, but catalog-013-3's VALIDATE
-    # CONSTRAINT will FAIL on any violating row on the NEXT engine upgrade
-    # and crash-loop the boot (013-3 guards MISSING constraints, not
-    # VIOLATING rows). Surface it as a WARNING before that upgrade, never a
-    # fatal on the current box.
+    # its chash CHECK constraints dropped out-of-band — the closed GH #1390
+    # shape) serves FINE, and v0.1.48+ engines tolerate the rows at BOOT
+    # too: rdr180-11 adds the octet-width CHECKs NOT VALID, and their
+    # VALIDATE is the client chash-rekey rung's post-heal act — no boot
+    # changeset VALIDATEs them (verified nexus-joima, T2 [21022]). The rows
+    # are unhealed upgrade-ladder debt: surface a WARNING steering the
+    # ladder heal (nexus-o513u ladder-first). Only a pre-v0.1.48 char-era
+    # engine can still crash-loop on catalog-013-3's first VALIDATE (it
+    # guards MISSING constraints, not VIOLATING rows). Never fatal on the
+    # current box.
     #
     # nexus-vounk: this MUST run on the nexus_diag path, NOT as nexus_admin.
     # Every chash-bearing table is ENABLE+FORCE RLS with the fail-closed
     # tenant_isolation policy, so a nexus_admin session with no nexus.tenant
     # GUC counts ZERO rows (demonstrated 0-vs-9 on a real store) — the probe
     # would report clean on the exact poisoned store the install-binary gate
-    # exists to block (the nexus-1wjmq asymmetry: Liquibase VALIDATE sees
-    # every row and crash-loops on the next upgrade). run_diagnostic_sql runs
+    # exists to block (the nexus-1wjmq asymmetry: any Liquibase VALIDATE that
+    # DOES run sees every row — on a pre-v0.1.48 char-era engine that
+    # crash-loops the boot). run_diagnostic_sql runs
     # as the SELECT-only BYPASSRLS nexus_diag role (no GUC), so integrity
     # counts see every tenant's rows — what VALIDATE sees. A missing
     # diagnostic role (pre-P2.1 install) or a probe failure degrades to a
     # WARN, never a false "clean".
     from nexus.db.chash_tables import (  # noqa: PLC0415 — deferred to avoid circular import
+        CHASH_CONFORMANCE_LABEL,
         POISON_DETAIL_TOKEN,
         chash_conformance_statements,
         debt_chash_conformance_statements,
@@ -2351,7 +2372,7 @@ def _check_migration_state(
         else resolve_diag_credentials(creds_path)
     if diag_creds is None:
         results.append(HealthResult(
-            label="Chunk chash conformance",
+            label=CHASH_CONFORMANCE_LABEL,
             ok=False,
             detail=(
                 "no nexus_diag diagnostic credentials (pre-P2.1 install) — "
@@ -2406,7 +2427,7 @@ def _check_migration_state(
             # or non-numeric output — a WARN, never a false poison-clean.
             nonconforming = -1
             results.append(HealthResult(
-                label="Chunk chash conformance",
+                label=CHASH_CONFORMANCE_LABEL,
                 ok=False,
                 detail=(
                     "could not probe chash length across chunk tables via the "
@@ -2417,26 +2438,40 @@ def _check_migration_state(
             ))
     if nonconforming > 0:
         results.append(HealthResult(
-            label="Chunk chash conformance",
+            label=CHASH_CONFORMANCE_LABEL,
             ok=False,
             detail=(
                 f"{nonconforming} chunk row(s) have a {POISON_DETAIL_TOKEN} "
                 "(octet_length <> 32 — legacy pre-RDR-108 ids, or chash "
-                "CHECK constraints were dropped out-of-band). The current "
-                "engine serves fine, but an engine UPGRADE will crash-loop "
-                "on catalog-013-3's VALIDATE CONSTRAINT (GH #1390 / "
-                "nexus-pnwu0)."
+                "CHECK constraints were dropped out-of-band). The engine "
+                "serves fine with these rows (the octet-width CHECKs stay "
+                "NOT VALID until the chash-rekey rung heals them), but "
+                "they are unhealed upgrade-ladder debt (GH #1414 / "
+                "nexus-pnwu0). Re-indexing affected content HEALS these "
+                "rows in place and lowers this count (new conformant rows "
+                "are written before stale rows are pruned — nexus-2hklz "
+                "verified heal-by-replacement); deleting affected content "
+                "also lowers it, so read a falling count as healing only "
+                "where your content is intact."
             ),
             fix_suggestions=[
-                "Do NOT upgrade the engine binary until remediated "
-                "(`nx daemon service install-binary` now refuses without "
-                "--force on a poisoned store).",
+                "Step 1 — find each affected collection's repo: "
+                "`nx catalog owners list`",
+                "Step 2 — re-index the file-backed legacy collections: "
+                "`nx index repo <path>` (additive, per-collection; "
+                "store_put-only notes need nothing — the rekey rung "
+                "heals those from stored text)",
+                "Step 3 — run the ladder: `nx upgrade` (the chash-rekey "
+                "rung recomputes correct ids from stored chunk text)",
+                "Step 4 — re-run `nx doctor`; upgrade the engine once "
+                "this warning clears.",
                 "Do NOT drop the chash length constraints to 'unblock' "
                 "anything — that is what caused GH #1390.",
-                "Recovery playbook (clickable): "
+                "Rollback (`nx storage migrate vectors --rollback`) is "
+                "for the will-not-boot class ONLY (service crash-looping "
+                "at startup on a pre-v0.1.48 engine) — see §8.1 of "
                 "https://github.com/Hellblazer/nexus/blob/main/docs/"
-                "migration-runbook.md §8.1 (rollback -> re-index legacy "
-                "collections -> re-migrate).",
+                "migration-runbook.md",
             ],
             warn=True,
         ))

@@ -413,8 +413,12 @@ def test_install_binary_force_overrides_poison_gate(tmp_path, monkeypatch):
     assert "verified" in result.output.lower()  # install proceeded
 
 
-def test_install_binary_gate_skips_on_probe_error(tmp_path, monkeypatch):
-    """A probe that raises must never block a legitimate install."""
+def test_install_binary_gate_warns_unverified_on_probe_error(tmp_path, monkeypatch):
+    """nexus-pgdcv round-2 HIGH-1: an unverifiable store must never block a
+    legitimate install (install-binary IS the recovery tool for the
+    will-not-boot class) — but it must never proceed SILENTLY either. The
+    old gate's silent fail-open was the same bug class converge_engine's
+    gate had."""
     from click.testing import CliRunner
     import nexus.health as _health
     from nexus.commands.daemon import service_install_binary_cmd
@@ -430,4 +434,35 @@ def test_install_binary_gate_skips_on_probe_error(tmp_path, monkeypatch):
         ["engine-service-v0.1.3", "--no-pg-bundle", "--config-dir", str(tmp_path)],
     )
     assert result.exit_code == 0, result.output
-    assert "pre-check skipped" in result.output
+    assert "UNVERIFIED" in result.output
+    assert "psql unreachable" in result.output
+    assert "nx doctor" in result.output  # the verify-after step is named
+
+
+def test_install_binary_gate_warns_unverified_on_fatal_health_result(
+    tmp_path, monkeypatch,
+):
+    """PG unreachable → _check_migration_state early-returns a fatal result
+    and the chash leg never runs. The gate must classify that UNKNOWN
+    (warn + proceed), never silent-clean — the exact GH #1414 ordering."""
+    from click.testing import CliRunner
+    import nexus.health as _health
+    from nexus.commands.daemon import service_install_binary_cmd
+    from nexus.health import HealthResult
+
+    fatal = HealthResult(
+        label="Schema migrations",
+        ok=False,
+        detail="Cannot query databasechangelog (psql exit 2): connection refused",
+        fatal=True,
+    )
+    monkeypatch.setattr(binstall, "install_binary", _fake_install_ok)
+    monkeypatch.setattr(_health, "_check_migration_state", lambda **kw: [fatal])
+
+    result = CliRunner().invoke(
+        service_install_binary_cmd,
+        ["engine-service-v0.1.3", "--no-pg-bundle", "--config-dir", str(tmp_path)],
+    )
+    assert result.exit_code == 0, result.output
+    assert "UNVERIFIED" in result.output
+    assert "Cannot query databasechangelog" in result.output

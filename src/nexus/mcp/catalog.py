@@ -733,6 +733,14 @@ def main():
     )
     # RDR-126 P2 (nexus-bsjro): see nexus/mcp/core.py for rationale.
     ensure_installed_and_running()
+    # nexus-g6vb4 (GH #1414): staleness self-detection — Claude Code users
+    # connect to BOTH servers, and this process has its own deferred imports
+    # subject to the identical mixed-module-graph failure after an in-place
+    # `uv tool upgrade`. Same decorate+warn hook as core.main(); best-effort,
+    # never blocks boot.
+    from nexus.mcp._stale_host import install_stale_host_hook  # noqa: PLC0415 — deferred to entry-point invocation, keeps module import cheap
+
+    install_stale_host_hook(mcp)
     # RDR-144 P5b: the embedder advisory notice is deliberately NOT applied
     # here. It rides core.main()'s server instructions. The .mcpb bundle
     # routes Desktop/Cowork users to nexus.mcp.core only (mcpb/manifest.json),

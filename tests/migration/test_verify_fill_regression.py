@@ -27,7 +27,8 @@ a tautology.
 Four surfaces + one composed CLI case, per the bead:
 
 1. ``TestChashRegressionFaultInjection`` — the chash relational path
-   (:func:`nexus.migration.orchestrator.verify_fill_chash`), N=200/K=3.
+   (originally via the now-retired chash leg, RDR-187; the vectors /
+   catalog / telemetry classes carry it), N=200/K=3.
 2. ``TestVectorsLegFaultInjection`` — the vectors leg
    (:func:`nexus.migration.vector_etl.verify_fill_collections` against a
    stateful ``FakeVectorClient``, already self-mutating via
@@ -86,13 +87,10 @@ from typing import Any
 
 import chromadb
 import pytest
-from click.testing import CliRunner
 
-from nexus.cli import main
 from nexus.db.t2.telemetry_etl import conflict_key
 from nexus.migration.orchestrator import (
     verify_fill_catalog,
-    verify_fill_chash,
     verify_fill_telemetry,
 )
 from nexus.migration.vector_etl import migrate_collections, verify_fill_collections
@@ -119,105 +117,6 @@ _K = 3
 # ═══════════════════════════════════════════════════════════════════════════
 # 1. chash relational path
 # ═══════════════════════════════════════════════════════════════════════════
-
-
-def _seed_chash_db(db_path: Path, rows: list[tuple[str, str]]) -> None:
-    conn = sqlite3.connect(str(db_path))
-    conn.execute(
-        "CREATE TABLE chash_index (chash TEXT, physical_collection TEXT, created_at TEXT)"
-    )
-    conn.executemany(
-        "INSERT INTO chash_index VALUES (?, ?, '2026-01-01T00:00:00Z')", rows,
-    )
-    conn.commit()
-    conn.close()
-
-
-class _StatefulChashTarget:
-    """Single stateful object serving THREE roles against the SAME
-    ``registered`` dict: the chash identity source
-    (``registered_chashes_for_collection``), the import target
-    (``import_rows`` mutates ``registered`` on receipt — mirroring what
-    the real service does), and the outer count source (``counts``,
-    derived from the same dict). This is the load-bearing design choice
-    that makes "second pass is a true no-op" a real assertion instead of a
-    tautology against a static canned snapshot.
-
-    nexus-f2qvx.3: ``_chash_import_fn`` (orchestrator.py) used to call
-    ``http_chash._client.post("/v1/chash/import", ...)`` directly — a
-    pre-mixin-adoption reach-through into the store's internal transport
-    that no longer works post-adoption (RefreshableHttpStoreMixin's
-    httpx.Client has no baked base_url). It now calls the public
-    ``HttpChashIndex.import_rows()`` wrapper instead, so this fake exposes
-    ``import_rows`` rather than ``_client.post``.
-    """
-
-    def __init__(self, registered: dict[str, set[str]]) -> None:
-        self.registered: dict[str, set[str]] = {k: set(v) for k, v in registered.items()}
-        self.posts: list[tuple[str, dict[str, Any]]] = []
-
-    def registered_chashes_for_collection(self, collection: str) -> set[str]:
-        return set(self.registered.get(collection, set()))
-
-    def import_rows(self, rows: list[dict[str, Any]]) -> int:
-        self.posts.append(("/v1/chash/import", {"rows": rows}))
-        for row in rows:
-            self.registered.setdefault(row["collection"], set()).add(row["chash"])
-        return len(rows)
-
-    def close(self) -> None:
-        pass
-
-    # CountSource surface
-    def counts(self, relations: list[str]) -> dict[str, int]:
-        total = sum(len(s) for s in self.registered.values())
-        return {r: total for r in relations}
-
-    @property
-    def total_rows_sent(self) -> int:
-        return sum(len(payload.get("rows", [])) for _url, payload in self.posts)
-
-
-class TestChashRegressionFaultInjection:
-    def test_hole_of_k_filled_not_full_resend_then_second_pass_noop(
-        self, tmp_path: Path,
-    ) -> None:
-        all_ids = [f"{i:032d}" for i in range(_N)]
-        db = tmp_path / "t2.db"
-        _seed_chash_db(db, [(chash, "code__x") for chash in all_ids])
-
-        holed = set(all_ids[50 : 50 + _K])  # noqa: E203 — black-formatted slice
-        target = _StatefulChashTarget({"code__x": set(all_ids) - holed})
-
-        # ── pass 1: divergent -> fill exactly the hole ──────────────────
-        result1 = verify_fill_chash(db, target, count_source=target)
-
-        assert result1["outer"]["chash_index"]["status"] == "divergent"
-        fill1 = result1["fill"]["code__x"]
-        assert fill1["status"] == "filled"
-        assert fill1["missing"] == _K
-        assert fill1["filled"] == _K  # (a): K, never N
-        assert result1["total_filled"] == _K
-
-        # (b): the spy received EXACTLY K rows total, not the 200-row table
-        assert target.total_rows_sent == _K
-        sent_chashes = {
-            row["chash"] for _url, payload in target.posts for row in payload["rows"]
-        }
-        assert sent_chashes == holed
-
-        # (c): the hole is now genuinely closed in the (stateful) target
-        assert target.registered["code__x"] == set(all_ids)
-
-        # ── pass 2: true no-op ───────────────────────────────────────────
-        result2 = verify_fill_chash(db, target, count_source=target)
-
-        assert result2["outer"]["chash_index"]["status"] == "parity"  # (c)
-        assert result2["fill"] == {}  # inner loop skipped entirely on parity
-        assert result2["total_filled"] == 0  # (d)
-        # (d): the spy received ZERO further rows — posts list unchanged
-        assert target.total_rows_sent == _K
-        assert len(target.posts) == 1  # still just the one batch from pass 1
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -501,7 +400,8 @@ class _StatefulTelemetryTarget:
     apart), and — via ``_LiveTelemetryCountSource`` below — the outer
     count source for the two ``_VERIFY_TABLES``-mapped tables
     (``hook_failures``, ``nx_answer_runs``). Same non-tautology discipline
-    as ``_StatefulChashTarget``/``_StatefulCatalogChunkTarget`` above: a
+    as ``_StatefulCatalogChunkTarget`` above (the chash twin retired with
+    its store, RDR-187): a
     second pass genuinely re-probes post-fill state rather than replaying
     a canned snapshot."""
 
@@ -738,42 +638,6 @@ class TestTelemetryFaultInjection:
 # 5. composed CLI-level case
 # ═══════════════════════════════════════════════════════════════════════════
 
-_CLI_N = 50
-_CLI_K = 3
-
-
-def _make_stateful_fake_chash_store(
-    registered: dict[str, set[str]], posts: list[tuple[str, dict[str, Any]]],
-):
-    """Factory mirroring test_verify_fill_cli.py's ``_make_fake_chash_store``
-    closure pattern, but STATEFUL: ``import_rows`` mutates the same
-    ``registered`` dict the identity surface reads from, so a second CLI
-    invocation against the same closures observes genuine post-fill
-    convergence.
-
-    nexus-f2qvx.3: ``_chash_import_fn`` (orchestrator.py) now calls the
-    public ``HttpChashIndex.import_rows()`` wrapper instead of reaching
-    into ``http_chash._client.post(...)`` directly — see
-    ``_StatefulChashTarget``'s docstring above for the full rationale.
-    """
-
-    class _FakeChashStore:
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            pass
-
-        def registered_chashes_for_collection(self, collection: str) -> set[str]:
-            return set(registered.get(collection, set()))
-
-        def import_rows(self, rows: list[dict[str, Any]]) -> int:
-            posts.append(("/v1/chash/import", {"rows": rows}))
-            for row in rows:
-                registered.setdefault(row["collection"], set()).add(row["chash"])
-            return len(rows)
-
-        def close(self) -> None:
-            pass
-
-    return _FakeChashStore
 
 
 class _LiveCliCountSource:
@@ -790,84 +654,3 @@ class _LiveCliCountSource:
         return {r: total for r in relations}
 
 
-def _seed_chash_db_cli(db_path: Path, rows: list[tuple[str, str]]) -> None:
-    conn = sqlite3.connect(str(db_path))
-    conn.execute(
-        "CREATE TABLE chash_index (chash TEXT, physical_collection TEXT, created_at TEXT)"
-    )
-    conn.executemany(
-        "INSERT INTO chash_index (chash, physical_collection, created_at) "
-        "VALUES (?, ?, '2026-01-01T00:00:00Z')",
-        rows,
-    )
-    conn.commit()
-    conn.close()
-
-
-class TestComposedCliFaultInjection:
-    def test_migrate_chash_verify_fill_twice_hole_then_noop(
-        self, tmp_path: Path,
-    ) -> None:
-        from unittest.mock import patch  # noqa: PLC0415 — scoped to this test
-
-        runner = CliRunner()
-        all_ids = [f"{i:032d}" for i in range(_CLI_N)]
-        db = tmp_path / "t2.db"
-        _seed_chash_db_cli(db, [(chash, "code__x") for chash in all_ids])
-        report_path = tmp_path / "report.json"
-
-        holed = set(all_ids[10 : 10 + _CLI_K])  # noqa: E203
-        registered: dict[str, set[str]] = {"code__x": set(all_ids) - holed}
-        posts: list[tuple[str, dict[str, Any]]] = []
-
-        common_patches = (
-            patch(
-                "nexus.db.t2.http_chash_index.HttpChashIndex",
-                _make_stateful_fake_chash_store(registered, posts),
-            ),
-            patch(
-                "nexus.migration.orchestrator.ServiceCountSource",
-                lambda: _LiveCliCountSource(registered),
-            ),
-            patch.dict("os.environ", {"NX_SERVICE_TOKEN": "t"}),
-        )
-
-        cli_args = [
-            "storage", "migrate", "chash",
-            "--db", str(db),
-            "--service-url", "http://fake-service:9",
-            "--report", str(report_path),
-            "--verify-fill",
-        ]
-
-        # ── pass 1: divergent -> fill exactly the hole ──────────────────
-        with common_patches[0], common_patches[1], common_patches[2]:
-            result1 = runner.invoke(main, cli_args)
-
-        assert result1.exit_code == 0, result1.output
-        assert "filled=3" in result1.output  # (a): K=3, never N=50
-        assert "outer_status=divergent" in result1.output
-
-        sent_chashes = {
-            row["chash"] for _url, payload in posts for row in payload["rows"]
-        }
-        assert sent_chashes == holed  # (b): exactly the hole
-        assert sum(len(payload["rows"]) for _u, payload in posts) == _CLI_K
-
-        report1 = json.loads(report_path.read_text())
-        assert report1["summary"]["total_written"] == _CLI_K
-
-        # ── pass 2: true no-op ───────────────────────────────────────────
-        with common_patches[0], common_patches[1], common_patches[2]:
-            result2 = runner.invoke(main, cli_args)
-
-        assert result2.exit_code == 0, result2.output
-        assert "filled=0" in result2.output  # (d)
-        assert "outer_status=parity" in result2.output  # (c)
-
-        # (d): the spy received ZERO further rows across the second pass
-        assert len(posts) == 1  # still just the one batch from pass 1
-        assert sum(len(payload["rows"]) for _u, payload in posts) == _CLI_K
-
-        report2 = json.loads(report_path.read_text())
-        assert report2["summary"]["total_written"] == 0

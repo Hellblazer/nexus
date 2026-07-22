@@ -54,7 +54,21 @@ CHASH_BEARING_TABLES: tuple[ChashBearingTable, ...] = (
     ChashBearingTable("nexus.chunks_384", "chash", poison=True),
     ChashBearingTable("nexus.chunks_768", "chash", poison=True),
     ChashBearingTable("nexus.chunks_1024", "chash", poison=True),
-    ChashBearingTable("nexus.chash_index", "chash", poison=True),
+    # RDR-187 (nexus-piwya.5): nexus.chash_index is RETIRED from the set
+    # ahead of the table DROP (nexus-piwya.9). The gate/forensics statements
+    # filter by table_name, so any deployed view generation (5-, 7- or
+    # 8-leg) still satisfies the narrowed gate; the LEGACY direct-table
+    # fallback would otherwise query the dropped relation and error. Poison
+    # in router rows is moot: the rows die at the DROP regardless.
+    #
+    # Window chain (.5 critique S2, verified): between this release and the
+    # DROP, chash_index-only width poison is no longer refused CLIENT-side
+    # (pre-binary-swap); the guard is SchemaMigrator.preflightChashConstraints
+    # engine-side, which fail-louds BEFORE Liquibase. That entry must die IN
+    # the .9 commit with the table, never before (pinned on the .9 bead).
+    # Old-client x newer-view cell: the retired leg's NULL sum degrades to a
+    # non-gating "could not probe" WARN via health.py's outer handler —
+    # never false-clean, never a hard block.
     ChashBearingTable("nexus.catalog_document_chunks", "chash", poison=True),
     ChashBearingTable("nexus.topic_assignments", "doc_id", poison=False),
     ChashBearingTable("nexus.frecency", "chunk_id", poison=False),
@@ -62,8 +76,9 @@ CHASH_BEARING_TABLES: tuple[ChashBearingTable, ...] = (
 )
 
 #: The upgrade-gating subset — the probe statements the install-binary gate
-#: and the forensics topic run. Identical to the pre-z5j0t five-table set,
-#: so deployed 5-leg views keep satisfying the gate unchanged.
+#: and the forensics topic run. Four tables post-RDR-187 (chash_index
+#: retired, nexus-piwya.5); per-table table_name filtering keeps every
+#: deployed view generation (5/7/8-leg) satisfying the gate unchanged.
 POISON_CHASH_TABLES: tuple[ChashBearingTable, ...] = tuple(
     t for t in CHASH_BEARING_TABLES if t.poison
 )
@@ -84,6 +99,16 @@ DEBT_CHASH_TABLES: tuple[ChashBearingTable, ...] = tuple(
 #: wording and its matchers cannot drift (era-neutral: octet_length ≠ 32 is
 #: the predicate in both the text era and the bytea era).
 POISON_DETAIL_TOKEN: str = "width-non-conformant chash"
+
+
+#: The HealthResult label the chash-conformance probe reports under
+#: (nexus-pgdcv round-2 MEDIUM-1). ``health._check_migration_state`` appends
+#: every conformance outcome — poison, probe-couldn't-run WARN — under this
+#: label, and the two gates (``upgrade_finish._poison_probe``,
+#: ``commands/daemon.py`` install-binary) filter on it to classify the
+#: store. ONE constant so a label rename cannot silently collapse both
+#: filters to empty (which would misread a poisoned store as clean).
+CHASH_CONFORMANCE_LABEL: str = "Chunk chash conformance"
 
 
 #: RDR-182 Amendment A6 (nexus-9bufb): the structural content boundary. A
@@ -162,7 +187,7 @@ def chash_conformance_statements() -> tuple[str, ...]:
     legacy direct counts (the probe's parser is unchanged), same read-only
     aggregate-only shape the ``nexus_diag`` lint accepts. Poison-only BY
     DESIGN (nexus-z5j0t): these feed the install-binary gate, and every
-    deployed view generation (5-leg or 8-leg) carries these rows, so the
+    deployed view generation (5-, 7- or 8-leg) carries these rows, so the
     gate's behavior is invariant across view generations. The view emits
     exactly one row per covered table unconditionally, so ``sum`` never
     returns NULL here."""

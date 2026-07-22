@@ -68,6 +68,8 @@ search(query="extraction pipeline", topic="Math-aware PDF Extraction")
 | `where` | string | `""` | Metadata filter (`KEY=VALUE`, comma-separated; supports `=`, `>=`, `<=`, `>`, `<`, `!=`) |
 | `cluster_by` | string | `""` | Set to `semantic` to group results by topic (Ward fallback below 50% coverage) |
 | `topic` | string | `""` | Pre-filter to a named topic. Run `nx taxonomy list` for available topics |
+| `threshold` | float | per-corpus config | Override the distance threshold uniformly (raw cosine distance, lower = stricter; `inf` disables filtering — RDR-087) |
+| `structured` | boolean | `false` | Return `{ids, tumblers, distances, collections}` instead of the human-readable string (plan-runner use) |
 
 ## query() MCP tool
 
@@ -84,14 +86,15 @@ query(question="database design", follow_links="cites", depth=1)  # + citation g
 | Parameter | Type | Description |
 |---|---|---|
 | `question` | string | Search query text (required) |
-| `corpus` | string | Collection prefix or comma-separated list (default `knowledge,code,docs,rdr`) |
+| `corpus` | string | Collection prefix or comma-separated list (default `knowledge`; pass `all` for every corpus) |
 | `author` | string | Filter by document author (catalog lookup) |
 | `content_type` | string | `code`, `prose`, `rdr`, `paper`, `knowledge` |
 | `subtree` | string | Tumbler prefix — search only documents under this address |
 | `follow_links` | string | Link type to follow (e.g., `cites`) — enriches with linked documents |
 | `depth` | integer | Hops to follow in the link graph (default 1) |
-| `n` | integer | Maximum results (default 10) |
+| `limit` | integer | Maximum results (default 10) |
 | `where` | string | Vector-store metadata filter (e.g. `bib_year>=2020,section_type!=references`) |
+| `structured` | boolean | Return a structured dict instead of the human-readable string (plan-runner use; default false) |
 
 ### How catalog routing works
 

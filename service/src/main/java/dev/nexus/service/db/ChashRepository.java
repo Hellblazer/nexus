@@ -1,50 +1,55 @@
 package dev.nexus.service.db;
 
+import dev.nexus.service.vectors.DimTables;
 import org.jooq.DSLContext;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
-import static dev.nexus.service.jooq.nexus.Tables.CHASH_INDEX;
-import org.jooq.impl.DSL;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashSet;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 /**
- * RDR-152 bead nexus-gmiaf.16 — jOOQ-based chash_index repository.
+ * RDR-187 (bead nexus-piwya.3) — the chash lookup surface, served from the
+ * chunks tables.
  *
- * <p>Mirrors {@code ChashIndex} (SQLite) for the Postgres service tier.
- * All methods route through {@link TenantScope#withTenant} so every row
+ * <p>Until RDR-187 this class fronted {@code nexus.chash_index}, the router
+ * remnant of the split-store architecture: a dual-written copy of "which
+ * collections hold this chash" that leaked orphans on every deletion path
+ * (292,230 rows dangling in production). The chunks tables
+ * ({@code chunks_384/768/1024}) ARE the chash-keyed store — the PK is
+ * {@code (tenant_id, collection, chash)} — so every question the router
+ * answered is answered here by probing them directly, using the
+ * {@code idx_chunks_<dim>_tenant_chash} indexes (nexus-piwya.1).
+ *
+ * <p>Conformance contract (pinned by {@code ChashRerouteConformanceTest}):
+ * answers are a SUPERSET of the router's — exact agreement on every router
+ * row backed by a real chunk, plus resolution of RDR-169 reference-only
+ * chunks the router never knew. Router rows without a backing chunk (the
+ * orphan class) are correctly NOT resolved. {@code created_at} carries the
+ * identical "when this chash entered this collection" semantics
+ * (first-insert-per-key; both chunk upsert paths exclude it from their
+ * ON CONFLICT set-lists — RDR-187 research finding 1).
+ *
+ * <p>WRITES ARE GONE: the router was the only thing written. The chunks
+ * tables are written by the vector ingest paths ({@code PgVectorRepository});
+ * {@code ChashHandler} accepts the old write shapes as deprecated no-ops for
+ * one release (mixed-version window, RDR-187 finding 3). The exceptions:
+ * {@link #renameCollection} stays REAL (rerouted to re-home
+ * {@code chunks_<dim>.collection}; idempotent when the RDR-164 catalog
+ * cascade already did the work), and {@link #resolveLegacyRef} reads the
+ * PERMANENT {@code chash_alias} map (out of RDR-187's scope by design).
+ *
+ * <p>All methods route through {@link TenantScope#withTenant} so every row
  * access is stamped with the tenant GUC and enforced by RLS.
- *
- * <p>The {@code chash_index} table is a content-addressed routing table:
- * given a {@code chash:<hex>} citation, it answers "which physical
- * collections hold this chunk?" The compound PK is
- * {@code (tenant_id, chash, physical_collection)} because the same chunk
- * text (same SHA-256) can legitimately live in multiple collections.
- *
- * <p>NO FTS — this store is an exact-lookup / batch-write table; no text
- * search is required (per the parity contract, Store 7).
- *
- * <p>Thread safety: all writes go through TenantScope which uses a
- * connection pool; each withTenant call gets its own connection.
- *
- * <p>RDR-180 (nexus-jxizy.7): {@code chash} is stored as 32 raw bytes
- * ({@code bytea}); this repository takes {@link Chash} values (already
- * boundary-validated by the handler) and binds {@code toBytes()}, and
- * every read encodes back to the 64-hex interchange form.
  */
 public final class ChashRepository {
-
-    private static final Logger log = LoggerFactory.getLogger(ChashRepository.class);
 
     /**
      * UTC second-precision ISO-8601 formatter matching Python's
@@ -54,6 +59,30 @@ public final class ChashRepository {
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'")
                              .withZone(ZoneOffset.UTC);
 
+    /**
+     * The lookup probe: which collections hold this chash for the current
+     * tenant, with the first-insert timestamp. Three PK-disjoint tables, so
+     * UNION ALL (a collection lives in exactly one dim table; no duplicate
+     * (collection, chash) pairs are possible across legs). The explicit
+     * tenant_id predicate binds the leading column of
+     * {@code idx_chunks_<dim>_tenant_chash}; RLS supplies the same qual for
+     * the serving role, and the plan keeps the index either way (pinned at
+     * 255k-row scale by {@code ChashProbePlanShapeTest}).
+     *
+     * <p>Public so plan-shape tests EXPLAIN exactly the shipped SQL.
+     */
+    public static final String PROBE_SQL =
+        "SELECT collection, created_at FROM nexus.chunks_384 " +
+        " WHERE tenant_id = current_setting('nexus.tenant', true) AND chash = ? " +
+        "UNION ALL " +
+        "SELECT collection, created_at FROM nexus.chunks_768 " +
+        " WHERE tenant_id = current_setting('nexus.tenant', true) AND chash = ? " +
+        "UNION ALL " +
+        "SELECT collection, created_at FROM nexus.chunks_1024 " +
+        " WHERE tenant_id = current_setting('nexus.tenant', true) AND chash = ?";
+
+    private static final int[] DIMS = {384, 768, 1024};
+
     private final TenantScope tenantScope;
 
     public ChashRepository(TenantScope tenantScope) {
@@ -61,26 +90,16 @@ public final class ChashRepository {
     }
 
     /**
-     * RDR-156 P0.2: ensure catalog_collections has a stub row for the given collection
-     * before any chash_index write that carries physical_collection.
-     * Idempotent — ON CONFLICT DO NOTHING.
-     *
-     * <p>physical_collection is NOT NULL in chash_index, so a blank/null value is a caller
-     * error — fail loud rather than silently skipping the registration step and letting the
-     * subsequent INSERT fail with a cryptic FK violation.
-     *
-     * <p>Bead nexus-h8rf6.2 (contention relief): skips the INSERT entirely when
-     * {@link CollectionRegistry} already knows this {@code (tenant, collection)} pair is
-     * registered. See {@link CollectionRegistry} class doc for why the repeated
-     * {@code ON CONFLICT DO NOTHING} was a same-row lock-wait convoy under concurrent
-     * indexing, and why callers (not this method) are responsible for marking the cache
-     * only after the enclosing transaction commits.
+     * RDR-156 P0.2: ensure catalog_collections has a stub row for the given
+     * collection before a rename re-homes rows onto it (fk-002 RESTRICT).
+     * Idempotent — ON CONFLICT DO NOTHING. In-transaction deliberately:
+     * rename's registration must be atomic with the re-point.
      *
      * @throws IllegalArgumentException if collection is null or blank
      */
     private static void ensureCollectionRegistered(DSLContext ctx, String tenant, String collection) {
         if (collection == null || collection.isBlank()) {
-            throw new IllegalArgumentException("physical_collection must not be blank");
+            throw new IllegalArgumentException("collection must not be blank");
         }
         if (CollectionRegistry.isKnown(tenant, collection)) {
             return;
@@ -93,137 +112,6 @@ public final class ChashRepository {
            .execute();
     }
 
-    /**
-     * Register {@code collection} in its OWN short committed transaction, then mark
-     * the {@link CollectionRegistry} cache.
-     *
-     * <p>Bounded first-burst convoy (v0.1.21, ChashVectorConcurrencyTest full-suite
-     * failure): with registration inside the batch transaction, the FIRST writer to
-     * a brand-new collection holds the {@code catalog_collections} ON CONFLICT value
-     * lock for its ENTIRE batch — every concurrent racer blocks for the winner's
-     * whole batch duration, and on a loaded host that exceeds the pool's
-     * connectionTimeout, surfacing typed 503s the cache was built to prevent. The
-     * CollectionRegistry cache bounds convoy COUNT (one per process lifetime);
-     * this bounds convoy DURATION (a single-statement micro-transaction, committed
-     * before the batch begins).
-     *
-     * <p>Trade-off, accepted: if the subsequent batch rolls back, the stub row
-     * persists — a zero-chunk registry stub is benign (collection existence is
-     * live-chunk-count-based everywhere: {@code collection_exists}, {@code /stats};
-     * {@code deleteCollection} removes stubs) and the pre-registration is exactly
-     * what any retry would recreate. Batch paths use this; {@code renameCollection}
-     * keeps in-transaction {@link #ensureCollectionRegistered} because its
-     * registration must be atomic with the re-point.
-     */
-    private void registerCollectionShortTxn(String tenant, String collection) {
-        if (collection == null || collection.isBlank()) {
-            throw new IllegalArgumentException("physical_collection must not be blank");
-        }
-        if (CollectionRegistry.isKnown(tenant, collection)) {
-            return;
-        }
-        tenantScope.withTenant(tenant, ctx -> {
-            ctx.insertInto(CATALOG_COLLECTIONS,
-                            CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .values(tenant, collection)
-               .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-               .doNothing()
-               .execute();
-            return null;
-        });
-        // Post-commit discipline per CollectionRegistry class doc: the registration
-        // transaction above has committed by the time withTenant returns.
-        CollectionRegistry.markKnown(tenant, collection);
-    }
-
-    // ── upsert ─────────────────────────────────────────────────────────────────
-
-    /**
-     * Register {@code chash} as living in {@code collection}.
-     *
-     * <p>INSERT ... ON CONFLICT (tenant_id, chash, physical_collection) DO UPDATE SET
-     * created_at = EXCLUDED.created_at — re-indexing the same chunk refreshes
-     * {@code created_at}, matching SQLite {@code INSERT OR REPLACE} semantics.
-     *
-     * @throws IllegalArgumentException if chash or collection is blank
-     */
-    public void upsert(String tenant, Chash chash, String collection) {
-        if (chash == null) throw new IllegalArgumentException("chash must not be null");
-        if (collection == null || collection.isBlank()) throw new IllegalArgumentException("collection must not be empty");
-
-        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
-        // Own short committed txn — bounds the first-registration convoy DURATION
-        // (see registerCollectionShortTxn doc); also handles markKnown post-commit.
-        registerCollectionShortTxn(tenant, collection);
-        tenantScope.withTenant(tenant, ctx -> {
-            ctx.insertInto(CHASH_INDEX,
-                            CHASH_INDEX.TENANT_ID, CHASH_INDEX.CHASH, CHASH_INDEX.PHYSICAL_COLLECTION, CHASH_INDEX.CREATED_AT)
-               .values(tenant, chash.toBytes(), collection, now)
-               .onConflict(CHASH_INDEX.TENANT_ID, CHASH_INDEX.CHASH, CHASH_INDEX.PHYSICAL_COLLECTION)
-               .doUpdate()
-               .set(CHASH_INDEX.CREATED_AT, DSL.field("EXCLUDED.created_at", OffsetDateTime.class))
-               .execute();
-            return null;
-        });
-    }
-
-    /**
-     * Register many {@code chashes} in one {@code collection} in a single batch.
-     *
-     * <p>Mirrors {@code ChashIndex.upsert_many}: collapses a batch to one round-trip.
-     * Blank/null entries in {@code chashes} are skipped. Empty collection raises
-     * {@link IllegalArgumentException}. An empty (or all-blank) chashes list is a no-op.
-     */
-    public void upsertMany(String tenant, List<Chash> chashes, String collection) {
-        if (collection == null || collection.isBlank()) throw new IllegalArgumentException("collection must not be empty");
-        if (chashes == null || chashes.isEmpty()) return;
-
-        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
-        // distinct(): a multi-VALUES INSERT .. ON CONFLICT DO UPDATE raises
-        // "cannot affect row a second time" (-> HTTP 500) when the same chash
-        // appears twice in one statement, and real files emit duplicate chunk
-        // text (nexus-85z0y). Dedup is semantics-free: a chash is a content
-        // hash, so every occurrence is identical.
-        // sorted(): the multi-row INSERT locks CHASH_INDEX rows in values() order.
-        // tenant + collection are constant within this call, so chash is the only
-        // varying part of the (tenant, chash, physical_collection) conflict key —
-        // sorting by chash gives every concurrent batch one global lock order and
-        // removes the cross-batch deadlock (SQLSTATE 40P01, nexus-ps9wb; same class as
-        // PgVectorRepository.upsertChunks). distinct(): a multi-VALUES INSERT ..
-        // ON CONFLICT DO UPDATE raises "cannot affect row a second time" (-> HTTP 500)
-        // when the same chash appears twice in one statement, and real files emit
-        // duplicate chunk text (nexus-85z0y). Dedup is semantics-free: a chash is a
-        // content hash, so every occurrence is identical.
-        // Sorting by hex preserves the global lock order (lowercase-hex
-        // lexicographic order == unsigned byte order of the stored key).
-        List<Chash> valid = chashes.stream()
-                .filter(java.util.Objects::nonNull)
-                .distinct()
-                .sorted(java.util.Comparator.comparing(Chash::toHex))
-                .toList();
-        if (valid.isEmpty()) return;
-
-        // Own short committed txn — bounds the first-registration convoy DURATION
-        // (see registerCollectionShortTxn doc); also handles markKnown post-commit.
-        registerCollectionShortTxn(tenant, collection);
-        // nexus-ps9wb belt: retry a residual cross-path deadlock (the sort removes the
-        // same-batch cycle; a concurrent writer on a different lock order can still
-        // deadlock). Idempotent ON CONFLICT batch, victim already rolled back → safe.
-        DeadlockRetry.run(collection, () -> tenantScope.withTenant(tenant, ctx -> {
-            var insert = ctx.insertInto(CHASH_INDEX,
-                                        CHASH_INDEX.TENANT_ID, CHASH_INDEX.CHASH, CHASH_INDEX.PHYSICAL_COLLECTION, CHASH_INDEX.CREATED_AT);
-            var step = insert.values(tenant, valid.get(0).toBytes(), collection, now);
-            for (int i = 1; i < valid.size(); i++) {
-                step = step.values(tenant, valid.get(i).toBytes(), collection, now);
-            }
-            step.onConflict(CHASH_INDEX.TENANT_ID, CHASH_INDEX.CHASH, CHASH_INDEX.PHYSICAL_COLLECTION)
-                .doUpdate()
-                .set(CHASH_INDEX.CREATED_AT, DSL.field("EXCLUDED.created_at", OffsetDateTime.class))
-                .execute();
-            return null;
-        }));
-    }
-
     // ── legacy-reference resolution (RDR-180 Item3 read seam) ─────────────────
 
     /**
@@ -233,6 +121,9 @@ public final class ChashRepository {
      * holds no fact for *oldRef* — the caller treats that as chash-not-found
      * (empty rows), never an error: the alias map is the collision-free
      * resolver, and an unmapped legacy reference is simply dangling.
+     *
+     * <p>PERMANENT: chash_alias is explicitly out of RDR-187's scope; this
+     * read seam outlives the router.
      */
     public Chash resolveLegacyRef(String tenant, String oldRef) {
         if (oldRef == null || oldRef.isBlank()) return null;
@@ -249,59 +140,53 @@ public final class ChashRepository {
     // ── lookup ─────────────────────────────────────────────────────────────────
 
     /**
-     * Return all {@code (collection, created_at)} rows for {@code chash}.
+     * Return all {@code (collection, created_at)} rows for {@code chash} —
+     * the collections whose chunk store actually holds this content.
      *
-     * <p>Returns an empty list when {@code chash} is unknown.
-     * Mirrors {@code ChashIndex.lookup}.
+     * <p>Returns an empty list when {@code chash} is unknown. Response keys
+     * ({@code collection}, {@code created_at}) and the second-precision UTC
+     * timestamp format are unchanged from the router era — the HTTP shape is
+     * part of the RDR-187 compatibility contract.
      */
+    // SANCTIONED RAW (nexus-piwya.3): PROBE_SQL is the PUBLISHED probe
+    // statement — ChashProbePlanShapeTest EXPLAINs the constant verbatim to
+    // pin index usage at 255k-row scale, so the executed SQL and the tested
+    // SQL must be the same string by construction. A jOOQ DSL rendering
+    // would decouple them (the pin would test a hand-maintained copy).
     public List<Map<String, String>> lookup(String tenant, Chash chash) {
+        byte[] bytes = chash.toBytes();
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.select(CHASH_INDEX.PHYSICAL_COLLECTION, CHASH_INDEX.CREATED_AT)
-                          .from(CHASH_INDEX)
-                          .where(CHASH_INDEX.CHASH.eq(chash.toBytes()))
-                          .fetch();
+            var rows = ctx.resultQuery(PROBE_SQL, bytes, bytes, bytes).fetch();
             List<Map<String, String>> result = new ArrayList<>(rows.size());
             for (var r : rows) {
-                OffsetDateTime ts = r.get(CHASH_INDEX.CREATED_AT);
+                OffsetDateTime ts = r.get("created_at", OffsetDateTime.class);
                 String tsStr = ts != null ? UTC_SECOND.format(ts.atZoneSameInstant(ZoneOffset.UTC)) : "";
-                result.add(Map.of("collection", r.get(CHASH_INDEX.PHYSICAL_COLLECTION), "created_at", tsStr));
+                result.add(Map.of("collection", r.get("collection", String.class), "created_at", tsStr));
             }
             return result;
         });
     }
 
-    // ── delete_collection ──────────────────────────────────────────────────────
-
-    /**
-     * Drop all rows for {@code collection}. Returns deleted row count.
-     *
-     * <p>Mirrors {@code ChashIndex.delete_collection}. Uses the
-     * {@code idx_chash_index_collection} index for an index seek (not a table scan).
-     * Idempotent: absent collection yields 0.
-     */
-    public int deleteCollection(String tenant, String collection) {
-        return tenantScope.withTenant(tenant, ctx ->
-                ctx.deleteFrom(CHASH_INDEX)
-                   .where(CHASH_INDEX.PHYSICAL_COLLECTION.eq(collection))
-                   .execute());
-    }
-
     // ── distinct_collections ───────────────────────────────────────────────────
 
     /**
-     * Return every distinct {@code physical_collection} value for this tenant.
+     * Return every distinct collection holding at least one chunk for this
+     * tenant.
      *
-     * <p>Mirrors {@code ChashIndex.distinct_collections}. Used by
-     * {@code nx catalog chash-reconcile} to identify ghost collections.
+     * <p>Used by {@code nx catalog chash-reconcile} to identify ghost
+     * collections. Chunk-backed truth: registry stubs with zero chunks do
+     * not appear (matching the router's behavior, which only knew
+     * collections that had received rows).
      */
     public Set<String> distinctCollections(String tenant) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.selectDistinct(CHASH_INDEX.PHYSICAL_COLLECTION)
-                          .from(CHASH_INDEX)
-                          .fetch();
-            Set<String> result = new HashSet<>(rows.size());
-            for (var r : rows) {
-                result.add(r.get(CHASH_INDEX.PHYSICAL_COLLECTION));
+            Set<String> result = new HashSet<>();
+            for (int dim : DIMS) {
+                DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+                result.addAll(ctx.selectDistinct(ch.collection())
+                                 .from(ch.table())
+                                 .where(ch.tenantId().eq(tenant))
+                                 .fetch(ch.collection()));
             }
             return result;
         });
@@ -310,98 +195,133 @@ public final class ChashRepository {
     // ── rename_collection ──────────────────────────────────────────────────────
 
     /**
-     * Re-point every row from {@code oldCollection} to {@code newCollection}.
-     * Returns the count of rows updated.
+     * Re-home every chunk row from {@code oldCollection} to
+     * {@code newCollection} across the three dim tables, AND the manifest's
+     * denormalized collection column. Returns the count of chunk rows
+     * updated (manifest rows are not counted — shape parity with the router
+     * era's return value).
      *
-     * <p>Mirrors {@code ChashIndex.rename_collection}: first deletes any
-     * pre-existing rows for {@code newCollection} that would collide with
-     * the rename (same chash), then updates. Runs in a single transaction
-     * via {@code withTenant}.
+     * <p>KEPT REAL under RDR-187 (design Q3): the RDR-164 catalog cascade
+     * ({@code CatalogRepository.renameCollection}) re-homes chunk rows, the
+     * manifest, and the registry in one transaction, so this direct endpoint
+     * usually matches 0 rows — idempotent belt-and-suspenders, real work
+     * only for a cascade-less caller.
+     *
+     * <p>The manifest leg ({@code catalog_document_chunks.collection}) is
+     * here because this rename now moves REAL chunk rows: renaming chunks
+     * without the manifest would strand the combined-query join key on the
+     * old name — the exact silently-empty-join class nexus-x6kdz closed for
+     * the cascade path (.3 critique S2). The router-era version moved only
+     * routing pointers, so it never had this exposure; matching the
+     * cascade's guarantee is what keeps Q3's "no new window case" claim
+     * true. Idempotent under either topology (0 rows when the cascade
+     * already re-homed).
+     *
+     * <p>Collision policy is INTENTIONALLY REVERSED from the router era
+     * (.3 review finding 1): the router deleted the colliding NEW-side row
+     * and moved OLD's row (OLD won, OLD's created_at survived); here rows
+     * already present in {@code newCollection} with the same chash win and
+     * the colliding {@code oldCollection} copy is dropped. Deleting the
+     * NEW-side CHUNK row to preserve a timestamp would discard real content
+     * state for a tiebreak field (RDR-187 Q1: created_at ordering is a
+     * tiebreak, not a correctness gate); the content is identical either
+     * way by definition of the chash.
      */
     public int renameCollection(String tenant, String oldCollection, String newCollection) {
+        if (oldCollection == null || oldCollection.isBlank()
+                || newCollection == null || newCollection.isBlank()) {
+            throw new IllegalArgumentException("old and new collection must not be empty");
+        }
         int updated = tenantScope.withTenant(tenant, ctx -> {
-            // RDR-156 P0.2: ensure the new collection is registered before renaming.
             ensureCollectionRegistered(ctx, tenant, newCollection);
-            // Drop rows in new that would collide with the rename
-            ctx.deleteFrom(CHASH_INDEX)
-               .where(CHASH_INDEX.PHYSICAL_COLLECTION.eq(newCollection)
-                   .and(CHASH_INDEX.CHASH.in(
-                       DSL.select(CHASH_INDEX.CHASH)
-                          .from(CHASH_INDEX)
-                          .where(CHASH_INDEX.PHYSICAL_COLLECTION.eq(oldCollection))
-                   )))
+            int total = 0;
+            for (int dim : DIMS) {
+                DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+                // Drop OLD rows whose chash already exists under NEW (NEW-side
+                // row wins — see the collision-policy paragraph above).
+                ctx.deleteFrom(ch.table())
+                   .where(ch.tenantId().eq(tenant)
+                       .and(ch.collection().eq(oldCollection))
+                       .and(ch.chash().in(
+                           ctx.select(ch.chash())
+                              .from(ch.table())
+                              .where(ch.tenantId().eq(tenant)
+                                  .and(ch.collection().eq(newCollection))))))
+                   .execute();
+                total += ctx.update(ch.table())
+                            .set(ch.collection(), newCollection)
+                            .where(ch.tenantId().eq(tenant)
+                                .and(ch.collection().eq(oldCollection)))
+                            .execute();
+            }
+            // Manifest re-home (collection is not part of its PK — no
+            // collision handling needed).
+            ctx.update(CATALOG_DOCUMENT_CHUNKS)
+               .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, newCollection)
+               .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
+                   .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(oldCollection)))
                .execute();
-            // Rename
-            return ctx.update(CHASH_INDEX)
-                      .set(CHASH_INDEX.PHYSICAL_COLLECTION, newCollection)
-                      .where(CHASH_INDEX.PHYSICAL_COLLECTION.eq(oldCollection))
-                      .execute();
+            return total;
         });
-        // Post-commit (nexus-h8rf6.2): see upsert()'s comment / CollectionRegistry doc.
+        // Post-commit (nexus-h8rf6.2): see CollectionRegistry class doc.
         CollectionRegistry.markKnown(tenant, newCollection);
         return updated;
-    }
-
-    // ── delete_stale ───────────────────────────────────────────────────────────
-
-    /**
-     * Drop the single row identified by the compound PK {@code (chash, collection)}.
-     *
-     * <p>Mirrors {@code ChashIndex.delete_stale}. Returns 0 when the PK was absent
-     * (idempotent under concurrent self-heal invocations).
-     */
-    public int deleteStale(String tenant, Chash chash, String collection) {
-        return tenantScope.withTenant(tenant, ctx ->
-                ctx.deleteFrom(CHASH_INDEX)
-                   .where(CHASH_INDEX.CHASH.eq(chash.toBytes()).and(CHASH_INDEX.PHYSICAL_COLLECTION.eq(collection)))
-                   .execute());
     }
 
     // ── is_empty ───────────────────────────────────────────────────────────────
 
     /**
-     * True when no rows exist for this tenant — the "fresh install" guard.
-     *
-     * <p>Mirrors {@code ChashIndex.is_empty}. Used by {@code nx doc cite}
-     * short-circuit.
+     * True when no chunk rows exist for this tenant — the "fresh install"
+     * guard. Used by {@code nx doc cite} short-circuit.
      */
     public boolean isEmpty(String tenant) {
-        return tenantScope.withTenant(tenant, ctx ->
-                !ctx.fetchExists(ctx.select(DSL.val(1)).from(CHASH_INDEX)));
+        return tenantScope.withTenant(tenant, ctx -> {
+            for (int dim : DIMS) {
+                DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+                if (ctx.fetchExists(ctx.selectOne()
+                        .from(ch.table())
+                        .where(ch.tenantId().eq(tenant)))) {
+                    return false;
+                }
+            }
+            return true;
+        });
     }
 
     // ── count_for_collection ───────────────────────────────────────────────────
 
     /**
-     * Return the row count for {@code collection}.
-     *
-     * <p>Mirrors {@code ChashIndex.count_for_collection}. Returns 0 for an
-     * unknown collection.
+     * Return the chunk-row count for {@code collection} (summed across the
+     * dim tables; a collection lives in exactly one, the others contribute
+     * zero). Returns 0 for an unknown collection.
      */
     public int countForCollection(String tenant, String collection) {
         return tenantScope.withTenant(tenant, ctx -> {
-            var row = ctx.select(DSL.count())
-                         .from(CHASH_INDEX)
-                         .where(CHASH_INDEX.PHYSICAL_COLLECTION.eq(collection))
-                         .fetchOne();
-            return row != null ? row.value1() : 0;
+            int total = 0;
+            for (int dim : DIMS) {
+                DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+                Integer n = ctx.selectCount()
+                               .from(ch.table())
+                               .where(ch.tenantId().eq(tenant)
+                                   .and(ch.collection().eq(collection)))
+                               .fetchOne(0, Integer.class);
+                if (n != null) total += n;
+            }
+            return total;
         });
     }
 
     // ── registered_chashes_for_collection ─────────────────────────────────────
 
     /**
-     * Return every distinct registered chash for {@code collection}, hex-encoded.
-     *
-     * <p>RDR-180: the natural chunk ID is the FULL digest, so the pre-flip
-     * {@code substr(chash, 1, 32)} compensation is retired — values encode to
-     * 64-hex (canonical rows) while not-yet-rekeyed legacy rows naturally
-     * encode to their shorter legacy hex, which callers treat as legacy
-     * references.
+     * Return every distinct chash present in {@code collection}, hex-encoded
+     * (64-hex full digests — RDR-180 natural chunk IDs).
      *
      * <p>Used by the collection-audit coverage probe
      * ({@code collection_audit.py}): one set-difference against T3 chunk IDs
-     * replaces the per-page IN-list query.
+     * replaces the per-page IN-list query. Chunk-backed truth: the audit now
+     * compares the chunk store against itself via the same table family,
+     * which is exactly the RDR-187 end-state (no derived copy to drift).
      *
      * @param tenant     tenant principal (sets RLS GUC)
      * @param collection physical collection name to query
@@ -412,128 +332,22 @@ public final class ChashRepository {
             throw new IllegalArgumentException("collection must not be empty");
         }
         return tenantScope.withTenant(tenant, ctx -> {
-            var rows = ctx.selectDistinct(CHASH_INDEX.CHASH)
-                          .from(CHASH_INDEX)
-                          .where(CHASH_INDEX.PHYSICAL_COLLECTION.eq(collection))
-                          .fetch();
-            Set<String> result = new HashSet<>(rows.size());
-            for (var r : rows) {
-                byte[] ch = r.value1();
-                if (ch != null && ch.length > 0) {
-                    result.add(HexFormat.of().formatHex(ch));
+            Set<String> result = new HashSet<>();
+            for (int dim : DIMS) {
+                DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+                // ch.chash() is the ChashHex-converted field: fetches as
+                // lowercase 64-hex directly.
+                for (String hex : ctx.selectDistinct(ch.chash())
+                                     .from(ch.table())
+                                     .where(ch.tenantId().eq(tenant)
+                                         .and(ch.collection().eq(collection)))
+                                     .fetch(ch.chash())) {
+                    if (hex != null && !hex.isEmpty()) {
+                        result.add(hex);
+                    }
                 }
             }
             return result;
         });
-    }
-
-    // ── import (fidelity-preserving ETL) ──────────────────────────────────────
-
-    /**
-     * Fidelity-preserving import of a single row.
-     *
-     * <p>ON CONFLICT (tenant_id, chash, physical_collection) DO UPDATE SET
-     * created_at = EXCLUDED.created_at. Chash entries are content-addressed
-     * and immutable; EXCLUDED verbatim is correct (no GREATEST needed —
-     * there is no mutable monotonic counter to protect). Idempotent re-runs
-     * are safe.
-     *
-     * @param createdAtIso UTC ISO-8601 string (e.g. "2025-06-01T10:30:00Z")
-     */
-    public void doImport(String tenant, Chash chash, String collection, String createdAtIso) {
-        if (chash == null) throw new IllegalArgumentException("chash must not be null");
-        if (collection == null || collection.isBlank()) throw new IllegalArgumentException("collection must not be empty");
-
-        OffsetDateTime createdAt;
-        try {
-            createdAt = OffsetDateTime.parse(createdAtIso);
-        } catch (Exception e) {
-            createdAt = OffsetDateTime.now(ZoneOffset.UTC);
-            log.warn("event=chash_import_bad_created_at chash={} raw={} fallback=now", chash, createdAtIso);
-        }
-
-        final OffsetDateTime ts = createdAt;
-        // Own short committed txn — bounds the first-registration convoy DURATION
-        // (see registerCollectionShortTxn doc); also handles markKnown post-commit.
-        registerCollectionShortTxn(tenant, collection);
-        tenantScope.withTenant(tenant, ctx -> {
-            ctx.insertInto(CHASH_INDEX,
-                            CHASH_INDEX.TENANT_ID, CHASH_INDEX.CHASH, CHASH_INDEX.PHYSICAL_COLLECTION, CHASH_INDEX.CREATED_AT)
-               .values(tenant, chash.toBytes(), collection, ts)
-               .onConflict(CHASH_INDEX.TENANT_ID, CHASH_INDEX.CHASH, CHASH_INDEX.PHYSICAL_COLLECTION)
-               .doUpdate()
-               .set(CHASH_INDEX.CREATED_AT, DSL.field("EXCLUDED.created_at", OffsetDateTime.class))
-               .execute();
-            return null;
-        });
-    }
-
-    /** One row of a batched ETL import (see {@link #doImportBatch}). */
-    public record ImportRow(Chash chash, String collection, String createdAtIso) {}
-
-    /**
-     * Batched ETL import: land the WHOLE batch in ONE multi-row
-     * {@code INSERT ... ON CONFLICT} statement (nexus-1usso).
-     *
-     * <p>The pre-fix path looped {@link #doImport} per row — for a 200-row
-     * client batch that meant 200 × (collection-stub check + INSERT) ≈ 600
-     * sequential Postgres round-trips per HTTP request, ~0.9s server-side,
-     * which was the measured 1-request/s (~34 KB/s) migration throughput
-     * ceiling. Here each DISTINCT collection is registered once and all rows
-     * ride a single statement: two-ish round-trips per request instead of 600.
-     *
-     * <p>Rows are deduped on {@code (chash, collection)} within the batch —
-     * last occurrence wins — because a single multi-row INSERT cannot touch
-     * the same conflict target twice (PG: "cannot affect row a second time").
-     * The ETL source's PK makes intra-batch duplicates impossible in
-     * practice; the dedupe is defensive.
-     *
-     * <p>Same fidelity semantics as {@link #doImport}: {@code created_at}
-     * transfers verbatim (EXCLUDED on conflict), unparseable timestamps fall
-     * back to now with a warning. Idempotent re-runs are safe.
-     *
-     * @return the number of unique rows landed
-     */
-    public int doImportBatch(String tenant, List<ImportRow> rows) {
-        if (rows == null || rows.isEmpty()) return 0;
-
-        // Dedupe on (chash, collection), last wins. LinkedHashMap keeps batch order.
-        var unique = new java.util.LinkedHashMap<String, ImportRow>(rows.size());
-        for (ImportRow r : rows) {
-            if (r.chash() == null
-                    || r.collection() == null || r.collection().isBlank()) {
-                throw new IllegalArgumentException("chash and collection must not be empty");
-            }
-            unique.put(r.chash().toHex() + "::" + r.collection(), r);
-        }
-        final List<ImportRow> deduped = List.copyOf(unique.values());
-
-        Set<String> collections = new java.util.LinkedHashSet<>();
-        for (ImportRow r : deduped) collections.add(r.collection());
-
-        // Own short committed txns — bounds the first-registration convoy DURATION
-        // (see registerCollectionShortTxn doc); also handles markKnown post-commit.
-        for (String c : collections) registerCollectionShortTxn(tenant, c);
-        int landed = tenantScope.withTenant(tenant, ctx -> {
-            var insert = ctx.insertInto(CHASH_INDEX,
-                    CHASH_INDEX.TENANT_ID, CHASH_INDEX.CHASH, CHASH_INDEX.PHYSICAL_COLLECTION, CHASH_INDEX.CREATED_AT);
-            for (ImportRow r : deduped) {
-                OffsetDateTime ts;
-                try {
-                    ts = OffsetDateTime.parse(r.createdAtIso());
-                } catch (Exception e) {
-                    ts = OffsetDateTime.now(ZoneOffset.UTC);
-                    log.warn("event=chash_import_bad_created_at chash={} raw={} fallback=now",
-                             r.chash(), r.createdAtIso());
-                }
-                insert = insert.values(tenant, r.chash().toBytes(), r.collection(), ts);
-            }
-            insert.onConflict(CHASH_INDEX.TENANT_ID, CHASH_INDEX.CHASH, CHASH_INDEX.PHYSICAL_COLLECTION)
-                  .doUpdate()
-                  .set(CHASH_INDEX.CREATED_AT, DSL.field("EXCLUDED.created_at", OffsetDateTime.class))
-                  .execute();
-            return deduped.size();
-        });
-        return landed;
     }
 }

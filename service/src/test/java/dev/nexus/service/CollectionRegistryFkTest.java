@@ -100,12 +100,12 @@ class CollectionRegistryFkTest {
     private static final String FK_CHUNKS_384  = "chunks_384_collection_fk";
     private static final String FK_CHUNKS_768  = "chunks_768_collection_fk";
     private static final String FK_CHUNKS_1024 = "chunks_1024_collection_fk";
-    private static final String FK_CHASH_INDEX = "chash_index_collection_fk";
     private static final String FK_TOPIC_ASSIGN= "topic_assignments_collection_fk";
 
-    // The five FK names P0.3 will VALIDATE (convalidated must be false until then)
+    // The surviving FK names (chash_index_collection_fk died with its table,
+    // RDR-187/nexus-piwya.9; the historical fk-002 changesets remain immutable)
     private static final List<String> ALL_FIVE_FK_NAMES = List.of(
-            FK_CHUNKS_384, FK_CHUNKS_768, FK_CHUNKS_1024, FK_CHASH_INDEX, FK_TOPIC_ASSIGN);
+            FK_CHUNKS_384, FK_CHUNKS_768, FK_CHUNKS_1024, FK_TOPIC_ASSIGN);
 
     // CHECK constraint names (RDR-180: TEXT length(chash)=32 checks were dropped and
     // replaced by bytea octet_length(chash)=32 checks — rdr180-001-bytea-chash.xml)
@@ -168,7 +168,7 @@ class CollectionRegistryFkTest {
             for (String tbl : List.of(
                     "catalog_collections", "catalog_documents",
                     "chunks_384", "chunks_768", "chunks_1024",
-                    "chash_index", "topic_assignments", "topics",
+                    "topic_assignments", "topics",
                     "catalog_document_chunks")) {
                 su.createStatement().execute(
                     "GRANT SELECT, INSERT, UPDATE, DELETE ON nexus." + tbl + " TO " + SVC_ROLE);
@@ -443,43 +443,9 @@ class CollectionRegistryFkTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // GROUP 5 — chash_index FK: unregistered physical_collection rejected
-    //
-    // EXPECTED RED: FK absent → insert with unregistered physical_collection succeeds.
+    // GROUP 5 RETIRED (RDR-187/nexus-piwya.9): chash_index and its
+    // collection FK died with the router table — nothing left to reject.
     // ══════════════════════════════════════════════════════════════════════════
-
-    @Test @Order(50)
-    void chashIndex_control_registeredCollection_accepted() throws Exception {
-        // CONTROL — must be GREEN before and after P0.2 lands.
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            insertCollection(su, TENANT_A, "ci-ctrl-col");
-            su.createStatement().execute(
-                "INSERT INTO nexus.chash_index (tenant_id, chash, physical_collection, created_at) " +
-                "VALUES ('" + TENANT_A + "', '" + validChash("ci-ctrl") + "', 'ci-ctrl-col', NOW())");
-            ResultSet rs = su.createStatement().executeQuery(
-                "SELECT COUNT(*) FROM nexus.chash_index " +
-                "WHERE tenant_id='" + TENANT_A + "' AND physical_collection='ci-ctrl-col'");
-            rs.next();
-            assertThat(rs.getInt(1)).as("registered chash_index insert must succeed").isEqualTo(1);
-        }
-    }
-
-    @Test @Order(51)
-    void chashIndex_unregisteredCollection_rejected() throws Exception {
-        // RED until P0.2 adds chash_index_collection_fk.
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            PSQLException ex = assertThrows(PSQLException.class, () ->
-                su.createStatement().execute(
-                    "INSERT INTO nexus.chash_index (tenant_id, chash, physical_collection, created_at) " +
-                    "VALUES ('" + TENANT_A + "', '" + validChash("ci-bad") + "', 'unreg-ci-col', NOW())")
-            );
-            assertThat(ex.getMessage())
-                .as("chash_index_collection_fk must reject unregistered physical_collection")
-                .containsIgnoringCase(FK_CHASH_INDEX);
-        }
-    }
 
     // ══════════════════════════════════════════════════════════════════════════
     // GROUP 6 — ON DELETE RESTRICT: registered collection with live chunk row
@@ -1199,20 +1165,10 @@ class CollectionRegistryFkTest {
         }
     }
 
-    @Test @Order(133)
-    void reconcileThenValidate_chashIndex_gapWindowOrphan() throws Exception {
-        final String T = "crfk-p03-ci";
-        final String COL = "p03-orphan-ci";
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            // chash_index FK is on physical_collection (not `collection`).
-            assertReconcileLoadBearing(su, "chash_index", FK_CHASH_INDEX, "physical_collection", "ON DELETE RESTRICT", T, COL,
-                "INSERT INTO nexus.chash_index (tenant_id, chash, physical_collection, created_at) " +
-                "VALUES ('" + T + "', '" + validChash("p03ci") + "', '" + COL + "', NOW())",
-                "INSERT INTO nexus.catalog_collections (tenant_id, name) " +
-                "SELECT DISTINCT tenant_id, physical_collection FROM nexus.chash_index ON CONFLICT (tenant_id, name) DO NOTHING");
-        }
-    }
+    // Order(133) reconcileThenValidate_chashIndex RETIRED
+    // (RDR-187/nexus-piwya.9): the router table and its FK are dropped; the
+    // gap-window reconcile discipline stays pinned by the sibling
+    // chunks/topic_assignments tests.
 
     @Test @Order(134)
     void reconcileThenValidate_topicAssignments_gapWindowOrphan() throws Exception {

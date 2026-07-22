@@ -77,6 +77,14 @@ class RawSqlGateTest {
      * DSL cannot express that specific site — see the referenced classes.
      */
     private static final Map<String, java.util.Set<String>> SANCTIONED_METHODS = Map.of(
+        "ChashRepository.java", java.util.Set.of(
+            // SANCTIONED RAW (nexus-piwya.3): lookup executes PROBE_SQL, the
+            // PUBLISHED probe constant that ChashProbePlanShapeTest EXPLAINs
+            // verbatim to pin index usage at 255k-row scale — executed SQL
+            // and tested SQL must be the same string by construction; a DSL
+            // rendering would decouple them. Every other ChashRepository
+            // method uses typed DSL (DimTables).
+            "lookup"),
         "PgVectorRepository.java", java.util.Set.of(
             // pgvector `<=>` ordered off a bind-parameter vector literal, combined with a
             // dynamic-arity metadata WHERE and (hybridSearch) a selectivity-dependent plan
@@ -129,9 +137,16 @@ class RawSqlGateTest {
             // StagingPromoteOps land-then-transform promote) — same sanction
             // rationale as RekeyOps, single-homed so the two writers of the
             // shared tables cannot drift. Never serving-path.
+            // SANCTIONED RAW (rdr180-17): refreshAliasStats additionally
+            // EXECUTES — ANALYZE is maintenance DDL with no jOOQ DSL form at
+            // all, and its privilege probe reads pg_class / has_table_privilege
+            // (system catalogs, outside codegen). It must run inside the
+            // caller's transaction so the planner sees the alias rows that
+            // transaction just wrote (F2: 101min vs 461s), so it cannot be
+            // hoisted out to a typed call site. Never serving-path.
             "contentCollapseDelete", "contentRekeyUpdate",
             "frecencyAliasAggregate", "residualMismatchCount",
-            "danglingManifestCount", "chashOldBytes"),
+            "danglingManifestCount", "chashOldBytes", "refreshAliasStats"),
         "SchemaMigrator.java", java.util.Set.of(
             // nexus-c4143 root fix: pg_constraint is a Postgres SYSTEM CATALOG (jOOQ
             // codegen only covers the nexus/t1 application schemas, no generated table

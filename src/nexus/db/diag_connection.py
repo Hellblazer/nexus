@@ -32,6 +32,16 @@ run (the fast idempotency path backfills the role + keys on already-running
 clusters, so one re-run of ``nx init --service``/``guided-upgrade`` heals
 them) — so resolution returns ``None`` and callers degrade cleanly, same
 posture as the probe gates that consume this.
+
+LOCAL-ONLY BY DESIGN (nexus-y3wuu, Hal decision 2026-07-20): this path
+shells a LOCAL ``psql`` at the LOCAL bundle Postgres (``host=127.0.0.1``,
+``dbname=nexus`` — the ``DiagCredentials`` defaults, never overridden by
+resolution) reading the LOCAL ``pg_credentials`` file. There is deliberately
+NO remote reachability — no host/dbname/sslmode resolution, no credential
+lookup outside the local bundle. On a managed/BYO service deployment the
+diagnostics run server-side with the store operator's own credentials;
+:func:`live_store_detail` refuses there with the contract stated, so
+"local-only by design" is never mistaken for "not provisioned".
 """
 from __future__ import annotations
 
@@ -58,7 +68,13 @@ PsqlRunner = Callable[..., "subprocess.CompletedProcess[str]"]
 
 @dataclass(frozen=True)
 class DiagCredentials:
-    """Connection material for the nexus_diag diagnostic session."""
+    """Connection material for the nexus_diag diagnostic session.
+
+    ``host``/``dbname`` are ALWAYS the local-bundle defaults — resolution
+    never sets them (local-only by design, see the module docstring).
+    Adding remote fields here is a contract change, not a bug fix — it
+    requires an explicit Hal decision reversing nexus-y3wuu.
+    """
 
     port: int
     user: str
@@ -150,11 +166,17 @@ def run_diagnostic_sql(
             "-U", creds.user, "-d", creds.dbname,
             "-v", "ON_ERROR_STOP=1", "-tAc", stmt,
         ]
-        env = dict(
-            os.environ,
-            PGPASSWORD=creds.password,
-            PGOPTIONS="-c default_transaction_read_only=on",
-        )
+        # nexus-iytd3 loader guard (GH #1414 era-hop, review round 3): the
+        # published PG bundles ship psql without an RPATH, so a bare env
+        # exits 127 (libpq.so.5 unresolvable) — and THIS is the leg the
+        # chash-conformance label (the tri-state poison gate's key) runs
+        # through, so an unguarded env here re-creates the permanent
+        # convergence defer one level below the health._run_psql fix.
+        from nexus.db.pg_provision import _bundle_lib_env  # noqa: PLC0415 — circular-dep avoidance (nexus.db.pg_provision)
+
+        env = _bundle_lib_env(argv, None)
+        env["PGPASSWORD"] = creds.password
+        env["PGOPTIONS"] = "-c default_transaction_read_only=on"
         proc = runner(argv, env)
         if proc.returncode != 0:
             _log.warning(
@@ -182,6 +204,30 @@ def live_store_detail(statements, *, resolve=None, run=None) -> str:
     _run = run if run is not None else run_diagnostic_sql
 
     creds = _resolve()
+    # nexus-y3wuu (Hal decision 2026-07-20): local-only BY DESIGN. On a
+    # managed/BYO service deployment the local probe can only ever report
+    # missing credentials, which an operator cannot distinguish from "not
+    # provisioned" — when nothing resolves LOCALLY on a non-local box,
+    # state the contract instead. Ordering matters (arc-critique SIG-2):
+    # resolution runs FIRST, so a self-hosted box whose is_local_mode()
+    # heuristic reads non-local (e.g. cloud embedder keys present) but
+    # which genuinely has a local bundle + credentials keeps a WORKING
+    # probe — the contract message fires only where there is actually
+    # nothing local to probe.
+    if creds is None:
+        from nexus.config import is_local_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
+
+        if not is_local_mode():
+            return (
+                "live diagnostics REFUSED — this probe is LOCAL-ONLY by "
+                "design (nexus-y3wuu): it shells a local psql at the local "
+                "bundle Postgres (127.0.0.1) using the local pg_credentials "
+                "file; no remote host/credential resolution exists. This "
+                "store is in service/cloud mode with nothing local to probe "
+                "— NOT a missing-credentials or unprovisioned condition. "
+                "Run the diagnostics server-side with the store operator's "
+                "own credentials instead."
+            )
     if creds is None:
         return (
             "live diagnostics UNAVAILABLE — no nexus_diag credentials "

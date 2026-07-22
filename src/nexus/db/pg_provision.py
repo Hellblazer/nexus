@@ -39,18 +39,36 @@ IDEMPOTENCY:
       service's env configuration.
 
 BINARY DISCOVERY:
-  The provisioner requires system-installed PostgreSQL 17 (or 16/15) binaries.
-  Search order:
-    1. ``NEXUS_PG_BIN`` env var override (tests + custom installs).
-    2. ``/opt/homebrew/opt/postgresql@17/bin`` (macOS Homebrew PG 17).
-    3. ``/opt/homebrew/opt/postgresql@15/bin`` (macOS Homebrew PG 15).
-    4. ``initdb`` on PATH (Linux; ``shutil.which`` → parent directory).
-    5. ``/usr/lib/postgresql/17/bin`` (Debian/Ubuntu system install).
-    6. ``/usr/lib/postgresql/15/bin`` (Debian/Ubuntu PG 15 fallback).
+  **In LOCAL-service mode nexus ALWAYS installs its own signed PostgreSQL
+  bundle (17.x) and never adopts a host PostgreSQL.** Bring-your-own PG is not
+  a supported mode: environment-dependent provisioning creates support
+  dead-ends and untestable behaviour matrices, so the deterministic install
+  wins over detection (policy locked 2026-07-07, GH #1381 arc).
 
-  Fails loudly with a platform-appropriate install hint when no binaries
-  are found.  Bundling/embedded Postgres is a future option (not this
-  bead).
+  "Always install" means always OUR PostgreSQL — it does NOT mean re-download
+  or re-extract on every run. Acquisition and extraction are both idempotent:
+  an already-downloaded archive is reused, and a complete prior extraction is
+  a cheap no-op (``is_bundle_extracted``). A given install fetches the bundle
+  once and keeps it.
+
+  In MANAGED/cloud mode no PostgreSQL is provisioned here at all — the engine
+  runs against a provider-managed server, so nothing in this module applies.
+
+  The search order below therefore describes where an ALREADY-PROVISIONED
+  bundle is found — plus two explicit operator carve-outs, which are
+  deliberate overrides rather than a fallback chain:
+    1. ``NEXUS_PG_BIN`` env var override (tests + operator override).
+    2. The extracted ship-alongside bundle under the config dir.
+    3..n. Fixed system paths, retained ONLY so an operator who has taken
+       carve-out 1 or 2 lands somewhere legible; not a supported install mode.
+
+  Fails loudly with a platform-appropriate hint when no binaries are found —
+  never a silent fallback.
+
+  NOTE: this docstring previously described host-PG discovery as the norm and
+  called bundling "a future option". That predated RDR-157, which shipped the
+  bundle; the stale text misled a reader into designing for a BYO substrate
+  that does not exist (2026-07-20).
 
 OUTPUT FILES (all under ``nexus_config_dir()``):
   postgres/          — initdb cluster data directory.
@@ -851,6 +869,46 @@ def reprovision_diag_view_best_effort() -> None:
         _provision_diag_conformance_view(bins, port, os_user)
     except Exception as exc:  # noqa: BLE001 — best-effort; probe falls back to legacy statements
         _log.warning("pg_diag_view_reprovision_failed", error=str(exc))
+
+
+def backfill_diag_role_best_effort() -> bool:
+    """Idempotent ``nexus_diag`` backfill for the UNATTENDED path (GH #1414
+    era-hop regression, 2026-07-21).
+
+    A pre-P2.1 install has no diag credentials, so the tri-state
+    chash-poison probe reads UNKNOWN and engine convergence defers — with
+    ``nx doctor`` (the advertised re-attempt) failing identically, because
+    no step of the unattended ``nx upgrade`` walk ever ran the P2.1
+    backfill (it lived only in ``nx init --service``). This wrapper makes
+    :func:`_backfill_diag_role` reachable from the probe itself.
+
+    Resolution-first guards (the f2c07c58 lesson — gate on what actually
+    resolves, never a mode guess): a LIVE ``pg_credentials`` with a
+    positive ``PG_PORT`` is the signature of the locally-provisioned
+    bundled cluster (migrated-away boxes park the file), and those are the
+    only clusters the bootstrap superuser can reach. Returns True when the
+    backfill ran to completion; False on any guard miss or failure —
+    best-effort by design, the caller's probe then classifies UNKNOWN
+    exactly as before (defer semantics untouched).
+    """
+    try:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred, circular-dep avoidance
+
+        creds_path = nexus_config_dir() / CREDENTIALS_FILENAME
+        if not creds_path.exists():
+            return False
+        creds = _read_credentials(creds_path)
+        port = int(creds.get("PG_PORT", 0) or 0)
+        if port <= 0:
+            return False
+        bins = discover_pg_binaries()
+        os_user = bootstrap_superuser()
+        _backfill_diag_role(bins, port, os_user, creds_path)
+        _log.info("pg_diag_role_backfilled", via="poison_probe_self_heal")
+        return True
+    except Exception as exc:  # noqa: BLE001 — best-effort; the probe classifies UNKNOWN as before
+        _log.warning("pg_diag_role_backfill_best_effort_failed", error=str(exc))
+        return False
 
 
 def _create_roles(

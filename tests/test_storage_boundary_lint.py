@@ -519,7 +519,13 @@ def test_dual_population_baseline_locked():
     # migration-SOURCE reads for the pre-land census + landing legs;
     # never a destination (same migration-machinery class as
     # remap_cascade._connect above).
-    assert result.epsilon_allow_connects == 24, (
+    # 22 = -2 for RDR-187 (nexus-piwya.10): storage_cmd.py migrate_chash_cmd
+    # retired (its ETL source-count read, the RDR-152 P2.6 +1 above) and
+    # orchestrator.py's chash-rows-by-collection source read (the RDR-178
+    # P4 +1 above) removed with the chash ETL leg — the counted sites are
+    # deleted code, not re-routed.
+
+    assert result.epsilon_allow_connects == 22, (
         f"raw-connect epsilon-allow baseline moved: {result.epsilon_allow_connects}"
     )
     # P3 endpoint: ZERO un-annotated direct T2Database constructions outside

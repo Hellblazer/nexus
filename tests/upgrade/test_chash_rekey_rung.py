@@ -13,6 +13,11 @@ from pathlib import Path
 
 import pytest
 
+from nexus.migration.remap_client import (
+    RekeyJobFailedError,
+    RekeyJobLostError,
+    RekeyJobTimeoutError,
+)
 from nexus.upgrade_ladder.protocol import ConvergeOutcome
 from nexus.upgrade_ladder.rungs.chash_rekey import (
     OCTET_CHECKS,
@@ -61,7 +66,10 @@ def _rung(**over) -> tuple[ChashRekeyRung, dict]:
 
     kwargs = dict(
         rekey_fn=lambda policy: calls.setdefault("policy", policy) and _counts() or _counts(),
-        validate_fn=lambda: True,
+        validate_fn=lambda checks=None: calls.__setitem__(
+            'validated_statements',
+            list(validate_statements(checks)) if checks is not None else [],
+        ) or True,
         reprovision_fn=lambda: calls.setdefault("reprovisioned", True),
         freeze_fn=freeze,
         detect_probe_fn=lambda: None,
@@ -142,13 +150,13 @@ class TestConverge:
         assert calls["restored"], "the freeze must be released on failure"
 
     def test_validate_failure_raises_after_clean_rekey(self):
-        rung, calls = _rung(validate_fn=lambda: False)
+        rung, calls = _rung(validate_fn=lambda checks=None: False)
         with pytest.raises(RuntimeError, match="VALIDATE failed"):
             rung.converge(_Report())
         assert calls["restored"]
 
     def test_managed_mode_validate_none_is_honest_not_fatal(self):
-        rung, _ = _rung(validate_fn=lambda: None)
+        rung, _ = _rung(validate_fn=lambda checks=None: None)
         result = rung.converge(_Report())
         assert result.outcome is ConvergeOutcome.COMPLETED
         assert "operator-step" in result.detail
@@ -159,6 +167,79 @@ class TestConverge:
         rung, calls = _rung(rekey_fn=boom)
         with pytest.raises(RuntimeError, match="collision"):
             rung.converge(_Report())
+        assert calls["restored"]
+
+
+class TestRestartRetry:
+    """nexus-sfgqi: the ONE could-not-tell with a correct automatic answer.
+
+    HttpRemapStore.rekey distinguishes known-failed from two could-not-tell
+    outcomes, but the ladder runner collapses every exception from converge()
+    into RungOutcome.FAILED. For an engine restart specifically that is the
+    wrong answer available: the rekey is idempotent, so re-running resolves
+    it — all-zero counts over an already-rekeyed store, real work over a
+    rolled-back one.
+    """
+
+    def test_lost_to_restart_retries_once_and_converges(self):
+        attempts = []
+
+        def flaky(policy):
+            attempts.append(policy)
+            if len(attempts) == 1:
+                raise RekeyJobLostError("job abc was lost to an engine restart")
+            return _counts()
+
+        rung, calls = _rung(rekey_fn=flaky)
+        result = rung.converge(_Report())
+        assert result.outcome is ConvergeOutcome.COMPLETED
+        assert len(attempts) == 2, "the idempotent rekey must be re-run exactly once"
+        assert calls["restored"]
+
+    def test_the_retry_is_bounded_at_one(self):
+        """A store that keeps losing the job must fail, not spin."""
+        attempts = []
+
+        def always_lost(policy):
+            attempts.append(policy)
+            raise RekeyJobLostError("lost again")
+
+        rung, calls = _rung(rekey_fn=always_lost)
+        with pytest.raises(RekeyJobLostError):
+            rung.converge(_Report())
+        assert len(attempts) == 2, "one retry, then give up"
+        assert calls["restored"]
+
+    def test_timeout_is_NOT_retried(self):
+        """A timeout means the transaction may still be running.
+
+        Starting a second rekey against a live one would queue behind the
+        per-tenant advisory lock rather than resolve anything, so this case
+        propagates untouched — could-not-tell, for a human to settle.
+        """
+        attempts = []
+
+        def timed_out(policy):
+            attempts.append(policy)
+            raise RekeyJobTimeoutError("still running after 3600s")
+
+        rung, calls = _rung(rekey_fn=timed_out)
+        with pytest.raises(RekeyJobTimeoutError):
+            rung.converge(_Report())
+        assert len(attempts) == 1, "a possibly-live transaction must not be re-driven"
+        assert calls["restored"]
+
+    def test_known_failure_is_NOT_retried(self):
+        attempts = []
+
+        def failed(policy):
+            attempts.append(policy)
+            raise RekeyJobFailedError("legacy id maps to two digests")
+
+        rung, calls = _rung(rekey_fn=failed)
+        with pytest.raises(RekeyJobFailedError):
+            rung.converge(_Report())
+        assert len(attempts) == 1, "a known failure is not made better by repetition"
         assert calls["restored"]
 
 
@@ -181,7 +262,9 @@ class TestVerify:
 class TestValidateStatements:
     def test_statements_shape(self):
         stmts = validate_statements()
-        assert len(stmts) == 5
+        # 5 -> 4: the chash_index entry died with its table (RDR-187/
+        # nexus-piwya.9); the four survivors are the whole VALIDATE surface.
+        assert len(stmts) == 4
         for s in stmts:
             assert s.startswith("ALTER TABLE nexus.")
             assert "VALIDATE CONSTRAINT" in s
@@ -234,3 +317,85 @@ class TestRegistry:
 
         assert RUNG_ORDER[-1] == RUNG_CHASH_REKEY
         assert [r.name for r in default_registry()] == list(RUNG_ORDER)
+
+
+def test_unrefreshed_alias_stats_are_surfaced_not_swallowed():
+    """rdr180-17 / F2: the engine reports whether its in-transaction ANALYZE of
+    chash_alias actually took effect — Postgres SILENTLY skips it for a role
+    without MAINTAIN (PG17+). A False must reach the operator: the rekey is
+    still correct, but a multi-tenant store just planned it blind, which
+    measured 101 minutes versus 461 seconds in production."""
+    rung, _ = _rung(
+        rekey_fn=lambda policy: _counts(alias_stats_refreshed=False),
+    )
+    result = rung.converge(_Report())
+    assert "alias planner statistics were NOT refreshed" in (result.detail or ""), (
+        "an unrefreshed-stats engine response must be surfaced in the converge "
+        f"detail, not swallowed; got: {result.detail!r}"
+    )
+
+
+def test_refreshed_alias_stats_stay_quiet():
+    """The happy path must not add noise — the NOTE appears only on False."""
+    rung, _ = _rung(rekey_fn=lambda policy: _counts(alias_stats_refreshed=True))
+    result = rung.converge(_Report())
+    assert "NOT refreshed" not in (result.detail or "")
+
+
+class TestPointerDebtValidatePolicy:
+    """nexus-noa8d: a lived-in store carrying PRE-EXISTING orphan pointers
+    cannot VALIDATE the two pointer-table octet CHECKs — the constraint is
+    table-grain, so 292,656 dangling rows (production, 2026-07-20) make it
+    arithmetically impossible. The rung must still VALIDATE the three CONTENT
+    tables (the RDR-180 contract) and report the debt, instead of failing the
+    whole upgrade.
+
+    The amnesty is a CEILING, never a table exemption (conexus correction,
+    Hal-caught): 'these two tables do not gate' would wave a FUTURE rekey's
+    brand-new orphans through as `observed`. The ceiling here is measured
+    within the run — pointer debt before the rekey versus after — so growth
+    caused by this rekey FAILS loud while pre-existing debt is grandfathered.
+    """
+
+    def test_pre_existing_debt_validates_content_and_reports_pointers(self):
+        # Post-RDR-187 the debt probe iterates only the manifest (the router
+        # died with its 292,230); the amnesty semantics are unchanged.
+        rung, calls = _rung(
+            pointer_debt_fn=lambda: {"nexus.catalog_document_chunks": 426},
+        )
+        result = rung.converge(_Report())
+        assert result.outcome is ConvergeOutcome.COMPLETED, (
+            "pre-existing pointer debt must NOT fail the upgrade"
+        )
+        detail = result.detail or ""
+        assert "426" in detail, (
+            f"the skipped debt must be REPORTED with counts, not silent: {detail!r}"
+        )
+        stmts = calls.get("validated_statements") or []
+        joined = " ".join(stmts)
+        assert "chunks_384" in joined and "chunks_768" in joined and "chunks_1024" in joined, (
+            f"the three CONTENT octet CHECKs must still be VALIDATEd: {stmts!r}"
+        )
+        assert "chash_index" not in joined and "catalog_document_chunks" not in joined, (
+            f"pointer-table CHECKs must be SKIPPED while debt exists: {stmts!r}"
+        )
+
+    def test_zero_debt_validates_all_four(self):
+        rung, calls = _rung(pointer_debt_fn=lambda: {})
+        rung.converge(_Report())
+        joined = " ".join(calls.get("validated_statements") or [])
+        for name in ("chunks_384", "chunks_768", "chunks_1024",
+                     "catalog_document_chunks"):
+            assert name in joined, f"a clean store must VALIDATE all four; missing {name}"
+        # RDR-187 (nexus-piwya.9): the router's VALIDATE must NEVER be issued
+        # again — against a dropped table it is a guaranteed RuntimeError on
+        # every upgrade (the .9 critique Critical 1).
+        assert "chash_index" not in joined
+
+    def test_debt_GROWN_by_this_rekey_fails_loud(self):
+        """THE CEILING. Debt measured before the rekey is grandfathered; any
+        INCREASE is damage this run caused and must never be waved through."""
+        seq = iter([{"nexus.catalog_document_chunks": 100}, {"nexus.catalog_document_chunks": 150}])
+        rung, _ = _rung(pointer_debt_fn=lambda: next(seq))
+        with pytest.raises(RuntimeError, match="NEW"):
+            rung.converge(_Report())

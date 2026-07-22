@@ -439,7 +439,7 @@ class TestEtlRegistry:
         # first (first-run FK safety). Lock extended, not weakened.
         assert LADDER_ORDER == (
             "memory", "plans", "telemetry", "taxonomy",
-            "aspects", "chash", "catalog", "aspects_queue",
+            "aspects", "catalog", "aspects_queue",
         )
 
     def test_unknown_store_rejected(self) -> None:

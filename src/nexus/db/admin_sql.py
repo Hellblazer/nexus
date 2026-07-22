@@ -124,7 +124,13 @@ def run_admin_sql(
             "-U", creds.user, "-d", creds.dbname,
             "-v", "ON_ERROR_STOP=1", "-tAc", stmt,
         ]
-        proc = runner(argv, dict(os.environ, PGPASSWORD=creds.password))
+        # nexus-iytd3 loader guard — same RPATH-less-bundle class as
+        # diag_connection.run_diagnostic_sql; see GH #1414 era-hop review.
+        from nexus.db.pg_provision import _bundle_lib_env  # noqa: PLC0415 — circular-dep avoidance
+
+        env = _bundle_lib_env(argv, None)
+        env["PGPASSWORD"] = creds.password
+        proc = runner(argv, env)
         if proc.returncode != 0:
             raise RuntimeError(
                 f"admin statement failed (psql exit {proc.returncode}): {stmt} — "

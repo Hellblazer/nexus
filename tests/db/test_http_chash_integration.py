@@ -14,31 +14,44 @@ Run locally with:
     PATH=$JAVA_HOME/bin:$PATH \\
     uv run pytest -m integration tests/db/test_http_chash_integration.py -v
 
-What is exercised (bead nexus-gmiaf.16 gate requirements):
-  a) upsert + lookup round-trip (same chash in multiple collections)
-  b) upsert_many batch round-trip
-  c) delete_collection removes rows; absent collection returns 0
-  d) distinct_collections across upserts
-  e) rename_collection re-points rows
-  f) delete_stale removes specific PK; absent PK returns 0
-  g) is_empty and count_for_collection
-  h) Cross-tenant RLS negative: default tenant rows invisible to other-tenant
-  i) RLS isolation: a genuine other-tenant write is invisible to default
-  j) ETL fidelity: migrate_chash_rows preserves created_at verbatim
-  k) ETL idempotent re-run: second pass produces no duplicates
-  l) Phase E: tenant comes from the bearer, not the X-Nexus-Tenant header
+POST-RDR-187 CONTRACT (nexus-piwya.3/.10 — supersedes the nexus-gmiaf.16 router
+MVV this file originally pinned): nexus.chash_index is DROPPED; the chunks
+tables ARE the chash-keyed store. The /v1/chash/* HTTP shape survives until
+nexus-piwya.11 with these semantics, which this family pins end-to-end:
+
+  a) upsert/upsert_many are DEPRECATED no-ops — accepted (200) but nothing
+     materializes; chash membership is derived from REAL chunk rows only
+  b) lookup / count / distinct_collections / is_empty / registered_chashes
+     are served from the chunks tables (the 3-table UNION probe)
+  c) delete_collection / delete_stale are DEPRECATED no-ops returning
+     deleted:0 — they must NOT escalate into content (chunk) deletion
+  d) rename_collection stays REAL: re-homes chunks_<dim>.collection
+  e) import is an HONEST no-op (imported:0) — the ETL leg is retired
+     (the orchestrator skips it; an old client sees visible divergence,
+     never fabricated success)
+  f) Cross-tenant RLS holds on every derived read
+  g) Phase E: tenant comes from the bearer, not the X-Nexus-Tenant header
      (the unset-GUC fail-closed property lives at the repo layer —
       ChashRepositoryTest / ChunksRlsBehavioralTest)
 
-NX_STORAGE_BACKEND is NOT touched — default SQLite path is unchanged.
+Chunk rows are seeded through the PUBLIC vector API
+(POST /v1/vectors/upsert-chunks) using the vector-PASSTHROUGH branch
+(embeddings supplied verbatim — no server-side embed, no model download,
+no API key). Collection names are RDR-103-conformant with the
+bge-base-en-v15-768 model segment so the service routes to chunks_768.
+
+Tests run in DEFINITION ORDER (no randomization in this suite): the module
+service is shared, collections are test-unique, and the one store-wide
+assertion (is_empty on a fresh store) lives in test_a, which runs before any
+chunk is seeded.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import signal
 import socket
-import sqlite3
 import subprocess
 import tempfile
 import time
@@ -54,9 +67,14 @@ def _ch(seed: str) -> str:
     (RDR-180 — the strict engine boundary rejects the pre-cohort 32-hex
     half-digest with a 400; free-form literals were already rejected by
     the z4skl/mzvwa.9/e0hd2 guards)."""
-    import hashlib
-
     return hashlib.sha256(seed.encode()).hexdigest()
+
+
+#: RDR-103-conformant collection-name factory. The bge-base-en-v15-768 model
+#: segment routes the write to chunks_768; each test passes a unique slug so
+#: the shared module-scoped service never needs a (retired) delete-based clean.
+def _coll(slug: str) -> str:
+    return f"knowledge__chashmvv-{slug}__bge-base-en-v15-768__v1"
 
 
 # ── Prerequisite paths ────────────────────────────────────────────────────────
@@ -253,207 +271,204 @@ def other_chash_store(service):
     s.close()
 
 
-@pytest.fixture(autouse=True)
-def _clean_collections(chash_store):
-    """Delete all known collections between tests to avoid cross-test pollution."""
-    for coll in list(chash_store.distinct_collections()):
-        chash_store.delete_collection(coll)
-    yield
-    for coll in list(chash_store.distinct_collections()):
-        chash_store.delete_collection(coll)
+def _seed_chunk(service, *, text: str, collection: str, token: str | None = None) -> str:
+    """Materialize a REAL chunk row through the public vector API and return
+    its canonical 64-hex chash.
+
+    Uses the vector-PASSTHROUGH branch (embeddings supplied verbatim,
+    nexus-hxry2) so no server-side embed, model download, or API key is
+    involved — the point here is chash-derived-read visibility, not
+    embedding quality. dim=768 matches the collection's model segment.
+    """
+    import httpx
+
+    base_url, default_token, _ = service
+    chash = _ch(text)
+    resp = httpx.post(
+        f"{base_url}/v1/vectors/upsert-chunks",
+        headers={
+            "Authorization": f"Bearer {token or default_token}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "collection": collection,
+            "ids": [chash],
+            "documents": [text],
+            "metadatas": [{}],
+            "embeddings": [[0.125] * 768],
+        },
+        timeout=60,
+    )
+    assert resp.status_code == 200, (
+        f"seed upsert-chunks failed ({resp.status_code}): {resp.text[:300]}"
+    )
+    return chash
 
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
 class TestChashMVV:
-    """Minimum viable verification for the chash_index service (nexus-gmiaf.16)."""
+    """Post-RDR-187 MVV for the /v1/chash/* compatibility surface
+    (nexus-piwya.3/.10; supersedes the nexus-gmiaf.16 router MVV)."""
 
-    def test_a_upsert_lookup_roundtrip(self, chash_store):
-        """a) upsert + lookup: same chash can live in multiple collections."""
-        chash_store.upsert(chash=_ch("sha256abc001"), collection="col_a")
-        chash_store.upsert(chash=_ch("sha256abc001"), collection="col_b")
-
-        rows = chash_store.lookup(_ch("sha256abc001"))
-        colls = {r["collection"] for r in rows}
-        assert colls == {"col_a", "col_b"}, (
-            f"lookup must return both collections; got {colls!r}"
-        )
-
-    def test_a2_lookup_unknown_returns_empty(self, chash_store):
-        """a2) lookup for absent chash returns []."""
-        rows = chash_store.lookup("nosuch00000000000000000000000000")
-        assert rows == []
-
-    def test_b_upsert_many_batch(self, chash_store):
-        """b) upsert_many round-trip."""
-        chashes = [_ch(f"hash{i:04d}") for i in range(5)]
-        chash_store.upsert_many(chashes=chashes, collection="col_batch")
-
-        assert chash_store.count_for_collection("col_batch") == 5
-
-    def test_c_delete_collection(self, chash_store):
-        """c) delete_collection removes all rows for a collection."""
-        chash_store.upsert(chash=_ch("c1"), collection="col_del")
-        chash_store.upsert(chash=_ch("c2"), collection="col_del")
-        chash_store.upsert(chash=_ch("c3"), collection="col_other")
-
-        deleted = chash_store.delete_collection("col_del")
-        assert deleted == 2
-
-        assert chash_store.count_for_collection("col_del") == 0
-        assert chash_store.count_for_collection("col_other") == 1
-
-    def test_c2_delete_collection_absent_returns_zero(self, chash_store):
-        """c2) delete_collection on absent collection returns 0."""
-        assert chash_store.delete_collection("no_such_collection") == 0
-
-    def test_d_distinct_collections(self, chash_store):
-        """d) distinct_collections returns all unique collection names."""
-        chash_store.upsert(chash=_ch("c1"), collection="col_x")
-        chash_store.upsert(chash=_ch("c2"), collection="col_y")
-        chash_store.upsert(chash=_ch("c3"), collection="col_x")
-
-        result = chash_store.distinct_collections()
-        assert "col_x" in result
-        assert "col_y" in result
-
-    def test_e_rename_collection(self, chash_store):
-        """e) rename_collection re-points all rows from old -> new."""
-        chash_store.upsert(chash=_ch("c1"), collection="old_col")
-        chash_store.upsert(chash=_ch("c2"), collection="old_col")
-
-        updated = chash_store.rename_collection(old="old_col", new="new_col")
-        assert updated == 2
-
-        assert chash_store.count_for_collection("old_col") == 0
-        assert chash_store.count_for_collection("new_col") == 2
-
-    def test_f_delete_stale_specific_pk(self, chash_store):
-        """f) delete_stale removes only the specific (chash, collection) row."""
-        chash_store.upsert(chash=_ch("c1"), collection="col_a")
-        chash_store.upsert(chash=_ch("c1"), collection="col_b")
-
-        deleted = chash_store.delete_stale(chash=_ch("c1"), collection="col_a")
-        assert deleted == 1
-        assert chash_store.count_for_collection("col_a") == 0
-        assert chash_store.count_for_collection("col_b") == 1
-
-    def test_f2_delete_stale_absent_returns_zero(self, chash_store):
-        """f2) delete_stale on absent PK returns 0 (idempotent)."""
-        assert chash_store.delete_stale(chash=_ch("ghost"), collection="nowhere") == 0
-
-    def test_g_is_empty_and_count(self, chash_store):
-        """g) is_empty + count_for_collection."""
+    def test_a_deprecated_upsert_is_an_honest_noop(self, chash_store):
+        """a) upsert is accepted (200) but materializes NOTHING — chash
+        membership derives from real chunk rows only. Runs FIRST: also pins
+        is_empty()==True on the untouched store (fresh-install guard)."""
         assert chash_store.is_empty() is True
 
-        chash_store.upsert(chash=_ch("c1"), collection="col_g")
+        chash_store.upsert(chash=_ch("sha256abc001"), collection=_coll("a1"))
+        chash_store.upsert(chash=_ch("sha256abc001"), collection=_coll("a2"))
+
+        assert chash_store.lookup(_ch("sha256abc001")) == [], (
+            "deprecated /v1/chash/upsert must not materialize rows"
+        )
+        assert chash_store.is_empty() is True
+
+    def test_a2_lookup_unknown_returns_empty(self, chash_store):
+        """a2) lookup for an absent canonical chash returns []; an unmapped
+        32-hex LEGACY reference also answers [] (alias miss is dangling,
+        not an error — RDR-180 Item3)."""
+        assert chash_store.lookup(_ch("no-such-content")) == []
+        assert chash_store.lookup("nosuch00000000000000000000000000") == []
+
+    def test_b_deprecated_upsert_many_is_a_noop(self, chash_store):
+        """b) upsert_many is accepted but writes nothing."""
+        chashes = [_ch(f"hash{i:04d}") for i in range(5)]
+        chash_store.upsert_many(chashes=chashes, collection=_coll("b"))
+
+        assert chash_store.count_for_collection(_coll("b")) == 0
+
+    def test_c_delete_collection_never_escalates_to_content(self, chash_store, service):
+        """c) delete_collection is a deprecated no-op (deleted:0) and must NOT
+        escalate into deleting the REAL chunk rows — content deletion is the
+        vector/catalog API's job (RDR-187 design note in ChashHandler)."""
+        coll = _coll("c")
+        chash = _seed_chunk(service, text="rdr187 delete-collection guard", collection=coll)
+        assert chash_store.count_for_collection(coll) == 1
+
+        assert chash_store.delete_collection(coll) == 0
+        assert chash_store.count_for_collection(coll) == 1, (
+            "deprecated delete_collection must not delete chunk content"
+        )
+        assert chash_store.lookup(chash), "chunk must remain lookup-visible"
+
+    def test_c2_delete_collection_absent_returns_zero(self, chash_store):
+        """c2) delete_collection on an absent collection returns 0."""
+        assert chash_store.delete_collection("no_such_collection") == 0
+
+    def test_d_distinct_collections_derive_from_chunks(self, chash_store, service):
+        """d) distinct_collections reflects collections that actually hold
+        chunk rows (chunk-backed truth — zero-chunk registry stubs excluded)."""
+        _seed_chunk(service, text="rdr187 distinct probe x", collection=_coll("dx"))
+        _seed_chunk(service, text="rdr187 distinct probe y", collection=_coll("dy"))
+
+        result = chash_store.distinct_collections()
+        assert _coll("dx") in result
+        assert _coll("dy") in result
+        assert _coll("b") not in result, (
+            "a collection touched only by deprecated no-op writes must not appear"
+        )
+
+    def test_e_rename_collection_is_real_over_chunks(self, chash_store, service):
+        """e) rename_collection stays REAL post-RDR-187: it re-homes
+        chunks_<dim>.collection (design Q3) and reports the re-homed count."""
+        old, new = _coll("e-old"), _coll("e-new")
+        ch1 = _seed_chunk(service, text="rdr187 rename chunk one", collection=old)
+        ch2 = _seed_chunk(service, text="rdr187 rename chunk two", collection=old)
+
+        updated = chash_store.rename_collection(old=old, new=new)
+        assert updated == 2
+
+        assert chash_store.count_for_collection(old) == 0
+        assert chash_store.count_for_collection(new) == 2
+        colls = {r["collection"] for r in chash_store.lookup(ch1)}
+        assert colls == {new}
+        colls2 = {r["collection"] for r in chash_store.lookup(ch2)}
+        assert colls2 == {new}
+
+    def test_f_delete_stale_is_a_noop(self, chash_store, service):
+        """f) delete_stale is a deprecated no-op: returns 0 and the real
+        chunk row survives (no derived copy left to heal)."""
+        coll = _coll("f")
+        chash = _seed_chunk(service, text="rdr187 delete-stale guard", collection=coll)
+
+        assert chash_store.delete_stale(chash=chash, collection=coll) == 0
+        assert chash_store.count_for_collection(coll) == 1
+        assert chash_store.lookup(chash), "chunk must remain lookup-visible"
+
+    def test_f2_delete_stale_absent_returns_zero(self, chash_store):
+        """f2) delete_stale on an absent PK returns 0 (idempotent)."""
+        assert chash_store.delete_stale(chash=_ch("ghost"), collection="nowhere") == 0
+
+    def test_g_lookup_and_count_serve_seeded_chunks(self, chash_store, service):
+        """g) The derived read path: a chunk written via the public vector API
+        is chash-visible with the router-era response shape (collection +
+        second-precision created_at — the RDR-187 compatibility contract)."""
+        coll = _coll("g")
+        assert chash_store.count_for_collection(coll) == 0
+
+        chash = _seed_chunk(service, text="rdr187 derived read probe", collection=coll)
+
         assert chash_store.is_empty() is False
-        assert chash_store.count_for_collection("col_g") == 1
-
-    def test_h_cross_tenant_rls_negative(self, chash_store, other_chash_store):
-        """h) rows inserted by tenant 'default' are invisible to 'other-tenant'."""
-        chash_store.upsert(chash=_ch("rls_probe_ch"), collection="col_rls")
-
-        # default can see it
-        rows = chash_store.lookup(_ch("rls_probe_ch"))
-        assert len(rows) == 1, "default tenant must see its own row"
-
-        # other-tenant must NOT see it
-        other_rows = other_chash_store.lookup(_ch("rls_probe_ch"))
-        assert other_rows == [], (
-            f"Cross-tenant RLS must filter: 'other-tenant' must not see 'default' "
-            f"rows; got {other_rows!r}"
-        )
-
-    def test_i_other_tenant_write_invisible_to_default(self, service):
-        """i) RLS isolation: a genuine other-tenant write is invisible to default."""
-        import httpx
-
-        base_url, token, _ = service
-        # Phase E (nexus-gmiaf.32.5): tenant_id is taken from the AUTHENTICATED
-        # bearer, not the X-Nexus-Tenant header. A genuine evil-tenant write
-        # therefore needs an evil-tenant-bound bearer (mirrors `nx tenant create`);
-        # the header alone resolves back to the bearer's tenant.
-        evil_token = create_tenant_token(base_url, token, "evil-tenant")
-        evil_headers = {
-            "Authorization": f"Bearer {evil_token}",
-            "Content-Type": "application/json",
-        }
-        resp = httpx.post(
-            f"{base_url}/v1/chash/upsert",
-            headers=evil_headers,
-            json={"chash": _ch("evil_ch"), "collection": "evil_col"},
-        )
-        # The upsert itself should succeed (evil-tenant's RLS allows own writes)
-        assert resp.status_code == 200
-
-        # But default tenant must NOT see that row
-        from nexus.db.t2.http_chash_index import HttpChashIndex
-        s = HttpChashIndex(base_url=base_url, _token=token, tenant="default")
-        rows = s.lookup(_ch("evil_ch"))
-        assert rows == [], (
-            f"RLS must isolate: default tenant must not see evil-tenant row; got {rows!r}"
-        )
-        s.close()
-
-    def test_j_etl_fidelity_preserves_created_at(self, service, tmp_path, chash_store):
-        """j) ETL: migrate_chash_rows preserves created_at verbatim."""
-        from nexus.db.t2.chash_etl import migrate_chash_rows
-        from nexus.db.t2.http_chash_index import HttpChashIndex
-
-        ts = "2024-03-15T08:00:00Z"
-        db = tmp_path / "t2_etl_fidelity.db"
-        conn = sqlite3.connect(str(db))
-        conn.execute(
-            "CREATE TABLE chash_index "
-            "(chash TEXT, physical_collection TEXT, created_at TEXT)"
-        )
-        conn.execute(f"INSERT INTO chash_index VALUES ('{_ch("etl_sha001")}', 'col_etl', '{ts}')")
-        conn.commit()
-        conn.close()
-
-        base_url, token, _ = service
-        store = HttpChashIndex(base_url=base_url, _token=token, tenant="default")
-        result = migrate_chash_rows(db, store)
-        store.close()
-
-        assert result["total"]    == 1
-        assert result["imported"] == 1
-        assert result["errors"]   == 0
-
-        rows = chash_store.lookup(_ch("etl_sha001"))
+        assert chash_store.count_for_collection(coll) == 1
+        rows = chash_store.lookup(chash)
         assert len(rows) == 1
-        assert rows[0]["created_at"] == ts, (
-            f"created_at must be preserved verbatim; got {rows[0]['created_at']!r}"
+        assert rows[0]["collection"] == coll
+        assert rows[0]["created_at"], "created_at must be populated"
+        # RDR-180: the engine echoes the canonical 64-hex it resolved.
+        assert rows[0]["chash"] == chash
+
+    def test_h_cross_tenant_rls_negative(self, chash_store, other_chash_store, service):
+        """h) chunk rows seeded by tenant 'default' are invisible to
+        'other-tenant' through every derived read."""
+        coll = _coll("h")
+        chash = _seed_chunk(service, text="rdr187 rls probe", collection=coll)
+
+        rows = chash_store.lookup(chash)
+        assert len(rows) == 1, "default tenant must see its own chunk"
+
+        assert other_chash_store.lookup(chash) == [], (
+            "Cross-tenant RLS must filter: 'other-tenant' must not see "
+            "'default' chunk rows"
         )
+        assert other_chash_store.count_for_collection(coll) == 0
 
-    def test_k_etl_idempotent_rerun(self, service, tmp_path, chash_store):
-        """k) Running ETL twice produces no duplicates (idempotent upsert)."""
-        from nexus.db.t2.chash_etl import migrate_chash_rows
-        from nexus.db.t2.http_chash_index import HttpChashIndex
+    def test_i_other_tenant_write_invisible_to_default(self, chash_store, service):
+        """i) RLS isolation: a genuine other-tenant CHUNK write (the write
+        that actually materializes post-RDR-187) is invisible to default.
 
-        db = tmp_path / "t2_etl_idem.db"
-        conn = sqlite3.connect(str(db))
-        conn.execute(
-            "CREATE TABLE chash_index "
-            "(chash TEXT, physical_collection TEXT, created_at TEXT)"
-        )
-        conn.execute(f"INSERT INTO chash_index VALUES ('{_ch("idem_sha001")}', 'col_idem', '2024-01-01T00:00:00Z')")
-        conn.execute(f"INSERT INTO chash_index VALUES ('{_ch("idem_sha002")}', 'col_idem', '2024-01-02T00:00:00Z')")
-        conn.commit()
-        conn.close()
-
+        Phase E (nexus-gmiaf.32.5): tenant_id is taken from the AUTHENTICATED
+        bearer, so the evil-tenant write needs an evil-tenant-bound bearer
+        (mirrors `nx tenant create`)."""
         base_url, token, _ = service
-        store = HttpChashIndex(base_url=base_url, _token=token, tenant="default")
-        r1 = migrate_chash_rows(db, store)
-        r2 = migrate_chash_rows(db, store)
-        store.close()
+        evil_token = create_tenant_token(base_url, token, "evil-tenant")
 
-        assert r1["imported"] == 2
-        assert r2["imported"] == 2  # idempotent: upserts same rows
+        chash = _seed_chunk(
+            service,
+            text="rdr187 evil tenant chunk",
+            collection=_coll("i"),
+            token=evil_token,
+        )
 
-        # Only 2 distinct rows after double ETL (no duplication)
-        assert chash_store.count_for_collection("col_idem") == 2
+        assert chash_store.lookup(chash) == [], (
+            "RLS must isolate: default tenant must not see the evil-tenant chunk"
+        )
+
+    def test_j_import_is_an_honest_noop(self, chash_store):
+        """j) The ETL import endpoint is an HONEST no-op (RDR-187): reports
+        imported:0 and materializes nothing — an old client's verify-fill
+        sees visible divergence, never fabricated success. The paired client
+        release skips the leg entirely (nexus-piwya.10: the orchestrator's
+        chash ETL + verify-fill legs are retired)."""
+        imported = chash_store.import_rows([{
+            "chash": _ch("etl_sha001"),
+            "collection": _coll("j"),
+            "created_at": "2024-03-15T08:00:00Z",
+        }])
+        assert imported == 0, "deprecated import must report imported:0"
+        assert chash_store.lookup(_ch("etl_sha001")) == []
+        assert chash_store.count_for_collection(_coll("j")) == 0
 
     def test_l_tenant_from_bearer_not_header(self, service):
         """l) Phase E: the X-Nexus-Tenant header is advisory-only — the bearer is
@@ -497,39 +512,35 @@ class TestChashMVV:
             f"bearer is authoritative; got bare={bare.json()} spoofed={spoofed.json()}"
         )
 
-    def test_m_registered_chashes_for_collection(self, chash_store):
-        """m) registered_chashes_for_collection returns the full-hex chash set.
+    def test_m_registered_chashes_for_collection(self, chash_store, service):
+        """m) registered_chashes_for_collection returns the full-hex chash set
+        derived from the collection's REAL chunk rows (RDR-180: full 64-hex;
+        RDR-187: chunk-backed truth)."""
+        coll_reg, coll_other = _coll("m-reg"), _coll("m-other")
+        ch1 = _seed_chunk(service, text="rdr187 registered one", collection=coll_reg)
+        ch2 = _seed_chunk(service, text="rdr187 registered two", collection=coll_reg)
+        ch3 = _seed_chunk(service, text="rdr187 registered other", collection=coll_other)
 
-        RDR-180: the natural chunk ID is the FULL 64-hex digest; the server
-        retired the pre-flip substr(chash,1,32) compensation. Exercises the
-        GET /v1/chash/registered_chashes endpoint end-to-end.
-        """
-        # Insert rows for col_reg
-        chash_store.upsert(chash=_ch("reg_chash001"), collection="col_reg")
-        chash_store.upsert(chash=_ch("reg_chash002"), collection="col_reg")
-        chash_store.upsert(chash=_ch("other_chash"), collection="col_other")
+        result = chash_store.registered_chashes_for_collection(coll_reg)
 
-        result = chash_store.registered_chashes_for_collection("col_reg")
-
-        assert _ch("reg_chash001") in result, f"reg_chash001 must be in result; got {result!r}"
-        assert _ch("reg_chash002") in result
-        assert _ch("other_chash") not in result, "other_chash must not appear for col_reg"
+        assert result == {ch1, ch2}, (
+            f"registered set must equal the seeded chunk chashes; got {result!r}"
+        )
+        assert ch3 not in result
 
     def test_m2_registered_chashes_unknown_collection(self, chash_store):
         """m2) registered_chashes_for_collection returns empty for absent collection."""
-        result = chash_store.registered_chashes_for_collection("col_no_such")
-        assert result == set()
+        assert chash_store.registered_chashes_for_collection("col_no_such") == set()
 
-    def test_m3_registered_chashes_rls_isolation(self, chash_store, other_chash_store):
+    def test_m3_registered_chashes_rls_isolation(self, chash_store, other_chash_store, service):
         """m3) registered_chashes_for_collection is RLS-isolated per tenant."""
-        chash_store.upsert(chash=_ch("rls_reg_chash"), collection="col_rls_reg")
+        coll = _coll("m3")
+        chash = _seed_chunk(service, text="rdr187 rls registered", collection=coll)
 
-        # default tenant sees its own row
-        own = chash_store.registered_chashes_for_collection("col_rls_reg")
-        assert _ch("rls_reg_chash") in own
+        own = chash_store.registered_chashes_for_collection(coll)
+        assert chash in own
 
-        # other-tenant gets empty (RLS filter)
-        other = other_chash_store.registered_chashes_for_collection("col_rls_reg")
+        other = other_chash_store.registered_chashes_for_collection(coll)
         assert other == set(), (
             f"RLS must isolate registered_chashes: 'other-tenant' must get empty; got {other!r}"
         )

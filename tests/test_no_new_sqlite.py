@@ -123,7 +123,8 @@ EPSILON_CENSUS: dict[str, int] = {
     "src/nexus/commands/plan.py": 2,
     "src/nexus/commands/rdr.py": 1,
     "src/nexus/commands/search_cmd.py": 1,
-    "src/nexus/commands/storage_cmd.py": 1,
+    # storage_cmd.py entry removed (RDR-187/nexus-piwya.10): the retired
+    # `migrate chash` command carried the file's one epsilon-allow connect.
     "src/nexus/commands/taxonomy_cmd.py": 17,
     "src/nexus/commands/tier_status.py": 1,
     "src/nexus/commands/upgrade.py": 3,
@@ -142,7 +143,8 @@ EPSILON_CENSUS: dict[str, int] = {
     # sanctioned remap_cascade class, never a destination.
     "src/nexus/migration/driver.py": 1,
     "src/nexus/migration/guided_upgrade.py": 1,
-    "src/nexus/migration/orchestrator.py": 1,
+    # orchestrator.py entry removed (RDR-187/nexus-piwya.10): the chash
+    # ETL source read carried the file's one epsilon-allow connect.
     "src/nexus/migration/remap_cascade.py": 1,
     "src/nexus/migration/vector_etl.py": 1,
     "src/nexus/migration/wire_reid.py": 1,

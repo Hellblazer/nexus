@@ -21,22 +21,33 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * RDR-152 bead nexus-gmiaf.16 — Chash-index HTTP endpoints.
+ * RDR-187 (bead nexus-piwya.3) — Chash HTTP endpoints, served from the chunks
+ * tables. The HTTP SHAPE is unchanged from the router era (the RDR-187
+ * compatibility contract); the {@code chash_index} router behind it is
+ * retired.
  *
  * <p>Routes (all under {@code /v1/chash/}):
  * <pre>
- *   POST   /v1/chash/upsert               register (chash, collection) row
- *   POST   /v1/chash/upsert_many          batch register (chashes[], collection)
- *   GET    /v1/chash/lookup               lookup(chash=) -> [{collection, created_at}]
- *   POST   /v1/chash/delete_collection    delete all rows for collection
- *   GET    /v1/chash/distinct_collections   all distinct collection names
- *   POST   /v1/chash/rename_collection    rename old -> new
- *   POST   /v1/chash/delete_stale         delete (chash, collection) PK row
- *   GET    /v1/chash/is_empty             true when no rows exist
- *   GET    /v1/chash/count_for_collection  count rows for collection=
- *   POST   /v1/chash/import               fidelity-preserving ETL import
- *   GET    /v1/chash/registered_chashes   set of hex chashes for collection= (audit)
+ *   POST   /v1/chash/upsert               DEPRECATED no-op (chunks ingest is the write path)
+ *   POST   /v1/chash/upsert_many          DEPRECATED no-op
+ *   GET    /v1/chash/lookup               lookup(chash=) -> [{collection, created_at}] over chunks
+ *   POST   /v1/chash/delete_collection    DEPRECATED no-op (vector/catalog delete owns content)
+ *   GET    /v1/chash/distinct_collections   distinct chunk-bearing collection names
+ *   POST   /v1/chash/rename_collection    REAL: re-homes chunks_<dim>.collection (Q3; idempotent
+ *                                         when the RDR-164 catalog cascade already re-homed)
+ *   POST   /v1/chash/delete_stale         DEPRECATED no-op (no derived copy, nothing to heal)
+ *   GET    /v1/chash/is_empty             true when no chunk rows exist
+ *   GET    /v1/chash/count_for_collection  chunk-row count for collection=
+ *   POST   /v1/chash/import               DEPRECATED no-op (returns imported:0 — honest)
+ *   GET    /v1/chash/registered_chashes   set of hex chashes for collection= (audit, over chunks)
  * </pre>
+ *
+ * <p>Deprecated write endpoints VALIDATE their inputs exactly as before (a
+ * malformed request still 400s — client bugs stay visible), perform no
+ * database work, and add {@code "deprecated":true} to the old response shape.
+ * The no-op window spans one release for the mixed-version guard (RDR-187
+ * finding 3); the release after nexus-piwya.9 flips them to 410
+ * (nexus-piwya.11, deferred).
  *
  * <p>All endpoints require {@code Authorization: Bearer <token>} (enforced by
  * {@link AuthFilter}) and {@code X-Nexus-Tenant} header.
@@ -102,40 +113,38 @@ public final class ChashHandler implements HttpHandler {
         }
     }
 
-    // ── POST /v1/chash/upsert ─────────────────────────────────────────────────
+    // ── POST /v1/chash/upsert (DEPRECATED no-op) ──────────────────────────────
 
     private void handleUpsert(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
         // RDR-180 (nexus-jxizy.7/.8): ONE strict tier — the boundary parses
         // through the Chash type (64 lowercase hex), yielding a uniform 400
-        // with the offending length BEFORE any transaction. The pre-flip
-        // 64->32 truncating normalization is retired: the full digest IS the
-        // key now, and a bare 32-hex is a legacy reference the client-side
-        // resolver maps through chash_alias before calling here.
-        Chash chash       = parseChash((String) body.get("chash"), "'chash'");
-        String collection = (String) body.get("collection");
-        repo.upsert(tenant, chash, collection);
-        HttpUtil.send(exchange, 200, "{\"ok\":true}");
+        // with the offending length BEFORE any transaction. Validation stays
+        // through the deprecation window so client bugs remain visible.
+        parseChash((String) body.get("chash"), "'chash'");
+        requireCollection((String) body.get("collection"), "'collection'");
+        // RDR-187: the router is retired; chunk ingest IS the registration.
+        logDeprecatedWrite("upsert", tenant);
+        HttpUtil.send(exchange, 200, "{\"ok\":true,\"deprecated\":true}");
     }
 
-    // ── POST /v1/chash/upsert_many ────────────────────────────────────────────
+    // ── POST /v1/chash/upsert_many (DEPRECATED no-op) ─────────────────────────
 
-    @SuppressWarnings("unchecked")
     private void handleUpsertMany(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
         Object rawChashes = body.get("chashes");
-        String collection = (String) body.get("collection");
+        requireCollection((String) body.get("collection"), "'collection'");
         if (!(rawChashes instanceof List)) {
             HttpUtil.send(exchange, 400, "{\"error\":\"'chashes' must be a JSON array\"}");
             return;
         }
-        // nexus-e0hd2: strict, not silent-drop — a non-string element used to
-        // vanish here (the castRows disease), and a malformed chash rode
-        // through to the DB (chash_index had no length CHECK pre-catalog-013).
-        List<Chash> chashes = new ArrayList<>();
+        // nexus-e0hd2: strict, not silent-drop — validation stays through the
+        // deprecation window so a malformed batch still fails loud at the
+        // boundary instead of silently "succeeding".
         List<?> rawList = (List<?>) rawChashes;
+        int count = 0;
         for (int i = 0; i < rawList.size(); i++) {
             Object item = rawList.get(i);
             if (!(item instanceof String s)) {
@@ -143,10 +152,14 @@ public final class ChashHandler implements HttpHandler {
                     "chashes[" + i + "]: must be a string, got "
                     + (item == null ? "null" : item.getClass().getSimpleName()));
             }
-            chashes.add(parseChash(s, "chashes[" + i + "]"));
+            parseChash(s, "chashes[" + i + "]");
+            count++;
         }
-        repo.upsertMany(tenant, chashes, collection);
-        HttpUtil.send(exchange, 200, "{\"ok\":true,\"count\":" + chashes.size() + "}");
+        // RDR-187: the router is retired; chunk ingest IS the registration.
+        // The count field keeps its historical meaning: chashes ACCEPTED
+        // (parsed), which was never a rows-persisted count.
+        logDeprecatedWrite("upsert_many", tenant);
+        HttpUtil.send(exchange, 200, "{\"ok\":true,\"count\":" + count + ",\"deprecated\":true}");
     }
 
     /**
@@ -198,7 +211,7 @@ public final class ChashHandler implements HttpHandler {
             Map.of("rows", rows, "chash", chash.toHex())));
     }
 
-    // ── POST /v1/chash/delete_collection ─────────────────────────────────────
+    // ── POST /v1/chash/delete_collection (DEPRECATED no-op) ───────────────────
 
     private void handleDeleteCollection(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
@@ -208,8 +221,13 @@ public final class ChashHandler implements HttpHandler {
             HttpUtil.send(exchange, 400, "{\"error\":\"'collection' required\"}");
             return;
         }
-        int deleted = repo.deleteCollection(tenant, collection);
-        HttpUtil.send(exchange, 200, "{\"deleted\":" + deleted + "}");
+        // RDR-187: content deletion is the vector/catalog API's job; there is
+        // no router copy left to drop. Rerouting this to DELETE chunk rows
+        // would silently escalate "drop routing rows" into "drop content" —
+        // deliberately not done. deleted:0 matches what callers already see
+        // today after the RDR-164 cascade has run.
+        logDeprecatedWrite("delete_collection", tenant);
+        HttpUtil.send(exchange, 200, "{\"deleted\":0,\"deprecated\":true}");
     }
 
     // ── GET /v1/chash/distinct_collections ───────────────────────────────────
@@ -235,7 +253,7 @@ public final class ChashHandler implements HttpHandler {
         HttpUtil.send(exchange, 200, "{\"updated\":" + updated + "}");
     }
 
-    // ── POST /v1/chash/delete_stale ───────────────────────────────────────────
+    // ── POST /v1/chash/delete_stale (DEPRECATED no-op) ────────────────────────
 
     private void handleDeleteStale(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
@@ -246,8 +264,12 @@ public final class ChashHandler implements HttpHandler {
             HttpUtil.send(exchange, 400, "{\"error\":\"'chash' and 'collection' required\"}");
             return;
         }
-        int deleted = repo.deleteStale(tenant, parseChash(rawChash, "'chash'"), collection);
-        HttpUtil.send(exchange, 200, "{\"deleted\":" + deleted + "}");
+        parseChash(rawChash, "'chash'");
+        // RDR-187: delete_stale was the client-side self-heal for router rows
+        // that had drifted from the chunk store. With no derived copy there
+        // is nothing to heal; the lookup is chunk-backed truth already.
+        logDeprecatedWrite("delete_stale", tenant);
+        HttpUtil.send(exchange, 200, "{\"deleted\":0,\"deprecated\":true}");
     }
 
     // ── GET /v1/chash/is_empty ────────────────────────────────────────────────
@@ -271,7 +293,7 @@ public final class ChashHandler implements HttpHandler {
         HttpUtil.send(exchange, 200, "{\"count\":" + count + "}");
     }
 
-    // ── POST /v1/chash/import ─────────────────────────────────────────────────
+    // ── POST /v1/chash/import (DEPRECATED no-op) ──────────────────────────────
 
     @SuppressWarnings("unchecked")
     private void handleImport(HttpExchange exchange, String tenant, String method) throws IOException {
@@ -284,45 +306,37 @@ public final class ChashHandler implements HttpHandler {
             HttpUtil.send(exchange, 400, "{\"error\":\"'rows' must be a JSON array\"}");
             return;
         }
-        // nexus-1usso: collect the whole batch and land it in ONE multi-row
-        // INSERT via doImportBatch. The old shape looped repo.doImport per row
-        // (200 rows ≈ 600 sequential PG round-trips ≈ 0.9s per request — the
-        // measured 1-request/s migration throughput ceiling).
-        List<ChashRepository.ImportRow> rows = new ArrayList<>(((List<?>) rawRows).size());
+        // Validation stays (same rules as the router era, incl. the RDR-180
+        // 64-hex requirement and input-position error indexing) so malformed
+        // batches still 400 during the window.
         List<?> rawList = (List<?>) rawRows;
         for (int rowIdx = 0; rowIdx < rawList.size(); rowIdx++) {
             Object item = rawList.get(rowIdx);
             if (!(item instanceof Map)) continue;
             Map<String, Object> row = (Map<String, Object>) item;
-            // /import is the MIGRATION route. RDR-180: on a converged
-            // client/engine pair the substrate rung derives the FULL digest
-            // on the wire (wire_reid), so imports arrive 64-hex; the pre-flip
-            // 64->32 truncating normalization is retired with the [:32] era.
-            // A 32-hex arrival means a pre-RDR-180 client against this engine
-            // — the pair must converge first (ONE engine per release), so it
-            // 400s with the alias hint rather than silently truncating.
-            // Index off the INPUT position, not rows.size() — skipped
-            // elements would shift every later error index (review F1).
             String rawChash   = (String) row.get("chash");
             String collection = (String) row.get("collection");
-            String createdAt  = (String) row.get("created_at");
             if (rawChash == null || rawChash.isBlank() || collection == null || collection.isBlank()) continue;
-            Chash chash = parseChash(rawChash, "rows[" + rowIdx + "].chash");
-            if (createdAt == null || createdAt.isBlank()) createdAt = "1970-01-01T00:00:00Z";
-            rows.add(new ChashRepository.ImportRow(chash, collection, createdAt));
+            parseChash(rawChash, "rows[" + rowIdx + "].chash");
         }
-        int imported = repo.doImportBatch(tenant, rows);
-        HttpUtil.send(exchange, 200, "{\"imported\":" + imported + "}");
+        // RDR-187: the router is retired, so the legacy --cold ETL leg has no
+        // destination. imported:0 is HONEST — nothing was persisted; an old
+        // client's verify-fill records filled=0 and reports visible
+        // divergence rather than a fabricated success (the paired client
+        // release skips this leg entirely, nexus-piwya.10).
+        logDeprecatedWrite("import", tenant);
+        HttpUtil.send(exchange, 200, "{\"imported\":0,\"deprecated\":true}");
     }
 
     // ── GET /v1/chash/registered_chashes?collection=<name> ───────────────────
 
     /**
-     * Return the set of registered chashes for {@code collection}, hex-encoded.
+     * Return the set of chashes present in {@code collection}, hex-encoded.
      *
-     * <p>RDR-180: full-digest natural IDs — canonical rows encode to 64-hex;
-     * not-yet-rekeyed legacy rows encode to their shorter legacy hex, which
-     * the audit caller treats as legacy references.
+     * <p>RDR-187: values come straight from {@code chunks_<dim>.chash} —
+     * uniformly full 64-hex digests (RDR-180 natural chunk IDs; the
+     * production rekey is complete, and the router-era "shorter legacy hex"
+     * caveat died with the router).
      *
      * <p>Response: {@code {"chashes": ["<hex>", ...]}}
      */
@@ -338,6 +352,22 @@ public final class ChashHandler implements HttpHandler {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /** Shared required-collection validation for the deprecated write shapes. */
+    private static void requireCollection(String collection, String label) {
+        if (collection == null || collection.isBlank()) {
+            throw new IllegalArgumentException(label + " must not be empty");
+        }
+    }
+
+    /**
+     * One structured line per deprecated-write call, debug level: old clients
+     * fire upsert_many on every index batch during the mixed-version window,
+     * so info would be log spam; debug keeps the forensic trail available.
+     */
+    private static void logDeprecatedWrite(String op, String tenant) {
+        log.debug("event=chash_write_deprecated op={} tenant={} rdr=187", op, tenant);
+    }
 
     private Map<String, Object> readBody(HttpExchange exchange) throws IOException {
         try (InputStream in = exchange.getRequestBody()) {

@@ -38,12 +38,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * half): (a) rehashable row → {@code sha256(chunk_text)}; (b) reference-only
  * row whose old chash has a content sibling → remapped to the sibling's new
  * key, NOT dropped; (c) orphaned row under {@code drop} → row GONE and its
- * manifest/chash_index pointers CASCADED (no dangling scan hit); (d)
+ * manifest pointers CASCADED (no dangling scan hit; the chash_index twin
+ * died with the router, RDR-187); (d)
  * orphaned row under {@code synthesize} → surrogate 32-byte key present
  * WITH {@code metadata.chash_origin='synthetic'}, pointer preserved (and
  * repointed to the surrogate — never dangling at the old key). Disposition
  * counts logged and asserted. Plus: two-phase duplicate collapse, the
- * ETL-era 32-byte-ASCII id class, full cascade (manifest, chash_index,
+ * ETL-era 32-byte-ASCII id class, full cascade (manifest,
  * topic_assignments, frecency, relevance_log), idempotency, and the
  * collision refusal.
  */
@@ -117,6 +118,15 @@ class RekeyOpsIntegrationTest {
             su.createStatement().execute("GRANT USAGE ON SCHEMA nexus TO " + SVC_ROLE);
             su.createStatement().execute(
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA nexus TO " + SVC_ROLE);
+            // Mirror grants-nexus-svc's MAINTAIN grant onto this test's stand-in
+            // for nexus_svc, so the rekey's in-transaction ANALYZE is exercised
+            // under the SAME privilege it holds in production (rdr180-17 / F2).
+            // That the CHANGESET grants this to the real nexus_svc is a separate
+            // contract, asserted in SchemaMigratorIntegrationTest — this fixture
+            // must not be the only thing standing between the grant and a silent
+            // no-op in production.
+            su.createStatement().execute(
+                "GRANT MAINTAIN ON nexus.chash_alias TO " + SVC_ROLE);
             su.createStatement().execute(
                 "ALTER ROLE " + SVC_ROLE + " SET search_path TO nexus, public");
         }
@@ -148,8 +158,6 @@ class RekeyOpsIntegrationTest {
             "ALTER TABLE nexus.chunks_384 DROP CONSTRAINT chunks_384_chash_octet_check");
         su.createStatement().execute(
             "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT catalog_document_chunks_chash_octet_check");
-        su.createStatement().execute(
-            "ALTER TABLE nexus.chash_index DROP CONSTRAINT chash_index_chash_octet_check");
         try {
             seed.run();
         } finally {
@@ -161,9 +169,6 @@ class RekeyOpsIntegrationTest {
                 + "CHECK (octet_length(chash) = 32) NOT VALID");
             su.createStatement().execute(
                 "ALTER TABLE nexus.catalog_document_chunks ADD CONSTRAINT catalog_document_chunks_chash_octet_check "
-                + "CHECK (octet_length(chash) = 32) NOT VALID");
-            su.createStatement().execute(
-                "ALTER TABLE nexus.chash_index ADD CONSTRAINT chash_index_chash_octet_check "
                 + "CHECK (octet_length(chash) = 32) NOT VALID");
         }
     }
@@ -240,7 +245,8 @@ class RekeyOpsIntegrationTest {
                 // (c) orphan: empty text, no content sibling anywhere
                 insertChunk(su, TA, "nexus.chunks_384", 384, "code__k", orphanKey, "");
                 try {
-                    // pointers at the orphan key (manifest + chash_index) — must cascade on drop
+                    // pointers at the orphan key (manifest; the chash_index
+                    // twin died with the router, RDR-187) — must cascade on drop
                     try (PreparedStatement ps = su.prepareStatement(
                         "INSERT INTO nexus.catalog_document_chunks "
                         + "(tenant_id, doc_id, position, chash, collection) VALUES ('"
@@ -252,20 +258,6 @@ class RekeyOpsIntegrationTest {
                         "INSERT INTO nexus.catalog_document_chunks "
                         + "(tenant_id, doc_id, position, chash, collection) VALUES ('"
                         + TA + "', '1.1', 1, ?, 'code__k')")) {
-                        ps.setBytes(1, legacyA);
-                        ps.executeUpdate();
-                    }
-                    try (PreparedStatement ps = su.prepareStatement(
-                        "INSERT INTO nexus.chash_index "
-                        + "(tenant_id, chash, physical_collection, created_at) VALUES ('"
-                        + TA + "', ?, 'code__k', now())")) {
-                        ps.setBytes(1, orphanKey);
-                        ps.executeUpdate();
-                    }
-                    try (PreparedStatement ps = su.prepareStatement(
-                        "INSERT INTO nexus.chash_index "
-                        + "(tenant_id, chash, physical_collection, created_at) VALUES ('"
-                        + TA + "', ?, 'code__k', now())")) {
                         ps.setBytes(1, legacyA);
                         ps.executeUpdate();
                     }
@@ -325,8 +317,6 @@ class RekeyOpsIntegrationTest {
                 .isZero();
         }
         assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks WHERE tenant_id='" + TA
-            + "' AND octet_length(chash) <> 32")).isZero();
-        assertThat(count("SELECT count(*) FROM nexus.chash_index WHERE tenant_id='" + TA
             + "' AND octet_length(chash) <> 32")).isZero();
         // alias facts: the 16-byte era row's old_ref is its 32-hex; the
         // ETL-era row's old_ref is its raw ASCII id (reversibility lemma)
@@ -432,8 +422,8 @@ class RekeyOpsIntegrationTest {
     @Order(3)
     void rekey_cascadeCollapse_frecencyMerges_assignmentsAndIndexTwoPhase() throws Exception {
         // Two distinct legacy ids carrying the SAME text (they collapse to
-        // one digest), each with its own frecency / topic_assignments /
-        // chash_index rows — exercising the GREATEST-merge and the
+        // one digest), each with its own frecency / topic_assignments
+        // rows — exercising the GREATEST-merge and the
         // two-phase delete branches of the cascades, which test 1 only
         // reached in their no-pre-existing-target shape.
         String tenant = "t-rekey-collapse";
@@ -452,15 +442,9 @@ class RekeyOpsIntegrationTest {
                 insertChunk(su, tenant, "nexus.chunks_768", 768, "code__m", old1, text);
                 insertChunk(su, tenant, "nexus.chunks_768", 768, "code__m", old2, text);
                 try {
-                    for (byte[] key : new byte[][] {old1, old2}) {
-                        try (PreparedStatement ps = su.prepareStatement(
-                            "INSERT INTO nexus.chash_index "
-                            + "(tenant_id, chash, physical_collection, created_at) VALUES ('"
-                            + tenant + "', ?, 'code__m', now())")) {
-                            ps.setBytes(1, key);
-                            ps.executeUpdate();
-                        }
-                    }
+                    // (chash_index seeds removed — RDR-187/nexus-piwya.9: the
+                    // router and its two-phase repoint died; topic_assignments
+                    // below carries the two-phase collapse coverage.)
                     exec(su, "INSERT INTO nexus.topics (tenant_id, id, collection, label, created_at) "
                         + "VALUES ('" + tenant + "', 992, 'code__m', 'topic-m', now()) ON CONFLICT DO NOTHING");
                     exec(su, "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id) VALUES "
@@ -485,11 +469,6 @@ class RekeyOpsIntegrationTest {
         // chunks collapsed to ONE row at the digest key
         assertThat(count("SELECT count(*) FROM nexus.chunks_768 WHERE tenant_id='" + tenant + "'"))
             .isEqualTo(1);
-        // chash_index two-phase: both old rows converge to ONE new-key row
-        assertThat(count("SELECT count(*) FROM nexus.chash_index WHERE tenant_id='" + tenant + "'"))
-            .isEqualTo(1);
-        assertThat(count("SELECT count(*) FROM nexus.chash_index WHERE tenant_id='" + tenant
-            + "' AND chash = decode('" + newHex + "', 'hex')")).isEqualTo(1);
         // topic_assignments two-phase: one surviving assignment at the 64-hex
         assertThat(count("SELECT count(*) FROM nexus.topic_assignments WHERE tenant_id='" + tenant + "'"))
             .isEqualTo(1);
@@ -531,5 +510,154 @@ class RekeyOpsIntegrationTest {
             + "' AND chash = decode('" + "d".repeat(32) + "', 'hex')")).isEqualTo(2);
         assertThat(count("SELECT count(*) FROM nexus.chash_alias WHERE tenant_id='" + TC + "'"))
             .isZero();
+    }
+
+    // ── Test 5: the rekey leaves chash_alias with FRESH planner stats ────────
+
+    /**
+     * F2, production 2026-07-20 (bus [20980]): the second tenant's rekey ran
+     * 101 MINUTES and had to be cancelled. Root cause was not the work — the
+     * same work took 461s once the planner was un-blinded. Autoanalyze fired
+     * the instant tenant 1 committed and froze {@code chash_alias} statistics
+     * at "this table is 100% tenant 1" ({@code most_common_vals={t1}},
+     * {@code freqs=[1.0]}, {@code n_distinct=1}). Tenant 2's ~134k alias rows
+     * are inserted INSIDE its own transaction and are therefore invisible to
+     * the planner, so {@code tenant_id = 't2'} estimated ONE row and Postgres
+     * chose a triple nested loop against ~134k x 466k actual.
+     *
+     * <p>The fix is one statement — ANALYZE {@code chash_alias} inside the
+     * rekey transaction, after the alias INSERT — because an in-transaction
+     * ANALYZE samples its own uncommitted rows.
+     *
+     * <p><strong>The trap this test exists to catch:</strong> the rekey runs as
+     * {@code nexus_svc}, which holds DML grants only and does NOT own the
+     * table. Postgres does not ERROR when a non-owner analyzes — it emits a
+     * WARNING and SKIPS the table. A naive fix therefore looks applied, logs
+     * nothing a caller sees, and leaves the planner exactly as blind as before.
+     * So this asserts the OBSERVABLE EFFECT (statistics exist and describe the
+     * rows this transaction wrote), never the mere presence of the statement.
+     *
+     * <p>Autovacuum is disabled on the table for the duration so the ONLY
+     * possible source of statistics is the rekey itself — without that, a
+     * passing assertion could be autoanalyze's work rather than ours.
+     */
+    @Test
+    @Order(5)
+    void rekey_leavesFreshPlannerStatsOnChashAlias() throws Exception {
+        final String tenant = "t-rekey-stats";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            // ONLY the rekey may produce statistics for this table.
+            exec(su, "ALTER TABLE nexus.chash_alias SET (autovacuum_enabled = false)");
+            exec(su, "DELETE FROM pg_statistic WHERE starelid = 'nexus.chash_alias'::regclass");
+            exec(su, "INSERT INTO nexus.catalog_collections (tenant_id, name) "
+                + "VALUES ('" + tenant + "', 'code__stats') ON CONFLICT DO NOTHING");
+            withChecksDropped(su, () -> {
+                for (int i = 0; i < 40; i++) {
+                    String text = "stats fixture chunk " + i;
+                    insertChunk(su, tenant, "nexus.chunks_768", 768, "code__stats",
+                        legacyKeyOf(text), text);
+                }
+            });
+        }
+        // Precondition: genuinely no statistics before the rekey. Without this
+        // the assertion below could pass on stale rows and prove nothing.
+        assertThat(count("SELECT count(*) FROM pg_stats WHERE schemaname='nexus' "
+            + "AND tablename='chash_alias' AND attname='tenant_id'"))
+            .as("fixture must start with NO chash_alias statistics")
+            .isZero();
+
+        Map<String, Object> counts = rekeyOps.rekey(tenant, false);
+        assertThat(((Number) counts.get("alias_rows")).intValue())
+            .as("the fixture must actually write alias rows, or the ANALYZE has nothing to see")
+            .isEqualTo(40);
+
+        // THE ASSERTION: the rekey's own transaction left usable statistics.
+        // Pre-fix this is 0 (no ANALYZE at all); with a permission-skipped
+        // ANALYZE it is ALSO 0 — which is exactly why the effect, not the
+        // statement, is what gets asserted.
+        assertThat(count("SELECT count(*) FROM pg_stats WHERE schemaname='nexus' "
+            + "AND tablename='chash_alias' AND attname='tenant_id'"))
+            .as("the rekey must leave FRESH planner statistics on chash_alias — an "
+                + "in-transaction ANALYZE that Postgres silently skipped for want of "
+                + "ownership/MAINTAIN leaves the planner blind (F2: 101min vs 461s)")
+            .isEqualTo(1);
+
+        // And they must DESCRIBE this tenant's rows, not merely exist: the
+        // production failure was statistics that were present but described a
+        // different tenant entirely.
+        assertThat(scalar("SELECT most_common_vals::text FROM pg_stats WHERE schemaname='nexus' "
+            + "AND tablename='chash_alias' AND attname='tenant_id'"))
+            .as("statistics must describe the rows this transaction wrote")
+            .contains(tenant);
+
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            exec(su, "ALTER TABLE nexus.chash_alias RESET (autovacuum_enabled)");
+        }
+    }
+
+    // ── Test 6: the server-side envelope log is the authoritative record ─────
+
+    /**
+     * nexus-b878d contract-to-keep: {@code RekeyOps} logs {@code
+     * event=rekey_complete} carrying the FULL envelope, server-side, after the
+     * transaction commits.
+     *
+     * <p>This is not decorative logging. During the RDR-180 production cutover
+     * the tls sidecar 504'd at 120.3s while the transaction committed 88s
+     * later, so the client never received its envelope — and this log line is
+     * what recovered it. nexus-b878d removes the long-held request that caused
+     * that, but the log stays the authoritative record of what a rekey did, and
+     * degrading it to a summary would re-open the same recovery gap.
+     *
+     * <p>Asserts the envelope's CONTENT, not merely that a line was emitted: it
+     * pins the formatted message against the returned map, so dropping any
+     * single count from the log fails this test.
+     */
+    @Test
+    @Order(6)
+    void rekeyComplete_logsTheFullEnvelopeServerSide() {
+        ch.qos.logback.classic.Logger root =
+            (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(
+                org.slf4j.Logger.ROOT_LOGGER_NAME);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs =
+            new ch.qos.logback.core.read.ListAppender<>();
+        logs.start();
+        root.addAppender(logs);
+        try {
+            Map<String, Object> counts = rekeyOps.rekey(TA, false);
+
+            var envelopeLines = logs.list.stream()
+                .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                .filter(m -> m.startsWith("event=rekey_complete"))
+                .toList();
+
+            assertThat(envelopeLines)
+                .as("exactly one rekey_complete line per rekey")
+                .hasSize(1);
+            assertThat(envelopeLines.getFirst())
+                .as("the line names the tenant it applies to")
+                .contains("tenant=" + TA);
+            assertThat(envelopeLines.getFirst())
+                .as("the line carries the FULL envelope, not a summary of it")
+                .contains("counts=" + counts);
+        } finally {
+            root.detachAppender(logs);
+            logs.stop();
+        }
+    }
+
+    /** The pre-RDR-180 32-hex half-digest of {@code text}, as raw bytes. */
+    private static byte[] legacyKeyOf(String text) {
+        try {
+            byte[] full = MessageDigest.getInstance("SHA-256")
+                .digest(text.getBytes(StandardCharsets.UTF_8));
+            byte[] half = new byte[16];
+            System.arraycopy(full, 0, half, 0, 16);
+            return half;
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 }

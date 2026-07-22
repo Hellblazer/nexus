@@ -81,8 +81,10 @@ public final class ChashCensus {
             "the byte carrier of old_ref — any width by design"));
 
     /** The known chash-bearing inventory the enumeration MUST rediscover. */
+    // chash_index.chash left the inventory WITH the table (RDR-187 DROP,
+    // nexus-piwya.9) — the schema-derived enumeration no longer discovers it.
     static final Set<String> KNOWN_INVENTORY = Set.of(
-        "catalog_document_chunks.chash", "chash_index.chash",
+        "catalog_document_chunks.chash",
         "topic_assignments.doc_id", "frecency.chunk_id", "relevance_log.chunk_id",
         "chunks_384.chash", "chunks_768.chash", "chunks_1024.chash");
 
@@ -135,12 +137,44 @@ public final class ChashCensus {
         return residue;
     }
 
+    /**
+     * Dangling-pointer legs (nexus-kmd5b).
+     *
+     * <p>These previously gated on the CONFORMANT width — {@code
+     * octet_length = 32} for chash_index, {@code ~ '^[0-9a-f]{64}$'} for the
+     * three TEXT debt columns — which excluded exactly the population they
+     * exist to find: a pointer the cascade could NOT repoint is, by
+     * definition, still at its LEGACY width. Production 2026-07-20 measured
+     * the consequence: the chash_index leg reported <strong>1</strong> against
+     * <strong>292,230</strong> actual orphans, while the manifest leg (no
+     * width precondition) reported 426 against 426. Same structural shape as
+     * nexus-vounk — a check that structurally cannot see the thing it checks
+     * for, whose "all clear" is evidence of a blind query, not a clean store.
+     *
+     * <p>DANGLING now means what it says: the pointer resolves to a live chunk
+     * by NO route — neither directly nor through the permanent {@code
+     * chash_alias} map, which is the whole point of that map (RDR-180: legacy
+     * references stay resolvable forever). A legacy-width pointer WITH an
+     * alias entry is therefore resolvable and not counted; one without is
+     * genuine debt and is.
+     *
+     * <p>The TEXT columns keep a shape filter, but widened to "a chash of
+     * EITHER era" (32- or 64-hex): {@code topic_assignments.doc_id} is a mixed
+     * identity space that also holds memory-note titles (RDR-180 Item2), and
+     * dropping the filter entirely would flag every title as dangling.
+     */
     private static Map<String, Integer> danglingPointers(DSLContext ctx) {
         Map<String, Integer> out = new LinkedHashMap<>();
-        String noContent =
+        // Resolves-by-no-route, for a hex-TEXT pointer of either era.
+        String unresolvableHex =
             "NOT EXISTS (SELECT 1 FROM nexus.chunks_384 c WHERE c.chash = decode(%1$s, 'hex')) "
             + "AND NOT EXISTS (SELECT 1 FROM nexus.chunks_768 c WHERE c.chash = decode(%1$s, 'hex')) "
-            + "AND NOT EXISTS (SELECT 1 FROM nexus.chunks_1024 c WHERE c.chash = decode(%1$s, 'hex'))";
+            + "AND NOT EXISTS (SELECT 1 FROM nexus.chunks_1024 c WHERE c.chash = decode(%1$s, 'hex')) "
+            + "AND NOT EXISTS (SELECT 1 FROM nexus.chash_alias a "
+            + "                 WHERE a.old_ref = %1$s "
+            + "                   AND (EXISTS (SELECT 1 FROM nexus.chunks_384 k WHERE k.chash = a.new_chash) "
+            + "                     OR EXISTS (SELECT 1 FROM nexus.chunks_768 k WHERE k.chash = a.new_chash) "
+            + "                     OR EXISTS (SELECT 1 FROM nexus.chunks_1024 k WHERE k.chash = a.new_chash)))";
         Map<String, String> hexKeyed = Map.of(
             "topic_assignments", "doc_id",
             "frecency", "chunk_id",
@@ -149,18 +183,21 @@ public final class ChashCensus {
             String col = e.getValue();
             Integer n = ctx.fetchOne(
                 "SELECT count(*) FROM nexus." + e.getKey() + " p "
-                + "WHERE p." + col + " ~ '^[0-9a-f]{64}$' AND "
-                + String.format(noContent, "p." + col)).get(0, Integer.class);
+                // EITHER era's chash shape — the 64-only filter was the blindness.
+                + "WHERE p." + col + " ~ '^([0-9a-f]{32}|[0-9a-f]{64})$' AND "
+                + String.format(unresolvableHex, "p." + col)).get(0, Integer.class);
             if (n != null && n > 0) out.put("dangling." + e.getKey(), n);
         }
-        Integer idx = ctx.fetchOne(
-            "SELECT count(*) FROM nexus.chash_index i "
-            + "WHERE octet_length(i.chash) = 32 "
-            + "  AND NOT EXISTS (SELECT 1 FROM nexus.chunks_384 c WHERE c.chash = i.chash) "
-            + "  AND NOT EXISTS (SELECT 1 FROM nexus.chunks_768 c WHERE c.chash = i.chash) "
-            + "  AND NOT EXISTS (SELECT 1 FROM nexus.chunks_1024 c WHERE c.chash = i.chash)")
-            .get(0, Integer.class);
-        if (idx != null && idx > 0) out.put("dangling.chash_index", idx);
+        // RDR-187 (nexus-piwya.5): the dangling.chash_index leg is RETIRED
+        // ahead of the table DROP (nexus-piwya.9) — a leg reading
+        // nexus.chash_index errors on the missing relation once the router
+        // dies, and its orphan population (292,230 measured in production,
+        // post-kmd5b) dies AT the DROP rather than being reported forever.
+        // The manifest leg below and the TEXT debt-column legs above remain
+        // the census's dangling surface. (KNOWN_INVENTORY's chash_index.chash
+        // entry left with the table in the same commit as the rdr187-2 DROP —
+        // the enumeration is schema-derived, and the two stayed in lockstep
+        // exactly as planned at .5.)
         // The manifest (review P1 Critical: the census backstop must cover
         // catalog_document_chunks independently of the finalize call site).
         Integer manifest = ctx.fetchOne(

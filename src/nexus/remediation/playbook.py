@@ -203,42 +203,69 @@ class Playbook:
 
 
 def _chash_poison(store_state: StoreState) -> Playbook:
-    """GH #1390 / nexus-pnwu0: non-32-char chash rows poison the pgvector
-    target — a new engine crash-loops on Liquibase VALIDATE at boot."""
+    """GH #1414 / nexus-pnwu0 class: width-non-conformant chash rows in the
+    pgvector store — unhealed upgrade-ladder debt.
+
+    nexus-o513u ladder-first rewrite (2026-07-21). The pre-rewrite premise
+    ("a new engine would crash-loop on Liquibase VALIDATE at boot") was
+    DISPROVEN for v0.1.48+ engines by the nexus-joima verification: the
+    RDR-180 octet-width CHECKs land NOT VALID and are VALIDATEd by the
+    client chash-rekey rung post-heal — no boot-time VALIDATE exists
+    (rdr180-11's header says so explicitly). The ladder heals the rows in
+    place; rollback is reserved for the will-not-boot class (pre-v0.1.48
+    char-era engines, the closed GH #1390 shape) via the escape branch.
+    Steering rollback-first on a serving store was observed live steering
+    an agent toward reverting a healthy pgvector migration (GH #1414)."""
     return Playbook(
         topic="chash-poison",
         context=(
-            "My conexus/nexus store has non-32-char chash rows in pgvector "
-            "(GH #1390 / nexus-pnwu0) and a new engine would crash-loop on "
-            "boot."
+            "My conexus/nexus store has width-non-conformant chash rows in "
+            "pgvector (octet_length <> 32 — legacy pre-RDR-108 ids; the "
+            "GH #1414 class). The serving engine tolerates them, but they "
+            "are unhealed debt the upgrade ladder should converge."
         ),
         constraints=(
             "Do NOT drop the chash length constraints.",
-            "Diagnostics are read-only — no DML against pgvector outside the "
-            "documented rollback command.",
+            "Do NOT roll back a serving store — rollback (nx storage "
+            "migrate vectors --rollback) is reserved for the will-not-boot "
+            "class in the escape below.",
+            "Diagnostics are read-only — no DML against pgvector; the only "
+            "mutating actions are the documented ladder commands in the "
+            "steps.",
         ),
         steps=(
-            "roll back the poisoned pgvector target (nx storage migrate "
-            "vectors --rollback)",
-            "re-index the affected legacy-id collections from source",
-            "re-run nx guided-upgrade",
+            "resolve the affected legacy-id collections to their repos "
+            "(nx catalog owners list) and re-index the file-backed ones "
+            "(nx index repo <path> — additive, per-collection)",
+            "run nx upgrade — the substrate-etl rung converges the "
+            "re-indexed collections and the chash-rekey rung recomputes "
+            "conformant ids from stored chunk text for the rest "
+            "(store_put-only notes included)",
+            "re-run nx doctor and confirm the 'Chunk chash conformance' "
+            "warning has cleared",
         ),
         deliverable=(
-            "Report back: the rollback command's verdict line, the re-indexed "
-            "collection names with their row counts, and the final "
-            "'Migration VERIFIED and unlocked' line from nx guided-upgrade."
+            "Report back: the re-indexed collection names with their row "
+            "counts, nx upgrade's rung verdict lines (substrate-etl and "
+            "chash-rekey), and the final nx doctor 'Chunk chash "
+            "conformance' line showing the warning cleared."
         ),
         escape=(
-            "If the source content for the affected collections is gone "
-            "(nothing left to re-index from), STOP — do not improvise DML "
-            "against pgvector; runbook §8 covers the rebuild-from-source "
-            "options and when rollback alone is the terminal state."
+            "If the service itself will NOT BOOT (Liquibase crash-loop at "
+            "startup — the closed GH #1390 shape, seen on pre-v0.1.48 "
+            "char-era engines), the ladder cannot run: roll back the "
+            "poisoned target (nx storage migrate vectors --rollback), "
+            "re-index, and re-run nx guided-upgrade per runbook §8.1. If "
+            "a file-backed collection's source content is gone, skip its "
+            "re-index — the chash-rekey rung recomputes ids from stored "
+            "text; STOP and report only if the ladder itself refuses."
         ),
         goal="let me upgrade the engine",
-        incident_ref="nexus-pnwu0",
+        incident_ref="nexus-pnwu0 / GH #1414",
         refusal_lead=(
-            "Refusing to install (nexus-pnwu0 / GH #1390): booting a new "
-            "engine on this store would crash-loop."
+            "Refusing to install (nexus-pnwu0 / GH #1414): this store has "
+            "width-non-conformant chash rows — heal them via the upgrade "
+            "ladder before swapping engine binaries."
         ),
         closing_warning=(
             "Do NOT drop the chash length constraints to force it through — "
@@ -246,8 +273,9 @@ def _chash_poison(store_state: StoreState) -> Playbook:
             "--force ONLY after you have remediated."
         ),
         force_risk=(
-            "The new engine may crash-loop on boot unless you have already "
-            "remediated."
+            "The rows stay unhealed debt: the chash-rekey rung's VALIDATE "
+            "will keep failing until they converge, and a pre-v0.1.48 "
+            "char-era engine can still crash-loop on boot."
         ),
         runbook_section="8.1",
         store_detail=store_state.detail,
@@ -268,9 +296,10 @@ def _chash_poison_forensics(store_state: StoreState) -> Playbook:
     return Playbook(
         topic="chash-poison",
         context=(
-            "My conexus/nexus store may hold non-32-char chash rows in "
-            "pgvector (the GH #1390 / nexus-pnwu0 class) — help me diagnose "
-            "the blast radius READ-ONLY before deciding on any remediation."
+            "My conexus/nexus store may hold width-non-conformant chash "
+            "rows in pgvector (the GH #1414 / nexus-pnwu0 class) — help me "
+            "diagnose the blast radius READ-ONLY before deciding on any "
+            "remediation."
         ),
         constraints=(
             "READ-ONLY investigation: run nothing that mutates — no DML, no "
@@ -283,10 +312,17 @@ def _chash_poison_forensics(store_state: StoreState) -> Playbook:
             "run the diagnostic SQL below (each statement is lint-verified "
             "read-only; the nexus_diag path executes them in a read-only "
             "session)",
-            "interpret: any non-zero count in the first five statements "
-            "(chunks_384/768/1024, chash_index, catalog_document_chunks) "
-            "means POISON rows exist in that table and a future engine "
-            "upgrade would crash-loop on VALIDATE",
+            "interpret: any non-zero count in the first four statements "
+            "(chunks_384/768/1024, catalog_document_chunks) means width-"
+            "non-conformant rows exist in that table — unhealed upgrade-"
+            "ladder debt. v0.1.48+ engines tolerate these rows at boot "
+            "(the octet-width CHECKs are NOT VALID until the chash-rekey "
+            "rung heals and VALIDATEs them — nexus-joima); the remedy is "
+            "the ladder (nx upgrade), not rollback. Only a pre-v0.1.48 "
+            "char-era engine can still crash-loop on a boot VALIDATE (the "
+            "closed GH #1390 shape). (The chash_index statement was "
+            "retired by RDR-187 — the router table is dropped as of "
+            "engine v0.1.51.)",
             "interpret: the next three statements (topic_assignments, "
             "frecency, relevance_log) are LEGACY DEBT — non-gating "
             "(no CHECK constraint exists there), but non-zero counts mean "

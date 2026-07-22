@@ -146,6 +146,40 @@ def _probe_legacy_ids(col: Any) -> str | None:
     return None
 
 
+def _probe_id_conformance(col: Any) -> tuple[str | None, bool]:
+    """One-pass id conformance probe: ``(truly_legacy_example, era32_present)``.
+
+    nexus-i5rbk (Hal decision 2026-07-21, era-hop): the 32-hex era ids
+    (pre-RDR-180-flip pgvector half-digests) are a DISTINCT axis from
+    truly-legacy ids — they are exactly re-derivable on the wire
+    (``sha256(chunk_text)``, a recompute, not a guess), so they feed
+    ``needs_reid`` without widening ``legacy_ids`` (whose consumers carry
+    census display and collision_audit historical-map semantics) and
+    without flipping model support. Same sampling contract as
+    :func:`_probe_legacy_ids` (first page, quota-compliant 300; the ETL
+    seam guard is the complete backstop; probe failure returns clean).
+    """
+    try:
+        sample = col.get(limit=300, include=[])
+    except Exception as exc:  # noqa: BLE001 — best-effort probe; the ETL per-batch guard is the backstop
+        _log.warning(
+            "migration_id_conformance_probe_failed",
+            collection=getattr(col, "name", "?"),
+            error=str(exc),
+        )
+        return None, False
+    ids = sample.get("ids") if isinstance(sample, dict) else None
+    truly_legacy: str | None = None
+    era32 = False
+    for chunk_id in ids or []:
+        if len(chunk_id) == 32:
+            era32 = True
+        elif len(chunk_id) != 64 and truly_legacy is None:
+            truly_legacy = chunk_id
+    return truly_legacy, era32
+    return None
+
+
 #: RDR-180 land-then-transform (nexus-jxizy.10.8): the width era a chunk id
 #: sample can land in. The legacy-id BLOCK that used to fire on a non-32/64
 #: id (see the now-retired check in ``pregate.assert_models_supported``) is
@@ -331,8 +365,18 @@ def is_measured_dim_override(c: "CollectionClassification") -> bool:
     return c.support == "unsupported" and c.measured_dim == _ONNX_DIM
 
 
-def cross_model_remappable(c: "CollectionClassification") -> bool:
+def cross_model_remappable(
+    c: "CollectionClassification", *, rehashes_ids: bool = False
+) -> bool:
     """Whether *c* is a legacy collection the cross-model migrate can re-embed.
+
+    ``rehashes_ids`` (nexus-leunq) declares that the CALLER's migration path
+    derives chunk ids by rehashing ``chunk_text`` server-side rather than
+    copying them verbatim — true under RDR-180 land-then-transform. It relaxes
+    only the legacy-id exclusion, which exists solely because a verbatim copy
+    would carry a non-conformant id into the target. Defaults to False so
+    every existing caller, including the historical reconstruction in
+    :mod:`nexus.migration.collision_audit`, keeps its current answer.
 
     RDR-162 P2: a collection is auto-migratable via stored-text re-embed (rather
     than blocked with the re-index diagnostic) iff ALL hold:
@@ -364,8 +408,16 @@ def cross_model_remappable(c: "CollectionClassification") -> bool:
     # GH #1390 / nexus-sot7v: the cross-model remap re-embeds stored TEXT but
     # keeps the chunk ids VERBATIM — a legacy-id collection would violate the
     # chash identity in the remapped target exactly as in a same-name copy.
-    # Never remappable; the pre-gate blocks it with the re-index diagnostic.
-    if c.legacy_ids:
+    #
+    # ...on a path that copies ids. Under RDR-180 land-then-transform the ids
+    # are REHASHED server-side from chunk_text, so the verbatim-preservation
+    # premise does not hold and the exclusion is stale there (nexus-leunq).
+    # Opt-in rather than a policy change, for two reasons: paths that still
+    # copy ids verbatim must keep the exclusion, and
+    # build_cross_model_target_names is ALSO how collision_audit reconstructs
+    # HISTORICAL target maps — flipping the default would have it audit maps
+    # no past run ever produced, the precise drift its docstring warns about.
+    if c.legacy_ids and not rehashes_ids:
         return False
     # nexus-nb7hr measured-dim override: a stored vector PROVED the content
     # is local bge/ONNX (768-dim), so the name-based exclusions below do not
@@ -461,6 +513,16 @@ class CollectionClassification:
     #: chash identity) and MUST NOT cross-model remap (remap re-embeds text
     #: but keeps ids). Blocked at the pre-gate with a re-index diagnostic.
     legacy_ids: bool = False
+    #: nexus-i5rbk (Hal decision 2026-07-21): the collection holds 32-hex
+    #: ERA ids (the pre-RDR-180-flip pgvector half-digest). A distinct axis
+    #: from ``legacy_ids``: re-derivable on the wire (sha256(chunk_text) is
+    #: a recompute, not a guess), it feeds the substrate rung's
+    #: ``needs_reid`` WITHOUT the census/remap semantics legacy_ids
+    #: carries and WITHOUT flipping model support. Post-flip the engine
+    #: boundary 400s non-64 ids, so an era-32 leg without the wire
+    #: transform can never land (the era-hop's
+    #: etl_seam_nonconformant_post_transform failure).
+    era32_ids: bool = False
 
 
 @dataclass(frozen=True)
@@ -524,9 +586,10 @@ def _classify_leg(
         # EVERY data-bearing collection (a conformant, supported-model name
         # can still hold legacy-era ids — the canon-chat store did).
         legacy_ids = False
+        era32_ids = False
         measured_dim: int | None = None
         if source_count > 0:
-            bad_id = _probe_legacy_ids(col)
+            bad_id, era32_ids = _probe_id_conformance(col)
             if bad_id is not None:
                 legacy_ids = True
                 support = "unsupported"
@@ -551,7 +614,19 @@ def _classify_leg(
         # Probe that case too — scoped to voyage-named collections only
         # (not a blanket enable-for-everything) since that is the one
         # shape a key's presence can hide.
-        should_probe_dim = not legacy_ids and source_count > 0 and (
+        # nexus-leunq: legacy ids used to suppress this probe, which made a
+        # single non-conformant id enough to hide what the vectors ARE. A
+        # pre-RDR-109 voyage-NAMED collection holding measured-bge 768 vectors
+        # plus one 16-char-id row then classified as genuinely-voyage-
+        # unsupported, and guided-upgrade blocked the whole run with
+        # "Configure voyage on the service (NX_VOYAGE_API_KEY)" — wrong twice
+        # over: the content is bge, so configuring voyage would bill a
+        # re-embed of never-voyage vectors; and under land-then-transform the
+        # ids are rehashed server-side, so they were never the obstacle.
+        #
+        # Id shape and vector dimension are independent facts. Measuring one
+        # has never depended on the other; the coupling was the bug.
+        should_probe_dim = source_count > 0 and (
             support == "unsupported"
             or (support == "supported-voyage-1024" and model in _VOYAGE_MODELS)
         )
@@ -593,6 +668,7 @@ def _classify_leg(
                 reason=reason,
                 measured_dim=measured_dim,
                 legacy_ids=legacy_ids,
+                era32_ids=era32_ids,
             )
         )
     return out
@@ -827,13 +903,27 @@ def _throughput_for_support(support: Support) -> float:
     return _EST_ONNX_CHUNKS_PER_SEC
 
 
-def build_dry_run_preview(report: DetectionReport) -> DryRunPreview:
+def build_dry_run_preview(
+    report: DetectionReport, *, rehashes_ids: bool = False
+) -> DryRunPreview:
     """Roll a :class:`DetectionReport` into a per-leg/per-model dry-run preview.
 
     Supported groups contribute token-volume + time estimates; unsupported
     collections are surfaced separately (their re-index / key diagnostics) and
     contribute nothing to the migratable totals — they would be BLOCKED, not
     migrated.
+
+    ``rehashes_ids`` must match what the REAL run will do, and is forwarded to
+    :func:`cross_model_remappable`. A preview that answers differently from the
+    run it previews is worse than no preview: nexus-leunq's first fix threaded
+    the flag into the live guided path only, leaving this one at the default,
+    so a legacy-id measured-bge collection rendered as
+    "BLOCKED ... must be resolved first" directly beside its own reason text
+    "auto-remapped at migration ... no Voyage key or re-index needed" — two
+    contradictory statements in one line, about a collection the real run
+    migrates fine. Worse than cosmetic, because ``migrate_cmd`` exits non-zero
+    on ``preview.unsupported``, so a script gating on the dry run blocked on a
+    collection that was never actually blocked.
     """
     # RDR-162 P2: a cross-model-remappable collection is migratable (re-embed),
     # not blocked. nexus-gilf2: bucket cross-model groups by their RESOLVED
@@ -842,7 +932,7 @@ def build_dry_run_preview(report: DetectionReport) -> DryRunPreview:
     # would otherwise name only one of them. ``target`` is None for non-cross-
     # model classifications, keeping supported/blocked buckets unchanged.
     def _cross_target(c: CollectionClassification) -> str | None:
-        if not cross_model_remappable(c):
+        if not cross_model_remappable(c, rehashes_ids=rehashes_ids):
             return None
         return remap_target_model(
             c, voyage_key_present=report.voyage_key_present
@@ -912,7 +1002,8 @@ def build_dry_run_preview(report: DetectionReport) -> DryRunPreview:
     # Only GENUINELY-blocked collections remain in unsupported — cross-model
     # collections are migratable and must not gate the dry-run exit.
     blocked = tuple(
-        c for c in report.unsupported if not cross_model_remappable(c)
+        c for c in report.unsupported
+        if not cross_model_remappable(c, rehashes_ids=rehashes_ids)
     )
     return DryRunPreview(
         groups=tuple(groups),

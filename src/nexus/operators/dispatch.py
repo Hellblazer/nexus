@@ -11,16 +11,64 @@ surfaces naturally.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import os
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 import structlog
 
 _log = structlog.get_logger()
 
+#: nexus-l1qpj: fail-open BATCH callers (taxonomy discover/review) roll
+#: dispatch failures up into one summary line themselves — inside their
+#: scope the per-failure ``operator_dispatch_failed`` event demotes from
+#: WARNING to INFO so a bad run does not wall the terminal with one
+#: WARNING per failed batch. INFO still reaches any attached file handler
+#: (``open_run_log`` unlocks INFO for its file while pinning stderr
+#: quiet), so the per-failure record survives; only the stderr noise goes.
+_ROLLED_UP: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "dispatch_failures_rolled_up", default=False,
+)
+
+
+@contextmanager
+def rolled_up_dispatch_failures() -> Iterator[None]:
+    """Demote per-failure dispatch WARNINGs to INFO within this scope.
+
+    ONLY for callers that (a) are fail-open by contract AND (b) emit their
+    own end-of-batch rollup summary naming the failure count and where the
+    per-failure records went. Everyone else keeps the WARNING default —
+    the durable-record posture of nexus-q6830 is the point of the choke
+    point.
+    """
+    token = _ROLLED_UP.set(True)
+    try:
+        yield
+    finally:
+        _ROLLED_UP.reset(token)
+
+#: Per-stream cap on what the failure log records, in characters.
+#: Sized against the handler's real budget, not picked for feel: the log
+#: rotates at 10 MB x 5 backups (:mod:`nexus.logging_setup`), so a 16 KB
+#: two-stream worst case is ~625 max-size entries per rotation — room for
+#: a pathological failure loop without letting it evict the retained
+#: window. Deliberately NOT the exception message's 300-char cap, which is
+#: sized for terminal readability: a JSON error payload with a stack
+#: summary clears 300 easily, and a durable record that inherits a
+#: readability cap loses the diagnostic all over again.
+_LOG_STREAM_CAP: int = 8000
+
+#: Appended when a stream is cut at the cap. Without it a field of exactly
+#: _LOG_STREAM_CAP chars is indistinguishable from a diagnostic that
+#: happened to be exactly that long — the same ambiguity the "no output on
+#: stdout or stderr" sentinel exists to prevent, one field over.
+_TRUNCATION_MARKER: str = "...[truncated]"
+
 __all__ = [
     "claude_dispatch",
+    "rolled_up_dispatch_failures",
     "OperatorError",
     "OperatorOutputError",
     "OperatorTimeoutError",
@@ -157,6 +205,14 @@ async def _drain_pipe(pipe: asyncio.StreamReader | None) -> bytes:
             "operator_pipe_read_failed", exc_info=True,
         )
         return b""
+
+
+def _capped(raw: bytes) -> str:
+    """Decode a subprocess stream for the failure log, marking any cut."""
+    text = raw.decode(errors="replace").strip()
+    if len(text) <= _LOG_STREAM_CAP:
+        return text
+    return text[:_LOG_STREAM_CAP] + _TRUNCATION_MARKER
 
 
 def _persist_timeout_log(
@@ -340,9 +396,73 @@ async def claude_dispatch(
         )
 
     if proc.returncode != 0:
-        err_snippet = stderr.decode(errors="replace")[:300]
+        # GH #1414: `claude -p --output-format json` reports its errors on
+        # STDOUT, so a stderr-only message rendered as the bare, useless
+        # "claude -p exited 1:" — twice, for nx_plan_audit, with nothing in
+        # mcp.log either. Report whichever stream spoke.
+        err_snippet = stderr.decode(errors="replace").strip()[:300]
+        out_snippet = stdout.decode(errors="replace").strip()[:300]
+        parts = [
+            f"{label}: {text}"
+            for label, text in (("stderr", err_snippet), ("stdout", out_snippet))
+            if text
+        ]
+        # Silence must READ as silence: a bare trailing colon is
+        # indistinguishable from "we dropped the output", which is the
+        # ambiguity that cost GH #1414 a hand investigation.
+        detail = " | ".join(parts) if parts else "no output on stdout or stderr"
+        # The DURABLE half. The exception above is visible for exactly one
+        # turn, in whatever renders the tool error; nothing writes it down.
+        # GH #1414 searched a May-July mcp.log and found nothing, because
+        # FastMCP's handler returns str(e) to the client without logging —
+        # and of the 17 call sites, 13 propagate bare on at least one real
+        # invocation path, three of them (nx_plan_audit, nx_tidy,
+        # nx_enrich_beads) with no covered path at all. This is the one
+        # choke point every caller passes through, including call site 18
+        # that nobody has written yet, so the record belongs here rather
+        # than at N call sites that must each remember to opt in.
+        #
+        # Deliberately NOT capped at the exception's 300 chars: that cap
+        # buys a readable message, and a durable record that inherits it
+        # loses the same diagnostic tail all over again (nexus-1at5's
+        # actual lesson was durability independent of the exception text,
+        # which the first cut of this fix claimed but did not deliver).
+        #
+        # SCOPE, precisely: this fires for all 17 call sites, but DURABILITY
+        # is a property of the calling process's logging mode, not of this
+        # choke point. mode="mcp" gets the rotating file handler, so the 15
+        # server-side sites get a record on disk. `nx taxonomy discover` and
+        # `review --auto` (taxonomy_cmd.py:1537,:1653) run under
+        # mode="cli", which logging_setup returns from before any file
+        # handler is attached — stderr only. Those two go from 100% silent
+        # to one stderr line per failure during the run, which is an
+        # improvement and is NOT "something to grep afterward".
+        emit = _log.info if _ROLLED_UP.get() else _log.warning
+        emit(
+            "operator_dispatch_failed",
+            returncode=proc.returncode,
+            stdout=_capped(stdout),
+            stderr=_capped(stderr),
+        )
+        # nexus-ri56e: (a) origin unambiguity — a populated message now
+        # reads like an ordinary application error, but this is the
+        # DISPATCH HARNESS failing (the claude -p CLI exited non-zero);
+        # whoever hits it must not mistake the relayed error text for a
+        # model-level answer. (b) addressability — the timeout branch has
+        # always named its artifact in the exception; name ours too, or
+        # honestly say there is none (plain CLI mode).
+        from nexus.logging_setup import active_log_file  # noqa: PLC0415 — deferred: logging_setup is heavier than this hot-free error path needs at import time
+
+        log_file = active_log_file()
+        where = (
+            f"durable record: operator_dispatch_failed in {log_file}"
+            if log_file is not None
+            else "no log file attached (plain CLI mode) — this message is "
+                 "the only record"
+        )
         raise OperatorError(
-            f"claude -p exited {proc.returncode}: {err_snippet}"
+            f"claude -p exited {proc.returncode} (dispatch-harness "
+            f"failure, not a model answer): {detail} [{where}]"
         )
 
     raw = stdout.decode(errors="replace").strip()

@@ -599,8 +599,16 @@ def _catalog_pdf_hook(
                 file_path=file_path_str,
                 source_mtime=source_mtime,
             )
-    except Exception:  # noqa: BLE001 - best-effort catalog PDF hook; logged via log.debug, cleanup in finally
-        _log.debug("catalog_pdf_hook_failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 - best-effort catalog PDF hook; logged + audited, cleanup in finally
+        # nexus-ou4tb: an indexed PDF that never reached the catalog is
+        # invisible to every catalog-routed query. WARNING + audit row.
+        _log.warning("catalog_pdf_hook_failed", exc_info=True)
+        from nexus.hook_registry import record_catalog_hook_failure  # noqa: PLC0415 — deferred, avoids an import cycle
+
+        record_catalog_hook_failure(
+            source_path=file_path_str or "", collection=collection_name or "",
+            hook_name="catalog_pdf_hook", error=str(exc),
+        )
     finally:
         if writer is not None:
             writer.close()

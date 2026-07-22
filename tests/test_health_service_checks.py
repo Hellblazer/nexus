@@ -458,10 +458,13 @@ class TestCheckMigrationState:
         assert "7" in r.detail
 
     def test_legacy_chash_rows_warn_not_fatal(self, tmp_path):
-        """nexus-pnwu0 / GH #1390: non-32-char chash rows -> a WARNING with
-        the do-not-upgrade + runbook remediation, plus the still-ok Schema
-        migrations result. Never fatal (the current engine serves fine).
-        The count is SUMMED across the chash-bearing tables via nexus_diag."""
+        """nexus-pnwu0 / GH #1414: width-non-conformant chash rows -> a
+        WARNING steering the upgrade-ladder heal (nexus-o513u ladder-first;
+        the old 'Do NOT upgrade the engine / will crash-loop' claim was
+        disproven for v0.1.48+ by nexus-joima), plus the still-ok Schema
+        migrations result. Never fatal (the serving engine tolerates the
+        rows). The count is SUMMED across the chash-bearing tables via
+        nexus_diag."""
         creds = _make_creds_file(tmp_path)
         results = _check_migration_state(
             creds_path=creds,
@@ -476,8 +479,20 @@ class TestCheckMigrationState:
         assert chash.warn is True
         assert chash.fatal is False
         assert "12" in chash.detail
-        assert any("Do NOT upgrade" in s for s in chash.fix_suggestions)
+        # nexus-2hklz (round-3 critique HIGH-1): the falling-count guidance
+        # must scope the healing claim to re-indexing — deletions also
+        # lower the count, so no blanket "shrinking = healing" claim.
+        assert "Re-indexing affected content HEALS" in chash.detail
+        assert "heal-by-replacement" in chash.detail
+        assert "deleting affected content also lowers it" in chash.detail
+        assert "not data loss" not in chash.detail
+        # nexus-o513u: ladder-first — heal steps lead; no unconditional
+        # do-not-upgrade gate; rollback only as the will-not-boot branch.
+        assert any("nx upgrade" in s for s in chash.fix_suggestions)
+        assert not any("Do NOT upgrade" in s for s in chash.fix_suggestions)
         assert any("§8.1" in s for s in chash.fix_suggestions)
+        rollback = [s for s in chash.fix_suggestions if "--rollback" in s]
+        assert rollback and all("will-not-boot" in s for s in rollback)
         # the migration result itself is still healthy (box works now)
         assert any(r.label == "Schema migrations" and r.ok for r in results)
 
@@ -690,7 +705,8 @@ _ALL_TENANT_TABLES = [
     "nexus.catalog_links",
     "nexus.catalog_meta",
     "nexus.catalog_owners",
-    "nexus.chash_index",
+    # ("nexus.chash_index" removed — RDR-187/nexus-piwya.9: dropped table,
+    # mirrors health._RLS_TENANT_TABLES)
     "nexus.chash_remap",
     "nexus.claude_assisted_remediation_consents",
     "nexus.document_aspects",
@@ -1007,7 +1023,15 @@ class TestRlsTableCompleteness:
             text = xml_path.read_text(encoding="utf-8")
             for m in pattern.finditer(text):
                 found.add(m.group(1))
-        return frozenset(found)
+        # Tables DROPPED by a later changeset: the ENABLE ROW LEVEL SECURITY
+        # line is immutable history, but the live _check_rls_present probe
+        # must not expect a dropped table (a listed-but-dropped table is a
+        # permanent false FATAL — RDR-187 .9 review High). One entry per
+        # retirement, with the dropping changeset named.
+        dropped = {
+            "nexus.chash_index",  # rdr187-001-drop-chash-index.xml (RDR-187)
+        }
+        return frozenset(found - dropped)
 
     def test_rls_tenant_tables_matches_changelogs(self):
         """_RLS_TENANT_TABLES equals the set of RLS tables found in XMLs.
@@ -1168,15 +1192,18 @@ class TestChashProbeViewFallback:
         )
         chash = [r for r in results if "chash" in r.label.lower()]
         assert chash and chash[0].ok is False and chash[0].warn is True
-        assert "10 chunk row(s)" in chash[0].detail  # 2 per table via LEGACY
+        assert "8 chunk row(s)" in chash[0].detail  # 2 per table via LEGACY (4 poison tables post-RDR-187)
         assert state["i"] == 1 + n  # one failed view call + the full legacy set
 
     def test_debt_over_zero_emits_nongating_warn(self, tmp_path):
         """critic-180-foundation finding 1 coverage: a positive debt count
         surfaces as a WARN under its own label, never gating."""
-        # 5 poison statements return 0 (clean), then 3 debt statements
-        # return 2 each -> debt 6.
-        counts = [0] * 5 + [2, 2, 2]
+        # 4 poison statements return 0 (clean; post-RDR-187 set), then 3
+        # debt statements return 2 each -> debt 6. Deriving the mock-call
+        # count from the registry is ALIGNMENT MECHANICS only — the
+        # cardinality pin itself is hardcoded in test_diag_conformance_view
+        # (explicit 4-tuple + chash_index-never-returns assertion).
+        counts = [0] * len(chash_tables.POISON_CHASH_TABLES) + [2, 2, 2]
         state = {"i": 0}
 
         def runner(argv, env):
@@ -1203,12 +1230,14 @@ class TestChashProbeViewFallback:
         """critic-180-foundation finding 1: a stale 5-leg view NULLs the debt
         sums (empty psql lines -> int('') ValueError). That must surface as
         an explicit UNKNOWN warn — absence would read as clean."""
-        counts_ok = ["0"] * 5  # poison statements fine
+        # Mock-alignment mechanics, not the cardinality pin (that lives
+        # hardcoded in test_diag_conformance_view).
+        n_poison = len(chash_tables.POISON_CHASH_TABLES)  # poison statements fine
         state = {"i": 0}
 
         def runner(argv, env):
             i = state["i"]; state["i"] += 1
-            if i < 5:
+            if i < n_poison:
                 return subprocess.CompletedProcess(argv, 0, stdout="0\n", stderr="")
             return subprocess.CompletedProcess(argv, 0, stdout="\n", stderr="")  # NULL sum
 

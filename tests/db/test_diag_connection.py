@@ -120,3 +120,133 @@ class TestCredentialResolution:
             assert resolve_diag_credentials(p) is None
         finally:
             p.chmod(0o600)
+
+
+class TestLiveStoreDetailLocalOnly:
+    """nexus-y3wuu (Hal decision 2026-07-20, option b): the diagnostic path
+    is LOCAL-ONLY BY DESIGN — no remote host/dbname/sslmode resolution
+    exists. On a non-local (managed/BYO service) deployment the leg must
+    refuse with the contract stated, not report 'no nexus_diag credentials'
+    (indistinguishable from 'not provisioned'; cost conexus a source-read
+    to discover)."""
+
+    def test_non_local_mode_with_nothing_local_refuses_naming_the_contract(
+        self, monkeypatch,
+    ):
+        from unittest.mock import patch
+
+        from nexus.db.diag_connection import live_store_detail
+
+        calls = {"run": 0}
+
+        def _run(statements, creds):
+            calls["run"] += 1
+
+        with patch("nexus.config.is_local_mode", return_value=False):
+            text = live_store_detail(
+                ["SELECT COUNT(*) FROM nexus.chunks_768;"],
+                resolve=lambda: None, run=_run,
+            )
+        assert "LOCAL-ONLY" in text
+        assert "by design" in text.lower()
+        assert "no nexus_diag credentials" not in text
+        # No SQL runs on the refused path.
+        assert calls == {"run": 0}
+
+    def test_non_local_heuristic_with_real_local_creds_still_probes(self):
+        # Arc-critique SIG-2: is_local_mode() is a heuristic (a self-hosted
+        # local service holding cloud embedder keys reads non-local). A box
+        # whose LOCAL resolution genuinely succeeds must keep a WORKING
+        # probe — the contract refusal fires only when there is actually
+        # nothing local to probe.
+        from unittest.mock import patch
+
+        from nexus.db.diag_connection import live_store_detail
+
+        with patch("nexus.config.is_local_mode", return_value=False):
+            text = live_store_detail(
+                ["SELECT 1;"], resolve=lambda: _CREDS, run=lambda s, c: ["9"],
+            )
+        assert "live diagnostic results" in text
+        assert "SELECT 1; = 9" in text
+        assert "REFUSED" not in text
+
+    def test_local_mode_no_creds_keeps_unavailable_message(self):
+        from unittest.mock import patch
+
+        from nexus.db.diag_connection import live_store_detail
+
+        with patch("nexus.config.is_local_mode", return_value=True):
+            text = live_store_detail(
+                ["SELECT 1;"], resolve=lambda: None, run=lambda s, c: [],
+            )
+        assert "UNAVAILABLE" in text
+        assert "no nexus_diag credentials" in text
+        assert "Do NOT interpret this as a clean store" in text
+
+    def test_local_mode_with_creds_renders_results(self):
+        from unittest.mock import patch
+
+        from nexus.db.diag_connection import live_store_detail
+
+        with patch("nexus.config.is_local_mode", return_value=True):
+            text = live_store_detail(
+                ["SELECT 1;"],
+                resolve=lambda: _CREDS,
+                run=lambda s, c: ["42"],
+            )
+        assert "live diagnostic results" in text
+        assert "SELECT 1; = 42" in text
+
+
+class TestBundleLibLoaderGuard:
+    """GH #1414 era-hop, review round 3 (2026-07-21): run_diagnostic_sql is
+    the leg the chash-conformance label (the tri-state poison gate's key)
+    actually runs through, so ITS psql env — not just health._run_psql's —
+    must carry the nexus-iytd3 _bundle_lib_env loader guard. Without it, an
+    RPATH-less bundled psql exits 127 (libpq.so.5 unresolvable), the probe
+    reads UNKNOWN, and converge_engine defers permanently one level below
+    the health-leg fix."""
+
+    def _bundle_psql(self, tmp_path: Path) -> Path:
+        (tmp_path / "bundle" / "bin").mkdir(parents=True)
+        (tmp_path / "bundle" / "lib").mkdir(parents=True)
+        psql = tmp_path / "bundle" / "bin" / "psql"
+        psql.write_text("")
+        return psql
+
+    def test_diag_env_carries_bundle_lib_path(self, tmp_path):
+        import os as _os
+
+        runner = _RecordingRunner()
+        psql = self._bundle_psql(tmp_path)
+        run_diagnostic_sql(
+            ["SELECT count(*) FROM nexus.chunks_768"],
+            _CREDS, psql_bin=psql, psql_runner=runner,
+        )
+        env = runner.envs[0]
+        lib = str(tmp_path / "bundle" / "lib")
+        assert env.get("LD_LIBRARY_PATH", "").split(_os.pathsep)[0] == lib, (
+            "diagnostic psql must get the bundle's sibling lib/ on the "
+            "loader path (same guard as pg_provision's own calls)"
+        )
+        # The read-only + auth env survives the guard:
+        assert env["PGPASSWORD"] == "pw"
+        assert env["PGOPTIONS"] == "-c default_transaction_read_only=on"
+
+    def test_non_bundle_layout_keeps_plain_env(self, tmp_path):
+        import os as _os
+
+        runner = _RecordingRunner()
+        (tmp_path / "bin").mkdir()
+        psql = tmp_path / "bin" / "psql"  # no sibling lib/
+        psql.write_text("")
+        run_diagnostic_sql(
+            ["SELECT count(*) FROM nexus.chunks_768"],
+            _CREDS, psql_bin=psql, psql_runner=runner,
+        )
+        env = runner.envs[0]
+        assert env["PGPASSWORD"] == "pw"
+        assert "LD_LIBRARY_PATH" not in env or (
+            env["LD_LIBRARY_PATH"] == _os.environ.get("LD_LIBRARY_PATH")
+        )

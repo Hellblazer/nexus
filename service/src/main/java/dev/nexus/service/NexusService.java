@@ -87,6 +87,9 @@ public final class NexusService {
     private final TokenStore tokenStore;
     private final TokenCache tokenCache;
 
+    /** nexus-b878d: async rekey jobs; its pool is shut down in {@link #stop()}. */
+    private final dev.nexus.service.http.RekeyJobs rekeyJobs;
+
     /**
      * Convenience constructor: no vector backend (original signature for existing tests).
      * The {@code /v1/vectors/*} routes answer 503 (explicit refusal, never a 404 or NPE).
@@ -281,8 +284,13 @@ public final class NexusService {
         // /v1/remap/* — chash_remap endpoints (RDR-186 nexus-146xx.4: wire re-id
         // map write-through + per-leg clear + live membership counts) + the
         // RDR-180 per-tenant full-digest rekey (nexus-jxizy.6)
+        // The rekey is submitted and polled rather than awaited (nexus-b878d):
+        // synchronously it outlived the tls sidecar's ~120s proxy_read_timeout
+        // and 504'd while its transaction went on to commit.
+        this.rekeyJobs = new dev.nexus.service.http.RekeyJobs(
+                new dev.nexus.service.db.RekeyOps(tenantScope)::rekey);
         var remapCtx = server.createContext("/v1/remap",
-                new RemapHandler(remapRepo, new dev.nexus.service.db.RekeyOps(tenantScope)));
+                new RemapHandler(remapRepo, rekeyJobs));
         remapCtx.getFilters().addAll(authFilter);
 
         // /v1/staging/* — RDR-180 land-then-transform (nexus-jxizy.10.4):
@@ -401,9 +409,10 @@ public final class NexusService {
         log.info("event=service_started port={}", getPort());
     }
 
-    /** Stop the HTTP server and TTL sweep scheduler immediately. */
+    /** Stop the HTTP server, TTL sweep scheduler and rekey job pool immediately. */
     public void stop() {
         sweepScheduler.shutdownNow();
+        rekeyJobs.close();
         server.stop(0);
         log.info("event=service_stopped");
     }

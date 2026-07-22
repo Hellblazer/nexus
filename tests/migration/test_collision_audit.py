@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import pytest
 
+from nexus.db.http_vector_client import VectorServiceError
+
 from nexus.migration import collision_audit
 from nexus.migration.collision_audit import (
     INDETERMINATE,
@@ -84,7 +86,12 @@ class _FakeVectorClient:
 
     def existing_ids(self, collection: str, ids: list[str]) -> set[str]:
         if self._degrade:
-            return set()  # the documented transport-failure degradation
+            # nexus-ou4tb: the REAL HttpVectorClient.existing_ids raises on a
+            # transport failure — it no longer degrades to an empty set. This
+            # double returned set() and so asserted a contract the production
+            # code had stopped honouring, which is precisely how the retry-heal
+            # test kept passing while _probe_source's healing was dead code.
+            raise VectorServiceError("simulated per-page transport failure")
         return self._collections.get(collection, set()) & set(ids)
 
 
@@ -459,9 +466,15 @@ def test_explicit_world_override_classifies_once(monkeypatch):
 
 
 def test_probe_retry_heals_single_pass_degradation():
-    """The missing-id re-check: existing_ids degrades (empty set) on the
-    FIRST pass only — a transient one-page transport failure must not flip
-    a genuinely-merged target to single-source/partial."""
+    """The missing-id re-check: a transient one-page transport failure must
+    not flip a genuinely-merged target to single-source/partial.
+
+    nexus-ou4tb: the flaky double used to RETURN an empty set on the first
+    pass, because that is what existing_ids did on failure. It now RAISES,
+    matching the real client — so this test actually exercises _probe_source's
+    explicit per-page catch rather than a degradation the production code no
+    longer performs.
+    """
 
     class _FlakyVectorClient(_FakeVectorClient):
         def __init__(self, collections):
@@ -471,7 +484,7 @@ def test_probe_retry_heals_single_pass_degradation():
         def existing_ids(self, collection: str, ids: list[str]) -> set[str]:
             self.calls += 1
             if self.calls == 1:  # the first source's first-pass page degrades
-                return set()
+                raise VectorServiceError("transient page failure")
             return super().existing_ids(collection, ids)
 
     vector = _FlakyVectorClient({_TARGET: {"h1", "h2", "h3", "s1", "s2"}})

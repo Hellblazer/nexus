@@ -153,3 +153,38 @@ def test_resolution_key_is_the_producer_derivation():
 
     assert chunk_id(TEXT) == FULL
     assert len(FULL) == CHUNK_ID_LEN == 64
+
+
+def test_resolver_never_deletes_rows_the_selfheal_is_retired():
+    """RDR-187 (nexus-piwya.4): the delete_stale self-heal is DELETED
+    OUTRIGHT. The lookup is chunk-backed truth engine-side (nexus-piwya.3),
+    so a returned row cannot be stale — and the resolver must never again
+    hold delete authority over the store (the nexus-8g79.3 purge-on-
+    transient class died with it). This pin drives the exact pre-.4 heal
+    scenario — a looked-up collection absent from T3 — and asserts the
+    resolver falls through WITHOUT calling delete_stale (which the fake
+    makes fatal, so a resurrected self-heal fails loudly here)."""
+    class _GhostCollectionIndex(_FakeChashIndex):
+        def lookup(self, chash: str):
+            self.lookups.append(chash)
+            if chash == FULL:
+                return [{"collection": "ghost__gone", "created_at": "2026-07-18T00:00:00Z"}]
+            return []
+
+        def delete_stale(self, **kwargs):
+            raise AssertionError(
+                "resolve_chash_globally must NOT self-heal: the delete_stale "
+                "leg was retired by RDR-187 (nexus-piwya.4)"
+            )
+
+    class _GhostAwareT3(_FakeT3):
+        def get_collection(self, name):
+            if name == "ghost__gone":
+                raise KeyError("collection does not exist")
+            return super().get_collection(name)
+
+    # The ghost row fails per-candidate resolution; the T3 fallback scan
+    # still finds the real chunk. No deletion anywhere on the way.
+    ref = resolve_chash_globally(f"chash:{FULL}", _GhostAwareT3(), _GhostCollectionIndex())
+    assert ref is not None
+    assert ref["chunk_text"] == TEXT

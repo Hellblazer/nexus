@@ -73,7 +73,7 @@ class SchemaMigratorIntegrationTest {
         "topics", "taxonomy_meta", "topic_assignments", "topic_links",
         "document_aspects", "document_highlights",
         "aspect_extraction_queue", "aspect_promotion_log",
-        "chash_index",
+        // ("chash_index" left the end-state — RDR-187/nexus-piwya.9 DROP)
         "catalog_owners", "catalog_documents", "catalog_links",
         "catalog_document_chunks", "catalog_collections", "catalog_meta",
         "service_tokens", "session_tokens",
@@ -502,7 +502,7 @@ class SchemaMigratorIntegrationTest {
                 try (Connection conn = agedDs.getConnection()) {
                     for (String t : new String[] {
                         "chunks_384", "chunks_768", "chunks_1024",
-                        "catalog_document_chunks", "chash_index"}) {
+                        "catalog_document_chunks"}) {
                         assertThat(constraintExists(conn, t + "_chash_len_check"))
                             .as("%s_chash_len_check gone post-rdr180-2 (aged divergence tolerated)", t)
                             .isFalse();
@@ -631,7 +631,7 @@ class SchemaMigratorIntegrationTest {
                 try (Connection conn = agedDs.getConnection()) {
                     for (String t : new String[] {
                         "chunks_384", "chunks_768", "chunks_1024",
-                        "catalog_document_chunks", "chash_index"}) {
+                        "catalog_document_chunks"}) {
                         assertThat(constraintExists(conn, t + "_chash_len_check"))
                             .as("%s_chash_len_check gone post-rdr180-2 (divergence tolerated)", t)
                             .isFalse();
@@ -674,11 +674,15 @@ class SchemaMigratorIntegrationTest {
         try (Connection conn = adminDs.getConnection()) {
             for (String t : new String[] {
                 "chunks_384", "chunks_768", "chunks_1024",
-                "catalog_document_chunks", "chash_index"}) {
+                "catalog_document_chunks"}) {
                 assertThat(constraintExists(conn, t + "_chash_len_check")).isFalse();
                 assertThat(constraintExists(conn, t + "_chash_octet_check")).isTrue();
                 assertThat(constraintValidated(conn, t + "_chash_octet_check")).isFalse();
             }
+            // RDR-187 (nexus-piwya.9): the fifth table died at the DROP —
+            // no chash_index, no constraints of any era.
+            assertThat(constraintExists(conn, "chash_index_chash_octet_check")).isFalse();
+            assertThat(constraintExists(conn, "chash_index_chash_len_check")).isFalse();
         }
     }
 
@@ -804,10 +808,8 @@ class SchemaMigratorIntegrationTest {
                         .as("chunks_1024_collection_fk must be validated despite "
                             + "chunks_384's divergence")
                         .isTrue();
-                    assertThat(constraintValidated(conn, "chash_index_collection_fk"))
-                        .as("chash_index_collection_fk must be validated despite "
-                            + "chunks_384's divergence")
-                        .isTrue();
+                    // (chash_index_collection_fk died with its table at HEAD —
+                    // RDR-187/nexus-piwya.9; asserted absent below with the rest.)
                     assertThat(constraintValidated(conn, "topic_assignments_collection_fk"))
                         .as("topic_assignments_collection_fk must be validated despite "
                             + "chunks_384's divergence")
@@ -851,7 +853,9 @@ class SchemaMigratorIntegrationTest {
             assertThat(constraintValidated(conn, "chunks_384_collection_fk")).isTrue();
             assertThat(constraintValidated(conn, "chunks_768_collection_fk")).isTrue();
             assertThat(constraintValidated(conn, "chunks_1024_collection_fk")).isTrue();
-            assertThat(constraintValidated(conn, "chash_index_collection_fk")).isTrue();
+            // RDR-187 (nexus-piwya.9): chash_index_collection_fk died with its
+            // table — nine surviving collection FKs validate; absence asserted.
+            assertThat(constraintExists(conn, "chash_index_collection_fk")).isFalse();
             assertThat(constraintValidated(conn, "topic_assignments_collection_fk")).isTrue();
             assertThat(constraintValidated(conn, "document_aspects_collection_fk")).isTrue();
             assertThat(constraintValidated(conn, "aspect_extraction_queue_collection_fk")).isTrue();
@@ -1087,9 +1091,11 @@ class SchemaMigratorIntegrationTest {
     void rdr180Rewrite_leavesPlannerStatsFresh() throws Exception {
         SchemaMigrator.migrate(adminDs);  // defensive; idempotent
 
+        // (chash_index left the set — RDR-187/nexus-piwya.9: dropped at HEAD,
+        // so it can carry no statistics at all.)
         Set<String> expected = Set.of(
             "chunks_384", "chunks_768", "chunks_1024",
-            "catalog_document_chunks", "chash_index");
+            "catalog_document_chunks");
 
         Set<String> analyzed = new HashSet<>();
         long deadline = System.nanoTime() + java.time.Duration.ofSeconds(10).toNanos();
@@ -1114,6 +1120,48 @@ class SchemaMigratorIntegrationTest {
                 + "migration (last_analyze stamped) — a rewrite silently resets stats and "
                 + "degrades sparse-gate hybrid queries to zero rows (BUG-0148)")
             .containsAll(expected);
+    }
+
+    // ── Test 12: nexus_svc can actually ANALYZE chash_alias (rdr180-17) ──────
+
+    /**
+     * F2 (production 2026-07-20): the rekey and staging-promote paths ANALYZE
+     * {@code nexus.chash_alias} inside their own transaction so the planner can
+     * see the alias rows they just wrote — without it, a multi-tenant store's
+     * second tenant is planned against statistics frozen at "100% tenant 1"
+     * and the cascade degrades from 461 seconds to 101 minutes.
+     *
+     * <p>This asserts the PRIVILEGE half of that fix, which is the half that
+     * fails silently: {@code nexus_svc} holds DML grants only and does not own
+     * the table, and Postgres does not ERROR when a non-owner analyzes — it
+     * WARNs and SKIPS. So an engine shipped without this grant would run the
+     * ANALYZE, log nothing the caller sees, and leave the planner blind.
+     * {@code RekeyOpsIntegrationTest} proves the rekey produces statistics
+     * given the privilege; this proves the migration actually grants it to the
+     * role production uses.
+     */
+    @Test
+    @Order(12)
+    void chashAlias_isAnalyzableByNexusSvc() throws Exception {
+        SchemaMigrator.migrate(adminDs);  // defensive; idempotent
+
+        try (Connection conn = adminDs.getConnection()) {
+            // No version assumption: nexus always installs its own PostgreSQL
+            // bundle (17.x) and never adopts a host server, so MAINTAIN is
+            // always available. A server that cannot satisfy this is an
+            // unsupported substrate and SHOULD fail here rather than be
+            // skipped past.
+            ResultSet rs = conn.createStatement().executeQuery(
+                "SELECT pg_catalog.has_table_privilege('nexus_svc', "
+                + "'nexus.chash_alias', 'MAINTAIN')");
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getBoolean(1))
+                .as("grants-nexus-svc must grant MAINTAIN on nexus.chash_alias to "
+                    + "nexus_svc — without it the rekey's in-transaction ANALYZE is a "
+                    + "SILENT no-op (Postgres warns and skips for a non-owner) and the "
+                    + "F2 planner blindness returns unnoticed")
+                .isTrue();
+        }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

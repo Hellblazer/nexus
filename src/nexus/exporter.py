@@ -566,7 +566,19 @@ def import_collection(
         (GH #1370 D3, ``--skip-existing``). No-op unless requested."""
         if not skip_existing:
             return batch_ids, batch_docs, batch_embs, batch_metas, 0
-        existing = db.existing_ids(collection_name, batch_ids)
+        # nexus-ou4tb: existing_ids raises now rather than reading as "nothing
+        # exists" — which previously made --skip-existing silently skip
+        # nothing. Isolate to THIS batch: an unreadable probe means we cannot
+        # prove these ids are duplicates, so import them (the upsert is
+        # idempotent) rather than losing the whole import's progress.
+        try:
+            existing = db.existing_ids(collection_name, batch_ids)
+        except Exception:  # noqa: BLE001 — per-batch isolation; import continues, duplicates are idempotent
+            _log.warning(
+                "skip_existing_probe_failed_importing_batch",
+                collection=collection_name, batch=len(batch_ids), exc_info=True,
+            )
+            return batch_ids, batch_docs, batch_embs, batch_metas, 0
         if not existing:
             return batch_ids, batch_docs, batch_embs, batch_metas, 0
         keep = [i for i, rid in enumerate(batch_ids) if rid not in existing]

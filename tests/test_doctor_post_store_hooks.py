@@ -44,14 +44,17 @@ class TestCheckPostStoreHooks:
 
     def test_lists_known_registered_hooks(self, runner: CliRunner):
         """Importing nexus.mcp.core triggers the static registrations:
-        chash_dual_write_batch_hook + taxonomy_assign_batch_hook on the
+        taxonomy_assign_batch_hook + manifest_write_batch_hook on the
         batch chain, aspect_extraction_enqueue_hook on the document
-        chain. The output must enumerate them.
+        chain. The output must enumerate them (and must not list the
+        RDR-187-retired chash dual-write hook).
         """
         result = runner.invoke(main, ["doctor", "--check-post-store-hooks"])
         assert result.exit_code == 0, result.output
         out = result.output
-        assert "chash_dual_write_batch_hook" in out
+        # RDR-187 (nexus-piwya.4): the chash dual-write hook is retired and
+        # must NOT be listed.
+        assert "chash_dual_write_batch_hook" not in out
         assert "taxonomy_assign_batch_hook" in out
         assert "aspect_extraction_enqueue_hook" in out
 

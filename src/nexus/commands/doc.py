@@ -602,11 +602,16 @@ def _phase5_search(*, query: str, corpus: str, limit: int) -> dict:
 
 
 def _chash_index_is_empty(chash_index) -> bool:
-    """True if no chash_index rows exist anywhere — fresh-install guard.
+    """True if no chash rows exist anywhere — fresh-install guard.
 
-    Thin wrapper over ``ChashIndex.is_empty()`` that swallows open/IO
-    failures so a corrupt or missing T2 file doesn't crash ``nx doc cite``
-    before the caller sees the "run backfill" hint.
+    Post-RDR-187 (nexus-piwya.4) the service-mode ``is_empty`` answers
+    from the chunks tables ("no chunks anywhere for this tenant"), which
+    is the truer fresh-install signal; the SQLite path still reads the
+    frozen router (pre-migration installs, RDR-158).
+
+    Thin wrapper that swallows open/IO failures so a corrupt or missing
+    substrate doesn't crash ``nx doc cite`` before the caller sees the
+    empty-store hint.
     """
     try:
         return chash_index.is_empty()
@@ -668,10 +673,16 @@ def cite_cmd(
     try:
         # RDR-086 gate finding S2: empty-index short-circuit.
         if _chash_index_is_empty(chash_index):
+            # RDR-187 (nexus-piwya.4): in service mode "empty" now means the
+            # store holds no chunks at all — backfill-hash is moot there
+            # (the router it backfilled is retired; index content instead).
+            # The backfill hint remains correct only for pre-migration
+            # SQLite installs whose router was never populated.
             click.echo(
-                "chash_index not populated — run 'nx collection backfill-hash "
-                "--all' (25-70 min on a 278k-chunk corpus). Re-run after "
-                "backfill completes.",
+                "no chash-addressable chunks found — index content first "
+                "(nx index …). On a pre-migration (SQLite) install an "
+                "unpopulated chash_index can instead be reconciled with "
+                "'nx collection backfill-hash --all'.",
                 err=True,
             )
             raise click.exceptions.Exit(2)

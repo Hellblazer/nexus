@@ -221,7 +221,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // the GH #1390 crash-loop class, retired by design).
                     for (String t : new String[] {
                         "chunks_384", "chunks_768", "chunks_1024",
-                        "catalog_document_chunks", "chash_index"}) {
+                        "catalog_document_chunks"}) {
                         assertThat(constraintExists(conn, t + "_chash_len_check"))
                             .as("%s_chash_len_check must be gone post-rdr180-2", t)
                             .isFalse();
@@ -237,7 +237,12 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .as("core catalog/chunk tables must exist after the old-tag->HEAD hop")
                         .containsAll(Set.of(
                             "chunks_384", "chunks_768", "chunks_1024",
-                            "catalog_document_chunks", "chash_index", "memory"));
+                            "catalog_document_chunks", "memory"));
+                    // RDR-187 (nexus-piwya.9): the router died at the DROP —
+                    // the hop's END STATE has no chash_index at all.
+                    assertThat(tablesInSchema(conn, "nexus"))
+                        .as("chash_index must be GONE at HEAD (rdr187-2)")
+                        .doesNotContain("chash_index");
                 }
             }
         } finally {
@@ -402,26 +407,25 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     // the column to bytea (32-hex decodes to 16 bytes — the
                     // mid-migration legacy state the /v1/remap/rekey rung
                     // later rekeys). Composition proof:
-                    assertThat(count(su, "SELECT count(*) FROM nexus.chash_index"))
-                        .as("dedupe semantics: 5 seeded rows must collapse to exactly 3")
-                        .isEqualTo(3);
+                    // RDR-187 (nexus-piwya.9): the router died at the DROP at
+                    // the END of this same hop — the 013-1b dedupe and the
+                    // rdr180-7 conversion still executed EN ROUTE (the
+                    // doesNotThrowAnyException above carries the proof: had
+                    // the RLS-blind DML no-op'd, 013-2's VALIDATE would have
+                    // crashed on the 64-char rows), and their end product was
+                    // then dropped with the table. Post-hop observability of
+                    // the DML-took-effect property rides the MANIFEST witness
+                    // below.
                     assertThat(count(su,
-                        "SELECT count(*) FROM nexus.chash_index WHERE octet_length(chash) = 16"))
-                        .as("013-1b normalized to 32-hex, then rdr180-7 decoded to 16-byte "
-                            + "legacy bytea — both legs must have taken effect for the "
-                            + "NOBYPASSRLS owner")
-                        .isEqualTo(3);
-                    // RDR-180 era: the len_check lifecycle is retired — the
-                    // constraint is GONE (rdr180-2), its octet successor
-                    // present and deliberately NOT VALID at boot.
-                    assertThat(count(su,
-                        "SELECT count(*) FROM pg_constraint "
-                        + "WHERE conname = 'chash_index_chash_len_check'"))
+                        "SELECT count(*) FROM information_schema.tables "
+                        + "WHERE table_schema = 'nexus' AND table_name = 'chash_index'"))
+                        .as("chash_index gone at HEAD (rdr187-2)")
                         .isEqualTo(0);
                     assertThat(count(su,
                         "SELECT count(*) FROM pg_constraint "
-                        + "WHERE conname = 'chash_index_chash_octet_check' AND NOT convalidated"))
-                        .isEqualTo(1);
+                        + "WHERE conname LIKE 'chash_index_chash%'"))
+                        .as("its constraints died with it")
+                        .isEqualTo(0);
 
                     // catalog-014-0 leg: every seeded manifest row stamped with the
                     // owning document's physical_collection, none left NULL.
@@ -438,12 +442,14 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .isEqualTo(0);
 
                     // Both fixes must RESTORE FORCE within their own changeset.
+                    // (chash_index left the toggled-set observation with the
+                    // DROP — RDR-187; the two surviving toggled tables pin it.)
                     assertThat(count(su,
                         "SELECT count(*) FROM pg_class WHERE relforcerowsecurity AND oid IN ("
-                        + "'nexus.chash_index'::regclass, 'nexus.catalog_document_chunks'::regclass, "
+                        + "'nexus.catalog_document_chunks'::regclass, "
                         + "'nexus.catalog_documents'::regclass)"))
-                        .as("FORCE ROW LEVEL SECURITY restored on every toggled table")
-                        .isEqualTo(3);
+                        .as("FORCE ROW LEVEL SECURITY restored on every toggled surviving table")
+                        .isEqualTo(2);
 
                     // Contrast pin vs the schema-divergence test: with no injected
                     // divergence all five constraints exist, so catalog-013-2's

@@ -63,7 +63,13 @@ class TestRequiredEngineVersion:
         # is the only vehicle for local installs. Deployed + per-query-diff
         # cloud-gated 2026-07-19 (parity 104/113 == baseline, recall AC3
         # 12/12 real values, xpg7 probes 3/3 J=1.0).
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 49)
+        # ->(0,1,51) 2026-07-21: the RDR-187 conformance tail — v0.1.50
+        # carries the chash_index DROP prerequisites; v0.1.51 delivers the
+        # 339xv/kmd5b/b878d fixes (planner blind-spot on just-written rows)
+        # with every octet CHECK validated at arc close. One-engine-per-
+        # release: v0.1.51 is the exact engine this release was tested
+        # with. Deployed + cloud-gated GREEN 2026-07-21.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 51)
 
 
 class TestParseEngineVersion:

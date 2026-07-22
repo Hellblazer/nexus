@@ -2946,7 +2946,7 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
     Use after store_list or search to read the complete document.
 
     Args:
-        doc_id: Exact 32-char content-hash document ID (from store_list / store_put / search),
+        doc_id: Exact 64-char content-hash document ID (from store_list / store_put / search),
                 OR an exact title (looked up via metadata).
         collection: Collection name or prefix (default: knowledge)
     """
@@ -2970,10 +2970,10 @@ def store_get(doc_id: str, collection: str = "knowledge") -> str:
                     return (
                         f"Multiple documents with title {doc_id!r} in {col_name}: "
                         + ", ".join(ids[:5]) + (" …" if len(ids) > 5 else "")
-                        + ". Pass a 32-char content-hash to disambiguate."
+                        + ". Pass a 64-char content-hash to disambiguate."
                     )
         if entry is None:
-            return f"Not found: {doc_id!r} in {col_name} (pass a 32-char content-hash from store_list/store_put/search, or an exact title)"
+            return f"Not found: {doc_id!r} in {col_name} (pass a 64-char content-hash from store_list/store_put/search, or an exact title)"
         title = entry.get("title", "")
         tags = entry.get("tags", "")
         indexed_at = (entry.get("indexed_at") or "")[:10]
@@ -6356,8 +6356,9 @@ def forensics(topic: str = "chash-poison") -> str:
 
     Args:
         topic: The diagnostic topic. Currently: ``chash-poison`` (the
-            GH #1390 poisoned-store class). Unknown topics list the known
-            set.
+            GH #1414 / nexus-pnwu0 width-non-conformant class; GH #1390
+            was the original, closed incident). Unknown topics list the
+            known set.
     """
     if not _remediation_opt_in():
         return _REMEDIATION_REFUSAL
@@ -6642,6 +6643,15 @@ def main():
     # (e.g. a FastMCP-internals change) — an injection-failure recovery path,
     # not a per-surface channel. Best-effort; never blocks boot.
     install_banner_dispatch_hook(mcp)
+    # nexus-g6vb4 (GH #1414): staleness self-detection — an in-place
+    # `uv tool upgrade` replaces site-packages under this live process;
+    # the first deferred import then fails with an opaque ImportError.
+    # The hook warn-logs once and decorates import-shaped failures with
+    # a "stale MCP host — restart" note. Never refuses a call; best-effort,
+    # never blocks boot.
+    from nexus.mcp._stale_host import install_stale_host_hook  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
+
+    install_stale_host_hook(mcp)
     # RDR-144 P5b: surface the embedder advisory to plugin/Desktop/Cowork-first
     # users who never run the Claude Code SessionStart hook. The MCP server
     # cannot print (stdout is JSON-RPC), so the notice rides the server

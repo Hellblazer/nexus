@@ -42,9 +42,9 @@ import java.util.Map;
  *       vector when reuse is legal — staged NULL embeddings must be
  *       embed-filled in staging BEFORE promote; this op REFUSES content
  *       rows with NULL embeddings, counting them loud).</li>
- *   <li>chash_index promote via alias join (canonical at INSERT — the
- *       strict octet CHECK is satisfied by construction; sha256 output is
- *       always 32 bytes).</li>
+ *   <li>(RETIRED, RDR-187/nexus-piwya.7) the chash_index promote leg —
+ *       landed staging.chash_index rows are an accepted dead sink; the
+ *       chunks promote above IS the chash registration.</li>
  * </ol>
  *
  * <h3>{@link #finalizeTenant} — IDEMPOTENT, RE-RUNNABLE (reconciliation C2)</h3>
@@ -181,6 +181,16 @@ public final class StagingPromoteOps {
                 + "ON CONFLICT (tenant_id, old_ref) DO NOTHING",
                 collection));
 
+            // (3a) Un-blind the planner before the promote/collapse joins read
+            // the rows just written — the same F2 exposure RekeyOps carries
+            // (production 2026-07-20): alias rows inserted in THIS transaction
+            // are invisible to a planner working from statistics autoanalyze
+            // froze at the previous tenant's distribution, which turns the
+            // alias joins below into nested loops over the full pointer tables.
+            // Silent no-op without MAINTAIN (grants-nexus-svc, PG17+), so the
+            // outcome rides the envelope rather than being assumed.
+            counts.put("alias_stats_refreshed", ChashSqlIdioms.refreshAliasStats(ctx));
+
             // (4) collection registration stub — the chunks tables carry a
             // (tenant, collection) FK to catalog_collections (RDR-156
             // schema-enforced integrity: the FK that mechanically catches a
@@ -227,25 +237,17 @@ public final class StagingPromoteOps {
                 collection).get(0, Integer.class);
             counts.put("staged_content", stagedContent);
 
-            // (5) chash_index promote via alias (canonical at INSERT).
-            counts.put("chash_index_promoted", ctx.execute(
-                "INSERT INTO nexus.chash_index (tenant_id, chash, physical_collection, created_at) "
-                + "SELECT DISTINCT ON (resolved.chash) current_setting('nexus.tenant', true), "
-                + "       resolved.chash, resolved.physical_collection, resolved.created_at "
-                + "FROM ("
-                + "  SELECT COALESCE(a.new_chash, "
-                + "           CASE WHEN s.chash ~ '^[0-9a-f]{64}$' THEN decode(s.chash, 'hex') END"
-                + "         ) AS chash, "
-                + "         s.physical_collection, "
-                + "         COALESCE(NULLIF(s.created_at, '')::timestamptz, now()) AS created_at "
-                + "  FROM staging.chash_index s "
-                + "  LEFT JOIN nexus.chash_alias a ON a.old_ref = s.chash "
-                + "  WHERE s.physical_collection = ?"
-                + ") resolved "
-                + "WHERE resolved.chash IS NOT NULL "
-                + "ORDER BY resolved.chash, resolved.created_at "
-                + "ON CONFLICT (tenant_id, chash, physical_collection) DO NOTHING",
-                collection));
+            // (5) RETIRED — the chash_index promote leg (RDR-187, nexus-piwya.7;
+            // gate Finding 1: this removal MUST precede the .9 DROP, or the
+            // INSERT above would hard-crash every guided-upgrade promote on a
+            // missing relation). staging.chash_index stays a LANDED DEAD SINK
+            // for one release: an old client mid-guided-upgrade still lands
+            // router rows (StagingHandler.STORES keeps the entry), and they are
+            // simply never promoted — the chunks promote (4) IS the chash
+            // registration now, and the router's imported-orphan population
+            // (the rows only this leg ever created) dies with the table. The
+            // chash_index_promoted count leaves the envelope with the leg;
+            // rehearse_guided.sh's field list moved in the same commit.
 
             return counts;
         });

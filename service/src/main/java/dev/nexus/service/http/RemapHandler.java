@@ -23,6 +23,13 @@ import java.util.Map;
  * <p>Routes (all under {@code /v1/remap/}):
  * <pre>
  *   POST /v1/remap/rekey          RDR-180 per-tenant full-digest rekey (nexus-jxizy.6)
+ *                                 ASYNC (nexus-b878d): 202 + {job_id}, never the
+ *                                 envelope — the synchronous form outlived the
+ *                                 proxy's read timeout and 504'd over a
+ *                                 committed transaction
+ *   GET  /v1/remap/rekey/{job_id} poll a submitted rekey: running / succeeded
+ *                                 (+envelope) / failed; 410 if the engine has
+ *                                 restarted since the id was minted
  *   POST /v1/remap/record_batch   persist a batch of old-id → new-chash facts
  *                                 {source_collection, entries:[{old_id, new_chash,
  *                                  target_collection, provenance}]} → {recorded}
@@ -76,11 +83,11 @@ public final class RemapHandler implements HttpHandler {
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
 
     private final RemapRepository repo;
-    private final dev.nexus.service.db.RekeyOps rekeyOps;
+    private final RekeyJobs rekeyJobs;
 
-    public RemapHandler(RemapRepository repo, dev.nexus.service.db.RekeyOps rekeyOps) {
+    public RemapHandler(RemapRepository repo, RekeyJobs rekeyJobs) {
         this.repo = repo;
-        this.rekeyOps = rekeyOps;
+        this.rekeyJobs = rekeyJobs;
     }
 
     @Override
@@ -96,6 +103,12 @@ public final class RemapHandler implements HttpHandler {
         String method = exchange.getRequestMethod().toUpperCase(Locale.ROOT);
 
         try {
+            // The rekey poll carries its job id in the path, so it cannot be an
+            // exact-match arm: /rekey/<epoch>-<uuid>.
+            if (op.startsWith("/rekey/")) {
+                handleRekeyStatus(exchange, tenant, method, op.substring("/rekey/".length()));
+                return;
+            }
             switch (op) {
                 case "/rekey"              -> handleRekey(exchange, tenant, method);
                 case "/record_batch"       -> handleRecordBatch(exchange, tenant, method);
@@ -125,9 +138,20 @@ public final class RemapHandler implements HttpHandler {
      * RDR-180 per-tenant full-digest rekey (nexus-jxizy.6) — see
      * {@link dev.nexus.service.db.RekeyOps}. Body (optional):
      * {@code {"orphan_policy": "drop"|"synthesize"}} (default drop).
-     * Runs INSIDE the freeze window, driven by the client rung; returns
-     * the disposition + per-table counts envelope. A legacy-id collision
-     * (one old id, two digests) returns 409 — never resolved silently.
+     *
+     * <p><strong>Asynchronous (nexus-b878d).</strong> Returns {@code 202} with a
+     * {@code job_id} immediately; the envelope is collected from
+     * {@code GET /v1/remap/rekey/{job_id}}. This is not a mode — it is the only
+     * shape — because the synchronous form could not survive a proxy: the rekey
+     * ran ~90s+ at production scale against an nginx {@code proxy_read_timeout}
+     * of ~120s, and gate-xr789 took a 504 at 120.3s while the transaction
+     * COMMITTED 88s later. An operator who sees a failure over a store that did
+     * change is the GH #1390 hazard class, so the long-held request is gone
+     * rather than merely lengthened.
+     *
+     * <p>A second submission while one is in flight for the tenant returns
+     * {@code 409} naming the running job, rather than queueing behind the
+     * per-tenant advisory lock.
      */
     private void handleRekey(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
@@ -139,11 +163,98 @@ public final class RemapHandler implements HttpHandler {
             return;
         }
         try {
-            Map<String, Object> counts = rekeyOps.rekey(tenant, "synthesize".equals(policy));
-            HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(counts));
-        } catch (dev.nexus.service.db.RekeyOps.RekeyConflictException e) {
-            HttpUtil.send(exchange, 409,
-                "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
+            String jobId = rekeyJobs.submit(tenant, "synthesize".equals(policy));
+            HttpUtil.send(exchange, 202, MAPPER.writeValueAsString(Map.of(
+                "job_id", jobId,
+                "status", "running",
+                "poll", "/v1/remap/rekey/" + jobId)));
+        } catch (RekeyJobs.AlreadyRunningException e) {
+            HttpUtil.send(exchange, 409, MAPPER.writeValueAsString(Map.of(
+                "error", e.getMessage(),
+                "job_id", e.runningJobId())));
+        }
+    }
+
+    // ── GET /v1/remap/rekey/{job_id} ─────────────────────────────────────────
+
+    /**
+     * Poll a submitted rekey (nexus-b878d). Fast by construction — it reads an
+     * in-memory registry — so no proxy read timeout is in play.
+     *
+     * <pre>
+     *   200 {status:"running"}
+     *   200 {status:"succeeded", envelope:{...}}   the RekeyOps counts envelope
+     *   200 {status:"failed",    error:"..."}      the run threw
+     *   409 {status:"failed",    error:"..."}      legacy-id collision (one old
+     *                                              id, two digests) — never
+     *                                              resolved silently, same
+     *                                              contract the sync form had
+     *   410 engine restarted: that transaction rolled back, store unchanged
+     *   404 unknown job for this tenant
+     *   400 malformed job id
+     * </pre>
+     *
+     * <p>The job id is tenant-scoped on read: a job belonging to another tenant
+     * reads as 404, so holding an id is not a way to observe another tenant's
+     * rekey.
+     */
+    private void handleRekeyStatus(HttpExchange exchange, String tenant, String method, String jobId)
+            throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+
+        switch (rekeyJobs.lookup(jobId)) {
+            case RekeyJobs.Lookup.Malformed ignored -> HttpUtil.send(exchange, 400,
+                "{\"error\":\"malformed job id\"}");
+
+            // A job id minted before a restart. This is NOT 404 — the id is
+            // well-formed and was real — but it is also NOT a claim that the
+            // store is unchanged. The commit and the registry's record of it
+            // are two steps, so an ill-timed death can leave a committed rekey
+            // that never reached SUCCEEDED; asserting "unchanged" here would
+            // re-commit the very sin this endpoint was rebuilt to remove.
+            // Report unknown, and name what actually settles it.
+            case RekeyJobs.Lookup.ForeignEpoch fe -> HttpUtil.send(exchange, 410,
+                MAPPER.writeValueAsString(Map.of(
+                    "error", "job belongs to a previous engine instance (epoch " + fe.jobEpoch()
+                             + ", current " + rekeyJobs.epoch() + "): the engine restarted and "
+                             + "this job's outcome is not in the current instance's memory. It "
+                             + "most likely rolled back, but that is NOT guaranteed — the store "
+                             + "may or may not have changed. The server-side event=rekey_complete "
+                             + "log is the authoritative record of what it did. The rekey is "
+                             + "idempotent, so re-submitting is safe and self-answering: over an "
+                             + "already-rekeyed store it reports all-zero counts.",
+                    "status", "lost",
+                    "store_changed", "unknown")));
+
+            case RekeyJobs.Lookup.Unknown ignored -> HttpUtil.send(exchange, 404,
+                "{\"error\":\"unknown job id\"}");
+
+            case RekeyJobs.Lookup.Found found -> {
+                RekeyJobs.Job job = found.job();
+                if (!tenant.equals(job.tenant())) {
+                    HttpUtil.send(exchange, 404, "{\"error\":\"unknown job id\"}");
+                    return;
+                }
+                switch (job.state()) {
+                    case RUNNING -> HttpUtil.send(exchange, 200,
+                        MAPPER.writeValueAsString(Map.of("job_id", jobId, "status", "running")));
+                    case SUCCEEDED -> HttpUtil.send(exchange, 200,
+                        MAPPER.writeValueAsString(Map.of(
+                            "job_id", jobId, "status", "succeeded", "envelope", job.envelope())));
+                    case FAILED -> {
+                        Throwable f = job.failure();
+                        // The sync form answered a legacy-id collision with 409;
+                        // the async form keeps that distinction rather than
+                        // flattening every failure into one status.
+                        int status = f instanceof dev.nexus.service.db.RekeyOps.RekeyConflictException
+                            ? 409 : 200;
+                        HttpUtil.send(exchange, status, MAPPER.writeValueAsString(Map.of(
+                            "job_id", jobId,
+                            "status", "failed",
+                            "error", String.valueOf(f == null ? "unknown error" : f.getMessage()))));
+                    }
+                }
+            }
         }
     }
 

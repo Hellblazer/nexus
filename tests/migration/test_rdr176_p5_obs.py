@@ -36,7 +36,7 @@ def _fake_etls(order_sink: list[str]):
 
     return [
         StoreEtl(s, _runner(s))
-        for s in ("catalog", "memory", "chash", "plans", "taxonomy",
+        for s in ("catalog", "memory", "plans", "taxonomy",
                   "telemetry", "aspects", "aspects_queue")
     ]
 
@@ -74,7 +74,7 @@ def test_migrate_all_emits_per_store_progress(tmp_path, monkeypatch) -> None:
     stores = [p[0] for p in progress]
     assert stores == [
         "memory", "plans", "telemetry", "taxonomy",
-        "aspects", "chash", "catalog", "aspects_queue",
+        "aspects", "catalog", "aspects_queue",
     ]
     assert all(written == 10 and read == 10 for _s, written, read in progress)
 
@@ -131,7 +131,7 @@ def test_no_progress_signal_for_crashed_store(tmp_path, monkeypatch) -> None:
         return [
             StoreEtl(s, _runner(s))
             for s in ("memory", "plans", "telemetry", "taxonomy",
-                      "aspects", "chash", "catalog", "aspects_queue")
+                      "aspects", "catalog", "aspects_queue")
         ]
 
     monkeypatch.setattr(orch, "build_store_etls", lambda s: _crashing_etls())

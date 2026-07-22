@@ -44,10 +44,17 @@ WORKDIR /home/nexus
 # The conexus wheel — staged to the context root by run.sh (keeps its real PEP
 # 427 name). This is the ONLY conexus artifact in the image; everything the
 # service needs is cold-acquired at runtime.
-COPY conexus-*.whl /tmp/
+# Split install (see Dockerfile for the full rationale): deps layer keyed on
+# uv.lock content (cache hit until deps change), wheel layer --no-deps (cheap,
+# churns per run); uv pip check fails loud on closure/Requires-Dist divergence.
+COPY requirements.txt /tmp/requirements.txt
 RUN --mount=type=cache,target=/home/nexus/.cache/uv,uid=1000,gid=1000 \
     uv venv --python 3.12 /home/nexus/nxenv \
-    && uv pip install --python /home/nexus/nxenv /tmp/conexus-*.whl \
+    && uv pip install --python /home/nexus/nxenv -r /tmp/requirements.txt
+COPY conexus-*.whl /tmp/
+RUN --mount=type=cache,target=/home/nexus/.cache/uv,uid=1000,gid=1000 \
+    uv pip install --python /home/nexus/nxenv --no-deps /tmp/conexus-*.whl \
+    && uv pip check --python /home/nexus/nxenv \
     && nx --version
 
 # Driver + seed last (trivial layers). rehearse_hole_punch.sh (nexus-s3dd4.7)

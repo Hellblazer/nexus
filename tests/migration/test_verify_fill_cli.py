@@ -15,7 +15,6 @@ real client -> IdentitySource/ManifestSource adapters, report augmentation
 """
 from __future__ import annotations
 
-import json
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -27,36 +26,6 @@ from click.testing import CliRunner
 from nexus.cli import main
 
 # ── Fakes ────────────────────────────────────────────────────────────────────
-
-
-def _make_fake_chash_store(registered: dict[str, set[str]], posts: list[tuple[str, dict]]):
-    """Factory: a fake HttpChashIndex bound to shared *registered*/*posts*
-    state the test seeds/inspects (mirrors ``_fake_etls``'s closure pattern
-    in test_storage_migrate_all.py).
-
-    nexus-f2qvx.3: ``_chash_import_fn`` (orchestrator.py) now calls the
-    public ``HttpChashIndex.import_rows()`` wrapper instead of reaching
-    into ``http_chash._client.post(...)`` directly (the pre-mixin-adoption
-    shape, which broke once RefreshableHttpStoreMixin's httpx.Client
-    stopped baking a base_url) — so this fake exposes ``import_rows``
-    rather than a fake ``._client``.
-    """
-
-    class _FakeChashStore:
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            pass
-
-        def registered_chashes_for_collection(self, collection: str) -> set[str]:
-            return set(registered.get(collection, set()))
-
-        def import_rows(self, rows: list[dict[str, Any]]) -> int:
-            posts.append(("/v1/chash/import", {"rows": rows}))
-            return len(rows)
-
-        def close(self) -> None:
-            pass
-
-    return _FakeChashStore
 
 
 class _FakeCountSource:
@@ -74,146 +43,20 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
-def _seed_chash_db(db_path: Path, rows: list[tuple[str, str]]) -> None:
-    """*rows* is a list of ``(chash, physical_collection)`` pairs."""
-    conn = sqlite3.connect(str(db_path))
-    conn.execute(
-        "CREATE TABLE chash_index ("
-        "chash TEXT, physical_collection TEXT, created_at TEXT)"
-    )
-    conn.executemany(
-        "INSERT INTO chash_index (chash, physical_collection, created_at) "
-        "VALUES (?, ?, '2026-01-01T00:00:00Z')",
-        rows,
-    )
-    conn.commit()
-    conn.close()
+class TestMigrateChashRetired:
+    """RDR-187 (nexus-piwya.10): `nx storage migrate chash` is retired —
+    the router table is dropped and /v1/chash/import accept-and-no-ops, so
+    the command fails LOUD instead of silently "succeeding" against a
+    no-op endpoint. The verify-fill tests that used this command as their
+    vehicle retired with it (generic coverage rides the sibling stores)."""
 
-
-# ── migrate chash --verify-fill ───────────────────────────────────────────────
-
-
-class TestMigrateChashVerifyFill:
-    def test_parity_sends_nothing(self, runner: CliRunner, tmp_path: Path) -> None:
-        db = tmp_path / "t2.db"
-        _seed_chash_db(db, [("a" * 32, "code__x")])
-        report_path = tmp_path / "report.json"
-        posts: list[tuple[str, dict]] = []
-        registered = {"code__x": {"a" * 32}}
-
-        with (
-            patch(
-                "nexus.db.t2.http_chash_index.HttpChashIndex",
-                _make_fake_chash_store(registered, posts),
-            ),
-            patch(
-                "nexus.migration.orchestrator.ServiceCountSource",
-                lambda: _FakeCountSource({"nexus.chash_index": 1}),
-            ),
-            patch.dict("os.environ", {"NX_SERVICE_TOKEN": "t"}),
-        ):
-            result = runner.invoke(main, [
-                "storage", "migrate", "chash",
-                "--db", str(db),
-                "--service-url", "http://fake-service:9",
-                "--report", str(report_path),
-                "--verify-fill",
-            ])
-
-        assert result.exit_code == 0, result.output
-        assert posts == []  # parity -- nothing sent
-        assert "filled=0" in result.output
-        assert "outer_status=parity" in result.output
-
-        report = json.loads(report_path.read_text())
-        assert report["verification"] in ("verified", "mismatch", "indeterminate")
-        assert report["target"]["service_url"] == "http://fake-service:9"
-
-    def test_divergence_fills_only_missing_rows(
-        self, runner: CliRunner, tmp_path: Path,
+    def test_command_fails_loud_with_retirement_message(
+        self, runner: CliRunner,
     ) -> None:
-        db = tmp_path / "t2.db"
-        _seed_chash_db(db, [
-            ("a" * 32, "code__x"),
-            ("b" * 32, "code__x"),
-            ("c" * 32, "code__x"),
-        ])
-        report_path = tmp_path / "report.json"
-        posts: list[tuple[str, dict]] = []
-        # only 'a' landed already -- b, c are a hole of 2
-        registered = {"code__x": {"a" * 32}}
-
-        with (
-            patch(
-                "nexus.db.t2.http_chash_index.HttpChashIndex",
-                _make_fake_chash_store(registered, posts),
-            ),
-            patch(
-                "nexus.migration.orchestrator.ServiceCountSource",
-                # target count (1) < source count (3) -> divergent
-                lambda: _FakeCountSource({"nexus.chash_index": 1}),
-            ),
-            patch.dict("os.environ", {"NX_SERVICE_TOKEN": "t"}),
-        ):
-            result = runner.invoke(main, [
-                "storage", "migrate", "chash",
-                "--db", str(db),
-                "--service-url", "http://fake-service:9",
-                "--report", str(report_path),
-                "--verify-fill",
-            ])
-
-        assert result.exit_code == 0, result.output
-        assert "filled=2" in result.output
-        assert "outer_status=divergent" in result.output
-
-        # exactly the 2 missing rows were transmitted, never the whole table
-        sent_chashes = {
-            row["chash"] for url, payload in posts for row in payload["rows"]
-        }
-        assert sent_chashes == {"b" * 32, "c" * 32}
-
-        report = json.loads(report_path.read_text())
-        assert report["target"]["service_url"] == "http://fake-service:9"
-        assert report["summary"]["total_written"] == 2
-
-    def test_report_verification_always_populated_even_without_verify_fill(
-        self, runner: CliRunner, tmp_path: Path,
-    ) -> None:
-        """R report-writer fixup (a): a per-store run (verify-fill or not)
-        must always carry report['verification'] -- previously only
-        `migrate all` verified."""
-        db = tmp_path / "t2.db"
-        _seed_chash_db(db, [("a" * 32, "code__x")])
-        report_path = tmp_path / "report.json"
-        posts: list[tuple[str, dict]] = []
-        registered: dict[str, set[str]] = {}
-
-        with (
-            patch(
-                "nexus.db.t2.http_chash_index.HttpChashIndex",
-                _make_fake_chash_store(registered, posts),
-            ),
-            patch(
-                "nexus.migration.orchestrator.ServiceCountSource",
-                lambda: _FakeCountSource({}),  # unreachable -> indeterminate
-            ),
-            patch.dict("os.environ", {"NX_SERVICE_TOKEN": "t"}),
-        ):
-            result = runner.invoke(main, [
-                "storage", "migrate", "chash",
-                "--db", str(db),
-                "--service-url", "http://fake-service:9",
-                "--report", str(report_path),
-            ])
-
-        assert result.exit_code == 0, result.output
-        report = json.loads(report_path.read_text())
-        assert "verification" in report
-        assert report["target"]["service_url"] == "http://fake-service:9"
-
-
-# ── migrate all --verify-fill (generic skip-on-parity + convergence notes) ───
+        result = runner.invoke(main, ["storage", "migrate", "chash"])
+        assert result.exit_code != 0
+        assert "retired by RDR-187" in result.output
+        assert "guided-upgrade" in result.output
 
 
 class TestMigrateAllVerifyFill:
@@ -240,7 +83,7 @@ class TestMigrateAllVerifyFill:
         fake_etls = [
             StoreEtl(s, _runner(s))
             for s in ("memory", "plans", "telemetry", "taxonomy",
-                      "aspects", "chash", "catalog", "aspects_queue")
+                      "aspects", "catalog", "aspects_queue")
         ]
 
         with (
@@ -270,17 +113,11 @@ class TestMigrateAllVerifyFill:
                  ("memory", "plans", "telemetry", "taxonomy")},
             ),
             # chash/catalog/telemetry under verify_fill=True construct REAL
-            # service clients (verify_fill_chash/verify_fill_catalog/
-            # verify_fill_telemetry own that, by design, since a delta fill
-            # genuinely needs the real IdentitySource surfaces) -- stub them
-            # here too so this "flag is wired" test needs no live service.
-            patch(
-                "nexus.migration.orchestrator.verify_fill_chash",
-                lambda *a, **k: {
-                    "store": "chash", "outer": {}, "fill": {},
-                    "total_filled": 0, "convergence_notes": [],
-                },
-            ),
+            # service clients (verify_fill_catalog/verify_fill_telemetry
+            # own that, by design, since a delta fill genuinely needs the
+            # real IdentitySource surfaces; the chash leg retired with its
+            # store, RDR-187) -- stub them here too so this "flag is wired"
+            # test needs no live service.
             patch(
                 "nexus.migration.orchestrator.verify_fill_catalog",
                 lambda *a, **k: {
@@ -294,10 +131,6 @@ class TestMigrateAllVerifyFill:
                     "store": "telemetry", "outer": {}, "fill": {},
                     "total_filled": 0, "convergence_notes": [],
                 },
-            ),
-            patch(
-                "nexus.migration.orchestrator._open_chash_store",
-                lambda: _make_fake_chash_store({}, [])(),
             ),
             patch(
                 "nexus.migration.orchestrator._open_catalog_client",
@@ -315,7 +148,7 @@ class TestMigrateAllVerifyFill:
 
         assert result.exit_code == 0, result.output
         # chash/catalog/telemetry are real-etls here (fakes), so
-        # verify_fill_chash / verify_fill_catalog / verify_fill_telemetry
+        # verify_fill_catalog / verify_fill_telemetry
         # are NOT invoked by the CLI in this fake-etl setup -- build_store_etls
         # is fully replaced. This test's purpose is narrower: prove
         # --verify-fill is accepted and threaded through to migrate_all()

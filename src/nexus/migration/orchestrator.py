@@ -54,7 +54,6 @@ _VERIFY_TABLES: dict[tuple[str, str], str] = {
     ("taxonomy", "topic_links"): "nexus.topic_links",
     ("telemetry", "hook_failures"): "nexus.hook_failures",
     ("telemetry", "nx_answer_runs"): "nexus.nx_answer_runs",
-    ("chash", "chash_index"): "nexus.chash_index",
     ("catalog", "owners"): "nexus.catalog_owners",
     ("catalog", "documents"): "nexus.catalog_documents",
     ("catalog", "collections"): "nexus.catalog_collections",
@@ -216,16 +215,10 @@ def build_store_etls(sources: EtlSources) -> list[StoreEtl]:
             with contextlib.suppress(Exception):
                 queue.close()
 
-    def _chash(s: EtlSources, collector: Any) -> dict:
-        from nexus.db.t2.chash_etl import migrate_chash_rows  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-        from nexus.db.t2.http_chash_index import HttpChashIndex  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-
-        store = HttpChashIndex()
-        try:
-            return migrate_chash_rows(s.sqlite_path, store, collector=collector)
-        finally:
-            with contextlib.suppress(Exception):
-                store.close()
+    # _chash ETL retired (RDR-187/nexus-piwya.10): the router table is
+    # dropped and /v1/chash/import accept-and-no-ops — the leg would spend
+    # ETL time to report misleading migrated-row counts. The chunks ETL IS
+    # the chash registration.
 
     def _catalog(s: EtlSources, collector: Any) -> dict:
         from nexus.catalog.factory import make_catalog_client_for_migration  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
@@ -251,7 +244,6 @@ def build_store_etls(sources: EtlSources) -> list[StoreEtl]:
         _StoreEtl("telemetry", _telemetry),
         _StoreEtl("taxonomy", _taxonomy),
         _StoreEtl("aspects", _aspects),
-        _StoreEtl("chash", _chash),
         _StoreEtl("catalog", _catalog),
         _StoreEtl("aspects_queue", _aspects_queue),
     ]
@@ -268,8 +260,9 @@ def build_store_etls(sources: EtlSources) -> list[StoreEtl]:
 # chash-bearing, see LANDING_MANIFEST in staging_land.py) and are excluded
 # WHOLESALE via the existing ``skip_stores`` seam (RDR-178 Gap 7):
 #
-#   * "chash"         — chash_index (the whole store, one table).
 #   * "aspects_queue" — aspect_extraction_queue (the whole store, one table).
+#   * ("chash" was the second wholesale exclusion until RDR-187/nexus-piwya.10
+#     removed the chash ETL store entirely — nothing left to exclude.)
 #
 # The "aspects", "taxonomy", "telemetry", and "catalog" stores are MIXED:
 # each has exactly one (or two) chash-bearing table(s) landed + promoted
@@ -299,7 +292,7 @@ def build_store_etls(sources: EtlSources) -> list[StoreEtl]:
 # table(s) at true table granularity; no store still runs its full legacy
 # ETL (and therefore double-writes a stale legacy-id copy) under the guided
 # path.
-GUIDED_LAND_EXCLUDED_STORES: frozenset[str] = frozenset({"chash", "aspects_queue"})
+GUIDED_LAND_EXCLUDED_STORES: frozenset[str] = frozenset({"aspects_queue"})
 
 
 def _aspects_non_chash(s: EtlSources, collector: Any) -> dict:
@@ -722,142 +715,11 @@ def _recover_flat_fill(
     }
 
 
-# ── chash: real IdentitySource + fill orchestration ──────────────────────────
-
-
-class _ChashCollectionIdentitySource:
-    """Real :class:`~nexus.migration.verify_fill.IdentitySource` wiring for
-    ``chash_index``, scoped to ONE physical_collection (chash's identity
-    surface — ``registered_chashes_for_collection`` — is collection-scoped;
-    the same chash value can legitimately appear in multiple collections, so
-    the diff must not conflate them)."""
-
-    def __init__(self, http_chash: Any, collection: str) -> None:
-        self._http_chash = http_chash
-        self._collection = collection
-
-    def present(self) -> set[str] | None:
-        try:
-            return self._http_chash.registered_chashes_for_collection(self._collection)
-        except Exception as exc:  # noqa: BLE001 — unreachable surface -> indeterminate (verify_fill's own documented contract)
-            _log.warning(
-                "verify_fill.chash_identity_unreachable",
-                collection=self._collection, error=str(exc),
-            )
-            return None
-
-
-def _read_chash_rows_by_collection(sqlite_path: Path) -> dict[str, list[dict[str, str]]]:
-    """Group SQLite ``chash_index`` rows by ``physical_collection`` — chash's
-    natural fill scope, mirroring ``chash_etl.migrate_chash_rows``'s own
-    read query (never duplicated transform logic, just the SELECT)."""
-    import sqlite3  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
-
-    conn = sqlite3.connect(str(sqlite_path), check_same_thread=False)  # epsilon-allow: ETL source-read; sqlite_path is the migration SOURCE SQLite, never T2Database
-    conn.row_factory = sqlite3.Row
-    try:
-        rows = conn.execute(
-            "SELECT chash, physical_collection, created_at FROM chash_index"
-        ).fetchall()
-    finally:
-        conn.close()
-    by_collection: dict[str, list[dict[str, str]]] = {}
-    for row in rows:
-        chash = row["chash"] or ""
-        collection = row["physical_collection"] or ""
-        if not chash or not collection:
-            continue
-        by_collection.setdefault(collection, []).append({
-            "chash": chash,
-            "collection": collection,
-            "created_at": row["created_at"] or "1970-01-01T00:00:00Z",
-        })
-    return by_collection
-
-
-def _chash_import_fn(http_chash: Any) -> Callable[[list[dict[str, Any]]], Any]:
-    # nexus-f2qvx.3: previously reached into ``http_chash._client.post(...)``
-    # directly — a pre-mixin-adoption wart. HttpChashIndex.import_rows() is
-    # the public wrapper (routes through RefreshableHttpStoreMixin's
-    # self-healing _post); the raw ``._client`` call would break
-    # post-adoption since the mixin's httpx.Client has no baked base_url.
-    def _import(batch: list[dict[str, Any]]) -> Any:
-        return http_chash.import_rows(batch)
-    return _import
-
-
-def verify_fill_chash(
-    sqlite_path: Path,
-    http_chash: Any,
-    *,
-    count_source: "CountSource | None" = None,
-    batch_size: int = 200,
-    breaker: Any = None,
-    collector: Any = None,
-) -> dict[str, Any]:
-    """RDR-178 P4: verify-fill (delta) for the ``chash`` store.
-
-    Runs the outer count-diff against ``chash_index``'s total row count; on
-    parity the fill is skipped entirely (zero HTTP writes — the design's
-    "no-op verify = one HTTP call" goal). On divergence OR indeterminacy
-    (verify_fill.py's documented contract: an indeterminate outer verdict is
-    treated the same as divergent for safety) runs the inner
-    :func:`~nexus.migration.verify_fill.fill_missing` PER PHYSICAL
-    COLLECTION — chash's identity surface is collection-scoped.
-
-    A per-collection circuit-breaker give-up is caught via :func:`_try_fill`
-    and converted into a partial-progress record rather than aborting the
-    whole command.
-    """
-    from nexus.migration.verify_fill import fill_missing, verify_store_counts  # noqa: PLC0415 — R2 import-cycle guard, mirrored from verify_fill.py
-    from nexus.retry import EtlCircuitBreaker  # noqa: PLC0415 — deferred to avoid CLI startup cost
-
-    breaker = breaker if breaker is not None else EtlCircuitBreaker()
-    batch_size = clamp_fill_batch_size(batch_size)
-    cs = count_source or ServiceCountSource()
-
-    by_collection = _read_chash_rows_by_collection(sqlite_path)
-    total_rows = sum(len(rows) for rows in by_collection.values())
-
-    outer_verdicts = verify_store_counts(
-        "chash", cs, {"chash_index": total_rows},
-    )
-    outer_status = outer_verdicts.get("chash_index", {}).get("status", "indeterminate")
-
-    fill_by_collection: dict[str, Any] = {}
-    total_filled = 0
-    if outer_status != "parity":
-        for collection, rows in sorted(by_collection.items()):
-            key_fn: Callable[[dict[str, Any]], str] = lambda r: (r["chash"] or "")[:32]  # noqa: E731
-            identity_source = _ChashCollectionIdentitySource(http_chash, collection)
-            result = _try_fill(
-                lambda: fill_missing(  # noqa: B023 — invoked immediately by _try_fill, not deferred past this iteration
-                    source_rows=rows,
-                    key_fn=key_fn,
-                    identity_source=identity_source,
-                    import_fn=_chash_import_fn(http_chash),
-                    batch_size=batch_size,
-                    breaker=breaker,
-                    table=f"chash_index[{collection}]",
-                ),
-                store="chash", table_name="chash_index", collector=collector,
-                recovery=lambda: _recover_flat_fill(identity_source, rows, key_fn),  # noqa: B023
-            )
-            fill_by_collection[collection] = result
-            total_filled += result["filled"]
-
-    if collector is not None:
-        collector.count_read("chash", "chash_index", total_rows)
-        collector.count_written("chash", "chash_index", total_filled)
-
-    return {
-        "store": "chash",
-        "outer": outer_verdicts,
-        "fill": fill_by_collection,
-        "total_filled": total_filled,
-        "convergence_notes": dedup_convergence_notes("chash", outer_verdicts),
-    }
-
+# ── chash verify-fill: RETIRED (RDR-187/nexus-piwya.10) ─────────────────────
+# _ChashCollectionIdentitySource / _read_chash_rows_by_collection /
+# _chash_import_fn / verify_fill_chash are GONE with the chash ETL store:
+# the router table is dropped, imports accept-and-no-op, and a verify-fill
+# against a store that can never converge would report divergence forever.
 
 # ── catalog: real IdentitySource/ManifestSource + fill orchestration ─────────
 
@@ -1240,7 +1102,7 @@ def verify_fill_telemetry(
     (CLI flag-surface wiring); tracked as residual follow-up on the parent
     bead.
     """
-    from nexus.db.t2.telemetry_etl import (  # noqa: PLC0415 — R2-style import-cycle guard, mirrors verify_fill_chash/verify_fill_catalog
+    from nexus.db.t2.telemetry_etl import (  # noqa: PLC0415 — R2-style import-cycle guard, mirrors verify_fill_catalog
         _open_ro,
         conflict_key,
         count_source_rows,
@@ -1503,7 +1365,7 @@ def _taxonomy_source_counts(sources: EtlSources) -> dict[str, int]:
 #: store -> function computing its _VERIFY_TABLES-shaped source counts, for
 #: the generic (outer-verify-only) verify-fill path. ``chash``/``catalog``/
 #: ``telemetry`` are handled separately (real delta fill — see
-#: ``verify_fill_chash`` / ``verify_fill_catalog`` / ``verify_fill_telemetry``
+#: ``verify_fill_catalog`` / ``verify_fill_telemetry``
 #: above/below); ``aspects`` / ``aspects_queue`` are NOT in this map (no
 #: dry-run counting seam wired today) and always run the full ETL under
 #: verify-fill, same as before.
@@ -1546,14 +1408,6 @@ def verify_fill_generic_or_full(
     return verdicts, run_full(), notes
 
 
-def _open_chash_store() -> Any:
-    """No-arg ``HttpChashIndex`` — resolves its endpoint config-first, same
-    as :func:`build_store_etls`'s ``_chash`` closure."""
-    from nexus.db.t2.http_chash_index import HttpChashIndex  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-
-    return HttpChashIndex()
-
-
 def _open_catalog_client() -> Any:
     """No-arg catalog client — resolves its endpoint config-first, same as
     :func:`build_store_etls`'s ``_catalog`` closure."""
@@ -1564,7 +1418,7 @@ def _open_catalog_client() -> Any:
 
 def _open_telemetry_store() -> Any:
     """No-arg ``HttpTelemetryStore`` — resolves its endpoint config-first,
-    same as :func:`_open_chash_store` / :func:`_open_catalog_client`."""
+    same as :func:`_open_catalog_client`."""
     from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     return HttpTelemetryStore()
@@ -1654,11 +1508,12 @@ def migrate_all(
     verify_fill: bool = False,
     etls: "list[StoreEtl] | None" = None,
 ) -> dict[str, Any]:
-    """Run ALL eight store migrations in RDR-152 ladder order and return ONE
+    """Run ALL seven store migrations in RDR-152 ladder order and return ONE
     RDR-153 report dict (with the verification verdict folded in).
 
-    Order: memory → plans → telemetry → taxonomy → aspects → chash →
-    catalog → aspects_queue (the last two trail so FK targets exist). One
+    Order: memory → plans → telemetry → taxonomy → aspects → catalog →
+    aspects_queue (the last two trail so FK targets exist; the chash leg
+    retired with the router, RDR-187). One
     shared :class:`IssueCollector` spans the run; a store-level crash is
     recorded and the run continues so the report covers every attempted
     store. The verification verdict is written INTO the report so the
@@ -1708,8 +1563,8 @@ def migrate_all(
     nexus-s3dd4.14): when True, run the delta path instead of the
     unconditional full re-send. Per store:
 
-    - ``chash`` / ``catalog`` — real inner-fill wiring
-      (:func:`verify_fill_chash` / :func:`verify_fill_catalog`): the outer
+    - ``catalog`` — real inner-fill wiring
+      (:func:`verify_fill_catalog`): the outer
       count-diff decides parity (zero writes) vs. divergent/indeterminate
       (send ONLY the missing rows, or — for catalog's documents/links,
       which have no wired fill surface — fall back to the full ETL for the
@@ -1788,20 +1643,7 @@ def migrate_all(
             on_store(etl.store)
         crashed = False
         try:
-            if verify_fill and etl.store == "chash":
-                store_client = _open_chash_store()
-                try:
-                    result = verify_fill_chash(
-                        sources.sqlite_path, store_client, count_source=cs,
-                        collector=collector,
-                    )
-                finally:
-                    with contextlib.suppress(Exception):
-                        store_client.close()
-                verify_fill_outer[etl.store] = result["outer"]
-                verify_fill_results[etl.store] = result
-                verify_fill_notes.extend(result["convergence_notes"])
-            elif verify_fill and etl.store == "catalog":
+            if verify_fill and etl.store == "catalog":
                 catalog_client = _open_catalog_client()
                 try:
                     result = verify_fill_catalog(

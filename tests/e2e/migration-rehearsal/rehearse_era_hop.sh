@@ -309,9 +309,10 @@ for name, want in seeded.items():
 # 2. Wire re-id: the legacy ids are GONE and the derived ones are PRESENT.
 #    `existing_ids(collection, ids)` returns the subset of *ids* present, so
 #    each direction is an exact membership probe. Exactness matters here more
-#    than usual: a 16-char legacy id is a strict PREFIX of its 32-char
-#    successor (both are sha256 of the same text), so any substring-flavoured
-#    check would report success against a store that never converged at all.
+#    than usual: a 16-char legacy id is a strict PREFIX of its 64-hex
+#    successor (both are sha256 of the same text — RDR-180: the FULL digest
+#    is the canonical identity), so any substring-flavoured check would
+#    report success against a store that never converged at all.
 for coll, old_ids in legacy.items():
     target = cross.get(coll, coll)
     want_new = expected.get(coll, [])
@@ -328,7 +329,7 @@ for coll, old_ids in legacy.items():
         print(f"       {target}: {len(missing_new)} derived id(s) absent: {missing_new[:3]}")
         fails += 1
     if not still_legacy and not missing_new:
-        print(f"       {target}: all {len(old_ids)} legacy ids -> their derived 32-char chashes")
+        print(f"       {target}: all {len(old_ids)} legacy ids -> their derived full-digest chashes")
 
 # 3. Nothing non-conformant anywhere in the migrated collections — the
 #    membership probes above are per-id, so this catches a stray id neither
@@ -337,14 +338,14 @@ for name in seeded:
     target = cross.get(name, name)
     try:
         bad_len = sorted(
-            cid for cid, _ in t3.list_chunks_with_metadata(target) if len(cid) != 32
+            cid for cid, _ in t3.list_chunks_with_metadata(target) if len(cid) != 64
         )
     except Exception as e:
         print(f"       {target}: list_chunks_with_metadata() error: {e}"); fails += 1; continue
     if bad_len:
-        print(f"       {target}: non-32-char id(s) present: {bad_len[:3]}"); fails += 1
+        print(f"       {target}: non-64-hex id(s) present: {bad_len[:3]}"); fails += 1
 if not fails:
-    print("       every migrated collection holds only conformant 32-char chunk ids")
+    print("       every migrated collection holds only conformant 64-hex chunk ids")
 
 sys.exit(1 if fails else 0)
 PY

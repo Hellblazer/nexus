@@ -93,7 +93,15 @@ def test_detection_surface():
     }
     assert _params(d.open_read_legs) == {"local_path"}
     assert _params(d.voyage_key_available) == set()
-    assert _params(d.build_dry_run_preview) == {"report"}
+    assert _params(d.build_dry_run_preview) == {
+        "report",
+        # nexus-leunq follow-up: the preview must answer the same question the
+        # run it previews will answer, so the caller declares whether its path
+        # rehashes chunk ids (land-then-transform) or copies them verbatim.
+        # Additive + backward compatible — keyword-only, default False
+        # reproduces the prior behavior exactly; the veneer need not pass it.
+        "rehashes_ids",
+    }
     assert _params(d.render_dry_run_preview) == {"preview"}
     assert _fields(d.DetectionReport) == {"classifications", "voyage_key_present"}
     assert _fields(d.CollectionClassification) == {
@@ -107,6 +115,7 @@ def test_detection_surface():
         "reason",
         "measured_dim",  # nexus-nb7hr: ground-truth probe result
         "legacy_ids",  # nexus-sot7v / GH #1390: pre-RDR-108 short-id block
+        "era32_ids",  # nexus-i5rbk: 32-hex era half-digests — wire re-id axis
     }
 
 

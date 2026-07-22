@@ -106,7 +106,7 @@ class CatalogDeleteCollectionCascadeTest {
         assertThat(counts.get("chunks_384")).as("chunks_384").isEqualTo(2);
         assertThat(counts.get("chunks_768")).as("chunks_768").isEqualTo(1);
         assertThat(counts.get("chunks_1024")).as("chunks_1024").isEqualTo(1);
-        assertThat(counts.get("chash_index")).as("chash_index").isEqualTo(2);
+        assertThat(counts).as("RDR-187: no chash_index leg in the cascade").doesNotContainKey("chash_index");
         assertThat(counts.get("topic_assignments")).as("topic_assignments (by source_collection)").isEqualTo(2);
         assertThat(counts.get("topics")).as("topics").isEqualTo(1);
         assertThat(counts.get("taxonomy_meta")).as("taxonomy_meta (RESTRICT child)").isEqualTo(1);
@@ -130,8 +130,6 @@ class CatalogDeleteCollectionCascadeTest {
                     + " WHERE tenant_id='" + TENANT_A + "' AND collection='" + COLL + "'"))
                     .as("no orphan rows in " + tbl).isZero();
             }
-            assertThat(rows(su, "SELECT COUNT(*) FROM nexus.chash_index WHERE tenant_id='" + TENANT_A
-                + "' AND physical_collection='" + COLL + "'")).as("chash_index orphans").isZero();
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.topic_assignments WHERE tenant_id='" + TENANT_A
                 + "' AND source_collection='" + COLL + "'")).as("assignment orphans").isZero();
             assertThat(rows(su, "SELECT COUNT(*) FROM nexus.catalog_documents WHERE tenant_id='" + TENANT_A
@@ -175,11 +173,7 @@ class CatalogDeleteCollectionCascadeTest {
         st.execute(chunkInsert(tenant, "chunks_384", 384, "dc384b"));
         st.execute(chunkInsert(tenant, "chunks_768", 768, "dc768a"));
         st.execute(chunkInsert(tenant, "chunks_1024", 1024, "dc1024a"));
-        // chash_index: 2
-        st.execute("INSERT INTO nexus.chash_index (tenant_id, chash, physical_collection, created_at) "
-            + "VALUES ('" + tenant + "', '" + chash("dcci1") + "', '" + COLL + "', NOW())");
-        st.execute("INSERT INTO nexus.chash_index (tenant_id, chash, physical_collection, created_at) "
-            + "VALUES ('" + tenant + "', '" + chash("dcci2") + "', '" + COLL + "', NOW())");
+        // (chash_index seeds removed — RDR-187/nexus-piwya.9: router dropped)
         // topics: 1 (explicit id)
         long topicId = Math.abs((long) (tenant + COLL).hashCode());
         st.execute("INSERT INTO nexus.topics (id, tenant_id, label, collection, doc_count, created_at, review_status) "

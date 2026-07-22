@@ -356,7 +356,9 @@ FRESHNESS_PROBES: dict[str, tuple[str, str]] = {
     "telemetry": ("search_telemetry", "ts"),
     "taxonomy": ("topics", "created_at"),
     "aspects": ("document_aspects", "extracted_at"),
-    "chash": ("chash_index", "created_at"),
+    # "chash" probe removed (RDR-187/nexus-piwya.9 sweep): unreachable since
+    # .10 dropped the store from LADDER_ORDER; detect_already_migrated never
+    # consults it.
     "catalog": ("documents", "indexed_at"),
     "aspects_queue": ("aspect_extraction_queue", "enqueued_at"),
 }

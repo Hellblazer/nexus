@@ -119,6 +119,13 @@ def purge_collection_cascade(db: object, name: str) -> CascadeCounts:
         counts.t3_absent = True
 
     # Taxonomy + chash index, routed through the T2 daemon (single-writer).
+    # RDR-187 (nexus-piwya.4): in service mode the chash_index leg lands on
+    # the engine's accept-and-no-op /v1/chash/delete_collection (deleted:0)
+    # — deliberate: content deletion is the vector/catalog cascade's job,
+    # and the .3 review traced both purge paths as not depending on this
+    # call actually deleting. The call is KEPT for the frozen SQLite twin
+    # (pre-migration installs, RDR-158), where it still prunes real router
+    # rows.
     try:
         from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 

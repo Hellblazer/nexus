@@ -42,9 +42,10 @@ def single_chunk_manifest_metadata(content: str) -> tuple[str, list[dict]]:
     here ``manifest_write_batch_hook`` short-circuits on
     ``if not metadatas: return`` and no ``catalog_document_chunks``
     manifest row (nor the ``documents.chunk_count`` update) is ever
-    written for these two callers (GH #1370 Defect 4b). As a side
-    effect this also unblocks ``chash_dual_write_batch_hook``, which
-    hit the same ``metadatas`` guard.
+    written for these two callers (GH #1370 Defect 4b). (Historically
+    this also unblocked the chash dual-write hook, which hit the same
+    ``metadatas`` guard — that hook was retired by RDR-187 /
+    nexus-piwya.4.)
     """
     content_hash = hashlib.sha256(content.encode()).hexdigest()
     doc_id = content_hash  # RDR-180: the full digest IS the natural id
@@ -184,8 +185,17 @@ def catalog_store_hook(
             meta={"doc_id": doc_id},
         )
         return str(tumbler)
-    except Exception:  # noqa: BLE001 - best-effort post-store catalog hook must not crash caller; logged via log.debug
-        _log.debug("catalog_store_hook_failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 - best-effort post-store catalog hook must not crash caller; logged + audited
+        # nexus-ou4tb: the "" return is indistinguishable from "no tumbler
+        # assigned", so at DEBUG this was a silent non-registration. WARNING +
+        # audit row so nx doctor can say how many documents are affected.
+        _log.warning("catalog_store_hook_failed", exc_info=True)
+        from nexus.hook_registry import record_catalog_hook_failure  # noqa: PLC0415 — deferred, avoids an import cycle
+
+        record_catalog_hook_failure(
+            source_path=doc_id or title or "", collection=collection_name or "",
+            hook_name="catalog_store_hook", error=str(exc),
+        )
         return ""
     finally:
         if writer is not None:

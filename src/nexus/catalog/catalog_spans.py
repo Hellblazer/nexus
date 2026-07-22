@@ -18,7 +18,8 @@ Public surface:
   collection, and a T3 client, return the chunk text + metadata
   (or ``None`` when no row matches).
 - :func:`resolve_chash_globally` — RDR-086 Phase 2 global chash
-  lookup via the T2 ``chash_index`` with parallel T3 fallback.
+  lookup (post-RDR-187: served from the chunks tables engine-side)
+  with parallel T3 fallback.
 - :func:`resolve_span_text_for_entry` — line-range / chunk-char /
   chash dispatcher used by :meth:`Catalog.resolve_span_text`. Takes
   a resolved :class:`CatalogEntry` so callers without one can
@@ -176,7 +177,7 @@ def fallback_chash_scan(
             "resolve_chash_fallback_scanning",
             chash_prefix=hex_chash[:16],
             collection_count=len(all_cols),
-            guidance="run 'nx collection backfill-hash --all' to populate T2",
+            guidance="index content (nx index ...); on a pre-migration SQLite install, 'nx collection backfill-hash --all' reconciles the router",
         )
         _chash_fallback_warned = True
 
@@ -268,23 +269,25 @@ def resolve_chash_globally(
     """Globally resolve a chash to the chunk it names (RDR-086 Phase 2).
 
     Unlike :func:`resolve_span_in_t3`, the caller does not need to
-    know which collection holds the chunk: the T2 ``chash_index``
-    populated by Phase 1 dual-write answers that question in one
-    SQL lookup.
+    know which collection holds the chunk: the chash lookup answers
+    that question in one call. Post-RDR-187 (nexus-piwya.3/.4) the
+    lookup is served engine-side from the chunks tables themselves —
+    a returned row is a live chunk by construction, so the old
+    delete_stale self-heal (and its purge-on-transient failure class,
+    nexus-8g79.3) is retired outright.
 
     Resolution order:
-      1. T2 lookup via ``chash_index.lookup(chash)``.
-      2. Drop rows whose ``physical_collection`` no longer exists
-         in T3 (self-healing: the stale row is deleted on access).
-      3. Tie-break the survivors — ``prefer_collection`` first,
-         then newest ``created_at``, then deterministic name sort.
-      4. Delegate to :func:`resolve_span_in_t3` for chunk text +
+      1. Lookup via ``chash_index.lookup(chash)`` (the kept
+         ``/v1/chash/lookup`` endpoint in service mode; the frozen
+         SQLite router on pre-migration installs, RDR-158).
+      2. Tie-break the rows — ``prefer_collection`` first, then
+         newest ``created_at``, then deterministic name sort.
+      3. Delegate to :func:`resolve_span_in_t3` for chunk text +
          metadata on the winner. On any per-candidate failure fall
          through.
-      5. If T2 was empty or exhausted, fall back to a parallel T3
-         scan across all collections. Missing from index is a
-         performance hit, not a correctness one —
-         ``nx collection backfill-hash --all`` reconciles.
+      4. If the lookup was empty or exhausted, fall back to a
+         parallel T3 scan across all collections (pre-migration
+         installs whose SQLite router was never populated).
 
     Accepts the same input forms as :func:`parse_chash_span`.
     """
@@ -323,63 +326,23 @@ def resolve_chash_globally(
             ref["char_range"] = span_result["char_range"]
         return ref
 
-    # ── T2 path ─────────────────────────────────────────────────────
+    # ── chash-lookup path ───────────────────────────────────────────
+    # RDR-187 (nexus-piwya.4): the delete_stale self-heal that lived here
+    # is DELETED OUTRIGHT, not moved. The lookup is now served engine-side
+    # from the chunks tables themselves (nexus-piwya.3), so a returned row
+    # IS a live chunk by construction — there is no derived router copy
+    # left to drift, and therefore nothing to heal. This also retires the
+    # nexus-8g79.3 failure class wholesale (a transient list_collections()
+    # error tricking the self-heal into purging the index): with no
+    # self-heal there is no purge path. Rows that fail per-candidate
+    # resolution below still fall through to the T3 scan.
     rows = chash_index.lookup(hex_chash)
     if rows:
-        # nexus-8g79.3: when T3 list_collections() fails transiently
-        # (network blip, quota, timeout) the pre-fix code defaulted
-        # ``live`` to the empty set, then the self-heal loop below
-        # treated EVERY row as stale and deleted them all — silently
-        # wiping the chash index across the whole prefix. The guarded
-        # delete_stale calls succeeded so no exception surfaced;
-        # subsequent span resolution then fell through to the full-
-        # collection scan fallback. Fail-loud-and-skip-cleanup is
-        # strictly safer than fail-quiet-and-purge: log at WARNING
-        # and return without touching the index.
-        try:
-            live = set(_t3_collection_names(t3))
-            list_failed = False
-        except Exception:  # noqa: BLE001 — transient T3 list failure must not purge the chash index (nexus-8g79.3); logged at WARNING, self-heal skipped this pass
-            _log.warning(
-                "chash_index_selfheal_skipped_list_collections_failed",
-                chash_prefix=hex_chash[:16],
-                exc_info=True,
-            )
-            # Skip self-heal this pass; treat every row as a survivor
-            # so span resolution still proceeds. A future call with a
-            # working T3 will reconcile. Pre-fix the bare
-            # ``except: live = set()`` purged every row from the chash
-            # index — catastrophic on a transient.
-            live = set()
-            list_failed = True
-        survivors: list[dict] = []
-        for row in rows:
-            if list_failed or row["collection"] in live:
-                # nexus-8g79.3: when list_collections() failed above
-                # we cannot tell stale from live, so every row is a
-                # provisional survivor and self-heal is skipped.
-                survivors.append(row)
-            else:
-                # Go through the locked public API — this must not race
-                # a concurrent upsert / delete_collection on the same
-                # store. Direct conn.execute() would bypass the lock.
-                try:
-                    chash_index.delete_stale(
-                        chash=hex_chash, collection=row["collection"],
-                    )
-                except Exception:  # noqa: BLE001 — best-effort stale-row cleanup; delete failure is logged at WARNING and self-heal continues, must not abort resolution
-                    _log.warning(
-                        "chash_index_selfheal_delete_failed",
-                        chash_prefix=hex_chash[:16],
-                        collection=row["collection"],
-                        exc_info=True,
-                    )
-
         def _sort_key(r: dict) -> tuple:
             preferred = 0 if r["collection"] == prefer_collection else 1
             return (preferred, negate_iso(r["created_at"]), r["collection"])
 
-        for row in sorted(survivors, key=_sort_key):
+        for row in sorted(rows, key=_sort_key):
             try:
                 span_res = resolve_span_in_t3(span, row["collection"], t3)
             except Exception:  # noqa: BLE001 — per-candidate resolution failure falls through to the next survivor / T3 fallback, must not abort the loop

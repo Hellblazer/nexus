@@ -17,8 +17,8 @@ Three chains, three shapes:
   document. Currently empty by default — registered ad-hoc.
 * **batch** (RDR-095) —
   ``fn(doc_ids, collection, contents, embeddings, metadatas, *,
-  catalog_doc_id="")`` per batch. Default consumers: chash dual-write,
-  taxonomy assign, manifest write.
+  catalog_doc_id="")`` per batch. Default consumers: taxonomy assign,
+  manifest write.
 * **document** (RDR-089) —
   ``fn(source_path, collection, content, *, doc_id="")`` per source
   document. Default consumer: aspect-extraction enqueue.
@@ -159,9 +159,8 @@ class HookRegistry:
         """Invoke every batch hook with the recorded call shape.
 
         Empty ``doc_ids`` returns early — no hooks fire on empty batches
-        (matches the legacy dispatcher's semantics; chash dual-write,
-        taxonomy assign, and manifest write all early-return on empty
-        inputs anyway).
+        (matches the legacy dispatcher's semantics; taxonomy assign
+        and manifest write both early-return on empty inputs anyway).
 
         Per-hook exceptions are caught, logged at WARNING, and
         persisted to T2 ``hook_failures`` with ``chain='batch'``; never
@@ -349,24 +348,25 @@ class HookRegistry:
 def install_default_hooks(registry: HookRegistry) -> None:
     """Register the load-bearing default consumers on *registry*.
 
-    Three batch hooks + one document hook were previously self-registered
-    at module load in ``nexus.mcp_infra`` (the batch trio) and
+    Two batch hooks + one document hook were previously self-registered
+    at module load in ``nexus.mcp_infra`` (the batch pair) and
     ``nexus.mcp.core`` (the aspect-extraction enqueue). Without these
-    consumers the catalog manifest, chash index, taxonomy assignments,
-    and aspect-extraction queue all silently fall out of sync with
-    every storage event.
+    consumers the catalog manifest, taxonomy assignments, and
+    aspect-extraction queue all silently fall out of sync with every
+    storage event. (The chash dual-write consumer was retired by RDR-187:
+    the chunks tables are the chash store.)
 
     Idempotent: re-registering the same callable on the same registry
     is a no-op (duplicate-registration detection by identity).
     """
     from nexus.mcp_infra import (  # noqa: PLC0415 — deferred to avoid circular import
-        chash_dual_write_batch_hook,
         manifest_write_batch_hook,
         taxonomy_assign_batch_hook,
     )
 
+    # RDR-187 (nexus-piwya.4): the chash dual-write hook is retired — the
+    # chunks tables are the chash store; nothing to dual-write.
     for hook in (
-        chash_dual_write_batch_hook,
         taxonomy_assign_batch_hook,
         manifest_write_batch_hook,
     ):
@@ -471,6 +471,31 @@ def _record_batch_hook_failure(
         doc_id=doc_ids[0] if doc_ids else "",
         collection=collection, hook_name=hook_name, error=error,
         chain="batch", batch_doc_ids=json.dumps(doc_ids), is_batch=True,
+    )
+
+
+def record_catalog_hook_failure(
+    *,
+    source_path: str,
+    collection: str,
+    hook_name: str,
+    error: str,
+) -> None:
+    """Public entry point for the CATALOG post-store hooks (nexus-ou4tb).
+
+    The catalog registration hooks live outside this module (``indexer``,
+    ``catalog.store_hook``, ``pipeline_stages``) but fail in exactly the shape
+    :func:`_record_document_hook_failure` records, and their failures were
+    previously logged at DEBUG and nowhere else — so a document could land in
+    T3 and never be registered in the catalog, with no doc_id, no manifest and
+    no links, and nobody told. Only a rebuild recovers it.
+
+    Best-effort by construction: recording a failure must never turn a
+    degraded-but-working index run into a crash.
+    """
+    _record_document_hook_failure(
+        source_path=source_path, collection=collection,
+        hook_name=hook_name, error=error,
     )
 
 

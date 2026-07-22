@@ -98,7 +98,7 @@ def test_cli_remediate_runs_no_credentialed_probe_when_flag_off(flag_off, cli_pr
     assert cli_probe_spy == []
     assert "LIVE COUNTS" not in result.output
     assert result.exit_code != 0                       # release refused
-    assert "roll back the poisoned pgvector target" not in result.output
+    assert "the substrate-etl rung converges" not in result.output
 
 
 # ── Non-vacuity: the property is enforced by the gate, not the fixtures ─────

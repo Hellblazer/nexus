@@ -123,6 +123,66 @@ public final class ChashSqlIdioms {
             + "AND chash IS DISTINCT FROM " + DIGEST;
     }
 
+    /**
+     * Refresh {@code nexus.chash_alias} statistics INSIDE the caller's
+     * transaction, and report whether it actually took effect (rdr180-17 / F2,
+     * production 2026-07-20).
+     *
+     * <p>BOTH chash movers write the alias map and then immediately join it —
+     * {@link RekeyOps} for the Item8 disposition and the step-5 cascades,
+     * {@code StagingPromoteOps} for its promote/collapse joins. On a
+     * multi-tenant store the SECOND tenant onward is planned against
+     * statistics autoanalyze froze the instant the FIRST tenant committed
+     * ({@code most_common_vals={t1}}, {@code freqs=[1.0]},
+     * {@code n_distinct=1}), while this transaction's own alias rows are
+     * uncommitted and therefore invisible. The planner estimates ONE row,
+     * picks a nested loop, and the cascade degrades from 461 seconds to 101
+     * minutes on real data. An in-transaction ANALYZE samples this
+     * transaction's own rows, which is the whole reason it cannot be deferred
+     * to a post-commit maintenance pass.
+     *
+     * <p>The return value is NOT ceremony. {@code nexus_svc} holds DML grants
+     * only and does not own the table; Postgres does not ERROR when a
+     * non-owner analyzes — it WARNs and SKIPS. Without {@code MAINTAIN}
+     * (granted by {@code grants-nexus-svc}) this method is a silent no-op, so
+     * callers report the outcome in their envelope rather than assuming the
+     * planner was un-blinded. Same discipline the RDR-180 window taught twice
+     * over: the outcome of the operation, never the issuing of the statement.
+     *
+     * <p>The server-version test is load-bearing, not defensive clutter:
+     * {@code MAINTAIN} does not exist before PostgreSQL 17, and
+     * {@code has_table_privilege(..., 'MAINTAIN')} does not return false there
+     * — it RAISES "unrecognized privilege type". Probing unguarded would
+     * therefore abort the entire rekey transaction on a legacy cluster, which
+     * is strictly worse than the stale-statistics slowness this method exists
+     * to prevent. Managed/cloud runs on a provider-controlled server (verified
+     * PostgreSQL 17.10, 2026-07-20) and local-service runs on our own 17.x
+     * bundle; the branch covers clusters an earlier, pre-bundle install
+     * created and the data-directory carve-out deliberately keeps.
+     *
+     * @return {@code true} when the role can actually analyze the table
+     */
+    // SANCTIONED RAW (rdr180-17): ANALYZE is maintenance DDL with no jOOQ DSL
+    // form, and the privilege probe reads system catalogs (pg_class,
+    // has_table_privilege) that codegen does not cover. Must execute inside the
+    // caller's transaction to see its own uncommitted rows. Never serving-path.
+    public static boolean refreshAliasStats(org.jooq.DSLContext ctx) {
+        Boolean permitted = ctx.fetchOne(
+            "SELECT current_setting('server_version_num')::int >= 170000 "
+            + "   AND (pg_catalog.has_table_privilege('nexus.chash_alias', "
+            + "          CASE WHEN current_setting('server_version_num')::int >= 170000 "
+            + "               THEN 'MAINTAIN' ELSE 'SELECT' END) "
+            + "        OR pg_catalog.pg_get_userbyid("
+            + "             (SELECT relowner FROM pg_class "
+            + "               WHERE oid = 'nexus.chash_alias'::regclass)) = current_user)"
+        ).get(0, Boolean.class);
+        if (permitted == null || !permitted) {
+            return false;
+        }
+        ctx.execute("ANALYZE nexus.chash_alias");
+        return true;
+    }
+
     /** In-txn verify: manifest rows pointing at no content row in any dim. */
     public static String danglingManifestCount() {
         return "SELECT count(*) FROM nexus.catalog_document_chunks m "

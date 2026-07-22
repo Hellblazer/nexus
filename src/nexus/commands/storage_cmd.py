@@ -11,7 +11,7 @@ Usage::
     nx storage migrate plans     [--db PATH] [--service-url URL]
     nx storage migrate telemetry [--db PATH] [--service-url URL]
     nx storage migrate taxonomy  [--db PATH] [--service-url URL]
-    nx storage migrate chash     [--db PATH] [--service-url URL]
+    nx storage migrate chash     (RETIRED, RDR-187 — fails loud)
     nx storage migrate vectors   [--local-path PATH | --cloud] [--rollback]
 
 Run flags:
@@ -844,187 +844,20 @@ def migrate_taxonomy_cmd(
 
 
 @migrate_group.command(name="chash")
-@click.option(
-    "--db",
-    "db_path",
-    default=None,
-    type=click.Path(exists=True, dir_okay=False, readable=True, path_type=Path),
-    help=(
-        "Path to the SQLite T2 database file. "
-        "Defaults to NX_DB_PATH env var or ~/.config/nexus/t2.db."
-    ),
-)
-@click.option(
-    "--service-url",
-    "service_url",
-    default=None,
-    help=(
-        "Base URL of the nexus-service (e.g. http://127.0.0.1:8080). "
-        "Defaults to NX_SERVICE_HOST + NX_SERVICE_PORT env vars."
-    ),
-)
-@click.option(
-    "--dry-run",
-    is_flag=True,
-    default=False,
-    help="Count rows in the source without writing. No service connection is made.",
-)
-@click.option(
-    "--report",
-    "report_path",
-    default=None,
-    type=click.Path(dir_okay=False, path_type=Path),
-    help="Write a single-store RDR-153 migration report to PATH.",
-)
-@click.option(
-    "--verify-fill",
-    "verify_fill",
-    is_flag=True,
-    default=False,
-    help=(
-        "Delta mode (RDR-178): verify per-table counts against the target "
-        "first; on parity nothing is sent, on divergence only the rows "
-        "genuinely missing are sent — never the whole table."
-    ),
-)
-def migrate_chash_cmd(
-    db_path: Path | None,
-    service_url: str | None,
-    dry_run: bool,
-    report_path: Path | None,
-    verify_fill: bool,
-) -> None:
-    """Migrate the SQLite chash_index store to Postgres via the nexus-service.
+def migrate_chash_cmd() -> None:
+    """RETIRED (RDR-187): the chash_index router table is dropped.
 
-    Reads all rows from the SQLite ``chash_index`` table and writes them through
-    the service HTTP API (``POST /v1/chash/import``).  The ETL is idempotent:
-    running it multiple times produces no duplicates (server-side upsert on
-    ``(tenant_id, chash, physical_collection)``).  The SQLite source is NEVER
-    modified.
-
-    Chash entries are content-addressed and immutable; ``created_at`` is
-    preserved verbatim.
-
-    Endpoint + token resolve config-first (RDR-176 P2): env (NX_SERVICE_URL /
-    NX_SERVICE_TOKEN) > config.yml (`nx config set service_url/service_token`) >
-    supervisor lease. --service-url overrides only the URL. No env var is
-    required if config.yml carries the credentials.
-
-    ``--verify-fill`` (RDR-178 wave-2): re-runs to patch a small hole no
-    longer re-send the whole table — the outer count-diff decides parity
-    (no writes) vs. divergent/indeterminate (send only the rows missing
-    from the target, per physical_collection).
-
-    Examples::
-
-        # Auto-detect DB, service from env:
-        nx storage migrate chash
-
-        # Explicit paths:
-        nx storage migrate chash --db ~/.config/nexus/t2.db --service-url http://127.0.0.1:8080
-
-        # Dry run (count only, no writes):
-        nx storage migrate chash --dry-run
-
-        # Delta mode: only send rows genuinely missing from the target:
-        nx storage migrate chash --verify-fill
+    There is nothing to migrate: chash registration IS the chunk store —
+    migrating your chunks (``nx storage migrate all`` / ``nx
+    guided-upgrade``) registers every chash, and ``/v1/chash/import``
+    accept-and-no-ops during the deprecation window. This command fails
+    loud instead of silently "succeeding" against a no-op endpoint.
     """
-    import sqlite3  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
-
-    resolved_db = _resolve_db_path(db_path)
-    if not resolved_db.exists():
-        raise click.ClickException(
-            f"SQLite database not found: {resolved_db}\n"
-            "Use --db to specify the path, or set NX_DB_PATH."
-        )
-
-    # Count source rows for dry-run or progress display
-    try:
-        conn = sqlite3.connect(str(resolved_db), check_same_thread=False)  # epsilon-allow: ETL source-read; resolved_db is the migration SOURCE SQLite (never T2Database); read-only count query
-        try:
-            row = conn.execute("SELECT COUNT(*) FROM chash_index").fetchone()
-            source_count = int(row[0]) if row else 0
-        except Exception:  # noqa: BLE001 — best-effort count query; degrades to 0, conn closed in finally
-            source_count = 0
-        finally:
-            conn.close()
-    except Exception as exc:  # noqa: BLE001 — boundary catch; re-raised as a domain error
-        raise click.ClickException(f"Cannot open SQLite db: {exc}")
-
-    click.echo(f"Source: {resolved_db} ({source_count} row(s) in chash_index)")
-
-    if dry_run:
-        click.echo("[dry-run] No writes performed.")
-        return
-
-    from nexus.db.t2.http_chash_index import HttpChashIndex  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-
-    try:
-        base_url, token = _migration_endpoint(service_url)
-        store = HttpChashIndex(base_url=base_url, _token=token)
-    except RuntimeError as exc:
-        raise click.ClickException(str(exc))
-
-    from nexus.migration.migration_report import IssueCollector  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-
-    _collector = IssueCollector()
-
-    if verify_fill:
-        from nexus.migration.orchestrator import verify_fill_chash  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-
-        try:
-            vf_result = verify_fill_chash(resolved_db, store, collector=_collector)
-        except Exception as exc:  # noqa: BLE001 — boundary catch; re-raised as a domain error
-            _emit_store_report(_collector, resolved_db, report_path, service_url=base_url)
-            raise click.ClickException(f"verify-fill failed: {exc}")
-        finally:
-            store.close()
-
-        _emit_store_report(_collector, resolved_db, report_path, service_url=base_url)
-
-        outer = vf_result["outer"].get("chash_index", {})
-        click.echo(
-            f"verify-fill done. outer_status={outer.get('status', '?')} "
-            f"filled={vf_result['total_filled']}"
-        )
-        for note in vf_result.get("convergence_notes", []):
-            click.echo(f"  convergence: {note}")
-
-        _log.info(
-            "storage.migrate.chash.verify_fill_complete",
-            db=str(resolved_db),
-            outer_status=outer.get("status"),
-            filled=vf_result["total_filled"],
-        )
-        return
-
-    from nexus.db.t2.chash_etl import migrate_chash_rows  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-
-    try:
-        results = migrate_chash_rows(resolved_db, store, collector=_collector)
-    except Exception as exc:  # noqa: BLE001 — boundary catch; re-raised as a domain error
-        # Partial data beats no data (P3 critique S2).
-        _emit_store_report(_collector, resolved_db, report_path, service_url=base_url)
-        raise click.ClickException(f"ETL failed: {exc}")
-    finally:
-        store.close()
-
-    _emit_store_report(_collector, resolved_db, report_path, service_url=base_url)
-
-    total    = results["total"]
-    imported = results["imported"]
-    errors   = results.get("errors", 0)
-
-    click.echo(f"Done. total={total}, imported={imported}")
-    if errors:
-        click.echo(f"Warning: {errors} row(s) failed to write — check logs.", err=True)
-
-    _log.info(
-        "storage.migrate.chash.complete",
-        db=str(resolved_db),
-        total=total,
-        imported=imported,
-        errors=errors,
+    raise click.ClickException(
+        "retired by RDR-187: the chash_index router table is dropped — "
+        "chash registration rides the chunk store itself. Migrate content "
+        "with 'nx storage migrate all' or 'nx guided-upgrade'; there is no "
+        "separate chash store to migrate."
     )
 
 
@@ -1653,7 +1486,7 @@ def _emit_store_report(
     default=False,
     help=(
         "Delta mode (RDR-178): verify per-table counts before writing. "
-        "chash/catalog send only the rows genuinely missing from the "
+        "catalog sends only the rows genuinely missing from the "
         "target; memory/plans/telemetry/taxonomy skip entirely when "
         "already at parity, falling back to the full ETL otherwise. "
         "aspects/aspects_queue are unaffected (no delta surface yet)."
@@ -1666,20 +1499,21 @@ def migrate_all_cmd(
     service_url: str | None,
     verify_fill: bool,
 ) -> None:
-    """Run ALL eight store migrations in the RDR-152 ladder order and emit
+    """Run ALL seven store migrations in the RDR-152 ladder order and emit
     ONE migration report (RDR-153 Phase 3).
 
-    Order: memory → plans → telemetry → taxonomy → aspects → chash →
-    catalog → aspects_queue (the last two trail so FK targets exist). One
+    Order: memory → plans → telemetry → taxonomy → aspects → catalog →
+    aspects_queue (the last two trail so FK targets exist; the chash leg
+    retired with the router, RDR-187). One
     shared IssueCollector spans the run; the report is the triage/recovery
     artifact and the Phase-4 gate input (``summary.total_failed == 0``).
     Post-run count verification is LOUD when it cannot run (nexus-r0esi:
     never SKIP-then-'all passed').
 
     ``--verify-fill`` (RDR-178 wave-2): a re-run to patch a small hole no
-    longer re-sends the whole store. See ``nx storage migrate chash
-    --help`` for the delta semantics; ``migrate all --verify-fill`` applies
-    the same outer-verify-first decision per store in the ladder.
+    longer re-sends the whole store; ``migrate all --verify-fill`` applies
+    the outer-verify-first decision per store in the ladder (the chash
+    delta path retired with its store, RDR-187).
     """
     from nexus.migration.etl_registry import EtlSources  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
     from nexus.migration.orchestrator import (  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import

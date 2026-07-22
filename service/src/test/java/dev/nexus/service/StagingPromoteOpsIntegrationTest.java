@@ -21,6 +21,7 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.sql.Connection;
+import java.sql.ResultSet;
 import java.util.HexFormat;
 import java.util.Map;
 
@@ -324,7 +325,9 @@ class StagingPromoteOpsIntegrationTest {
             return null;
         });
 
-        // The chash_index leg rides the per-collection promote.
+        // RDR-187 (nexus-piwya.7): the chash_index promote leg is retired —
+        // the per-collection promote must leave the landed rows unpromoted
+        // (asserted below).
         ops.promoteCollection(T1, COLL_A, 768);
         Map<String, Object> fin = ops.finalizeTenant(T1, false);
 
@@ -340,9 +343,14 @@ class StagingPromoteOpsIntegrationTest {
         assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
             + "WHERE doc_id = '1.1.1' AND encode(chash,'hex') = '" + canon1 + "'"))
             .as("the legacy manifest pointer promoted CANONICAL").isEqualTo(1);
-        assertThat(count("SELECT count(*) FROM nexus.chash_index "
-            + "WHERE encode(chash,'hex') = '" + canon1 + "' AND physical_collection = '" + COLL_A + "'"))
-            .isEqualTo(1);
+        assertThat(count("SELECT count(*) FROM information_schema.tables "
+            + "WHERE table_schema = 'nexus' AND table_name = 'chash_index'"))
+            .as("RDR-187 (nexus-piwya.7/.9): the staging chash promote leg is RETIRED "
+                + "and the router TABLE is dropped — the landed staging.chash_index "
+                + "row (seeded above, deliberately kept: old clients mid-guided-upgrade "
+                + "still land it) is a DEAD SINK with no possible destination. The "
+                + "chunks promote (4) is the registration.")
+            .isZero();
         assertThat(count("SELECT count(*) FROM nexus.topic_assignments ta "
             + "JOIN nexus.topics t ON t.id = ta.topic_id "
             + "WHERE ta.doc_id = '" + canon1 + "' AND t.label = 'topic-x'"))
@@ -570,5 +578,135 @@ class StagingPromoteOpsIntegrationTest {
             + "WHERE doc_id = '1.1.9' AND encode(chash,'hex') = '" + digestHex(text) + "'"))
             .as("idempotent resume converges the pointer once the alias facts return")
             .isEqualTo(1);
+    }
+
+    // ── nexus-kmd5b: the dangling census must see LEGACY-WIDTH pointers ──────
+
+    /**
+     * The dangling-pointer legs gated on the CONFORMANT width, which excludes
+     * exactly the population they exist to find: a pointer the cascade could
+     * NOT repoint is, by definition, still at its legacy width. Production
+     * 2026-07-20 measured the consequence — the chash_index leg reported
+     * <strong>1</strong> against <strong>292,230</strong> actual orphans,
+     * five orders of magnitude low, while the manifest leg (which carries no
+     * width precondition) reported 426 against 426 actual.
+     *
+     * <p>Same structural shape as nexus-vounk: a check that cannot see the
+     * thing it is checking for. Its "all clear" was not evidence of a clean
+     * store, it was evidence of a blind query.
+     *
+     * <p>Seeds one dangling pointer per affected leg at LEGACY width — 16-byte
+     * bytea for chash_index, 32-hex text for the three debt columns — with no
+     * chash_alias entry, so none is resolvable by any route. Every leg must
+     * report it. Pre-fix all four are silently invisible.
+     */
+    @Test
+    @Order(13)
+    void census_seesDanglingPointersAtLegacyWidth() throws Exception {
+        final String legacyHex = "b".repeat(32);   // 16 bytes decoded
+        long topicId;
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
+                + T1 + "', 'code__kmd5b') ON CONFLICT DO NOTHING");
+            // (nexus.chash_index seed removed — RDR-187/nexus-piwya.9: the
+            // router table is dropped; the doesNotContainKey pin below now
+            // guards against a resurrected LEG against a resurrected TABLE
+            // both, and the debt-column legs remain the live subjects.)
+            try (ResultSet rs = su.createStatement().executeQuery(
+                    "INSERT INTO nexus.topics (tenant_id, label, collection, created_at) "
+                    + "VALUES ('" + T1 + "', 'kmd5b', 'code__kmd5b', now()) RETURNING id")) {
+                rs.next();
+                topicId = rs.getLong(1);
+            }
+            su.createStatement().execute(
+                "INSERT INTO nexus.topic_assignments (tenant_id, doc_id, topic_id, assigned_by) "
+                + "VALUES ('" + T1 + "', '" + legacyHex + "', " + topicId + ", 'kmd5b')");
+            su.createStatement().execute(
+                "INSERT INTO nexus.relevance_log (tenant_id, query, chunk_id, action, timestamp) "
+                + "VALUES ('" + T1 + "', 'kmd5b', '" + legacyHex + "', 'view', now())");
+        }
+        try {
+            Map<String, Integer> residue = scope.withTenant(T1, ctx ->
+                dev.nexus.service.db.ChashCensus.scan(ctx));
+            assertThat(residue)
+                .as("RDR-187 (nexus-piwya.5): the dangling.chash_index census leg is "
+                    + "RETIRED ahead of the table DROP (nexus-piwya.9) — a leg reading "
+                    + "nexus.chash_index would error on the missing relation once the "
+                    + "router dies. The seeded orphan row is deliberately still here: "
+                    + "the census must NOT report it (a resurrected leg fails this). "
+                    + "The 292,230-orphan population this leg once counted dies at the "
+                    + "DROP itself; the manifest + debt-column legs below remain the "
+                    + "census's surface.")
+                .doesNotContainKey("dangling.chash_index");
+            assertThat(residue)
+                .as("the 32-hex debt columns are the same bug shape: a legacy-width "
+                    + "pointer the cascade missed is excluded by a 64-hex-only filter")
+                .containsKeys("dangling.topic_assignments", "dangling.relevance_log");
+        } finally {
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                su.createStatement().execute(
+                    "DELETE FROM nexus.topic_assignments WHERE assigned_by = 'kmd5b'");
+                su.createStatement().execute(
+                    "DELETE FROM nexus.topics WHERE label = 'kmd5b'");
+                su.createStatement().execute(
+                    "DELETE FROM nexus.relevance_log WHERE query = 'kmd5b'");
+            }
+        }
+    }
+
+    /**
+     * The other half of the kmd5b contract: widening the legs must not turn
+     * every LEGACY-BUT-RESOLVABLE pointer into a false orphan. A legacy-width
+     * pointer WITH a chash_alias entry pointing at a live chunk resolves fine
+     * — that is exactly what the permanent alias map is for (RDR-180: legacy
+     * references stay resolvable forever) — so it must NOT be reported.
+     * Without this, the fix would trade a blind check for a screaming one and
+     * the census would flag the entire pre-rekey era.
+     */
+    @Test
+    @Order(14)
+    void census_doesNotFlagLegacyPointersTheAliasStillResolves() throws Exception {
+        final String legacyHex = "c".repeat(32);
+        final String text = "kmd5b alias-resolvable chunk";
+        final String liveHex = digestHex(text);
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('"
+                + T1 + "', 'code__kmd5b2') ON CONFLICT DO NOTHING");
+            su.createStatement().execute(
+                "INSERT INTO nexus.chunks_768 (tenant_id, collection, chash, chunk_text, embedding) "
+                + "VALUES ('" + T1 + "', 'code__kmd5b2', decode('" + liveHex + "', 'hex'), '"
+                + text + "', '" + vec(768) + "'::vector)");
+            su.createStatement().execute(
+                "INSERT INTO nexus.chash_alias (tenant_id, old_ref, old_bytes, new_chash, source) "
+                + "VALUES ('" + T1 + "', '" + legacyHex + "', decode('" + legacyHex + "', 'hex'), "
+                + "decode('" + liveHex + "', 'hex'), 'kmd5b2')");
+            // (nexus.chash_index seed removed — RDR-187/nexus-piwya.9: the
+            // router is dropped; relevance_log carries the alias-resolvable
+            // not-flagged proof.)
+            su.createStatement().execute(
+                "INSERT INTO nexus.relevance_log (tenant_id, query, chunk_id, action, timestamp) "
+                + "VALUES ('" + T1 + "', 'kmd5b2', '" + legacyHex + "', 'view', now())");
+        }
+        try {
+            Map<String, Integer> residue = scope.withTenant(T1, ctx ->
+                dev.nexus.service.db.ChashCensus.scan(ctx));
+            assertThat(residue)
+                .as("a legacy pointer the alias map RESOLVES to a live chunk is not "
+                    + "dangling — widening the leg must not flag the whole legacy era")
+                .doesNotContainKeys("dangling.relevance_log");
+        } finally {
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                su.createStatement().execute("DELETE FROM nexus.relevance_log WHERE query = 'kmd5b2'");
+                su.createStatement().execute("DELETE FROM nexus.chash_alias WHERE source = 'kmd5b2'");
+                su.createStatement().execute(
+                    "DELETE FROM nexus.chunks_768 WHERE collection = 'code__kmd5b2'");
+            }
+        }
     }
 }

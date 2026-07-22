@@ -70,20 +70,38 @@ RUN mkdir -p /home/nexus/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx \
 # them to fixed names at the context root so COPY needs no globs.
 # Wheel keeps its real PEP 427 name (uv requires the version in the filename);
 # it's at the context root so the glob resolves without the repo .dockerignore.
-COPY conexus-*.whl /tmp/
-# Install the wheel into a venv (the faithful pip-into-venv user path) so `nx`
-# AND a matching `python` (with chromadb for seed_legacy.py) share one env.
-# Debian bookworm ships Python 3.11; conexus needs 3.12+, so uv fetches a
-# managed standalone 3.12 for the venv.
+# Split install (measured 2026-07-21: the single wheel-keyed layer re-ran its
+# full 430s dependency install every build because the wheel's bytes churn per
+# run — embedded mtimes — even with the uv download cache warm). Layer 1
+# installs the dependency closure from the lock-derived requirements.txt that
+# run.sh exports: its cache key is uv.lock content, so it is a cache HIT until
+# dependencies actually change. Layer 2 installs the wheel --no-deps (cheap,
+# churns every run by design); `uv pip check` fails the build loud if the
+# exported closure ever diverges from the wheel's Requires-Dist.
 #
-# The BuildKit uv cache mount persists uv's download/build cache across builds:
-# the conexus wheel changes every run, but its heavy dependency closure
-# (chromadb, onnxruntime, tokenizers) is stable, so a fresh wheel reuses the
-# already-downloaded/compiled deps instead of a cold 10-20m install. The mount
-# is keyed by nexus's uid (1000) so the unprivileged install can write it.
+# ACCEPTED TRADEOFF (substantive-critic, 2026-07-21): lock-keyed deps mean
+# this image (and .cold/.fullstack) no longer re-resolves the wheel's
+# Requires-Dist against LIVE PyPI on every build — a transitive dep shipping
+# a new in-bounds version goes unvalidated here until uv.lock moves. That
+# live-resolution coverage deliberately lives in the --package-upgrade and
+# --era-hop legs, which install unpinned from real PyPI at RUNTIME by design
+# (--package-upgrade is the designated release gate for it, run in the
+# release skill's step 1). These legs validate provisioning/migration against
+# the locked closure — the same closure the full test suites run against.
+#
+# Install into a venv (the faithful pip-into-venv user path) so `nx` AND a
+# matching `python` (with chromadb for seed_legacy.py) share one env. Debian
+# bookworm ships Python 3.11; conexus needs 3.12+, so uv fetches a managed
+# standalone 3.12. The BuildKit uv cache mount persists downloads across
+# builds, keyed by nexus's uid (1000) so the unprivileged install can write it.
+COPY requirements.txt /tmp/requirements.txt
 RUN --mount=type=cache,target=/home/nexus/.cache/uv,uid=1000,gid=1000 \
     uv venv --python 3.12 /home/nexus/nxenv \
-    && uv pip install --python /home/nexus/nxenv /tmp/conexus-*.whl \
+    && uv pip install --python /home/nexus/nxenv -r /tmp/requirements.txt
+COPY conexus-*.whl /tmp/
+RUN --mount=type=cache,target=/home/nexus/.cache/uv,uid=1000,gid=1000 \
+    uv pip install --python /home/nexus/nxenv --no-deps /tmp/conexus-*.whl \
+    && uv pip check --python /home/nexus/nxenv \
     && nx --version
 
 # The native binary + its native-image .so siblings, kept together so the
