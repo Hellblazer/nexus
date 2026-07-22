@@ -82,12 +82,13 @@ public final class VoyageReranker implements Reranker {
     }
 
     /**
-     * Package-private full wiring, the single build path: tests inject a fake
-     * upstream URL, a fast retry base, and {@code Optional.empty()} so an
-     * ambient {@code HTTPS_PROXY} can never route the localhost upstream.
+     * Full wiring, the single build path: tests (unit + Testcontainers stage
+     * suite) inject a fake upstream URL, a fast retry base, and
+     * {@code Optional.empty()} so an ambient {@code HTTPS_PROXY} can never
+     * route the localhost upstream. Production uses the 2-arg constructor.
      */
-    VoyageReranker(String apiKey, String model, String url, long retryBaseMs,
-                   Optional<ProxySelector> proxy) {
+    public VoyageReranker(String apiKey, String model, String url, long retryBaseMs,
+                          Optional<ProxySelector> proxy) {
         this.apiKey = apiKey;
         this.model = model;
         this.url = url;
