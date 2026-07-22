@@ -160,3 +160,60 @@ class TestConstructionEvidenceGate:
 
         assert http_token_store._resolve_endpoint is se.resolve_service_endpoint_with_evidence_gate
         assert http_scratch_store._resolve_endpoint is se.resolve_service_endpoint_with_evidence_gate
+
+
+class TestAdopterOverridesForwardIdempotent:
+    """Review 2026-07-22 (bugcluster): HttpAspectQueue's original ``_post``
+    override silently DROPPED the new ``idempotent`` kwarg — a caller
+    passing it got a TypeError in production. Four sibling stores carried
+    the identical latent trap. This tripwire inspects EVERY
+    RefreshableHttpStoreMixin adopter in nexus.db: any override of the
+    transport verbs must both ACCEPT and FORWARD ``idempotent``.
+    """
+
+    def _adopters(self):
+        import importlib
+        import inspect
+        import pkgutil
+
+        import nexus.db as dbpkg
+        from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
+
+        for mod in pkgutil.walk_packages(dbpkg.__path__, prefix="nexus.db."):
+            try:
+                m = importlib.import_module(mod.name)
+            except Exception:  # pragma: no cover — optional deps
+                continue
+            for _, cls in inspect.getmembers(m, inspect.isclass):
+                if (
+                    issubclass(cls, RefreshableHttpStoreMixin)
+                    and cls is not RefreshableHttpStoreMixin
+                    and cls.__module__ == mod.name
+                ):
+                    yield cls
+
+    def test_every_transport_verb_override_accepts_and_forwards(self) -> None:
+        import inspect
+
+        from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
+
+        verbs = ("_send", "_post", "_get", "_delete")
+        adopters = list(self._adopters())
+        assert len(adopters) >= 5, f"adopter discovery broke: {adopters}"
+        offenders = []
+        for cls in adopters:
+            for verb in verbs:
+                fn = cls.__dict__.get(verb)
+                if fn is None:  # inherited — mixin handles it
+                    continue
+                sig = inspect.signature(fn)
+                if "idempotent" not in sig.parameters:
+                    offenders.append(f"{cls.__name__}.{verb}: kwarg not accepted")
+                    continue
+                src = inspect.getsource(fn)
+                if "idempotent=idempotent" not in src:
+                    offenders.append(f"{cls.__name__}.{verb}: accepted but not forwarded")
+        assert not offenders, (
+            "transport-verb overrides must accept AND forward idempotent "
+            "(the HttpAspectQueue TypeError class): " + "; ".join(offenders)
+        )

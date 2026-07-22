@@ -91,33 +91,6 @@ public final class PgContainerHelper {
         return c;
     }
 
-    /**
-     * Open a superuser JDBC connection with bounded retry (nexus-1hj1d).
-     *
-     * <p>The post-start {@code pg.createConnection("")} calls in each
-     * class's {@code @BeforeAll} (role creation, Liquibase) bypass the
-     * container's own startup probe loop and can land in the same
-     * transient window the startup probe survives. Five attempts, capped
-     * exponential backoff (0.2s/0.4s/0.8s/1.6s/3.2s) — a healthy
-     * container connects on attempt one; a genuinely dead one still fails
-     * loud within ~6s.
-     */
-    public static java.sql.Connection connect(PostgreSQLContainer<?> c) throws Exception {
-        Exception last = null;
-        long delayMs = 200;
-        for (int attempt = 1; attempt <= 5; attempt++) {
-            try {
-                return c.createConnection("");
-            } catch (Exception e) {
-                last = e;
-                if (attempt < 5) {
-                    Thread.sleep(delayMs);
-                    delayMs *= 2;
-                }
-            }
-        }
-        throw last;
-    }
 
     /**
      * Return a pooled superuser DataSource.

@@ -166,6 +166,34 @@ def _t3_collection_names(t3: "ClientAPI") -> list[str]:
     ]
 
 
+def _raise_if_unreadable(unreadable: int, hex_chash: str, scanned: int) -> None:
+    """Raise ``VectorServiceError`` when *unreadable* collections exist.
+
+    nexus-ou4tb/nexus-ib6uy: N collections were unreadable (degraded
+    vector service), so a "no match" verdict is an INCOMPLETE scan, not
+    a clean not-found. Loud — and RAISED: a not-found over a scan that
+    couldn't read must be distinguishable at the API boundary
+    (unreachable ≠ empty). Also invoked from the deadline-timeout exits
+    (review 2026-07-22): a timeout AFTER service failures is equally
+    incomplete. No-op when *unreadable* is 0.
+    """
+    if not unreadable:
+        return
+    _log.warning(
+        "resolve_chash_fallback_incomplete_service_degraded",
+        chash_prefix=hex_chash[:16],
+        unreadable_collections=unreadable,
+        scanned_collections=scanned,
+    )
+    from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — circular-dep avoidance: nexus.db imports catalog
+
+    raise VectorServiceError(
+        f"chash resolution incomplete: {unreadable} "
+        f"collection(s) unreadable (vector service degraded) — "
+        f"not-found cannot be concluded for {hex_chash[:16]}…"
+    )
+
+
 def fallback_chash_scan(
     *,
     hex_chash: str,
@@ -245,6 +273,11 @@ def fallback_chash_scan(
                     chash_prefix=hex_chash[:16],
                     deadline_s=_CHASH_FALLBACK_DEADLINE_S,
                 )
+                # Review (bugcluster): a timeout AFTER service failures is an
+                # incomplete scan too — widespread degradation slows every
+                # probe toward the deadline; not-found still cannot be
+                # concluded (nexus-ib6uy).
+                _raise_if_unreadable(svc_failures + prior_unreadable, hex_chash, len(all_cols))
                 return None
 
             done, _pending = wait(
@@ -258,6 +291,7 @@ def fallback_chash_scan(
                     chash_prefix=hex_chash[:16],
                     deadline_s=_CHASH_FALLBACK_DEADLINE_S,
                 )
+                _raise_if_unreadable(svc_failures + prior_unreadable, hex_chash, len(all_cols))
                 return None
 
             for fut in done:
@@ -290,25 +324,7 @@ def fallback_chash_scan(
                     coll=coll, doc_id=doc_id, span_result=span_res,
                 )
 
-        if svc_failures or prior_unreadable:
-            # nexus-ou4tb/nexus-ib6uy: N collections were unreadable
-            # (degraded vector service), so this "no match" is an
-            # INCOMPLETE scan, not a clean not-found. Loud — and RAISED:
-            # a not-found verdict over a scan that couldn't read must be
-            # distinguishable at the API boundary (unreachable ≠ empty).
-            _log.warning(
-                "resolve_chash_fallback_incomplete_service_degraded",
-                chash_prefix=hex_chash[:16],
-                unreadable_collections=svc_failures + prior_unreadable,
-                scanned_collections=len(all_cols),
-            )
-            from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — circular-dep avoidance: nexus.db imports catalog
-
-            raise VectorServiceError(
-                f"chash resolution incomplete: {svc_failures + prior_unreadable} "
-                f"collection(s) unreadable (vector service degraded) — "
-                f"not-found cannot be concluded for {hex_chash[:16]}…"
-            )
+        _raise_if_unreadable(svc_failures + prior_unreadable, hex_chash, len(all_cols))
         return None
     finally:
         ex.shutdown(wait=False, cancel_futures=True)

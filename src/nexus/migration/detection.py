@@ -797,6 +797,18 @@ def open_read_legs(
         # half-configured / unconfigured cloud leg — absent, not an error
         cloud = None
     except Exception as exc:  # noqa: BLE001 — nexus-dv708: DEAD-cred / transport failures degrade LOUD, never crash detection
+        # Critique narrowing: only the OBSERVED dead-leg shapes degrade —
+        # chromadb's ChromaError family (revoked key at CloudClient
+        # construction) and ValueError (chromadb wraps httpx transport
+        # failures). A programming bug (TypeError/AttributeError from a
+        # bad refactor) must still crash loud, not re-file itself as an
+        # unreadable leg. chromadb import deferred: optional heavy dep.
+        try:
+            from chromadb.errors import ChromaError  # noqa: PLC0415 — deferred import; optional heavy dep
+        except ImportError:  # pragma: no cover — chromadb absent: no cloud leg possible anyway
+            ChromaError = ()  # type: ignore[assignment,misc]
+        if not isinstance(exc, (ChromaError, ValueError)):
+            raise
         # A CONFIGURED cloud leg whose credentials are dead (revoked key →
         # chromadb ChromaError/AuthError at CloudClient construction) or
         # whose host is unreachable (httpx transport wrapped as ValueError

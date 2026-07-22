@@ -136,10 +136,12 @@ def _is_retryable_endpoint_error(exc: Exception) -> bool:
       handling, not transport staleness).
     - ``httpx.RemoteProtocolError``: the supervisor SIGTERMs the JVM
       process group on restart, so a request IN FLIGHT at restart time can
-      see the connection reset rather than refused. Every ``_post``/``_get``
-      caller in this mixin's target classes issues idempotent requests
-      (upserts, reads, deletes keyed by natural id), so a single retry
-      after a mid-flight reset is safe.
+      see the connection reset rather than refused. Callers that reach
+      this classifier are retry-safe BY CONTRACT (nexus-tjvgf): the
+      non-idempotent verbs (queue claims, ``mark_retry``,
+      ``put_or_merge``) pass ``idempotent=False`` and bypass both retry
+      axes entirely — the old blanket "every caller is idempotent" claim
+      is retired; the opt-out is the mechanism that makes it true here.
     - Bare ``ConnectionRefusedError`` / ``ConnectionResetError``: defensive
       fallback in case a lower transport layer raises the raw OS error
       instead of httpx's wrapped exception type.

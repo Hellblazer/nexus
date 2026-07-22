@@ -1739,3 +1739,25 @@ class TestOpenReadLegsDeadCloudCreds:
         assert not any(
             e["event"] == "detection.cloud_read_leg_unreadable" for e in logs
         )
+
+
+class TestOpenReadLegsProgrammingErrorPropagates:
+    """nexus-dv708 negative arm: the cloud-leg narrowing catches ONLY
+    (ChromaError, ValueError) — a programming error (TypeError from a bad
+    refactor) must ESCAPE open_read_legs, never re-file itself as an
+    unreadable-leg warning."""
+
+    def test_typeerror_escapes(self, monkeypatch, tmp_path) -> None:
+        import nexus.migration.chroma_read as cr
+        from nexus.migration import detection
+
+        def _cloud_bug() -> object:
+            raise TypeError("bug in the leg, not a dead credential")
+
+        def _local_absent(path) -> object:
+            raise FileNotFoundError(path)
+
+        monkeypatch.setattr(cr, "open_cloud_read_client", _cloud_bug)
+        monkeypatch.setattr(cr, "open_local_read_client", _local_absent)
+        with pytest.raises(TypeError):
+            detection.open_read_legs(tmp_path / "nope")

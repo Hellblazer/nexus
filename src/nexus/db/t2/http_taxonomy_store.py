@@ -185,12 +185,12 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     # super()._post/_get (RefreshableHttpStoreMixin._send), never
     # self._client directly.
 
-    def _post(self, path: str, body: dict[str, Any]) -> Any:
-        return super()._post(f"/v1/taxonomy{path}", body)
+    def _post(self, path: str, body: dict[str, Any], *, idempotent: bool = True) -> Any:
+        return super()._post(f"/v1/taxonomy{path}", body, idempotent=idempotent)
 
-    def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+    def _get(self, path: str, params: dict[str, Any] | None = None, *, idempotent: bool = True) -> Any:
         q = {k: str(v) for k, v in (params or {}).items() if v is not None}
-        return super()._get(f"/v1/taxonomy{path}", q)
+        return super()._get(f"/v1/taxonomy{path}", q, idempotent=idempotent)
 
     # ── Topics ─────────────────────────────────────────────────────────────────
 

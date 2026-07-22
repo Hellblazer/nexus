@@ -146,6 +146,113 @@ class TestCatalogSpans:
         )
         assert row["unreadable_collections"] == 2
 
+    def test_composite_prior_unreadable_added_to_scan_failures(
+        self, monkeypatch,
+    ) -> None:
+        """fallback_chash_scan: unreadable collections observed BEFORE the
+        scan (prior_unreadable) compose with scan-time failures — the
+        raise carries the sum."""
+        monkeypatch.setattr(
+            spans, "_t3_collection_names", lambda t3: ["code__a"],
+        )
+        def _raise(*a, **k):
+            raise _BOOM
+        monkeypatch.setattr(spans, "resolve_span_in_t3", _raise)
+        spans.reset_chash_fallback_warning_for_tests()
+        with capture_logs() as logs, pytest.raises(VectorServiceError):
+            spans.fallback_chash_scan(
+                span="chash:" + "ab" * 32,
+                hex_chash="ab" * 32,
+                t3=_RaisingT3(),
+                build_ref=lambda **kw: kw,
+                prior_unreadable=1,
+            )
+        row = next(
+            e for e in logs
+            if e["event"] == "resolve_chash_fallback_incomplete_service_degraded"
+        )
+        assert row["unreadable_collections"] == 2  # 1 scan + 1 prior
+
+    def test_timeout_after_service_failures_still_raises(
+        self, monkeypatch,
+    ) -> None:
+        """The deadline-timeout exits must NOT read as clean not-found when
+        service failures were already observed (review 2026-07-22): a
+        degraded service slowing every probe toward the deadline is the
+        same incomplete-scan condition as an exhausted scan."""
+        import time as _time
+
+        monkeypatch.setattr(
+            spans, "_t3_collection_names", lambda t3: ["code__a", "code__b"],
+        )
+
+        def _probe(span, coll, t3):
+            if coll == "code__a":
+                raise _BOOM  # fast service failure, counted before timeout
+            _time.sleep(2.0)  # stalls past the shrunk deadline
+            return None
+
+        monkeypatch.setattr(spans, "resolve_span_in_t3", _probe)
+        monkeypatch.setattr(spans, "_CHASH_FALLBACK_DEADLINE_S", 0.3)
+        spans.reset_chash_fallback_warning_for_tests()
+        with capture_logs() as logs, pytest.raises(VectorServiceError):
+            spans.fallback_chash_scan(
+                span="chash:" + "ab" * 32,
+                hex_chash="ab" * 32,
+                t3=_RaisingT3(),
+                build_ref=lambda **kw: kw,
+            )
+        events = _events(logs)
+        assert "resolve_chash_fallback_timeout" in events
+        assert "resolve_chash_fallback_incomplete_service_degraded" in events
+
+    def test_timeout_with_only_prior_unreadable_raises(
+        self, monkeypatch,
+    ) -> None:
+        """An immediately-expired deadline (deadline 0) with prior
+        unreadable collections raises through the FIRST timeout exit."""
+        monkeypatch.setattr(
+            spans, "_t3_collection_names", lambda t3: ["code__a"],
+        )
+        import time as _time
+        monkeypatch.setattr(
+            spans, "resolve_span_in_t3",
+            lambda *a, **k: _time.sleep(2.0),
+        )
+        monkeypatch.setattr(spans, "_CHASH_FALLBACK_DEADLINE_S", 0.0)
+        spans.reset_chash_fallback_warning_for_tests()
+        with pytest.raises(VectorServiceError):
+            spans.fallback_chash_scan(
+                span="chash:" + "ab" * 32,
+                hex_chash="ab" * 32,
+                t3=_RaisingT3(),
+                build_ref=lambda **kw: kw,
+                prior_unreadable=1,
+            )
+
+    def test_timeout_clean_misses_still_returns_none(
+        self, monkeypatch,
+    ) -> None:
+        """Timeout with ZERO failures keeps the existing contract: plain
+        None (slow-but-healthy service, span genuinely may not exist)."""
+        import time as _time
+
+        monkeypatch.setattr(
+            spans, "_t3_collection_names", lambda t3: ["code__a"],
+        )
+        monkeypatch.setattr(
+            spans, "resolve_span_in_t3",
+            lambda *a, **k: _time.sleep(2.0),
+        )
+        monkeypatch.setattr(spans, "_CHASH_FALLBACK_DEADLINE_S", 0.3)
+        spans.reset_chash_fallback_warning_for_tests()
+        assert spans.fallback_chash_scan(
+            span="chash:" + "ab" * 32,
+            hex_chash="ab" * 32,
+            t3=_RaisingT3(),
+            build_ref=lambda **kw: kw,
+        ) is None
+
 
 class TestIndexerLegacyPrune:
     def test_legacy_in_prune_service_degraded_warns_and_continues(

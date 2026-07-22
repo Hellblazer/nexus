@@ -124,9 +124,9 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     def _post(self, path: str, body: dict[str, Any], *, idempotent: bool = True) -> Any:
         return super()._post(f"/v1/aspects/queue{path}", body, idempotent=idempotent)
 
-    def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+    def _get(self, path: str, params: dict[str, Any] | None = None, *, idempotent: bool = True) -> Any:
         q = {k: str(v) for k, v in (params or {}).items() if v is not None}
-        return super()._get(f"/v1/aspects/queue{path}", q)
+        return super()._get(f"/v1/aspects/queue{path}", q, idempotent=idempotent)
 
     # ── Public API — mirrors AspectExtractionQueue ────────────────────────────
 
