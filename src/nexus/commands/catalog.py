@@ -178,8 +178,17 @@ def _get_catalog_writer():
     """
     from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     from nexus.config import catalog_path  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
-    if not Catalog.is_initialized(catalog_path()):
+    # nexus-kmo9h: in service mode the Java service owns the catalog — no
+    # local state is required (a fresh box legitimately has none), and the
+    # old unconditional gate raised a FALSE "run 'nx catalog setup'"
+    # diagnostic on healthy installs. The local check applies only to the
+    # SQLite opt-out mode.
+    if (
+        storage_backend_for("catalog") != StorageBackend.SERVICE
+        and not Catalog.is_initialized(catalog_path())
+    ):
         raise click.ClickException(
             "Catalog not initialized. Run 'nx catalog setup' to create and populate it."
         )
@@ -298,6 +307,19 @@ def setup_cmd(remote: str) -> None:
     this, 'nx catalog search' and 'nx catalog links' work immediately.
     """
     from nexus.config import catalog_path  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+
+    # nexus-kmo9h: in service mode the nexus service owns the live catalog;
+    # creating a local one here builds a divergent SQLite substrate the
+    # service never reads (and flips other legacy local-presence checks
+    # into passing against empty data). Refuse rather than diverge.
+    if storage_backend_for("catalog") == StorageBackend.SERVICE:
+        raise click.ClickException(
+            "Service mode: the nexus service owns the catalog — there is no "
+            "local catalog to set up. 'nx catalog search' and 'nx catalog "
+            "links' already work against the service. (To operate on a "
+            "local catalog, opt out with NX_STORAGE_BACKEND_CATALOG=sqlite.)"
+        )
 
     path = catalog_path()
     if not Catalog.is_initialized(path):

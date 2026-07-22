@@ -295,6 +295,18 @@ Every step below is **required**. Missing any one of them has caused problems in
 
    Forgetting any one fails CI parity; forgetting `source.ref` ships a release that installed Claude Code users never receive.
 
+7a. **Run the fresh-install MVV** (~3-5 min; downloads on first run)
+   ```bash
+   ./tests/e2e/fresh-install-mvv.sh
+   ```
+   The virgin-journey gate (nexus-nolqs): wheel under test → scrubbed-env
+   virgin HOME → local init (ladder converged) → store/index with
+   engine-catalog registration asserted → search → doctor (zero ✗, empty
+   warnings allowlist). Complements the upgrade-axis gates (rehearsal,
+   era-hop, guided) which all start from a populated install — the
+   2026-07-21 fresh-box defect class was invisible to every one of them.
+   Must end `FRESH-INSTALL MVV PASSED`.
+
 7b. **Run the sandbox smoke** (~2 min)
    ```bash
    ./tests/e2e/release-sandbox.sh smoke

@@ -6,6 +6,67 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.16.0] - 2026-07-21
+
+Ships with (and requires) engine-service-v0.1.51 (unchanged from 6.15.0).
+
+The fresh-install release: every mode of nexus — green (virgin install),
+upgrade (migrated box), and cloud (managed) — now completes the full data
+journey, proven by a new release gate that runs it end-to-end.
+
+### Fixed
+
+- **Fresh service-mode installs register documents in the engine catalog
+  again.** A family of pre-service-era local presence checks
+  (`Catalog.is_initialized` on a directory that legitimately doesn't exist
+  when the service owns the catalog) silently skipped catalog registration
+  for `nx store put`, PDF and markdown indexing, DEVONthink stamping,
+  enrichment links, and the post-delete tombstone reap on every virgin box —
+  documents landed in T3 but were invisible to catalog-routed search.
+  Migrated boxes passed these gates only by accident of the frozen
+  migration-source `.catalog.db` on disk. All sites now delegate presence to
+  the catalog factory; two exact-count census tripwires keep both shapes of
+  the class (presence gates and raw local-catalog constructions) from
+  regrowing. (nexus-f1itv, nexus-e9ru2, nexus-kmo9h)
+- **`nx catalog setup` refuses to create a divergent local catalog in
+  service mode**, and the catalog writer helper no longer raises a false
+  "run 'nx catalog setup'" on healthy service-mode boxes. Local-artifact
+  doctor verbs keep their local-only semantics with mode-honest diagnostics.
+- **Migrated boxes: audits and identity probes stop reading the frozen
+  catalog.** The document-aspects doc-id probe routes through the service
+  catalog; the collection-audit orphans leg degrades explicitly ("skipped —
+  no local catalog to audit") instead of reporting stale data as live.
+- **An ambient `VOYAGE_API_KEY` no longer flips a bge-768 local install
+  voyage-only.** The supervisor plumbs the Voyage key to the engine only
+  when the configured `local.embed_model` is a voyage model (or unset —
+  legacy behavior preserved); an explicit `NX_VOYAGE_API_KEY` always wins.
+  Previously the first `nx store put` on such an install failed with
+  HTTP 422. (nexus-r5f3c)
+- **A virgin box's first `nx doctor` is clean.** `nx init` converges the
+  upgrade ladder once the backend serves (no more vacuous pending
+  chash-rekey rung or missing diagnostic view); MinerU is probed only when
+  actually provisioned (a ✗ now means a provisioned server went stale);
+  missing ripgrep renders as an optional-accelerator advisory with install
+  hints instead of a failed doctor; and the bge→tier-0 embedder warning no
+  longer fires in service mode, where bge-768 is the service's embedder and
+  the Python-side fallback is by design. (nexus-9xfx5)
+- The markdown catalog hook's failure path is loud (WARNING + audit row,
+  matching the PDF hook) instead of a DEBUG swallow. (nexus-ou4tb site)
+
+### Added
+
+- **`tests/e2e/fresh-install-mvv.sh` — the virgin-journey release gate**
+  (nexus-nolqs), now a required release-checklist step: wheel under test →
+  scrubbed-env virgin HOME → local init (engine signature-verified, portable
+  PG, bge-768) → ladder converged → store + index with engine-catalog
+  registration asserted → search → doctor with zero ✗ / zero ⚠ / an empty
+  warnings allowlist. Caught four real journey defects during its own
+  shakedown before passing.
+- `nexus.config.mineru_server_provisioned()` — explicit provisioned-ness
+  predicate for the MinerU server.
+- `AuditReport.orphans_checked` — collection audits distinguish "checked,
+  clean" from "couldn't check".
+
 ## [6.15.0] - 2026-07-21
 
 Ships with (and requires) engine-service-v0.1.51.

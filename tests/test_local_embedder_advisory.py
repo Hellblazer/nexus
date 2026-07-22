@@ -70,3 +70,47 @@ class TestState2DegradedBge:
         # the degraded-bge message must call out the chosen-but-missing
         # state, not merely repeat the generic upgrade nudge.
         assert s1.detail != s2.detail
+
+
+class TestResolverServiceModeWarning:
+    """nexus-9xfx5 (fresh-install MVV finding #4): in service mode the
+    ``local.embed_model`` key records the SERVICE embedder — T3 embeds
+    bge-768 server-side and the Python EF serves only T1/local paths where
+    tier-0 is by design (nexus-ybw87). The bge-fallback WARNING must not
+    fire there (it fired on every doctor run of a fresh service install);
+    it stays for the genuine local-mode degradation."""
+
+    def _resolve(self, monkeypatch, *, service_mode: bool):
+        import nexus.db.local_ef as local_ef
+
+        monkeypatch.setattr(
+            "nexus.config.local_embed_model_choice", lambda: _TIER1_MODEL
+        )
+        monkeypatch.setattr(local_ef, "_fastembed_available", lambda: False)
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client.is_vector_service_mode",
+            lambda: service_mode,
+        )
+        events: list[str] = []
+        monkeypatch.setattr(
+            local_ef, "_log",
+            type("L", (), {
+                "warning": lambda self, event, **kw: events.append(event),
+            })(),
+        )
+        return local_ef._resolve_local_model(warn=True), events
+
+    def test_service_mode_no_warning_tier0_returned(self, monkeypatch):
+        model, events = self._resolve(monkeypatch, service_mode=True)
+        assert model == _TIER0_MODEL
+        assert events == [], (
+            "service mode: bge is the SERVICE's embedder — the Python-side "
+            "fallback is by design, not a degradation"
+        )
+
+    def test_local_mode_warning_preserved(self, monkeypatch):
+        model, events = self._resolve(monkeypatch, service_mode=False)
+        assert model == _TIER0_MODEL
+        assert events == ["local_embed_model_unavailable"], (
+            "genuine local-mode degradation must stay loud"
+        )

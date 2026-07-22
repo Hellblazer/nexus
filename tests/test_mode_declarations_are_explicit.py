@@ -109,7 +109,11 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 72
 # `_cls` helper has always used — so the set did not need to grow. Preferred to
 # an exclusion: the tests read better without duplicated magic strings, and an
 # exclusion the lint does not need is dead weight the ratchet then guards.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 55
+# 55→56 (nexus-r5f3c, 2026-07-21): test_voyage_configured_model_still_plumbs —
+# "string-literal-as-config-value"; the supervisor env-plumbing mirror case
+# needs the literal voyage model name as a CONFIG value, Popen mocked, no
+# embedder constructed. Rationale in conftest.py beside the entry.
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 56
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:

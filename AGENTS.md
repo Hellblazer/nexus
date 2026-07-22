@@ -134,6 +134,7 @@ If it exits non-zero, STOP — do not proceed with the PyPI release; cut + deplo
 
 
 1. **Run unit + integration suite.** `uv run pytest` and `uv run pytest -m integration`. Both must pass — integration is excluded from CI and is your last line of defense.
+1b. **Run the fresh-install MVV.** `./tests/e2e/fresh-install-mvv.sh` (nexus-nolqs). The VIRGIN-journey gate — every other E2E gate tests the upgrade axis from a populated install, and the unit suite pins the SQLite opt-out backend, which is how the 2026-07-21 fresh-box defect class (f1itv/e9ru2/kmo9h/r5f3c/9xfx5) shipped unseen. Builds the wheel under test, then on a scrubbed-env virgin HOME: local init (engine + portable PG + bge-768), ladder converged at init, store put + index md with ENGINE-CATALOG registration asserted (not just T3 chunks), semantic search returns both, doctor with zero ✗ and an empty warnings allowlist. Must end `FRESH-INSTALL MVV PASSED`.
 2. **Audit docs against changes since last tag.** `git log --oneline v<prev>..HEAD` then check `docs/cli-reference.md`, `docs/architecture.md`, `README.md` for user-visible drift.
 3. **Bump version in all four manifests AND both `source.ref` fields** (CI enforces parity):
    - `pyproject.toml` — `version = "X.Y.Z"`

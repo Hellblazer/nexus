@@ -822,11 +822,16 @@ def _check_tools() -> list[HealthResult]:
 
     # ripgrep
     rg_path = shutil.which("rg")
+    # nexus-9xfx5 (fresh-install MVV finding #3): rg is an OPTIONAL system
+    # accelerator that `pip install conexus` can never provide — its absence
+    # is a degradation (hybrid search off), not a broken install. Render it
+    # like an uninstalled git hook: ✓ with the detail + install suggestions,
+    # never a red ✗ / non-zero doctor exit on a virgin box.
     r = HealthResult(
         label="ripgrep   (rg)",
-        ok=bool(rg_path),
-        detail=rg_path or "not found — hybrid search disabled",
-        fatal=True,
+        ok=True,
+        detail=rg_path or "not installed — hybrid search disabled (optional)",
+        fatal=False,
     )
     if not rg_path:
         # nexus-njmg (GH #622): winget --scope user avoids UAC-prompt
@@ -1248,10 +1253,18 @@ def _check_mineru_server() -> list[HealthResult]:
     subsequent session. ``nx doctor`` is the natural place to surface
     that drift.
     """
-    from nexus.config import get_mineru_server_url  # noqa: PLC0415 — heavy/optional dependency deferred to call time
+    from nexus.config import get_mineru_server_url, mineru_server_provisioned  # noqa: PLC0415 — heavy/optional dependency deferred to call time
     import httpx as _httpx  # noqa: PLC0415 — heavy/optional dependency deferred to call time
 
     try:
+        # nexus-9xfx5 (reviewer-3modes H1): never probe the built-in default
+        # URL on a box where no server was ever provisioned — every fresh
+        # install rendered a red ✗ ("unreachable ... OOM-risk") in the
+        # DEFAULT doctor flow. Unprovisioned → no result row (MinerU is
+        # opt-in); a ✗ now means a PROVISIONED server went stale — exactly
+        # the drift this check exists to surface.
+        if not mineru_server_provisioned():
+            return []
         url = get_mineru_server_url()
     except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
         return []

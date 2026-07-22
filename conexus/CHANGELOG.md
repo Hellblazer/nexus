@@ -4,6 +4,12 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.16.0] - 2026-07-21
+
+Plugin version aligned with conexus 6.16.0. No plugin-side changes; the
+release carries the fresh-install journey fixes and the new virgin-journey
+release gate (see the root CHANGELOG).
+
 ## [6.15.0] - 2026-07-21
 
 Plugin version aligned with conexus 6.15.0. No plugin-side changes.

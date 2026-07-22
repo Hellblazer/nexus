@@ -823,6 +823,12 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # already offending before P4 and went unnoticed because this arc ran
     # narrow, path-scoped selections — this lint only fires when the full
     # session is collected, so `pytest tests/upgrade/` alone never sees it.
+    # nexus-r5f3c — reason: "string-literal-as-config-value". The test's
+    # subject is the SUPERVISOR's env-plumbing gate: a legacy config with
+    # local.embed_model="voyage-context-3" must still plumb the credential
+    # chain (the mirror of the bge-blocks-plumb case). Popen is mocked; no
+    # embedder or cloud call exists. cloud_mode would change nothing.
+    "tests/daemon/test_storage_service_daemon.py::TestSpawnServiceVoyageKeyPlumbing::test_voyage_configured_model_still_plumbs",
     "tests/upgrade/test_rollback_via_map.py::test_cross_model_rollback_deletes_from_recorded_target",
     "tests/upgrade/test_rollback_via_map.py::test_cross_model_conformant_ids_roll_back_via_target_names",
     "tests/upgrade/test_substrate_leg.py::test_execute_cross_model_leg_targets_remapped_collection",

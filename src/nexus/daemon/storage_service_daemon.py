@@ -536,19 +536,38 @@ class StorageServiceSupervisor:
         # through the nexus credential chain (VOYAGE_API_KEY env > config.yml
         # credentials) so `nx daemon service start` works without manual env
         # plumbing. An explicit NX_VOYAGE_API_KEY in the caller's env wins.
+        #
+        # nexus-r5f3c: the configured local embed model is the INTENT record.
+        # `nx init` (local mode) provisions bge-768 and saves
+        # ``local.embed_model``; plumbing an ambient VOYAGE_API_KEY anyway
+        # flipped the engine voyage-only and 422'd the first store against
+        # the bge collections the client builds — a broken first-run for any
+        # user with a Voyage key exported. Plumb from the chain only when
+        # the configured model IS a voyage model, or when no choice was
+        # recorded (pre-init / legacy voyage-local installs keep today's
+        # behavior). Explicit NX_VOYAGE_API_KEY still always passes through.
         if not env.get("NX_VOYAGE_API_KEY"):
-            from nexus.config import get_credential  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
-            voyage_key = get_credential("voyage_api_key")
-            if voyage_key:
-                env["NX_VOYAGE_API_KEY"] = voyage_key
-                _log.info("storage_service_voyage_key_resolved", source="credential_chain")
-            else:
-                _log.warning(
-                    "storage_service_no_voyage_key",
-                    embedding_mode="onnx-local",
-                    consequence="voyage-* collections will be refused (HTTP 422)",
-                    hint="set VOYAGE_API_KEY or `nx config set voyage_api_key <key>`",
+            from nexus.config import get_credential, local_embed_model_choice  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
+            embed_choice = local_embed_model_choice() or ""
+            if embed_choice and not embed_choice.lower().startswith("voyage"):
+                _log.info(
+                    "storage_service_voyage_key_not_plumbed",
+                    configured_embed_model=embed_choice,
+                    reason="local.embed_model configures a non-voyage embedder; "
+                           "set NX_VOYAGE_API_KEY explicitly to override",
                 )
+            else:
+                voyage_key = get_credential("voyage_api_key")
+                if voyage_key:
+                    env["NX_VOYAGE_API_KEY"] = voyage_key
+                    _log.info("storage_service_voyage_key_resolved", source="credential_chain")
+                else:
+                    _log.warning(
+                        "storage_service_no_voyage_key",
+                        embedding_mode="onnx-local",
+                        consequence="voyage-* collections will be refused (HTTP 422)",
+                        hint="set VOYAGE_API_KEY or `nx config set voyage_api_key <key>`",
+                    )
 
         # Launch artifact: native binary (argv[0] = binary) or, when explicitly
         # opted in via NEXUS_SERVICE_JAR, the JVM (argv = java -jar <jar>). The

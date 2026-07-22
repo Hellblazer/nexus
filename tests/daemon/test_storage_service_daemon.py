@@ -1166,6 +1166,54 @@ class TestSpawnServiceVoyageKeyPlumbing:
             env = self._spawn_env(config_dir, clock, monkeypatch)
         assert "NX_VOYAGE_API_KEY" not in env
 
+    # -- nexus-r5f3c: the configured local embed model is the intent record --
+
+    def test_bge_configured_model_blocks_chain_plumbing(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nx init saved local.embed_model=bge — an ambient VOYAGE_API_KEY
+        must NOT flip the engine voyage-only (it 422'd the first store on
+        every fresh local install whose shell exported a Voyage key)."""
+        monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
+        monkeypatch.setenv("VOYAGE_API_KEY", "ambient-key-must-not-plumb")
+        with patch(
+            "nexus.config.local_embed_model_choice",
+            return_value="BAAI/bge-base-en-v1.5",
+        ), patch("nexus.config.get_credential") as get_cred:
+            env = self._spawn_env(config_dir, clock, monkeypatch)
+        get_cred.assert_not_called()
+        assert "NX_VOYAGE_API_KEY" not in env
+
+    def test_bge_configured_model_explicit_override_still_wins(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An EXPLICIT NX_VOYAGE_API_KEY is caller intent — it overrides the
+        configured model and passes through unchanged."""
+        monkeypatch.setenv("NX_VOYAGE_API_KEY", "explicit-key")
+        with patch(
+            "nexus.config.local_embed_model_choice",
+            return_value="BAAI/bge-base-en-v1.5",
+        ):
+            env = self._spawn_env(config_dir, clock, monkeypatch)
+        assert env["NX_VOYAGE_API_KEY"] == "explicit-key"
+
+    def test_voyage_configured_model_still_plumbs(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A voyage-configured local install keeps the chain plumbing (the
+        mirror failure — ONNX-only engine refusing voyage-* collections —
+        must not be introduced by the r5f3c fix)."""
+        monkeypatch.delenv("NX_VOYAGE_API_KEY", raising=False)
+        with patch(
+            "nexus.config.local_embed_model_choice",
+            return_value="voyage-context-3",
+        ), patch(
+            "nexus.config.get_credential", return_value="chain-key",
+        ) as get_cred:
+            env = self._spawn_env(config_dir, clock, monkeypatch)
+        get_cred.assert_called_once_with("voyage_api_key")
+        assert env["NX_VOYAGE_API_KEY"] == "chain-key"
+
 
 class TestNativeStartHasNoSchemaSkewGate:
     """RDR-161: the JVM-only schema-skew gate (nexus-pebfx.4) is expunged with

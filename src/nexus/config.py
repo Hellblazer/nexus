@@ -288,6 +288,23 @@ def get_mineru_server_url(repo_root: Path | None = None) -> str:
     return configured
 
 
+def mineru_server_provisioned(repo_root: Path | None = None) -> bool:
+    """Return True when a MinerU server is actually provisioned.
+
+    Provisioned means an explicit non-default ``pdf.mineru_server_url``
+    (operator intent, RDR-148 Gap 1) OR a live pid-file server from
+    ``nx mineru start``. False when ``get_mineru_server_url`` would fall
+    through to the built-in default — i.e. nothing was ever set up.
+
+    nexus-9xfx5: ``nx doctor`` uses this to render an unprovisioned
+    MinerU as a not-configured skip instead of a red ✗ probing the
+    built-in default URL on every fresh install.
+    """
+    if get_pdf_config(repo_root).mineru_server_url != _MINERU_DEFAULT_URL:
+        return True
+    return _read_live_mineru_port() is not None
+
+
 def get_mineru_configured_fixed_port(repo_root: Path | None = None) -> int | None:
     """Return the port from an explicit, non-default local ``mineru_server_url``.
 

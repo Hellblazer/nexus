@@ -154,9 +154,13 @@ def _which_missing(name):
 
 
 def test_doctor_missing_rg(runner, mock_reg):
+    """nexus-9xfx5 (fresh-install MVV finding #3): rg is an optional system
+    accelerator pip can never provide — its absence renders like an
+    uninstalled git hook (✓ + detail + install hints), NOT a failed doctor.
+    Exit 0: a virgin box without ripgrep is healthy, just degraded."""
     result = _invoke(runner, mock_reg, which=_which_missing)
-    assert result.exit_code == 1
-    assert "not found" in result.output
+    assert result.exit_code == 0
+    assert "not installed" in result.output
     assert "hybrid search disabled" in result.output
     assert "brew install ripgrep" in result.output
 

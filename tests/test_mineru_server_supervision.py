@@ -28,6 +28,8 @@ from nexus.health import _check_mineru_server
 def test_check_mineru_server_pass_when_reachable() -> None:
     fake_resp = MagicMock(status_code=200)
     with patch(
+        "nexus.config.mineru_server_provisioned", return_value=True,
+    ), patch(
         "nexus.config.get_mineru_server_url",
         return_value="http://127.0.0.1:8010",
     ), patch("httpx.get", return_value=fake_resp):
@@ -38,7 +40,11 @@ def test_check_mineru_server_pass_when_reachable() -> None:
 
 
 def test_check_mineru_server_fail_when_unreachable() -> None:
+    """A PROVISIONED server that went stale must still render the red ✗ —
+    that drift is exactly what this check exists to surface."""
     with patch(
+        "nexus.config.mineru_server_provisioned", return_value=True,
+    ), patch(
         "nexus.config.get_mineru_server_url",
         return_value="http://127.0.0.1:49353",
     ), patch(
@@ -53,9 +59,24 @@ def test_check_mineru_server_fail_when_unreachable() -> None:
     assert any("config.yml" in s for s in results[0].fix_suggestions)
 
 
+def test_check_mineru_server_skips_unprovisioned_fresh_box() -> None:
+    """nexus-9xfx5 (reviewer-3modes H1): the DEFAULT doctor flow must not
+    probe the built-in default URL on a box where no MinerU server was
+    ever provisioned — every fresh install rendered a red ✗ otherwise.
+    This is the always-on `run_health_checks` leg, NOT --check-mineru."""
+    with patch(
+        "nexus.config.mineru_server_provisioned", return_value=False,
+    ), patch("httpx.get") as probe:
+        results = _check_mineru_server()
+    assert results == [], "unprovisioned box must produce no MinerU result row"
+    probe.assert_not_called()
+
+
 def test_check_mineru_server_fail_on_non_200() -> None:
     fake_resp = MagicMock(status_code=503)
     with patch(
+        "nexus.config.mineru_server_provisioned", return_value=True,
+    ), patch(
         "nexus.config.get_mineru_server_url",
         return_value="http://127.0.0.1:8010",
     ), patch("httpx.get", return_value=fake_resp):
@@ -66,7 +87,9 @@ def test_check_mineru_server_fail_on_non_200() -> None:
 
 
 def test_check_mineru_server_no_op_when_url_missing() -> None:
-    with patch("nexus.config.get_mineru_server_url", return_value=""):
+    with patch(
+        "nexus.config.mineru_server_provisioned", return_value=True,
+    ), patch("nexus.config.get_mineru_server_url", return_value=""):
         results = _check_mineru_server()
     assert results == []
 

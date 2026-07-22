@@ -175,16 +175,19 @@ def _register_or_lookup_doc_id(
         from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.tumbler)
         from nexus.config import catalog_path  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
 
-        cat_path = catalog_path()
-        if not Catalog.is_initialized(cat_path):
-            # nexus-fq3b: auto-init so chunks land with doc_id and the
-            # post-Phase-5c prune (which can no longer key on the
-            # dropped source_path field) finds stale chunks via the
-            # doc_id-keyed where filter on re-index. Idempotent.
-            Catalog.init(cat_path)
         # RDR-146 P1.2 strict split: reads via reader, writes via the
         # write-only daemon proxy.
         reader = make_catalog_reader()
+        if reader is None:
+            # nexus-fq3b auto-init, SQLite opt-out mode ONLY (reader is None
+            # exactly when that mode has no initialised local catalog):
+            # create it so chunks land with doc_id and the post-Phase-5c
+            # prune finds stale chunks via the doc_id-keyed where filter on
+            # re-index. Idempotent. nexus-e9ru2: in service mode the Java
+            # service owns the catalog — auto-creating a local one here
+            # built a divergent SQLite substrate the service never reads.
+            Catalog.init(catalog_path())
+            reader = make_catalog_reader()
         writer = make_catalog_writer()
 
         # Owner resolution mirrors _catalog_pdf_hook / _catalog_markdown_hook
@@ -1649,16 +1652,16 @@ def _catalog_markdown_hook(
     reader = None
     writer = None
     try:
-        from nexus.catalog import Catalog  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         from nexus.catalog.catalog import make_relative  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-        from nexus.config import catalog_path  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
 
-        cat_path = catalog_path()
-        if not Catalog.is_initialized(cat_path):
-            return
-
+        # nexus-e9ru2 (sibling of nexus-f1itv): no local is_initialized
+        # pre-check — in service mode the Java service owns the catalog and
+        # a fresh box legitimately has no local state. make_catalog_reader()
+        # returns None only in the SQLite opt-out mode when uninitialised.
         reader = make_catalog_reader()
+        if reader is None:
+            return
         writer = make_catalog_writer()
 
         # Derive title and year from frontmatter or filename
@@ -1739,8 +1742,20 @@ def _catalog_markdown_hook(
                 chunk_count=chunk_count, year=year,
                 source_mtime=source_mtime,
             )
-    except Exception:  # noqa: BLE001 — best-effort/telemetry path; failure logged at debug, must not crash caller
-        _log.debug("catalog_markdown_hook_failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — best-effort catalog markdown hook; logged + audited, cleanup in finally
+        # nexus-ou4tb (site from the e9ru2 review): an indexed markdown doc
+        # that never reached the catalog is invisible to every catalog-routed
+        # query — the same class as the pdf hook, which already got the
+        # WARNING + audit-row treatment. Post-e9ru2 this path also fires on
+        # service-down (the gate no longer pre-skips), so the DEBUG swallow
+        # hid real failures.
+        _log.warning("catalog_markdown_hook_failed", exc_info=True)
+        from nexus.hook_registry import record_catalog_hook_failure  # noqa: PLC0415 — deferred, avoids an import cycle
+
+        record_catalog_hook_failure(
+            source_path=str(md_path), collection=collection_name or "",
+            hook_name="catalog_markdown_hook", error=str(exc),
+        )
     finally:
         if writer is not None:
             writer.close()

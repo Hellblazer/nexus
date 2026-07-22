@@ -100,13 +100,15 @@ def _find_ghost_by_title(reader, owner, title: str):
 def catalog_store_hook(
     title: str, doc_id: str, collection_name: str,
 ) -> str:
-    """Register a knowledge entry in the catalog. Silently skipped if absent.
+    """Register a knowledge entry in the catalog.
 
     Returns the catalog ``Document.doc_id`` (Tumbler string) so the
     caller can pass it to ``T3Database.put()`` as ``catalog_doc_id``
     for chunk-write-time embedding (RDR-101 Phase 3 PR δ Stage B.4).
-    Returns ``""`` when the catalog is absent or an error occurs —
-    the schema funnel drops empty ``doc_id`` at the boundary.
+    Returns ``""`` when an error occurs, or in the SQLite opt-out mode
+    when no local catalog is initialised (service mode always has a
+    catalog — the Java service owns it; nexus-f1itv) — the schema
+    funnel drops empty ``doc_id`` at the boundary.
 
     ``doc_id`` here is the T3 chunk natural-id (RDR-108 D1 / nexus-kmb6;
     the FULL ``sha256(content)`` hex per RDR-180). It is consulted for legacy
@@ -129,15 +131,18 @@ def catalog_store_hook(
     reader = None
     writer = None
     try:
-        from nexus.catalog import Catalog  # noqa: PLC0415 - deferred to avoid circular import at module load
         from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 - deferred to avoid circular import at module load
-        from nexus.config import catalog_path  # noqa: PLC0415 - deferred to avoid circular import at module load
 
-        cat_path = catalog_path()
-        if not Catalog.is_initialized(cat_path):
-            return ""
-
+        # nexus-f1itv: presence semantics belong to the factory. In service
+        # mode the Java service owns the catalog and no local state exists —
+        # the old local ``Catalog.is_initialized(catalog_path())`` pre-check
+        # silently skipped registration on every fresh box (migrated boxes
+        # passed it only via the frozen migration-source ``.catalog.db``).
+        # ``make_catalog_reader()`` returns ``None`` only in the SQLite
+        # opt-out mode with an uninitialised local catalog.
         reader = make_catalog_reader()
+        if reader is None:
+            return ""
 
         # Dedup by chunk_chroma_id stored in legacy meta.doc_id.
         existing = reader.by_doc_id(doc_id)

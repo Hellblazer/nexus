@@ -36,14 +36,11 @@ def _build_catalog_manifest_lookup() -> Callable[[str], list[Any]] | None:
     insertion order, the pre-fix behaviour).
     """
     try:
-        from nexus.catalog import Catalog  # noqa: PLC0415 — circular-dep avoidance; command-local import
-        from nexus.config import catalog_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance; command-local import
-        cat_path = catalog_path()
-        if not Catalog.is_initialized(cat_path):
+        cat = make_catalog_reader()  # nexus-kmo9h: None ⇔ sqlite opt-out + uninitialised
+        if cat is None:
             return None
-        cat = make_catalog_reader()
     except Exception:  # noqa: BLE001 — best-effort catalog init; any failure degrades to None (no lookup, legacy fallback)
         return None
 
@@ -71,14 +68,11 @@ def _build_catalog_doc_id_lookup() -> Callable[[str, str], str] | None:
     lookups stay consistent across the Phase 4 prune.
     """
     try:
-        from nexus.catalog import Catalog  # noqa: PLC0415 — circular-dep avoidance; command-local import
-        from nexus.config import catalog_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance; command-local import
-        cat_path = catalog_path()
-        if not Catalog.is_initialized(cat_path):
+        cat = make_catalog_reader()  # nexus-kmo9h: None ⇔ sqlite opt-out + uninitialised
+        if cat is None:
             return None
-        cat = make_catalog_reader()
     except Exception:  # noqa: BLE001 — best-effort catalog init; any failure degrades to None (no lookup, legacy fallback)
         return None
 
@@ -490,23 +484,22 @@ def run_bib_enrichment(
         f"{skipped_titles} titles had no {backend_label} match."
     )
 
-    # Auto-generate citation links if catalog is initialized
+    # Auto-generate citation links if the catalog is reachable
     if enriched_titles > 0:
         try:
-            from nexus.catalog import Catalog  # noqa: PLC0415 — circular-dep avoidance; command-local import
-            from nexus.config import catalog_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
+            from nexus.catalog.link_generator import generate_citation_links  # noqa: PLC0415 — circular-dep avoidance; command-local import
+            from nexus.catalog.factory import (  # noqa: PLC0415 — circular-dep avoidance; command-local import
+                make_catalog_reader,
+                make_catalog_writer,
+            )
 
-            cat_path = catalog_path()
-            if Catalog.is_initialized(cat_path):
-                from nexus.catalog.link_generator import generate_citation_links  # noqa: PLC0415 — circular-dep avoidance; command-local import
-                from nexus.catalog.factory import (  # noqa: PLC0415 — circular-dep avoidance; command-local import
-                    make_catalog_reader,
-                    make_catalog_writer,
-                )
-
+            # nexus-kmo9h: factory delegation — None ⇔ sqlite opt-out +
+            # uninitialised; the old local gate silently skipped citation-
+            # link generation on fresh service-mode boxes.
+            reader = make_catalog_reader()
+            if reader is not None:
                 # generate_citation_links reads (all_documents) via the reader
                 # and writes (link_if_absent) via the write-only daemon proxy.
-                reader = make_catalog_reader()
                 writer = make_catalog_writer()
                 try:
                     link_count = generate_citation_links(reader, writer=writer)
@@ -762,16 +755,14 @@ def _catalog_enrich_hook(
     row to corrupt.
     """
     try:
-        from nexus.catalog import Catalog  # noqa: PLC0415 — circular-dep avoidance; command-local import
         from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — circular-dep avoidance; command-local import
-        from nexus.config import catalog_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
-
-        cat_path = catalog_path()
-        if not Catalog.is_initialized(cat_path):
-            return False
 
         from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — circular-dep avoidance; command-local import
+
+        # nexus-kmo9h: factory delegation — None ⇔ sqlite opt-out + uninitialised.
         reader = make_catalog_reader()
+        if reader is None:
+            return False
         writer = make_catalog_writer()
         try:
             return _enrich_apply(
@@ -1065,17 +1056,16 @@ def _select_entries(
 ) -> list | None:
     """Return the catalog entries to process, or None if the catalog
     is missing (terminal error already echoed)."""
-    from nexus.catalog import Catalog  # noqa: PLC0415 — circular-dep avoidance; command-local import
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
-    from nexus.config import catalog_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
-    cat_path = catalog_path()
-    if not Catalog.is_initialized(cat_path):
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance; command-local import
+
+    # nexus-kmo9h: factory delegation — None ⇔ sqlite opt-out + uninitialised.
+    cat = make_catalog_reader()
+    if cat is None:
         click.echo("Catalog not initialized — run 'nx catalog setup' first.")
         return None
-    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance; command-local import
-    cat = make_catalog_reader()
     entries = cat.list_by_collection(collection)
 
     if re_extract:
@@ -1727,8 +1717,6 @@ def enrich_aspects_delete(
     exits 0. Re-extraction (``nx enrich aspects --re-extract``)
     will repopulate the row when run.
     """
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
-    from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
     if not yes:
         click.confirm(
@@ -1890,16 +1878,16 @@ _ASPECT_FIELDS: tuple[str, ...] = (
 def _resolve_catalog_entry(tumbler_or_title: str):
     """Resolve a tumbler or title to (catalog, entry). Raises
     ClickException on miss."""
-    from nexus.catalog import Catalog, resolve_tumbler  # noqa: PLC0415 — circular-dep avoidance; command-local import
-    from nexus.config import catalog_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
+    from nexus.catalog import resolve_tumbler  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
-    cat_path = catalog_path()
-    if not Catalog.is_initialized(cat_path):
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance; command-local import
+
+    # nexus-kmo9h: factory delegation — None ⇔ sqlite opt-out + uninitialised.
+    cat = make_catalog_reader()
+    if cat is None:
         raise click.ClickException(
             "Catalog not initialized. Run 'nx catalog setup' first."
         )
-    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance; command-local import
-    cat = make_catalog_reader()
     t, err = resolve_tumbler(cat, tumbler_or_title)
     if err:
         raise click.ClickException(err)
@@ -2062,19 +2050,18 @@ def aspects_list_cmd(
     detail. With ``--missing`` the verb inverts to gap detection:
     catalog rows in COLLECTION that don't have a matching aspect row.
     """
-    from nexus.catalog import Catalog  # noqa: PLC0415 — circular-dep avoidance; command-local import
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
-    from nexus.config import catalog_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
     if missing:
-        cat_path = catalog_path()
-        if not Catalog.is_initialized(cat_path):
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance; command-local import
+
+        # nexus-kmo9h: factory delegation — None ⇔ sqlite opt-out + uninitialised.
+        cat = make_catalog_reader()
+        if cat is None:
             raise click.ClickException(
                 "Catalog not initialized. Run 'nx catalog setup' first."
             )
-        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance; command-local import
-        cat = make_catalog_reader()
         entries = cat.list_by_collection(collection)
         with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
             existing = {

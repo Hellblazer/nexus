@@ -139,22 +139,19 @@ def _stamp_dt_uri_on_entry(file_path: Path, uuid: str) -> bool:
     aborting the whole batch. ``nx catalog update --source-uri`` can
     recover after the fact.
     """
-    from nexus.catalog import resolve_tumbler  # noqa: PLC0415 — command-local import (catalog)
-    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — command-local import (catalog)
     from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — command-local import (catalog.factory)
-    from nexus.config import catalog_path  # noqa: PLC0415 — command-local import (config)
 
     dt_uri = f"x-devonthink-item://{uuid}"
-    cat_path = catalog_path()
-    if not Catalog.is_initialized(cat_path):
+    # nexus-kmo9h: factory delegation — None only in SQLite opt-out mode
+    # when uninitialised; service mode always proceeds.
+    reader = make_catalog_reader()
+    if reader is None:
         _log.warning(
             "dt_stamp_skipped_uninitialized_catalog",
             file_path=str(file_path),
             uuid=uuid,
         )
         return False
-
-    reader = make_catalog_reader()
     # RDR-146 P2 (nexus-5p2ci.12): foreground, user-initiated dt write —
     # the latency-sensitive op #1046 showed starved by background indexing.
     # Tag interactive so the daemon prioritises it over a batch index burst.
@@ -210,16 +207,13 @@ def _link_semantic_record(uuid: str) -> bool:
     when at least one edge was created. Fail-soft: any error or unresolvable
     tumbler logs and returns ``False`` — linking never aborts the index batch.
     """
-    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — command-local import (catalog)
     from nexus.catalog.dt_link_generator import generate_dt_links  # noqa: PLC0415 — command-local import (catalog.dt_link_generator)
     from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — command-local import (catalog.factory)
-    from nexus.config import catalog_path  # noqa: PLC0415 — command-local import (config)
 
     dt_uri = f"x-devonthink-item://{uuid}"
-    cat_path = catalog_path()
-    if not Catalog.is_initialized(cat_path):
+    reader = make_catalog_reader()  # nexus-kmo9h: None ⇔ sqlite opt-out + uninitialised
+    if reader is None:
         return False
-    reader = make_catalog_reader()
     # RDR-146 P2: foreground dt write — interactive priority (see above).
     writer = make_catalog_writer(priority="interactive")
     try:
@@ -252,16 +246,13 @@ def _writeback_record(uuid: str) -> bool:
     keywords exist at ``nx dt index`` time. Stamping them is deferred to a
     follow-on re-stamp pass (tracked) rather than stamped empty.
     """
-    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — command-local import (catalog)
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — command-local import (catalog.factory)
-    from nexus.config import catalog_path  # noqa: PLC0415 — command-local import (config)
     from nexus.dt_writeback import writeback_record  # noqa: PLC0415 — command-local import (dt_writeback)
 
     dt_uri = f"x-devonthink-item://{uuid}"
-    cat_path = catalog_path()
-    if not Catalog.is_initialized(cat_path):
+    cat = make_catalog_reader()  # nexus-kmo9h: None ⇔ sqlite opt-out + uninitialised
+    if cat is None:
         return False
-    cat = make_catalog_reader()
     try:
         entry = cat.by_source_uri(dt_uri)
         if entry is None:
@@ -288,9 +279,7 @@ def _ingest_highlights_record(uuid: str) -> bool:
     row was written. Fail-soft: no tumbler / no highlights / any error -> log +
     ``False``; highlight ingest never aborts the index batch.
     """
-    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — command-local import (catalog)
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — command-local import (catalog.factory)
-    from nexus.config import catalog_path  # noqa: PLC0415 — command-local import (config)
     from nexus.db.t2.document_highlights import (  # noqa: PLC0415 — command-local import (db.t2.document_highlights)
         DocumentHighlights,
         HighlightRecord,
@@ -298,10 +287,9 @@ def _ingest_highlights_record(uuid: str) -> bool:
     from nexus.mcp_client import devonthink as _dt  # noqa: PLC0415 — command-local import (mcp_client.devonthink)
 
     dt_uri = f"x-devonthink-item://{uuid}"
-    cat_path = catalog_path()
-    if not Catalog.is_initialized(cat_path):
+    cat = make_catalog_reader()  # nexus-kmo9h: None ⇔ sqlite opt-out + uninitialised
+    if cat is None:
         return False
-    cat = make_catalog_reader()
     try:
         entry = cat.by_source_uri(dt_uri)
         if entry is None:
@@ -869,16 +857,15 @@ def _resolve_dt_uri_from_tumbler(tumbler: str) -> str | None:
             catalog entry (caller surfaces this as a non-zero exit).
     """
     from nexus.catalog import resolve_tumbler  # noqa: PLC0415 — command-local import (catalog)
-    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — command-local import (catalog)
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — command-local import (catalog.factory)
-    from nexus.config import catalog_path  # noqa: PLC0415 — command-local import (config)
 
-    path = catalog_path()
-    if not Catalog.is_initialized(path):
+    # nexus-kmo9h: factory delegation — the old local gate raised a false
+    # "run 'nx catalog setup'" on healthy service-mode boxes.
+    cat = make_catalog_reader()
+    if cat is None:
         raise click.ClickException(
             "Catalog not initialized. Run 'nx catalog setup' first.",
         )
-    cat = make_catalog_reader()
     try:
         t, err = resolve_tumbler(cat, tumbler)
         if err:
@@ -957,21 +944,20 @@ def incorporate_cmd(uuid: str) -> None:
             "(e.g. 8EDC855D-213F-40AD-A9CF-9543CC76476B)."
         )
 
-    from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — command-local import (nexus.catalog.catalog)
     from nexus.catalog.dt_link_generator import generate_dt_links  # noqa: PLC0415 — command-local import (nexus.catalog.dt_link_generator)
     from nexus.catalog.factory import (  # noqa: PLC0415 — command-local import (nexus.catalog.factory)
         make_catalog_reader,
         make_catalog_writer,
     )
-    from nexus.config import catalog_path  # noqa: PLC0415 — command-local import (nexus.config)
     from nexus.dt_writeback import writeback_record  # noqa: PLC0415 — command-local import (nexus.dt_writeback)
 
-    if not Catalog.is_initialized(catalog_path()):
-        raise click.ClickException("nexus catalog is not initialized")
     cat = None
     writer = None
     try:
+        # nexus-kmo9h: factory delegation — None ⇔ sqlite opt-out + uninitialised.
         cat = make_catalog_reader()
+        if cat is None:
+            raise click.ClickException("nexus catalog is not initialized")
         entry = cat.by_source_uri(f"x-devonthink-item://{uuid}")
         if entry is None:
             raise click.ClickException(

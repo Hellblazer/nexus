@@ -96,6 +96,11 @@ class AuditReport:
     orphans: list[OrphanChunk]
     hub_assignments: list[HubAssignment]
     chash_coverage: ChashCoverage | None = None
+    #: nexus-kmo9h (critic item 2): False when the orphan leg never ran —
+    #: service mode (the local .catalog.db is a frozen migration source) or
+    #: no local catalog. Distinguishes "checked, clean" from "couldn't
+    #: check" in the render; the DistanceHistogram source="empty" idiom.
+    orphans_checked: bool = True
 
 
 # ── Section 1: distance histogram (telemetry primary, live fallback) ────────
@@ -363,7 +368,15 @@ def _open_catalog_conn() -> sqlite3.Connection | None:
     """
     from nexus.catalog.catalog import Catalog  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.config import catalog_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
+    if storage_backend_for("catalog") == StorageBackend.SERVICE:
+        # nexus-e9ru2: in service mode the local .catalog.db is a FROZEN
+        # migration source — auditing against it reports stale orphans as
+        # live. Degrade the catalog legs (orphans=[]) instead, the same
+        # service-mode skip this module applies to taxonomy raw access
+        # (nexus-9613q.4). P5 catalog-collapse owns the service-side read.
+        return None
     path = catalog_path()
     if not Catalog.is_initialized(path):
         return None
@@ -526,8 +539,10 @@ def run_collection_audit(
             hubs = []
         if cat_conn is not None:
             orphans = compute_orphan_chunks(cat_conn, collection)
+            orphans_checked = True
         else:
             orphans = []
+            orphans_checked = False
     finally:
         if t2 is not None:
             t2.close()
@@ -566,6 +581,7 @@ def run_collection_audit(
         orphans=orphans,
         hub_assignments=hubs,
         chash_coverage=chash,
+        orphans_checked=orphans_checked,
     )
 
 
@@ -604,7 +620,14 @@ def format_audit_human(report: AuditReport) -> str:
     lines.append("")
     # Section 3
     lines.append("=== orphan chunks (>30d, no incoming links) ===")
-    if not report.orphans:
+    if not report.orphans_checked:
+        # nexus-kmo9h: never render "couldn't check" as "checked, clean".
+        lines.append(
+            "  (skipped — no local catalog to audit: service mode's local "
+            ".catalog.db is a frozen migration source; service-side orphan "
+            "audit lands with P5 catalog-collapse)"
+        )
+    elif not report.orphans:
         lines.append("  (none)")
     else:
         for o in report.orphans:
