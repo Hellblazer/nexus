@@ -43,6 +43,48 @@ def test_codesign_step_present_and_mac_gated() -> None:
         )
 
 
+def test_entitlements_disable_library_validation() -> None:
+    """Critique 96677bf7 Critical / nexus-2oh5q: Hardened Runtime implies
+    Library Validation, which refuses the bundled onnxruntime/DJL dylibs
+    local-mode embedding System.load()s — signing WITHOUT the entitlement
+    ships a binary that crashes where the ad-hoc one worked."""
+    text = _text()
+    assert "--entitlements service/deploy/mac-entitlements.plist" in text
+    plist = (
+        Path(__file__).parent.parent / "service" / "deploy" / "mac-entitlements.plist"
+    )
+    assert plist.exists(), "mac-entitlements.plist vanished"
+    assert "com.apple.security.cs.disable-library-validation" in plist.read_text()
+
+
+def test_post_activation_regression_guard() -> None:
+    """Critique 96677bf7 Significant 1: once signing is activated, vanished
+    secrets must hard-fail (vars.APPLE_SIGNING_REQUIRED), never regress to
+    a warn-in-a-run-nobody-reads."""
+    text = _text()
+    assert text.count("APPLE_SIGNING_REQUIRED: ${{ vars.APPLE_SIGNING_REQUIRED }}") == 2, (
+        "both signing steps must read the activation variable"
+    )
+    assert text.count('if [ "${APPLE_SIGNING_REQUIRED:-}" = "true" ]') == 2, (
+        "both absent-secrets branches need the activation hard-fail guard"
+    )
+
+
+def test_signing_is_tag_gated_like_cosign() -> None:
+    """Review 96677bf7 Critical: without the tag gate, every
+    workflow_dispatch dev/smoke run would burn a Developer-ID sign + a
+    20-minute notarytool --wait on a 10x-billed macOS runner for a 14-day
+    Actions artifact — the CI Cost Discipline class. Both steps must gate
+    on the release tag exactly like the sibling cosign steps."""
+    text = _text()
+    for step in ("Developer ID codesign", "Notarize (mac-arm64"):
+        idx = text.index(step)
+        window = text[idx:idx + 1800]
+        assert "startsWith(github.ref, 'refs/tags/engine-service-v')" in window, (
+            f"{step} lost its release-tag gate"
+        )
+
+
 def test_signing_runs_before_hashing_and_cosign() -> None:
     """codesign rewrites the binary — every digest (sha256 stage, cosign
     bundles) must be computed AFTER it or published verification breaks."""
