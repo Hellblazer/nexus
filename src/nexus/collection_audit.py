@@ -96,6 +96,11 @@ class AuditReport:
     orphans: list[OrphanChunk]
     hub_assignments: list[HubAssignment]
     chash_coverage: ChashCoverage | None = None
+    #: nexus-kmo9h (critic item 2): False when the orphan leg never ran —
+    #: service mode (the local .catalog.db is a frozen migration source) or
+    #: no local catalog. Distinguishes "checked, clean" from "couldn't
+    #: check" in the render; the DistanceHistogram source="empty" idiom.
+    orphans_checked: bool = True
 
 
 # ── Section 1: distance histogram (telemetry primary, live fallback) ────────
@@ -534,8 +539,10 @@ def run_collection_audit(
             hubs = []
         if cat_conn is not None:
             orphans = compute_orphan_chunks(cat_conn, collection)
+            orphans_checked = True
         else:
             orphans = []
+            orphans_checked = False
     finally:
         if t2 is not None:
             t2.close()
@@ -574,6 +581,7 @@ def run_collection_audit(
         orphans=orphans,
         hub_assignments=hubs,
         chash_coverage=chash,
+        orphans_checked=orphans_checked,
     )
 
 
@@ -612,7 +620,14 @@ def format_audit_human(report: AuditReport) -> str:
     lines.append("")
     # Section 3
     lines.append("=== orphan chunks (>30d, no incoming links) ===")
-    if not report.orphans:
+    if not report.orphans_checked:
+        # nexus-kmo9h: never render "couldn't check" as "checked, clean".
+        lines.append(
+            "  (skipped — no local catalog to audit: service mode's local "
+            ".catalog.db is a frozen migration source; service-side orphan "
+            "audit lands with P5 catalog-collapse)"
+        )
+    elif not report.orphans:
         lines.append("  (none)")
     else:
         for o in report.orphans:

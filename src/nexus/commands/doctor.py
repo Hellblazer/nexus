@@ -2,7 +2,6 @@
 """nx doctor — health check for all required services."""
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -1248,8 +1247,13 @@ def _run_check_mineru() -> None:
     # Optional: surface server-side state. The mineru-api server is opt-in;
     # not running is fine. Just report status.
     try:
-        from nexus.config import get_mineru_server_url  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
-        url = get_mineru_server_url()
+        from nexus.config import get_mineru_server_url, mineru_server_provisioned  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
+        # nexus-9xfx5: never probe the built-in default URL on a box where
+        # no server was ever provisioned — every fresh install rendered a
+        # red ✗ ("unreachable ... OOM-risk") for a service init never set
+        # up. Unprovisioned renders as the not-configured skip below; a ✗
+        # now means a PROVISIONED server is actually unreachable.
+        url = get_mineru_server_url() if mineru_server_provisioned() else None
     except Exception:  # noqa: BLE001 — best-effort config read; falls back to None
         url = None
     if url:
@@ -1652,19 +1656,18 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
         return
 
     if fix_paths:
-        from nexus.catalog import Catalog  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         from nexus.catalog.catalog import make_relative  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-        from nexus.config import catalog_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
         from nexus.db import make_t3  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
-        cat_p = catalog_path()
-        if not Catalog.is_initialized(cat_p):
+        # nexus-kmo9h: factory delegation — None only in SQLite opt-out mode
+        # when uninitialised; service mode always proceeds (the old local
+        # gate printed a false "run: nx catalog setup" on healthy boxes).
+        reader = make_catalog_reader()
+        if reader is None:
             click.echo("Catalog not initialized — run: nx catalog setup")
             return
-
-        reader = make_catalog_reader()
         writer = make_catalog_writer()
 
         # Find all entries with absolute file_path (nexus-xnz0o: uses

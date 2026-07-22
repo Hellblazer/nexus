@@ -27,6 +27,33 @@ import click
 from nexus.catalog.catalog import Catalog
 
 
+def _local_artifacts_missing_error(cat_path: Path) -> click.ClickException:
+    """Build the uninitialised-catalog error with a mode-honest remedy.
+
+    nexus-kmo9h: these doctor verbs genuinely require the LOCAL catalog
+    artifacts (events.jsonl / documents.jsonl / .catalog.db projection) —
+    they stay local-only by design. But in service mode a fresh box
+    legitimately has no local artifacts, and the old unconditional
+    "Run 'nx catalog setup' first" advice would CREATE a divergent local
+    catalog the service never reads. Say what is actually going on.
+    """
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+
+    if storage_backend_for("catalog") == StorageBackend.SERVICE:
+        return click.ClickException(
+            f"No local catalog artifacts at {cat_path}. This verb operates "
+            "on the LOCAL catalog (event log / JSONL / projection); in "
+            "service mode the live catalog is owned by the nexus service, "
+            "so fresh installs have nothing local to diagnose (migrated "
+            "installs keep frozen pre-migration artifacts). Do NOT run "
+            "'nx catalog setup' — it would create a divergent local catalog."
+        )
+    return click.ClickException(
+        f"Catalog at {cat_path} is not initialized. "
+        "Run 'nx catalog setup' first."
+    )
+
+
 @click.command("synthesize-log")
 @click.option(
     "--check", is_flag=True,
@@ -81,10 +108,7 @@ def synthesize_log_cmd(
 
     cat_path = catalog_path()
     if not Catalog.is_initialized(cat_path):
-        raise click.ClickException(
-            f"Catalog at {cat_path} is not initialized. "
-            "Run 'nx catalog setup' first."
-        )
+        raise _local_artifacts_missing_error(cat_path)
 
     bootstrap_status = _check_bootstrap_status()
     fallback_active = bool(bootstrap_status.get("fallback_active"))
@@ -1312,10 +1336,7 @@ def _run_replay_equality() -> dict:
 
     cat_dir = catalog_path()
     if not Catalog.is_initialized(cat_dir):
-        raise click.ClickException(
-            f"Catalog not initialized at {cat_dir}. "
-            "Run 'nx catalog setup' to create and populate it."
-        )
+        raise _local_artifacts_missing_error(cat_dir)
 
     live_db_path = cat_dir / ".catalog.db"
     if not live_db_path.exists():
@@ -1558,10 +1579,7 @@ def _run_t3_doc_id_coverage(
 
     cat_dir = catalog_path()
     if not Catalog.is_initialized(cat_dir):
-        raise click.ClickException(
-            f"Catalog not initialized at {cat_dir}. "
-            "Run 'nx catalog setup' to create and populate it."
-        )
+        raise _local_artifacts_missing_error(cat_dir)
     log = EventLog(cat_dir)
     if not log.path.exists() or log.path.stat().st_size == 0:
         raise click.ClickException(

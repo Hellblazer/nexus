@@ -292,17 +292,18 @@ def _reap_catalog_for_doc_ids(doc_ids: list[str]) -> None:
     Eventual consistency surprised users who expected delete to be atomic.
     Skipped silently when the catalog is uninitialised.
     """
-    from nexus.catalog import Catalog  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-    from nexus.config import catalog_path  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
-    cat_path = catalog_path()
-    if not Catalog.is_initialized(cat_path):
-        return
     reader = None
     writer = None
     try:
+        # nexus-kmo9h: presence semantics belong to the factory (None only
+        # in SQLite opt-out mode when uninitialised) — the old local
+        # is_initialized gate silently skipped the post-delete catalog
+        # tombstone reap on every fresh service-mode box.
         reader = make_catalog_reader()
+        if reader is None:
+            return
         writer = make_catalog_writer()
         for doc_id in doc_ids:
             entry = reader.by_doc_id(doc_id)

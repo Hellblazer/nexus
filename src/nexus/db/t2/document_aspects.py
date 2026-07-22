@@ -169,11 +169,17 @@ def _resolve_doc_id(record: AspectRecord) -> str:
     # primitives for FTS5 sanitisation), but the *behaviour* is no
     # longer reaching into Catalog internals.
     try:
-        from nexus.catalog import Catalog  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-        from nexus.config import catalog_path  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-        cat_path = catalog_path()
-        if Catalog.is_initialized(cat_path):
-            cat = Catalog(cat_path, cat_path / ".catalog.db")
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+
+        # nexus-kmo9h: route through the factory. The old direct
+        # Catalog(cat_path, .catalog.db) open resolved identities against
+        # the FROZEN migration-source catalog on migrated service-mode
+        # boxes (wrong-but-plausible results); the factory returns the
+        # service handle there (lookup_doc_id_by_collection_and_path has
+        # documented return-shape parity on HttpCatalogClient) and None
+        # only in the SQLite opt-out mode when uninitialised.
+        cat = make_catalog_reader()
+        if cat is not None:
             resolved = cat.lookup_doc_id_by_collection_and_path(
                 record.collection, record.source_path,
             )
