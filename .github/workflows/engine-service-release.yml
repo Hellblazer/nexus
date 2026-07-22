@@ -139,6 +139,16 @@ jobs:
         with:
           cache-key: bge-onnx-standard-${{ runner.os }}-${{ matrix.target.arch }}-v1
 
+      - name: Prime ms-marco cross-encoder ONNX (cache or pinned HF revision)
+        # RDR-188 P1: the native smoke's fused-rerank section exercises the
+        # cross-encoder's STRONG scoring path (DJL pair tokenization + a second
+        # OrtSession in the native image) only when the ~91MB artifact is
+        # present; absent, it falls back to asserting the LOUD-degrade contract.
+        # Prime it so release binaries are gated on real native inference.
+        uses: ./.github/actions/prime-crossencoder-onnx
+        with:
+          cache-key: crossencoder-onnx-msmarco-${{ runner.os }}-${{ matrix.target.arch }}-v1
+
       - name: Resolve engine-service version
         id: ver
         # On a tag push, the published version is the tag minus the

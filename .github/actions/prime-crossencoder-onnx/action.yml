@@ -1,0 +1,62 @@
+name: Prime ms-marco cross-encoder ONNX
+description: >-
+  Provision the ms-marco-MiniLM-L-6-v2 cross-encoder ONNX (~91MB fp32)
+  into ~/.cache/nexus for CI (RDR-188 P1.3 local-mode reranker). Restores
+  from the Actions cache; on a miss, downloads the PINNED-revision
+  HuggingFace resolve URLs with retry/backoff and sha256 verification —
+  the same pinned source src/nexus/db/service_crossencoder_model.py uses.
+  Priming makes CrossEncoderRerankerInferenceTest and the integration
+  suite's cross-encoder success path RUN on CI instead of skipping (the
+  bge lesson, RDR-160 CA-1: an export class that onnxruntime-java cannot
+  run must be caught by CI, not by the first provisioned user). If the
+  anonymous-HF origin ever starts 429-flaking despite the retry (the bge
+  history at 416MB), mirror the artifacts into a ci-assets-* release tag
+  like prime-bge-onnx and switch the origin here and in
+  service_crossencoder_model.py together.
+
+inputs:
+  cache-key:
+    description: >-
+      actions/cache key. Use an arch-qualified key for multi-arch matrix
+      jobs so each runner architecture caches independently.
+    required: false
+    default: crossencoder-onnx-msmarco-${{ runner.os }}-v1
+
+runs:
+  using: composite
+  steps:
+    - name: Restore cross-encoder ONNX cache
+      id: cache
+      # STABLE key — the artifact is an immutable pinned-revision export;
+      # bump the -v suffix only if the pinned revision changes.
+      uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+      with:
+        path: ~/.cache/nexus/onnx_models/ms-marco-minilm-l6-v2
+        key: ${{ inputs.cache-key }}
+
+    - name: Download cross-encoder ONNX on cache miss (pinned HF revision)
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        # Pinned revision + digests MUST stay in lockstep with
+        # src/nexus/db/service_crossencoder_model.py (test-guarded there).
+        REVISION: c5ee24cb16019beea0893ab7796b1df96625c6b8
+        MODEL_SHA256: 5d3e70fd0c9ff14b9b5169a51e957b7a9c74897afd0a35ce4bd318150c1d4d4a
+        TOKENIZER_SHA256: d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66
+      run: |
+        set -euo pipefail
+        MODEL_DIR="$HOME/.cache/nexus/onnx_models/ms-marco-minilm-l6-v2/onnx"
+        mkdir -p "$MODEL_DIR"
+        base="https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2/resolve/${REVISION}"
+        echo "cross-encoder ONNX cache miss; fetching pinned revision ${REVISION} from HF."
+
+        fetch() {
+          curl -fL --retry 5 --retry-delay 8 --retry-all-errors -o "$1" "${base}/$2"
+        }
+
+        fetch "$MODEL_DIR/model.onnx" onnx/model.onnx
+        fetch "$MODEL_DIR/tokenizer.json" tokenizer.json
+
+        echo "${MODEL_SHA256}  $MODEL_DIR/model.onnx" | shasum -a 256 -c -
+        echo "${TOKENIZER_SHA256}  $MODEL_DIR/tokenizer.json" | shasum -a 256 -c -
+        echo "cross-encoder ONNX provisioned + verified (pinned revision)."

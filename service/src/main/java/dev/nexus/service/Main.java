@@ -126,11 +126,18 @@ public final class Main {
             qryEmbedRouter = new EmbedderRouter(voyageKey, "query");
             // RDR-188: the same key grants the fused rerank stage — the engine owns
             // ALL Voyage traffic (embed + rerank); no new credential surface.
-            reranker = new dev.nexus.service.vectors.VoyageReranker(
-                    voyageKey, dev.nexus.service.vectors.VoyageReranker.DEFAULT_MODEL);
+            // NX_RERANK_MODEL (RDR-157 config-via-env) is the SERVER-side successor
+            // of the client's embeddings.rerankerModel knob (e.g. rerank-2.5-lite
+            // for cost/latency): model choice moved server-side with the traffic —
+            // there is deliberately NO per-request model field (the server owns
+            // rerank cost; the client knob retires loudly in P2, nexus bead filed).
+            String rerankModelEnv = System.getenv("NX_RERANK_MODEL");
+            String rerankModel = (rerankModelEnv == null || rerankModelEnv.isBlank())
+                    ? dev.nexus.service.vectors.VoyageReranker.DEFAULT_MODEL
+                    : rerankModelEnv.trim();
+            reranker = new dev.nexus.service.vectors.VoyageReranker(voyageKey, rerankModel);
             log.info("event=embedding_mode_banner mode={} models={} reranker={} backend=pgvector",
-                    docEmbedRouter.modeName(), docEmbedRouter.availableModels(),
-                    dev.nexus.service.vectors.VoyageReranker.DEFAULT_MODEL);
+                    docEmbedRouter.modeName(), docEmbedRouter.availableModels(), rerankModel);
         } else {
             // Local mode (RDR-160): bge-768 serves EVERY collection. MiniLM is
             // NOT loaded on the local path (Decision 5) — a non-bge collection

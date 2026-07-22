@@ -368,6 +368,63 @@ else
   echo "       (set NX_BGE_MODEL_PATH or provision via 'nx init --service' to gate the JNI embed path)"
 fi
 
+# ── Fused rerank stage (RDR-188 P1) ──────────────────────────────────────────
+# Reranks (query, chunk) pairs through the local ms-marco cross-encoder — DJL
+# PAIR tokenization + a second OrtSession, the same native JNI risk class as the
+# bge embed above. store-put two chunks, search with rerank=true, and assert the
+# structured envelope. With the ~91MB model present (CI: prime-crossencoder-onnx)
+# the STRONG path must return real scores; absent, the LOUD-degrade contract is
+# asserted instead — either way the envelope is exercised, never silently skipped.
+if [ -f "$BGE_MODEL" ]; then
+  echo "fused rerank stage (RDR-188):"
+  RCOL="knowledge__nativesmoke__bge-base-en-v15-768__v1"
+  put_rerank_chunk() {
+    curl -s -o /tmp/ns-rerank-put.out -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
+      -d "{\"collection\":\"$RCOL\",\"doc_id\":\"$1\",\"content\":$2}" "$U/v1/vectors/store-put"
+  }
+  p1=$(put_rerank_chunk "$(printf 'e%.0s' {1..64})" '"Mix flour and water, ferment the dough, bake the bread in a hot oven."')
+  p2=$(put_rerank_chunk "$(printf 'f%.0s' {1..64})" '"Quantum chromodynamics describes the strong interaction between quarks."')
+  if [ "$p1" = "200" ] && [ "$p2" = "200" ]; then
+    rcode=$(curl -s -o /tmp/ns-rerank.out -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
+      -d "{\"query\":\"how do I bake bread\",\"collections\":[\"$RCOL\"],\"n_results\":2,\"rerank\":true}" \
+      "$U/v1/vectors/search")
+    CE_MODEL="${NX_CROSSENCODER_MODEL_PATH:-$HOME/.cache/nexus/onnx_models/ms-marco-minilm-l6-v2/onnx/model.onnx}"
+    if [ -f "$CE_MODEL" ]; then
+      if [ "$rcode" = "200" ] && python3 - <<'PYEOF' 2>/dev/null
+import json
+r = json.load(open("/tmp/ns-rerank.out"))
+assert r["rerank_degraded"] is False, r.get("rerank_error")
+assert r["rerank_model"] == "ms-marco-minilm-l6-v2"
+rows = r["results"]
+assert len(rows) == 2 and all("rerank_score" in x for x in rows)
+assert "bread" in rows[0]["content"]
+PYEOF
+      then
+        echo "  ok   rerank=true -> cross-encoder scores in native image (correct top doc)"
+      else
+        echo "  FAIL rerank strong path -> $rcode: $(head -c300 /tmp/ns-rerank.out)"; fail=1
+      fi
+    else
+      if [ "$rcode" = "200" ] && python3 - <<'PYEOF' 2>/dev/null
+import json
+r = json.load(open("/tmp/ns-rerank.out"))
+assert r["rerank_degraded"] is True and "not found" in r["rerank_error"]
+assert len(r["results"]) == 2
+PYEOF
+      then
+        echo "  ok   rerank=true -> LOUD structured degrade (model absent at $CE_MODEL)"
+        echo "       (prime the ms-marco ONNX to exercise the strong scoring path)"
+      else
+        echo "  FAIL rerank degrade path -> $rcode: $(head -c300 /tmp/ns-rerank.out)"; fail=1
+      fi
+    fi
+  else
+    echo "  FAIL rerank fixture store-put -> $p1/$p2: $(head -c200 /tmp/ns-rerank-put.out)"; fail=1
+  fi
+else
+  echo "  WARN rerank stage NOT covered — bge model absent (store-put needs the embedder)"
+fi
+
 if grep -qiE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" /tmp/native-smoke-svc.log; then
   echo "FAIL: native runtime error in service log:"; grep -iE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" /tmp/native-smoke-svc.log | head; fail=1
 fi
