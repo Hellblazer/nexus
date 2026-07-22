@@ -61,9 +61,17 @@ class TestConfiguredModelSelection:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """bge chosen but extra not installed: fall back to tier0 and WARN
-        (not silent — P5a doctor surfaces it). Never raise."""
+        (not silent — P5a doctor surfaces it). Never raise.
+
+        Pins LOCAL vector mode explicitly (nexus-9xfx5): in service mode the
+        fallback is by design (bge is the SERVICE's embedder; the Python EF
+        serves T1) and deliberately does NOT warn — see
+        tests/test_local_embedder_advisory.py::TestResolverServiceModeWarning."""
         monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: _TIER1_MODEL)
         monkeypatch.setattr("nexus.db.local_ef._fastembed_available", lambda: False)
+        monkeypatch.setattr(
+            "nexus.db.http_vector_client.is_vector_service_mode", lambda: False
+        )
         warnings: list[str] = []
         monkeypatch.setattr(
             "nexus.db.local_ef._log",

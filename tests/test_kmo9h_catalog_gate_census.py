@@ -218,13 +218,13 @@ def test_document_aspects_identity_probe_routes_service(service_mode_fresh_box):
     from nexus.db.t2.document_aspects import _resolve_doc_id
 
     class _Record:
-        collection = "docs__x__voyage-context-3__v1"
+        collection = "docs__x__bge-base-en-v15-768__v1"
         source_path = "notes/a.md"
         source_uri = ""
 
     assert (
         _resolve_doc_id(_Record())
-        == "resolved:docs__x__voyage-context-3__v1:notes/a.md"
+        == "resolved:docs__x__bge-base-en-v15-768__v1:notes/a.md"
     )
 
 
@@ -267,7 +267,7 @@ def test_audit_render_distinguishes_skipped_from_clean():
     def _report(checked: bool) -> str:
         return format_audit_human(
             AuditReport(
-                collection="docs__x__voyage-context-3__v1",
+                collection="docs__x__bge-base-en-v15-768__v1",
                 distance_histogram=DistanceHistogram(
                     buckets=[0] * 10, source="empty", sample_size=0
                 ),
