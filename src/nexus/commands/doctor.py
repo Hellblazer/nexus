@@ -2144,9 +2144,16 @@ def _format_quota_report(report: dict) -> str:
 
     # ── Voyage ───────────────────────────────────────────────────────────
     v = report["voyage"]
-    status = _CHECK if v["api_key_set"] else _WARN
-    key_label = "VOYAGE_API_KEY: set" if v["api_key_set"] else "VOYAGE_API_KEY: absent"
-    lines.append(f"  {status} Voyage AI: {key_label}")
+    # RDR-188 (nexus-9o6y2.16): the client key is engine-bootstrap/migration
+    # material — absence is INFO, not a warning (no client code path consumes
+    # it; the engine's own key state is what matters and doctor's service
+    # checks cover that).
+    key_label = (
+        "VOYAGE_API_KEY: set (engine-bootstrap/migration material)"
+        if v["api_key_set"]
+        else "VOYAGE_API_KEY: absent (client does not consume it; engine key plumbed at spawn)"
+    )
+    lines.append(f"  {_CHECK} Voyage AI: {key_label}")
     lines.append(f"    target rpm (indexer rate limiter):        {v['target_rpm']}")
     for model, caps in v["models"].items():
         lines.append(

@@ -307,37 +307,24 @@ def _voyage_thresholds_active(t3: Any) -> bool:
     that attribute, so filtering silently disabled on every service-mode
     search — the same bug class as the reranker (nexus-xbw0f).
 
-    The fallback preserves the original semantics for HttpVectorClient:
-    Voyage is in use iff NOT local mode (local embeds with bge/MiniLM —
-    Voyage-calibrated thresholds must stay off) AND a Voyage key is
-    configured. Other handles (test fakes, injected stubs) keep the
+    RDR-188 P3.2 (nexus-9o6y2.14): for HttpVectorClient the signal is the
+    SERVER-reported embedder family (``t3.embedding_mode()`` from
+    ``GET /version``) — thresholds on iff the engine embeds with Voyage.
+    The former client-key heuristic is retired with the client's Voyage
+    consumption. Other handles (test fakes, injected stubs) keep the
     attribute-only gate.
     """
     if getattr(t3, "_voyage_client", None) is not None:
         return True
     if not isinstance(t3, HttpVectorClient):
         return False
-    global _service_thresholds_memo
-    if _service_thresholds_memo is None:
-        # Memoized for the process lifetime (wave review): is_local_mode +
-        # get_credential each re-read config.yml, a per-search file-IO cost.
-        # Mode/credential changes require a process restart — same lifetime
-        # the retired T3Database gave its _voyage_client.
-        from nexus.config import get_credential, is_local_mode  # noqa: PLC0415 — circular-dep avoidance (config)
-
-        _service_thresholds_memo = (
-            not is_local_mode() and bool(get_credential("voyage_api_key"))
-        )
-    return _service_thresholds_memo
-
-
-_service_thresholds_memo: bool | None = None
-
-
-def reset_threshold_gate_cache_for_tests() -> None:
-    """Clear the service-mode threshold-gate memo (test isolation)."""
-    global _service_thresholds_memo
-    _service_thresholds_memo = None
+    # RDR-188 P3.2 (nexus-9o6y2.14): the gate consults the SERVER's reported
+    # embedder family (GET /version, memoized on the client handle) — not the
+    # client's credential file. Removing the now-unconsumed client voyage key
+    # can no longer silently regress search quality (Gap 3), and the signal is
+    # what actually embedded the corpus. Unknown (probe failed) → thresholds
+    # off: never guess Voyage; a down service fails the search itself anyway.
+    return t3.embedding_mode() == "voyage"
 
 
 def _overfetch_multiplier(collection_name: str) -> int:

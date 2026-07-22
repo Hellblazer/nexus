@@ -6532,13 +6532,18 @@ def _resolve_mode_diagnostics() -> dict[str, str | None]:
     live Desktop run leaves a durable on-disk trail in mcp.log instead of
     requiring the divergence to be reproduced first.
 
-    nexus-smd1k (substantive-critic finding): ``is_local_mode()`` has THREE
-    decision branches (explicit ``NX_LOCAL``, ``service_url`` presence,
-    legacy chroma/voyage-key presence) — per the bead's own CLI-vs-GUI
-    divergence evidence, the more likely root cause sits in branch 2 or 3,
-    not branch 1. ``service_url_found``/``chroma_key_found``/
-    ``voyage_key_found`` evidence which credential each branch actually
-    saw, as booleans ONLY — never the credential values themselves.
+    nexus-smd1k (substantive-critic finding): ``is_local_mode()`` has FOUR
+    decision branches since RDR-188 P3.1 (explicit ``NX_LOCAL``,
+    ``service_url`` presence, ``pg_credentials`` presence, legacy
+    chroma-key fallback) — per the bead's own CLI-vs-GUI divergence
+    evidence, the likely root cause sits below branch 1.
+    ``service_url_found``/``pg_credentials_found``/``chroma_key_found``
+    evidence what each branch actually saw, as booleans ONLY — never the
+    credential values. ``voyage_key_found`` is retained as INFORMATIONAL
+    (nexus-9o6y2.16): since RDR-188 the voyage key has ZERO mode
+    influence — it is engine-bootstrap/migration material; the boolean
+    stays because a divergence report that shows it TRUE while mode
+    flips would immediately falsify a suspected key-inference regression.
 
     Never raises: a diagnostic must not block MCP startup. On resolution
     failure returns ``{"mode": "unknown", "error": str(exc)}``.
@@ -6559,7 +6564,9 @@ def _resolve_mode_diagnostics() -> dict[str, str | None]:
             "home": _os.environ.get("HOME", ""),
             "nx_local_env": _os.environ.get("NX_LOCAL", ""),
             "service_url_found": bool(get_credential("service_url")),
+            "pg_credentials_found": (nexus_config_dir() / "pg_credentials").is_file(),
             "chroma_key_found": bool(get_credential("chroma_api_key")),
+            # Informational only — zero mode influence since RDR-188 P3.1.
             "voyage_key_found": bool(get_credential("voyage_api_key")),
         }
     except Exception as exc:  # noqa: BLE001 — diagnostic-only, must never block startup

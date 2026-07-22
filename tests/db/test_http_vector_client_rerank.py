@@ -96,3 +96,40 @@ def test_no_rerank_request_body_and_return_unchanged(client, monkeypatch):
     assert "rerank" not in captured[0]["body"]
     assert "rerank_top_k" not in captured[0]["body"]
     assert rows[0]["id"] == "a"
+
+
+# ── RDR-188 P3.2 (nexus-9o6y2.14): server-reported embedding mode ────────────
+
+
+def test_embedding_mode_reads_version_and_memoizes(client, monkeypatch):
+    calls: list[str] = []
+
+    def fake_get(path, tenant=None):
+        calls.append(path)
+        return {"embedding_mode": "voyage", "embedding_models": ["voyage-code-3"]}
+
+    monkeypatch.setattr(hvc, "_get", fake_get)
+    assert client.embedding_mode() == "voyage"
+    assert client.embedding_mode() == "voyage"
+    assert calls == ["/version"]  # memoized after first success
+
+
+def test_embedding_mode_probe_failure_returns_none_without_memoizing(client, monkeypatch):
+    attempts: list[int] = []
+
+    def failing_get(path, tenant=None):
+        attempts.append(1)
+        raise ConnectionError("service down")
+
+    monkeypatch.setattr(hvc, "_get", failing_get)
+    assert client.embedding_mode() is None
+    # Not memoized: recovery is re-probed, thresholds are not locked off.
+    monkeypatch.setattr(hvc, "_get",
+                        lambda path, tenant=None: {"embedding_mode": "onnx-local"})
+    assert client.embedding_mode() == "onnx-local"
+    assert attempts == [1]
+
+
+def test_embedding_mode_garbage_version_body_is_unknown(client, monkeypatch):
+    monkeypatch.setattr(hvc, "_get", lambda path, tenant=None: ["not", "a", "dict"])
+    assert client.embedding_mode() is None

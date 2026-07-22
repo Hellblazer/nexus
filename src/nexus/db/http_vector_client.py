@@ -991,6 +991,36 @@ class HttpVectorClient:
     #: never asked to rerank.
     supports_server_rerank: bool = True
 
+    #: Memoized GET /version ``embedding_mode`` (class-level default so
+    #: partially-constructed test instances still resolve; successful probes
+    #: shadow it per-instance). RDR-188 P3.2 (nexus-9o6y2.14).
+    _embedding_mode_memo: str | None = None
+
+    def embedding_mode(self) -> str | None:
+        """The engine's AUTHORITATIVE embedder family from ``GET /version``:
+        ``"voyage"`` or ``"onnx-local"`` (``EmbedderRouter.modeName``).
+
+        RDR-188 P3.2 (nexus-9o6y2.14): this replaces client-key inference as
+        the search threshold gate's signal — thresholds are calibrated for
+        Voyage embeddings, and whether Voyage served the query is a fact
+        about the SERVER, not about which keys sit in client config.
+
+        Memoized per instance on success (the engine's mode is fixed for its
+        process lifetime). A failed probe returns ``None`` WITHOUT memoizing —
+        unknown, not "not voyage" — so a service that was briefly unreachable
+        is re-asked on the next call rather than locking thresholds off.
+        """
+        if self._embedding_mode_memo is None:
+            try:
+                info = _get("/version", tenant=self._tenant)
+            except Exception as exc:  # noqa: BLE001 — probe is advisory; search itself surfaces a down service
+                _log.debug("embedding_mode_probe_failed", error=str(exc))
+                return None
+            mode = info.get("embedding_mode") if isinstance(info, dict) else None
+            if isinstance(mode, str) and mode:
+                self._embedding_mode_memo = mode
+        return self._embedding_mode_memo
+
     def search(
         self,
         query: str,

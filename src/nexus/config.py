@@ -582,9 +582,19 @@ def is_local_mode() -> bool:
         local (nexus-3k43p: the legacy heuristic below mis-detected a greenfield
         managed user — service_url set, no chroma/voyage key — as local). This
         mirrors ``_resolve_init_mode``'s precedence (NX_LOCAL wins over
-        service_url, which wins over the legacy heuristic).
-      - Otherwise (legacy, pre-6.0): True when **either** CHROMA_API_KEY or
-        VOYAGE_API_KEY is absent.
+        service_url, which wins over the rest). Wins over ``pg_credentials``
+        too: a migrated local→managed install keeps the old file on disk.
+      - ``pg_credentials`` present in the config dir → True — the EXPLICIT
+        positive record that a local service was provisioned (``nx init``
+        local mode; the same signal health.py gates its service checks on).
+        RDR-188 P3.1 (nexus-9o6y2.13): mode comes from explicit install
+        state, not key inference.
+      - Otherwise (legacy, pre-service Chroma era): True when CHROMA_API_KEY
+        is absent. The voyage clause is DELETED (RDR-188 Gap 3): the client
+        no longer consumes the voyage key for anything, so its presence or
+        absence must have ZERO mode influence — a chroma-key-without-voyage
+        install is a half-configured CLOUD install whose missing key should
+        surface loudly, never a silent flip to local.
     """
     nx_local = os.environ.get("NX_LOCAL", "").strip()
     if nx_local == "1":
@@ -593,10 +603,12 @@ def is_local_mode() -> bool:
         return False
     if (get_credential("service_url") or "").strip():
         return False
-    # Auto-detect (legacy): local mode when either cloud credential is missing
-    chroma_key = get_credential("chroma_api_key")
-    voyage_key = get_credential("voyage_api_key")
-    return not (chroma_key and voyage_key)
+    from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — leaf constant, deferred to keep config import-light
+
+    if (nexus_config_dir() / CREDENTIALS_FILENAME).is_file():
+        return True
+    # Auto-detect (legacy): a Chroma-Cloud key marks a cloud install.
+    return not get_credential("chroma_api_key")
 
 
 # RDR-101 Phase 5c (nexus-o6aa.13) removed ``is_catalog_event_sourced``.

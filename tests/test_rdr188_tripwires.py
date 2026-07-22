@@ -228,3 +228,35 @@ def test_degrade_surface_invariant(cloud_env):
     assert res.exit_code == 0, res.output
     assert "server rerank degraded" in res.output
     assert "engine says no" in res.output
+
+
+# ── 5. P3 mode-lint (nexus-9o6y2.17): retired voyage heuristics stay gone ───
+
+
+def test_is_local_mode_source_has_no_voyage_clause():
+    """.13's deletion, pinned at source level: the mode decision must never
+    again read the voyage credential."""
+    src = (_SRC / "config.py").read_text()
+    start = src.index("def is_local_mode(")
+    end = src.index("\ndef ", start + 10)
+    body = src[start:end]
+    # The docstring legitimately EXPLAINS the deletion; the lint targets the
+    # credential-read token itself.
+    assert 'get_credential("voyage' not in body, (
+        "is_local_mode() reads the voyage credential again — RDR-188 P3.1 "
+        "deleted key inference from the mode decision"
+    )
+
+
+def test_threshold_gate_source_reads_server_mode_not_client_key():
+    """.14's rewrite, pinned: the service-mode threshold gate consults the
+    server's embedding_mode, never the client credential file."""
+    src = (_SRC / "search_engine.py").read_text()
+    start = src.index("def _voyage_thresholds_active(")
+    end = src.index("\ndef ", start + 10)
+    body = src[start:end]
+    assert "embedding_mode()" in body
+    assert "get_credential" not in body, (
+        "_voyage_thresholds_active reads client credentials again — the "
+        "signal is the SERVER's reported embedder family (RDR-188 P3.2)"
+    )
