@@ -104,6 +104,30 @@ class TestIsLocalMode:
         monkeypatch.setenv("NX_SERVICE_URL", "https://m.example")
         assert is_local_mode() is False
 
+    def test_ambiguous_pg_creds_plus_chroma_key_warns_loud(self, tmp_path, monkeypatch):
+        """Reviewer Critical fold (T2 [21057]): pg_credentials + chroma key
+        with no service_url is genuinely ambiguous (migrated-local-with-
+        source-keys vs former-local-reconfigured-to-legacy-cloud). It
+        resolves LOCAL — the live migrated population must keep working —
+        but NEVER silently: a one-shot structured warning names the
+        NX_LOCAL=0 / service_url escape hatches."""
+        import nexus.config as config_mod
+        self._cfg(tmp_path, monkeypatch, pg_creds=True)
+        monkeypatch.setenv("CHROMA_API_KEY", "k")
+        monkeypatch.setattr(config_mod, "_ambiguous_mode_warned", False)
+        events: list[str] = []
+
+        class _Cap:
+            def warning(self, event, **kw):
+                events.append(event)
+
+        monkeypatch.setattr("structlog.get_logger", lambda *a, **k: _Cap())
+        assert is_local_mode() is True
+        assert events == ["mode_ambiguous_resolved_local"]
+        # One-shot: a second call does not re-warn.
+        assert is_local_mode() is True
+        assert events == ["mode_ambiguous_resolved_local"]
+
     def test_blanking_voyage_key_never_changes_mode(self, tmp_path, monkeypatch):
         """Gap 3's regression pin: the client no longer consumes the voyage
         key (RDR-188), so its presence/absence must have ZERO mode influence

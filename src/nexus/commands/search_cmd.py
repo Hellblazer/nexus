@@ -481,7 +481,10 @@ def search_cmd(
     if want_server_rerank:
         _degraded = {c: m for c, m in rerank_meta.items() if m.get("degraded")}
         if _degraded:
-            _reason = next(iter(_degraded.values())).get("error") or "unknown"
+            _reasons = {m.get("error") or "unknown" for m in _degraded.values()}
+            _reason = next(iter(sorted(_reasons)))
+            if len(_reasons) > 1:
+                _reason += f" (+{len(_reasons) - 1} other reasons; see engine log)"
             click.echo(
                 f"Warning: server rerank degraded "
                 f"({len(_degraded)}/{max(len(rerank_meta), len(_degraded))} collections): "

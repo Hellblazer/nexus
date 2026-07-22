@@ -659,8 +659,14 @@ def provision_service_stack(embedder: str | None = None) -> bool:
     """
     from nexus.daemon.storage_service_daemon import StorageServiceStartError  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
+    # RDR-188 P3.1 fold (reviewer Critical, T2 [21057]): resolve the mode
+    # BEFORE provisioning — _provision_postgres_step() writes pg_credentials,
+    # which is itself a positive local signal to is_local_mode(); deciding
+    # after the write would let the just-written file flip the answer within
+    # this very call and defeat the cloud-internal early return below.
+    local = _config.is_local_mode()
     _provision_postgres_step()
-    if not _config.is_local_mode():
+    if not local:
         return False
     # Local service backend (RDR-160): the Java service embeds every collection
     # with bge-768. Lock the embedder + provision the standard ONNX it reads.

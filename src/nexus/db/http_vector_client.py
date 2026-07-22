@@ -995,6 +995,8 @@ class HttpVectorClient:
     #: partially-constructed test instances still resolve; successful probes
     #: shadow it per-instance). RDR-188 P3.2 (nexus-9o6y2.14).
     _embedding_mode_memo: str | None = None
+    _embedding_mode_probe_failures: int = 0
+    _EMBEDDING_MODE_MAX_PROBES: int = 3
 
     def embedding_mode(self) -> str | None:
         """The engine's AUTHORITATIVE embedder family from ``GET /version``:
@@ -1009,13 +1011,31 @@ class HttpVectorClient:
         process lifetime). A failed probe returns ``None`` WITHOUT memoizing —
         unknown, not "not voyage" — so a service that was briefly unreachable
         is re-asked on the next call rather than locking thresholds off.
+        Bounded (reviewer Medium, T2 [21057]): after
+        ``_EMBEDDING_MODE_MAX_PROBES`` consecutive failures the probe settles
+        on unknown for the process lifetime — a persistently-failing /version
+        beside a working search path must not tax every search with an extra
+        round trip forever.
         """
         if self._embedding_mode_memo is None:
+            if self._embedding_mode_probe_failures >= self._EMBEDDING_MODE_MAX_PROBES:
+                return None
             try:
                 info = _get("/version", tenant=self._tenant)
             except Exception as exc:  # noqa: BLE001 — probe is advisory; search itself surfaces a down service
-                _log.debug("embedding_mode_probe_failed", error=str(exc))
+                self._embedding_mode_probe_failures += 1
+                if self._embedding_mode_probe_failures >= self._EMBEDDING_MODE_MAX_PROBES:
+                    _log.warning(
+                        "embedding_mode_probe_settled_unknown",
+                        attempts=self._embedding_mode_probe_failures,
+                        consequence="voyage-calibrated distance thresholds stay off "
+                                    "for this process",
+                        error=str(exc),
+                    )
+                else:
+                    _log.debug("embedding_mode_probe_failed", error=str(exc))
                 return None
+            self._embedding_mode_probe_failures = 0
             mode = info.get("embedding_mode") if isinstance(info, dict) else None
             if isinstance(mode, str) and mode:
                 self._embedding_mode_memo = mode

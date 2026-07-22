@@ -136,3 +136,20 @@ def test_embedding_mode_probe_failure_returns_none_without_memoizing(client, mon
 def test_embedding_mode_garbage_version_body_is_unknown(client, monkeypatch):
     monkeypatch.setattr(hvc, "_get", lambda path, tenant=None: ["not", "a", "dict"])
     assert client.embedding_mode() is None
+
+
+def test_embedding_mode_probe_settles_unknown_after_cap(client, monkeypatch):
+    """Reviewer Medium fold (T2 [21057]): a persistently-failing /version
+    beside a working search path stops being probed after the cap — no
+    unbounded per-search round-trip tax."""
+    attempts: list[int] = []
+
+    def failing_get(path, tenant=None):
+        attempts.append(1)
+        raise ConnectionError("version route broken")
+
+    monkeypatch.setattr(hvc, "_get", failing_get)
+    client._embedding_mode_probe_failures = 0
+    for _ in range(10):
+        assert client.embedding_mode() is None
+    assert len(attempts) == client._EMBEDDING_MODE_MAX_PROBES
