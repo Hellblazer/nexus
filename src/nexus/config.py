@@ -601,7 +601,22 @@ def is_local_mode() -> bool:
         return True
     if nx_local == "0":
         return False
-    if (get_credential("service_url") or "").strip():
+    # nexus-x3ugg: the EXPLICIT mode record (config.yml ``install.mode``,
+    # stamped by ``nx init`` / managed onboarding at resolution time). Record
+    # beats artifact inference; a configured service_url beats a stale
+    # ``local`` record (the endpoint is the operationally safer read,
+    # nexus-3k43p posture) — but that contradiction is surfaced LOUDLY.
+    recorded = str(
+        load_config().get("install", {}).get("mode", "") or ""
+    ).strip().lower()
+    service_url_set = bool((get_credential("service_url") or "").strip())
+    if service_url_set:
+        if recorded == "local":
+            _warn_mode_record_contradiction_once()
+        return False
+    if recorded == "local":
+        return True
+    if recorded == "managed":
         return False
     from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — leaf constant, deferred to keep config import-light
 
@@ -615,13 +630,36 @@ def is_local_mode() -> bool:
         # direct-Chroma cloud posture with the stale file left behind.
         # pg_credentials wins — (a) is current and common, (b) is a legacy
         # corner with explicit escape hatches — but the resolution is
-        # surfaced loudly, never silent (tracked for an explicit mode
-        # record: bead nexus-x3ugg).
+        # surfaced loudly, never silent. This branch is now the FALLBACK for
+        # installs predating the install.mode record above (nexus-x3ugg):
+        # any init/onboarding completed after the record shipped resolves
+        # via the record and never reaches this inference.
         if get_credential("chroma_api_key"):
             _warn_ambiguous_mode_once()
         return True
     # Auto-detect (legacy): a Chroma-Cloud key marks a cloud install.
     return not get_credential("chroma_api_key")
+
+
+_mode_record_contradiction_warned: bool = False
+
+
+def _warn_mode_record_contradiction_once() -> None:
+    """One-shot per process: install.mode=local recorded but a service_url is
+    configured — the endpoint wins; tell the user how to reconcile."""
+    global _mode_record_contradiction_warned
+    if _mode_record_contradiction_warned:
+        return
+    _mode_record_contradiction_warned = True
+    import structlog  # noqa: PLC0415 — deferred; config must stay import-light
+
+    structlog.get_logger(__name__).warning(
+        "mode_record_contradicts_service_url",
+        recorded="local",
+        resolution="managed (the configured service_url wins)",
+        remedy="re-run `nx init` to re-stamp the record, or remove the stale "
+               "service_url / set NX_LOCAL=1 if this box is genuinely local",
+    )
 
 
 _ambiguous_mode_warned: bool = False

@@ -106,6 +106,8 @@ class TestManagedMode:
         assert result.exit_code == 0, result.output
         assert called == [], "MANAGED mode must not provision locally"
         assert "local" not in _read_config(cfg_dir)
+        # nexus-x3ugg: successful managed onboarding stamps the mode record.
+        assert _read_config(cfg_dir).get("install", {}).get("mode") == "managed"
 
 
 # ── P5: --service / Postgres provisioning flag ────────────────────────────────
@@ -1517,3 +1519,19 @@ class TestProvisionStackModeOrdering:
         with pytest.raises(_Stop):
             init_mod.provision_service_stack()
         assert order == ["mode", "provision", "embedder"]
+
+    def test_completed_local_walk_stamps_the_mode_record(self, monkeypatch):
+        """nexus-x3ugg: a walk that reaches return True stamps install.mode=local;
+        an aborted walk (previous test) must NOT have stamped."""
+        from nexus.commands import init as init_mod
+
+        stamped: list[tuple] = []
+        monkeypatch.setattr(init_mod._config, "is_local_mode", lambda: True)
+        monkeypatch.setattr(init_mod, "_provision_postgres_step", lambda: None)
+        monkeypatch.setattr(init_mod, "_provision_service_embedder_step", lambda e: None)
+        monkeypatch.setattr(init_mod, "_ensure_service_binary_step", lambda d: True)
+        monkeypatch.setattr(init_mod, "set_config_value",
+                            lambda k, v: stamped.append((k, v)))
+
+        assert init_mod.provision_service_stack() is True
+        assert ("install.mode", "local") in stamped

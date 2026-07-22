@@ -6549,7 +6549,7 @@ def _resolve_mode_diagnostics() -> dict[str, str | None]:
     failure returns ``{"mode": "unknown", "error": str(exc)}``.
     """
     try:
-        from nexus.config import get_credential, is_local_mode, nexus_config_dir  # noqa: PLC0415 — deferred, rare/branch-local path
+        from nexus.config import get_credential, is_local_mode, load_config, nexus_config_dir  # noqa: PLC0415 — deferred, rare/branch-local path
 
         local = is_local_mode()
         local_embedder = None
@@ -6563,6 +6563,9 @@ def _resolve_mode_diagnostics() -> dict[str, str | None]:
             "config_dir": str(nexus_config_dir()),
             "home": _os.environ.get("HOME", ""),
             "nx_local_env": _os.environ.get("NX_LOCAL", ""),
+            "mode_record": str(
+                (load_config().get("install", {}) or {}).get("mode", "") or ""
+            ) or None,
             "service_url_found": bool(get_credential("service_url")),
             "pg_credentials_found": (nexus_config_dir() / "pg_credentials").is_file(),
             "chroma_key_found": bool(get_credential("chroma_api_key")),

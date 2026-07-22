@@ -680,8 +680,12 @@ def provision_service_stack(embedder: str | None = None) -> bool:
             "— install one (`nx daemon service install-binary` or configure the "
             "engine-service tag), then retry"
         )
+    # nexus-x3ugg: the explicit mode record — a completed local provisioning
+    # walk IS the user's local intent; stamp it so is_local_mode() reads the
+    # record instead of inferring from artifact files (the pg_credentials /
+    # chroma-key ambiguity corner resolves silently once stamped).
+    set_config_value("install.mode", "local")
     return True
-
 
 def _resolve_init_mode() -> str:
     """Resolve the init dispatch mode with explicit precedence (RDR-174 P1.1).
@@ -927,6 +931,8 @@ def init_cmd(
             # service, then STOP. _managed_onboarding exits non-zero on probe
             # failure and never reaches local provisioning.
             _managed_onboarding(ctx)
+            # nexus-x3ugg: probe succeeded — stamp the explicit mode record.
+            set_config_value("install.mode", "managed")
         else:
             click.echo("Nexus is configured for CLOUD mode (Voyage embeddings).")
             click.echo(

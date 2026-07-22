@@ -128,6 +128,72 @@ class TestIsLocalMode:
         assert is_local_mode() is True
         assert events == ["mode_ambiguous_resolved_local"]
 
+    # ── nexus-x3ugg: explicit mode record (install.mode) ─────────────────────
+
+    def _record(self, tmp_path, monkeypatch, mode, *, pg_creds=False):
+        self._cfg(tmp_path, monkeypatch, pg_creds=pg_creds)
+        import yaml
+        cfg_file = tmp_path / "cfg" / "config.yml"
+        cfg_file.write_text(yaml.safe_dump({"install": {"mode": mode}}))
+
+    def test_recorded_local_wins_over_artifact_inference(self, tmp_path, monkeypatch):
+        """An explicit install.mode=local record resolves LOCAL with no
+        artifacts and no warning — record beats inference."""
+        self._record(tmp_path, monkeypatch, "local", pg_creds=False)
+        monkeypatch.setenv("CHROMA_API_KEY", "k")  # would infer cloud without the record
+        assert is_local_mode() is True
+
+    def test_recorded_managed_resolves_false_without_service_url(self, tmp_path, monkeypatch):
+        """install.mode=managed resolves managed even before service_url is
+        configured (mid-onboarding shapes)."""
+        self._record(tmp_path, monkeypatch, "managed", pg_creds=True)
+        assert is_local_mode() is False
+
+    def test_ambiguity_warning_suppressed_when_record_present(self, tmp_path, monkeypatch):
+        """pg_credentials + chroma key is only ambiguous WITHOUT a record —
+        a recorded mode resolves it silently."""
+        import nexus.config as config_mod
+        self._record(tmp_path, monkeypatch, "local", pg_creds=True)
+        monkeypatch.setenv("CHROMA_API_KEY", "k")
+        monkeypatch.setattr(config_mod, "_ambiguous_mode_warned", False)
+        events: list[str] = []
+
+        class _Cap:
+            def warning(self, event, **kw):
+                events.append(event)
+
+        monkeypatch.setattr("structlog.get_logger", lambda *a, **k: _Cap())
+        assert is_local_mode() is True
+        assert events == []
+
+    def test_stale_local_record_with_service_url_warns_and_service_url_wins(
+        self, tmp_path, monkeypatch,
+    ):
+        """Contradiction: a configured service_url beside install.mode=local —
+        the configured endpoint wins (nexus-3k43p posture) but LOUDLY."""
+        import nexus.config as config_mod
+        self._record(tmp_path, monkeypatch, "local", pg_creds=False)
+        monkeypatch.setenv("NX_SERVICE_URL", "https://m.example")
+        monkeypatch.setattr(config_mod, "_mode_record_contradiction_warned", False)
+        events: list[str] = []
+
+        class _Cap:
+            def warning(self, event, **kw):
+                events.append(event)
+
+        monkeypatch.setattr("structlog.get_logger", lambda *a, **k: _Cap())
+        assert is_local_mode() is False
+        assert events == ["mode_record_contradicts_service_url"]
+
+    def test_nx_local_env_beats_the_record(self, tmp_path, monkeypatch):
+        self._record(tmp_path, monkeypatch, "managed", pg_creds=False)
+        monkeypatch.setenv("NX_LOCAL", "1")
+        assert is_local_mode() is True
+
+    def test_garbage_record_value_falls_through_to_inference(self, tmp_path, monkeypatch):
+        self._record(tmp_path, monkeypatch, "purple", pg_creds=True)
+        assert is_local_mode() is True  # pg_credentials inference still applies
+
     def test_blanking_voyage_key_never_changes_mode(self, tmp_path, monkeypatch):
         """Gap 3's regression pin: the client no longer consumes the voyage
         key (RDR-188), so its presence/absence must have ZERO mode influence

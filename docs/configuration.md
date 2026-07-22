@@ -82,6 +82,7 @@ The notes below apply only to a pre-6.0 ChromaDB Cloud store being read as a **m
 | YAML path | Env var | Default | Description |
 |---|---|---|---|
 | `embeddings.rerankerModel` | `NX_EMBEDDINGS_RERANKER_MODEL` | `rerank-2.5` | RETIRED (RDR-188): reranking runs server-side; the engine picks the model via `NX_RERANK_MODEL` in its environment. A set value emits a deprecation notice and is otherwise ignored |
+| `install.mode` | — | (stamped by `nx init`) | Explicit mode record: `local` or `managed`. Written at init/onboarding; `is_local_mode()` reads it ahead of artifact inference (a configured `service_url` still wins over a stale `local` record, loudly) |
 | `client.host` | `NX_CLIENT_HOST` | `localhost` | Legacy ChromaDB host override; no-op as of 6.0 (the managed/local service URL is `NX_SERVICE_URL`). |
 | `pdf.extractor` | — | `auto` | PDF extraction backend: `auto`, `docling`, or `mineru`. Set globally with `nx config set pdf.extractor=mineru` |
 | `pdf.mineru_server_url` | — | `http://127.0.0.1:8010` | MinerU API server URL. Auto-updated when `nx mineru start` binds a port |
