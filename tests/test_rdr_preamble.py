@@ -646,6 +646,40 @@ class TestRdrResearch:
         assert "Hello World" in result.output
         assert "Research Findings" in result.output
 
+    def test_rdr_research_t2_rows_matched_despite_listing_prefix(
+        self, rdr_env, monkeypatch,
+    ) -> None:
+        """Regression (2026-07-22, caught on RDR-188): `nx memory list`
+        rows are "[id] <project>/<title>  (…)" — the old ^-anchored
+        title regex matched NOTHING, so every preamble reported "No
+        research findings recorded" while T2 held them."""
+        import subprocess as _sp
+
+        import nexus.commands.rdr as rdr_mod
+
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-001-hello-world.md",
+            {"title": "Hello World", "status": "draft", "type": "decision", "priority": "P1"},
+        )
+        real_run = _sp.run
+
+        def _fake_run(cmd, *a, **k):
+            if cmd[:3] == ["nx", "memory", "list"]:
+                return _sp.CompletedProcess(
+                    cmd, 0,
+                    stdout="[21044] nexus_rdr/1-research-1: canned finding  (-, 2026-07-22T00:00:00Z)\n"
+                           "[21042] nexus_rdr/1  (-, 2026-07-22T00:00:00Z)\n",
+                    stderr="",
+                )
+            return _sp.CompletedProcess(cmd, 1, stdout="", stderr="unavailable")
+
+        monkeypatch.setattr(rdr_mod.subprocess, "run", _fake_run)
+        result = _runner().invoke(rdr, ["preamble", "rdr-research", "--", "1"])
+        assert result.exit_code == 0, result.output
+        assert "1-research-1: canned finding" in result.output
+        assert "No research findings recorded" not in result.output
+
     def test_rdr_research_double_dash_passthrough_with_subcommand_word(self, rdr_env):
         """Subcommand word 'add' plus numeric ID: numeric ID is extracted correctly."""
         _write_rdr(

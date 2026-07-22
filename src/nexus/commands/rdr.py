@@ -694,9 +694,14 @@ def preamble_rdr_show(args: tuple[str, ...]) -> None:
                     capture_output=True, text=True, timeout=10,
                 )
                 list_out = (list_result.stdout or "").strip()
+                # `nx memory list` rows are "[id] <project>/<title>  (…)" —
+                # match the title after the project slash, not line start
+                # (the ^-anchored form matched nothing, so every preamble
+                # reported "No research findings recorded" while T2 held
+                # them; caught on RDR-188, 2026-07-22).
                 research_lines = [
                     ln for ln in list_out.splitlines()
-                    if re.match(rf"^{t2_key}-research", ln)
+                    if re.search(rf"/{t2_key}-research", ln)
                 ]
                 print("\n".join(research_lines) if research_lines
                       else "No research findings recorded")
@@ -1384,9 +1389,14 @@ def preamble_rdr_research(args: tuple[str, ...]) -> None:
                     capture_output=True, text=True, timeout=10,
                 )
                 list_out = (list_result.stdout or "").strip()
+                # `nx memory list` rows are "[id] <project>/<title>  (…)" —
+                # match the title after the project slash, not line start
+                # (the ^-anchored form matched nothing, so every preamble
+                # reported "No research findings recorded" while T2 held
+                # them; caught on RDR-188, 2026-07-22).
                 research_lines = [
                     ln for ln in list_out.splitlines()
-                    if re.match(rf"^{t2_key}-research", ln)
+                    if re.search(rf"/{t2_key}-research", ln)
                 ]
                 print(
                     "\n".join(research_lines) if research_lines
