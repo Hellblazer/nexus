@@ -33,10 +33,14 @@ import java.util.Map;
  *   POST /v1/vectors/search          embed query server-side + cosine rank (multi-collection)
  *   POST /v1/vectors/query           alias for search (mirrors MCP query tool)
  *   POST /v1/vectors/hybrid-search   pgvector hybrid fusion (tsvector+pg_trgm gate, vector rank) — RDR-155 P3
+ *   POST /v1/vectors/search-metadata-scoped  combined catalog-metadata-scoped query — RDR-156 P4
+ *   POST /v1/vectors/search-topic-scoped     combined topic-scoped query (chunk-level) — RDR-156 P4
+ *   POST /v1/vectors/search-graph-hop        combined graph-hop query (catalog BFS + rank) — RDR-156 P4
  *   POST /v1/vectors/store-put       single-chunk put (MCP store_put path)
  *   POST /v1/vectors/get             get chunks by metadata where-filter (incremental-sync staleness check)
  *   POST /v1/vectors/get-all-metadata  ids+metadata for an ENTIRE collection in one round trip (nexus-duoak)
  *   POST /v1/vectors/store-get       fetch chunks by IDs (MCP store_get/store_get_many)
+ *   POST /v1/vectors/get-embeddings  fetch stored vectors by IDs (migration/audit)
  *   POST /v1/vectors/store-list      list collection (MCP store_list)
  *   POST /v1/vectors/store-delete    delete by IDs (MCP store_delete)
  *   POST /v1/vectors/update-metadata metadata-only update (frecency reindex)
@@ -45,6 +49,17 @@ import java.util.Map;
  *   GET  /v1/vectors/stats           per-collection live stats (count/dim/last_write) — RDR-156 P3
  *   POST /v1/vectors/embed           embed-only (parity gate); 503 without a router
  * </pre>
+ *
+ * <p><strong>Fused rerank stage (RDR-188, bead nexus-9o6y2.2).</strong> The five
+ * search routes (search/query, hybrid-search, search-metadata-scoped,
+ * search-topic-scoped, search-graph-hop) accept optional {@code "rerank": true}
+ * + {@code "rerank_top_k": N} request fields. With {@code rerank=true} the
+ * response becomes the {@link RerankStage} object envelope
+ * ({@code {"results": [...], "rerank_degraded": ...}}) — rows are reranked
+ * server-side on content already fetched under RLS, and any scoring failure
+ * degrades LOUD via {@code rerank_degraded=true} + {@code rerank_error}, never
+ * a silent fallback to distance order. Without the field the bare-array
+ * envelope is byte-shape unchanged.
  *
  * <p><strong>Tenant contract (skp06 supersession).</strong> Every serving op is
  * scoped by the SERVER-RESOLVED tenant from {@link RequestContext} under FORCE RLS —
@@ -96,6 +111,7 @@ public final class VectorHandler implements HttpHandler {
 
     private final EmbedderRouter      embedderRouter;
     private final PgVectorRepository  pgRepo;
+    private final RerankStage         rerankStage;
 
     /**
      * @param embedderRouter collection-aware embedder router for /embed (may be null —
@@ -104,8 +120,25 @@ public final class VectorHandler implements HttpHandler {
      *                       (may be null — all serving routes answer 503)
      */
     public VectorHandler(EmbedderRouter embedderRouter, PgVectorRepository pgRepo) {
+        this(embedderRouter, pgRepo, null);
+    }
+
+    /**
+     * Full wiring (RDR-188 bead nexus-9o6y2.2).
+     *
+     * @param embedderRouter collection-aware embedder router for /embed (may be null —
+     *                       /embed answers 503, the pinned absent-router behaviour)
+     * @param pgRepo         pgvector repository serving every storage/query route
+     *                       (may be null — all serving routes answer 503)
+     * @param reranker       reranker for the fused rerank stage on the search routes
+     *                       (may be null — {@code rerank=true} requests degrade LOUD
+     *                       with {@code rerank_error="no reranker configured..."})
+     */
+    public VectorHandler(EmbedderRouter embedderRouter, PgVectorRepository pgRepo,
+                         dev.nexus.service.vectors.Reranker reranker) {
         this.embedderRouter = embedderRouter;
         this.pgRepo         = pgRepo;
+        this.rerankStage    = new RerankStage(reranker);
     }
 
     @Override
@@ -328,9 +361,30 @@ public final class VectorHandler implements HttpHandler {
 
         var searchResult = repo.searchWithTokens(tenant, queryText, collections, nResults, where,
                                                  includeSourceUri);
-        // Emit token count from the query-embedding call (bead nexus-ehc4q).
-        emitTokenUsage(ex, searchResult.tokens());
-        HttpUtil.send(ex, 200, json(searchResult.value()));
+        sendSearchResult(ex, body, queryText, searchResult);
+    }
+
+    /**
+     * Shared tail of the five search handlers: emit the query-embedding token
+     * count (bead nexus-ehc4q), then either the bare-array envelope (unchanged
+     * legacy shape) or — when the caller opted in with {@code rerank=true} —
+     * the {@link RerankStage} object envelope (RDR-188 bead nexus-9o6y2.2).
+     * A {@code rerank_top_k} without {@code rerank=true} is a caller error
+     * (400), not a silently ignored field.
+     */
+    private void sendSearchResult(HttpExchange ex, Map<String, Object> body, String queryText,
+                                  PgVectorRepository.Tokened<List<Map<String, Object>>> result)
+            throws IOException {
+        emitTokenUsage(ex, result.tokens());
+        boolean rerank     = optBool(body, "rerank", false);
+        Integer rerankTopK = optInteger(body, "rerank_top_k");
+        if (!rerank && rerankTopK != null) {
+            throw new IllegalArgumentException(
+                    "rerank_top_k requires \"rerank\": true — set both or neither");
+        }
+        Object payload = rerank ? rerankStage.apply(queryText, result.value(), rerankTopK)
+                                : result.value();
+        HttpUtil.send(ex, 200, json(payload));
     }
 
     /**
@@ -354,9 +408,7 @@ public final class VectorHandler implements HttpHandler {
 
         var hybridResult = repo.hybridSearchWithTokens(tenant, queryText, collections, nResults, where,
                                                        includeSourceUri);
-        // Emit token count from the query-embedding call (bead nexus-ehc4q).
-        emitTokenUsage(ex, hybridResult.tokens());
-        HttpUtil.send(ex, 200, json(hybridResult.value()));
+        sendSearchResult(ex, body, queryText, hybridResult);
     }
 
     /**
@@ -386,9 +438,7 @@ public final class VectorHandler implements HttpHandler {
         var metaResult = repo.searchMetadataScopedWithTokens(
             tenant, queryText, collections, contentType, author, year, corpus,
             subtree, where, nResults);
-        // Emit token count from the query-embedding call (bead nexus-ehc4q).
-        emitTokenUsage(ex, metaResult.tokens());
-        HttpUtil.send(ex, 200, json(metaResult.value()));
+        sendSearchResult(ex, body, queryText, metaResult);
     }
 
     /**
@@ -409,9 +459,7 @@ public final class VectorHandler implements HttpHandler {
         int nResults      = optInt(body, "n_results", 10);
 
         var topicResult = repo.searchTopicScopedWithTokens(tenant, queryText, topicLabel, collection, nResults);
-        // Emit token count from the query-embedding call (bead nexus-ehc4q).
-        emitTokenUsage(ex, topicResult.tokens());
-        HttpUtil.send(ex, 200, json(topicResult.value()));
+        sendSearchResult(ex, body, queryText, topicResult);
     }
 
     /**
@@ -443,9 +491,7 @@ public final class VectorHandler implements HttpHandler {
 
         var graphResult = repo.searchGraphHopWithTokens(
             tenant, queryText, seeds, collections, linkType, depth, direction, where, nResults);
-        // Emit token count from the query-embedding call (bead nexus-ehc4q).
-        emitTokenUsage(ex, graphResult.tokens());
-        HttpUtil.send(ex, 200, json(graphResult.value()));
+        sendSearchResult(ex, body, queryText, graphResult);
     }
 
     /**

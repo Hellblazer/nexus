@@ -107,13 +107,13 @@ class VoyageRerankerTest {
                 + "{\"index\": 0, \"relevance_score\": 0.61}, "
                 + "{\"index\": 1, \"relevance_score\": 0.15}"));
 
-        List<VoyageReranker.Scored> out = reranker()
+        List<Reranker.Scored> out = reranker()
                 .rerank("what is a tumbler", List.of("doc a", "doc b", "doc c"), null);
 
         assertThat(out).containsExactly(
-                new VoyageReranker.Scored(2, 0.97),
-                new VoyageReranker.Scored(0, 0.61),
-                new VoyageReranker.Scored(1, 0.15));
+                new Reranker.Scored(2, 0.97),
+                new Reranker.Scored(0, 0.61),
+                new Reranker.Scored(1, 0.15));
 
         JsonNode body = MAPPER.readTree(requestBodies.get(0));
         assertThat(body.get("query").asText()).isEqualTo("what is a tumbler");
@@ -131,21 +131,21 @@ class VoyageRerankerTest {
                 "{\"index\": 0, \"relevance_score\": 0.10}, "
                 + "{\"index\": 1, \"relevance_score\": 0.90}"));
 
-        List<VoyageReranker.Scored> out = reranker().rerank("q", List.of("a", "b"), null);
+        List<Reranker.Scored> out = reranker().rerank("q", List.of("a", "b"), null);
 
         assertThat(out).containsExactly(
-                new VoyageReranker.Scored(1, 0.90),
-                new VoyageReranker.Scored(0, 0.10));
+                new Reranker.Scored(1, 0.90),
+                new Reranker.Scored(0, 0.10));
     }
 
     @Test
     void topKIsForwardedAndTruncatedResponseAccepted() throws Exception {
         respond(200, dataBody("{\"index\": 3, \"relevance_score\": 0.88}"));
 
-        List<VoyageReranker.Scored> out = reranker()
+        List<Reranker.Scored> out = reranker()
                 .rerank("q", List.of("a", "b", "c", "d"), 1);
 
-        assertThat(out).containsExactly(new VoyageReranker.Scored(3, 0.88));
+        assertThat(out).containsExactly(new Reranker.Scored(3, 0.88));
         JsonNode body = MAPPER.readTree(requestBodies.get(0));
         assertThat(body.get("top_k").asInt()).isEqualTo(1);
     }
@@ -191,9 +191,9 @@ class VoyageRerankerTest {
         respond(429, "{\"detail\": \"rate limited\"}");
         respond(200, dataBody("{\"index\": 0, \"relevance_score\": 0.5}"));
 
-        List<VoyageReranker.Scored> out = reranker().rerank("q", List.of("a"), null);
+        List<Reranker.Scored> out = reranker().rerank("q", List.of("a"), null);
 
-        assertThat(out).containsExactly(new VoyageReranker.Scored(0, 0.5));
+        assertThat(out).containsExactly(new Reranker.Scored(0, 0.5));
         assertThat(requestBodies).hasSize(2);
     }
 

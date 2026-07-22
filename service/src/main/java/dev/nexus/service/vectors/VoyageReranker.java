@@ -51,7 +51,7 @@ import java.util.Optional;
  *
  * <p>Stateless: each {@link #rerank} call is independent. Thread-safe.
  */
-public final class VoyageReranker {
+public final class VoyageReranker implements Reranker {
 
     private static final Logger log = LoggerFactory.getLogger(VoyageReranker.class);
 
@@ -65,10 +65,6 @@ public final class VoyageReranker {
     // Fused-stage bound: worst case with retries ≈ 3×30s + backoff, still under
     // typical client HTTP timeouts; the embed path's 120s would not be.
     private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
-
-    /** One reranked document: {@code index} into the input list, higher score = more relevant. */
-    public record Scored(int index, double relevanceScore) {
-    }
 
     private final String       apiKey;
     private final String       model;
@@ -102,6 +98,7 @@ public final class VoyageReranker {
         this.mapper = new ObjectMapper();
     }
 
+    @Override
     public String modelToken() {
         return model;
     }
@@ -118,6 +115,7 @@ public final class VoyageReranker {
      * @throws RerankUpstreamException  any other upstream failure — retries
      *         exhausted, non-retryable status, network error, invalid response
      */
+    @Override
     public List<Scored> rerank(String query, List<String> documents, Integer topK) {
         if (query == null || query.isBlank()) {
             throw new IllegalArgumentException("rerank query must be non-blank");

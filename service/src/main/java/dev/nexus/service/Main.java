@@ -114,6 +114,7 @@ public final class Main {
         // migration ran for hours against silent ONNX-384 fallback because the
         // mode was invisible; onnx-local now logs at WARN and names the refusal
         // behaviour so a missing key is unmissable in the service log.
+        dev.nexus.service.vectors.Reranker reranker = null;
         if (voyageKey != null && !voyageKey.isBlank()) {
             // Cloud mode: PURE Voyage routing — NO local ONNX embedder (nexus-0n7uc).
             // The cloud container has no MiniLM model on disk; constructing
@@ -123,8 +124,13 @@ public final class Main {
             // 384-dim fallback; non-conformant collections are REFUSED (422).
             docEmbedRouter = new EmbedderRouter(voyageKey, "document");
             qryEmbedRouter = new EmbedderRouter(voyageKey, "query");
-            log.info("event=embedding_mode_banner mode={} models={} backend=pgvector",
-                    docEmbedRouter.modeName(), docEmbedRouter.availableModels());
+            // RDR-188: the same key grants the fused rerank stage — the engine owns
+            // ALL Voyage traffic (embed + rerank); no new credential surface.
+            reranker = new dev.nexus.service.vectors.VoyageReranker(
+                    voyageKey, dev.nexus.service.vectors.VoyageReranker.DEFAULT_MODEL);
+            log.info("event=embedding_mode_banner mode={} models={} reranker={} backend=pgvector",
+                    docEmbedRouter.modeName(), docEmbedRouter.availableModels(),
+                    dev.nexus.service.vectors.VoyageReranker.DEFAULT_MODEL);
         } else {
             // Local mode (RDR-160): bge-768 serves EVERY collection. MiniLM is
             // NOT loaded on the local path (Decision 5) — a non-bge collection
@@ -154,7 +160,7 @@ public final class Main {
             System.exit(1);
         }
 
-        var service = new NexusService(port, token, ds, docEmbedRouter, pgVectorRepo);
+        var service = new NexusService(port, token, ds, docEmbedRouter, pgVectorRepo, reranker);
         service.start();
 
         log.info("event=service_ready port={}", service.getPort());
