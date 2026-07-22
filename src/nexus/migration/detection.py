@@ -771,9 +771,12 @@ def open_read_legs(
     product's own env-aware local-Chroma path, nexus-id750) or an
     unconfigured cloud leg yields ``None`` for that leg — a fresh user with
     neither leg gets ``(None, None)``, which :func:`classify_collections`
-    treats as a clean no-op. Only the "absent leg" sentinels
-    (``FileNotFoundError`` / the cloud half-configured ``RuntimeError``) are
-    swallowed; any other failure (a corrupt store) propagates loud.
+    treats as a clean no-op. The "absent leg" sentinels
+    (``FileNotFoundError`` / the cloud half-configured ``RuntimeError``)
+    are swallowed silently; a CONFIGURED-but-unreadable cloud leg (dead
+    creds, unreachable host — nexus-dv708) degrades to absent with a LOUD
+    warning instead of crashing detection. Only a LOCAL-leg failure beyond
+    file-absence (a corrupt store) still propagates.
     """
     from nexus.migration.chroma_read import (  # noqa: PLC0415 — circular-dep avoidance (nexus.migration.chroma_read)
         open_cloud_read_client,
@@ -792,6 +795,24 @@ def open_read_legs(
         cloud = open_cloud_read_client()
     except RuntimeError:
         # half-configured / unconfigured cloud leg — absent, not an error
+        cloud = None
+    except Exception as exc:  # noqa: BLE001 — nexus-dv708: DEAD-cred / transport failures degrade LOUD, never crash detection
+        # A CONFIGURED cloud leg whose credentials are dead (revoked key →
+        # chromadb ChromaError/AuthError at CloudClient construction) or
+        # whose host is unreachable (httpx transport wrapped as ValueError
+        # by chromadb.api.client) previously propagated out of detect()
+        # and hard-failed the whole upgrade walk ("detect raised", rung
+        # FAILED, did not converge). The leg is a retired MIGRATION SOURCE
+        # — an unreadable one means "this source is unavailable", which is
+        # the same detect() verdict as absent, said LOUDLY (the 6.15.0
+        # shakeout's dead-VOYAGE-key class). The LOCAL leg deliberately
+        # keeps propagating: a corrupt local store is a real error.
+        _log.warning(
+            "detection.cloud_read_leg_unreadable",
+            error=f"{type(exc).__name__}: {exc}",
+            guidance="cloud migration-source leg skipped — fix or remove the "
+                     "CHROMA_API_KEY/tenant config if this source still matters",
+        )
         cloud = None
 
     return local, cloud

@@ -1670,3 +1670,72 @@ class TestEra32Classification:
         truly_legacy, era32 = _probe_id_conformance(self._col(ids))
         assert truly_legacy == "short-id-16chars"
         assert era32 is True
+
+
+class TestOpenReadLegsDeadCloudCreds:
+    """nexus-dv708: a CONFIGURED-but-unreadable Chroma Cloud read leg
+    (revoked key -> ChromaError at CloudClient construction; unreachable
+    host -> ValueError) must degrade to leg-absent WITH a loud warning —
+    never propagate out of detection and hard-fail the whole upgrade walk
+    ('detect raised', rung FAILED, did not converge). The half-configured
+    RuntimeError stays the SILENT absent sentinel; the local leg's
+    corrupt-store propagation is untouched."""
+
+    @staticmethod
+    def _patch_legs(monkeypatch, cloud_raises: Exception) -> None:
+        import nexus.migration.chroma_read as cr
+
+        def _cloud_boom() -> object:
+            raise cloud_raises
+
+        def _local_absent(path) -> object:
+            raise FileNotFoundError(path)
+
+        monkeypatch.setattr(cr, "open_cloud_read_client", _cloud_boom)
+        monkeypatch.setattr(cr, "open_local_read_client", _local_absent)
+
+    def test_dead_cred_degrades_loud(self, monkeypatch) -> None:
+        from chromadb.errors import ChromaError
+
+        from nexus.migration.detection import open_read_legs
+
+        class _Auth(ChromaError):
+            pass
+
+        self._patch_legs(monkeypatch, _Auth("Forbidden"))
+        from structlog.testing import capture_logs
+        with capture_logs() as logs:
+            local, cloud = open_read_legs("/nonexistent")
+        assert local is None
+        assert cloud is None, "dead-cred cloud leg must degrade, not raise"
+        assert any(
+            e["event"] == "detection.cloud_read_leg_unreadable" for e in logs
+        ), "the degrade must be LOUD"
+
+    def test_unreachable_host_degrades_loud(self, monkeypatch) -> None:
+        from nexus.migration.detection import open_read_legs
+
+        self._patch_legs(
+            monkeypatch, ValueError("Could not connect to a Chroma server."),
+        )
+        from structlog.testing import capture_logs
+        with capture_logs() as logs:
+            _, cloud = open_read_legs("/nonexistent")
+        assert cloud is None
+        assert any(
+            e["event"] == "detection.cloud_read_leg_unreadable" for e in logs
+        )
+
+    def test_half_configured_sentinel_stays_silent(self, monkeypatch) -> None:
+        """Regression guard: the absent-leg RuntimeError sentinel must NOT
+        grow a warning — unconfigured boxes stay quiet."""
+        from nexus.migration.detection import open_read_legs
+
+        self._patch_legs(monkeypatch, RuntimeError("half-configured cloud read"))
+        from structlog.testing import capture_logs
+        with capture_logs() as logs:
+            _, cloud = open_read_legs("/nonexistent")
+        assert cloud is None
+        assert not any(
+            e["event"] == "detection.cloud_read_leg_unreadable" for e in logs
+        )
