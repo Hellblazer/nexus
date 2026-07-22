@@ -20,7 +20,7 @@ Any tripped threshold files a mechanization bead (`bd create`) — never just a 
 
 1. **Directive-diff (Gap 2)**: diff sent scope-updates vs each hand-back's addressed items; count `nx scratch` tag `crossed-resend`. >2 crossed-resends → bead.
 2. **Commit-pathspec (Gap 4)**: `bash tests/e2e/lib/commit_scope_audit.sh <session-start-ref>.. <intended pathspecs...>`. Any `!!! FOREIGN FILE(S)` → bead.
-3. **Declaration-completeness (Gap 1)**: `source tests/e2e/lib/expectations.sh; expectations_undeclared <session_id>` — flags named-morphology dispatches with no EXPECT row (either mode suppresses; unnamed/sync dispatches never flagged). Any UNDECLARED → bead. Census for nexus-ccs9v.11: report `EXPECT`/`START`/`REPORTED`/`WOULDBLOCK`/`BLOCKED` row counts in the handoff.
+3. **Declaration-completeness (Gap 1)**: `source tests/e2e/lib/expectations.sh; expectations_undeclared <session_id>` — flags named-morphology dispatches with no EXPECT row (either mode suppresses; unnamed/sync dispatches never flagged). Any UNDECLARED → bead. Census: `expectations_census <session_id>` — the SCRIPTED per-agent classification + ROWS/CLASSIFIED summary (nexus-hybv1: never hand-count; `BLOCKED_RESOLVED` = guard success, bare `BLOCKED_UNRESOLVED` = real idle). Paste its two summary lines into the handoff.
 4. **Payload-morphology tripwire**: after any Claude Code version change, rerun `./tests/cc-validation/runner.sh --scenario 27` (the `a<name>-<hash>` encoding is production-load-bearing).
 
 ### Step 1: write the full handoff to `<Target file>`
