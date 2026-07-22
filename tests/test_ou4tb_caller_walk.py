@@ -90,9 +90,10 @@ class TestCatalogSpans:
             meta={"doc_id": "d1"},
             tumbler="1.2.3",
         )
-        with capture_logs() as logs:
-            out = resolve_span_text_for_entry(entry, "3:10-40", catalog=None)
-        assert out is None
+        # nexus-ib6uy: degraded service now RAISES (unreachable ≠ empty) —
+        # the API boundary renders the distinction, never a silent None.
+        with capture_logs() as logs, pytest.raises(VectorServiceError):
+            resolve_span_text_for_entry(entry, "3:10-40", catalog=None)
         assert "resolve_span_chunk_char_service_degraded" in _events(logs)
 
     def test_chunk_char_span_generic_failure_stays_debug(self, monkeypatch) -> None:
@@ -129,14 +130,15 @@ class TestCatalogSpans:
             raise _BOOM
         monkeypatch.setattr(spans, "resolve_span_in_t3", _raise)
         spans.reset_chash_fallback_warning_for_tests()
-        with capture_logs() as logs:
-            out = spans.fallback_chash_scan(
+        # nexus-ib6uy: an all-unreadable scan RAISES — not-found cannot be
+        # concluded over collections that couldn't be read.
+        with capture_logs() as logs, pytest.raises(VectorServiceError):
+            spans.fallback_chash_scan(
                 span="chash:" + "ab" * 32,
                 hex_chash="ab" * 32,
                 t3=_RaisingT3(),
                 build_ref=lambda **kw: kw,
             )
-        assert out is None
         assert "resolve_chash_fallback_incomplete_service_degraded" in _events(logs)
         row = next(
             e for e in logs

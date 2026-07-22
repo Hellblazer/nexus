@@ -199,7 +199,19 @@ def _append_chash_footnotes(
         seen.add(c.chash)
         try:
             ref = cat.resolve_chash(c.chash, t3, chash_index)
-        except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
+        except Exception as exc:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
+            from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred import; rare/branch-local path
+
+            if isinstance(exc, VectorServiceError):
+                # nexus-ib6uy: a degraded vector service must ABORT the
+                # render — emitting "[unresolved chash]" footnotes for
+                # spans that merely couldn't be READ would bake a false
+                # dangling-ref verdict into an authored document.
+                raise click.ClickException(
+                    f"doc render aborted: vector service degraded while "
+                    f"resolving chash:{c.chash[:8]}… — fix the service and "
+                    f"re-render ({exc})"
+                ) from exc
             ref = None
         short = c.chash[:8]
         if ref is None:
