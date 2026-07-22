@@ -38,22 +38,33 @@
     <key>RunAtLoad</key>
     <true/>
     <!--
-      always-keep-alive: the storage service must persist regardless of exit
-      reason (a clean SIGTERM sets exit code 0; KeepAlive=<true/> is the
-      canonical macOS pattern for a daemon that must come back). ExitTimeOut
-      bounds a stuck graceful shutdown so launchd does not loop too hard.
+      restart-on-FAILURE only (nexus-6bmph, RDR-183 defect-3; parity with the
+      systemd unit's Restart=on-failure): SuccessfulExit=<false/> means launchd
+      respawns the supervisor only when it exits NON-zero. A SUCCESSFUL exit
+      settles the unit, which is load-bearing twice over:
+        - healthy coexistence: start() finds a live session-started supervisor
+          already owning the lease and exits 0 (exit_if_process_unowned) — the
+          old KeepAlive=<true/> respawned that exit-0 every ThrottleInterval
+          FOREVER (the GH #1405 defect-3 steady-state churn);
+        - a graceful ``nx daemon service stop`` (SIGTERM -> clean exit 0) now
+          STAYS stopped instead of being resurrected within 30s.
+      Failure exits (crash; exit 2 pre-provisioning before ``nx init``; exit 3
+      watchdog service-unrecoverable) still respawn indefinitely — the
+      never-give-up posture is preserved exactly where it belongs. Boot
+      coverage is RunAtLoad; if a session-owned supervisor later dies, the
+      client-side heal-on-next-use respawn path recovers it (RDR-175's OS
+      watchdog supervises processes THIS unit started, not foreign leases).
+      ExitTimeOut bounds a stuck graceful shutdown.
 
-      ThrottleInterval (RDR-174 P2.1 review SIG-1): the supervisor fails loud
-      (non-zero exit) until provisioning completes (no pg_credentials / no
-      engine binary yet — the normal state right after this unit is installed
-      but before ``nx init``). Without throttling, KeepAlive=<true/>
-      would respawn it in a tight loop. 30s mirrors the Linux RestartSec spirit
-      at a safer interval. (The pre-provisioning crash is inherent to installing
-      the unit before ``nx init``; the supervisor owns PG startup, so
-      no readiness wrapper applies — ThrottleInterval is the bound that matters.)
+      ThrottleInterval (RDR-174 P2.1 review SIG-1): bounds the FAILURE respawn
+      loop (e.g. crash-looping before ``nx init`` provisions pg_credentials).
+      30s mirrors the Linux RestartSec spirit at a safer interval.
     -->
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
     <key>ThrottleInterval</key>
     <integer>30</integer>
     <key>ExitTimeOut</key>

@@ -846,6 +846,61 @@ _T2_AUTOSTART_UNIT_KIND = (
 )
 
 
+def unload_stale_service_launchagent(config_dir: Path) -> list[str]:
+    """Remove a NON-local box's stray ``com.nexus.service`` autostart unit
+    (nexus-6bmph, RDR-183 residual — the :func:`unload_stale_t2_launchagent`
+    sibling for the SERVICE unit; live evidence 2026-07-22: a cloud-mode box
+    accumulated 810 err lines in one morning from the exit-2 respawn loop).
+
+    Gated on ``is_local_mode()`` — the unit is LEGITIMATE on a local-service
+    install (it is that box's boot autostart); only a managed/cloud-resolving
+    box has nothing for it to run (no local pg_credentials -> immediate exit
+    -> OS respawn churn). Same two-tier failure discipline as the t2 leg:
+    applicability-probe failures degrade silently; a confirmed-present unit
+    that fails to REMOVE is a loud NEEDS HUMAN line. Never raises.
+    ``config_dir`` accepted-not-read for call-signature parity with siblings.
+    """
+    try:
+        from nexus.config import is_local_mode  # noqa: PLC0415 — deferred, circular-dep avoidance
+
+        if is_local_mode():
+            return []
+
+        from nexus.commands.daemon import _service_autostart_unit_installed  # noqa: PLC0415 — deferred, CLI startup cost
+
+        if _service_autostart_unit_installed() is None:
+            return []
+    except Exception as exc:  # noqa: BLE001 — best-effort applicability probe; must never break the finish pass
+        _log.debug("service_launchagent_applicability_probe_failed", error=str(exc))
+        return []
+
+    try:
+        from nexus.daemon.installer import (  # noqa: PLC0415 — deferred, CLI startup cost
+            UninstallStatus,
+            uninstall_autostart,
+        )
+
+        result = uninstall_autostart(tier="service")
+    except Exception as exc:  # noqa: BLE001 — a CONFIRMED-present unit failed to remove; loud, never a crash
+        _log.warning("service_launchagent_unload_failed", error=str(exc))
+        return [
+            "NEEDS HUMAN: this box resolves to managed/cloud mode but a stray "
+            f"storage-service autostart unit is installed and could not be removed ({exc}) — "
+            "run `nx daemon service uninstall --autostart` yourself"
+        ]
+
+    if result.status != UninstallStatus.REMOVED:
+        return []  # NOT_INSTALLED — the probe above already filtered this, defensive only
+
+    actions = [
+        "removed the stray storage-service autostart unit (managed/cloud mode — "
+        f"it respawned an immediately-exiting local engine): {result.dest}"
+    ]
+    for w in getattr(result, "warnings", ()) or ():
+        actions.append(f"note: {w}")
+    return actions
+
+
 def unload_stale_t2_launchagent(config_dir: Path) -> list[str]:
     """Remove a service-mode box's stray ``com.nexus.t2`` LaunchAgent.
 
@@ -1041,6 +1096,7 @@ def check_version_transition(config_dir: Path) -> str | None:
         _log.warning("diag_view_heal_failed", exc_info=True)
     try:
         actions = actions + unload_stale_t2_launchagent(config_dir)
+        actions = actions + unload_stale_service_launchagent(config_dir)
     except Exception:  # noqa: BLE001 — the finish pass must never break CLI startup
         _log.warning("t2_launchagent_unload_failed", exc_info=True)
     # critic-180-cohort finding 2: engine convergence swaps the binary (and
