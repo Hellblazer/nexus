@@ -138,11 +138,17 @@ public final class Main {
             Bge768Embedder bge = new Bge768Embedder();
             docEmbedRouter = new EmbedderRouter(bge, "document");
             qryEmbedRouter = new EmbedderRouter(bge, "query");
-            log.warn("event=embedding_mode_banner mode={} models={} backend=pgvector "
+            // RDR-188 P1.3: local no-Voyage posture reranks with the ms-marco
+            // cross-encoder. Lazy init (ctor touches no I/O): a not-yet-provisioned
+            // model degrades the fused stage LOUD per request instead of failing
+            // boot, and is picked up on first rerank once `nx init` lands it.
+            reranker = new dev.nexus.service.vectors.CrossEncoderReranker();
+            log.warn("event=embedding_mode_banner mode={} models={} reranker={} backend=pgvector "
                     + "voyage_collections=REFUSED_422 hint=\"set NX_VOYAGE_API_KEY (or let "
                     + "the supervisor plumb it from VOYAGE_API_KEY / config.yml credentials) "
                     + "to serve voyage-* collections\"",
-                    docEmbedRouter.modeName(), docEmbedRouter.availableModels());
+                    docEmbedRouter.modeName(), docEmbedRouter.availableModels(),
+                    reranker.modelToken());
         }
         var pgVectorRepo = new PgVectorRepository(new TenantScope(ds), docEmbedRouter,
                                                   qryEmbedRouter);

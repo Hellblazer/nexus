@@ -90,6 +90,42 @@ def _provision_service_embedder_step(embedder: str | None) -> None:
         _log.warning("service_bge_provision_failed", error=str(exc))
         raise click.ClickException(str(exc)) from exc
 
+    _provision_service_crossencoder_step()
+
+
+def _provision_service_crossencoder_step() -> None:
+    """Fetch the ms-marco cross-encoder ONNX the engine's rerank stage reads.
+
+    RDR-188 P1.3: local service installs rerank server-side with the ms-marco
+    cross-encoder (the engine's ``CrossEncoderReranker`` lazy-loads it from the
+    Java-read path). Deliberately NON-fatal, unlike the bge fetch above: the
+    engine boots and serves without this file — the fused rerank stage degrades
+    LOUD per request (``rerank_degraded=true``) until it exists, and the engine
+    picks it up on the next rerank without a restart. Failure here is surfaced
+    loudly (stderr + doctor keeps flagging it) but must not abort an otherwise
+    good install.
+    """
+    from nexus.db.service_crossencoder_model import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        SERVICE_CROSSENCODER_DOWNLOAD_HINT,
+        fetch_service_crossencoder_onnx,
+    )
+
+    click.echo(
+        f"\nProvisioning the ms-marco cross-encoder the service reranks with "
+        f"({SERVICE_CROSSENCODER_DOWNLOAD_HINT}) — one-time download …"
+    )
+    try:
+        dest = fetch_service_crossencoder_onnx()
+        click.echo(f"Done — service cross-encoder ready at {dest}.")
+    except Exception as exc:  # noqa: BLE001 — must stay actionable
+        _log.warning("service_crossencoder_provision_failed", error=str(exc))
+        click.echo(
+            f"\nWARNING: {exc}\n(The service still runs; server-side rerank stays "
+            f"degraded — loudly — until the model is provisioned. `nx doctor` "
+            f"tracks it.)",
+            err=True,
+        )
+
 
 def _ensure_service_binary_step(config_dir: Path) -> bool:
     """Acquire the signed native service binary if none is already installed.

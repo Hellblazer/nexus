@@ -468,6 +468,49 @@ def _check_service_bge_model() -> list[HealthResult]:
     )]
 
 
+def _check_service_crossencoder_model() -> list[HealthResult]:
+    """RDR-188 P1.3: surface a missing/incomplete ms-marco cross-encoder model.
+
+    In local service mode the Java engine reranks with the ms-marco-MiniLM
+    cross-encoder read from a fixed path. Unlike the bge model (boot-fatal),
+    a missing cross-encoder only degrades the fused rerank stage — LOUD, per
+    request (``rerank_degraded=true``) — so this is a soft warn with the
+    provisioning remedy, mirroring :func:`_check_service_bge_model`'s gating:
+    only a service install (``pg_credentials`` present) reads this file.
+    """
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred to avoid circular import
+
+    if not (nexus_config_dir() / CREDENTIALS_FILENAME).exists():
+        return []  # not a service install — the Java engine is what reads this model
+
+    from nexus.db.service_crossencoder_model import (  # noqa: PLC0415 — deferred to avoid circular import
+        service_crossencoder_model_dir,
+        service_crossencoder_model_present,
+    )
+
+    model_dir = service_crossencoder_model_dir()
+    if service_crossencoder_model_present():
+        return [HealthResult(
+            label="Service reranker (ms-marco cross-encoder)",
+            ok=True,
+            detail=f"ONNX present at {model_dir}",
+        )]
+    return [HealthResult(
+        label="Service reranker (ms-marco cross-encoder)",
+        ok=False,
+        warn=True,
+        detail=(
+            f"the local engine reranks with the ms-marco cross-encoder but its ONNX "
+            f"is missing or incomplete at {model_dir} — server-side rerank degrades "
+            f"loud (rerank_degraded=true) until it is provisioned"
+        ),
+        fix_suggestions=[
+            "Provision it: nx init",
+        ],
+    )]
+
+
 #: Bounded tail size read by :func:`_last_boot_failure_detail` (nexus-4m6i0.7).
 #: The service can crash-loop BEFORE it answers any HTTP request, so the
 #: only evidence of *why* is in its own log file — never the whole file,
@@ -3282,6 +3325,7 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     if _local:
         results.extend(_check_t3_local())
         results.extend(_check_service_bge_model())
+        results.extend(_check_service_crossencoder_model())
         results.extend(_check_t3_daemon_version())
     else:
         results.extend(_check_t3_cloud())
