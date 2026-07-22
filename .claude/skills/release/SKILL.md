@@ -40,9 +40,23 @@ This gate exists because the engine silently drifted 22 `service/` commits / 4 d
 uv run pytest                        # unit suite (no API keys)
 tests/e2e/local-service-gate.sh      # integration incl. the local-service functional gate
 tests/e2e/migration-rehearsal/run.sh --package-upgrade   # ONE-engine convergence MVV (nexus-cfgo9)
+tests/e2e/fresh-install-mvv.sh       # VIRGIN-journey gate (nexus-nolqs) — see below
 ```
 
 All must pass. Integration is excluded from CI and is the last line of defense before tag-push.
+
+**`fresh-install-mvv.sh` — the virgin-journey gate (nexus-nolqs, 2026-07-21).**
+Every other E2E gate starts from a POPULATED install and tests the upgrade
+axis; the unit suite pins the SQLite opt-out backend — which is how the
+f1itv/e9ru2/kmo9h/r5f3c/9xfx5 fresh-box defect class shipped through the full
+release process unseen. This gate builds the wheel under test, then on a
+scrubbed-env virgin HOME: local init (engine sha256+sig-verified, portable PG,
+bge-768), ladder converged at init, store put + index md with ENGINE-CATALOG
+registration asserted, semantic search returns both sentinels, doctor with
+zero ✗ / zero ⚠ / an EMPTY warnings allowlist. Must end
+`FRESH-INSTALL MVV PASSED`. `FRESH_MVV_CACHE=/tmp/fresh-mvv-cache` reuses the
+416MB model download across runs. Every new fresh-box warning is a decision:
+fix it or allowlist it in the script WITH a rationale + bead reference.
 
 **`--package-upgrade` — the fix-delivery gate (GH #1402, nexus-cfgo9).** Proves
 what 6.10.0 shipped without: that an EXISTING install upgrading the package

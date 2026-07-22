@@ -581,6 +581,12 @@ One-command onboarding: creates the catalog, populates from existing T3 collecti
 
 On a new machine with an existing catalog remote: `nx catalog setup --remote <url>` clones from the remote instead of creating an empty catalog.
 
+**Service mode (the default): this command refuses.** The nexus service owns
+the live catalog — `nx catalog search` / `nx catalog links` already work
+against it with nothing to set up, and creating a local catalog here would
+build a divergent store the service never reads (nexus-kmo9h). The command
+applies only to the SQLite opt-out mode (`NX_STORAGE_BACKEND_CATALOG=sqlite`).
+
 ### nx catalog search
 
 ```
@@ -1393,6 +1399,12 @@ nx init --service             # DEPRECATED — plain `nx init` now does this by 
 | `--no-autostart` | Do not register the autostart unit; start a session supervisor only (local mode). Takes precedence over `--yes`. |
 | `--service` | **DEPRECATED** (RDR-174 P3.1) — plain `nx init` now provisions the local service backend by default; the flag still works (and prints a deprecation notice) but will be removed in a future release. Provisions the local Postgres + pgvector cluster the RDR-152 service backend uses, locks the embedder to bge-768, acquires + verifies the native service binary, fetches the bge-768 ONNX, and starts the service. Idempotent. The binary + PG bundle are acquired automatically from the wheel's pinned engine tag (override: `NEXUS_SERVICE_TAG` env or a prior `nx daemon service install-binary`). |
 
+**First-run ladder convergence (nexus-9xfx5):** once the backend is serving,
+`nx init` converges the upgrade ladder as its final step, so a virgin box's
+first `nx doctor` shows no pending rungs and the diagnostic views exist. A
+convergence failure never fails init — it defers with a pointer at
+`nx upgrade` (idempotent).
+
 **Service autostart (RDR-174 P2.4, decide-first):** in local mode `nx init`
 decides autostart *before* starting any supervisor. Interactive runs prompt
 (default yes); `--yes` accepts, `--no-autostart` declines. A non-interactive run
@@ -1560,7 +1572,7 @@ Health check for all dependencies.
 nx doctor
 ```
 
-Checks (live T3 first): the nexus-service vector reachability probe (RDR-155: probed unconditionally — a pgvector install with the service down does NOT doctor all-green), the T3 collection census via the pgvector service, the service bge-768 model in local-service mode, and the legacy on-disk Chroma store (reported as awaiting the migration ETL, not as the live backend). Then: Voyage AI key, ripgrep binary, git binary, git hooks status for registered repos, index log last-write time, orphaned PDF checkpoints, orphaned pipeline buffer entries, T2 integrity, T2 daemon singleton (RDR-129: hard error if more than one T2 daemon serves the same `memory.db`), T2 best-effort writes (RDR-129: soft warning with the count of chash dual-writes dropped under WAL contention), and — in service mode — a stray T2 autostart unit left over from a pre-service-mode install (GH #1405: soft warning naming the unit path and the removal command). The T2 integrity check reports a transient FTS5 write-lock during active indexing as a soft warning, not a hard failure (RDR-129 B4). The ChromaDB Cloud / Voyage credential lines (`CHROMA_API_KEY` / `CHROMA_TENANT` / `CHROMA_DATABASE` / `VOYAGE_API_KEY`) are informational only as of 6.13.1: they describe migration-source config (read by the legacy-store ETL, not by serving) and are never fatal — the live T3 health surface is the vector-service probe above and `nx daemon service status`. Any install with no Chroma keys is healthy; a missing migration-source credential surfaces from the migration command itself.
+Checks (live T3 first): the nexus-service vector reachability probe (RDR-155: probed unconditionally — a pgvector install with the service down does NOT doctor all-green), the T3 collection census via the pgvector service, the service bge-768 model in local-service mode, and the legacy on-disk Chroma store (reported as awaiting the migration ETL, not as the live backend). Then: Voyage AI key, ripgrep binary (as of 6.16.0 an optional-accelerator advisory — missing rg renders install hints, never a failed doctor; hybrid search is simply disabled), git binary, git hooks status for registered repos, the MinerU server (as of 6.16.0 probed only when actually provisioned — an explicit non-default `pdf.mineru_server_url` or a live `nx mineru start` pid; unprovisioned fresh boxes render the not-configured skip instead of a red ✗), index log last-write time, orphaned PDF checkpoints, orphaned pipeline buffer entries, T2 integrity, T2 daemon singleton (RDR-129: hard error if more than one T2 daemon serves the same `memory.db`), T2 best-effort writes (RDR-129: soft warning with the count of chash dual-writes dropped under WAL contention), and — in service mode — a stray T2 autostart unit left over from a pre-service-mode install (GH #1405: soft warning naming the unit path and the removal command). The T2 integrity check reports a transient FTS5 write-lock during active indexing as a soft warning, not a hard failure (RDR-129 B4). The ChromaDB Cloud / Voyage credential lines (`CHROMA_API_KEY` / `CHROMA_TENANT` / `CHROMA_DATABASE` / `VOYAGE_API_KEY`) are informational only as of 6.13.1: they describe migration-source config (read by the legacy-store ETL, not by serving) and are never fatal — the live T3 health surface is the vector-service probe above and `nx daemon service status`. Any install with no Chroma keys is healthy; a missing migration-source credential surfaces from the migration command itself.
 
 Migration-health checks (RDR-178): the newest `<config>/migration-reports/migration-*.json` is read and doctor fails loud (fatal) when `summary.total_failed > 0` or the recorded verification verdict is `mismatch`/`indeterminate` — with the report path, per-store failure counts, and a re-run suggestion (`nx storage migrate all --verify-fill`). A legacy report written by pre-6.2 tooling (no verification key at all) with zero failures is a non-fatal WARN, not a failure. Once the newest report records a cloud `target.service_url`, a write-divergence check warns (non-fatal) when `memory.db`'s freshest local write postdates the report's `completed_at` — local writes have landed after the cloud cutover and are not in the cloud tier.
 
