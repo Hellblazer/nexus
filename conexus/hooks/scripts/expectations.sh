@@ -214,6 +214,117 @@ expectations_undeclared() {
     return 0
 }
 
+# expectations_census <session_id> — the scripted census (nexus-hybv1: the
+# hand-count method under-reported a real BLOCKED as 0 on bfbfa2fe and
+# over-reported resolved blocks as failures on b819e8f3; .19 and every
+# later success-criteria measurement derives counts from THIS, never by
+# hand). Output (TSV):
+#   AGENT <agent_id> <name> <terminal> <declared|undeclared>
+#       terminal: REPORTED | BLOCKED_RESOLVED (BLOCKED then a later
+#       REPORTED — the guard nudged a report out, i.e. it WORKED) |
+#       BLOCKED_UNRESOLVED (no report ever recorded after the block) |
+#       WOULDBLOCK | NO_TERMINAL (started, owes nothing recorded)
+#   EXPECTED_NO_START <name>   — declared but no named START row
+#   ROWS expect=N start=N reported=N blocked=N wouldblock=N
+#   CLASSIFIED reported=N blocked_resolved=N blocked_unresolved=N \
+#       wouldblock=N no_terminal=N undeclared=N expected_no_start=N
+# Exact-duplicate lines (the nexus-3h0u6 doubling, legacy files) are
+# dropped; legitimate repeats (same verb, different timestamp — e.g. one
+# REPORTED per round) are kept in ROWS counts. Missing/unreadable file =>
+# no output, exit 0 (fail-open, like every consult surface here).
+expectations_census() {
+    local sid="$1"
+    [[ -n "$sid" ]] || return 0
+    local file
+    file="$(expectations_file "$sid" 2>/dev/null)" || return 0
+    [[ -r "$file" ]] || return 0
+    awk -F'\t' '
+        # Classification is LAST-STATE-WINS in row order (review 21032
+        # Critical 1: a one-way-sticky REPORTED masked a LATER unresolved
+        # BLOCKED — the exact defect class this function exists to kill):
+        #   BLOCKED    -> BLOCKED_UNRESOLVED (unconditionally supersedes)
+        #   REPORTED   -> BLOCKED_RESOLVED if currently blocked, else REPORTED
+        #   WOULDBLOCK -> WOULDBLOCK (observe-mode soft block, supersedes)
+        # Any terminal verb also seeds the per-agent list (review 21032
+        # Critical 2: a BLOCKED/REPORTED id with no START row — hooks are
+        # independent invocations with no ordering guarantee — must not
+        # vanish from the per-agent view; it prints with name "-" and
+        # declaration "no-start"). NOTE term[] reads auto-vivify keys;
+        # printing iterates order[] only, so stray keys are inert.
+        seen[$0]++ { next }                     # 3h0u6 exact-duplicate rows
+        { rows[$2]++ }
+        $2 == "EXPECT"  { expect[$3] = 1 }
+        $2 == "START" && index($3, "a" $4 "-") == 1 && length($3) > length($4) + 2 {
+            if (!($3 in listed)) { order[++n] = $3; listed[$3] = 1 }
+            name[$3] = $4
+        }
+        $2 == "START"   { started[$4] = 1 }
+        $2 == "REPORTED" || $2 == "BLOCKED" || $2 == "WOULDBLOCK" {
+            if (!($3 in listed)) { order[++n] = $3; listed[$3] = 1 }
+        }
+        $2 == "REPORTED" {
+            # Resolution strength (critique 2026-07-22): a REPORTED row that
+            # RESOLVES a block carries "immediate" (the block round-trip
+            # itself produced the report — the guard demonstrably worked) or
+            # "later" (a subsequent stop found a report that may have arrived
+            # for unrelated reasons) in field 4. Both fold into
+            # BLOCKED_RESOLVED per-agent; the split is surfaced in CLASSIFIED
+            # so guard-effectiveness claims can weight them honestly. Rows
+            # with no field 4 (primary-path REPORTED, pre-split ledgers)
+            # count as immediate when they resolve.
+            if (term[$3] == "BLOCKED_UNRESOLVED") {
+                term[$3] = "BLOCKED_RESOLVED"
+                if ($4 == "later") res_later++; else res_immediate++
+            } else if (term[$3] != "BLOCKED_RESOLVED") {
+                term[$3] = "REPORTED"
+            }
+        }
+        $2 == "BLOCKED"    { term[$3] = "BLOCKED_UNRESOLVED" }
+        $2 == "WOULDBLOCK" { term[$3] = "WOULDBLOCK" }
+        END {
+            for (i = 1; i <= n; i++) {
+                id = order[i]
+                t = (term[id] == "") ? "NO_TERMINAL" : term[id]
+                if (name[id] == "") {
+                    print "AGENT\t" id "\t-\t" t "\tno-start"
+                    nostart++
+                } else {
+                    d = (name[id] in expect) ? "declared" : "undeclared"
+                    print "AGENT\t" id "\t" name[id] "\t" t "\t" d
+                    if (d == "undeclared") undeclared++
+                }
+                cls[t]++
+            }
+            ens = 0
+            for (nm in expect) if (!(nm in started)) { print "EXPECTED_NO_START\t" nm; ens++ }
+            printf "ROWS\texpect=%d start=%d reported=%d blocked=%d wouldblock=%d\n", \
+                rows["EXPECT"], rows["START"], rows["REPORTED"], rows["BLOCKED"], rows["WOULDBLOCK"]
+            printf "CLASSIFIED\treported=%d blocked_resolved=%d (immediate=%d later=%d) blocked_unresolved=%d wouldblock=%d no_terminal=%d undeclared=%d no_start=%d expected_no_start=%d\n", \
+                cls["REPORTED"], cls["BLOCKED_RESOLVED"], res_immediate, res_later, \
+                cls["BLOCKED_UNRESOLVED"], \
+                cls["WOULDBLOCK"], cls["NO_TERMINAL"], undeclared, nostart, ens
+        }
+    ' "$file" 2>/dev/null
+    return 0
+}
+
+# expectations_last_terminal <session_id> <agent_id> — echo the LAST
+# terminal verb (REPORTED|BLOCKED|WOULDBLOCK) recorded for agent_id, or
+# nothing. Consumed by the stop hook''s resolution stamp to avoid
+# appending consecutive duplicate REPORTED rows on every re-stop of a
+# resolved agent (review 21032 finding 3 — ROWS counts stay meaningful).
+expectations_last_terminal() {
+    local sid="$1" agent_id="${2:-}"
+    [[ -n "$sid" && -n "$agent_id" ]] || return 0
+    local file
+    file="$(expectations_file "$sid" 2>/dev/null)" || return 0
+    [[ -r "$file" ]] || return 0
+    awk -F'\t' -v id="$agent_id" \
+        '($2 == "REPORTED" || $2 == "BLOCKED" || $2 == "WOULDBLOCK") && $3 == id { v = $2 } END { if (v != "") print v }' \
+        "$file" 2>/dev/null
+    return 0
+}
+
 # expectations_sweep — best-effort reap of expectations files older than 7
 # days (no session-directory tie; the lifespan orphan-reaper precedent).
 # Safe to call from any hook entry; never fails the caller.
