@@ -232,6 +232,15 @@
                 <configuration>
                     <argLine>--enable-preview</argLine>
                     <excludedGroups>${test.excluded.groups}</excludedGroups>
+                    <!-- nexus-1hj1d: deliberately NO rerunFailingTestsCount.
+                         A blanket rerun retries EVERY failing test, so a racy
+                         PRODUCT bug would be retried into a green run — the
+                         suite's job is to fail loud on nondeterminism. Boot
+                         transients are handled at their mechanism instead:
+                         PgContainerHelper.newContainer() (sslmode=disable +
+                         withStartupAttempts, container-scoped). If a new
+                         transient class appears, root-cause it there too
+                         (Hal, 2026-07-22). -->
                 </configuration>
             </plugin>
 
