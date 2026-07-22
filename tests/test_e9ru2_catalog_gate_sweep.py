@@ -221,3 +221,36 @@ def test_audit_catalog_conn_is_none_in_service_mode(tmp_path, monkeypatch):
     finally:
         if conn is not None:
             conn.close()
+
+
+def test_markdown_hook_service_down_is_loud_not_silent(
+    service_mode_fresh_box, fake_client, tmp_path, monkeypatch
+):
+    """nexus-ou4tb (e9ru2 review site): post-sweep, service-down reaches the
+    markdown hook's except block on fresh boxes — it must WARN + audit like
+    the pdf hook, not swallow at DEBUG."""
+    from nexus.doc_indexer import _catalog_markdown_hook
+
+    def _boom(self, name):
+        raise ConnectionError("service unreachable")
+
+    monkeypatch.setattr(
+        _FakeHttpCatalogClient, "curator_owner_tumbler_by_name", _boom
+    )
+
+    audit_rows: list[dict] = []
+    import nexus.hook_registry as hook_registry
+
+    monkeypatch.setattr(
+        hook_registry,
+        "record_catalog_hook_failure",
+        lambda **kw: audit_rows.append(kw),
+    )
+
+    md = tmp_path / "note.md"
+    md.write_text("body\n")
+    _catalog_markdown_hook(md, _COLLECTION, "prose", "", 1)  # must not raise
+    (row,) = audit_rows
+    assert row["hook_name"] == "catalog_markdown_hook"
+    assert row["collection"] == _COLLECTION
+    assert "unreachable" in row["error"]

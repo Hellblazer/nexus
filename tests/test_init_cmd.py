@@ -61,6 +61,16 @@ def cfg_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return d
 
 
+@pytest.fixture(autouse=True)
+def _stub_ladder_convergence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """init converges the upgrade ladder post-provision (nexus-9xfx5); the
+    real walk does live rung detect() reads — unit tests stub it. The
+    TestLadderConvergence wiring tests override this stub with a recorder."""
+    monkeypatch.setattr(
+        "nexus.commands.init._converge_ladder_best_effort", lambda: None
+    )
+
+
 
 # ── managed mode ──────────────────────────────────────────────────────────────
 
@@ -1360,3 +1370,88 @@ class TestResolveInitMode:
         monkeypatch.delenv("NX_LOCAL", raising=False)
         monkeypatch.delenv("NX_SERVICE_URL", raising=False)
         assert _resolve_init_mode() == "local"
+
+
+# ── nexus-9xfx5: first-run ladder convergence ────────────────────────────────
+
+# Captured at import time, BEFORE the autouse _stub_ladder_convergence fixture
+# replaces the module attribute — the best-effort test needs the real helper.
+import nexus.commands.init as _init_mod  # noqa: E402 — deliberate late import to capture the real helper
+
+_REAL_CONVERGE = _init_mod._converge_ladder_best_effort
+
+
+class TestLadderConvergence:
+    """A virgin install must not boot with a vacuous pending rung: init
+    converges the upgrade ladder once the backend is serving (both the
+    session-supervisor and autostart paths), best-effort."""
+
+    def _record_convergence(self, monkeypatch: pytest.MonkeyPatch) -> list[bool]:
+        calls: list[bool] = []
+        monkeypatch.setattr(
+            "nexus.commands.init._converge_ladder_best_effort",
+            lambda: calls.append(True),
+        )
+        return calls
+
+    def test_session_path_converges_after_lease(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("NX_LOCAL", "1")
+        monkeypatch.setattr(
+            "nexus.commands.init.provision_and_start_service",
+            lambda embedder=None: _FAKE_LEASE,
+        )
+        calls = self._record_convergence(monkeypatch)
+        result = CliRunner().invoke(init_cmd, [])
+        assert result.exit_code == 0, result.output
+        assert calls == [True], "serving session path must converge the ladder"
+
+    def test_autostart_path_converges_after_lease(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("NX_LOCAL", "1")
+        monkeypatch.setattr(
+            "nexus.commands.init._decide_autostart", lambda *a, **kw: True
+        )
+        monkeypatch.setattr(
+            "nexus.commands.init._provision_and_autostart_service",
+            lambda embedder=None: _FAKE_LEASE,
+        )
+        calls = self._record_convergence(monkeypatch)
+        result = CliRunner().invoke(init_cmd, [])
+        assert result.exit_code == 0, result.output
+        assert calls == [True], "serving autostart path must converge the ladder"
+
+    def test_autostart_pending_lease_skips_convergence(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No lease (unit registered, service not yet up) → nothing to
+        converge against; the OS unit owns bring-up."""
+        monkeypatch.setenv("NX_LOCAL", "1")
+        monkeypatch.setattr(
+            "nexus.commands.init._decide_autostart", lambda *a, **kw: True
+        )
+        monkeypatch.setattr(
+            "nexus.commands.init._provision_and_autostart_service",
+            lambda embedder=None: None,
+        )
+        calls = self._record_convergence(monkeypatch)
+        result = CliRunner().invoke(init_cmd, [])
+        assert result.exit_code == 0, result.output
+        assert calls == [], "no lease → no convergence attempt"
+
+    def test_helper_is_best_effort_on_ladder_failure(
+        self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys
+    ) -> None:
+        """A failing ladder walk must not fail init — it defers with a
+        pointer at `nx upgrade` (which is idempotent). Uses the REAL helper
+        (captured below, before the autouse stub patches the module attr)."""
+
+        def _boom(**kw):
+            raise RuntimeError("engine unreachable")
+
+        monkeypatch.setattr("nexus.commands.upgrade._run_ladder", _boom)
+        _REAL_CONVERGE()  # must not raise
+        err = capsys.readouterr().err
+        assert "run `nx upgrade` to converge" in err

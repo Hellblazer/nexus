@@ -737,6 +737,33 @@ def _managed_onboarding(ctx: click.Context) -> None:
     click.echo("Indexing/search route to the managed service — no local stack to start.")
 
 
+def _converge_ladder_best_effort() -> None:
+    """Finish first-run setup with a converged upgrade ladder (nexus-9xfx5).
+
+    A virgin install otherwise boots with a pending chash-rekey rung
+    (vacuously convergeable on empty stores) and the diag conformance view
+    missing until the first ``nx upgrade`` — so a fresh box's very first
+    ``nx doctor`` looked broken. Runs the ladder walk (`_run_ladder`) —
+    NOT the full ``nx upgrade`` (no ``_quiesce_daemon`` / ``_run_upgrade``
+    / ``_converge_preconditions``; those are no-ops or not-applicable on
+    the just-provisioned service-mode box this runs against, per
+    reviewer-3modes trace — this is not a general upgrade substitute).
+    Best-effort:
+    init already provisioned a serving backend, so a convergence failure
+    points at ``nx upgrade`` (idempotent) instead of failing init.
+    """
+    try:
+        from nexus.commands.upgrade import _run_ladder  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+        _run_ladder(dry_run=False, auto_mode=False)
+    except Exception as exc:  # noqa: BLE001 — provisioning succeeded; convergence is retryable via `nx upgrade`, so surface-and-continue beats failing a fresh init
+        click.echo(
+            f"  Upgrade-ladder convergence deferred ({exc}); run `nx upgrade` "
+            "to converge.",
+            err=True,
+        )
+
+
 @click.command("init")
 @click.option(
     "--embedder",
@@ -865,7 +892,9 @@ def init_cmd(
         if autostart:
             # Self-reporting; handles cloud-internal, activation-error fallback,
             # lease-timeout, and success messaging internally.
-            _provision_and_autostart_service(embedder)
+            lease = _provision_and_autostart_service(embedder)
+            if lease is not None:
+                _converge_ladder_best_effort()
             return
         lease = provision_and_start_service(embedder)
     except StorageServiceStartError:
@@ -891,5 +920,9 @@ def init_cmd(
             "with `nx config init`."
         )
         return
+    # nexus-9xfx5: converge the ladder now that the backend is serving, so the
+    # first `nx doctor` on a fresh box is clean (no vacuous pending rung, no
+    # missing diag view).
+    _converge_ladder_best_effort()
     # RDR-157 P4.1 / RDR-174 §3: one command left the user with a running backend.
     return

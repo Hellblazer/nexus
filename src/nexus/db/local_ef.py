@@ -119,7 +119,18 @@ def _resolve_local_model(*, warn: bool) -> str:
     configured = local_embed_model_choice()
     if configured in _MODEL_DIMS:
         if configured == _TIER1_MODEL and not _fastembed_available():
-            if warn:
+            # nexus-9xfx5 (fresh-install MVV finding #4): in service mode
+            # ``local.embed_model`` records the SERVICE embedder `nx init`
+            # provisioned — T3 embeds bge-768 server-side, and this Python
+            # EF serves only T1/local-Python paths where tier-0 is by
+            # design (nexus-ybw87). Nothing is degraded, so no warning:
+            # every doctor run on a fresh service install warned here
+            # otherwise. The warning stays for the genuine local-mode
+            # degradation (chose bge, [local] extra missing, Python EF IS
+            # the T3 embedder).
+            from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+
+            if warn and not is_vector_service_mode():
                 _log.warning(
                     "local_embed_model_unavailable",
                     chosen=configured,

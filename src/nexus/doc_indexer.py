@@ -1742,8 +1742,20 @@ def _catalog_markdown_hook(
                 chunk_count=chunk_count, year=year,
                 source_mtime=source_mtime,
             )
-    except Exception:  # noqa: BLE001 — best-effort/telemetry path; failure logged at debug, must not crash caller
-        _log.debug("catalog_markdown_hook_failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — best-effort catalog markdown hook; logged + audited, cleanup in finally
+        # nexus-ou4tb (site from the e9ru2 review): an indexed markdown doc
+        # that never reached the catalog is invisible to every catalog-routed
+        # query — the same class as the pdf hook, which already got the
+        # WARNING + audit-row treatment. Post-e9ru2 this path also fires on
+        # service-down (the gate no longer pre-skips), so the DEBUG swallow
+        # hid real failures.
+        _log.warning("catalog_markdown_hook_failed", exc_info=True)
+        from nexus.hook_registry import record_catalog_hook_failure  # noqa: PLC0415 — deferred, avoids an import cycle
+
+        record_catalog_hook_failure(
+            source_path=str(md_path), collection=collection_name or "",
+            hook_name="catalog_markdown_hook", error=str(exc),
+        )
     finally:
         if writer is not None:
             writer.close()
