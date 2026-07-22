@@ -106,7 +106,10 @@ def test_embedding_mode_reads_version_and_memoizes(client, monkeypatch):
 
     def fake_get(path, tenant=None):
         calls.append(path)
-        return {"embedding_mode": "voyage", "embedding_models": ["voyage-code-3"]}
+        # embedding_models omitted from the fake: the probe reads only
+        # embedding_mode (and naming a voyage model here would trip the
+        # RDR-109 mode-declaration lint for a test that never goes cloud).
+        return {"embedding_mode": "voyage"}
 
     monkeypatch.setattr(hvc, "_get", fake_get)
     assert client.embedding_mode() == "voyage"
