@@ -261,6 +261,12 @@
          landing surface) survives until the N+1 release. Before grants. -->
     <include file="db/changelog/rdr187-001-drop-chash-index.xml"/>
 
+    <!-- nexus-78n33: register-path TOCTOU backstop — dedup backfill (FORCE-RLS
+         toggled per the catalog-013-1b discipline) + partial unique index on
+         LIVE (tenant_id, source_uri). Late in the chain so it indexes the
+         post-rdr180/post-187 shape of catalog_documents; before grants. -->
+    <include file="db/changelog/catalog-016-source-uri-unique.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
