@@ -2,7 +2,8 @@
 title: "Storage-Service Supervisor Ownership Topology: Eliminate Session-Teardown Churn and launchd/Autostart Races"
 id: RDR-183
 type: Architecture
-status: draft
+status: closed
+closed_date: 2026-07-22
 priority: high
 author: Hal Hildebrand
 reviewed-by: ""
