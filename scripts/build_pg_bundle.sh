@@ -121,8 +121,16 @@ build_pgvector() {
     cd "$WORK_DIR"
     git clone --depth 1 --branch "${PGVECTOR_VERSION}" https://github.com/pgvector/pgvector.git
     cd pgvector
-    make -s PG_CONFIG="${BUNDLE_PREFIX}/bin/pg_config"
-    make -s PG_CONFIG="${BUNDLE_PREFIX}/bin/pg_config" install
+    # OPTFLAGS="" — a DISTRIBUTED bundle must never carry the builder's CPU
+    # ISA. pgvector's stock Makefile defaults OPTFLAGS to -march=native, so
+    # the built vector.so executes only on CPUs at least as capable as the
+    # build machine: on GitHub's heterogeneous amd64 fleet the cached bundle
+    # SIGILL'd the backend at CREATE EXTENSION on ~half the runners (the
+    # CA-3 coin-flip, 2026-07-21), and the same .so ships to end users via
+    # the engine-release nexus-pg bundles. Portable build keeps SIMD through
+    # pgvector's runtime dispatch (target_clones on supported paths).
+    make -s PG_CONFIG="${BUNDLE_PREFIX}/bin/pg_config" OPTFLAGS=""
+    make -s PG_CONFIG="${BUNDLE_PREFIX}/bin/pg_config" OPTFLAGS="" install
 }
 
 fixup_macos_relocatability() {
