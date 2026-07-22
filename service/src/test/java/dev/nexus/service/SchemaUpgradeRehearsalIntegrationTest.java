@@ -316,6 +316,11 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         .as("old tag %s must PREDATE catalog-014's manifest collection stamp — "
                             + "otherwise seeding un-stamped manifest rows exercises nothing", OLD_TAG)
                         .isFalse();
+                    assertThat(changesetApplied(conn, "catalog-016-0", "nexus-78n33"))
+                        .as("old tag %s must PREDATE catalog-016's source_uri dedup backfill — "
+                            + "otherwise seeding duplicate live source_uri rows exercises nothing",
+                            OLD_TAG)
+                        .isFalse();
                 }
 
                 // ── SEED, as superuser (implicit BYPASSRLS): models rows written
@@ -331,6 +336,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   catalog-013-0 nexus-e0hd2
                 //   catalog-013-1b nexus-1wjmq
                 //   catalog-014-0 nexus-x6kdz
+                //   catalog-016-0 nexus-78n33
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
@@ -361,6 +367,14 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     seedDocument(su, "t1", "1.1.100", "seeded doc", "code__x");
                     seedManifestRow(su, "t1", "1.1.100", 0, "1".repeat(32));
                     seedManifestRow(su, "t1", "1.1.100", 1, "2".repeat(32));
+
+                    // Duplicate LIVE source_uri rows (the RDR-156 P0 audit's
+                    // 201-uri ghost class) for catalog-016-0's dedup backfill:
+                    // 1.1.202 wins (most chunks); 1.1.201 must be tombstoned.
+                    seedDocumentWithUri(su, "t1", "1.1.201", "dup loser", "code__x",
+                        "file:///seed/dup.md", 1);
+                    seedDocumentWithUri(su, "t1", "1.1.202", "dup winner", "code__x",
+                        "file:///seed/dup.md", 7);
 
                     assertThat(count(su, "SELECT count(*) FROM nexus.chash_index"))
                         .as("superuser ground truth after seeding").isEqualTo(5);
@@ -440,6 +454,34 @@ class SchemaUpgradeRehearsalIntegrationTest {
                         + "WHERE collection IS NULL"))
                         .as("no manifest row may remain un-stamped after catalog-014-0")
                         .isEqualTo(0);
+
+                    // catalog-016-0 leg: the dedup backfill saw the seeded rows
+                    // through its FORCE-RLS toggle and tombstoned the loser —
+                    // exactly one LIVE row per (tenant, source_uri) survives,
+                    // and it is the most-chunk-bearing winner.
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.catalog_documents "
+                        + "WHERE source_uri = 'file:///seed/dup.md' AND deleted_at IS NULL"))
+                        .as("catalog-016-0 must tombstone the duplicate-uri loser "
+                            + "(an RLS-blind no-op would leave 2 live rows and fail "
+                            + "016-1's unique-index creation)")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.catalog_documents "
+                        + "WHERE tumbler = '1.1.202' AND deleted_at IS NULL"))
+                        .as("the most-chunk-bearing row must be the surviving winner")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM nexus.catalog_documents "
+                        + "WHERE tumbler = '1.1.201' AND deleted_at IS NOT NULL"))
+                        .as("the loser must be TOMBSTONED, never hard-deleted")
+                        .isEqualTo(1);
+                    assertThat(count(su,
+                        "SELECT count(*) FROM pg_indexes "
+                        + "WHERE schemaname = 'nexus' "
+                        + "AND indexname = 'ux_catalog_documents_live_source_uri'"))
+                        .as("catalog-016-1's partial unique index exists at HEAD")
+                        .isEqualTo(1);
 
                     // Both fixes must RESTORE FORCE within their own changeset.
                     // (chash_index left the toggled-set observation with the
@@ -688,6 +730,24 @@ class SchemaUpgradeRehearsalIntegrationTest {
             ps.setString(2, tumbler);
             ps.setString(3, title);
             ps.setString(4, physicalCollection);
+            ps.executeUpdate();
+        }
+    }
+
+    /** Document row WITH a source_uri + chunk_count (catalog-016-0's dedup input shape). */
+    private static void seedDocumentWithUri(Connection c, String tenant, String tumbler,
+                                            String title, String physicalCollection,
+                                            String sourceUri, int chunkCount) throws Exception {
+        try (var ps = c.prepareStatement(
+            "INSERT INTO nexus.catalog_documents "
+            + "(tenant_id, tumbler, title, physical_collection, source_uri, chunk_count) "
+            + "VALUES (?, ?, ?, ?, ?, ?)")) {
+            ps.setString(1, tenant);
+            ps.setString(2, tumbler);
+            ps.setString(3, title);
+            ps.setString(4, physicalCollection);
+            ps.setString(5, sourceUri);
+            ps.setInt(6, chunkCount);
             ps.executeUpdate();
         }
     }
