@@ -120,46 +120,6 @@ def test_rerank_local_failure_falls_back_to_original_order(monkeypatch) -> None:
     assert [r.id for r in out] == ["r0", "r1"]
 
 
-def test_rerank_routes_to_cloud_in_cloud_mode(cloud_mode, monkeypatch) -> None:
-    """Cloud mode preserves the existing Voyage path."""
-    from nexus import scoring
-
-    results = [_make_result(i, f"doc {i}") for i in range(3)]
-
-    class _RerankItem:
-        def __init__(self, index: int, relevance_score: float) -> None:
-            self.index = index
-            self.relevance_score = relevance_score
-
-    class _RerankResp:
-        def __init__(self, items) -> None:
-            self.results = items
-
-    captured: dict[str, object] = {}
-
-    def fake_rerank(query, documents, model, top_k):
-        captured["query"] = query
-        captured["documents"] = list(documents)
-        captured["model"] = model
-        return _RerankResp([
-            _RerankItem(2, 0.9),
-            _RerankItem(0, 0.5),
-            _RerankItem(1, 0.1),
-        ])
-
-    class _FakeClient:
-        def rerank(self, **kw):
-            return fake_rerank(**kw)
-
-    from unittest.mock import MagicMock as _MM
-    stub_t3 = _MM()
-    stub_t3._voyage_client = _FakeClient()
-
-    out = scoring.rerank_results(results, query="q", t3=stub_t3)
-    assert [r.id for r in out] == ["r2", "r0", "r1"]
-    assert captured["model"] == "rerank-2.5"
-
-
 def test_rerank_returns_empty_when_input_empty(monkeypatch) -> None:
     from nexus import scoring
 

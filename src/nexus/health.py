@@ -764,8 +764,9 @@ def _check_t3_cloud() -> list[HealthResult]:
     # absence is deliberately non-fatal here (see the tradeoff note above).
 
     # VOYAGE_API_KEY — server-side embedding on the service path; the
-    # client key is migration/enrichment config (e.g. rerank soft-degrades
-    # without it), not a serving requirement.
+    # client key is migration/enrichment + engine-bootstrap material only
+    # (RDR-188 moved reranking server-side — no client code path consumes
+    # this key for rerank), not a serving requirement.
     voyage_key = get_credential("voyage_api_key")
     results.append(HealthResult(
         label="Voyage AI (VOYAGE_API_KEY)",

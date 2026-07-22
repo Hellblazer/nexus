@@ -6,7 +6,6 @@ from typing import Any
 
 import structlog
 
-from nexus.retry import _voyage_with_retry
 from nexus.types import SearchResult
 
 _log = structlog.get_logger()
@@ -379,29 +378,17 @@ def rerank_results(
     *,
     t3: Any = None,
 ) -> list[SearchResult]:
-    """Rerank *results* by cross-encoder relevance for *query*.
+    """Rerank *results* by LOCAL cross-encoder relevance for *query*.
 
-    RDR-109 Phase 3 mode-aware dispatch:
+    RDR-188 (bead nexus-9o6y2.9): the CLOUD branch is RETIRED — reranking
+    rides the server search request (`rerank=true` on the fused stage;
+    `search_cmd` consumes server scores), so client-side Voyage rerank no
+    longer exists. Calling this in cloud/service mode raises loudly to
+    catch zombie callers; the LOCAL branch survives only until bead
+    nexus-9o6y2.19 retires the client cross-encoder rerank usage too.
 
-    - Cloud mode: Voyage AI reranker (``rerank-2.5``). Prefers *t3*'s
-      ``_voyage_client`` attribute when *t3* carries one (test stubs,
-      the Phase-5 ETL's injected ``T3Database``). Production call
-      sites route through ``make_t3()`` -> ``HttpVectorClient``
-      (RDR-155 P4a.2), which carries no such attribute; in that case
-      the reranker falls back to ``nexus.db.get_voyage_client()``,
-      which constructs a Voyage client independently from configured
-      credentials (bead nexus-xbw0f). Only when NEITHER source yields
-      a client (``voyage_api_key`` genuinely unconfigured) does the
-      reranker skip with a warning.
-    - Local mode: ONNX cross-encoder via
-      :class:`nexus.cross_encoder.LocalCrossEncoder` (default
-      ``cross-encoder/ms-marco-MiniLM-L-6-v2``, ~80MB lazy download).
-
-    Returns results sorted by relevance score descending. Mutates
-    ``hybrid_score`` on each SearchResult in place. On any failure
-    (network, missing model, exception during scoring) falls back to
-    the input order, truncated to *top_k* if supplied. Failure is
-    logged at WARN; reranking is best-effort.
+    *model* and *t3* are retained for signature compatibility with the
+    surviving local-path tests; both are ignored on the local branch.
     """
     if not results:
         return results
@@ -413,59 +400,11 @@ def rerank_results(
 
     if is_local_mode():
         return _rerank_local(results, query, documents, n)
-    return _rerank_cloud(results, query, documents, model, n, t3=t3)
-
-
-def _rerank_cloud(
-    results: list[SearchResult],
-    query: str,
-    documents: list[str],
-    model: str,
-    top_n: int,
-    *,
-    t3: Any = None,
-) -> list[SearchResult]:
-    """Cloud reranker via Voyage AI. Best-effort: any exception falls
-    back to the original order truncated to *top_n*.
-
-    The Voyage client is sourced from ``t3._voyage_client`` when *t3*
-    carries one (test stubs, injected ``T3Database``). Production
-    ``HttpVectorClient`` handles (RDR-155 P4a.2) carry no such
-    attribute, so this falls back to
-    :func:`nexus.db.get_voyage_client`, which constructs a client
-    directly from configured credentials (bead nexus-xbw0f). Only
-    when both sources yield ``None`` (``voyage_api_key`` genuinely
-    unconfigured) does the reranker log a warning and return the
-    input order unchanged.
-    """
-    client = getattr(t3, "_voyage_client", None) if t3 is not None else None
-    if client is None:
-        from nexus.db import get_voyage_client  # noqa: PLC0415 — circular-dep avoidance (nexus.db)
-        client = get_voyage_client()
-    if client is None:
-        _log.warning(
-            "rerank_skipped_no_voyage_client",
-            reason="cloud reranker requires either t3._voyage_client or a "
-                   "configured voyage_api_key credential; neither was available",
-        )
-        return results[:top_n]
-    try:
-        rerank_response = _voyage_with_retry(
-            client.rerank,
-            query=query,
-            documents=documents,
-            model=model,
-            top_k=top_n,
-        )
-    except Exception as exc:  # noqa: BLE001 — best-effort rerank; any failure logged and falls back to original order
-        _log.warning("rerank failed, returning original order", error=str(exc))
-        return results[:top_n]
-    reranked: list[SearchResult] = []
-    for item in rerank_response.results:
-        r = results[item.index]
-        r.hybrid_score = float(item.relevance_score)
-        reranked.append(r)
-    return reranked
+    raise RuntimeError(
+        "client-side cloud rerank is retired (RDR-188): reranking runs "
+        "server-side via the search request's rerank=true field. This call "
+        "path should not exist — repoint the caller at the server envelope."
+    )
 
 
 def _rerank_local(

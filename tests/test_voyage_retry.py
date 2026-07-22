@@ -304,27 +304,6 @@ def test_index_code_file_embed_retries(tmp_path, cloud_mode) -> None:
     assert mock_voyage.embed.call_count >= 2
 
 
-def test_rerank_retries_then_degrades() -> None:
-    import nexus.scoring as scoring
-    from nexus.types import SearchResult
-    results = [SearchResult(id="1", content="text", collection="code__repo", distance=0.1, metadata={})]
-    mock_client = MagicMock()
-    mock_client.rerank.side_effect = _ve.APIConnectionError("persistent")
-    stub_t3 = MagicMock()
-    stub_t3._voyage_client = mock_client
-    # Pin cloud mode: on CI without a .env, is_local_mode() defaults to
-    # True and rerank_results dispatches to the ONNX local path instead
-    # of the cloud path under test. The migrated test (nexus-12v7c)
-    # surfaced this CI-specific vulnerability that the prior test
-    # masked via patch("nexus.config.get_credential", ...) (which
-    # happened to short-circuit is_local_mode's credential check).
-    with patch("nexus.config.is_local_mode", return_value=False), \
-         patch("nexus.retry.time.sleep"):
-        returned = scoring.rerank_results(results, "query", top_k=1, t3=stub_t3)
-    assert mock_client.rerank.call_count == 3
-    assert returned == results
-
-
 # Note: test_reset_clears_singleton removed as part of the
 # _voyage_instance singleton elimination (nexus-12v7c). No singleton
 # to reset; tests construct stub T3 instances with a mocked

@@ -2095,11 +2095,14 @@ def _collect_quota_report() -> dict:
     # error.
     retry = dict(get_retry_stats())
 
-    # RDR-109 Phase 3: cross-encoder substrate availability + active backend.
+    # RDR-188 (nexus-9o6y2.9): reranking runs SERVER-side — the engine scores
+    # with Voyage rerank-2.5 (server key) or its ms-marco cross-encoder. The
+    # client substrate check survives only for the salience consumer
+    # (RDR-109 P4; disposition finalized in bead nexus-9o6y2.19).
     from nexus.cross_encoder import cross_encoder_available  # noqa: PLC0415 — circular-dep avoidance (nexus.cross_encoder)
     cross_encoder_info = {
         "available": cross_encoder_available(),
-        "backend": "voyage-rerank-2.5" if not is_local_mode() else "onnx-local",
+        "backend": "server-side (engine: voyage-rerank-2.5 or ms-marco cross-encoder, RDR-188)",
         "default_local_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
     }
 
