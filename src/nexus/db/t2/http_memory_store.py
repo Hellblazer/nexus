@@ -503,7 +503,10 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             payload["agent"] = agent
         if session is not None:
             payload["session"] = session
-        resp = self._post("/v1/memory/put_or_merge", payload)
+        # nexus-tjvgf: the MERGE branch appends incoming content server-side
+        # (MemoryRepository.putOrMerge) — a lost-response retry appends the
+        # same content TWICE. Single attempt; callers see the raise.
+        resp = self._post("/v1/memory/put_or_merge", payload, idempotent=False)
         return int(resp["id"]), str(resp["action"])
 
     def flag_stale_memories(

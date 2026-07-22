@@ -264,14 +264,13 @@ def _resolve_endpoint_with_evidence_gate() -> tuple[str, str]:
     violation this bead's other half was fixed to prevent. The subclass
     is raised at, and only at, the genuine not-resolvable site.
     """
-    from nexus.db.service_endpoint import ServiceEndpointUnresolvableError  # noqa: PLC0415 — deferred to avoid circular import
+    # nexus-bgh2j: the gate body now lives PUBLICLY in service_endpoint
+    # (resolve_service_endpoint_with_evidence_gate) so the standalone
+    # non-mixin stores share the identical logic — this wrapper survives
+    # for its docstring and existing call sites.
+    from nexus.db.service_endpoint import resolve_service_endpoint_with_evidence_gate  # noqa: PLC0415 — deferred to avoid circular import
 
-    try:
-        return resolve_service_endpoint()
-    except ServiceEndpointUnresolvableError:
-        if not has_ever_resolved_lease():
-            raise
-        return resolve_service_endpoint(wait_budget_s=DEFAULT_LEASE_WAIT_BUDGET_S)
+    return resolve_service_endpoint_with_evidence_gate()
 
 
 def _resolve_token_only_with_evidence_gate() -> str:
@@ -474,15 +473,21 @@ class RefreshableHttpStoreMixin:
 
     # ── Public transport (subclasses call these, never self._client directly) ──
 
-    def _post(self, path: str, payload: dict[str, Any]) -> Any:
-        """POST JSON *payload* to *path*; self-heals once on a retryable error."""
-        return self._send("POST", path, json=payload)
+    def _post(self, path: str, payload: dict[str, Any], *, idempotent: bool = True) -> Any:
+        """POST JSON *payload* to *path*; self-heals once on a retryable error.
 
-    def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        ``idempotent=False`` (nexus-tjvgf) disables BOTH retry axes for
+        operations where a lost-response retry double-applies server-side
+        (queue claims, counter increments, content-appending merges) —
+        see :meth:`_send`.
+        """
+        return self._send("POST", path, json=payload, idempotent=idempotent)
+
+    def _get(self, path: str, params: dict[str, Any] | None = None, *, idempotent: bool = True) -> Any:
         """GET *path*; self-heals once on a retryable error."""
-        return self._send("GET", path, params=params)
+        return self._send("GET", path, params=params, idempotent=idempotent)
 
-    def _delete(self, path: str, params: dict[str, Any] | None = None) -> Any:
+    def _delete(self, path: str, params: dict[str, Any] | None = None, *, idempotent: bool = True) -> Any:
         """DELETE *path*; self-heals once on a retryable error.
 
         Mirrors ``_get``'s shape (no request body, query-string params) —
@@ -491,12 +496,24 @@ class RefreshableHttpStoreMixin:
         ``self._client.delete(...)`` inline because the mixin had no
         ``_delete`` convenience method yet.
         """
-        return self._send("DELETE", path, params=params)
+        return self._send("DELETE", path, params=params, idempotent=idempotent)
 
     # ── Internal ─────────────────────────────────────────────────────────────
 
-    def _send(self, method: str, path: str, **kwargs: Any) -> Any:
+    def _send(self, method: str, path: str, *, idempotent: bool = True, **kwargs: Any) -> Any:
         """One round-trip, with ONE re-resolve-and-retry on a retryable error.
+
+        ``idempotent=False`` (nexus-tjvgf): the request is issued EXACTLY
+        ONCE — no gateway 502/503/504 backoff loop, no endpoint
+        re-resolve-and-retry. For a non-idempotent server-side operation a
+        lost RESPONSE after a successful apply means a retry double-applies
+        (a re-claimed queue row orphaning the first claim; a retry-budget
+        counter double-incremented toward premature terminal failure; a
+        merge appending the same content twice). The caller sees the raise
+        and owns recovery — every production call site of the opted-out
+        verbs already sits under ``mcp_infra._service_t2_write_locked``,
+        which evicts + rebuilds the store singleton on any raise, so no
+        supervisor-restart resilience is lost by opting out.
 
         Mirrors ``http_vector_client._request``'s FULL two-axis shape
         (nexus-1ytp6 — the original port carried only the first axis):
@@ -510,6 +527,8 @@ class RefreshableHttpStoreMixin:
           invalidates + re-resolves, then retries EXACTLY ONCE. A second
           failure (of ANY kind) propagates untouched — no retry loops.
         """
+        if not idempotent:
+            return self._request_once(method, path, **kwargs)
         try:
             return self._once_with_gateway_retry(method, path, **kwargs)
         except (
@@ -552,14 +571,11 @@ class RefreshableHttpStoreMixin:
         adopter set): MOST adopted-store operations are natural-id
         upserts/reads/deletes where a lost-response retry is safe, but
         ``HttpAspectQueue.claim_next``/``claim_batch`` (SELECT ... FOR
-        UPDATE SKIP LOCKED + mark-in-progress) and ``mark_retry`` (a
-        server-side counter increment) are not — a lost gateway response
-        after a successful server-side apply double-applies on retry
-        (orphaned claim until ``reclaim_stale``; double-incremented retry
-        budget). Accepted for now: the damage is bounded/self-recovering
-        and strictly narrower than the pre-nexus-1ytp6 behavior of failing
-        the whole operation on the first 503. Tracked properly (exclude
-        those ops or add idempotency tokens) in nexus-tjvgf.
+        UPDATE SKIP LOCKED + mark-in-progress), ``mark_retry`` (a
+        server-side counter increment), and ``put_or_merge``'s merge
+        branch (content append) are not. RESOLVED (nexus-tjvgf): those
+        verbs pass ``idempotent=False`` and never reach this loop — this
+        method may assume its caller's operation is retry-safe.
         """
         for i, delay in enumerate((*_GATEWAY_RETRY_SLEEPS, None)):
             try:

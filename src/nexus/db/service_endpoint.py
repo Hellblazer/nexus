@@ -129,6 +129,33 @@ def has_ever_resolved_lease() -> bool:
     return _has_ever_resolved_lease
 
 
+def resolve_service_endpoint_with_evidence_gate() -> "tuple[str, str]":
+    """:func:`resolve_service_endpoint` with the evidence-gated bounded
+    wait (nexus-bgh2j — the GH #1405 residual).
+
+    The canonical gate shape (see
+    ``_refreshable_client._resolve_endpoint_with_evidence_gate`` for the
+    full nexus-7dsgp rationale): a resolution failure retries with
+    ``wait_budget_s=DEFAULT_LEASE_WAIT_BUDGET_S`` ONLY when this process
+    has previously discovered a live lease (a respawn-gap symptom); a
+    cold process fails fast unchanged. Catches only
+    :class:`ServiceEndpointUnresolvableError`, never bare RuntimeError
+    (a config-typo parse failure must not burn the wait budget).
+
+    Public here so the STANDALONE (non-mixin) stores — HttpTokenStore and
+    the T1 HttpScratchStore, which resolve once at CONSTRUCTION for the
+    instance lifetime — get the same gate the nine mixin adopters already
+    have; both previously called the bare resolver at construction while
+    carrying the gated wait only on their call-time rebind leg.
+    """
+    try:
+        return resolve_service_endpoint()
+    except ServiceEndpointUnresolvableError:
+        if not has_ever_resolved_lease():
+            raise
+        return resolve_service_endpoint(wait_budget_s=DEFAULT_LEASE_WAIT_BUDGET_S)
+
+
 def reset_lease_resolution_history_for_tests() -> None:
     """Test-only: reset the process-wide "ever resolved a lease" signal.
 
