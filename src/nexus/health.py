@@ -2178,7 +2178,7 @@ def _check_service_launchagent_stray() -> list[HealthResult]:
             "(log churn; GH #1405 defect-3 family)"
         ),
         fix_suggestions=[
-            "nx daemon service uninstall  # removes the stray autostart unit",
+            "nx daemon service uninstall --autostart  # removes the stray autostart unit",
         ],
     )]
 

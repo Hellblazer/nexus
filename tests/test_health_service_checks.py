@@ -316,7 +316,7 @@ class TestCheckServiceLaunchagentStray:
         assert r.warn is True
         assert r.fatal is False
         assert str(dest) in r.detail
-        assert any("nx daemon service uninstall" in f for f in r.fix_suggestions)
+        assert any("nx daemon service uninstall --autostart" in f for f in r.fix_suggestions)
 
     def test_probe_failure_degrades_silently(self):
         with patch("nexus.config.is_local_mode", side_effect=RuntimeError("boom")):
