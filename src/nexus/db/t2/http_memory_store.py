@@ -459,9 +459,14 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         # _is_retryable_endpoint_error), so catch it specifically and
         # re-raise anything else untouched.
         try:
+            # idempotent=False (critic 2026-07-22, nexus-tjvgf class): the
+            # merge DELETEs rows — a lost-response gateway retry after a
+            # successful merge replays against already-deleted delete_ids,
+            # 409s, and mislabels a completed merge as "keep_id not found".
             self._post(
                 "/v1/memory/merge",
                 {"keep_id": keep_id, "delete_ids": delete_ids, "merged_content": merged_content},
+                idempotent=False,
             )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 409:

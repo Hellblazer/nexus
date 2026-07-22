@@ -254,6 +254,72 @@ class TestCatalogSpans:
         ) is None
 
 
+class TestFallbackScanEntryPoint:
+    def test_list_collections_service_failure_raises(self, monkeypatch) -> None:
+        """Critic (nexus-j54kv): a TOTAL service outage fails at the very
+        first read — list_collections — before any probe or timeout
+        guard. It must raise, not read as clean not-found over zero
+        scanned collections."""
+        def _boom_list(t3):
+            raise _BOOM
+        monkeypatch.setattr(spans, "_t3_collection_names", _boom_list)
+        spans.reset_chash_fallback_warning_for_tests()
+        with pytest.raises(VectorServiceError):
+            spans.fallback_chash_scan(
+                span="chash:" + "ab" * 32,
+                hex_chash="ab" * 32,
+                t3=_RaisingT3(),
+                build_ref=lambda **kw: kw,
+            )
+
+    def test_list_collections_generic_failure_still_degrades(
+        self, monkeypatch,
+    ) -> None:
+        """Non-service list failures keep the best-effort contract: None."""
+        def _boom_list(t3):
+            raise RuntimeError("not a service error")
+        monkeypatch.setattr(spans, "_t3_collection_names", _boom_list)
+        spans.reset_chash_fallback_warning_for_tests()
+        assert spans.fallback_chash_scan(
+            span="chash:" + "ab" * 32,
+            hex_chash="ab" * 32,
+            t3=_RaisingT3(),
+            build_ref=lambda **kw: kw,
+        ) is None
+
+
+class TestDocLintDegradedService:
+    def test_fail_ungrounded_aborts_instead_of_flagging(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        """Critic fold (nexus-i3a9f): --fail-ungrounded during a service
+        blip must ABORT, never report a real citation as ungrounded."""
+        from click.testing import CliRunner
+
+        import nexus.commands.doc as doc_mod
+
+        md = tmp_path / "cited.md"
+        md.write_text("evidence [here](chash:" + "ab" * 32 + ")\n")
+
+        class _Cat:
+            def resolve_chash(self, *a, **k):
+                raise _BOOM
+
+        monkeypatch.setattr(
+            doc_mod, "_phase4_catalog_t3_chash",
+            lambda: (_Cat(), None, None),
+        )
+        res = CliRunner().invoke(
+            doc_mod.check_grounding_cmd,
+            [str(md), "--fail-ungrounded"],
+        )
+        assert res.exit_code != 0
+        assert "vector service degraded" in res.output
+        assert "ungrounded" not in res.output.lower().replace(
+            "--fail-ungrounded", ""
+        )
+
+
 class TestIndexerLegacyPrune:
     def test_legacy_in_prune_service_degraded_warns_and_continues(
         self, monkeypatch,

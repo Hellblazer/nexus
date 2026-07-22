@@ -215,7 +215,13 @@ def fallback_chash_scan(
 
     try:
         all_cols = _t3_collection_names(t3)
-    except Exception:  # noqa: BLE001 — best-effort fallback scan; T3 list failure is logged and degrades to no-match, must not crash caller
+    except Exception as exc:  # noqa: BLE001 — best-effort fallback scan; a NON-service T3 list failure degrades to no-match, must not crash caller
+        if _is_vector_service_error(exc):
+            # Critic (nexus-j54kv): a total service outage fails at this
+            # very first read — before any probe, before either timeout
+            # guard. Not-found cannot be concluded over zero collections
+            # scanned; same contract as the mid-scan raises.
+            raise
         _log.debug("chash_fallback_list_collections_failed", exc_info=True)
         return None
 

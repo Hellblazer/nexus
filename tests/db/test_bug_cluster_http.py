@@ -120,6 +120,23 @@ class TestIdempotentOptOut:
             "put_or_merge's merge branch appends content — must not retry"
         )
 
+    def test_merge_memories_opts_out(self, monkeypatch) -> None:
+        """Critic fold 2026-07-22: /v1/memory/merge DELETEs rows — a
+        lost-response replay 409s against already-deleted delete_ids and
+        mislabels a completed merge as 'keep_id not found'."""
+        from nexus.db.t2.http_memory_store import HttpMemoryStore
+
+        captured: dict = {}
+
+        def _capture_send(self, method, path, *, idempotent=True, **kwargs):
+            captured["idempotent"] = idempotent
+            return {}
+
+        monkeypatch.setattr(RefreshableHttpStoreMixin, "_send", _capture_send)
+        store = HttpMemoryStore(base_url="http://127.0.0.1:9", _token="t")
+        store.merge_memories(1, [2, 3], "merged")
+        assert captured.get("idempotent") is False
+
 
 class TestConstructionEvidenceGate:
     def test_cold_process_fails_fast_no_wait(self, monkeypatch) -> None:
@@ -180,10 +197,11 @@ class TestAdopterOverridesForwardIdempotent:
         from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 
         for mod in pkgutil.walk_packages(dbpkg.__path__, prefix="nexus.db."):
-            try:
-                m = importlib.import_module(mod.name)
-            except Exception:  # pragma: no cover — optional deps
-                continue
+            # Import failures FAIL the walk (critic 2026-07-22): a
+            # silently-skipped module could hide the exact regression
+            # this tripwire exists to catch, without breaching the
+            # count floor below.
+            m = importlib.import_module(mod.name)
             for _, cls in inspect.getmembers(m, inspect.isclass):
                 if (
                     issubclass(cls, RefreshableHttpStoreMixin)
