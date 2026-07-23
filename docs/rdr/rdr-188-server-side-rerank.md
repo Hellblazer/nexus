@@ -2,7 +2,8 @@
 title: "Server-Side Reranking: Retire the Last Client-Side Voyage Consumer So the Client Carries Zero Voyage Credentials"
 id: RDR-188
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-07-23
 accepted_date: 2026-07-22
 priority: medium
 author: Hal Hildebrand
@@ -331,3 +332,17 @@ discipline; engine work follows the engine-release skill.
   from "loud floor degrade" to the one-engine CONVERGENCE doctrine;
   MCP/nx_answer explicitly out of scope; degraded-field surfacing test
   added; governor debt accepted with bead nexus-rb67a.
+- 2026-07-22: CLOSED (implemented, no divergences). All four Proposed
+  Solution items delivered as locked: engine fused rerank + local
+  cross-encoder shipped in engine-service-v0.1.52 (deployed +
+  per-query-diff cloud-gated GREEN 2026-07-23Z, T2 [21062]:
+  parity 106/113 == baseline, zero per-query regressions,
+  reranker=rerank-2.5 active, zero degrade events); client repoint +
+  Voyage-reranker deletion + tripwires (ce76b8d1/3bbe4e7f/a3a7eaa3);
+  floor (0,1,52) (3ac406ad); credential-chain retirement (d206ebdf).
+  Phase cross-walk PASS: T2 nexus_rdr/188-phase-review-gate-2026-07-22
+  [21064]. Stacked reviews [21052]/[21053]/[21057]/[21058]/[21060].
+  Deferred by design (unfiled, per §Proposed Solution item 2): MCP
+  search/query + nx_answer rerank opt-in — a request-field flip when
+  wanted. Category-(b) migration-source Voyage loops remain RDR-155
+  P4b scope.
