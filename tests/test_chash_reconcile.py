@@ -302,3 +302,33 @@ class TestChashReconcileCLI:
         )
         # The verb's normal output should appear (no exception).
         assert "ghost" in result.output or "Nothing to reconcile" in result.output
+
+
+def test_service_mode_refuses_loud(monkeypatch, tmp_path) -> None:
+    """nexus-yh044: on a migrated (service-backed) install the SQLite
+    chash_index is the FROZEN MIGRATION SOURCE (RDR-176 immutability;
+    rollback target until RDR-155 P4b). The old docstring claimed migrated
+    installs 'exit at the No T2 db guard' — FALSE for migrated-in-place
+    boxes where memory.db still exists frozen: the verb would diff live T3
+    against the frozen index (garbage ghosts) and --apply would DELETE rows
+    from the source. The verb must refuse before ANY work."""
+    from click.testing import CliRunner
+
+    from nexus.commands.catalog_cmds.maintenance import chash_reconcile_cmd
+    from nexus.db.storage_mode import StorageBackend
+
+    # A frozen memory.db exists (migrated-in-place shape).
+    db = tmp_path / "memory.db"
+    db.write_bytes(b"")
+    monkeypatch.setattr(
+        "nexus.commands._helpers.default_db_path", lambda: db,
+    )
+    monkeypatch.setattr(
+        "nexus.db.storage_mode.storage_backend_for",
+        lambda store: StorageBackend.SERVICE,
+    )
+
+    result = CliRunner().invoke(chash_reconcile_cmd, ["--apply"])
+    assert result.exit_code != 0
+    assert "pre-migration" in result.output.lower()
+    assert "frozen migration source" in result.output.lower()
