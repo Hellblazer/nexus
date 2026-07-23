@@ -28,6 +28,7 @@ Worker contract:
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 from pathlib import Path
@@ -35,7 +36,10 @@ from unittest.mock import patch
 
 import pytest
 
+from nexus.db.storage_mode import has_raw_access
 from nexus.db.t2 import T2Database
+
+_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
 
 
 @pytest.fixture(autouse=True)
@@ -346,14 +350,25 @@ class TestWorkerDrain:
                 worker.stop(timeout=5.0)
 
         with T2Database(_isolate_t2) as db:
-            row = db.aspect_queue.conn.execute(
-                "SELECT status, retry_count, last_error "
-                "FROM aspect_extraction_queue WHERE source_path = ?",
-                ("/p1.pdf",),
-            ).fetchone()
-        assert row[0] == "failed"
-        assert row[1] >= 1
-        assert "worker-level failure" in row[2]
+            q = db.aspect_queue
+            if has_raw_access(q):
+                row = q.conn.execute(
+                    "SELECT status, retry_count, last_error "
+                    "FROM aspect_extraction_queue WHERE source_path = ?",
+                    ("/p1.pdf",),
+                ).fetchone()
+                assert row[0] == "failed"
+                assert row[1] >= 1
+                assert "worker-level failure" in row[2]
+            else:
+                # Service substrate: last_error is not exposed on the public
+                # QueueRow surface; assert the observable failed-state via
+                # list_failed (RDR-155 P4b P0a' has_raw_access branch).
+                failed = [
+                    r for r in q.list_failed() if r.source_path == "/p1.pdf"
+                ]
+                assert len(failed) == 1
+                assert failed[0].retry_count >= 1
 
 
 # ── Worker lifecycle ─────────────────────────────────────────────────────────
@@ -465,6 +480,14 @@ class TestEnqueueHook:
         assert rows == []
         assert get_worker() is None  # no lazy start either
 
+    @pytest.mark.skipif(
+        _ENGINE_SUBSTRATE,
+        reason="dies-roster: the hook's IN-PROCESS worker autostart is the "
+        "local/SQLite-backend leg of _ensure_aspect_worker; on the service "
+        "backend the hook routes to the leased aspect-worker DAEMON "
+        "(RDR-173 P2) and get_worker() stays None by design — the "
+        "in-process leg dies at the RDR-155 P4b flip",
+    )
     def test_hook_starts_worker_on_first_supported_enqueue(
         self, _isolate_t2: Path, monkeypatch,
     ) -> None:
@@ -745,25 +768,53 @@ class TestEnqueueFailureTripwire:
         import nexus.aspect_worker as mod
         from nexus.aspect_worker import aspect_extraction_enqueue_hook
         from nexus.db.t2.aspect_extraction_queue import AspectExtractionQueue
+        from nexus.db.t2.http_aspect_queue import HttpAspectQueue
+        from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
 
         monkeypatch.setattr(mod, "ensure_worker_started", lambda: None)
         monkeypatch.setattr(mod, "_resolve_catalog_reader", lambda: None)
 
+        with T2Database(_isolate_t2) as db:
+            raw = has_raw_access(db.aspect_queue)
+
         def _boom(self, *a, **k):
             raise RuntimeError("enqueue boom")
 
-        monkeypatch.setattr(AspectExtractionQueue, "enqueue", _boom)
+        if raw:
+            monkeypatch.setattr(AspectExtractionQueue, "enqueue", _boom)
+        else:
+            # Service substrate: the enqueue routes through HttpAspectQueue
+            # and hook_failures has no public read surface — force the boom
+            # on the HTTP class and capture the tripwire persist via a spy
+            # (RDR-155 P4b P0a' has_raw_access branch).
+            monkeypatch.setattr(HttpAspectQueue, "enqueue", _boom)
+            recorded: list[dict] = []
+            real_record = HttpTelemetryStore.record_hook_failure
+
+            def _spy(self, **kwargs):
+                recorded.append(kwargs)
+                return real_record(self, **kwargs)
+
+            monkeypatch.setattr(HttpTelemetryStore, "record_hook_failure", _spy)
 
         aspect_extraction_enqueue_hook(
             source_path="/p1.pdf", collection="knowledge__delos", content="x",
         )
-        with T2Database(_isolate_t2) as db:
-            rows = db.telemetry.conn.execute(
-                "SELECT doc_id, collection, hook_name, error, chain "
-                "FROM hook_failures"
-            ).fetchall()
-        assert len(rows) == 1
-        doc_id, coll, hook_name, error, chain = rows[0]
+        if raw:
+            with T2Database(_isolate_t2) as db:
+                rows = db.telemetry.conn.execute(
+                    "SELECT doc_id, collection, hook_name, error, chain "
+                    "FROM hook_failures"
+                ).fetchall()
+            assert len(rows) == 1
+            doc_id, coll, hook_name, error, chain = rows[0]
+        else:
+            assert len(recorded) == 1
+            doc_id = recorded[0]["doc_id"]
+            coll = recorded[0]["collection"]
+            hook_name = recorded[0]["hook_name"]
+            error = recorded[0]["error"]
+            chain = recorded[0]["chain"]
         assert doc_id == "/p1.pdf"
         assert coll == "knowledge__delos"
         assert hook_name == "aspect_extraction_enqueue_hook"
@@ -781,15 +832,35 @@ class TestEnqueueFailureTripwire:
         monkeypatch.setattr(mod, "ensure_worker_started", lambda: None)
         monkeypatch.setattr(mod, "_resolve_catalog_reader", lambda: None)
 
+        from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
+
+        recorded: list[dict] = []
+        real_record = HttpTelemetryStore.record_hook_failure
+
+        def _spy(self, **kwargs):
+            recorded.append(kwargs)
+            return real_record(self, **kwargs)
+
+        monkeypatch.setattr(HttpTelemetryStore, "record_hook_failure", _spy)
+
         aspect_extraction_enqueue_hook(
             source_path="/p1.pdf", collection="knowledge__delos", content="x",
         )
         with T2Database(_isolate_t2) as db:
             pending = db.aspect_queue.list_pending()
-            failures = db.telemetry.conn.execute(
-                "SELECT count(*) FROM hook_failures "
-                "WHERE hook_name = 'aspect_extraction_enqueue_hook'"
-            ).fetchone()[0]
+            if has_raw_access(db.telemetry):
+                failures = db.telemetry.conn.execute(
+                    "SELECT count(*) FROM hook_failures "
+                    "WHERE hook_name = 'aspect_extraction_enqueue_hook'"
+                ).fetchone()[0]
+            else:
+                # Service substrate: hook_failures has no public read surface
+                # — the spy above proves zero tripwire persists fired
+                # (RDR-155 P4b P0a' has_raw_access branch).
+                failures = len(
+                    [r for r in recorded
+                     if r.get("hook_name") == "aspect_extraction_enqueue_hook"]
+                )
         assert len(pending) == 1
         assert failures == 0
 
@@ -835,19 +906,37 @@ def _wait_until(predicate, timeout: float = 5.0, poll: float = 0.05) -> None:
 
 
 def _queue_size(db_path: Path) -> int:
+    """Total row count on the SQLite substrate; 0/1 drained-indicator on the
+    service substrate (no raw handle — RDR-155 P4b P0a' has_raw_access
+    branch). Every call site only compares ``== 0``, and ``is_drained``'s
+    "no non-failed rows" matches the drain tests (which never leave failed
+    rows behind)."""
     with T2Database(db_path) as db:
-        return db.aspect_queue.conn.execute(
-            "SELECT COUNT(*) FROM aspect_extraction_queue"
-        ).fetchone()[0]
+        q = db.aspect_queue
+        if has_raw_access(q):
+            return q.conn.execute(
+                "SELECT COUNT(*) FROM aspect_extraction_queue"
+            ).fetchone()[0]
+        return 0 if q.is_drained() else 1
 
 
 def _row_status(db_path: Path, source_path: str) -> str | None:
     with T2Database(db_path) as db:
-        row = db.aspect_queue.conn.execute(
-            "SELECT status FROM aspect_extraction_queue WHERE source_path = ?",
-            (source_path,),
-        ).fetchone()
-    return row[0] if row else None
+        q = db.aspect_queue
+        if has_raw_access(q):
+            row = q.conn.execute(
+                "SELECT status FROM aspect_extraction_queue WHERE source_path = ?",
+                (source_path,),
+            ).fetchone()
+            return row[0] if row else None
+        # Service substrate: no raw handle — derive status from the public
+        # list surfaces (failed is the only status the waiting tests poll
+        # for; pending covers the rest of the observable states).
+        if any(r.source_path == source_path for r in q.list_failed()):
+            return "failed"
+        if any(r.source_path == source_path for r in q.list_pending()):
+            return "pending"
+        return None
 
 
 # ── Batch path (RDR-089 Phase D) ────────────────────────────────────────────
@@ -916,12 +1005,13 @@ class TestBatchPath:
         assert batch_calls == [5]
         assert single_calls == []
 
-        # All five aspect rows landed.
+        # All five aspect rows landed (public read surface — works on both
+        # substrates, RDR-155 P4b P0a').
         with T2Database(_isolate_t2) as db:
-            count = db.document_aspects.conn.execute(
-                "SELECT COUNT(*) FROM document_aspects"
-            ).fetchone()[0]
-        assert count == 5
+            for i in range(5):
+                assert db.document_aspects.get(
+                    "knowledge__delos", f"/papers/p{i}.pdf",
+                ) is not None
 
     def test_worker_uses_single_path_when_only_one_row(
         self, _isolate_t2: Path,
@@ -1177,6 +1267,15 @@ class TestRetryLadderRouting:
 class TestRetryLadderIntegration:
     """End-to-end: a retryable failure cycles the ladder to terminal at the cap."""
 
+    @pytest.mark.skipif(
+        _ENGINE_SUBSTRATE,
+        reason="dies-roster: this test relies on the SQLite queue stub "
+        "IGNORING the backoff interval (no next_retry_at column) so the "
+        "ladder burns to terminal in unit-test time; the engine stamps a "
+        "real next_retry_at (base 30s, doubling) server-side, so the "
+        "burn-the-ladder shortcut dies at the RDR-155 P4b flip — the real "
+        "backoff ladder is exercised by the --fullstack rehearsal",
+    )
     def test_retryable_failure_climbs_to_terminal_at_cap(self, _isolate_t2: Path) -> None:
         import sqlite3
 
@@ -1233,18 +1332,43 @@ class TestEnqueueHookDocIdWiring:
     def test_enqueue_persists_catalog_doc_id_verbatim(self, _isolate_t2):
         from nexus.aspect_worker import aspect_extraction_enqueue_hook
 
+        with T2Database(_isolate_t2) as db:
+            raw = has_raw_access(db.aspect_queue)
+
+        if raw:
+            # SQLite has no FK — any doc_id string pins the wiring.
+            doc_id = "1.7.42"
+        else:
+            # Engine substrate (RDR-155 P4b P0a', idiom 6): the queue's
+            # doc_id carries a REAL FK to catalog_documents, so seed the
+            # catalog row through the engine and use ITS tumbler — the
+            # wiring assertion (verbatim persistence) is unchanged, and the
+            # FK leg is now exercised live instead of skipped.
+            from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+            with HttpCatalogClient() as cat:
+                owner = cat.register_owner(
+                    "wiring-repo", "repo", repo_hash="deadbeef",
+                )
+                tumbler = cat.register(
+                    owner, "doc-id wiring doc",
+                    content_type="paper",
+                    physical_collection="knowledge__delos",
+                )
+            doc_id = str(tumbler)
+
         chunk_id = "bf715bbd" + "0" * 24  # the WRONG identity (T3 chunk hash)
         aspect_extraction_enqueue_hook(
             source_path=chunk_id,
             collection="knowledge__delos",
             content="note body",
-            doc_id="1.7.42",
+            doc_id=doc_id,
         )
 
         with T2Database(_isolate_t2) as db:
             row = db.aspect_queue.claim_next()
         assert row is not None
-        assert row.doc_id == "1.7.42"
+        assert row.doc_id == doc_id
         assert row.source_path == chunk_id
 
     def test_enqueue_empty_doc_id_stays_empty(self, _isolate_t2):

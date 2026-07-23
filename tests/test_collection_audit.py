@@ -8,12 +8,29 @@ to follow-up bead ``nexus-fx2d``.
 """
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 from tests.conftest import make_vector_test_client
+
+_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
+
+# RDR-155 P4b P0a' dies-roster: the collection-audit T2 diagnostic sections
+# (distance histogram / cross-projections / hubs) are raw-SQLite SELECTs over
+# ``db.taxonomy.conn`` — DELIBERATELY degraded to empty in service mode
+# (nexus-9613q.4). The chash-coverage drift ratio is likewise a genuine
+# signal only on the SQLite substrate (service mode is a tautology by design,
+# RDR-187 nexus-piwya.3/.4). Tests asserting those SQLite-populated sections
+# die at the flip.
+_sqlite_audit_dies_at_flip = pytest.mark.skipif(
+    _ENGINE_SUBSTRATE,
+    reason="dies-roster: raw-SQLite T2 audit diagnostics (taxonomy_conn "
+    "SELECTs / sqlite chash_index drift ratio) die at the RDR-155 P4b flip; "
+    "service mode degrades these sections by design (nexus-9613q.4)",
+)
 
 
 def _clean_ephemeral_client():
@@ -43,9 +60,17 @@ def _seed_t2(path: Path) -> None:
     """Build a T2 DB with topics, topic_assignments, and search_telemetry
     seeded for a ``code__main`` collection under audit plus a few others
     so cross-projection + hub queries have data."""
+    from nexus.db.storage_mode import has_raw_access
     from nexus.db.t2 import T2Database
 
     db = T2Database(path)
+    if not has_raw_access(db.taxonomy):
+        # Engine substrate (RDR-155 P4b P0a'): the audit's T2 diagnostic
+        # sections are service-mode-degraded by design (nexus-9613q.4), so
+        # there is nothing meaningful to seed — callers that assert on
+        # SQLite-populated sections carry a dies-roster skip instead.
+        db.close()
+        return
     c = db.taxonomy.conn
     c.executemany(
         "INSERT OR IGNORE INTO topics "
@@ -138,6 +163,7 @@ def _seed_catalog_conn(db_path: Path) -> "sqlite3.Connection":
 
 
 class TestCrossProjections:
+    @_sqlite_audit_dies_at_flip
     def test_ranked_by_score_shared_x_similarity(self, tmp_path: Path) -> None:
         from nexus.collection_audit import compute_cross_projections
         from nexus.db.t2 import T2Database
@@ -163,6 +189,7 @@ class TestCrossProjections:
         # are in code__main (that's not cross-projection).
         assert "code__main" not in names
 
+    @_sqlite_audit_dies_at_flip
     def test_empty_when_no_projection_rows(self, tmp_path: Path) -> None:
         from nexus.collection_audit import compute_cross_projections
         from nexus.db.t2 import T2Database
@@ -218,6 +245,7 @@ class TestOrphanChunks:
 
 
 class TestHubAssignments:
+    @_sqlite_audit_dies_at_flip
     def test_top_10_by_source_collection_breadth(self, tmp_path: Path) -> None:
         from nexus.collection_audit import compute_hub_assignments
         from nexus.db.t2 import T2Database
@@ -247,6 +275,7 @@ class TestHubAssignments:
 
 
 class TestDistanceHistogramTelemetryOnly:
+    @_sqlite_audit_dies_at_flip
     def test_buckets_cover_0_to_2_in_10_bins(self, tmp_path: Path) -> None:
         from nexus.collection_audit import compute_distance_histogram
         from nexus.db.t2 import T2Database
@@ -264,6 +293,7 @@ class TestDistanceHistogramTelemetryOnly:
         assert sum(hist.buckets) == hist.sample_size == 15
         assert hist.source == "telemetry"
 
+    @_sqlite_audit_dies_at_flip
     def test_reports_empty_source_when_no_rows(self, tmp_path: Path) -> None:
         from nexus.collection_audit import compute_distance_histogram
         from nexus.db.t2 import T2Database
@@ -357,6 +387,7 @@ class TestLiveDistanceProbe:
         assert hist.source == "empty"
         assert hist.sample_size == 0
 
+    @_sqlite_audit_dies_at_flip
     def test_run_audit_uses_live_probe_only_when_telemetry_is_cold(
         self, tmp_path: Path,
     ) -> None:
@@ -425,6 +456,7 @@ class TestChashCoverageSection:
         finally:
             idx.close()
 
+    @_sqlite_audit_dies_at_flip
     def test_full_coverage_ratio_1(self, tmp_path: Path, monkeypatch) -> None:
         from nexus.collection_audit import compute_chash_coverage
 
@@ -456,6 +488,7 @@ class TestChashCoverageSection:
         assert cov.ratio == 1.0
         assert cov.missing_sample == []
 
+    @_sqlite_audit_dies_at_flip
     def test_partial_coverage_ratio_less_than_one(
         self, tmp_path: Path, monkeypatch,
     ) -> None:
@@ -533,6 +566,7 @@ class TestChashCoverageSection:
         assert cov.indexed_rows == 0
         assert cov.ratio is None
 
+    @_sqlite_audit_dies_at_flip
     def test_missing_t2_returns_none(
         self, tmp_path: Path, monkeypatch,
     ) -> None:
