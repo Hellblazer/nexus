@@ -8,7 +8,12 @@ import click
 import structlog
 
 from nexus.commands.store import _t3
-from nexus.corpus import embedding_model_for_collection, index_model_for_collection
+from nexus.corpus import (
+    CANONICAL_EMBEDDING_MODELS,
+    LOCAL_EMBEDDING_MODELS,
+    embedding_model_for_collection,
+    index_model_for_collection,
+)
 
 _log = structlog.get_logger(__name__)
 
@@ -146,6 +151,188 @@ def delete_cmd(name: str, yes: bool) -> None:
         click.echo(f"Deleted: {name} ({'; '.join(parts)})")
     else:
         click.echo(f"Deleted: {name}")
+
+
+# ── prune (nexus-9tsdf / GH #1113) ──────────────────────────────────────────
+
+
+def _dim_for_model_token(token: str) -> int | None:
+    """Dimension implied by a conformant collection's ``__<model>__`` segment.
+
+    Local-mode tokens encode the dim in the suffix
+    (``minilm-l6-v2-384`` -> 384, ``bge-base-en-v15-768`` -> 768). Voyage
+    tokens are hardcoded to 1024. Mirrors
+    ``nexus.commands.catalog_cmds.doctor._expected_dim_for_model_token``
+    (a self-consistency check: name-token vs THIS collection's own
+    content). That check lives outside this file's scope; duplicated here
+    rather than imported since it is a small pure function and the two
+    checks answer different questions (name-vs-own-content there,
+    name-vs-ACTIVE-serving-embedder here).
+    """
+    if token in CANONICAL_EMBEDDING_MODELS:
+        return 1024
+    if token in LOCAL_EMBEDDING_MODELS:
+        tail = token.rsplit("-", 1)[-1]
+        try:
+            return int(tail)
+        except ValueError:
+            return None
+    return None
+
+
+def _active_embedding_dim(t3: Any) -> tuple[int | None, str]:
+    """Return ``(dim, label)`` for the CURRENTLY SERVING embedder.
+
+    ``dim`` is ``None`` when it cannot be verified — an unreachable /
+    not-yet-resolved service probe must never be guessed at, since a wrong
+    guess here would flag healthy collections as orphans and delete real
+    data (fail-safe: "cannot verify" means "skip", not "assume").
+
+    Two dispatch paths:
+
+    * ``t3`` exposes ``embedding_mode()`` (the production
+      :class:`HttpVectorClient` handle, RDR-155 P4a.2 — this is what
+      ``make_t3()`` returns unconditionally today, in BOTH local and cloud
+      mode): trust its authoritative ``GET /version`` probe. ``"voyage"``
+      -> 1024d. ``"onnx-local"`` -> the dim of the locally-configured
+      model (``local.embed_model``, the same value the service itself was
+      provisioned with — nexus-9xfx5). A failed/unresolved probe (``None``)
+      returns ``(None, "unknown")`` rather than guessing.
+    * ``t3`` has no ``embedding_mode`` (a raw :class:`T3Database` — test /
+      migration-ETL substitute): its own ``_local_mode`` flag is
+      authoritative and never ambiguous.
+    """
+    embedding_mode = getattr(t3, "embedding_mode", None)
+    if callable(embedding_mode):
+        try:
+            family = embedding_mode()
+        except Exception:  # noqa: BLE001 — probe is best-effort; unknown falls back to "cannot verify"
+            family = None
+        if family == "voyage":
+            return 1024, "voyage"
+        if family == "onnx-local":
+            from nexus.db.local_ef import local_model_token  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+            token = local_model_token()
+            return _dim_for_model_token(token), token
+        return None, "unknown"
+
+    local_mode = getattr(t3, "_local_mode", True)
+    if local_mode:
+        from nexus.db.local_ef import local_model_token  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+        token = local_model_token()
+        return _dim_for_model_token(token), token
+    return 1024, "voyage"
+
+
+def _find_dimension_mismatched_collections(
+    t3: Any,
+) -> tuple[list[dict], int, str]:
+    """Collections whose ``__<model>__`` name segment declares a dim that no
+    longer matches the active serving embedder (orphans from a prior
+    embedder generation — GH #1113).
+
+    Returns ``(mismatches, skipped_non_conformant, active_label)``.
+    ``mismatches`` items: ``{name, declared_model, declared_dim, active_dim,
+    count}``. Bypass-schema (``taxonomy__*`` etc.) and non-conformant
+    (legacy 2-segment, no embedder-model token) collection names are
+    skipped, not flagged — there is no name-derived dim to compare against
+    for those, and guessing would risk a false-positive delete.
+    """
+    from nexus.corpus import is_conformant_collection_name, parse_conformant_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    active_dim, active_label = _active_embedding_dim(t3)
+    mismatches: list[dict] = []
+    skipped = 0
+    if active_dim is None:
+        return mismatches, skipped, active_label
+
+    for c in t3.list_collections():
+        name = c["name"]
+        if name.startswith(_BYPASS_SCHEMA_PREFIXES):
+            continue
+        if not is_conformant_collection_name(name):
+            skipped += 1
+            continue
+        token = parse_conformant_collection_name(name)["embedding_model"]
+        declared_dim = _dim_for_model_token(token)
+        if declared_dim is None:
+            skipped += 1
+            continue
+        if declared_dim != active_dim:
+            mismatches.append({
+                "name": name,
+                "declared_model": token,
+                "declared_dim": declared_dim,
+                "active_dim": active_dim,
+                "count": c.get("count", 0),
+            })
+    return mismatches, skipped, active_label
+
+
+@collection.command("prune")
+@click.option("--yes", "-y", is_flag=True, help="Delete the listed orphans (non-interactive; the ONLY way to delete).")
+@click.option("--dry-run", "dry_run", is_flag=True, help="List only; never delete. This is the default behavior — the flag exists for explicit scripting and always wins over --yes.")
+def prune_cmd(yes: bool, dry_run: bool) -> None:
+    """List (and, with --yes, delete) orphaned dimension-mismatched T3
+    collections (GH #1113).
+
+    A collection created under a prior embedder generation (e.g. a
+    minilm-l6-v2-384 collection left behind after the active embedder
+    moved to bge-base-en-v15-768) can never be searched — every
+    cross-corpus search silently skips it. Before this command the only
+    way to find and remove such an orphan was to read structured logs and
+    run ``nx collection delete <name>`` by hand.
+
+    Fail-safe by default: with no flags, this command ONLY lists what it
+    found — nothing is ever deleted. Pass --yes to actually delete the
+    listed collections (cascade-purges taxonomy/chash/pipeline/catalog
+    state the same way ``nx collection delete`` does). --dry-run is an
+    explicit, always-safe alias for the default and takes precedence over
+    --yes if both are passed.
+    """
+    t3 = _t3()
+    mismatches, skipped, active_label = _find_dimension_mismatched_collections(t3)
+
+    if not mismatches:
+        click.echo(
+            f"No dimension-mismatched collections found "
+            f"(active embedder: {active_label})."
+        )
+        if skipped:
+            click.echo(
+                f"({skipped} non-conformant collection name(s) skipped — "
+                f"cannot verify their dimension from the name alone.)"
+            )
+        return
+
+    click.echo(f"Active embedder: {active_label}")
+    click.echo(f"{len(mismatches)} dimension-mismatched collection(s):")
+    for m in mismatches:
+        click.echo(
+            f"  {m['name']}"
+            f"  (declared {m['declared_model']}={m['declared_dim']}d,"
+            f" active={m['active_dim']}d, {m['count']} chunk(s))"
+        )
+    if skipped:
+        click.echo(
+            f"({skipped} non-conformant collection name(s) skipped — "
+            f"cannot verify their dimension from the name alone.)"
+        )
+
+    if dry_run or not yes:
+        click.echo("\nDry run — nothing deleted. Re-run with --yes to delete.")
+        return
+
+    from nexus.db.collection_purge import purge_collection_cascade  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    for m in mismatches:
+        cascade = purge_collection_cascade(t3, m["name"])
+        for failure in cascade.failures:
+            click.echo(f"warn: {failure}", err=True)
+    click.echo(f"\nDeleted {len(mismatches)} collection(s).")
 
 
 # nexus-8g79.10 (V5): rename_collection_data_plane extracted to

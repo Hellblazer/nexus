@@ -1190,7 +1190,24 @@ class T3Database:
         # Log a distinct ERROR so operators can correlate with the root cause
         # (wrong embedder, or collections need reindexing) rather than assuming
         # the query had no relevant content.
-        if queried_count > 0 and queried_count == dim_skipped_count:
+        #
+        # nexus-9tsdf (GH #1113): ``queried_count > 1`` — search_engine.py's
+        # cross-corpus fan-out (nexus-o51et) calls this method once PER
+        # collection (``collection_names`` is always a 1-item list from that
+        # caller). With the old ``queried_count > 0`` guard, ANY single
+        # dimension-mismatched orphan touched by a corpus=all search fired
+        # this ERROR on every search call — "does not match ANY indexed
+        # collection" read as total failure when e.g. 1 of 80 collections
+        # mismatched and the other 79 searched fine. A single-collection
+        # call cannot tell "this collection mismatches" (already the
+        # WARNING above) apart from "the whole corpus mismatches" — that
+        # distinction needs the caller's full scope, which only a direct,
+        # genuinely multi-collection caller of THIS method has. Requiring
+        # queried_count > 1 preserves the ERROR for such direct callers
+        # (see test_local_daemon_client_embed.py's 2-collection-both-skip
+        # case) while killing the false positive from the 1-collection
+        # fan-out shape.
+        if queried_count > 1 and queried_count == dim_skipped_count:
             _log.error(
                 "search_all_collections_dimension_skipped",
                 queried=queried_count,

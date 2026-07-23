@@ -3357,6 +3357,62 @@ def _check_legacy_id_census() -> list[HealthResult]:
     )]
 
 
+def _check_dimension_orphans() -> list[HealthResult]:
+    """Name T3 collections whose declared embedding dim no longer matches
+    the active serving embedder, and suggest the remedy (GH #1113 /
+    nexus-9tsdf AC2).
+
+    Such a collection (e.g. a minilm-l6-v2-384 leftover after the active
+    embedder moved to 1024d voyage) can never be searched — every
+    cross-corpus search skips it. Reuses the SAME finder ``nx collection
+    prune`` lists from, so doctor and the remedy command can never
+    disagree about what counts as an orphan. Degrades to a skip — never a
+    crash, and never a guess: an unresolved active-embedder probe reports
+    "skipped" rather than risk telling the operator to delete healthy
+    collections.
+    """
+    label = "T3 dimension orphans"
+    try:
+        from nexus.commands.collection import _find_dimension_mismatched_collections  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid circular import
+
+        t3 = make_t3()
+        mismatches, _skipped, active_label = _find_dimension_mismatched_collections(t3)
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_dimension_orphan_check_failed", error=str(exc))
+        return [HealthResult(label=label, ok=True, detail="skipped (T3 unavailable)")]
+
+    if active_label == "unknown":
+        return [HealthResult(
+            label=label, ok=True,
+            detail="skipped (active embedder unresolved — cannot verify)",
+        )]
+    if not mismatches:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=f"none (active embedder: {active_label})",
+        )]
+
+    names = "; ".join(
+        f"{m['name']} ({m['declared_dim']}d vs active {m['active_dim']}d, "
+        f"{m['count']} chunk(s))"
+        for m in mismatches
+    )
+    return [HealthResult(
+        label=label,
+        ok=False,
+        warn=True,
+        detail=(
+            f"{len(mismatches)} collection(s) unsearchable under the active "
+            f"embedder ({active_label}): {names}"
+        ),
+        fix_suggestions=[
+            "nx collection prune          (list them)",
+            "nx collection prune --yes    (delete them)",
+        ],
+    )]
+
+
 def run_health_checks() -> tuple[list[HealthResult], bool]:
     """Run all health checks.
 
@@ -3380,6 +3436,11 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
         results.extend(_check_t3_daemon_version())
     else:
         results.extend(_check_t3_cloud())
+
+    # nexus-9tsdf (GH #1113 AC2): name dimension-orphaned collections and
+    # point at `nx collection prune`. Applies in both modes; degrades
+    # internally.
+    results.extend(_check_dimension_orphans())
 
     results.extend(_check_tools())
     results.extend(_check_git_hooks())

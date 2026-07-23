@@ -1009,6 +1009,106 @@ class TestPerCollectionErrorIsolation:
         )
 
 
+# ── nexus-9tsdf / GH #1113: quieter dimension-mismatch search logging ───────
+
+
+class TestDimensionMismatchLoggingQuieted:
+    """A stale, orphaned dimension-mismatched collection (leftover from a
+    prior embedder generation) fails every search with an embedding-space
+    HTTP 400. Pre-fix this logged one WARNING per search, every search,
+    for as long as the orphan existed -- even when it was 1 of 80
+    collections and everything else searched fine. Quieted per AC3: <5%
+    of the requested scope -> DEBUG (noise); >=5% -> WARNING (real
+    problem). Never silent either way."""
+
+    _DIM_ERROR = (
+        "POST /v1/vectors/search -> HTTP 400: query embedder produced a "
+        "1024-dim vector but the collection dispatches to chunks_384"
+    )
+
+    def test_small_fraction_dimension_mismatch_downgraded_to_debug(self):
+        """1 mismatched collection out of 21 (~4.8%) is noise -- DEBUG,
+        not WARNING. The event still fires (never silent).
+
+        The suite's default structlog wrapper (tests/conftest.py) filters
+        below WARNING, matching the default runtime -- exactly the
+        visibility change this fix is for. Raise the wrapper threshold to
+        DEBUG for this test only so the (correctly suppressed-by-default)
+        debug entry is observable; the autouse
+        ``_restore_structlog_after_test`` fixture resets it after.
+        """
+        import logging
+
+        import structlog
+        from structlog.testing import capture_logs
+
+        structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG))
+
+        good_cols = [f"code__c{i}" for i in range(20)]
+        t3 = _FailingT3(
+            {c: [] for c in good_cols},
+            failing={"knowledge__orphan__minilm-l6-v2-384__v1"},
+        )
+        with capture_logs() as logs:
+            search_cross_corpus(
+                "q", [*good_cols, "knowledge__orphan__minilm-l6-v2-384__v1"],
+                10, t3,
+            )
+        matches = [
+            e for e in logs
+            if e["event"] == "collection_search_failed"
+            and e.get("collection") == "knowledge__orphan__minilm-l6-v2-384__v1"
+        ]
+        assert matches, "the failure must still be logged -- never silent"
+        assert matches[0]["log_level"] == "debug"
+
+    def test_large_fraction_dimension_mismatch_stays_warning(self):
+        """40 of 80 collections mismatched (50%) is a real problem --
+        stays at WARNING, per the AC3 example."""
+        from structlog.testing import capture_logs
+
+        good_cols = [f"code__c{i}" for i in range(40)]
+        bad_cols = [f"knowledge__orphan{i}__minilm-l6-v2-384__v1" for i in range(40)]
+        t3 = _FailingT3(
+            {c: [] for c in good_cols}, failing=set(bad_cols),
+        )
+        with capture_logs() as logs:
+            search_cross_corpus("q", [*good_cols, *bad_cols], 10, t3)
+        levels = {
+            e["log_level"] for e in logs
+            if e["event"] == "collection_search_failed" and e.get("collection") in bad_cols
+        }
+        assert levels == {"warning"}
+
+    def test_non_dimension_failure_unaffected_stays_warning(self):
+        """A genuine (non-dimension) service failure keeps its immediate
+        per-collection WARNING regardless of how small a fraction it is --
+        only the dimension-mismatch class is reclassified."""
+        from structlog.testing import capture_logs
+
+        good_cols = [f"code__c{i}" for i in range(20)]
+        t3 = _FailingT3({c: [] for c in good_cols}, failing=set())
+        # Monkeypatch one collection to raise a non-dimension error.
+        from nexus.db.http_vector_client import VectorServiceError
+
+        real_search = t3.search
+
+        def _search(query, collection_names, n_results=10, where=None):
+            if collection_names[0] == "code__c0":
+                raise VectorServiceError("POST /v1/vectors/search -> HTTP 503: service unavailable")
+            return real_search(query, collection_names, n_results, where)
+
+        t3.search = _search
+        with capture_logs() as logs:
+            search_cross_corpus("q", good_cols, 10, t3)
+        matches = [
+            e for e in logs
+            if e["event"] == "collection_search_failed" and e.get("collection") == "code__c0"
+        ]
+        assert matches
+        assert matches[0]["log_level"] == "warning"
+
+
 # ── nexus-7lm3q: batch manifest/resolve, backward-compat fallback ────────────
 
 

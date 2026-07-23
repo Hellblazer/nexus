@@ -676,15 +676,33 @@ def search_cross_corpus(
         with ThreadPoolExecutor(max_workers=workers) as pool:
             partials = list(pool.map(_search_one, collections))
 
+    # nexus-9tsdf (GH #1113): a stale, orphaned dimension-mismatched
+    # collection (leftover from a prior embedder generation) can never be
+    # searched — the service rejects it with an embedding-space-mismatch
+    # HTTP 400 ("... produced a 1024-dim vector but the collections
+    # dispatch to chunks_384", see PgVectorRepository). Logging every such
+    # per-collection failure at WARNING meant one orphan touched by a
+    # corpus=all search spammed a WARNING on EVERY search call, even when
+    # it was 1 of 80 collections and the other 79 searched fine. Collect
+    # dimension-mismatch failures separately and log them as a class: at
+    # DEBUG when they affect a small minority (<5%) of the requested scope
+    # (noise — `nx doctor` / `nx collection prune` carry the actionable
+    # per-collection detail), at WARNING when they affect a real fraction
+    # (>=5% — a genuine problem). Never silent either way; non-dimension
+    # failures are unaffected and stay at WARNING immediately, as before.
+    dim_mismatch_cols: list[str] = []
     for part in partials:
         col = part["col"]
         if part.get("error") is not None:
             failed_collections[col] = part["error"]
-            _log.warning(
-                "collection_search_failed",
-                collection=col,
-                error=part["error"],
-            )
+            if "dim" in part["error"].lower():
+                dim_mismatch_cols.append(col)
+            else:
+                _log.warning(
+                    "collection_search_failed",
+                    collection=col,
+                    error=part["error"],
+                )
             continue
         all_results.extend(part["results"])
         diag_per_collection[col] = (
@@ -702,6 +720,16 @@ def search_cross_corpus(
                 collection=col,
                 dropped=part["dropped"],
                 threshold=part["threshold"],
+            )
+
+    if dim_mismatch_cols:
+        fraction = len(dim_mismatch_cols) / len(collections) if collections else 0.0
+        _dim_log = _log.warning if fraction >= 0.05 else _log.debug
+        for col in dim_mismatch_cols:
+            _dim_log(
+                "collection_search_failed",
+                collection=col,
+                error=failed_collections[col],
             )
 
     if failed_collections and len(failed_collections) == len(collections):

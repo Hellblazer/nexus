@@ -1236,6 +1236,7 @@ nx collection list
 | `health` | Composite per-collection health table — chunk counts (T3-sourced), staleness, hub score, chash coverage (RDR-087 Phase 3.4) |
 | `merge-candidates` | Pair-wise cross-collection overlap ranking — surfaces collection pairs with high shared-topic similarity as merge/bridge candidates (RDR-087 Phase 4.3) |
 | `delete NAME` | Delete collection (irreversible) |
+| `prune` | List collections whose name-declared embedding dim mismatches the ACTIVE serving embedder — orphans from a prior embedder generation that every search silently skips (GH #1113, nexus-9tsdf). Fail-safe: no flags lists only; `--yes` deletes via the same cascade as `delete`; `--dry-run` always wins over `--yes`. An unresolved active-embedder probe lists nothing (never guesses). `nx doctor` names these orphans and points here |
 
 **`verify` flags:**
 
