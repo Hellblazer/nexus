@@ -287,6 +287,28 @@ curl -s "https://pypi.org/pypi/conexus/json" | \
 
 Both must report `vX.Y.Z` / `X.Y.Z`. **Do not declare done before this check passes.** PyPI publish can be skipped if the Release workflow's pytest fails; the tag alone does not guarantee publication.
 
+### 11b. Back-merge main into develop (MANDATORY — ends the stale-develop class)
+
+```bash
+git checkout develop && git pull
+git merge origin/main --no-edit    # trivially clean right after a release:
+                                   # the release branch just CONTAINED develop
+git push origin develop
+```
+
+Why mandatory (2026-07-23 incident): from 6.12.0 through 6.17.0 no release
+was ever merged back, so develop's seven manifests froze at 6.11.0 — all
+stale TOGETHER, so the parity tests stayed green on a coherent lie (a
+consistency gate cannot detect consistent staleness). Every dev-tree
+install self-identified as 6.11.0: doctor nagged, the downgrade guard
+misfired on reinstalls, and the RDR-143 lockstep hook was primed to
+silently replace a deliberate dogfood install with PyPI. Each release also
+re-paid Step 7's conflict tax, whose forgotten-step failure mode is a
+release PR with NO CI checks at all. Running this step immediately after
+tag-push is the moment the merge is conflict-free by construction; skipping
+it re-opens the divergence that Step 7 then has to re-resolve under
+pressure. Do it every release, zero-change releases included.
+
 ### 12. Reinstall local tool and verify
 
 ```bash
