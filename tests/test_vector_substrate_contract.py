@@ -305,3 +305,36 @@ class TestEfAttachedSurface:
         col.add(ids=["a", "b"], documents=["alpha beta", "gamma delta"])
         res = col.query(query_texts=["alpha beta"], n_results=2)
         assert res["ids"][0][0] == "a"
+
+
+# ── Consumer integration: the T3Database facade wrap ─────────────────────────
+# The ``nx index --dry-run`` leg (and the canonical test-fixture pattern)
+# wraps a substrate client in T3Database via ``_client=`` injection. Pin
+# that wrap differentially: strict naming guard, collection creation with
+# the production cosine metadata, and the get() preview read the dry-run
+# leg performs.
+
+
+class TestT3FacadeWrap:
+    def _t3(self, substrate):
+        from nexus.db.t3 import T3Database
+
+        return T3Database(_client=substrate, _ef_override=_ToyEF())
+
+    def test_dry_run_call_shape(self, substrate) -> None:
+        t3 = self._t3(substrate)
+        name = f"docs__contract-owner__toy-ef__v{uuid.uuid4().int % 9 + 1}"
+        col = t3.get_or_create_collection(name)
+        col.add(ids=["c1", "c2"], documents=["alpha beta", "gamma delta"],
+                metadatas=[{"page_number": 1}, {"page_number": 2}])
+        preview = t3.get_or_create_collection(name).get(
+            include=["documents", "metadatas"],
+        )
+        assert sorted(preview["ids"]) == ["c1", "c2"]
+        assert len(preview["documents"]) == 2
+        assert {m["page_number"] for m in preview["metadatas"]} == {1, 2}
+
+    def test_nonconformant_name_rejected(self, substrate) -> None:
+        t3 = self._t3(substrate)
+        with pytest.raises(ValueError, match="not conformant"):
+            t3.get_or_create_collection("docs__legacy-two-segment")

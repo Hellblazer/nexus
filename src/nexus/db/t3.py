@@ -15,9 +15,17 @@ import chromadb.errors
 import httpx
 from chromadb.errors import (
     InvalidArgumentError as _ChromaInvalidArgumentError,
-    NotFoundError as _ChromaNotFoundError,
 )
 import structlog
+
+from nexus.errors import collection_not_found_errors
+
+# Substrate-neutral missing-collection catch tuple (RDR-155 P4b P0c):
+# includes chromadb.errors.NotFoundError while the dependency is present,
+# collapses to CollectionNotFoundError alone when it leaves at P3. Needed
+# here because T3Database wraps BOTH substrates during the transition
+# (EphemeralClient oracle + InMemoryVectorClient).
+_NotFoundErrors = collection_not_found_errors()
 
 # voyageai is imported lazily inside ``__init__`` only when cloud mode
 # is selected. The eager import here was pulling
@@ -1081,7 +1089,7 @@ class T3Database:
                     col = self._client_for(name).get_collection(
                         name, embedding_function=self._embedding_fn(name)
                     )
-            except _ChromaNotFoundError:
+            except _NotFoundErrors:
                 continue  # collection doesn't exist, skip it
             count = _chroma_with_retry(col.count)
             if count == 0:
@@ -1247,7 +1255,7 @@ class T3Database:
         kc = self._client
         try:
             collections = kc.list_collections()
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             _log.warning("expire_skipped_knowledge_store_not_found")
             return 0
         for col_or_name in collections:
@@ -1297,7 +1305,7 @@ class T3Database:
         """
         try:
             col = self._client_for(collection).get_collection(collection)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return []
         clamped = limit if self._local_mode else min(limit, QUOTAS.MAX_QUERY_RESULTS)
         with self._read_sem(collection):
@@ -1321,7 +1329,7 @@ class T3Database:
 
         try:
             raw = self._client.list_collections()
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return []
 
         names = [c if isinstance(c, str) else c.name for c in raw]
@@ -1348,7 +1356,7 @@ class T3Database:
         try:
             self._client_for(name).get_collection(name)
             return True
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return False
 
     def delete_collection(self, name: str) -> None:
@@ -1393,7 +1401,7 @@ class T3Database:
         """
         try:
             col = self._client_for(collection_name).get_collection(collection_name)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return []
         seen: set[str] = set()
         offset = 0
@@ -1428,7 +1436,7 @@ class T3Database:
         """
         try:
             col = self._client_for(collection_name).get_collection(collection_name)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return []
         ids: list[str] = []
         offset = 0
@@ -1456,7 +1464,7 @@ class T3Database:
         """
         try:
             col = self._client_for(collection_name).get_collection(collection_name)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return 0
         ids = self.ids_for_source(collection_name, source_path)
         if ids:
@@ -1487,7 +1495,7 @@ class T3Database:
         """
         try:
             col = self._client_for(collection_name).get_collection(collection_name)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return []
         chashes = catalog.get_chunk_chashes(doc_id)
         if not chashes:
@@ -1521,7 +1529,7 @@ class T3Database:
         """
         try:
             col = self._client_for(collection_name).get_collection(collection_name)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return 0
         ids = self.ids_for_doc_id(collection_name, doc_id, catalog=catalog)
         if ids:
@@ -1545,7 +1553,7 @@ class T3Database:
         """
         try:
             col = self._client_for(collection_name).get_collection(collection_name)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return
         offset = 0
         page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
@@ -1584,7 +1592,7 @@ class T3Database:
             return 0
         try:
             col = self._client_for(collection_name).get_collection(collection_name)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return 0
         self._delete_batch(col, collection_name, chunk_ids)
         return len(chunk_ids)
@@ -1599,7 +1607,7 @@ class T3Database:
         """
         try:
             col = self._client_for(collection_name).get_collection(collection_name)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return 0
         ids: list[str] = []
         metadatas: list[dict] = []
@@ -1643,7 +1651,7 @@ class T3Database:
         """
         try:
             col = self._client_for(collection).get_collection(collection)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return None
         with self._read_sem(collection):
             result = _chroma_with_retry(
@@ -1661,7 +1669,7 @@ class T3Database:
         """Delete a single entry by its exact document ID. Returns True if found and deleted."""
         try:
             col = self._client_for(collection).get_collection(collection)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return False
         result = _chroma_with_retry(col.get, ids=[doc_id], include=[])
         if not result["ids"]:
@@ -1677,7 +1685,7 @@ class T3Database:
         """
         try:
             col = self._client_for(collection).get_collection(collection)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return []
         ids: list[str] = []
         offset = 0
@@ -1713,7 +1721,7 @@ class T3Database:
             return set()
         try:
             col = self._client_for(collection).get_collection(collection)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return set()
         found: set[str] = set()
         page = QUOTAS.MAX_RECORDS_PER_WRITE
@@ -1730,7 +1738,7 @@ class T3Database:
             return
         try:
             col = self._client_for(collection).get_collection(collection)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return
         self._delete_batch(col, collection, ids)
 
@@ -1741,7 +1749,7 @@ class T3Database:
         """
         try:
             col = self._client_for(name).get_collection(name)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             raise KeyError(f"Collection not found: {name!r}") from None
         return {"count": _chroma_with_retry(col.count), "metadata": col.metadata or {}}
 
@@ -1755,7 +1763,7 @@ class T3Database:
         """
         try:
             col = self._client_for(collection_name).get_collection(collection_name)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             raise KeyError(f"Collection not found: {collection_name!r}") from None
         parsed = embedding_model_for_collection_name(collection_name)
         return {

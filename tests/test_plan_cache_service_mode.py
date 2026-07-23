@@ -7,9 +7,9 @@ to ``PlanSessionCache`` (chroma-shaped) AttributeError'd, flipped the
 registry to ``_UNAVAILABLE``, and silently degraded EVERY production plan
 match to FTS5-only: the whole RDR-078 calibrated cosine gate
 (min_confidence, grown-plan floors, scope-fit ranking) never ran. The fix
-detects a non-chroma client and builds an in-process ``EphemeralClient``
-(the cache is session-scoped and in-memory by contract; per-process IS the
-session isolation for an MCP server)."""
+detects a non-chroma client and builds an in-process substrate — since
+RDR-155 P4b P0a, an ``InMemoryVectorClient`` with real per-instance
+isolation (the cache is session-scoped and in-memory by contract)."""
 from __future__ import annotations
 
 from unittest.mock import patch
@@ -40,6 +40,15 @@ def test_service_backed_t1_yields_available_cache() -> None:
     cache = _fresh_registry_cache()
     assert cache is not None, "service-backed T1 must not disable the plan cache"
     assert cache.is_available
+
+
+def test_service_backed_fallback_substrate_is_inmemory() -> None:
+    """RDR-155 P4b P0a: the service-path fallback substrate is the
+    dependency-free InMemoryVectorClient, not chromadb.EphemeralClient."""
+    from nexus.db.inmemory_vector_store import InMemoryVectorClient
+
+    cache = _fresh_registry_cache()
+    assert isinstance(cache._client, InMemoryVectorClient)
 
 
 def test_service_backed_cache_round_trips_a_plan() -> None:
