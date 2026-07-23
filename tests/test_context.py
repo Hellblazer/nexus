@@ -380,3 +380,55 @@ class TestRefreshContextL1:
         result = refresh_context_l1(db_path=db_path, output_path=out)
         assert result == out
         assert "Refresh Test" in out.read_text()
+
+
+class TestServiceModeL1(object):
+    """nexus-azss4: generate_context_l1 must work against an
+    HttpTaxonomyStore-shaped handle (no raw .conn/._lock) — the raw-handle
+    AttributeError was swallowed at both call sites, leaving every
+    service-mode box's SessionStart Knowledge Map permanently stale."""
+
+    class _FakeHttpTaxonomy:
+        """HttpTaxonomyStore-shaped: public API only, no .conn/._lock."""
+
+        def __init__(self, rows: list[dict]) -> None:
+            self._rows = rows
+            self.calls: list[int | None] = []
+
+        def get_topics(self, *, parent_id: int | None = None) -> list[dict]:
+            self.calls.append(parent_id)
+            assert parent_id is None
+            return list(self._rows)
+
+    def test_service_handle_generates_l1(self, tmp_path: Path) -> None:
+        from nexus.context import generate_context_l1
+
+        fake = self._FakeHttpTaxonomy([
+            {"collection": "code__nexus__m__v1", "label": "Routing", "doc_count": 9},
+            {"collection": "docs__nexus__m__v1", "label": "Guides", "doc_count": 4},
+        ])
+        out = generate_context_l1(fake, output_path=tmp_path / "l1.md")
+        assert out is not None
+        text = out.read_text()
+        assert "Routing" in text and "Guides" in text
+        assert fake.calls == [None]
+
+    def test_service_handle_empty_topics_returns_none(self, tmp_path: Path) -> None:
+        from nexus.context import generate_context_l1
+
+        fake = self._FakeHttpTaxonomy([])
+        assert generate_context_l1(fake, output_path=tmp_path / "l1.md") is None
+
+    def test_service_rows_sorted_client_side(self, tmp_path: Path) -> None:
+        """Top-N selection depends on doc_count DESC ordering — the client
+        must not trust wire ordering."""
+        from nexus.context import generate_context_l1
+
+        fake = self._FakeHttpTaxonomy([
+            {"collection": f"code__nexus__m__v1", "label": f"T{i}", "doc_count": i}
+            for i in range(1, 8)  # ascending — wrong order on the wire
+        ])
+        out = generate_context_l1(fake, output_path=tmp_path / "l1.md")
+        text = out.read_text()
+        assert "T7" in text  # highest doc_count survives the top-5 cut
+        assert "T1" not in text and "T2" not in text  # lowest two cut

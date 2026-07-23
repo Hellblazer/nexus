@@ -119,13 +119,33 @@ def generate_context_l1(
     output_path = output_path or _context_path_for_repo(repo_path)
     allowed = _repo_collections(repo_path)
 
-    # Query root topics only (excludes children from split)
-    with taxonomy._lock:
-        rows = taxonomy.conn.execute(
-            "SELECT collection, label, doc_count FROM topics "
-            "WHERE parent_id IS NULL "
-            "ORDER BY doc_count DESC"
-        ).fetchall()
+    # Query root topics only (excludes children from split).
+    # nexus-azss4: the raw-conn read only exists on a SQLite CatalogTaxonomy;
+    # an HttpTaxonomyStore (service mode — the default since migration) has
+    # no .conn/._lock, and the resulting AttributeError was swallowed as
+    # "non-fatal" at both refresh call sites — every service-mode box's
+    # SessionStart Knowledge Map went permanently stale. Service handles use
+    # the public root-topics API instead.
+    if hasattr(taxonomy, "_lock") and hasattr(taxonomy, "conn"):
+        with taxonomy._lock:
+            rows = taxonomy.conn.execute(
+                "SELECT collection, label, doc_count FROM topics "
+                "WHERE parent_id IS NULL "
+                "ORDER BY doc_count DESC"
+            ).fetchall()
+    else:
+        topics = taxonomy.get_topics(parent_id=None)
+        rows = [
+            (
+                str(t.get("collection") or ""),
+                str(t.get("label") or ""),
+                int(t.get("doc_count") or 0),
+            )
+            for t in topics
+        ]
+        # Top-N selection below depends on doc_count DESC — sort client-side
+        # rather than trusting wire ordering.
+        rows.sort(key=lambda r: r[2], reverse=True)
 
     if not rows:
         return None

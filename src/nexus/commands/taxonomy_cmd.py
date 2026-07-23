@@ -845,7 +845,9 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
                 from nexus.context import generate_context_l1  # noqa: PLC0415 - deferred to avoid circular import at module load
                 generate_context_l1(db.taxonomy, repo_path=_Path.cwd())
             except Exception as exc:  # noqa: BLE001 - non-fatal best-effort step
-                _log.debug("taxonomy_context_l1_generation_failed", error=str(exc))
+                # nexus-azss4: DEBUG hid the service-mode raw-handle break —
+                # a dead Knowledge Map refresh must be operator-visible.
+                _log.warning("taxonomy_context_l1_generation_failed", error=str(exc))
 
     click.echo(f"\nTotal: {total_topics} topics, {total_labeled} labeled.")
 
