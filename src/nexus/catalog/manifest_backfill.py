@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import structlog
-from chromadb.errors import NotFoundError as _ChromaNotFoundError
+from nexus.errors import collection_not_found_errors
 
 from nexus.db.limits import QUOTAS
 
@@ -208,7 +208,7 @@ def backfill_manifest_for_collection(
     col = None
     try:
         col = t3.get_collection(collection_name)
-    except _ChromaNotFoundError:
+    except collection_not_found_errors():
         # Collection doesn't exist in T3 — all docs will be counted as skipped.
         col = None
 

@@ -21,7 +21,31 @@ class CredentialsMissingError(NexusError):
 
 
 class CollectionNotFoundError(NexusError):
-    """The requested ChromaDB collection does not exist."""
+    """The requested vector collection does not exist.
+
+    RDR-155 P4b (P0c, nexus-g37fr plan v3): the substrate-neutral successor
+    to ``chromadb.errors.NotFoundError`` as the missing-collection contract
+    between :class:`~nexus.db.http_vector_client.HttpVectorClient` (raiser)
+    and the indexer/purge/reidentify/backfill catchers.
+    """
+
+
+def collection_not_found_errors() -> tuple[type[BaseException], ...]:
+    """The exception types that mean "collection does not exist".
+
+    Transition contract (RDR-155 P4b P0c): during the deletion window the
+    chroma-backed TEST substrate (``T3Database`` over ``EphemeralClient``)
+    still raises ``chromadb.errors.NotFoundError`` natively, so catchers
+    must tolerate both types. The chroma member drops out AUTOMATICALLY
+    when the dependency leaves the tree at P3 (the deferred import fails
+    and the tuple collapses to the nexus-native type) — catchers need no
+    edit at removal time.
+    """
+    try:
+        from chromadb.errors import NotFoundError as _chroma_not_found  # noqa: PLC0415 — transition-window optional dep; absence is the designed P3 end state
+    except ImportError:
+        return (CollectionNotFoundError,)
+    return (CollectionNotFoundError, _chroma_not_found)
 
 
 class EmbeddingModelMismatch(NexusError):

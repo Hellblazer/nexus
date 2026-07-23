@@ -1559,21 +1559,25 @@ class HttpVectorClient:
         """Return a collection stub, raising ChromaNotFoundError if the collection does not exist.
 
         RDR-152 bead nexus-enehl: mirrors T3Database.get_collection() semantics
-        for the frecency-only loop.  The loop catches ChromaNotFoundError and
-        skips collections that have not yet been indexed.
+        for the frecency-only loop.  The loop catches the missing-collection
+        error and skips collections that have not yet been indexed.
 
         Checks existence via the service's ``/v1/vectors/collections`` list.
-        A missing collection raises ``chromadb.errors.NotFoundError`` rather than
-        creating a zombie collection (contrast with
-        :meth:`get_or_create_collection`).
+        A missing collection raises the substrate-neutral
+        :class:`nexus.errors.CollectionNotFoundError` (RDR-155 P4b P0c — the
+        successor to ``chromadb.errors.NotFoundError``; catchers tolerate
+        both via :func:`nexus.errors.collection_not_found_errors` during the
+        transition window) rather than creating a zombie collection
+        (contrast with :meth:`get_or_create_collection`).
         """
-        from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415 — optional dependency deferred (chromadb.errors)
+        from nexus.errors import CollectionNotFoundError  # noqa: PLC0415 — local import mirrors the deferred style of this method's callers
+
         try:
             cols = self.list_collections()
             if not any(c.get("name") == name for c in cols):
-                raise _ChromaNotFoundError(f"collection {name!r} not found in service")
+                raise CollectionNotFoundError(f"collection {name!r} not found in service")
         except VectorServiceError as exc:
-            raise _ChromaNotFoundError(
+            raise CollectionNotFoundError(
                 f"service unavailable checking collection {name!r}"
             ) from exc
         return _ServiceCollectionStub(name=name, tenant=self._tenant)

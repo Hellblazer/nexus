@@ -1720,7 +1720,7 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
     # nexus-ks40: frecency_only is a read-update flow; if the
     # collection has not yet been written, skip rather than mint an
     # empty zombie via get_or_create_collection.
-    from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415  — optional/heavy dependency deferred (chromadb)
+    from nexus.errors import collection_not_found_errors  # noqa: PLC0415 — deferred import (RDR-155 P4b P0c: substrate-neutral missing-collection contract)
 
     # nexus-7zcv (RDR-108 Phase 4 review D-H4): the legacy
     # ``where={"doc_id": <id>}`` lookup matches nothing for Phase-3
@@ -1741,7 +1741,7 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
             col = db.get_collection(collection_name)
             if col is None:
                 continue
-        except _ChromaNotFoundError:
+        except collection_not_found_errors():
             continue
         for file, score in frecency_map.items():
             doc_id = file_to_doc_id.get(file, "")
@@ -2455,7 +2455,7 @@ def _prune_misclassified(
     ~ceil(N / _CHROMA_PAGE_SIZE) queries per direction (~34 total for
     ART) — about a 300x reduction in roundtrips.
     """
-    from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415  — optional/heavy dependency deferred (chromadb)
+    from nexus.errors import collection_not_found_errors  # noqa: PLC0415 — deferred import (RDR-155 P4b P0c: substrate-neutral missing-collection contract)
     from tqdm import tqdm  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     # nexus-ks40: read-only sweeps must NOT speculatively create T3
@@ -2469,7 +2469,7 @@ def _prune_misclassified(
     def _read_collection_or_none(name: str):
         try:
             return db.get_collection(name)
-        except _ChromaNotFoundError:
+        except collection_not_found_errors():
             return None
 
     code_col = _read_collection_or_none(code_collection)
@@ -2567,7 +2567,7 @@ def _prune_deleted_files(
     # T3 collection is a clean skip, not a speculative empty creation
     # (the latter is the leak that fed the doctor's "T3 collections
     # without projection rows" zombie list).
-    from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415  — optional/heavy dependency deferred (chromadb)
+    from nexus.errors import collection_not_found_errors  # noqa: PLC0415 — deferred import (RDR-155 P4b P0c: substrate-neutral missing-collection contract)
     # nexus-3lswy: rdr_collection was missing here even after RDR became a
     # first-class 4th collection (catalog registration, doc_id_resolver, and
     # staleness cache all cover it) — this GC pass silently never swept
@@ -2581,7 +2581,7 @@ def _prune_deleted_files(
         referenced = catalog.chashes_for_collection(collection_name)
         try:
             col = db.get_collection(collection_name)
-        except _ChromaNotFoundError:
+        except collection_not_found_errors():
             continue
         # nexus-xukbj: restore BEFORE the empty-collection early-continue —
         # a fully-quarantined collection (origin emptied) must still be able

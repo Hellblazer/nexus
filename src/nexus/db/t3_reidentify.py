@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import structlog
-from chromadb.errors import NotFoundError as _ChromaNotFoundError
+from nexus.errors import collection_not_found_errors
 
 from nexus.chunk_identity import chunk_id_from_hash as _chunk_id_from_hash
 from nexus.db.limits import QUOTAS
@@ -143,7 +143,7 @@ def reidentify_collection(
 
     try:
         col = t3._client_for(collection_name).get_collection(collection_name)
-    except _ChromaNotFoundError:
+    except collection_not_found_errors():
         _log.info(
             "reidentify_collection_absent",
             collection=collection_name,

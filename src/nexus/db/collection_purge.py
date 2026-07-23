@@ -111,11 +111,11 @@ def purge_collection_cascade(db: object, name: str) -> CascadeCounts:
         return _purge_pipeline_db(name, counts)
 
     # ── Local (sqlite/Chroma) mode: client-side fan-out (CA-5) ───────────────
-    from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: PLC0415 — heavy/optional dep deferred
+    from nexus.errors import collection_not_found_errors  # noqa: PLC0415 — deferred import (RDR-155 P4b P0c contract)
 
     try:
         db.delete_collection(name)  # type: ignore[attr-defined]
-    except _ChromaNotFoundError:
+    except collection_not_found_errors():
         counts.t3_absent = True
 
     # Taxonomy + chash index, routed through the T2 daemon (single-writer).
