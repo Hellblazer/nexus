@@ -768,6 +768,12 @@ class TestDrainTimeoutDefault:
 
 
 class TestMCPLockDetection:
+    @pytest.mark.skipif(
+        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        reason="pins the sqlite-mode file-lock branch drain_worker deliberately "
+        "skips in SERVICE mode; dies with that branch at the RDR-155 P4b flip "
+        "(dies-roster)",
+    )
     def test_drain_raises_when_mcp_lock_file_present(
         self, queue_path: Path, locks_dir: Path
     ) -> None:
@@ -803,6 +809,12 @@ class TestMCPLockDetection:
             "DrainBlockedByActiveWorker must include the blocking PID"
         )
 
+    @pytest.mark.skipif(
+        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        reason="pins the sqlite-mode file-lock branch drain_worker deliberately "
+        "skips in SERVICE mode; dies with that branch at the RDR-155 P4b flip "
+        "(dies-roster)",
+    )
     def test_drain_ignores_stale_lock_file_for_dead_pid(
         self, queue_path: Path, locks_dir: Path
     ) -> None:

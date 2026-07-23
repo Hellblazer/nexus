@@ -178,9 +178,11 @@ class TestRecordConsent:
                 scope="remediate:chash-poison", ts="2026-07-12T00:00:00+00:00",
                 granted=True,
             )
-            row = db.telemetry.conn.execute(
-                "SELECT scope, granted FROM claude_assisted_remediation_consents"
-            ).fetchone()
+            # Read back through the public surface (substrate-neutral;
+            # RDR-155 P4b P0a') instead of a raw-conn SELECT.
+            consents = db.telemetry.list_consents()
         finally:
             db.close()
-        assert row == ("remediate:chash-poison", 1)
+        assert [(c["scope"], bool(c["granted"])) for c in consents] == [
+            ("remediate:chash-poison", True)
+        ]

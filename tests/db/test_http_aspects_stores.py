@@ -632,6 +632,10 @@ class TestT2DatabaseAspectsSeam:
         monkeypatch.setenv("NX_STORAGE_BACKEND_DOCUMENT_ASPECTS", "service")
         monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
         monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+        # Env hygiene: the engine-substrate fixture (and any ambient shell)
+        # sets NX_SERVICE_URL, which routes resolution down the URL leg
+        # before the no-port check this test pins.
+        monkeypatch.delenv("NX_SERVICE_URL", raising=False)
 
         from nexus.db.t2 import T2Database
         with pytest.raises(RuntimeError, match="NX_SERVICE_PORT"):
