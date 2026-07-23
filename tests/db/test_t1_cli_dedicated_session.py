@@ -1640,11 +1640,20 @@ class TestResolveT1RoutingTiers:
         get_t1_database_post_dispatch = get_t1_database_src.rsplit(
             "T1RoutingAction.USE_LEASED", 1
         )[-1]
-        assert "mint_t1_session_token(" in get_t1_database_post_dispatch, (
+        # nexus-jc33g: the fallthrough now routes through the shared
+        # flock-guarded mint-or-borrow primitive (which itself calls
+        # mint_t1_session_token on the mint path) instead of minting
+        # unconditionally — either call form is real behavioral evidence
+        # that the fallthrough can still mint.
+        assert (
+            "mint_t1_session_token(" in get_t1_database_post_dispatch
+            or "_lock_guarded_mint_or_borrow(" in get_t1_database_post_dispatch
+        ), (
             "get_t1_database()'s fallthrough-to-mint branch must actually "
-            "CALL mint_t1_session_token(...) after the USE_LEASED dispatch "
-            "-- a comment mentioning MINT is not sufficient evidence the "
-            "fallthrough still mints (nexus-1si7z)"
+            "mint (mint_t1_session_token or the _lock_guarded_mint_or_borrow "
+            "primitive) after the USE_LEASED dispatch -- a comment mentioning "
+            "MINT is not sufficient evidence the fallthrough still mints "
+            "(nexus-1si7z / nexus-jc33g)"
         )
 
         lifespan_src = inspect.getsource(mcp_core_module._t1_chroma_lifespan)
@@ -1841,3 +1850,122 @@ class TestDeferredMintBoundaries:
             assert mcp_infra._t1_instance is None
         finally:
             self._disarm(mcp_core, mcp_infra)
+
+
+# ── nexus-jc33g: CLI-dedicated TOKEN is cached; no per-invocation re-mint ─────
+
+
+class TestDedicatedTokenCache:
+    def test_second_invocation_does_not_remint(self, fake_service, config_dir) -> None:
+        """The dedicated-id file gave id continuity but every fresh bare-CLI
+        process still paid a full mint round trip. The token now rides the
+        same published-lease mechanism (nexus-ngcpo freshness rules): a
+        second invocation borrows the cached fresh token instead of minting."""
+        from nexus.db.t1 import get_t1_database
+
+        store1 = get_t1_database()
+        assert len(_MINT_CALLS) == 1
+
+        store2 = get_t1_database()
+        assert len(_MINT_CALLS) == 1, "fresh cached token must be borrowed, not re-minted"
+
+        doc_id = store2.put("no remint", tags="jc33g")
+        entry = store2.get(doc_id)
+        assert entry is not None and entry["content"] == "no remint"
+
+    def test_expired_cached_token_remints(self, fake_service, config_dir) -> None:
+        """A cached token past its lease expiry is ABSENT (ngcpo fail-safe
+        rules) — the next invocation mints fresh rather than borrowing blind."""
+        import time as _time
+
+        global _MINT_TTL_SECONDS
+        _MINT_TTL_SECONDS = 1
+        from nexus.db.t1 import get_t1_database
+
+        get_t1_database()
+        assert len(_MINT_CALLS) == 1
+        _time.sleep(1.2)
+        get_t1_database()
+        assert len(_MINT_CALLS) == 2, "expired cached token must trigger a fresh mint"
+
+    def test_selfheal_republishes_for_future_invocations(
+        self, fake_service, config_dir
+    ) -> None:
+        """After a 401 self-heal re-mint, the fresh token is republished so
+        the NEXT bare-CLI invocation borrows it instead of minting again."""
+        import httpx
+
+        from nexus.db.t1 import get_t1_database
+
+        store1 = get_t1_database()
+        sid = store1.session_id
+        # A racing sibling rotates the token server-side (ON CONFLICT DO
+        # UPDATE) — store1's in-hand token and the published lease are now
+        # both stale.
+        httpx.post(
+            f"{fake_service}/v1/sessions/start",
+            json={"session_id": sid},
+            headers={
+                "Authorization": f"Bearer {SERVICE_TOKEN}",
+                "X-Nexus-Tenant": "default",
+                "Content-Type": "application/json",
+            },
+        )
+        mints_before = len(_MINT_CALLS)
+        doc_id = store1.put("healed", tags="jc33g")
+        assert doc_id
+        assert len(_MINT_CALLS) == mints_before + 1  # exactly the self-heal mint
+
+        store2 = get_t1_database()
+        assert len(_MINT_CALLS) == mints_before + 1, (
+            "self-heal must republish the fresh token; the next invocation borrows it"
+        )
+        entry = store2.get(doc_id)
+        assert entry is not None and entry["content"] == "healed"
+
+
+# ── nexus-by875: total wall-clock budget on the CLI op stack ─────────────────
+
+
+class TestCliOpBudget:
+    def test_exhausted_budget_skips_selfheal_retry_leg(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """The mint->op->401->re-mint->retry stack must never compound past
+        the budget: with the budget exhausted, a 401 propagates with the
+        remedy message instead of starting another mint+retry round trip."""
+        from nexus.db.t1 import get_t1_database
+
+        store = get_t1_database()
+        _ALWAYS_401.add(store.session_id)
+        monkeypatch.setenv("NX_T1_CLI_BUDGET_S", "0")
+
+        mints_before = len(_MINT_CALLS)
+        with pytest.raises(RuntimeError, match="budget"):
+            store.put("never lands", tags="by875")
+        assert len(_MINT_CALLS) == mints_before, (
+            "no re-mint leg may start once the budget is exhausted"
+        )
+
+    def test_selfheal_still_runs_within_default_budget(
+        self, fake_service, config_dir
+    ) -> None:
+        """Control: with the default budget the pre-existing self-heal
+        semantics are unchanged (TestSelfHeal's contract still holds)."""
+        import httpx
+
+        from nexus.db.t1 import get_t1_database
+
+        store = get_t1_database()
+        httpx.post(
+            f"{fake_service}/v1/sessions/start",
+            json={"session_id": store.session_id},
+            headers={
+                "Authorization": f"Bearer {SERVICE_TOKEN}",
+                "X-Nexus-Tenant": "default",
+                "Content-Type": "application/json",
+            },
+        )
+        doc_id = store.put("within budget", tags="by875")
+        entry = store.get(doc_id)
+        assert entry is not None and entry["content"] == "within budget"
