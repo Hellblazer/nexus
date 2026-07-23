@@ -231,13 +231,28 @@ def mint_test_tenant(state: dict) -> tuple[str, str]:
     with _lock:
         _mint_counter += 1
         name = f"t{os.getpid()}-{_mint_counter}"
-    resp = httpx.post(
-        f"{state['base_url']}/v1/tenants/create",
-        json={"name": name},
-        headers={"Authorization": f"Bearer {state['bearer']}",
-                 "Content-Type": "application/json"},
-        timeout=10.0,
-    )
+    # 60s + one retry: the dry-run sweep observed intermittent >10s
+    # /v1/tenants/create latency after a few hundred mints in one engine
+    # (recorded on nexus-g37fr as an engine observation — the bandaid
+    # keeps the suite honest about WHAT failed, not silently flaky).
+    resp = None
+    last_exc: Exception | None = None
+    for _attempt in range(2):
+        try:
+            resp = httpx.post(
+                f"{state['base_url']}/v1/tenants/create",
+                json={"name": name},
+                headers={"Authorization": f"Bearer {state['bearer']}",
+                         "Content-Type": "application/json"},
+                timeout=60.0,
+            )
+            break
+        except httpx.TimeoutException as exc:
+            last_exc = exc
+    if resp is None:
+        raise RuntimeError(
+            f"T2 engine substrate: tenant mint timed out twice: {last_exc}"
+        )
     if resp.status_code != 200:
         raise RuntimeError(
             f"T2 engine substrate: tenant mint failed "

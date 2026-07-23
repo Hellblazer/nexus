@@ -16,6 +16,7 @@ short-circuit at the ``select_config`` step.
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -26,6 +27,19 @@ from click.testing import CliRunner
 from nexus.aspect_extractor import AspectRecord
 from nexus.catalog import Catalog
 from nexus.commands.enrich import enrich
+
+_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
+
+# These tests seed the rich SQLite Catalog (Catalog.init + cat.register via the
+# env fixture) and expect the CLI's catalog reader to iterate those rows. On
+# the engine substrate make_catalog_reader() returns the service catalog client
+# instead, which cannot see the local rich-catalog rows ("No documents to
+# process"). Includes the SQLite-mode uninitialized-catalog abort path.
+_rich_catalog_dies_at_flip = pytest.mark.skipif(
+    _ENGINE_SUBSTRATE,
+    reason="dies-roster: rich SQLite Catalog stack (Catalog.init-seeded CLI "
+    "catalog iteration) dies at the RDR-155 P4b flip",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -127,6 +141,7 @@ class TestRouting:
 
 
 class TestDryRun:
+    @_rich_catalog_dies_at_flip
     def test_dry_run_reports_count_and_cost_no_subprocess(
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -158,6 +173,7 @@ class TestDryRun:
         # Prediction step gracefully skipped when T3 is unavailable.
         assert "read-side prediction skipped" in result.output
 
+    @_rich_catalog_dies_at_flip
     def test_dry_run_all_readable_proceeds(
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -190,6 +206,7 @@ class TestDryRun:
         assert "Planned skips" not in result.output
         assert "by_reason" not in result.output
 
+    @_rich_catalog_dies_at_flip
     def test_dry_run_predicts_skips_via_read_source(
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -261,6 +278,7 @@ class TestDeterministicCostEstimate:
                 file_path=sp,
             )
 
+    @_rich_catalog_dies_at_flip
     def test_dry_run_rdr_collection_reports_no_api_cost(
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -284,6 +302,7 @@ class TestDeterministicCostEstimate:
         assert "$0" in result.output
         assert "Haiku" not in result.output
 
+    @_rich_catalog_dies_at_flip
     def test_dry_run_knowledge_collection_still_reports_haiku_cost(
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -323,6 +342,7 @@ class TestDryRunSurfacesSourceUri:
     diagnosis (cross-project catalog corruption).
     """
 
+    @_rich_catalog_dies_at_flip
     def test_dry_run_skip_lines_include_source_uri(
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -384,6 +404,7 @@ class TestSourceUriResolutionForChromaLookup:
     field.
     """
 
+    @_rich_catalog_dies_at_flip
     def test_dry_run_uses_source_uri_abspath_when_available(
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -453,6 +474,7 @@ class TestSourceUriResolutionForChromaLookup:
             f"reader should not be queried with bare relative path; got {seen_uris!r}"
         )
 
+    @_rich_catalog_dies_at_flip
     def test_dry_run_falls_back_to_file_path_when_source_uri_empty(
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -500,6 +522,7 @@ class TestSourceUriResolutionForChromaLookup:
 
 
 class TestDefaultExtraction:
+    @_rich_catalog_dies_at_flip
     def test_extracts_and_upserts_each_entry(
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -534,6 +557,7 @@ class TestDefaultExtraction:
             ).fetchone()[0]
         assert count == 2
 
+    @_rich_catalog_dies_at_flip
     def test_aspect_persist_routes_through_t2_index_write(
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -590,6 +614,7 @@ class TestDefaultExtraction:
             ).fetchone()[0]
         assert count == 2
 
+    @_rich_catalog_dies_at_flip
     def test_per_doc_write_failure_skips_and_continues_batch(
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -641,6 +666,7 @@ class TestDefaultExtraction:
             ).fetchone()[0]
         assert count == 1
 
+    @_rich_catalog_dies_at_flip
     def test_extract_fail_skips_without_upsert(
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -698,6 +724,7 @@ class TestDefaultExtraction:
         assert "empty=1" in result.output
         assert "unreachable=1" in result.output
 
+    @_rich_catalog_dies_at_flip
     def test_null_fields_record_counted_separately(
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -731,6 +758,7 @@ class TestDefaultExtraction:
 
 
 class TestReExtract:
+    @_rich_catalog_dies_at_flip
     def test_re_extract_filters_to_outdated_rows(
         self, env, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -825,6 +853,7 @@ class TestValidateSample:
         assert "Validating" not in result.output
         assert verify_calls == []
 
+    @_rich_catalog_dies_at_flip
     def test_validate_sample_runs_verify_and_writes_failures(
         self,
         env,
@@ -894,6 +923,7 @@ class TestValidateSample:
         assert all(e == "reassembled OCR prose from T3 chunks" for e in seen_evidence)
         assert all("paper content" not in e for e in seen_evidence)
 
+    @_rich_catalog_dies_at_flip
     def test_validate_sample_skips_when_indexed_text_unavailable(
         self,
         env,
@@ -954,6 +984,7 @@ class TestValidateSample:
 
 
 class TestCatalogMissing:
+    @_rich_catalog_dies_at_flip
     def test_uninitialized_catalog_aborts(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

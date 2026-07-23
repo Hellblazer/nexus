@@ -18,6 +18,17 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import os
+
+# RDR-155 P4b P0a' dies-roster: this module tests the T2-daemon routing enablers — machinery
+# on the [21098] DELETE list. Skipped under the engine substrate; the file
+# itself dies at the flip.
+pytestmark = [
+    pytest.mark.skipif(
+        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        reason="dies-roster: T2-daemon routing enablers dies at the RDR-155 P4b flip",
+    ),
+]
 
 
 class _FakeDatabaseProxy:

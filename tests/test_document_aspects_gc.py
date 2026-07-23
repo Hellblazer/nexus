@@ -11,6 +11,7 @@ and the ``nx aspects gc`` CLI verb.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,6 +22,19 @@ from click.testing import CliRunner
 
 from nexus.aspect_extractor import AspectRecord
 from nexus.db.t2 import T2Database
+
+_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
+
+# delete_orphans is SQLite-specific by design: it ATTACHes the catalog SQLite
+# cache to join against document_aspects. HttpDocumentAspectsStore.delete_orphans
+# is a documented (0, 0) noop (the service has no catalog-path access); the
+# engine enforces orphan integrity via the fk-001 catalog FKs instead.
+_attach_gc_dies_at_flip = pytest.mark.skipif(
+    _ENGINE_SUBSTRATE,
+    reason="dies-roster: SQLite ATTACH-based document_aspects orphan GC "
+    "(delete_orphans + nx aspects gc against the .catalog.db cache) dies at "
+    "the RDR-155 P4b flip",
+)
 
 
 def _seed_catalog(cat_db: Path, source_uris: list[str]) -> None:
@@ -76,6 +90,7 @@ class TestDocumentAspectsDeleteOrphans:
             missing = tmp_path / "nonexistent.db"
             assert db.document_aspects.delete_orphans(missing) == (0, 0)
 
+    @_attach_gc_dies_at_flip
     def test_dry_run_counts_but_does_not_delete(self, tmp_path: Path) -> None:
         """Default ``dry_run=True`` reports orphans without writing."""
         cat_db = tmp_path / ".catalog.db"
@@ -93,6 +108,7 @@ class TestDocumentAspectsDeleteOrphans:
             ).fetchone()[0]
             assert remaining == 2
 
+    @_attach_gc_dies_at_flip
     def test_apply_deletes_only_orphans(self, tmp_path: Path) -> None:
         """``dry_run=False`` deletes orphans and preserves live rows."""
         cat_db = tmp_path / ".catalog.db"
@@ -115,6 +131,7 @@ class TestDocumentAspectsDeleteOrphans:
             )
             assert surviving == ["file:///live1.pdf", "file:///live2.pdf"]
 
+    @_attach_gc_dies_at_flip
     def test_idempotent_after_apply(self, tmp_path: Path) -> None:
         """A second run on a clean state reports zero orphans."""
         cat_db = tmp_path / ".catalog.db"
@@ -129,6 +146,7 @@ class TestDocumentAspectsDeleteOrphans:
             )
             assert (orphans, total) == (0, 1)
 
+    @_attach_gc_dies_at_flip
     def test_empty_source_uri_not_classified_as_orphan(self, tmp_path: Path) -> None:
         """Aspects with empty source_uri are legacy / pre-RDR-096-P2.1
         rows; they cannot be GC'd by URI mismatch and must be addressed
@@ -161,6 +179,7 @@ class TestDocumentAspectsDeleteOrphans:
             ).fetchone()[0]
             assert remaining == 2
 
+    @_attach_gc_dies_at_flip
     def test_collection_renamed_does_not_orphan_when_source_uri_stable(
         self, tmp_path: Path,
     ) -> None:
@@ -213,6 +232,7 @@ class TestAspectsGcCLI:
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
         return cat_db, mem_db
 
+    @_attach_gc_dies_at_flip
     def test_dry_run_default_reports_without_deleting(
         self, tmp_path: Path, monkeypatch, runner,
     ) -> None:
@@ -237,6 +257,7 @@ class TestAspectsGcCLI:
             ).fetchone()[0]
             assert n == 2
 
+    @_attach_gc_dies_at_flip
     def test_apply_actually_deletes(
         self, tmp_path: Path, monkeypatch, runner,
     ) -> None:
