@@ -42,10 +42,16 @@ DEFAULT_MANAGED_SERVICE_URL = "https://api.conexus-nexus.com"
 
 #: CROSS-REPO CONTRACT (conexus RDR-001): the managed multitenant service MUST
 #: expose ``GET /version`` UNAUTHENTICATED with ``release_version`` (and
-#: ``app_version``). conexus relay [4566] (2026-06-23) confirmed the managed
-#: ``/version`` now returns ``release_version`` and was trimmed to
-#: ``{app_version, release_version}`` (the embedding-mode / model / schema
-#: disclosure was dropped from the public endpoint).
+#: ``app_version``). conexus relay [21079] (2026-07-23, conexus-24c4, revises
+#: [4566]): the managed ``/version`` exposes ``{app_version, release_version,
+#: embedding_mode, embedding_models}`` — the embedding fields were restored to
+#: the public endpoint after nexus-bwulw showed the old trim silently disabled
+#: their client consumers (voyage threshold gating, dimension-orphan tooling,
+#: guided-upgrade voyage-capability check). ``schema_latest_id`` /
+#: ``schema_changeset_count`` / ``schema_error`` remain absent on the managed
+#: endpoint BY DESIGN (DB-journal fingerprint stays behind the trust boundary;
+#: their only consumer is the local supervisor pre-spawn gate, which managed
+#: clients never run) — keep treating them as optional/``None``.
 #:
 #: The gate compares against :data:`nexus.engine_version.REQUIRED_ENGINE_VERSION`
 #: — nexus-b6qlf unified what used to be two independently-drifting constants
@@ -115,10 +121,12 @@ class ManagedCapabilities:
     #: before constructing caps in that case, so a returned caps always carries
     #: a real release.
     release_version: str
-    #: embedding_mode / models / schema_* are informational and OPTIONAL: the
-    #: managed public ``/version`` was trimmed to ``{app_version,
-    #: release_version}`` (conexus relay [4566]); a self-hosted/local service
-    #: may still report them. Absent -> ``"unknown"`` / ``[]`` / ``None``.
+    #: embedding_mode / embedding_models are exposed by the managed public
+    #: ``/version`` (conexus relay [21079], conexus-24c4 — restored after the
+    #: [4566]-era trim silently disabled their client consumers) and by
+    #: self-hosted/local services; still parsed as OPTIONAL (absent ->
+    #: ``"unknown"`` / ``[]``) for pre-24c4 edges. schema_* remain absent on
+    #: the managed endpoint by design -> ``None``.
     embedding_mode: str
     embedding_models: list[str]
     schema_latest_id: str | None
