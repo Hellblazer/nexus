@@ -143,7 +143,7 @@ class PlanCacheRegistry:
                             # rehoming (engine-side embed) tracked on the bead.
                             import chromadb  # noqa: PLC0415 — deferred; heavy import on a rare init path
 
-                            chroma_client = chromadb.EphemeralClient()
+                            chroma_client = chromadb.EphemeralClient()  # epsilon-allow: nexus-373jo session-scoped in-memory plan-match cache; NOT storage (no persistence); P4b rehoming to engine-side embed tracked on the bead
                             _log.info(
                                 "plan_session_cache_ephemeral_substrate",
                                 reason="service-backed T1 has no chroma client",
