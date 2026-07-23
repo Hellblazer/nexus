@@ -16,6 +16,7 @@ from pathlib import Path
 import chromadb
 import pytest
 from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
+from tests.conftest import make_vector_test_client
 
 # ── NDCG math ────────────────────────────────────────────────────────────────
 
@@ -127,7 +128,7 @@ def benchmark_collection():
     corpus: list[dict] = json.loads(corpus_path.read_text())
 
     ef = ONNXMiniLM_L6_V2()
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     collection = client.create_collection(
         name="benchmark",
         embedding_function=ef,

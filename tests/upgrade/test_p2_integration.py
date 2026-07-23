@@ -31,6 +31,7 @@ from nexus.upgrade_ladder.rungs.substrate_etl import (
     plan_substrate_legs,
     run_substrate_migration,
 )
+from tests.conftest import make_vector_test_client
 
 pytestmark = pytest.mark.integration
 
@@ -56,7 +57,7 @@ def _sha64(text: str) -> str:
 @pytest.fixture
 def chroma_source() -> Any:
     chromadb = pytest.importorskip("chromadb")
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     # EphemeralClient shares process state (known gotcha): a collection
     # created by a previous test in this process is still there. Clean slate.
     try:

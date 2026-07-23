@@ -21,6 +21,7 @@ import pytest
 from nexus.db.local_ef import LocalEmbeddingFunction
 from nexus.db.t2 import T2Database
 from nexus.types import SearchResult
+from tests.conftest import make_vector_test_client
 
 # Full e2e pipeline: real ChromaDB clients (Ephemeral + Persistent), real
 # MiniLM embeddings, real HDBSCAN clustering. ~2.9s/test average on CI,
@@ -40,7 +41,7 @@ def ef() -> LocalEmbeddingFunction:
 
 @pytest.fixture()
 def ephemeral_chroma() -> chromadb.ClientAPI:
-    return chromadb.EphemeralClient()
+    return make_vector_test_client()
 
 
 @pytest.fixture()

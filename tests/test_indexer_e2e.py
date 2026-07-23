@@ -13,6 +13,7 @@ from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
 from nexus.db.t3 import T3Database
 from nexus.registry import RepoRegistry
+from tests.conftest import make_vector_test_client
 
 # All tests in this module are end-to-end: real ChromaDB, real local
 # embeddings, real CLI subprocesses. They average ~5.8s/test on CI and
@@ -85,7 +86,7 @@ def mini_repo(tmp_path_factory: pytest.TempPathFactory) -> Path:
 @pytest.fixture
 def local_t3() -> T3Database:
     return T3Database(
-        _client=chromadb.EphemeralClient(), _ef_override=DefaultEmbeddingFunction()
+        _client=make_vector_test_client(), _ef_override=DefaultEmbeddingFunction()
     )
 
 

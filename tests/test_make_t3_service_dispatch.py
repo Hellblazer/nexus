@@ -16,6 +16,7 @@ reintroduce a direct Chroma client construction.
 from __future__ import annotations
 
 import pytest
+from tests.conftest import make_vector_test_client
 
 
 @pytest.fixture(autouse=True)
@@ -70,7 +71,7 @@ class TestServiceDispatch:
         from nexus.db import make_t3
         from nexus.db.t3 import T3Database
 
-        ephemeral = chromadb.EphemeralClient()
+        ephemeral = make_vector_test_client()
         result = make_t3(_client=ephemeral)
         assert isinstance(result, T3Database)
         assert result._client is ephemeral

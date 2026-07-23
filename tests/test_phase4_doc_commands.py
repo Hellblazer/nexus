@@ -22,6 +22,7 @@ from unittest.mock import MagicMock, patch
 import chromadb
 import pytest
 from click.testing import CliRunner
+from tests.conftest import make_vector_test_client
 
 
 # ── Shared seed helper ───────────────────────────────────────────────────────
@@ -31,7 +32,7 @@ def _seed_catalog_and_t3(tmp_path: Path):
     """Create a Catalog, T3 EphemeralClient, and T2 ChashIndex. Return
     (cat, t3, chash_index, chash_hex) after seeding one resolvable chunk.
 
-    ``chromadb.EphemeralClient()`` is a process-shared singleton — drop
+    ``make_vector_test_client()`` is a process-shared singleton — drop
     the phase4-specific collection before recreating so two tests in
     the same process don't leak chunks between ``knowledge__phase4``
     instances.
@@ -43,7 +44,7 @@ def _seed_catalog_and_t3(tmp_path: Path):
     cat_dir.mkdir()
     cat = Catalog(cat_dir, cat_dir / ".catalog.db")
 
-    t3 = chromadb.EphemeralClient()
+    t3 = make_vector_test_client()
     try:
         t3.delete_collection("knowledge__phase4")
     except Exception:

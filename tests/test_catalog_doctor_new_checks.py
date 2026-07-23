@@ -27,6 +27,7 @@ from nexus.commands.catalog_cmds.doctor import (
     _percentile,
     doctor_cmd,
 )
+from tests.conftest import make_vector_test_client
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
@@ -47,7 +48,7 @@ def chroma_client():
     """Fresh EphemeralClient with collections cleared (chromadb's
     in-memory backend is process-shared per project memory).
     """
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     for col in list(client.list_collections()):
         try:
             client.delete_collection(col.name)

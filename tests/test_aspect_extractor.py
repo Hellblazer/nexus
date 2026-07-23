@@ -23,6 +23,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from tests.conftest import make_vector_test_client
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -570,7 +571,7 @@ class TestUriDispatch:
 
         from nexus.aspect_extractor import AspectRecord, extract_aspects
 
-        client = chromadb.EphemeralClient()
+        client = make_vector_test_client()
         try:
             client.delete_collection("knowledge__uri_dispatch")
         except Exception:
@@ -609,7 +610,7 @@ class TestUriDispatch:
 
         from nexus.aspect_extractor import ExtractFail, extract_aspects
 
-        client = chromadb.EphemeralClient()
+        client = make_vector_test_client()
         try:
             client.delete_collection("knowledge__ghost")
         except Exception:

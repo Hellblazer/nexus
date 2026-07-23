@@ -460,7 +460,8 @@ class TestUpdateChunks:
 
 
 class TestGetCollection:
-    """RDR-152 nexus-enehl: get_collection raises ChromaNotFoundError when absent."""
+    """RDR-152 nexus-enehl: get_collection raises the substrate-neutral
+    CollectionNotFoundError when absent (RDR-155 P4b P0c raiser)."""
 
     def test_returns_stub_when_collection_exists(self, monkeypatch):
         from nexus.db.http_vector_client import _ServiceCollectionStub
@@ -473,32 +474,32 @@ class TestGetCollection:
         assert isinstance(stub, _ServiceCollectionStub)
 
     def test_raises_not_found_when_absent(self, monkeypatch):
-        from chromadb.errors import NotFoundError as _ChromaNotFoundError
+        from nexus.errors import CollectionNotFoundError
         client = HttpVectorClient()
         monkeypatch.setattr(
             "nexus.db.http_vector_client._get",
             lambda path, **kw: [{"name": "other__col__model__v1", "id": "uuid-2"}]
         )
-        with pytest.raises(_ChromaNotFoundError):
+        with pytest.raises(CollectionNotFoundError):
             client.get_collection("code__repo__model__v1")
 
     def test_raises_not_found_on_empty_list(self, monkeypatch):
-        from chromadb.errors import NotFoundError as _ChromaNotFoundError
+        from nexus.errors import CollectionNotFoundError
         client = HttpVectorClient()
         monkeypatch.setattr(
             "nexus.db.http_vector_client._get",
             lambda path, **kw: []
         )
-        with pytest.raises(_ChromaNotFoundError):
+        with pytest.raises(CollectionNotFoundError):
             client.get_collection("any__col__model__v1")
 
     def test_raises_not_found_on_service_error(self, monkeypatch):
-        from chromadb.errors import NotFoundError as _ChromaNotFoundError
+        from nexus.errors import CollectionNotFoundError
         client = HttpVectorClient()
         def raise_err(path, **kw):
             raise VectorServiceError("connection refused")
         monkeypatch.setattr("nexus.db.http_vector_client._get", raise_err)
-        with pytest.raises(_ChromaNotFoundError):
+        with pytest.raises(CollectionNotFoundError):
             client.get_collection("col__name__model__v1")
 
 

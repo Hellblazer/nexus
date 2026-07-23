@@ -26,6 +26,7 @@ from nexus.mcp_infra import (
     record_search_trace,
     reset_singletons,
 )
+from tests.conftest import make_vector_test_client
 
 
 # ── T2 relevance_log schema + methods ────────────────────────────────────────
@@ -183,7 +184,7 @@ def test_clear_search_traces():
 @pytest.fixture()
 def t1():
     reset_singletons()
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     db = T1Database(session_id="test-session-e2", client=client)
     from nexus.mcp_infra import inject_t1
     inject_t1(db)

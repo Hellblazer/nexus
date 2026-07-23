@@ -16,11 +16,12 @@ import pytest
 
 from nexus.db.t2 import T2Database
 from nexus.hook_registry import HookRegistry
+from tests.conftest import make_vector_test_client
 
 
 @pytest.fixture()
 def chroma_client() -> chromadb.ClientAPI:
-    return chromadb.EphemeralClient()
+    return make_vector_test_client()
 
 
 # ── Hook mechanism ───────────────────────────────────────────────────────────

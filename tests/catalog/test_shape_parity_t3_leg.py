@@ -41,6 +41,7 @@ from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.db.t2.chash_index import ChashIndex
 from tests.catalog.test_http_catalog_client import start_fake_server
 from tests.catalog.test_shape_parity_tripwire import shape
+from tests.conftest import make_vector_test_client
 
 # ── fixture literals ─────────────────────────────────────────────────────────
 
@@ -75,7 +76,7 @@ def env(tmp_path: Path) -> Iterator[tuple[Catalog, "chromadb.ClientAPI", ChashIn
     # chromadb.EphemeralClient instances share an in-memory backend across the
     # test session — collections leak between tests in the same process.
     # Clear on entry (same pattern as test_chash_reconcile.py).
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     for c in list(client.list_collections()):
         name = c if isinstance(c, str) else c.name
         try:

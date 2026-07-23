@@ -5,6 +5,7 @@ import pytest
 
 from nexus.db.t1 import T1Database
 from nexus.db.t2 import T2Database
+from tests.conftest import make_vector_test_client
 
 _SESSION = "test-session-0000-0000-0000-000000000000"
 _SESSION_B = "test-session-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
@@ -23,7 +24,7 @@ def t1(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> T1Database:
 def two_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     import chromadb
     monkeypatch.setenv("HOME", str(tmp_path))
-    shared = chromadb.EphemeralClient()
+    shared = make_vector_test_client()
     db_a = T1Database(session_id=_SESSION, client=shared)
     db_b = T1Database(session_id=_SESSION_B, client=shared)
     db_a.clear(); db_b.clear()

@@ -30,6 +30,7 @@ from nexus.mcp_infra import (
     manifest_write_batch_hook,
     reset_manifest_identity_drops,
 )
+from tests.conftest import make_vector_test_client
 
 
 @pytest.fixture(autouse=True)
@@ -46,7 +47,7 @@ def git_identity(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def local_t3() -> T3Database:
     return T3Database(
-        _client=chromadb.EphemeralClient(),
+        _client=make_vector_test_client(),
         _ef_override=DefaultEmbeddingFunction(),
     )
 

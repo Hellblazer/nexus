@@ -19,6 +19,7 @@ from nexus.health import (
     HealthResult,
 )
 from nexus.db.t2 import T2Database
+from tests.conftest import make_vector_test_client
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -306,7 +307,7 @@ class TestCheckT2DaemonSingleton:
 
 @pytest.fixture()
 def ephemeral_client():
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     for col in client.list_collections():
         client.delete_collection(col.name)
     return client

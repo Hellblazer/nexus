@@ -15,6 +15,7 @@ from nexus.catalog.catalog import Catalog
 from nexus.catalog.tumbler import Tumbler
 from nexus.db.t3 import T3Database
 from nexus.registry import RepoRegistry
+from tests.conftest import make_vector_test_client
 
 _NEXUS_ROOT = Path(__file__).parent.parent
 _CODE_FILES = ["src/nexus/ttl.py", "src/nexus/corpus.py", "src/nexus/types.py"]
@@ -69,7 +70,7 @@ def catalog_repo(tmp_path_factory: pytest.TempPathFactory) -> Path:
 @pytest.fixture
 def local_t3() -> T3Database:
     return T3Database(
-        _client=chromadb.EphemeralClient(),
+        _client=make_vector_test_client(),
         _ef_override=DefaultEmbeddingFunction(),
     )
 

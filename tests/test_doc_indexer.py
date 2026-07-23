@@ -18,6 +18,7 @@ from nexus.doc_indexer import (
     batch_index_markdowns, batch_index_pdfs, index_markdown, index_pdf,
 )
 from tests.conftest import set_credentials
+from tests.conftest import make_vector_test_client
 
 
 # RDR-109 Phase 2: local-token in test collection names varies by whether
@@ -266,7 +267,7 @@ def test_batch_index_markdowns_skips_malformed_frontmatter_and_continues(
         encoding="utf-8",
     )
 
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     t3 = T3Database(_client=client, local_mode=True)
 
     t0 = time.monotonic()
@@ -322,7 +323,7 @@ def test_index_md_falls_back_to_local_embedder_when_no_credentials(
 
     # Inject an EphemeralClient so the test doesn't hit a real
     # PersistentClient on disk.
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     from nexus.db.t3 import T3Database
     local_t3 = T3Database(_client=client, local_mode=True)
 
@@ -398,7 +399,7 @@ def test_index_markdown_auto_inits_catalog_when_absent_and_prunes_on_reindex(
     monkeypatch.setattr(
         "nexus.config._global_config_path", lambda: Path("/nonexistent"),
     )
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     local_t3 = T3Database(_client=client, local_mode=True)
 
     # First index: no catalog yet. Auto-init must fire.
@@ -1728,7 +1729,7 @@ def _setup_phase_a_catalog(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "nexus.config._global_config_path", lambda: Path("/nonexistent"),
     )
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     return cat_dir, T3Database(_client=client, local_mode=True)
 
 

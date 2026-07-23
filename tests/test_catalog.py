@@ -11,6 +11,7 @@ import pytest
 
 from nexus.catalog.catalog import Catalog, _SPAN_PATTERN
 from nexus.catalog.tumbler import Tumbler
+from tests.conftest import make_vector_test_client
 
 
 @pytest.fixture
@@ -39,7 +40,7 @@ def span_env(tmp_path):
     d = tmp_path / "catalog"
     d.mkdir()
     cat = Catalog(d, d / ".catalog.db")
-    t3 = chromadb.EphemeralClient()
+    t3 = make_vector_test_client()
     col_name = f"code__span_{tmp_path.name}"
     col = t3.create_collection(col_name)
     return cat, t3, col_name, col
@@ -955,7 +956,7 @@ class TestLinkChashSpans:
 
 class TestLinkChashValidation:
     def _setup_val_env(self, cat, tmp_path):
-        t3 = chromadb.EphemeralClient()
+        t3 = make_vector_test_client()
         col_name = f"code__val_{tmp_path.name}"
         col = t3.create_collection(col_name)
         owner = cat.register_owner("nexus", "repo", repo_hash="abc123")

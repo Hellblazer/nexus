@@ -12,6 +12,7 @@ import chromadb
 import pytest
 
 from nexus.plans.session_cache import PlanSessionCache
+from tests.conftest import make_vector_test_client
 
 
 def test_query_uses_query_embeddings_not_query_texts() -> None:
@@ -27,7 +28,7 @@ def test_query_uses_query_embeddings_not_query_texts() -> None:
     # test instances; scope the where-filter to a unique session_id
     # so other tests' rows don't leak into this query.
     cache = PlanSessionCache(
-        client=chromadb.EphemeralClient(),
+        client=make_vector_test_client(),
         session_id="test-554-empty-session",
     )
 
@@ -48,7 +49,7 @@ def test_query_does_not_warn_on_chromadb_text_path(caplog) -> None:
     import logging
 
     cache = PlanSessionCache(
-        client=chromadb.EphemeralClient(),
+        client=make_vector_test_client(),
         session_id="test-554-no-warn-session",
     )
 

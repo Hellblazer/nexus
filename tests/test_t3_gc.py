@@ -35,6 +35,7 @@ from nexus.catalog.event_log import EVENTS_FILENAME, EventLog
 from nexus.catalog.events import TYPE_CHUNK_ORPHANED, Event
 from nexus.cli import main
 from nexus.db.t3 import T3Database
+from tests.conftest import make_vector_test_client
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
@@ -44,7 +45,7 @@ from nexus.db.t3 import T3Database
 def t3_db():
     """Real T3Database backed by an ephemeral local Chroma."""
     return T3Database(
-        _client=chromadb.EphemeralClient(),
+        _client=make_vector_test_client(),
         _ef_override=DefaultEmbeddingFunction(),
     )
 
@@ -571,7 +572,7 @@ class TestGetEmbeddingsRequestOrder:
 
         from nexus.db.t3 import T3Database
 
-        client = chromadb.EphemeralClient()
+        client = make_vector_test_client()
         t3 = T3Database(_client=client, _ef_override=DefaultEmbeddingFunction())
         col = t3.get_or_create_collection("knowledge__ordertest", strict=False)
         # Insert in REVERSE alphabetical order so insertion order != request
@@ -595,7 +596,7 @@ class TestGetEmbeddingsRequestOrder:
 
         from nexus.db.t3 import T3Database
 
-        client = chromadb.EphemeralClient()
+        client = make_vector_test_client()
         t3 = T3Database(_client=client, _ef_override=DefaultEmbeddingFunction())
         col = t3.get_or_create_collection("knowledge__ordertest2", strict=False)
         col.add(ids=["only"], documents=["text"], metadatas=[{"k": "v"}])

@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import structlog
 from structlog.testing import capture_logs
+from tests.conftest import make_vector_test_client
 
 
 @pytest.fixture(autouse=True)
@@ -295,10 +296,10 @@ def test_catalog_store_hook_failed_logs_warning(tmp_path, monkeypatch):
         t2_path = tmp_path / "t2.db"
         monkeypatch.setattr(core_mod, "_t2_ctx", lambda: T2Database(t2_path))
 
-        t1_client = chromadb.EphemeralClient()
+        t1_client = make_vector_test_client()
         _inject_t1(T1Database(session_id="hook-fail", client=t1_client))
 
-        t3_client = chromadb.EphemeralClient()
+        t3_client = make_vector_test_client()
         ef = chromadb.utils.embedding_functions.DefaultEmbeddingFunction()
         _inject_t3(T3Database(_client=t3_client, _ef_override=ef))
 

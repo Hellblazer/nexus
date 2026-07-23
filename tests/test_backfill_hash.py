@@ -8,6 +8,7 @@ import hashlib
 
 import chromadb
 import pytest
+from tests.conftest import make_vector_test_client
 
 
 def _make_collection(client, name, chunks):
@@ -30,7 +31,7 @@ class TestBackfillChunkTextHash:
         """Chunks without chunk_text_hash get it added."""
         from nexus.commands.collection import _backfill_chunk_text_hash
 
-        client = chromadb.EphemeralClient()
+        client = make_vector_test_client()
         col = _make_collection(client, "code__test_backfill", [
             ("def foo(): pass", False),
             ("def bar(): return 1", False),
@@ -52,7 +53,7 @@ class TestBackfillChunkTextHash:
         """Running backfill twice produces no changes on second run."""
         from nexus.commands.collection import _backfill_chunk_text_hash
 
-        client = chromadb.EphemeralClient()
+        client = make_vector_test_client()
         col = _make_collection(client, "code__test_idempotent", [
             ("hello world", False),
             ("goodbye world", False),
@@ -67,7 +68,7 @@ class TestBackfillChunkTextHash:
         """Backfill does not clobber other metadata fields."""
         from nexus.commands.collection import _backfill_chunk_text_hash
 
-        client = chromadb.EphemeralClient()
+        client = make_vector_test_client()
         col = _make_collection(client, "code__test_preserve", [
             ("some code", False),
         ])
@@ -83,7 +84,7 @@ class TestBackfillChunkTextHash:
         """Empty collection returns zeros."""
         from nexus.commands.collection import _backfill_chunk_text_hash
 
-        client = chromadb.EphemeralClient()
+        client = make_vector_test_client()
         col = client.get_or_create_collection("code__test_empty")
 
         updated, skipped, total = _backfill_chunk_text_hash(col)
@@ -180,7 +181,7 @@ class TestBackfillUpsertHandlesLegacyChunks:
     def test_legacy_chunk_with_cargo_gets_hash_via_upsert(self):
         from nexus.commands.collection import _backfill_chunk_text_hash
 
-        client = chromadb.EphemeralClient()
+        client = make_vector_test_client()
         col = client.get_or_create_collection("docs__legacy_cargo")
         col.add(
             ids=["legacy-1"],
@@ -309,7 +310,7 @@ class TestBackfillPopulatesT2ChashIndex:
         from nexus.commands.collection import _backfill_chunk_text_hash
         from nexus.db.t2.chash_index import ChashIndex
 
-        client = chromadb.EphemeralClient()
+        client = make_vector_test_client()
         col = _make_collection(client, "code__pop_new", [
             ("alpha code", False),
             ("beta code", False),
@@ -342,7 +343,7 @@ class TestBackfillPopulatesT2ChashIndex:
         from nexus.commands.collection import _backfill_chunk_text_hash
         from nexus.db.t2.chash_index import ChashIndex
 
-        client = chromadb.EphemeralClient()
+        client = make_vector_test_client()
         col = _make_collection(client, "code__pop_existing", [
             ("gamma code", True),   # already hashed in T3
             ("delta code", True),   # already hashed in T3
@@ -375,7 +376,7 @@ class TestBackfillPopulatesT2ChashIndex:
         from nexus.commands.collection import _backfill_chunk_text_hash
         from nexus.db.t2.chash_index import ChashIndex
 
-        client = chromadb.EphemeralClient()
+        client = make_vector_test_client()
         col = _make_collection(client, "code__t2_idem", [
             ("epsilon", False),
             ("zeta", False),
@@ -399,7 +400,7 @@ class TestBackfillPopulatesT2ChashIndex:
         """
         from nexus.commands.collection import _backfill_chunk_text_hash
 
-        client = chromadb.EphemeralClient()
+        client = make_vector_test_client()
         col = _make_collection(client, "code__no_t2", [
             ("eta", False),
             ("theta", True),
@@ -426,7 +427,7 @@ class TestBackfillProgressReporting:
         from nexus.commands import collection as collection_mod
         from nexus.commands.collection import _backfill_chunk_text_hash
 
-        client = chromadb.EphemeralClient()
+        client = make_vector_test_client()
         # Use a small batch size to keep the test fast while still exercising
         # the "multiple batches" branch.
         monkey_orig = collection_mod._BACKFILL_BATCH
@@ -455,7 +456,7 @@ class TestBackfillProgressReporting:
         """Omitting on_progress is fine — no coupling to reporting UX."""
         from nexus.commands.collection import _backfill_chunk_text_hash
 
-        client = chromadb.EphemeralClient()
+        client = make_vector_test_client()
         col = _make_collection(client, "code__silent", [
             ("whatever", False),
         ])

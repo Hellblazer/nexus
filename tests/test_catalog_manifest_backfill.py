@@ -29,6 +29,7 @@ from click.testing import CliRunner
 from nexus.catalog.catalog import Catalog
 from nexus.cli import main
 from nexus.db.t3 import T3Database
+from tests.conftest import make_vector_test_client
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -51,7 +52,7 @@ def _unique_coll(prefix: str = "code") -> str:
 def t3_db():
     """Real T3Database backed by an ephemeral local Chroma."""
     return T3Database(
-        _client=chromadb.EphemeralClient(),
+        _client=make_vector_test_client(),
         _ef_override=DefaultEmbeddingFunction(),
     )
 

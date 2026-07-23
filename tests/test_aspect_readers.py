@@ -23,6 +23,7 @@ from urllib.parse import quote
 
 import chromadb
 import pytest
+from tests.conftest import make_vector_test_client
 
 
 # ── CHROMA_IDENTITY_FIELD dispatch ───────────────────────────────────────────
@@ -180,7 +181,7 @@ def t3_client():
     cleanup happens via unique collection names below; tests still
     drop their own collection at start as defense-in-depth.
     """
-    return chromadb.EphemeralClient()
+    return make_vector_test_client()
 
 
 def _seed_chunks(
@@ -866,7 +867,7 @@ def t1_scratch():
 
     return T1Database(
         session_id=f"test-{uuid.uuid4().hex[:8]}",
-        client=chromadb.EphemeralClient(),
+        client=make_vector_test_client(),
     )
 
 

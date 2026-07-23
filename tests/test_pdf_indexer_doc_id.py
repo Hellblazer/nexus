@@ -30,6 +30,7 @@ from nexus.catalog.catalog import Catalog
 from nexus.catalog.tumbler import Tumbler
 from nexus.db.t3 import T3Database
 from nexus.registry import RepoRegistry
+from tests.conftest import make_vector_test_client
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -63,7 +64,7 @@ def pdf_repo(tmp_path: Path, simple_pdf: Path) -> Path:
 @pytest.fixture
 def local_t3() -> T3Database:
     return T3Database(
-        _client=chromadb.EphemeralClient(),
+        _client=make_vector_test_client(),
         _ef_override=DefaultEmbeddingFunction(),
     )
 

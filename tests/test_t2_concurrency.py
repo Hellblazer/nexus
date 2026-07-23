@@ -22,6 +22,7 @@ from pathlib import Path
 import numpy as np
 
 from nexus.db.t2 import T2Database
+from tests.conftest import make_vector_test_client
 
 
 # ── Cross-domain parallelism ─────────────────────────────────────────────────
@@ -212,7 +213,7 @@ def test_memory_search_under_discover_topics_load(tmp_path: Path) -> None:
 
     db_path = tmp_path / "discover_underload.db"
     db = T2Database(db_path)
-    chroma_client = chromadb.EphemeralClient()
+    chroma_client = make_vector_test_client()
     try:
         # Seed memory entries for the search baseline
         vocab_words = (

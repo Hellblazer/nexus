@@ -104,27 +104,46 @@ def _matches(meta: dict[str, Any], where: dict[str, Any]) -> bool:
 
 
 class _Row:
-    __slots__ = ("id", "document", "metadata", "embedding_normed")
+    """Stores the RAW embedding (byte-identical round-trip through
+    get/peek — the reidentify contract) plus its normalized form for
+    cosine scoring."""
+
+    __slots__ = ("id", "document", "metadata", "embedding", "embedding_normed")
 
     def __init__(self, id_: str, document: str | None,
-                 metadata: dict[str, Any], embedding_normed: list[float]):
+                 metadata: dict[str, Any], embedding: list[float]):
         self.id = id_
         self.document = document
         self.metadata = metadata
-        self.embedding_normed = embedding_normed
+        self.embedding = embedding
+        self.embedding_normed = _normalize(embedding)
 
 
 class InMemoryCollection:
     """Chroma-shaped collection over a dict — the consumed API subset only."""
 
     def __init__(self, name: str, *, embedding_function: Any = None,
-                 metadata: dict[str, Any] | None = None) -> None:
+                 metadata: dict[str, Any] | None = None,
+                 registry: "InMemoryVectorClient | None" = None) -> None:
         self.name = name
         self.metadata = metadata or {}
         self._ef = embedding_function
+        self._registry = registry  # owning client, for modify(name=...) re-key
         self._rows: dict[str, _Row] = {}
         self._order: list[str] = []  # insertion order for get() paging
         self._lock = threading.Lock()
+
+    def modify(self, *, name: str | None = None,
+               metadata: dict[str, Any] | None = None) -> None:
+        """Chroma-parity ``modify``: O(1) rename and/or metadata replace.
+        The rename re-keys the owning client's registry (the
+        ``nx collection rename`` surface, T3Database.rename_collection)."""
+        if name is not None and name != self.name:
+            if self._registry is not None:
+                self._registry._rename(self.name, name)
+            self.name = name
+        if metadata is not None:
+            self.metadata = dict(metadata)
 
     # ── embedding resolution ────────────────────────────────────────────
 
@@ -170,10 +189,33 @@ class InMemoryCollection:
         with self._lock:
             for id_, emb, doc, meta in zip(ids, embeddings, docs, metas,
                                            strict=True):
-                if id_ not in self._rows:
+                emb_list = list(emb)
+                self._check_dimension(len(emb_list))
+                existing = self._rows.get(id_)
+                if existing is None:
                     self._order.append(id_)
-                self._rows[id_] = _Row(id_, doc, dict(meta or {}),
-                                       _normalize(list(emb)))
+                    self._rows[id_] = _Row(id_, doc, dict(meta or {}),
+                                           emb_list)
+                else:
+                    # Oracle-verified chroma parity: upsert on an existing
+                    # id replaces document + embedding but MERGES metadata
+                    # at key level (same as update).
+                    merged = dict(existing.metadata)
+                    merged.update(meta or {})
+                    self._rows[id_] = _Row(id_, doc, merged, emb_list)
+
+    def _check_dimension(self, dim: int) -> None:
+        """Chroma parity: a collection's dimensionality is pinned by its
+        first write; mismatched writes/queries raise with 'dimension' in
+        the message (the nx doctor / embed-migrate probe contract)."""
+        for first_id in self._order:
+            stored = len(self._rows[first_id].embedding)
+            if dim != stored:
+                raise ValueError(
+                    f"Embedding dimension {dim} does not match collection "
+                    f"dimensionality {stored}"
+                )
+            return
 
     def update(self, *, ids: list[str],
                embeddings: list[list[float]] | None = None,
@@ -191,7 +233,10 @@ class InMemoryCollection:
                 if row is None:
                     continue
                 if embeddings is not None:
-                    row.embedding_normed = _normalize(list(embeddings[i]))
+                    emb_list = list(embeddings[i])
+                    self._check_dimension(len(emb_list))
+                    row.embedding = emb_list
+                    row.embedding_normed = _normalize(emb_list)
                 if documents is not None:
                     row.document = documents[i]
                 if metadatas is not None:
@@ -226,7 +271,7 @@ class InMemoryCollection:
             rows = [self._rows[i] for i in self._order[:limit]]
             return {
                 "ids": [r.id for r in rows],
-                "embeddings": [list(r.embedding_normed) for r in rows],
+                "embeddings": [list(r.embedding) for r in rows],
                 "documents": [r.document for r in rows],
                 "metadatas": [dict(r.metadata) for r in rows],
             }
@@ -253,7 +298,7 @@ class InMemoryCollection:
             if "metadatas" in include:
                 out["metadatas"] = [dict(r.metadata) for r in rows]
             if "embeddings" in include:
-                out["embeddings"] = [list(r.embedding_normed) for r in rows]
+                out["embeddings"] = [list(r.embedding) for r in rows]
             return out
 
     def query(self, *, query_embeddings: list[list[float]] | None = None,
@@ -267,6 +312,8 @@ class InMemoryCollection:
         include = include if include is not None else ["documents", "metadatas",
                                                        "distances"]
         with self._lock:
+            for q in query_embeddings:
+                self._check_dimension(len(q))
             candidates = [r for r in self._rows.values()
                           if where is None or _matches(r.metadata, where)]
             ids_out, docs_out, metas_out, dists_out = [], [], [], []
@@ -319,6 +366,7 @@ class InMemoryVectorClient:
                 name,
                 embedding_function=embedding_function or self._default_ef,
                 metadata=metadata,
+                registry=self,
             )
             self._collections[name] = col
             return col
@@ -349,6 +397,7 @@ class InMemoryVectorClient:
                     name,
                     embedding_function=embedding_function or self._default_ef,
                     metadata=metadata,
+                    registry=self,
                 )
                 self._collections[name] = col
             elif embedding_function is not None and col._ef is None:
@@ -369,3 +418,10 @@ class InMemoryVectorClient:
     def list_collections(self) -> list[InMemoryCollection]:
         with self._lock:
             return list(self._collections.values())
+
+    def _rename(self, old: str, new: str) -> None:
+        """Re-key *old* to *new* (collection.modify(name=...) back-call)."""
+        with self._lock:
+            if new in self._collections:
+                raise ValueError(f"collection {new!r} already exists")
+            self._collections[new] = self._collections.pop(old)

@@ -9,6 +9,7 @@ from click.testing import CliRunner
 from nexus.cli import main
 from nexus.db.http_vector_client import HttpVectorClient
 from nexus.db.t3 import T3Database
+from tests.conftest import make_vector_test_client
 
 
 @pytest.fixture
@@ -939,7 +940,7 @@ def test_reembed_dry_run_reports_count(runner, env_creds, tmp_path, cloud_mode) 
     import uuid
 
     coll_name = f"knowledge__rem_{uuid.uuid4().hex[:12]}"
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     col = client.get_or_create_collection(coll_name)
     col.add(
         ids=["c1", "c2"], documents=["doc one", "doc two"],
@@ -983,7 +984,7 @@ def test_reembed_no_dry_run_writes_via_voyage(
     # passthrough, never upsert_chunks_with_embeddings (which the
     # service handle discards vectors on).
     coll_name = f"code__rem{uuid.uuid4().hex[:10]}__voyage-code-3__v1"
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     col = client.get_or_create_collection(coll_name)
     col.add(
         ids=["c1", "c2"], documents=["doc one", "doc two"],
@@ -1057,7 +1058,7 @@ def test_reembed_skips_empty_documents(
 
     # nexus-u37lw: model-encoded name so the same-model service path runs.
     coll_name = f"code__rem{uuid.uuid4().hex[:10]}__voyage-3__v1"
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     col = client.get_or_create_collection(coll_name)
     col.add(
         ids=["good", "blank"],

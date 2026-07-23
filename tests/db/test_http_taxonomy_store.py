@@ -29,6 +29,7 @@ import pytest
 
 from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
 from nexus.db.t2.http_taxonomy_store import DEFAULT_TENANT, HttpTaxonomyStore
+from tests.conftest import make_vector_test_client
 
 TOKEN = "fake-taxonomy-token-abc"
 
@@ -1275,7 +1276,7 @@ def _seed_oracle_chroma(records: list[dict]):
     collection (EphemeralClient shares in-process backend state)."""
     import chromadb
 
-    cl = chromadb.EphemeralClient()
+    cl = make_vector_test_client()
     try:
         cl.delete_collection("taxonomy__centroids")
     except Exception:

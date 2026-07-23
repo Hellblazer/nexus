@@ -103,6 +103,20 @@ class TestCollectionLifecycle:
         with pytest.raises(Exception):
             substrate.get_collection(col.name)
 
+    def test_modify_renames_collection(self, substrate) -> None:
+        """col.modify(name=...) — the nx collection rename surface
+        (T3Database.rename_collection): rows survive, the new name
+        resolves, the old name is gone."""
+        col = _make(substrate)
+        old = col.name
+        new = f"{old}-renamed"
+        col.add(ids=["a"], embeddings=[_E1], documents=["doc a"])
+        col.modify(name=new)
+        renamed = substrate.get_collection(new)
+        assert renamed.count() == 1
+        with pytest.raises(Exception):
+            substrate.get_collection(old)
+
 
 # ── Write semantics ──────────────────────────────────────────────────────────
 
@@ -124,6 +138,39 @@ class TestWriteSemantics:
         got = col.get(ids=["a"], include=["documents", "metadatas"])
         assert got["documents"] == ["second"]
         assert got["metadatas"][0]["v"] == 2
+
+    def test_upsert_existing_id_merges_metadata_keys(self, substrate) -> None:
+        """Oracle-verified 2026-07-23: upsert on an existing id replaces
+        document + embedding but MERGES metadata at key level (same as
+        update). The backfill-hash path depends on this — its normalized
+        re-upsert drops non-canonical keys and the merge keeps them."""
+        col = _make(substrate)
+        col.upsert(ids=["a"], embeddings=[_E1], documents=["first"],
+                   metadatas=[{"x": 1, "y": "keep"}])
+        col.upsert(ids=["a"], embeddings=[_E1], documents=["second"],
+                   metadatas=[{"x": 2}])
+        got = col.get(ids=["a"], include=["documents", "metadatas"])
+        assert got["documents"] == ["second"]
+        assert got["metadatas"][0] == {"x": 2, "y": "keep"}
+
+    def test_embeddings_round_trip_byte_identical(self, substrate) -> None:
+        """The reidentify contract: embeddings come back exactly as
+        written, NOT normalized (vectors here are deliberately
+        non-unit)."""
+        raw = [0.25, 0.5, 0.125, 0.0625]
+        col = _make(substrate)
+        col.add(ids=["a"], embeddings=[raw], documents=["d"])
+        got = col.get(ids=["a"], include=["embeddings"])["embeddings"][0]
+        assert [float(v) for v in got] == raw
+
+    def test_dimension_mismatch_query_raises_dimension_error(self, substrate) -> None:
+        """The embed-migrate / nx doctor stale-collection probe: querying
+        with a wrong-dimension vector raises with 'dimension' in the
+        message (detect_stale_local_collections classifies on it)."""
+        col = _make(substrate)
+        col.add(ids=["a"], embeddings=[_E1], documents=["d"])
+        with pytest.raises(Exception, match="[Dd]imension"):
+            col.query(query_embeddings=[[1.0, 0.0]], n_results=1)
 
     def test_metadata_type_round_trip(self, substrate) -> None:
         col = _make(substrate)

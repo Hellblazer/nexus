@@ -23,6 +23,7 @@ from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from click.testing import CliRunner
 
 from nexus.commands.catalog_cmds.doctor import doctor_cmd
+from tests.conftest import make_vector_test_client
 
 
 @pytest.fixture()
@@ -36,7 +37,7 @@ def chroma_client():
     is ONNX MiniLM L6 v2 → 384-dim, which gives us the realistic 4.28-era
     bug shape for free (collection is named for voyage but actually holds
     MiniLM vectors)."""
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     for col in list(client.list_collections()):
         try:
             client.delete_collection(col.name)

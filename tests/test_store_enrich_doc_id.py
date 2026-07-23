@@ -28,12 +28,13 @@ from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from nexus.catalog.catalog import Catalog
 from nexus.catalog.tumbler import Tumbler
 from nexus.db.t3 import T3Database
+from tests.conftest import make_vector_test_client
 
 
 @pytest.fixture
 def local_t3() -> T3Database:
     return T3Database(
-        _client=chromadb.EphemeralClient(),
+        _client=make_vector_test_client(),
         _ef_override=DefaultEmbeddingFunction(),
     )
 

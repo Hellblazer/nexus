@@ -12,6 +12,7 @@ from nexus.catalog.tumbler import Tumbler
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
 from nexus.mcp_server import _inject_t3, _reset_singletons, query
+from tests.conftest import make_vector_test_client
 
 
 @pytest.fixture(autouse=True)
@@ -23,7 +24,7 @@ def _reset():
 
 @pytest.fixture()
 def t3():
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     ef = chromadb.utils.embedding_functions.DefaultEmbeddingFunction()
     db = T3Database(_client=client, _ef_override=ef)
     _inject_t3(db)

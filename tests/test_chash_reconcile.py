@@ -24,6 +24,7 @@ from click.testing import CliRunner
 from nexus.cli import main
 from nexus.db.t2.chash_index import ChashIndex
 from nexus.db.t3 import T3Database
+from tests.conftest import make_vector_test_client
 
 
 # ── ChashIndex.distinct_collections ────────────────────────────────────────
@@ -68,7 +69,7 @@ class TestChashReconcileCLI:
         # ``test_unindexed_t3_collections_reported_not_deleted``)
         # silently fail under shared state. Drop every existing
         # collection on fixture entry so each test sees a clean slate.
-        client = chromadb.EphemeralClient()
+        client = make_vector_test_client()
         for c in list(client.list_collections()):
             name = c if isinstance(c, str) else c.name
             try:

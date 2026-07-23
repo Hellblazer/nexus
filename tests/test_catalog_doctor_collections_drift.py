@@ -30,6 +30,7 @@ from click.testing import CliRunner
 from nexus.catalog.catalog import Catalog
 from nexus.cli import main
 from nexus.db.t3 import T3Database
+from tests.conftest import make_vector_test_client
 
 
 @pytest.fixture()
@@ -40,7 +41,7 @@ def runner() -> CliRunner:
 @pytest.fixture()
 def t3_db():
     db = T3Database(
-        _client=chromadb.EphemeralClient(),
+        _client=make_vector_test_client(),
         _ef_override=DefaultEmbeddingFunction(),
     )
     for raw in list(db._client.list_collections()):

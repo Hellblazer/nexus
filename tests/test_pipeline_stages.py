@@ -25,6 +25,7 @@ from nexus.pipeline_stages import (
     pipeline_index_pdf,
     uploader_loop,
 )
+from tests.conftest import make_vector_test_client
 
 
 # RDR-109 Phase 2: local-token in test collection names varies by whether
@@ -658,7 +659,7 @@ class TestPipelineIndexPdf:
 
         pdf_path = tmp_path / "stream_b.pdf"
         pdf_path.write_bytes(b"fake pdf bytes for Phase B streaming test")
-        client = chromadb.EphemeralClient()
+        client = make_vector_test_client()
         t3 = T3Database(_client=client, local_mode=True)
 
         fc = _tc(
@@ -712,7 +713,7 @@ class TestPipelineIndexPdf:
 
         pdf_path = tmp_path / "stream.pdf"
         pdf_path.write_bytes(b"fake pdf bytes for streaming pipeline test")
-        client = chromadb.EphemeralClient()
+        client = make_vector_test_client()
         t3 = T3Database(_client=client, local_mode=True)
 
         fc = _tc(

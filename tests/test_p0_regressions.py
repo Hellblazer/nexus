@@ -17,6 +17,7 @@ from nexus.db.t1 import T1Database
 from nexus.db.t3 import T3Database
 from nexus.md_chunker import SemanticMarkdownChunker
 from nexus.registry import RepoRegistry
+from tests.conftest import make_vector_test_client
 
 
 # ── Test 1: T1 session isolation ──────────────────────────────────────────────
@@ -104,7 +105,7 @@ def test_t3_put_with_ttl_stores_indexed_at_and_ttl_days() -> None:
     from nexus.metadata_schema import is_expired
     from datetime import datetime, timedelta, UTC
 
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     ef = DefaultEmbeddingFunction()
     db = T3Database(_client=client, _ef_override=ef)
 

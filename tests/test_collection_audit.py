@@ -13,19 +13,20 @@ from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
+from tests.conftest import make_vector_test_client
 
 
 def _clean_ephemeral_client():
     """Return a chromadb.EphemeralClient with all collections cleared.
 
-    chromadb.EphemeralClient() instances share an in-memory backend
+    make_vector_test_client() instances share an in-memory backend
     across the process, so a hardcoded ``create_collection(name=...)``
     in test N collides with a leftover from test N-1 when both ran in
     the same suite. Clearing collections at entry guarantees per-test
     isolation. See project memory: chromadb_ephemeral_shared_state.
     """
     import chromadb  # noqa: PLC0415
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     for col in list(client.list_collections()):
         try:
             client.delete_collection(col.name)

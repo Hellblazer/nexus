@@ -21,6 +21,7 @@ from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from nexus.catalog.catalog import Catalog
 from nexus.catalog.tumbler import Tumbler
 from nexus.db.t3 import T3Database
+from tests.conftest import make_vector_test_client
 
 
 @pytest.fixture()
@@ -29,7 +30,7 @@ def t3_db() -> T3Database:
     test_chash_reconcile.py / test_collection_gc.py pattern of
     clearing collections on entry to defend against the chromadb
     in-memory backend's session-shared state."""
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     for c in list(client.list_collections()):
         name = c if isinstance(c, str) else c.name
         try:

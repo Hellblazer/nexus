@@ -16,12 +16,13 @@ from nexus.taxonomy import (
     get_topic_tree,
     get_topics,
 )
+from tests.conftest import make_vector_test_client
 
 
 @pytest.fixture()
 def chroma_client() -> chromadb.ClientAPI:
     """Ephemeral ChromaDB client for taxonomy centroid tests."""
-    return chromadb.EphemeralClient()
+    return make_vector_test_client()
 
 
 # ── schema ──────────────────────────────────────────────────────────────────
@@ -1893,7 +1894,7 @@ class TestMiniLMTopicQuality:
 
     @pytest.fixture()
     def chroma(self):
-        return chromadb.EphemeralClient()
+        return make_vector_test_client()
 
     def test_code_chunk_topic_quality(
         self, db: T2Database, ef, chroma,
@@ -2445,7 +2446,7 @@ class TestDiscoverStoresTerms:
 
     @pytest.fixture()
     def chroma_client(self) -> chromadb.ClientAPI:
-        return chromadb.EphemeralClient()
+        return make_vector_test_client()
 
     def test_terms_stored_as_json(
         self, db: T2Database, chroma_client: chromadb.ClientAPI,
@@ -2781,7 +2782,7 @@ class TestSplitTopic:
 
     @pytest.fixture()
     def chroma(self) -> chromadb.ClientAPI:
-        return chromadb.EphemeralClient()
+        return make_vector_test_client()
 
     def test_split_creates_children(
         self, db: T2Database, chroma: chromadb.ClientAPI,
@@ -3113,7 +3114,7 @@ class TestSplitTopic:
         db.taxonomy.conn.commit()
 
         result = db.taxonomy.split_topic(
-            parent_id, k=3, chroma_client=chromadb.EphemeralClient(),
+            parent_id, k=3, chroma_client=make_vector_test_client(),
         )
         assert result == 0
 
@@ -3864,7 +3865,7 @@ class TestManualPreservation:
 
     @pytest.fixture()
     def chroma(self) -> chromadb.ClientAPI:
-        return chromadb.EphemeralClient()
+        return make_vector_test_client()
 
     def test_manual_assignments_survive_rebuild(
         self, db: T2Database, chroma: chromadb.ClientAPI,
@@ -3917,7 +3918,7 @@ class TestRediscoveryCentroidLifecycle:
 
     @pytest.fixture()
     def chroma(self) -> chromadb.ClientAPI:
-        return chromadb.EphemeralClient()
+        return make_vector_test_client()
 
     def test_force_clears_old_centroids(
         self, db: T2Database, chroma: chromadb.ClientAPI,
@@ -4358,7 +4359,7 @@ class TestEdgeCases:
         embeddings = rng.standard_normal((3, 384)).astype(np.float32)
         doc_ids = ["doc-0", "doc-1", "doc-2"]
         texts = ["hello world", "foo bar", "baz qux"]
-        chroma = chromadb.EphemeralClient()
+        chroma = make_vector_test_client()
 
         result = db.taxonomy.discover_topics(
             "tiny__coll", doc_ids, embeddings, texts, chroma,
@@ -4369,7 +4370,7 @@ class TestEdgeCases:
         self, db: T2Database,
     ) -> None:
         """Rebuild with n < 5 clears old topics and records the count."""
-        chroma = chromadb.EphemeralClient()
+        chroma = make_vector_test_client()
 
         # Seed existing topics for the collection
         db.taxonomy.conn.execute(
@@ -4415,13 +4416,13 @@ class TestEdgeCases:
             )
         db.taxonomy.conn.commit()
 
-        chroma = chromadb.EphemeralClient()
+        chroma = make_vector_test_client()
         result = db.taxonomy.split_topic(tid, k=2, chroma_client=chroma)
         assert result == 0
 
     def test_discover_skip_existing_topics(self, db: T2Database) -> None:
         """discover_topics skips if topics already exist for collection."""
-        chroma = chromadb.EphemeralClient()
+        chroma = make_vector_test_client()
         rng = np.random.default_rng(42)
         embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
         embeddings[:30, 0] += 3.0

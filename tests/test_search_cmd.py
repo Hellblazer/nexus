@@ -17,6 +17,7 @@ from nexus.db.t3 import T3Database
 from nexus.scoring import apply_hybrid_scoring
 from nexus.search_engine import search_cross_corpus
 from nexus.types import SearchResult
+from tests.conftest import make_vector_test_client
 
 # ── Helpers & fixtures ──────────────────────────────────────────────────────
 
@@ -619,7 +620,7 @@ _QUERIES = [
 
 @pytest.fixture(scope="module")
 def search_corpus() -> T3Database:
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     ef = DefaultEmbeddingFunction()
     db = T3Database(_client=client, _ef_override=ef)
 
@@ -863,7 +864,7 @@ def test_silent_zero_end_to_end_real_engine(
 
     coll_name = "knowledge__e2e_silentzero"
     ef = DefaultEmbeddingFunction()
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     real_t3 = T3Database(_client=client, _ef_override=ef)
 
     # Seed a collection with three documents whose raw distances will

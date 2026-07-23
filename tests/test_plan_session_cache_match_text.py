@@ -22,6 +22,7 @@ from nexus.plans.session_cache import (
     PlanSessionCache,
     _synthesize_match_text,
 )
+from tests.conftest import make_vector_test_client
 
 
 # ── Synthesiser unit tests ──────────────────────────────────────────────────
@@ -89,7 +90,7 @@ class TestSynthesizeMatchText:
 @pytest.fixture()
 def cache() -> PlanSessionCache:
     """Real EphemeralClient-backed cache (no network, no API keys)."""
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     return PlanSessionCache(client=client, session_id="test-session")
 
 
@@ -140,7 +141,7 @@ class TestUpsertEmbedsMatchText:
         match_text — a regression gate against accidentally reverting to
         raw description.
         """
-        client = chromadb.EphemeralClient()
+        client = make_vector_test_client()
         cache = PlanSessionCache(client=client, session_id="sess")
 
         spy = MagicMock(wraps=cache._col.upsert)

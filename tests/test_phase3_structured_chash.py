@@ -31,6 +31,7 @@ from nexus.mcp_server import (
     search,
     store_put,
 )
+from tests.conftest import make_vector_test_client
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -45,7 +46,7 @@ def _reset():
 
 @pytest.fixture()
 def t1():
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     db = T1Database(session_id="p3-test", client=client)
     _inject_t1(db)
     return db
@@ -59,7 +60,7 @@ def t2_path():
 
 @pytest.fixture()
 def t3():
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     ef = chromadb.utils.embedding_functions.DefaultEmbeddingFunction()
     db = T3Database(_client=client, _ef_override=ef)
     _inject_t3(db)

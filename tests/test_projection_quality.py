@@ -17,6 +17,7 @@ import numpy as np
 import pytest
 
 from nexus.db.t2 import T2Database
+from tests.conftest import make_vector_test_client
 
 
 def _make_taxonomy_db() -> sqlite3.Connection:
@@ -179,7 +180,7 @@ class TestAddProjectionQualityColumns:
 def chroma_client() -> chromadb.ClientAPI:
     """Ephemeral ChromaDB client per test.
 
-    nexus-alnpa: ``chromadb.EphemeralClient()`` instances share a
+    nexus-alnpa: ``make_vector_test_client()`` instances share a
     process-global in-memory backend, so collections leak across tests and
     across files within the same process. A sibling test that leaves a
     same-named collection (e.g. ``nt_coll``) pollutes this file's
@@ -188,7 +189,7 @@ def chroma_client() -> chromadb.ClientAPI:
     test starts from a clean backend regardless of what ran before. See the
     ``project_chromadb_ephemeral_shared_state`` note.
     """
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     for coll in client.list_collections():
         client.delete_collection(coll.name)
     return client
