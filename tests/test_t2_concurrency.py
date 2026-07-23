@@ -14,6 +14,7 @@ multi-process (cross-nx-mcp) WAL case. This file covers the in-process
 """
 from __future__ import annotations
 
+import os
 import statistics
 import threading
 import time
@@ -554,6 +555,12 @@ def test_serving_busy_timeout_constant_matches_bootstrap() -> None:
     assert SERVING_BUSY_TIMEOUT_MS == _BOOTSTRAP_BUSY_TIMEOUT_MS
 
 
+@_pytest.mark.skipif(
+    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    reason="dies-roster: the 30s serving busy_timeout PRAGMA is a property of "
+    "the raw SQLite store connections; dies with the twins at the RDR-155 "
+    "P4b flip (the engine's PG pool owns its own timeouts)",
+)
 @_pytest.mark.parametrize(
     "store_attr,conn_attr",
     [

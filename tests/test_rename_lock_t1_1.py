@@ -12,6 +12,7 @@ Tests covering:
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 from pathlib import Path
@@ -298,6 +299,12 @@ class TestLockOrdering:
         finally:
             db.close()
 
+    @pytest.mark.skipif(
+        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        reason="dies-roster: per-store SQLite self._lock ordering is the "
+        "SQLite queue's protocol; HttpAspectQueue exposes no raw '_lock' "
+        "(the engine owns serialization) — dies at the RDR-155 P4b flip",
+    )
     def test_cascade_bypasses_per_store_lock(self, tmp_path: Path) -> None:
         """rename_collection_cascade holds RENAME_LOCK, not per-store self._lock.
 
