@@ -51,6 +51,93 @@ class PreconditionReport:
     actions: tuple[str, ...] = ()
 
 
+def _default_plugin_version() -> str | None:
+    """Installed conexus plugin version from Claude Code's
+    ``installed_plugins.json`` — the identity a session's
+    ``CLAUDE_PLUGIN_ROOT`` ultimately resolves to. ``None`` when no conexus
+    plugin install is detectable (no Claude Code on this box, or the plugin
+    is not installed). On-disk only, per the module contract."""
+    import json  # noqa: PLC0415 — stdlib, deferred with the module's on-disk-read convention
+
+    path = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    for key, entries in (data.get("plugins") or {}).items():
+        if (
+            isinstance(key, str)
+            and key.split("@", 1)[0] == "conexus"
+            and isinstance(entries, list)
+            and entries
+            and isinstance(entries[0], dict)
+        ):
+            version = entries[0].get("version")
+            if isinstance(version, str) and version:
+                return version
+    return None
+
+
+def _default_lockstep_marker() -> str | None:
+    """Last CLI version the RDR-143 lockstep action CONFIRMED, read from the
+    SAME marker file the SessionStart hook reads
+    (``~/.config/nexus/cli_lockstep_marker``; ``NX_LOCKSTEP_MARKER``
+    overrides for tests, mirroring the hook). ``None`` = never confirmed or
+    unreadable — a comparison INPUT, never an authority."""
+    import os  # noqa: PLC0415 — stdlib, deferred with the module's on-disk-read convention
+
+    override = os.environ.get("NX_LOCKSTEP_MARKER")
+    marker = (
+        Path(override) if override
+        else Path.home() / ".config" / "nexus" / "cli_lockstep_marker"
+    )
+    try:
+        text = marker.read_text().strip()
+    except OSError:
+        return None
+    return text or None
+
+
+def _lockstep_report(
+    plugin_version: str | None, marker_version: str | None
+) -> PreconditionReport:
+    """RDR-185 P3.0 / nexus-2a5ij: hooks/plugin lockstep freshness as a named
+    STATELESS precondition — the comparison INPUTS are the installed plugin
+    version and the RDR-143 lockstep marker, the same on-disk pair the
+    SessionStart hook reads. Report-only by design: NO new mechanism, no
+    converge action ever — acquisition is the lockstep hook/action's job,
+    fired at the next SessionStart."""
+    name = "plugin-lockstep"
+    if plugin_version is None:
+        return PreconditionReport(
+            name=name, applicable=False, current=True,
+            detail="no conexus plugin install detected (Claude Code absent "
+                   "or plugin not installed)",
+        )
+    if marker_version is None:
+        return PreconditionReport(
+            name=name, applicable=True, current=False,
+            detail=(
+                f"plugin {plugin_version} installed but no lockstep marker — "
+                "CLI lockstep unconfirmed (the SessionStart hook confirms it "
+                "on the next Claude session)"
+            ),
+        )
+    if marker_version != plugin_version:
+        return PreconditionReport(
+            name=name, applicable=True, current=False,
+            detail=(
+                f"plugin {plugin_version} vs last-confirmed CLI "
+                f"{marker_version} — upgrade in flight (the RDR-143 lockstep "
+                "action converges it at the next Claude session)"
+            ),
+        )
+    return PreconditionReport(
+        name=name, applicable=True, current=True,
+        detail=f"plugin and CLI lockstep confirmed at {plugin_version}",
+    )
+
+
 def _converge_provisioning(
     provisioned_fn: Callable[[], bool],
     footprint_fn: Callable[[], bool],
@@ -228,8 +315,10 @@ def check_preconditions(
     _installed_version_fn: Callable[[], str] | None = None,
     _provisioned_fn: Callable[[], bool] | None = None,
     _footprint_fn: Callable[[], bool] | None = None,
+    _plugin_version_fn: Callable[[], str | None] | None = None,
+    _lockstep_marker_fn: Callable[[], str | None] | None = None,
 ) -> list[PreconditionReport]:
-    """READ-ONLY live verdicts for all four axes.
+    """READ-ONLY live verdicts for every precondition axis.
 
     Stateless by construction: every call re-reads the sidecar, the lease
     file, and package metadata. Never probes a process.
@@ -256,12 +345,20 @@ def check_preconditions(
     )
     footprint_fn = _footprint_fn if _footprint_fn is not None else _default_footprint
 
+    plugin_fn = (
+        _plugin_version_fn if _plugin_version_fn is not None else _default_plugin_version
+    )
+    marker_fn = (
+        _lockstep_marker_fn if _lockstep_marker_fn is not None else _default_lockstep_marker
+    )
+
     installed = installed_fn() or ""
     return [
         _package_report(installed),
         _engine_report(engine_detect()),
         _provisioning_report(provisioned_fn(), footprint_fn()),
         _process_report(lease_fn(), installed),
+        _lockstep_report(plugin_fn(), marker_fn()),
     ]
 
 
@@ -278,6 +375,8 @@ def converge_preconditions(
     _provisioned_fn: Callable[[], bool] | None = None,
     _footprint_fn: Callable[[], bool] | None = None,
     _establish_fn: Callable[[], Any] | None = None,
+    _plugin_version_fn: Callable[[], str | None] | None = None,
+    _lockstep_marker_fn: Callable[[], str | None] | None = None,
 ) -> list[PreconditionReport]:
     """Converge stale axes in order: package (report-only) → engine →
     process (re-derived AFTER the engine step; see module docstring for
@@ -368,4 +467,16 @@ def converge_preconditions(
             actions=("cycled supervised service to the installed version",),
         )
     reports.append(process)
+
+    # Plugin/CLI lockstep (nexus-2a5ij): REPORT-ONLY, deliberately last and
+    # never converged here — the RDR-143 SessionStart hook/action owns
+    # acquisition; this surface only makes the skew visible alongside the
+    # other axes instead of leaving it a hook-log-only fact.
+    plugin_fn = (
+        _plugin_version_fn if _plugin_version_fn is not None else _default_plugin_version
+    )
+    marker_fn = (
+        _lockstep_marker_fn if _lockstep_marker_fn is not None else _default_lockstep_marker
+    )
+    reports.append(_lockstep_report(plugin_fn(), marker_fn()))
     return reports

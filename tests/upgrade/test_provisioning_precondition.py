@@ -64,7 +64,9 @@ def test_provisioning_is_a_reported_axis(tmp_path: pathlib.Path) -> None:
         _footprint_fn=lambda: False,
         **_kwargs(),
     )
-    assert [r.name for r in reports] == ["package", "engine", "provisioning", "process"]
+    assert [r.name for r in reports] == [
+        "package", "engine", "provisioning", "process", "plugin-lockstep",
+    ]
 
 
 def test_provisioned_install_is_current(tmp_path: pathlib.Path) -> None:
