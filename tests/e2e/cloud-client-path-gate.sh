@@ -25,9 +25,11 @@
 #   A  /version contract through the edge: 200, release_version parseable
 #      and >= REQUIRED_ENGINE_VERSION, embedding_mode present and known,
 #      embedding_models non-empty (RDR-002 + nexus-pebfx.5 contract).
-#   B  /health ez5.1 contract through the edge: UNAUTHENTICATED GET ->
-#      200 + body.db == "up" (exactly what guided_upgrade._health_gate
-#      sends; an auth-gated edge breaks managed migrations to cloud).
+#   B  /health edge contract: AUTHENTICATED GET -> 200 + body.db == "up"
+#      (conexus relay [21082], decision (b): the public edge auth-gates
+#      /health and relays the engine's ez5.1 body verbatim to bearers —
+#      exactly what guided_upgrade's health gate now sends for managed
+#      targets; unauth-401 is conexus's own IT-pinned contract).
 #   C  real-client probe: HttpVectorClient.embedding_mode() through the
 #      live config resolves a mode (never None). This is the exact signal
 #      the search threshold gate and dimension-orphan tooling key on.
@@ -102,17 +104,26 @@ print(f"  ok: release_version={body['release_version']} "
       f"embedding_mode={mode} models={models}")
 PY
 
-# ── Leg B: /health ez5.1 contract, unauthenticated (guided_upgrade's exact
-#    probe shape) ─────────────────────────────────────────────────────────
-echo "[B] /health ez5.1 contract (unauthenticated)"
-HEALTH_STATUS="$(curl -sS -m 20 -o /tmp/cloud-gate-health.$$ -w "%{http_code}" "$SERVICE_URL/health" || echo 000)"
-HEALTH_BODY="$(cat /tmp/cloud-gate-health.$$ 2>/dev/null; rm -f /tmp/cloud-gate-health.$$)"
-if [ "$HEALTH_STATUS" != "200" ]; then
-    _leg_fail "B: unauthenticated /health returned HTTP $HEALTH_STATUS (body: $HEALTH_BODY) — ez5.1 pins 200 + db=up; guided_upgrade's readiness gate polls exactly this and will time out 'service not ready' on any managed migration targeting this service"
-elif ! echo "$HEALTH_BODY" | grep -q '"db"[[:space:]]*:[[:space:]]*"up"'; then
-    _leg_fail "B: /health 200 but body lacks db=up (body: $HEALTH_BODY)"
+# ── Leg B: /health edge contract, AUTHENTICATED (guided_upgrade's managed-
+#    target probe shape per conexus relay [21082], decision (b)) ──────────
+echo "[B] /health edge contract (authenticated bearer)"
+SERVICE_TOKEN="$(uv run python - <<'PY'
+from nexus.config import get_credential
+print((get_credential("service_token") or "").strip())
+PY
+)"
+if [ -z "$SERVICE_TOKEN" ]; then
+    _leg_fail "B: no service_token credential configured — cannot probe the auth-gated edge /health"
 else
-    echo "  ok: 200 + db=up"
+    HEALTH_STATUS="$(curl -sS -m 20 -H "Authorization: Bearer $SERVICE_TOKEN" -o /tmp/cloud-gate-health.$$ -w "%{http_code}" "$SERVICE_URL/health" || echo 000)"
+    HEALTH_BODY="$(cat /tmp/cloud-gate-health.$$ 2>/dev/null; rm -f /tmp/cloud-gate-health.$$)"
+    if [ "$HEALTH_STATUS" != "200" ]; then
+        _leg_fail "B: authenticated /health returned HTTP $HEALTH_STATUS (body: $HEALTH_BODY) — the edge contract (conexus [21082]) is 200 + verbatim engine {status, db} for bearers; guided_upgrade's managed-target readiness gate will time out 'service not ready'"
+    elif ! echo "$HEALTH_BODY" | grep -q '"db"[[:space:]]*:[[:space:]]*"up"'; then
+        _leg_fail "B: authenticated /health 200 but body lacks db=up (body: $HEALTH_BODY)"
+    else
+        echo "  ok: 200 + db=up (authenticated)"
+    fi
 fi
 
 # ── Legs C+D: real client code through the live config ───────────────────

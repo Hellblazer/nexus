@@ -881,8 +881,19 @@ def establish_verified_service(
 
     prov = _provision()
 
+    # nexus-bwulw / conexus relay [21082]: a managed (https, non-loopback)
+    # target's edge auth-gates /health, so the gate sends the configured
+    # bearer there; the loopback provision path stays unauthenticated
+    # (ez5.1, the engine contract).
+    health_token: str | None = None
+    if prov.service_url.startswith("https://"):
+        from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid import cycle
+
+        health_token = (get_credential("service_token") or "").strip() or None
+
     health = _health(
-        service_url=prov.service_url, timeout_s=timeout_s, interval_s=interval_s
+        service_url=prov.service_url, timeout_s=timeout_s, interval_s=interval_s,
+        token=health_token,
     )
     if not health.ready:
         reason = (
@@ -1052,6 +1063,7 @@ def wait_for_service_health(
     service_url: str,
     timeout_s: float = 30.0,
     interval_s: float = 1.0,
+    token: str | None = None,
     http_get: Callable[[str, float], Any] | None = None,
     sleep: Callable[[float], None] | None = None,
     clock: Callable[[], float] | None = None,
@@ -1063,6 +1075,15 @@ def wait_for_service_health(
     deadline; returns ``ready=False`` with the last status/error when the
     service does not come up in time — the caller hard-fails with a remedy
     (ez5.7), it does NOT wait forever.
+
+    ``token`` (nexus-bwulw, conexus relay [21082]): the managed public edge
+    auth-gates /health (401 unauthenticated) — ez5.1's UNAUTHENTICATED
+    contract is the LOOPBACK/ENGINE contract only. When *token* is set the
+    default transport sends ``Authorization: Bearer``; the edge relays the
+    engine's ``{status, db}`` body verbatim to authenticated callers
+    (IT-pinned conexus-side, conexus-4ap0), so readiness semantics are
+    identical on both paths. Loopback callers pass no token and stay
+    unauthenticated.
 
     ``http_get`` / ``sleep`` / ``clock`` are injection seams for deterministic
     tests; production uses ``httpx.get`` / ``time.sleep`` / ``time.monotonic``.
@@ -1085,7 +1106,8 @@ def wait_for_service_health(
         def _get(url: str, timeout: float) -> Any:
             import httpx  # noqa: PLC0415 — optional/heavy dependency deferred (httpx)
 
-            return httpx.get(url, timeout=timeout)
+            headers = {"Authorization": f"Bearer {token}"} if token else {}
+            return httpx.get(url, timeout=timeout, headers=headers)
 
     url = service_url.rstrip("/") + "/health"
     req_timeout = max(0.1, min(interval_s, 5.0)) if interval_s > 0 else 1.0
