@@ -120,7 +120,19 @@ from __future__ import annotations
 #: every octet CHECK on the conformance arc close ([21020]). Deployed to
 #: api.conexus-nexus.com + cloud-gated GREEN 2026-07-21. One-engine-per-
 #: release: v0.1.51 is the exact engine this release was tested with.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 51)
+#: -> (0,1,52) 2026-07-22: RDR-188 server-side rerank. The client's search
+#: repoint (P2, rerank fused into the /v1/vectors/* handlers, client
+#: Voyage reranker deleted) hard-depends on the engine-side rerank
+#: envelope {results, rerank_degraded, rerank_model|rerank_error}; the
+#: floor is the fix-delivery vehicle for local service-mode installs.
+#: v0.1.52 also carries catalog-016 (TOCTOU dupe backstop; 016-0
+#: tombstoned the live 201-dupe class at deploy — 403 rows/276 uris,
+#: proportional to the known population — and 016-1's unique index
+#: proves no live dupe survived). Deployed to api.conexus-nexus.com +
+#: per-query-diff cloud-gated GREEN 2026-07-23Z (parity 106/113 ==
+#: baseline with zero per-query regressions, recall AC-3 identical,
+#: reranker=rerank-2.5 active with zero degrade events, T2 [21062]).
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 52)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:
