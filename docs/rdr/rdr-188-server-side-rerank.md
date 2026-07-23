@@ -4,6 +4,7 @@ id: RDR-188
 type: Architecture
 status: closed
 closed_date: 2026-07-23
+postmortem_waiver: "Clean same-day full lifecycle (create -> research -> gate -> accept -> implement -> deploy -> close, 2026-07-22), zero divergences from the locked Proposed Solution: engine fused rerank + local cross-encoder shipped in engine-service-v0.1.52 (deployed + per-query-diff cloud-gated GREEN, parity 106/113 == baseline, reranker active zero degrades, T2 [21062]); client repoint + tripwires + floor (0,1,52); credential-chain retirement. The gate's round-1 Criticals (End-State overpromise, floor-vs-convergence doctrine clash) were caught and folded PRE-acceptance — already recorded in the RDR's own Revision History. Phase cross-walk PASS T2 nexus_rdr/188-phase-review-gate-2026-07-22 [21064]; stacked reviews [21052]/[21053]/[21057]/[21058]/[21060]. Full closure record in T2 nexus_rdr/188 + epic nexus-9o6y2."
 accepted_date: 2026-07-22
 priority: medium
 author: Hal Hildebrand
