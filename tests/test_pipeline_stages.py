@@ -16,7 +16,6 @@ from nexus.db.t3 import T3Database
 from nexus.db.http_pipeline_client import HttpPipelineDB
 from tests.pipeline_fake_engine import make_fake_engine_db
 from nexus.pipeline_stages import (
-    PipelineCancelled,
     _enrich_metadata_from_extraction,
     _prune_stale_chunks,
     _update_chunk_metadata,
@@ -466,7 +465,6 @@ class TestUploaderLoop:
         returns: T3 receives the post-Phase-3 metadata (no
         ``chunk_index``); the hook receives the injected value.
         """
-        from unittest.mock import patch
 
         _pop_chunks(db, "h1", 200)
         t3 = MagicMock()
@@ -644,7 +642,6 @@ class TestPipelineIndexPdf:
         Without this drop, every PDF indexed via the streaming pipeline
         would continue regressing source_path post-Phase-B.
         """
-        import chromadb
         from nexus.catalog.catalog import Catalog
         from nexus.db.t3 import T3Database
 
@@ -698,7 +695,6 @@ class TestPipelineIndexPdf:
         populates ``document_chunks`` from the post-store batch fire.
         Verify chunks lack doc_id and the manifest carries it instead.
         """
-        import chromadb
         from nexus.catalog.catalog import Catalog
         from nexus.db.t3 import T3Database
 

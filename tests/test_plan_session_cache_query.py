@@ -8,8 +8,6 @@ query_embeddings and returns results without crashing.
 """
 from __future__ import annotations
 
-import chromadb
-import pytest
 
 from nexus.plans.session_cache import PlanSessionCache
 from tests.conftest import make_vector_test_client

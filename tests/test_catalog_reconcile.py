@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 
-import chromadb
 import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from click.testing import CliRunner

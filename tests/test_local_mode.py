@@ -5,7 +5,6 @@ import sqlite3
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import chromadb
 import pytest
 
 from nexus.config import is_local_mode, _default_local_path
@@ -560,7 +559,6 @@ class TestFrecencyOnlyLocalMode:
         # RDR-155 P4a.2 (nexus-1k8s1): local mode without injected _client
         # routes to the pgvector service. Stub make_t3 so this test
         # exercises the frecency code path without a running service.
-        import chromadb
         from nexus.db.t3 import T3Database
 
         def _stub_make_t3(*, _client=None, _ef_override=None):

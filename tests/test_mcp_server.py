@@ -103,11 +103,13 @@ def t2_path():
 
 
 def _clear_ephemeral_collections(client) -> None:
-    """Delete every collection in the shared in-process Ephemeral backend.
+    """Delete every collection in the client.
 
-    nexus-st976: ``make_vector_test_client()`` instances share ONE
-    in-memory backend within a process, so collections created by another
-    test file's T3 fixture survive into this "fresh" client. ``store_put``
+    Historical (nexus-st976): ``chromadb.EphemeralClient`` instances
+    shared ONE in-process backend, so collections created by another
+    test file's T3 fixture survived into a "fresh" client. The RDR-155
+    P4b ``InMemoryVectorClient`` has real per-instance isolation, making
+    this a no-op safeguard on a fresh client. ``store_put``
     resolves ``collection="knowledge"`` via ``t3_collection_name``, which
     probes ``list_collections()`` for a unique ``knowledge__*`` match and
     returns it verbatim — so a single leaked ``knowledge__<owner>__...``

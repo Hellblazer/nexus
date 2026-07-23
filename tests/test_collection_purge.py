@@ -8,7 +8,6 @@ regression both P4-follow-up reviewers flagged).
 """
 from __future__ import annotations
 
-import chromadb
 import pytest
 
 from nexus.db.collection_purge import CascadeCounts, purge_collection_cascade

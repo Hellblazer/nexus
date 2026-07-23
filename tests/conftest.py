@@ -242,10 +242,11 @@ def _isolate_t1_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     the constructor raises ``T1ServerNotFoundError``. Tests that
     previously relied on the legacy EphemeralClient fallback opt
     in via ``NX_T1_ISOLATED=1`` Path C; this autouse fixture sets
-    it process-wide so the suite gets a per-test
-    EphemeralClient by default. Tests that need a different mode
-    (env-passdown, addr file, fail-loud raise) override the env
-    inside the test.
+    it process-wide so the suite gets the process-scoped
+    ``InMemoryVectorClient`` singleton by default (RDR-155 P4b
+    P0a; session_id metadata filtering provides per-test scoping).
+    Tests that need a different mode (env-passdown, addr file,
+    fail-loud raise) override the env inside the test.
     """
     monkeypatch.setenv("NX_T1_ISOLATED", "1")
 

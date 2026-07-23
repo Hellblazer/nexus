@@ -20,7 +20,6 @@ import socket
 import threading
 from http.server import HTTPServer
 
-import chromadb
 import pytest
 
 from nexus.db.t1 import T1Database

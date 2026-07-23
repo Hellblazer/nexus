@@ -5,7 +5,6 @@ import threading
 import time
 from unittest.mock import MagicMock
 
-import chromadb
 import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 

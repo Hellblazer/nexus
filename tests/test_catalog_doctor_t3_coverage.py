@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import chromadb
 import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from click.testing import CliRunner

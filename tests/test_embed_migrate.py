@@ -20,11 +20,9 @@ deterministically.
 """
 from __future__ import annotations
 
-import chromadb
 import pytest
 
 from nexus.db.embed_migrate import (
-    MigrationOutcome,
     StaleCollection,
     detect_stale_local_collections,
     migrate_collection_safe,

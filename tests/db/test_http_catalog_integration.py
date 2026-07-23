@@ -1553,7 +1553,6 @@ class TestServiceModeIndexMVV:
         Postgres instance.
         """
         import re  # noqa: PLC0415
-        import chromadb  # noqa: PLC0415 — integration-only heavy dep
         from unittest.mock import MagicMock, patch  # noqa: PLC0415
 
         from chromadb.utils.embedding_functions import DefaultEmbeddingFunction  # noqa: PLC0415

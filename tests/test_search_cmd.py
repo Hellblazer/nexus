@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
-import chromadb
 import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from click import BadParameter
@@ -747,7 +746,6 @@ def test_silent_zero_emits_single_stderr_line_when_raw_gt_zero(
     runner: CliRunner, cloud_env, monkeypatch,
 ) -> None:
     """Zero post-threshold results + raw>0 + drops>0 → exactly one stderr line."""
-    import structlog
     from nexus.search_engine import SearchDiagnostics
 
     mock_t3 = _mock_t3(["knowledge__art"])
@@ -859,7 +857,6 @@ def test_silent_zero_end_to_end_real_engine(
     Do not split to ``mix_stderr=False`` without switching the
     assertions to ``result.stderr`` simultaneously.
     """
-    import chromadb
     from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
     coll_name = "knowledge__e2e_silentzero"

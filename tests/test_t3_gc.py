@@ -22,17 +22,15 @@ machinery without Cloud credentials. The Catalog uses a tmp_path
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from unittest.mock import patch
 
-import chromadb
 import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from click.testing import CliRunner
 
 from nexus.catalog.catalog import Catalog
 from nexus.catalog.event_log import EVENTS_FILENAME, EventLog
-from nexus.catalog.events import TYPE_CHUNK_ORPHANED, Event
+from nexus.catalog.events import TYPE_CHUNK_ORPHANED
 from nexus.cli import main
 from nexus.db.t3 import T3Database
 from tests.conftest import make_vector_test_client
@@ -566,7 +564,6 @@ class TestGetEmbeddingsRequestOrder:
     must reorder to request order, exactly like the service path."""
 
     def test_rows_follow_request_order_not_insertion_order(self):
-        import chromadb
         import numpy as np
         from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
@@ -591,7 +588,6 @@ class TestGetEmbeddingsRequestOrder:
         assert np.allclose(result[1], np.array(by_id["id-b"], dtype=np.float32))
 
     def test_missing_ids_dropped(self):
-        import chromadb
         from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
         from nexus.db.t3 import T3Database

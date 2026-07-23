@@ -21,7 +21,6 @@ from __future__ import annotations
 from pathlib import Path
 from urllib.parse import quote
 
-import chromadb
 import pytest
 from tests.conftest import make_vector_test_client
 
@@ -861,7 +860,6 @@ def t1_scratch():
     """
     import uuid
 
-    import chromadb
 
     from nexus.db.t1 import T1Database
 
@@ -1567,7 +1565,7 @@ class TestReadSourceObsidianDispatch:
         """Cross-tenant isolation: tenant A's vault root cannot resolve
         tenant B's file even if the relative path exists in A's vault.
         """
-        from nexus.aspect_readers import ReadFail, ReadOk, read_source
+        from nexus.aspect_readers import ReadFail, read_source
 
         vault_a = tmp_path / "vault_a"
         vault_b = tmp_path / "vault_b"

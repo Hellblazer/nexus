@@ -14,16 +14,11 @@ Tests cover:
 from __future__ import annotations
 
 import os
-import signal
 import sqlite3
-import threading
-import time
 import uuid
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock, patch
 
-import chromadb
 import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from click.testing import CliRunner

@@ -22,7 +22,6 @@ def t1(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> T1Database:
 
 @pytest.fixture
 def two_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    import chromadb
     monkeypatch.setenv("HOME", str(tmp_path))
     shared = make_vector_test_client()
     db_a = T1Database(session_id=_SESSION, client=shared)

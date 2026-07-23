@@ -14,12 +14,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import chromadb
 import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
 from nexus.catalog.catalog import Catalog
-from nexus.catalog.tumbler import Tumbler
 from nexus.db.t3 import T3Database
 from tests.conftest import make_vector_test_client
 

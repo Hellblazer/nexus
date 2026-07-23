@@ -4,7 +4,6 @@ import uuid
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import chromadb
 import pytest
 
 from nexus.errors import CredentialsMissingError

@@ -15,7 +15,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import chromadb
 import pytest
 
 from nexus.plans.session_cache import (

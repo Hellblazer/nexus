@@ -8,7 +8,6 @@ from click.testing import CliRunner
 
 from nexus.cli import main
 from nexus.db.http_vector_client import HttpVectorClient
-from nexus.db.t3 import T3Database
 from tests.conftest import make_vector_test_client
 
 
@@ -305,7 +304,6 @@ def test_verify_without_deep(runner, env_creds, mock_db) -> None:
 
 
 def _verify_deep(runner, mock_db, col_name, count, verify_result, verify_side_effect=None):
-    from nexus.db.t3 import VerifyResult
     mock_db.list_collections.return_value = [{"name": col_name, "count": count}]
     patch_kwargs = {"return_value": verify_result} if verify_side_effect is None else {"side_effect": verify_side_effect}
     with patch("nexus.commands.collection._t3", return_value=mock_db), \
@@ -936,7 +934,6 @@ def test_corpus_default_keeps_docs_collection(tmp_path, monkeypatch) -> None:
 def test_reembed_dry_run_reports_count(runner, env_creds, tmp_path, cloud_mode) -> None:
     """nexus-bw65: --dry-run (default) reports the chunk count that
     would be re-embedded without making any writes. No Voyage call."""
-    import chromadb
     import uuid
 
     coll_name = f"knowledge__rem_{uuid.uuid4().hex[:12]}"
@@ -975,7 +972,6 @@ def test_reembed_no_dry_run_writes_via_voyage(
     new vectors. Chunk ids + document text + metadata preserved;
     metadata.embedding_model stamped to the target model.
     """
-    import chromadb
     import uuid
 
     # nexus-u37lw: name ENCODES the target model — service mode only
@@ -1053,7 +1049,6 @@ def test_reembed_skips_empty_documents(
 ) -> None:
     """nexus-bw65: chunks with empty / whitespace-only document text are
     skipped (Voyage rejects empty strings). Counted under ``skipped``."""
-    import chromadb
     import uuid
 
     # nexus-u37lw: model-encoded name so the same-model service path runs.

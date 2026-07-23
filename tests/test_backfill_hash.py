@@ -6,8 +6,6 @@ from __future__ import annotations
 
 import hashlib
 
-import chromadb
-import pytest
 from tests.conftest import make_vector_test_client
 
 

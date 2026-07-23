@@ -7,7 +7,6 @@ import json
 from pathlib import Path
 from typing import Generator
 
-import chromadb
 import msgpack
 import numpy as np
 import pytest

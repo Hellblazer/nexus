@@ -15,9 +15,7 @@ Conservative: a non-empty unreferenced collection is preserved
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
 
-import chromadb
 import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from click.testing import CliRunner

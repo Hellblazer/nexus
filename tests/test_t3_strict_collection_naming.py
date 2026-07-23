@@ -16,7 +16,6 @@ escape hatch (used by backfill / migration verbs).
 """
 from __future__ import annotations
 
-import chromadb
 import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 

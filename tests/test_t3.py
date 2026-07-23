@@ -544,7 +544,6 @@ def test_put_then_delete_by_title_cross_collapses_shared_content():
     mocked ``mock_db`` fixture above only proves id parity, not the
     delete-side consequence).
     """
-    import chromadb
     from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
     db = T3Database(

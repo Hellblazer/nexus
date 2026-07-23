@@ -13,7 +13,6 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-import chromadb
 import pytest
 from tests.conftest import make_vector_test_client
 

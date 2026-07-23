@@ -6,8 +6,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import chromadb
-import pytest
 
 from nexus.catalog.catalog import Catalog
 from tests.conftest import make_vector_test_client

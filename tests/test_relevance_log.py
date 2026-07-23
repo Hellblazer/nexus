@@ -11,11 +11,9 @@ Verifies:
 from __future__ import annotations
 
 import tempfile
-import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import chromadb
 import pytest
 
 from nexus.db.t1 import T1Database
@@ -326,7 +324,6 @@ def test_t1_public_session_id_property(t1):
 def test_catalog_link_logs_relevance_with_collection_match(t1, tmp_path, monkeypatch):
     """catalog_link logs relevance when target collection matches a recent search chunk."""
     from nexus.catalog import Catalog
-    from nexus.catalog.tumbler import Tumbler
     from nexus.mcp.catalog import catalog_link
 
     # Set up a catalog with two documents in the same collection

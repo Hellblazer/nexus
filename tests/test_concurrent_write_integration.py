@@ -29,9 +29,7 @@ import hashlib
 import threading
 import time
 from datetime import UTC, datetime
-from pathlib import Path
 
-import chromadb
 import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 

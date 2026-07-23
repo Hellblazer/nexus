@@ -67,7 +67,6 @@ class TestServiceDispatch:
         """An injected ``_client`` (the dry-run indexer pattern, the
         test ephemeral-client pattern) must return the T3Database
         facade over that client — no service involvement."""
-        import chromadb
         from nexus.db import make_t3
         from nexus.db.t3 import T3Database
 

@@ -5,7 +5,6 @@ Uses EphemeralClient + DefaultEmbeddingFunction — no API keys needed.
 """
 from __future__ import annotations
 
-import chromadb
 import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 

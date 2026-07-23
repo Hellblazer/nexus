@@ -15,7 +15,6 @@ imported, not duplicated).
 """
 from __future__ import annotations
 
-import chromadb
 import pytest
 
 from nexus.db.t1 import T1Database

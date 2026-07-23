@@ -113,8 +113,6 @@ def test_parse_returns_none_for_legacy() -> None:
 
 @pytest.fixture
 def t3_local():
-    import chromadb
-    from nexus.db.local_ef import LocalEmbeddingFunction
     from nexus.db.t3 import T3Database
 
     return T3Database(
@@ -127,7 +125,6 @@ def t3_local():
 
 @pytest.fixture
 def t3_cloud(monkeypatch):
-    import chromadb
     from nexus.db.t3 import T3Database
 
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)

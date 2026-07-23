@@ -15,10 +15,8 @@ Four fixes validated here:
 """
 from __future__ import annotations
 
-import pytest
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
-import chromadb
 from chromadb.errors import InvalidArgumentError
 
 from nexus.db.t3 import T3Database
@@ -293,7 +291,6 @@ class TestFix3AllSkippedErrorEvent:
 
     def test_all_collections_dimension_skipped_fires_error(self, caplog) -> None:
         """Fix 3: if all collections are dimension-skipped, an ERROR-level distinct event fires."""
-        import logging
         db, _ = self._db_with_dim_error_cols(["col1", "col2"])
 
         with patch.object(db, "_local_mode", False):

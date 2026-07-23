@@ -14,9 +14,7 @@ and the ``nx catalog chash-reconcile`` CLI verb.
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
 
-import chromadb
 import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from click.testing import CliRunner
@@ -106,7 +104,6 @@ class TestChashReconcileCLI:
         finally:
             idx.close()
 
-        import nexus.commands._helpers as h
         monkeypatch.setattr("nexus.config.default_db_path", lambda: mem_db)
         monkeypatch.setattr("nexus.db.make_t3", lambda: t3_db)
         return mem_db
@@ -230,7 +227,6 @@ class TestChashReconcileCLI:
         self, tmp_path: Path, monkeypatch, runner,
     ) -> None:
         absent_db = tmp_path / "absent" / "memory.db"
-        import nexus.commands._helpers as h
         monkeypatch.setattr("nexus.config.default_db_path", lambda: absent_db)
 
         result = runner.invoke(main, ["catalog", "chash-reconcile"])
@@ -292,7 +288,6 @@ class TestChashReconcileCLI:
         finally:
             idx.close()
 
-        import nexus.commands._helpers as h
         monkeypatch.setattr("nexus.config.default_db_path", lambda: mem_db)
         monkeypatch.setattr("nexus.db.make_t3", lambda: t3)
 

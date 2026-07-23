@@ -2,14 +2,8 @@
 """Tests for T1Database — session scratch with per-session server sharing."""
 from __future__ import annotations
 
-import json
-import os
-import time
-import warnings
-from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
-import chromadb
 import pytest
 
 from nexus.db.t1 import T1Database

@@ -25,7 +25,6 @@ def _clean_ephemeral_client():
     the same suite. Clearing collections at entry guarantees per-test
     isolation. See project memory: chromadb_ephemeral_shared_state.
     """
-    import chromadb  # noqa: PLC0415
     client = make_vector_test_client()
     for col in list(client.list_collections()):
         try:
@@ -290,7 +289,6 @@ class TestLiveDistanceProbe:
     def _ephemeral_collection_with_embeddings(self, name: str):
         """Seed a Chroma EphemeralClient collection with N deterministic
         embeddings so ``col.query`` returns repeatable distances."""
-        import chromadb
         from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
         client = _clean_ephemeral_client()
@@ -345,7 +343,6 @@ class TestLiveDistanceProbe:
 
     def test_live_histogram_empty_when_collection_empty(self) -> None:
         from nexus.collection_audit import compute_live_distance_histogram
-        import chromadb
         from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
         client = _clean_ephemeral_client()
@@ -665,7 +662,6 @@ class TestCollectionAuditCli:
     ) -> None:
         """nexus-fx2d — ``--live`` promotes source="empty" → source="live"
         by probing ChromaDB for chunks that have never been searched."""
-        import chromadb
         import json
         from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
         from unittest.mock import patch

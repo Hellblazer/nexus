@@ -209,7 +209,6 @@ def test_memory_search_under_discover_topics_load(tmp_path: Path) -> None:
     taxonomy path) would inflate the median by 50-100x, well above 10x.
     The p95 figures are still printed for diagnostic reference.
     """
-    import chromadb
 
     db_path = tmp_path / "discover_underload.db"
     db = T2Database(db_path)

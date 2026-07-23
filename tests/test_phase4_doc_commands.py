@@ -19,8 +19,6 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import chromadb
-import pytest
 from click.testing import CliRunner
 from tests.conftest import make_vector_test_client
 

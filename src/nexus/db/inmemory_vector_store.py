@@ -137,13 +137,17 @@ class InMemoryCollection:
                metadata: dict[str, Any] | None = None) -> None:
         """Chroma-parity ``modify``: O(1) rename and/or metadata replace.
         The rename re-keys the owning client's registry (the
-        ``nx collection rename`` surface, T3Database.rename_collection)."""
+        ``nx collection rename`` surface, T3Database.rename_collection).
+        Registry re-key happens OUTSIDE self._lock — the registry has its
+        own lock and never calls back into the collection (no deadlock)."""
         if name is not None and name != self.name:
             if self._registry is not None:
                 self._registry._rename(self.name, name)
-            self.name = name
+            with self._lock:
+                self.name = name
         if metadata is not None:
-            self.metadata = dict(metadata)
+            with self._lock:
+                self.metadata = dict(metadata)
 
     # ── embedding resolution ────────────────────────────────────────────
 
@@ -178,6 +182,10 @@ class InMemoryCollection:
                embeddings: list[list[float]] | None = None,
                documents: list[str] | None = None,
                metadatas: list[dict[str, Any]] | None = None) -> None:
+        """Rows commit per-row, DELIBERATELY: a batch that fails
+        validation on row N leaves rows < N written (chroma batches are
+        not transactional either, and every consumer retry is per-row
+        idempotent). A rejected row never corrupts the collection."""
         if embeddings is None:
             if documents is None:
                 raise ValueError("upsert needs embeddings or documents")
@@ -424,4 +432,10 @@ class InMemoryVectorClient:
         with self._lock:
             if new in self._collections:
                 raise ValueError(f"collection {new!r} already exists")
+            if old not in self._collections:
+                from nexus.errors import CollectionNotFoundError  # noqa: PLC0415 — circular-dep avoidance
+
+                raise CollectionNotFoundError(
+                    f"collection {old!r} does not exist"
+                )
             self._collections[new] = self._collections.pop(old)

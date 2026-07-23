@@ -172,6 +172,21 @@ class TestWriteSemantics:
         with pytest.raises(Exception, match="[Dd]imension"):
             col.query(query_embeddings=[[1.0, 0.0]], n_results=1)
 
+    def test_rejected_wrong_dim_write_leaves_collection_usable(self, substrate) -> None:
+        """Blast-radius pin (review finding 2): a refused
+        wrong-dimension write must not poison the collection — correct
+        subsequent ops keep working. Matters most for the process-scoped
+        T1-isolated singleton, where a poisoned collection would break
+        every later scratch op in the process."""
+        col = _make(substrate)
+        col.add(ids=["a"], embeddings=[_E1], documents=["d"])
+        with pytest.raises(Exception):
+            col.add(ids=["bad"], embeddings=[[1.0, 0.0]], documents=["x"])
+        col.add(ids=["b"], embeddings=[_E2], documents=["d2"])
+        assert col.count() == 2
+        res = col.query(query_embeddings=[_E1], n_results=1)
+        assert res["ids"][0] == ["a"]
+
     def test_metadata_type_round_trip(self, substrate) -> None:
         col = _make(substrate)
         meta = {"s": "text", "i": 7, "f": 0.5, "b": True}

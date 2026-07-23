@@ -4,7 +4,7 @@ import hashlib
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from voyageai.object.embeddings import EmbeddingsObject
@@ -1212,7 +1212,6 @@ def test_prune_deleted_files_round_trip_with_real_catalog(tmp_path):
     ``chunk_text_hash[:32]``, end-to-end."""
     import hashlib
 
-    import chromadb
 
     from nexus.catalog.catalog import Catalog
     from nexus.indexer import _prune_deleted_files

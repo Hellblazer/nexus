@@ -27,7 +27,6 @@ import uuid
 from typing import Any
 from unittest.mock import patch
 
-import chromadb
 import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from click.testing import CliRunner
@@ -934,7 +933,6 @@ class TestReidentifyCLI:
         """
         import threading
         import time
-        from collections import defaultdict
         from unittest.mock import patch as _patch
 
         # Seed three collections; each will need migration.
