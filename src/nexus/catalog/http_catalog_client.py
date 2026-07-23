@@ -1274,7 +1274,29 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         }
 
     def resolve_span_text(self, tumbler: Tumbler | str, span: str) -> str | None:
-        return None  # not supported in initial service-mode implementation
+        """Resolve a span to text content — service-mode parity (nexus-p8nd5).
+
+        Faithful mirror of :meth:`nexus.catalog.catalog.Catalog.resolve_span_text`
+        (the canonical contract, ``catalog_protocol``): ``None`` when the span
+        is genuinely unresolvable (unknown tumbler, missing chunk); RAISES
+        :class:`~nexus.db.http_vector_client.VectorServiceError` when the
+        vector service is DEGRADED (nexus-ib6uy — unreachable is never
+        collapsed into not-found; the CLI boundaries render the distinction).
+        Composition over the existing service surfaces: entry via
+        :meth:`resolve`, chunk reads via the service store routes (the shared
+        resolver's T3 reads are client-shape-agnostic since the p8nd5 seam
+        fix), manifest via :meth:`get_manifest` for chunk:char spans.
+        """
+        if not span:
+            return None
+        entry = self.resolve(tumbler)
+        if entry is None:
+            return None
+        from nexus.catalog import catalog_spans  # noqa: PLC0415 — circular-dep avoidance
+
+        return catalog_spans.resolve_span_text_for_entry(
+            entry, span, catalog=self,
+        )
 
     # ══════════════════════════════════════════════════════════════════════════
     # LINKS

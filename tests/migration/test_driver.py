@@ -151,10 +151,10 @@ def _patch_engine(
     local = _FakeClient("detect-local", closables=closables)
     cloud = _FakeClient("detect-cloud", closables=closables)
 
-    def _open_read_legs(local_path=None):
+    def _open_read_legs(local_path=None, **_kw):
         return local, cloud
 
-    def _classify(*, local_client, cloud_client, voyage_key_present):
+    def _classify(*, local_client, cloud_client, voyage_key_present, **_kw):
         order.append("classify")
         return detection
 
@@ -212,10 +212,10 @@ def test_run_t2_passthrough_only_when_provided(monkeypatch, _sources):
     would break every caller unaware of this seam)."""
     captured: dict[str, object] = {}
 
-    def _open_read_legs(local_path=None):
+    def _open_read_legs(local_path=None, **_kw):
         return _FakeClient("l", closables=[]), _FakeClient("c", closables=[])
 
-    def _classify(*, local_client, cloud_client, voyage_key_present):
+    def _classify(*, local_client, cloud_client, voyage_key_present, **_kw):
         return _detection()
 
     def _run_land_then_transform(
@@ -449,7 +449,7 @@ def test_reopened_legs_closed_when_land_then_transform_raises(monkeypatch, _sour
     local = _FakeClient("detect-local", closables=closables)
     cloud = _FakeClient("detect-cloud", closables=closables)
 
-    monkeypatch.setattr(driver, "open_read_legs", lambda local_path=None: (local, cloud))
+    monkeypatch.setattr(driver, "open_read_legs", lambda local_path=None, **kw: (local, cloud))
     monkeypatch.setattr(
         driver, "classify_collections",
         lambda **kw: (order.append("classify"), detection)[1],
@@ -492,7 +492,7 @@ def test_reopen_for_landing_raises_wrapped_as_runtimeerror(monkeypatch, _sources
     local = _FakeClient("detect-local", closables=closables)
     cloud = _FakeClient("detect-cloud", closables=closables)
 
-    monkeypatch.setattr(driver, "open_read_legs", lambda local_path=None: (local, cloud))
+    monkeypatch.setattr(driver, "open_read_legs", lambda local_path=None, **kw: (local, cloud))
     monkeypatch.setattr(
         driver, "classify_collections",
         lambda **kw: (order.append("classify"), detection)[1],

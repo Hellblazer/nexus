@@ -326,7 +326,7 @@ def _drive(
     # footprint. The hermetic oracle's footprint is EXACTLY the seeded stores.
     local_client = chromadb.PersistentClient(path=str(local_path))
 
-    def _open_read_legs(_lp: Any = None):  # type: ignore[no-untyped-def]
+    def _open_read_legs(_lp: Any = None, skipped_out=None):  # type: ignore[no-untyped-def]
         return local_client, cloud_store
 
     monkeypatch.setattr(driver, "open_read_legs", _open_read_legs)

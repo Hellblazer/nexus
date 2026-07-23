@@ -502,8 +502,14 @@ def resolve_span_text_for_entry(
         try:
             from nexus.db import make_t3  # noqa: PLC0415 — function-local to avoid a circular import (nexus.db imports catalog)
             t3 = make_t3()
+            # nexus-p8nd5: reach the collection surface through whichever shape
+            # this handle has. T3Database wraps a chroma client at ``_client``;
+            # the service-mode HttpVectorClient deliberately has NO ``_client``
+            # (pinned) but exposes ``get_collection`` itself — the old
+            # unconditional ``t3._client`` read AttributeError'd into the broad
+            # except below and masked every service-mode chash span to None.
             result = resolve_span_in_t3(
-                span, entry.physical_collection, t3._client,
+                span, entry.physical_collection, getattr(t3, "_client", t3),
             )
             return result["chunk_text"] if result else None
         except Exception as exc:  # noqa: BLE001 — span resolution is best-effort; failure is logged at WARNING and degrades to None, must not crash caller

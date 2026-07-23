@@ -479,12 +479,14 @@ def run_guided_upgrade(
     # 1. DETECT — open read legs, classify, then CLOSE before any landing (the
     #    local leg is a WAL single-opener; the landing reopen must be the sole
     #    opener).
-    local, cloud = open_read_legs(local_path)
+    _skipped: dict = {}
+    local, cloud = open_read_legs(local_path, skipped_out=_skipped)
     try:
         detection = classify_collections(
             local_client=local,
             cloud_client=cloud,
             voyage_key_present=key_present,
+            cloud_leg_skipped_reason=_skipped.get("cloud"),
         )
     finally:
         for client in (local, cloud):

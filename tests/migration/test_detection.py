@@ -740,7 +740,7 @@ class TestMigrateToServiceCli:
 
         seen: dict[str, object] = {}
 
-        def _fake_open(local_path=None):
+        def _fake_open(local_path=None, skipped_out=None):
             seen["local_path"] = local_path
             return None, None
 
@@ -844,7 +844,7 @@ class TestMigrateToServiceRun:
         # these tests exercise result rendering, not the cost gate (covered in
         # test_migrate_cost_guardrail). A no-data classify → zero billed cost →
         # no prompt, so --yes below is belt-and-suspenders.
-        monkeypatch.setattr(migrate_cmd, "open_read_legs", lambda p: (None, None))
+        monkeypatch.setattr(migrate_cmd, "open_read_legs", lambda p, **kw: (None, None))
         monkeypatch.setattr(migrate_cmd, "_close_quietly", lambda c: None)
         if token is None:
             monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
@@ -1725,6 +1725,49 @@ class TestOpenReadLegsDeadCloudCreds:
         assert any(
             e["event"] == "detection.cloud_read_leg_unreadable" for e in logs
         )
+
+    def test_skip_reason_reaches_the_out_param_and_report(self, monkeypatch) -> None:
+        """nexus-p8nd5 dv708 fold: the skip is STRUCTURED, not just a WARN —
+        skipped_out carries leg->reason, and DetectionReport /
+        DryRunPreview expose cloud_leg_skipped_reason so non-stderr
+        consumers can tell skipped-unreadable from never-configured."""
+        from chromadb.errors import ChromaError
+
+        from nexus.migration.detection import (
+            build_dry_run_preview,
+            classify_collections,
+            open_read_legs,
+        )
+
+        class _Auth(ChromaError):
+            pass
+
+        self._patch_legs(monkeypatch, _Auth("Forbidden"))
+        skipped: dict = {}
+        local, cloud = open_read_legs("/nonexistent", skipped_out=skipped)
+        assert cloud is None
+        assert "cloud" in skipped and "Forbidden" in skipped["cloud"]
+
+        report = classify_collections(
+            local_client=None, cloud_client=None, voyage_key_present=False,
+            cloud_leg_skipped_reason=skipped.get("cloud"),
+        )
+        assert report.cloud_leg_skipped_reason == skipped["cloud"]
+        preview = build_dry_run_preview(report, rehashes_ids=True)
+        assert preview.cloud_leg_skipped_reason == skipped["cloud"]
+
+        from nexus.migration.detection import render_dry_run_preview
+        rendered = render_dry_run_preview(preview)
+        assert "SKIPPED (unreadable, not absent)" in rendered
+        assert "Forbidden" in rendered
+
+    def test_never_configured_report_has_no_skip_reason(self) -> None:
+        from nexus.migration.detection import classify_collections
+
+        report = classify_collections(
+            local_client=None, cloud_client=None, voyage_key_present=False,
+        )
+        assert report.cloud_leg_skipped_reason is None
 
     def test_half_configured_sentinel_stays_silent(self, monkeypatch) -> None:
         """Regression guard: the absent-leg RuntimeError sentinel must NOT

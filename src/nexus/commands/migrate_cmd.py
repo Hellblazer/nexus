@@ -142,12 +142,14 @@ def migrate_to_service_cmd(
 
 
 def _run_dry_run(local_path: str | None) -> None:
-    local, cloud = open_read_legs(local_path)
+    _skipped: dict = {}
+    local, cloud = open_read_legs(local_path, skipped_out=_skipped)
     try:
         report = classify_collections(
             local_client=local,
             cloud_client=cloud,
             voyage_key_present=voyage_key_available(),
+            cloud_leg_skipped_reason=_skipped.get("cloud"),
         )
         # The real run this previews is run_guided_upgrade -> land-then-
         # transform, which rehashes ids server-side. The preview must answer
@@ -254,13 +256,15 @@ def _run_migration(
     # gate the billed run behind an explicit confirmation. A migration that
     # bills nothing (byte-for-byte copy / local ONNX re-embed) proceeds silently.
     # Runs AFTER the version-floor gate above (see the nexus-b6qlf comment).
-    local_read, cloud_read = open_read_legs(local_path)
+    _skipped2: dict = {}
+    local_read, cloud_read = open_read_legs(local_path, skipped_out=_skipped2)
     try:
         cost_preview = build_dry_run_preview(
             classify_collections(
                 local_client=local_read,
                 cloud_client=cloud_read,
                 voyage_key_present=voyage_key_available(),
+                cloud_leg_skipped_reason=_skipped2.get("cloud"),
             ),
             # Same path as the run below (land-then-transform).
             rehashes_ids=True,

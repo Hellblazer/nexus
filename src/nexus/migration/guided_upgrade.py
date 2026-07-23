@@ -262,12 +262,19 @@ def detect_pending_migration(
     _open = open_legs if open_legs is not None else open_read_legs
     _close = close_leg if close_leg is not None else close_read_client
 
-    local, cloud = _open(local_path)
+    _skipped: dict = {}
+    try:
+        local, cloud = _open(local_path, skipped_out=_skipped)
+    except TypeError:
+        # Injected open_legs doubles predate the skipped_out kwarg — the
+        # structured skip note is best-effort for them.
+        local, cloud = _open(local_path)
     try:
         report = classify_collections(
             local_client=local,
             cloud_client=cloud,
             voyage_key_present=key_present,
+            cloud_leg_skipped_reason=_skipped.get("cloud"),
         )
     finally:
         # Close only the legs that were actually opened — an absent leg is
