@@ -1,4 +1,5 @@
 import logging
+import os
 
 import pytest
 from pathlib import Path
@@ -54,6 +55,11 @@ def _disable_aspect_worker_autostart() -> None:
 
 _enable_t2_test_auto_migrate()
 _disable_aspect_worker_autostart()
+
+# RDR-155 P4b P0a': import at collection start so the engine substrate
+# resolves PG binaries against the AMBIENT env (per-test fixtures patch
+# HOME/NEXUS_CONFIG_DIR before the lazy first ensure_engine() call).
+import tests._engine_substrate  # noqa: E402, F401
 
 
 def pytest_configure(config):
@@ -262,6 +268,33 @@ def _pin_mineru_autostart_off(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NX_MINERU_AUTOSTART", "1") + patched spawn core.
     """
     monkeypatch.setenv("NX_MINERU_AUTOSTART", "0")
+
+
+@pytest.fixture
+def t2_service_env(request: pytest.FixtureRequest,
+                   monkeypatch: pytest.MonkeyPatch) -> str:
+    """Engine-backed T2 substrate env for one test (RDR-155 P4b P0a', D-A).
+
+    Boots the session-scoped hermetic PG + service JAR on first use
+    (tests/_engine_substrate.py, memoized) and points this test's env at
+    it with a freshly MINTED tenant + tenant-bound token — the engine
+    binds tenant to the BEARER server-side (AuthFilter Decision 1; the
+    X-Nexus-Tenant header is ignored), so per-test isolation is a
+    per-test token. Tests never share or clean up state. Returns the
+    tenant name.
+
+    Opt-in during the incremental migration; replaces the sqlite pin
+    (set AFTER _pin_storage_backend_sqlite — later setenv wins) and
+    becomes the suite default when the pin flips at the end of P0a'.
+    """
+    from tests._engine_substrate import ensure_engine, mint_test_tenant
+
+    state = ensure_engine()
+    tenant, token = mint_test_tenant(state)
+    monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+    monkeypatch.setenv("NX_SERVICE_URL", state["base_url"])
+    monkeypatch.setenv("NX_SERVICE_TOKEN", token)
+    return tenant
 
 
 @pytest.fixture(autouse=True)
