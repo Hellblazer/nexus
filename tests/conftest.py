@@ -298,8 +298,17 @@ def t2_service_env(request: pytest.FixtureRequest,
 
 
 @pytest.fixture(autouse=True)
-def _pin_storage_backend_sqlite(monkeypatch: pytest.MonkeyPatch) -> None:
+def _pin_storage_backend_sqlite(request: pytest.FixtureRequest,
+                                monkeypatch: pytest.MonkeyPatch) -> None:
     """Pin the unit suite to the SQLite storage backend (RDR-152 nexus-fjwxh).
+
+    FLIP MECHANISM (RDR-155 P4b P0a'): ``NX_TEST_T2_SUBSTRATE=engine``
+    routes this autouse pin to the engine-backed substrate instead —
+    every test gets the session PG+JAR with a freshly minted tenant
+    (exactly what the ``t2_service_env`` opt-in fixture provides). This
+    is both the flip dry-run switch (run any subset against the engine
+    without editing files) and, when the migration completes, the
+    default this fixture body becomes.
 
     ``storage_backend_for`` defaults to ``service`` since the T2 cutover, so a
     bare ``T2Database(path)`` would construct the Http* stores and try to reach
@@ -314,6 +323,9 @@ def _pin_storage_backend_sqlite(monkeypatch: pytest.MonkeyPatch) -> None:
     test that wants service mode sets ``NX_STORAGE_BACKEND[_<store>]`` itself,
     which overrides this pin (later ``setenv`` wins).
     """
+    if os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine":
+        request.getfixturevalue("t2_service_env")
+        return
     monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
 
 
