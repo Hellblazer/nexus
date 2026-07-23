@@ -357,17 +357,27 @@ def detect_pending_migration_memoized() -> PreflightDetection:
 #: probe is used only to decide whether to SKIP re-shipping, never to
 #: confirm correctness, and a false skip is still safe (copy-not-move — the
 #: source is never at risk, only re-verified less eagerly).
-FRESHNESS_PROBES: dict[str, tuple[str, str]] = {
-    "memory": ("memory", "timestamp"),
-    "plans": ("plans", "created_at"),
-    "telemetry": ("search_telemetry", "ts"),
-    "taxonomy": ("topics", "created_at"),
-    "aspects": ("document_aspects", "extracted_at"),
+FRESHNESS_PROBES: dict[str, tuple[tuple[str, str], ...]] = {
+    "memory": (("memory", "timestamp"),),
+    "plans": (("plans", "created_at"),),
+    "telemetry": (("search_telemetry", "ts"),),
+    "taxonomy": (("topics", "created_at"),),
+    # nexus-g8r2h critic Critical (critique [21092]): document_highlights
+    # rides the "aspects" ETL slot (aspects_etl.migrate_highlights) but the
+    # probe never anchored on it — a highlights-only local write (the
+    # pre-g8r2h service-mode writer bug's stranded window) read as "no newer
+    # local writes": a CONFIDENTLY FALSE clean, worse than no signal. Every
+    # table an ETL slot ships must be probed; multi-probe slots confirm
+    # freshness only when EVERY probe answers "no newer writes".
+    "aspects": (
+        ("document_aspects", "extracted_at"),
+        ("document_highlights", "ingested_at"),
+    ),
     # "chash" probe removed (RDR-187/nexus-piwya.9 sweep): unreachable since
     # .10 dropped the store from LADDER_ORDER; detect_already_migrated never
     # consults it.
-    "catalog": ("documents", "indexed_at"),
-    "aspects_queue": ("aspect_extraction_queue", "enqueued_at"),
+    "catalog": (("documents", "indexed_at"),),
+    "aspects_queue": (("aspect_extraction_queue", "enqueued_at"),),
 }
 
 
@@ -537,17 +547,23 @@ def _decide_store(
             f"{verification!r} — will migrate",
         )
 
-    probe = FRESHNESS_PROBES.get(store)
+    probes = FRESHNESS_PROBES.get(store) or ()
     freshness_confirmed = False
-    if probe is not None and completed_at:
-        newer = _has_newer_local_writes(sqlite_path, probe, completed_at)
-        if newer is True:
+    if probes and completed_at:
+        answers = [
+            _has_newer_local_writes(sqlite_path, probe, completed_at)
+            for probe in probes
+        ]
+        if any(a is True for a in answers):
             return StoreMigrationStatus(
                 store, False,
                 f"{store}: local writes newer than the report ({completed_at}) "
                 "— will migrate",
             )
-        freshness_confirmed = newer is False
+        # Confirmed only when EVERY probe positively answered "no newer
+        # writes" — a missing/unreadable table (None) degrades to
+        # trust-the-report, never to a confident clean (nexus-g8r2h fold).
+        freshness_confirmed = bool(answers) and all(a is False for a in answers)
 
     if freshness_confirmed:
         line = f"{store}: already migrated {completed_at}, no newer local writes"
@@ -881,8 +897,19 @@ def establish_verified_service(
 
     prov = _provision()
 
+    # nexus-bwulw / conexus relay [21082]: a managed (https, non-loopback)
+    # target's edge auth-gates /health, so the gate sends the configured
+    # bearer there; the loopback provision path stays unauthenticated
+    # (ez5.1, the engine contract).
+    health_token: str | None = None
+    if prov.service_url.startswith("https://"):
+        from nexus.config import get_credential  # noqa: PLC0415 — deferred to avoid import cycle
+
+        health_token = (get_credential("service_token") or "").strip() or None
+
     health = _health(
-        service_url=prov.service_url, timeout_s=timeout_s, interval_s=interval_s
+        service_url=prov.service_url, timeout_s=timeout_s, interval_s=interval_s,
+        token=health_token,
     )
     if not health.ready:
         reason = (
@@ -1052,6 +1079,7 @@ def wait_for_service_health(
     service_url: str,
     timeout_s: float = 30.0,
     interval_s: float = 1.0,
+    token: str | None = None,
     http_get: Callable[[str, float], Any] | None = None,
     sleep: Callable[[float], None] | None = None,
     clock: Callable[[], float] | None = None,
@@ -1063,6 +1091,15 @@ def wait_for_service_health(
     deadline; returns ``ready=False`` with the last status/error when the
     service does not come up in time — the caller hard-fails with a remedy
     (ez5.7), it does NOT wait forever.
+
+    ``token`` (nexus-bwulw, conexus relay [21082]): the managed public edge
+    auth-gates /health (401 unauthenticated) — ez5.1's UNAUTHENTICATED
+    contract is the LOOPBACK/ENGINE contract only. When *token* is set the
+    default transport sends ``Authorization: Bearer``; the edge relays the
+    engine's ``{status, db}`` body verbatim to authenticated callers
+    (IT-pinned conexus-side, conexus-4ap0), so readiness semantics are
+    identical on both paths. Loopback callers pass no token and stay
+    unauthenticated.
 
     ``http_get`` / ``sleep`` / ``clock`` are injection seams for deterministic
     tests; production uses ``httpx.get`` / ``time.sleep`` / ``time.monotonic``.
@@ -1085,7 +1122,8 @@ def wait_for_service_health(
         def _get(url: str, timeout: float) -> Any:
             import httpx  # noqa: PLC0415 — optional/heavy dependency deferred (httpx)
 
-            return httpx.get(url, timeout=timeout)
+            headers = {"Authorization": f"Bearer {token}"} if token else {}
+            return httpx.get(url, timeout=timeout, headers=headers)
 
     url = service_url.rstrip("/") + "/health"
     req_timeout = max(0.1, min(interval_s, 5.0)) if interval_s > 0 else 1.0

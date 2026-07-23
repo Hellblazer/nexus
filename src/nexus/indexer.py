@@ -1317,14 +1317,11 @@ def _catalog_hook(
         _stage_mark = time.monotonic()
 
         # Housekeeping: detect and evict orphaned catalog entries.
-        # nexus-fltb4: NEVER against a partial (delta-filtered) walk — the
-        # miss-count sweep interprets "not in this run's set" as "gone".
-        if skip_housekeeping:
-            _log.debug("catalog_housekeeping_skipped", reason="partial_walk")
-        else:
-            _progress(f"  Catalog: housekeeping…\r")
-            indexed_set = _indexed_relpaths(indexed_files, repo)
-            _run_housekeeping(cat, owner, indexed_set, writer=writer)
+        _maybe_run_housekeeping(
+            cat, owner, indexed_files, repo,
+            writer=writer, skip_housekeeping=skip_housekeeping,
+            progress=_progress,
+        )
         _stage_s["housekeeping"] = time.monotonic() - _stage_mark
 
         _log.info(
@@ -1353,6 +1350,34 @@ def _catalog_hook(
         if reader is not None:
             reader.close()  # nexus-qnp5s: HttpCatalogClient.close() is safe; Catalog._db.close() is internal
     return file_to_doc_id
+
+
+def _maybe_run_housekeeping(
+    cat,
+    owner,
+    indexed_files: list,
+    repo: "Path",
+    *,
+    writer,
+    skip_housekeeping: bool,
+    progress: "Callable[[str], object]" = lambda _s: None,
+) -> None:
+    """The nexus-fltb4 mass-delete gate, as a behavioral seam (nexus-4kh95).
+
+    Housekeeping's miss-count sweep interprets "not in this run's indexed
+    set" as "gone" — run against a PARTIAL (delta-filtered) walk it marks
+    every unvisited doc as missing and evicts them after two runs (the
+    mass-delete class). ``skip_housekeeping=True`` (set by the --since-head
+    delta path) must therefore never reach :func:`_run_housekeeping`.
+    Extracted from ``_catalog_hook``'s body so the gate is testable by
+    CALLING it, not by source-text inspection.
+    """
+    if skip_housekeeping:
+        _log.debug("catalog_housekeeping_skipped", reason="partial_walk")
+        return
+    progress("  Catalog: housekeeping…\r")
+    indexed_set = _indexed_relpaths(indexed_files, repo)
+    _run_housekeeping(cat, owner, indexed_set, writer=writer)
 
 
 def _indexed_relpaths(indexed_files: list, repo: "Path") -> set[str]:

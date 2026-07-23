@@ -566,6 +566,28 @@ nx aspects requeue-failed --limit 100            # pace a large backlog
 nx aspects requeue-failed --dry-run              # report only, no writes
 ```
 
+### nx aspects backfill-source-uri
+
+```
+nx aspects backfill-source-uri [--apply]
+```
+
+Backfill NULL/empty `source_uri` rows in `document_aspects` (RDR-120 §A8 repair verb, carved out of the old migration chain). RDR-096 added `document_aspects.source_uri` in 4.16.0; rows written before that (plus a transient writer-path gap) lack a URI, and the 4.31.0 migration that drops the legacy `source_path` column refuses to run until every row has one; run this before the next upgrade if your database has unbackfilled rows.
+
+Idempotent: only touches rows where `source_uri` is NULL/empty AND `source_path` is populated. URI schemes match the writer: `file://` for `rdr__*` / `docs__*` / `code__*`, `chroma://` for `knowledge__*` and other chroma-backed prefixes. Rows with empty `source_path` are skipped and counted separately for manual triage. Dry-run by default; `--apply` writes.
+
+Operates on the local SQLite T2 via a direct connection, deliberately bypassing the normal migration chain: the verb must work precisely when that chain is stuck on this precondition. No-op when no local T2 database exists (i.e. on migrated service-mode installs).
+
+### nx aspects gc-pre-rdr096
+
+```
+nx aspects gc-pre-rdr096 [--apply]
+```
+
+Delete pre-RDR-096 read-failure rows from `document_aspects` (RDR-120 §A8 repair verb). Uses the seven-clause discriminator from RDR-096 research-3: every aspect field empty AND `confidence IS NULL`, a fingerprint structurally reachable only from a pre-RDR-096 read failure, because the going-forward writer contract records structured-zero successes (parser ran, no scholarly structure) with an explicit `confidence = 1.0`. The `confidence IS NULL` clause is load-bearing: without it the verb would silently drop legitimate structured-zero rows.
+
+Idempotent; safe on a missing table or empty database. Dry-run by default; `--apply` deletes. Same local-SQLite scope as `backfill-source-uri`.
+
 ---
 
 ## nx catalog
@@ -587,6 +609,14 @@ the live catalog — `nx catalog search` / `nx catalog links` already work
 against it with nothing to set up, and creating a local catalog here would
 build a divergent store the service never reads (nexus-kmo9h). The command
 applies only to the SQLite opt-out mode (`NX_STORAGE_BACKEND_CATALOG=sqlite`).
+
+### nx catalog init
+
+```
+nx catalog init [--remote URL]
+```
+
+Low-level primitive: initialize the catalog git repository at the config-dir catalog path, without populating it. `nx catalog setup` (init + populate + link) is the normal onboarding path; use `init` only when you want an empty catalog deliberately. Same service-mode caveat as `setup`: a local catalog created here is a divergent store the service never reads.
 
 ### nx catalog search
 
@@ -764,7 +794,47 @@ nx catalog gc                          # report-only (default is --dry-run)
 nx catalog gc --no-dry-run --confirm   # actually delete
 ```
 
-Remove orphan catalog entries (entries with `miss_count >= 2` — missed in 2 consecutive index runs). Double-gated like `nx t3 gc`: it is report-only by default, and deleting requires **both** `--no-dry-run` **and** `--confirm` — `--no-dry-run` alone silently makes no changes.
+Remove orphan catalog entries (entries with `miss_count >= 2`, i.e. missed in 2 consecutive index runs). Double-gated like `nx t3 gc`: report-only by default; both `--no-dry-run` AND `--confirm` are required to actually delete — `--no-dry-run` alone silently makes no changes (nexus-tnz3: 4.29.1 inverted the default so a forgotten flag no longer silently destroys entries). Before deleting, writes a JSONL backup snapshot restorable via `nx catalog undelete`.
+
+### nx catalog list-backups / undelete / vacuum-backups
+
+```
+nx catalog list-backups
+nx catalog undelete BACKUP
+nx catalog vacuum-backups [--older-than-days N] [--no-dry-run]
+```
+
+Lifecycle verbs over the JSONL snapshots that destructive catalog verbs (`delete`, `gc`, `prune-stale`, `link-bulk-delete`) write under `$NEXUS_CONFIG_DIR/catalog/.deleted-backups/` BEFORE deleting (RDR-106).
+
+- `list-backups` shows each recoverable snapshot: filename, originating verb, timestamp, row count, reason.
+- `undelete BACKUP` restores the documents (and their inbound/outbound links) from a snapshot. `BACKUP` is a filename inside `.deleted-backups/` or an absolute path. Documents are restored with their ORIGINAL tumblers (the minting path is bypassed) as `DocumentRegistered` events, links via idempotent `link_if_absent`; re-running on an already-restored backup is a no-op.
+- `vacuum-backups` drops snapshots past the retention window (default 30 days). Report-only by default; `--no-dry-run` deletes. Vacuumed rows are no longer recoverable via `undelete`.
+
+### nx catalog remediate-paths
+
+```
+nx catalog remediate-paths SOURCE_DIR [--dry-run] [--collection NAME] [--owner PREFIX]
+                           [--prefer-deepest] [--mark-missing] [--extensions LIST] [--rdr-prefix-mode]
+```
+
+Repair catalog entries whose `file_path` is a bare basename or points at a file that no longer exists on disk. Walks `SOURCE_DIR`, indexes files by basename (default extensions `.pdf,.md,.markdown`; `--extensions '*'` matches everything), and updates each remediable entry to the absolute path of its unique basename match. Use after moving PDFs from `~/Downloads` into a papers archive, or any time the original ingest paths went away.
+
+- Entries whose `meta` carries a `devonthink_uri` are resolved via DEVONthink first (macOS only); DT's answer is authoritative when the reported path exists.
+- Multiple basename matches are ambiguous and skipped by default; `--prefer-deepest` breaks ties by longest path.
+- `--rdr-prefix-mode` adds a fallback for RDRs renamed end-to-end: when basename match fails, match by the durable `rdr-NNN-` prefix instead.
+- `--mark-missing` sets `meta.status='missing'` on entries with no candidate, so `nx catalog gc` can sweep them.
+
+Idempotent: re-running on the same `SOURCE_DIR` is a no-op once entries are resolved. Empty-`file_path` entries (MCP-stored knowledge with no source file) are never touched.
+
+### nx catalog prune-stale
+
+```
+nx catalog prune-stale [--collection NAME] [--owner PREFIX] [--source-dir DIR] [--no-dry-run --confirm]
+```
+
+Drop catalog entries whose `file_path` is missing on disk: the catalog-side counterpart to `nx t3 prune-stale`. Pairs naturally with `remediate-paths`: run the remediator first to repair what's recoverable, then prune the rest. Default is report-only; both `--no-dry-run` AND `--confirm` are required to delete. Writes an `undelete`-restorable backup snapshot before deleting.
+
+Never deleted: entries with empty `file_path` (MCP-stored), basename-only paths (remediable, not stale), paths that exist, relative-path entries whose owner has no `repo_root` (presence cannot be verified; repair the owner first), and, when `--source-dir` is set with `--rdr-prefix-skip` (the default), RDR entries whose `rdr-NNN-` prefix matches a file under the source dir (a plausible rename; prefer remediation over destructive prune). Relative paths are resolved against the owner's `repo_root`, not the cwd (nexus-6ims).
 
 ### nx catalog link-density
 
@@ -778,6 +848,22 @@ Per-collection report of outgoing-link counts at the depth-N BFS frontier (defau
 
 Standard catalog management. Run `nx catalog COMMAND --help` for details.
 
+### nx catalog dedupe-owners
+
+```
+nx catalog dedupe-owners [--apply] [--json]
+```
+
+Consolidate orphan owners (nexus-tmbh). Classifies each curator owner as `alias` (synthetic `<repo>-<hash>` names mapping to a canonical repo owner: each doc is aliased via `documents.alias_of`, matched by file_path; rows stay so external references keep resolving), `remove` (`int-cce-*` / `int-prov-*` / `pdf-e2e-*` test leakage predating RDR-060's autouse fixture; documents, links, and the owner row deleted with JSONL tombstones), or `skip` (everything else, manual review). Dry-run by default; `--apply` commits, then `nx catalog sync` pushes the audit trail. `--json` emits the full plan.
+
+### nx catalog backfill-owner-id
+
+```
+nx catalog backfill-owner-id [--no-dry-run] [--no-from-documents]
+```
+
+One-time RDR-137 P1.5a migration: populate `collections.owner_id` for rows where it is empty. The store's auto-migration already handles conformant four-segment names on every DB open; this verb adds the documents-table fallback that recovers `owner_id` for legacy 2-segment names (e.g. `knowledge__delos`) by inferring the owner from documents physically registered against the collection. Ambiguous rows (documents from multiple owners) are skipped with a warning. Report-only by default. SQLite-only: refuses in service mode; run it locally before switching.
+
 ### nx catalog backfill-collections
 
 ```
@@ -787,6 +873,38 @@ nx catalog backfill-collections [--dry-run]
 Populate the RDR-101 Phase 6 collections projection from existing state. Walks both the live T3 vector store and the catalog `documents.physical_collection` column, unions the two sets, and registers each name not already in the projection. The projector's `is_conformant_collection_name` regex decides each row's `legacy_grandfathered` flag automatically.
 
 Idempotent. Conventional first invocation is `--dry-run` for operator review, then `--no-dry-run` to apply.
+
+### nx catalog collection-name
+
+```
+nx catalog collection-name --content-type code|docs|rdr|knowledge [--repo DIR]
+```
+
+Resolve and print the canonical conformant T3 collection name for a content type in a repo (default: cwd). Output is a single line, suitable for shell substitution:
+
+```
+nx store put --collection "$(nx catalog collection-name --content-type knowledge)" ...
+```
+
+Requires an initialized catalog AND a registered owner for the repo (the indexer's `_catalog_hook` registers it on first `nx index repo`); errors with that remediation otherwise. Plugin-layer call sites (rdr-close post-mortem archival, rdr_hook status reporting) use this instead of constructing the legacy 2-segment shape by hand.
+
+### nx catalog collection-gc
+
+```
+nx catalog collection-gc [--apply]
+```
+
+Sweep zombie T3 collections, the junkyard pattern flagged by `nx catalog doctor --collections-drift`: collections pre-created by an interrupted index or deleted worktree (`get_or_create_collection`) that never received a chunk. Conservative: a collection is deleted only when it has 0 chunks AND is not in the collections projection AND is not referenced by any `documents.physical_collection` row AND is not bypass-schema (`taxonomy__*`). Dry-run by default; `--apply` deletes. Stale projection rows (row exists, T3 collection gone) are NOT handled here (the event log is append-only), so those need an explicit `supersede_collection`; use the recipe printed by `nx catalog doctor --collections-drift`.
+
+### nx catalog chash-reconcile
+
+```
+nx catalog chash-reconcile [--apply]
+```
+
+Sweep stale rows from the LOCAL SQLite `chash_index`, the routing table that resolves `chash:<hex>` link spans to their (collection, chunk). Rows are not cascaded when a collection is deleted from T3, so they linger as ghosts pointing at non-existent collections. Dry-run by default; `--apply` deletes; reports per-ghost-collection row counts.
+
+Scope (RDR-187): meaningful only on pre-migration installs whose SQLite router still routes. On a migrated (service-mode) install there is no local router to sweep: the verb exits at the "No T2 db" guard, and server-side the question "which collections hold chunks" is answered from the chunks tables themselves, which cannot go stale.
 
 ### nx catalog rename-collection
 
@@ -836,6 +954,50 @@ RDR-101 catalog doctor surface; pass at least one check flag.
 
 Returns non-zero on any check failure. `--json` emits the per-check result for CI consumption.
 
+### nx catalog verify
+
+```
+nx catalog verify [--collection NAME] [--heal] [--json]
+```
+
+Reconcile catalog tumblers against their T3 collections: reports *ghost* tumblers, catalog entries whose `meta.doc_id` has no matching row in T3. Ghosts most commonly survive from 4.9.7/4.9.8 installs where an oversize `store_put` silently truncated before the #244 guard landed; fresh writes cannot create new ones. The sweep is cheap (one batched id-existence probe per 300-id page; no ANN, no payload). Entries without a `doc_id` are skipped as unverifiable.
+
+`--heal` enters an interactive loop per ghost: drop the tumbler, print the `nx store put` template that would repopulate it, skip, or quit. `--json` emits a machine-parseable `{collection: [{tumbler, title, doc_id}]}` map on stdout (CI-friendly). Collections that cannot be read are reported to stderr as SKIPPED, never silently folded in as "all ghosts" or "no ghosts" (nexus-ou4tb), and the exit code marks the verify incomplete.
+
+### nx catalog synthesize-log
+
+```
+nx catalog synthesize-log [--check] [--dry-run] [--no-verify] [--force]
+```
+
+Rebuild `events.jsonl` from the catalog's JSONL state in place: the companion to `nx catalog doctor` for catalogs stuck in bootstrap-fallback mode (sparse event log vs `documents.jsonl`). The lossless alternative to `rm -rf catalog && nx catalog setup`, which would discard user-authored typed links and owner registrations (not reconstructible from T3 alone).
+
+- `--check`: detect fallback mode without writing; exit 0 when healthy, 1 when fallback is active.
+- Default run is a no-op unless fallback is active; `--force` synthesizes anyway, harvesting existing event-log doc_ids first so T3 chunk metadata referencing them does not go stale.
+- `--dry-run`: print per-event-type counts, write nothing.
+
+Safety: snapshots the entire catalog directory to a sibling before writing (retained even on PASS, for forensics), writes atomically (tmp + fsync + rename), then verifies via the doctor's replay-equality check. On verify FAIL the failed state is rotated aside and the snapshot restored; three artifacts remain for forensics. `--no-verify` skips the verification (only when you have verified independently).
+
+### nx catalog orphan-backfill
+
+```
+nx catalog orphan-backfill dt-link COLLECTION [--min-score 0.75] [--owner PREFIX] [--no-dry-run]
+nx catalog orphan-backfill synthetic COLLECTION [--owner PREFIX] [--no-dry-run]
+nx catalog orphan-backfill dump-csv COLLECTION [--out-dir DIR] [--min-score 0.75]
+nx catalog orphan-backfill apply-csv COLLECTION CSV_PATH [--owner PREFIX]
+nx catalog orphan-backfill link-existing COLLECTION [--by title|content_hash] [--also-synthetic] [--no-dry-run]
+```
+
+Subgroup that backfills catalog Documents for T3 chunks that have no catalog entry. Complementary to `backfill-collections` (which syncs the collections projection) and to the manifest backfill (which writes manifest rows when Documents already exist). All destructive subcommands default to dry-run.
+
+- `dt-link`: walks T3 chunks for the collection, groups by title, fuzzy-matches against DEVONthink via osascript, and registers a Document with `source_uri=x-devonthink-item://<UUID>` per high-precision match (score >= 0.75 by default). Requires DEVONthink running; macOS only.
+- `synthetic`: registers Documents with `nx-orphan-backfill://` URIs for chunks `dt-link` cannot claim, populating the manifest without claiming false provenance. Untitled chunks fall back to per-chash singleton Documents.
+- `dump-csv`: writes matched / low-confidence / unmatched title CSVs (default under `$NEXUS_CONFIG_DIR/backfill-queue/`) for operator triage; edit `operator_decision` / `operator_dt_uuid` columns.
+- `apply-csv`: reads the operator-curated CSV back and registers Documents with the verified UUIDs.
+- `link-existing`: links T3 chunks to EXISTING catalog Documents: `--by title` (MCP-style title metadata, e.g. `knowledge__knowledge`) or `--by content_hash` (PDF-shaped chunks matched to `documents.head_hash`). Writes `document_chunks` manifest rows only; `--also-synthetic` falls through to synthetic registration for what remains unlinked.
+
+Owner resolution: `--owner` overrides; otherwise the owner is looked up from the built-in per-collection default map and unknown collections error with instructions.
+
 ---
 
 ## nx t3
@@ -867,18 +1029,30 @@ Default is report-only; both `--no-dry-run` AND `--yes` are required to actually
 ### nx t3 reidentify
 
 ```
-nx t3 reidentify (-c COLLECTION | --all-collections) [--no-dry-run]
+nx t3 reidentify (-c COLLECTION | --all-collections) [--no-dry-run] [--max-workers N]
 ```
 
-Re-upsert T3 chunks under content-derived natural IDs `chunk_text_hash[:32]` (RDR-108 D1 / nexus-jc63). Per collection the verb paginates T3 chunks (300/op), computes the new natural ID for each chunk, re-upserts under the new ID using the existing embedding (no Voyage call), and batch-deletes the old chunk IDs after the get-loop completes. Document-level metadata fields (`doc_id`, `chunk_index`, `chunk_count`) are stripped at re-upsert; the `document_chunks` manifest table is now authoritative for those.
+Re-upsert T3 chunks under content-derived natural IDs, the full `chunk_text_hash` (RDR-108 D1 / nexus-jc63; full-width per RDR-180). Per collection the verb paginates T3 chunks (300/op), computes the new natural ID for each chunk, re-upserts under the new ID using the existing embedding (no Voyage call), and batch-deletes the old chunk IDs after the get-loop completes. Document-level metadata fields (`doc_id`, `chunk_index`, `chunk_count`) are stripped at re-upsert; the `document_chunks` manifest table is now authoritative for those.
 
 The verb is idempotent: re-running on a fully-migrated collection performs zero writes. It is also crash-resumable: re-invoking after an interrupted run safely sweeps the un-deleted old IDs.
 
 Default is `--dry-run` (report-only). Use `--no-dry-run` to perform the migration.
 
+`--max-workers N` (default 4) sets how many collections process in parallel under `--all-collections` via a thread pool. Each collection has an independent ID namespace so concurrency is correctness-preserving; the practical ceiling is backend rate limits, not local CPU. Completion order is non-deterministic above 1 worker; pass `--max-workers 1` for serial, operator-readable output. Single-collection runs are inherently serial.
+
 Carve-outs:
 - `taxonomy__*` collections are skipped (centroids use `centroid_hash` from the `topics` table, not `chunk_text_hash`).
 - Pre-RDR-053 chunks lacking `chunk_text_hash` raise a structured error; re-index that collection from source before running.
+
+### nx t3 backfill-manifest
+
+```
+nx t3 backfill-manifest [-c COLLECTION] [--no-dry-run] [-n N] [--resume]
+```
+
+Backfill the `document_chunks` manifest from T3 chunk metadata (RDR-108 D2). Reads each catalog document's T3 chunk metadata (`doc_id`, `chunk_index`, `chunk_text_hash`, span coordinates) and writes one manifest row per chunk, so the catalog can answer "what chunks compose this Document, in what order?" without consulting T3. Omitting `-c` processes every collection registered in the catalog; `-n` caps documents per collection.
+
+Idempotent: re-running overwrites the manifest with the same content (DELETE + INSERT in one transaction per document). Progress goes to stderr; SIGINT flushes a state file (`$NEXUS_BACKFILL_STATE_FILE`) so `--resume` skips collections already marked done. Same carve-outs as `reidentify`: `taxonomy__*` skipped, pre-RDR-053 chunks without `chunk_text_hash` error out.
 
 ---
 
@@ -1214,6 +1388,14 @@ with `action`, `existing_title`, and `merged` fields. The CLI surfaces only the
 `action` field; the full report is available to agents through `scratch_manage`
 and Python API callers. See [Storage Tiers § Progressive Formalization](storage-tiers.md#progressive-formalization-rdr-057).
 
+**Wall-clock budget (`NX_T1_CLI_BUDGET_S`, default 60):** every bare-CLI
+scratch operation runs under a total wall-clock budget covering the
+session-token mint/borrow and any 401 self-heal retry legs. Past the budget no
+further leg starts and the command fails with a "T1 service slow/unreachable"
+remedy pointing at `nx doctor`; an operation slower than 5s emits a visible
+slow-path warning. `0` (or negative) is the strictest setting — no retry legs
+ever — not unlimited.
+
 ---
 
 ## nx collection
@@ -1349,6 +1531,8 @@ Hooks run `nx index repo` in the background after each qualifying git operation,
 **Hook status values:** `not installed` · `owned` (nexus-created) · `appended` (added to existing hook) · `unmanaged` (no nexus sentinel)
 
 ### nx hook routing-stats
+
+The `nx hook` group (hidden from `nx --help`) hosts Claude Code lifecycle plumbing: `session-start`, `session-end`, `session-end-flush`, and `session-end-detach` are invoked by the conexus plugin's SessionStart/SessionEnd hooks with a JSON payload on stdin and are not intended for manual use. `routing-stats` is the group's one operator-facing verb.
 
 ```
 nx hook routing-stats [--log-path PATH] [--json]
@@ -1686,54 +1870,146 @@ The `--check-aspect-queue` flag (introduced 4.18.0, `nexus-1pfq`) reports the `a
 Plan library maintenance commands (RDR-092 Phase 0d).
 
 ```
-nx plan repair all               # Run every repair pass in order (the usual entry point)
-nx plan repair dimensions        # Just the RDR-092 dimension backfill (below)
-nx plan repair scope-tags        # Backfill scope tags on legacy rows
-nx plan repair match-text        # Rebuild plan match-text from dimensional identity
-nx plan repair retire-legacy     # Retire pre-dimensional legacy plans
-nx plan repair builtin-bindings  # Refresh built-in plan bindings
+nx plan list                     # Tabulate plans in the library
+nx plan show ID_OR_NAME          # Full record for one plan
+nx plan delete PLAN_ID           # Delete a plan row (prompts unless -y)
+nx plan disable PLAN_ID          # Soft-disable a plan without deleting it
+nx plan enable PLAN_ID           # Re-enable a previously disabled plan
+nx plan set-scope PLAN_ID TAGS   # Override a plan's scope_tags
+nx plan reseed [--force]         # Re-run the builtin seed loader
+nx plan repair SUBCOMMAND        # Consumer-side content-repair verbs (group)
+nx plan hygiene [--apply]        # Flag/disable bead-dumps, null-verb, always-failing plans
 ```
 
-`nx plan repair` is a command group — run one of the subcommands above
-(bare `nx plan repair` just prints help). `nx plan repair all` runs them
-all in order; the rest target one pass. The `dimensions` pass
-(introduced 4.9.12, nexus-1kvj) re-runs the RDR-092 Phase 0d.1
-plan-dimension backfill heuristic against the live T2 DB. On every run it:
+In service mode (the default since the PG migration) the read/write verbs
+(`list` / `show` / `delete` / `disable` / `enable` / `set-scope` / `reseed` /
+`hygiene`) route to the live engine-served plan library over HTTP; in SQLite
+opt-out mode they open the local T2 DB. The `repair` group and
+`reseed --force` are SQLite-only and refuse in service mode (see below).
 
-- backfills `verb` / `name` / `dimensions` on any row where
-  `dimensions IS NULL`, using a 20-rule verb-from-stem dictionary
-  over the `query` column;
-- falls back to a wh-question heuristic (`how` / `what` → research;
-  `why` → review) for rows that miss every stem rule;
-- tags confident matches with `backfill` and low-confidence
-  wh-fallback rows with `backfill-low-conf`;
-- prints the backfill count, then lists each `backfill-low-conf`
-  row with its id, inferred verb, and original query text so an
-  operator can correct edge cases by hand (direct SQL, or a future
-  editor command).
-
-Idempotent: a second run reports `0 backfilled` and exits cleanly.
-When the T2 DB is absent, exits 0 with "nothing to do" rather than a
-traceback.
+### nx plan hygiene
 
 ```
-nx plan disable PLAN_ID    # Soft-disable a plan without deleting it
-nx plan enable PLAN_ID     # Re-enable a previously disabled plan
+nx plan hygiene            # report-only scan
+nx plan hygiene --apply    # disable the flagged plans (reversible)
 ```
 
-Introduced 4.18.0 (`nexus-mrzp`). `disable` flips `outcome=disabled` on the plan row so it drops out of `plan_match` results without losing its row id, telemetry counters, or T1 cache embedding. `enable` flips it back to `outcome=success`. Useful for triaging a plan whose match-text is misrouting traffic without committing to a delete + re-seed cycle. The pair operates on plan ids returned from `nx plan list` or `nx plan repair`.
+Scans the plan library for three pollution classes and, with `--apply`,
+DISABLES them (never deletes; reverse with `nx plan enable ID`):
 
-### Inspecting and managing plans
+- plans whose `plan_json` is not an executable retrieval DAG (unparseable
+  JSON, no/empty `steps`, steps without a `tool`) — the bead-dump class that
+  can match a question and then crash the plan runner;
+- null-verb rows (legacy pollution predating the save-time verb requirement;
+  unmatchable by verb-filtered `nx_answer`);
+- always-failing plans (zero recorded successes, 3+ failures) — the matcher
+  already skips these live; hygiene retires them durably.
+
+Unlike `nx plan repair`, this verb works in service mode: it routes through
+the storage facade and cleans the live engine-served library on migrated
+installs. Partial apply failures are reported per plan; a scan that hits the
+10,000-row limit says so rather than silently truncating.
+
+### nx plan list
 
 ```
-nx plan list [--scope SCOPE] [--origin ORIGIN] [--name NAME] [--limit N]
-nx plan show ID_OR_NAME        # full record: json + dimensions + run metrics
-nx plan delete PLAN_ID         # delete one plan row (add --yes to skip the prompt)
-nx plan set-scope PLAN_ID [TAGS]   # set/override a plan's scope_tags
-nx plan reseed                 # re-run the four-tier plan-library seed loader
+nx plan list [--scope S] [--origin builtin|grown|user] [--name SUBSTR] [-n N] [--json] [--include-disabled]
 ```
 
-`list` shows the plan library (filter by scope, origin, or name; `--limit` defaults to 50). `show` prints one plan's full record by id or name. `delete` removes a single row by id. `set-scope` overrides the scope tags used for scope-aware matching. `reseed` re-runs the seed loader that populates built-in and template plans.
+Tabulates plans: id, origin, verb, scope, use count, last used, name. Origin is
+heuristic (`builtin` when tags include `builtin-template`; `grown` when
+`project == 'personal'` with empty tags; `user` otherwise; nexus-7bwe tracks an
+explicit origin column). `--include-disabled` also shows soft-disabled rows,
+marked `[D]`. `--json` emits the same fields as a JSON array. Default limit 50.
+
+### nx plan show
+
+```
+nx plan show ID_OR_NAME [--json]
+```
+
+Prints a plan's full record: metadata, run metrics (use / match / success /
+failure counts), dimensions, and the pretty-printed `plan_json`. The argument
+is a numeric id or a name substring (first match wins). `--json` dumps the raw
+row.
+
+### nx plan delete
+
+```
+nx plan delete PLAN_ID [-y]
+```
+
+Deletes the plan row. The numeric id is required (not a name) because deletion
+is destructive and a name-substring lookup is fuzzy; find the id with
+`nx plan list` or `nx plan show <name>` first. Prompts for confirmation unless
+`-y`/`--yes`.
+
+### nx plan disable / enable
+
+```
+nx plan disable PLAN_ID [--reason TEXT]    # Soft-disable a plan without deleting it
+nx plan enable PLAN_ID                     # Re-enable a previously disabled plan
+```
+
+Introduced 4.18.0 (`nexus-mrzp`). `disable` sets `disabled_at` on the plan row so both matcher lanes (T1 cosine via `list_active_plans`, T2 FTS5 via `search_plans`) skip it, without losing its row id, telemetry counters, or T1 cache embedding. `--reason` appends a `disable-reason:<text>` tag as a historical record (preserved even after re-enable). `enable` clears `disabled_at`. Useful for triaging a plan whose match-text is misrouting traffic without committing to a delete + re-seed cycle.
+
+### nx plan set-scope
+
+```
+nx plan set-scope PLAN_ID TAGS
+nx plan set-scope PLAN_ID --from-project
+```
+
+Explicit admin override of a plan's `scope_tags` (comma-separated; can widen or
+narrow scope). The matcher reads scope_tags fresh on every call, so changes take
+effect immediately. Applies the same normalization as `plan_save`: hash suffixes
+and glob tails stripped, scope-agnostic sentinels (`all`) dropped, stored
+sorted-unique. Idempotent. `--from-project` (mutually exclusive with `TAGS`)
+stamps scope_tags from the plan's own `project` column, the same recovery
+source as the automatic #1069 fallback in `save_plan`.
+
+### nx plan reseed
+
+```
+nx plan reseed [--force]
+```
+
+Re-runs the builtin plan-template seed loader. Idempotent by default: only
+previously-missing builtins insert. `--force` deletes every builtin row first so
+description or `plan_json` changes to an existing builtin pick up cleanly (the
+deduper keys on canonical dimensions, so a tweak on an existing dimension is
+invisible to the idempotent path). `--force` is unavailable in service mode (it
+is a raw-SQL delete against the local SQLite); delete builtin rows via
+`nx plan delete <id>` there, then rerun `nx plan reseed`.
+
+### nx plan repair
+
+```
+nx plan repair scope-tags          # Backfill empty scope_tags + rewash legacy 'all' sentinels
+nx plan repair dimensions          # Backfill verb/name/dimensions on NULL-dimension rows
+nx plan repair match-text          # Populate plans.match_text + refresh plans_fts
+nx plan repair retire-legacy       # Delete pre-RDR-078 'operation'-shape rows
+nx plan repair builtin-bindings    # Patch bindings into pre-4.10.1 builtin rows
+nx plan repair all                 # Every pass, in dependency order
+```
+
+Consumer-side content-repair verbs (RDR-120 §A8): legacy backfills that mutated
+row content moved out of the substrate migration chain into these explicit
+operator-driven subcommands. Run them after `nx upgrade`, or whenever legacy
+rows surface that need repair. Each subcommand is idempotent; a second run
+reports 0 changes. When the T2 DB is absent, they exit 0 with "nothing to do".
+
+The `dimensions` pass (introduced 4.9.12, nexus-1kvj) uses a 20-rule
+verb-from-stem dictionary over the `query` column, falls back to a wh-question
+heuristic (`how` / `what` → research; `why` → review), tags confident matches
+`backfill` and wh-fallback rows `backfill-low-conf`, and lists each low-conf
+row (id, inferred verb, original query) for operator review.
+
+These verbs mutate row content via raw SQL against the local T2 SQLite, so in
+service mode the whole group refuses (the local file is the frozen
+pre-migration snapshot; repairing it would be a silent no-op against the live
+library). Set `NX_STORAGE_BACKEND=sqlite` to deliberately repair the local
+file.
 
 ---
 

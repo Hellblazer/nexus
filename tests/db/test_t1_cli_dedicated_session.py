@@ -28,6 +28,7 @@ simulated deterministically.
 from __future__ import annotations
 
 import json
+import os
 import socket
 import threading
 import uuid
@@ -1640,11 +1641,20 @@ class TestResolveT1RoutingTiers:
         get_t1_database_post_dispatch = get_t1_database_src.rsplit(
             "T1RoutingAction.USE_LEASED", 1
         )[-1]
-        assert "mint_t1_session_token(" in get_t1_database_post_dispatch, (
+        # nexus-jc33g: the fallthrough now routes through the shared
+        # flock-guarded mint-or-borrow primitive (which itself calls
+        # mint_t1_session_token on the mint path) instead of minting
+        # unconditionally — either call form is real behavioral evidence
+        # that the fallthrough can still mint.
+        assert (
+            "mint_t1_session_token(" in get_t1_database_post_dispatch
+            or "_lock_guarded_mint_or_borrow(" in get_t1_database_post_dispatch
+        ), (
             "get_t1_database()'s fallthrough-to-mint branch must actually "
-            "CALL mint_t1_session_token(...) after the USE_LEASED dispatch "
-            "-- a comment mentioning MINT is not sufficient evidence the "
-            "fallthrough still mints (nexus-1si7z)"
+            "mint (mint_t1_session_token or the _lock_guarded_mint_or_borrow "
+            "primitive) after the USE_LEASED dispatch -- a comment mentioning "
+            "MINT is not sufficient evidence the fallthrough still mints "
+            "(nexus-1si7z / nexus-jc33g)"
         )
 
         lifespan_src = inspect.getsource(mcp_core_module._t1_chroma_lifespan)
@@ -1841,3 +1851,263 @@ class TestDeferredMintBoundaries:
             assert mcp_infra._t1_instance is None
         finally:
             self._disarm(mcp_core, mcp_infra)
+
+
+# ── nexus-jc33g: CLI-dedicated TOKEN is cached; no per-invocation re-mint ─────
+
+
+class TestDedicatedTokenCache:
+    def test_second_invocation_does_not_remint(self, fake_service, config_dir) -> None:
+        """The dedicated-id file gave id continuity but every fresh bare-CLI
+        process still paid a full mint round trip. The token now rides the
+        same published-lease mechanism (nexus-ngcpo freshness rules): a
+        second invocation borrows the cached fresh token instead of minting."""
+        from nexus.db.t1 import get_t1_database
+
+        store1 = get_t1_database()
+        assert len(_MINT_CALLS) == 1
+
+        store2 = get_t1_database()
+        assert len(_MINT_CALLS) == 1, "fresh cached token must be borrowed, not re-minted"
+
+        doc_id = store2.put("no remint", tags="jc33g")
+        entry = store2.get(doc_id)
+        assert entry is not None and entry["content"] == "no remint"
+
+    def test_expired_cached_token_remints(self, fake_service, config_dir) -> None:
+        """A cached token past its lease expiry is ABSENT (ngcpo fail-safe
+        rules) — the next invocation mints fresh rather than borrowing blind."""
+        import time as _time
+
+        global _MINT_TTL_SECONDS
+        _MINT_TTL_SECONDS = 1
+        from nexus.db.t1 import get_t1_database
+
+        get_t1_database()
+        assert len(_MINT_CALLS) == 1
+        _time.sleep(1.2)
+        get_t1_database()
+        assert len(_MINT_CALLS) == 2, "expired cached token must trigger a fresh mint"
+
+    def test_selfheal_republishes_for_future_invocations(
+        self, fake_service, config_dir
+    ) -> None:
+        """After a 401 self-heal re-mint, the fresh token is republished so
+        the NEXT bare-CLI invocation borrows it instead of minting again."""
+        import httpx
+
+        from nexus.db.t1 import get_t1_database
+
+        store1 = get_t1_database()
+        sid = store1.session_id
+        # A racing sibling rotates the token server-side (ON CONFLICT DO
+        # UPDATE) — store1's in-hand token and the published lease are now
+        # both stale.
+        httpx.post(
+            f"{fake_service}/v1/sessions/start",
+            json={"session_id": sid},
+            headers={
+                "Authorization": f"Bearer {SERVICE_TOKEN}",
+                "X-Nexus-Tenant": "default",
+                "Content-Type": "application/json",
+            },
+        )
+        mints_before = len(_MINT_CALLS)
+        doc_id = store1.put("healed", tags="jc33g")
+        assert doc_id
+        assert len(_MINT_CALLS) == mints_before + 1  # exactly the self-heal mint
+
+        store2 = get_t1_database()
+        assert len(_MINT_CALLS) == mints_before + 1, (
+            "self-heal must republish the fresh token; the next invocation borrows it"
+        )
+        entry = store2.get(doc_id)
+        assert entry is not None and entry["content"] == "healed"
+
+
+# ── nexus-by875: total wall-clock budget on the CLI op stack ─────────────────
+
+
+class TestCliOpBudget:
+    def test_exhausted_budget_skips_selfheal_retry_leg(
+        self, fake_service, config_dir, monkeypatch
+    ) -> None:
+        """The mint->op->401->re-mint->retry stack must never compound past
+        the budget: with the budget exhausted, a 401 propagates with the
+        remedy message instead of starting another mint+retry round trip."""
+        from nexus.db.t1 import get_t1_database
+
+        store = get_t1_database()
+        _ALWAYS_401.add(store.session_id)
+        monkeypatch.setenv("NX_T1_CLI_BUDGET_S", "0")
+
+        mints_before = len(_MINT_CALLS)
+        with pytest.raises(RuntimeError, match="budget"):
+            store.put("never lands", tags="by875")
+        assert len(_MINT_CALLS) == mints_before, (
+            "no re-mint leg may start once the budget is exhausted"
+        )
+
+    def test_selfheal_still_runs_within_default_budget(
+        self, fake_service, config_dir
+    ) -> None:
+        """Control: with the default budget the pre-existing self-heal
+        semantics are unchanged (TestSelfHeal's contract still holds)."""
+        import httpx
+
+        from nexus.db.t1 import get_t1_database
+
+        store = get_t1_database()
+        httpx.post(
+            f"{fake_service}/v1/sessions/start",
+            json={"session_id": store.session_id},
+            headers={
+                "Authorization": f"Bearer {SERVICE_TOKEN}",
+                "X-Nexus-Tenant": "default",
+                "Content-Type": "application/json",
+            },
+        )
+        doc_id = store.put("within budget", tags="by875")
+        entry = store.get(doc_id)
+        assert entry is not None and entry["content"] == "within budget"
+
+
+class TestCliOpBudgetEnforcement:
+    """Reviewer H1 + critic Critical folds (nexus-by875): the budget must
+    ACTUALLY bind — an intermediate value distinguishes enforcing code from
+    non-enforcing (budget=0 is trivially exceeded; 60s never binds)."""
+
+    def _store_with(self, first_op, mint):
+        """A wrapper around fakes: first_op raises/returns per call; mint is
+        monkeypatched at module level by the caller."""
+        from nexus.db.t1 import _CliDedicatedScratchStore
+
+        class _FakeStore:
+            session_id = "dedicated-x"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def put(self, *a, **k):
+                self.calls += 1
+                return first_op(self.calls)
+
+        return _CliDedicatedScratchStore("dedicated-x", _FakeStore())
+
+    def test_intermediate_budget_blocks_retry_after_slow_first_leg(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """First leg consumes more than the (small, non-zero) budget then
+        401s: the re-mint leg must never start."""
+        import time as _time
+
+        from nexus.db import t1 as t1_mod
+        from nexus.db.http_scratch_store import SESSION_UNAUTHORIZED_MARKER
+
+        monkeypatch.setenv("NX_T1_CLI_BUDGET_S", "0.05")
+        minted: list[str] = []
+        monkeypatch.setattr(
+            t1_mod, "mint_t1_session_token",
+            lambda sid, context: minted.append(sid) or {"session_token": "t"},
+        )
+
+        def _slow_401(_calls: int):
+            _time.sleep(0.1)
+            raise RuntimeError(f"boom {SESSION_UNAUTHORIZED_MARKER}")
+
+        store = self._store_with(_slow_401, None)
+        with pytest.raises(RuntimeError, match="budget"):
+            store.put("x")
+        assert minted == [], "re-mint leg must not start past the budget"
+
+    def test_post_remint_exhaustion_blocks_retry_leg(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Fast first 401 within budget, but the re-mint itself consumes the
+        remainder: the retry leg must not start (the reviewer's exact gap —
+        pre-fold code retried unconditionally after remint)."""
+        import time as _time
+
+        from nexus.db import t1 as t1_mod
+        from nexus.db.http_scratch_store import SESSION_UNAUTHORIZED_MARKER
+
+        monkeypatch.setenv("NX_T1_CLI_BUDGET_S", "0.05")
+
+        def _slow_mint(sid, context):
+            _time.sleep(0.1)
+            return {"session_token": "fresh"}
+
+        monkeypatch.setattr(t1_mod, "mint_t1_session_token", _slow_mint)
+        # _remint constructs a fresh HttpScratchStore (endpoint resolution
+        # this unit test deliberately lacks) — stub the class; if the gate
+        # works the retry never touches the stub anyway.
+        import types as _types
+
+        monkeypatch.setattr(
+            "nexus.db.http_scratch_store.HttpScratchStore",
+            lambda session_id, _session_token: _types.SimpleNamespace(
+                session_id=session_id,
+            ),
+        )
+
+        def _fast_401(calls: int):
+            raise RuntimeError(f"boom {SESSION_UNAUTHORIZED_MARKER}")
+
+        store = self._store_with(_fast_401, None)
+        first_leg_store = store._store  # _remint swaps _store for the stub
+        with pytest.raises(RuntimeError, match="after the self-heal re-mint"):
+            store.put("x")
+        # first leg ran once; the retry (which would hit the post-remint stub
+        # and AttributeError on .put) never started.
+        assert first_leg_store.calls == 1
+
+    def test_construction_deadline_bounds_lock_wait(
+        self, fake_service, config_dir, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Critic Critical: a sibling holding the mint lock must not wedge a
+        budgeted caller — the bounded-poll acquire raises the remedy at the
+        deadline instead of blocking forever."""
+        import fcntl as _fcntl
+
+        from nexus.db.t1 import _lock_guarded_mint_or_borrow, _t1_session_mint_lock_path
+
+        lock_path = _t1_session_mint_lock_path("held-id", config_dir)
+        config_dir.mkdir(parents=True, exist_ok=True)
+        holder_fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT, 0o600)
+        _fcntl.flock(holder_fd, _fcntl.LOCK_EX)
+        try:
+            import time as _time
+
+            with pytest.raises(RuntimeError, match="mint lock"):
+                _lock_guarded_mint_or_borrow(
+                    "held-id", config_dir, context="CLI-dedicated session mint",
+                    deadline=_time.monotonic() + 0.2,
+                )
+        finally:
+            _fcntl.flock(holder_fd, _fcntl.LOCK_UN)
+            os.close(holder_fd)
+
+    def test_budget_env_parsing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from nexus.db.t1 import _t1_cli_op_budget_seconds
+
+        monkeypatch.delenv("NX_T1_CLI_BUDGET_S", raising=False)
+        assert _t1_cli_op_budget_seconds() == 60.0
+        monkeypatch.setenv("NX_T1_CLI_BUDGET_S", "12.5")
+        assert _t1_cli_op_budget_seconds() == 12.5
+        monkeypatch.setenv("NX_T1_CLI_BUDGET_S", "abc")
+        assert _t1_cli_op_budget_seconds() == 60.0  # malformed -> default
+        monkeypatch.setenv("NX_T1_CLI_BUDGET_S", "-3")
+        assert _t1_cli_op_budget_seconds() == -3.0  # negative = strictest, never unlimited
+
+
+class TestLeaseFreshnessMargin:
+    def test_near_expiry_lease_reads_absent(self, tmp_path: Path) -> None:
+        """jc33g critic fold: a lease inside the freshness margin is not
+        borrowed — the borrower would 401 on first use."""
+        from nexus.db.t1 import publish_t1_session_lease, read_t1_session_lease
+
+        publish_t1_session_lease("margin-id", "tok", tmp_path, ttl_seconds=3.0)
+        assert read_t1_session_lease("margin-id", tmp_path) is None  # < 5s margin
+
+        publish_t1_session_lease("margin-id2", "tok2", tmp_path, ttl_seconds=60.0)
+        assert read_t1_session_lease("margin-id2", tmp_path) == "tok2"

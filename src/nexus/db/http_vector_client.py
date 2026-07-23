@@ -865,7 +865,22 @@ class HttpVectorClient:
                 body["embeddings"] = embeddings[start:end]
             if force_re_embed:
                 body["force_re_embed"] = True
-            _post("/v1/vectors/upsert-chunks", body, tenant=self._tenant, timeout=600)
+            result = _post(
+                "/v1/vectors/upsert-chunks", body, tenant=self._tenant, timeout=600,
+            )
+            # nexus-znwc2 / nexus-ir6eh: the engine echoes ids.length as
+            # `upserted` unconditionally (VectorHandler), so any deviation —
+            # missing field or wrong count — means something interposed on
+            # the WRITE path (stub proxy, truncating hop). A write whose ack
+            # cannot be reconciled must not read as success.
+            acked = result.get("upserted") if isinstance(result, dict) else None
+            if acked != end - start:
+                raise RuntimeError(
+                    f"upsert-chunks ack mismatch for {collection!r}: sent "
+                    f"{end - start} ids, service acked {acked!r} — the write "
+                    "path may be intercepted or stubbed; refusing to treat "
+                    "the write as durable"
+                )
         _log.debug(
             "http_vector_upsert_chunks",
             collection=collection,
@@ -1144,11 +1159,27 @@ class HttpVectorClient:
 
         if rerank:
             if isinstance(results, dict) and "results" in results:
-                meta = {
-                    "degraded": bool(results.get("rerank_degraded")),
-                    "error": results.get("rerank_error"),
-                    "model": results.get("rerank_model"),
-                }
+                if "rerank_degraded" in results:
+                    meta = {
+                        "degraded": bool(results.get("rerank_degraded")),
+                        "error": results.get("rerank_error"),
+                        "model": results.get("rerank_model"),
+                    }
+                else:
+                    # nexus-znwc2: an object envelope WITHOUT the degrade flag
+                    # cannot attest rerank ran. The engine's RerankStage emits
+                    # rerank_degraded unconditionally in the rerank envelope,
+                    # so absence means a field-stripping middleman (the
+                    # /version-stub class) — absence-of-flag is NOT success.
+                    meta = {
+                        "degraded": True,
+                        "error": (
+                            "rerank envelope carried no rerank_degraded flag "
+                            "(field-stripping middleman?) — cannot attest the "
+                            "server reranked; treating results as "
+                            "distance-ordered"
+                        ),
+                    }
                 results = results["results"]
             else:
                 meta = {
@@ -1164,11 +1195,24 @@ class HttpVectorClient:
                 rerank_meta_out.update(meta)
 
         if structured:
-            # Return the plan-runner compatible structured form
+            # Return the plan-runner compatible structured form.
+            # nexus-znwc2 (reviewer H1): a missing/None distance is emitted
+            # as an honest None, never 0.0 (fabricated best-match on a
+            # stripped field) and never float('inf') (the MCP text
+            # serializer renders inf as the bare `Infinity` token — invalid
+            # JSON for strict clients).
+            distances = [r.get("distance") for r in results]
+            missing = sum(1 for d in distances if d is None)
+            if missing:
+                _log.warning(
+                    "search_structured_rows_missing_distance",
+                    missing=missing, total=len(results),
+                    consequence="emitting null distances (never a fabricated 0.0)",
+                )
             return {
                 "ids":         [r.get("id", "")         for r in results],
                 "tumblers":    [r.get("tumbler", "")    for r in results],
-                "distances":   [r.get("distance", 0.0)  for r in results],
+                "distances":   distances,
                 "collections": [r.get("collection", "") for r in results],
             }
         return results

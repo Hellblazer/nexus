@@ -895,6 +895,10 @@ _T1_SESSION_LEASE_PREFIX = "t1_session_lease."
 #: freshness window tracks the real server-side expiry, not this fallback.
 _T1_SESSION_LEASE_DEFAULT_TTL_SECONDS: float = 86_400.0
 
+#: nexus-jc33g critic fold: a lease within this many seconds of expiry reads
+#: as ABSENT (borrow would 401 on first use; mint fresh instead).
+_T1_LEASE_FRESHNESS_MARGIN_SECONDS: float = 5.0
+
 
 def _t1_session_lease_path(session_id: str, config_dir: Path) -> Path:
     return config_dir / f"{_T1_SESSION_LEASE_PREFIX}{session_id}"
@@ -992,7 +996,12 @@ def read_t1_session_lease(session_id: str, config_dir: Path) -> str | None:
         return None
     if not token:
         return None
-    if time.time() >= expires_at:
+    # nexus-jc33g critic fold: a small freshness MARGIN, not a hard
+    # boundary — borrowing a token with sub-second remaining TTL hands the
+    # borrower a guaranteed first-op 401 (functionally recovered by the
+    # self-heal, but paying the exact mint round trip the borrow exists to
+    # avoid). A near-expiry lease reads as absent so the caller mints fresh.
+    if time.time() >= expires_at - _T1_LEASE_FRESHNESS_MARGIN_SECONDS:
         return None
     return token
 
@@ -1253,7 +1262,11 @@ def mint_t1_session_token(session_id: str, *, context: str) -> dict:
 
 
 def _lock_guarded_mint_or_borrow(
-    session_id: str, config_dir: Path
+    session_id: str,
+    config_dir: Path,
+    *,
+    context: str = "stale-lease recovery mint",
+    deadline: float | None = None,
 ) -> tuple[str, bool, float | None]:
     """Flock-guarded double-check-then-mint-or-borrow (nexus-jwqjm).
 
@@ -1311,7 +1324,30 @@ def _lock_guarded_mint_or_borrow(
         # a one-shot "double-check the lease, mint if still stale" mutex for
         # a single session id, mirroring _cli_dedicated_session_id's own
         # one-shot idempotent lock above -- not a leased-liveness election.
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)  # lifecycle-gate-allow: one-shot mint-or-borrow mutex serializing concurrent stale-lease recoverers, not a lifecycle election
+        #
+        # nexus-by875 (critic Critical): with a *deadline*, the lock wait is
+        # BOUNDED — non-blocking acquire + short poll until the deadline —
+        # so a sibling holding the lock through its own slow mint can never
+        # wedge this caller past its wall-clock budget. Deadline-less
+        # callers (the MCP Branch-0 stale-lease recovery path) keep the
+        # original blocking semantics.
+        if deadline is None:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)  # lifecycle-gate-allow: one-shot mint-or-borrow mutex serializing concurrent stale-lease recoverers, not a lifecycle election
+        else:
+            while True:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # lifecycle-gate-allow: bounded-poll variant of the same one-shot mint-or-borrow mutex
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError(
+                            f"T1 {context}: could not acquire the mint lock "
+                            "within the wall-clock budget — a sibling process "
+                            "holds it (T1 service slow/unreachable?); check "
+                            "`nx doctor` / engine convergence "
+                            "(budget: NX_T1_CLI_BUDGET_S)"
+                        ) from None
+                    time.sleep(0.05)
         try:
             leased_token = read_t1_session_lease(session_id, config_dir)
             if leased_token:
@@ -1320,9 +1356,16 @@ def _lock_guarded_mint_or_borrow(
                 # do not mint a competing token.
                 return leased_token, False, None
 
-            minted = mint_t1_session_token(
-                session_id, context="stale-lease recovery mint"
-            )
+            if deadline is not None and time.monotonic() >= deadline:
+                # nexus-by875: never START the mint leg past the budget —
+                # the mint itself is bounded only by its own httpx timeouts.
+                raise RuntimeError(
+                    f"T1 {context}: wall-clock budget exhausted before the "
+                    "mint round trip could start — T1 service "
+                    "slow/unreachable; check `nx doctor` / engine "
+                    "convergence (budget: NX_T1_CLI_BUDGET_S)"
+                )
+            minted = mint_t1_session_token(session_id, context=context)
             mint_ttl = float(
                 minted.get("expires_in_seconds")
                 or _T1_SESSION_LEASE_DEFAULT_TTL_SECONDS
@@ -1344,6 +1387,34 @@ def _lock_guarded_mint_or_borrow(
         os.close(lock_fd)
 
 
+#: nexus-by875: elapsed threshold past which a CLI T1 op emits a user-visible
+#: slow-path warning (structlog -> stderr on the CLI path).
+_T1_CLI_SLOW_NOTICE_SECONDS: float = 5.0
+
+
+def _t1_cli_op_budget_seconds() -> float:
+    """Total wall-clock budget for one CLI T1 invocation (nexus-by875):
+    the construction-time mint/borrow (lock wait + mint-leg start) AND the
+    per-op self-heal legs are all gated on it. The budget bounds which legs
+    may START; an in-flight leg runs to its own httpx timeout, so the true
+    worst case is ~budget + one leg's timeout, never a multi-leg stack.
+
+    Env-tunable via ``NX_T1_CLI_BUDGET_S``; read per call so tests and
+    operators adjust without process restarts. ``0`` (or negative) means
+    "no retry legs ever" — the strictest setting, NOT unlimited. A
+    malformed value falls back to the 60s default with a debug log."""
+    raw = os.environ.get("NX_T1_CLI_BUDGET_S", "")
+    if not raw.strip():
+        return 60.0
+    try:
+        return float(raw)
+    except ValueError:
+        _log.debug(
+            "t1_cli_budget_env_malformed", raw=raw, fallback_s=60.0,
+        )
+        return 60.0
+
+
 class _CliDedicatedScratchStore:
     """T1Database-shaped wrapper around ``HttpScratchStore`` for the
     CLI-dedicated session path.
@@ -1356,9 +1427,10 @@ class _CliDedicatedScratchStore:
     looping.
     """
 
-    def __init__(self, dedicated_id: str, store) -> None:
+    def __init__(self, dedicated_id: str, store, config_dir: Path | None = None) -> None:
         self._dedicated_id = dedicated_id
         self._store = store
+        self._config_dir = config_dir
 
     def _remint(self) -> None:
         from nexus.db.http_scratch_store import HttpScratchStore  # noqa: PLC0415 — deferred import (rare/branch-local path)
@@ -1366,6 +1438,26 @@ class _CliDedicatedScratchStore:
         minted = mint_t1_session_token(
             self._dedicated_id, context="CLI-dedicated session re-mint"
         )
+        # nexus-jc33g: republish the healed token (best-effort) so the NEXT
+        # bare-CLI invocation borrows it instead of minting yet again. A
+        # deliberate direct mint, NOT _lock_guarded_mint_or_borrow: the
+        # published lease at this point is stale-but-unexpired (a sibling
+        # rotated the server token), so a borrow would hand back the exact
+        # token that just 401ed.
+        if self._config_dir is not None:
+            try:
+                publish_t1_session_lease(
+                    self._dedicated_id, minted["session_token"], self._config_dir,
+                    ttl_seconds=float(
+                        minted.get("expires_in_seconds")
+                        or _T1_SESSION_LEASE_DEFAULT_TTL_SECONDS
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001 — best-effort publish; must never fail an already-successful heal
+                _log.warning(
+                    "t1_cli_dedicated_lease_republish_failed",
+                    session_id=self._dedicated_id, error=str(exc),
+                )
         self._store = HttpScratchStore(
             session_id=self._dedicated_id,
             _session_token=minted["session_token"],
@@ -1374,19 +1466,62 @@ class _CliDedicatedScratchStore:
     def _call(self, name: str, *args, **kwargs):
         from nexus.db.http_scratch_store import SESSION_UNAUTHORIZED_MARKER  # noqa: PLC0415 — deferred import (rare/branch-local path)
 
+        start = time.monotonic()
         try:
             return getattr(self._store, name)(*args, **kwargs)
         except RuntimeError as exc:
             if SESSION_UNAUTHORIZED_MARKER not in str(exc):
                 raise
+            # nexus-by875: the mint->op->401->re-mint->retry stack is bounded
+            # PER LEG (30s httpx timeouts, single retries) but compounds
+            # across legs with zero user-facing signal. Gate every further
+            # leg START on the remaining wall-clock budget — once exhausted,
+            # stop compounding and surface the remedy instead. (An in-flight
+            # leg is bounded by its own httpx timeouts; the budget bounds
+            # which legs may start — reviewer H1 re-scope, enforced both
+            # before the re-mint AND again before the retry.)
+            budget = _t1_cli_op_budget_seconds()
+            elapsed = time.monotonic() - start
+            if elapsed >= budget:
+                raise RuntimeError(
+                    f"T1 op {name!r} exceeded its wall-clock budget "
+                    f"({elapsed:.1f}s >= {budget:.0f}s) before the "
+                    "self-heal retry could run — T1 service slow/unreachable; "
+                    "check `nx doctor` / engine convergence "
+                    "(budget: NX_T1_CLI_BUDGET_S)"
+                ) from exc
             _log.warning(
                 "t1_cli_dedicated_session_selfheal",
                 session_id=self._dedicated_id,
                 op=name,
             )
             self._remint()
+            elapsed = time.monotonic() - start
+            if elapsed >= budget:
+                # The re-mint itself consumed the remaining budget — do not
+                # start the retry leg on top of it.
+                raise RuntimeError(
+                    f"T1 op {name!r} exceeded its wall-clock budget "
+                    f"({elapsed:.1f}s >= {budget:.0f}s) after the self-heal "
+                    "re-mint — T1 service slow/unreachable; check "
+                    "`nx doctor` / engine convergence "
+                    "(budget: NX_T1_CLI_BUDGET_S)"
+                ) from exc
             # Exactly one retry: a second failure propagates to the caller.
             return getattr(self._store, name)(*args, **kwargs)
+        finally:
+            elapsed = time.monotonic() - start
+            if elapsed >= _T1_CLI_SLOW_NOTICE_SECONDS:
+                # nexus-by875: never a silent multi-second grind. structlog
+                # renders to stderr on the CLI path, so this IS user-visible
+                # without a library-code print().
+                _log.warning(
+                    "t1_cli_slow",
+                    op=name,
+                    elapsed_s=round(elapsed, 1),
+                    remedy="T1 service slow/unreachable — check `nx doctor` "
+                           "/ engine convergence",
+                )
 
     @property
     def session_id(self) -> str:
@@ -1509,10 +1644,28 @@ def get_t1_database(
         # see resolve_t1_routing_tiers's docstring for why tier 3 stays
         # caller-specific rather than unified too.
         dedicated_id = _cli_dedicated_session_id(config_dir)
-        minted = mint_t1_session_token(dedicated_id, context="CLI-dedicated session mint")
-        store = HttpScratchStore(
-            session_id=dedicated_id, _session_token=minted["session_token"]
+        # nexus-jc33g: the dedicated-id file gave cross-invocation id
+        # continuity, but the TOKEN was re-minted unconditionally on every
+        # fresh bare-CLI process — a full extra round trip preceding every
+        # op (roughly DOUBLING the measured per-op latency). The token now
+        # rides the same published-lease mechanism the live-MCP sessions
+        # use (freshness-checked per nexus-ngcpo; 0600 atomic publish), so
+        # a fresh invocation borrows a still-fresh cached token and only
+        # mints when the cache is absent/expired — serialized under the
+        # per-id flock so racing bare-CLI starts converge on ONE mint
+        # instead of rotating each other (the CLI-vs-CLI churn the 401
+        # self-heal below existed to mop up).
+        # nexus-by875 (critic Critical): the construction-time mint/borrow is
+        # part of "the whole op" — it gets the same wall-clock deadline the
+        # per-op legs honor, bounding the lock wait and gating the mint-leg
+        # start. An in-flight leg still runs to its own httpx timeout; the
+        # budget bounds which legs may START.
+        deadline = time.monotonic() + _t1_cli_op_budget_seconds()
+        token, _minted, _ttl = _lock_guarded_mint_or_borrow(
+            dedicated_id, config_dir, context="CLI-dedicated session mint",
+            deadline=deadline,
         )
-        return _CliDedicatedScratchStore(dedicated_id, store)  # type: ignore[return-value]
+        store = HttpScratchStore(session_id=dedicated_id, _session_token=token)
+        return _CliDedicatedScratchStore(dedicated_id, store, config_dir)  # type: ignore[return-value]
 
     return T1Database(session_id=session_id, client=client)

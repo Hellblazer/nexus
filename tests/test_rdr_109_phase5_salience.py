@@ -292,3 +292,43 @@ def test_salience_boost_no_op_when_no_doc_id(tmp_path: Path, monkeypatch) -> Non
     )
     out = _apply_salience_boost([r], query="q", weight=0.5)
     assert out == [r]
+
+
+def test_salience_boost_routes_via_http_store_in_service_mode(monkeypatch) -> None:
+    """nexus-g8r2h fold (sweep [21089] item 8): on a service-backed box the
+    boost must read salient_sentences through HttpDocumentAspectsStore —
+    the old direct DocumentAspects(memory.db) read served STALE frozen
+    pre-migration rows. Also pins that the store's close() is called (it
+    closes the httpx pool — load-bearing, reviewer Low)."""
+    from nexus.db.storage_mode import StorageBackend
+
+    calls: dict = {"salient": [], "closed": 0}
+
+    class _FakeHttpAspects:
+        def get_salient_sentences(self, doc_id: str) -> list[str]:
+            calls["salient"].append(doc_id)
+            return ["hybrid retrieval cross-encoder reranking"] if doc_id == "B" else []
+
+        def close(self) -> None:
+            calls["closed"] += 1
+
+    monkeypatch.setattr(
+        "nexus.db.storage_mode.storage_backend_for",
+        lambda store: StorageBackend.SERVICE,
+    )
+    monkeypatch.setattr(
+        "nexus.db.t2.http_document_aspects_store.HttpDocumentAspectsStore",
+        lambda: _FakeHttpAspects(),
+    )
+
+    from nexus.search_engine import _apply_salience_boost
+    results = [
+        _make_result("a", "knowledge__rag", "A", score=0.50),
+        _make_result("b", "knowledge__rag", "B", score=0.45),
+    ]
+    out = _apply_salience_boost(
+        results, query="hybrid retrieval cross-encoder", weight=0.5,
+    )
+    assert [r.id for r in out] == ["b", "a"]
+    assert sorted(calls["salient"]) == ["A", "B"]
+    assert calls["closed"] == 1

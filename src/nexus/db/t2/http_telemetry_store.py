@@ -319,6 +319,24 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             payload["occurred_at"] = occurred_at
         self._post("/v1/telemetry/hook_failures/record", payload)
 
+    @staticmethod
+    def _batch_ack(resp: Any, sent: int) -> int:
+        """The service's ``inserted`` ack, or 0 with a warning when absent.
+
+        nexus-znwc2: the old ``resp.get("inserted", len(rows))`` fabricated a
+        full-batch durable count on a stripped/stubbed response. Telemetry is
+        advisory, so a missing ack degrades to a VISIBLE undercount (0 +
+        warning) rather than aborting the caller.
+        """
+        acked = resp.get("inserted") if isinstance(resp, dict) else None
+        if acked is None:
+            _log.warning(
+                "telemetry_batch_ack_missing", sent=sent,
+                consequence="counting 0 inserted (never assuming the batch landed)",
+            )
+            return 0
+        return int(acked)
+
     def log_relevance_batch(
         self,
         rows: list[tuple[str, str, str, str, str]],
@@ -334,7 +352,7 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "rows": [list(r) for r in rows]
         }
         resp = self._post("/v1/telemetry/relevance/batch", payload)
-        return int(resp.get("inserted", len(rows)))
+        return self._batch_ack(resp, len(rows))
 
     def get_relevance_log(
         self,
@@ -387,7 +405,7 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "rows": [list(r) for r in rows]
         }
         resp = self._post("/v1/telemetry/search/batch", payload)
-        return int(resp.get("inserted", len(rows)))
+        return self._batch_ack(resp, len(rows))
 
     def query_collection_stats(
         self, collection: str, *, days: int = 30,

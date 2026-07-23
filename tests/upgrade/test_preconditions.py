@@ -78,8 +78,12 @@ def test_check_covers_every_precondition_axis(tmp_path: pathlib.Path) -> None:
         _installed_version_fn=lambda: "6.12.0",
         _provisioned_fn=lambda: True,
         _footprint_fn=lambda: False,
+        _plugin_version_fn=lambda: "6.12.0",
+        _lockstep_marker_fn=lambda: "6.12.0",
     )
-    assert _names(reports) == ["package", "engine", "provisioning", "process"]
+    assert _names(reports) == [
+        "package", "engine", "provisioning", "process", "plugin-lockstep",
+    ]
     assert all(r.current for r in reports)  # nothing running, engine converged
 
 
@@ -399,3 +403,110 @@ def test_upgrade_trigger_wires_preconditions_before_the_walk() -> None:
     source = inspect.getsource(upgrade.callback)
     assert "_converge_preconditions(" in source
     assert source.index("_converge_preconditions(") < source.index("_run_ladder(")
+
+
+class TestPluginLockstepPrecondition:
+    """nexus-2a5ij (RDR-185 P3.0): hooks/plugin lockstep freshness as a named,
+    STATELESS, report-only precondition — inputs are the installed plugin
+    version and the RDR-143 lockstep marker, the same on-disk pair the
+    SessionStart hook reads. Never converged here (no actions, ever)."""
+
+    def _report(self, plugin: str | None, marker: str | None):
+        from nexus.upgrade_ladder.preconditions import _lockstep_report
+
+        return _lockstep_report(plugin, marker)
+
+    def test_no_plugin_install_is_not_applicable(self) -> None:
+        r = self._report(None, "6.12.0")
+        assert r.applicable is False
+        assert r.current is True
+        assert r.actions == ()
+
+    def test_missing_marker_is_stale_unconfirmed(self) -> None:
+        r = self._report("6.12.0", None)
+        assert r.applicable is True
+        assert r.current is False
+        assert "unconfirmed" in r.detail
+        assert r.actions == ()
+
+    def test_skew_is_stale_with_both_versions_in_detail(self) -> None:
+        r = self._report("6.13.0", "6.12.0")
+        assert r.current is False
+        assert "6.13.0" in r.detail and "6.12.0" in r.detail
+        assert r.actions == ()
+
+    def test_matched_versions_are_current(self) -> None:
+        r = self._report("6.12.0", "6.12.0")
+        assert r.applicable is True
+        assert r.current is True
+
+    def test_converge_reports_include_lockstep_and_never_act_on_it(
+        self, tmp_path: pathlib.Path,
+    ) -> None:
+        """Report-only through the CONVERGE surface too: skewed lockstep
+        appears in the verdicts but grows no actions (acquisition belongs to
+        the RDR-143 SessionStart hook, not the upgrade trigger)."""
+        from nexus.upgrade_ladder.preconditions import converge_preconditions
+
+        reports = converge_preconditions(
+            config_dir=tmp_path,
+            _engine_detect_fn=lambda: _EngineStatus(converged=True, reason=None),
+            _engine_converge_fn=lambda: [],
+            _lease_fn=lambda: None,
+            _installed_version_fn=lambda: "6.12.0",
+            _cycle_fn=lambda: None,
+            _provisioned_fn=lambda: True,
+            _footprint_fn=lambda: False,
+            _plugin_version_fn=lambda: "6.13.0",
+            _lockstep_marker_fn=lambda: "6.12.0",
+        )
+        by = {r.name: r for r in reports}
+        assert "plugin-lockstep" in by
+        assert by["plugin-lockstep"].current is False
+        assert by["plugin-lockstep"].actions == ()
+
+    def test_default_readers_use_hook_marker_override(
+        self, tmp_path: pathlib.Path, monkeypatch,
+    ) -> None:
+        """_default_lockstep_marker honors NX_LOCKSTEP_MARKER exactly like
+        the SessionStart hook does — the two readers must resolve the SAME
+        file or the verdict and the hook can disagree about freshness."""
+        from nexus.upgrade_ladder.preconditions import _default_lockstep_marker
+
+        marker = tmp_path / "cli_lockstep_marker"
+        marker.write_text("6.12.0\n")
+        monkeypatch.setenv("NX_LOCKSTEP_MARKER", str(marker))
+        assert _default_lockstep_marker() == "6.12.0"
+
+        marker.unlink()
+        assert _default_lockstep_marker() is None
+
+
+def test_default_plugin_version_delegates_to_health_reader(
+    tmp_path: pathlib.Path, monkeypatch,
+) -> None:
+    """Reviewer Medium fold (nexus-2a5ij): the plugin-version reader must be
+    the SAME schema-tolerant reader health.py uses (both registry schema
+    variants, multi-entry) — not a third narrower reimplementation. Pinned
+    behaviorally: a v1-style top-level-dict registry (no "plugins" wrapper)
+    must still resolve, and multiple versions resolve to the highest."""
+    import json as _json
+
+    from nexus.upgrade_ladder.preconditions import _default_plugin_version
+
+    registry = tmp_path / "installed_plugins.json"
+    # v1-shape: top-level dict, no "plugins" wrapper; two conexus entries.
+    registry.write_text(_json.dumps({
+        "conexus@nexus-plugins": [
+            {"version": "6.13.0"}, {"version": "6.17.0"},
+        ],
+    }))
+
+    import nexus.health as health_mod
+
+    real = health_mod._installed_conexus_plugin_versions
+    monkeypatch.setattr(
+        health_mod, "_installed_conexus_plugin_versions",
+        lambda registry_path=None: real(registry),
+    )
+    assert _default_plugin_version() == "6.17.0"

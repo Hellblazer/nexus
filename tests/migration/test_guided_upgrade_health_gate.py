@@ -186,3 +186,42 @@ class TestWaitForServiceHealth:
     def test_negative_timeout_rejected(self) -> None:
         with pytest.raises(ValueError):
             wait_for_service_health(service_url=SERVICE_URL, timeout_s=-1.0)
+
+
+class TestHealthGateAuthToken:
+    """nexus-bwulw / conexus relay [21082] decision (b): the managed edge
+    auth-gates /health; the gate's default transport sends the bearer when a
+    token is supplied and stays unauthenticated (ez5.1) without one."""
+
+    def _capture_httpx(self, monkeypatch):
+        import httpx
+
+        calls: list[dict] = []
+
+        class _Resp:
+            status_code = 200
+
+            @staticmethod
+            def json() -> dict:
+                return {"status": "ok", "db": "up"}
+
+        def _fake_get(url, timeout=None, headers=None, **kw):
+            calls.append({"url": url, "headers": headers or {}})
+            return _Resp()
+
+        monkeypatch.setattr(httpx, "get", _fake_get)
+        return calls
+
+    def test_token_sends_bearer_header(self, monkeypatch) -> None:
+        calls = self._capture_httpx(monkeypatch)
+        result = wait_for_service_health(
+            service_url=SERVICE_URL, timeout_s=5.0, token="sekrit",
+        )
+        assert result.ready is True
+        assert calls[0]["headers"] == {"Authorization": "Bearer sekrit"}
+
+    def test_no_token_stays_unauthenticated(self, monkeypatch) -> None:
+        calls = self._capture_httpx(monkeypatch)
+        result = wait_for_service_health(service_url=SERVICE_URL, timeout_s=5.0)
+        assert result.ready is True
+        assert calls[0]["headers"] == {}

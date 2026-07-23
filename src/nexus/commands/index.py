@@ -1130,7 +1130,10 @@ def run_collection_postprocessing(
                         from nexus.context import generate_context_l1  # noqa: PLC0415 — deliberate function-local import (rare branch: L1 refresh only when repo_path supplied)
                         generate_context_l1(db.taxonomy, repo_path=repo_path)
                     except Exception:  # noqa: BLE001 — best-effort L1 context-cache refresh; non-fatal trailing enrichment step in a guarded chain
-                        pass  # Non-fatal
+                        # nexus-azss4: a bare `pass` here hid the service-mode
+                        # raw-handle break for weeks (SessionStart Knowledge
+                        # Map permanently stale). Still non-fatal — but LOUD.
+                        _log.warning("context_l1_refresh_failed", exc_info=True)
     except Exception:  # noqa: BLE001 — boundary catch wrapping the whole post-processing chain; failure logged and never crashes the index command
         _log.debug("taxonomy_discover_failed", exc_info=True)
 

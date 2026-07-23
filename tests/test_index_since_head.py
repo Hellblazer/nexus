@@ -185,25 +185,32 @@ def test_since_head_ignored_with_force(git_repo, monkeypatch):
 
 
 def test_catalog_hook_skip_housekeeping_flag():
-    """The load-bearing safety pin: _catalog_hook(skip_housekeeping=True)
-    must NEVER reach _run_housekeeping — a miss-count sweep against a
-    delta-filtered walk marks every unvisited doc as gone (mass delete
-    after two runs)."""
+    """The load-bearing safety pin, BEHAVIORAL (nexus-4kh95, upgraded from a
+    source-text grep): skip_housekeeping=True must NEVER reach
+    _run_housekeeping — a miss-count sweep against a delta-filtered walk
+    marks every unvisited doc as gone (mass delete after two runs). The
+    gate lives in the extracted _maybe_run_housekeeping seam, exercised
+    here by CALLING it both ways."""
     from nexus import indexer as idx
 
     called: list[bool] = []
     with patch.object(idx, "_run_housekeeping",
-                      side_effect=lambda *a, **k: called.append(True)), \
-         patch.object(idx, "make_catalog_reader", create=True), \
-         patch("nexus.catalog.factory.make_catalog_reader", return_value=None):
-        # Reader None -> hook returns early; the flag pin is structural:
-        # verify by source inspection that the housekeeping call is gated.
-        src = Path(idx.__file__).read_text()
-        hook_start = src.index("def _catalog_hook(")
-        hook_end = src.index("\ndef ", hook_start + 10)
-        body = src[hook_start:hook_end]
-        assert "skip_housekeeping" in body
-        gate = body.index("if skip_housekeeping:")
-        call = body.index("_run_housekeeping(cat, owner, indexed_set")
-        assert gate < call, "housekeeping must be behind the skip gate"
-    assert called == []
+                      side_effect=lambda *a, **k: called.append(True)):
+        idx._maybe_run_housekeeping(
+            object(), object(), [], Path("/tmp"),
+            writer=None, skip_housekeeping=True,
+        )
+        assert called == [], "partial-walk housekeeping must be gated OFF"
+
+        idx._maybe_run_housekeeping(
+            object(), object(), [], Path("/tmp"),
+            writer=None, skip_housekeeping=False,
+        )
+        assert called == [True], "full-walk housekeeping must still run"
+
+    # The hook must actually route through the tested seam — otherwise the
+    # behavioral test above pins a helper nobody calls.
+    import inspect
+
+    hook_src = inspect.getsource(idx._catalog_hook)
+    assert "_maybe_run_housekeeping(" in hook_src

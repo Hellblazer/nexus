@@ -70,6 +70,23 @@ _SCOPE_FIT_WEIGHT: float = 0.15
 _GROWN_PLAN_MIN_CONFIDENCE: float = 0.55
 
 
+#: nexus-vtp8h: a plan whose recorded runs are ALL failures at/past this
+#: count (with zero successes) is skipped by the matcher — re-matching it
+#: just re-crashes the runner (the plan-138 class). One success ever
+#: exempts a plan permanently (real plans can fail transiently).
+_ALWAYS_FAILING_MIN_FAILURES: int = 3
+
+
+def _is_always_failing(row: dict) -> bool:
+    """True when the plan's run record is all-failure (see constant above)."""
+    try:
+        failures = int(row.get("failure_count") or 0)
+        successes = int(row.get("success_count") or 0)
+    except (TypeError, ValueError):
+        return False
+    return successes == 0 and failures >= _ALWAYS_FAILING_MIN_FAILURES
+
+
 def _is_grown_plan_tags(tags: str | None) -> bool:
     """Return True when *tags* identifies a grown plan.
 
@@ -319,6 +336,7 @@ def plan_match(
         # Gather all admissible candidates with (adjusted_score, specificity).
         scored: list[tuple[float, int, Match]] = []
         scope_conflict_drops = 0
+        always_failing_drops = 0
         for plan_id, distance in hits:
             row = library.get_plan(plan_id)
             if row is None:
@@ -340,6 +358,16 @@ def plan_match(
                 continue
             confidence = max(0.0, 1.0 - float(distance))
             if confidence < min_confidence:
+                continue
+            if _is_always_failing(row):
+                # nexus-vtp8h: every recorded run failed — skip rather than
+                # hand the runner a plan that only ever crashes. Attrition is
+                # counted, not over-fetch-compensated (reviewer Medium,
+                # recorded as accepted): `nx plan hygiene` retires these
+                # durably, so cosine-hit domination by always-failing rows is
+                # a transient pre-hygiene state, and the counter below makes
+                # it observable rather than silently under-delivering n.
+                always_failing_drops += 1
                 continue
             # RDR-090 P1.3: grown plans need a higher cosine floor so
             # broad scaffolding ('which RDR…') in their match-text
@@ -384,6 +412,12 @@ def plan_match(
                 dropped=scope_conflict_drops,
                 scope_pref=scope_pref,
             )
+        if always_failing_drops:
+            _log.debug(
+                "plan_match_always_failing_dropped",
+                dropped=always_failing_drops,
+                remedy="nx plan hygiene --apply retires these durably",
+            )
 
     # FTS5 fallback: either cache unavailable or T1 returned no hits.
     # Over-fetch so the dimension post-filter doesn't starve the caller.
@@ -393,6 +427,9 @@ def plan_match(
     rows = library.search_plans(intent, limit=_fts_over, project=project)
     matches: list[Match] = []
     for row in rows:
+        if _is_always_failing(row):
+            # nexus-vtp8h: same skip on the FTS5 path.
+            continue
         m = Match.from_plan_row(row, confidence=None)
         if filter_dims and not _superset(m.dimensions, filter_dims):
             continue

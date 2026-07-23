@@ -153,14 +153,17 @@ def chash_reconcile_cmd(apply: bool) -> None:
     """Sweep stale ``chash_index`` rows pointing at deleted T3 collections.
 
     \b
-    SCOPE (RDR-187 / nexus-piwya.4): this verb operates on the LOCAL
-    SQLite ``chash_index`` ONLY — it opens the T2 db file directly, so
-    it is meaningful solely on pre-migration installs whose SQLite
-    router still routes (frozen migration source, RDR-158). On a
-    migrated (service-mode) install there is no local router to sweep:
-    the verb exits at the ``No T2 db`` guard, and the PG-side router is
-    retired outright by RDR-187 (its ghosts die with the table at the
-    DROP) — server-side, "which collections hold chunks" is answered
+    SCOPE (RDR-187 / nexus-piwya.4, guard corrected by nexus-yh044): this
+    verb operates on the LOCAL SQLite ``chash_index`` ONLY — meaningful
+    solely on PRE-migration installs whose SQLite router still routes.
+    On a migrated (service-backed) install it REFUSES before any work:
+    a migrated-in-place box still has memory.db on disk (the docstring
+    used to claim the ``No T2 db`` guard covers this — it does not), and
+    diffing live T3 against that FROZEN index yields garbage ghosts whose
+    ``--apply`` would delete rows from the frozen migration source,
+    violating RDR-176 source immutability (the rollback target must stay
+    untouched until RDR-155 P4b). The PG-side router is retired outright
+    by RDR-187 — server-side, "which collections hold chunks" is answered
     from the chunks tables themselves, which cannot go stale.
 
     \b
@@ -188,7 +191,33 @@ def chash_reconcile_cmd(apply: bool) -> None:
     """
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
     from nexus.db import make_t3  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred import; rare/branch-local path
     from nexus.db.t2.chash_index import ChashIndex  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+
+    # nexus-yh044: refuse BEFORE any work on a service-backed install — the
+    # "No T2 db" guard below does NOT cover migrated-in-place boxes where
+    # the file survives frozen. Message branches on which shape this box is
+    # (critic Significant: SERVICE is the hard default for FRESH installs
+    # too, where "frozen migration source" would be a false premise).
+    if storage_backend_for("chash_index") == StorageBackend.SERVICE:
+        db_path = default_db_path()
+        if db_path.exists():
+            raise click.ClickException(
+                "chash-reconcile is a PRE-MIGRATION repair verb and this "
+                "install is service-backed. The local SQLite chash_index "
+                "here is the FROZEN MIGRATION SOURCE (RDR-176: immutable "
+                "rollback target until RDR-155 P4b) — reconciling it "
+                "against live T3 would manufacture ghosts and --apply would "
+                "delete source rows. The PG side needs no reconciliation "
+                "(RDR-187: the router is retired; chunk tables cannot go "
+                "stale)."
+            )
+        raise click.ClickException(
+            "chash-reconcile is a PRE-MIGRATION repair verb: this install "
+            "is service-backed and has no local T2 database — there is "
+            "nothing to reconcile. The PG side needs no reconciliation "
+            "(RDR-187: the router is retired; chunk tables cannot go stale)."
+        )
 
     db_path = default_db_path()
     if not db_path.exists():

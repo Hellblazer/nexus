@@ -554,9 +554,18 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             raise ValueError(f"limit must be > 0, got {limit!r}")
         result = self._get("/manifest/orphans", dim=dim, limit=limit)
         result = result or {}
+        if "count" not in result:
+            # nexus-znwc2: `count` feeds the migration P3 validation gate
+            # (manifest_check) — a stripped field defaulting to 0 would be a
+            # vacuous PASS. Fail closed, matching relation_counts' model.
+            raise RuntimeError(
+                "manifest/orphans response carried no `count` field — cannot "
+                "verify orphan state; refusing a false-clean zero "
+                f"(response keys: {sorted(result)})"
+            )
         return {
             "dim": int(result.get("dim", dim)),
-            "count": int(result.get("count", 0)),
+            "count": int(result["count"]),
             "orphans": result.get("orphans", []),
         }
 

@@ -6,6 +6,87 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.18.0] - 2026-07-23
+
+Engine unchanged: ships with (and requires) engine-service-v0.1.52.
+
+### Added
+- `nx plan hygiene [--apply]`: scans the plan library for non-executable
+  bead-dump plans, legacy null-verb rows, and always-failing plans;
+  `--apply` disables them (reversible via `nx plan enable`). Works in
+  service mode, unlike the SQLite-only `nx plan repair` group.
+- `NX_T1_CLI_BUDGET_S` (default 60): total wall-clock budget on every
+  bare-CLI T1 operation, covering the session-token mint/borrow and all
+  self-heal retry legs; past budget no further leg starts and the command
+  fails with a remedy pointing at `nx doctor`. Operations slower than 5s
+  emit a visible slow-path warning.
+- `tests/e2e/cloud-client-path-gate.sh`: asserts the engine's pinned HTTP
+  contracts (/version fields, authenticated /health, client
+  embedding-mode probe, /v1 read path) survive the public edge — the
+  client-visible half of the cloud gate, now a standing post-deploy step.
+- Plugin/CLI lockstep surfaced as a named `plugin-lockstep` precondition
+  verdict alongside package/engine/provisioning/process.
+
+### Fixed
+- Semantic plan matching restored in production: since the T1 service
+  cutover the cosine plan-match cache was silently unavailable
+  (service-backed T1 carries no chroma client) and every match ran
+  FTS5-only; the cache now gets an in-process ephemeral substrate and the
+  calibrated RDR-078 gate runs again. Save-time validation refuses
+  non-executable `plan_json` (the runner-crash class), and the matcher
+  skips plans whose every recorded run failed.
+- Bare-CLI T1 operations no longer pay a session-token mint round trip on
+  every invocation: the token rides the freshness-checked published-lease
+  cache (measured 1.09s to 0.75s on a warm `nx scratch list` against the
+  cloud), with a 5s expiry margin so near-expired tokens are never
+  borrowed into a guaranteed first-op 401.
+- SessionStart Knowledge Map (L1 context cache) regenerates on
+  service-mode installs; the refresh had silently died since migration
+  (raw SQLite handle on an HTTP taxonomy store) and `nx context refresh`
+  now works instead of printing a traceback.
+- `nx dt index --highlights` / `nx dt highlights` route through the
+  storage facade on migrated installs; previously the writer stored
+  highlights in local SQLite where nothing reads them and the reader
+  reported "no ingested highlights" against real migrated rows. The
+  guided-upgrade freshness probe now also anchors on
+  `document_highlights`, so any rows stranded by the old writer are
+  recovered by a plain `nx guided-upgrade` re-run.
+- The `attention_guided_v1` salience boost reads salient sentences
+  through the service on migrated installs instead of a stale frozen
+  local snapshot; a sustained outage of the boost now warns once per
+  process instead of dying silently.
+- `nx catalog chash-reconcile` refuses before any work on service-backed
+  installs: the local index there is the frozen migration source
+  (RDR-176 rollback target) and `--apply` could previously delete rows
+  from it on migrated-in-place boxes.
+- Response-shape trust hardening across the engine client: a missing or
+  stripped response field never reads as success — rerank envelopes
+  require the degrade flag, migration parity checks require real counts,
+  write acks are reconciled (upsert-chunks) or never assumed
+  (remap/telemetry), missing search distances are emitted as null (never
+  a fabricated best-match 0.0), and the migration orphan gate fails
+  closed on an absent count.
+- Guided-upgrade's readiness gate authenticates against managed targets
+  (the public edge auth-gates /health), unblocking managed migrations to
+  the cloud; the voyage-capability check works against the restored
+  public /version embedding fields.
+- `nx collection prune` says "skipped (cannot verify)" instead of a
+  verified-clean "found none" when the active embedder cannot be
+  resolved.
+
+### Documentation
+- CLI reference covers the previously undocumented surface: the
+  `nx plan` verb family and repair group, 14 `nx catalog` verbs and the
+  orphan-backfill subgroup, `nx aspects` repair verbs,
+  `nx t3 backfill-manifest`, `nx plan hygiene`, and the T1 budget
+  environment variable; three misleading entries corrected (plan repair
+  as a group, catalog gc's inverted dry-run default, t3 reidentify's
+  full-hash identity).
+- Release process: mandatory post-tag back-merge of main into develop
+  (step 11b) ends the stale-develop-manifests class (develop sat at
+  6.11.0 across six releases while internally-consistent parity checks
+  stayed green).
+
 ## [6.17.0] - 2026-07-23
 
 Ships with (and requires) engine-service-v0.1.52.

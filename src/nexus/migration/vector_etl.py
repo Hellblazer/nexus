@@ -1393,8 +1393,19 @@ def _delegate_ingest_cloud(
         if entry is None:
             failed.append(name)
             continue
-        copied = int(entry.get("copied", 0))
-        dest = int(entry.get("dest", 0))
+        if not isinstance(entry, dict) or "copied" not in entry or "dest" not in entry:
+            # nexus-znwc2: with either count stripped, the old 0-defaults
+            # passed parity on 0 == 0 and certified the collection migrated
+            # with zero evidence (excluding it from the client-leg fallback).
+            # Unverifiable parity routes to the fallback leg instead.
+            _log.warning(
+                "vector_etl_ingest_cloud_collection_parity_unverifiable",
+                collection=name, job_id=job_id, entry_keys=sorted(entry),
+            )
+            failed.append(name)
+            continue
+        copied = int(entry["copied"])
+        dest = int(entry["dest"])
         if dest != copied:
             _log.warning(
                 "vector_etl_ingest_cloud_collection_parity_mismatch",

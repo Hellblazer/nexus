@@ -182,3 +182,71 @@ def test_highlights_show_command(runner, tmp_path, monkeypatch) -> None:
     miss = runner.invoke(main, ["dt", "highlights", "9.9.9"])
     assert miss.exit_code != 0
     assert "no ingested highlights" in miss.output
+
+
+# ── nexus-g8r2h: highlights route via the storage facade ─────────────────────
+
+
+class _FakeHttpHighlights:
+    def __init__(self) -> None:
+        self.upserts: list = []
+        self.gets: list = []
+
+    def upsert(self, record) -> bool:
+        self.upserts.append(record)
+        return True
+
+    def get(self, doc_id):
+        self.gets.append(("get", doc_id))
+        return None
+
+    def get_by_source_uri(self, uri):
+        self.gets.append(("uri", uri))
+        return None
+
+
+def test_ingest_routes_to_http_store_in_service_mode(
+    tmp_path, monkeypatch,
+) -> None:
+    """nexus-g8r2h: on a migrated (service-mode) box the writer must hit the
+    HTTP store — the old direct DocumentHighlights(default_db_path()) write
+    landed in local SQLite where nothing service-side reads (split-brain)."""
+    from nexus.commands import dt as dt_mod
+    from nexus.db.storage_mode import StorageBackend
+
+    _patch_catalog(monkeypatch, tmp_path,
+                   collection="knowledge__dt__stub-cce-1024__v1")
+    monkeypatch.setattr("nexus.mcp_client.devonthink.dt_extract_highlights",
+                        lambda u: "## Highlights\n- svc")
+    monkeypatch.setattr("nexus.mcp_client.devonthink.dt_extract_mentions",
+                        lambda u: None)
+    monkeypatch.setattr(
+        "nexus.db.storage_mode.storage_backend_for",
+        lambda store: StorageBackend.SERVICE,
+    )
+    fake = _FakeHttpHighlights()
+    monkeypatch.setattr(
+        "nexus.db.t2.http_document_highlights_store.HttpDocumentHighlightsStore",
+        lambda: fake,
+    )
+
+    assert dt_mod._ingest_highlights_record("SVC") is True
+    assert len(fake.upserts) == 1
+    assert fake.upserts[0].highlights_md == "## Highlights\n- svc"
+
+
+def test_show_reads_http_store_in_service_mode(monkeypatch) -> None:
+    from nexus.commands import dt as dt_mod
+    from nexus.db.storage_mode import StorageBackend
+
+    monkeypatch.setattr(
+        "nexus.db.storage_mode.storage_backend_for",
+        lambda store: StorageBackend.SERVICE,
+    )
+    fake = _FakeHttpHighlights()
+    monkeypatch.setattr(
+        "nexus.db.t2.http_document_highlights_store.HttpDocumentHighlightsStore",
+        lambda: fake,
+    )
+    store = dt_mod._open_highlights_store()
+    assert store is fake
