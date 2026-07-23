@@ -25,6 +25,7 @@ from nexus.upgrade_finish import (
     heal_diag_view,
     restart_stale,
     unload_stale_t2_launchagent,
+    unload_stale_service_launchagent,
 )
 
 _REQUIRED_STR = ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
@@ -970,6 +971,60 @@ class TestCheckVersionTransitionDiagViewHeal:
         ):
             line = check_version_transition(tmp_path)
         assert "healed: nexus_diag lacked SELECT" in line
+
+
+class TestUnloadStaleServiceLaunchagent:
+    """nexus-6bmph (RDR-183 residual): a managed/cloud box must never keep a
+    respawning com.nexus.service unit (the t2-leg sibling)."""
+
+    def test_local_mode_untouched(self, tmp_path):
+        with patch("nexus.config.is_local_mode", return_value=True), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed") as probe, \
+             patch("nexus.daemon.installer.uninstall_autostart") as uninstall:
+            actions = unload_stale_service_launchagent(tmp_path)
+        assert actions == []
+        probe.assert_not_called()
+        uninstall.assert_not_called()
+
+    def test_nonlocal_no_unit_is_noop(self, tmp_path):
+        with patch("nexus.config.is_local_mode", return_value=False), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed",
+                   return_value=None), \
+             patch("nexus.daemon.installer.uninstall_autostart") as uninstall:
+            actions = unload_stale_service_launchagent(tmp_path)
+        assert actions == []
+        uninstall.assert_not_called()
+
+    def test_nonlocal_with_unit_removes_and_reports(self, tmp_path):
+        from pathlib import Path as _P
+
+        from nexus.daemon.installer import UninstallResult, UninstallStatus
+
+        dest = tmp_path / "com.nexus.service.plist"
+        with patch("nexus.config.is_local_mode", return_value=False), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed",
+                   return_value=_P(dest)), \
+             patch("nexus.daemon.installer.uninstall_autostart",
+                   return_value=UninstallResult(status=UninstallStatus.REMOVED, dest=dest)) as uninstall:
+            actions = unload_stale_service_launchagent(tmp_path)
+        uninstall.assert_called_once_with(tier="service")
+        assert len(actions) == 1
+        assert "removed" in actions[0]
+        assert str(dest) in actions[0]
+
+    def test_removal_failure_is_needs_human_never_raises(self, tmp_path):
+        from pathlib import Path as _P
+
+        dest = tmp_path / "com.nexus.service.plist"
+        with patch("nexus.config.is_local_mode", return_value=False), \
+             patch("nexus.commands.daemon._service_autostart_unit_installed",
+                   return_value=_P(dest)), \
+             patch("nexus.daemon.installer.uninstall_autostart",
+                   side_effect=RuntimeError("bootout exploded")):
+            actions = unload_stale_service_launchagent(tmp_path)
+        assert len(actions) == 1
+        assert "NEEDS HUMAN" in actions[0]
+        assert "nx daemon service uninstall --autostart" in actions[0]
 
 
 class TestUnloadStaleT2Launchagent:

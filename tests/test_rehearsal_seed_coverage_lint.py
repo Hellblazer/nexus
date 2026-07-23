@@ -140,6 +140,11 @@ DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
         ("catalog-013-0", "nexus-e0hd2"),
         ("catalog-013-1b", "nexus-1wjmq"),
         ("catalog-014-0", "nexus-x6kdz"),
+        # nexus-78n33: the source_uri dedup backfill (FORCE-RLS-toggled row
+        # DML) — seeded as duplicate live-uri docs 1.1.201/1.1.202 in the
+        # data leg; effect-asserted (loser tombstoned, winner survives,
+        # 016-1 index exists).
+        ("catalog-016-0", "nexus-78n33"),
     }
 )
 

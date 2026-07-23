@@ -90,6 +90,42 @@ def _provision_service_embedder_step(embedder: str | None) -> None:
         _log.warning("service_bge_provision_failed", error=str(exc))
         raise click.ClickException(str(exc)) from exc
 
+    _provision_service_crossencoder_step()
+
+
+def _provision_service_crossencoder_step() -> None:
+    """Fetch the ms-marco cross-encoder ONNX the engine's rerank stage reads.
+
+    RDR-188 P1.3: local service installs rerank server-side with the ms-marco
+    cross-encoder (the engine's ``CrossEncoderReranker`` lazy-loads it from the
+    Java-read path). Deliberately NON-fatal, unlike the bge fetch above: the
+    engine boots and serves without this file — the fused rerank stage degrades
+    LOUD per request (``rerank_degraded=true``) until it exists, and the engine
+    picks it up on the next rerank without a restart. Failure here is surfaced
+    loudly (stderr + doctor keeps flagging it) but must not abort an otherwise
+    good install.
+    """
+    from nexus.db.service_crossencoder_model import (  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        SERVICE_CROSSENCODER_DOWNLOAD_HINT,
+        fetch_service_crossencoder_onnx,
+    )
+
+    click.echo(
+        f"\nProvisioning the ms-marco cross-encoder the service reranks with "
+        f"({SERVICE_CROSSENCODER_DOWNLOAD_HINT}) — one-time download …"
+    )
+    try:
+        dest = fetch_service_crossencoder_onnx()
+        click.echo(f"Done — service cross-encoder ready at {dest}.")
+    except Exception as exc:  # noqa: BLE001 — must stay actionable
+        _log.warning("service_crossencoder_provision_failed", error=str(exc))
+        click.echo(
+            f"\nWARNING: {exc}\n(The service still runs; server-side rerank stays "
+            f"degraded — loudly — until the model is provisioned. `nx doctor` "
+            f"tracks it.)",
+            err=True,
+        )
+
 
 def _ensure_service_binary_step(config_dir: Path) -> bool:
     """Acquire the signed native service binary if none is already installed.
@@ -623,8 +659,14 @@ def provision_service_stack(embedder: str | None = None) -> bool:
     """
     from nexus.daemon.storage_service_daemon import StorageServiceStartError  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
+    # RDR-188 P3.1 fold (reviewer Critical, T2 [21057]): resolve the mode
+    # BEFORE provisioning — _provision_postgres_step() writes pg_credentials,
+    # which is itself a positive local signal to is_local_mode(); deciding
+    # after the write would let the just-written file flip the answer within
+    # this very call and defeat the cloud-internal early return below.
+    local = _config.is_local_mode()
     _provision_postgres_step()
-    if not _config.is_local_mode():
+    if not local:
         return False
     # Local service backend (RDR-160): the Java service embeds every collection
     # with bge-768. Lock the embedder + provision the standard ONNX it reads.
@@ -638,8 +680,12 @@ def provision_service_stack(embedder: str | None = None) -> bool:
             "— install one (`nx daemon service install-binary` or configure the "
             "engine-service tag), then retry"
         )
+    # nexus-x3ugg: the explicit mode record — a completed local provisioning
+    # walk IS the user's local intent; stamp it so is_local_mode() reads the
+    # record instead of inferring from artifact files (the pg_credentials /
+    # chroma-key ambiguity corner resolves silently once stamped).
+    set_config_value("install.mode", "local")
     return True
-
 
 def _resolve_init_mode() -> str:
     """Resolve the init dispatch mode with explicit precedence (RDR-174 P1.1).
@@ -824,6 +870,20 @@ def init_cmd(
     ``--service`` is still accepted (it forces local provisioning) and is slated
     for a deprecation notice in P3.1.
     """
+    # nexus-gynt2: stranded-install refusal, FIRST — before any provisioning.
+    # Disarmed (constant-check no-op) on every migration-capable release; at
+    # N+1 an init on a box carrying unmigrated pre-PG data must refuse with
+    # the two-hop redirect rather than provision a fresh empty install
+    # beside it (indistinguishable from data loss). Deliberately NOT wrapped
+    # in try/except (unlike the CLI/MCP banner sites, which are advisory and
+    # fail open): a detector crash here must abort init loudly rather than
+    # fall through into provisioning — that fall-through IS the failure mode
+    # this guard exists to prevent.
+    stranded = _config.detect_stranded_install_default()
+    if stranded is not None:
+        click.echo(f"Refusing to initialize: {stranded.message}", err=True)
+        ctx.exit(1)
+
     # RDR-174 P2.4: ``--yes`` now accepts the service-autostart registration
     # non-interactively (the embedder picker that previously made it a no-op was
     # removed in P1.3). ``--no-autostart`` declines. The decision is made
@@ -871,6 +931,8 @@ def init_cmd(
             # service, then STOP. _managed_onboarding exits non-zero on probe
             # failure and never reaches local provisioning.
             _managed_onboarding(ctx)
+            # nexus-x3ugg: probe succeeded — stamp the explicit mode record.
+            set_config_value("install.mode", "managed")
         else:
             click.echo("Nexus is configured for CLOUD mode (Voyage embeddings).")
             click.echo(

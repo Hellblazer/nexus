@@ -351,8 +351,108 @@ else
 fi
 rm -f "$audf"
 
-# ── Test 13: sweep removes only stale files ──────────────────────────────
-echo "Test 13: sweep removes >7d-old files, keeps fresh ones"
+# ── Test 13: census — scripted counts (nexus-hybv1) ──────────────────────
+echo "Test 13: expectations_census classification + dedup"
+CSID="sess-census-1"
+cf="$(expectations_file "$CSID")"
+{
+    # reviewer: clean report. critic: blocked then resolved (post-block
+    # REPORTED stamp, no strength field = immediate). ghost: blocked,
+    # never resolved. rogue: named START with no EXPECT (undeclared).
+    # phantom: EXPECT with no START. flaky: REPORTED then a LATER
+    # unresolved BLOCKED (review 21032 Critical 1 — last state must win).
+    # noshow: BLOCKED with no START row at all (review 21032 Critical 2 /
+    # nexus-0s0o1 — must still appear per-agent). slowres: blocked then
+    # resolved with strength "later" (weak causal evidence, split out).
+    # Every hook-written row doubled — the nexus-3h0u6 legacy shape.
+    printf '2026-07-19T15:27:00Z\tEXPECT\treviewer-x\tbackground\n'
+    printf '2026-07-19T15:27:00Z\tEXPECT\tcritic-x\tbackground\n'
+    printf '2026-07-19T15:27:00Z\tEXPECT\tghost-x\tbackground\n'
+    printf '2026-07-19T15:27:00Z\tEXPECT\tphantom-x\tbackground\n'
+    printf '2026-07-19T15:27:00Z\tEXPECT\tflaky-x\tbackground\n'
+    printf '2026-07-19T15:27:00Z\tEXPECT\tslowres-x\tbackground\n'
+    printf '2026-07-19T15:27:17Z\tSTART\tareviewer-x-1b8b\treviewer-x\n'
+    printf '2026-07-19T15:27:17Z\tSTART\tareviewer-x-1b8b\treviewer-x\n'
+    printf '2026-07-19T15:27:31Z\tSTART\tacritic-x-efef\tcritic-x\n'
+    printf '2026-07-19T15:27:31Z\tSTART\tacritic-x-efef\tcritic-x\n'
+    printf '2026-07-19T15:27:40Z\tSTART\taghost-x-aaaa\tghost-x\n'
+    printf '2026-07-19T15:27:50Z\tSTART\tarogue-x-bbbb\trogue-x\n'
+    printf '2026-07-19T15:27:55Z\tSTART\taflaky-x-dddd\tflaky-x\n'
+    printf '2026-07-19T15:27:58Z\tSTART\taslowres-x-eeee\tslowres-x\n'
+    printf '2026-07-19T15:30:00Z\tREPORTED\taflaky-x-dddd\n'
+    printf '2026-07-19T15:33:49Z\tBLOCKED\tacritic-x-efef\n'
+    printf '2026-07-19T15:33:49Z\tBLOCKED\tacritic-x-efef\n'
+    printf '2026-07-19T15:33:55Z\tBLOCKED\taghost-x-aaaa\n'
+    printf '2026-07-19T15:33:58Z\tBLOCKED\tanoshow-x-cccc\n'
+    printf '2026-07-19T15:34:02Z\tBLOCKED\taslowres-x-eeee\n'
+    printf '2026-07-19T15:34:12Z\tREPORTED\tareviewer-x-1b8b\n'
+    printf '2026-07-19T15:34:12Z\tREPORTED\tareviewer-x-1b8b\n'
+    printf '2026-07-19T15:34:20Z\tREPORTED\tacritic-x-efef\n'
+    printf '2026-07-19T15:40:00Z\tBLOCKED\taflaky-x-dddd\n'
+    printf '2026-07-19T15:41:00Z\tREPORTED\taslowres-x-eeee\tlater\n'
+} >"$cf"
+census="$(expectations_census "$CSID")"
+if grep -q $'AGENT\tareviewer-x-1b8b\treviewer-x\tREPORTED\tdeclared' <<<"$census"; then
+    ok "clean reporter classified REPORTED"
+else
+    bad "reviewer classification wrong: $census"
+fi
+if grep -q $'AGENT\tacritic-x-efef\tcritic-x\tBLOCKED_RESOLVED\tdeclared' <<<"$census"; then
+    ok "blocked-then-reported classified BLOCKED_RESOLVED (guard success)"
+else
+    bad "critic classification wrong"
+fi
+if grep -q $'AGENT\taghost-x-aaaa\tghost-x\tBLOCKED_UNRESOLVED\tdeclared' <<<"$census"; then
+    ok "bare block classified BLOCKED_UNRESOLVED"
+else
+    bad "ghost classification wrong"
+fi
+if grep -q $'AGENT\tarogue-x-bbbb\trogue-x\tNO_TERMINAL\tundeclared' <<<"$census"; then
+    ok "undeclared named START flagged undeclared"
+else
+    bad "rogue classification wrong"
+fi
+if grep -q $'EXPECTED_NO_START\tphantom-x' <<<"$census"; then
+    ok "EXPECT with no START surfaced"
+else
+    bad "phantom missing from census"
+fi
+if grep -q $'AGENT\taflaky-x-dddd\tflaky-x\tBLOCKED_UNRESOLVED\tdeclared' <<<"$census"; then
+    ok "REPORTED-then-later-BLOCKED classifies BLOCKED_UNRESOLVED (last state wins — review 21032 C1)"
+else
+    bad "flaky classification wrong: $(grep aflaky <<<"$census")"
+fi
+if grep -q $'AGENT\tanoshow-x-cccc\t-\tBLOCKED_UNRESOLVED\tno-start' <<<"$census"; then
+    ok "BLOCKED with no START row still appears per-agent (review 21032 C2 / nexus-0s0o1)"
+else
+    bad "noshow missing/wrong: $(grep anoshow <<<"$census")"
+fi
+if grep -q $'AGENT\taslowres-x-eeee\tslowres-x\tBLOCKED_RESOLVED\tdeclared' <<<"$census"; then
+    ok "later-strength resolution still folds to BLOCKED_RESOLVED per-agent"
+else
+    bad "slowres classification wrong"
+fi
+# Doubled rows must count ONCE: blocked=5 (critic, ghost, noshow, slowres,
+# flaky), not 6 (critic doubled).
+if grep -q 'ROWS	expect=6 start=6 reported=4 blocked=5 wouldblock=0' <<<"$census"; then
+    ok "3h0u6-doubled rows deduplicated in ROWS counts"
+else
+    bad "ROWS counts wrong: $(grep ROWS <<<"$census")"
+fi
+if grep -q 'CLASSIFIED	reported=1 blocked_resolved=2 (immediate=1 later=1) blocked_unresolved=3 wouldblock=0 no_terminal=1 undeclared=1 no_start=1 expected_no_start=1' <<<"$census"; then
+    ok "CLASSIFIED summary exact (incl. immediate/later resolution split)"
+else
+    bad "CLASSIFIED summary wrong: $(grep CLASSIFIED <<<"$census")"
+fi
+if [[ -z "$(expectations_census "no-such-census-session")" ]]; then
+    ok "missing file: census emits nothing, exit 0 (fail-open)"
+else
+    bad "census produced output for a missing file"
+fi
+rm -f "$cf"
+
+# ── Test 14: sweep removes only stale files ──────────────────────────────
+echo "Test 14: sweep removes >7d-old files, keeps fresh ones"
 oldf="$(expectations_file "old-session")"
 : >"$oldf"
 touch -t 202601010000 "$oldf"

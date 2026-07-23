@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-78n33 (stacked-review TOCTOU finding on nexus-9dvqy, 2026-07-05;
+    RELEASE-GATE per Hal 2026-07-13).
+
+    registerDocument AND registerDocumentMany check idempotency
+    (source_uri / file_path SELECT, deleted_at IS NULL) BEFORE the
+    next_seq FOR UPDATE claim, under READ COMMITTED. The only unique key
+    on catalog_documents is (tenant_id, tumbler) — so two concurrent
+    registrations of the SAME new file can both pass the idempotency
+    SELECT and both INSERT: a duplicate live document. Contained in
+    practice by the client's per-repo advisory lock (which serializes two
+    `nx index repo` on the same repo), but nothing DB-side enforced it.
+
+    Fix (bead option a): a partial unique index on (tenant_id, source_uri)
+    for LIVE rows, plus ON CONFLICT DO NOTHING + winner re-select in both
+    register paths (CatalogRepository). Scope facts that shape the index:
+
+    - source_uri is TEXT NOT NULL DEFAULT '' (catalog-001): docs with no
+      URI store '' — the predicate MUST exclude '' or every no-URI doc
+      would collide into one slot.
+    - file_path deliberately has NO unique index: it is repo-ROOT-relative
+      (two owners legitimately share "README.md"); the file_path
+      idempotency SELECT is owner-scoped (tumbler prefix), which an index
+      cannot express. source_uri is absolute by construction (RDR-096 +
+      the nexus-3e4s register-time guard anchors it on owner.repo_root),
+      so tenant-wide uniqueness is correct for it.
+    - Tombstoned rows are excluded: a re-registration after soft-delete
+      legitimately creates a new live row beside the trash entry
+      (catalog-003 contract).
+
+    DUPES ARE EVIDENCED, NOT HYPOTHETICAL (T2 nexus_rdr/156-P0-source-uri-
+    audit, 2026-06-11): the pre-migration live SQLite catalog carried 201
+    distinct duplicated source_uris (8,245 uri-bearing docs), including
+    same-subtree ghosts. No dedup sweep ran between that audit and the
+    RDR-153 production migration (which imports by tumbler and therefore
+    PRESERVED them), so 016-0 is expected to tombstone real rows on the
+    production deploy — the Liquibase "rows affected" line for 016-0 in
+    the deploy log is the count to eyeball at the engine cloud-gate. This
+    changeset is exactly the "ghost dedup sweep, then constraint"
+    follow-on that RDR-156 Decision 7 deferred.
+
+    IMPORT PATH POSTURE: the migration import surface (importDocument/
+    importDocumentsBatch) upserts by (tenant_id, tumbler) for source
+    fidelity. A migration SOURCE carrying live same-source_uri duplicates
+    — the evidenced 201-uri class above, present in any not-yet-migrated
+    legacy catalog — fails that client-side batch loudly into the RDR-153
+    migration report (BATCH granularity: every row in the failing batch is
+    named; innocent batch-mates get flagged alongside the dupe pair) and
+    the failure REPEATS on re-run. The companion client-side fix
+    (source-side dedup in the catalog ETL, same winner rule as 016-0,
+    dropped dupes recorded in the report) ships with the conexus release
+    that pins the first engine tag carrying this changeset — the two MUST
+    ship together or hop-1 migrations of dupe-bearing catalogs land
+    persistent batch failures.
+
+    LINK ORPHANING ON DEDUP (explicit, per critique): 016-0 tombstones
+    losers without re-pointing catalog_links rows whose from/to named a
+    loser tumbler — live graph traversal (catalog_links / traverse)
+    excludes deleted-endpoint edges, so such links become invisible to
+    BFS (still recoverable via catalog_link_query; nothing hard-deleted).
+    Accepted under no-preventive-scope-beyond-evidence: no dupes are
+    known to exist, so no links to them can exist either; if the dedup
+    ever fires on a real install the migration-report/doctor trail names
+    the tombstoned tumblers for manual link repair.
+
+    SOURCE_URI DERIVATION COMPANION (same bead): the index only guards
+    rows that HAVE a source_uri. CatalogRepository.deriveSourceUri now
+    derives file://<repo_root>/<file_path> at the register boundary
+    (mirroring the Python local-mode _normalize_source_uri, RDR-096 +
+    nexus-3e4s) so the dominant nx-index-repo path — which sends only
+    file_path — is actually covered. Rows with a relative file_path and
+    no owner repo_root remain shapeless ('') and ride the owner-scoped
+    file_path idempotency, unguarded: the honest residual.
+
+    016-0 DML runs under the catalog-013-1b FORCE-RLS discipline:
+    nexus_admin (the Liquibase role) owns the table but has NO BYPASSRLS,
+    and catalog-001 put FORCE ROW LEVEL SECURITY on catalog_documents —
+    without the toggle the dedup would silently see ZERO rows in
+    production while the index creation (DDL, never row-filtered) then
+    failed on the very dupes the dedup missed (the nexus-1wjmq class).
+    Testcontainers runs Liquibase as superuser, which is why tests alone
+    cannot prove this leg — the toggle is the proof.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="catalog-016-0" author="nexus-78n33">
+        <comment>Dedup backfill: tombstone duplicate LIVE (tenant_id, source_uri) documents before the unique index lands — keep the row with the most chunks (tie: earliest indexed_at, then lowest tumbler)</comment>
+        <sql splitStatements="true">
+ALTER TABLE nexus.catalog_documents NO FORCE ROW LEVEL SECURITY;
+-- Winner per duplicate group: the document most likely to be the live,
+-- chunk-bearing one — greatest chunk_count, then earliest non-empty
+-- indexed_at, then lowest tumbler (stable). Losers are TOMBSTONED
+-- (deleted_at = NOW()), never hard-deleted: soft delete keeps them
+-- restorable/purgeable through the catalog-003 trash flow, and their
+-- document_chunks manifest rows stay intact for forensics.
+WITH ranked AS (
+    SELECT tenant_id, tumbler,
+           row_number() OVER (
+               PARTITION BY tenant_id, source_uri
+               ORDER BY coalesce(chunk_count, 0) DESC,
+                        NULLIF(indexed_at, '') ASC NULLS LAST,
+                        tumbler ASC
+           ) AS rn
+      FROM nexus.catalog_documents
+     WHERE deleted_at IS NULL
+       AND source_uri &lt;&gt; ''
+)
+UPDATE nexus.catalog_documents d
+   SET deleted_at = NOW()
+  FROM ranked r
+ WHERE d.tenant_id = r.tenant_id
+   AND d.tumbler   = r.tumbler
+   AND r.rn &gt; 1;
+ALTER TABLE nexus.catalog_documents FORCE ROW LEVEL SECURITY;
+        </sql>
+    </changeSet>
+
+    <changeSet id="catalog-016-1" author="nexus-78n33">
+        <comment>Partial unique index: one LIVE document per (tenant_id, source_uri); '' (no URI) and tombstoned rows excluded. Creation itself validates 016-0 — it fails if any live dupe survived</comment>
+        <sql splitStatements="true">
+CREATE UNIQUE INDEX ux_catalog_documents_live_source_uri
+    ON nexus.catalog_documents (tenant_id, source_uri)
+ WHERE deleted_at IS NULL AND source_uri &lt;&gt; '';
+        </sql>
+        <rollback>
+            <sql>DROP INDEX IF EXISTS nexus.ux_catalog_documents_live_source_uri;</sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

@@ -95,6 +95,27 @@ def main(ctx: click.Context, verbose: bool) -> None:
     from nexus.commands._migration_prompt import maybe_emit_bootstrap_prompt  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
     maybe_emit_bootstrap_prompt()
 
+    # nexus-gynt2: stranded-install detector. Disarmed (a pure constant
+    # check, no filesystem access) on every migration-capable release; at
+    # N+1 it trips a LOUD stderr banner on EVERY invocation while pre-PG
+    # data sits unmigrated — correctness class, no stamp-once suppression.
+    # ORDER MATTERS (critique 21029 Critical 1): this block must run BEFORE
+    # the upgrade-finish trigger below — check_version_transition rewrites
+    # the last_seen_version stamp to the running version, and the detector
+    # reads that stamp as the pre-PG era. Detector first = the first
+    # invocation after a direct hop onto N+1 still reports the true era.
+    try:
+        from nexus.config import detect_stranded_install_default  # noqa: PLC0415 — deferred import
+
+        _stranded = detect_stranded_install_default()
+        if _stranded is not None:
+            click.echo(f"[stranded-install] {_stranded.message}", err=True)
+    except Exception:  # noqa: BLE001 — the detector must never break CLI startup
+        import structlog  # noqa: PLC0415 — deferred import
+        structlog.get_logger(__name__).warning(
+            "stranded_install_check_failed", exc_info=True,
+        )
+
     # nexus-4xgfy: finish-the-upgrade auto-trigger. uv offers no
     # post-install hook, so the first invocation after a version change
     # runs the safe finish pass (restart detached stale daemons; name the

@@ -69,7 +69,17 @@ class TestRequiredEngineVersion:
         # with every octet CHECK validated at arc close. One-engine-per-
         # release: v0.1.51 is the exact engine this release was tested
         # with. Deployed + cloud-gated GREEN 2026-07-21.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 51)
+        # ->(0,1,52) 2026-07-22: hard dependency — RDR-188 server-side
+        # rerank. The client search path repointed to the engine's fused
+        # rerank envelope and DELETED its own Voyage reranker; pre-52
+        # engines cannot serve the rerank contract. Also carries
+        # catalog-016 (TOCTOU dupe backstop; tombstoned the live 201-dupe
+        # class at deploy, 403 rows/276 uris, unique index proves no
+        # survivor). Deployed + per-query-diff cloud-gated GREEN
+        # 2026-07-23Z: parity 106/113 == baseline, zero per-query
+        # regressions, reranker=rerank-2.5 active, zero degrades (T2
+        # [21062]).
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 52)
 
 
 class TestParseEngineVersion:

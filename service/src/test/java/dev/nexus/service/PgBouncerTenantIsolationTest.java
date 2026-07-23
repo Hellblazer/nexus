@@ -85,11 +85,10 @@ class PgBouncerTenantIsolationTest {
     @SuppressWarnings("resource")
     void startAll() throws Exception {
         net = Network.newNetwork();
-        pg = new PostgreSQLContainer<>(
-                DockerImageName.parse(PgContainerHelper.IMAGE).asCompatibleSubstituteFor("postgres"))
-            .withDatabaseName(PgContainerHelper.DATABASE)
-            .withUsername(PgContainerHelper.USERNAME)
-            .withPassword(PgContainerHelper.PASSWORD)
+        // nexus-1hj1d: route through the helper's hardened recipe
+        // (sslmode=disable + startup attempts) — this was the ONE raw boot
+        // bypassing it, so the SSL startup flake survived here.
+        pg = PgContainerHelper.newContainer()
             .withNetwork(net)
             .withNetworkAliases(PG_ALIAS);
         pg.start();

@@ -47,20 +47,50 @@ public final class PgContainerHelper {
     private PgContainerHelper() {}
 
     /**
+     * Create a CONFIGURED, UNSTARTED container (nexus-1hj1d).
+     *
+     * <p>The single hardened boot recipe — every test boot path (this
+     * helper's {@link #start()} AND the network-attached raw boot in
+     * {@code PgBouncerTenantIsolationTest}) must construct through here or
+     * the SSL-handshake startup flake survives in the bypassing path:
+     *
+     * <ul>
+     *   <li>{@code sslmode=disable}: the flake signature was the JDBC
+     *       startup probe failing "setting up the SSL connection" for the
+     *       whole 120s window against a restarting/half-up server under
+     *       Docker pressure (pg JDBC defaults to sslmode=prefer; a local
+     *       throwaway container needs no TLS). The testcontainers default
+     *       wait strategy ALREADY waits for the ready line twice, so the
+     *       classic initdb-restart fix is a no-op here — the URL param is
+     *       the load-bearing change, propagating via getJdbcUrl() to every
+     *       pool and createConnection call.</li>
+     *   <li>{@code withStartupAttempts(3)}: native belt — a genuinely
+     *       failed startup recreates the whole container (fresh initdb)
+     *       instead of flaking the class.</li>
+     * </ul>
+     */
+    public static PostgreSQLContainer<?> newContainer() {
+        return new PostgreSQLContainer<>(
+            DockerImageName.parse(IMAGE).asCompatibleSubstituteFor("postgres"))
+            .withDatabaseName(DATABASE)
+            .withUsername(USERNAME)
+            .withPassword(PASSWORD)
+            .withUrlParam("sslmode", "disable")
+            .withStartupAttempts(3);
+    }
+
+    /**
      * Create and start a fresh container.
      *
      * <p>Replaces {@code EmbeddedPostgres.builder().start()}.
      */
     @SuppressWarnings("resource")
     public static PostgreSQLContainer<?> start() {
-        PostgreSQLContainer<?> c = new PostgreSQLContainer<>(
-            DockerImageName.parse(IMAGE).asCompatibleSubstituteFor("postgres"))
-            .withDatabaseName(DATABASE)
-            .withUsername(USERNAME)
-            .withPassword(PASSWORD);
+        PostgreSQLContainer<?> c = newContainer();
         c.start();
         return c;
     }
+
 
     /**
      * Return a pooled superuser DataSource.

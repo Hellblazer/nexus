@@ -381,6 +381,44 @@ public final class CatalogRepository {
      * <p>If the owner does not exist, one is created with next_seq=1 and tumbler derived
      * from the owner_prefix directly (the owner should have been registered first).
      */
+    /**
+     * RDR-096 source_uri derivation at the REGISTER boundary (nexus-78n33
+     * critique Critical 2): {@code file://<abspath>} from {@code file_path}
+     * when the caller sent no {@code source_uri}. Mirrors the Python
+     * {@code Catalog._normalize_source_uri} — which only ran on the
+     * local-SQLite path, so every service-mode registration from the
+     * dominant {@code nx index repo} pipeline arrived with {@code ''} and
+     * silently bypassed the catalog-016 unique-index backstop. Deriving
+     * HERE makes the identity rule live beside the index that enforces it,
+     * for every wire client.
+     *
+     * <p>Relative {@code file_path} anchors on the OWNER's {@code repo_root}
+     * (the nexus-3e4s contamination fix) via pure LEXICAL normalization —
+     * the server must never resolve against its own filesystem/CWD. A
+     * relative path with no known repo_root stays shapeless ({@code ''}),
+     * exactly like the Python legacy-entry rule (those rows keep the
+     * owner-scoped file_path idempotency, unguarded — the honest residual).
+     */
+    public static String deriveSourceUri(String sourceUri, String filePath, String repoRoot) {
+        if (!sourceUri.isEmpty() || filePath.isEmpty()) return sourceUri;
+        java.nio.file.Path p = java.nio.file.Paths.get(filePath);
+        if (!p.isAbsolute()) {
+            if (repoRoot == null || repoRoot.isEmpty()) return "";
+            java.nio.file.Path root = java.nio.file.Paths.get(repoRoot);
+            if (!root.isAbsolute()) return "";
+            p = root.resolve(filePath);
+        }
+        return "file://" + p.normalize();
+    }
+
+    private String ownerRepoRoot(org.jooq.DSLContext ctx, String tenant, String ownerPrefix) {
+        String root = ctx.select(CATALOG_OWNERS.REPO_ROOT).from(CATALOG_OWNERS)
+                         .where(CATALOG_OWNERS.TENANT_ID.eq(tenant)
+                                .and(CATALOG_OWNERS.TUMBLER_PREFIX.eq(ownerPrefix)))
+                         .fetchOne(CATALOG_OWNERS.REPO_ROOT);
+        return root != null ? root : "";
+    }
+
     public String registerDocument(String tenant, String ownerPrefix, Map<String, Object> fields) {
         if (TenantConstants.isWildcard(tenant)) {
             throw new IllegalArgumentException(
@@ -403,7 +441,10 @@ public final class CatalogRepository {
             // Idempotency check: only match LIVE (non-tombstoned) docs.
             // A tombstoned source_uri re-registration allocates a NEW tumbler;
             // the trash entry is left untouched (users can restore or purge it separately).
-            String srcUri = s(fields, "source_uri", "");
+            String srcUri = deriveSourceUri(
+                s(fields, "source_uri", ""),
+                s(fields, "file_path", ""),
+                ownerRepoRoot(ctx, tenant, ownerPrefix));
             if (!srcUri.isEmpty()) {
                 var existing = ctx.select(CATALOG_DOCUMENTS.TUMBLER).from(CATALOG_DOCUMENTS)
                                   .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
@@ -438,7 +479,7 @@ public final class CatalogRepository {
 
             // Insert document
             String metaJson = jsonOrNull(fields.get("meta"));
-            ctx.insertInto(CATALOG_DOCUMENTS,
+            int inserted = ctx.insertInto(CATALOG_DOCUMENTS,
                     CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.YEAR,
                     CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CHUNK_COUNT,
                     CATALOG_DOCUMENTS.HEAD_HASH, CATALOG_DOCUMENTS.INDEXED_AT, F_DOC_META, CATALOG_DOCUMENTS.SOURCE_MTIME, CATALOG_DOCUMENTS.ALIAS_OF, CATALOG_DOCUMENTS.SOURCE_URI,
@@ -458,7 +499,7 @@ public final class CatalogRepository {
                        jsonbVal(metaJson),
                        nd(dbl(fields,"source_mtime")),
                        nne(s(fields,"alias_of", "")),
-                       nne(s(fields,"source_uri", "")),
+                       srcUri,
                        ni(i(fields,"bib_year"), 0),
                        nne(s(fields,"bib_authors", "")),
                        nne(s(fields,"bib_venue", "")),
@@ -467,8 +508,45 @@ public final class CatalogRepository {
                        nne(s(fields,"bib_openalex_id", "")),
                        nne(s(fields,"bib_doi", "")),
                        nne(s(fields,"bib_enriched_at", "")))
+               // nexus-78n33: TOCTOU backstop. Two concurrent registrations of
+               // the same NEW source_uri can both pass the idempotency SELECT
+               // above (READ COMMITTED); the partial unique index
+               // ux_catalog_documents_live_source_uri (catalog-016) makes the
+               // loser's INSERT a no-op instead of a duplicate. The loser then
+               // returns the winner's tumbler below. The already-claimed seq
+               // is burned — an accepted, race-only gap (the common
+               // re-registration path still returns before claiming).
+               .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.SOURCE_URI)
+               .where(CATALOG_DOCUMENTS.DELETED_AT.isNull()
+                      .and(CATALOG_DOCUMENTS.SOURCE_URI.ne("")))
+               .doNothing()
                .execute();
-
+            // (jOOQ execute() returns the affected rowcount; DO NOTHING on a
+            // lost race yields 0. Only non-empty source_uri rows can engage
+            // the partial-index arbiter, so inserted==0 implies srcUri set.)
+            if (inserted == 0) {
+                // Our INSERT was the conflict loser — hand back the winner.
+                // Review (78n33): if the winner has ALSO vanished by now (a
+                // concurrent tombstone in the microsecond gap between our
+                // no-op'd INSERT and this SELECT), returning our own tumbler
+                // would fabricate a document that was never persisted — the
+                // silent-fallback class. FAIL LOUD instead; the caller
+                // retries into a now-clear registration.
+                var winner = ctx.select(CATALOG_DOCUMENTS.TUMBLER).from(CATALOG_DOCUMENTS)
+                                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                                       .and(CATALOG_DOCUMENTS.SOURCE_URI.eq(srcUri))
+                                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                                .fetchOne();
+                if (winner == null) {
+                    throw new IllegalStateException(
+                        "registerDocument race lost for source_uri=" + srcUri
+                        + " but no live winner exists (concurrent tombstone?) — "
+                        + "refusing to return a never-persisted tumbler; retry");
+                }
+                log.info("event=register_document_race_lost tenant={} source_uri={} winner={}",
+                    tenant, srcUri, winner.value1());
+                return winner.value1();
+            }
             return tumbler;
         });
     }
@@ -521,11 +599,19 @@ public final class CatalogRepository {
 
             // Batch idempotency: fetch existing LIVE docs for every source_uri and
             // file_path in the batch in ONE query per direction, then join locally.
+            // nexus-78n33: source_uri is DERIVED (RDR-096, file_path anchored on
+            // the owner's repo_root) when the caller sent none — see
+            // deriveSourceUri. The derived value is used for lookup, insert,
+            // and race patching alike.
+            String repoRoot = ownerRepoRoot(ctx, tenant, ownerPrefix);
+            String[] uriOf = new String[docs.size()];
             java.util.List<String> srcUris = new java.util.ArrayList<>();
             java.util.List<String> filePaths = new java.util.ArrayList<>();
-            for (var d : docs) {
-                String su = s(d, "source_uri", "");
-                if (!su.isEmpty()) srcUris.add(su);
+            for (int i = 0; i < docs.size(); i++) {
+                var d = docs.get(i);
+                uriOf[i] = deriveSourceUri(
+                    s(d, "source_uri", ""), s(d, "file_path", ""), repoRoot);
+                if (!uriOf[i].isEmpty()) srcUris.add(uriOf[i]);
                 String fp = s(d, "file_path", "");
                 if (!fp.isEmpty()) filePaths.add(fp);
             }
@@ -558,16 +644,27 @@ public final class CatalogRepository {
             // doesn't mislabel this as seq-update time — review M-1.)
             String[] out = new String[docs.size()];
             java.util.List<Integer> newIdx = new java.util.ArrayList<>();
+            // nexus-78n33: intra-batch source_uri dedup. Two NEW docs in the
+            // SAME batch sharing a source_uri would otherwise both be
+            // assigned tumblers, and the catalog-016 partial unique index
+            // would drop the second row's INSERT (ON CONFLICT DO NOTHING) —
+            // returning a tumbler that points at no document. First
+            // occurrence wins; later duplicates alias to its tumbler.
+            java.util.Map<String, Integer> firstNewBySrcUri = new java.util.HashMap<>();
+            java.util.Map<Integer, Integer> aliasOfIdx = new java.util.HashMap<>();
             for (int i = 0; i < docs.size(); i++) {
                 var d = docs.get(i);
-                String su = s(d, "source_uri", "");
+                String su = uriOf[i];
                 String fp = s(d, "file_path", "");
                 String existing = null;
                 if (!su.isEmpty()) existing = tumblerBySrcUri.get(su);
                 if (existing == null && !fp.isEmpty()) existing = tumblerByFilePath.get(fp);
                 if (existing != null) {
                     out[i] = existing;
+                } else if (!su.isEmpty() && firstNewBySrcUri.containsKey(su)) {
+                    aliasOfIdx.put(i, firstNewBySrcUri.get(su));
                 } else {
+                    if (!su.isEmpty()) firstNewBySrcUri.put(su, i);
                     newIdx.add(i);
                 }
             }
@@ -610,7 +707,7 @@ public final class CatalogRepository {
                             jsonbVal(metaJson),
                             nd(dbl(fields, "source_mtime")),
                             nne(s(fields, "alias_of", "")),
-                            nne(s(fields, "source_uri", "")),
+                            uriOf[idx],
                             ni(i(fields, "bib_year"), 0),
                             nne(s(fields, "bib_authors", "")),
                             nne(s(fields, "bib_venue", "")),
@@ -620,14 +717,67 @@ public final class CatalogRepository {
                             nne(s(fields, "bib_doi", "")),
                             nne(s(fields, "bib_enriched_at", "")));
                 }
-                insert.execute();
+                // nexus-78n33: same TOCTOU backstop as the single-doc path —
+                // a row whose source_uri was registered by a CONCURRENT
+                // transaction between our lookup and this INSERT becomes a
+                // no-op against the catalog-016 partial unique index instead
+                // of a duplicate. Detected below by rowcount; the affected
+                // out[] slots are patched to the winners' tumblers.
+                int inserted = insert
+                    .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.SOURCE_URI)
+                    .where(CATALOG_DOCUMENTS.DELETED_AT.isNull()
+                           .and(CATALOG_DOCUMENTS.SOURCE_URI.ne("")))
+                    .doNothing()
+                    .execute();
                 tInsert = System.nanoTime();
 
                 // Advance next_seq by exactly the number of new docs claimed.
+                // (Race-dropped rows still consume their seq — an accepted,
+                // race-only gap; the block was claimed under FOR UPDATE.)
                 ctx.update(CATALOG_OWNERS)
                    .set(CATALOG_OWNERS.NEXT_SEQ, cursor)
                    .where(CATALOG_OWNERS.TENANT_ID.eq(tenant).and(CATALOG_OWNERS.TUMBLER_PREFIX.eq(ownerPrefix)))
                    .execute();
+
+                if (inserted < newIdx.size()) {
+                    // At least one row lost the cross-transaction race: its
+                    // assigned tumbler points at no document. Re-resolve every
+                    // uri-bearing NEW row; winners overwrite (a non-conflicted
+                    // row re-resolves to its own fresh tumbler — harmless).
+                    log.info("event=register_many_race_lost tenant={} owner={} dropped={}",
+                        tenant, ownerPrefix, newIdx.size() - inserted);
+                    java.util.Map<String, String> winners = new java.util.HashMap<>();
+                    if (!firstNewBySrcUri.isEmpty()) {
+                        ctx.select(CATALOG_DOCUMENTS.SOURCE_URI, CATALOG_DOCUMENTS.TUMBLER)
+                           .from(CATALOG_DOCUMENTS)
+                           .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
+                                  .and(CATALOG_DOCUMENTS.SOURCE_URI.in(firstNewBySrcUri.keySet()))
+                                  .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                           .fetch()
+                           .forEach(r -> winners.put(r.value1(), r.value2()));
+                    }
+                    for (var e : firstNewBySrcUri.entrySet()) {
+                        String winner = winners.get(e.getKey());
+                        if (winner == null) {
+                            // Our own inserted rows are visible to this
+                            // same-transaction SELECT, so a missing uri means
+                            // BOTH our row was conflict-dropped AND the winner
+                            // has since been tombstoned. Returning the
+                            // pre-assigned (never-persisted) tumbler would be
+                            // the silent-fallback class — FAIL LOUD (review
+                            // 78n33); the batch retries into a clear state.
+                            throw new IllegalStateException(
+                                "registerDocumentMany race lost for source_uri=" + e.getKey()
+                                + " but no live winner exists (concurrent tombstone?) — "
+                                + "refusing to return a never-persisted tumbler; retry");
+                        }
+                        out[e.getValue()] = winner;
+                    }
+                }
+            }
+            // Fill intra-batch aliases from their winning row's final tumbler.
+            for (var e : aliasOfIdx.entrySet()) {
+                out[e.getKey()] = out[e.getValue()];
             }
             long tEnd = System.nanoTime();
             log.info("event=register_many_timing tenant={} owner={} docs={} new={} "

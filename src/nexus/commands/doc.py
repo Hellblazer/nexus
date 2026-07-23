@@ -25,6 +25,7 @@ import click
 
 from nexus.commands._helpers import default_db_path
 from nexus.config import load_config
+from nexus.db.http_vector_client import VectorServiceError
 from nexus.db.t2 import T2Database
 from nexus.doc.citations import (
     extensions_report,
@@ -152,6 +153,13 @@ def render_cmd(
         except OSError as exc:
             click.echo(f"io error: {exc}", err=True)
             raise click.exceptions.Exit(2)
+        # DELIBERATE (critic 2026-07-22): _append_chash_footnotes raises
+        # click.ClickException on a degraded vector service, which is NOT
+        # caught here — the whole multi-path batch aborts. The degradation
+        # is environmental (every remaining path would hit the same dead
+        # service), so fail-fast beats per-file catch-and-continue, which
+        # would emit N copies of the same error while producing renders
+        # with silently missing footnotes.
     finally:
         if db is not None:
             db.close()
@@ -199,7 +207,17 @@ def _append_chash_footnotes(
         seen.add(c.chash)
         try:
             ref = cat.resolve_chash(c.chash, t3, chash_index)
-        except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
+        except Exception as exc:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
+            if isinstance(exc, VectorServiceError):
+                # nexus-ib6uy: a degraded vector service must ABORT the
+                # render — emitting "[unresolved chash]" footnotes for
+                # spans that merely couldn't be READ would bake a false
+                # dangling-ref verdict into an authored document.
+                raise click.ClickException(
+                    f"doc render aborted: vector service degraded while "
+                    f"resolving chash:{c.chash[:8]}… — fix the service and "
+                    f"re-render ({exc})"
+                ) from exc
             ref = None
         short = c.chash[:8]
         if ref is None:
@@ -332,6 +350,14 @@ def check_grounding_cmd(
                         continue
                     try:
                         ref = cat.resolve_chash(c.chash, t3, chash_index)
+                    except VectorServiceError as exc:
+                        # nexus-ib6uy: a degraded vector service must NOT
+                        # report a real citation as ungrounded — that fails
+                        # a lint gate on a condition unrelated to citation
+                        # validity. Abort the lint loudly instead.
+                        raise click.ClickException(
+                            f"citation grounding unavailable — vector service degraded: {exc}"
+                        ) from exc
                     except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
                         ref = None
                     if ref is None:
@@ -458,6 +484,13 @@ def check_extensions_cmd(
                         continue
                     try:
                         ref = cat.resolve_chash(c.chash, t3, chash_index)
+                    except VectorServiceError as exc:
+                        # nexus-ib6uy: unreadable ≠ unresolvable — a
+                        # degraded service would silently shrink the
+                        # grounded doc_id set and skew the report.
+                        raise click.ClickException(
+                            f"extensions report aborted — vector service degraded: {exc}"
+                        ) from exc
                     except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
                         ref = None
                     if ref is not None and ref.get("doc_id"):
@@ -707,6 +740,12 @@ def cite_cmd(
 
         try:
             ref = cat.resolve_chash(top_hash, t3, chash_index)
+        except VectorServiceError as exc:
+            # nexus-ib6uy: the JSON envelope's excerpts must not silently
+            # go empty because the service couldn't be read.
+            raise click.ClickException(
+                f"anchor resolution aborted — vector service degraded: {exc}"
+            ) from exc
         except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
             ref = None
         excerpt = ""
@@ -734,6 +773,10 @@ def cite_cmd(
                 c = collections[0] if collections else collection
                 try:
                     r = cat.resolve_chash(h, t3, chash_index) if h else None
+                except VectorServiceError as exc:
+                    raise click.ClickException(
+                        f"anchor resolution aborted — vector service degraded: {exc}"
+                    ) from exc
                 except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
                     r = None
                 exc = (str(r.get("chunk_text", "")).strip()[:200]

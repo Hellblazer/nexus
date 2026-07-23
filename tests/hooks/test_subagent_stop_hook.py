@@ -359,6 +359,107 @@ class TestFailOpen:
         assert _decision(proc) is None
 
 
+class TestPostBlockResolution:
+    """nexus-hybv1: a BLOCKED row must stop being terminal-forever. Both
+    once-guard exits (stop_hook_active round-trip; already-blocked later
+    stop) re-scan the transcript and stamp REPORTED when the report has
+    since appeared — forensics over bfbfa2fe + b819e8f3 showed all 7
+    recorded blocks resolved with a real SendMessage within ~20s, yet the
+    ledger read them as failures."""
+
+    def _blocked_agent(self, tmp_path: Path) -> None:
+        """EXPECT row + BLOCKED row already on file for the standard agent."""
+        _expect_row(tmp_path)
+        f = _expectations_file(tmp_path)
+        with f.open("a") as fh:
+            fh.write(f"2026-07-17T00:01:00Z\tBLOCKED\t{AGENT_ID}\n")
+
+    def test_stop_hook_active_stamps_resolution_when_reported(self, tmp_path: Path) -> None:
+        """The immediate post-block re-stop: agent heeded the nudge, sent
+        SendMessage, stopped again with stop_hook_active=true — the ledger
+        gets a REPORTED row (BLOCKED then REPORTED = guard success)."""
+        self._blocked_agent(tmp_path)
+        t = _transcript(tmp_path, with_sendmessage=True)
+        proc = _run_hook(
+            _payload(transcript=str(t), stop_hook_active=True), tmp_path, mode="block"
+        )
+        assert proc.returncode == 0
+        assert _decision(proc) is None
+        content = _expectations_file(tmp_path).read_text()
+        assert f"REPORTED\t{AGENT_ID}\timmediate" in content
+
+    def test_stop_hook_active_no_stamp_when_still_unreported(self, tmp_path: Path) -> None:
+        """Round-trip stop with STILL no SendMessage: nothing stamped, never
+        re-blocked — a bare BLOCKED stays honestly unresolved."""
+        self._blocked_agent(tmp_path)
+        t = _transcript(tmp_path, with_sendmessage=False)
+        proc = _run_hook(
+            _payload(transcript=str(t), stop_hook_active=True), tmp_path, mode="block"
+        )
+        assert proc.returncode == 0
+        assert _decision(proc) is None
+        assert "REPORTED" not in _expectations_file(tmp_path).read_text()
+
+    def test_stop_hook_active_never_stamps_unblocked_agent(self, tmp_path: Path) -> None:
+        """The resolution stamp is scoped to owing+blocked agents only — a
+        round-trip stop for a never-blocked agent records nothing (the
+        normal FOUND path already covers it on its ordinary stop)."""
+        _expect_row(tmp_path)
+        t = _transcript(tmp_path, with_sendmessage=True)
+        proc = _run_hook(
+            _payload(transcript=str(t), stop_hook_active=True), tmp_path, mode="block"
+        )
+        assert proc.returncode == 0
+        assert "REPORTED" not in _expectations_file(tmp_path).read_text()
+
+    def test_later_stop_of_blocked_agent_stamps_resolution(self, tmp_path: Path) -> None:
+        """A previously-blocked multi-round teammate stops again later
+        (stop_hook_active=false): the once-guard still never re-blocks, and
+        the delivered report is stamped (the gh1414-critic round-2/3 class,
+        which previously left no trace)."""
+        self._blocked_agent(tmp_path)
+        t = _transcript(tmp_path, with_sendmessage=True)
+        proc = _run_hook(_payload(transcript=str(t)), tmp_path, mode="block")
+        assert proc.returncode == 0
+        assert _decision(proc) is None
+        content = _expectations_file(tmp_path).read_text()
+        assert f"REPORTED\t{AGENT_ID}\tlater" in content
+        assert content.count("BLOCKED") == 1  # never re-blocked
+
+    def test_repeat_stops_stamp_resolution_exactly_once(self, tmp_path: Path) -> None:
+        """Critique 2026-07-22 repro: the scan is whole-transcript, so
+        without the consecutive-duplicate guard every idle re-stop of a
+        resolved agent appended another REPORTED row forever (3 calls ->
+        3 rows in the live repro). With the guard: exactly one."""
+        self._blocked_agent(tmp_path)
+        t = _transcript(tmp_path, with_sendmessage=True)
+        for _ in range(3):
+            proc = _run_hook(_payload(transcript=str(t)), tmp_path, mode="block")
+            assert proc.returncode == 0
+            assert _decision(proc) is None
+        content = _expectations_file(tmp_path).read_text()
+        assert content.count(f"REPORTED\t{AGENT_ID}") == 1
+
+    def test_later_stop_of_blocked_agent_unreported_stays_bare(self, tmp_path: Path) -> None:
+        self._blocked_agent(tmp_path)
+        t = _transcript(tmp_path, with_sendmessage=False)
+        proc = _run_hook(_payload(transcript=str(t)), tmp_path, mode="block")
+        assert proc.returncode == 0
+        assert _decision(proc) is None
+        assert "REPORTED" not in _expectations_file(tmp_path).read_text()
+
+    def test_resolution_missing_transcript_fails_open(self, tmp_path: Path) -> None:
+        self._blocked_agent(tmp_path)
+        proc = _run_hook(
+            _payload(transcript=str(tmp_path / "nope.jsonl"), stop_hook_active=True),
+            tmp_path,
+            mode="block",
+        )
+        assert proc.returncode == 0
+        assert _decision(proc) is None
+        assert "REPORTED" not in _expectations_file(tmp_path).read_text()
+
+
 class TestObserveMode:
     def test_observe_never_blocks_but_records(self, tmp_path: Path) -> None:
         """Observe mode is the .11 measurement vehicle: no decision output,

@@ -395,6 +395,38 @@ class TestRdrAccept:
         assert "Step count detected:** 4" in result.output
         assert "Has plan section:** yes" in result.output
 
+    def test_rdr_accept_open_status_is_accepted_synonym(self, rdr_env):
+        """GH #1409 (nexus-qsryj): projects whose RDR convention never uses
+        `draft` (open -> accepted lifecycle, e.g. MarkupEditorApp's 22 RDRs)
+        must be able to accept an `open` RDR — the gate-PASSED check is the
+        real guard, not the pre-accept status word."""
+        body = (
+            "## Problem Statement\n\nProblem.\n\n"
+            "## Approach\n\n### Phase 1: Implement\nWork.\n\n"
+            "## Tradeoffs\n\nSome."
+        )
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-001-open-convention.md",
+            {"title": "Open Convention", "status": "open", "type": "decision", "priority": "P1"},
+            body=body,
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-accept", "--", "1"])
+        assert result.exit_code == 0, result.output
+        assert "BLOCKED" not in result.output
+        assert "Planning Handoff" in result.output
+
+    def test_rdr_accept_no_arg_lists_open_rdrs_too(self, rdr_env):
+        """The no-id eligibility table includes `open` RDRs (GH #1409)."""
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-001-open-one.md",
+            {"title": "Open One", "status": "open", "type": "decision", "priority": "P1"},
+        )
+        result = _runner().invoke(rdr, ["preamble", "rdr-accept"])
+        assert result.exit_code == 0, result.output
+        assert "Open One" in result.output
+
     def test_rdr_accept_blocked_non_draft_status(self, rdr_env):
         """Non-draft/accepted status: prints BLOCKED message."""
         _write_rdr(
@@ -645,6 +677,40 @@ class TestRdrResearch:
         assert "### RDR 1:" in result.output
         assert "Hello World" in result.output
         assert "Research Findings" in result.output
+
+    def test_rdr_research_t2_rows_matched_despite_listing_prefix(
+        self, rdr_env, monkeypatch,
+    ) -> None:
+        """Regression (2026-07-22, caught on RDR-188): `nx memory list`
+        rows are "[id] <project>/<title>  (…)" — the old ^-anchored
+        title regex matched NOTHING, so every preamble reported "No
+        research findings recorded" while T2 held them."""
+        import subprocess as _sp
+
+        import nexus.commands.rdr as rdr_mod
+
+        _write_rdr(
+            rdr_env["rdr_dir"],
+            "rdr-001-hello-world.md",
+            {"title": "Hello World", "status": "draft", "type": "decision", "priority": "P1"},
+        )
+        real_run = _sp.run
+
+        def _fake_run(cmd, *a, **k):
+            if cmd[:3] == ["nx", "memory", "list"]:
+                return _sp.CompletedProcess(
+                    cmd, 0,
+                    stdout="[21044] nexus_rdr/1-research-1: canned finding  (-, 2026-07-22T00:00:00Z)\n"
+                           "[21042] nexus_rdr/1  (-, 2026-07-22T00:00:00Z)\n",
+                    stderr="",
+                )
+            return _sp.CompletedProcess(cmd, 1, stdout="", stderr="unavailable")
+
+        monkeypatch.setattr(rdr_mod.subprocess, "run", _fake_run)
+        result = _runner().invoke(rdr, ["preamble", "rdr-research", "--", "1"])
+        assert result.exit_code == 0, result.output
+        assert "1-research-1: canned finding" in result.output
+        assert "No research findings recorded" not in result.output
 
     def test_rdr_research_double_dash_passthrough_with_subcommand_word(self, rdr_env):
         """Subcommand word 'add' plus numeric ID: numeric ID is extracted correctly."""

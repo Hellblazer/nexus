@@ -1628,6 +1628,41 @@ def index_pdf(
     return len(prepared)
 
 
+def _parse_md_title_year(md_path: Path) -> tuple[str, int]:
+    """Parse frontmatter title + year for *md_path* (nexus-ivzw8).
+
+    Returns ``(stem, 0)`` when there is no frontmatter or parsing fails —
+    the same defaults the pre-flight registration used before the fix.
+    Year comes from the first of ``created``/``date``/``accepted_date``.
+    Extracted from the markdown hook so the PRE-FLIGHT registration can
+    use the same values (the update branch's stem-guard backfill and the
+    fresh-registration path must agree on the parse).
+    """
+    title = md_path.stem
+    year = 0
+    try:
+        text = md_path.read_text(encoding="utf-8")
+        if text.startswith("---"):
+            import re  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
+            m = re.search(r"^title:\s*(.+)$", text, re.MULTILINE)
+            if m:
+                title = m.group(1).strip().strip('"').strip("'") or md_path.stem
+            for field in ("created", "date", "accepted_date"):
+                ym = re.search(rf"^{field}:\s*(.+)$", text, re.MULTILINE)
+                if ym:
+                    dm = re.search(r"(\d{4})", ym.group(1))
+                    if dm:
+                        year = int(dm.group(1))
+                        break
+    except Exception:  # noqa: BLE001 — best-effort parse; stem/0 defaults preserved, logged for diagnosis
+        import structlog  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
+        structlog.get_logger(__name__).debug(
+            "catalog_markdown_frontmatter_parse_failed",
+            path=str(md_path), exc_info=True,
+        )
+    return title, year
+
+
 def _catalog_markdown_hook(
     md_path: Path, collection_name: str, content_type: str, corpus: str, chunk_count: int,
     *, base_path: Path | None = None,
@@ -1664,34 +1699,9 @@ def _catalog_markdown_hook(
             return
         writer = make_catalog_writer()
 
-        # Derive title and year from frontmatter or filename
-        title = md_path.stem
-        year = 0
-        try:
-            text = md_path.read_text(encoding="utf-8")
-            if text.startswith("---"):
-                import re  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
-                m = re.search(r"^title:\s*(.+)$", text, re.MULTILINE)
-                if m:
-                    title = m.group(1).strip().strip('"').strip("'")
-                # Extract year from created/date/accepted_date frontmatter
-                for field in ("created", "date", "accepted_date"):
-                    ym = re.search(rf"^{field}:\s*(.+)$", text, re.MULTILINE)
-                    if ym:
-                        dm = re.search(r"(\d{4})", ym.group(1))
-                        if dm:
-                            year = int(dm.group(1))
-                            break
-        except Exception:  # noqa: BLE001 — best-effort/telemetry path; failure logged at debug, must not crash caller
-            # nexus-8g79.8: silent pass leaves title/year unset for the
-            # whole catalog entry — `nx catalog show` shows "" / 0.
-            # DEBUG-with-exc_info + path so a recurring permissions or
-            # encoding issue surfaces without aborting indexing.
-            import structlog  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
-            structlog.get_logger(__name__).debug(
-                "catalog_markdown_frontmatter_parse_failed",
-                path=str(md_path), exc_info=True,
-            )
+        # Derive title and year from frontmatter or filename (shared with the
+        # pre-flight registration, nexus-ivzw8).
+        title, year = _parse_md_title_year(md_path)
 
         owner_name = corpus if corpus else "standalone-docs"
         # Curator-only lookup — see _register_or_lookup_doc_id for
@@ -1728,13 +1738,23 @@ def _catalog_markdown_hook(
         # that bypass the public entry points).
         existing = reader.by_file_path(owner, fp)
         if existing is not None:
-            writer.update(
-                existing.tumbler,
+            update_kwargs: dict = dict(
                 physical_collection=collection_name,
                 chunk_count=chunk_count,
                 indexed_at=datetime.now(UTC).isoformat(),
                 source_mtime=source_mtime,
             )
+            # nexus-ivzw8 stem-guard backfill: the pre-flight registers with
+            # title=stem, and this branch previously never wrote title/year —
+            # frontmatter values were unreachable on the standard path. Apply
+            # them ONLY over the stem default (or empties) so a hand-curated
+            # catalog title is never clobbered by a re-index.
+            existing_title = (existing.title or "").strip()
+            if title != md_path.stem and existing_title in ("", md_path.stem):
+                update_kwargs["title"] = title
+            if year and not getattr(existing, "year", 0):
+                update_kwargs["year"] = year
+            writer.update(existing.tumbler, **update_kwargs)
         else:
             writer.register(
                 owner=owner, title=title, content_type=content_type,
@@ -1826,10 +1846,15 @@ def index_markdown(
     # doc_id populated at write time. Idempotent on re-index via
     # Catalog.register's by_file_path early-return. Returns "" when the
     # catalog is absent (no-catalog ingest contract preserved).
+    # nexus-ivzw8: thread the frontmatter title/year into the PRE-FLIGHT
+    # registration so a fresh Document row never carries the stem default.
+    _fm_title, _fm_year = _parse_md_title_year(md_path)
     doc_id = _register_or_lookup_doc_id(
         md_path, corpus,
         content_type=content_type,
         physical_collection=col_name,
+        title=_fm_title,
+        year=_fm_year,
         base_path=base_path,
     )
     chunk_fn = partial(

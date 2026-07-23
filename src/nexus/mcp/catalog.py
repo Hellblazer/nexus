@@ -733,6 +733,17 @@ def main():
     )
     # RDR-126 P2 (nexus-bsjro): see nexus/mcp/core.py for rationale.
     ensure_installed_and_running()
+    # nexus-gynt2: stranded-install detector — deliberately wired on BOTH
+    # MCP servers, in contrast to the embedder advisory's single-channel-
+    # on-core decision (RDR-144 P5b below): that one is cosmetic and
+    # doubling it is noise; this one is the data-loss-shaped correctness
+    # class (unmigrated pre-PG data on a post-deletion release), where a
+    # hand-configured catalog-only client must still hear it. Same
+    # nexus-4xgfy reasoning as the check_version_transition duplication at
+    # the top of this function. Disarmed no-op until the N+1 cut.
+    from nexus.mcp._first_run import apply_stranded_notice  # noqa: PLC0415 — deferred to entry-point invocation, keeps module import cheap
+
+    apply_stranded_notice(mcp)
     # nexus-g6vb4 (GH #1414): staleness self-detection — Claude Code users
     # connect to BOTH servers, and this process has its own deferred imports
     # subject to the identical mixed-module-graph failure after an in-place

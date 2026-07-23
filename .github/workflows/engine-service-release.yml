@@ -83,8 +83,11 @@ jobs:
     needs: jooq-codegen
     # Native-image build (~2-3m analysis + image) + native smoke (linux only).
     # No jOOQ codegen here — sources come from the jooq-codegen artifact, so no
-    # Docker is needed to BUILD (mac-arm64 can build). 40m covers a cold runner.
-    timeout-minutes: 40
+    # Docker is needed to BUILD (mac-arm64 can build). 40m covers a cold runner;
+    # mac-arm64 gets 65m on tag runs: its slow 8GB build PLUS the nexus-27i0m
+    # notarytool --wait (up to 20m on a slow Apple queue) must fit (review
+    # 96677bf7 Suggestion 3).
+    timeout-minutes: ${{ matrix.target.timeout }}
     strategy:
       fail-fast: false
       # max-parallel: 2 — the two linux builds run in parallel (they schedule
@@ -102,12 +105,12 @@ jobs:
         # reached the 5.25GB heap — the 8GB box itself is the constraint there, and
         # a larger heap would deepen the swap pressure behind its 25%-GC-time build.
         target:
-          - { arch: linux-amd64, runner: ubuntu-latest,    smoke: true,  maxheap: 11g }
-          - { arch: linux-arm64, runner: ubuntu-24.04-arm, smoke: true,  maxheap: 11g }
+          - { arch: linux-amd64, runner: ubuntu-latest,    smoke: true,  maxheap: 11g, timeout: 40 }
+          - { arch: linux-arm64, runner: ubuntu-24.04-arm, smoke: true,  maxheap: 11g, timeout: 40 }
           # mac-arm64: build + publish, but UNSMOKED. native-smoke.sh needs Docker
           # (throwaway pgvector) which GH macOS lacks; macOS runtime correctness is
           # covered by the mac-arm64 CA-3 gate + the lp2qo native-serving spike.
-          - { arch: mac-arm64,   runner: macos-14,          smoke: false, maxheap: 5632m }
+          - { arch: mac-arm64,   runner: macos-14,          smoke: false, maxheap: 5632m, timeout: 65 }
     env:
       ASSET: nexus-service-${{ matrix.target.arch }}
 
@@ -135,6 +138,16 @@ jobs:
         uses: ./.github/actions/prime-bge-onnx
         with:
           cache-key: bge-onnx-standard-${{ runner.os }}-${{ matrix.target.arch }}-v1
+
+      - name: Prime ms-marco cross-encoder ONNX (cache or pinned HF revision)
+        # RDR-188 P1: the native smoke's fused-rerank section exercises the
+        # cross-encoder's STRONG scoring path (DJL pair tokenization + a second
+        # OrtSession in the native image) only when the ~91MB artifact is
+        # present; absent, it falls back to asserting the LOUD-degrade contract.
+        # Prime it so release binaries are gated on real native inference.
+        uses: ./.github/actions/prime-crossencoder-onnx
+        with:
+          cache-key: crossencoder-onnx-msmarco-${{ runner.os }}-${{ matrix.target.arch }}-v1
 
       - name: Resolve engine-service version
         id: ver
@@ -224,6 +237,129 @@ jobs:
         # a real Postgres — the cloud runtime path. Don't publish a broken binary.
         # linux only: needs Docker, which GH macOS lacks (mac is build-only).
         run: ./native-smoke.sh
+
+      - name: Developer ID codesign (mac-arm64; nexus-27i0m)
+        # Signs the bare Mach-O IN PLACE — must run BEFORE the sha256 stage
+        # and cosign steps, which hash the final bytes. Secrets are Hal's
+        # Apple Developer identity (provisioning checklist in the bead):
+        #   APPLE_DEV_ID_CERT_P12      — Developer ID Application cert, .p12 base64
+        #   APPLE_DEV_ID_CERT_PASSWORD — the .p12 passphrase
+        #   APPLE_DEV_ID_IDENTITY      — e.g. "Developer ID Application: Hal Hildebrand (TEAMID)"
+        # ABSENT secrets → LOUD warning annotation + step-summary line and the
+        # ad-hoc GraalVM linker signature ships (status quo: runs via
+        # nx install-binary, Gatekeeper-blocked on browser download).
+        # PARTIALLY-present secrets → hard FAIL (misconfiguration, never a
+        # silent downgrade). The non-vacuity pin lives in
+        # tests/test_engine_release_workflow_signing.py.
+        # TAG-GATED like the sibling cosign steps (review 96677bf7 Critical):
+        # a workflow_dispatch dev/smoke run must not burn a Developer-ID
+        # sign + a 20-minute notarytool wait on a 10x-billed macOS runner
+        # for a 14-day Actions artifact (CI Cost Discipline directive).
+        if: matrix.target.arch == 'mac-arm64' && startsWith(github.ref, 'refs/tags/engine-service-v')
+        env:
+          APPLE_DEV_ID_CERT_P12: ${{ secrets.APPLE_DEV_ID_CERT_P12 }}
+          APPLE_DEV_ID_CERT_PASSWORD: ${{ secrets.APPLE_DEV_ID_CERT_PASSWORD }}
+          APPLE_DEV_ID_IDENTITY: ${{ secrets.APPLE_DEV_ID_IDENTITY }}
+          APPLE_SIGNING_REQUIRED: ${{ vars.APPLE_SIGNING_REQUIRED }}
+        run: |
+          set -euo pipefail
+          bin="service/target/nexus-service"
+          if [ -z "${APPLE_DEV_ID_CERT_P12:-}" ] && [ -z "${APPLE_DEV_ID_CERT_PASSWORD:-}" ] && [ -z "${APPLE_DEV_ID_IDENTITY:-}" ]; then
+            # Post-activation regression guard (critique 96677bf7 Sig 1):
+            # once Hal confirms end-to-end signing works, setting the repo
+            # variable APPLE_SIGNING_REQUIRED=true promotes vanished secrets
+            # (org rotation, repo transfer) from a warn-in-a-run-nobody-reads
+            # to a hard release failure — the silent-downgrade class.
+            if [ "${APPLE_SIGNING_REQUIRED:-}" = "true" ]; then
+              echo "FAIL: APPLE_SIGNING_REQUIRED=true but the APPLE_DEV_ID_* secrets are absent — signing was activated and has silently regressed. Restore the secrets (or consciously unset the repo variable)." >&2
+              exit 1
+            fi
+            echo "::warning title=mac-arm64 UNSIGNED (ad-hoc)::APPLE_DEV_ID_* secrets not provisioned — publishing the ad-hoc-signed binary (browser downloads stay Gatekeeper-blocked). See nexus-27i0m for the provisioning checklist."
+            echo "### mac-arm64 signing: SKIPPED — no Developer ID secrets (ad-hoc binary published)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ -z "${APPLE_DEV_ID_CERT_P12:-}" ] || [ -z "${APPLE_DEV_ID_CERT_PASSWORD:-}" ] || [ -z "${APPLE_DEV_ID_IDENTITY:-}" ]; then
+            echo "FAIL: APPLE_DEV_ID_* secrets are PARTIALLY configured — refusing to silently ship ad-hoc. Provision all three or none." >&2
+            exit 1
+          fi
+          KEYCHAIN="$RUNNER_TEMP/sign.keychain-db"
+          KEYPASS="$(uuidgen)"
+          security create-keychain -p "$KEYPASS" "$KEYCHAIN"
+          security set-keychain-settings -lut 900 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYPASS" "$KEYCHAIN"
+          printf '%s' "$APPLE_DEV_ID_CERT_P12" | base64 -d > "$RUNNER_TEMP/devid.p12"
+          security import "$RUNNER_TEMP/devid.p12" -k "$KEYCHAIN" -P "$APPLE_DEV_ID_CERT_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/devid.p12"
+          security set-key-partition-list -S "apple-tool:,apple:" -s -k "$KEYPASS" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          # --entitlements is LOAD-BEARING (critique 96677bf7 Critical /
+          # nexus-2oh5q): Hardened Runtime implies Library Validation, which
+          # refuses the bundled onnxruntime/DJL dylibs the binary
+          # System.load()s for local-mode embedding — without
+          # disable-library-validation the SIGNED binary crashes where the
+          # ad-hoc one worked. See service/deploy/mac-entitlements.plist.
+          codesign --force --options runtime --timestamp \
+            --entitlements service/deploy/mac-entitlements.plist \
+            --sign "$APPLE_DEV_ID_IDENTITY" "$bin"
+          codesign --verify --strict --verbose=2 "$bin"
+          # Non-vacuity: the signature must carry a REAL team identity — an
+          # ad-hoc result here means the sign silently failed.
+          info="$(codesign -dv "$bin" 2>&1)"
+          echo "$info" | grep "TeamIdentifier=" | grep -v "not set" \
+            || { echo "FAIL: TeamIdentifier not set after codesign — ad-hoc signature survived" >&2; exit 1; }
+          echo "### mac-arm64 signing: Developer ID SIGNED ($(echo "$info" | grep TeamIdentifier=))" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Notarize (mac-arm64; nexus-27i0m)
+        # Requires the Developer-ID-signed binary from the step above.
+        # Secrets (App Store Connect API key):
+        #   APPLE_NOTARY_KEY_P8     — .p8 private key, base64
+        #   APPLE_NOTARY_KEY_ID    — key id
+        #   APPLE_NOTARY_ISSUER_ID — issuer id
+        # A bare Mach-O CANNOT be stapled (stapler needs .app/.dmg/.pkg) —
+        # the notarization ticket is checked ONLINE by Gatekeeper, which is
+        # sufficient for the browser-download case this bead closes.
+        # TAG-GATED (same rationale as the codesign step above).
+        if: matrix.target.arch == 'mac-arm64' && startsWith(github.ref, 'refs/tags/engine-service-v')
+        env:
+          APPLE_NOTARY_KEY_P8: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          APPLE_SIGNING_REQUIRED: ${{ vars.APPLE_SIGNING_REQUIRED }}
+        run: |
+          set -euo pipefail
+          bin="service/target/nexus-service"
+          if [ -z "${APPLE_NOTARY_KEY_P8:-}" ] && [ -z "${APPLE_NOTARY_KEY_ID:-}" ] && [ -z "${APPLE_NOTARY_ISSUER_ID:-}" ]; then
+            # Same post-activation regression guard as the codesign step.
+            if [ "${APPLE_SIGNING_REQUIRED:-}" = "true" ]; then
+              echo "FAIL: APPLE_SIGNING_REQUIRED=true but the APPLE_NOTARY_* secrets are absent — notarization was activated and has silently regressed." >&2
+              exit 1
+            fi
+            echo "::warning title=mac-arm64 NOT NOTARIZED::APPLE_NOTARY_* secrets not provisioned — Gatekeeper will block browser downloads even if Developer-ID signed. See nexus-27i0m."
+            echo "### mac-arm64 notarization: SKIPPED — no notary secrets" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ -z "${APPLE_NOTARY_KEY_P8:-}" ] || [ -z "${APPLE_NOTARY_KEY_ID:-}" ] || [ -z "${APPLE_NOTARY_ISSUER_ID:-}" ]; then
+            echo "FAIL: APPLE_NOTARY_* secrets are PARTIALLY configured — refusing a silent skip." >&2
+            exit 1
+          fi
+          # Notarizing an ad-hoc binary is a guaranteed Apple-side rejection —
+          # fail here with the real reason instead.
+          codesign -dv "$bin" 2>&1 | grep "TeamIdentifier=" | grep -v "not set" \
+            || { echo "FAIL: binary is not Developer-ID signed (are APPLE_DEV_ID_* secrets provisioned?) — cannot notarize" >&2; exit 1; }
+          key="$RUNNER_TEMP/notary.p8"
+          printf '%s' "$APPLE_NOTARY_KEY_P8" | base64 -d > "$key"
+          /usr/bin/ditto -c -k "$bin" "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+            --key "$key" --key-id "$APPLE_NOTARY_KEY_ID" --issuer "$APPLE_NOTARY_ISSUER_ID" \
+            --wait --timeout 20m
+          rm -f "$key" "$RUNNER_TEMP/notarize.zip"
+          echo "### mac-arm64 notarization: ACCEPTED (ticket online — bare Mach-O is not stapleable)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Clean up signing keychain (mac-arm64)
+        if: always() && matrix.target.arch == 'mac-arm64'
+        run: |
+          security delete-keychain "$RUNNER_TEMP/sign.keychain-db" 2>/dev/null || true
+          security list-keychains -d user -s login.keychain-db 2>/dev/null || true
 
       - name: Stage artifact + sha256
         id: stage
@@ -366,6 +502,12 @@ jobs:
             "for native-smoke.sh). Its runtime correctness rests on the mac-arm64" \
             "CA-3 gate + the lp2qo native-serving spike, not a per-build smoke —" \
             "treat it as experimental. The linux binaries ARE smoke-tested." \
+            "mac-arm64 signing: Developer-ID signed + notarized WHEN the APPLE_*" \
+            "secrets are provisioned (see the build job summary for this run's" \
+            "actual status); otherwise ad-hoc-signed — browser downloads are then" \
+            "Gatekeeper-blocked, but nx install-binary (urllib fetch, no quarantine" \
+            "xattr) works either way. Ticket is checked online; bare Mach-O cannot" \
+            "be stapled." \
             "" \
             "glibc floor: linux binaries built on ubuntu-latest (~2.39). The runtime" \
             "base must have glibc >= that (conexus uses debian:trixie-slim = 2.41);" \
@@ -389,6 +531,10 @@ jobs:
             "The local 'nx daemon service install-binary' path verifies the protobuf" \
             ".sigstore.json offline via sigstore-python (no cosign binary required)." \
             > notes.md
+          # CAUTION (critique 96677bf7 observation): once APPLE_* signing is
+          # provisioned, do NOT re-run an already-published tag's job to
+          # "backfill" signing — --clobber would silently change the asset
+          # bytes + sha256 under the same download URL. Cut a fresh tag.
           # Matrix-safe: create the release once (whichever arch job wins), then
           # each job uploads its OWN arch assets (--clobber for re-runs). Use
           # view-then-create rather than `create ... 2>/dev/null || true`: the old

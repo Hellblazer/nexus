@@ -187,6 +187,91 @@ def _current_head(repo: Path) -> str:
         return ""
 
 
+def _get_owner_head_hash(repo: Path) -> str | None:
+    """Read the owner's last-indexed ``head_hash`` (nexus-fltb4).
+
+    The read counterpart of :func:`_set_owner_head_hash`: resolves the owner
+    via ``owner_for_repo`` then reads the owner record. ``None`` on any
+    degradation (catalog absent, owner unregistered, column empty) — the
+    caller falls back to a full index.
+    """
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+        from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+
+        reader = make_catalog_reader()
+        if reader is None:
+            return None
+        _, repo_hash = _repo_identity(repo)
+        owner = reader.owner_for_repo(repo_hash)
+        if owner is None:
+            return None
+        rec = reader.get_owner_by_prefix(str(owner))
+        if not rec:
+            return None
+        head = str(rec.get("head_hash") or "").strip()
+        return head or None
+    except Exception:  # noqa: BLE001 — best-effort read; any failure means full-index fallback
+        _log.debug("get_owner_head_hash_failed", repo=str(repo), exc_info=True)
+        return None
+
+
+def _git_changed_since(
+    repo: Path, base: str,
+) -> tuple[list[str], list[str]] | None:
+    """Worktree-inclusive git delta since *base* (nexus-fltb4).
+
+    Returns ``(changed_relpaths, deleted_relpaths)`` from
+    ``git diff --name-status --find-renames <base>`` — worktree-inclusive
+    (no ``HEAD`` operand), so uncommitted edits are included exactly like
+    the full walk's mtime staleness would catch them. Renames contribute
+    the old path to *deleted* and the new to *changed*; copies contribute
+    the new path only.
+
+    ``None`` (full-index fallback) when the base commit is unreachable
+    (history rewrite, shallow clone, gc), git fails, or parsing sees an
+    unexpected status — never guess on a partial delta.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "diff", "--name-status",
+             "--find-renames", "--no-color", base],
+            capture_output=True, text=True, timeout=60,
+        )
+    except Exception:  # noqa: BLE001 — git unavailable/hung: full-index fallback
+        _log.debug("git_changed_since_failed", repo=str(repo), exc_info=True)
+        return None
+    if proc.returncode != 0:
+        _log.info(
+            "since_head_base_unusable",
+            base=base, stderr=proc.stderr.strip()[:200],
+            fallback="full index",
+        )
+        return None
+    changed: list[str] = []
+    deleted: list[str] = []
+    for line in proc.stdout.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        status = parts[0]
+        if status.startswith(("R", "C")) and len(parts) == 3:
+            if status.startswith("R"):
+                deleted.append(parts[1])
+            changed.append(parts[2])
+        elif status[:1] in ("A", "M", "T") and len(parts) == 2:
+            changed.append(parts[1])
+        elif status[:1] == "D" and len(parts) == 2:
+            deleted.append(parts[1])
+        elif status[:1] == "U":
+            # merge conflict in progress — indexing mid-merge is undefined
+            return None
+        else:
+            _log.info("since_head_unparsed_status", line=line[:120])
+            return None
+    return changed, deleted
+
+
 def _set_owner_head_hash(repo: Path, head_hash: str, *, cat=None) -> None:
     """RDR-137 Phase 3.8 (nexus-tts0d.13): persist *head_hash* on the
     owner row for *repo*.
@@ -721,6 +806,46 @@ def _migrate_legacy_collections(
     return result
 
 
+def _delete_docs_for_paths(repo: Path, deleted_relpaths: list[str]) -> None:
+    """Delete the catalog documents for explicitly-deleted paths (nexus-fltb4).
+
+    The delta path's replacement for housekeeping's miss-count sweep: git
+    already told us these worktree-relative paths are gone (rename detection
+    applied), so their docs are deleted immediately — the manifest FK CASCADE
+    then exposes their chunks to ``_prune_deleted_files``'s orphan sweep.
+    Best-effort per path; a failed lookup/delete is logged and skipped (the
+    next FULL run's housekeeping recovers it).
+    """
+    try:
+        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+        from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+
+        reader = make_catalog_reader()
+        if reader is None:
+            return
+        writer = make_catalog_writer()
+        _, repo_hash = _repo_identity(repo)
+        owner = reader.owner_for_repo(repo_hash)
+        if owner is None:
+            return
+        for rel in deleted_relpaths:
+            try:
+                entry = reader.by_file_path(owner, rel)
+                if entry is None:
+                    continue
+                writer.delete_document(entry.tumbler)
+                _log.info(
+                    "since_head_deleted_doc",
+                    file_path=rel, tumbler=str(entry.tumbler),
+                )
+            except Exception:  # noqa: BLE001 — per-path best-effort; full-run housekeeping recovers
+                _log.warning(
+                    "since_head_delete_doc_failed", file_path=rel, exc_info=True,
+                )
+    except Exception:  # noqa: BLE001 — catalog unavailable: nothing to delete from
+        _log.debug("since_head_delete_docs_unavailable", exc_info=True)
+
+
 def _catalog_hook(
     repo: Path,
     repo_name: str,
@@ -728,6 +853,7 @@ def _catalog_hook(
     head_hash: str,
     indexed_files: list[tuple[Path, str, str]],
     on_locked: str = "wait",
+    skip_housekeeping: bool = False,
 ) -> dict[Path, str]:
     """Register/update indexed files in catalog. Silently skipped if catalog absent.
 
@@ -1190,10 +1316,15 @@ def _catalog_hook(
         _stage_s["linking"] = time.monotonic() - _stage_mark
         _stage_mark = time.monotonic()
 
-        # Housekeeping: detect and evict orphaned catalog entries
-        _progress(f"  Catalog: housekeeping…\r")
-        indexed_set = _indexed_relpaths(indexed_files, repo)
-        _run_housekeeping(cat, owner, indexed_set, writer=writer)
+        # Housekeeping: detect and evict orphaned catalog entries.
+        # nexus-fltb4: NEVER against a partial (delta-filtered) walk — the
+        # miss-count sweep interprets "not in this run's set" as "gone".
+        if skip_housekeeping:
+            _log.debug("catalog_housekeeping_skipped", reason="partial_walk")
+        else:
+            _progress(f"  Catalog: housekeeping…\r")
+            indexed_set = _indexed_relpaths(indexed_files, repo)
+            _run_housekeeping(cat, owner, indexed_set, writer=writer)
         _stage_s["housekeeping"] = time.monotonic() - _stage_mark
 
         _log.info(
@@ -1345,6 +1476,7 @@ def index_repository(
     chunk_lines: int | None = None,
     force: bool = False,
     force_stale: bool = False,
+    since_head: bool = False,
     on_locked: str = "wait",
     on_start: Callable[[int], None] | None = None,
     on_file: Callable[[Path, int, float], None] | None = None,
@@ -1417,7 +1549,7 @@ def index_repository(
             _run_index_frecency_only(repo, registry)
             stats: dict[str, int] = {}
         else:
-            stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_stale=force_stale, on_locked=on_locked, on_start=on_start, on_file=on_file, on_phase=on_phase, on_stage_timers=on_stage_timers, hooks=hooks)
+            stats = _run_index(repo, registry, chunk_lines=chunk_lines, force=force, force_stale=force_stale, since_head=since_head, on_locked=on_locked, on_start=on_start, on_file=on_file, on_phase=on_phase, on_stage_timers=on_stage_timers, hooks=hooks)
             _set_owner_head_hash(repo, _current_head(repo))
         return stats
     finally:
@@ -2078,6 +2210,8 @@ def _prune_misclassified_in_collection(
     that pre-date the catalog backfill keep getting cleaned up. The
     legacy set is typically small post-backfill.
     """
+    from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — circular-dep avoidance: nexus.db.http_vector_client
+
     doc_ids: list[str] = []
     legacy_paths: list[str] = []
     for path in target_paths:
@@ -2213,9 +2347,21 @@ def _prune_misclassified_in_collection(
                 existing = _paginated_get(
                     col, include=[], where={"doc_id": {"$in": batch}},
                 )
+            except VectorServiceError as exc:
+                # nexus-ou4tb walk: a degraded service is NOT "no legacy
+                # rows" — isolate the batch but say so (matches the sibling
+                # legacy source_path arm below). Prune stays best-effort.
+                _log.warning(
+                    "legacy_prune_in_query_failed",
+                    batch_size=len(batch),
+                    error=str(exc),
+                )
+                continue
             except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
                 # Some Chroma deployments reject ``$in`` on absent keys;
-                # treat as empty result.
+                # treat as empty result (logged for the nexus-ou4tb audit
+                # trail — this arm was fully silent before).
+                _log.debug("legacy_prune_in_query_rejected", exc_info=True)
                 continue
             if existing["ids"]:
                 _batched_delete(col, existing["ids"])
@@ -2529,6 +2675,18 @@ def _prune_deleted_files(
 # ── Main indexing pipeline ───────────────────────────────────────────────────
 
 
+def _fmt_duration(seconds: float) -> str:
+    """Compact human duration: 42s / 1m30s / 2h05m (nexus-zedf7)."""
+    s = int(round(seconds))
+    if s < 60:
+        return f"{s}s"
+    m, s = divmod(s, 60)
+    if m < 60:
+        return f"{m}m{s:02d}s" if s else f"{m}m"
+    h, m = divmod(m, 60)
+    return f"{h}h{m:02d}m"
+
+
 def _drain_batcher_with_markers(
     batcher: "ChunkBatcher",
     on_phase: Callable[[str], None] | None,
@@ -2558,10 +2716,15 @@ def _drain_batcher_with_markers(
         on_phase(f"Flushing {' + '.join(parts)}…")
 
         def progress(done: int, total: int) -> None:
-            on_phase(
-                f"  flush {done}/{total} complete "
-                f"({time.monotonic() - t0:.1f}s)"
-            )
+            # nexus-zedf7: rolling rate + projected remaining, so an hour of
+            # legitimate server-side embedding never reads as a hang.
+            elapsed = time.monotonic() - t0
+            line = f"  flush {done}/{total} complete ({elapsed:.1f}s"
+            if 0 < done < total and elapsed > 0:
+                rate = done / elapsed
+                line += f", {rate * 60:.1f} flushes/min"
+                line += f", ~{_fmt_duration((total - done) / rate)} remaining"
+            on_phase(line + ")")
     flushed = batcher.drain(on_progress=progress)
     if on_phase is not None and busy:
         on_phase(
@@ -2578,6 +2741,7 @@ def _run_index(
     *,
     force: bool = False,
     force_stale: bool = False,
+    since_head: bool = False,
     on_locked: str = "wait",
     on_start: Callable[[int], None] | None = None,
     on_file: Callable[[Path, int, float], None] | None = None,
@@ -2646,6 +2810,49 @@ def _run_index(
     # Collect git metadata once for all chunks
     git_meta = _git_metadata(repo)
 
+    # nexus-fltb4 (--since-head): git-diff-driven incremental scope. When a
+    # usable delta exists, ONLY the changed files are walked/indexed, the
+    # full-collection staleness pulls are skipped, deleted paths get their
+    # catalog docs removed explicitly (git already did rename detection),
+    # and every full-tree pass that would misread a partial walk
+    # (housekeeping miss-counting, misclassified/orphan prunes, the rg
+    # cache rebuild) is skipped. Any doubt about the delta -> full index.
+    delta_changed: "set[str] | None" = None
+    delta_deleted: list[str] = []
+    if since_head and not force and not force_stale:
+        _base = _get_owner_head_hash(repo)
+        _delta = _git_changed_since(repo, _base) if _base else None
+        if _delta is None:
+            _log.info(
+                "since_head_fallback_full_index",
+                repo=str(repo), base=_base or "<none>",
+            )
+            if on_phase is not None:
+                on_phase("--since-head: no usable base — full index")
+        else:
+            delta_changed = set(_delta[0])
+            delta_deleted = _delta[1]
+            _log.info(
+                "since_head_delta",
+                repo=str(repo), base=_base,
+                changed=len(delta_changed), deleted=len(delta_deleted),
+            )
+            if on_phase is not None:
+                on_phase(
+                    f"--since-head: {len(delta_changed)} changed, "
+                    f"{len(delta_deleted)} deleted since {_base[:12]}"
+                )
+            if not delta_changed and not delta_deleted:
+                if on_phase is not None:
+                    on_phase("--since-head: nothing changed — done")
+                return {"rdr_indexed": 0, "rdr_current": 0, "rdr_failed": 0,
+                        "files_changed": 0}
+    elif since_head:
+        _log.info(
+            "since_head_ignored_with_force",
+            reason="force/force_stale requests a full pass by definition",
+        )
+
     # Compute frecency scores in a single git log pass
     frecency_map = batch_frecency(repo, decay_rate=tuning.decay_rate, timeout=tuning.git_log_timeout)
 
@@ -2679,6 +2886,9 @@ def _run_index(
         if rdr_dir.is_dir():
             for md_file in sorted(rdr_dir.rglob("*.md")):
                 if md_file.is_file() and not md_file.is_symlink():
+                    if (delta_changed is not None
+                            and str(md_file.relative_to(repo)) not in delta_changed):
+                        continue  # nexus-fltb4: outside the delta
                     rdr_md_paths.append((frecency_map.get(md_file, 0.0), md_file))
     rdr_md_paths.sort(key=lambda x: x[0], reverse=True)
     have_rdr_files = bool(rdr_md_paths)
@@ -2723,6 +2933,8 @@ def _run_index(
         if not path.is_file():
             continue  # git ls-files may list deleted files not yet committed
         rel = path.relative_to(repo)
+        if delta_changed is not None and str(rel) not in delta_changed:
+            continue  # nexus-fltb4: outside the delta
         # Defense-in-depth: still filter hidden dirs and ignore patterns
         if any(part.startswith(".") for part in rel.parts):
             continue  # Skip hidden dirs/files
@@ -2807,7 +3019,13 @@ def _run_index(
     from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     _repo_basename, _repo_hash = _repo_identity(repo)
     cache_path = nexus_config_dir() / f"{_repo_basename}-{_repo_hash}.cache"
-    build_cache(repo, cache_path, all_text_scored)
+    if delta_changed is None:
+        build_cache(repo, cache_path, all_text_scored)
+    else:
+        # nexus-fltb4: rebuilding the rg cache from a delta-filtered file
+        # list would CLOBBER the full cache with a sliver. Leave the cache
+        # slightly stale; the next full run refreshes it.
+        _log.debug("since_head_rg_cache_skipped", files=len(all_text_scored))
 
     # Credential check and T3 setup
     from nexus.config import is_local_mode as _is_local  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
@@ -3032,6 +3250,9 @@ def _run_index(
         head_hash=_current_head(repo),
         indexed_files=indexed_for_catalog,
         on_locked=on_locked,
+        # nexus-fltb4: miss-counting against a delta-filtered walk would mark
+        # every unvisited doc as missing and mass-delete after two runs.
+        skip_housekeeping=delta_changed is not None,
     )
     if on_phase is not None:
         on_phase(
@@ -3075,12 +3296,21 @@ def _run_index(
             )
         return build_staleness_cache(col)
 
-    code_staleness = _build_with_marker("code", code_col)
-    docs_staleness = _build_with_marker("docs", docs_col)
-    # nexus-3lswy: distinct cache object from docs_staleness — rdr__ is a
-    # separate physical collection from docs__, so a shared object would
-    # cross-contaminate staleness lookups between the two.
-    rdr_staleness = _build_with_marker("rdr", rdr_col)
+    if delta_changed is not None:
+        # nexus-fltb4: the delta files are known-changed; the caches exist to
+        # SKIP unchanged files, which the delta already excludes. Empty caches
+        # route the (small) delta set through the per-file staleness path,
+        # which still no-ops content-identical rewrites.
+        code_staleness = StalenessCache()
+        docs_staleness = StalenessCache()
+        rdr_staleness = StalenessCache()
+    else:
+        code_staleness = _build_with_marker("code", code_col)
+        docs_staleness = _build_with_marker("docs", docs_col)
+        # nexus-3lswy: distinct cache object from docs_staleness — rdr__ is a
+        # separate physical collection from docs__, so a shared object would
+        # cross-contaminate staleness lookups between the two.
+        rdr_staleness = _build_with_marker("rdr", rdr_col)
     _log.info(
         "staleness_caches_built",
         code_doc_ids=len(code_staleness.by_doc_id),
@@ -3613,25 +3843,38 @@ def _run_index(
 
         _phase("Pruning misclassified chunks…")
         _t = time.monotonic()
-        _prune_misclassified(
-            repo, code_collection, docs_collection,
-            [f for _, f in code_files],
-            [f for _, f in prose_files],
-            [f for _, f in pdf_files],
-            db,
-            file_to_doc_id=file_to_doc_id,
-            catalog=_cat,
-        )
+        if delta_changed is not None:
+            _phase("  skipped (--since-head: full-tree pass)")
+        else:
+            _prune_misclassified(
+                repo, code_collection, docs_collection,
+                [f for _, f in code_files],
+                [f for _, f in prose_files],
+                [f for _, f in pdf_files],
+                db,
+                file_to_doc_id=file_to_doc_id,
+                catalog=_cat,
+            )
         _phase(f"Pruning misclassified done ({time.monotonic() - _t:.1f}s)")
 
         # C3: Prune deleted files. Remove orphan chunks via the catalog
         # manifest (RDR-108 Phase 4 / nexus-dyxe).
         _phase("Pruning deleted files…")
         _t = time.monotonic()
-        _prune_deleted_files(
-            code_collection, docs_collection, db, catalog=_cat,
-            rdr_collection=rdr_col_name,
-        )
+        if delta_changed is not None and not delta_deleted:
+            _phase("  skipped (--since-head: no deletions in delta)")
+        else:
+            if delta_deleted:
+                # nexus-fltb4: git said these paths are GONE (rename detection
+                # already applied) — delete their catalog docs NOW so the
+                # manifest CASCADE exposes their chunks to the orphan sweep
+                # below. The full-walk path never reaches here with
+                # delta_deleted set.
+                _delete_docs_for_paths(repo, delta_deleted)
+            _prune_deleted_files(
+                code_collection, docs_collection, db, catalog=_cat,
+                rdr_collection=rdr_col_name,
+            )
         _phase(f"Pruning deleted files done ({time.monotonic() - _t:.1f}s)")
 
         # Stamp pipeline version after all work completes (nexus-7yfm).

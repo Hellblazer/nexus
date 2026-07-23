@@ -82,6 +82,14 @@ jobs:
         # release asset, no HuggingFace 429 dependency).
         uses: ./.github/actions/prime-bge-onnx
 
+      - name: Prime ms-marco cross-encoder ONNX (cache or pinned HF revision)
+        # RDR-188 P1: CrossEncoderRerankerInferenceTest + the integration
+        # suite's cross-encoder success path load the real ms-marco ONNX;
+        # priming makes them RUN on CI instead of Assumptions-skipping (the
+        # bge/RDR-160 CA-1 export-compat risk class must be CI-caught).
+        # Non-vacuity enforced by assert_rerank_inference_ran.py below.
+        uses: ./.github/actions/prime-crossencoder-onnx
+
       # jOOQ codegen now runs INSIDE the build (bead nexus-9qvam): the
       # testcontainers-jooq-codegen-maven-plugin generates into
       # target/generated-sources/jooq at the generate-sources phase from the
@@ -107,6 +115,15 @@ jobs:
         run: |
           python3 scripts/assert_rehearsal_ran.py \
             service/target/surefire-reports/TEST-dev.nexus.service.SchemaUpgradeRehearsalIntegrationTest.xml
+
+      # RDR-188 P1 critic fold: the cross-encoder real-inference tests gate on
+      # the primed ms-marco ONNX via JUnit Assumptions — a skip is invisible
+      # behind a green checkmark, so prove the priming reached the tests.
+      - name: Assert cross-encoder real-inference gate actually ran (not skipped)
+        run: |
+          python3 scripts/assert_rerank_inference_ran.py \
+            service/target/surefire-reports/TEST-dev.nexus.service.vectors.CrossEncoderRerankerInferenceTest.xml \
+            service/target/surefire-reports/TEST-dev.nexus.service.RerankStageIntegrationTest.xml
 
   # 2026-07-06 CI-cost pass: the native-image-build-and-smoke job that lived
   # here was removed — every service/** push was building the native image

@@ -46,6 +46,24 @@ if TYPE_CHECKING:
 _log = structlog.get_logger(__name__)
 
 
+def _is_vector_service_error(exc: BaseException) -> bool:
+    """True iff *exc* is the service client's VectorServiceError.
+
+    nexus-ou4tb caller walk: this module's resolution paths deliberately
+    degrade to ``None`` ("span not found") on per-collection failures —
+    correct for a missing chunk, WRONG-silently for a degraded vector
+    service, which previously vanished into the same ``None``. The
+    import is deferred because ``nexus.db`` imports the catalog package
+    (a top-level import here would be circular); an ImportError degrades
+    to False (treated as a generic failure), never a crash.
+    """
+    try:
+        from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — circular-dep avoidance: nexus.db imports catalog
+    except ImportError:  # pragma: no cover — nexus.db always importable in practice
+        return False
+    return isinstance(exc, VectorServiceError)
+
+
 _CHASH_FALLBACK_CONCURRENCY: int = 10
 _CHASH_FALLBACK_DEADLINE_S: float = 30.0
 _chash_fallback_warned: bool = False
@@ -148,12 +166,41 @@ def _t3_collection_names(t3: "ClientAPI") -> list[str]:
     ]
 
 
+def _raise_if_unreadable(unreadable: int, hex_chash: str, scanned: int) -> None:
+    """Raise ``VectorServiceError`` when *unreadable* collections exist.
+
+    nexus-ou4tb/nexus-ib6uy: N collections were unreadable (degraded
+    vector service), so a "no match" verdict is an INCOMPLETE scan, not
+    a clean not-found. Loud — and RAISED: a not-found over a scan that
+    couldn't read must be distinguishable at the API boundary
+    (unreachable ≠ empty). Also invoked from the deadline-timeout exits
+    (review 2026-07-22): a timeout AFTER service failures is equally
+    incomplete. No-op when *unreadable* is 0.
+    """
+    if not unreadable:
+        return
+    _log.warning(
+        "resolve_chash_fallback_incomplete_service_degraded",
+        chash_prefix=hex_chash[:16],
+        unreadable_collections=unreadable,
+        scanned_collections=scanned,
+    )
+    from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — circular-dep avoidance: nexus.db imports catalog
+
+    raise VectorServiceError(
+        f"chash resolution incomplete: {unreadable} "
+        f"collection(s) unreadable (vector service degraded) — "
+        f"not-found cannot be concluded for {hex_chash[:16]}…"
+    )
+
+
 def fallback_chash_scan(
     *,
     hex_chash: str,
     span: str,
     t3: "ClientAPI",
     build_ref: Callable[..., dict],
+    prior_unreadable: int = 0,
 ) -> dict | None:
     """Parallel scan across all T3 collections for a missing chash.
 
@@ -168,7 +215,13 @@ def fallback_chash_scan(
 
     try:
         all_cols = _t3_collection_names(t3)
-    except Exception:  # noqa: BLE001 — best-effort fallback scan; T3 list failure is logged and degrades to no-match, must not crash caller
+    except Exception as exc:  # noqa: BLE001 — best-effort fallback scan; a NON-service T3 list failure degrades to no-match, must not crash caller
+        if _is_vector_service_error(exc):
+            # Critic (nexus-j54kv): a total service outage fails at this
+            # very first read — before any probe, before either timeout
+            # guard. Not-found cannot be concluded over zero collections
+            # scanned; same contract as the mid-scan raises.
+            raise
         _log.debug("chash_fallback_list_collections_failed", exc_info=True)
         return None
 
@@ -181,10 +234,23 @@ def fallback_chash_scan(
         )
         _chash_fallback_warned = True
 
-    def _probe(coll: str) -> dict | None:
+    #: Sentinel distinguishing "collection unreadable (degraded service)"
+    #: from a genuine miss (None). Returned by _probe instead of mutating a
+    #: shared counter — _probe runs on up to _CHASH_FALLBACK_CONCURRENCY
+    #: pool threads, and an unlocked closure `+=` there can lose increments
+    #: (review 2026-07-22); the single-threaded result loop below does the
+    #: counting instead, so there is no shared mutable state at all.
+    _svc_fail = object()
+    svc_failures = 0
+
+    def _probe(coll: str) -> dict | object | None:
         try:
             return resolve_span_in_t3(span, coll, t3)
-        except Exception:  # noqa: BLE001 — per-collection probe in parallel scan; a single collection failure must not abort the fan-out, treat as miss
+        except Exception as exc:  # noqa: BLE001 — per-collection probe in parallel scan; a single collection failure must not abort the fan-out, treat as miss
+            if _is_vector_service_error(exc):
+                # Aggregated below — a not-found verdict over a scan that
+                # COULDN'T read is reported, never silent (nexus-ou4tb).
+                return _svc_fail
             return None
 
     deadline = time.monotonic() + _CHASH_FALLBACK_DEADLINE_S
@@ -213,6 +279,11 @@ def fallback_chash_scan(
                     chash_prefix=hex_chash[:16],
                     deadline_s=_CHASH_FALLBACK_DEADLINE_S,
                 )
+                # Review (bugcluster): a timeout AFTER service failures is an
+                # incomplete scan too — widespread degradation slows every
+                # probe toward the deadline; not-found still cannot be
+                # concluded (nexus-ib6uy).
+                _raise_if_unreadable(svc_failures + prior_unreadable, hex_chash, len(all_cols))
                 return None
 
             done, _pending = wait(
@@ -226,11 +297,15 @@ def fallback_chash_scan(
                     chash_prefix=hex_chash[:16],
                     deadline_s=_CHASH_FALLBACK_DEADLINE_S,
                 )
+                _raise_if_unreadable(svc_failures + prior_unreadable, hex_chash, len(all_cols))
                 return None
 
             for fut in done:
                 coll = in_flight.pop(fut)
                 span_res = fut.result()
+                if span_res is _svc_fail:
+                    svc_failures += 1  # single-threaded here — no race
+                    continue
                 if span_res is None:
                     continue
                 # Recover doc_id from the hit collection — for fallback
@@ -242,12 +317,20 @@ def fallback_chash_scan(
                         include=[],
                     )
                     doc_id = hit["ids"][0] if hit["ids"] else ""
-                except Exception:  # noqa: BLE001 — best-effort doc_id recovery on a confirmed hit; failure degrades to empty doc_id, the span text is still returned
+                except Exception as exc:  # noqa: BLE001 — best-effort doc_id recovery on a confirmed hit; failure degrades to empty doc_id, the span text is still returned
+                    if _is_vector_service_error(exc):
+                        _log.warning(
+                            "chash_fallback_doc_id_recovery_service_degraded",
+                            chash_prefix=hex_chash[:16],
+                            collection=coll,
+                            error=str(exc),
+                        )
                     doc_id = ""
                 return build_ref(
                     coll=coll, doc_id=doc_id, span_result=span_res,
                 )
 
+        _raise_if_unreadable(svc_failures + prior_unreadable, hex_chash, len(all_cols))
         return None
     finally:
         ex.shutdown(wait=False, cancel_futures=True)
@@ -337,6 +420,7 @@ def resolve_chash_globally(
     # self-heal there is no purge path. Rows that fail per-candidate
     # resolution below still fall through to the T3 scan.
     rows = chash_index.lookup(hex_chash)
+    candidate_svc_failures = 0
     if rows:
         def _sort_key(r: dict) -> tuple:
             preferred = 0 if r["collection"] == prefer_collection else 1
@@ -345,7 +429,20 @@ def resolve_chash_globally(
         for row in sorted(rows, key=_sort_key):
             try:
                 span_res = resolve_span_in_t3(span, row["collection"], t3)
-            except Exception:  # noqa: BLE001 — per-candidate resolution failure falls through to the next survivor / T3 fallback, must not abort the loop
+            except Exception as exc:  # noqa: BLE001 — per-candidate resolution failure falls through to the next survivor / T3 fallback, must not abort the loop
+                if _is_vector_service_error(exc):
+                    # nexus-ou4tb: a degraded service is not "candidate
+                    # missing" — say so, count it (nexus-ib6uy: the
+                    # fallback raises when the WHOLE resolution ends
+                    # unresolved with unreadable collections), and fall
+                    # through to the next survivor.
+                    candidate_svc_failures += 1
+                    _log.warning(
+                        "resolve_chash_candidate_service_degraded",
+                        chash_prefix=hex_chash[:16],
+                        collection=row["collection"],
+                        error=str(exc),
+                    )
                 span_res = None
             if span_res is None:
                 continue
@@ -361,8 +458,12 @@ def resolve_chash_globally(
             )
 
     # ── T3 fallback ─────────────────────────────────────────────────
+    # nexus-ib6uy: candidate-path service failures ride along so a final
+    # not-found over an incomplete read raises instead of collapsing to
+    # None (a hit on ANY path still resolves normally).
     return fallback_chash_scan(
         hex_chash=hex_chash, span=span, t3=t3, build_ref=_build_ref,
+        prior_unreadable=candidate_svc_failures,
     )
 
 
@@ -401,17 +502,27 @@ def resolve_span_text_for_entry(
         try:
             from nexus.db import make_t3  # noqa: PLC0415 — function-local to avoid a circular import (nexus.db imports catalog)
             t3 = make_t3()
+            # nexus-p8nd5: reach the collection surface through whichever shape
+            # this handle has. T3Database wraps a chroma client at ``_client``;
+            # the service-mode HttpVectorClient deliberately has NO ``_client``
+            # (pinned) but exposes ``get_collection`` itself — the old
+            # unconditional ``t3._client`` read AttributeError'd into the broad
+            # except below and masked every service-mode chash span to None.
             result = resolve_span_in_t3(
-                span, entry.physical_collection, t3._client,
+                span, entry.physical_collection, getattr(t3, "_client", t3),
             )
             return result["chunk_text"] if result else None
-        except Exception:  # noqa: BLE001 — span resolution is best-effort; failure is logged at WARNING and degrades to None, must not crash caller
+        except Exception as exc:  # noqa: BLE001 — span resolution is best-effort; failure is logged at WARNING and degrades to None, must not crash caller
             _log.warning(
                 "resolve_span_text_failed",
                 span=span,
                 collection=entry.physical_collection,
                 exc_info=True,
             )
+            if _is_vector_service_error(exc):
+                # nexus-ib6uy: degraded service ≠ span-not-found — raise so
+                # the boundary renders the distinction.
+                raise
             return None
 
     # Line-range span: read from source file
@@ -484,7 +595,23 @@ def resolve_span_text_for_entry(
             if docs:
                 text = docs[0]
                 return text[char_start:char_end]
-        except Exception:  # noqa: BLE001 — chunk:char resolution is best-effort over T3/manifest; degrades to None rather than crashing the resolver
+        except Exception as exc:  # noqa: BLE001 — chunk:char resolution is best-effort over T3/manifest; degrades to None rather than crashing the resolver
+            if _is_vector_service_error(exc):
+                # nexus-ib6uy (ou4tb follow-through): a degraded vector
+                # service is NOT "span not found" — RAISE so the API
+                # boundary can render the distinction (the aspect_readers
+                # unreachable-vs-empty contract). Callers that want the old
+                # collapse can catch VectorServiceError themselves.
+                _log.warning(
+                    "resolve_span_chunk_char_service_degraded",
+                    span=span,
+                    collection=entry.physical_collection,
+                    error=str(exc),
+                )
+                raise
+            _log.debug(
+                "resolve_span_chunk_char_failed", span=span, exc_info=True,
+            )
             return None
 
     return None

@@ -202,7 +202,9 @@ class TestGuidedUpgradeCmd:
         _args, kwargs = est.call_args
         assert "provision" not in kwargs
         # wiring: the VERIFIED url + path overrides are handed to _run_migration.
-        mig.assert_called_once_with(None, None, None, "http://127.0.0.1:8099")
+        mig.assert_called_once_with(
+            None, None, None, "http://127.0.0.1:8099", assume_yes=True
+        )
 
     def test_pins_verified_endpoint_into_env_for_migration_legs(self) -> None:
         # nexus-qvemn: the migration's T2 store ETLs + count-source resolve the
@@ -454,6 +456,43 @@ class TestGuidedUpgradeCmd:
         assert "NX_SERVICE_TOKEN" in result.output
         mig.assert_not_called()
 
+    def test_yes_flag_threads_assume_yes_into_run_migration(self) -> None:
+        """nexus-4nvcf: `--yes` must suppress the Voyage cost-confirmation
+        prompt inside `_run_migration`/`_confirm_voyage_cost` too, not just
+        guided-upgrade's own top-level confirm gate. Pre-fix, `assume_yes`
+        was never forwarded, so an unattended `--yes` run could still block
+        on the billed-re-embed prompt."""
+        with patch(f"{_MOD}.detect_pending_migration",
+                   return_value=_preflight(True, 2)), \
+             patch(f"{_MOD}.establish_verified_service",
+                   return_value=_ready()), \
+             patch("nexus.db.pg_provision.load_service_credentials_into_env",
+                   return_value=True), \
+             patch("nexus.commands.migrate_cmd._run_migration") as mig:
+            result = CliRunner().invoke(guided_upgrade_cmd, ["--yes"])
+        assert result.exit_code == 0, result.output
+        mig.assert_called_once_with(
+            None, None, None, "http://127.0.0.1:8099", assume_yes=True,
+        )
+
+    def test_without_yes_flag_run_migration_receives_assume_yes_false(self) -> None:
+        """The interactive path (no `--yes`) must NOT force `assume_yes=True`
+        onto `_run_migration` — its own Voyage cost gate must remain free to
+        prompt. guided-upgrade's own top-level confirm still fires and is
+        answered here to reach the migration hand-off."""
+        with patch(f"{_MOD}.detect_pending_migration",
+                   return_value=_preflight(True, 2)), \
+             patch(f"{_MOD}.establish_verified_service",
+                   return_value=_ready()), \
+             patch("nexus.db.pg_provision.load_service_credentials_into_env",
+                   return_value=True), \
+             patch("nexus.commands.migrate_cmd._run_migration") as mig:
+            result = CliRunner().invoke(guided_upgrade_cmd, [], input="y\n")
+        assert result.exit_code == 0, result.output
+        mig.assert_called_once_with(
+            None, None, None, "http://127.0.0.1:8099", assume_yes=False,
+        )
+
     def test_bad_service_url_is_rejected_before_migrating(self) -> None:
         with patch(f"{_MOD}.detect_pending_migration",
                    return_value=_preflight(True, 1)), \
@@ -500,6 +539,7 @@ class TestAlreadyMigratedWiring:
         assert det.call_args.kwargs["force"] is False
         mig.assert_called_once_with(
             None, None, None, "http://127.0.0.1:8099",
+            assume_yes=True,
             skip_t2_stores=frozenset({"memory", "plans"}),
         )
 
@@ -516,7 +556,9 @@ class TestAlreadyMigratedWiring:
         assert result.exit_code == 0, result.output
         assert "already migrated" not in result.output
         # No skip_t2_stores kwarg at all when nothing is skipped.
-        mig.assert_called_once_with(None, None, None, "http://127.0.0.1:8099")
+        mig.assert_called_once_with(
+            None, None, None, "http://127.0.0.1:8099", assume_yes=True
+        )
 
     def test_force_flag_is_forwarded_to_detection(self) -> None:
         plan = self._plan(skip=frozenset())
@@ -549,5 +591,6 @@ class TestAlreadyMigratedWiring:
         est.assert_called_once()  # still provisions — T3 leg is untouched by this bead
         mig.assert_called_once_with(
             None, None, None, "http://127.0.0.1:8099",
+            assume_yes=True,
             skip_t2_stores=frozenset(LADDER_ORDER),
         )

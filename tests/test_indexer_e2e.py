@@ -492,8 +492,17 @@ def test_smart_index_py_excluded_from_docs(
 
 
 def test_smart_index_rdr_routing(
+    cloud_mode,
     rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
 ) -> None:
+    # nexus-x2x6v: cloud_mode MUST be the FIRST fixture param — pytest sets
+    # up same-scope fixtures in request order, and rich_registry mints the
+    # code/docs collection NAMES at setup time. Without the pin (or with it
+    # ordered after rich_registry), the names are minted under the AMBIENT
+    # mode (local/minilm on a box without CHROMA_API_KEY) while _index's
+    # get_credential patch indexes under cloud/voyage — the mode-mismatch
+    # signature this pair flaked with. (The bisect to c7fc8803 was a red
+    # herring: that commit only touches scripts/build_pg_bundle.sh.)
     """RDR-102 D2: source_path is gone from chunks. The frontmatter
     title for ADR-001-storage-tiers.md is "Storage Tier Architecture"
     (overrides the filename-derived stem), so the chunk's ``title``
@@ -515,6 +524,11 @@ def test_smart_index_rdr_routing(
 
     from nexus.indexer import _repo_collection_or_legacy
     rdr_col_name = _repo_collection_or_legacy(rich_repo, "rdr")
+    # nexus-x2x6v hardening: make the mode-pin's effect explicit — with
+    # cloud_mode first, every derivation point resolves the SAME
+    # voyage-shaped name (this line also brings the test under the
+    # mode-declaration lint, which the dynamic derivation used to evade).
+    assert "voyage-context-3" in rdr_col_name, rdr_col_name
     rdr_col = local_t3.get_or_create_collection(rdr_col_name)
     rdr_metas = rdr_col.get(include=["metadatas"])["metadatas"]
     assert rdr_metas, f"expected ADR-001 chunks in {rdr_col_name}; got none"
@@ -543,9 +557,12 @@ def test_smart_index_search(
 
 
 def test_smart_index_embedding_model_metadata(
-    rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
     cloud_mode,
+    rich_repo: Path, rich_registry: RepoRegistry, local_t3: T3Database,
 ) -> None:
+    # nexus-x2x6v: cloud_mode FIRST (was last — set up AFTER rich_registry
+    # had already minted minilm-named collections; see the sibling test's
+    # comment for the full mechanism).
     _index(rich_repo, rich_registry, local_t3)
     info = rich_registry.get(rich_repo)
     code_col = local_t3.get_or_create_collection(info["code_collection"])

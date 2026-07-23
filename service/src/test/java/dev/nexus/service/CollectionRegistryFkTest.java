@@ -778,52 +778,52 @@ class CollectionRegistryFkTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // GROUP 9 — source_uri audit harness + deferred-constraint pin
-    //
-    // EXPECTED GREEN (both sub-tests): the audit query detects the seeded duplicate,
-    // AND no unique constraint exists on (tenant_id, source_uri).
+    // GROUP 9 — source_uri uniqueness: constraint LANDED (was: audit-only)
     //
     // Provenance: T2 nexus_rdr/156-P0-source-uri-audit (2026-06-11) found 201 distinct
     // source_uris duplicated in live SQLite before RDR-153 migration, e.g. the rdr-127
-    // file registered under tumblers 1.1.1781, 1.10.2708, and 1.10.2836.  A UNIQUE
-    // constraint on (tenant_id, source_uri) is DEFERRED pending ghost dedup; P0.2 ships
-    // NO such constraint.  A blind ADD UNIQUE would fail on existing data.
+    // file registered under tumblers 1.1.1781, 1.10.2708, and 1.10.2836.  P0.2 therefore
+    // DEFERRED the unique constraint pending a dedup ("a blind ADD UNIQUE would fail on
+    // existing data") and shipped only an audit query — Order(90) below originally
+    // seeded a live duplicate and asserted the audit query FOUND it.
+    //
+    // catalog-016 (nexus-78n33) closed that loop exactly as Decision 7 prescribed:
+    // 016-0 IS the dedup sweep (tombstones losers, most-chunks winner), 016-1 adds the
+    // PARTIAL unique index on LIVE (tenant_id, source_uri) WHERE source_uri <> ''.
+    // The seeded-duplicate scenario now must be REFUSED, not merely detected.
+    // Order(91) is unchanged: it pins that no FULL (non-partial) unique index exists —
+    // its original text explicitly allowed the partial-index endgame.
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test @Order(90)
-    void sourceUriAuditQuery_detectsSeededDuplicate() throws Exception {
-        // GREEN before and after P0.2 lands.
-        // Seeds two catalog_documents rows with the same non-empty source_uri (same tenant,
-        // different tumblers), then verifies the audit GROUP BY query finds them.
+    void sourceUriSeededDuplicate_nowRefusedByPartialUniqueIndex() throws Exception {
+        // Was: audit-query-detects (constraint deferred). Now: the catalog-016
+        // partial unique index refuses the second LIVE row outright.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            // Seed: two docs sharing the same source_uri — mirrors the 201-uri debt found
-            // in the 2026-06-11 live audit (e.g. rdr-127 → 1.1.1781 + 1.10.2708)
             String dupUri = "file:///docs/rdr/rdr-127-shared.md";
             su.createStatement().execute(
                 "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, source_uri) " +
                 "VALUES ('" + TENANT_A + "', 'audit-t1', 'Audit Doc 1', '" + dupUri + "') " +
                 "ON CONFLICT (tenant_id, tumbler) DO UPDATE SET source_uri = EXCLUDED.source_uri");
-            su.createStatement().execute(
-                "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, source_uri) " +
-                "VALUES ('" + TENANT_A + "', 'audit-t2', 'Audit Doc 2', '" + dupUri + "') " +
-                "ON CONFLICT (tenant_id, tumbler) DO UPDATE SET source_uri = EXCLUDED.source_uri");
+            PSQLException ex = assertThrows(PSQLException.class, () ->
+                su.createStatement().execute(
+                    "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, source_uri) " +
+                    "VALUES ('" + TENANT_A + "', 'audit-t2', 'Audit Doc 2', '" + dupUri + "')"));
+            assertThat(ex.getMessage())
+                .as("the catalog-016 partial unique index must refuse the live duplicate "
+                    + "(the 201-uri debt class, audit 2026-06-11, dedup+constraint landed nexus-78n33)")
+                .contains("ux_catalog_documents_live_source_uri");
 
-            // Audit query: group by (tenant_id, source_uri) HAVING count > 1 WHERE non-empty
+            // The audit query the P0 harness shipped now finds NOTHING live —
+            // uniqueness is enforced, not merely observed.
             ResultSet rs = su.createStatement().executeQuery(
-                "SELECT tenant_id, source_uri, COUNT(*) AS cnt " +
-                "FROM nexus.catalog_documents " +
-                "WHERE source_uri <> '' " +
-                "GROUP BY tenant_id, source_uri " +
-                "HAVING COUNT(*) > 1 " +
-                "AND tenant_id = '" + TENANT_A + "' " +
-                "AND source_uri = '" + dupUri + "'");
+                "SELECT 1 FROM nexus.catalog_documents " +
+                "WHERE source_uri <> '' AND deleted_at IS NULL " +
+                "GROUP BY tenant_id, source_uri HAVING COUNT(*) > 1");
             assertThat(rs.next())
-                .as("audit query must detect the seeded duplicate source_uri (201-uri debt, 2026-06-11)")
-                .isTrue();
-            assertThat(rs.getInt("cnt"))
-                .as("duplicate count must be exactly 2 for the seeded pair")
-                .isEqualTo(2);
+                .as("no live duplicate (tenant_id, source_uri) groups can exist post-016")
+                .isFalse();
         }
     }
 

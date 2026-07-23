@@ -2083,6 +2083,37 @@ def test_drain_markers_busy_emits_open_heartbeat_close():
     assert phases[3].startswith("Flush drain complete — 2 flushes,")
 
 
+def test_drain_markers_heartbeats_carry_rate_and_eta(monkeypatch):
+    """nexus-zedf7: each heartbeat states the rolling rate and projected
+    remaining time — an hour-long legitimate embed drain must never read
+    as a hang. Injected clock: 30s per flush."""
+    from nexus import indexer as idx
+
+    t = {"now": 1000.0}
+    monkeypatch.setattr(idx.time, "monotonic", lambda: t["now"])
+
+    class _TickingBatcher(_StubBatcher):
+        def drain(self, on_progress=None):
+            for i in range(self._flushes):
+                t["now"] += 30.0
+                if on_progress is not None:
+                    on_progress(i + 1, self._flushes)
+            return self._flushes
+
+    phases: list[str] = []
+    b = _TickingBatcher({"chunks": 900, "collections": 2, "in_flight": 1}, flushes=4)
+    idx._drain_batcher_with_markers(b, phases.append)
+
+    # flush 1/4 at t=30s: rate 2.0 flushes/min, 3 left -> ~90s -> ~1m30s.
+    assert "flush 1/4 complete (30.0s" in phases[1]
+    assert "~1m30s remaining" in phases[1]
+    # flush 3/4 at t=90s: 1 left at 30s/flush -> ~30s remaining.
+    assert "~30s remaining" in phases[3]
+    # final flush: no remaining estimate on a finished drain.
+    assert "remaining" not in phases[4]
+    assert phases[5].startswith("Flush drain complete — 4 flushes,")
+
+
 def test_drain_markers_quiet_drain_is_silent():
     # Nothing pending, nothing in flight → no phantom markers.
     from nexus.indexer import _drain_batcher_with_markers

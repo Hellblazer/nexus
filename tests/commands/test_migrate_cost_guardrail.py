@@ -103,7 +103,7 @@ class TestRunMigrationGate:
 
         ran: list[str] = []
         monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
-        monkeypatch.setattr(mc, "open_read_legs", lambda p: (None, None))
+        monkeypatch.setattr(mc, "open_read_legs", lambda p, **kw: (None, None))
         monkeypatch.setattr(mc, "classify_collections", lambda **k: object())
         monkeypatch.setattr(mc, "voyage_key_available", lambda: True)
         monkeypatch.setattr(
@@ -179,7 +179,7 @@ class TestRunMigrationEngineFloorGate:
 
         ran: list[str] = []
         monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
-        monkeypatch.setattr(mc, "open_read_legs", lambda p: (None, None))
+        monkeypatch.setattr(mc, "open_read_legs", lambda p, **kw: (None, None))
         monkeypatch.setattr(mc, "classify_collections", lambda **k: object())
         monkeypatch.setattr(mc, "voyage_key_available", lambda: True)
         monkeypatch.setattr(
@@ -251,7 +251,7 @@ class TestRunMigrationCollisionGuard:
         import nexus.commands.migrate_cmd as mc
 
         monkeypatch.setenv("NX_SERVICE_TOKEN", "tok")
-        monkeypatch.setattr(mc, "open_read_legs", lambda p: (None, None))
+        monkeypatch.setattr(mc, "open_read_legs", lambda p, **kw: (None, None))
         monkeypatch.setattr(mc, "classify_collections", lambda **k: object())
         monkeypatch.setattr(mc, "voyage_key_available", lambda: True)
         monkeypatch.setattr(
@@ -407,7 +407,7 @@ class TestRunMigrationCollisionGuard:
         )
 
         monkeypatch.setattr(
-            driver, "open_read_legs", lambda local_path=None: (object(), object())
+            driver, "open_read_legs", lambda local_path=None, **kw: (object(), object())
         )
         monkeypatch.setattr(driver, "classify_collections", lambda **_k: detection)
         # nexus-jxizy.10.7: the guided driver now runs the land-then-transform

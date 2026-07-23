@@ -265,6 +265,48 @@ def apply_embedder_notice(server: object) -> bool:
         return False
 
 
+def apply_stranded_notice(server: object) -> bool:
+    """nexus-gynt2: surface the stranded-install two-hop redirect through
+    the server ``instructions`` channel at ``initialize``.
+
+    A structlog line alone is invisible to MCP-only users (Desktop /
+    Cowork / plugin-first — the dominant post-upgrade path per
+    nexus-4xgfy), and stdout is JSON-RPC, so the instructions string is
+    the LOUD channel here — same mechanism as :func:`apply_embedder_notice`.
+    Unlike the embedder advisory (single-channel on core, RDR-144 P5b —
+    doubling a cosmetic notice is noise), this is the data-loss-shaped
+    correctness class: BOTH servers apply it, so a hand-configured
+    catalog-only client still hears it. Disarmed (a pure constant check)
+    on every migration-capable release. Detection-only: the server still
+    serves — ``nx init``'s refusal and ``nx doctor``'s fatal check carry
+    the blocking surface.
+
+    Best-effort on the DELIVERY path only: an instructions-write failure
+    must never break MCP boot, but the detection result is logged at
+    ERROR before any write is attempted, so a delivery failure never
+    silences the finding entirely.
+    """
+    try:
+        from nexus.config import detect_stranded_install_default  # noqa: PLC0415 — deferred import — near-zero while disarmed
+
+        stranded = detect_stranded_install_default()
+    except Exception:  # noqa: BLE001 — the detector must never break server startup
+        _log.warning("stranded_install_check_failed", exc_info=True)
+        return False
+    if stranded is None:
+        return False
+    _log.error("stranded_install_detected", message=stranded.message)
+    try:
+        low = server._mcp_server  # type: ignore[attr-defined]  # noqa: SLF001 — the writable instructions surface (P5b spike)
+        notice = f"nexus STRANDED INSTALL — relay this to the user verbatim: {stranded.message}"
+        existing = getattr(low, "instructions", None)
+        low.instructions = f"{existing}\n\n{notice}" if existing else notice
+        return True
+    except Exception as exc:  # noqa: BLE001 — never block startup on notice delivery (already logged at ERROR above)
+        _log.warning("stranded_notice_apply_failed", error=f"{type(exc).__name__}: {exc}")
+        return False
+
+
 # ── RDR-126 §3: first-run banner ──────────────────────────────────────────────
 
 

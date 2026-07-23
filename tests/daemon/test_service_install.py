@@ -317,3 +317,33 @@ class TestServiceInstallCli:
             )
         assert result.exit_code == 0, result.output
         assert "already up to date; no changes" in result.output
+
+
+class TestServicePlistRespawnPosture:
+    """nexus-6bmph (RDR-183 defect-3): the launchd unit restarts on FAILURE
+    only — SuccessfulExit=false gives parity with the systemd unit's
+    Restart=on-failure. A bare KeepAlive=<true/> respawned exit-0 (healthy
+    coexistence; graceful stop) every ThrottleInterval forever."""
+
+    def test_keepalive_is_successful_exit_false(self):
+        import plistlib
+        import re
+        from pathlib import Path
+
+        template = (
+            Path(__file__).resolve().parents[2]
+            / "conexus" / "daemon" / "com.nexus.service.plist"
+        )
+        # The template's prose comments legitimately contain `--` (CLI flags),
+        # which strict XML parsers reject inside comments (launchd is lenient).
+        # Strip comments before parsing the real structure.
+        raw = re.sub(rb"<!--.*?-->", b"", template.read_bytes(), flags=re.S)
+        data = plistlib.loads(raw)
+        ka = data["KeepAlive"]
+        assert isinstance(ka, dict), (
+            "KeepAlive must be the SuccessfulExit dict form — a bare <true/> "
+            "respawns successful exits (GH #1405 defect-3 steady-state churn)"
+        )
+        assert ka == {"SuccessfulExit": False}
+        assert data["ThrottleInterval"] == 30
+        assert data["RunAtLoad"] is True

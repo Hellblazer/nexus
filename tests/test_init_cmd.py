@@ -106,6 +106,8 @@ class TestManagedMode:
         assert result.exit_code == 0, result.output
         assert called == [], "MANAGED mode must not provision locally"
         assert "local" not in _read_config(cfg_dir)
+        # nexus-x3ugg: successful managed onboarding stamps the mode record.
+        assert _read_config(cfg_dir).get("install", {}).get("mode") == "managed"
 
 
 # ── P5: --service / Postgres provisioning flag ────────────────────────────────
@@ -1455,3 +1457,81 @@ class TestLadderConvergence:
         _REAL_CONVERGE()  # must not raise
         err = capsys.readouterr().err
         assert "run `nx upgrade` to converge" in err
+
+
+class TestProvisionStackModeOrdering:
+    """RDR-188 P3.1 fold regression (reviewer Critical, T2 [21057]; gap named
+    by the .12/.18 test-validator [21060]): ``provision_service_stack`` must
+    resolve ``is_local_mode()`` BEFORE ``_provision_postgres_step()`` writes
+    ``pg_credentials`` — the just-written file is itself a positive local
+    signal, so deciding after the write would flip a cloud-resolving install
+    to local within the same call and defeat the cloud-internal early return.
+    """
+
+    def test_mode_resolved_before_postgres_provision(self, monkeypatch):
+        from nexus.commands import init as init_mod
+
+        order: list[str] = []
+
+        monkeypatch.setattr(
+            init_mod._config, "is_local_mode",
+            lambda: order.append("mode") or False,
+        )
+        monkeypatch.setattr(
+            init_mod, "_provision_postgres_step",
+            lambda: order.append("provision"),
+        )
+        # Cloud-resolving (False): must return False WITHOUT touching the
+        # local-only steps that follow the early return.
+        from unittest.mock import MagicMock as _MM
+        embedder_step = _MM(
+            side_effect=AssertionError("local-only step ran on the cloud branch"))
+        monkeypatch.setattr(
+            init_mod, "_provision_service_embedder_step", embedder_step)
+
+        assert init_mod.provision_service_stack() is False
+        assert order == ["mode", "provision"], (
+            "is_local_mode must be captured BEFORE pg_credentials is written — "
+            f"observed call order: {order}"
+        )
+        assert not embedder_step.called
+
+    def test_local_resolution_still_provisions_and_continues(self, monkeypatch):
+        from nexus.commands import init as init_mod
+
+        order: list[str] = []
+        monkeypatch.setattr(
+            init_mod._config, "is_local_mode",
+            lambda: order.append("mode") or True,
+        )
+        monkeypatch.setattr(
+            init_mod, "_provision_postgres_step", lambda: order.append("provision"))
+        monkeypatch.setattr(
+            init_mod, "_provision_service_embedder_step",
+            lambda embedder: order.append("embedder"))
+        # Stop the walk after the embedder step: the binary step raises a
+        # sentinel so the test never reaches real install/start machinery.
+        class _Stop(Exception):
+            pass
+        monkeypatch.setattr(
+            init_mod, "_ensure_service_binary_step",
+            lambda config_dir: (_ for _ in ()).throw(_Stop()))
+        with pytest.raises(_Stop):
+            init_mod.provision_service_stack()
+        assert order == ["mode", "provision", "embedder"]
+
+    def test_completed_local_walk_stamps_the_mode_record(self, monkeypatch):
+        """nexus-x3ugg: a walk that reaches return True stamps install.mode=local;
+        an aborted walk (previous test) must NOT have stamped."""
+        from nexus.commands import init as init_mod
+
+        stamped: list[tuple] = []
+        monkeypatch.setattr(init_mod._config, "is_local_mode", lambda: True)
+        monkeypatch.setattr(init_mod, "_provision_postgres_step", lambda: None)
+        monkeypatch.setattr(init_mod, "_provision_service_embedder_step", lambda e: None)
+        monkeypatch.setattr(init_mod, "_ensure_service_binary_step", lambda d: True)
+        monkeypatch.setattr(init_mod, "set_config_value",
+                            lambda k, v: stamped.append((k, v)))
+
+        assert init_mod.provision_service_stack() is True
+        assert ("install.mode", "local") in stamped

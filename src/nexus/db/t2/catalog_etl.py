@@ -352,6 +352,70 @@ def _transform_collection(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def live_source_uri_losers(doc_rows: list[dict[str, Any]]) -> set[str]:
+    """Tumblers that LOSE the per-``source_uri`` uniqueness dedup (nexus-78n33).
+
+    The catalog-016 partial unique index (one LIVE document per
+    ``(tenant_id, source_uri)``) exists on the target engine BEFORE this
+    import runs, so a source carrying duplicate live source_uris — the
+    evidenced 201-uri class from the 2026-06-11 audit (T2
+    ``nexus_rdr/156-P0-source-uri-audit``); no dedup sweep ever ran on the
+    SQLite side — would land persistent batch failures. Instead the import
+    stream is made conflict-free HERE, deterministically, with the SAME
+    winner rule as the server-side catalog-016-0 backfill: greatest
+    ``chunk_count``, then earliest non-empty ``indexed_at``, then lowest
+    ``tumbler``. Losers (and, in the sibling migrate functions, their
+    ``document_chunks`` / ``links`` child rows) are skipped and RECORDED in
+    the migration report — never silently dropped. The immutable SQLite
+    source keeps every row as the rollback record.
+
+    Pure function of the source rows so each migrate_* step can recompute
+    it independently and reach the identical verdict (no cross-step state).
+    """
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for r in doc_rows:
+        su = r.get("source_uri") or ""
+        if su:
+            groups.setdefault(su, []).append(r)
+    losers: set[str] = set()
+    for rows in groups.values():
+        if len(rows) < 2:
+            continue
+        def _rank(r: dict[str, Any]) -> tuple:
+            indexed_at = r.get("indexed_at") or ""
+            return (
+                -(r.get("chunk_count") or 0),
+                (indexed_at == "", indexed_at),  # empty sorts last
+                str(r["tumbler"]),
+            )
+        ordered = sorted(rows, key=_rank)
+        losers.update(str(r["tumbler"]) for r in ordered[1:])
+    return losers
+
+
+def _record_uri_dedup_skips(
+    collector: Any, table: str, sample_ids: list[str],
+) -> None:
+    if collector is None or not sample_ids:
+        return
+    for sid in sample_ids:
+        collector.record(
+            "catalog", table,
+            issue_class="identity_mismatch",
+            constraint="ux_catalog_documents_live_source_uri",
+            reason=(
+                "duplicate live source_uri in the migration source (the "
+                "201-uri class, audit 2026-06-11): the catalog-016 unique "
+                "index on the target refuses a second live row, so the "
+                "dedup LOSER (fewest chunks / latest indexed_at / highest "
+                "tumbler) is skipped; the winner carries the identity. "
+                "Source row preserved in the immutable SQLite rollback copy."
+            ),
+            action="skipped",
+            sample_id=sid,
+        )
+
+
 def _max_seq_for_owner(tumbler_prefix: str, doc_tumblers: list[str]) -> int:
     """Return the highest document-sequence number for an owner prefix.
 
@@ -447,6 +511,16 @@ def migrate_documents(
         docs_rows = _fetch_all(conn, "documents")
     finally:
         conn.close()
+    # nexus-78n33: make the stream conflict-free against the target's
+    # catalog-016 unique index (see live_source_uri_losers).
+    losers = live_source_uri_losers(docs_rows)
+    if losers:
+        _log.warning(
+            "catalog_etl.source_uri_dedup",
+            table="documents", skipped=len(losers),
+        )
+        _record_uri_dedup_skips(collector, "documents", sorted(losers))
+        docs_rows = [r for r in docs_rows if str(r["tumbler"]) not in losers]
     result = _import_table(
         table="documents", rows=docs_rows, transform=_transform_document,
         import_fn=lambda rows: client._post("/import/document", {"rows": rows}),
@@ -495,16 +569,37 @@ def migrate_document_chunks(
     conn = _open_ro(catalog_db_path)
     try:
         chunks_rows = _fetch_all(conn, "document_chunks")
+        docs_rows = _fetch_all(conn, "documents")
     finally:
         conn.close()
+
+    # nexus-78n33: chunks carry the HARD FK to documents — manifest rows of
+    # source_uri-dedup LOSERS (whose parent doc is skipped by
+    # migrate_documents) would fail the import. Skip + record them; the
+    # winner document's own manifest carries the content.
+    losers = live_source_uri_losers(docs_rows)
 
     chunk_read = 0
     chunk_written = 0
     # Group chunks by doc_id for the envelope format {"doc_id": ..., "rows": [...]}
     chunks_by_doc: dict[str, list[dict[str, Any]]] = {}
+    skipped_loser_docs: list[str] = []
     for crow in chunks_rows:
         doc_id = crow["doc_id"]
+        if str(doc_id) in losers:
+            chunk_read += 1
+            if not skipped_loser_docs or skipped_loser_docs[-1] != str(doc_id):
+                skipped_loser_docs.append(str(doc_id))
+            continue
         chunks_by_doc.setdefault(doc_id, []).append(crow)
+    if skipped_loser_docs:
+        _log.warning(
+            "catalog_etl.source_uri_dedup",
+            table="document_chunks", skipped_docs=len(skipped_loser_docs),
+        )
+        _record_uri_dedup_skips(
+            collector, "document_chunks", sorted(set(skipped_loser_docs)),
+        )
 
     # RDR-176 P3 (Gap 1): the /import/chunk envelope is doc-scoped ({doc_id,
     # rows}); split each doc's chunks into <= quota-sized sub-batches so a doc
@@ -587,11 +682,27 @@ def migrate_links(
 
     if collector is not None:
         live_tumblers = {r.get("tumbler") for r in docs_rows}
+        # nexus-78n33: links whose endpoint is a source_uri-dedup LOSER
+        # import as event data (soft-FK policy, same as danglers) but the
+        # endpoint document is skipped by migrate_documents — the edge is
+        # invisible to live traversal on the target. Flag them so the
+        # report names the orphaned edges instead of leaving them silent.
+        dedup_losers = live_source_uri_losers(docs_rows)
         for r in links_rows:
-            if (
-                r.get("from_tumbler") not in live_tumblers
-                or r.get("to_tumbler") not in live_tumblers
-            ):
+            f, t = r.get("from_tumbler"), r.get("to_tumbler")
+            if str(f) in dedup_losers or str(t) in dedup_losers:
+                collector.record(
+                    "catalog", "links",
+                    issue_class="identity_mismatch",
+                    constraint="ux_catalog_documents_live_source_uri",
+                    reason="link endpoint is a source_uri-dedup loser (its "
+                           "document is skipped; the winner carries the "
+                           "identity) — edge imports but is orphaned from "
+                           "live traversal; sample ids are <from>:<to>",
+                    action="flagged",
+                    sample_id=f"{f}:{t}",
+                )
+            elif f not in live_tumblers or t not in live_tumblers:
                 collector.record(
                     "catalog", "links",
                     issue_class="soft_dangler",
@@ -600,7 +711,7 @@ def migrate_links(
                     reason="link endpoint references a missing document; row "
                            "imports; sample ids are <from_tumbler>:<to_tumbler>",
                     action="flagged",
-                    sample_id=f"{r.get('from_tumbler')}:{r.get('to_tumbler')}",
+                    sample_id=f"{f}:{t}",
                 )
 
     result = _import_table(

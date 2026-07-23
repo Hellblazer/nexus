@@ -49,7 +49,11 @@ class TestIsLocalMode:
             pytest.param({"NX_LOCAL": "0"}, False, id="nx_local_0_overrides"),
             pytest.param({}, True, id="no_credentials"),
             pytest.param({"CHROMA_API_KEY": "k", "VOYAGE_API_KEY": "k"}, False, id="both_keys"),
-            pytest.param({"CHROMA_API_KEY": "k"}, True, id="chroma_only"),
+            # RDR-188 P3.1 (nexus-9o6y2.13): the legacy fallback is chroma-only.
+            # A chroma key marks a Chroma-Cloud install even with no voyage key
+            # (half-configured cloud surfaces its missing key loudly instead of
+            # silently flipping local).
+            pytest.param({"CHROMA_API_KEY": "k"}, False, id="chroma_only_is_cloud"),
             pytest.param({"VOYAGE_API_KEY": "k"}, True, id="voyage_only"),
             # nexus-3k43p: a managed 6.0 user (service_url set, no chroma/voyage
             # key) must NOT be mis-detected as local. service_url presence wins
@@ -68,7 +72,144 @@ class TestIsLocalMode:
         for k, v in env.items():
             monkeypatch.setenv(k, v)
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
         assert is_local_mode() is expected
+
+    def _cfg(self, tmp_path, monkeypatch, *, pg_creds: bool):
+        cfg = tmp_path / "cfg"
+        cfg.mkdir(exist_ok=True)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        for var in ("NX_LOCAL", "CHROMA_API_KEY", "VOYAGE_API_KEY", "NX_SERVICE_URL"):
+            monkeypatch.delenv(var, raising=False)
+        if pg_creds:
+            from nexus.db.pg_provision import CREDENTIALS_FILENAME
+            (cfg / CREDENTIALS_FILENAME).write_text("PGHOST=127.0.0.1\n")
+
+    # ── RDR-188 P3.1 (nexus-9o6y2.13): explicit local signal + no voyage clause ──
+
+    def test_pg_credentials_is_the_explicit_local_signal(self, tmp_path, monkeypatch):
+        """A provisioned local service (pg_credentials present) is LOCAL even
+        when legacy cloud keys sit in the environment (they are migration-
+        source / engine-bootstrap material, not mode signals)."""
+        self._cfg(tmp_path, monkeypatch, pg_creds=True)
+        monkeypatch.setenv("CHROMA_API_KEY", "k")
+        monkeypatch.setenv("VOYAGE_API_KEY", "k")
+        assert is_local_mode() is True
+
+    def test_service_url_beats_pg_credentials(self, tmp_path, monkeypatch):
+        """A migrated local→managed install keeps its old pg_credentials on
+        disk; the configured service_url must win (managed, not local)."""
+        self._cfg(tmp_path, monkeypatch, pg_creds=True)
+        monkeypatch.setenv("NX_SERVICE_URL", "https://m.example")
+        assert is_local_mode() is False
+
+    def test_ambiguous_pg_creds_plus_chroma_key_warns_loud(self, tmp_path, monkeypatch):
+        """Reviewer Critical fold (T2 [21057]): pg_credentials + chroma key
+        with no service_url is genuinely ambiguous (migrated-local-with-
+        source-keys vs former-local-reconfigured-to-legacy-cloud). It
+        resolves LOCAL — the live migrated population must keep working —
+        but NEVER silently: a one-shot structured warning names the
+        NX_LOCAL=0 / service_url escape hatches."""
+        import nexus.config as config_mod
+        self._cfg(tmp_path, monkeypatch, pg_creds=True)
+        monkeypatch.setenv("CHROMA_API_KEY", "k")
+        monkeypatch.setattr(config_mod, "_ambiguous_mode_warned", False)
+        events: list[str] = []
+
+        class _Cap:
+            def warning(self, event, **kw):
+                events.append(event)
+
+        monkeypatch.setattr("structlog.get_logger", lambda *a, **k: _Cap())
+        assert is_local_mode() is True
+        assert events == ["mode_ambiguous_resolved_local"]
+        # One-shot: a second call does not re-warn.
+        assert is_local_mode() is True
+        assert events == ["mode_ambiguous_resolved_local"]
+
+    # ── nexus-x3ugg: explicit mode record (install.mode) ─────────────────────
+
+    def _record(self, tmp_path, monkeypatch, mode, *, pg_creds=False):
+        self._cfg(tmp_path, monkeypatch, pg_creds=pg_creds)
+        import yaml
+        cfg_file = tmp_path / "cfg" / "config.yml"
+        cfg_file.write_text(yaml.safe_dump({"install": {"mode": mode}}))
+
+    def test_recorded_local_wins_over_artifact_inference(self, tmp_path, monkeypatch):
+        """An explicit install.mode=local record resolves LOCAL with no
+        artifacts and no warning — record beats inference."""
+        self._record(tmp_path, monkeypatch, "local", pg_creds=False)
+        monkeypatch.setenv("CHROMA_API_KEY", "k")  # would infer cloud without the record
+        assert is_local_mode() is True
+
+    def test_recorded_managed_resolves_false_without_service_url(self, tmp_path, monkeypatch):
+        """install.mode=managed resolves managed even before service_url is
+        configured (mid-onboarding shapes)."""
+        self._record(tmp_path, monkeypatch, "managed", pg_creds=True)
+        assert is_local_mode() is False
+
+    def test_ambiguity_warning_suppressed_when_record_present(self, tmp_path, monkeypatch):
+        """pg_credentials + chroma key is only ambiguous WITHOUT a record —
+        a recorded mode resolves it silently."""
+        import nexus.config as config_mod
+        self._record(tmp_path, monkeypatch, "local", pg_creds=True)
+        monkeypatch.setenv("CHROMA_API_KEY", "k")
+        monkeypatch.setattr(config_mod, "_ambiguous_mode_warned", False)
+        events: list[str] = []
+
+        class _Cap:
+            def warning(self, event, **kw):
+                events.append(event)
+
+        monkeypatch.setattr("structlog.get_logger", lambda *a, **k: _Cap())
+        assert is_local_mode() is True
+        assert events == []
+
+    def test_stale_local_record_with_service_url_warns_and_service_url_wins(
+        self, tmp_path, monkeypatch,
+    ):
+        """Contradiction: a configured service_url beside install.mode=local —
+        the configured endpoint wins (nexus-3k43p posture) but LOUDLY."""
+        import nexus.config as config_mod
+        self._record(tmp_path, monkeypatch, "local", pg_creds=False)
+        monkeypatch.setenv("NX_SERVICE_URL", "https://m.example")
+        monkeypatch.setattr(config_mod, "_mode_record_contradiction_warned", False)
+        events: list[str] = []
+
+        class _Cap:
+            def warning(self, event, **kw):
+                events.append(event)
+
+        monkeypatch.setattr("structlog.get_logger", lambda *a, **k: _Cap())
+        assert is_local_mode() is False
+        assert events == ["mode_record_contradicts_service_url"]
+
+    def test_nx_local_env_beats_the_record(self, tmp_path, monkeypatch):
+        self._record(tmp_path, monkeypatch, "managed", pg_creds=False)
+        monkeypatch.setenv("NX_LOCAL", "1")
+        assert is_local_mode() is True
+
+    def test_garbage_record_value_falls_through_to_inference(self, tmp_path, monkeypatch):
+        self._record(tmp_path, monkeypatch, "purple", pg_creds=True)
+        assert is_local_mode() is True  # pg_credentials inference still applies
+
+    def test_blanking_voyage_key_never_changes_mode(self, tmp_path, monkeypatch):
+        """Gap 3's regression pin: the client no longer consumes the voyage
+        key (RDR-188), so its presence/absence must have ZERO mode influence
+        in every branch."""
+        self._cfg(tmp_path, monkeypatch, pg_creds=False)
+        monkeypatch.setenv("CHROMA_API_KEY", "k")
+        monkeypatch.setenv("VOYAGE_API_KEY", "k")
+        with_key = is_local_mode()
+        monkeypatch.delenv("VOYAGE_API_KEY")
+        assert is_local_mode() is with_key
+
+        monkeypatch.delenv("CHROMA_API_KEY")
+        monkeypatch.setenv("VOYAGE_API_KEY", "k")
+        with_key_no_chroma = is_local_mode()
+        monkeypatch.delenv("VOYAGE_API_KEY")
+        assert is_local_mode() is with_key_no_chroma
 
 
 class TestDefaultLocalPath:

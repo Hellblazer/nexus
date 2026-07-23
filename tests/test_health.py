@@ -714,3 +714,87 @@ def test_run_health_checks_survives_unresolvable_catalog_endpoint(monkeypatch, t
     catalog_results = [r for r in results if r.label == "Catalog"]
     assert catalog_results, "Catalog check must still report, degraded, not vanish"
     assert catalog_results[0].ok is True
+
+
+# ── _check_dimension_orphans (nexus-9tsdf / GH #1113 AC2) ────────────────────
+
+
+def _patch_orphan_finder(monkeypatch, *, mismatches, skipped=0, active="voyage"):
+    """Stub the shared finder + T3 handle so the health check is exercised
+    without a live service. The finder is THE shared source of truth with
+    `nx collection prune` — doctor and the remedy command can never
+    disagree about what counts as an orphan."""
+    from nexus import health
+
+    monkeypatch.setattr("nexus.db.make_t3", lambda: object())
+    monkeypatch.setattr(
+        "nexus.commands.collection._find_dimension_mismatched_collections",
+        lambda t3: (mismatches, skipped, active),
+    )
+    return health
+
+
+def test_check_dimension_orphans_names_collection_and_suggests_prune(
+    monkeypatch,
+) -> None:
+    """AC2 (GH #1113): doctor names the specific mismatched collection(s)
+    and suggests the prune command."""
+    orphan = "knowledge__shakedown-scratch__minilm-l6-v2-384__v1"
+    health = _patch_orphan_finder(
+        monkeypatch,
+        mismatches=[{
+            "name": orphan, "declared_model": "minilm-l6-v2-384",
+            "declared_dim": 384, "active_dim": 1024, "count": 1,
+        }],
+    )
+    results = health._check_dimension_orphans()
+    assert len(results) == 1
+    r = results[0]
+    assert r.ok is False and r.warn is True, "orphans are a soft warn, never fatal"
+    assert orphan in r.detail
+    assert "384" in r.detail and "1024" in r.detail
+    assert any("nx collection prune" in s for s in r.fix_suggestions)
+
+
+def test_check_dimension_orphans_clean_passes(monkeypatch) -> None:
+    health = _patch_orphan_finder(monkeypatch, mismatches=[])
+    results = health._check_dimension_orphans()
+    assert len(results) == 1
+    assert results[0].ok is True
+    assert "voyage" in results[0].detail
+
+
+def test_check_dimension_orphans_unknown_embedder_never_guesses(
+    monkeypatch,
+) -> None:
+    """An unresolved active-embedder probe must skip, not guess — a wrong
+    guess here would tell the operator to delete healthy collections."""
+    health = _patch_orphan_finder(monkeypatch, mismatches=[], active="unknown")
+    results = health._check_dimension_orphans()
+    assert len(results) == 1
+    assert results[0].ok is True
+    assert "skipped" in results[0].detail.lower()
+
+
+def test_check_dimension_orphans_degrades_on_t3_failure(monkeypatch) -> None:
+    from nexus import health
+
+    def _boom():
+        raise RuntimeError("service unreachable")
+
+    monkeypatch.setattr("nexus.db.make_t3", _boom)
+    results = health._check_dimension_orphans()
+    assert len(results) == 1
+    assert results[0].ok is True
+    assert "skipped" in results[0].detail.lower()
+
+
+def test_check_dimension_orphans_wired_into_run_health_checks() -> None:
+    """Falsification pin: deleting the run_health_checks call site must
+    fail this test, not silently drop AC2 from `nx doctor`."""
+    import inspect
+
+    from nexus import health
+
+    src = inspect.getsource(health.run_health_checks)
+    assert "_check_dimension_orphans" in src

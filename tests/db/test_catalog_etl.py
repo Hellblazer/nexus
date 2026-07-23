@@ -989,6 +989,155 @@ class TestPerTableSplit:
         assert "/import/chunk" in paths
 
 
+class TestSourceUriDedup:
+    """nexus-78n33: the catalog-016 partial unique index (one LIVE document
+    per (tenant_id, source_uri)) exists on the target BEFORE hop-1 imports
+    run, and the 2026-06-11 audit evidenced 201 duplicated source_uris in
+    the live pre-migration SQLite (T2 nexus_rdr/156-P0-source-uri-audit) —
+    so the ETL must make the stream conflict-free deterministically: same
+    winner rule as the server-side 016-0 backfill (most chunks, earliest
+    non-empty indexed_at, lowest tumbler), losers + their chunk manifests
+    skipped and RECORDED, loser-endpoint links flagged."""
+
+    def _make_mock_client(self) -> MagicMock:
+        client = MagicMock()
+        client._post.return_value = None
+        return client
+
+    def _dupe_db(self) -> Path:
+        return _make_source_catalog(
+            owners=[{"tumbler_prefix": "1.1", "name": "r", "owner_type": "repo"}],
+            documents=[
+                # dupe group: 1.1.2 wins (most chunks); 1.1.1 and 1.1.3 lose.
+                {"tumbler": "1.1.1", "title": "loser-few", "chunk_count": 2,
+                 "indexed_at": "2026-01-01T00:00:00Z",
+                 "source_uri": "file:///r/docs/dup.md"},
+                {"tumbler": "1.1.2", "title": "winner", "chunk_count": 9,
+                 "indexed_at": "2026-01-02T00:00:00Z",
+                 "source_uri": "file:///r/docs/dup.md"},
+                {"tumbler": "1.1.3", "title": "loser-none", "chunk_count": 0,
+                 "source_uri": "file:///r/docs/dup.md"},
+                # singleton + empty-uri rows are untouched.
+                {"tumbler": "1.1.4", "title": "solo",
+                 "source_uri": "file:///r/docs/solo.md"},
+                {"tumbler": "1.1.5", "title": "no-uri"},
+            ],
+            links=[
+                {"from_tumbler": "1.1.1", "to_tumbler": "1.1.4", "link_type": "cites"},
+                {"from_tumbler": "1.1.2", "to_tumbler": "1.1.4", "link_type": "cites"},
+            ],
+            chunks=[
+                {"doc_id": "1.1.1", "position": 0, "chash": "a" * 64},
+                {"doc_id": "1.1.2", "position": 0, "chash": "b" * 64},
+                {"doc_id": "1.1.4", "position": 0, "chash": "c" * 64},
+            ],
+        )
+
+    def test_loser_rule_matches_catalog_016(self) -> None:
+        from nexus.db.t2.catalog_etl import live_source_uri_losers
+
+        rows = [
+            {"tumbler": "1.1.1", "source_uri": "u", "chunk_count": 2,
+             "indexed_at": "2026-01-01T00:00:00Z"},
+            {"tumbler": "1.1.2", "source_uri": "u", "chunk_count": 9,
+             "indexed_at": "2026-01-02T00:00:00Z"},
+            {"tumbler": "1.1.3", "source_uri": "u", "chunk_count": 0,
+             "indexed_at": ""},
+        ]
+        assert live_source_uri_losers(rows) == {"1.1.1", "1.1.3"}
+        # chunk tie -> earliest non-empty indexed_at wins; empty sorts last.
+        tie = [
+            {"tumbler": "2.1.1", "source_uri": "v", "chunk_count": 5, "indexed_at": ""},
+            {"tumbler": "2.1.2", "source_uri": "v", "chunk_count": 5,
+             "indexed_at": "2026-01-01T00:00:00Z"},
+        ]
+        assert live_source_uri_losers(tie) == {"2.1.1"}
+        # full tie -> lowest tumbler wins.
+        full = [
+            {"tumbler": "3.1.2", "source_uri": "w", "chunk_count": 1, "indexed_at": "x"},
+            {"tumbler": "3.1.1", "source_uri": "w", "chunk_count": 1, "indexed_at": "x"},
+        ]
+        assert live_source_uri_losers(full) == {"3.1.2"}
+        # singletons / empty uris never lose.
+        assert live_source_uri_losers([
+            {"tumbler": "4.1.1", "source_uri": "y"},
+            {"tumbler": "4.1.2", "source_uri": ""},
+            {"tumbler": "4.1.3", "source_uri": ""},
+        ]) == set()
+
+    def test_migrate_documents_skips_losers_and_records(self) -> None:
+        from nexus.db.t2.catalog_etl import migrate_documents
+        from nexus.migration.migration_report import IssueCollector
+
+        db_path = self._dupe_db()
+        client = self._make_mock_client()
+        collector = IssueCollector()
+        result = migrate_documents(db_path, client, collector=collector)
+
+        sent = [
+            row["tumbler"]
+            for call in client._post.call_args_list
+            for row in call.args[1]["rows"]
+        ]
+        assert "1.1.2" in sent and "1.1.4" in sent and "1.1.5" in sent
+        assert "1.1.1" not in sent and "1.1.3" not in sent
+        assert result["written"] == 3
+        issues = collector.issues_for("catalog", "documents")
+        assert len(issues) == 1
+        assert issues[0].action == "skipped"
+        assert issues[0].count == 2
+        assert set(issues[0].sample_ids) == {"1.1.1", "1.1.3"}
+
+    def test_migrate_document_chunks_skips_loser_manifests(self) -> None:
+        from nexus.db.t2.catalog_etl import migrate_document_chunks
+        from nexus.migration.migration_report import IssueCollector
+
+        db_path = self._dupe_db()
+        client = self._make_mock_client()
+        collector = IssueCollector()
+        migrate_document_chunks(db_path, client, collector=collector)
+
+        doc_ids = [c.args[1]["doc_id"] for c in client._post.call_args_list]
+        assert "1.1.2" in doc_ids and "1.1.4" in doc_ids
+        assert "1.1.1" not in doc_ids, "loser manifest must be skipped (hard FK)"
+        issues = collector.issues_for("catalog", "document_chunks")
+        assert len(issues) == 1
+        assert issues[0].sample_ids == ["1.1.1"]
+
+    def test_migrate_links_flags_loser_endpoints_but_still_imports(self) -> None:
+        from nexus.db.t2.catalog_etl import migrate_links
+        from nexus.migration.migration_report import IssueCollector
+
+        db_path = self._dupe_db()
+        client = self._make_mock_client()
+        collector = IssueCollector()
+        result = migrate_links(db_path, client, collector=collector)
+
+        assert result["written"] == 2, "links import as event data (soft FK)"
+        issues = collector.issues_for("catalog", "links")
+        flagged = [i for i in issues
+                   if i.constraint == "ux_catalog_documents_live_source_uri"]
+        assert len(flagged) == 1
+        assert flagged[0].sample_ids == ["1.1.1:1.1.4"]
+
+    def test_clean_source_is_untouched(self) -> None:
+        from nexus.db.t2.catalog_etl import migrate_documents
+        from nexus.migration.migration_report import IssueCollector
+
+        db_path = _make_source_catalog(
+            owners=[{"tumbler_prefix": "1.1", "name": "r", "owner_type": "repo"}],
+            documents=[
+                {"tumbler": "1.1.1", "title": "a", "source_uri": "file:///r/a.md"},
+                {"tumbler": "1.1.2", "title": "b", "source_uri": "file:///r/b.md"},
+            ],
+        )
+        client = self._make_mock_client()
+        collector = IssueCollector()
+        result = migrate_documents(db_path, client, collector=collector)
+        assert result["written"] == 2
+        assert collector.issues_for("catalog", "documents") == []
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Integration tests — real Java service + hermetic Postgres 16
 # ══════════════════════════════════════════════════════════════════════════════

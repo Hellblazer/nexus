@@ -90,8 +90,12 @@ def test_detection_surface():
         "local_client",
         "cloud_client",
         "voyage_key_present",
+        "cloud_leg_skipped_reason",  # nexus-p8nd5 dv708 fold
     }
-    assert _params(d.open_read_legs) == {"local_path"}
+    assert _params(d.open_read_legs) == {
+        "local_path",
+        "skipped_out",  # nexus-p8nd5 dv708 fold: structured cloud-skip reason
+    }
     assert _params(d.voyage_key_available) == set()
     assert _params(d.build_dry_run_preview) == {
         "report",
@@ -103,7 +107,11 @@ def test_detection_surface():
         "rehashes_ids",
     }
     assert _params(d.render_dry_run_preview) == {"preview"}
-    assert _fields(d.DetectionReport) == {"classifications", "voyage_key_present"}
+    assert _fields(d.DetectionReport) == {
+        "classifications",
+        "voyage_key_present",
+        "cloud_leg_skipped_reason",  # nexus-p8nd5 dv708 fold
+    }
     assert _fields(d.CollectionClassification) == {
         "collection",
         "leg",

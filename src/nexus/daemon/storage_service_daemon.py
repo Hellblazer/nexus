@@ -537,6 +537,15 @@ class StorageServiceSupervisor:
         # credentials) so `nx daemon service start` works without manual env
         # plumbing. An explicit NX_VOYAGE_API_KEY in the caller's env wins.
         #
+        # SCOPE DECISION (RDR-188 P3.3, bead nexus-9o6y2.15 — End State 1):
+        # this plumb is ENGINE-BOOTSTRAP material, not client consumption.
+        # The voyage key may persist in config.yml on local-service installs
+        # SOLELY as the delivery wire for the engine's own embed+rerank key
+        # at spawn time; zero client code paths consume it (enforced by the
+        # tests/test_rdr188_tripwires.py suite). Engine-owned credential
+        # files were considered and rejected: the key lives on the same disk
+        # either way, and this spawn is already the trust boundary.
+        #
         # nexus-r5f3c: the configured local embed model is the INTENT record.
         # `nx init` (local mode) provisions bge-768 and saves
         # ``local.embed_model``; plumbing an ambient VOYAGE_API_KEY anyway

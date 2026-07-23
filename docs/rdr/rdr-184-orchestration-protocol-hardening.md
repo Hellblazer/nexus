@@ -2,7 +2,8 @@
 title: "Multi-Agent Orchestration Protocol Hardening: Completion Reporting, Directive-Race Immunity, and Singleton-Resource Discipline"
 id: RDR-184
 type: Process
-status: accepted
+status: closed
+closed_date: 2026-07-22
 accepted_date: 2026-07-15
 priority: high
 author: Hal Hildebrand

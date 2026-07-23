@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -1612,8 +1614,18 @@ def search(
 
         where_dict = _parse_where_str(where)
 
-        # Fetch enough to fill the requested page
-        fetch_n = offset + limit
+        # nexus-e4srp: page-turn cache. Each stateless page call re-embeds the
+        # query server-side and re-fetches every earlier page's rows. Instead:
+        # over-fetch a small lookahead window on a fresh retrieval identity and
+        # serve subsequent pages from it (one query embed per burst). The
+        # cached list is post-sort, so cached pages are byte-identical to what
+        # the uncached path would render.
+        need = offset + limit
+        fetch_n = need + limit * _PAGE_LOOKAHEAD_PAGES
+        cache_key = (
+            query, tuple(target), where or "", cluster_by or "",
+            topic or "", threshold,
+        )
         clustered = bool(cluster_by)
         # Always pass taxonomy for topic grouping + topic boost (RDR-070).
         # Wrapped in context manager to avoid connection leak.
@@ -1621,24 +1633,31 @@ def search(
         # zero-hit can surface the closest dropped candidate (the MCP tool
         # turns it into an actionable message; the engine still emits no stderr).
         diag: list = []
-        with _t2_ctx() as _t2_db:
+        cached = _page_cache_get(cache_key, need)
+        if cached is not None:
+            results, diag = cached
+        else:
+            results = None
+        if results is None:
+            with _t2_ctx() as _t2_db:
             # ``telemetry`` wired for RDR-087 Phase 2.2 hot-path logging;
             # opt-out via ``telemetry.search_enabled=false`` in .nexus.yml.
-            results = search_cross_corpus(
-                query, target, n_results=fetch_n, t3=t3, where=where_dict,
-                cluster_by=cluster_by or None,
-                catalog=_get_catalog(),
-                link_boost=False,
-                taxonomy=_t2_db.taxonomy,
-                topic=topic or None,
-                threshold_override=threshold,
-                telemetry=_t2_db.telemetry,
-                diagnostics_out=diag,
-            )
-        # Only sort by distance for flat (non-clustered) results.
-        # Clustered results arrive in cluster-grouped order from search_engine.
-        if not clustered:
-            results.sort(key=lambda r: r.distance)
+                results = search_cross_corpus(
+                    query, target, n_results=fetch_n, t3=t3, where=where_dict,
+                    cluster_by=cluster_by or None,
+                    catalog=_get_catalog(),
+                    link_boost=False,
+                    taxonomy=_t2_db.taxonomy,
+                    topic=topic or None,
+                    threshold_override=threshold,
+                    telemetry=_t2_db.telemetry,
+                    diagnostics_out=diag,
+                )
+            # Only sort by distance for flat (non-clustered) results.
+            # Clustered results arrive in cluster-grouped order.
+            if not clustered:
+                results.sort(key=lambda r: r.distance)
+            _page_cache_put(cache_key, results, fetch_n, diag)
         if not results:
             if structured:
                 return {
@@ -1731,6 +1750,61 @@ def search(
         return "\n\n".join(lines)
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("search", e)
+
+
+#: nexus-e4srp: single-entry page-turn cache for the ``search`` tool. Page
+#: bursts are same-identity, seconds apart; one entry with a short TTL covers
+#: them without holding stale results past content changes. Thread-safe via
+#: the lock (MCP tools can run concurrently).
+_PAGE_LOOKAHEAD_PAGES = 2
+_PAGE_CACHE_TTL_S = 120.0
+_page_cache_lock = threading.Lock()
+_page_cache: dict[str, Any] = {}
+
+
+def _page_cache_get(key: tuple, need: int) -> tuple[list, list] | None:
+    """``(results, diagnostics)`` when the entry matches *key*, is TTL-fresh,
+    and its fetch covered the needed window (or exhausted the corpus).
+
+    Diagnostics ride the cache (batch-f1655f55 critique): a cached zero-hit
+    must render the same nexus-uro6c closest-dropped-candidate hint as the
+    uncached path — serving ``[]`` with empty diagnostics silently degraded
+    the message to a bare "No results."."""
+    with _page_cache_lock:
+        if _page_cache.get("key") != key:
+            return None
+        if time.monotonic() - _page_cache.get("at", 0.0) > _PAGE_CACHE_TTL_S:
+            return None
+        results = _page_cache.get("results") or []
+        fetched = _page_cache.get("fetch_n", 0)
+        exhausted = len(results) < fetched   # corpus smaller than the ask
+        if fetched >= need or exhausted:
+            return results, _page_cache.get("diag") or []
+        return None
+
+
+def _page_cache_put(key: tuple, results: list, fetch_n: int, diag: list) -> None:
+    with _page_cache_lock:
+        _page_cache.clear()
+        _page_cache.update({
+            "key": key, "results": results, "fetch_n": fetch_n,
+            "diag": diag, "at": time.monotonic(),
+        })
+
+
+def _page_cache_invalidate() -> None:
+    """Drop the page-turn cache after a same-process write (batch-f1655f55
+    critique): a ``store_put``/``store_delete`` inside the TTL window must
+    not leave a page burst serving pre-write results. Cross-process writes
+    (CLI indexing) remain bounded by the TTL — this cache lives in the MCP
+    process, whose write surface is exactly these tools."""
+    with _page_cache_lock:
+        _page_cache.clear()
+
+
+def _reset_page_cache_for_tests() -> None:
+    with _page_cache_lock:
+        _page_cache.clear()
 
 
 def _resolve_corpus_target(corpus: str, t3: Any) -> list[str]:
@@ -2849,6 +2923,9 @@ def store_put(
             ttl_days=ttl_days,
             catalog_doc_id=catalog_doc_id,
         )
+        # A committed write makes any cached page burst stale — drop it so a
+        # same-identity search re-fetches (batch-f1655f55 critique).
+        _page_cache_invalidate()
         # Auto-link from T1 scratch link-context.
         # nexus-a414: replace prior bare-except with named-exception capture
         # so unexpected errors surface at WARNING instead of silently passing.
@@ -3929,6 +4006,7 @@ def store_delete(doc_id: str, collection: str = "knowledge") -> str:
         col_name = t3_collection_name(collection, t3=t3)
         deleted = t3.delete_by_id(col_name, doc_id)
         if deleted:
+            _page_cache_invalidate()
             return f"Deleted: {doc_id} from {col_name}"
         return f"Not found: {doc_id!r} in {col_name}"
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
@@ -6532,19 +6610,24 @@ def _resolve_mode_diagnostics() -> dict[str, str | None]:
     live Desktop run leaves a durable on-disk trail in mcp.log instead of
     requiring the divergence to be reproduced first.
 
-    nexus-smd1k (substantive-critic finding): ``is_local_mode()`` has THREE
-    decision branches (explicit ``NX_LOCAL``, ``service_url`` presence,
-    legacy chroma/voyage-key presence) — per the bead's own CLI-vs-GUI
-    divergence evidence, the more likely root cause sits in branch 2 or 3,
-    not branch 1. ``service_url_found``/``chroma_key_found``/
-    ``voyage_key_found`` evidence which credential each branch actually
-    saw, as booleans ONLY — never the credential values themselves.
+    nexus-smd1k (substantive-critic finding): ``is_local_mode()`` has FOUR
+    decision branches since RDR-188 P3.1 (explicit ``NX_LOCAL``,
+    ``service_url`` presence, ``pg_credentials`` presence, legacy
+    chroma-key fallback) — per the bead's own CLI-vs-GUI divergence
+    evidence, the likely root cause sits below branch 1.
+    ``service_url_found``/``pg_credentials_found``/``chroma_key_found``
+    evidence what each branch actually saw, as booleans ONLY — never the
+    credential values. ``voyage_key_found`` is retained as INFORMATIONAL
+    (nexus-9o6y2.16): since RDR-188 the voyage key has ZERO mode
+    influence — it is engine-bootstrap/migration material; the boolean
+    stays because a divergence report that shows it TRUE while mode
+    flips would immediately falsify a suspected key-inference regression.
 
     Never raises: a diagnostic must not block MCP startup. On resolution
     failure returns ``{"mode": "unknown", "error": str(exc)}``.
     """
     try:
-        from nexus.config import get_credential, is_local_mode, nexus_config_dir  # noqa: PLC0415 — deferred, rare/branch-local path
+        from nexus.config import get_credential, is_local_mode, load_config, nexus_config_dir  # noqa: PLC0415 — deferred, rare/branch-local path
 
         local = is_local_mode()
         local_embedder = None
@@ -6558,8 +6641,13 @@ def _resolve_mode_diagnostics() -> dict[str, str | None]:
             "config_dir": str(nexus_config_dir()),
             "home": _os.environ.get("HOME", ""),
             "nx_local_env": _os.environ.get("NX_LOCAL", ""),
+            "mode_record": str(
+                (load_config().get("install", {}) or {}).get("mode", "") or ""
+            ) or None,
             "service_url_found": bool(get_credential("service_url")),
+            "pg_credentials_found": (nexus_config_dir() / "pg_credentials").is_file(),
             "chroma_key_found": bool(get_credential("chroma_api_key")),
+            # Informational only — zero mode influence since RDR-188 P3.1.
             "voyage_key_found": bool(get_credential("voyage_api_key")),
         }
     except Exception as exc:  # noqa: BLE001 — diagnostic-only, must never block startup
@@ -6603,6 +6691,7 @@ def main():
     from nexus.mcp._first_run import (  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
         apply_embedder_notice,
         apply_first_run_banner_instructions,
+        apply_stranded_notice,
         ensure_installed_and_running,
         install_banner_dispatch_hook,
     )
@@ -6622,6 +6711,14 @@ def main():
     # .mcpb and a CLI simulation with the same credentials. See
     # _resolve_mode_diagnostics' docstring for the field evidence.
     log.info("mcp_server_mode_resolved", **_resolve_mode_diagnostics())
+    # nexus-gynt2: stranded-install detector. Disarmed (constant-check
+    # no-op) on every migration-capable release; at N+1 an MCP host booting
+    # over unmigrated pre-PG data logs the two-hop redirect at ERROR and
+    # surfaces it through the server `instructions` channel (the LOUD
+    # surface for MCP-only users — see apply_stranded_notice). Detection-
+    # only: the server still serves (the doctor check and `nx init`
+    # refusal carry the blocking surface).
+    apply_stranded_notice(mcp)
     # RDR-126 P2 (nexus-bsjro): ensure the host T2 daemon's OS-level
     # autostart unit is installed and the daemon is running before
     # serving any tools. Without this, a Claude-Desktop-only user who

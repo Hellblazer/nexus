@@ -468,6 +468,49 @@ def _check_service_bge_model() -> list[HealthResult]:
     )]
 
 
+def _check_service_crossencoder_model() -> list[HealthResult]:
+    """RDR-188 P1.3: surface a missing/incomplete ms-marco cross-encoder model.
+
+    In local service mode the Java engine reranks with the ms-marco-MiniLM
+    cross-encoder read from a fixed path. Unlike the bge model (boot-fatal),
+    a missing cross-encoder only degrades the fused rerank stage — LOUD, per
+    request (``rerank_degraded=true``) — so this is a soft warn with the
+    provisioning remedy, mirroring :func:`_check_service_bge_model`'s gating:
+    only a service install (``pg_credentials`` present) reads this file.
+    """
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — deferred to avoid circular import
+
+    if not (nexus_config_dir() / CREDENTIALS_FILENAME).exists():
+        return []  # not a service install — the Java engine is what reads this model
+
+    from nexus.db.service_crossencoder_model import (  # noqa: PLC0415 — deferred to avoid circular import
+        service_crossencoder_model_dir,
+        service_crossencoder_model_present,
+    )
+
+    model_dir = service_crossencoder_model_dir()
+    if service_crossencoder_model_present():
+        return [HealthResult(
+            label="Service reranker (ms-marco cross-encoder)",
+            ok=True,
+            detail=f"ONNX present at {model_dir}",
+        )]
+    return [HealthResult(
+        label="Service reranker (ms-marco cross-encoder)",
+        ok=False,
+        warn=True,
+        detail=(
+            f"the local engine reranks with the ms-marco cross-encoder but its ONNX "
+            f"is missing or incomplete at {model_dir} — server-side rerank degrades "
+            f"loud (rerank_degraded=true) until it is provisioned"
+        ),
+        fix_suggestions=[
+            "Provision it: nx init",
+        ],
+    )]
+
+
 #: Bounded tail size read by :func:`_last_boot_failure_detail` (nexus-4m6i0.7).
 #: The service can crash-loop BEFORE it answers any HTTP request, so the
 #: only evidence of *why* is in its own log file — never the whole file,
@@ -721,8 +764,9 @@ def _check_t3_cloud() -> list[HealthResult]:
     # absence is deliberately non-fatal here (see the tradeoff note above).
 
     # VOYAGE_API_KEY — server-side embedding on the service path; the
-    # client key is migration/enrichment config (e.g. rerank soft-degrades
-    # without it), not a serving requirement.
+    # client key is migration/enrichment + engine-bootstrap material only
+    # (RDR-188 moved reranking server-side — no client code path consumes
+    # this key for rerank), not a serving requirement.
     voyage_key = get_credential("voyage_api_key")
     results.append(HealthResult(
         label="Voyage AI (VOYAGE_API_KEY)",
@@ -2089,6 +2133,56 @@ def _check_t2_launchagent_stray() -> list[HealthResult]:
     )]
 
 
+def _check_service_launchagent_stray() -> list[HealthResult]:
+    """nexus-6bmph (RDR-183 residual; GH #1405 defect-3 family): the c0vby
+    sibling for the storage-SERVICE autostart unit.
+
+    A ``com.nexus.service`` unit on a NON-local install (managed/cloud mode)
+    launches the local engine against a config with no ``pg_credentials`` —
+    the process exits immediately and launchd's restart policy respawns it
+    every ``ThrottleInterval`` (30s) forever. Live evidence 2026-07-22: a
+    cloud-mode box accumulated 810 error lines in one morning from exactly
+    this loop. Soft warning naming the removal verb; silent on local mode
+    (the unit is legitimate there) and on any probe failure (best-effort,
+    must never break ``nx doctor``).
+    """
+    try:
+        from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
+
+        if is_local_mode():
+            return []
+
+        from nexus.commands.daemon import _service_autostart_unit_installed  # noqa: PLC0415 — deferred, CLI startup cost
+
+        unit_path = _service_autostart_unit_installed()
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_service_launchagent_check_failed", error=str(exc))
+        return []
+
+    if unit_path is None:
+        return [HealthResult(
+            label="Service autostart unit (non-local mode)",
+            ok=True,
+            detail="no stray storage-service autostart unit installed",
+        )]
+
+    return [HealthResult(
+        label="Service autostart unit (non-local mode)",
+        ok=False,
+        warn=True,
+        detail=(
+            f"a storage-service autostart unit is installed at {unit_path} but "
+            "this install resolves to managed/cloud mode — the unit launches a "
+            "local engine that exits immediately (no local pg_credentials) and "
+            "the OS restart policy respawns it every ~30s indefinitely "
+            "(log churn; GH #1405 defect-3 family)"
+        ),
+        fix_suggestions=[
+            "nx daemon service uninstall --autostart  # removes the stray autostart unit",
+        ],
+    )]
+
+
 def _check_migration_state(
     creds_path: Path | None = None,
     psql_bin: Path | None = None,
@@ -2785,6 +2879,122 @@ def _is_local_service_url(url: str) -> bool:
     return host in ("localhost", "127.0.0.1", "::1")
 
 
+#: First conexus plugin release whose hooks.json carries the RDR-184
+#: orchestration hook registrations (subagent-start-stamp + subagent-stop
+#: landed ~78bb02b6/d613f2e7, ancestors of v6.14.0; nexus-3h0u6 then made
+#: the plugin's hooks.json the ONLY registration surface). An installed
+#: plugin below this floor has ZERO orchestration-hook coverage —
+#: silently: no EXPECT/START rows, no stop guard (defeats the
+#: nexus-ccs9v.15 default-ON directive). The plugin cannot warn about
+#: this itself (a pre-floor plugin's hooks.json predates any warning hook
+#: we could add), so the CLI — which upgrades via PyPI independently of
+#: the plugin pin — carries the check (nexus-3xg21).
+_ORCH_HOOKS_PLUGIN_FLOOR: tuple[int, int, int] = (6, 14, 0)
+
+
+def _installed_conexus_plugin_versions(registry_path: Path | None = None) -> list[str] | None:
+    """Versions of the installed conexus plugin per Claude Code's
+    ``installed_plugins.json`` (v2 schema: ``"<plugin>@<marketplace>":
+    [{"installPath": ..., "version": ...}, ...]``). ``None`` when the
+    registry is absent/unreadable or carries no conexus entry — callers
+    treat that as "not a plugin box", never a failure."""
+    if registry_path is None:
+        registry_path = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
+    try:
+        data = json.loads(registry_path.read_text())
+    except (OSError, ValueError):
+        return None
+    plugins = data.get("plugins") if isinstance(data.get("plugins"), dict) else data
+    if not isinstance(plugins, dict):
+        return None
+    versions: list[str] = []
+    for key, entries in plugins.items():
+        if not (isinstance(key, str) and key.split("@")[0] == "conexus"):
+            continue
+        if isinstance(entries, dict):
+            entries = [entries]
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, dict) and isinstance(entry.get("version"), str):
+                versions.append(entry["version"])
+    return versions or None
+
+
+def _check_orchestration_hook_floor(registry_path: Path | None = None) -> list[HealthResult]:
+    """nexus-3xg21: warn when the installed conexus plugin predates the
+    RDR-184 orchestration hook registrations. Soft WARN, never fatal —
+    orchestration hooks are a multi-agent hygiene surface, and a box
+    without the plugin at all is simply not in scope (ok row)."""
+    label = "Orchestration hooks (plugin floor)"
+    from nexus.engine_version import parse_engine_version  # noqa: PLC0415 — generic X.Y.Z parser, deferred import
+
+    versions = _installed_conexus_plugin_versions(registry_path)
+    if versions is None:
+        return [HealthResult(
+            label=label, ok=True,
+            detail="no conexus plugin install detected — not applicable",
+        )]
+    parsed = [v for v in (parse_engine_version(s) for s in versions) if v is not None]
+    if not parsed:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=f"plugin version unparseable ({versions[:3]}) — cannot verify",
+        )]
+    newest = max(parsed)
+    floor_str = ".".join(str(p) for p in _ORCH_HOOKS_PLUGIN_FLOOR)
+    if newest >= _ORCH_HOOKS_PLUGIN_FLOOR:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=f"plugin v{'.'.join(str(p) for p in newest)} >= v{floor_str} (hooks present)",
+        )]
+    return [HealthResult(
+        label=label, ok=False, warn=True,
+        detail=(
+            f"installed conexus plugin v{'.'.join(str(p) for p in newest)} predates the "
+            f"RDR-184 orchestration hooks (v{floor_str}+): NO stop-guard, NO "
+            f"expectations ledger — multi-agent sessions run unguarded, silently"
+        ),
+        fix_suggestions=["/plugin update conexus (then restart the session)"],
+    )]
+
+
+def _check_stranded_install() -> list[HealthResult]:
+    """nexus-gynt2: stranded-install detector (N+1 P4b prerequisite).
+
+    Disarmed (``LAST_MIGRATION_CAPABLE is None``) on every
+    migration-capable release — reported as an ok row so the check is
+    visibly wired. At N+1 the stamped constant arms it: unmigrated pre-PG
+    data (chroma.sqlite3 / t2.db / memory.db / .catalog.db present, no
+    verified migration report) is a FATAL ✗ carrying the literal two-hop
+    redirect. Pure file stats — see :mod:`nexus.stranded_install`.
+    """
+    label = "Stranded pre-PG install"
+    from nexus.config import detect_stranded_install_default  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.stranded_install import LAST_MIGRATION_CAPABLE  # noqa: PLC0415 — leaf module, deferred for symmetry
+
+    if LAST_MIGRATION_CAPABLE is None:
+        return [HealthResult(
+            label=label,
+            ok=True,
+            detail="detector disarmed — this release ships the migration tool",
+        )]
+    stranded = detect_stranded_install_default()
+    if stranded is None:
+        return [HealthResult(label=label, ok=True, detail="no unmigrated pre-PG data")]
+    return [HealthResult(
+        label=label,
+        ok=False,
+        fatal=True,
+        detail=stranded.message,
+        fix_suggestions=[
+            f"Install the last migration-capable release: uv tool install conexus=={stranded.pinned_release}",
+            "Run: nx upgrade (the ladder converges the pre-PG data migration)",
+            "Then upgrade back to this version",
+        ],
+    )]
+
+
 def _check_migration_reports(reports_dir: Path | None = None) -> list[HealthResult]:
     """RDR-178 Gap 1 (nexus-aigpt): read the newest migration report and
     fail loud when it recorded failures or an unverified run.
@@ -3147,6 +3357,62 @@ def _check_legacy_id_census() -> list[HealthResult]:
     )]
 
 
+def _check_dimension_orphans() -> list[HealthResult]:
+    """Name T3 collections whose declared embedding dim no longer matches
+    the active serving embedder, and suggest the remedy (GH #1113 /
+    nexus-9tsdf AC2).
+
+    Such a collection (e.g. a minilm-l6-v2-384 leftover after the active
+    embedder moved to 1024d voyage) can never be searched — every
+    cross-corpus search skips it. Reuses the SAME finder ``nx collection
+    prune`` lists from, so doctor and the remedy command can never
+    disagree about what counts as an orphan. Degrades to a skip — never a
+    crash, and never a guess: an unresolved active-embedder probe reports
+    "skipped" rather than risk telling the operator to delete healthy
+    collections.
+    """
+    label = "T3 dimension orphans"
+    try:
+        from nexus.commands.collection import _find_dimension_mismatched_collections  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid circular import
+
+        t3 = make_t3()
+        mismatches, _skipped, active_label = _find_dimension_mismatched_collections(t3)
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_dimension_orphan_check_failed", error=str(exc))
+        return [HealthResult(label=label, ok=True, detail="skipped (T3 unavailable)")]
+
+    if active_label == "unknown":
+        return [HealthResult(
+            label=label, ok=True,
+            detail="skipped (active embedder unresolved — cannot verify)",
+        )]
+    if not mismatches:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=f"none (active embedder: {active_label})",
+        )]
+
+    names = "; ".join(
+        f"{m['name']} ({m['declared_dim']}d vs active {m['active_dim']}d, "
+        f"{m['count']} chunk(s))"
+        for m in mismatches
+    )
+    return [HealthResult(
+        label=label,
+        ok=False,
+        warn=True,
+        detail=(
+            f"{len(mismatches)} collection(s) unsearchable under the active "
+            f"embedder ({active_label}): {names}"
+        ),
+        fix_suggestions=[
+            "nx collection prune          (list them)",
+            "nx collection prune --yes    (delete them)",
+        ],
+    )]
+
+
 def run_health_checks() -> tuple[list[HealthResult], bool]:
     """Run all health checks.
 
@@ -3166,9 +3432,15 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     if _local:
         results.extend(_check_t3_local())
         results.extend(_check_service_bge_model())
+        results.extend(_check_service_crossencoder_model())
         results.extend(_check_t3_daemon_version())
     else:
         results.extend(_check_t3_cloud())
+
+    # nexus-9tsdf (GH #1113 AC2): name dimension-orphaned collections and
+    # point at `nx collection prune`. Applies in both modes; degrades
+    # internally.
+    results.extend(_check_dimension_orphans())
 
     results.extend(_check_tools())
     results.extend(_check_git_hooks())
@@ -3229,6 +3501,7 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     results.extend(_check_storage_service_health())
     results.extend(_check_engine_convergence())
     results.extend(_check_t2_launchagent_stray())
+    results.extend(_check_service_launchagent_stray())
     results.extend(_check_migration_state())
     results.extend(_check_rls_present())
     # RDR-185 P0.4: read-only pending-rungs surface (degrades internally).
@@ -3254,6 +3527,32 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
         _log.warning("doctor_migration_divergence_check_failed", error=str(exc))
         results.append(HealthResult(
             label="Migration divergence (memory)", ok=True, detail="check failed (non-critical)",
+        ))
+
+    # nexus-gynt2: stranded-install detector (disarmed no-op until the N+1
+    # cut stamps LAST_MIGRATION_CAPABLE). A crash here must not take down
+    # `nx doctor` — but unlike the best-effort checks above, a check
+    # failure surfaces as a WARN, not a silent ok: this is the
+    # data-loss-shaped class (no silent fallbacks for correctness).
+    try:
+        results.extend(_check_stranded_install())
+    except Exception as exc:  # noqa: BLE001 — must not crash `nx doctor`; degraded to WARN, never silent-ok
+        _log.warning("doctor_stranded_install_check_failed", error=str(exc))
+        results.append(HealthResult(
+            label="Stranded pre-PG install", ok=False, warn=True,
+            detail=f"check failed ({exc}) — could not verify pre-PG data state",
+        ))
+
+    # nexus-3xg21: plugin-floor check for the RDR-184 orchestration hooks —
+    # the CLI is the only surface that can warn (a pre-floor plugin's own
+    # hooks.json predates any warning hook). Best-effort.
+    try:
+        results.extend(_check_orchestration_hook_floor())
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.warning("doctor_orch_hook_floor_check_failed", error=str(exc))
+        results.append(HealthResult(
+            label="Orchestration hooks (plugin floor)", ok=True,
+            detail="check failed (non-critical)",
         ))
 
     return results, _local

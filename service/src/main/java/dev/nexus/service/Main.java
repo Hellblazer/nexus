@@ -114,6 +114,7 @@ public final class Main {
         // migration ran for hours against silent ONNX-384 fallback because the
         // mode was invisible; onnx-local now logs at WARN and names the refusal
         // behaviour so a missing key is unmissable in the service log.
+        dev.nexus.service.vectors.Reranker reranker = null;
         if (voyageKey != null && !voyageKey.isBlank()) {
             // Cloud mode: PURE Voyage routing — NO local ONNX embedder (nexus-0n7uc).
             // The cloud container has no MiniLM model on disk; constructing
@@ -123,8 +124,20 @@ public final class Main {
             // 384-dim fallback; non-conformant collections are REFUSED (422).
             docEmbedRouter = new EmbedderRouter(voyageKey, "document");
             qryEmbedRouter = new EmbedderRouter(voyageKey, "query");
-            log.info("event=embedding_mode_banner mode={} models={} backend=pgvector",
-                    docEmbedRouter.modeName(), docEmbedRouter.availableModels());
+            // RDR-188: the same key grants the fused rerank stage — the engine owns
+            // ALL Voyage traffic (embed + rerank); no new credential surface.
+            // NX_RERANK_MODEL (RDR-157 config-via-env) is the SERVER-side successor
+            // of the client's embeddings.rerankerModel knob (e.g. rerank-2.5-lite
+            // for cost/latency): model choice moved server-side with the traffic —
+            // there is deliberately NO per-request model field (the server owns
+            // rerank cost; the client knob retires loudly in P2, nexus bead filed).
+            String rerankModelEnv = System.getenv("NX_RERANK_MODEL");
+            String rerankModel = (rerankModelEnv == null || rerankModelEnv.isBlank())
+                    ? dev.nexus.service.vectors.VoyageReranker.DEFAULT_MODEL
+                    : rerankModelEnv.trim();
+            reranker = new dev.nexus.service.vectors.VoyageReranker(voyageKey, rerankModel);
+            log.info("event=embedding_mode_banner mode={} models={} reranker={} backend=pgvector",
+                    docEmbedRouter.modeName(), docEmbedRouter.availableModels(), rerankModel);
         } else {
             // Local mode (RDR-160): bge-768 serves EVERY collection. MiniLM is
             // NOT loaded on the local path (Decision 5) — a non-bge collection
@@ -132,11 +145,17 @@ public final class Main {
             Bge768Embedder bge = new Bge768Embedder();
             docEmbedRouter = new EmbedderRouter(bge, "document");
             qryEmbedRouter = new EmbedderRouter(bge, "query");
-            log.warn("event=embedding_mode_banner mode={} models={} backend=pgvector "
+            // RDR-188 P1.3: local no-Voyage posture reranks with the ms-marco
+            // cross-encoder. Lazy init (ctor touches no I/O): a not-yet-provisioned
+            // model degrades the fused stage LOUD per request instead of failing
+            // boot, and is picked up on first rerank once `nx init` lands it.
+            reranker = new dev.nexus.service.vectors.CrossEncoderReranker();
+            log.warn("event=embedding_mode_banner mode={} models={} reranker={} backend=pgvector "
                     + "voyage_collections=REFUSED_422 hint=\"set NX_VOYAGE_API_KEY (or let "
                     + "the supervisor plumb it from VOYAGE_API_KEY / config.yml credentials) "
                     + "to serve voyage-* collections\"",
-                    docEmbedRouter.modeName(), docEmbedRouter.availableModels());
+                    docEmbedRouter.modeName(), docEmbedRouter.availableModels(),
+                    reranker.modelToken());
         }
         var pgVectorRepo = new PgVectorRepository(new TenantScope(ds), docEmbedRouter,
                                                   qryEmbedRouter);
@@ -154,7 +173,7 @@ public final class Main {
             System.exit(1);
         }
 
-        var service = new NexusService(port, token, ds, docEmbedRouter, pgVectorRepo);
+        var service = new NexusService(port, token, ds, docEmbedRouter, pgVectorRepo, reranker);
         service.start();
 
         log.info("event=service_ready port={}", service.getPort());

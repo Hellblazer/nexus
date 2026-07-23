@@ -2079,7 +2079,15 @@ class Catalog:
         return self._links.validate_link(from_t, to_t, link_type)
 
     def resolve_span_text(self, tumbler: Tumbler, span: str) -> str | None:
-        """Resolve a span to actual text content. Returns None if unavailable.
+        """Resolve a span to actual text content.
+
+        Returns ``None`` when the span is genuinely unresolvable (unknown
+        tumbler, missing chunk, unreadable file). RAISES
+        :class:`~nexus.db.http_vector_client.VectorServiceError` when the
+        vector service is DEGRADED (nexus-ib6uy) — unreachable is never
+        collapsed into not-found; boundaries render the distinction (see
+        the ``nx catalog show`` preview marker and ``nx doc render``'s
+        abort).
 
         Resolves the tumbler to a :class:`CatalogEntry` then delegates
         the span dispatch to

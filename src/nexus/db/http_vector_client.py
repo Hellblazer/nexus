@@ -288,7 +288,32 @@ def per_collection_chunk_cap(collection: str) -> int:
     not taken here without that measurement. Code (voyage-code-3) sustains 300.
     """
     prefix = collection.split("__", 1)[0]
-    return _CCE_UPSERT_CHUNK_CAP if prefix in _CCE_COLLECTION_PREFIXES else _CODE_UPSERT_CHUNK_CAP
+    if prefix not in _CCE_COLLECTION_PREFIXES:
+        return _CODE_UPSERT_CHUNK_CAP
+    # nexus-w3hzw (oub13 profile run 2): the 64 cap exists for VOYAGE CCE —
+    # slow server-side contextual embedding behind the managed 30s gateway.
+    # When the engine reports it serves onnx-local (bge embeds every prefix,
+    # no gateway in the topology), the CCE-prefixed collections sustain the
+    # same 300 the code prefix does; keeping them at 64 only multiplied
+    # round trips 3-5x. Unknown mode (no probe answer yet) stays on the
+    # conservative voyage split — never widen a batch on a guess.
+    if _serving_embedding_mode() == "onnx-local":
+        return _CODE_UPSERT_CHUNK_CAP
+    return _CCE_UPSERT_CHUNK_CAP
+
+
+def _serving_embedding_mode() -> str | None:
+    """The serving engine's embedder family via the process-singleton client's
+    memoized ``/version`` probe (RDR-188 P3.2). Best-effort: no singleton yet,
+    or a probe failure, is ``None`` — this helper never constructs a client
+    and never raises (a cap decision must not fail an upsert)."""
+    client = _vector_client_instance
+    if client is None:
+        return None
+    try:
+        return client.embedding_mode()
+    except Exception:  # noqa: BLE001 — cap heuristic is best-effort; unknown falls back conservative
+        return None
 
 
 def _wait_for_lease_republication() -> None:
@@ -985,6 +1010,78 @@ class HttpVectorClient:
 
     # ── Read path ────────────────────────────────────────────────────────────
 
+    #: RDR-188: this backend serves the fused rerank stage (P1.2 request
+    #: fields on /v1/vectors/search). Capability marker read by
+    #: ``search_engine.search_cross_corpus`` — legacy backends without it are
+    #: never asked to rerank.
+    supports_server_rerank: bool = True
+
+    #: Memoized GET /version ``embedding_mode`` (class-level default so
+    #: partially-constructed test instances still resolve; successful probes
+    #: shadow it per-instance). RDR-188 P3.2 (nexus-9o6y2.14).
+    _embedding_mode_memo: str | None = None
+    _embedding_mode_probe_failures: int = 0
+    _EMBEDDING_MODE_MAX_PROBES: int = 3
+
+    def embedding_mode(self) -> str | None:
+        """The engine's AUTHORITATIVE embedder family from ``GET /version``:
+        ``"voyage"`` or ``"onnx-local"`` (``EmbedderRouter.modeName``).
+
+        RDR-188 P3.2 (nexus-9o6y2.14): this replaces client-key inference as
+        the search threshold gate's signal — thresholds are calibrated for
+        Voyage embeddings, and whether Voyage served the query is a fact
+        about the SERVER, not about which keys sit in client config.
+
+        Memoized per instance on success (the engine's mode is fixed for its
+        process lifetime). A failed probe returns ``None`` WITHOUT memoizing —
+        unknown, not "not voyage" — so a service that was briefly unreachable
+        is re-asked on the next call rather than locking thresholds off.
+        Bounded (reviewer Medium, T2 [21057]): after
+        ``_EMBEDDING_MODE_MAX_PROBES`` consecutive failures the probe settles
+        on unknown for the process lifetime — a persistently-failing /version
+        beside a working search path must not tax every search with an extra
+        round trip forever.
+        """
+        if self._embedding_mode_memo is None:
+            if self._embedding_mode_probe_failures >= self._EMBEDDING_MODE_MAX_PROBES:
+                return None
+            try:
+                info = _get("/version", tenant=self._tenant)
+            except Exception as exc:  # noqa: BLE001 — probe is advisory; search itself surfaces a down service
+                self._embedding_mode_probe_failures += 1
+                if self._embedding_mode_probe_failures >= self._EMBEDDING_MODE_MAX_PROBES:
+                    _log.warning(
+                        "embedding_mode_probe_settled_unknown",
+                        attempts=self._embedding_mode_probe_failures,
+                        consequence="voyage-calibrated distance thresholds stay off "
+                                    "for this process",
+                        error=str(exc),
+                    )
+                else:
+                    _log.debug("embedding_mode_probe_failed", error=str(exc))
+                return None
+            mode = info.get("embedding_mode") if isinstance(info, dict) else None
+            if isinstance(mode, str) and mode:
+                self._embedding_mode_probe_failures = 0
+                self._embedding_mode_memo = mode
+            else:
+                # Critic fold (T2 [21058]): a REACHABLE /version without a
+                # usable embedding_mode — exactly what every pre-.10 engine
+                # returns — is a probe failure too. Counting only exceptions
+                # would reset the counter here and re-probe on every search
+                # for the process lifetime of the client singleton.
+                self._embedding_mode_probe_failures += 1
+                if self._embedding_mode_probe_failures >= self._EMBEDDING_MODE_MAX_PROBES:
+                    _log.warning(
+                        "embedding_mode_probe_settled_unknown",
+                        attempts=self._embedding_mode_probe_failures,
+                        reason="/version reachable but reports no embedding_mode "
+                               "(engine predates the field)",
+                        consequence="voyage-calibrated distance thresholds stay off "
+                                    "for this process",
+                    )
+        return self._embedding_mode_memo
+
     def search(
         self,
         query: str,
@@ -996,6 +1093,9 @@ class HttpVectorClient:
         threshold: float | None = None,
         structured: bool = False,
         include_source_uri: bool = False,
+        rerank: bool = False,
+        rerank_top_k: int | None = None,
+        rerank_meta_out: dict | None = None,
     ) -> list[dict] | dict:
         """Semantic search via the Java service.
 
@@ -1011,6 +1111,17 @@ class HttpVectorClient:
         When ``include_source_uri=True``, gates a catalog JOIN server-side to
         populate ``source_uri`` on each row (RDR-169 G5, bead nexus-jkv85).
         Default False — omits the field so default callers pay zero JOIN cost.
+
+        RDR-188 (bead nexus-9o6y2.8): ``rerank=True`` requests the server's
+        fused rerank stage. The response becomes an object envelope
+        ``{"results": [...], "rerank_degraded": ..., ...}``; scored rows carry
+        ``rerank_score``. The envelope's degrade state is written into
+        ``rerank_meta_out`` (``{"degraded", "error", "model"}``) — the caller
+        MUST surface a degrade to the user (Gap 2: WARN-only invisibility is
+        the retired defect). An engine predating the fused stage ignores the
+        unknown field and returns a bare array: reported as
+        ``degraded=True, stale_engine=True`` with the convergence remedy —
+        one-engine doctrine, never a refusal.
         """
         body: dict[str, Any] = {
             "query": query,
@@ -1021,9 +1132,36 @@ class HttpVectorClient:
             body["where"] = where
         if include_source_uri:
             body["include_source_uri"] = True
+        if rerank:
+            body["rerank"] = True
+            if rerank_top_k is not None:
+                body["rerank_top_k"] = rerank_top_k
 
         results = _post("/v1/vectors/search", body, tenant=self._tenant)
-        # results is a list of {id, content, distance, collection, ...}
+        # results is a list of {id, content, distance, collection, ...} — or,
+        # when rerank was requested against a rerank-capable engine, the
+        # RerankStage object envelope.
+
+        if rerank:
+            if isinstance(results, dict) and "results" in results:
+                meta = {
+                    "degraded": bool(results.get("rerank_degraded")),
+                    "error": results.get("rerank_error"),
+                    "model": results.get("rerank_model"),
+                }
+                results = results["results"]
+            else:
+                meta = {
+                    "degraded": True,
+                    "stale_engine": True,
+                    "error": (
+                        "engine predates server-side rerank; `nx upgrade` "
+                        "converges the local engine (managed cloud: server "
+                        "upgrade pending)"
+                    ),
+                }
+            if rerank_meta_out is not None:
+                rerank_meta_out.update(meta)
 
         if structured:
             # Return the plan-runner compatible structured form

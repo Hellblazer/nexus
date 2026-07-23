@@ -2095,11 +2095,15 @@ def _collect_quota_report() -> dict:
     # error.
     retry = dict(get_retry_stats())
 
-    # RDR-109 Phase 3: cross-encoder substrate availability + active backend.
+    # RDR-188 (nexus-9o6y2.9): reranking runs SERVER-side — the engine scores
+    # with Voyage rerank-2.5 (server key) or its ms-marco cross-encoder. The
+    # client substrate check survives only for the salience consumer
+    # (RDR-109 P4; disposition finalized in bead nexus-9o6y2.19).
     from nexus.cross_encoder import cross_encoder_available  # noqa: PLC0415 — circular-dep avoidance (nexus.cross_encoder)
     cross_encoder_info = {
         "available": cross_encoder_available(),
-        "backend": "voyage-rerank-2.5" if not is_local_mode() else "onnx-local",
+        "backend": "server-side (engine: voyage-rerank-2.5 or ms-marco cross-encoder, RDR-188)",
+        "client_role": "salience-only (nexus.salience; rerank caller retired, nexus-9o6y2.19)",
         "default_local_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
     }
 
@@ -2140,9 +2144,16 @@ def _format_quota_report(report: dict) -> str:
 
     # ── Voyage ───────────────────────────────────────────────────────────
     v = report["voyage"]
-    status = _CHECK if v["api_key_set"] else _WARN
-    key_label = "VOYAGE_API_KEY: set" if v["api_key_set"] else "VOYAGE_API_KEY: absent"
-    lines.append(f"  {status} Voyage AI: {key_label}")
+    # RDR-188 (nexus-9o6y2.16): the client key is engine-bootstrap/migration
+    # material — absence is INFO, not a warning (no client code path consumes
+    # it; the engine's own key state is what matters and doctor's service
+    # checks cover that).
+    key_label = (
+        "VOYAGE_API_KEY: set (engine-bootstrap/migration material)"
+        if v["api_key_set"]
+        else "VOYAGE_API_KEY: absent (client does not consume it; engine key plumbed at spawn)"
+    )
+    lines.append(f"  {_CHECK} Voyage AI: {key_label}")
     lines.append(f"    target rpm (indexer rate limiter):        {v['target_rpm']}")
     for model, caps in v["models"].items():
         lines.append(
@@ -2158,10 +2169,8 @@ def _format_quota_report(report: dict) -> str:
         lines.append(
             f"  {ce_status} Cross-encoder backend: {ce.get('backend', 'unknown')}"
         )
-        if ce.get("backend") == "onnx-local":
-            lines.append(
-                f"    default local model: {ce.get('default_local_model', '')}"
-            )
+        if ce.get("client_role"):
+            lines.append(f"    client substrate: {ce.get('client_role')}")
         lines.append("")
 
     # ── Retry accumulator ────────────────────────────────────────────────

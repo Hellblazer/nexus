@@ -42,6 +42,16 @@ rules:
       drafts; stage by explicit path (feedback_no_git_add_all).
     escape_token: "# routing-allow:"
     fail_closed: false
+  subagent_git_write_requires_orchestrator:
+    hook_script: subagent_git_write_requires_orchestrator.py
+    matcher: Bash
+    mode: block
+    rationale: >-
+      subagents never git add/commit in the shared tree — hand-back is
+      diffs+paths and the orchestrator commits pathspec-limited (RDR-184
+      Gap-4, nexus-s88vq); linked-worktree agents are exempt.
+    escape_token: "# routing-allow:"
+    fail_closed: false
   phase_review_close_requires_gate:
     hook_script: phase_review_close_requires_gate.py
     matcher: Bash

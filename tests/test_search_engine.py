@@ -9,7 +9,6 @@ from nexus.scoring import (
     apply_hybrid_scoring,
     hybrid_score,
     min_max_normalize,
-    rerank_results,
     round_robin_interleave,
 )
 from nexus.search_engine import _attach_display_paths, search_cross_corpus
@@ -79,34 +78,6 @@ def test_hybrid_mixed_corpus_no_warning(capsys):
 
 
 # ── AC3: Cross-corpus reranking ───────────────────────────────────────────────
-
-def test_rerank_results_returns_unified_ranking(cloud_mode):
-    """rerank_results reorders results using the reranker model.
-
-    RDR-109 Phase 3: rerank_results dispatches by mode. This test
-    asserts the cloud (Voyage) path; the local path is exercised in
-    ``tests/test_cross_encoder.py``.
-    """
-    results = [
-        SearchResult(id="1", content="alpha", distance=0.5, collection="code__r", metadata={}),
-        SearchResult(id="2", content="beta", distance=0.2, collection="docs__d", metadata={}),
-        SearchResult(id="3", content="gamma", distance=0.8, collection="knowledge__k", metadata={}),
-    ]
-    mock_client = MagicMock()
-    mock_client.rerank.return_value = MagicMock(
-        results=[
-            MagicMock(index=2, relevance_score=0.9),
-            MagicMock(index=0, relevance_score=0.7),
-            MagicMock(index=1, relevance_score=0.3),
-        ]
-    )
-    stub_t3 = MagicMock()
-    stub_t3._voyage_client = mock_client
-    reranked = rerank_results(results, query="test", model="rerank-2.5", top_k=3, t3=stub_t3)
-    assert reranked[0].id == "3"
-    assert reranked[1].id == "1"
-    assert reranked[2].id == "2"
-
 
 def test_round_robin_interleave_no_rerank():
     """round_robin_interleave alternates results across collections."""
@@ -1038,6 +1009,106 @@ class TestPerCollectionErrorIsolation:
         )
 
 
+# ── nexus-9tsdf / GH #1113: quieter dimension-mismatch search logging ───────
+
+
+class TestDimensionMismatchLoggingQuieted:
+    """A stale, orphaned dimension-mismatched collection (leftover from a
+    prior embedder generation) fails every search with an embedding-space
+    HTTP 400. Pre-fix this logged one WARNING per search, every search,
+    for as long as the orphan existed -- even when it was 1 of 80
+    collections and everything else searched fine. Quieted per AC3: <5%
+    of the requested scope -> DEBUG (noise); >=5% -> WARNING (real
+    problem). Never silent either way."""
+
+    _DIM_ERROR = (
+        "POST /v1/vectors/search -> HTTP 400: query embedder produced a "
+        "1024-dim vector but the collection dispatches to chunks_384"
+    )
+
+    def test_small_fraction_dimension_mismatch_downgraded_to_debug(self):
+        """1 mismatched collection out of 21 (~4.8%) is noise -- DEBUG,
+        not WARNING. The event still fires (never silent).
+
+        The suite's default structlog wrapper (tests/conftest.py) filters
+        below WARNING, matching the default runtime -- exactly the
+        visibility change this fix is for. Raise the wrapper threshold to
+        DEBUG for this test only so the (correctly suppressed-by-default)
+        debug entry is observable; the autouse
+        ``_restore_structlog_after_test`` fixture resets it after.
+        """
+        import logging
+
+        import structlog
+        from structlog.testing import capture_logs
+
+        structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG))
+
+        good_cols = [f"code__c{i}" for i in range(20)]
+        t3 = _FailingT3(
+            {c: [] for c in good_cols},
+            failing={"knowledge__orphan__minilm-l6-v2-384__v1"},
+        )
+        with capture_logs() as logs:
+            search_cross_corpus(
+                "q", [*good_cols, "knowledge__orphan__minilm-l6-v2-384__v1"],
+                10, t3,
+            )
+        matches = [
+            e for e in logs
+            if e["event"] == "collection_search_failed"
+            and e.get("collection") == "knowledge__orphan__minilm-l6-v2-384__v1"
+        ]
+        assert matches, "the failure must still be logged -- never silent"
+        assert matches[0]["log_level"] == "debug"
+
+    def test_large_fraction_dimension_mismatch_stays_warning(self):
+        """40 of 80 collections mismatched (50%) is a real problem --
+        stays at WARNING, per the AC3 example."""
+        from structlog.testing import capture_logs
+
+        good_cols = [f"code__c{i}" for i in range(40)]
+        bad_cols = [f"knowledge__orphan{i}__minilm-l6-v2-384__v1" for i in range(40)]
+        t3 = _FailingT3(
+            {c: [] for c in good_cols}, failing=set(bad_cols),
+        )
+        with capture_logs() as logs:
+            search_cross_corpus("q", [*good_cols, *bad_cols], 10, t3)
+        levels = {
+            e["log_level"] for e in logs
+            if e["event"] == "collection_search_failed" and e.get("collection") in bad_cols
+        }
+        assert levels == {"warning"}
+
+    def test_non_dimension_failure_unaffected_stays_warning(self):
+        """A genuine (non-dimension) service failure keeps its immediate
+        per-collection WARNING regardless of how small a fraction it is --
+        only the dimension-mismatch class is reclassified."""
+        from structlog.testing import capture_logs
+
+        good_cols = [f"code__c{i}" for i in range(20)]
+        t3 = _FailingT3({c: [] for c in good_cols}, failing=set())
+        # Monkeypatch one collection to raise a non-dimension error.
+        from nexus.db.http_vector_client import VectorServiceError
+
+        real_search = t3.search
+
+        def _search(query, collection_names, n_results=10, where=None):
+            if collection_names[0] == "code__c0":
+                raise VectorServiceError("POST /v1/vectors/search -> HTTP 503: service unavailable")
+            return real_search(query, collection_names, n_results, where)
+
+        t3.search = _search
+        with capture_logs() as logs:
+            search_cross_corpus("q", good_cols, 10, t3)
+        matches = [
+            e for e in logs
+            if e["event"] == "collection_search_failed" and e.get("collection") == "code__c0"
+        ]
+        assert matches
+        assert matches[0]["log_level"] == "warning"
+
+
 # ── nexus-7lm3q: batch manifest/resolve, backward-compat fallback ────────────
 
 
@@ -1263,15 +1334,14 @@ class TestAttachDisplayPathsBatch:
 
 
 class TestThresholdGateServiceMode:
-    """nexus-h8rf6.9: the ``apply_thresholds`` gate checked
-    ``t3._voyage_client``, a shape only the retired T3Database serving
-    handle carried — so distance-threshold filtering silently disabled in
-    service mode (HttpVectorClient), the same bug class as the reranker
-    (nexus-xbw0f). The fallback must preserve the original semantics:
-    thresholds are calibrated for Voyage embeddings, so cloud mode with a
-    configured key -> on; local mode (bge/MiniLM) -> off; no key -> off.
-    Non-HttpVectorClient handles (test fakes, injected stubs) keep the
-    attribute-only gate.
+    """RDR-188 P3.2 (nexus-9o6y2.14, supersedes the nexus-h8rf6.9 client-key
+    heuristic): in service mode the ``apply_thresholds`` gate consults the
+    SERVER's reported embedder family (``HttpVectorClient.embedding_mode()``
+    from GET /version) — thresholds on iff the engine embeds with Voyage.
+    The client's voyage credential has ZERO influence (Gap 3: removing the
+    now-unconsumed key must not silently regress filtering). Unknown mode
+    (probe failed) → thresholds off, never guess Voyage. Non-HttpVectorClient
+    handles (test fakes, injected stubs) keep the attribute-only gate.
     """
 
     _ROWS = {
@@ -1281,17 +1351,7 @@ class TestThresholdGateServiceMode:
         ],
     }
 
-    @pytest.fixture(autouse=True)
-    def _reset_gate_memo(self):
-        # The gate memoizes its config lookup for the process lifetime
-        # (wave review #6) — clear it around each test so the per-test
-        # monkeypatched config functions are actually consulted.
-        from nexus.search_engine import reset_threshold_gate_cache_for_tests
-        reset_threshold_gate_cache_for_tests()
-        yield
-        reset_threshold_gate_cache_for_tests()
-
-    def _service_t3(self, monkeypatch):
+    def _service_t3(self, monkeypatch, mode):
         from nexus.db.http_vector_client import HttpVectorClient
         client = HttpVectorClient()
         monkeypatch.setattr(
@@ -1299,34 +1359,25 @@ class TestThresholdGateServiceMode:
             lambda self, query, collection_names, n_results=10, where=None:
                 TestThresholdGateServiceMode._ROWS.get(collection_names[0], []),
         )
+        monkeypatch.setattr(client.__class__, "embedding_mode", lambda self: mode)
         return client
 
-    def test_service_mode_cloud_with_key_filters(self, monkeypatch):
-        monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
-        monkeypatch.setattr(
-            "nexus.config.get_credential",
-            lambda name: "sk-voyage" if name == "voyage_api_key" else "",
-        )
-        t3 = self._service_t3(monkeypatch)
+    def test_server_voyage_mode_filters(self, monkeypatch):
+        t3 = self._service_t3(monkeypatch, "voyage")
         results = search_cross_corpus("test", ["code__nexus"], 10, t3)
         assert {r.id for r in results} == {"a"}  # 0.50 > code threshold 0.45
 
-    def test_service_mode_local_mode_skips_filtering(self, monkeypatch):
-        # Local mode embeds with bge/MiniLM — Voyage-calibrated thresholds
-        # must stay off even when a voyage key happens to be configured.
-        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
-        monkeypatch.setattr(
-            "nexus.config.get_credential",
-            lambda name: "sk-voyage" if name == "voyage_api_key" else "",
-        )
-        t3 = self._service_t3(monkeypatch)
+    def test_server_onnx_local_mode_skips_filtering(self, monkeypatch):
+        # The engine embeds bge locally — Voyage-calibrated thresholds stay
+        # off REGARDLESS of any client credential state.
+        monkeypatch.setenv("VOYAGE_API_KEY", "sk-configured-but-irrelevant")
+        t3 = self._service_t3(monkeypatch, "onnx-local")
         results = search_cross_corpus("test", ["code__nexus"], 10, t3)
         assert {r.id for r in results} == {"a", "b"}
 
-    def test_service_mode_no_key_skips_filtering(self, monkeypatch):
-        monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
-        monkeypatch.setattr("nexus.config.get_credential", lambda name: "")
-        t3 = self._service_t3(monkeypatch)
+    def test_unknown_mode_skips_filtering(self, monkeypatch):
+        # /version unreachable → unknown, not "voyage": thresholds off.
+        t3 = self._service_t3(monkeypatch, None)
         results = search_cross_corpus("test", ["code__nexus"], 10, t3)
         assert {r.id for r in results} == {"a", "b"}
 

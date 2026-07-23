@@ -536,6 +536,13 @@ class DetectionReport:
     #: cloud mode, bge-768 in local. Defaults False (local) for the many test
     #: doubles that construct a report without a live mode signal.
     voyage_key_present: bool = False
+    #: nexus-p8nd5 dv708 fold: why the CONFIGURED cloud read leg was skipped
+    #: (dead creds / unreachable host — the nexus-dv708 degrade), or ``None``
+    #: when the leg was read or was never configured. Lets non-stderr
+    #: consumers (dry-run preview JSON, doctor) distinguish
+    #: "skipped-unreadable" from "never configured" — previously only a WARN
+    #: log carried the distinction.
+    cloud_leg_skipped_reason: str | None = None
 
     @property
     def legs_with_data(self) -> frozenset[str]:
@@ -679,6 +686,7 @@ def classify_collections(
     local_client: Any | None = None,
     cloud_client: Any | None = None,
     voyage_key_present: bool,
+    cloud_leg_skipped_reason: str | None = None,
 ) -> DetectionReport:
     """Classify the Chroma footprint per collection across both source legs.
 
@@ -703,6 +711,7 @@ def classify_collections(
     report = DetectionReport(
         classifications=tuple(classifications),
         voyage_key_present=voyage_key_present,
+        cloud_leg_skipped_reason=cloud_leg_skipped_reason,
     )
     _log.info(
         "migration_detect_classified",
@@ -764,6 +773,7 @@ def resolve_default_local_leg() -> Path:
 
 def open_read_legs(
     local_path: str | Path | None = None,
+    skipped_out: dict | None = None,
 ) -> tuple[Any | None, Any | None]:
     """Open whichever Chroma read legs are present, returning ``(local, cloud)``.
 
@@ -771,9 +781,12 @@ def open_read_legs(
     product's own env-aware local-Chroma path, nexus-id750) or an
     unconfigured cloud leg yields ``None`` for that leg — a fresh user with
     neither leg gets ``(None, None)``, which :func:`classify_collections`
-    treats as a clean no-op. Only the "absent leg" sentinels
-    (``FileNotFoundError`` / the cloud half-configured ``RuntimeError``) are
-    swallowed; any other failure (a corrupt store) propagates loud.
+    treats as a clean no-op. The "absent leg" sentinels
+    (``FileNotFoundError`` / the cloud half-configured ``RuntimeError``)
+    are swallowed silently; a CONFIGURED-but-unreadable cloud leg (dead
+    creds, unreachable host — nexus-dv708) degrades to absent with a LOUD
+    warning instead of crashing detection. Only a LOCAL-leg failure beyond
+    file-absence (a corrupt store) still propagates.
     """
     from nexus.migration.chroma_read import (  # noqa: PLC0415 — circular-dep avoidance (nexus.migration.chroma_read)
         open_cloud_read_client,
@@ -792,6 +805,40 @@ def open_read_legs(
         cloud = open_cloud_read_client()
     except RuntimeError:
         # half-configured / unconfigured cloud leg — absent, not an error
+        cloud = None
+    except Exception as exc:  # noqa: BLE001 — nexus-dv708: DEAD-cred / transport failures degrade LOUD, never crash detection
+        # Critique narrowing: only the OBSERVED dead-leg shapes degrade —
+        # chromadb's ChromaError family (revoked key at CloudClient
+        # construction) and ValueError (chromadb wraps httpx transport
+        # failures). A programming bug (TypeError/AttributeError from a
+        # bad refactor) must still crash loud, not re-file itself as an
+        # unreadable leg. chromadb import deferred: optional heavy dep.
+        try:
+            from chromadb.errors import ChromaError  # noqa: PLC0415 — deferred import; optional heavy dep
+        except ImportError:  # pragma: no cover — chromadb absent: no cloud leg possible anyway
+            ChromaError = ()  # type: ignore[assignment,misc]
+        if not isinstance(exc, (ChromaError, ValueError)):
+            raise
+        # A CONFIGURED cloud leg whose credentials are dead (revoked key →
+        # chromadb ChromaError/AuthError at CloudClient construction) or
+        # whose host is unreachable (httpx transport wrapped as ValueError
+        # by chromadb.api.client) previously propagated out of detect()
+        # and hard-failed the whole upgrade walk ("detect raised", rung
+        # FAILED, did not converge). The leg is a retired MIGRATION SOURCE
+        # — an unreadable one means "this source is unavailable", which is
+        # the same detect() verdict as absent, said LOUDLY (the 6.15.0
+        # shakeout's dead-VOYAGE-key class). The LOCAL leg deliberately
+        # keeps propagating: a corrupt local store is a real error.
+        _log.warning(
+            "detection.cloud_read_leg_unreadable",
+            error=f"{type(exc).__name__}: {exc}",
+            guidance="cloud migration-source leg skipped — fix or remove the "
+                     "CHROMA_API_KEY/tenant config if this source still matters",
+        )
+        if skipped_out is not None:
+            # dv708 structured residual (nexus-p8nd5): carry the skip reason
+            # to DetectionReport so non-stderr consumers see it.
+            skipped_out["cloud"] = f"{type(exc).__name__}: {exc}"
         cloud = None
 
     return local, cloud
@@ -895,6 +942,10 @@ class DryRunPreview:
     #: lacking a stored vector re-embeds that batch (and bills). Surfaced as a
     #: caveat so the ``$0`` estimate is honest about that fallback (review).
     passthrough_voyage_tokens: int = 0
+    #: dv708 structured residual (nexus-p8nd5): a CONFIGURED cloud leg that
+    #: was skipped-unreadable (dead creds / unreachable) — the preview must
+    #: say so, or "no cloud collections" silently means two different things.
+    cloud_leg_skipped_reason: str | None = None
 
 
 def _throughput_for_support(support: Support) -> float:
@@ -1015,6 +1066,7 @@ def build_dry_run_preview(
         billed_voyage_tokens=billed_voyage_tokens,
         est_voyage_cost_usd=billed_voyage_tokens / 1_000_000 * _VOYAGE_COST_USD_PER_1M_TOKENS,
         passthrough_voyage_tokens=passthrough_voyage_tokens,
+        cloud_leg_skipped_reason=report.cloud_leg_skipped_reason,
     )
 
 
@@ -1025,6 +1077,12 @@ def render_dry_run_preview(preview: DryRunPreview) -> str:
     ``click.echo`` over it.
     """
     lines: list[str] = []
+    if preview.cloud_leg_skipped_reason:
+        lines.append(
+            f"  ⚠ cloud migration-source leg SKIPPED (unreadable, not absent): "
+            f"{preview.cloud_leg_skipped_reason} — fix or remove the cloud "
+            f"config if that source still matters"
+        )
     lines.append("Chroma -> service migration — DRY RUN (no data will be moved)")
     lines.append("")
     if not preview.groups:

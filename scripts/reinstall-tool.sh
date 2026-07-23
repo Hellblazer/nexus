@@ -75,10 +75,22 @@ if [[ ! -f "${SOURCE}/pyproject.toml" && -f "$RECEIPT" && "$FORCE" != "1" ]]; th
     fi
 fi
 
-if [[ -f "${SOURCE}/pyproject.toml" ]] && command -v nx >/dev/null 2>&1; then
+# nexus-zfutt: resolve the "installed" version from the TARGET venv this
+# invocation is about to reinstall (${VENV_DIR}/bin/nx, which honors
+# whatever $HOME is active — including an isolated sandbox HOME), never from
+# a bare `nx` lookup on the ambient $PATH. `tests/e2e/release-sandbox.sh`
+# activates a sandbox HOME + prepends its own bin dir to $PATH before
+# calling this script; on a fresh (or not-yet-populated) sandbox no `nx`
+# exists there yet, so a PATH-based lookup falls through to the REAL global
+# install and a lagging develop-branch pyproject version reads as a false
+# "downgrade" of an install this reinstall has nothing to do with. A missing
+# target-venv nx (nothing installed there yet) correctly skips the
+# comparison — there is nothing to downgrade.
+NX_BIN="${VENV_DIR}/bin/nx"
+if [[ -f "${SOURCE}/pyproject.toml" && -x "$NX_BIN" ]]; then
     SRC_VERSION="$(sed -n "s/^version *= *[\"']\([^\"']*\)[\"']/\1/p" "${SOURCE}/pyproject.toml" | head -1)"
     [[ -n "$SRC_VERSION" ]] || echo "warn: could not parse version from ${SOURCE}/pyproject.toml — downgrade guard inactive"
-    INSTALLED_VERSION="$(nx --version 2>/dev/null | sed -n 's/.*version \([0-9][0-9.]*\).*/\1/p' | head -1)"
+    INSTALLED_VERSION="$("$NX_BIN" --version 2>/dev/null | sed -n 's/.*version \([0-9][0-9.]*\).*/\1/p' | head -1)"
     if [[ -n "$SRC_VERSION" && -n "$INSTALLED_VERSION" ]]; then
         NEWEST="$(printf '%s\n%s\n' "$SRC_VERSION" "$INSTALLED_VERSION" | sort -V | tail -1)"
         if [[ "$SRC_VERSION" != "$INSTALLED_VERSION" && "$NEWEST" == "$INSTALLED_VERSION" && "$FORCE" != "1" ]]; then

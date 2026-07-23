@@ -6,13 +6,11 @@ from typing import Any
 
 import structlog
 
-from nexus.retry import _voyage_with_retry
 from nexus.types import SearchResult
 
 _log = structlog.get_logger()
 
 _EPSILON = 1e-9
-_RERANK_MODEL = "rerank-2.5"
 _FILE_SIZE_THRESHOLD = 30
 RG_FLOOR_SCORE = 0.5
 
@@ -369,133 +367,6 @@ def apply_topic_boost(
             r.distance = max(0.0, r.distance - _TOPIC_LINKED_BOOST)
 
     return results
-
-
-def rerank_results(
-    results: list[SearchResult],
-    query: str,
-    model: str = _RERANK_MODEL,
-    top_k: int | None = None,
-    *,
-    t3: Any = None,
-) -> list[SearchResult]:
-    """Rerank *results* by cross-encoder relevance for *query*.
-
-    RDR-109 Phase 3 mode-aware dispatch:
-
-    - Cloud mode: Voyage AI reranker (``rerank-2.5``). Prefers *t3*'s
-      ``_voyage_client`` attribute when *t3* carries one (test stubs,
-      the Phase-5 ETL's injected ``T3Database``). Production call
-      sites route through ``make_t3()`` -> ``HttpVectorClient``
-      (RDR-155 P4a.2), which carries no such attribute; in that case
-      the reranker falls back to ``nexus.db.get_voyage_client()``,
-      which constructs a Voyage client independently from configured
-      credentials (bead nexus-xbw0f). Only when NEITHER source yields
-      a client (``voyage_api_key`` genuinely unconfigured) does the
-      reranker skip with a warning.
-    - Local mode: ONNX cross-encoder via
-      :class:`nexus.cross_encoder.LocalCrossEncoder` (default
-      ``cross-encoder/ms-marco-MiniLM-L-6-v2``, ~80MB lazy download).
-
-    Returns results sorted by relevance score descending. Mutates
-    ``hybrid_score`` on each SearchResult in place. On any failure
-    (network, missing model, exception during scoring) falls back to
-    the input order, truncated to *top_k* if supplied. Failure is
-    logged at WARN; reranking is best-effort.
-    """
-    if not results:
-        return results
-
-    n = top_k or len(results)
-    documents = [r.content for r in results]
-
-    from nexus.config import is_local_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.config)
-
-    if is_local_mode():
-        return _rerank_local(results, query, documents, n)
-    return _rerank_cloud(results, query, documents, model, n, t3=t3)
-
-
-def _rerank_cloud(
-    results: list[SearchResult],
-    query: str,
-    documents: list[str],
-    model: str,
-    top_n: int,
-    *,
-    t3: Any = None,
-) -> list[SearchResult]:
-    """Cloud reranker via Voyage AI. Best-effort: any exception falls
-    back to the original order truncated to *top_n*.
-
-    The Voyage client is sourced from ``t3._voyage_client`` when *t3*
-    carries one (test stubs, injected ``T3Database``). Production
-    ``HttpVectorClient`` handles (RDR-155 P4a.2) carry no such
-    attribute, so this falls back to
-    :func:`nexus.db.get_voyage_client`, which constructs a client
-    directly from configured credentials (bead nexus-xbw0f). Only
-    when both sources yield ``None`` (``voyage_api_key`` genuinely
-    unconfigured) does the reranker log a warning and return the
-    input order unchanged.
-    """
-    client = getattr(t3, "_voyage_client", None) if t3 is not None else None
-    if client is None:
-        from nexus.db import get_voyage_client  # noqa: PLC0415 — circular-dep avoidance (nexus.db)
-        client = get_voyage_client()
-    if client is None:
-        _log.warning(
-            "rerank_skipped_no_voyage_client",
-            reason="cloud reranker requires either t3._voyage_client or a "
-                   "configured voyage_api_key credential; neither was available",
-        )
-        return results[:top_n]
-    try:
-        rerank_response = _voyage_with_retry(
-            client.rerank,
-            query=query,
-            documents=documents,
-            model=model,
-            top_k=top_n,
-        )
-    except Exception as exc:  # noqa: BLE001 — best-effort rerank; any failure logged and falls back to original order
-        _log.warning("rerank failed, returning original order", error=str(exc))
-        return results[:top_n]
-    reranked: list[SearchResult] = []
-    for item in rerank_response.results:
-        r = results[item.index]
-        r.hybrid_score = float(item.relevance_score)
-        reranked.append(r)
-    return reranked
-
-
-def _rerank_local(
-    results: list[SearchResult],
-    query: str,
-    documents: list[str],
-    top_n: int,
-) -> list[SearchResult]:
-    """Local reranker via ONNX cross-encoder. Best-effort: model
-    download failures or missing optional deps fall back to the
-    original order."""
-    try:
-        from nexus.cross_encoder import get_local_cross_encoder  # noqa: PLC0415 — circular-dep avoidance (nexus.cross_encoder)
-        scores = get_local_cross_encoder().score(query, documents)
-    except Exception as exc:  # noqa: BLE001 — best-effort local rerank; model/dep failure logged, falls back to original order
-        _log.warning(
-            "local rerank failed, returning original order",
-            error=str(exc),
-        )
-        return results[:top_n]
-    pairs = sorted(
-        zip(results, scores, strict=True),
-        key=lambda p: p[1],
-        reverse=True,
-    )
-    reranked: list[SearchResult] = []
-    for r, s in pairs[:top_n]:
-        r.hybrid_score = float(s)
-        reranked.append(r)
-    return reranked
 
 
 def round_robin_interleave(

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  nexus-27i0m / nexus-2oh5q: entitlements for the Developer-ID-signed
+  mac-arm64 nexus-service native image.
+
+  disable-library-validation is REQUIRED, not optional: the Hardened
+  Runtime (codesign - -options runtime, mandatory for notarization)
+  implicitly enables macOS Library Validation, which refuses any dylib
+  not signed by the same Team ID as the main executable. The engine
+  bundles onnxruntime-java's and DJL HF tokenizers' native dylibs as
+  native-image resources, extracts them at runtime, and System.load()s
+  them for local-mode embedding (Bge768Embedder/OnnxEmbedder — exercised
+  by every local install). Those dylibs carry Microsoft/DJL signatures
+  (or none, post-extraction) — without this entitlement the SIGNED binary
+  crashes exactly where the ad-hoc one worked (jnr-ffi#257 / zstd-jni#321
+  precedent). Notarization accepts this entitlement.
+
+  Runtime validation of the signed artifact (one real embed on mac-arm64
+  hardware) is nexus-2oh5q's gate before the first signed tag is trusted
+  — CI cannot exercise it (mac runners are Docker-less, smoke: false).
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>

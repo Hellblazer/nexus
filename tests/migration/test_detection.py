@@ -740,7 +740,7 @@ class TestMigrateToServiceCli:
 
         seen: dict[str, object] = {}
 
-        def _fake_open(local_path=None):
+        def _fake_open(local_path=None, skipped_out=None):
             seen["local_path"] = local_path
             return None, None
 
@@ -844,7 +844,7 @@ class TestMigrateToServiceRun:
         # these tests exercise result rendering, not the cost gate (covered in
         # test_migrate_cost_guardrail). A no-data classify → zero billed cost →
         # no prompt, so --yes below is belt-and-suspenders.
-        monkeypatch.setattr(migrate_cmd, "open_read_legs", lambda p: (None, None))
+        monkeypatch.setattr(migrate_cmd, "open_read_legs", lambda p, **kw: (None, None))
         monkeypatch.setattr(migrate_cmd, "_close_quietly", lambda c: None)
         if token is None:
             monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
@@ -1670,3 +1670,137 @@ class TestEra32Classification:
         truly_legacy, era32 = _probe_id_conformance(self._col(ids))
         assert truly_legacy == "short-id-16chars"
         assert era32 is True
+
+
+class TestOpenReadLegsDeadCloudCreds:
+    """nexus-dv708: a CONFIGURED-but-unreadable Chroma Cloud read leg
+    (revoked key -> ChromaError at CloudClient construction; unreachable
+    host -> ValueError) must degrade to leg-absent WITH a loud warning —
+    never propagate out of detection and hard-fail the whole upgrade walk
+    ('detect raised', rung FAILED, did not converge). The half-configured
+    RuntimeError stays the SILENT absent sentinel; the local leg's
+    corrupt-store propagation is untouched."""
+
+    @staticmethod
+    def _patch_legs(monkeypatch, cloud_raises: Exception) -> None:
+        import nexus.migration.chroma_read as cr
+
+        def _cloud_boom() -> object:
+            raise cloud_raises
+
+        def _local_absent(path) -> object:
+            raise FileNotFoundError(path)
+
+        monkeypatch.setattr(cr, "open_cloud_read_client", _cloud_boom)
+        monkeypatch.setattr(cr, "open_local_read_client", _local_absent)
+
+    def test_dead_cred_degrades_loud(self, monkeypatch) -> None:
+        from chromadb.errors import ChromaError
+
+        from nexus.migration.detection import open_read_legs
+
+        class _Auth(ChromaError):
+            pass
+
+        self._patch_legs(monkeypatch, _Auth("Forbidden"))
+        from structlog.testing import capture_logs
+        with capture_logs() as logs:
+            local, cloud = open_read_legs("/nonexistent")
+        assert local is None
+        assert cloud is None, "dead-cred cloud leg must degrade, not raise"
+        assert any(
+            e["event"] == "detection.cloud_read_leg_unreadable" for e in logs
+        ), "the degrade must be LOUD"
+
+    def test_unreachable_host_degrades_loud(self, monkeypatch) -> None:
+        from nexus.migration.detection import open_read_legs
+
+        self._patch_legs(
+            monkeypatch, ValueError("Could not connect to a Chroma server."),
+        )
+        from structlog.testing import capture_logs
+        with capture_logs() as logs:
+            _, cloud = open_read_legs("/nonexistent")
+        assert cloud is None
+        assert any(
+            e["event"] == "detection.cloud_read_leg_unreadable" for e in logs
+        )
+
+    def test_skip_reason_reaches_the_out_param_and_report(self, monkeypatch) -> None:
+        """nexus-p8nd5 dv708 fold: the skip is STRUCTURED, not just a WARN —
+        skipped_out carries leg->reason, and DetectionReport /
+        DryRunPreview expose cloud_leg_skipped_reason so non-stderr
+        consumers can tell skipped-unreadable from never-configured."""
+        from chromadb.errors import ChromaError
+
+        from nexus.migration.detection import (
+            build_dry_run_preview,
+            classify_collections,
+            open_read_legs,
+        )
+
+        class _Auth(ChromaError):
+            pass
+
+        self._patch_legs(monkeypatch, _Auth("Forbidden"))
+        skipped: dict = {}
+        local, cloud = open_read_legs("/nonexistent", skipped_out=skipped)
+        assert cloud is None
+        assert "cloud" in skipped and "Forbidden" in skipped["cloud"]
+
+        report = classify_collections(
+            local_client=None, cloud_client=None, voyage_key_present=False,
+            cloud_leg_skipped_reason=skipped.get("cloud"),
+        )
+        assert report.cloud_leg_skipped_reason == skipped["cloud"]
+        preview = build_dry_run_preview(report, rehashes_ids=True)
+        assert preview.cloud_leg_skipped_reason == skipped["cloud"]
+
+        from nexus.migration.detection import render_dry_run_preview
+        rendered = render_dry_run_preview(preview)
+        assert "SKIPPED (unreadable, not absent)" in rendered
+        assert "Forbidden" in rendered
+
+    def test_never_configured_report_has_no_skip_reason(self) -> None:
+        from nexus.migration.detection import classify_collections
+
+        report = classify_collections(
+            local_client=None, cloud_client=None, voyage_key_present=False,
+        )
+        assert report.cloud_leg_skipped_reason is None
+
+    def test_half_configured_sentinel_stays_silent(self, monkeypatch) -> None:
+        """Regression guard: the absent-leg RuntimeError sentinel must NOT
+        grow a warning — unconfigured boxes stay quiet."""
+        from nexus.migration.detection import open_read_legs
+
+        self._patch_legs(monkeypatch, RuntimeError("half-configured cloud read"))
+        from structlog.testing import capture_logs
+        with capture_logs() as logs:
+            _, cloud = open_read_legs("/nonexistent")
+        assert cloud is None
+        assert not any(
+            e["event"] == "detection.cloud_read_leg_unreadable" for e in logs
+        )
+
+
+class TestOpenReadLegsProgrammingErrorPropagates:
+    """nexus-dv708 negative arm: the cloud-leg narrowing catches ONLY
+    (ChromaError, ValueError) — a programming error (TypeError from a bad
+    refactor) must ESCAPE open_read_legs, never re-file itself as an
+    unreadable-leg warning."""
+
+    def test_typeerror_escapes(self, monkeypatch, tmp_path) -> None:
+        import nexus.migration.chroma_read as cr
+        from nexus.migration import detection
+
+        def _cloud_bug() -> object:
+            raise TypeError("bug in the leg, not a dead credential")
+
+        def _local_absent(path) -> object:
+            raise FileNotFoundError(path)
+
+        monkeypatch.setattr(cr, "open_cloud_read_client", _cloud_bug)
+        monkeypatch.setattr(cr, "open_local_read_client", _local_absent)
+        with pytest.raises(TypeError):
+            detection.open_read_legs(tmp_path / "nope")

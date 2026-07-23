@@ -1,10 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Local cross-encoder substrate for RDR-109 Phase 3.
+"""Local cross-encoder substrate — SALIENCE-ONLY since RDR-188.
 
 Provides ``LocalCrossEncoder`` — an ONNX-runtime cross-encoder for
-(query, document) salience scoring without PyTorch. Used by
-:mod:`nexus.scoring` for the local-mode rerank path and reserved for
-RDR-109 Phase 4 (salience calibration, nexus-2wc1).
+(query, document) salience scoring without PyTorch.
+
+DESIGN DECISION (RDR-188 P2.6, bead nexus-9o6y2.19 — recorded so a future
+reader knows this file survived on purpose): the RDR's "client
+cross_encoder.py retires with it" shorthand applied to the RERANK
+consumer only. This module's sole surviving consumer is
+:mod:`nexus.salience` (``extract_salient_sentences``, RDR-109 Phase 4) —
+a genuine NON-rerank use. The rerank caller (``scoring.rerank_results``
+/ ``_rerank_local``) is DELETED: local-mode reranking now runs
+SERVER-side in the engine's ms-marco cross-encoder (RDR-188 P1.3),
+requested via ``rerank=true`` on the search request. Do not re-grow a
+client rerank path on this substrate; migrate salience if this module
+ever becomes a burden.
 
 Stack:
 

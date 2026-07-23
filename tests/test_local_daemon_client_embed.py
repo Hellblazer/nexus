@@ -334,6 +334,44 @@ class TestFix3AllSkippedErrorEvent:
             "Fix 3: an empty (but not erroring) collection must NOT trigger all-skipped ERROR"
         )
 
+    def test_single_collection_call_dimension_skip_does_not_fire_error(self) -> None:
+        """nexus-9tsdf (GH #1113): search_engine.py's cross-corpus fan-out
+        (nexus-o51et) calls ``T3Database.search`` once PER collection —
+        ``collection_names`` is always a 1-item list from that caller. The
+        old ``queried_count > 0`` guard fired the misleading "does not
+        match ANY indexed collection" ERROR on EVERY search that touched a
+        single dimension-mismatched orphan, even when 79 of 80 collections
+        in the overall corpus searched fine. A single-collection call must
+        still emit the per-collection WARNING (the detail `nx doctor` /
+        `nx collection prune` build on) but must NOT fire the misleading
+        all-corpus-failed ERROR — that requires queried_count > 1 (a
+        caller that genuinely queried multiple collections in ONE call)."""
+        db, _ = self._db_with_dim_error_cols(["orphan"])
+
+        with patch.object(db, "_local_mode", False):
+            with patch("nexus.db.t3._log") as mock_log:
+                results = db.search(
+                    "test",
+                    collection_names=["knowledge__orphan__minilm-l6-v2-384__v1"],
+                )
+
+        assert results == []
+        error_calls = [
+            c for c in mock_log.error.call_args_list
+            if c.args and "search_all_collections_dimension_skipped" in str(c.args[0])
+        ]
+        assert not error_calls, (
+            "nexus-9tsdf regression: a 1-collection call must not fire the "
+            "all-corpus-skipped ERROR"
+        )
+        warning_calls = [
+            c for c in mock_log.warning.call_args_list
+            if c.args and "collection_dimension_mismatch_skipped" in str(c.args[0])
+        ]
+        assert warning_calls, (
+            "the per-collection WARNING must still fire -- never silent"
+        )
+
     def test_partial_dimension_skip_does_not_trigger_all_skipped_error(self) -> None:
         """Fix 3: one skipped + one successful collection must NOT trigger all-skipped ERROR."""
         mock_client = MagicMock()

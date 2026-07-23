@@ -311,7 +311,7 @@ def lint(paths: tuple[Path, ...], root: Path | None) -> None:
 #: Status words recognised in the README index status cell, so the cell can be
 #: rewritten without assuming a fixed column position.
 _KNOWN_STATUSES: frozenset[str] = frozenset({
-    "draft", "proposed", "accepted", "closed", "deferred", "superseded",
+    "draft", "open", "proposed", "accepted", "closed", "deferred", "superseded",
     "scrapped", "abandoned", "revised", "locked", "final",
 })
 
@@ -694,9 +694,14 @@ def preamble_rdr_show(args: tuple[str, ...]) -> None:
                     capture_output=True, text=True, timeout=10,
                 )
                 list_out = (list_result.stdout or "").strip()
+                # `nx memory list` rows are "[id] <project>/<title>  (…)" —
+                # match the title after the project slash, not line start
+                # (the ^-anchored form matched nothing, so every preamble
+                # reported "No research findings recorded" while T2 held
+                # them; caught on RDR-188, 2026-07-22).
                 research_lines = [
                     ln for ln in list_out.splitlines()
-                    if re.match(rf"^{t2_key}-research", ln)
+                    if re.search(rf"/{t2_key}-research", ln)
                 ]
                 print("\n".join(research_lines) if research_lines
                       else "No research findings recorded")
@@ -940,7 +945,10 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
         print("> **Usage**: `nx rdr preamble rdr-accept <id>`")
         print()
         rdrs = _preamble_get_all_rdrs(rdr_path)
-        draft_rdrs = [r for r in rdrs if r["status"].lower() == "draft"]
+        # GH #1409 (nexus-qsryj): `open` is an accepted pre-accept synonym for
+        # `draft` — some projects' RDR conventions (open -> accepted) never use
+        # draft at all; the rdr-gate PASSED check is the real acceptance guard.
+        draft_rdrs = [r for r in rdrs if r["status"].lower() in ("draft", "open")]
         print("### Draft RDRs (eligible for acceptance)")
         print()
         if draft_rdrs:
@@ -949,7 +957,7 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
             for r in draft_rdrs:
                 print(f"| {r['file']} | {r['title']} | {r['status']} | {r['rtype']} |")
         else:
-            print("No Draft RDRs found. Only Draft RDRs can be accepted.")
+            print("No draft/open RDRs found. Only pre-accept (draft or open) RDRs can be accepted.")
         return
 
     rdr_file = _preamble_find_rdr_file(rdr_path, id_match.group(0))
@@ -971,11 +979,13 @@ def preamble_rdr_accept(args: tuple[str, ...]) -> None:
     )
     print()
 
-    # Accepted status is allowed — agent handles idempotency
-    if current_status.lower() not in ("draft", "accepted"):
+    # Accepted status is allowed — agent handles idempotency. `open` is a
+    # pre-accept synonym for `draft` (GH #1409, nexus-qsryj): the rdr-gate
+    # PASSED lookup below is the real acceptance guard, not the status word.
+    if current_status.lower() not in ("draft", "open", "accepted"):
         print(
             f"> **BLOCKED**: RDR status is `{current_status}`. "
-            "Only Draft RDRs can be accepted."
+            "Only pre-accept (draft or open) RDRs can be accepted."
         )
         return
 
@@ -1384,9 +1394,14 @@ def preamble_rdr_research(args: tuple[str, ...]) -> None:
                     capture_output=True, text=True, timeout=10,
                 )
                 list_out = (list_result.stdout or "").strip()
+                # `nx memory list` rows are "[id] <project>/<title>  (…)" —
+                # match the title after the project slash, not line start
+                # (the ^-anchored form matched nothing, so every preamble
+                # reported "No research findings recorded" while T2 held
+                # them; caught on RDR-188, 2026-07-22).
                 research_lines = [
                     ln for ln in list_out.splitlines()
-                    if re.match(rf"^{t2_key}-research", ln)
+                    if re.search(rf"/{t2_key}-research", ln)
                 ]
                 print(
                     "\n".join(research_lines) if research_lines

@@ -121,12 +121,12 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     # super()._post/_get (RefreshableHttpStoreMixin._send), never
     # self._client directly.
 
-    def _post(self, path: str, body: dict[str, Any]) -> Any:
-        return super()._post(f"/v1/aspects/queue{path}", body)
+    def _post(self, path: str, body: dict[str, Any], *, idempotent: bool = True) -> Any:
+        return super()._post(f"/v1/aspects/queue{path}", body, idempotent=idempotent)
 
-    def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+    def _get(self, path: str, params: dict[str, Any] | None = None, *, idempotent: bool = True) -> Any:
         q = {k: str(v) for k, v in (params or {}).items() if v is not None}
-        return super()._get(f"/v1/aspects/queue{path}", q)
+        return super()._get(f"/v1/aspects/queue{path}", q, idempotent=idempotent)
 
     # ── Public API — mirrors AspectExtractionQueue ────────────────────────────
 
@@ -220,7 +220,11 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         Returns the claimed row as a QueueRow, or None when no pending row exists.
         The Java service uses FOR UPDATE SKIP LOCKED — no CAS retry loop needed.
         """
-        r = self._post("/claim_next", {})
+        # nexus-tjvgf: claiming is NOT retry-safe — a lost response
+        # after a successful server-side claim orphans the row
+        # in_progress until reclaim_stale. Single attempt; the worker
+        # loop owns recovery.
+        r = self._post("/claim_next", {}, idempotent=False)
         if not r or r.get("claimed") is False or not r.get("row"):
             return None
         return _body_to_queue_row(r["row"])
@@ -229,7 +233,8 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """Claim up to *limit* pending rows in FIFO order."""
         if limit <= 0:
             return []
-        r = self._post("/claim_batch", {"limit": limit})
+        # nexus-tjvgf: see claim_next — single attempt.
+        r = self._post("/claim_batch", {"limit": limit}, idempotent=False)
         # nexus-575kd: the Java service sends a BARE JSON ARRAY here
         # (AspectHandler.handleQueueClaimBatch -> writeValueAsString(rows)),
         # unlike claim_next which is enveloped. Accept the array directly;
@@ -279,11 +284,14 @@ class HttpAspectQueue(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         ``next_retry_at = now() + interval_seconds`` server-side (RDR-163 P1,
         nexus-ztpt6). Default 0 = ready immediately.
         """
+        # nexus-tjvgf: retry_count = retry_count + 1 server-side — a
+        # retried request double-increments the budget toward premature
+        # terminal mark_failed. Single attempt.
         self._post("/mark_retry", {
             "collection": collection,
             "source_path": source_path,
             "interval_seconds": interval_seconds,
-        })
+        }, idempotent=False)
 
     def reclaim_stale(self, timeout_seconds: int = 300) -> int:
         """Reset in_progress rows older than timeout back to 'pending'.

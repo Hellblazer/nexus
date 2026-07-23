@@ -1800,10 +1800,13 @@ def rollback_collections(
             {default_target} | {tgt or default_target for _new, tgt in remap.values()}
         )
         handles = {tgt: vector_client.get_or_create_collection(tgt) for tgt in involved}
-        # Reachability probe BEFORE any lookup: count() propagates service
-        # errors, unlike the collection handle's get(), which swallows them
-        # and returns empty — without this, an unreachable service would
-        # read as a clean "deleted 0". Summed across every involved target.
+        # Reachability probe BEFORE any lookup. Historical rationale: the
+        # collection handle's get() used to swallow transport errors to
+        # empty; since f138b3ef (nexus-ou4tb) it RAISES VectorServiceError,
+        # so an unreachable service now fails loud either way. The probe
+        # stays as belt-and-suspenders (cheap, and it pins target_before
+        # for the count-verification below). Summed across every involved
+        # target.
         target_before = sum(int(vector_client.count(tgt)) for tgt in involved)
         removed = 0
         source_ids = 0
@@ -1830,9 +1833,11 @@ def rollback_collections(
                     removed += len(present)
         if removed == 0 and source_ids > 0 and target_before > 0:
             # The target holds chunks and the source has chashes, yet not a
-            # single lookup resolved. The lookup layer swallows transport
-            # errors, so this state is indistinguishable from a failed read
-            # — refuse to report a clean zero (no-silent-fallback rule).
+            # single lookup resolved. (Historically the lookup layer
+            # swallowed transport errors; since f138b3ef it raises — this
+            # guard survives as defense-in-depth against any residual
+            # empty-but-shouldn't-be state, per the no-silent-fallback
+            # rule.)
             raise RuntimeError(
                 f"rollback for '{name}': target holds {target_before} chunk(s) "
                 f"and the source has {source_ids}, but no source chash resolved "
@@ -1842,9 +1847,10 @@ def rollback_collections(
                 "non-migrated chunks, exclude it via collections=[...]."
             )
         if removed:
-            # The delete leg of the collection handle ALSO swallows transport
-            # errors — verify the count actually moved by what we deleted
-            # (rollback runs in the same quiescent window as migration).
+            # Verify the count actually moved by what we deleted (rollback
+            # runs in the same quiescent window as migration). The delete
+            # leg raises on transport errors since f138b3ef; this count
+            # check remains as the end-to-end confirmation.
             target_after = sum(int(vector_client.count(tgt)) for tgt in involved)
             if target_after != target_before - removed:
                 raise RuntimeError(

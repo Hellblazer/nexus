@@ -75,7 +75,12 @@ SESSION_UNAUTHORIZED_MARKER: str = "HttpScratchStore: unauthorized T1 session (H
 # RDR-152 nexus-fjwxh: env-only resolution replaced by the centralized
 # resolver (env halves -> ServiceRegistry lease -> fail loud), so the
 # T2 service-mode default works wherever the supervisor is running.
-from nexus.db.service_endpoint import resolve_service_endpoint as _resolve_endpoint
+# nexus-bgh2j: construction-time resolution gets the SAME evidence-gated
+# bounded wait as the nine mixin adopters (call sites unchanged — only
+# the alias target moved to the gated resolver).
+from nexus.db.service_endpoint import (
+    resolve_service_endpoint_with_evidence_gate as _resolve_endpoint,
+)
 
 
 # ── HttpScratchStore ───────────────────────────────────────────────────────────

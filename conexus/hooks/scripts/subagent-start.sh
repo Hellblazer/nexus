@@ -164,7 +164,7 @@ cat <<'ORCH'
 |-----------|------|
 | Completion | SendMessage full result to main BEFORE idling: success/failure/blocked + live background task ids |
 | Inbox | Re-check inbox right before composing any hand-back; newest directive wins |
-| Git | Shared tree: NEVER git add/commit. Hand back diffs+paths; orchestrator commits pathspec-limited |
+| Git | Shared tree: NEVER git add/commit (hook-ENFORCED; linked worktrees exempt). Hand back diffs+paths; orchestrator commits pathspec-limited |
 ORCH
 
 # Serena + Context7 guidance injected by sn plugin (sn/hooks/scripts/mcp-inject.sh).

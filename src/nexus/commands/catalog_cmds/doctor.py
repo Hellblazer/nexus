@@ -1084,6 +1084,7 @@ def _run_name_vs_embed_dim() -> dict:
     checked = 0
     skipped_non_conformant = 0
     unknown_token: list[dict] = []
+    read_errors: list[dict] = []
 
     try:
         t3_db = make_t3()
@@ -1112,22 +1113,38 @@ def _run_name_vs_embed_dim() -> dict:
         if expected is None:
             unknown_token.append({"collection": name, "token": token})
             continue
-        try:
-            # nexus-pyv0e: sample via the dual-mode-safe public surface
-            # (get_collection + get_embeddings), not client._client — the
-            # service-mode HttpVectorClient has no ._client attribute, only
-            # local T3Database's raw chromadb client does.
-            coll = t3_db.get_collection(name)
-            sample = coll.get(limit=1)
-            ids = sample.get("ids") or []
-            if not ids:
-                empty.append(name)
-                continue
-            embs = t3_db.get_embeddings(name, ids[:1])
-        except Exception as exc:  # noqa: BLE001 — boundary catch; third-party raises undocumented types, handled gracefully
-            unknown_token.append(
-                {"collection": name, "token": token, "error": str(exc)}
+        probe_err: str | None = None
+        ids: list = []
+        embs = None
+        # ou4tb critique: ONE bounded retry so a single transient blip
+        # during a multi-collection run doesn't flap the whole check to
+        # FAIL; persistent unreadability still fails loud below.
+        for _attempt in (1, 2):
+            try:
+                # nexus-pyv0e: sample via the dual-mode-safe public surface
+                # (get_collection + get_embeddings), not client._client — the
+                # service-mode HttpVectorClient has no ._client attribute, only
+                # local T3Database's raw chromadb client does.
+                coll = t3_db.get_collection(name)
+                sample = coll.get(limit=1)
+                ids = sample.get("ids") or []
+                embs = t3_db.get_embeddings(name, ids[:1]) if ids else None
+                probe_err = None
+                break
+            except Exception as exc:  # noqa: BLE001 — boundary catch; third-party raises undocumented types, handled gracefully
+                probe_err = str(exc)
+        if probe_err is not None:
+            # nexus-ou4tb walk (MEDIUM): a read failure is NOT an
+            # "unrecognized model token" — burying it there let a fully
+            # unreadable/degraded store render PASS (checked=0), the
+            # confident-but-blind false all-clear this check exists to
+            # prevent. Read errors get their own bucket and FAIL the check.
+            read_errors.append(
+                {"collection": name, "token": token, "error": probe_err}
             )
+            continue
+        if not ids:
+            empty.append(name)
             continue
         if embs is None or len(embs) == 0:
             empty.append(name)
@@ -1143,12 +1160,13 @@ def _run_name_vs_embed_dim() -> dict:
             })
 
     return {
-        "pass": not mismatches,
+        "pass": not mismatches and not read_errors,
         "checked": checked,
         "mismatches": mismatches,
         "empty": empty,
         "skipped_non_conformant": skipped_non_conformant,
         "unknown_token": unknown_token,
+        "read_errors": read_errors,
     }
 
 
@@ -1190,6 +1208,14 @@ def _print_name_vs_embed_dim_text(report: dict) -> None:
         for u in report["unknown_token"][:20]:
             extra = f"  ({u['error']})" if u.get("error") else ""
             click.echo(f"    {u['collection']}  token={u['token']}{extra}")
+    if report.get("read_errors"):
+        click.echo(
+            f"\n  UNREADABLE collections ({len(report['read_errors'])}) — "
+            f"embedding probe failed; the store could not be verified "
+            f"(degraded vector service?):"
+        )
+        for u in report["read_errors"][:20]:
+            click.echo(f"    {u['collection']}  {u['error']}")
 
 
 def _check_bootstrap_status() -> dict:

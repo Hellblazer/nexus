@@ -5,7 +5,10 @@ import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from nexus.stranded_install import StrandedInstall
 
 import click
 import structlog
@@ -550,6 +553,24 @@ def catalog_path() -> Path:
     return nexus_config_dir() / "catalog"
 
 
+def detect_stranded_install_default() -> "StrandedInstall | None":
+    """Run the stranded-install detector (nexus-gynt2) against the real
+    path roots: config dir, local Chroma dir, catalog dir.
+
+    The single assembler every entry point (``nx init``, CLI startup, MCP
+    startup, ``nx doctor``) calls, so the path-resolution knowledge stays
+    here with the resolvers. Near-zero cost while the detector is
+    disarmed (``stranded_install.LAST_MIGRATION_CAPABLE is None`` — every
+    migration-capable release): the leaf short-circuits before touching
+    the filesystem.
+    """
+    from nexus.stranded_install import detect_stranded_install  # noqa: PLC0415 — leaf module, deferred to keep config import-light
+
+    return detect_stranded_install(
+        nexus_config_dir(), _default_local_path(), catalog_path()
+    )
+
+
 def is_local_mode() -> bool:
     """Return True if nexus should use the local T3 backend.
 
@@ -561,21 +582,107 @@ def is_local_mode() -> bool:
         local (nexus-3k43p: the legacy heuristic below mis-detected a greenfield
         managed user — service_url set, no chroma/voyage key — as local). This
         mirrors ``_resolve_init_mode``'s precedence (NX_LOCAL wins over
-        service_url, which wins over the legacy heuristic).
-      - Otherwise (legacy, pre-6.0): True when **either** CHROMA_API_KEY or
-        VOYAGE_API_KEY is absent.
+        service_url, which wins over the rest). Wins over ``pg_credentials``
+        too: a migrated local→managed install keeps the old file on disk.
+      - ``pg_credentials`` present in the config dir → True — the EXPLICIT
+        positive record that a local service was provisioned (``nx init``
+        local mode; the same signal health.py gates its service checks on).
+        RDR-188 P3.1 (nexus-9o6y2.13): mode comes from explicit install
+        state, not key inference.
+      - Otherwise (legacy, pre-service Chroma era): True when CHROMA_API_KEY
+        is absent. The voyage clause is DELETED (RDR-188 Gap 3): the client
+        no longer consumes the voyage key for anything, so its presence or
+        absence must have ZERO mode influence — a chroma-key-without-voyage
+        install is a half-configured CLOUD install whose missing key should
+        surface loudly, never a silent flip to local.
     """
     nx_local = os.environ.get("NX_LOCAL", "").strip()
     if nx_local == "1":
         return True
     if nx_local == "0":
         return False
-    if (get_credential("service_url") or "").strip():
+    # nexus-x3ugg: the EXPLICIT mode record (config.yml ``install.mode``,
+    # stamped by ``nx init`` / managed onboarding at resolution time). Record
+    # beats artifact inference; a configured service_url beats a stale
+    # ``local`` record (the endpoint is the operationally safer read,
+    # nexus-3k43p posture) — but that contradiction is surfaced LOUDLY.
+    recorded = str(
+        load_config().get("install", {}).get("mode", "") or ""
+    ).strip().lower()
+    service_url_set = bool((get_credential("service_url") or "").strip())
+    if service_url_set:
+        if recorded == "local":
+            _warn_mode_record_contradiction_once()
         return False
-    # Auto-detect (legacy): local mode when either cloud credential is missing
-    chroma_key = get_credential("chroma_api_key")
-    voyage_key = get_credential("voyage_api_key")
-    return not (chroma_key and voyage_key)
+    if recorded == "local":
+        return True
+    if recorded == "managed":
+        return False
+    from nexus.db.pg_provision import CREDENTIALS_FILENAME  # noqa: PLC0415 — leaf constant, deferred to keep config import-light
+
+    if (nexus_config_dir() / CREDENTIALS_FILENAME).is_file():
+        # AMBIGUOUS CORNER (reviewer Critical, T2 [21057]): a chroma key next
+        # to pg_credentials is indistinguishable between (a) a migrated
+        # local-service install retaining its legacy keys as the immutable
+        # migration source (the LIVE population — must resolve local; the
+        # deprecation window keeps those keys on disk until RDR-155 P4b) and
+        # (b) a former-local install hand-reconfigured to the deprecated
+        # direct-Chroma cloud posture with the stale file left behind.
+        # pg_credentials wins — (a) is current and common, (b) is a legacy
+        # corner with explicit escape hatches — but the resolution is
+        # surfaced loudly, never silent. This branch is now the FALLBACK for
+        # installs predating the install.mode record above (nexus-x3ugg):
+        # any init/onboarding completed after the record shipped resolves
+        # via the record and never reaches this inference.
+        if get_credential("chroma_api_key"):
+            _warn_ambiguous_mode_once()
+        return True
+    # Auto-detect (legacy): a Chroma-Cloud key marks a cloud install.
+    return not get_credential("chroma_api_key")
+
+
+_mode_record_contradiction_warned: bool = False
+
+
+def _warn_mode_record_contradiction_once() -> None:
+    """One-shot per process: install.mode=local recorded but a service_url is
+    configured — the endpoint wins; tell the user how to reconcile."""
+    global _mode_record_contradiction_warned
+    if _mode_record_contradiction_warned:
+        return
+    _mode_record_contradiction_warned = True
+    import structlog  # noqa: PLC0415 — deferred; config must stay import-light
+
+    structlog.get_logger(__name__).warning(
+        "mode_record_contradicts_service_url",
+        recorded="local",
+        resolution="managed (the configured service_url wins)",
+        remedy="re-run `nx init` to re-stamp the record, or remove the stale "
+               "service_url / set NX_LOCAL=1 if this box is genuinely local",
+    )
+
+
+_ambiguous_mode_warned: bool = False
+
+
+def _warn_ambiguous_mode_once() -> None:
+    """One-shot per process: pg_credentials + chroma key with no service_url
+    resolved LOCAL; name the overrides so a genuinely-cloud user can escape."""
+    global _ambiguous_mode_warned
+    if _ambiguous_mode_warned:
+        return
+    _ambiguous_mode_warned = True
+    import structlog  # noqa: PLC0415 — deferred; config must stay import-light
+
+    structlog.get_logger(__name__).warning(
+        "mode_ambiguous_resolved_local",
+        reason="pg_credentials (local service provisioned) and chroma_api_key "
+               "(legacy cloud) are both present with no service_url",
+        resolution="local (the provisioned service wins; legacy keys are "
+                   "treated as migration-source material)",
+        override="set NX_LOCAL=0 or configure a managed service_url if this "
+                 "install is genuinely cloud",
+    )
 
 
 # RDR-101 Phase 5c (nexus-o6aa.13) removed ``is_catalog_event_sourced``.

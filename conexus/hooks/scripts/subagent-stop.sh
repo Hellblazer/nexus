@@ -14,13 +14,25 @@
 # missing evidence; the file is an enabling allowlist, not a gate):
 #   NX_ORCH_STOP_GUARD off/unknown        -> exit 0        (explicit opt-out)
 #   NX_ORCH_STOP_GUARD unset              -> block         (DEFAULT-ON since P1.G, bead .15, 2026-07-17)
-#   stop_hook_active true                 -> exit 0        (21c once-guard round-trip)
+#   stop_hook_active true                 -> resolution stamp*, exit 0  (21c once-guard round-trip)
 #   agent not listed / sync / unnamed     -> exit 0        (sync stays unblockable by construction)
-#   BLOCKED row already present           -> exit 0        (once-guard belt)
+#   BLOCKED row already present           -> resolution stamp*, exit 0  (once-guard belt)
 #   transcript missing/not-a-file/junk    -> exit 0        (fail-open; scan crash too)
 #   assistant SendMessage in transcript   -> REPORTED row, exit 0   (report sent)
 #   otherwise, mode=observe               -> WOULDBLOCK row, exit 0   (.11 measurement)
 #   otherwise, mode=block                 -> BLOCKED row + {"decision":"block"}
+#
+# *POST-BLOCK RESOLUTION STAMP (nexus-hybv1): before this fix, a BLOCKED
+# row was terminal FOREVER — the once-guard exits recorded nothing, so an
+# agent that heeded the block and delivered its report was ledger-
+# indistinguishable from one that died silent. Forensics across bfbfa2fe +
+# b819e8f3 showed ALL 7 recorded blocks resolved with a real SendMessage
+# 17-26s after the nudge, yet the census read them as failures ("census
+# OVER-reports BLOCKED"). Both once-guard exits now re-scan the transcript
+# for an agent that owes and was already blocked, and append a REPORTED
+# row when the report has since appeared — so BLOCKED followed by REPORTED
+# reads as "guard worked" and a bare BLOCKED means genuinely unresolved.
+# Same fail-open posture: a failed re-scan stamps nothing and never blocks.
 #
 # REPORT CHECK SCOPE (documented narrowing): the RDR's ideal is "final
 # turn lacks a SendMessage-to-main". v1 checks for any SendMessage
@@ -73,24 +85,20 @@ print("\t".join(f.replace("\t", " ").replace("\n", " ") for f in fields))
 ' 2>/dev/null
 )"
 
-[[ "$STOP_ACTIVE" == "true" ]] && exit 0
-[[ -n "$SESSION_ID" && -n "$AGENT_ID" && -n "$AGENT_TYPE" ]] || exit 0
-
-expectations_sweep
-
-expectations_owes_report "$SESSION_ID" "$AGENT_ID" "$AGENT_TYPE" || exit 0
-expectations_already_blocked "$SESSION_ID" "$AGENT_ID" && exit 0
-
 # Report check: a SendMessage tool_use in an ASSISTANT message of the
 # agent transcript (scoped to assistant tool_use blocks so
 # SendMessage-shaped JSON the agent merely READ — nested in a
 # tool_result — never counts as its report). VERDICT-TOKEN plumbing: the
-# scan prints FOUND / NOTFOUND; only the literal NOTFOUND may block.
+# scan echoes FOUND / NOTFOUND; only the literal NOTFOUND may block.
 # Anything else — python3 missing, a crash (e.g. the path is a readable
-# DIRECTORY), empty output — fails OPEN, never through to the block
-# branch. Missing/non-regular/unreadable transcript -> fail open too.
-[[ -n "$TRANSCRIPT" && -f "$TRANSCRIPT" && -r "$TRANSCRIPT" ]] || exit 0
-VERDICT="$(python3 - "$TRANSCRIPT" <<'PYEOF' 2>/dev/null
+# DIRECTORY), empty output, missing/non-regular/unreadable transcript
+# (echoed as SKIP) — fails OPEN, never through to the block branch.
+_scan_verdict() {
+    if [[ -z "$TRANSCRIPT" || ! -f "$TRANSCRIPT" || ! -r "$TRANSCRIPT" ]]; then
+        echo "SKIP"
+        return 0
+    fi
+    python3 - "$TRANSCRIPT" <<'PYEOF' 2>/dev/null
 import json, sys
 
 def scan(path) -> bool:
@@ -123,7 +131,60 @@ try:
 except Exception:
     print("SCANERROR")
 PYEOF
-)"
+}
+
+# _stamp_resolution_if_reported <strength> — nexus-hybv1: called from the
+# two once-guard exits. If THIS agent owes a report, has a BLOCKED row,
+# and its transcript NOW shows a SendMessage, append a REPORTED row so
+# the ledger records the block as resolved. <strength> (4th TSV field;
+# inert to every exact-field reader, same tolerance as WOULDBLOCK) keeps
+# the causal evidence honest (critique 2026-07-22): "immediate" = the
+# block round-trip itself produced the report (strong: the guard
+# demonstrably worked); "later" = a subsequent stop found a report that
+# may have arrived for unrelated reasons (weak). Every failure path
+# stamps nothing (fail-open); never blocks, never exits non-zero.
+_stamp_resolution_if_reported() {
+    local strength="${1:-immediate}"
+    [[ -n "$SESSION_ID" && -n "$AGENT_ID" && -n "$AGENT_TYPE" ]] || return 0
+    expectations_owes_report "$SESSION_ID" "$AGENT_ID" "$AGENT_TYPE" || return 0
+    expectations_already_blocked "$SESSION_ID" "$AGENT_ID" || return 0
+    # Consecutive-duplicate guard (review 21032 finding 3): the scan is
+    # whole-transcript, so every re-stop of a resolved agent would re-find
+    # the same SendMessage and append another REPORTED forever. Stamp only
+    # when the agent's LAST terminal row is not already REPORTED — real
+    # interleavings (BLOCKED -> REPORTED) still record; idle re-stops of a
+    # resolved agent add nothing.
+    [[ "$(expectations_last_terminal "$SESSION_ID" "$AGENT_ID")" == "REPORTED" ]] && return 0
+    if [[ "$(_scan_verdict)" == "FOUND" ]]; then
+        _expectations_append "$(expectations_file "$SESSION_ID")" \
+            "$(_expectations_ts)"$'\tREPORTED\t'"$AGENT_ID"$'\t'"$strength"
+    fi
+    return 0
+}
+
+if [[ "$STOP_ACTIVE" == "true" ]]; then
+    # The immediate re-stop after a block round-trip: the agent was told
+    # to report and stop again. Record whether it did (nexus-hybv1).
+    _stamp_resolution_if_reported immediate
+    exit 0
+fi
+[[ -n "$SESSION_ID" && -n "$AGENT_ID" && -n "$AGENT_TYPE" ]] || exit 0
+
+expectations_sweep
+
+expectations_owes_report "$SESSION_ID" "$AGENT_ID" "$AGENT_TYPE" || exit 0
+if expectations_already_blocked "$SESSION_ID" "$AGENT_ID"; then
+    # A later stop of a previously-blocked agent (e.g. a multi-round
+    # teammate's round 2+): the once-guard still never re-blocks, but a
+    # report sent since the block is stamped so the ledger reflects the
+    # delivery outcome (nexus-hybv1 — before this, gh1414-critic's
+    # round-2/3 reports left no trace while the never-blocked reviewer
+    # accrued one REPORTED row per round).
+    _stamp_resolution_if_reported later
+    exit 0
+fi
+
+VERDICT="$(_scan_verdict)"
 case "$VERDICT" in
     FOUND)
         # .11 census raw material: EXPECT (dispatched) x REPORTED (scan

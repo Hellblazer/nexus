@@ -2,7 +2,8 @@
 title: "Storage-Service Supervisor Ownership Topology: Eliminate Session-Teardown Churn and launchd/Autostart Races"
 id: RDR-183
 type: Architecture
-status: draft
+status: closed
+closed_date: 2026-07-22
 priority: high
 author: Hal Hildebrand
 reviewed-by: ""
@@ -184,4 +185,47 @@ for the kick-else-spawn hybrid.
 
 ## Decision
 
-(Open — draft.)
+**CLOSED 2026-07-22 — dissolved/demoted; the topology decision is
+intentionally NOT made.** (Closure investigation: T2
+`nexus/rdr183-closure-investigation-2026-07-22`; full post-mortem:
+[`post-mortem/183-storage-service-supervisor-ownership-topology.md`](post-mortem/183-storage-service-supervisor-ownership-topology.md).)
+
+Rationale:
+
+1. **The founding TERM-attribution hypothesis was refuted by this RDR's own
+   research**: the client spawn already uses `start_new_session=True`
+   (`commands/daemon.py`, `ensure_storage_supervisor`), so session-teardown
+   pgroup TERM was never the churn mechanism.
+2. **Candidate 0 was the dominant fix and shipped as an ordinary defect fix**,
+   not a topology change: version-gating `_cycle_storage_service_to_current`
+   (`95014020`, nexus-f0pmd, 6.11.0) eliminated the ~20/day `stop_requested`
+   churn that motivated defect-1.
+3. **The client-visible gap closed independently**: lease-gap re-resolve +
+   single retry across the RefreshableHttpStoreMixin family (`89455bc1`,
+   nexus-7dsgp, verified live in 6.10.2), MCP never-crash-at-startup
+   (`80f914a5`), and the t2 stray-LaunchAgent cleanup (nexus-c0vby).
+4. The remaining purpose of this RDR — choosing among candidates 1–3 — was
+   explicitly gated on re-measuring residual severity after candidate 0.
+   Post-fix telemetry never re-escalated; the choice would now be a solution
+   without a measured problem. Iterate this RDR if telemetry re-escalates.
+
+Residual scope, filed as beads at close (none of it decision-sized):
+
+- **nexus-6bmph** — defect-3 proper: launchd steady-state respawn churn
+  (`KeepAlive=true` + `ThrottleInterval=30` vs `exit_if_process_unowned`
+  exit 0) plus the `com.nexus.service` stray/mode-mismatch cleanup (the
+  c0vby sibling), with live 2026-07-22 crash-loop evidence.
+- **nexus-3z8a7** — HttpTokenStore/HttpScratchStore construction-time
+  resolve gating (promised in §Constraints, previously never filed).
+- The 2026-07-19 nondeterministic lease absence stays dispositioned on
+  GH #1405 (instrumented `302aef6a`, watch-for-recurrence).
+
+GH #1405 closed with this RDR (its stay-open reason was "defect-1 root +
+defect-3 tracked in RDR-183"; defect-3's tracker is now nexus-6bmph).
+
+## Revision History
+
+- 2026-07-15: Drafted from the 6.10.1 shakeout (GH #1405 defects 1–3).
+- 2026-07-22: Closed from draft — dissolved/demoted per the closure
+  investigation; Decision section records the disposition; residuals
+  nexus-6bmph + nexus-3z8a7; post-mortem archived.

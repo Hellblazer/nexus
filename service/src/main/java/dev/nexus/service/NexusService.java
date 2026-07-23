@@ -210,6 +210,29 @@ public final class NexusService {
     public NexusService(int port, String token, DataSource dataSource,
                         EmbedderRouter docEmbedderRouter,
                         PgVectorRepository pgVectorRepository) throws IOException {
+        this(port, token, dataSource, docEmbedderRouter, pgVectorRepository, null);
+    }
+
+    /**
+     * Full constructor with the fused-rerank scorer (RDR-188, bead nexus-9o6y2.2).
+     *
+     * @param port              listen port; 0 for OS-assigned ephemeral (use in tests)
+     * @param token             expected bearer token
+     * @param dataSource        pooled connection source
+     * @param docEmbedderRouter optional EmbedderRouter for {@code /v1/vectors/embed}
+     *                          (may be null — /embed answers 503, the pinned
+     *                          absent-router invariant)
+     * @param pgVectorRepository optional PgVectorRepository serving every
+     *                          {@code /v1/vectors/*} storage/query route (may be null —
+     *                          those routes answer 503)
+     * @param reranker          optional scorer for the fused rerank stage on the search
+     *                          routes (may be null — {@code rerank=true} requests
+     *                          degrade LOUD with a structured {@code rerank_error})
+     */
+    public NexusService(int port, String token, DataSource dataSource,
+                        EmbedderRouter docEmbedderRouter,
+                        PgVectorRepository pgVectorRepository,
+                        dev.nexus.service.vectors.Reranker reranker) throws IOException {
         this.tenantScope = new TenantScope(dataSource);
 
         // Token lifecycle (RDR-152 bead nexus-gmiaf.32.2): resolve bearer→tenant
@@ -354,10 +377,10 @@ public final class NexusService {
         // repository for storage/query, embedder router for /embed) is absent — a
         // missing backend is a refusal, never a 404 that masquerades as an unknown route.
         var vectorCtx = server.createContext("/v1/vectors",
-                new VectorHandler(docEmbedderRouter, pgVectorRepository));
+                new VectorHandler(docEmbedderRouter, pgVectorRepository, reranker));
         vectorCtx.getFilters().addAll(authFilter);
-        log.info("event=vector_endpoints_registered has_embed_router={} has_pgvector={}",
-                docEmbedderRouter != null, pgVectorRepository != null);
+        log.info("event=vector_endpoints_registered has_embed_router={} has_pgvector={} has_reranker={}",
+                docEmbedderRouter != null, pgVectorRepository != null, reranker != null);
 
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
 

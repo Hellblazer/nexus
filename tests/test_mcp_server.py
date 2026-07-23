@@ -41,6 +41,7 @@ from nexus.mcp_server import (
     scratch,
     scratch_manage,
     search,
+    store_delete,
     store_get,
     store_list,
     store_put,
@@ -669,6 +670,182 @@ def test_collections_cache_ttl_expiry_refetches():
 
 
 # ── Pagination ───────────────────────────────────────────────────────────────
+
+
+def _fresh_page_cache(monkeypatch):
+    from nexus.mcp import core as mcp_core
+    mcp_core._reset_page_cache_for_tests()
+
+
+def test_page_turn_serves_from_lookahead_without_reembedding(monkeypatch):
+    """nexus-e4srp: page 1 over-fetches a lookahead window; page 2 of the SAME
+    retrieval identity serves from it — ONE engine call (one server-side query
+    embed) for the page-turn burst, no refetch amplification."""
+    from nexus.mcp import core as mcp_core
+    _fresh_page_cache(monkeypatch)
+    _mock_t3([{"name": "knowledge__test", "count": 9}])
+    calls: list[int] = []
+
+    def fake(query, collections, n_results, t3, where=None, **kw):
+        calls.append(n_results)
+        return [
+            SearchResult(id=f"r{i}", content=f"c{i}", distance=0.1 + i * 0.01,
+                         collection="knowledge__test", metadata={})
+            for i in range(min(n_results, 9))
+        ]
+
+    with patch("nexus.search_engine.search_cross_corpus", fake):
+        page1 = search(query="q", corpus="knowledge__test", limit=2, offset=0)
+        page2 = search(query="q", corpus="knowledge__test", limit=2, offset=2)
+
+    assert len(calls) == 1, f"page-turn must reuse the lookahead fetch, got {calls}"
+    assert calls[0] >= 4  # the first fetch covered at least two pages
+    assert "r0" in page1 and "r2" in page2 and "r0" not in page2
+
+
+def test_page_cache_misses_on_different_query(monkeypatch):
+    from nexus.mcp import core as mcp_core
+    _fresh_page_cache(monkeypatch)
+    _mock_t3([{"name": "knowledge__test", "count": 5}])
+    calls: list[str] = []
+
+    def fake(query, collections, n_results, t3, where=None, **kw):
+        calls.append(query)
+        return [SearchResult(id="a", content="c", distance=0.1,
+                             collection="knowledge__test", metadata={})]
+
+    with patch("nexus.search_engine.search_cross_corpus", fake):
+        search(query="first", corpus="knowledge__test", limit=2, offset=0)
+        search(query="second", corpus="knowledge__test", limit=2, offset=0)
+
+    assert calls == ["first", "second"]
+
+
+def test_page_cache_expires_on_ttl(monkeypatch):
+    from nexus.mcp import core as mcp_core
+    _fresh_page_cache(monkeypatch)
+    _mock_t3([{"name": "knowledge__test", "count": 5}])
+    t = {"now": 1000.0}
+    monkeypatch.setattr(mcp_core.time, "monotonic", lambda: t["now"])
+    calls: list[int] = []
+
+    def fake(query, collections, n_results, t3, where=None, **kw):
+        calls.append(1)
+        return [SearchResult(id=f"r{i}", content="c", distance=0.1 + i * 0.01,
+                             collection="knowledge__test", metadata={})
+                for i in range(6)]
+
+    with patch("nexus.search_engine.search_cross_corpus", fake):
+        search(query="q", corpus="knowledge__test", limit=2, offset=0)
+        t["now"] += mcp_core._PAGE_CACHE_TTL_S + 1
+        search(query="q", corpus="knowledge__test", limit=2, offset=2)
+
+    assert len(calls) == 2, "an expired cache entry must refetch"
+
+
+def test_page_beyond_lookahead_refetches_wider(monkeypatch):
+    from nexus.mcp import core as mcp_core
+    _fresh_page_cache(monkeypatch)
+    _mock_t3([{"name": "knowledge__test", "count": 50}])
+    calls: list[int] = []
+
+    def fake(query, collections, n_results, t3, where=None, **kw):
+        calls.append(n_results)
+        return [SearchResult(id=f"r{i}", content="c", distance=0.1 + i * 0.001,
+                             collection="knowledge__test", metadata={})
+                for i in range(n_results)]
+
+    with patch("nexus.search_engine.search_cross_corpus", fake):
+        search(query="q", corpus="knowledge__test", limit=2, offset=0)   # covers ~3 pages
+        search(query="q", corpus="knowledge__test", limit=2, offset=20)  # beyond lookahead
+
+    assert len(calls) == 2
+    assert calls[1] >= 22  # refetched wide enough for the requested window
+
+def test_store_put_invalidates_page_cache(t3, monkeypatch):
+    """Batch-f1655f55 critique fold: a write inside the TTL window must not
+    leave a same-identity page burst serving pre-write results — store_put
+    clears the page cache so the next search refetches."""
+    from nexus.mcp import core as mcp_core
+    _fresh_page_cache(monkeypatch)
+    store_put(content="seed doc", collection="knowledge", title="cache-seed")
+    calls: list[int] = []
+
+    def fake(query, collections, n_results, t3, where=None, **kw):
+        calls.append(1)
+        return [SearchResult(id=f"r{i}", content="c", distance=0.1 + i * 0.01,
+                             collection="knowledge__knowledge", metadata={})
+                for i in range(6)]
+
+    with patch("nexus.search_engine.search_cross_corpus", fake):
+        search(query="q", corpus="knowledge", limit=2, offset=0)
+        search(query="q", corpus="knowledge", limit=2, offset=2)
+        assert len(calls) == 1, "page-turn burst must serve from cache pre-write"
+        store_put(content="written mid-burst", collection="knowledge",
+                  title="cache-inval")
+        search(query="q", corpus="knowledge", limit=2, offset=2)
+
+    assert len(calls) == 2, (
+        "a store_put must invalidate the page cache — a repeat search "
+        "served stale pre-write results"
+    )
+
+
+def test_store_delete_invalidates_page_cache(t3, monkeypatch):
+    from nexus.mcp import core as mcp_core
+    _fresh_page_cache(monkeypatch)
+    put_result = store_put(
+        content="delete me", collection="knowledge", title="cache-del"
+    )
+    real_doc_id = put_result.split("Stored: ")[1].split()[0]
+    calls: list[int] = []
+
+    def fake(query, collections, n_results, t3, where=None, **kw):
+        calls.append(1)
+        return [SearchResult(id=f"r{i}", content="c", distance=0.1 + i * 0.01,
+                             collection="knowledge__knowledge", metadata={})
+                for i in range(6)]
+
+    with patch("nexus.search_engine.search_cross_corpus", fake):
+        search(query="q", corpus="knowledge", limit=2, offset=0)
+        assert len(calls) == 1
+        store_delete(doc_id=real_doc_id, collection="knowledge")
+        search(query="q", corpus="knowledge", limit=2, offset=0)
+
+    assert len(calls) == 2, "a store_delete must invalidate the page cache"
+
+
+def test_cached_zero_hit_preserves_threshold_diag(monkeypatch):
+    """Batch-f1655f55 critique fold: a repeat zero-hit inside the TTL must
+    keep the nexus-uro6c closest-dropped-candidate hint — the cache stores
+    the diagnostics alongside the (empty) result list, so the cached path
+    cannot degrade the message to a bare 'No results.'."""
+    from nexus.search_engine import SearchDiagnostics
+    _fresh_page_cache(monkeypatch)
+    _mock_t3([{"name": "knowledge__test", "count": 5}])
+    calls: list[int] = []
+
+    def fake(query, collections, n_results, t3, where=None,
+             diagnostics_out=None, **kw):
+        calls.append(1)
+        if diagnostics_out is not None:
+            d = SearchDiagnostics()
+            d.per_collection["knowledge__test"] = (3, 3, 0.4, 0.55)
+            d.total_dropped = 3
+            d.total_raw = 3
+            diagnostics_out.append(d)
+        return []
+
+    with patch("nexus.search_engine.search_cross_corpus", fake):
+        first = search(query="q", corpus="knowledge__test", limit=2, offset=0)
+        second = search(query="q", corpus="knowledge__test", limit=2, offset=0)
+
+    assert len(calls) == 1, "the repeat zero-hit must serve from cache"
+    assert "dropped at distance" in first, "uncached path must carry the hint"
+    assert second == first, (
+        "cached zero-hit lost the threshold diagnostic (uro6c hint)"
+    )
+
 
 def test_search_pagination_first_page(t3):
     coll = "knowledge__pag__voyage-context-3__v1"
