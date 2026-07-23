@@ -194,13 +194,22 @@ def _active_embedding_dim(t3: Any) -> tuple[int | None, str]:
       :class:`HttpVectorClient` handle, RDR-155 P4a.2 — this is what
       ``make_t3()`` returns unconditionally today, in BOTH local and cloud
       mode): trust its authoritative ``GET /version`` probe. ``"voyage"``
-      -> 1024d. ``"onnx-local"`` -> the dim of the locally-configured
-      model (``local.embed_model``, the same value the service itself was
-      provisioned with — nexus-9xfx5). A failed/unresolved probe (``None``)
-      returns ``(None, "unknown")`` rather than guessing.
+      -> 1024d. ``"onnx-local"`` -> the dim of the SERVICE's provisioned
+      embedder. A failed/unresolved probe (``None``) returns
+      ``(None, "unknown")`` rather than guessing.
     * ``t3`` has no ``embedding_mode`` (a raw :class:`T3Database` — test /
       migration-ETL substitute): its own ``_local_mode`` flag is
       authoritative and never ambiguous.
+
+    The onnx-local dim comes from the persisted ``local.embed_model``
+    choice (``local_embed_model_choice()``) — the model ``nx init``
+    provisioned the SERVICE with — falling back to the client-EF resolver
+    (``local_model_token()``) only when no choice was ever recorded
+    (legacy box). The client-EF resolver alone is WRONG here: without the
+    ``[local]`` extra it deliberately tier-0-falls-back to minilm-384
+    while T3 embeds bge-768 server-side (fresh-install MVV regression,
+    6.17.0 prep — every healthy 768d collection on a virgin box was
+    flagged as an orphan).
     """
     embedding_mode = getattr(t3, "embedding_mode", None)
     if callable(embedding_mode):
@@ -211,19 +220,27 @@ def _active_embedding_dim(t3: Any) -> tuple[int | None, str]:
         if family == "voyage":
             return 1024, "voyage"
         if family == "onnx-local":
-            from nexus.db.local_ef import local_model_token  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-
-            token = local_model_token()
+            token = _service_local_token()
             return _dim_for_model_token(token), token
         return None, "unknown"
 
     local_mode = getattr(t3, "_local_mode", True)
     if local_mode:
-        from nexus.db.local_ef import local_model_token  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-
-        token = local_model_token()
+        token = _service_local_token()
         return _dim_for_model_token(token), token
     return 1024, "voyage"
+
+
+def _service_local_token() -> str:
+    """Token of the local-mode SERVICE embedder: the persisted
+    ``local.embed_model`` choice first, client-EF auto-select fallback."""
+    from nexus.config import local_embed_model_choice  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.db.local_ef import _MODEL_TOKENS, local_model_token  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    choice = local_embed_model_choice()
+    if choice in _MODEL_TOKENS:
+        return _MODEL_TOKENS[choice]
+    return local_model_token()
 
 
 def _find_dimension_mismatched_collections(

@@ -1081,3 +1081,48 @@ def test_reembed_skips_empty_documents(
     assert result.exit_code == 0, result.output
     assert "re-embedded 1" in result.output
     assert "skipped 1" in result.output
+
+
+def test_prune_service_mode_bge_config_without_fastembed_resolves_service_dim(
+    runner, env_creds, mock_db, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fresh-install MVV regression (6.17.0 prep): on a service-mode box the
+    persisted local.embed_model (the SERVICE's embedder, bge-768) is the
+    active dim — NOT local_model_token(), which resolves the client Python
+    EF and deliberately falls back to minilm-384 when the [local] extra is
+    absent (T3 embeds server-side; the client EF only serves T1). Using the
+    EF token flagged every healthy bge-768 collection as an orphan on a
+    virgin box."""
+    mock_db.embedding_mode.return_value = "onnx-local"
+    mock_db.list_collections.return_value = [
+        {"name": "knowledge__knowledge__bge-base-en-v15-768__v1", "count": 1},
+    ]
+    monkeypatch.setattr(
+        "nexus.config.local_embed_model_choice", lambda: "BAAI/bge-base-en-v1.5",
+    )
+    # The client-EF resolver reports minilm (no fastembed) — must NOT win.
+    monkeypatch.setattr(
+        "nexus.db.local_ef.local_model_token", lambda: "minilm-l6-v2-384",
+    )
+    result = _invoke(runner, mock_db, ["prune"])
+    assert result.exit_code == 0, result.output
+    assert "No dimension-mismatched collections found" in result.output
+    assert "bge-base-en-v15-768" in result.output
+
+
+def test_prune_no_recorded_choice_falls_back_to_ef_token(
+    runner, env_creds, mock_db, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy box with no local.embed_model record: the EF auto-select is
+    the only signal and remains authoritative."""
+    mock_db.embedding_mode.return_value = "onnx-local"
+    mock_db.list_collections.return_value = [
+        {"name": _ORPHAN, "count": 1},
+    ]
+    monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: None)
+    monkeypatch.setattr(
+        "nexus.db.local_ef.local_model_token", lambda: "minilm-l6-v2-384",
+    )
+    result = _invoke(runner, mock_db, ["prune"])
+    assert result.exit_code == 0, result.output
+    assert "No dimension-mismatched collections found" in result.output
