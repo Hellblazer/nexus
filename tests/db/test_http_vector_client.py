@@ -1640,14 +1640,56 @@ class TestGatewayTransientRetry:
 # ── nexus-nf3n7: per-collection upsert paging (CCE 504 avoidance) ──────────────
 
 
-def test_per_collection_chunk_cap_values():
-    from nexus.db.http_vector_client import per_collection_chunk_cap
+def test_per_collection_chunk_cap_values(monkeypatch):
+    """nexus-w3hzw: the 64 CCE cap is VOYAGE-cloud-specific (slow CCE embed
+    behind the managed 30s gateway). Keyed on the SERVING embedder family:
+    unknown/voyage keeps the conservative split; onnx-local flushes every
+    prefix at 300 (same embedder as code; no gateway — the 64 cap only
+    multiplied round trips 3-5x, oub13 profile run 2)."""
+    from nexus.db import http_vector_client as hvc
 
-    assert per_collection_chunk_cap("docs__o__onnx-x__v1") == 64
-    assert per_collection_chunk_cap("knowledge__x__onnx-x__v1") == 64
-    assert per_collection_chunk_cap("rdr__x__onnx-x__v1") == 64
-    assert per_collection_chunk_cap("code__x__onnx-x__v1") == 300
-    assert per_collection_chunk_cap("weird-no-prefix") == 300
+    # Unknown serving mode (no probe answer) -> conservative voyage split.
+    monkeypatch.setattr(hvc, "_serving_embedding_mode", lambda: None)
+    assert hvc.per_collection_chunk_cap("docs__o__x__v1") == 64
+    assert hvc.per_collection_chunk_cap("knowledge__x__x__v1") == 64
+    assert hvc.per_collection_chunk_cap("rdr__x__x__v1") == 64
+    assert hvc.per_collection_chunk_cap("code__x__x__v1") == 300
+    assert hvc.per_collection_chunk_cap("weird-no-prefix") == 300
+
+    # Voyage serving -> identical conservative split.
+    monkeypatch.setattr(hvc, "_serving_embedding_mode", lambda: "voyage")
+    assert hvc.per_collection_chunk_cap("docs__o__x__v1") == 64
+    assert hvc.per_collection_chunk_cap("code__x__x__v1") == 300
+
+    # Local bge serving -> every prefix at the 300 cap.
+    monkeypatch.setattr(hvc, "_serving_embedding_mode", lambda: "onnx-local")
+    assert hvc.per_collection_chunk_cap("docs__o__x__v1") == 300
+    assert hvc.per_collection_chunk_cap("knowledge__x__x__v1") == 300
+    assert hvc.per_collection_chunk_cap("rdr__x__x__v1") == 300
+    assert hvc.per_collection_chunk_cap("code__x__x__v1") == 300
+
+
+def test_serving_embedding_mode_reads_singleton_best_effort(monkeypatch):
+    """The helper consults the process singleton's memoized /version probe;
+    no client (or a probe failure) is None — never raises, never constructs."""
+    from nexus.db import http_vector_client as hvc
+
+    monkeypatch.setattr(hvc, "_vector_client_instance", None)
+    assert hvc._serving_embedding_mode() is None
+
+    class _C:
+        def embedding_mode(self):
+            return "onnx-local"
+
+    monkeypatch.setattr(hvc, "_vector_client_instance", _C())
+    assert hvc._serving_embedding_mode() == "onnx-local"
+
+    class _Boom:
+        def embedding_mode(self):
+            raise RuntimeError("probe exploded")
+
+    monkeypatch.setattr(hvc, "_vector_client_instance", _Boom())
+    assert hvc._serving_embedding_mode() is None
 
 
 class TestUpsertChunksPaging:

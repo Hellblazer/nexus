@@ -288,7 +288,32 @@ def per_collection_chunk_cap(collection: str) -> int:
     not taken here without that measurement. Code (voyage-code-3) sustains 300.
     """
     prefix = collection.split("__", 1)[0]
-    return _CCE_UPSERT_CHUNK_CAP if prefix in _CCE_COLLECTION_PREFIXES else _CODE_UPSERT_CHUNK_CAP
+    if prefix not in _CCE_COLLECTION_PREFIXES:
+        return _CODE_UPSERT_CHUNK_CAP
+    # nexus-w3hzw (oub13 profile run 2): the 64 cap exists for VOYAGE CCE —
+    # slow server-side contextual embedding behind the managed 30s gateway.
+    # When the engine reports it serves onnx-local (bge embeds every prefix,
+    # no gateway in the topology), the CCE-prefixed collections sustain the
+    # same 300 the code prefix does; keeping them at 64 only multiplied
+    # round trips 3-5x. Unknown mode (no probe answer yet) stays on the
+    # conservative voyage split — never widen a batch on a guess.
+    if _serving_embedding_mode() == "onnx-local":
+        return _CODE_UPSERT_CHUNK_CAP
+    return _CCE_UPSERT_CHUNK_CAP
+
+
+def _serving_embedding_mode() -> str | None:
+    """The serving engine's embedder family via the process-singleton client's
+    memoized ``/version`` probe (RDR-188 P3.2). Best-effort: no singleton yet,
+    or a probe failure, is ``None`` — this helper never constructs a client
+    and never raises (a cap decision must not fail an upsert)."""
+    client = _vector_client_instance
+    if client is None:
+        return None
+    try:
+        return client.embedding_mode()
+    except Exception:  # noqa: BLE001 — cap heuristic is best-effort; unknown falls back conservative
+        return None
 
 
 def _wait_for_lease_republication() -> None:

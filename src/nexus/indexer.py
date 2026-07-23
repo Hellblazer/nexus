@@ -2543,6 +2543,18 @@ def _prune_deleted_files(
 # ── Main indexing pipeline ───────────────────────────────────────────────────
 
 
+def _fmt_duration(seconds: float) -> str:
+    """Compact human duration: 42s / 1m30s / 2h05m (nexus-zedf7)."""
+    s = int(round(seconds))
+    if s < 60:
+        return f"{s}s"
+    m, s = divmod(s, 60)
+    if m < 60:
+        return f"{m}m{s:02d}s" if s else f"{m}m"
+    h, m = divmod(m, 60)
+    return f"{h}h{m:02d}m"
+
+
 def _drain_batcher_with_markers(
     batcher: "ChunkBatcher",
     on_phase: Callable[[str], None] | None,
@@ -2572,10 +2584,15 @@ def _drain_batcher_with_markers(
         on_phase(f"Flushing {' + '.join(parts)}…")
 
         def progress(done: int, total: int) -> None:
-            on_phase(
-                f"  flush {done}/{total} complete "
-                f"({time.monotonic() - t0:.1f}s)"
-            )
+            # nexus-zedf7: rolling rate + projected remaining, so an hour of
+            # legitimate server-side embedding never reads as a hang.
+            elapsed = time.monotonic() - t0
+            line = f"  flush {done}/{total} complete ({elapsed:.1f}s"
+            if 0 < done < total and elapsed > 0:
+                rate = done / elapsed
+                line += f", {rate * 60:.1f} flushes/min"
+                line += f", ~{_fmt_duration((total - done) / rate)} remaining"
+            on_phase(line + ")")
     flushed = batcher.drain(on_progress=progress)
     if on_phase is not None and busy:
         on_phase(
