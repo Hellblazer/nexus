@@ -1979,6 +1979,70 @@ def test_index_markdown_post_hook_updates_chunk_count_after_preflight(
     )
 
 
+def test_frontmatter_title_year_reach_catalog_despite_preflight(
+    tmp_path, monkeypatch,
+):
+    """nexus-ivzw8: the pre-flight registers with title=stem; the post-hook's
+    update branch previously wrote only chunk_count/mtime — so frontmatter
+    title/year NEVER reached the catalog on the standard path. The fix
+    threads the parsed frontmatter into the pre-flight AND stem-guard
+    backfills on update; the row must carry the frontmatter values."""
+    from nexus.catalog.catalog import Catalog
+
+    md = tmp_path / "widget-spec.md"
+    md.write_text(
+        "---\ntitle: The Widget Specification\ncreated: 2026-03-14\n---\n\n"
+        "# Widgets\n\nBody.\n"
+    )
+    cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
+
+    n = index_markdown(md, corpus="ivzw8-title", t3=t3)
+    assert n > 0
+
+    cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+    rows = cat._db.execute(
+        "SELECT title, year FROM documents WHERE file_path = ?",
+        (str(md.resolve()),),
+    ).fetchall()
+    assert len(rows) == 1
+    title, year = rows[0]
+    assert title == "The Widget Specification", (
+        f"catalog kept the stem title {title!r} — frontmatter never applied "
+        f"(nexus-ivzw8)"
+    )
+    assert year == 2026
+
+
+def test_curated_title_survives_reindex(tmp_path, monkeypatch):
+    """The stem-guard: a curated (non-stem) catalog title must NEVER be
+    clobbered by a re-index — backfill applies only to the stem default."""
+    from nexus.catalog.catalog import Catalog
+
+    md = tmp_path / "notes.md"
+    md.write_text("---\ntitle: Frontmatter Title\n---\n\n# N\n\nBody.\n")
+    cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
+
+    assert index_markdown(md, corpus="ivzw8-curated", t3=t3) > 0
+
+    cat = Catalog(cat_dir, cat_dir / ".catalog.db")
+    row = cat._db.execute(
+        "SELECT tumbler FROM documents WHERE file_path = ?",
+        (str(md.resolve()),),
+    ).fetchone()
+    cat.update(row[0], title="Hand-Curated Title")
+
+    # touch content so the re-index actually re-runs the hook
+    md.write_text("---\ntitle: Frontmatter Title\n---\n\n# N\n\nBody v2.\n")
+    assert index_markdown(md, corpus="ivzw8-curated", t3=t3) > 0
+
+    cat2 = Catalog(cat_dir, cat_dir / ".catalog.db")
+    title = cat2._db.execute(
+        "SELECT title FROM documents WHERE file_path = ?",
+        (str(md.resolve()),),
+    ).fetchone()[0]
+    assert title == "Hand-Curated Title"
+
+
 def test_preflight_registration_idempotent_on_staleness_skip(
     sample_md, tmp_path, monkeypatch,
 ):
