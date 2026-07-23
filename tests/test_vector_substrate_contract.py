@@ -135,6 +135,56 @@ class TestWriteSemantics:
             assert type(got[key]) is type(value)
 
 
+class TestUpdateSemantics:
+    """The T1 scratch surface: batched ``col.update`` for access-count
+    telemetry (t1.py search phase 2 + flag/unflag). Oracle-verified
+    2026-07-23: metadata MERGES at key level; unsupplied fields are
+    preserved; unknown ids are silently skipped."""
+
+    def test_metadata_only_update_merges_and_preserves(self, substrate) -> None:
+        col = _make(substrate)
+        col.add(ids=["a"], embeddings=[_E1], documents=["orig doc"],
+                metadatas=[{"x": 1, "y": "keep"}])
+        col.update(ids=["a"], metadatas=[{"x": 2}])
+        got = col.get(ids=["a"], include=["documents", "metadatas"])
+        assert got["documents"] == ["orig doc"]
+        assert got["metadatas"][0] == {"x": 2, "y": "keep"}
+        # embedding untouched: still nearest to _E1 (unit vector, so
+        # normalization is identity on both substrates)
+        res = col.query(query_embeddings=[_E1], n_results=1)
+        assert res["ids"][0] == ["a"]
+        assert res["distances"][0][0] == pytest.approx(0.0, abs=1e-6)
+
+    def test_document_and_embedding_update_preserves_metadata(self, substrate) -> None:
+        col = _make(substrate)
+        col.add(ids=["b"], embeddings=[_E2], documents=["old"],
+                metadatas=[{"m": 1}])
+        col.update(ids=["b"], documents=["new"], embeddings=[_E1])
+        got = col.get(ids=["b"], include=["documents", "metadatas"])
+        assert got["documents"] == ["new"]
+        assert got["metadatas"][0] == {"m": 1}
+        res = col.query(query_embeddings=[_E1], n_results=1)
+        assert res["distances"][0][0] == pytest.approx(0.0, abs=1e-6)
+
+    def test_update_unknown_id_is_silent_noop(self, substrate) -> None:
+        col = _make(substrate)
+        col.add(ids=["a"], embeddings=[_E1], documents=["d"])
+        col.update(ids=["missing"], metadatas=[{"z": 9}])
+        assert col.get(ids=["missing"])["ids"] == []
+        assert col.count() == 1
+
+    def test_batched_update(self, substrate) -> None:
+        col = _make(substrate)
+        col.add(ids=["a", "b"], embeddings=[_E1, _E2],
+                documents=["da", "db"],
+                metadatas=[{"n": 0}, {"n": 0}])
+        col.update(ids=["a", "b"], metadatas=[{"n": 1}, {"n": 2}])
+        got = col.get(ids=["a", "b"], include=["metadatas"])
+        by_id = dict(zip(got["ids"], got["metadatas"]))
+        assert by_id["a"]["n"] == 1
+        assert by_id["b"]["n"] == 2
+
+
 # ── Read/get semantics: ids, where subset, paging ────────────────────────────
 
 

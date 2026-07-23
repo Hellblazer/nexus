@@ -156,6 +156,28 @@ class InMemoryCollection:
                 self._rows[id_] = _Row(id_, doc, dict(meta or {}),
                                        _normalize(list(emb)))
 
+    def update(self, *, ids: list[str],
+               embeddings: list[list[float]] | None = None,
+               documents: list[str] | None = None,
+               metadatas: list[dict[str, Any]] | None = None) -> None:
+        """Chroma-parity partial update (differentially verified):
+        unknown ids are silently skipped; metadata MERGES at key level;
+        unsupplied fields are preserved; a document update without
+        explicit embeddings re-embeds via the collection EF."""
+        if embeddings is None and documents is not None:
+            embeddings = self._embed_documents(documents)
+        with self._lock:
+            for i, id_ in enumerate(ids):
+                row = self._rows.get(id_)
+                if row is None:
+                    continue
+                if embeddings is not None:
+                    row.embedding_normed = _normalize(list(embeddings[i]))
+                if documents is not None:
+                    row.document = documents[i]
+                if metadatas is not None:
+                    row.metadata.update(metadatas[i])
+
     def delete(self, *, ids: list[str] | None = None,
                where: dict[str, Any] | None = None) -> None:
         with self._lock:
@@ -242,10 +264,18 @@ class InMemoryVectorClient:
     """Chroma-client-shaped registry of :class:`InMemoryCollection`.
 
     Per-instance state, genuinely — two clients share nothing.
+
+    ``default_embedding_function`` (when given) attaches to collections
+    created without an explicit EF — the analogue of chroma's implicit
+    default EF, but injected rather than ambient. The T1-isolated leg
+    relies on this: :class:`~nexus.db.t1.T1Database` creates its
+    ``scratch`` collection without passing an EF and then adds
+    documents-only rows.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, default_embedding_function: Any = None) -> None:
         self._collections: dict[str, InMemoryCollection] = {}
+        self._default_ef = default_embedding_function
         self._lock = threading.Lock()
 
     def create_collection(self, name: str, *,
@@ -254,8 +284,11 @@ class InMemoryVectorClient:
         with self._lock:
             if name in self._collections:
                 raise ValueError(f"collection {name!r} already exists")
-            col = InMemoryCollection(name, embedding_function=embedding_function,
-                                     metadata=metadata)
+            col = InMemoryCollection(
+                name,
+                embedding_function=embedding_function or self._default_ef,
+                metadata=metadata,
+            )
             self._collections[name] = col
             return col
 
@@ -282,7 +315,8 @@ class InMemoryVectorClient:
             col = self._collections.get(name)
             if col is None:
                 col = InMemoryCollection(
-                    name, embedding_function=embedding_function,
+                    name,
+                    embedding_function=embedding_function or self._default_ef,
                     metadata=metadata,
                 )
                 self._collections[name] = col

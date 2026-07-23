@@ -6,6 +6,7 @@ import enum
 import fcntl
 import json
 import os
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -119,6 +120,41 @@ def _find_promote_overlap_candidates(
     return [cand for _, cand in hits]
 
 
+#: Process-scoped client for the ``NX_T1_ISOLATED=1`` leg (RDR-155 P4b
+#: P0a). Chroma-parity note: ``EphemeralClient`` instances in one process
+#: shared backing state (the SharedSystemClient settings-hash cache), so
+#: the legacy isolated leg had per-PROCESS scratch continuity across
+#: ``T1Database`` constructions — the scratch CLI journey inside a single
+#: process depends on it. ONE client per process preserves that observable
+#: contract; a dispatch child is a fresh process, so children still start
+#: empty (the nexus-g37fr [21099] design guard).
+_isolated_client = None
+_isolated_client_lock = threading.Lock()
+
+
+def _isolated_vector_client():
+    """Return the process-scoped :class:`InMemoryVectorClient` for Path C.
+
+    The default EF is pinned to tier-0 MiniLM — byte-identical to the
+    implicit chroma default EF the legacy ``EphemeralClient`` leg used
+    (lazy model load, no construction cost here). The tier-0 disposition
+    is a P0b decision; this call site is the T1-isolated consumer to
+    update there.
+    """
+    global _isolated_client
+    with _isolated_client_lock:
+        if _isolated_client is None:
+            from nexus.db.inmemory_vector_store import InMemoryVectorClient  # noqa: PLC0415 — circular-dep avoidance
+            from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 — circular-dep avoidance
+
+            _isolated_client = InMemoryVectorClient(
+                default_embedding_function=LocalEmbeddingFunction(
+                    model_name="all-MiniLM-L6-v2"
+                )
+            )
+        return _isolated_client
+
+
 class T1ServerNotFoundError(RuntimeError):
     """Raised when ``T1Database()`` cannot resolve a live T1 server.
 
@@ -132,7 +168,7 @@ class T1ServerNotFoundError(RuntimeError):
       - ``T1Database(client=...)`` for explicit client injection in
         tests and the MCP server lifespan.
       - ``NX_T1_ISOLATED=1`` for stateless one-shot subprocesses; constructs an
-        ``EphemeralClient``.
+        in-process ``InMemoryVectorClient`` (RDR-155 P4b P0a).
     """
 
 
@@ -180,8 +216,8 @@ class T1Database:
         Branch order (opt-in outranks discovery):
 
         Path C (operator opt-in, highest priority)
-            ``NX_T1_ISOLATED=1`` -> ``EphemeralClient``. The only place
-            ``EphemeralClient`` may be constructed in this code path.
+            ``NX_T1_ISOLATED=1`` -> ``InMemoryVectorClient`` (RDR-155
+            P4b P0a; dependency-free, genuinely per-instance).
             nexus-svpq / GH #593: this branch is consulted FIRST so an
             explicit operator opt-in to ephemeral semantics is not
             silently overridden by env-pair or addr-file auto-discovery
@@ -213,7 +249,11 @@ class T1Database:
         flag-off paths are mutually exclusive per process.
         """
         if _t1_isolated_env():
-            self._client = chromadb.EphemeralClient()
+            # RDR-155 P4b P0a: the isolated leg uses the process-scoped
+            # InMemoryVectorClient, not chromadb.EphemeralClient. See
+            # _isolated_vector_client for the per-process continuity
+            # contract this preserves.
+            self._client = _isolated_vector_client()
             self._session_id = self._resolve_session_id(session_id)
             return
 
