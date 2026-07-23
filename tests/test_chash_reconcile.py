@@ -332,3 +332,24 @@ def test_service_mode_refuses_loud(monkeypatch, tmp_path) -> None:
     assert result.exit_code != 0
     assert "pre-migration" in result.output.lower()
     assert "frozen migration source" in result.output.lower()
+
+
+def test_service_mode_refuses_dry_run_too(monkeypatch, tmp_path) -> None:
+    """The gate is unconditional on --apply: even the read-only dry-run is
+    refused on a migrated install (diffing live T3 against the frozen index
+    produces garbage ghosts — a misleading report is still harm)."""
+    from click.testing import CliRunner
+
+    from nexus.commands.catalog_cmds.maintenance import chash_reconcile_cmd
+    from nexus.db.storage_mode import StorageBackend
+
+    db = tmp_path / "memory.db"
+    db.write_bytes(b"")
+    monkeypatch.setattr("nexus.commands._helpers.default_db_path", lambda: db)
+    monkeypatch.setattr(
+        "nexus.db.storage_mode.storage_backend_for",
+        lambda store: StorageBackend.SERVICE,
+    )
+    result = CliRunner().invoke(chash_reconcile_cmd, [])
+    assert result.exit_code != 0
+    assert "pre-migration" in result.output.lower()

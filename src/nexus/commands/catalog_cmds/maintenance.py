@@ -194,19 +194,29 @@ def chash_reconcile_cmd(apply: bool) -> None:
     from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred import; rare/branch-local path
     from nexus.db.t2.chash_index import ChashIndex  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
-    # nexus-yh044: refuse BEFORE any work on a migrated install — the local
-    # SQLite chash_index there is the frozen migration source (RDR-176
-    # immutability, rollback target until P4b), and the "No T2 db" guard
-    # below does NOT cover migrated-in-place boxes where the file survives.
+    # nexus-yh044: refuse BEFORE any work on a service-backed install — the
+    # "No T2 db" guard below does NOT cover migrated-in-place boxes where
+    # the file survives frozen. Message branches on which shape this box is
+    # (critic Significant: SERVICE is the hard default for FRESH installs
+    # too, where "frozen migration source" would be a false premise).
     if storage_backend_for("chash_index") == StorageBackend.SERVICE:
+        db_path = default_db_path()
+        if db_path.exists():
+            raise click.ClickException(
+                "chash-reconcile is a PRE-MIGRATION repair verb and this "
+                "install is service-backed. The local SQLite chash_index "
+                "here is the FROZEN MIGRATION SOURCE (RDR-176: immutable "
+                "rollback target until RDR-155 P4b) — reconciling it "
+                "against live T3 would manufacture ghosts and --apply would "
+                "delete source rows. The PG side needs no reconciliation "
+                "(RDR-187: the router is retired; chunk tables cannot go "
+                "stale)."
+            )
         raise click.ClickException(
-            "chash-reconcile is a PRE-MIGRATION repair verb and this install "
-            "is service-backed. The local SQLite chash_index here is the "
-            "FROZEN MIGRATION SOURCE (RDR-176: immutable rollback target "
-            "until RDR-155 P4b) — reconciling it against live T3 would "
-            "manufacture ghosts and --apply would delete source rows. The "
-            "PG side needs no reconciliation (RDR-187: the router is "
-            "retired; chunk tables cannot go stale)."
+            "chash-reconcile is a PRE-MIGRATION repair verb: this install "
+            "is service-backed and has no local T2 database — there is "
+            "nothing to reconcile. The PG side needs no reconciliation "
+            "(RDR-187: the router is retired; chunk tables cannot go stale)."
         )
 
     db_path = default_db_path()

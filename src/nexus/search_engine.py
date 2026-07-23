@@ -876,8 +876,22 @@ def search_cross_corpus(
                 query=query,
                 weight=float(ag_cfg.get("weight", 0.025)),
             )
-        except Exception:  # noqa: BLE001 — best-effort salience boost; failure logged at debug, results returned unboosted
-            _log.debug("salience_boost_failed", exc_info=True)
+        except Exception:  # noqa: BLE001 — best-effort salience boost; failure logged, results returned unboosted
+            # nexus-g8r2h critique fold: post-routing this guards a real HTTP
+            # round-trip on service boxes, not a rarely-failing local SQLite
+            # read. Per-call stays quiet, but the FIRST failure per process
+            # warns — a sustained outage must not be silently dead for weeks.
+            global _salience_failure_warned
+            if not _salience_failure_warned:
+                _salience_failure_warned = True
+                _log.warning(
+                    "salience_boost_failed_first",
+                    consequence="attention_guided_v1 boost inactive for this "
+                                "process (subsequent failures log at debug)",
+                    exc_info=True,
+                )
+            else:
+                _log.debug("salience_boost_failed", exc_info=True)
 
     # nexus-1qed: catalog-resolved display path attached as metadata
     # so formatters never need to import the catalog. Best-effort;
@@ -1057,6 +1071,11 @@ def _flag_contradictions(
     return out
 
 
+#: nexus-g8r2h critique fold: first-failure-per-process latch for the
+#: salience boost's swallow (see the caller's except arm).
+_salience_failure_warned: bool = False
+
+
 def _apply_salience_boost(
     results: list[SearchResult],
     *,
@@ -1117,7 +1136,10 @@ def _apply_salience_boost(
             if boost:
                 r.hybrid_score = float(r.hybrid_score) + boost
     finally:
-        # HttpDocumentAspectsStore has no close(); the SQLite store does.
+        # Both stores close(): the SQLite store closes its connection and
+        # HttpDocumentAspectsStore inherits close() from
+        # RefreshableHttpStoreMixin (closes the httpx pool — load-bearing,
+        # not a no-op; reviewer Low corrected the earlier claim here).
         close = getattr(aspects, "close", None)
         if callable(close):
             close()

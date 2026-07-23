@@ -326,17 +326,28 @@ def _ingest_highlights_record(uuid: str) -> bool:
         # the previous direct DocumentHighlights construction wrote local
         # SQLite even on migrated boxes. Low contention either way: one
         # write per indexed record, not a long-lived worker (RDR-128 N/A).
+        # Reviewer High fold: close per use (try/finally, like every
+        # _open_plan_library caller) — this runs inside the dt-index batch
+        # loop, and an unclosed HttpDocumentHighlightsStore leaks one httpx
+        # connection pool PER RECORD. Construction itself is cheap (local
+        # env/lease resolution, no network), so per-call open/close is the
+        # minimal leak-free shape.
         store = _open_highlights_store()
         from datetime import datetime, timezone  # noqa: PLC0415 — stdlib deferred to call site (datetime)
 
-        return store.upsert(HighlightRecord(
-            doc_id=str(entry.tumbler),
-            source_uri=dt_uri,
-            collection=getattr(entry, "physical_collection", "") or "",
-            highlights_md=highlights_md,
-            mentions_md=mentions_md,
-            ingested_at=datetime.now(timezone.utc).isoformat(),
-        ))
+        try:
+            return store.upsert(HighlightRecord(
+                doc_id=str(entry.tumbler),
+                source_uri=dt_uri,
+                collection=getattr(entry, "physical_collection", "") or "",
+                highlights_md=highlights_md,
+                mentions_md=mentions_md,
+                ingested_at=datetime.now(timezone.utc).isoformat(),
+            ))
+        finally:
+            _close = getattr(store, "close", None)
+            if callable(_close):
+                _close()
     except Exception as e:  # noqa: BLE001 — DEVONthink boundary op is best-effort; failure logged via log.warning
         _log.warning("dt_highlights_failed", uuid=uuid, error=str(e))
         return False
@@ -1009,15 +1020,28 @@ def highlights_cmd(tumbler_or_uuid: str) -> None:
     ``document_highlights`` T2 table populated by ``nx dt index --highlights``.
     This is a pure T2 read — DEVONthink need not be running.
     """
-    store = _open_highlights_store()
-    if _UUID_RE.match(tumbler_or_uuid):
-        rec = store.get_by_source_uri(f"x-devonthink-item://{tumbler_or_uuid}")
-    elif _TUMBLER_RE.match(tumbler_or_uuid):
-        rec = store.get(tumbler_or_uuid)
-    else:
+    if not (_UUID_RE.match(tumbler_or_uuid) or _TUMBLER_RE.match(tumbler_or_uuid)):
         raise click.ClickException(
             "argument is neither a tumbler (e.g. 1.2.3) nor a UUID.",
         )
+    store = _open_highlights_store()
+    try:
+        if _UUID_RE.match(tumbler_or_uuid):
+            rec = store.get_by_source_uri(f"x-devonthink-item://{tumbler_or_uuid}")
+        else:
+            rec = store.get(tumbler_or_uuid)
+    except click.ClickException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — reviewer Medium (nexus-g8r2h): a connection-class failure must read as "service unavailable", never a raw traceback indistinguishable from "no highlights"
+        raise click.ClickException(
+            f"highlights store unavailable ({type(exc).__name__}: {exc}) — "
+            "check `nx doctor` / service status. This is NOT 'no highlights "
+            "ingested'."
+        ) from exc
+    finally:
+        _close = getattr(store, "close", None)
+        if callable(_close):
+            _close()
     if rec is None:
         raise click.ClickException(
             f"no ingested highlights for {tumbler_or_uuid} "

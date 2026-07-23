@@ -94,9 +94,12 @@ def _make_sqlite(tmp_path: Path, *, rows: dict[str, str], filename: str = "t2.db
     conn = sqlite3.connect(db)
     try:
         for store, ts in rows.items():
-            table, column = FRESHNESS_PROBES[store]
-            conn.execute(f"CREATE TABLE {table} ({column} TEXT)")  # noqa: S608 — fixed internal test fixture, no external input
-            conn.execute(f"INSERT INTO {table} ({column}) VALUES (?)", (ts,))
+            # Multi-probe stores (nexus-g8r2h: "aspects" also probes
+            # document_highlights) get every probe table stamped at *ts* so
+            # all-probes-must-answer freshness semantics hold in fixtures.
+            for table, column in FRESHNESS_PROBES[store]:
+                conn.execute(f"CREATE TABLE {table} ({column} TEXT)")  # noqa: S608 — fixed internal test fixture, no external input
+                conn.execute(f"INSERT INTO {table} ({column}) VALUES (?)", (ts,))
         conn.commit()
     finally:
         conn.close()
@@ -379,3 +382,38 @@ class TestReportEvidenceQuality:
         plan = detect_already_migrated(sqlite_path=db, reports_dir=reports_dir)
 
         assert plan.all_skipped is True
+
+
+def test_highlights_only_local_write_defeats_false_clean(tmp_path: Path) -> None:
+    """nexus-g8r2h critic Critical (critique [21092]): a document_highlights
+    row NEWER than the report — with document_aspects untouched (the exact
+    stranded-window shape the pre-fix service-mode writer produced) — must
+    read 'will migrate', never 'already migrated ... no newer local writes'.
+    Pre-fold, the aspects slot probed only document_aspects.extracted_at and
+    reported a confidently false clean."""
+    import sqlite3 as _sqlite3
+
+    from nexus.migration.guided_upgrade import _decide_store
+
+    db = tmp_path / "t2.db"
+    conn = _sqlite3.connect(db)
+    try:
+        conn.execute("CREATE TABLE document_aspects (extracted_at TEXT)")
+        conn.execute(
+            "INSERT INTO document_aspects (extracted_at) VALUES (?)",
+            (BEFORE_T0,),
+        )
+        conn.execute("CREATE TABLE document_highlights (ingested_at TEXT)")
+        conn.execute(
+            "INSERT INTO document_highlights (ingested_at) VALUES (?)",
+            (AFTER_T0,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    status = _decide_store(
+        "aspects", [_report(stores={"aspects": 0})], sqlite_path=db,
+    )
+    assert status.skip is False
+    assert "newer than the report" in status.line

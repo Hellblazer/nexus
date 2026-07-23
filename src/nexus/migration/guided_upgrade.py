@@ -357,17 +357,27 @@ def detect_pending_migration_memoized() -> PreflightDetection:
 #: probe is used only to decide whether to SKIP re-shipping, never to
 #: confirm correctness, and a false skip is still safe (copy-not-move — the
 #: source is never at risk, only re-verified less eagerly).
-FRESHNESS_PROBES: dict[str, tuple[str, str]] = {
-    "memory": ("memory", "timestamp"),
-    "plans": ("plans", "created_at"),
-    "telemetry": ("search_telemetry", "ts"),
-    "taxonomy": ("topics", "created_at"),
-    "aspects": ("document_aspects", "extracted_at"),
+FRESHNESS_PROBES: dict[str, tuple[tuple[str, str], ...]] = {
+    "memory": (("memory", "timestamp"),),
+    "plans": (("plans", "created_at"),),
+    "telemetry": (("search_telemetry", "ts"),),
+    "taxonomy": (("topics", "created_at"),),
+    # nexus-g8r2h critic Critical (critique [21092]): document_highlights
+    # rides the "aspects" ETL slot (aspects_etl.migrate_highlights) but the
+    # probe never anchored on it — a highlights-only local write (the
+    # pre-g8r2h service-mode writer bug's stranded window) read as "no newer
+    # local writes": a CONFIDENTLY FALSE clean, worse than no signal. Every
+    # table an ETL slot ships must be probed; multi-probe slots confirm
+    # freshness only when EVERY probe answers "no newer writes".
+    "aspects": (
+        ("document_aspects", "extracted_at"),
+        ("document_highlights", "ingested_at"),
+    ),
     # "chash" probe removed (RDR-187/nexus-piwya.9 sweep): unreachable since
     # .10 dropped the store from LADDER_ORDER; detect_already_migrated never
     # consults it.
-    "catalog": ("documents", "indexed_at"),
-    "aspects_queue": ("aspect_extraction_queue", "enqueued_at"),
+    "catalog": (("documents", "indexed_at"),),
+    "aspects_queue": (("aspect_extraction_queue", "enqueued_at"),),
 }
 
 
@@ -537,17 +547,23 @@ def _decide_store(
             f"{verification!r} — will migrate",
         )
 
-    probe = FRESHNESS_PROBES.get(store)
+    probes = FRESHNESS_PROBES.get(store) or ()
     freshness_confirmed = False
-    if probe is not None and completed_at:
-        newer = _has_newer_local_writes(sqlite_path, probe, completed_at)
-        if newer is True:
+    if probes and completed_at:
+        answers = [
+            _has_newer_local_writes(sqlite_path, probe, completed_at)
+            for probe in probes
+        ]
+        if any(a is True for a in answers):
             return StoreMigrationStatus(
                 store, False,
                 f"{store}: local writes newer than the report ({completed_at}) "
                 "— will migrate",
             )
-        freshness_confirmed = newer is False
+        # Confirmed only when EVERY probe positively answered "no newer
+        # writes" — a missing/unreadable table (None) degrades to
+        # trust-the-report, never to a confident clean (nexus-g8r2h fold).
+        freshness_confirmed = bool(answers) and all(a is False for a in answers)
 
     if freshness_confirmed:
         line = f"{store}: already migrated {completed_at}, no newer local writes"
