@@ -81,6 +81,7 @@ nx index repo ./my-project
 |------|-------------|
 | `--frecency-only` | Update frecency scores only; skip re-embedding (faster, for re-ranking refresh). Mutually exclusive with `--force` |
 | `--force-stale` | Re-index only if collection pipeline version is outdated (smart force — skips current collections) |
+| `--since-head` | Index only the git delta since the last indexed commit (`owners.head_hash`): changed files re-index, deleted files' docs prune, full-tree passes (staleness pulls, housekeeping, misclassified/orphan prunes, rg cache rebuild) are skipped. Worktree-inclusive. Falls back to a full index when no usable base exists; ignored with `--force`/`--force-stale`. The per-commit hook's fast path |
 | `--corpus [docs\|knowledge]` | Corpus routing for auto-classified prose/PDF files (default: `docs`). `docs` routes to `docs__` collections; `knowledge` routes to `knowledge__` collections instead |
 | `--on-locked {skip,wait}` | Behavior under contention (default: `wait`). Per-repo advisory lock (two `nx index repo` on the same repo): `skip` exits immediately, `wait` blocks. Catalog-write fairness (RDR-146): when a foreground interactive catalog write is pending, `skip` defers this run's catalog writes to the next idempotent pass, `wait` proceeds after a bounded yield. `NX_WRITE_PRIORITY=interactive|batch` overrides the tty-based priority of a run's catalog writes. |
 

@@ -349,6 +349,13 @@ class _ETATicker:
     show_default=True,
     help="Behaviour when another process holds the repo lock: skip exits immediately, wait blocks.",
 )
+@click.option(
+    "--since-head", "since_head", is_flag=True, default=False,
+    help="Index only the git delta since the last indexed commit "
+         "(owners.head_hash): changed files are (re)indexed, deleted files' "
+         "docs pruned, full-tree passes skipped. Falls back to a full index "
+         "when no usable base exists. Ignored with --force/--force-stale.",
+)
 @click.option("--no-taxonomy", is_flag=True, default=False,
               help="Skip automatic topic discovery after indexing.")
 @click.option("--debug-timing", "debug_timing", is_flag=True, default=False,
@@ -371,7 +378,7 @@ class _ETATicker:
 )
 def index_repo_cmd(
     path: Path, frecency_only: bool, force: bool, monitor: bool,
-    force_stale: bool, on_locked: str, no_taxonomy: bool,
+    force_stale: bool, since_head: bool, on_locked: str, no_taxonomy: bool,
     debug_timing: bool, corpus_choice: str,
 ) -> None:
     """Register and immediately index a code repository at PATH.
@@ -646,7 +653,7 @@ def index_repo_cmd(
         stats: dict = {}
         try:
             stats = index_repository(path, reg, frecency_only=frecency_only, force=force,
-                                     force_stale=force_stale,
+                                     force_stale=force_stale, since_head=since_head,
                                      on_locked=on_locked, on_start=on_start, on_file=on_file,
                                      on_phase=on_phase,
                                      on_stage_timers=on_stage_timers) or {}
