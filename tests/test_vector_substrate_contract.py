@@ -39,8 +39,15 @@ def _chroma_client():
     return chromadb.EphemeralClient()
 
 
+def _inmemory_client():
+    from nexus.db.inmemory_vector_store import InMemoryVectorClient
+
+    return InMemoryVectorClient()
+
+
 SUBSTRATES: list[tuple[str, Any]] = [
     ("chromadb", _chroma_client),
+    ("inmemory", _inmemory_client),
 ]
 
 
