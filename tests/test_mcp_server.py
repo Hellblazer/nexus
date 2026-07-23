@@ -987,6 +987,14 @@ def catalog_with_docs(tmp_path, monkeypatch):
     cat.link(cat.find("Attention Paper")[0].tumbler,
              cat.find("BERT Paper")[0].tumbler, "cites", created_by="test")
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+    # Pin query()'s catalog to THIS local fixture instance (same pattern as
+    # test_catalog_params_without_catalog). The SUBJECT here is query()'s
+    # catalog-routing logic over these registered docs; without the pin, the
+    # engine substrate's global NX_STORAGE_BACKEND=service makes
+    # make_catalog_reader() return the service catalog client — an empty
+    # per-test tenant that never sees the fixture's registrations.
+    import nexus.mcp.core as _core_mod
+    monkeypatch.setattr(_core_mod, "_get_catalog", lambda: cat)
     return cat
 
 

@@ -352,38 +352,78 @@ class TestGracefulDegradation:
 
 class TestRunRecording:
 
+    @staticmethod
+    def _record_and_capture(db, **kwargs) -> dict:
+        """Drive ``_nx_answer_record_run`` against the REAL telemetry store on
+        either substrate, spying on the store-call kwargs (post-redaction) and
+        asserting the write was not silently dropped.
+
+        ``_nx_answer_record_run`` swallows store errors via
+        ``_warn_telemetry_drop`` (best-effort telemetry), so
+        ``warn.assert_not_called()`` is the backend-blind proof that the row
+        landed (SQLite INSERT committed / service POST returned 2xx). Raw-row
+        content assertions stay behind ``has_raw_access`` at the call sites —
+        the Http store exposes no row-level read surface for nx_answer_runs."""
+        from nexus.mcp import core as _core
+
+        telemetry = db.telemetry
+        seen: dict = {}
+        real = telemetry.record_nx_answer_run
+
+        def _spy(**call_kwargs):
+            seen.update(call_kwargs)
+            return real(**call_kwargs)
+
+        with patch.object(telemetry, "record_nx_answer_run", side_effect=_spy), \
+             patch.object(_core, "_warn_telemetry_drop") as warn:
+            _core._nx_answer_record_run(telemetry, **kwargs)
+        warn.assert_not_called()
+        return seen
+
     def test_record_run_trace_true(self, tmp_path):
+        from nexus.db.storage_mode import has_raw_access
         from nexus.db.t2 import T2Database
-        from nexus.mcp.core import _nx_answer_record_run
 
         with T2Database(tmp_path / "mem.db") as db:
-            _nx_answer_record_run(
-                db.telemetry, question="test question", plan_id=1,
+            seen = self._record_and_capture(
+                db, question="test question", plan_id=1,
                 matched_confidence=0.55, step_count=3,
                 final_text="the answer", cost_usd=0.04,
                 duration_ms=1500, trace=True,
             )
+            assert seen["question"] == "test question"
+            assert seen["final_text"] == "the answer"
 
-            row = db.telemetry.conn.execute("SELECT * FROM nx_answer_runs").fetchone()
-            assert row is not None
-            assert row[1] == "test question"   # question
-            assert row[5] == "the answer"      # final_text
+            if has_raw_access(db.telemetry):
+                row = db.telemetry.conn.execute(
+                    "SELECT * FROM nx_answer_runs"
+                ).fetchone()
+                assert row is not None
+                assert row[1] == "test question"   # question
+                assert row[5] == "the answer"      # final_text
 
     def test_record_run_trace_false_redacts(self, tmp_path):
+        from nexus.db.storage_mode import has_raw_access
         from nexus.db.t2 import T2Database
-        from nexus.mcp.core import _nx_answer_record_run
 
         with T2Database(tmp_path / "mem.db") as db:
-            _nx_answer_record_run(
-                db.telemetry, question="private question", plan_id=2,
+            seen = self._record_and_capture(
+                db, question="private question", plan_id=2,
                 matched_confidence=None, step_count=2,
                 final_text="sensitive answer", cost_usd=0.02,
                 duration_ms=800, trace=False,
             )
+            # Redaction happens caller-side, BEFORE the store boundary —
+            # identical on both substrates.
+            assert seen["question"] == "[redacted]"
+            assert seen["final_text"] == "[redacted]"
 
-            row = db.telemetry.conn.execute("SELECT * FROM nx_answer_runs").fetchone()
-            assert row[1] == "[redacted]"   # question
-            assert row[5] == "[redacted]"   # final_text
+            if has_raw_access(db.telemetry):
+                row = db.telemetry.conn.execute(
+                    "SELECT * FROM nx_answer_runs"
+                ).fetchone()
+                assert row[1] == "[redacted]"   # question
+                assert row[5] == "[redacted]"   # final_text
 
     def test_record_run_lands_via_t2_telemetry(self, tmp_path):
         """Regression for nexus-598n + nexus-pyzk7: the MCP call sites write
@@ -395,24 +435,30 @@ class TestRunRecording:
         nexus-pyzk7: passing a raw ``.conn`` broke again in service mode (an
         ``Http*Store`` has none). Routing through ``db.telemetry`` (which owns
         the INSERT and dispatches SQLite-raw vs service-POST) locks the
-        backend-blind contract.
+        backend-blind contract — asserted here on BOTH substrates via the
+        no-silent-drop spy in ``_record_and_capture``.
         """
+        from nexus.db.storage_mode import has_raw_access
         from nexus.db.t2 import T2Database
-        from nexus.mcp.core import _nx_answer_record_run
 
         path = tmp_path / "mem.db"
         with T2Database(path) as db:
             assert hasattr(db, "telemetry")
-            _nx_answer_record_run(
-                db.telemetry, question="integration-probe",
+            seen = self._record_and_capture(
+                db, question="integration-probe",
                 plan_id=7, matched_confidence=0.8, step_count=2,
                 final_text="ok", cost_usd=0.0, duration_ms=42,
                 trace=True,
             )
-            row = db.telemetry.conn.execute(
-                "SELECT question, plan_id, step_count FROM nx_answer_runs"
-            ).fetchone()
-            assert row == ("integration-probe", 7, 2)
+            assert seen["question"] == "integration-probe"
+            assert seen["plan_id"] == 7
+            assert seen["step_count"] == 2
+
+            if has_raw_access(db.telemetry):
+                row = db.telemetry.conn.execute(
+                    "SELECT question, plan_id, step_count FROM nx_answer_runs"
+                ).fetchone()
+                assert row == ("integration-probe", 7, 2)
 
 
 # ── Plan-run use_count / success_count / failure_count telemetry ──────────────
@@ -1831,21 +1877,26 @@ class TestNxAnswerCostStub:
 
     def test_cost_usd_recorded_as_zero(self, tmp_path):
         """_nx_answer_record_run stores cost_usd=0.0 (P5 stub — not real cost)."""
+        from nexus.db.storage_mode import has_raw_access
         from nexus.db.t2 import T2Database
-        from nexus.mcp.core import _nx_answer_record_run
 
         with T2Database(tmp_path / "mem.db") as db:
-            _nx_answer_record_run(
-                db.telemetry, question="q", plan_id=1, matched_confidence=0.8,
+            seen = TestRunRecording._record_and_capture(
+                db, question="q", plan_id=1, matched_confidence=0.8,
                 step_count=2, final_text="answer", cost_usd=0.0,
                 duration_ms=500, trace=True,
             )
+            # SC-TODO P5: cost_usd is a stub (always 0.0). When real cost
+            # tracking ships, this test documents the before state and must
+            # be updated.
+            assert seen["cost_usd"] == 0.0
 
-            row = db.telemetry.conn.execute("SELECT cost_usd FROM nx_answer_runs").fetchone()
-            assert row is not None
-        # SC-TODO P5: cost_usd is a stub (always 0.0). When real cost tracking
-        # ships, this test documents the before state and must be updated.
-        assert row[0] == 0.0
+            if has_raw_access(db.telemetry):
+                row = db.telemetry.conn.execute(
+                    "SELECT cost_usd FROM nx_answer_runs"
+                ).fetchone()
+                assert row is not None
+                assert row[0] == 0.0
 
     def test_budget_usd_parameter_accepted_without_error(self, tmp_path):
         """budget_usd is a no-op parameter — accepted but not enforced (P5 stub)."""

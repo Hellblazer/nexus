@@ -19,11 +19,124 @@ CLI can report what was cleaned.
 """
 from __future__ import annotations
 
+import hashlib
+import os
 from pathlib import Path
 
 import pytest
 
 from nexus.db.http_vector_client import HttpVectorClient
+
+_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
+
+
+def _chash(seed: str) -> str:
+    """Deterministic full-width chunk hash (RDR-180: 64 lowercase hex).
+
+    The engine enforces the full-sha256 width contract on every chash-shaped
+    field; the SQLite twin accepted any string. Derive per-test values from a
+    stable seed — never random."""
+    return hashlib.sha256(seed.encode()).hexdigest()
+
+
+# Assignment doc_ids are chunk chashes on the wire (see
+# HttpTaxonomyStore.import_assignment) — full-width on both substrates.
+D_DOOMED1 = _chash("doomed:doc1:0")
+D_DOOMED2 = _chash("doomed:doc2:0")
+D_KEEP1 = _chash("keepme:doc1:0")
+D_KEEP2 = _chash("keepme:doc2:0")
+
+
+def _src_ids(tmp_path: Path, n: int) -> list[int]:
+    """Deterministic per-test topic ids for the fidelity-import path.
+
+    ``import_topic`` PRESERVES the given id, and the topics PK is global
+    across tenants on the engine — fixed literals (1, 2, 3) collide across
+    tests sharing the session PG. Derive from the per-test tmp_path."""
+    base = int.from_bytes(hashlib.sha256(str(tmp_path).encode()).digest()[:6], "big")
+    return [base + i for i in range(1, n + 1)]
+
+
+def _seed_topic(tax, *, src_id: int, label: str, collection: str,
+                centroid_hash: str, doc_count: int) -> int:
+    """Seed one topics row on either substrate: raw SQLite INSERT on the
+    legacy backend, the fidelity-import surface on the engine (the settled
+    seeding idiom — cf. tests/db/test_telemetry_retention_marker.py)."""
+    from nexus.db.storage_mode import has_raw_access
+
+    if has_raw_access(tax):
+        cur = tax.conn.execute(
+            "INSERT INTO topics (label, collection, centroid_hash, doc_count, terms, created_at) "
+            "VALUES (?, ?, ?, ?, ?, '2026-04-16T00:00:00Z')",
+            (label, collection, centroid_hash, doc_count, "[]"),
+        )
+        tax.conn.commit()
+        return cur.lastrowid
+    return tax.import_topic(
+        src_id=src_id, label=label, parent_id=None, collection=collection,
+        centroid_hash=centroid_hash, doc_count=doc_count,
+        created_at="2026-04-16T00:00:00Z", review_status="pending", terms="[]",
+    )
+
+
+def _seed_assignment(tax, *, doc_id: str, topic_id: int, assigned_by: str,
+                     source_collection: str) -> None:
+    from nexus.db.storage_mode import has_raw_access
+
+    if has_raw_access(tax):
+        tax.conn.execute(
+            "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by, source_collection) "
+            "VALUES (?, ?, ?, ?)",
+            (doc_id, topic_id, assigned_by, source_collection),
+        )
+        tax.conn.commit()
+        return
+    tax.import_assignment(
+        doc_id=doc_id, topic_id=topic_id, assigned_by=assigned_by,
+        similarity=None, assigned_at=None, source_collection=source_collection,
+    )
+
+
+def _seed_link(tax, *, from_topic_id: int, to_topic_id: int, link_count: int) -> None:
+    from nexus.db.storage_mode import has_raw_access
+
+    if has_raw_access(tax):
+        tax.conn.execute(
+            "INSERT INTO topic_links (from_topic_id, to_topic_id, link_count, link_types) "
+            "VALUES (?, ?, ?, ?)",
+            (from_topic_id, to_topic_id, link_count, "[]"),
+        )
+        tax.conn.commit()
+        return
+    tax.import_topic_link(
+        from_topic_id=from_topic_id, to_topic_id=to_topic_id,
+        link_count=link_count, link_types="[]",
+    )
+
+
+def _seed_meta(tax, *, collection: str, doc_count: int = 10) -> None:
+    from nexus.db.storage_mode import has_raw_access
+
+    if has_raw_access(tax):
+        tax.conn.execute(
+            "INSERT INTO taxonomy_meta (collection, last_discover_doc_count, last_discover_at) "
+            "VALUES (?, ?, ?)",
+            (collection, doc_count, "2026-04-14T12:00:00Z"),
+        )
+        tax.conn.commit()
+        return
+    tax.import_taxonomy_meta(
+        collection=collection, last_discover_doc_count=doc_count,
+        last_discover_at="2026-04-14T12:00:00Z",
+    )
+
+
+def _meta_row_present(tax, collection: str, *, doc_count: int = 10) -> bool:
+    """Backend-blind presence probe for a taxonomy_meta row seeded with
+    ``last_discover_doc_count=doc_count``: ``needs_rebalance`` returns True
+    when the row is ABSENT on both substrates (SQLite: no-prior-discovery;
+    engine: 404), and False for a present row probed at its own count."""
+    return not tax.needs_rebalance(collection, doc_count)
 
 
 @pytest.fixture
@@ -37,82 +150,43 @@ def seeded_taxonomy(tmp_path: Path):
     db = T2Database(db_path)
     tax = db.taxonomy
 
+    sid1, sid2, sid3 = _src_ids(tmp_path, 3)
+
     # --- Seed collection A (to be deleted) ---
-    t_a1 = tax.conn.execute(
-        "INSERT INTO topics (label, collection, centroid_hash, doc_count, terms, created_at) "
-        "VALUES (?, ?, ?, ?, ?, '2026-04-16T00:00:00Z')",
-        ("A-Topic-1", "docs__doomed", "h1", 5, "[]"),
-    ).lastrowid
-    t_a2 = tax.conn.execute(
-        "INSERT INTO topics (label, collection, centroid_hash, doc_count, terms, created_at) "
-        "VALUES (?, ?, ?, ?, ?, '2026-04-16T00:00:00Z')",
-        ("A-Topic-2", "docs__doomed", "h2", 3, "[]"),
-    ).lastrowid
+    t_a1 = _seed_topic(tax, src_id=sid1, label="A-Topic-1", collection="docs__doomed",
+                       centroid_hash=_chash("h1"), doc_count=5)
+    t_a2 = _seed_topic(tax, src_id=sid2, label="A-Topic-2", collection="docs__doomed",
+                       centroid_hash=_chash("h2"), doc_count=3)
 
     # --- Seed collection B (must survive) ---
-    t_b1 = tax.conn.execute(
-        "INSERT INTO topics (label, collection, centroid_hash, doc_count, terms, created_at) "
-        "VALUES (?, ?, ?, ?, ?, '2026-04-16T00:00:00Z')",
-        ("B-Topic-1", "docs__keepme", "h3", 8, "[]"),
-    ).lastrowid
+    t_b1 = _seed_topic(tax, src_id=sid3, label="B-Topic-1", collection="docs__keepme",
+                       centroid_hash=_chash("h3"), doc_count=8)
 
     # --- Assignments: mix source_collection and topic_id ownership ---
     # Native A assignment (doc in A, topic in A)
-    tax.conn.execute(
-        "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by, source_collection) "
-        "VALUES (?, ?, ?, ?)",
-        ("doomed:doc1:0", t_a1, "hdbscan", "docs__doomed"),
-    )
+    _seed_assignment(tax, doc_id=D_DOOMED1, topic_id=t_a1,
+                     assigned_by="hdbscan", source_collection="docs__doomed")
     # Projection of doomed chunks into B's topic
-    tax.conn.execute(
-        "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by, source_collection) "
-        "VALUES (?, ?, ?, ?)",
-        ("doomed:doc2:0", t_b1, "projection", "docs__doomed"),
-    )
+    _seed_assignment(tax, doc_id=D_DOOMED2, topic_id=t_b1,
+                     assigned_by="projection", source_collection="docs__doomed")
     # Projection of B chunks into A's topic (must also be purged — doomed
     # topic_id → NULL FK residue left behind otherwise)
-    tax.conn.execute(
-        "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by, source_collection) "
-        "VALUES (?, ?, ?, ?)",
-        ("keepme:doc1:0", t_a2, "projection", "docs__keepme"),
-    )
+    _seed_assignment(tax, doc_id=D_KEEP1, topic_id=t_a2,
+                     assigned_by="projection", source_collection="docs__keepme")
     # Native B assignment — must survive
-    tax.conn.execute(
-        "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by, source_collection) "
-        "VALUES (?, ?, ?, ?)",
-        ("keepme:doc2:0", t_b1, "hdbscan", "docs__keepme"),
-    )
+    _seed_assignment(tax, doc_id=D_KEEP2, topic_id=t_b1,
+                     assigned_by="hdbscan", source_collection="docs__keepme")
 
-    # --- topic_links: A→B, B→A, A→A, B→B ---
-    tax.conn.execute(
-        "INSERT INTO topic_links (from_topic_id, to_topic_id, link_count, link_types) "
-        "VALUES (?, ?, ?, ?)",
-        (t_a1, t_b1, 2, "[]"),
-    )
-    tax.conn.execute(
-        "INSERT INTO topic_links (from_topic_id, to_topic_id, link_count, link_types) "
-        "VALUES (?, ?, ?, ?)",
-        (t_b1, t_a1, 1, "[]"),
-    )
-    tax.conn.execute(
-        "INSERT INTO topic_links (from_topic_id, to_topic_id, link_count, link_types) "
-        "VALUES (?, ?, ?, ?)",
-        (t_a1, t_a2, 3, "[]"),  # A→A, both doomed
-    )
+    # --- topic_links: A→B, B→A, A→A ---
+    _seed_link(tax, from_topic_id=t_a1, to_topic_id=t_b1, link_count=2)
+    _seed_link(tax, from_topic_id=t_b1, to_topic_id=t_a1, link_count=1)
+    _seed_link(tax, from_topic_id=t_a1, to_topic_id=t_a2, link_count=3)  # A→A, both doomed
 
     # --- taxonomy_meta ---
-    tax.conn.execute(
-        "INSERT INTO taxonomy_meta (collection, last_discover_at) "
-        "VALUES (?, ?)",
-        ("docs__doomed", "2026-04-14T12:00:00Z"),
-    )
-    tax.conn.execute(
-        "INSERT INTO taxonomy_meta (collection, last_discover_at) "
-        "VALUES (?, ?)",
-        ("docs__keepme", "2026-04-14T12:00:00Z"),
-    )
-    tax.conn.commit()
-    yield db, tax
+    _seed_meta(tax, collection="docs__doomed")
+    _seed_meta(tax, collection="docs__keepme")
+
+    yield db, tax, {"t_a1": t_a1, "t_a2": t_a2, "t_b1": t_b1}
     db.close()
 
 
@@ -120,75 +194,64 @@ class TestPurgeCollection:
     """Unit tests for the new purge_collection method."""
 
     def test_purge_removes_topics_for_collection(self, seeded_taxonomy):
-        db, tax = seeded_taxonomy
+        db, tax, _ids = seeded_taxonomy
         counts = tax.purge_collection("docs__doomed")
         assert counts["topics"] == 2
 
-        remaining = tax.conn.execute(
-            "SELECT COUNT(*) FROM topics WHERE collection = ?",
-            ("docs__doomed",),
-        ).fetchone()[0]
-        assert remaining == 0
+        assert tax.get_topics_for_collection("docs__doomed") == []
 
         # Survivor untouched
-        surv = tax.conn.execute(
-            "SELECT COUNT(*) FROM topics WHERE collection = ?",
-            ("docs__keepme",),
-        ).fetchone()[0]
-        assert surv == 1
+        assert len(tax.get_topics_for_collection("docs__keepme")) == 1
 
     def test_purge_removes_assignments_by_topic_and_source(self, seeded_taxonomy):
-        db, tax = seeded_taxonomy
+        db, tax, ids = seeded_taxonomy
         counts = tax.purge_collection("docs__doomed")
 
         # Seeded 4 assignments; 3 reference doomed (native + 2 projections).
         # Only the native-B assignment (topic_id=B, source=B) should survive.
         assert counts["assignments"] == 3
-        remaining_total = tax.conn.execute(
-            "SELECT COUNT(*) FROM topic_assignments"
-        ).fetchone()[0]
-        assert remaining_total == 1
+        remaining = tax.get_assignments_for_docs(
+            [D_DOOMED1, D_DOOMED2, D_KEEP1, D_KEEP2]
+        )
+        assert remaining == {D_KEEP2: ids["t_b1"]}
 
-        # No assignment should reference a doomed source_collection
-        leftover = tax.conn.execute(
-            "SELECT COUNT(*) FROM topic_assignments WHERE source_collection = ?",
-            ("docs__doomed",),
-        ).fetchone()[0]
-        assert leftover == 0
+        # No projection row keyed to the doomed source_collection survives
+        assert "docs__doomed" not in tax.get_projection_counts_by_collection()
 
     def test_purge_removes_links_touching_doomed_topics(self, seeded_taxonomy):
-        db, tax = seeded_taxonomy
+        db, tax, ids = seeded_taxonomy
         counts = tax.purge_collection("docs__doomed")
 
         # 3 seeded links; all 3 touch a doomed topic (A→B, B→A, A→A).
         assert counts["links"] == 3
-        remaining = tax.conn.execute("SELECT COUNT(*) FROM topic_links").fetchone()[0]
-        assert remaining == 0
+        # Empty-shape tolerance: the SQLite store returns {} and the Http
+        # store [] for the no-links case; both are falsy.
+        assert not tax.get_topic_link_pairs(
+            [ids["t_a1"], ids["t_a2"], ids["t_b1"]]
+        )
 
     def test_purge_removes_taxonomy_meta_row(self, seeded_taxonomy):
-        db, tax = seeded_taxonomy
+        db, tax, _ids = seeded_taxonomy
         counts = tax.purge_collection("docs__doomed")
 
         assert counts["meta"] == 1
-        remaining = tax.conn.execute(
-            "SELECT COUNT(*) FROM taxonomy_meta WHERE collection = ?",
-            ("docs__doomed",),
-        ).fetchone()[0]
-        assert remaining == 0
+        assert not _meta_row_present(tax, "docs__doomed")
         # Survivor meta row untouched
-        surv = tax.conn.execute(
-            "SELECT COUNT(*) FROM taxonomy_meta WHERE collection = ?",
-            ("docs__keepme",),
-        ).fetchone()[0]
-        assert surv == 1
+        assert _meta_row_present(tax, "docs__keepme")
 
+    @pytest.mark.skipif(
+        _ENGINE_SUBSTRATE,
+        reason="dies-roster: sabotages the raw SQLite conn to prove the "
+               "client-side purge transaction rolls back; the engine substrate "
+               "has no raw handle to sabotage — dies at the RDR-155 P4b flip",
+    )
     def test_purge_is_transactional(self, seeded_taxonomy):
         """If any step fails mid-cascade, the whole purge rolls back.
 
         sqlite3.Connection.execute is read-only at the C-API level so
         we sabotage via a wrapper that masquerades as the real conn.
         """
-        db, tax = seeded_taxonomy
+        db, tax, _ids = seeded_taxonomy
 
         class FlakyConn:
             def __init__(self, real):
@@ -222,11 +285,20 @@ class TestPurgeCollection:
 
     def test_purge_unknown_collection_returns_zero_counts(self, seeded_taxonomy):
         """Purging a collection with no rows is a silent no-op."""
-        db, tax = seeded_taxonomy
+        db, tax, _ids = seeded_taxonomy
         counts = tax.purge_collection("docs__never-existed")
         assert counts == {"topics": 0, "assignments": 0, "links": 0, "meta": 0}
 
 
+@pytest.mark.skipif(
+    _ENGINE_SUBSTRATE,
+    reason="dies-roster: exercises the LOCAL client-side fan-out cascade "
+           "(mocked _t3 handle, chromadb NotFoundError fail-open, "
+           "purge-after-Chroma-delete ordering); in service mode "
+           "purge_collection_cascade routes to the engine's single atomic "
+           "deleteCollection and never touches the mocked handle — dies at "
+           "the RDR-155 P4b flip",
+)
 class TestCollectionDeleteCommandCascades:
     """Integration: `nx collection delete` cascades via Click entry point."""
 
@@ -246,12 +318,8 @@ class TestCollectionDeleteCommandCascades:
 
         db_path = tmp_path / "memory.db"
         db = T2Database(db_path)
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, centroid_hash, "
-            "doc_count, terms, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            ("Orphan", "docs__gone", "h", 1, "[]", "2026-04-17T00:00:00Z"),
-        )
-        db.taxonomy.conn.commit()
+        _seed_topic(db.taxonomy, src_id=1, label="Orphan", collection="docs__gone",
+                    centroid_hash=_chash("h"), doc_count=1)
         db.close()
 
         # make_t3()/_t3() return the service-backed HttpVectorClient
@@ -280,11 +348,8 @@ class TestCollectionDeleteCommandCascades:
 
         # Cascade DID run despite the NotFoundError
         with T2Database(db_path) as verify_db:
-            remaining = verify_db.taxonomy.conn.execute(
-                "SELECT COUNT(*) FROM topics WHERE collection = ?",
-                ("docs__gone",),
-            ).fetchone()[0]
-        assert remaining == 0, (
+            remaining = verify_db.taxonomy.get_topics_for_collection("docs__gone")
+        assert remaining == [], (
             "Cascade must run even when T3 collection is absent"
         )
 
@@ -301,17 +366,9 @@ class TestCollectionDeleteCommandCascades:
         db_path = tmp_path / "memory.db"
         db = T2Database(db_path)
         # Seed one topic for the doomed collection so purge has work
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, centroid_hash, "
-            "doc_count, terms, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            ("Only", "docs__doomed", "h", 1, "[]", "2026-04-16T00:00:00Z"),
-        )
-        db.taxonomy.conn.execute(
-            "INSERT INTO taxonomy_meta (collection, last_discover_at) "
-            "VALUES (?, ?)",
-            ("docs__doomed", "2026-04-14T00:00:00Z"),
-        )
-        db.taxonomy.conn.commit()
+        _seed_topic(db.taxonomy, src_id=1, label="Only", collection="docs__doomed",
+                    centroid_hash=_chash("h"), doc_count=1)
+        _seed_meta(db.taxonomy, collection="docs__doomed")
         db.close()
 
         # make_t3()/_t3() return the service-backed HttpVectorClient
@@ -339,21 +396,23 @@ class TestCollectionDeleteCommandCascades:
 
         # Cascade actually happened
         with T2Database(db_path) as verify_db:
-            topics = verify_db.taxonomy.conn.execute(
-                "SELECT COUNT(*) FROM topics WHERE collection = ?",
-                ("docs__doomed",),
-            ).fetchone()[0]
-            meta = verify_db.taxonomy.conn.execute(
-                "SELECT COUNT(*) FROM taxonomy_meta WHERE collection = ?",
-                ("docs__doomed",),
-            ).fetchone()[0]
-        assert topics == 0
-        assert meta == 0
+            topics = verify_db.taxonomy.get_topics_for_collection("docs__doomed")
+            meta_present = _meta_row_present(verify_db.taxonomy, "docs__doomed")
+        assert topics == []
+        assert not meta_present
 
 
 # ── Phase 1.4 (nexus-r9b) — chash_index cascade ──────────────────────────────
 
 
+@pytest.mark.skipif(
+    _ENGINE_SUBSTRATE,
+    reason="dies-roster: the chash_index router cascade's live subject is the "
+           "frozen SQLite twin (RDR-158 pre-migration installs); the engine's "
+           "/v1/chash endpoints are width-validating accept-and-no-op remnants "
+           "(RDR-187 orphan-by-design), so rows can't be seeded or counted "
+           "engine-side — dies at the RDR-155 P4b flip",
+)
 class TestChashIndexDeleteCascade:
     """RDR-086 Phase 1.4: `nx collection delete` must also remove every
     chash_index row pointing at the deleted collection. Without the cascade,
@@ -371,15 +430,17 @@ class TestChashIndexDeleteCascade:
 
         db_path = tmp_path / "memory.db"
         with T2Database(db_path) as db:
+            # Full-width chashes (RDR-180): the engine rejects anything
+            # shorter than the full 64-hex sha256 with HTTP 400.
             db.chash_index.upsert(
-                chash="aa11", collection="code__gone",
+                chash=_chash("gone-1"), collection="code__gone",
             )
             db.chash_index.upsert(
-                chash="bb22", collection="code__gone",
+                chash=_chash("gone-2"), collection="code__gone",
             )
             # Row in a different collection — must survive the cascade.
             db.chash_index.upsert(
-                chash="cc33", collection="code__stays",
+                chash=_chash("stays-1"), collection="code__stays",
             )
 
         # make_t3()/_t3() return the service-backed HttpVectorClient
@@ -401,14 +462,8 @@ class TestChashIndexDeleteCascade:
         assert result.exit_code == 0, result.output
 
         with T2Database(db_path) as verify_db:
-            gone_rows = verify_db.chash_index.conn.execute(
-                "SELECT COUNT(*) FROM chash_index WHERE physical_collection = ?",
-                ("code__gone",),
-            ).fetchone()[0]
-            stays_rows = verify_db.chash_index.conn.execute(
-                "SELECT COUNT(*) FROM chash_index WHERE physical_collection = ?",
-                ("code__stays",),
-            ).fetchone()[0]
+            gone_rows = verify_db.chash_index.count_for_collection("code__gone")
+            stays_rows = verify_db.chash_index.count_for_collection("code__stays")
         assert gone_rows == 0, "cascade must clear deleted collection's rows"
         assert stays_rows == 1, "cascade must NOT touch other collections"
 
@@ -428,7 +483,7 @@ class TestChashIndexDeleteCascade:
         db_path = tmp_path / "memory.db"
         with T2Database(db_path) as db:
             db.chash_index.upsert(
-                chash="aa11", collection="docs__orphan",
+                chash=_chash("orphan-1"), collection="docs__orphan",
             )
 
         # make_t3()/_t3() return the service-backed HttpVectorClient
@@ -454,10 +509,7 @@ class TestChashIndexDeleteCascade:
         assert result.exit_code == 0, result.output
 
         with T2Database(db_path) as verify_db:
-            remaining = verify_db.chash_index.conn.execute(
-                "SELECT COUNT(*) FROM chash_index WHERE physical_collection = ?",
-                ("docs__orphan",),
-            ).fetchone()[0]
+            remaining = verify_db.chash_index.count_for_collection("docs__orphan")
         assert remaining == 0
 
     def test_cli_delete_reports_chash_index_count(self, tmp_path, monkeypatch):
@@ -474,7 +526,7 @@ class TestChashIndexDeleteCascade:
         with T2Database(db_path) as db:
             for i in range(5):
                 db.chash_index.upsert(
-                    chash=f"h{i:02d}", collection="code__reported",
+                    chash=_chash(f"reported-{i:02d}"), collection="code__reported",
                 )
 
         # make_t3()/_t3() return the service-backed HttpVectorClient
