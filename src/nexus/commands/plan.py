@@ -266,6 +266,89 @@ def _open_plan_library():
     return PlanLibrary(path=db_path)
 
 
+def _hygiene_scan(library) -> list[dict]:
+    """Scan the plan library for hygiene violations (nexus-vtp8h).
+
+    Three classes, each with a named reason:
+      * non-executable plan_json (unparseable, or fails the
+        ``validate_plan_steps(require_steps=True)`` executable-DAG check —
+        the bead-dump class the drift audit found 77/116 of);
+      * null-verb rows (pre-fiovt legacy pollution — save-time refusal
+        exists now, but migrated rows predate it);
+      * always-failing rows (zero successes, >= 3 failures — the matcher
+        skips them live; hygiene retires them durably).
+
+    Read-only; returns ``[{id, query, reason}]``.
+    """
+    import json as _json  # noqa: PLC0415 — command-local import
+
+    from nexus.plans.matcher import _is_always_failing  # noqa: PLC0415 — command-local import
+    from nexus.plans.schema import PlanTemplateSchemaError, validate_plan_steps  # noqa: PLC0415 — command-local import
+
+    findings: list[dict] = []
+    rows = library.list_plans(limit=10_000, include_disabled=False)
+    for row in rows:
+        pid = row.get("id")
+        query = (row.get("query") or "")[:60]
+        reason = None
+        try:
+            parsed = _json.loads(row.get("plan_json") or "")
+            validate_plan_steps(parsed, require_steps=True)
+        except (TypeError, ValueError) as exc:
+            reason = f"not an executable DAG: {exc}"
+        except PlanTemplateSchemaError as exc:
+            reason = f"not an executable DAG: {exc}"
+        if reason is None and not (row.get("verb") or "").strip():
+            reason = "null-verb (pre-fiovt pollution; unmatchable by verb-filtered nx_answer)"
+        if reason is None and _is_always_failing(row):
+            reason = (
+                f"always-failing ({row.get('failure_count')} failures, "
+                "0 successes)"
+            )
+        if reason is not None:
+            findings.append({"id": pid, "query": query, "reason": reason})
+    return findings
+
+
+def _hygiene_apply(library, findings: list[dict]) -> int:
+    """Disable (never delete) each finding; returns the count disabled."""
+    count = 0
+    for f in findings:
+        if library.set_plan_disabled(f["id"], reason=f"hygiene: {f['reason'][:120]}"):
+            count += 1
+    return count
+
+
+@plan.command("hygiene")
+@click.option("--apply", "apply_", is_flag=True,
+              help="Disable the flagged plans (default: report only).")
+def hygiene_cmd(apply_: bool) -> None:
+    """Scan the plan library for bead-dumps, null-verb rows, and
+    always-failing plans; --apply DISABLES them (reversible via
+    `nx plan enable` — never deletes).
+
+    Works in BOTH modes: unlike `nx plan repair` (local-SQLite-only), this
+    verb routes through the storage facade, so it cleans the live
+    engine-served library on migrated installs (nexus-vtp8h).
+    """
+    library = _open_plan_library()
+    if library is None:
+        return
+    findings = _hygiene_scan(library)
+    if not findings:
+        click.echo("Plan library clean: no bead-dumps, null-verb, or always-failing plans.")
+        return
+    click.echo(f"{len(findings)} plan(s) flagged:")
+    for f in findings:
+        click.echo(f"  [{f['id']}] {f['query']!r}: {f['reason']}")
+    if not apply_:
+        click.echo("\nReport only — re-run with --apply to disable them "
+                   "(reversible via `nx plan enable <id>`).")
+        return
+    count = _hygiene_apply(library, findings)
+    click.echo(f"Disabled {count} plan(s).")
+
+
 def _emit(result: dict, *, indent: str = "") -> None:
     """Pretty-print a repair-verb result dict."""
     if not result:

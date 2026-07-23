@@ -3917,6 +3917,28 @@ def plan_save(
                 "Implementation / pipeline / phased-execution plans belong in beads "
                 "+ T2 memory (memory_put), not the plan library."
             )
+        # nexus-vtp8h: refuse non-executable plan_json at the door. The
+        # drift audit's plan 138 was a bead-dump that MATCHED at 0.66-0.70
+        # then crashed the runner (unknown tool '') — save-time validation
+        # kills the class before it can pollute the match library.
+        from nexus.plans.schema import PlanTemplateSchemaError, validate_plan_steps  # noqa: PLC0415 — deferred import; rare/branch-local path
+
+        try:
+            parsed_plan = json.loads(plan_json)
+        except (TypeError, ValueError) as exc:
+            return (
+                f"Plan not saved: plan_json is not valid JSON ({exc}). The "
+                "plan library stores executable retrieval plans only."
+            )
+        try:
+            validate_plan_steps(parsed_plan, require_steps=True)
+        except PlanTemplateSchemaError as exc:
+            return (
+                f"Plan not saved: {exc}. The plan library stores executable "
+                "retrieval plans (a non-empty steps list, each step with a "
+                "tool); implementation / phased plans belong in beads + T2 "
+                "memory (memory_put)."
+            )
         # nexus-j5geq: route through the T2 daemon (plans.save_plan is in
         # _WRITE_OPS; the daemon serialises the write through its single WAL
         # writer, eliminating the "database is locked" races seen 2026-06-11).

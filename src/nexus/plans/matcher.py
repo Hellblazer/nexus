@@ -70,6 +70,23 @@ _SCOPE_FIT_WEIGHT: float = 0.15
 _GROWN_PLAN_MIN_CONFIDENCE: float = 0.55
 
 
+#: nexus-vtp8h: a plan whose recorded runs are ALL failures at/past this
+#: count (with zero successes) is skipped by the matcher — re-matching it
+#: just re-crashes the runner (the plan-138 class). One success ever
+#: exempts a plan permanently (real plans can fail transiently).
+_ALWAYS_FAILING_MIN_FAILURES: int = 3
+
+
+def _is_always_failing(row: dict) -> bool:
+    """True when the plan's run record is all-failure (see constant above)."""
+    try:
+        failures = int(row.get("failure_count") or 0)
+        successes = int(row.get("success_count") or 0)
+    except (TypeError, ValueError):
+        return False
+    return successes == 0 and failures >= _ALWAYS_FAILING_MIN_FAILURES
+
+
 def _is_grown_plan_tags(tags: str | None) -> bool:
     """Return True when *tags* identifies a grown plan.
 
@@ -341,6 +358,10 @@ def plan_match(
             confidence = max(0.0, 1.0 - float(distance))
             if confidence < min_confidence:
                 continue
+            if _is_always_failing(row):
+                # nexus-vtp8h: every recorded run failed — skip rather than
+                # hand the runner a plan that only ever crashes.
+                continue
             # RDR-090 P1.3: grown plans need a higher cosine floor so
             # broad scaffolding ('which RDR…') in their match-text
             # cannot fire against unrelated questions. Caller floor
@@ -393,6 +414,9 @@ def plan_match(
     rows = library.search_plans(intent, limit=_fts_over, project=project)
     matches: list[Match] = []
     for row in rows:
+        if _is_always_failing(row):
+            # nexus-vtp8h: same skip on the FTS5 path.
+            continue
         m = Match.from_plan_row(row, confidence=None)
         if filter_dims and not _superset(m.dimensions, filter_dims):
             continue

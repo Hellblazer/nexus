@@ -32,6 +32,7 @@ __all__ = [
     "PlanTemplateLoader",
     "PlanTemplateSchemaError",
     "canonical_dimensions_json",
+    "validate_plan_steps",
     "validate_plan_template",
 ]
 
@@ -159,11 +160,42 @@ def validate_plan_template(
         raise PlanTemplateSchemaError(
             "plan template requires a 'plan_json' object with a 'steps' list"
         )
+    validate_plan_steps(plan_json)
 
+
+def validate_plan_steps(
+    plan_json: dict[str, Any], *, require_steps: bool = False,
+) -> None:
+    """Validate that ``plan_json`` carries an EXECUTABLE steps list
+    (nexus-vtp8h, extracted from :func:`validate_plan_template`).
+
+    ``require_steps=True`` additionally rejects a missing/empty steps list —
+    the bead-dump signature (the drift audit's plan 138 matched at 0.66-0.70
+    then crashed the runner with unknown tool ``''``). Template loaders keep
+    the historical may-be-empty semantics (``require_steps=False``).
+
+    Raises :class:`PlanTemplateSchemaError` with a named reason.
+    """
+    if not isinstance(plan_json, dict):
+        raise PlanTemplateSchemaError(
+            f"plan_json must be a mapping, got {type(plan_json).__name__}"
+        )
     steps = plan_json.get("steps")
+    if steps is None:
+        if require_steps:
+            raise PlanTemplateSchemaError(
+                "plan_json has no 'steps' list — not an executable retrieval "
+                "plan (implementation/phased plans belong in beads + T2 "
+                "memory, not the plan library)"
+            )
+        raise PlanTemplateSchemaError("plan_json requires a 'steps' list")
     if not isinstance(steps, list):
         raise PlanTemplateSchemaError(
             f"plan_json.steps must be a list, got {type(steps).__name__}"
+        )
+    if require_steps and not steps:
+        raise PlanTemplateSchemaError(
+            "plan_json.steps is empty — not an executable retrieval plan"
         )
 
     for index, step in enumerate(steps):

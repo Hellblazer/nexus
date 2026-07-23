@@ -122,10 +122,36 @@ class PlanCacheRegistry:
                         from nexus.mcp_infra import get_t1  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
                         from nexus.plans.session_cache import PlanSessionCache  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
                         t1, _ = get_t1()
+                        chroma_client = getattr(t1, "_client", None)
+                        if not hasattr(chroma_client, "get_or_create_collection"):
+                            # nexus-373jo: a SERVICE-backed T1 (HttpScratchStore,
+                            # the default since nexus-rn3wo.1) carries an
+                            # httpx.Client here — handing it to the chroma-shaped
+                            # PlanSessionCache AttributeError'd and silently
+                            # flipped EVERY production plan match to FTS5-only.
+                            # The cache is session-scoped and in-memory by
+                            # contract, so an in-process EphemeralClient restores
+                            # the calibrated cosine gate with identical isolation
+                            # (per-MCP-process == per-session). P4b rehoming
+                            # (engine-side embed) tracked on the bead.
+                            import chromadb  # noqa: PLC0415 — deferred; heavy import on a rare init path
+
+                            chroma_client = chromadb.EphemeralClient()
+                            _log.info(
+                                "plan_session_cache_ephemeral_substrate",
+                                reason="service-backed T1 has no chroma client",
+                            )
                         self._cache = PlanSessionCache(
-                            client=t1._client, session_id=t1.session_id,
+                            client=chroma_client, session_id=t1.session_id,
                         )
                     except Exception:  # noqa: BLE001 — boundary catch; third-party raises undocumented types, handled gracefully
+                        # nexus-373jo: settling UNAVAILABLE means the cosine
+                        # gate is off for the process lifetime — never silent.
+                        _log.warning(
+                            "plan_session_cache_disabled_for_process",
+                            consequence="plan match degrades to FTS5-only",
+                            exc_info=True,
+                        )
                         self._cache = _UNAVAILABLE
         if self._cache is _UNAVAILABLE:
             return None

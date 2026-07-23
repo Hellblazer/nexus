@@ -125,7 +125,10 @@ def test_plan_save_routes_via_t2_index_write(tmp_path: Path) -> None:
     ):
         result = core.plan_save(
             query="test-plan-query",
-            plan_json='{"steps":[]}',
+            # nexus-vtp8h: plan_save now refuses empty-steps bead-dumps at
+            # the door; this test pins ROUTING, so it uses a minimal valid
+            # executable plan.
+            plan_json='{"steps":[{"tool":"search","args":{"query":"x"}}]}',
             verb="query",
             outcome="success",
             tags="test",
