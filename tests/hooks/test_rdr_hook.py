@@ -126,3 +126,87 @@ def test_resolve_rdr_collection_synthesises_conformant_when_owner_unregistered(
     )
     name = rdr_hook_module._resolve_rdr_collection(repo)
     assert name == "rdr__fresh-deadbeef__voyage-context-3__v1"
+
+
+# ── nexus-e2sim: `open` is a pre-accept synonym for `draft` (GH #1409) ──────
+
+
+def _write_rdr(tmp_path: Path, status: str) -> Path:
+    f = tmp_path / "001-test-decision.md"
+    f.write_text(f"---\nstatus: {status}\ntitle: test\n---\n\n# RDR-001\n")
+    return f
+
+
+def test_reconcile_open_file_vs_draft_t2_is_no_op(
+    rdr_hook_module, tmp_path, monkeypatch
+) -> None:
+    """nexus-e2sim (GH #1409 follow-through): rdr-create seeds T2 at
+    'draft', so an RDR file legitimately using 'open' (the qsryj-accepted
+    pre-accept synonym) must NOT be silently rewritten back to 'draft' by
+    the SessionStart reconcile — the exact revert the fix was filed
+    against. Equal rank means neither side wins: pure no-op."""
+    mod = rdr_hook_module
+    f = _write_rdr(tmp_path, "open")
+    file_writes: list = []
+    t2_writes: list = []
+    monkeypatch.setattr(
+        mod, "_update_file_status", lambda *a: file_writes.append(a) or True
+    )
+    monkeypatch.setattr(
+        mod, "_update_t2_status", lambda *a: t2_writes.append(a) or True
+    )
+
+    reconciled = mod._reconcile(
+        tmp_path, "myrepo", [f], {"001": "draft"}
+    )
+
+    assert reconciled == 0
+    assert file_writes == [], (
+        "the hook must not rewrite an 'open' file back to 'draft' "
+        "(the GH #1409 revert this test pins)"
+    )
+    assert t2_writes == []
+
+
+def test_reconcile_draft_file_vs_open_t2_is_no_op(
+    rdr_hook_module, tmp_path, monkeypatch
+) -> None:
+    mod = rdr_hook_module
+    f = _write_rdr(tmp_path, "draft")
+    file_writes: list = []
+    t2_writes: list = []
+    monkeypatch.setattr(
+        mod, "_update_file_status", lambda *a: file_writes.append(a) or True
+    )
+    monkeypatch.setattr(
+        mod, "_update_t2_status", lambda *a: t2_writes.append(a) or True
+    )
+
+    reconciled = mod._reconcile(
+        tmp_path, "myrepo", [f], {"001": "open"}
+    )
+
+    assert reconciled == 0
+    assert file_writes == [] and t2_writes == []
+
+
+def test_reconcile_open_file_still_advances_to_accepted_t2(
+    rdr_hook_module, tmp_path, monkeypatch
+) -> None:
+    """'open' ranks WITH 'draft', not above the lifecycle: a T2 record at
+    'accepted' still wins and updates the file, same as it would for
+    'draft'."""
+    mod = rdr_hook_module
+    f = _write_rdr(tmp_path, "open")
+    file_writes: list = []
+    monkeypatch.setattr(
+        mod, "_update_file_status", lambda *a: file_writes.append(a) or True
+    )
+    monkeypatch.setattr(mod, "_update_t2_status", lambda *a: True)
+
+    reconciled = mod._reconcile(
+        tmp_path, "myrepo", [f], {"001": "accepted"}
+    )
+
+    assert reconciled == 1
+    assert file_writes == [(f, "accepted")]

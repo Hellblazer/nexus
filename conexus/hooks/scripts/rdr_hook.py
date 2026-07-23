@@ -19,8 +19,13 @@ from pathlib import Path
 
 
 # Monotonic status ordering (higher index = more advanced)
+# "open" ranks WITH "draft" (nexus-e2sim / GH #1409): it is the accepted
+# pre-accept synonym in rdr.py's accept flow, and rdr-create always seeds
+# T2 at "draft" — an unranked "open" here made this hook silently rewrite
+# every open-status file back to draft on session start.
 _STATUS_ORDER = {
     "draft": 0,
+    "open": 0,
     "accepted": 1,
     "implemented": 2,
     "closed": 3,

@@ -1633,9 +1633,9 @@ def search(
         # zero-hit can surface the closest dropped candidate (the MCP tool
         # turns it into an actionable message; the engine still emits no stderr).
         diag: list = []
-        cached_results = _page_cache_get(cache_key, need)
-        if cached_results is not None:
-            results = cached_results
+        cached = _page_cache_get(cache_key, need)
+        if cached is not None:
+            results, diag = cached
         else:
             results = None
         if results is None:
@@ -1657,7 +1657,7 @@ def search(
             # Clustered results arrive in cluster-grouped order.
             if not clustered:
                 results.sort(key=lambda r: r.distance)
-            _page_cache_put(cache_key, results, fetch_n)
+            _page_cache_put(cache_key, results, fetch_n, diag)
         if not results:
             if structured:
                 return {
@@ -1762,9 +1762,14 @@ _page_cache_lock = threading.Lock()
 _page_cache: dict[str, Any] = {}
 
 
-def _page_cache_get(key: tuple, need: int) -> list | None:
-    """Cached results when the entry matches *key*, is TTL-fresh, and its
-    fetch covered the needed window (or exhausted the corpus)."""
+def _page_cache_get(key: tuple, need: int) -> tuple[list, list] | None:
+    """``(results, diagnostics)`` when the entry matches *key*, is TTL-fresh,
+    and its fetch covered the needed window (or exhausted the corpus).
+
+    Diagnostics ride the cache (batch-f1655f55 critique): a cached zero-hit
+    must render the same nexus-uro6c closest-dropped-candidate hint as the
+    uncached path — serving ``[]`` with empty diagnostics silently degraded
+    the message to a bare "No results."."""
     with _page_cache_lock:
         if _page_cache.get("key") != key:
             return None
@@ -1774,17 +1779,27 @@ def _page_cache_get(key: tuple, need: int) -> list | None:
         fetched = _page_cache.get("fetch_n", 0)
         exhausted = len(results) < fetched   # corpus smaller than the ask
         if fetched >= need or exhausted:
-            return results
+            return results, _page_cache.get("diag") or []
         return None
 
 
-def _page_cache_put(key: tuple, results: list, fetch_n: int) -> None:
+def _page_cache_put(key: tuple, results: list, fetch_n: int, diag: list) -> None:
     with _page_cache_lock:
         _page_cache.clear()
         _page_cache.update({
             "key": key, "results": results, "fetch_n": fetch_n,
-            "at": time.monotonic(),
+            "diag": diag, "at": time.monotonic(),
         })
+
+
+def _page_cache_invalidate() -> None:
+    """Drop the page-turn cache after a same-process write (batch-f1655f55
+    critique): a ``store_put``/``store_delete`` inside the TTL window must
+    not leave a page burst serving pre-write results. Cross-process writes
+    (CLI indexing) remain bounded by the TTL — this cache lives in the MCP
+    process, whose write surface is exactly these tools."""
+    with _page_cache_lock:
+        _page_cache.clear()
 
 
 def _reset_page_cache_for_tests() -> None:
@@ -2908,6 +2923,9 @@ def store_put(
             ttl_days=ttl_days,
             catalog_doc_id=catalog_doc_id,
         )
+        # A committed write makes any cached page burst stale — drop it so a
+        # same-identity search re-fetches (batch-f1655f55 critique).
+        _page_cache_invalidate()
         # Auto-link from T1 scratch link-context.
         # nexus-a414: replace prior bare-except with named-exception capture
         # so unexpected errors surface at WARNING instead of silently passing.
@@ -3988,6 +4006,7 @@ def store_delete(doc_id: str, collection: str = "knowledge") -> str:
         col_name = t3_collection_name(collection, t3=t3)
         deleted = t3.delete_by_id(col_name, doc_id)
         if deleted:
+            _page_cache_invalidate()
             return f"Deleted: {doc_id} from {col_name}"
         return f"Not found: {doc_id!r} in {col_name}"
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
