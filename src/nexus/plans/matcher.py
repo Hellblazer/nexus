@@ -336,6 +336,7 @@ def plan_match(
         # Gather all admissible candidates with (adjusted_score, specificity).
         scored: list[tuple[float, int, Match]] = []
         scope_conflict_drops = 0
+        always_failing_drops = 0
         for plan_id, distance in hits:
             row = library.get_plan(plan_id)
             if row is None:
@@ -360,7 +361,13 @@ def plan_match(
                 continue
             if _is_always_failing(row):
                 # nexus-vtp8h: every recorded run failed — skip rather than
-                # hand the runner a plan that only ever crashes.
+                # hand the runner a plan that only ever crashes. Attrition is
+                # counted, not over-fetch-compensated (reviewer Medium,
+                # recorded as accepted): `nx plan hygiene` retires these
+                # durably, so cosine-hit domination by always-failing rows is
+                # a transient pre-hygiene state, and the counter below makes
+                # it observable rather than silently under-delivering n.
+                always_failing_drops += 1
                 continue
             # RDR-090 P1.3: grown plans need a higher cosine floor so
             # broad scaffolding ('which RDR…') in their match-text
@@ -404,6 +411,12 @@ def plan_match(
                 t1_hits=len(hits),
                 dropped=scope_conflict_drops,
                 scope_pref=scope_pref,
+            )
+        if always_failing_drops:
+            _log.debug(
+                "plan_match_always_failing_dropped",
+                dropped=always_failing_drops,
+                remedy="nx plan hygiene --apply retires these durably",
             )
 
     # FTS5 fallback: either cache unavailable or T1 returned no hits.

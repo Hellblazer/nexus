@@ -191,7 +191,10 @@ class TestPlanHygieneVerb:
         ]
 
         class _Lib:
-            disabled: list[tuple[int, str]] = []
+            def __init__(self) -> None:
+                # instance-level (reviewer nit: a class-level mutable list
+                # silently shares state across _Lib() instances)
+                self.disabled: list[tuple[int, str]] = []
 
             def list_plans(self, limit=20, project="", *, include_disabled=False):
                 return list(rows)

@@ -181,14 +181,15 @@ def validate_plan_steps(
             f"plan_json must be a mapping, got {type(plan_json).__name__}"
         )
     steps = plan_json.get("steps")
-    if steps is None:
-        if require_steps:
-            raise PlanTemplateSchemaError(
-                "plan_json has no 'steps' list — not an executable retrieval "
-                "plan (implementation/phased plans belong in beads + T2 "
-                "memory, not the plan library)"
-            )
-        raise PlanTemplateSchemaError("plan_json requires a 'steps' list")
+    if steps is None and require_steps:
+        raise PlanTemplateSchemaError(
+            "plan_json has no 'steps' list — not an executable retrieval "
+            "plan (implementation/phased plans belong in beads + T2 "
+            "memory, not the plan library)"
+        )
+    # steps=None without require_steps falls through to the isinstance check
+    # below, preserving the pre-extraction error text byte-for-byte
+    # ("plan_json.steps must be a list, got NoneType") — reviewer Low.
     if not isinstance(steps, list):
         raise PlanTemplateSchemaError(
             f"plan_json.steps must be a list, got {type(steps).__name__}"

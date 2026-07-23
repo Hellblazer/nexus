@@ -286,7 +286,15 @@ def _hygiene_scan(library) -> list[dict]:
     from nexus.plans.schema import PlanTemplateSchemaError, validate_plan_steps  # noqa: PLC0415 — command-local import
 
     findings: list[dict] = []
-    rows = library.list_plans(limit=10_000, include_disabled=False)
+    scan_limit = 10_000
+    rows = library.list_plans(limit=scan_limit, include_disabled=False)
+    if len(rows) >= scan_limit:
+        # No silent caps (reviewer Low non-vacuity): a library at/over the
+        # scan limit means this pass may be incomplete — say so.
+        click.echo(
+            f"warn: plan library returned {len(rows)} rows at the "
+            f"{scan_limit}-row scan limit — hygiene scan may be incomplete"
+        )
     for row in rows:
         pid = row.get("id")
         query = (row.get("query") or "")[:60]
@@ -311,11 +319,22 @@ def _hygiene_scan(library) -> list[dict]:
 
 
 def _hygiene_apply(library, findings: list[dict]) -> int:
-    """Disable (never delete) each finding; returns the count disabled."""
+    """Disable (never delete) each finding; returns the count disabled.
+
+    Partial failure is surfaced per-plan (reviewer Medium): a finding whose
+    disable returns False (e.g. deleted between scan and apply) is echoed,
+    never silently folded into the aggregate count.
+    """
     count = 0
     for f in findings:
-        if library.set_plan_disabled(f["id"], reason=f"hygiene: {f['reason'][:120]}"):
+        reason = f"hygiene: {f['reason']}"[:120]
+        if library.set_plan_disabled(f["id"], reason=reason):
             count += 1
+        else:
+            click.echo(
+                f"  warn: could not disable [{f['id']}] "
+                "(deleted or already disabled between scan and apply?)"
+            )
     return count
 
 

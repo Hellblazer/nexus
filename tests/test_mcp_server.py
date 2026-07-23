@@ -914,7 +914,7 @@ def test_memory_search_pagination_offset_beyond_end(t2_path):
 def test_plan_save_and_search(t2_path):
     result = plan_save(
         query="compare error handling",
-        plan_json='{"steps": [{"step": 1, "operation": "search"}]}',
+        plan_json='{"steps": [{"tool": "search", "args": {"query": "$input"}}]}',
         verb="analyze",
         project="testproj", tags="search,compare",
     )
@@ -946,7 +946,7 @@ def test_plan_delete_round_trip(t2_path):
     # entry must be removable via MCP without direct DB access.
     plan_save(
         query="throwaway shakeout probe entry",
-        plan_json='{"steps": [{"step": 1, "operation": "search"}]}',
+        plan_json='{"steps": [{"tool": "search", "args": {"query": "$input"}}]}',
         verb="query",
         project="testproj", tags="shakeout-probe",
     )

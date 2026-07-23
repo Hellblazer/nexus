@@ -130,10 +130,17 @@ class PlanCacheRegistry:
                             # PlanSessionCache AttributeError'd and silently
                             # flipped EVERY production plan match to FTS5-only.
                             # The cache is session-scoped and in-memory by
-                            # contract, so an in-process EphemeralClient restores
-                            # the calibrated cosine gate with identical isolation
-                            # (per-MCP-process == per-session). P4b rehoming
-                            # (engine-side embed) tracked on the bead.
+                            # contract; an in-process EphemeralClient restores
+                            # the calibrated cosine gate. ISOLATION NOTE
+                            # (review-verified): EphemeralClient instances in
+                            # one process SHARE backing state (SharedSystemClient
+                            # caches by settings hash — the known
+                            # project_chromadb_ephemeral_shared_state gotcha),
+                            # so isolation comes from PlanSessionCache's
+                            # session_id row filter, NOT from client instance
+                            # boundaries; the plans__session collection is
+                            # process-global across registry resets. P4b
+                            # rehoming (engine-side embed) tracked on the bead.
                             import chromadb  # noqa: PLC0415 — deferred; heavy import on a rare init path
 
                             chroma_client = chromadb.EphemeralClient()
