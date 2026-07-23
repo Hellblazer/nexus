@@ -192,7 +192,20 @@ class HttpRemapStore(RefreshableHttpStoreMixin):
                         for e in page
                     ],
                 })
-                recorded += int(result.get("recorded", len(page)))
+                acked = result.get("recorded") if isinstance(result, dict) else None
+                if acked is None:
+                    # nexus-znwc2: the old default fabricated len(page) as the
+                    # durable count. This method's own contract is fail-loud —
+                    # a fact whose ack cannot be read did not provably land,
+                    # and the r2 ordering forbids proceeding to the target
+                    # write on an unproven map.
+                    raise RuntimeError(
+                        "remap record_batch response carried no `recorded` "
+                        f"ack for a {len(page)}-entry page "
+                        f"({source_collection!r}) — cannot attest the map "
+                        "facts landed; aborting before the target write"
+                    )
+                recorded += int(acked)
         return recorded
 
     # ── leg operations ──────────────────────────────────────────────────────

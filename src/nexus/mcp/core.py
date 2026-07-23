@@ -1861,17 +1861,43 @@ def _group_collections_by_model(target: list[str]) -> list[list[str]]:
 
 
 def _distance_key(row: dict) -> float:
-    """Sort key for combined-query merge rows: missing OR ``None`` -> 0.0.
+    """Sort key for combined-query merge rows: missing OR ``None`` -> +inf.
 
-    ``row.get("distance", 0.0)`` alone only covers a MISSING key — a row
+    ``row.get("distance", ...)`` alone only covers a MISSING key — a row
     carrying an explicit ``None`` distance (server anomaly) would still
     reach the sort as ``None`` and raise ``TypeError`` when compared against
     a ``float``. Centralized here so every merge-sort site (the two
     model-group merges below, and ``search_topic_scoped``'s pre-existing
     per-collection merge) hardens uniformly instead of drifting per-site.
+
+    nexus-znwc2: the sentinel is ``+inf`` (sorts LAST), not 0.0 — a
+    distance-less row promoted to best-match silently corrupted relevance
+    in every service-mode merge whenever a field was stripped in transit.
     """
     d = row.get("distance")
-    return d if d is not None else 0.0
+    return d if d is not None else float("inf")
+
+
+def _reported_distances(rows: list[dict]) -> list[float | None]:
+    """The emitted structured ``distances`` list: missing/None stays ``None``.
+
+    nexus-znwc2 / nexus-3809x: never fabricate 0.0 (a perfect-match score)
+    for a stripped field — and never emit ``float('inf')`` either: the MCP
+    text serializer renders it as the bare ``Infinity`` token (invalid JSON,
+    breaks strict clients) while pydantic's structuredContent turns the same
+    value into ``null``. ``+inf`` lives ONLY inside :func:`_distance_key`'s
+    sort ordering; the emitted value for an unknown distance is an honest,
+    JSON-safe ``None``, logged loud.
+    """
+    distances = [r.get("distance") for r in rows]
+    missing = sum(1 for d in distances if d is None)
+    if missing:
+        _log.warning(
+            "structured_rows_missing_distance",
+            missing=missing, total=len(rows),
+            consequence="emitting null distances (never a fabricated 0.0)",
+        )
+    return distances
 
 
 def _grouped_combined_query(
@@ -2062,7 +2088,7 @@ def search_metadata_scoped(
             return {
                 "ids": ids,
                 "tumblers": ids,
-                "distances": [r.get("distance", 0.0) for r in rows],
+                "distances": _reported_distances(rows),
                 "collections": [r.get("collection", "") for r in rows],
                 # contents inline so plan steps can summarize directly via
                 # $stepN.contents WITHOUT store_get_many hydration (which is
@@ -2136,7 +2162,7 @@ def search_topic_scoped(
             return {
                 "ids": [r.get("id", "") for r in merged],
                 "tumblers": ["" for _ in merged],
-                "distances": [r.get("distance", 0.0) for r in merged],
+                "distances": _reported_distances(merged),
                 "collections": [r.get("collection", "") for r in merged],
                 # contents inline so plan steps summarize via $stepN.contents
                 # without hydration (topic ids are chunk chashes).
@@ -2263,7 +2289,7 @@ def search_graph_hop(
             return {
                 "ids": ids,
                 "tumblers": ids,
-                "distances": [r.get("distance", 0.0) for r in rows],
+                "distances": _reported_distances(rows),
                 "collections": [r.get("collection", "") for r in rows],
                 # contents inline so plan steps summarize via $stepN.contents WITHOUT
                 # store_get_many hydration (which is chash-keyed and would miss tumblers).
@@ -2503,7 +2529,7 @@ def query(
                     return {
                         "ids": tumblers_svc,
                         "tumblers": tumblers_svc,
-                        "distances": [float(r.get("distance", 0.0)) for r in rows],
+                        "distances": _reported_distances(rows),
                         # sorted distinct across rows (mirrors existing dance path)
                         "collections": sorted({r.get("collection", "") for r in rows}),
                         # per-row aligned (RDR-086 / review #7)

@@ -1698,10 +1698,14 @@ class TestUpsertChunksPaging:
 
     def _capture(self, monkeypatch):
         calls: list[dict] = []
-        monkeypatch.setattr(
-            "nexus.db.http_vector_client._post",
-            lambda path, body, **kw: calls.append(body),
-        )
+
+        def _fake(path, body, **kw):
+            calls.append(body)
+            # nexus-znwc2: the client reconciles the `upserted` ack per page —
+            # echo ids.length like the real engine (VectorHandler) does.
+            return {"upserted": len(body.get("ids", []))}
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", _fake)
         return calls
 
     def test_oversize_cce_pages_into_cap_sized_posts(self, monkeypatch):

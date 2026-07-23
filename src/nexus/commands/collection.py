@@ -1317,9 +1317,14 @@ def reembed_cmd(
         )
         return
 
-    processed, skipped = _reembed_collection(
-        db, name, target_model, dry_run=False,
-    )
+    try:
+        processed, skipped = _reembed_collection(
+            db, name, target_model, dry_run=False,
+        )
+    except Exception as exc:  # noqa: BLE001 — boundary catch re-raised as ClickException (file convention; reviewer M1, nexus-znwc2 — the upsert ack-mismatch RuntimeError surfaces here)
+        raise click.ClickException(
+            f"collection {name!r}: {type(exc).__name__}: {exc}"
+        )
     click.echo(
         f"re-embedded {processed} chunk(s) in {name!r} with "
         f"{target_model!r}; skipped {skipped} empty-document row(s)."
