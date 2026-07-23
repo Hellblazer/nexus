@@ -10,6 +10,15 @@ import pytest
 from nexus.db.t2 import T2Database
 
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _engine_substrate(t2_service_env):
+    """RDR-155 P4b P0a' representative batch: this module runs its T2
+    against the engine-backed substrate (per-test minted tenant)."""
+
+
 # ── overlap detection ───────────────────────────────────────────────────────
 
 
@@ -121,13 +130,14 @@ def test_merge_multiple_entries(db: T2Database) -> None:
 
 def test_flag_stale_uses_last_accessed(db: T2Database) -> None:
     """Entries with old last_accessed are flagged as stale."""
-    db.put(project="proj", title="old.md", content="old entry")
-    # Backdate last_accessed
-    old_ts = (datetime.now(UTC) - timedelta(days=45)).isoformat()
-    db.memory.conn.execute(
-        "UPDATE memory SET last_accessed=? WHERE title='old.md'", (old_ts,)
+    # Seed with a backdated last_accessed via the fidelity-import surface
+    # (RDR-155 P4b P0a': import_entry writes timestamps VERBATIM — the
+    # substrate-neutral replacement for the retired raw-conn UPDATE).
+    old_ts = (datetime.now(UTC) - timedelta(days=45)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    db.memory.import_entry(
+        project="proj", title="old.md", content="old entry",
+        timestamp=old_ts, last_accessed=old_ts,
     )
-    db.memory.conn.commit()
 
     db.put(project="proj", title="fresh.md", content="fresh entry")
     db.get(project="proj", title="fresh.md")  # sets last_accessed to now
@@ -140,14 +150,13 @@ def test_flag_stale_uses_last_accessed(db: T2Database) -> None:
 
 def test_flag_stale_falls_back_to_timestamp(db: T2Database) -> None:
     """Entries with empty last_accessed use timestamp for staleness check."""
-    db.put(project="proj", title="never-accessed.md", content="untouched")
-    # Backdate the timestamp, leave last_accessed empty
+    # Backdated timestamp, never accessed (NULL last_accessed) — seeded
+    # via the fidelity-import surface (see test above).
     old_ts = (datetime.now(UTC) - timedelta(days=45)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    db.memory.conn.execute(
-        "UPDATE memory SET timestamp=?, last_accessed='' WHERE title='never-accessed.md'",
-        (old_ts,),
+    db.memory.import_entry(
+        project="proj", title="never-accessed.md", content="untouched",
+        timestamp=old_ts,
     )
-    db.memory.conn.commit()
 
     stale = db.flag_stale_memories("proj", idle_days=30)
     assert len(stale) >= 1
@@ -209,13 +218,10 @@ def test_mcp_memory_consolidate_flag_stale(db: T2Database, monkeypatch) -> None:
     """memory_consolidate(action='flag-stale') lists stale entries."""
     from nexus.mcp.core import memory_consolidate
 
-    db.put(project="proj", title="old.md", content="stale")
     old_ts = (datetime.now(UTC) - timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    db.memory.conn.execute(
-        "UPDATE memory SET timestamp=?, last_accessed='' WHERE title='old.md'",
-        (old_ts,),
+    db.memory.import_entry(
+        project="proj", title="old.md", content="stale", timestamp=old_ts,
     )
-    db.memory.conn.commit()
     monkeypatch.setattr("nexus.mcp.core._t2_ctx", lambda: _NonClosingT2Ctx(db))
 
     result = memory_consolidate(action="flag-stale", project="proj", idle_days=30)
@@ -560,14 +566,15 @@ def test_mcp_memory_consolidate_with_real_t2_ctx(tmp_path, monkeypatch) -> None:
     assert "overlapping pair" in result
     assert "a.md" in result
 
-    # Backdate a.md so flag-stale has something to find
+    # Backdate a.md so flag-stale has something to find: import_entry
+    # upserts by (project, title) writing the source timestamp verbatim.
     backdate_db = T2Database(db_path)
     old_ts = (datetime.now(UTC) - timedelta(days=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    backdate_db.memory.conn.execute(
-        "UPDATE memory SET timestamp=?, last_accessed='' WHERE title='a.md'",
-        (old_ts,),
+    backdate_db.memory.import_entry(
+        project="proj", title="a.md",
+        content="search engine architecture design patterns optimization benchmarks indexing",
+        timestamp=old_ts,
     )
-    backdate_db.memory.conn.commit()
     backdate_db.close()
 
     # flag-stale on the same re-opened DB
@@ -582,22 +589,18 @@ def test_find_overlapping_does_not_bump_access_count(db: T2Database) -> None:
     db.put(project="proj", title="b.md",
            content="search engine architecture design implementation")
 
-    # Snapshot access_count before the scan
-    before_a = db.memory.conn.execute(
-        "SELECT access_count FROM memory WHERE title='a.md'"
-    ).fetchone()[0]
-    before_b = db.memory.conn.execute(
-        "SELECT access_count FROM memory WHERE title='b.md'"
-    ).fetchone()[0]
+    # Snapshot access_count via the non-bumping list surface (get_all) —
+    # the substrate-neutral replacement for the raw-conn SELECT.
+    def _counts() -> dict[str, int]:
+        return {r["title"]: r["access_count"] for r in db.memory.get_all("proj")}
+
+    before = _counts()
 
     db.find_overlapping_memories("proj")
 
-    after_a = db.memory.conn.execute(
-        "SELECT access_count FROM memory WHERE title='a.md'"
-    ).fetchone()[0]
-    after_b = db.memory.conn.execute(
-        "SELECT access_count FROM memory WHERE title='b.md'"
-    ).fetchone()[0]
+    after = _counts()
+    before_a, before_b = before["a.md"], before["b.md"]
+    after_a, after_b = after["a.md"], after["b.md"]
 
     assert after_a == before_a
     assert after_b == before_b

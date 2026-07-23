@@ -81,16 +81,24 @@ def pg_bin_dir() -> Path:
     CLI binaries, same class of fixed non-isolated location as the old
     hardcoded Homebrew path.
 
-    Returns a nonexistent sentinel path when no PG is discoverable so the
-    per-module ``.exists()`` prereq checks skip cleanly, same as before.
-    A SET-but-broken ``NEXUS_PG_BIN`` re-raises at import/collection time
-    (product policy: a misconfigured explicit override is a user error —
-    fail loud, never mass-skip). Known footgun accepted with that policy:
-    the raise aborts collection of all 22 importing modules, so a stale
-    ``NEXUS_PG_BIN`` export lingering in a dev shell breaks even a plain
-    ``uv run pytest`` — deliberately, with the fix in the error message
-    ("Fix NEXUS_PG_BIN or unset it"), rather than silently skipping the
-    family the way the hardcoded path used to.
+    SELF-PROVISIONING LEG (RDR-155 P4b P0a'; Hal directive: we BUILD our
+    PG — tests never depend on a pre-existing host install): when
+    discovery misses, download the sigstore-verified ``nexus-pg-<target>``
+    bundle for :data:`~nexus.daemon.binary_install.PINNED_SERVICE_TAG`
+    through the product's OWN install seam (``install_pg_bundle`` +
+    ``ensure_pg_bundle``) into a dedicated per-tag test cache
+    (``~/.cache/nexus-test-substrate/<tag>/`` — NEVER the live config
+    dir). Keyed on the immutable tag: warm cache = extract-marker no-op;
+    a floor bump re-provisions exactly once. This is what retired the
+    silent mass-skip on boxes with no host PG (2026-07-23: EVERY
+    tests/db module had been skipping on the dev box).
+
+    Returns a nonexistent sentinel path only when self-provisioning
+    ITSELF fails (offline box, no cached bundle) so the per-module
+    ``.exists()`` prereq checks skip cleanly. A SET-but-broken
+    ``NEXUS_PG_BIN`` re-raises at import/collection time (product
+    policy: a misconfigured explicit override is a user error — fail
+    loud, never mass-skip).
     """
     from nexus.db.pg_provision import PgBinaryNotFoundError, discover_pg_binaries
 
@@ -99,7 +107,46 @@ def pg_bin_dir() -> Path:
     except PgBinaryNotFoundError:
         if os.environ.get("NEXUS_PG_BIN", "").strip():
             raise
+        provisioned = _self_provision_pg_bundle()
+        if provisioned is not None:
+            return provisioned
         return Path("/nexus-pg-binaries-not-found")
+
+
+def _self_provision_pg_bundle() -> Path | None:
+    """Fetch + extract OUR pinned PG bundle into the per-tag test cache.
+
+    Product seams only: ``install_pg_bundle`` (sigstore-verified release
+    download) and ``ensure_pg_bundle`` (idempotent extract). Returns the
+    bundle ``bin/`` dir, or ``None`` when provisioning is impossible
+    (no pinned tag, offline) — the caller then falls back to the
+    skip-sentinel. Never touches the live config dir.
+    """
+    from nexus.daemon.binary_install import PINNED_SERVICE_TAG, install_pg_bundle
+    from nexus.db.pg_bundle import ensure_pg_bundle, extracted_bin_dir
+
+    if not PINNED_SERVICE_TAG:
+        return None
+    cache_dir = Path.home() / ".cache" / "nexus-test-substrate" / PINNED_SERVICE_TAG
+    cached = extracted_bin_dir(cache_dir)
+    if cached is not None:
+        return cached
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        (cache_dir / "service").mkdir(exist_ok=True)
+        install_pg_bundle(PINNED_SERVICE_TAG, cache_dir)
+        return ensure_pg_bundle(
+            cache_dir, search_dirs=[cache_dir / "service"]
+        )
+    except Exception as exc:  # noqa: BLE001 — provisioning is best-effort; miss degrades to the documented skip-sentinel
+        import warnings
+
+        warnings.warn(
+            f"PG-bundle self-provisioning failed ({exc}); PG-dependent "
+            "tests will skip. Fix connectivity or set NEXUS_PG_BIN.",
+            stacklevel=2,
+        )
+        return None
 
 
 def jar_freshness_skip_reason(jar: Path = _SERVICE_JAR) -> str | None:
