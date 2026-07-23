@@ -339,6 +339,7 @@ def guided_upgrade_cmd(
     try:
         _run_migration(
             local_path, db_path, catalog_db_path, readiness.service_url,
+            assume_yes=assume_yes,
             **_extra_kwargs,
         )
     except click.ClickException:
