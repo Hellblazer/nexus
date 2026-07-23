@@ -204,11 +204,15 @@ class TestFullPipelineEphemeral:
                 "code__e2e", doc_ids, embeddings, texts, ephemeral_chroma,
             )
 
-            # Manual assignment should be preserved
-            rows = db.taxonomy.conn.execute(
-                "SELECT assigned_by FROM topic_assignments WHERE doc_id = 'manual-doc'"
-            ).fetchall()
-            assert any(r[0] == "manual" for r in rows), "Manual assignment lost"
+            # Manual assignment should be preserved — read through the
+            # public rebuild-state surface (manual_assignments is exactly
+            # the assigned_by='manual' row set; RDR-155 P4b P0a').
+            # centroid_coll: required positionally by the SQLite oracle,
+            # ignored by the Http twin (centroids route through the port).
+            manual = db.taxonomy.read_rebuild_old_state(
+                "code__e2e", ephemeral_chroma.get_or_create_collection("taxonomy__centroids"),
+            )["manual_assignments"]
+            assert "manual-doc" in manual, "Manual assignment lost"
 
     def test_merge_and_split_roundtrip(
         self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: chromadb.ClientAPI,
