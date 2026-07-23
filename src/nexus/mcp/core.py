@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -1612,8 +1614,18 @@ def search(
 
         where_dict = _parse_where_str(where)
 
-        # Fetch enough to fill the requested page
-        fetch_n = offset + limit
+        # nexus-e4srp: page-turn cache. Each stateless page call re-embeds the
+        # query server-side and re-fetches every earlier page's rows. Instead:
+        # over-fetch a small lookahead window on a fresh retrieval identity and
+        # serve subsequent pages from it (one query embed per burst). The
+        # cached list is post-sort, so cached pages are byte-identical to what
+        # the uncached path would render.
+        need = offset + limit
+        fetch_n = need + limit * _PAGE_LOOKAHEAD_PAGES
+        cache_key = (
+            query, tuple(target), where or "", cluster_by or "",
+            topic or "", threshold,
+        )
         clustered = bool(cluster_by)
         # Always pass taxonomy for topic grouping + topic boost (RDR-070).
         # Wrapped in context manager to avoid connection leak.
@@ -1621,24 +1633,31 @@ def search(
         # zero-hit can surface the closest dropped candidate (the MCP tool
         # turns it into an actionable message; the engine still emits no stderr).
         diag: list = []
-        with _t2_ctx() as _t2_db:
+        cached_results = _page_cache_get(cache_key, need)
+        if cached_results is not None:
+            results = cached_results
+        else:
+            results = None
+        if results is None:
+            with _t2_ctx() as _t2_db:
             # ``telemetry`` wired for RDR-087 Phase 2.2 hot-path logging;
             # opt-out via ``telemetry.search_enabled=false`` in .nexus.yml.
-            results = search_cross_corpus(
-                query, target, n_results=fetch_n, t3=t3, where=where_dict,
-                cluster_by=cluster_by or None,
-                catalog=_get_catalog(),
-                link_boost=False,
-                taxonomy=_t2_db.taxonomy,
-                topic=topic or None,
-                threshold_override=threshold,
-                telemetry=_t2_db.telemetry,
-                diagnostics_out=diag,
-            )
-        # Only sort by distance for flat (non-clustered) results.
-        # Clustered results arrive in cluster-grouped order from search_engine.
-        if not clustered:
-            results.sort(key=lambda r: r.distance)
+                results = search_cross_corpus(
+                    query, target, n_results=fetch_n, t3=t3, where=where_dict,
+                    cluster_by=cluster_by or None,
+                    catalog=_get_catalog(),
+                    link_boost=False,
+                    taxonomy=_t2_db.taxonomy,
+                    topic=topic or None,
+                    threshold_override=threshold,
+                    telemetry=_t2_db.telemetry,
+                    diagnostics_out=diag,
+                )
+            # Only sort by distance for flat (non-clustered) results.
+            # Clustered results arrive in cluster-grouped order.
+            if not clustered:
+                results.sort(key=lambda r: r.distance)
+            _page_cache_put(cache_key, results, fetch_n)
         if not results:
             if structured:
                 return {
@@ -1731,6 +1750,46 @@ def search(
         return "\n\n".join(lines)
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("search", e)
+
+
+#: nexus-e4srp: single-entry page-turn cache for the ``search`` tool. Page
+#: bursts are same-identity, seconds apart; one entry with a short TTL covers
+#: them without holding stale results past content changes. Thread-safe via
+#: the lock (MCP tools can run concurrently).
+_PAGE_LOOKAHEAD_PAGES = 2
+_PAGE_CACHE_TTL_S = 120.0
+_page_cache_lock = threading.Lock()
+_page_cache: dict[str, Any] = {}
+
+
+def _page_cache_get(key: tuple, need: int) -> list | None:
+    """Cached results when the entry matches *key*, is TTL-fresh, and its
+    fetch covered the needed window (or exhausted the corpus)."""
+    with _page_cache_lock:
+        if _page_cache.get("key") != key:
+            return None
+        if time.monotonic() - _page_cache.get("at", 0.0) > _PAGE_CACHE_TTL_S:
+            return None
+        results = _page_cache.get("results") or []
+        fetched = _page_cache.get("fetch_n", 0)
+        exhausted = len(results) < fetched   # corpus smaller than the ask
+        if fetched >= need or exhausted:
+            return results
+        return None
+
+
+def _page_cache_put(key: tuple, results: list, fetch_n: int) -> None:
+    with _page_cache_lock:
+        _page_cache.clear()
+        _page_cache.update({
+            "key": key, "results": results, "fetch_n": fetch_n,
+            "at": time.monotonic(),
+        })
+
+
+def _reset_page_cache_for_tests() -> None:
+    with _page_cache_lock:
+        _page_cache.clear()
 
 
 def _resolve_corpus_target(corpus: str, t3: Any) -> list[str]:
