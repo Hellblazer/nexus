@@ -1878,13 +1878,37 @@ nx plan enable PLAN_ID           # Re-enable a previously disabled plan
 nx plan set-scope PLAN_ID TAGS   # Override a plan's scope_tags
 nx plan reseed [--force]         # Re-run the builtin seed loader
 nx plan repair SUBCOMMAND        # Consumer-side content-repair verbs (group)
+nx plan hygiene [--apply]        # Flag/disable bead-dumps, null-verb, always-failing plans
 ```
 
 In service mode (the default since the PG migration) the read/write verbs
-(`list` / `show` / `delete` / `disable` / `enable` / `set-scope` / `reseed`)
-route to the live engine-served plan library over HTTP; in SQLite opt-out mode
-they open the local T2 DB. The `repair` group and `reseed --force` are
-SQLite-only and refuse in service mode (see below).
+(`list` / `show` / `delete` / `disable` / `enable` / `set-scope` / `reseed` /
+`hygiene`) route to the live engine-served plan library over HTTP; in SQLite
+opt-out mode they open the local T2 DB. The `repair` group and
+`reseed --force` are SQLite-only and refuse in service mode (see below).
+
+### nx plan hygiene
+
+```
+nx plan hygiene            # report-only scan
+nx plan hygiene --apply    # disable the flagged plans (reversible)
+```
+
+Scans the plan library for three pollution classes and, with `--apply`,
+DISABLES them (never deletes; reverse with `nx plan enable ID`):
+
+- plans whose `plan_json` is not an executable retrieval DAG (unparseable
+  JSON, no/empty `steps`, steps without a `tool`) — the bead-dump class that
+  can match a question and then crash the plan runner;
+- null-verb rows (legacy pollution predating the save-time verb requirement;
+  unmatchable by verb-filtered `nx_answer`);
+- always-failing plans (zero recorded successes, 3+ failures) — the matcher
+  already skips these live; hygiene retires them durably.
+
+Unlike `nx plan repair`, this verb works in service mode: it routes through
+the storage facade and cleans the live engine-served library on migrated
+installs. Partial apply failures are reported per plan; a scan that hits the
+10,000-row limit says so rather than silently truncating.
 
 ### nx plan list
 
