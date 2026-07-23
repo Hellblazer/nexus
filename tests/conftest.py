@@ -1046,17 +1046,35 @@ def db(tmp_path: Path) -> T2Database:
     database.close()
 
 
+def make_vector_test_client():
+    """THE test vector substrate (RDR-155 P4b P0a): a fresh
+    ``InMemoryVectorClient`` with the real MiniLM default EF.
+
+    The single replacement idiom for inline ``chromadb.EphemeralClient()``
+    test constructions — semantics pinned differentially against the
+    chroma oracle by ``tests/test_vector_substrate_contract.py``. Real
+    per-instance isolation (no SharedSystemClient shared-state gotcha).
+    The EF choice is centralised here so the P0b test-EF decision edits
+    ONE line; the chromadb import dies with the dependency at P3.
+    """
+    from nexus.db.inmemory_vector_store import InMemoryVectorClient
+
+    return InMemoryVectorClient(
+        default_embedding_function=DefaultEmbeddingFunction()
+    )
+
+
 @pytest.fixture
 def local_t3() -> T3Database:
-    """T3Database backed by an in-memory EphemeralClient and DefaultEmbeddingFunction.
+    """T3Database backed by a fresh InMemoryVectorClient and DefaultEmbeddingFunction.
 
     Each test gets a fresh, isolated database — no API keys required.
     DefaultEmbeddingFunction uses the bundled ONNX MiniLM-L6-v2 model,
     so semantic similarity works correctly without Voyage AI.
     """
-    client = chromadb.EphemeralClient()
-    ef = DefaultEmbeddingFunction()
-    return T3Database(_client=client, _ef_override=ef)
+    return T3Database(
+        _client=make_vector_test_client(), _ef_override=DefaultEmbeddingFunction()
+    )
 
 
 # ── PDF fixture generators ─────────────────────────────────────────────────

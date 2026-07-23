@@ -25,8 +25,9 @@ store's permanent conformance pin. Deliberate properties:
   documented gotcha), two ``InMemoryVectorClient`` instances share
   nothing.
 * **The where-grammar is the USED subset, fail-loud.** Implicit ``$eq``,
-  explicit ``$eq``/``$ne``/``$in``, and ``$and``/``$or`` — anything else
-  raises ``ValueError`` rather than silently half-matching.
+  explicit ``$eq``/``$ne``/``$in``, comparisons
+  ``$gt``/``$gte``/``$lt``/``$lte``, and ``$and``/``$or`` — anything
+  else raises ``ValueError`` rather than silently half-matching.
 """
 from __future__ import annotations
 
@@ -45,7 +46,11 @@ def _normalize(vec: list[float]) -> list[float]:
 
 
 def _cosine_distance(a_normed: list[float], b_normed: list[float]) -> float:
-    return 1.0 - sum(x * y for x, y in zip(a_normed, b_normed, strict=True))
+    # Clamp to the documented [0, 2] cosine-distance range: float32 EF
+    # vectors can dot to 1.0000001 on exact matches, and a -1.2e-07
+    # distance trips downstream >= 0.0 assertions (verify-deep probe).
+    d = 1.0 - sum(x * y for x, y in zip(a_normed, b_normed, strict=True))
+    return min(2.0, max(0.0, d))
 
 
 def _matches(meta: dict[str, Any], where: dict[str, Any]) -> bool:
@@ -73,6 +78,20 @@ def _matches(meta: dict[str, Any], where: dict[str, Any]) -> bool:
                         return False
                 elif op == "$in":
                     if meta.get(key) not in operand:
+                        return False
+                elif op in ("$gt", "$gte", "$lt", "$lte"):
+                    # Oracle-verified: a row missing the field never
+                    # matches a comparison operator.
+                    value = meta.get(key)
+                    if value is None:
+                        return False
+                    if op == "$gt" and not value > operand:
+                        return False
+                    if op == "$gte" and not value >= operand:
+                        return False
+                    if op == "$lt" and not value < operand:
+                        return False
+                    if op == "$lte" and not value <= operand:
                         return False
                 else:
                     raise ValueError(
@@ -199,6 +218,18 @@ class InMemoryCollection:
     def count(self) -> int:
         with self._lock:
             return len(self._rows)
+
+    def peek(self, limit: int = 10) -> dict[str, Any]:
+        """First *limit* rows in insertion order — ids, embeddings,
+        documents, metadatas (chroma-parity, oracle-verified)."""
+        with self._lock:
+            rows = [self._rows[i] for i in self._order[:limit]]
+            return {
+                "ids": [r.id for r in rows],
+                "embeddings": [list(r.embedding_normed) for r in rows],
+                "documents": [r.document for r in rows],
+                "metadatas": [dict(r.metadata) for r in rows],
+            }
 
     def get(self, *, ids: list[str] | None = None,
             where: dict[str, Any] | None = None,

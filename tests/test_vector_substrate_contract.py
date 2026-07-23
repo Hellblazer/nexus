@@ -240,6 +240,36 @@ class TestGetSemantics:
         got = col.get(where={"kind": "nope"})
         assert got["ids"] == []
 
+    def test_where_numeric_comparisons(self, substrate) -> None:
+        """$gt/$gte/$lt/$lte — the T3 expire path filters ttl_days with
+        $gt (t3.py). Oracle-verified 2026-07-23."""
+        col = _make(substrate)
+        _seed(col)
+        assert sorted(col.get(where={"rank": {"$gt": 2}})["ids"]) == ["c", "d"]
+        assert sorted(col.get(where={"rank": {"$gte": 3}})["ids"]) == ["c", "d"]
+        assert sorted(col.get(where={"rank": {"$lt": 2}})["ids"]) == ["a"]
+        assert sorted(col.get(where={"rank": {"$lte": 2}})["ids"]) == ["a", "b"]
+
+    def test_where_comparison_skips_rows_missing_the_field(self, substrate) -> None:
+        col = _make(substrate)
+        _seed(col)
+        col.add(ids=["e"], embeddings=[_E2], documents=["doc e"],
+                metadatas=[{"other": 5}])
+        got = col.get(where={"rank": {"$gt": 0}})
+        assert "e" not in got["ids"]
+        assert sorted(got["ids"]) == ["a", "b", "c", "d"]
+
+    def test_peek_first_rows_with_embeddings(self, substrate) -> None:
+        """peek() — the verify-deep probe surface (t3.py). First N rows in
+        insertion order; ids, embeddings, documents, metadatas present."""
+        col = _make(substrate)
+        _seed(col)
+        p = col.peek(limit=2)
+        assert p["ids"] == ["a", "b"]
+        assert p["documents"] == ["doc a", "doc b"]
+        assert len(p["metadatas"]) == 2
+        assert p["embeddings"] is not None and len(p["embeddings"]) == 2
+
     def test_limit_offset_page_through_everything(self, substrate) -> None:
         col = _make(substrate)
         _seed(col)
