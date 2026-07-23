@@ -4,6 +4,11 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.17.0] - 2026-07-23
+Plugin version aligned with conexus 6.17.0. Plugin-side: SessionStart RDR
+reconcile hook now treats `open` as rank-equal to `draft` (GH #1409
+follow-through).
+
 ## [6.16.0] - 2026-07-21
 
 Plugin version aligned with conexus 6.16.0. No plugin-side changes; the

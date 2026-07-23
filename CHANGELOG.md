@@ -6,6 +6,72 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [6.17.0] - 2026-07-23
+
+Ships with (and requires) engine-service-v0.1.52.
+
+### Added
+- **Server-side reranking (RDR-188)**: `nx search` now consumes the engine's
+  fused rerank stage (Voyage rerank-2.5 in cloud mode, a local ms-marco
+  cross-encoder in local mode — no Voyage key needed). A degraded rerank is
+  reported loudly on stderr and results fall back to distance order; the
+  client-side Voyage reranker is deleted, so the client carries zero Voyage
+  consumption on the search path. `NX_RERANK_MODEL` selects the engine-side
+  model; the client `rerankerModel` knob is retired with a loud error.
+- **`nx collection prune`** (GH #1113): lists collections whose name-declared
+  embedding dimension mismatches the active serving embedder (orphans from a
+  prior embedder generation that every search silently skips). Fail-safe:
+  list-only by default, `--yes` deletes via the same cascade as
+  `nx collection delete`, `--dry-run` always wins. `nx doctor` now names such
+  orphans and suggests the command.
+- **`nx index repo --since-head`**: git-diff-driven incremental indexing —
+  changed files re-index, deleted files' docs prune, and the full-tree passes
+  (housekeeping, misclassified/orphan prunes, rg cache rebuild) are skipped
+  under the partial walk (mass-delete hazard structurally pinned). The
+  per-commit hook's fast path.
+- **MCP search page-turn cache**: one query embed per pagination burst
+  (2-page lookahead, 120s TTL); `store_put`/`store_delete` invalidate it, and
+  threshold diagnostics ride the cache so a repeated zero-hit keeps its
+  closest-dropped-candidate hint.
+- **Explicit `install.mode` record**: `nx init` records the install intent;
+  `is_local_mode()` reads it ahead of artifact inference (precedence:
+  NX_LOCAL > service_url > install.mode record > pg_credentials > chroma-key
+  fallback). The Voyage key has zero mode influence.
+- **Embed-drain observability**: local-mode-aware flush cap plus drain
+  rate/ETA heartbeats during `nx index repo`.
+- **Doctor: stray `com.nexus.service` autostart detection** (GH #1405
+  defect-3): non-local installs get the stray LaunchAgent named with the
+  exact removal command; upgrade-finish auto-unloads it; the launchd unit
+  restarts on failure only (`KeepAlive={SuccessfulExit:false}`).
+- **Warm-reindex embed-skip regression gate**
+  (`tests/e2e/warm-reindex-skip-gate.sh`): proves RDR-181's server-side
+  embed-skip keeps a warm reindex at minutes (52s vs 96min measured), with a
+  falsification leg so the gate cannot pass vacuously.
+
+### Fixed
+- `nx guided-upgrade --yes` now reaches the migration cost gate (an
+  unattended run could previously still block on the Voyage cost prompt);
+  the reinstall downgrade guard reads the target venv.
+- Markdown frontmatter title/year reach the catalog on the standard indexing
+  path (pre-flight + stem-guarded backfill that never clobbers hand-curated
+  titles).
+- `HttpCatalogClient.resolve_span_text` service-mode parity; cloud-skip
+  reasons are threaded structurally.
+- `nx rdr accept` accepts frontmatter `status: open` as a pre-accept synonym
+  for `draft` (GH #1409), and the SessionStart reconcile hook ranks `open`
+  with `draft` instead of silently reverting it.
+- A single dimension-mismatched collection no longer fires the misleading
+  "does not match ANY indexed collection" ERROR on every cross-corpus search;
+  the mismatch class logs at DEBUG below 5% of the searched scope (doctor and
+  `nx collection prune` carry the actionable detail), WARNING at or above.
+
+### Engine (engine-service-v0.1.52)
+- Fused rerank on all 5 `/v1/vectors/*` search handlers with loud structured
+  degrade; VoyageReranker + local CrossEncoderReranker (lazy-init DJL/ONNX).
+- catalog-016: source_uri TOCTOU dedup backstop — tombstoned the live
+  duplicate class at deploy (403 rows / 276 uris) and a partial unique index
+  prevents recurrence; the ETL companion keeps hop-1 imports conflict-free.
+
 ## [6.16.0] - 2026-07-21
 
 Ships with (and requires) engine-service-v0.1.51 (unchanged from 6.15.0).
