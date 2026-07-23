@@ -19,7 +19,6 @@ Nexus auto-detects local mode when cloud credentials are absent. The recommended
 |---|---|---|
 | `NX_LOCAL` | (auto) | `1` = force local, `0` = force cloud, unset = auto-detect |
 | `NX_LOCAL_CHROMA_PATH` | `~/.local/share/nexus/chroma` | Path to the legacy ChromaDB store. As of 6.0 this is read only as the **migration source** for the ladder's substrate rung (`nx upgrade`); T3 serves from the Postgres+pgvector service, not this path. |
-| `NX_LOCAL_EMBED_MODEL` | (auto) | Force a specific local embedding model name |
 | `NEXUS_CATALOG_PATH` | `~/.config/nexus/catalog` | Override catalog git repo location |
 | `NEXUS_CATALOG_ALLOW_CROSS_PROJECT` | unset | Set to `1` to bypass the register-time cross-project source_uri guard. Emergency-only escape hatch for known-good recovery scripts that legitimately need to register rows across project boundaries; never the right answer for normal indexing |
 
