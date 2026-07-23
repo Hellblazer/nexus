@@ -228,13 +228,18 @@ def test_prune_skips_non_conformant_names(runner, env_creds, mock_db) -> None:
 
 def test_prune_active_dim_unknown_lists_nothing(runner, env_creds, mock_db) -> None:
     """A probe that cannot resolve the active embedder must never guess —
-    guessing wrong would flag (and with --yes, delete) healthy collections."""
+    guessing wrong would flag (and with --yes, delete) healthy collections.
+
+    nexus-bwulw: the output must say SKIPPED / cannot verify, aligned with
+    doctor's ``_check_dimension_orphans`` wording — the old "No
+    dimension-mismatched collections found (active embedder: unknown)"
+    read as verified-clean when nothing was actually checked."""
     mock_db.embedding_mode.return_value = None
     mock_db.list_collections.return_value = [{"name": _ORPHAN, "count": 1}]
     result = _invoke(runner, mock_db, ["prune", "--yes"])
     assert result.exit_code == 0, result.output
-    assert "No dimension-mismatched collections found" in result.output
-    assert "unknown" in result.output
+    assert "Skipped (active embedder unresolved — cannot verify)" in result.output
+    assert "No dimension-mismatched collections found" not in result.output
     mock_db.delete_collection.assert_not_called()
 
 

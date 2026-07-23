@@ -313,6 +313,19 @@ def prune_cmd(yes: bool, dry_run: bool) -> None:
     t3 = _t3()
     mismatches, skipped, active_label = _find_dimension_mismatched_collections(t3)
 
+    if active_label == "unknown":
+        # nexus-bwulw: an unresolved active-embedder probe means NOTHING was
+        # checked — say so, aligned with doctor's wording. The old
+        # "No dimension-mismatched collections found (active embedder:
+        # unknown)" read as verified-clean.
+        click.echo(
+            "Skipped (active embedder unresolved — cannot verify): the "
+            "service /version probe reported no embedding_mode, so orphan "
+            "detection has no dimension to compare against and never "
+            "guesses. Nothing was checked or deleted."
+        )
+        return
+
     if not mismatches:
         click.echo(
             f"No dimension-mismatched collections found "
