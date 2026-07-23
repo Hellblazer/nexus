@@ -480,3 +480,33 @@ class TestPluginLockstepPrecondition:
 
         marker.unlink()
         assert _default_lockstep_marker() is None
+
+
+def test_default_plugin_version_delegates_to_health_reader(
+    tmp_path: pathlib.Path, monkeypatch,
+) -> None:
+    """Reviewer Medium fold (nexus-2a5ij): the plugin-version reader must be
+    the SAME schema-tolerant reader health.py uses (both registry schema
+    variants, multi-entry) — not a third narrower reimplementation. Pinned
+    behaviorally: a v1-style top-level-dict registry (no "plugins" wrapper)
+    must still resolve, and multiple versions resolve to the highest."""
+    import json as _json
+
+    from nexus.upgrade_ladder.preconditions import _default_plugin_version
+
+    registry = tmp_path / "installed_plugins.json"
+    # v1-shape: top-level dict, no "plugins" wrapper; two conexus entries.
+    registry.write_text(_json.dumps({
+        "conexus@nexus-plugins": [
+            {"version": "6.13.0"}, {"version": "6.17.0"},
+        ],
+    }))
+
+    import nexus.health as health_mod
+
+    real = health_mod._installed_conexus_plugin_versions
+    monkeypatch.setattr(
+        health_mod, "_installed_conexus_plugin_versions",
+        lambda registry_path=None: real(registry),
+    )
+    assert _default_plugin_version() == "6.17.0"

@@ -1387,6 +1387,14 @@ with `action`, `existing_title`, and `merged` fields. The CLI surfaces only the
 `action` field; the full report is available to agents through `scratch_manage`
 and Python API callers. See [Storage Tiers § Progressive Formalization](storage-tiers.md#progressive-formalization-rdr-057).
 
+**Wall-clock budget (`NX_T1_CLI_BUDGET_S`, default 60):** every bare-CLI
+scratch operation runs under a total wall-clock budget covering the
+session-token mint/borrow and any 401 self-heal retry legs. Past the budget no
+further leg starts and the command fails with a "T1 service slow/unreachable"
+remedy pointing at `nx doctor`; an operation slower than 5s emits a visible
+slow-path warning. `0` (or negative) is the strictest setting — no retry legs
+ever — not unlimited.
+
 ---
 
 ## nx collection

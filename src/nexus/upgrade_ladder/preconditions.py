@@ -52,30 +52,30 @@ class PreconditionReport:
 
 
 def _default_plugin_version() -> str | None:
-    """Installed conexus plugin version from Claude Code's
-    ``installed_plugins.json`` — the identity a session's
+    """Installed conexus plugin version — the identity a session's
     ``CLAUDE_PLUGIN_ROOT`` ultimately resolves to. ``None`` when no conexus
     plugin install is detectable (no Claude Code on this box, or the plugin
-    is not installed). On-disk only, per the module contract."""
-    import json  # noqa: PLC0415 — stdlib, deferred with the module's on-disk-read convention
+    is not installed). On-disk only, per the module contract.
 
-    path = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, ValueError):
+    Delegates to :func:`nexus.health._installed_conexus_plugin_versions`
+    (reviewer Medium, nexus-2a5ij fold): that reader already tolerates both
+    ``installed_plugins.json`` schema variants and multi-entry plugins — a
+    third reimplementation here is the nexus-1si7z "held together by
+    cross-referencing" drift class. Multiple installed versions resolve to
+    the highest (best-effort numeric ordering)."""
+    from nexus.health import _installed_conexus_plugin_versions  # noqa: PLC0415 — deferred to avoid import cycle
+
+    versions = _installed_conexus_plugin_versions()
+    if not versions:
         return None
-    for key, entries in (data.get("plugins") or {}).items():
-        if (
-            isinstance(key, str)
-            and key.split("@", 1)[0] == "conexus"
-            and isinstance(entries, list)
-            and entries
-            and isinstance(entries[0], dict)
-        ):
-            version = entries[0].get("version")
-            if isinstance(version, str) and version:
-                return version
-    return None
+
+    def _key(v: str) -> tuple:
+        try:
+            return tuple(int(p) for p in v.split("."))
+        except ValueError:
+            return (-1,)
+
+    return max(versions, key=_key)
 
 
 def _default_lockstep_marker() -> str | None:
