@@ -1087,10 +1087,21 @@ def _apply_salience_boost(
     if not targeted:
         return results
 
-    db_path = nexus_config_dir() / "memory.db"
-    if not db_path.exists():
-        return results
-    aspects = DocumentAspects(db_path)
+    # nexus-g8r2h fold (sweep [21089] item 8): route via the storage facade —
+    # the old direct DocumentAspects(memory.db) read served STALE frozen
+    # pre-migration salient_sentences on migrated boxes (and no boost at all
+    # for post-migration docs).
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — circular-dep avoidance
+
+    if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
+        from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore  # noqa: PLC0415 — circular-dep avoidance
+
+        aspects = HttpDocumentAspectsStore()
+    else:
+        db_path = nexus_config_dir() / "memory.db"
+        if not db_path.exists():
+            return results
+        aspects = DocumentAspects(db_path)
     try:
         cache: dict[str, list[str]] = {}
         for r in targeted:
@@ -1106,7 +1117,10 @@ def _apply_salience_boost(
             if boost:
                 r.hybrid_score = float(r.hybrid_score) + boost
     finally:
-        aspects.close()
+        # HttpDocumentAspectsStore has no close(); the SQLite store does.
+        close = getattr(aspects, "close", None)
+        if callable(close):
+            close()
 
     return sorted(results, key=lambda r: r.hybrid_score, reverse=True)
 

@@ -267,6 +267,28 @@ def _writeback_record(uuid: str) -> bool:
         cat.close()
 
 
+def _open_highlights_store():
+    """document_highlights store routed via the storage facade (nexus-g8r2h).
+
+    The old direct ``DocumentHighlights(default_db_path())`` construction
+    was a split-brain on migrated boxes: writes landed in local SQLite where
+    no service-side consumer reads (write-to-nowhere), and reads missed
+    every ETL'd-to-PG row ("no ingested highlights" against real data).
+    Mirrors ``plan.py``'s ``_open_plan_library`` routing (RDR-179 pattern);
+    the HTTP store has full method parity (upsert/get/get_by_source_uri).
+    """
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — command-local import
+
+    if storage_backend_for("document_highlights") == StorageBackend.SERVICE:
+        from nexus.db.t2.http_document_highlights_store import HttpDocumentHighlightsStore  # noqa: PLC0415 — command-local import
+
+        return HttpDocumentHighlightsStore()
+    from nexus.config import default_db_path  # noqa: PLC0415 — command-local import
+    from nexus.db.t2.document_highlights import DocumentHighlights  # noqa: PLC0415 — command-local import
+
+    return DocumentHighlights(default_db_path())
+
+
 def _ingest_highlights_record(uuid: str) -> bool:
     """RDR-139 Layer E: ingest a just-indexed record's DEVONthink highlights +
     mentions as a note attached to its catalog tumbler.
@@ -300,14 +322,11 @@ def _ingest_highlights_record(uuid: str) -> bool:
         if not (highlights_md or mentions_md):
             _log.debug("dt_highlights_none", uuid=uuid)
             return False
-        # One-shot CLI ingest of a new, cascade-free store: construct the
-        # DocumentHighlights store directly (not the daemon RPC path, which
-        # has no highlights method, and not T2Database, which the storage
-        # boundary lint reserves for the daemon). Low contention: one write
-        # per indexed record, not a long-lived worker (RDR-128 hazard N/A).
-        from nexus.config import default_db_path  # noqa: PLC0415 — command-local import (config)
-
-        store = DocumentHighlights(default_db_path())
+        # One-shot CLI ingest, routed via the storage facade (nexus-g8r2h) —
+        # the previous direct DocumentHighlights construction wrote local
+        # SQLite even on migrated boxes. Low contention either way: one
+        # write per indexed record, not a long-lived worker (RDR-128 N/A).
+        store = _open_highlights_store()
         from datetime import datetime, timezone  # noqa: PLC0415 — stdlib deferred to call site (datetime)
 
         return store.upsert(HighlightRecord(
@@ -990,10 +1009,7 @@ def highlights_cmd(tumbler_or_uuid: str) -> None:
     ``document_highlights`` T2 table populated by ``nx dt index --highlights``.
     This is a pure T2 read — DEVONthink need not be running.
     """
-    from nexus.config import default_db_path  # noqa: PLC0415 — command-local import (config)
-    from nexus.db.t2.document_highlights import DocumentHighlights  # noqa: PLC0415 — command-local import (db.t2.document_highlights)
-
-    store = DocumentHighlights(default_db_path())
+    store = _open_highlights_store()
     if _UUID_RE.match(tumbler_or_uuid):
         rec = store.get_by_source_uri(f"x-devonthink-item://{tumbler_or_uuid}")
     elif _TUMBLER_RE.match(tumbler_or_uuid):
