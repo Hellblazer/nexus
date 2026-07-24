@@ -2673,6 +2673,103 @@ def _check_orchestration_hook_floor(registry_path: Path | None = None) -> list[H
     )]
 
 
+def _check_catalog_legacy_file(*, config_dir: Path | None = None) -> list[HealthResult]:
+    """nexus-aoqnb (GH #1419 Issue 4): name any legacy catalog SQLite file as
+    a FROZEN MIGRATION SOURCE, never a live mirror.
+
+    Steve Harris's backup held ``catalog.db`` with 532 docs / 13 links while
+    the authoritative PG catalog held 592 / 52, and nothing in the product
+    said which was real. The dangerous property is PLAUSIBILITY: a stale
+    catalog opens, parses, and answers queries, so a recovery procedure
+    reaches for it first. Copy-not-move migration leaves it behind
+    deliberately (orphan-by-design, the Hal two-hop contract), which makes
+    labelling it the product's job rather than the operator's.
+
+    Two shapes both need naming — populated-but-stale (Steve's) and
+    empty-but-present (observed on a dev box a month post-migration, 11
+    tables and zero rows). The second is arguably worse for a restore: it
+    succeeds and silently yields nothing.
+
+    Not fatal: an orphaned source is the EXPECTED post-migration state. The
+    failure being guarded is a human trusting it, so the row exists to be
+    read, and the fix suggestions carry the actual instruction.
+    """
+    if config_dir is None:
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid circular import
+        config_dir = nexus_config_dir()
+
+    results: list[HealthResult] = []
+
+    # The stray: ~/.config/nexus/catalog.db, 0 bytes on real installs. Named
+    # separately so nobody chases a file with nothing in it.
+    stray = config_dir / "catalog.db"
+    if stray.is_file():
+        size = stray.stat().st_size
+        if size == 0:
+            results.append(HealthResult(
+                label="Legacy catalog file",
+                ok=False,
+                warn=True,
+                detail=(
+                    f"{stray} is an EMPTY 0-byte stray — not a catalog, not a "
+                    "migration source, no rows of any kind. Safe to ignore; "
+                    "named only so it is not mistaken for a restore candidate."
+                ),
+                fix_suggestions=[
+                    "Nothing to restore from this file — the catalog lives in "
+                    "Postgres. Delete it only if you want the directory tidy.",
+                ],
+            ))
+
+    legacy = config_dir / "catalog" / ".catalog.db"
+    if legacy.is_file():
+        docs: int | str = "unknown"
+        links: int | str = "unknown"
+        try:
+            import sqlite3  # noqa: PLC0415 — deferred; legacy-source probe only
+
+            conn = sqlite3.connect(f"file:{legacy}?mode=ro", uri=True)
+            try:
+                for tbl, key in (("documents", "docs"), ("links", "links")):
+                    try:
+                        n = conn.execute(f"SELECT count(*) FROM {tbl}").fetchone()[0]
+                    except sqlite3.Error:
+                        continue
+                    if key == "docs":
+                        docs = n
+                    else:
+                        links = n
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001 — an unreadable legacy file must still be NAMED
+            pass
+
+        import datetime as _dt  # noqa: PLC0415 — deferred, formatting only
+
+        mtime = _dt.datetime.fromtimestamp(legacy.stat().st_mtime).strftime(
+            "%Y-%m-%d %H:%M"
+        )
+        results.append(HealthResult(
+            label="Legacy catalog file",
+            ok=False,
+            warn=True,
+            detail=(
+                f"{legacy} is a FROZEN migration source, not a live mirror of "
+                f"the catalog. It holds {docs} document rows / {links} link "
+                f"rows, last written {mtime}. The authoritative catalog is in "
+                "Postgres and has moved on independently — these numbers will "
+                "drift further apart over time and that is expected."
+            ),
+            fix_suggestions=[
+                "Do NOT restore or recover from this file — it is a "
+                "pre-migration snapshot kept only as a rollback source. "
+                "Use `nx catalog stats` for the real counts.",
+            ],
+        ))
+
+    return results
+
+
 def _check_stranded_install() -> list[HealthResult]:
     """nexus-gynt2: stranded-install detector (N+1 P4b prerequisite).
 
@@ -2892,6 +2989,20 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
         results.append(HealthResult(
             label="Stranded pre-PG install", ok=False, warn=True,
             detail=f"check failed ({exc}) — could not verify pre-PG data state",
+        ))
+
+    # nexus-aoqnb (GH #1419 Issue 4): label any orphaned catalog SQLite file
+    # as a frozen migration source. Same WARN-on-failure posture as the
+    # stranded check above and for the same reason — the guarded failure is
+    # a human restoring from a stale-but-plausible store, so "could not
+    # check" must never render as "nothing to see".
+    try:
+        results.extend(_check_catalog_legacy_file())
+    except Exception as exc:  # noqa: BLE001 — must not crash `nx doctor`; degraded to WARN, never silent-ok
+        _log.warning("doctor_catalog_legacy_check_failed", error=str(exc))
+        results.append(HealthResult(
+            label="Legacy catalog file", ok=False, warn=True,
+            detail=f"check failed ({exc}) — could not verify legacy catalog state",
         ))
 
     # nexus-3xg21: plugin-floor check for the RDR-184 orchestration hooks —
