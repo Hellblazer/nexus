@@ -29,7 +29,7 @@ import structlog
 
 from nexus._locking import lock_file, unlock_file
 from nexus.corpus import index_model_for_collection
-from nexus.retry import _chroma_with_retry, _voyage_with_retry  # noqa: F401 — re-exported for any existing imports
+from nexus.retry import _vector_with_retry, _voyage_with_retry  # noqa: F401 — re-exported for any existing imports
 from nexus.errors import CredentialsMissingError  # re-exported for backward compatibility
 from nexus.hook_registry import record_catalog_hook_failure
 from nexus.indexer_utils import (
@@ -2185,7 +2185,7 @@ def _paginated_get(col: object, include: list[str], where: dict | None = None) -
         kwargs: dict = {"include": include, "limit": _CHROMA_PAGE_SIZE, "offset": offset}
         if where is not None:
             kwargs["where"] = where
-        batch = _chroma_with_retry(col.get, **kwargs)
+        batch = _vector_with_retry(col.get, **kwargs)
         batch_ids: list[str] = batch["ids"] or []
         all_ids.extend(batch_ids)
         if has_metas:
@@ -2205,7 +2205,7 @@ def _batched_delete(col: object, ids: list[str]) -> int:
     deleted = 0
     for i in range(0, len(ids), _CHROMA_PAGE_SIZE):
         batch = ids[i : i + _CHROMA_PAGE_SIZE]
-        _chroma_with_retry(col.delete, ids=batch)
+        _vector_with_retry(col.delete, ids=batch)
         deleted += len(batch)
     return deleted
 

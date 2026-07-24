@@ -19,7 +19,7 @@ from pathlib import Path
 import structlog
 
 from nexus.errors import CredentialsMissingError
-from nexus.retry import _chroma_with_retry
+from nexus.retry import _vector_with_retry
 
 _log = structlog.get_logger(__name__)
 
@@ -485,7 +485,7 @@ def check_staleness(
       ``nx index repo`` on a healthy repo (most files current) pays
       one paginated sweep instead of one Chroma query per file.
     - **Per-file (back-compat).** When *cache* is ``None``, performs a
-      ChromaDB ``get()`` wrapped in ``_chroma_with_retry``. The retry
+      ChromaDB ``get()`` wrapped in ``_vector_with_retry``. The retry
       logic is part of the staleness check's contract — callers must
       NOT wrap this call. Direct test callers and any caller that has
       not migrated to the cache stay on this path.
@@ -536,7 +536,7 @@ def check_staleness(
         where = {"content_hash": content_hash}
     else:
         where = {"source_path": str(source_file)}
-    existing = _chroma_with_retry(
+    existing = _vector_with_retry(
         col.get,  # type: ignore[attr-defined]
         where=where,
         include=["metadatas"],

@@ -46,7 +46,7 @@ from nexus.errors import collection_not_found_errors
 
 from nexus.chunk_identity import chunk_id_from_hash as _chunk_id_from_hash
 from nexus.db.limits import QUOTAS
-from nexus.retry import _chroma_with_retry
+from nexus.retry import _vector_with_retry
 
 if TYPE_CHECKING:
     from nexus.db.t3 import T3Database
@@ -168,7 +168,7 @@ def reidentify_collection(
     all_cids: list[str] = []
     offset = 0
     while True:
-        page = _chroma_with_retry(
+        page = _vector_with_retry(
             col.get, limit=_PAGE_SIZE, offset=offset, include=[]
         )
         page_ids: list[str] = page.get("ids") or []
@@ -199,7 +199,7 @@ def reidentify_collection(
     ]
 
     def _fetch(batch: list[str]) -> dict:
-        return _chroma_with_retry(
+        return _vector_with_retry(
             col.get,
             ids=batch,
             include=["documents", "embeddings", "metadatas"],
@@ -281,7 +281,7 @@ def reidentify_collection(
                 metas_to_upsert.append(new_meta)
 
             if ids_to_upsert and not dry_run:
-                _chroma_with_retry(
+                _vector_with_retry(
                     col.upsert,
                     ids=ids_to_upsert,
                     documents=docs_to_upsert,
@@ -295,7 +295,7 @@ def reidentify_collection(
         old_ids_list = list(seen_old_ids)
         for start in range(0, len(old_ids_list), _PAGE_SIZE):
             batch = old_ids_list[start : start + _PAGE_SIZE]
-            _chroma_with_retry(col.delete, ids=batch)
+            _vector_with_retry(col.delete, ids=batch)
             result.chunks_deleted += len(batch)
 
     _log.info(

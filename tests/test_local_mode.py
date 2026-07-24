@@ -407,11 +407,11 @@ class TestRetryableSqliteError:
         ids=["locked", "other"],
     )
     def test_retryable_classification(self, msg: str, expected: bool) -> None:
-        from nexus.retry import _is_retryable_chroma_error
-        assert _is_retryable_chroma_error(sqlite3.OperationalError(msg)) is expected
+        from nexus.retry import _is_retryable_vector_error
+        assert _is_retryable_vector_error(sqlite3.OperationalError(msg)) is expected
 
-    def test_chroma_with_retry_retries_locked(self) -> None:
-        from nexus.retry import _chroma_with_retry
+    def test_vector_with_retry_retries_locked(self) -> None:
+        from nexus.retry import _vector_with_retry
         call_count = 0
 
         def flaky_fn():
@@ -422,7 +422,7 @@ class TestRetryableSqliteError:
             return "success"
 
         with patch("nexus.retry.time.sleep"):
-            result = _chroma_with_retry(flaky_fn)
+            result = _vector_with_retry(flaky_fn)
         assert result == "success"
         assert call_count == 3
 

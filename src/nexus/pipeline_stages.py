@@ -39,7 +39,7 @@ import structlog
 from nexus.pdf_chunker import PDFChunker
 from nexus.pdf_extractor import ExtractionResult, PDFExtractor
 from nexus.db.http_pipeline_client import HttpPipelineDB
-from nexus.retry import _chroma_with_retry
+from nexus.retry import _vector_with_retry
 
 _log = structlog.get_logger(__name__)
 
@@ -928,7 +928,7 @@ def _enrich_metadata_from_extraction(
         all_metas: list[dict] = []
         offset = 0
         while True:
-            batch = _chroma_with_retry(
+            batch = _vector_with_retry(
                 col.get,
                 where={"content_hash": content_hash},
                 include=["metadatas"],
@@ -970,7 +970,7 @@ def _update_chunk_metadata(
         all_metas: list[dict] = []
         offset = 0
         while True:
-            batch = _chroma_with_retry(
+            batch = _vector_with_retry(
                 col.get,
                 where={"content_hash": content_hash},
                 include=["metadatas"],
@@ -1023,7 +1023,7 @@ def _prune_stale_chunks(
     # Phase 1: query for stale chunks
     try:
         while True:
-            batch = _chroma_with_retry(
+            batch = _vector_with_retry(
                 col.get,
                 where=where_filter,
                 include=["metadatas"],
@@ -1051,7 +1051,7 @@ def _prune_stale_chunks(
     try:
         for i in range(0, len(stale_ids), 300):
             batch = stale_ids[i:i + 300]
-            _chroma_with_retry(col.delete, ids=batch)
+            _vector_with_retry(col.delete, ids=batch)
         _log.info("stale_chunks_pruned", count=len(stale_ids), pdf_path=pdf_path)
         return True
     except Exception as exc:  # noqa: BLE001 - best-effort stale-prune delete; logged via log.warning, returns False

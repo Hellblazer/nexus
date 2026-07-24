@@ -588,10 +588,10 @@ def index_repo_cmd(
                     f"voyage {retry_stats['voyage_seconds']:.1f}s over "
                     f"{retry_stats['voyage_count']} retries"
                 )
-            if retry_stats["chroma_count"]:
+            if retry_stats["vector_count"]:
                 parts.append(
-                    f"chroma {retry_stats['chroma_seconds']:.1f}s over "
-                    f"{retry_stats['chroma_count']} retries"
+                    f"chroma {retry_stats['vector_seconds']:.1f}s over "
+                    f"{retry_stats['vector_count']} retries"
                 )
             click.echo(
                 f"  Transient-error backoff: {retry_stats['total_seconds']:.1f}s total "

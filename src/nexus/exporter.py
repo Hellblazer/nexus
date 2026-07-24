@@ -37,7 +37,7 @@ from nexus.errors import (
     FormatVersionError,
     NexusError,
 )
-from nexus.retry import _chroma_with_retry
+from nexus.retry import _vector_with_retry
 
 if TYPE_CHECKING:
     from nexus.db.http_vector_client import HttpVectorClient
@@ -276,7 +276,7 @@ def export_collection(
     # _ServiceCollectionStub on HttpVectorClient -- never reach for the
     # Chroma-only db._client_for() private method here.
     col = db.get_collection(collection_name)
-    total_count = _chroma_with_retry(col.count)
+    total_count = _vector_with_retry(col.count)
 
     embedding_model = index_model_for_collection(collection_name)
 
@@ -319,7 +319,7 @@ def export_collection(
         with gzip.GzipFile(fileobj=f, mode="wb") as gz:
             offset = 0
             while True:
-                result = _chroma_with_retry(
+                result = _vector_with_retry(
                     col.get,
                     include=["documents", "metadatas"],
                     limit=page_size,

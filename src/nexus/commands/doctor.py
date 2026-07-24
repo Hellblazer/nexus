@@ -2182,10 +2182,10 @@ def _format_quota_report(report: dict) -> str:
                 f"    voyage:  {r['voyage_seconds']:>6.1f}s over "
                 f"{r['voyage_count']} retries"
             )
-        if r.get("chroma_count", 0) > 0:
+        if r.get("vector_count", 0) > 0:
             lines.append(
-                f"    chroma:  {r['chroma_seconds']:>6.1f}s over "
-                f"{r['chroma_count']} retries"
+                f"    chroma:  {r['vector_seconds']:>6.1f}s over "
+                f"{r['vector_count']} retries"
             )
         lines.append(
             f"    total:   {r['total_seconds']:>6.1f}s over "

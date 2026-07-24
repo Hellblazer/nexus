@@ -630,11 +630,11 @@ class TestCheckQuotas:
     ) -> None:
         """A session that has hit transient errors shows the cumulative
         backoff time + count under "Observed transient-error retries"."""
-        from nexus.retry import _add_chroma_retry, _add_voyage_retry
+        from nexus.retry import _add_vector_retry, _add_voyage_retry
 
         _add_voyage_retry(1.5)
         _add_voyage_retry(3.0)
-        _add_chroma_retry(2.0)
+        _add_vector_retry(2.0)
 
         with (
             patch("nexus.config.is_local_mode", return_value=False),

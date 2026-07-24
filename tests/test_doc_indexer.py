@@ -1637,7 +1637,7 @@ class TestStreamingRouting:
             patch("nexus.config.is_local_mode", return_value=False),
             patch("nexus.doc_indexer._sha256", return_value="abc123"),
             patch("nexus.doc_indexer.make_t3"),
-            patch("nexus.doc_indexer._chroma_with_retry", return_value={"metadatas": []}),
+            patch("nexus.doc_indexer._vector_with_retry", return_value={"metadatas": []}),
             patch("nexus.doc_indexer._pdf_chunks", return_value=[]) as mock_chunks,
         ):
             result = index_pdf(pdf, "test", streaming="never")
@@ -1659,7 +1659,7 @@ class TestStreamingRouting:
             patch("nexus.config.is_local_mode", return_value=False),
             patch("nexus.doc_indexer._sha256", return_value="abc123"),
             patch("nexus.doc_indexer.make_t3"),
-            patch("nexus.doc_indexer._chroma_with_retry", return_value={"metadatas": []}),
+            patch("nexus.doc_indexer._vector_with_retry", return_value={"metadatas": []}),
             patch("pymupdf.open") as mock_pymupdf_open,
             patch("nexus.pipeline_stages.pipeline_index_pdf", return_value=expected) as mock_pipeline,
         ):

@@ -207,7 +207,7 @@ def _backfill_catalog_from_chunks(collection: str) -> tuple[int, int, int]:
     Returns ``(titles_backfilled, chunks_scanned, titles_skipped_no_row)``.
     """
     from nexus.db import make_t3  # noqa: PLC0415 — circular-dep avoidance; command-local import
-    from nexus.retry import _chroma_with_retry  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
+    from nexus.retry import _vector_with_retry  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
 
     db = make_t3()
     col = db.get_or_create_collection(collection)
@@ -220,7 +220,7 @@ def _backfill_catalog_from_chunks(collection: str) -> tuple[int, int, int]:
     chunks_scanned = 0
     offset = 0
     while True:
-        batch = _chroma_with_retry(
+        batch = _vector_with_retry(
             col.get, include=["metadatas"], limit=300, offset=offset,
         )
         batch_ids = batch.get("ids", [])
@@ -289,7 +289,7 @@ def run_bib_enrichment(
     (RDR-139 Layer C) to run a DT-CrossRef gap-fill pass over a freshly
     indexed collection. ``source="dt"`` enables the gap-fill layer."""
     from nexus.db import make_t3  # noqa: PLC0415 — circular-dep avoidance; command-local import
-    from nexus.retry import _chroma_with_retry  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
+    from nexus.retry import _vector_with_retry  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
 
     # RDR-139 Layer C: ``--source dt`` is the ``auto`` primary backend plus a
     # lowest-precedence DT-CrossRef gap-fill pass. Resolve the primary first.
@@ -321,7 +321,7 @@ def run_bib_enrichment(
     total_chunks = 0
     offset = 0
     while True:
-        batch = _chroma_with_retry(
+        batch = _vector_with_retry(
             col.get,
             include=["metadatas"],
             limit=300,
@@ -427,7 +427,7 @@ def run_bib_enrichment(
         source_paths: set[str] = set()
         for batch_start in range(0, len(chunk_ids), _BATCH):
             batch_ids = chunk_ids[batch_start:batch_start + _BATCH]
-            fetch = _chroma_with_retry(col.get, ids=batch_ids, include=["metadatas"])
+            fetch = _vector_with_retry(col.get, ids=batch_ids, include=["metadatas"])
             for cid, meta in zip(fetch.get("ids", []), fetch.get("metadatas", [])):
                 merged = dict(meta)
                 merged["bib_year"] = bib.get("year", 0)
@@ -454,7 +454,7 @@ def run_bib_enrichment(
         if updated_ids:
             for batch_start in range(0, len(updated_ids), _BATCH):
                 batch_end = min(batch_start + _BATCH, len(updated_ids))
-                _chroma_with_retry(
+                _vector_with_retry(
                     col.update,
                     ids=updated_ids[batch_start:batch_end],
                     metadatas=updated_meta[batch_start:batch_end],
@@ -530,7 +530,7 @@ def _extract_identifiers_for_title(
     reads are free, the regex is bounded, the direct lookup is unambiguous.
     """
     from nexus.bib_extractor import extract_identifiers  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
-    from nexus.retry import _chroma_with_retry  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
+    from nexus.retry import _vector_with_retry  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
 
     body_text = ""
     filename = ""
@@ -538,7 +538,7 @@ def _extract_identifiers_for_title(
         try:
             collected_docs: list[str] = []
             for batch_start in range(0, len(chunk_ids), 300):
-                batch = _chroma_with_retry(
+                batch = _vector_with_retry(
                     col.get,
                     ids=chunk_ids[batch_start:batch_start + 300],
                     include=["documents", "metadatas"],
