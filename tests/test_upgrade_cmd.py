@@ -223,75 +223,21 @@ class TestT3UpgradeStep:
         assert step.fn is fn
 
 class TestSubstrateBridgeRetired:
-    """RDR-185 P4.2 (nexus-n7u38.29): the nexus-0rwwv bridge is RETIRED.
+    """RDR-185 P4.2 retired the nexus-0rwwv bridge; RDR-155 P4b deleted
+    its machinery outright (guided_upgrade.py and the demoted verbs are
+    gone). The surviving pin: `nx upgrade` output never names the deleted
+    verb."""
 
-    The bridge pointed ``nx upgrade`` at ``nx guided-upgrade`` when a
-    substrate cutover was pending, and offered to chain into it. P4.0
-    registered the substrate rung and P4.0b made provisioning a
-    precondition, so the walk IS the cutover — the pointer would advertise
-    a verb P4.1 demoted out of ``--help`` (breaking "one story, one verb")
-    and re-answer a DATA-rung question from an ad-hoc re-sample (the third
-    mechanism Gap-4 bans).
-
-    These are RETIREMENT pins: the probe must not run, its output must not
-    reach the user, and the walk must never chain into the demoted verb —
-    each pinned with the probe patched to a LOUD return, so a re-introduced
-    bridge fails rather than passing vacuously.
-    """
-
-    def test_pending_cutover_never_advertises_the_demoted_verb(
+    def test_upgrade_never_advertises_the_deleted_verb(
         self, runner: CliRunner, tmp_path: Path, monkeypatch,
     ) -> None:
-        monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
         with (
             patch("nexus.commands.upgrade._db_path", return_value=tmp_path / "memory.db"),
             patch("nexus.commands.upgrade.T3_UPGRADES", []),
-            patch("nexus.migration.guided_upgrade.pending_migration_notice",
-                  return_value="A one-time storage migration is pending: run nx guided-upgrade") as notice,
         ):
             result = runner.invoke(main, ["upgrade"])
         assert result.exit_code == 0
-        # Not merely absent from the output — never probed at all.
-        notice.assert_not_called()
         assert "guided-upgrade" not in result.output
-
-    def test_auto_mode_never_probes(
-        self, runner: CliRunner, tmp_path: Path, monkeypatch,
-    ) -> None:
-        monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
-        with (
-            patch("nexus.commands.upgrade._db_path", return_value=tmp_path / "memory.db"),
-            patch("nexus.commands.upgrade.T3_UPGRADES", []),
-            patch("nexus.migration.guided_upgrade.pending_migration_notice") as notice,
-        ):
-            result = runner.invoke(main, ["upgrade", "--auto"])
-        assert result.exit_code == 0
-        notice.assert_not_called()
-
-    def test_never_chains_into_guided_upgrade_even_on_a_tty(
-        self, runner: CliRunner, tmp_path: Path, monkeypatch,
-    ) -> None:
-        # The chain prompt is gone: a knob at a derivable point. The walk
-        # already converged the cutover in this same invocation, and the
-        # genuine decisions it cannot derive (source-gone, billed re-embed)
-        # are consented INSIDE the rung. Nothing may prompt to run the
-        # demoted verb, and nothing may invoke it.
-        from unittest.mock import MagicMock
-
-        monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
-        guided = MagicMock()
-        with (
-            patch("nexus.commands.upgrade._db_path", return_value=tmp_path / "memory.db"),
-            patch("nexus.commands.upgrade.T3_UPGRADES", []),
-            patch("nexus.migration.guided_upgrade.pending_migration_notice",
-                  return_value="A one-time storage migration is pending"),
-            patch("nexus.commands.guided_upgrade_cmd.guided_upgrade_cmd", guided),
-            patch("click.confirm", return_value=True) as confirm,
-        ):
-            result = runner.invoke(main, ["upgrade"])
-        assert result.exit_code == 0
-        guided.assert_not_called()
-        confirm.assert_not_called()
 
 
 class TestT3StepsThroughLadderLedger:
@@ -316,7 +262,6 @@ class TestT3StepsThroughLadderLedger:
 
         from nexus.upgrade_ladder.holder import InProcessCompletionHolder
 
-        os.environ["NX_MIGRATION_NOTICE"] = "0"  # keep the bridge probe out
         db_path = tmp_path / "memory.db"
         with (
             patch("nexus.commands.upgrade._db_path", return_value=db_path),

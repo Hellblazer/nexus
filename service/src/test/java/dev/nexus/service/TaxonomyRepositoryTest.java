@@ -109,7 +109,10 @@ class TaxonomyRepositoryTest {
                     "GRANT SELECT, INSERT, UPDATE, DELETE ON " + schema + "." + table + " TO " + SVC_ROLE);
             }
             su.createStatement().execute(
-                "GRANT USAGE ON SEQUENCE " + schema + ".topics_id_seq TO " + SVC_ROLE);
+                // UPDATE mirrors taxonomy-005 (production grants nexus_svc UPDATE on
+                // this one sequence so the fidelity import can setval past imported
+                // ids — g37fr FINDING 2); SELECT for the GREATEST(last_value, ...).
+                "GRANT USAGE, SELECT, UPDATE ON SEQUENCE " + schema + ".topics_id_seq TO " + SVC_ROLE);
             // Grant SELECT on catalog_documents to the DML role for general catalog
             // query coverage in mixed tests. (nexus-sa14p: importAssignment no longer
             // reads catalog_documents — fk_ta_catalog_doc was removed — so this is not
@@ -463,6 +466,38 @@ class TaxonomyRepositoryTest {
 
         // review_status STILL uses EXCLUDED (verbatim): last import wins.
         assertThat(row.get().get("review_status")).isEqualTo("pending");
+    }
+
+    @Test @Order(215)
+    void importTopic_advancesIdSequence_noCollisionOnNextSerialInsert() {
+        // g37fr FINDING 2 (RDR-155 P4b, engine v0.1.53): fidelity import
+        // preserves the source id verbatim but must ALSO advance the topics
+        // BIGSERIAL sequence past it — otherwise the next live serial INSERT
+        // (persist_rebuild) collides 409 on a shared store. Standard PG
+        // import discipline: setval(pg_get_serial_sequence, GREATEST(...))
+        // inside the import transaction.
+        long liveId = repo.insertTopic(TENANT_A, "seq-live-probe", null, COL_A, 0, null, null);
+        long importedId = liveId + 1; // exactly the sequence's next value pre-fix
+        repo.importTopic(TENANT_A, importedId, "seq-imported", null, COL_A,
+                         "centroid-seq", 0, PAST_TS, "pending", null);
+        long nextId = repo.insertTopic(TENANT_A, "seq-after-import", null, COL_A, 0, null, null);
+        assertThat(nextId)
+            .as("serial insert after fidelity import must not collide with the imported id")
+            .isGreaterThan(importedId);
+    }
+
+    @Test @Order(216)
+    void importBatch_topics_advancesIdSequence() {
+        // Batch twin of the sequence-advance discipline (same 409 class).
+        long liveId = repo.insertTopic(TENANT_A, "seq-batch-probe", null, COL_A, 0, null, null);
+        long importedId = liveId + 1;
+        repo.importBatch(TENANT_A, "topic", List.of(Map.of(
+            "id", importedId, "label", "seq-batch-imported", "collection", COL_A,
+            "created_at", PAST_TS, "doc_count", 0, "review_status", "pending")));
+        long nextId = repo.insertTopic(TENANT_A, "seq-batch-after", null, COL_A, 0, null, null);
+        assertThat(nextId)
+            .as("serial insert after batch fidelity import must not collide")
+            .isGreaterThan(importedId);
     }
 
     @Test @Order(22)

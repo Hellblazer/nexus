@@ -143,6 +143,17 @@ _guided_restore() {
 trap '_guided_restore' EXIT
 
 [ "$COLD" = 1 ] && [ "$GUIDED" = 1 ] && { echo "--cold and --guided are different flows; pick one" >&2; exit 2; }
+
+# ── RETIRED journeys (RDR-155 P4b, 2026-07-24, nexus-8nlj4) ──────────────────
+# --guided / --cold / --hole-punch drive `nx guided-upgrade`, and the DEFAULT
+# rehearse.sh Phase B drives `nx migrate-to-service` — verbs DELETED in P4b P2.
+# The Chroma->PG guided-migration journey is replaced by the two-hop
+# stranded-install redirect; its acceptance rehearsal is tracked in nexus-8nlj4
+# (cut-time, gated on the LAST_MIGRATION_CAPABLE stamp). Refuse loud, pre-build.
+if [ "$GUIDED" = 1 ] || [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ]; then
+  echo "RETIRED (RDR-155 P4b): --guided/--cold/--hole-punch drive nx guided-upgrade, deleted in P4b P2. Superseded by the two-hop stranded-redirect rehearsal (nexus-8nlj4). The surviving journeys are --era-hop, --package-upgrade, --shakeout, --fullstack, --chash-window, and the default rehearse.sh (Phases A/D/E; its migrate leg is skipped)." >&2
+  exit 2
+fi
 # nexus-gilf2: --guided seeds local-ONNX (bge-768) cross-model targets, while
 # --with-cloud boots a voyage-only service. The combination is incoherent: the
 # bge-768 targets have no embedder in voyage mode and the pebfx.2 guard 422s the

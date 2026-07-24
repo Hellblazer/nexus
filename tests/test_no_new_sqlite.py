@@ -77,7 +77,8 @@ DDL_CENSUS: dict[str, int] = {
     "src/nexus/db/t2/memory_store.py": 3,
     "src/nexus/db/t2/plan_library.py": 3,
     "src/nexus/db/t2/telemetry.py": 4,
-    "src/nexus/migration/wire_reid.py": 1,        # chash_remap.db (PG twin = RDR-185 .16 Liquibase work)
+    # wire_reid.py entry removed (RDR-155 P4b P2): file deleted with the
+    # migration machinery.
 }
 
 #: 2026-07-18 census — per-file counts of ``ALTER TABLE`` statements
@@ -134,26 +135,19 @@ EPSILON_CENSUS: dict[str, int] = {
     "src/nexus/context.py": 1,
     "src/nexus/db/t2/chash_etl.py": 1,
     "src/nexus/doc_indexer.py": 1,
-    "src/nexus/health.py": 2,
+    # health.py 2 -> 1 (RDR-155 P4b P2): the migration-divergence check's
+    # read-only connect died with the migration-report doctor rows.
+    "src/nexus/health.py": 1,
     "src/nexus/indexer.py": 1,
     "src/nexus/mcp_infra.py": 4,
     "src/nexus/merge_candidates.py": 2,
-    "src/nexus/migration/chroma_read.py": 2,
-    # RDR-180 land-then-transform (nexus-jxizy.10.7, Hal-directed design):
-    # the guided driver's ONE read-only migration-SOURCE connect
-    # (file:...?mode=ro URI) feeding pre-land census + landing — the
-    # sanctioned remap_cascade class, never a destination.
-    "src/nexus/migration/driver.py": 1,
-    "src/nexus/migration/guided_upgrade.py": 1,
     # orchestrator.py entry removed (RDR-187/nexus-piwya.10): the chash
     # ETL source read carried the file's one epsilon-allow connect.
-    "src/nexus/migration/remap_cascade.py": 1,
-    "src/nexus/migration/vector_etl.py": 1,
-    "src/nexus/migration/wire_reid.py": 1,
+    # migration/* + rungs/t2_schema.py entries removed (RDR-155 P4b P2):
+    # files deleted with the migration machinery. DOWNWARD-only edit.
     "src/nexus/operators/aspect_sql.py": 6,
     "src/nexus/storage_boundary_lint.py": 10,     # defines the token; matches its own docs
     "src/nexus/taxonomy.py": 1,
-    "src/nexus/upgrade_ladder/rungs/t2_schema.py": 1,
 }
 
 

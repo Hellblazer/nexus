@@ -258,14 +258,27 @@
          table (chash-001, fk-002, catalog-013, rdr180) — those remain
          immutable history and, on fresh installs, still create/validate the
          table before this drops it. staging.chash_index (the dead-sink
-         landing surface) survives until the N+1 release. Before grants. -->
+         landing surface) survived one more release; rdr187-002 below drops
+         it. Before grants. -->
     <include file="db/changelog/rdr187-001-drop-chash-index.xml"/>
+
+    <!-- RDR-187 nexus-piwya.11 (the N+1 release of the line above): DROP
+         staging.chash_index, the dead-sink landing twin. The /v1/chash write
+         endpoints flip to 410 and the staging store spec is removed in the
+         same tag, so nothing can land here anymore. Before grants. -->
+    <include file="db/changelog/rdr187-002-drop-staging-chash-index.xml"/>
 
     <!-- nexus-78n33: register-path TOCTOU backstop — dedup backfill (FORCE-RLS
          toggled per the catalog-013-1b discipline) + partial unique index on
          LIVE (tenant_id, source_uri). Late in the chain so it indexes the
          post-rdr180/post-187 shape of catalog_documents; before grants. -->
     <include file="db/changelog/catalog-016-source-uri-unique.xml"/>
+
+    <!-- g37fr FINDING 2 (RDR-155 P4b): UPDATE on the topics id sequence so
+         the taxonomy fidelity import can setval past imported ids (the
+         serial-collision fix). Needs role-001 (nexus_svc) + taxonomy-001
+         (the sequence); before the runAlways grants for file-order clarity. -->
+    <include file="db/changelog/taxonomy-005-topics-seq-update-grant.xml"/>
 
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".

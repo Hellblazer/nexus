@@ -278,9 +278,9 @@ class T3Database:
     :class:`~nexus.db.http_vector_client.HttpVectorClient`); this facade
     survives for callers that INJECT a chroma client:
 
-    - tests (``EphemeralClient`` + ``DefaultEmbeddingFunction``), and
-    - the Phase-5 migration ETL, which wraps the read legs opened by
-      ``nexus.migration.chroma_read``.
+    - tests only, since P4b P2 (the migration ETL that wrapped the
+      Chroma read legs died with them; this facade + chroma_quotas die
+      at P3 with the chromadb dependency).
 
     The two historical modes still shape embedding-function dispatch:
     ``local_mode=True`` selects local EFs; cloud mode (default) selects
@@ -314,8 +314,8 @@ class T3Database:
         # (PersistentClient for local mode, CloudClient for cloud mode) are
         # retired — an injected ``_client`` is now REQUIRED. Production T3
         # serving routes through the pgvector-backed nexus-service
-        # (``nexus.db.make_t3()``); the ONLY surviving Chroma constructors are
-        # the Phase-5 ETL read legs (``nexus.migration.chroma_read``). The
+        # (``nexus.db.make_t3()``); since P4b P2 no production code
+        # constructs a Chroma client at all (this facade is test-only). The
         # nexus-9ji credential fallback that served the bare constructor died
         # with the constructions it fed.
         if _client is None:

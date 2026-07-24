@@ -114,7 +114,6 @@ _FLOCK_ALLOWED_MODULES = frozenset({
     "daemon/service_registry.py",        # the ONLY election flock (_elect)
     "daemon/storage_service_daemon.py",  # storage-daemon spawn lock
     "daemon/t2_daemon.py",               # T2 spawn / heartbeat locks
-    "daemon/t3_daemon.py",               # T3 spawn lock
     "db/migrations.py",                  # migration serialization lock
     "commands/daemon.py",                # daemon CLI single-instance lock
     # verify-fill watermark file lock (nexus-te885.10, review c0e4493e f4):
@@ -190,7 +189,6 @@ def test_gate_doc_exists() -> None:
 # helper is exactly the drift class this gate exists to catch.
 _OWNS_PROCESS_CONSUMER_MODULES = frozenset({
     "daemon/storage_service_daemon.py",
-    "daemon/t3_daemon.py",
 })
 
 

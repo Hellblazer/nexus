@@ -442,8 +442,9 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
             f"embedding-model mismatch: {old!r} encodes {old_model!r} but "
             f"{new!r} encodes {new_model!r}. rename never re-embeds — the "
             f"vectors would silently stay {old_model!r} under a name claiming "
-            f"{new_model!r}. Cross-model moves go through the migration "
-            f"pipeline (nx migrate / guided-upgrade, RDR-162 vector ETL). "
+            f"{new_model!r}. Cross-model moves re-index from source into the "
+            f"{new_model!r}-named collection (nx index repo / nx index pdf — "
+            f"the RDR-162 vector-ETL pipeline retired at RDR-155 P4b). "
             f"Pass --force-prefix-change ONLY if you know the vectors are "
             f"already {new_model!r}."
         )
@@ -1295,12 +1296,12 @@ def reembed_cmd(
                 f"service mode re-embeds server-side using the model the "
                 f"collection NAME encodes — or, for legacy 2-segment names, "
                 f"the prefix-inferred model ({encoded!r}); --to {target_model!r} "
-                f"cannot take effect on {name!r}. Cross-model moves go "
-                f"through the migration pipeline (nx migrate / "
-                f"guided-upgrade — the RDR-162 vector ETL re-embeds into a "
-                f"{target_model}-named collection). Plain 'nx collection "
-                f"rename' does NOT re-embed and would corrupt the "
-                f"name-encoded model contract."
+                f"cannot take effect on {name!r}. Cross-model moves "
+                f"re-index from source into a {target_model}-named "
+                f"collection (nx index repo / nx index pdf — the RDR-162 "
+                f"vector-ETL pipeline retired at RDR-155 P4b). Plain "
+                f"'nx collection rename' does NOT re-embed and would "
+                f"corrupt the name-encoded model contract."
             )
 
     if dry_run:

@@ -857,6 +857,48 @@ class CatalogRepositoryTest {
         assertThat(repo.getManifest(TENANT_A, "mfst.3")).isEmpty();
     }
 
+    @Test @Order(52)
+    void manifest_purge_zeroesChunkCountInSameTransaction() {
+        // nexus-b6enc F5: purgeManifest used to delete the manifest rows but
+        // leave documents.chunk_count stale — a ghost count with no rows
+        // behind it. The zero must land in the SAME transaction as the purge.
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.purge2", "title", "Purge Count Doc",
+            "content_type", "paper", "corpus", "knowledge", "chunk_count", 2));
+        repo.writeManifest(TENANT_A, "mfst.purge2", List.of(
+            Map.<String, Object>of("position", 0, "chash", ch("pg0"), "chunk_index", 0),
+            Map.<String, Object>of("position", 1, "chash", ch("pg1"), "chunk_index", 1)
+        ));
+        repo.purgeManifest(TENANT_A, "mfst.purge2");
+        var doc = repo.getDocument(TENANT_A, "mfst.purge2");
+        assertThat(((Number) doc.get("chunk_count")).intValue())
+            .as("purgeManifest must zero chunk_count with the rows")
+            .isZero();
+    }
+
+    @Test @Order(52)
+    void manifest_write_foldsChunkCountLikeWriteManifestMany() {
+        // nexus-b6enc F5: the single-doc REPLACE must fold chunk_count the
+        // same way writeManifestMany / resyncChunkCount do — a stale count
+        // after a single-doc rewrite is the same ghost class as the purge.
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.wcnt", "title", "Write Count Doc",
+            "content_type", "paper", "corpus", "knowledge", "chunk_count", 0));
+        repo.writeManifest(TENANT_A, "mfst.wcnt", List.of(
+            Map.<String, Object>of("position", 0, "chash", ch("wc0"), "chunk_index", 0),
+            Map.<String, Object>of("position", 1, "chash", ch("wc1"), "chunk_index", 1),
+            Map.<String, Object>of("position", 2, "chash", ch("wc2"), "chunk_index", 2)
+        ));
+        var doc = repo.getDocument(TENANT_A, "mfst.wcnt");
+        assertThat(((Number) doc.get("chunk_count")).intValue())
+            .as("writeManifest must fold chunk_count = rows.size()")
+            .isEqualTo(3);
+        // And the REPLACE shrink folds too.
+        repo.writeManifest(TENANT_A, "mfst.wcnt", List.of(
+            Map.<String, Object>of("position", 0, "chash", ch("wc9"), "chunk_index", 0)
+        ));
+        assertThat(((Number) repo.getDocument(TENANT_A, "mfst.wcnt").get("chunk_count")).intValue())
+            .isEqualTo(1);
+    }
+
     @Test @Order(53)
     void manifest_chashesForCollection() {
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.4", "title", "Chash For Collection",
@@ -879,6 +921,10 @@ class CatalogRepositoryTest {
             Map.<String, Object>of("position", 1, "chash", ch("rsync1"), "chunk_index", 1),
             Map.<String, Object>of("position", 2, "chash", ch("rsync2"), "chunk_index", 2)
         ));
+        // De-sync the count deliberately (writeManifest itself now folds it —
+        // nexus-b6enc F5 — so force a wrong value to prove resync repairs).
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "mfst.5", "title", "Resync Doc",
+            "content_type", "paper", "corpus", "knowledge", "chunk_count", 99));
         repo.resyncChunkCount(TENANT_A, "mfst.5");
         var doc = repo.getDocument(TENANT_A, "mfst.5");
         assertThat(doc.get("chunk_count")).isEqualTo(3);

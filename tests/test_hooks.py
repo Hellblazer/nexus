@@ -223,41 +223,17 @@ def test_infer_repo_git_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert name == tmp_path.name
 
 
-# ── nexus-0rwwv: SessionStart surfaces a pending substrate migration ─────────
+# ── RDR-155 P4b: the nexus-0rwwv SessionStart migration notice is retired ───
 
 
-def test_session_start_appends_migration_notice_when_pending(monkeypatch, tmp_path):
+def test_session_start_carries_no_migration_notice(monkeypatch):
+    """The bridge died with the migration machinery: SessionStart is the
+    plain ready line — stranded pre-PG installs are redirected by the
+    stranded-install detector at CLI/MCP startup instead."""
     from unittest.mock import patch as _patch
 
-    monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
-    with _patch("nexus.migration.guided_upgrade.legacy_footprint_pending",
-                return_value=True),          _patch("nexus.hooks.write_claude_session_id"):
+    with _patch("nexus.hooks.write_claude_session_id"):
         output = session_start(claude_session_id="s-0rwwv")
     assert "Nexus ready" in output
-    # RDR-185 P4.2: the SessionStart nudge survives the bridge retirement (it
-    # is a proactive notice, not a duplicate of a line shown beside it) but
-    # must name the single trigger — a verb demoted out of --help is a dead
-    # end to point an agent at.
-    assert "nx upgrade" in output
+    assert "storage migration" not in output
     assert "guided-upgrade" not in output
-
-
-def test_session_start_silent_without_pending(monkeypatch):
-    from unittest.mock import patch as _patch
-
-    monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
-    with _patch("nexus.migration.guided_upgrade.legacy_footprint_pending",
-                return_value=False),          _patch("nexus.hooks.write_claude_session_id"):
-        output = session_start(claude_session_id="s-0rwwv")
-    assert "Nexus ready" in output
-    assert "ONE-TIME storage migration" not in output
-
-
-def test_session_start_notice_failure_never_breaks_hook(monkeypatch):
-    from unittest.mock import patch as _patch
-
-    monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
-    with _patch("nexus.migration.guided_upgrade.legacy_footprint_pending",
-                side_effect=RuntimeError("boom")),          _patch("nexus.hooks.write_claude_session_id"):
-        output = session_start(claude_session_id="s-0rwwv")
-    assert "Nexus ready" in output

@@ -1,19 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""RDR-185 P0.1: the ordered ladder registry — RQ2's five hard edges as data.
+"""RDR-185 P0.1: the ordered ladder registry — RQ2's hard edges as data.
 
-The five hard ordering edges (RDR-185 Research RQ2, no cycles):
+RDR-155 P4b reshaped the edge set: the t2-schema and substrate-etl rungs
+(and their co-resident chunk-identity / embedder-era axes) died with the
+Chroma + client-SQLite migration machinery. What remains:
 
 1. package → everything            (:data:`PRECONDITION_PACKAGE` → ``*``)
-2. engine → substrate ETL          (:data:`PRECONDITION_ENGINE` → substrate-etl)
-3. T2 schema → all T2 reads        (:data:`RUNG_T2_SCHEMA` → ``*``)
-4. chunk-identity → T3 ETL         (co-resident, :data:`CO_RESIDENT_AXES`)
-5. embedder-era + chunk-identity CO-RESIDENT inside the substrate-ETL rung
-   (co-resident, :data:`CO_RESIDENT_AXES`)
-
-Edges 1–3 are sequencing edges over preconditions and rungs; edges 4–5 are
-encoded as CO-RESIDENCY — both axes are in-flight transforms INSIDE the
-substrate-ETL rung, satisfied by construction rather than by sequencing.
+2. engine → chash rekey            (:data:`PRECONDITION_ENGINE` → chash-rekey)
 
 Package/engine/process are STATELESS preconditions (RDR-185 Constraints):
 re-derived from ON-DISK state at every invocation, converged before the
@@ -28,20 +22,17 @@ answer.
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Sequence
-from pathlib import Path
+from collections.abc import Iterator, Sequence
 
 from nexus.upgrade_ladder.protocol import Rung
 
 # ── Canonical node names ─────────────────────────────────────────────────────
 
-#: T2 schema rung (native reference implementation lands in P1, bead .8).
-RUNG_T2_SCHEMA = "t2-schema"
-#: Substrate ETL rung (Chroma→pgvector with wire re-id; lands in P2).
-RUNG_SUBSTRATE_ETL = "substrate-etl"
 #: RDR-180 chash rekey rung (nexus-jxizy.6): the freeze-gated full-digest
-#: cutover — runs AFTER the substrate ETL (its input is the pgvector store)
-#: and after the ENGINE precondition (needs the bytea schema + /v1/remap/rekey).
+#: cutover — needs the bytea schema + /v1/remap/rekey (ENGINE precondition).
+#: RDR-155 P4b: the t2-schema and substrate-etl rungs died with the
+#: migration machinery; the rekey rung is RDR-185's standing convergence
+#: mechanism and the ladder's sole data rung.
 RUNG_CHASH_REKEY = "chash-rekey"
 
 #: Stateless preconditions — NOT rungs (see module docstring).
@@ -56,26 +47,20 @@ ALL_RUNGS = "*"
 #: here (with their edges in :data:`HARD_EDGES`) — the order is validated
 #: against the edges at import/construction time, so an inconsistent insert
 #: fails immediately rather than walking in a wrong order.
-RUNG_ORDER: tuple[str, ...] = (RUNG_T2_SCHEMA, RUNG_SUBSTRATE_ETL, RUNG_CHASH_REKEY)
+RUNG_ORDER: tuple[str, ...] = (RUNG_CHASH_REKEY,)
 
 #: RQ2 hard edges as ``(before, after)`` pairs; ``after == ALL_RUNGS`` means
-#: the source precedes every rung. Edges 4–5 are in CO_RESIDENT_AXES.
+#: the source precedes every rung.
 HARD_EDGES: tuple[tuple[str, str], ...] = (
     (PRECONDITION_PACKAGE, ALL_RUNGS),
-    (PRECONDITION_ENGINE, RUNG_SUBSTRATE_ETL),
     (PRECONDITION_ENGINE, RUNG_CHASH_REKEY),
-    (RUNG_T2_SCHEMA, ALL_RUNGS),
-    (RUNG_SUBSTRATE_ETL, RUNG_CHASH_REKEY),
 )
 
-#: RQ2 edges 4–5: axes that live INSIDE a rung as in-flight transforms.
-#: chunk-identity is computed on the wire during the substrate ETL (the id is
-#: derivable from the chunk text being carried); embedder-era remap is a
-#: co-resident leg of the same rung — never a separate, sequenced rung.
-CO_RESIDENT_AXES: dict[str, str] = {
-    "chunk-identity": RUNG_SUBSTRATE_ETL,
-    "embedder-era": RUNG_SUBSTRATE_ETL,
-}
+#: RQ2 edges 4–5 (chunk-identity / embedder-era co-residency inside the
+#: substrate-ETL rung) retired with that rung at RDR-155 P4b. The mapping
+#: stays as the co-residency REGISTRY (empty = no co-resident axes today);
+#: a future rung hosting an in-flight transform registers it here.
+CO_RESIDENT_AXES: dict[str, str] = {}
 
 
 class LadderOrderError(ValueError):
@@ -184,28 +169,14 @@ class LadderRegistry:
         return len(self._rungs)
 
 
-def default_registry(
-    *,
-    db_path_fn: Callable[[], Path] | None = None,
-    t2_apply_attempted: bool = False,
-) -> LadderRegistry:
-    """The production ladder. Native rungs land phase by phase: t2-schema
-    (P1, here), substrate-etl (P2), each slotting into :data:`RUNG_ORDER`
-    position.
+def default_registry() -> LadderRegistry:
+    """The production ladder.
 
-    ``db_path_fn`` is an injectable T2 path seam: ``nx upgrade`` routes its
-    own ``_db_path`` test seam through so patched-path tests never touch a
-    live install's ``memory.db``; ``None`` uses the production config-dir
-    default (correct for ``nx doctor``'s read-only detect sweep).
+    RDR-155 P4b: the t2-schema and substrate-etl rungs died with the
+    migration machinery (Chroma + client-SQLite retirement) — the ladder
+    is rekey-only. The RDR-180 chash-rekey rung SURVIVES (D-D): it is
+    RDR-185's standing convergence mechanism, not migration plumbing.
     """
     from nexus.upgrade_ladder.rungs.chash_rekey import default_chash_rekey_rung  # noqa: PLC0415 — deferred to avoid import cycle
-    from nexus.upgrade_ladder.rungs.substrate_etl import SubstrateEtlRung  # noqa: PLC0415 — deferred to avoid import cycle
-    from nexus.upgrade_ladder.rungs.t2_schema import T2SchemaRung  # noqa: PLC0415 — deferred to avoid import cycle
 
-    kwargs: dict[str, object] = {"apply_attempted": t2_apply_attempted}
-    if db_path_fn is not None:
-        kwargs["db_path_fn"] = db_path_fn
-    # RQ2 hard edge, live: t2-schema precedes substrate-etl; the RDR-180
-    # chash-rekey rung walks LAST (its input is the migrated pgvector store
-    # and the cohort engine — the registry validator enforces the order).
-    return LadderRegistry((T2SchemaRung(**kwargs), SubstrateEtlRung(), default_chash_rekey_rung()))  # type: ignore[arg-type]
+    return LadderRegistry((default_chash_rekey_rung(),))  # type: ignore[arg-type]

@@ -23,6 +23,7 @@ import java.security.MessageDigest;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -292,11 +293,9 @@ class StagingPromoteOpsIntegrationTest {
             ctx.execute("INSERT INTO staging.document_chunks "
                 + "(tenant_id, doc_id, position, chash) VALUES (?, '1.1.1', 1, ?) "
                 + "ON CONFLICT DO NOTHING", T1, digestHex(TEXT_2));
-            // chash_index rows for COLL_A (promoted per-collection).
-            ctx.execute("INSERT INTO staging.chash_index "
-                + "(tenant_id, chash, physical_collection, created_at) "
-                + "VALUES (?, ?, ?, '2026-07-01T00:00:00Z') ON CONFLICT DO NOTHING",
-                T1, legacy32, COLL_A);
+            // (staging.chash_index seed removed — RDR-187/nexus-piwya.11:
+            // the dead-sink landing twin is dropped by rdr187-002; old
+            // clients' landing attempts now 400 at /v1/staging/load.)
             // THE CROSS-ID-SPACE SCENARIO (critic-p1 Critical): the staged
             // assignment carries a LEGACY integer id (424242 — some SQLite
             // BIGSERIAL value that can never exist in nexus.topics) plus the
@@ -346,10 +345,13 @@ class StagingPromoteOpsIntegrationTest {
         assertThat(count("SELECT count(*) FROM information_schema.tables "
             + "WHERE table_schema = 'nexus' AND table_name = 'chash_index'"))
             .as("RDR-187 (nexus-piwya.7/.9): the staging chash promote leg is RETIRED "
-                + "and the router TABLE is dropped — the landed staging.chash_index "
-                + "row (seeded above, deliberately kept: old clients mid-guided-upgrade "
-                + "still land it) is a DEAD SINK with no possible destination. The "
-                + "chunks promote (4) is the registration.")
+                + "and the router TABLE is dropped. The chunks promote (4) is the "
+                + "registration.")
+            .isZero();
+        assertThat(count("SELECT count(*) FROM information_schema.tables "
+            + "WHERE table_schema = 'staging' AND table_name = 'chash_index'"))
+            .as("RDR-187 (nexus-piwya.11): the staging landing twin is dropped "
+                + "by rdr187-002 — nothing can land, nothing can promote.")
             .isZero();
         assertThat(count("SELECT count(*) FROM nexus.topic_assignments ta "
             + "JOIN nexus.topics t ON t.id = ta.topic_id "
@@ -416,6 +418,44 @@ class StagingPromoteOpsIntegrationTest {
             .as("no dangling manifest row was created").isEqualTo(0);
         scope.withTenant(T1, ctx -> {
             ctx.execute("DELETE FROM staging.document_chunks WHERE position = 7");
+            return null;
+        });
+    }
+
+    @Test
+    @Order(11)
+    void unresolvableKnowledgePointer_resyncsCountAndSurfacesTitle() {
+        // nexus-b6enc F3: a store_put-origin doc (content_type='knowledge',
+        // empty file_path) whose staged pointer cannot resolve has NO source
+        // file to re-index from. The promote must (a) resync the doc's
+        // verbatim-imported chunk_count down to the actually-promoted rows
+        // and (b) surface the doc BY TITLE in the finalize envelope.
+        String ghost = digestHex("knowledge note content that never landed");
+        scope.withTenant(T1, ctx -> {
+            ctx.execute("INSERT INTO nexus.catalog_documents "
+                + "(tenant_id, tumbler, title, content_type, file_path, chunk_count) "
+                + "VALUES (?, '5.5.5', 'orphaned-note-title', 'knowledge', '', 3) "
+                + "ON CONFLICT DO NOTHING", T1);
+            ctx.execute("INSERT INTO staging.document_chunks "
+                + "(tenant_id, doc_id, position, chash) VALUES (?, '5.5.5', 0, ?) "
+                + "ON CONFLICT DO NOTHING", T1, ghost);
+            return null;
+        });
+        Map<String, Object> fin = ops.finalizeTenant(T1, false);
+        assertThat(((Number) fin.get("chunk_count_resynced")).intValue())
+            .as("the verbatim-imported count (3) must resync to the promoted rows (0)")
+            .isGreaterThanOrEqualTo(1);
+        assertThat(count("SELECT chunk_count FROM nexus.catalog_documents "
+            + "WHERE tumbler = '5.5.5'"))
+            .as("never trust the verbatim-imported count").isEqualTo(0);
+        @SuppressWarnings("unchecked")
+        List<String> titles = (List<String>) fin.get("unresolved_knowledge_titles");
+        assertThat(titles)
+            .as("the store_put-origin doc must be surfaced BY TITLE")
+            .contains("orphaned-note-title");
+        scope.withTenant(T1, ctx -> {
+            ctx.execute("DELETE FROM staging.document_chunks WHERE doc_id = '5.5.5'");
+            ctx.execute("DELETE FROM nexus.catalog_documents WHERE tumbler = '5.5.5'");
             return null;
         });
     }

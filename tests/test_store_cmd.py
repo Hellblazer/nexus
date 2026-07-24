@@ -18,6 +18,9 @@ def runner() -> CliRunner:
 
 @pytest.fixture
 def env_creds(monkeypatch: pytest.MonkeyPatch) -> None:
+    # RDR-155 P4b: the chroma-key mode inference is gone — pin cloud mode
+    # explicitly so the voyage collection-name promotion under test fires.
+    monkeypatch.setenv("NX_LOCAL", "0")
     monkeypatch.setenv("CHROMA_API_KEY", "test-chroma-key")
     monkeypatch.setenv("VOYAGE_API_KEY", "test-voyage-key")
     monkeypatch.setenv("CHROMA_TENANT", "test-tenant")

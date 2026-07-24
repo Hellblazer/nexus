@@ -37,8 +37,9 @@ from nexus.migration.state import (
     "do_clear",
     is_flag=True,
     default=False,
-    help="Remove a stranded migration sentinel (safe: a resumed "
-    "nx migrate-to-service recomputes progress from live counts).",
+    help="Remove a stranded migration sentinel (safe: a resumed migration "
+    "on the pinned migration-capable release recomputes progress from "
+    "live counts).",
 )
 @click.option(
     "--force",
@@ -71,7 +72,8 @@ def migration_cmd(do_clear: bool, force: bool) -> None:
         click.echo(
             f"Cleared migration sentinel (was {state.phase}, "
             f"{state.collections_done}/{state.collections_total} collections). "
-            "Reads serve normally again; re-run nx migrate-to-service to resume."
+            "Reads serve normally again; resume on the pinned "
+            "migration-capable release if the migration is still needed."
         )
         return
 

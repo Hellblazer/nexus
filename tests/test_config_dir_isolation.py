@@ -270,7 +270,7 @@ class TestLocalChromaPathUnaffected:
     NEXUS_CONFIG_DIR override only controls the ``.config/nexus`` surface."""
 
     def test_local_chroma_path_uses_xdg_data_home(self, sandbox_dir: Path, monkeypatch):
-        from nexus.config import _default_local_path
+        from nexus.stranded_install import legacy_chroma_dir as _default_local_path
 
         # Not redirected by NEXUS_CONFIG_DIR.
         monkeypatch.delenv("NX_LOCAL_CHROMA_PATH", raising=False)

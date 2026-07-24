@@ -95,34 +95,30 @@ def _build_dispatch_env(
 ) -> dict[str, str]:
     """Build the env dict for a dispatched ``claude -p`` subprocess.
 
-    RDR-105 P4 (nexus-jnx7). Three modes:
+    RDR-105 P4 (nexus-jnx7). Three modes (RDR-155 P4b: the chroma T1
+    server is retired — ``share_t1=True`` now raises, since there is no
+    parent-owned chroma address to share; cross-process findings go to
+    T2, and service-mode T1 sharing rides the session-lease mechanism):
 
     Shared T1 (``share_t1=True``)
-        Subprocess inherits ``NX_T1_HOST`` / ``NX_T1_PORT`` from the
-        parent's ``nexus.mcp._t1_state.T1_ADDR`` so its ``T1Database``
-        connects to the parent's chroma. ``NX_T1_ISOLATED`` is
-        stripped. Raises ``RuntimeError`` when
-        the parent's T1 isn't live; a silent fallback would defeat
-        the caller's intent.
+        RETIRED. Raises ``RuntimeError`` unconditionally.
 
     Ephemeral (``ephemeral=True``)
-        Sets ``NX_T1_ISOLATED=1`` so the receiving MCP's lifespan
-        skips the chroma spawn and the constructor opens a per-process
-        ``EphemeralClient``. Strips inherited ``NX_T1_HOST`` /
-        ``NX_T1_PORT`` so the subprocess does not silently connect to
-        the parent. Mutually exclusive with ``share_t1``.
+        Sets ``NX_T1_ISOLATED=1`` so the receiving process's T1 routing
+        takes the private in-process path (InMemoryVectorClient).
+        Strips inherited ``NX_T1_HOST`` / ``NX_T1_PORT`` legacy vars.
+        Mutually exclusive with ``share_t1``.
 
     Owned (default, neither flag set)
         Strips ``NX_T1_HOST`` / ``NX_T1_PORT`` / ``NX_T1_ISOLATED``
-        so the subprocess MCP spawns its own
-        chroma (lifespan Branch 3). The subprocess gets a
-        sealed-from-parent T1 session of its own. Internal Bash tools
-        and sub-agents within the subprocess see consistent state.
+        so the subprocess resolves its own T1 (service-backed in
+        service mode, private in-process otherwise). The subprocess
+        gets a sealed-from-parent T1 session of its own.
 
     nexus-5daww (defense in depth): both ``ephemeral`` and ``owned`` also
     strip ``NX_T1_SESSION`` / ``NX_T1_SESSION_ID`` -- the SERVICE-backed T1
     session-token pair minted by the top-level MCP's
-    ``_t1_chroma_lifespan`` Branch 0. Pre-fix, ``base = dict(os.environ)``
+    ``_t1_lifespan`` Branch 0. Pre-fix, ``base = dict(os.environ)``
     carried the parent's already-minted, LIVE token straight through to a
     nested ``nx-mcp`` (spawned by a subsequent tool-granting dispatch, e.g.
     ``nx_plan_audit`` / ``nx_enrich_beads``), whose own Branch 0 would
@@ -133,7 +129,7 @@ def _build_dispatch_env(
     on its own to prevent a same-session re-mint since ``NX_SESSION_ID``
     is deliberately still forwarded below for attribution -- the
     session-level fix (a lease-file consult before mint) lives in
-    ``mcp.core._t1_chroma_lifespan`` Branch 0 (nexus-5daww) and is the
+    ``mcp.core._t1_lifespan`` Branch 0 (nexus-5daww) and is the
     layer that actually prevents rotation.
     """
     if share_t1 and ephemeral:
@@ -145,19 +141,12 @@ def _build_dispatch_env(
     base = dict(os.environ)
 
     if share_t1:
-        from nexus.mcp import _t1_state  # noqa: PLC0415 - deferred to avoid circular import at module load
-
-        if _t1_state.T1_ADDR is None:
-            raise RuntimeError(
-                "share_t1=True requires the top-level MCP's T1 to be "
-                "live (nexus.mcp._t1_state.T1_ADDR is None; the "
-                "lifespan publish path did not run)."
-            )
-        host, port = _t1_state.T1_ADDR
-        base["NX_T1_HOST"] = host
-        base["NX_T1_PORT"] = str(port)
-        base.pop("NX_T1_ISOLATED", None)
-    elif ephemeral:
+        raise RuntimeError(
+            "share_t1=True is retired (RDR-155 P4b): the parent-owned "
+            "chroma T1 server no longer exists. Use T2 (memory_put) for "
+            "cross-process findings, or service-mode T1 session leases."
+        )
+    if ephemeral:
         base["NX_T1_ISOLATED"] = "1"
         base.pop("NX_T1_HOST", None)
         base.pop("NX_T1_PORT", None)

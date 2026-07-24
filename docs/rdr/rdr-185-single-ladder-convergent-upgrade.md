@@ -220,6 +220,21 @@ Open sub-decisions for research:
 
 ## Success Criteria
 
+> **SUPERSESSION ADDENDUM (2026-07-24, RDR-155 P4b).** SC-1 below and the
+> migration-rehearsal SC are partially superseded by the combined 7.0.0
+> wave. The Chroma→PG in-place `nx upgrade`/`nx guided-upgrade` migration
+> journey is RETIRED (verbs deleted in RDR-155 P4b P2); a stranded pre-PG
+> install now takes the Hal-locked **two-hop stranded-install redirect**
+> (2026-07-21 / D-D): install the `LAST_MIGRATION_CAPABLE` release, migrate
+> there, then upgrade to 7.0.0. The ladder (SC on rungs, verify-before-
+> complete, two-mechanism version state) SURVIVES unchanged — it is 7.0.0's
+> standing convergence mechanism for already-PG boxes (engine/binary/PG
+> preconditions + chash-rekey). The migration-rehearsal acceptance suite
+> named in `related_tests` drove the retired verbs and is being reshaped;
+> the replacement two-hop acceptance rehearsal is tracked in **nexus-8nlj4**
+> (cut-time, gated on the `LAST_MIGRATION_CAPABLE` stamp). RDR content is
+> retained per the close-is-a-flip rule; this note records what changed.
+
 - A fresh-or-ancient install converges with `nx upgrade` alone: the
   2026-07-16 work-instance shape (pre-RDR-108 ids, store_put-only
   collections, Chroma substrate) reaches current UNATTENDED — the

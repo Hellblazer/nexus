@@ -7,8 +7,8 @@ assume the source is a Chroma store; neither covers rows written directly to
 local pgvector post-cutover that exist in no Chroma store at all — the exact
 substrate behind the 2026-07-01 nexus-te885.1 incident (27,283 chunks,
 previously reconciled once by an ad hoc manual script). This module presents
-the SAME duck-typed interface ``chroma_read.iter_collection_chunks`` already
-consumes, so ``verify_fill_collections`` needs zero changes to gain a
+the SAME duck-typed interface ``nexus.db.reconcile.iter_collection_chunks``
+already consumes, so ``verify_fill_collections`` needs zero changes to gain a
 pg-source leg — only a new caller (``verify_fill_pg_source``, nexus-te885.8.2)
 that opens THIS adapter instead of a Chroma client.
 
@@ -242,7 +242,7 @@ class PgReadClient:
     """Chroma-``client``-shaped read-only handle over a local nexus-service.
 
     Presents ``list_collections()`` / ``get_collection(name)`` exactly as
-    ``nexus.migration.chroma_read.iter_collection_chunks`` /
+    ``nexus.db.reconcile.iter_collection_chunks`` /
     ``list_collection_names`` already consume, so those functions work
     against this adapter unmodified.
     """

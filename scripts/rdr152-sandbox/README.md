@@ -1,6 +1,6 @@
 # RDR-152 Acceptance Sandbox Harness
 
-Fully isolated Postgres + Chroma + Java service stack for de-risking
+Fully isolated Postgres + Java service stack for de-risking
 Phase-4 destructive deletion.  Prod is never written.
 
 ## Prerequisites
@@ -36,8 +36,7 @@ SANDBOX_HOME=/tmp/my-sandbox ./up.sh
    `nexus_admin` (DDL) and `nexus_svc` (DML / FORCE RLS) roles with random
    passwords written to `$SANDBOX_HOME/.config/nexus/pg_credentials`.
 3. Build the Java service jar (skipped if already built).
-4. Start the service with `NX_CHROMA_MODE=local`, pointing at an isolated
-   Chroma data directory.  **The service self-applies Liquibase at startup**
+4. Start the service.  **The service self-applies Liquibase at startup**
    (the full net63 two-role topology: `nexus_admin` runs DDL, `nexus_svc`
    does DML under FORCE RLS, all 52 changesets).  This is the end-to-end
    proof of the `.31` public-schema grant fix.
@@ -54,9 +53,7 @@ SANDBOX_HOME=/tmp/my-sandbox ./up.sh
 `prod-copy.sh` will:
 
 1. Record prod file mtimes before touching anything.
-2. Copy `~/.config/nexus/chroma` into the sandbox Chroma directory via
-   `cp -R` (no write to source).
-3. Run all five `nx storage migrate` ETLs (memory, plans, telemetry, taxonomy,
+2. Run all five `nx storage migrate` ETLs (memory, plans, telemetry, taxonomy,
    chash) pointing at the prod SQLite file as source and the sandbox service
    as destination.  Each ETL opens the source in `mode=ro` (OS-level
    read-only; the fidelity-preserving `/import` endpoints are idempotent).
@@ -80,7 +77,6 @@ Reports:
 - `DATABASECHANGELOG` row count (proves Liquibase ran)
 - `nexus_admin` and `nexus_svc` role existence
 - Per-table row counts from Postgres
-- Chroma collection / embedding counts
 
 ### 4. Tear down
 
@@ -101,21 +97,13 @@ Reports:
   under `$SANDBOX_HOME/.config/nexus/postgres` at a fresh ephemeral port.
   All credentials are sandbox-specific.
 - **Read-only ETL source**: all T2 SQLite ETLs open the prod file with
-  SQLite URI `mode=ro`; the Chroma copy uses `cp -R` with no `--archive`
-  timestamp-update flags.  All `sqlite3` CLI invocations on prod paths use
+  SQLite URI `mode=ro`.  All `sqlite3` CLI invocations on prod paths use
   `--readonly` so the WAL-mode `-shm` sidecar is never updated.
-- **Chroma copy is a live-prod snapshot** (best-effort): `cp -R` takes the
-  Chroma directory while the prod MCP may be writing new embeddings.  If the
-  sandbox produces odd query results, stop the prod MCP (`nx daemon stop`),
-  re-run `prod-copy.sh`, then restart the prod MCP.  For Phase-4 smoke testing
-  the snapshot is sufficient; the exact embedding counts are asserted post-copy.
 - **Down --purge safety guard**: `down.sh --purge` refuses to `rm -rf` unless
   the target contains a harness marker file (`sandbox.env` or `service.pid`),
   has >= 2 path components, is not `$HOME`, and is not under prod
   `~/.config/nexus`.  This prevents `SANDBOX_HOME=~ ./down.sh --purge` from
   deleting the home directory.
-- **Separate Chroma**: `NX_CHROMA_PATH` points at
-  `$SANDBOX_HOME/.config/nexus/chroma`, not the prod path.
 - **Separate service token**: `NX_SERVICE_TOKEN` is a freshly generated
   random hex string.
 
@@ -123,10 +111,9 @@ Reports:
 
 - **catalog.db / catalog/ directory**: The catalog (SQLite in
   `~/.config/nexus/catalog/`) is not included in the `nx storage migrate`
-  ETL set.  `prod-copy.sh` copies the Chroma data (which includes T3
-  collections) but does not ETL the catalog graph.  A catalog ETL bead
-  is a known future item.  For Phase-4 smoke testing (vector ops, DML) the
-  current ETL coverage is sufficient.
+  ETL set — `prod-copy.sh` does not ETL the catalog graph.  A catalog ETL
+  bead is a known future item.  For Phase-4 smoke testing (vector ops, DML)
+  the current ETL coverage is sufficient.
 - **aspect_extraction_queue / document_aspects / document_highlights**:
   These tables exist in `memory.db` but do not yet have a dedicated ETL
   in `nx storage migrate`.  They are not required for Phase-4 decommission
@@ -149,5 +136,4 @@ the sandbox:
 | `NX_DB_URL` | nexus_svc JDBC URL |
 | `NX_DB_ADMIN_URL` | nexus_admin JDBC URL |
 | `PG_PORT` | Sandbox Postgres port |
-| `NX_CHROMA_PATH` | Sandbox Chroma data dir |
 | `NX_STORAGE_BACKEND` | Set to `service` |

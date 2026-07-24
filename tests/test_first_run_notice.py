@@ -134,7 +134,7 @@ class TestCoreMainWiring:
         import nexus.mcp.core as core
 
         _pin(monkeypatch, local=True, choice=None, active=_TIER0_MODEL)
-        monkeypatch.setattr(core, "_t1_chroma_shutdown", lambda: None)
+        monkeypatch.setattr(core, "_t1_shutdown", lambda: None)
         monkeypatch.setattr(
             "nexus.mcp._first_run.ensure_installed_and_running", lambda: None
         )

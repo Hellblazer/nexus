@@ -370,8 +370,8 @@ case "$MODE" in
 
         echo
         echo "── 10/11 nx doctor (all checks, post-activity) ──"
-        for check in --check-schema --check-plan-library --check-taxonomy \
-                     --check-tmpdirs; do
+        # (--check-tmpdirs retired at RDR-155 P4b with the chroma T1 tmpdirs.)
+        for check in --check-schema --check-plan-library --check-taxonomy; do
             echo "  $check:"
             nx doctor "$check" 2>&1 | tail -5 | sed 's/^/    /' || true
         done

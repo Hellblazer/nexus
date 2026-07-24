@@ -25,12 +25,10 @@ from nexus.health import (
     _check_t2_integrity,
     _check_t2_dropped_writes,
     _check_t2_daemon_singleton,
-    _check_chroma_pagination,
     _check_orphan_checkpoints,
     HealthResult,
 )
 from nexus.db.t2 import T2Database
-from tests.conftest import make_vector_test_client
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -315,63 +313,6 @@ class TestCheckT2DaemonSingleton:
         )
         ok, results = self._run(db)
         assert ok is True
-
-
-# ── Step 7: ChromaDB pagination ─────────────────────────────────────────────
-
-@pytest.fixture()
-def ephemeral_client():
-    client = make_vector_test_client()
-    for col in client.list_collections():
-        client.delete_collection(col.name)
-    return client
-
-
-class TestCheckChromaPagination:
-    def _run(self, client, db="test_db") -> tuple[bool, list[HealthResult]]:
-        results = _check_chroma_pagination(client, db)
-        ok = all(r.ok for r in results)
-        return ok, results
-
-    @pytest.mark.parametrize("n_docs,setup", [
-        (0, "no_col"), (0, "empty_col"), (10, "small"), (350, "large"),
-    ])
-    def test_valid_collections_pass(self, ephemeral_client, n_docs, setup):
-        if setup == "empty_col":
-            ephemeral_client.create_collection("empty_col")
-        elif setup in ("small", "large"):
-            col = ephemeral_client.create_collection("col")
-            col.add(ids=[f"id{i}" for i in range(n_docs)],
-                    documents=[f"doc {i}" for i in range(n_docs)])
-        ok, results = self._run(ephemeral_client)
-        assert ok is True and results[0].ok is True
-        if n_docs > 0:
-            assert f"count={n_docs}" in results[0].detail
-            assert f"paginated={n_docs}" in results[0].detail
-
-    def test_count_mismatch_fails(self, ephemeral_client):
-        col = ephemeral_client.create_collection("mismatch_col")
-        col.add(ids=[f"id{i}" for i in range(5)], documents=[f"doc {i}" for i in range(5)])
-        mock_col = MagicMock(wraps=col)
-        mock_col.name = col.name
-        mock_col.count.return_value = 105
-        mock_client = MagicMock()
-        mock_client.list_collections.return_value = [mock_col]
-        ok, results = self._run(mock_client)
-        assert ok is False and results[0].ok is False
-
-    def test_list_collections_exception(self):
-        bad_client = MagicMock()
-        bad_client.list_collections.side_effect = RuntimeError("network error")
-        ok, results = self._run(bad_client, "bad_db")
-        assert ok is False and "list failed" in results[0].detail
-
-    def test_only_one_collection_audited(self, ephemeral_client):
-        for i in range(3):
-            col = ephemeral_client.create_collection(f"col_{i}")
-            col.add(ids=[f"id{i}"], documents=[f"doc {i}"])
-        _, results = self._run(ephemeral_client)
-        assert len(results) == 1
 
 
 # ── Orphan checkpoints ──────────────────────────────────────────────────────

@@ -6,7 +6,6 @@ import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.ChashRepository;
 import dev.nexus.service.db.LadderRepository;
 import dev.nexus.service.db.MemoryRepository;
-import dev.nexus.service.db.MigrationJobRepository;
 import dev.nexus.service.db.PipelineRepository;
 import dev.nexus.service.db.PlanRepository;
 import dev.nexus.service.db.RemapRepository;
@@ -19,7 +18,6 @@ import dev.nexus.service.db.TokenStore;
 import dev.nexus.service.http.AspectHandler;
 import dev.nexus.service.http.AuthFilter;
 import dev.nexus.service.http.CatalogHandler;
-import dev.nexus.service.http.MigrationHandler;
 import dev.nexus.service.http.ChashHandler;
 import dev.nexus.service.http.HealthHandler;
 import dev.nexus.service.http.VersionHandler;
@@ -258,7 +256,6 @@ public final class NexusService {
         var ladderRepo    = new LadderRepository(tenantScope);
         var pipelineRepo  = new PipelineRepository(tenantScope);
         var catalogRepo   = new CatalogRepository(tenantScope);
-        var migrationJobRepo = new MigrationJobRepository(tenantScope);
 
         this.server = HttpServer.create(
             new InetSocketAddress(resolveBindHost(), port), /* backlog */ 10);
@@ -338,16 +335,6 @@ public final class NexusService {
         // /v1/catalog/* — catalog endpoints (bead nexus-gmiaf.18)
         var catalogCtx = server.createContext("/v1/catalog", new CatalogHandler(catalogRepo));
         catalogCtx.getFilters().addAll(authFilter);
-
-        // /v1/migration/* — cloud→cloud server-side ingest (RDR-176 P4, nexus-t9rmg.24;
-        // async job contract, RDR-178 Gap 5, nexus-melvx). Only wired when a
-        // PgVectorRepository is present (the serving substrate); absent = the route
-        // 404s rather than NPEs.
-        if (pgVectorRepository != null) {
-            var migrationCtx = server.createContext(
-                    "/v1/migration", new MigrationHandler(pgVectorRepository, migrationJobRepo));
-            migrationCtx.getFilters().addAll(authFilter);
-        }
 
         // /v1/tenants/* + /v1/service-tokens/* — token lifecycle admin (bead nexus-gmiaf.32.3).
         // Shares the live tokenStore + tokenCache so revoke invalidates the cache AuthFilter reads.

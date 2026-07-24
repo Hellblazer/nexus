@@ -157,23 +157,6 @@ def test_docs_rendered_copy_matches_the_generator():
     )
 
 
-def test_cascade_covers_every_debt_table():
-    """nexus-z5j0t's completeness link: every legacy-debt entry must have a
-    remap-cascade implementation (same table + same column), so the set that
-    OBSERVES debt and the machinery that CONVERGES it cannot drift."""
-    from nexus.migration.remap_cascade import _STORE_COLUMNS
-
-    cascade = {
-        (f"nexus.{table}", column)
-        for (_db, table, column) in _STORE_COLUMNS.values()
-    }
-    for t in DEBT_CHASH_TABLES:
-        assert (t.table, t.column) in cascade, (
-            f"{t.table}.{t.column} is observed as chash legacy debt but has "
-            "no remap-cascade implementation - extend CASCADE_STORES"
-        )
-
-
 def test_poison_detail_token_couples_probe_and_gates():
     """The convergence gate (upgrade_finish.py) distinguishes REAL poison
     from probe-degraded WARNs by substring-matching the health detail

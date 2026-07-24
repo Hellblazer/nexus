@@ -24,10 +24,11 @@ SRC = REPO_ROOT / "src" / "nexus"
 # nexus-rn3wo.2: the genuine Chroma migration-read leg. QuotaValidator and
 # the Chroma-Cloud error hierarchy die WITH chroma_quotas.py in nexus-g37fr;
 # these three files die alongside it (RDR-155 P4b).
+# RDR-155 P4b P2: the migration dying set is DELETED; the remainder shrinks
+# to the ONE permitted importer — db/t3.py (QuotaValidator) — until both die
+# together at P3 with the chromadb dependency.
 _CHROMA_QUOTAS_IMPORT_ALLOWED = {
-    SRC / "migration" / "chroma_read.py",
-    SRC / "migration" / "vector_etl.py",
-    SRC / "migration" / "collision_audit.py",
+    SRC / "db" / "t3.py",
 }
 
 # Only the rehomed CONSTANTS (QUOTAS / SAFE_CHUNK_BYTES) are in scope for
@@ -40,7 +41,6 @@ _IMPORT_PATTERN = re.compile(
     r"from\s+nexus\.db\.chroma_quotas\s+import\s+(?:\([^)]*\)|[^\n]*)"
     r"|from\s+nexus\.db\s+import\s+chroma_quotas"
 )
-_REHOMED_NAME_PATTERN = re.compile(r"\bQUOTAS\b|\bSAFE_CHUNK_BYTES\b")
 
 
 def _chroma_quotas_importers() -> dict[Path, list[int]]:
@@ -51,7 +51,7 @@ def _chroma_quotas_importers() -> dict[Path, list[int]]:
         for lineno, line in enumerate(
             path.read_text(encoding="utf-8").splitlines(), start=1
         ):
-            if _IMPORT_PATTERN.search(line) and _REHOMED_NAME_PATTERN.search(line):
+            if _IMPORT_PATTERN.search(line):
                 sites.setdefault(path, []).append(lineno)
     return sites
 
@@ -64,22 +64,23 @@ def test_chroma_quotas_has_no_importer_outside_dying_set() -> None:
         if p not in _CHROMA_QUOTAS_IMPORT_ALLOWED
     }
     assert offenders == {}, (
-        "chroma_quotas.py has live importers outside the Phase-4b dying set "
-        "(migration/chroma_read.py, vector_etl.py, collision_audit.py) — "
-        "these must be re-pointed to nexus.db.limits before nexus-g37fr can "
-        f"delete chroma_quotas.py: {offenders}"
+        "chroma_quotas.py has live importers outside its P3 remainder "
+        "(db/t3.py's QuotaValidator is the ONLY permitted importer until "
+        "both die at P3 with the chromadb dependency) — re-point new "
+        f"callers to nexus.db.limits: {offenders}"
     )
 
 
 def test_dying_set_files_still_import_chroma_quotas() -> None:
-    # Sanity: the 3 genuinely-Chroma-coupled files should still be wired to
-    # chroma_quotas — if this flips, the rehome accidentally touched them.
+    # Sanity (non-vacuity): db/t3.py should still be wired to chroma_quotas
+    # (QuotaValidator) — if this flips, either P3 landed (delete this suite
+    # with it) or the rehome accidentally touched t3.py early.
     sites = _chroma_quotas_importers()
     for path in _CHROMA_QUOTAS_IMPORT_ALLOWED:
         assert path in sites, (
             f"{path.relative_to(REPO_ROOT)} was expected to still import "
-            "chroma_quotas (genuine Chroma coupling, dies with the module "
-            "in nexus-g37fr) but no import was found"
+            "chroma_quotas (QuotaValidator; dies WITH the module at P3) "
+            "but no import was found"
         )
 
 
@@ -103,7 +104,6 @@ _REHOMED_FILES = [
     SRC / "db" / "t3.py",
     SRC / "exporter.py",
     SRC / "md_chunker.py",
-    SRC / "migration" / "orchestrator.py",
     SRC / "pdf_chunker.py",
     SRC / "search_engine.py",
 ]
@@ -112,7 +112,7 @@ _LIMITS_IMPORT_PATTERN = re.compile(r"from\s+nexus\.db\.limits\s+import")
 
 
 def test_all_rehomed_callers_import_from_limits_module() -> None:
-    assert len(_REHOMED_FILES) == 22, "the rehomed-file roster itself drifted"
+    assert len(_REHOMED_FILES) == 21, "the rehomed-file roster itself drifted"
     missing = []
     for path in _REHOMED_FILES:
         assert path.is_file(), f"expected rehomed file missing: {path}"
@@ -127,7 +127,11 @@ def test_all_rehomed_callers_import_from_limits_module() -> None:
 def test_rehomed_files_no_longer_import_chroma_quotas() -> None:
     sites = _chroma_quotas_importers()
     offenders = [
-        str(p.relative_to(REPO_ROOT)) for p in _REHOMED_FILES if p in sites
+        str(p.relative_to(REPO_ROOT))
+        for p in _REHOMED_FILES
+        # db/t3.py is BOTH a rehomed QUOTAS caller and the P3 remainder's
+        # sole permitted QuotaValidator importer — exempt here.
+        if p in sites and p not in _CHROMA_QUOTAS_IMPORT_ALLOWED
     ]
     assert offenders == [], (
         f"these re-pointed files still import chroma_quotas: {offenders}"

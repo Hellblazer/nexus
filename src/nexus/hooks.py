@@ -82,32 +82,10 @@ def session_start(claude_session_id: str | None = None) -> str:
     # lifespan (RDR-105 P4), which may key its lease on a DIFFERENT session-id
     # (its NX_SESSION_ID) than the one written above. Claiming initialization
     # masked exactly that divergence during the 5.10.x T1-scratch failure.
-    ready = f"Nexus ready (session: {session_id})."
-
-    # nexus-0rwwv: surface a pending substrate migration into the session
-    # context so the AGENT relays it — for plugin users this is the only
-    # surface their normal update route is guaranteed to cross. Cheap gate
-    # only (env + backend + dir existence — never opens the store).
-    try:
-        from nexus.migration.guided_upgrade import legacy_footprint_pending  # noqa: PLC0415 — deferred import — the bridge dies with the migration module at RDR-155 P4b
-
-        if legacy_footprint_pending():
-            # RDR-185 P4.2 (nexus-n7u38.29): the remedy is the single trigger.
-            # This notice SURVIVES the bridge retirement — unlike the ones on
-            # `nx upgrade` and `nx doctor`, it is not a duplicate report shown
-            # beside the ladder's own pending-rungs line; it is the proactive
-            # nudge a session gets before the user has asked anything. But it
-            # must name a verb they can actually find: `nx guided-upgrade` is
-            # demoted out of --help, so pointing an agent at it is a dead end.
-            ready += (
-                "\n⚠ A ONE-TIME storage migration is pending for this install "
-                "(legacy local store detected): tell the user to run "
-                "`nx upgrade` (converges everything; shows a cost preview "
-                "before anything bills)."
-            )
-    except Exception as exc:  # noqa: BLE001 — best-effort; the hook must never fail on the notice
-        _log.debug("session_start_migration_notice_failed", error=str(exc))
-    return ready
+    # RDR-155 P4b: the substrate-migration bridge notice (nexus-0rwwv) died
+    # with the migration machinery; stranded pre-PG installs are redirected
+    # to the LAST_MIGRATION_CAPABLE release by the stranded-install detector.
+    return f"Nexus ready (session: {session_id})."
 
 
 # -- SessionEnd ---------------------------------------------------------------

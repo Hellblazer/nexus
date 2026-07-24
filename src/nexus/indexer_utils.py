@@ -580,8 +580,8 @@ def check_local_path_writable() -> None:
     Raises:
         CredentialsMissingError: When the local path cannot be written to.
     """
-    from nexus.config import _default_local_path  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-    local_path = _default_local_path()
+    from nexus.stranded_install import legacy_chroma_dir  # noqa: PLC0415 — deferred import; legacy leg, dies at RDR-155 P3
+    local_path = legacy_chroma_dir()
     try:
         local_path.mkdir(parents=True, exist_ok=True)
         test_file = local_path / ".write_test"

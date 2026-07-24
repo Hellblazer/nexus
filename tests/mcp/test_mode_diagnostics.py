@@ -70,7 +70,8 @@ class TestResolveModeDiagnostics:
         result = _resolve_mode_diagnostics()
 
         assert result["service_url_found"] is True
-        assert result["chroma_key_found"] is False
+        # RDR-155 P4b: chroma_key_found dropped with the chroma credential map.
+        assert "chroma_key_found" not in result
         assert result["voyage_key_found"] is True
 
     def test_credential_booleans_never_leak_the_actual_values(

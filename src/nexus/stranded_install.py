@@ -105,6 +105,29 @@ class StrandedInstall:
         )
 
 
+def legacy_chroma_dir() -> Path:
+    """The FROZEN legacy local-Chroma store location (pre-PG era).
+
+    RDR-155 P4b: this stopped being a configurable serving path when the
+    chroma substrate retired; it survives only as the on-disk location the
+    stranded-install detector (and the P3-dying legacy index leg) probes.
+
+    Precedence (matching the retired ``config._default_local_path``):
+      1. ``NX_LOCAL_CHROMA_PATH`` env var (explicit override)
+      2. ``$XDG_DATA_HOME/nexus/chroma``
+      3. ``~/.local/share/nexus/chroma``
+    """
+    import os  # noqa: PLC0415 — stdlib, branch-local
+
+    override = os.environ.get("NX_LOCAL_CHROMA_PATH")
+    if override:
+        return Path(override)
+    xdg = os.environ.get("XDG_DATA_HOME")
+    if xdg:
+        return Path(xdg) / "nexus" / "chroma"
+    return Path.home() / ".local" / "share" / "nexus" / "chroma"
+
+
 def _pre_pg_artifacts(config_dir: Path, chroma_dir: Path, catalog_dir: Path) -> tuple[Path, ...]:
     """The four pre-PG store files whose presence marks unmigrated data."""
     return (

@@ -24,11 +24,11 @@ against the actually-registered ``nx`` commands:
       -> parse + compare [REAL] -> ManagedServiceIncompatible
       -> _cloud_probe_failure_message() [REAL] -> click.ClickException
 
-Three call sites are exercised end-to-end: ``nx migrate-to-service``
-(``migrate_cmd._run_migration``), ``nx storage migrate vectors``
-(``storage_cmd.migrate_vectors_cmd``), and a plain ``make_t3()`` consumer
-(``nx search``, via ``nexus.commands.store._t3``). A future refactor that
-silently un-wires any one of these from the gate fails a test here instead
+One call site is exercised end-to-end: a plain ``make_t3()`` consumer
+(``nx search``, via ``nexus.commands.store._t3``). RDR-155 P4b: the two
+migration call sites (``nx migrate-to-service``, ``nx storage migrate
+vectors``) died with the migration machinery. A future refactor that
+silently un-wires the search path from the gate fails a test here instead
 of shipping the original nexus-b6qlf bug again.
 """
 from __future__ import annotations
@@ -41,15 +41,9 @@ import httpx
 import pytest
 from click.testing import CliRunner
 
-from nexus.commands.migrate_cmd import migrate_to_service_cmd
 from nexus.commands.search_cmd import search_cmd
-from nexus.commands.storage_cmd import migrate_vectors_cmd
 from nexus.db.http_vector_client import reset_http_vector_client_for_tests
 from nexus.engine_version import REQUIRED_ENGINE_VERSION
-from nexus.migration.detection import DetectionReport
-from nexus.migration.driver import GuidedUpgradeResult
-from nexus.migration.sequencer import SequenceOutcome
-from nexus.migration.vector_etl import MigrationReport
 
 # ── floor-relative version strings (nexus-9qq85 single source of truth) ────
 # Derived from REQUIRED_ENGINE_VERSION so a future floor bump does not
@@ -153,171 +147,6 @@ def _assert_loud_cloud_failure(result, http_calls: list) -> None:
     assert "traceback (most recent call last)" not in output_lower
     assert len(http_calls) >= 1
     assert all(url.endswith("/version") for url, _ in http_calls)
-
-
-class TestMigrateToServiceConnectionPath:
-    """``nx migrate-to-service`` -> ``migrate_cmd._run_migration`` ->
-    ``get_http_vector_client()``."""
-
-    def _invoke(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setenv("NX_SERVICE_TOKEN", "cli-test-token")
-        monkeypatch.setenv("NX_SERVICE_URL", "https://cloud.test.invalid")
-        # The cost guardrail's cloud read leg (open_read_legs -> open_cloud_
-        # read_client) resolves chroma_database/chroma_api_key via
-        # nexus.config.get_credential, which falls back to the REAL
-        # ~/.config/nexus/config.yml when unset in env — on a machine with
-        # real (and here, incidentally invalid) ChromaCloud credentials
-        # configured, this constructs a REAL chromadb.CloudClient and hits
-        # real network auth, raising a raw ChromaError instead of the
-        # deterministic "leg absent" RuntimeError. Force ONLY the chroma_*
-        # credentials empty (delegating everything else to the real
-        # get_credential, which checks env first — service_url/service_token
-        # resolution elsewhere in the command depends on that) so the cloud
-        # leg is deterministically unconfigured, mirroring the local leg's
-        # "provably does not exist" isolation below — this suite tests the
-        # version-floor gate's position on the call graph, not the cost
-        # guardrail's cloud-credential resolution.
-        import nexus.config as _nexus_config
-
-        _real_get_credential = _nexus_config.get_credential
-
-        def _fake_get_credential(name: str) -> str:
-            if name in ("chroma_database", "chroma_api_key", "chroma_tenant"):
-                return ""
-            return _real_get_credential(name)
-
-        monkeypatch.setattr(
-            "nexus.config.get_credential", _fake_get_credential
-        )
-        t2_path = tmp_path / "t2.db"
-        t2_path.touch()
-        catalog_path = tmp_path / "catalog.db"
-        catalog_path.touch()
-        # A local leg that provably does not exist — deterministic
-        # "fresh user, nothing billed" cost-preview regardless of the host
-        # machine's real local Chroma state.
-        missing_local = tmp_path / "no-such-chroma"
-        return CliRunner().invoke(
-            migrate_to_service_cmd,
-            [
-                "--db", str(t2_path),
-                "--catalog-db", str(catalog_path),
-                "--local-path", str(missing_local),
-            ],
-        )
-
-    def test_below_floor_fails_loud_and_etl_never_runs(
-        self, tmp_path, monkeypatch, cloud_below_floor
-    ) -> None:
-        run_guided_upgrade = MagicMock()
-        monkeypatch.setattr(
-            "nexus.migration.driver.run_guided_upgrade", run_guided_upgrade
-        )
-
-        result = self._invoke(tmp_path, monkeypatch)
-
-        _assert_loud_cloud_failure(result, cloud_below_floor)
-        # The highest-stakes cloud operation (a data migration) must never
-        # reach the ETL engine when the gate fails.
-        run_guided_upgrade.assert_not_called()
-
-    def test_at_floor_gate_passes_version_check(
-        self, tmp_path, monkeypatch, cloud_at_floor
-    ) -> None:
-        stub_result = GuidedUpgradeResult(
-            detection=DetectionReport(classifications=(), voyage_key_present=False),
-            sequence=SequenceOutcome(
-                ok=True,
-                phase="not-migrating",
-                collections_total=0,
-                collections_done=0,
-                t2_total_failed=None,
-                legs_attempted=(),
-                legs_ok=(),
-                blocked_reason=None,
-                t2_report=None,
-            ),
-            validation=None,
-            ok=True,
-        )
-        run_guided_upgrade = MagicMock(return_value=stub_result)
-        monkeypatch.setattr(
-            "nexus.migration.driver.run_guided_upgrade", run_guided_upgrade
-        )
-
-        result = self._invoke(tmp_path, monkeypatch)
-
-        # Not asserting full command success in general (robustness per the
-        # bead) — only that the version-gate error specifically is absent
-        # and the engine was actually reached (proving the gate let a
-        # floor-compatible engine through).
-        assert "cannot be fixed locally" not in result.output.lower()
-        run_guided_upgrade.assert_called_once()
-        assert len(cloud_at_floor) >= 1
-        assert result.exit_code == 0
-        assert "already on the service stack" in result.output
-
-
-class TestStorageMigrateVectorsConnectionPath:
-    """``nx storage migrate vectors`` -> ``storage_cmd.migrate_vectors_cmd`` ->
-    ``get_http_vector_client()``."""
-
-    def _env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("NX_SERVICE_TOKEN", "cli-test-token")
-        monkeypatch.setenv("NX_SERVICE_URL", "https://cloud.test.invalid")
-
-    def test_below_floor_fails_loud_and_etl_never_runs(
-        self, monkeypatch, cloud_below_floor
-    ) -> None:
-        self._env(monkeypatch)
-        migrate_local = MagicMock()
-        migrate_cloud = MagicMock()
-        monkeypatch.setattr("nexus.migration.vector_etl.migrate_local", migrate_local)
-        monkeypatch.setattr("nexus.migration.vector_etl.migrate_cloud", migrate_cloud)
-
-        result = CliRunner().invoke(migrate_vectors_cmd, [])
-
-        _assert_loud_cloud_failure(result, cloud_below_floor)
-        migrate_local.assert_not_called()
-        migrate_cloud.assert_not_called()
-
-    def test_at_floor_gate_passes_version_check(
-        self, monkeypatch, cloud_at_floor
-    ) -> None:
-        self._env(monkeypatch)
-        migrate_local = MagicMock(return_value=MigrationReport(leg="local", results=()))
-        monkeypatch.setattr("nexus.migration.vector_etl.migrate_local", migrate_local)
-
-        result = CliRunner().invoke(migrate_vectors_cmd, [])
-
-        assert "cannot be fixed locally" not in result.output.lower()
-        migrate_local.assert_called_once()
-        assert len(cloud_at_floor) >= 1
-        assert result.exit_code == 0
-
-    def test_dry_run_unaffected_control(
-        self, monkeypatch, tmp_path
-    ) -> None:
-        """br90a carve-out: --dry-run never constructs through the gated
-        factory (bare ``HttpVectorClient()``, no probe) and must not regress
-        into being gated. Control case: cloud mode pinned, but NO httpx
-        patch installed at all — if --dry-run regressed into calling the
-        gated factory this test would blow up on a real network call
-        instead of silently passing, which is the point of leaving the
-        boundary unpatched here."""
-        monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
-        migrate_local = MagicMock(return_value=MigrationReport(leg="local", results=()))
-        monkeypatch.setattr("nexus.migration.vector_etl.migrate_local", migrate_local)
-
-        result = CliRunner().invoke(
-            migrate_vectors_cmd,
-            ["--dry-run", "--local-path", str(tmp_path / "chroma")],
-        )
-
-        assert result.exit_code == 0, result.output
-        migrate_local.assert_called_once()
-        _, kwargs = migrate_local.call_args
-        assert kwargs["dry_run"] is True
 
 
 class TestPlainMakeT3ConsumerConnectionPath:

@@ -535,8 +535,10 @@ class TestCheckMigrationState:
         assert any("nx upgrade" in s for s in chash.fix_suggestions)
         assert not any("Do NOT upgrade" in s for s in chash.fix_suggestions)
         assert any("§8.1" in s for s in chash.fix_suggestions)
-        rollback = [s for s in chash.fix_suggestions if "--rollback" in s]
-        assert rollback and all("will-not-boot" in s for s in rollback)
+        # RDR-155 P4b: the --rollback verb died with the migration machinery;
+        # the will-not-boot branch now names the pinned-release redirect.
+        pinned = [s for s in chash.fix_suggestions if "LAST_MIGRATION_CAPABLE" in s]
+        assert pinned and all("will-not-boot" in s for s in pinned)
         # the migration result itself is still healthy (box works now)
         assert any(r.label == "Schema migrations" and r.ok for r in results)
 

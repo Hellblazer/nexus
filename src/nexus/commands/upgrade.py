@@ -105,7 +105,7 @@ def upgrade(
         # walk cannot derive (source-gone, billed re-embed) surface from
         # INSIDE the rung; pending state is reported by `nx doctor`.
         with _standing_consent(assume_yes):
-            _run_ladder(dry_run=dry_run, auto_mode=auto_mode, _t2_apply_attempted=not dry_run)
+            _run_ladder(dry_run=dry_run, auto_mode=auto_mode)
     except Exception:
         if auto_mode:
             _log.warning("upgrade_auto_error", exc_info=True)
@@ -252,7 +252,6 @@ def _run_ladder(
     dry_run: bool,
     auto_mode: bool,
     _ledger_fn: "Callable[[], object] | None" = None,  # noqa: F821 — lazy imports (module keeps cold-start cheap)
-    _t2_apply_attempted: bool = False,
 ) -> None:
     """RDR-185 P0.4: walk the upgrade ladder (or report it, on --dry-run).
 
@@ -276,15 +275,10 @@ def _run_ladder(
         RungOutcome,
     )
 
-    # Route the command's _db_path seam into the T2 rung, so tests that
-    # patch _db_path (the established test_upgrade_cmd.py isolation) never
-    # touch a live install. (ladder.db is gone — RDR-186 .12 — so the seam
-    # covers only the rung's own reads now.)
-    # _t2_apply_attempted: _run_upgrade already ran apply_pending in this
-    # invocation — the T2 rung REPORTS instead of re-executing (P1 critique
-    # Critical: the deferred case otherwise re-runs every eligible step,
-    # incl. a 30s drain attempt, twice — also on the --auto hook path).
-    registry = default_registry(db_path_fn=_db_path, t2_apply_attempted=_t2_apply_attempted)
+    # RDR-155 P4b: the T2-schema and substrate-ETL rungs died with the
+    # migration machinery — the ladder is rekey-only (D-D), so the old
+    # _db_path / t2_apply_attempted plumbing into default_registry is gone.
+    registry = default_registry()
     if dry_run:
         # Per-rung detect guard (critic P0.R2 finding 1): a real rung's
         # detect() does live reads that can fail (locked db, bad path); the
@@ -422,40 +416,6 @@ def _cycle_daemon_to_current() -> None:
         _log.warning("upgrade_daemon_cycle_failed", error=str(exc))
 
 
-def _cycle_t3_daemon_to_current() -> None:
-    """Bring a stale supervised T3 daemon to the just-installed version
-    (best-effort). RDR-149 P3 (#1112): the supervised T3 daemon froze its
-    Python bytecode at start; only a process RESTART (not an in-process
-    chroma respawn) refreshes it, so this stops then starts the supervisor.
-
-    Only acts on a running daemon (no auto-spawn during upgrade). Local
-    mode only; a no-op when no T3 daemon is running or in cloud mode.
-    Never raises.
-    """
-    import subprocess  # noqa: PLC0415 — stdlib import kept branch-local
-
-    try:
-        from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-        from nexus.daemon.discovery import find_t3_daemon  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-
-        if not is_local_mode() or find_t3_daemon() is None:
-            return  # nothing running to cycle (or cloud mode)
-
-        from nexus.commands.daemon import _resolve_nx_bin  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-
-        nx = _resolve_nx_bin()
-        for verb in ("stop", "start"):
-            subprocess.run(
-                [*nx, "daemon", "t3", verb],
-                timeout=30,
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-    except Exception as exc:  # noqa: BLE001 — best-effort T3 daemon cycle; failure logged via _log.warning and upgrade continues
-        _log.warning("upgrade_t3_daemon_cycle_failed", error=str(exc))
-
-
 def _cycle_storage_service_to_current(
     *,
     _discover_fn=None,
@@ -464,8 +424,8 @@ def _cycle_storage_service_to_current(
     _installed_version_fn=None,
 ) -> None:
     """Bring a stale supervised storage service to the just-installed version
-    (best-effort). RDR-149 P5.1 (nexus-gmiaf.30): symmetric to
-    ``_cycle_t3_daemon_to_current`` for the Java storage-service + Postgres.
+    (best-effort). RDR-149 P5.1 (nexus-gmiaf.30): the version-skew cycle
+    for the Java storage-service + Postgres.
 
     The supervisor starts the Java JAR with the nexus Python code from the
     same Python install, so a nexus upgrade requires a supervisor restart to
@@ -566,7 +526,8 @@ def _cycle_supervised_daemons_to_current(*, skip_t3: bool = False) -> None:
     """
     _cycle_daemon_to_current()  # T2
     if not skip_t3:
-        _cycle_t3_daemon_to_current()  # T3
+        # RDR-155 P4b: the supervised Chroma T3 daemon is retired — the Java
+        # storage service serves T3 in every mode.
         _cycle_storage_service_to_current()  # Java storage service + Postgres (P5.1)
 
 

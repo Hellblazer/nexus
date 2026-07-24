@@ -62,7 +62,7 @@ import java.util.regex.Pattern;
  *   <li><strong>Tenant scoping.</strong> Every operation takes an explicit {@code tenant}
  *       and executes inside {@link TenantScope#withTenant} so the {@code nexus.tenant} GUC
  *       stamps the transaction and FORCE RLS scopes every row. Unlike the Chroma-backed
- *       {@link VectorRepository} (where collection names were the access boundary), RLS is
+ *       {@code VectorRepository} (deleted at RDR-155 P4b; collection names were the access boundary there), RLS is
  *       the tenant boundary here.
  *   <li><strong>Runtime per-dim dispatch.</strong> The collection-name embedding-model
  *       segment (RDR-103 collection-name authority, third {@code __}-separated segment)
@@ -86,7 +86,7 @@ import java.util.regex.Pattern;
  *       through the {@link EmbedderRouter} constructor - {@code EmbedderRouter.embed()}
  *       (the plain {@link Embedder} interface) always falls back to ONNX regardless of
  *       collection. Production wiring MUST use the router constructor (exactly like the
- *       Chroma {@link VectorRepository}); wiring a router through the plain-Embedder
+ *       Chroma {@code VectorRepository} did); wiring a router through the plain-Embedder
  *       constructor would produce 384-dim ONNX vectors for 1024-dim collections (caught
  *       fail-loud by the dim check, but only at the first upsert). With the router
  *       constructor the embedding path is identical to the Chroma path's
@@ -106,11 +106,11 @@ import java.util.regex.Pattern;
  *       {@code SET LOCAL} discipline as the TenantScope GUC stamp).
  * </ul>
  *
- * <p>The Chroma-backed {@link VectorRepository} stays RUNNABLE through Phase 3 as the
+ * <p>The Chroma-backed {@code VectorRepository} stays RUNNABLE through Phase 3 as the
  * hybrid-parity comparand (plan invariant 3); Phase 4a retires it.
  *
  * <p><strong>P4a seam note:</strong> this class shares no interface with the Chroma
- * {@link VectorRepository} and its methods take an explicit {@code tenant} first parameter
+ * {@code VectorRepository} and its methods take an explicit {@code tenant} first parameter
  * (RLS is the tenant boundary here; Chroma had none). The Phase 4a serving cutover must
  * either introduce a port interface or rewrite {@code VectorHandler}'s call sites - it is
  * NOT a drop-in substitution. Recorded on the P4a impl bead (nexus-1k8s1).
@@ -244,7 +244,7 @@ public final class PgVectorRepository {
     /**
      * Collection-aware constructor - the PRODUCTION wiring (Seam B). Routes each
      * embed call by collection prefix via {@link EmbedderRouter#embedForCollection},
-     * exactly like the Chroma {@link VectorRepository} path.
+     * exactly like the Chroma {@code VectorRepository} path.
      *
      * @param tenantScope the ONLY DSLContext factory
      * @param docRouter   collection-aware embedder router for document indexing

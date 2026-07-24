@@ -59,15 +59,13 @@ class TestDiscoveryFileShape:
         expected = config_dir / f"t2_addr.{os.getuid()}"
         assert t2_discovery_path(config_dir) == expected
 
-    def test_discovery_filename_distinct_from_t1_and_t3(self, config_dir: Path) -> None:
+    def test_discovery_filename_distinct_from_t1(self, config_dir: Path) -> None:
+        # RDR-155 P4b: the T3 daemon (and t3_addr.* files) retired; only the
+        # t1-vs-t2 distinctness half of this check survives.
         from nexus.daemon.t2_daemon import t2_discovery_path
-        from nexus.daemon.t3_daemon import t3_discovery_path
 
         t2 = t2_discovery_path(config_dir)
-        t3 = t3_discovery_path(config_dir)
         assert t2.name.startswith("t2_addr.")
-        assert t3.name.startswith("t3_addr.")
-        assert t2 != t3
         assert "t1_addr" not in t2.name
 
 

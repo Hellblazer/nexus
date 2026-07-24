@@ -79,7 +79,9 @@ def test_banner_text_while_migrating() -> None:
     assert "results incomplete" in banner
 
 
-def test_banner_text_while_migrated_failed_points_at_rollback() -> None:
+def test_banner_text_while_migrated_failed_points_at_pinned_release() -> None:
+    # RDR-155 P4b: the re-run pointer flipped from the deleted
+    # `nx migrate-to-service` verb to the pinned-release redirect.
     begin_migration(collections_total=7, started_at=_FIXED_STARTED_AT)
     record_progress(collections_done=4, collections_total=7)
     mark_failed("3 collections unsupported")
@@ -87,7 +89,8 @@ def test_banner_text_while_migrated_failed_points_at_rollback() -> None:
     assert banner is not None
     assert "FAILED" in banner
     assert "4/7" in banner
-    assert "nx migrate-to-service" in banner  # re-run / rollback pointer
+    assert "LAST_MIGRATION_CAPABLE" in banner  # pinned-release pointer
+    assert "nx migrate-to-service" not in banner  # the verb is gone
     assert "report" in banner.lower()
 
 

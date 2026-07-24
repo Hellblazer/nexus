@@ -76,14 +76,8 @@ ALLOWLIST: tuple[tuple[str, str, str], ...] = (
         "The gated factory itself — the singleton construction that sits "
         "directly behind the engine-version-floor probe (nexus-jn0nm).",
     ),
-    (
-        "commands/storage_cmd.py",
-        "migrate_vectors_cmd",
-        "Deliberate --dry-run carve-out (nexus-br90a): dry-run counts "
-        "source chunks only and never contacts the destination service, so "
-        "no probe applies; the live branch of the same command goes "
-        "through get_http_vector_client().",
-    ),
+    # (RDR-155 P4b: the storage_cmd.py migrate_vectors_cmd --dry-run
+    # carve-out entry died with the file.)
 )
 
 
@@ -362,7 +356,7 @@ def test_real_src_tree_exact_construction_count():
     """Exact count (== per feedback_exact_assertions_for_fixture_regression),
     doubling as the non-vacuity floor: a silently-empty scan cannot pass."""
     constructions = scan_constructions()
-    assert len(constructions) == len(ALLOWLIST) == 2, (
+    assert len(constructions) == len(ALLOWLIST) == 1, (
         f"expected exactly {len(ALLOWLIST)} HttpVectorClient constructions "
         f"in src/nexus/ (the allowlisted factory + dry-run carve-out), "
         f"found {len(constructions)}: "

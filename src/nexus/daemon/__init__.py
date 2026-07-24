@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Storage daemons for the nexus substrate (RDR-120).
+"""Storage daemons for the nexus substrate (RDR-120 / RDR-149).
 
-P1.A (nexus-41unl) introduces the T3 daemon: a managed ``chroma run``
-subprocess with discovery + start/stop/status lifecycle. The T3Client
-factory (P1.B) and call-site flips (P2) ship in subsequent beads.
+The shared lifecycle primitive (discovery, single-writer lease,
+self-heal, version-skew) lives in ``service_registry.py`` and applies
+to every supervised tier. RDR-155 P4b: the managed-chroma T3 daemon is
+retired — T3 is served by the Java storage service in every mode.
 
 Import contract: callers reach the public types through their defining
 submodules, not through this package root. No facade re-exports.
 
-  - ``from nexus.daemon.t3_daemon import start_t3_daemon, stop_t3_daemon``
-  - ``from nexus.daemon.discovery import discovery_resolve, find_t3_daemon``
+  - ``from nexus.daemon.discovery import discovery_resolve, find_t2_daemon``
+  - ``from nexus.daemon.service_registry import ServiceRegistry``
 """

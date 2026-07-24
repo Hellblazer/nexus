@@ -7,14 +7,20 @@ P0e rehome (nexus-g37fr plan v3, partition record T2
 permanent home of the provision → health-gate → version-pin →
 discoverability-gate family that used to live in
 :mod:`nexus.migration.guided_upgrade`. ``guided_upgrade`` — the
-Chroma→PG guided-migration bridge — DELETES WHOLE-FILE at P2 of the
+Chroma→PG guided-migration bridge — deleted whole-file at P2 of the
 combined 7.0.0 wave; this family is the ladder's standing
 service-acquisition machinery (RDR-185 convergence, not migration
-plumbing), consumed by the SURVIVING :mod:`nexus.upgrade_ladder.preconditions`
-(engine precondition's ``_default_establish``). ``guided_upgrade`` keeps
-thin re-export shims delegating here until it dies; dying consumers
-(``guided_upgrade_cmd``, ``vector_etl``'s ingest-cloud probe) stay
-pointed at ``guided_upgrade`` and die with it.
+plumbing).
+
+CONSUMPTION STATUS (P2, 2026-07-24): the precondition's establish leg
+died WITH the legacy-footprint census at P2 — ``converge_preconditions``
+is report-only (the upgrade path never provisions; ``nx init`` owns
+acquisition, and a stranded pre-PG install gets the stranded-install
+redirect). This family currently has TEST consumers only. It is kept
+deliberately: it is the intended material for nexus-4yf4u
+(restart-stale must converge the engine through the same path a fresh
+``nx init`` uses), and deleting a Hal-locked D-C rehome without that
+decision would be scope creep. If 4yf4u lands elsewhere, revisit.
 
 Moved verbatim (pure move, no behavior change):
 

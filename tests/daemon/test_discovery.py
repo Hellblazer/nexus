@@ -24,7 +24,6 @@ from nexus.daemon.discovery import (
     DaemonNotRunningError,
     discovery_path,
     discovery_resolve,
-    find_t3_daemon,
 )
 
 
@@ -73,100 +72,12 @@ class TestDiscoveryPath:
             discovery_path(config_dir, tier="t9")  # type: ignore[arg-type]
 
 
-class TestFindT3Daemon:
-    def test_returns_none_when_file_absent(self, config_dir: Path) -> None:
-        assert find_t3_daemon(config_dir) is None
+class TestT3LegRetired:
+    """RDR-155 P4b: the T3 discovery leg (find_t3_daemon / NX_T3_ADDR)
+    retired with the managed-chroma daemon — only 't2' resolves."""
 
-    def test_returns_payload_when_pid_alive(self, config_dir: Path) -> None:
-        path = discovery_path(config_dir, tier="t3")
-        path.write_text(json.dumps(_live_payload()))
-        payload = find_t3_daemon(config_dir)
-        assert payload is not None
-        assert payload["pid"] == os.getpid()
-
-    def test_stale_pid_returns_none_and_unlinks_file(self, config_dir: Path) -> None:
-        path = discovery_path(config_dir, tier="t3")
-        path.write_text(json.dumps(_stale_payload()))
-        assert find_t3_daemon(config_dir) is None
-        assert not path.exists()
-
-    def test_shutdown_marker_returns_none(self, config_dir: Path) -> None:
-        path = discovery_path(config_dir, tier="t3")
-        payload = _live_payload()
-        payload["status"] = "shutting_down"
-        path.write_text(json.dumps(payload))
-        assert find_t3_daemon(config_dir) is None
-
-    def test_format_version_too_new_returns_none(self, config_dir: Path) -> None:
-        path = discovery_path(config_dir, tier="t3")
-        payload = _live_payload()
-        payload["format_version"] = 999
-        path.write_text(json.dumps(payload))
-        assert find_t3_daemon(config_dir) is None
-
-    def test_non_dict_payload_returns_none(self, config_dir: Path) -> None:
-        path = discovery_path(config_dir, tier="t3")
-        path.write_text(json.dumps(["not", "a", "dict"]))
-        assert find_t3_daemon(config_dir) is None
-
-    def test_garbage_file_returns_none(self, config_dir: Path) -> None:
-        path = discovery_path(config_dir, tier="t3")
-        path.write_text("<<< not json >>>")
-        assert find_t3_daemon(config_dir) is None
-
-
-class TestDiscoveryResolveT3:
-    """RDR-120 C2 precedence: env-var wins when set + non-empty; file
-    is fallback when env unset."""
-
-    def test_env_var_wins_when_set(
-        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Plant a live discovery file too; env must take precedence.
-        path = discovery_path(config_dir, tier="t3")
-        path.write_text(json.dumps(_live_payload()))
-        monkeypatch.setenv("NX_T3_ADDR", "10.0.0.5:6000")
-
-        resolved = discovery_resolve("t3", config_dir=config_dir)
-        assert resolved["source"] == "env:NX_T3_ADDR"
-        assert resolved["tcp_host"] == "10.0.0.5"
-        assert resolved["tcp_port"] == 6000
-
-    def test_empty_env_var_treated_as_unset(
-        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        path = discovery_path(config_dir, tier="t3")
-        path.write_text(json.dumps(_live_payload()))
-        monkeypatch.setenv("NX_T3_ADDR", "")
-
-        resolved = discovery_resolve("t3", config_dir=config_dir)
-        assert resolved["source"] == "file"
-        assert resolved["tcp_port"] == 9999
-
-    def test_file_fallback_when_env_unset(self, config_dir: Path) -> None:
-        path = discovery_path(config_dir, tier="t3")
-        path.write_text(json.dumps(_live_payload()))
-        resolved = discovery_resolve("t3", config_dir=config_dir)
-        assert resolved["source"] == "file"
-
-    def test_raises_when_neither_env_nor_file(self, config_dir: Path) -> None:
-        with pytest.raises(DaemonNotRunningError) as excinfo:
-            discovery_resolve("t3", config_dir=config_dir)
-        msg = str(excinfo.value)
-        assert "nx daemon t3 start" in msg
-
-    def test_malformed_env_var_raises_value_error(
-        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("NX_T3_ADDR", "no-colon-here")
-        with pytest.raises(ValueError):
-            discovery_resolve("t3", config_dir=config_dir)
-
-    def test_non_integer_port_raises_value_error(
-        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("NX_T3_ADDR", "host:not-a-port")
-        with pytest.raises(ValueError):
+    def test_discovery_resolve_t3_raises(self, config_dir: Path) -> None:
+        with pytest.raises(ValueError, match="t2"):
             discovery_resolve("t3", config_dir=config_dir)
 
 
@@ -485,40 +396,6 @@ class TestT2LivenessProbeAndPidFastPath:
 
         assert resolved is not None
         assert resolved["uds_path"] == sock_path
-
-    def test_t3_expired_lease_no_uds_probe(self, short_tmp: Path) -> None:
-        """T3 expired lease -> None + unlinked WITHOUT attempting a UDS probe.
-
-        The T3 path must be byte-for-byte identical to before this bead.
-        No UDS probe is performed (T3 is TCP chroma).
-        """
-        from nexus.daemon.discovery import find_t3_daemon
-
-        path = discovery_path(short_tmp, tier="t3")
-
-        # T3 lease uses TCP, no uds_path; expired
-        lease = {
-            "scope_key": str(os.getuid()),
-            "generation": 1,
-            "owner_token": "tok-t3",
-            "heartbeat_epoch": 0.0,  # ancient
-            "ttl": 3.0,
-            "endpoint": {
-                "tcp_host": "127.0.0.1",
-                "tcp_port": 8000,
-                "pid": os.getpid(),
-            },
-            "version": "5.10.6",
-            "payload": {},
-            "status": "live",
-            "format_version": 1,
-        }
-        path.write_text(json.dumps(lease))
-
-        result = find_t3_daemon(short_tmp)
-
-        assert result is None
-        assert not path.exists(), "T3 expired lease must be unlinked"
 
     def test_expired_lease_warning_logged(
         self, short_tmp: Path, uds_base: Path

@@ -121,12 +121,13 @@ def test_doctor_does_not_mention_serve(runner, mock_reg, absent):
 # ── Missing credentials ─────────────────────────────────────────────────────
 
 def test_doctor_missing_credentials_informational(runner, mock_reg):
-    """nexus-nmw3i/c7aj3: absent legacy creds are migration-source status
-    lines, never a failing/fatal doctor result (the exit-1 false-positive
-    on migrated installs)."""
+    """nexus-nmw3i/c7aj3 → RDR-155 P4b: the CHROMA_* credential rows died
+    with the migration machinery; the Voyage row survives and stays
+    informational — absent creds are never a failing/fatal doctor result
+    (the exit-1 false-positive on migrated installs)."""
     result = _invoke(runner, mock_reg, cred=None)
-    assert "CHROMA_API_KEY" in result.output
-    assert "migration-source only" in result.output
+    assert "CHROMA_API_KEY" not in result.output  # row deleted at P4b
+    assert "VOYAGE_API_KEY" in result.output
     # Absent creds alone must not produce the fatal ✗ + exit 1 shape or
     # push credential setup on a serving-healthy install.
     assert "nx config init" not in result.output
@@ -134,15 +135,14 @@ def test_doctor_missing_credentials_informational(runner, mock_reg):
 
 
 def test_doctor_partial_credentials_informational(runner, mock_reg):
-    """Partially-set legacy creds: the set ones read 'set', the absent
-    ones read migration-source-only — no fatal line either way
-    (nexus-nmw3i/c7aj3)."""
+    """The Voyage row reads 'set' when present; no CHROMA rows remain
+    (RDR-155 P4b) — no fatal line either way (nexus-nmw3i/c7aj3)."""
     def cred_side_effect(key):
-        return "sk-key" if key in ("chroma_api_key", "voyage_api_key") else None
+        return "sk-key" if key == "voyage_api_key" else None
 
     result = _invoke(runner, mock_reg, cred=cred_side_effect)
-    assert "CHROMA_DATABASE" in result.output
-    assert "migration-source only" in result.output
+    assert "CHROMA_DATABASE" not in result.output  # row deleted at P4b
+    assert "VOYAGE_API_KEY" in result.output
     assert "nx config set chroma_database" not in result.output
 
 
@@ -374,7 +374,6 @@ def test_doctor_local_mode_shows_local_checks(runner, mock_reg, tmp_path):
     # code rather than passing for unrelated reasons.
     with (
         patch("nexus.config.is_local_mode", return_value=True),
-        patch("nexus.config._default_local_path", return_value=tmp_path / "chroma"),
         patch("nexus.health.shutil.which", return_value="/usr/bin/rg"),
         patch(
             "nexus.repos.list_repos_dual",
@@ -410,7 +409,6 @@ def test_doctor_local_mode_shows_collection_count(runner, mock_reg, tmp_path):
     with (
         patch("nexus.config.is_local_mode", return_value=True),
         patch("nexus.config.local_embed_model_choice", return_value="all-MiniLM-L6-v2"),
-        patch("nexus.config._default_local_path", return_value=chroma_path),
         patch("nexus.health.shutil.which", return_value="/usr/bin/rg"),
         patch(
             "nexus.repos.list_repos_dual",
@@ -423,7 +421,9 @@ def test_doctor_local_mode_shows_collection_count(runner, mock_reg, tmp_path):
         result = runner.invoke(main, ["doctor"])
     assert result.exit_code == 0
     assert "1 collections" in result.output
-    assert "on disk" in result.output
+    # RDR-155 P4b: the legacy-Chroma "on disk" size report died with the
+    # migration machinery — the census is the pgvector service count only.
+    assert "on disk" not in result.output
 
 
 # ── doctor --fix-paths ─────────────────────────────────────────────────────
@@ -798,167 +798,6 @@ class TestCheckPlanLibrary:
 
 
 
-# ── --check-tmpdirs (RDR-094 Phase 3) ───────────────────────────────────────
-
-
-class TestCheckTmpdirs:
-    """``nx doctor --check-tmpdirs`` surfaces orphan ``nx_t1_*``
-    tmpdirs (no session record reference, mtime > 24h). Read-only
-    by default; ``--reap-tmpdirs`` actually deletes."""
-
-    def test_no_candidates_exits_zero(
-        self, runner: CliRunner, tmp_path: Path,
-    ) -> None:
-        # Empty tmproot => zero candidates.
-        empty_root = tmp_path / "empty"
-        empty_root.mkdir()
-        with patch(
-            "tempfile.gettempdir", return_value=str(empty_root),
-        ):
-            result = runner.invoke(main, ["doctor", "--check-tmpdirs"])
-        assert result.exit_code == 0, result.output
-        assert "No orphan" in result.output
-
-    def test_lists_candidates_without_reap(
-        self, runner: CliRunner, tmp_path: Path,
-    ) -> None:
-        import os as _os
-        import time as _time
-
-        tmproot = tmp_path / "tmp"
-        tmproot.mkdir()
-        sessions = tmp_path / "sessions"
-        sessions.mkdir()
-        old_orphan = tmproot / "nx_t1_old"
-        old_orphan.mkdir()
-        backdate = _time.time() - 30 * 3600
-        _os.utime(old_orphan, (backdate, backdate))
-
-        with patch("tempfile.gettempdir", return_value=str(tmproot)):
-            result = runner.invoke(main, ["doctor", "--check-tmpdirs"])
-        assert result.exit_code == 0, result.output
-        assert "nx_t1_old" in result.output
-        # Read-only mode: candidate still on disk.
-        assert old_orphan.exists()
-
-    def test_reap_actually_deletes(
-        self, runner: CliRunner, tmp_path: Path,
-    ) -> None:
-        import os as _os
-        import time as _time
-
-        tmproot = tmp_path / "tmp"
-        tmproot.mkdir()
-        sessions = tmp_path / "sessions"
-        sessions.mkdir()
-        old_orphan = tmproot / "nx_t1_old"
-        old_orphan.mkdir()
-        backdate = _time.time() - 30 * 3600
-        _os.utime(old_orphan, (backdate, backdate))
-
-        with patch("tempfile.gettempdir", return_value=str(tmproot)):
-            result = runner.invoke(
-                main, ["doctor", "--check-tmpdirs", "--reap-tmpdirs"],
-            )
-        assert result.exit_code == 0, result.output
-        assert "Reaped: 1" in result.output
-        assert not old_orphan.exists()
-
-    def test_json_out_emits_machine_parseable(
-        self, runner: CliRunner, tmp_path: Path,
-    ) -> None:
-        import json as _json
-        import os as _os
-        import time as _time
-
-        tmproot = tmp_path / "tmp"
-        tmproot.mkdir()
-        sessions = tmp_path / "sessions"
-        sessions.mkdir()
-        orphan = tmproot / "nx_t1_x"
-        orphan.mkdir()
-        backdate = _time.time() - 30 * 3600
-        _os.utime(orphan, (backdate, backdate))
-
-        with patch("tempfile.gettempdir", return_value=str(tmproot)):
-            result = runner.invoke(
-                main, ["doctor", "--check-tmpdirs", "--json"],
-            )
-        assert result.exit_code == 0, result.output
-        payload = _json.loads(result.stdout)
-        assert payload["cutoff_hours"] == 24.0
-        assert len(payload["candidates"]) == 1
-        assert payload["candidates"][0]["path"].endswith("nx_t1_x")
-        assert payload["reaped"] == 0
-
-    def test_detects_orphan_under_config_t1_not_only_os_temp(
-        self, runner: CliRunner, tmp_path: Path,
-    ) -> None:
-        """After nexus-ycwec Fix #1, orphans live under <config>/t1/ not OS-temp.
-
-        ``nx doctor --check-tmpdirs`` must scan <config>/t1/ so operators
-        see the real candidates.  The autouse fixture already patches
-        nexus_config_dir -> tmp_path, so we only need to create the
-        orphan under tmp_path/t1/ and ensure no OS-temp orphan is present.
-        """
-        import json as _json
-        import os as _os
-        import time as _time
-
-        # Point OS-temp at an empty dir — no legacy orphans there.
-        empty_ostmp = tmp_path / "ostmp_empty"
-        empty_ostmp.mkdir()
-
-        # Create an orphan under the config/t1/ location (new store path).
-        config_t1 = tmp_path / "t1"
-        config_t1.mkdir()
-        orphan = config_t1 / "nx_t1_config_orphan"
-        orphan.mkdir()
-        backdate = _time.time() - 30 * 3600
-        _os.utime(orphan, (backdate, backdate))
-
-        with patch("tempfile.gettempdir", return_value=str(empty_ostmp)):
-            result = runner.invoke(
-                main, ["doctor", "--check-tmpdirs", "--json"],
-            )
-        assert result.exit_code == 0, result.output
-        payload = _json.loads(result.stdout)
-        assert len(payload["candidates"]) == 1, (
-            "Expected 1 candidate from <config>/t1/ scan; "
-            "got zero — check-tmpdirs is not scanning config_dir/t1/"
-        )
-        assert "nx_t1_config_orphan" in payload["candidates"][0]["path"]
-        assert payload["reaped"] == 0
-
-    def test_reap_removes_orphan_under_config_t1(
-        self, runner: CliRunner, tmp_path: Path,
-    ) -> None:
-        """--reap-tmpdirs must delete orphans under <config>/t1/ via config_dir=."""
-        import os as _os
-        import time as _time
-
-        empty_ostmp = tmp_path / "ostmp_empty"
-        empty_ostmp.mkdir()
-
-        config_t1 = tmp_path / "t1"
-        config_t1.mkdir()
-        orphan = config_t1 / "nx_t1_reap_me"
-        orphan.mkdir()
-        backdate = _time.time() - 30 * 3600
-        _os.utime(orphan, (backdate, backdate))
-
-        with patch("tempfile.gettempdir", return_value=str(empty_ostmp)):
-            result = runner.invoke(
-                main, ["doctor", "--check-tmpdirs", "--reap-tmpdirs"],
-            )
-        assert result.exit_code == 0, result.output
-        assert "Reaped: 1" in result.output, (
-            "reap-tmpdirs did not reap config/t1/ orphan — "
-            "sweep_orphan_tmpdirs was likely called without config_dir="
-        )
-        assert not orphan.exists(), "orphan dir must be deleted after --reap-tmpdirs"
-
-
 # ── --check-t1 (RDR-105 P5 / nexus-ssdg) ─────────────────────────────────────
 
 
@@ -1023,44 +862,3 @@ class TestCheckT1:
             result = runner.invoke(main, ["doctor", "--check-t1"])
         assert result.exit_code == 0, result.output
         assert "chroma reachable" in result.output
-
-# ── RDR-185 P4.2: the nexus-0rwwv bridge is retired from the health path ────
-#
-# A pending cutover is reported by the ladder's own read-only surface
-# (health's `_check_pending_rungs`, which renders the substrate rung's
-# detect() with `nx upgrade` as the remedy). The bridge's coarse count with
-# a `nx guided-upgrade` remedy was a second line for the same state naming a
-# demoted verb — Gap-2 scattered remediation, and a third DATA-rung
-# mechanism per Gap-4.
-
-
-def test_doctor_never_advertises_the_demoted_verb(runner, monkeypatch):
-    monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
-    with (
-        patch("nexus.health.run_health_checks", return_value=([], True)),
-        patch("nexus.health.format_health_for_cli", return_value=("all green", [])),
-        patch("nexus.migration.guided_upgrade.pending_migration_notice",
-              return_value="A one-time storage migration is pending: run nx guided-upgrade") as notice,
-    ):
-        result = runner.invoke(main, ["doctor"])
-    assert result.exit_code == 0
-    # Not merely absent from the output — never probed at all.
-    notice.assert_not_called()
-    assert "guided-upgrade" not in result.output
-
-
-def test_doctor_stays_silent_on_the_retired_bridge_when_checks_fail(runner, monkeypatch):
-    # The old notice printed before the failed-exit so a red doctor still
-    # pointed. Retired on BOTH paths — a red doctor must not resurrect it.
-    monkeypatch.setenv("NX_MIGRATION_NOTICE", "1")
-    with (
-        patch("nexus.health.run_health_checks", return_value=([], True)),
-        patch("nexus.health.format_health_for_cli",
-              return_value=("something failed", ["something"])),
-        patch("nexus.migration.guided_upgrade.pending_migration_notice",
-              return_value="A one-time storage migration is pending: run nx guided-upgrade") as notice,
-    ):
-        result = runner.invoke(main, ["doctor"])
-    assert result.exit_code == 1
-    notice.assert_not_called()
-    assert "guided-upgrade" not in result.output

@@ -78,12 +78,16 @@ def test_yes_flag_reaches_the_rungs_consent_channel(
     coverage of the only part a user touches. This arc already shipped a
     NameError in a production default no test executed; same class.
 
-    Observes at `_run_ladder`, the ONLY consumer, reading exactly what the rung's
-    `assume_yes()` would read."""
-    from nexus.upgrade_ladder.rungs.substrate_etl import assume_yes
+    Observes at `_run_ladder`, the ONLY consumer, reading the NX_ASSUME_YES
+    env channel a consent-gated rung would read (RDR-155 P4b: the
+    substrate-etl rung's `assume_yes()` reader died with the rung; the
+    channel itself survives in `_standing_consent`)."""
+    def _consent() -> bool:
+        import os
+        return os.environ.get("NX_ASSUME_YES", "").strip() == "1"
 
     seen: list[bool] = []
-    monkeypatch.setattr(upgrade_mod, "_run_ladder", lambda **_kw: seen.append(assume_yes()))
+    monkeypatch.setattr(upgrade_mod, "_run_ladder", lambda **_kw: seen.append(_consent()))
     monkeypatch.setattr(upgrade_mod, "_quiesce_daemon", lambda: None)
     monkeypatch.setattr(upgrade_mod, "_run_upgrade", lambda **_kw: None)
     monkeypatch.setattr(upgrade_mod, "_converge_preconditions", lambda **_kw: None)
@@ -423,7 +427,6 @@ def test_upgrade_invocation_executes_each_migration_step_exactly_once(
         "MIGRATIONS",
         [Migration(introduced="99.0.0", name="counting-defer", fn=_counting_defer)],
     )
-    monkeypatch.setenv("NX_MIGRATION_NOTICE", "0")  # keep the bridge probe out
     db = tmp_path / "memory.db"
     with (
         patch("nexus.commands.upgrade._db_path", return_value=db),

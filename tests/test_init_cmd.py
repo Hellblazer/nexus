@@ -1075,15 +1075,15 @@ class TestLocalDispatchP13:
         ):
             assert not hasattr(init_mod, name), f"{name} must be removed in P1.3"
 
-    def test_cloud_keys_no_service_url_does_not_provision_pg(
+    def test_legacy_keys_no_service_url_provisions_local(
         self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Regression guard (substantive-critic SIG-1): a cloud-Voyage user with
-        cloud keys but NO service_url and NX_LOCAL unset resolves LOCAL by
-        service_url-absence, yet must NOT have a local Postgres cluster silently
-        provisioned (provision_and_start_service runs _provision_postgres_step
-        BEFORE its internal is_local_mode guard). The secondary cloud guard in
-        init_cmd short-circuits before provisioning and prints the cloud notice."""
+        """RDR-155 P4b re-ground of the SIG-1 guard: the chroma-key cloud
+        inference died with the chroma credential map, so legacy keys in the
+        env are INERT — with no service_url and NX_LOCAL unset the box is
+        genuinely LOCAL and init provisions the local stack. (Cloud is
+        service_url; the secondary cloud guard now fires only for a real
+        managed resolution.)"""
         monkeypatch.delenv("NX_LOCAL", raising=False)
         monkeypatch.delenv("NX_SERVICE_URL", raising=False)
         monkeypatch.setenv("VOYAGE_API_KEY", "vk-test")
@@ -1091,14 +1091,15 @@ class TestLocalDispatchP13:
         called: list[str] = []
         monkeypatch.setattr(
             "nexus.commands.init.provision_and_start_service",
-            lambda embedder=None: called.append("provisioned"),
+            lambda embedder=None: called.append("provisioned") or _FAKE_LEASE,
         )
 
         result = CliRunner().invoke(init_cmd, [])
 
         assert result.exit_code == 0, result.output
-        assert called == [], "cloud-keys + no service_url must not provision a local PG"
-        assert "cloud" in result.output.lower()
+        assert called == ["provisioned"], (
+            "legacy chroma keys are inert post-P4b — a local box must provision"
+        )
 
     def test_service_flag_forces_provisioning_in_managed_mode(
         self, cfg_dir: Path, monkeypatch: pytest.MonkeyPatch
@@ -1159,12 +1160,13 @@ class TestLocalDispatchP13:
         assert installed == [], "managed --yes must not register an autostart unit"
         assert "no-op" not in result.output.lower(), "obsolete no-op notice removed"
 
-    def test_guided_upgrade_default_serve_still_calls_provision(
+    def test_provisioning_default_serve_still_calls_provision(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """DO-NOT-BREAK: migration._default_serve still routes through
+        """DO-NOT-BREAK: provisioning._default_serve (P0e rehome of the
+        guided_upgrade seam) still routes through
         init.provision_and_start_service unchanged (signature intact)."""
-        from nexus.migration import guided_upgrade
+        from nexus.upgrade_ladder import provisioning
 
         called: list[str] = []
         monkeypatch.setattr(
@@ -1172,7 +1174,7 @@ class TestLocalDispatchP13:
             lambda embedder=None: called.append("served") or _FAKE_LEASE,
         )
 
-        result = guided_upgrade._default_serve()
+        result = provisioning._default_serve()
 
         assert called == ["served"]
         assert result is _FAKE_LEASE

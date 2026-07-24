@@ -473,104 +473,6 @@ def _run_check_mcp_logs(*, json_out: bool, hours: int = 24) -> None:
             )
 
 
-def _run_check_tmpdirs(*, reap: bool, json_out: bool) -> None:
-    """List or reap orphan ``nx_t1_*`` tmpdirs (RDR-094 Phase 3).
-
-    Read-only by default: enumerates candidates that
-    :func:`nexus.session.sweep_orphan_tmpdirs` would reap (no session
-    record reference, mtime > 24h). With ``--reap-tmpdirs``, calls
-    the sweep function and reports the count actually deleted.
-
-    Exits non-zero when reap reports zero candidates and ``--reap-
-    tmpdirs`` was passed (so the operator can spot a no-op run in
-    automation).
-    """
-    import json  # noqa: PLC0415 — deferred to keep CLI startup fast
-    import tempfile  # noqa: PLC0415 — deferred to keep CLI startup fast
-    import time  # noqa: PLC0415 — deferred to keep CLI startup fast
-    from pathlib import Path  # noqa: PLC0415 — deferred to keep CLI startup fast
-
-    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-    from nexus.session import sweep_orphan_tmpdirs  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-
-    config_dir = nexus_config_dir()
-    tmpdir_root = Path(tempfile.gettempdir())
-    cutoff_hours = 24.0
-    cutoff = time.time() - cutoff_hours * 3600.0
-
-    def _scan_root(root: Path) -> list[dict]:
-        results: list[dict] = []
-        if not root.exists():
-            return results
-        for d in sorted(root.glob("nx_t1_*")):
-            if not d.is_dir():
-                continue
-            try:
-                mtime = d.stat().st_mtime
-            except OSError:
-                continue
-            age_h = (time.time() - mtime) / 3600.0
-            if mtime >= cutoff:
-                continue
-            try:
-                size_kb = sum(
-                    p.stat().st_size for p in d.rglob("*") if p.is_file()
-                ) / 1024.0
-            except OSError:
-                size_kb = 0.0
-            results.append({
-                "path": str(d),
-                "age_hours": round(age_h, 2),
-                "size_kb": round(size_kb, 1),
-            })
-        return results
-
-    # Primary: new config-dir store location (nexus-ycwec Fix #1: <config>/t1/).
-    # Legacy: OS-temp root for pre-fix orphans placed there by older versions.
-    candidates: list[dict] = _scan_root(config_dir / "t1") + _scan_root(tmpdir_root)
-
-    payload: dict = {
-        "tmpdir_root": str(tmpdir_root),
-        "config_t1_root": str(config_dir / "t1"),
-        "cutoff_hours": cutoff_hours,
-        "candidates": candidates,
-        "reaped": 0,
-    }
-
-    if reap:
-        payload["reaped"] = sweep_orphan_tmpdirs(
-            config_dir=config_dir,
-            tmpdir_root=tmpdir_root,
-            max_age_hours=cutoff_hours,
-        )
-
-    if json_out:
-        click.echo(json.dumps(payload, indent=2))
-    else:
-        if not candidates:
-            click.echo(
-                f"No orphan nx_t1_* tmpdirs older than {cutoff_hours}h "
-                f"under {config_dir / 't1'} or {tmpdir_root}."
-            )
-        else:
-            click.echo(
-                f"Orphan nx_t1_* candidates "
-                f"(scanned {config_dir / 't1'} + {tmpdir_root}): "
-                f"{len(candidates)}"
-            )
-            for c in candidates:
-                click.echo(
-                    f"  {c['path']}  age={c['age_hours']}h  "
-                    f"size={c['size_kb']}KB"
-                )
-        if reap:
-            click.echo(f"Reaped: {payload['reaped']}")
-
-    if reap and payload["reaped"] == 0 and candidates:
-        # All candidates failed to delete; surface as non-zero.
-        raise click.exceptions.Exit(1)
-
-
 def _run_check_plan_library() -> None:
     """Report plan-library dimensional health. RDR-092 Phase 0c.2.
 
@@ -1365,16 +1267,6 @@ def _run_check_mineru() -> None:
          "Phase 0c.2.",
 )
 @click.option(
-    "--check-tmpdirs",
-    "check_tmpdirs",
-    is_flag=True,
-    default=False,
-    help="List orphan nx_t1_* tmpdirs that no session record points "
-         "at AND are older than 24h. Reap candidates from RDR-094 "
-         "Phase 3 sweep_orphan_tmpdirs. Read-only; pair with "
-         "--reap-tmpdirs to actually delete them.",
-)
-@click.option(
     "--check-mcp-logs",
     "check_mcp_logs",
     is_flag=True,
@@ -1433,15 +1325,6 @@ def _run_check_mineru() -> None:
     type=click.IntRange(min=1),
     show_default=True,
     help="Lookback window in hours for --check-mcp-logs.",
-)
-@click.option(
-    "--reap-tmpdirs",
-    "reap_tmpdirs",
-    is_flag=True,
-    default=False,
-    help="With --check-tmpdirs, run sweep_orphan_tmpdirs and report "
-         "the count reaped. Without --check-tmpdirs this flag is "
-         "ignored.",
 )
 @click.option(
     "--json",
@@ -1527,7 +1410,6 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                check_search: bool, check_resources: bool,
                check_quotas: bool, check_taxonomy: bool,
                check_plan_library: bool,
-               check_tmpdirs: bool, reap_tmpdirs: bool,
                check_mcp_logs: bool, mcp_log_hours: int,
                check_mineru: bool,
                json_out: bool,
@@ -1563,10 +1445,6 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
 
     if check_quotas:
         _run_check_quotas(json_out=json_out)
-        return
-
-    if check_tmpdirs:
-        _run_check_tmpdirs(reap=reap_tmpdirs, json_out=json_out)
         return
 
     if check_mcp_logs:

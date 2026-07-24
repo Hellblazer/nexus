@@ -43,8 +43,9 @@ import java.util.Map;
  *       embed-filled in staging BEFORE promote; this op REFUSES content
  *       rows with NULL embeddings, counting them loud).</li>
  *   <li>(RETIRED, RDR-187/nexus-piwya.7) the chash_index promote leg —
- *       landed staging.chash_index rows are an accepted dead sink; the
- *       chunks promote above IS the chash registration.</li>
+ *       the chunks promote above IS the chash registration. The
+ *       staging.chash_index landing twin itself dropped at nexus-piwya.11
+ *       (rdr187-002); old clients' landing attempts answer 400.</li>
  * </ol>
  *
  * <h3>{@link #finalizeTenant} — IDEMPOTENT, RE-RUNNABLE (reconciliation C2)</h3>
@@ -238,16 +239,13 @@ public final class StagingPromoteOps {
             counts.put("staged_content", stagedContent);
 
             // (5) RETIRED — the chash_index promote leg (RDR-187, nexus-piwya.7;
-            // gate Finding 1: this removal MUST precede the .9 DROP, or the
-            // INSERT above would hard-crash every guided-upgrade promote on a
-            // missing relation). staging.chash_index stays a LANDED DEAD SINK
-            // for one release: an old client mid-guided-upgrade still lands
-            // router rows (StagingHandler.STORES keeps the entry), and they are
-            // simply never promoted — the chunks promote (4) IS the chash
-            // registration now, and the router's imported-orphan population
-            // (the rows only this leg ever created) dies with the table. The
-            // chash_index_promoted count leaves the envelope with the leg;
-            // rehearse_guided.sh's field list moved in the same commit.
+            // gate Finding 1: this removal had to precede the .9 DROP, or the
+            // INSERT above would have hard-crashed every guided-upgrade promote
+            // on a missing relation). The one-release LANDED-DEAD-SINK window
+            // closed at nexus-piwya.11: staging.chash_index is dropped
+            // (rdr187-002) and StagingHandler.STORES lost the entry, so an old
+            // client's landing attempt answers 400 unknown-store. The chunks
+            // promote (4) IS the chash registration.
 
             return counts;
         });
@@ -350,6 +348,37 @@ public final class StagingPromoteOps {
                 + "WHERE NOT EXISTS (SELECT 1 FROM nexus.chash_alias a WHERE a.old_ref = s.chash) "
                 + "  AND NOT (s.chash ~ '^[0-9a-f]{64}$' AND (" + canonExists + "))")
                 .get(0, Integer.class));
+
+            // (2b) nexus-b6enc F3: the promote above is RESOLVABLE-ONLY, so
+            // the verbatim-imported documents.chunk_count can claim more
+            // chunks than actually landed. Mass-resync the count from the
+            // actually-promoted manifest rows for every doc this migration
+            // staged — never trust the imported count. Scoped to staged docs
+            // so live serving writes outside the migration are untouched.
+            counts.put("chunk_count_resynced", ctx.execute(
+                "UPDATE nexus.catalog_documents d "
+                + "SET chunk_count = COALESCE(m.cnt, 0) "
+                + "FROM (SELECT DISTINCT doc_id FROM staging.document_chunks) sd "
+                + "LEFT JOIN (SELECT doc_id, count(*) AS cnt "
+                + "             FROM nexus.catalog_document_chunks GROUP BY doc_id) m "
+                + "  ON m.doc_id = sd.doc_id "
+                + "WHERE d.tumbler = sd.doc_id "
+                + "  AND d.chunk_count IS DISTINCT FROM COALESCE(m.cnt, 0)"));
+
+            // (2c) nexus-b6enc F3: store_put-origin docs (content_type =
+            // 'knowledge', empty file_path) have NO source file — an
+            // unresolved pointer for one can never converge via re-index, so
+            // it must be surfaced BY TITLE for the user to re-store.
+            List<String> unresolvedKnowledgeTitles = ctx.fetch(
+                "SELECT DISTINCT d.title FROM nexus.catalog_documents d "
+                + "JOIN staging.document_chunks s ON s.doc_id = d.tumbler "
+                + "WHERE d.content_type = 'knowledge' "
+                + "  AND COALESCE(d.file_path, '') = '' "
+                + "  AND NOT EXISTS (SELECT 1 FROM nexus.chash_alias a WHERE a.old_ref = s.chash) "
+                + "  AND NOT (s.chash ~ '^[0-9a-f]{64}$' AND (" + canonExists + ")) "
+                + "ORDER BY 1 LIMIT 100")
+                .map(r -> r.get(0, String.class));
+            counts.put("unresolved_knowledge_titles", unresolvedKnowledgeTitles);
 
             // (3) topic_assignments: alias-repoint chash-shaped doc_ids,
             //     verbatim pass-through for memory titles (mixed identity).

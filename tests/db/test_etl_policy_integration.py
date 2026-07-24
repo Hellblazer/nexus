@@ -23,7 +23,7 @@ import pytest
 
 from nexus.db.t2.taxonomy_etl import migrate_taxonomy_rows
 from nexus.db.t2.telemetry_etl import migrate_telemetry_rows
-from nexus.migration.migration_report import IssueCollector, build_report
+from tests.db._issue_collector import IssueCollector
 
 # ── Source fixtures ──────────────────────────────────────────────────────────
 
@@ -383,29 +383,6 @@ class TestTelemetryPolicy:
 # ── Report round-trip over a real two-store run ──────────────────────────────
 
 
-class TestEndToEndReport:
-    def test_gate_predicate_over_real_etl_run(self, tmp_path: Path) -> None:
-        """The production-shaped pass: orphans skipped, timestamps handled,
-        danglers flagged, one unparseable row failed — the report reflects
-        every action and total_failed counts exactly the failed rows."""
-        tax_db = TestTaxonomyPolicy()._seeded_db(tmp_path)
-        tel_db = TestTelemetryPolicy()._seeded_db(
-            (tmp_path / "tel").resolve() if (tmp_path / "tel").mkdir() is None else tmp_path / "tel",
-        )
-        collector = IssueCollector()
-        migrate_taxonomy_rows(tax_db, _CaptureStore(), collector=collector)
-        migrate_telemetry_rows(tel_db, _CaptureStore(), collector=collector)
-
-        report = build_report(collector, source={"sqlite": str(tax_db)}, target={})
-        summary = report["summary"]
-        assert summary["by_action"]["skipped"] == 4      # 2 assignments + 2 links
-        assert summary["by_action"]["handled"] == 2  # both naive ts rows
-        assert summary["by_action"]["flagged"] == 1
-        assert summary["by_action"]["schema_corrected"] == 1
-        assert summary["total_failed"] == 1              # the unparseable ts
-        assert summary["max_severity"] == 4
-
-
 # ── Catalog policy (P2.3) ────────────────────────────────────────────────────
 
 _CATALOG_SCHEMA = """
@@ -752,47 +729,6 @@ class TestCleanStoreCountsAndCatchAll:
             if i.action == "failed"
         ]
         assert issue.count == 2
-
-    def test_chash_batch_error_records_failed_per_row(self, tmp_path: Path) -> None:
-        from nexus.db.t2.chash_etl import migrate_chash_rows
-
-        db = tmp_path / "chash.db"
-        conn = sqlite3.connect(db)
-        conn.executescript(
-            "CREATE TABLE chash_index (chash TEXT PRIMARY KEY, "
-            "physical_collection TEXT, created_at TEXT);"
-        )
-        conn.executemany(
-            "INSERT INTO chash_index VALUES (?,?,?)",
-            [("c1", "k", ""), ("c2", "k", "")],
-        )
-        conn.commit()
-        conn.close()
-
-        class _OkChash:
-            def import_batch(self, *a, **k):
-                return len(a[0]) if a else 0
-
-            def __getattr__(self, name):
-                def _f(*a, **k):
-                    payload = a[0] if a else k.get("rows", [])
-                    return {"imported": len(payload)} if isinstance(payload, list) else 1
-                return _f
-
-        collector = IssueCollector()
-        migrate_chash_rows(db, _OkChash(), collector=collector)
-        counts = collector.table_counts("chash", "chash_index")
-        assert counts["read"] == 2
-        # _OkChash's __getattr__ returns a bare function for ._client, so
-        # the batch post raises — this test OWNS the error path (CRE P2
-        # finding): nothing written, and total_failed counts BOTH rows.
-        assert counts["written"] == 0
-        (issue,) = [
-            i for i in collector.issues_for("chash", "chash_index")
-            if i.action == "failed"
-        ]
-        assert issue.count == 2
-
 
 class TestNeverSilentSweep:
     """RDR-153 P2 critic Criticals: EVERY ETL surface records import
