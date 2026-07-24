@@ -10,7 +10,7 @@ dependencies = [
     # while collections are indexed at 768/1024-dim, so every T3 search hits a
     # dimension mismatch and returns zero results. The .mcpb cannot run the
     # interactive `nx init` embedder choice, so it must pin [local] explicitly.
-    "conexus[local]>=6.18.0",
+    "conexus[local]>=6.18.1",
 ]
 
 [tool.uv]

@@ -97,7 +97,7 @@ class TestB6encStoreHookEngineSubstrate:
         )
 
         content = "b6enc engine substrate smoke content"
-        col = "knowledge__engine__voyage-context-3__v1"
+        col = "knowledge__engine__bge-base-en-v15-768__v1"
         chash, metadatas = single_chunk_manifest_metadata(content)
 
         tumbler, created = catalog_store_hook_tracked(
