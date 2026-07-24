@@ -601,7 +601,10 @@ def test_lint_baseline_unchanged_after_voyageai_extension():
     # sites — storage_cmd.py migrate_chash_cmd's source count and
     # orchestrator.py's chash-rows-by-collection read (lockstep with
     # test_storage_boundary_lint's copy; derive-don't-paste still stands).
-    assert result.epsilon_allow_connects == 22, (
+    # 22 -> 15: RDR-155 P4b P2 deleted the migration machinery's counted
+    # connect sites (driver/wire_reid/remap_cascade/guided_upgrade/
+    # vector_etl/t2_schema) + health.py's divergence ro-connect.
+    assert result.epsilon_allow_connects == 15, (
         f"epsilon_allow_connects baseline changed: {result.epsilon_allow_connects}"
     )
     # RDR-152 nexus-fjwxh: 31 -> 33 (CLI t2_handle + MCP t2_index_write service-

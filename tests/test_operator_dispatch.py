@@ -472,7 +472,7 @@ class TestSubprocessContract:
 # verbatim except for a short explicit-strip list that did NOT include
 # NX_T1_SESSION / NX_T1_SESSION_ID -- so a PARENT nx-mcp's already-minted,
 # LIVE SERVICE-backed T1 session token leaked straight through to the child's
-# env. The child's own `_t1_chroma_lifespan` Branch 0 would then resolve the
+# env. The child's own `_t1_lifespan` Branch 0 would then resolve the
 # SAME session id (via the still-forwarded NX_SESSION_ID) and either directly
 # reuse the leaked token to mint a REPLACEMENT (before the mcp/core.py fix)
 # or, worse, invalidate the parent's live token via

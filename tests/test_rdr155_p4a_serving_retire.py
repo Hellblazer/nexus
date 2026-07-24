@@ -42,18 +42,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC = REPO_ROOT / "src" / "nexus"
 SERVICE_MAIN = REPO_ROOT / "service" / "src" / "main" / "java" / "dev" / "nexus" / "service"
 
-# The surviving Phase-5 ETL read leg — the ONE module allowed to construct
-# T3-scope Chroma clients after the Phase-4a serving retire. P4a.2 creates it.
-ETL_READ_LEG = SRC / "migration" / "chroma_read.py"
-
+# RDR-155 P4b shrank the allowed set: the ETL read leg (chroma_read.py) and
+# the T1 chroma client legs are DELETED — no module may construct a
+# T3-scope Chroma client any more. The lint module survives (docstring
+# spells the banned constructors in call form, which matches the regex).
 _CONSTRUCTION_ALLOWED = {
-    ETL_READ_LEG,
-    # The enforcement machinery: its module DOCSTRING spells the banned
-    # constructors in call form (``chromadb.PersistentClient(...)``), which
-    # incidentally matches the scan regex.
     SRC / "storage_boundary_lint.py",
-    # T1's per-session chroma client (RDR-105) — out of RDR-155 scope.
-    SRC / "db" / "t1.py",
 }
 
 # T3-scope Chroma client constructions. Matches `chromadb.PersistentClient(`,
@@ -111,29 +105,6 @@ class TestServingConstructionsRetired:
             f"requires ALL serving to route through pgvector: {offenders}"
         )
 
-    def test_etl_read_leg_module_exists(self) -> None:
-        assert ETL_READ_LEG.is_file(), (
-            f"{ETL_READ_LEG.relative_to(REPO_ROOT)} must exist: the minimal Chroma "
-            "READ client (local PersistentClient read + ChromaCloud read) survives "
-            "Phase 4a, reserved for the Phase-5 migration ETL"
-        )
-
-    def test_etl_read_leg_contains_both_read_legs(self) -> None:
-        # The ETL needs BOTH legs (RDR §Migrate): local PersistentClient copy and
-        # ChromaCloud REST/auth read. An ETL module with only one leg is a silent
-        # half-migration.
-        assert ETL_READ_LEG.is_file(), (
-            f"{ETL_READ_LEG.relative_to(REPO_ROOT)} does not exist yet (P4a.2 "
-            "creates it) — cannot check its read legs"
-        )
-        text = ETL_READ_LEG.read_text(encoding="utf-8")
-        assert re.search(r"\bPersistentClient\s*\(", text), (
-            "ETL read leg must retain the local PersistentClient read path"
-        )
-        assert re.search(r"\bCloudClient\s*\(", text), (
-            "ETL read leg must retain the ChromaCloud read path"
-        )
-
 
 class TestJavaServingWiringChromaFree:
     """RED until P4a.2 — VectorHandler/NexusService/Main still wire Chroma."""
@@ -162,22 +133,10 @@ class TestPhase4aSurvivalPins:
     def test_chroma_quotas_survives_phase_4a(self) -> None:
         quotas = SRC / "db" / "chroma_quotas.py"
         assert quotas.is_file(), (
-            "chroma_quotas.py must SURVIVE Phase 4a — it still governs the "
-            "surviving ETL read leg. Its deletion is Phase 4b (nexus-g37fr), "
-            "gated on P5.G migration completion. If this test fails, a 4b "
-            "deletion ran early."
+            "chroma_quotas.py must SURVIVE P2 of the P4b wave — it dies at "
+            "P3 together with db/t3.py and the chromadb dependency "
+            "(tests/test_rdr155_p4b_quotas_rehome.py pins its sole importer)."
         )
-
-    def test_java_chroma_read_client_classes_survive_phase_4a(self) -> None:
-        # The Java Chroma machinery survives 4a as the read client + the parity /
-        # dual-run test comparand; P4b owns the deletion.
-        for name in ("VectorRepository.java", "ChromaRestClient.java",
-                     "LocalChromaServer.java", "ChromaQuotaValidator.java"):
-            path = SERVICE_MAIN / "vectors" / name
-            assert path.is_file(), (
-                f"{name} must survive Phase 4a (read-client machinery + test "
-                "comparand); full deletion is Phase 4b, gated on P5.G"
-            )
 
     def test_skp06_app_layer_guard_stays_unbuilt(self) -> None:
         # The skp06 app-layer Chroma tenant guard was never built and is
@@ -191,62 +150,3 @@ class TestPhase4aSurvivalPins:
         assert offenders == [], (
             f"the superseded skp06 app-layer Chroma tenant guard surfaced in: {offenders}"
         )
-
-
-class TestRdr155P4bDeprecationWindowGate:
-    """nexus-5uvag — two-release deprecation-window release-N tripwire.
-
-    The single irreversible step of the migration arc is RDR-155 P4b, which
-    deletes the migration ETL AND the surviving Chroma read leg (and the
-    migration tool itself: beads nexus-19svb / nexus-g37fr / nexus-8zpmf).
-    The two-release deprecation window requires that release N — the first
-    migration-capable release that lets nexus-luxe6 lift — STILL ships those
-    modules, with P4b's deletion landing only in release N+1.
-
-    Today that ordering is held only by bead dependencies + human discipline.
-    The intended hard E2E gate (nexus-myk4e) is deferred until AFTER the
-    boundary lifts, so it cannot guard the very release it protects. This
-    class fills the gap with a mechanical, NOW-running assertion: a
-    mis-sequenced P4b that deletes (or breaks) the migration modules trips
-    this gate on the PR that would merge it into release N.
-
-    Stronger than the P4a presence pins above (which assert the file exists
-    and matches a source regex): these assert the modules actually IMPORT —
-    a file can exist but be half-deleted / broken. ``chroma_read`` imports
-    ``chromadb`` lazily (inside its functions), so importing the module is
-    lightweight and has no heavyweight client side effects.
-
-    Incidental coverage (do NOT "simplify" away): ``chroma_read`` keeps a
-    TOP-LEVEL ``from nexus.db.chroma_quotas import QUOTAS``, so a mis-sequenced
-    partial P4b that deletes ``chroma_quotas.py`` before ``chroma_read.py``
-    makes the import below raise and trips this gate too (substantive-critic
-    O2, 2026-06-23).
-    """
-
-    def test_migration_package_importable(self) -> None:
-        import importlib
-
-        try:
-            importlib.import_module("nexus.migration")
-        except Exception as exc:  # pragma: no cover - failure path is the signal
-            raise AssertionError(
-                "nexus.migration must remain present AND importable through the "
-                "two-release deprecation window — its deletion is RDR-155 P4b and "
-                "must not land before release N+1 (nexus-5uvag / blocks nexus-h3ilf). "
-                f"Import failed: {exc!r}"
-            ) from exc
-
-    def test_chroma_read_leg_importable(self) -> None:
-        import importlib
-
-        try:
-            importlib.import_module("nexus.migration.chroma_read")
-        except Exception as exc:  # pragma: no cover - failure path is the signal
-            raise AssertionError(
-                "nexus.migration.chroma_read (the surviving Chroma read leg) must "
-                "remain present AND importable through the two-release deprecation "
-                "window. RDR-155 P4b deletes it (nexus-19svb / nexus-g37fr); that "
-                "deletion must land only in release N+1, never in the "
-                "migration-capable release N. Import failed: "
-                f"{exc!r}"
-            ) from exc

@@ -1067,7 +1067,7 @@ class TestSourceUriDedup:
 
     def test_migrate_documents_skips_losers_and_records(self) -> None:
         from nexus.db.t2.catalog_etl import migrate_documents
-        from nexus.migration.migration_report import IssueCollector
+        from tests.db._issue_collector import IssueCollector
 
         db_path = self._dupe_db()
         client = self._make_mock_client()
@@ -1090,7 +1090,7 @@ class TestSourceUriDedup:
 
     def test_migrate_document_chunks_skips_loser_manifests(self) -> None:
         from nexus.db.t2.catalog_etl import migrate_document_chunks
-        from nexus.migration.migration_report import IssueCollector
+        from tests.db._issue_collector import IssueCollector
 
         db_path = self._dupe_db()
         client = self._make_mock_client()
@@ -1106,7 +1106,7 @@ class TestSourceUriDedup:
 
     def test_migrate_links_flags_loser_endpoints_but_still_imports(self) -> None:
         from nexus.db.t2.catalog_etl import migrate_links
-        from nexus.migration.migration_report import IssueCollector
+        from tests.db._issue_collector import IssueCollector
 
         db_path = self._dupe_db()
         client = self._make_mock_client()
@@ -1122,7 +1122,7 @@ class TestSourceUriDedup:
 
     def test_clean_source_is_untouched(self) -> None:
         from nexus.db.t2.catalog_etl import migrate_documents
-        from nexus.migration.migration_report import IssueCollector
+        from tests.db._issue_collector import IssueCollector
 
         db_path = _make_source_catalog(
             owners=[{"tumbler_prefix": "1.1", "name": "r", "owner_type": "repo"}],

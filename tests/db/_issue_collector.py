@@ -1,45 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""RDR-153: structured issue reporting for the SQLite→Postgres T2 migration.
+"""Test-local issue-collector fixture (RDR-155 P4b).
 
-The migration runs with strict foreign keys DELIBERATELY — the constraints
-are the diagnostic. This module is the shared issue-record primitive every
-``migrate_*`` ETL writes to (replacing ad-hoc per-row error logging) and
-the serializer for the one structured ``migration-report.json`` each run
-emits — the triage / recovery / learning artifact and the Phase-4 gate
-input (``summary.total_failed == 0``).
-
-Lives in ``src/nexus/migration/`` and NOT under ``src/nexus/db/t2/``:
-RDR-152 Phase 4 deletes that subtree, but this primitive and the
-``migration-report show`` reader must survive the SQLite decommission
-(the Phase-4 gate itself reads a report).
-
-Contract (docs/rdr/rdr-153-migration-data-quality-policy.md): two distinct
-enums, never mixed — each issue has a ``class`` (what is wrong) and an
-``action`` (what the ETL did). ``summary.by_action`` aggregates by the
-five ACTION values; that is the gate-facing rollup.
+Faithful copy of the retired ``nexus.migration.migration_report``
+``MigrationIssue`` / ``IssueCollector`` (deleted with the migration
+machinery at P4b). The surviving T2 ETL modules
+(``nexus.db.t2.{catalog,taxonomy,telemetry}_etl``) take ``collector`` as
+a duck-typed ``Any``; their tests still need a recording implementation
+to assert skip/flag/fail policy, so the fixture lives here now.
 """
 from __future__ import annotations
 
-import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-import structlog
-
-_log = structlog.get_logger(__name__)
-
-__all__ = [
-    "ISSUE_CLASSES",
-    "ISSUE_ACTIONS",
-    "ACTION_SEVERITY",
-    "SAMPLE_IDS_CAP",
-    "MigrationIssue",
-    "IssueCollector",
-    "build_report",
-    "load_report",
-]
+__all__ = ["MigrationIssue", "IssueCollector"]
 
 #: What is WRONG with the row (diagnosis).
 ISSUE_CLASSES: frozenset[str] = frozenset({
@@ -245,97 +220,3 @@ class IssueCollector:
 
     def _table(self, store: str, table: str) -> dict[str, int]:
         return self._counts.setdefault((store, table), {"read": 0, "written": 0})
-
-
-def build_report(
-    collector: IssueCollector,
-    *,
-    source: dict[str, str],
-    target: dict[str, str],
-    migration_id: str | None = None,
-    started_at: str | None = None,
-) -> dict[str, Any]:
-    """Serialize one migration run into the schema_version=1 report dict.
-
-    Self-describing and stable (``schema_version``) so downstream triage
-    tooling evolves independently; JSON-round-trip safe (plain dict/list/
-    str/int/bool values only).
-    """
-    now = datetime.now(UTC).isoformat()
-    stores_out: list[dict[str, Any]] = []
-    # Severity-descending key order, matching the RDR schema example
-    # (JSON objects are unordered by spec; this is for human readers).
-    by_action: dict[str, int] = {
-        a: 0
-        for a in sorted(ISSUE_ACTIONS, key=lambda a: ACTION_SEVERITY[a], reverse=True)
-    }
-    totals = {"read": 0, "written": 0, "skipped": 0, "flagged": 0, "failed": 0}
-    max_severity = 0
-
-    for store in collector.store_names():
-        tables_out: list[dict[str, Any]] = []
-        for table in collector.tables_for(store):
-            counts = collector.table_counts(store, table)
-            issues = collector.issues_for(store, table)
-            per_action = {a: 0 for a in ISSUE_ACTIONS}
-            for issue in issues:
-                per_action[issue.action] += issue.count
-                by_action[issue.action] += issue.count
-                max_severity = max(max_severity, issue.severity)
-            tables_out.append({
-                "table": table,
-                "read": counts["read"],
-                "written": counts["written"],
-                "skipped": per_action["skipped"],
-                "flagged": per_action["flagged"],
-                "failed": per_action["failed"],
-                "issues": [i.to_dict() for i in issues],
-            })
-            totals["read"] += counts["read"]
-            totals["written"] += counts["written"]
-            totals["skipped"] += per_action["skipped"]
-            totals["flagged"] += per_action["flagged"]
-            totals["failed"] += per_action["failed"]
-        stores_out.append({"store": store, "tables": tables_out})
-
-    report = {
-        "schema_version": "1",
-        "migration_id": migration_id or str(uuid.uuid4()),
-        "started_at": started_at or collector.started_at,
-        "completed_at": now,
-        "source": dict(source),
-        "target": dict(target),
-        "stores": stores_out,
-        "summary": {
-            "total_read": totals["read"],
-            "total_written": totals["written"],
-            "total_skipped": totals["skipped"],
-            "total_flagged": totals["flagged"],
-            "total_failed": totals["failed"],
-            "max_severity": max_severity,
-            "by_action": by_action,
-        },
-    }
-    _log.info(
-        "migration_report_built",
-        migration_id=report["migration_id"],
-        total_failed=totals["failed"],
-        max_severity=max_severity,
-    )
-    return report
-
-
-def load_report(path: "Path | str") -> dict[str, Any]:
-    """Load a migration-report artifact (the ``migration-report show``
-    reader — Phase-4's gate input).
-
-    Raises ``FileNotFoundError`` / ``json.JSONDecodeError`` loud — a gate
-    that cannot read its input must never default to a pass.
-    """
-    import json  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-    from pathlib import Path as _Path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-
-    data = json.loads(_Path(path).read_text())
-    if not isinstance(data, dict):
-        raise ValueError(f"{path}: migration report must be a JSON object")
-    return data

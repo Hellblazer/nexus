@@ -432,7 +432,7 @@ class TestSelfHeal:
 
 def _mint_live_session_token(fake_service: str, session_id: str) -> str:
     """Mint a token directly against the fake service, simulating what
-    mcp/core.py's _t1_chroma_lifespan Branch 0 does for a live MCP session."""
+    mcp/core.py's _t1_lifespan Branch 0 does for a live MCP session."""
     import httpx
 
     resp = httpx.post(
@@ -858,7 +858,7 @@ class TestMintErrorWrapping:
         reached = {"yield": False}
 
         async def _run() -> None:
-            async with mcp_core._t1_chroma_lifespan(None):
+            async with mcp_core._t1_lifespan(None):
                 reached["yield"] = True
                 # During the deferred window: hook registered, state present,
                 # NO session env (a bare-id or CLI-dedicated fallback would be
@@ -996,7 +996,7 @@ class TestMintErrorWrapping:
 # ── mcp/core.py Branch 0 wiring: publish-on-mint, clear-on-teardown ────────────
 #
 # The lease helpers and get_t1_database()'s consumption of them are covered
-# above; this class proves the OTHER half -- that _t1_chroma_lifespan's
+# above; this class proves the OTHER half -- that _t1_lifespan's
 # Branch 0 (the live MCP session's own mint path) actually calls
 # publish_t1_session_lease / clear_t1_session_lease at the right times, not
 # just that the helpers work in isolation. code-review-expert previously
@@ -1009,13 +1009,13 @@ class TestMcpCoreLeaseWiring:
     @pytest.fixture(autouse=True)
     def _reset_branch0_shutdown_state(self):
         """nexus-5daww: Branch 0's normal post-yield teardown now routes
-        through the SAME ``_t1_chroma_shutdown()`` used by Branch 3 / SIGTERM
+        through the SAME ``_t1_shutdown()`` used by Branch 3 / SIGTERM
         / atexit, which sets the module-sticky ``_SHUTDOWN_IN_FLIGHT`` flag
         ("once set, never cleared: shutdown is one-shot per process") and
         clears ``_OWNED_T1_SESSION``. Without a per-test reset, the FIRST
         test in this class to exercise a real mint+teardown would leave
         ``_SHUTDOWN_IN_FLIGHT=True`` for the rest of the test process, and
-        every later test's ``_t1_chroma_shutdown()`` call would silently
+        every later test's ``_t1_shutdown()`` call would silently
         no-op (lease never cleared, token never closed) -- mirroring the
         existing save/restore idiom in
         ``tests/test_t1_discovery.py::test_sigterm_path_cleans_up_via_owned_chroma``.
@@ -1063,7 +1063,7 @@ class TestMcpCoreLeaseWiring:
         seen: dict[str, str | None] = {"lease_token": None, "env_token": None}
 
         async def _run() -> None:
-            async with mcp_core._t1_chroma_lifespan(None):
+            async with mcp_core._t1_lifespan(None):
                 assert lease_path.exists(), (
                     "Branch 0 must publish the lease during the live session, "
                     "before yield"
@@ -1125,7 +1125,7 @@ class TestMcpCoreLeaseWiring:
         )
 
         async def _run() -> None:
-            async with mcp_core._t1_chroma_lifespan(None):
+            async with mcp_core._t1_lifespan(None):
                 # The inherited token must be left untouched, in place.
                 assert _os_mod.environ.get("NX_T1_SESSION") == parent_token
 
@@ -1186,7 +1186,7 @@ class TestMcpCoreLeaseWiring:
         seen: dict[str, str | None] = {"env_token": None}
 
         async def _run() -> None:
-            async with mcp_core._t1_chroma_lifespan(None):
+            async with mcp_core._t1_lifespan(None):
                 import os as _os_mod
                 seen["env_token"] = _os_mod.environ.get("NX_T1_SESSION")
 
@@ -1201,13 +1201,13 @@ class TestMcpCoreLeaseWiring:
     def test_sigterm_before_normal_exit_revokes_token_and_clears_lease(
         self, fake_service, config_dir, monkeypatch
     ) -> None:
-        """The second nexus-5daww CRITICAL: `_t1_chroma_shutdown()` must
+        """The second nexus-5daww CRITICAL: `_t1_shutdown()` must
         close the Branch-0-minted token and clear its lease even when
         invoked from a SIGTERM / atexit path that never resumes the paused
         lifespan generator past its `yield` (the documented NORMAL stdio
         shutdown path -- `_sigterm_handler` calls `os._exit(0)` right after
-        `_t1_chroma_shutdown()`). Simulated here by calling
-        `_t1_chroma_shutdown()` directly from INSIDE the `async with` block,
+        `_t1_shutdown()`). Simulated here by calling
+        `_t1_shutdown()` directly from INSIDE the `async with` block,
         before ever letting the lifespan's own post-yield teardown run.
         """
         import asyncio
@@ -1223,14 +1223,14 @@ class TestMcpCoreLeaseWiring:
         lease_path = _t1_session_lease_path(live_session_id, config_dir)
 
         async def _run() -> None:
-            async with mcp_core._t1_chroma_lifespan(None):
+            async with mcp_core._t1_lifespan(None):
                 assert lease_path.exists()
                 assert _VALID_TOKENS.get(live_session_id) is not None
 
                 # SIGTERM-equivalent: the signal handler / atexit path calls
                 # this directly, WITHOUT the generator ever resuming past
                 # this yield.
-                mcp_core._t1_chroma_shutdown()
+                mcp_core._t1_shutdown()
 
                 assert not lease_path.exists(), (
                     "SIGTERM path must clear the lease file, not just the "
@@ -1244,7 +1244,7 @@ class TestMcpCoreLeaseWiring:
 
             # Exiting the `async with` now runs the lifespan's own finally,
             # which must be idempotent (no error, no double-close) since
-            # `_t1_chroma_shutdown` already ran and cleared its state.
+            # `_t1_shutdown` already ran and cleared its state.
 
         asyncio.run(_run())
 
@@ -1327,7 +1327,7 @@ class TestBranch0RefreshTask:
     ) -> None:
         """End-to-end: a live Branch-0 session with a short mint TTL sees its
         OWN env token change to a newer mint within the lifespan's lifetime
-        -- proving the task started by `_t1_chroma_lifespan` is actually
+        -- proving the task started by `_t1_lifespan` is actually
         live and ticking, not just constructed."""
         import asyncio
         import os as _os_mod
@@ -1352,7 +1352,7 @@ class TestBranch0RefreshTask:
         seen: dict[str, Any] = {}
 
         async def _run() -> None:
-            async with mcp_core._t1_chroma_lifespan(None):
+            async with mcp_core._t1_lifespan(None):
                 assert mcp_core._T1_SESSION_REFRESH_TASK is not None
                 initial_token = _os_mod.environ.get("NX_T1_SESSION")
                 mint_calls_before = len(_MINT_CALLS)
@@ -1429,7 +1429,7 @@ class TestBranch0StaleLeaseRecovery:
         seen: dict[str, Any] = {}
 
         async def _run() -> None:
-            async with mcp_core._t1_chroma_lifespan(None):
+            async with mcp_core._t1_lifespan(None):
                 seen["owned_session_id"] = mcp_core._OWNED_T1_SESSION.get("session_id")
                 seen["refresh_task"] = mcp_core._T1_SESSION_REFRESH_TASK
                 seen["env_token"] = _os_mod.environ.get("NX_T1_SESSION")
@@ -1657,16 +1657,16 @@ class TestResolveT1RoutingTiers:
             "(nexus-1si7z / nexus-jc33g)"
         )
 
-        lifespan_src = inspect.getsource(mcp_core_module._t1_chroma_lifespan)
+        lifespan_src = inspect.getsource(mcp_core_module._t1_lifespan)
         assert "= resolve_t1_routing_tiers(" in lifespan_src, (
-            "_t1_chroma_lifespan's Branch 0 must actually CALL the shared "
+            "_t1_lifespan's Branch 0 must actually CALL the shared "
             "resolve_t1_routing_tiers (not just mention its name) -- a "
             "hand-rolled tier-1/tier-2 check here can silently diverge "
             "from get_t1_database() again (nexus-1si7z)"
         )
         for action in explicit_actions:
             assert f"T1RoutingAction.{action}" in lifespan_src, (
-                f"_t1_chroma_lifespan's Branch 0 must dispatch on "
+                f"_t1_lifespan's Branch 0 must dispatch on "
                 f"T1RoutingAction.{action} -- computing the decision but not "
                 "consuming one of its branches is the same silent-divergence "
                 "risk this test guards against (nexus-1si7z)"
@@ -1683,7 +1683,7 @@ class TestResolveT1RoutingTiers:
         # test checks for at THIS call site is that the fallthrough branch
         # actually invokes the mint-or-borrow helper, not a comment mention.
         assert "_lock_guarded_mint_or_borrow(" in lifespan_post_dispatch, (
-            "_t1_chroma_lifespan's Branch 0 fallthrough-to-mint branch must "
+            "_t1_lifespan's Branch 0 fallthrough-to-mint branch must "
             "actually CALL _lock_guarded_mint_or_borrow(...) after the "
             "USE_LEASED dispatch -- a comment mentioning MINT is not "
             "sufficient evidence the fallthrough still mints (nexus-1si7z, "
@@ -1767,7 +1767,7 @@ class TestDeferredMintBoundaries:
         _MINT_FAILS = True
 
         async def _run() -> None:
-            async with mcp_core._t1_chroma_lifespan(None):
+            async with mcp_core._t1_lifespan(None):
                 pass
 
         try:

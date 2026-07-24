@@ -41,13 +41,9 @@ def _no_real_provisioning_probes(monkeypatch: pytest.MonkeyPatch) -> None:
     does not inject those seams must never reach them (the same
     live-environment isolation the P3 review required for the process
     axis)."""
+    # RDR-155 P4b: the footprint/establish seams died with the census —
+    # provisioning is report-only now; only the provisioned probe remains.
     monkeypatch.setattr(pre_mod, "_default_provisioned", lambda _config_dir: True)
-    monkeypatch.setattr(pre_mod, "_default_footprint", lambda: False)
-    monkeypatch.setattr(
-        pre_mod,
-        "_default_establish",
-        lambda: pytest.fail("a test reached the real service-provisioning path"),
-    )
 
 
 @dataclass
@@ -77,7 +73,6 @@ def test_check_covers_every_precondition_axis(tmp_path: pathlib.Path) -> None:
         _lease_fn=lambda: None,
         _installed_version_fn=lambda: "6.12.0",
         _provisioned_fn=lambda: True,
-        _footprint_fn=lambda: False,
         _plugin_version_fn=lambda: "6.12.0",
         _lockstep_marker_fn=lambda: "6.12.0",
     )
@@ -295,7 +290,6 @@ def test_upgrade_command_threads_flags_into_the_precondition_stage(
     click flags — a hardcoded skip_t3=False at the call site passed every
     test. Drive the CLI and unpack the call kwargs."""
     migrations._upgrade_done.clear()
-    monkeypatch.setenv("NX_MIGRATION_NOTICE", "0")
     with (
         patch("nexus.commands.upgrade._db_path", return_value=tmp_path / "memory.db"),
         patch("nexus.commands.upgrade.T3_UPGRADES", []),
@@ -456,8 +450,7 @@ class TestPluginLockstepPrecondition:
             _installed_version_fn=lambda: "6.12.0",
             _cycle_fn=lambda: None,
             _provisioned_fn=lambda: True,
-            _footprint_fn=lambda: False,
-            _plugin_version_fn=lambda: "6.13.0",
+                _plugin_version_fn=lambda: "6.13.0",
             _lockstep_marker_fn=lambda: "6.12.0",
         )
         by = {r.name: r for r in reports}

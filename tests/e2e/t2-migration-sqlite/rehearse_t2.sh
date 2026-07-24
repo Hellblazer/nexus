@@ -10,11 +10,8 @@
 set -uo pipefail
 
 export NX_STORAGE_BACKEND=sqlite
-# nexus-0rwwv: interactive `nx upgrade` runs the substrate-migration probe,
-# whose local-Chroma default resolves via XDG — NOT isolated by this
-# harness. On a dev box outside the container that would open the
-# operator's REAL local store. Pin the bridge off.
-export NX_MIGRATION_NOTICE=0
+# (RDR-155 P4b: the nexus-0rwwv bridge probe and its NX_MIGRATION_NOTICE
+# kill switch are gone — no pin needed.)
 export NX_LOCAL=1
 SEED=/work/seed_gated.py
 FAILS=0

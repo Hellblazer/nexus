@@ -210,43 +210,21 @@ class T1Database:
         """
         return resolve_active_session_id(arg) or "unknown"
 
-    def _init_new_discovery(self, chromadb, session_id: str | None) -> None:
-        """RDR-105 P2 (nexus-mj2o): four-branch fail-loud constructor.
+    def _init_new_discovery(self, session_id: str | None) -> None:
+        """Two-branch fail-loud constructor (RDR-155 P4b).
 
-        Branch order (opt-in outranks discovery):
+        The chromadb ``HttpClient`` discovery legs (env-pair inherit,
+        session-id lease, ancestor-pid fallback) died with the chroma T1
+        server. What remains:
 
-        Path C (operator opt-in, highest priority)
+        Path C (operator opt-in)
             ``NX_T1_ISOLATED=1`` -> ``InMemoryVectorClient`` (RDR-155
-            P4b P0a; dependency-free, genuinely per-instance).
-            nexus-svpq / GH #593: this branch is consulted FIRST so an
-            explicit operator opt-in to ephemeral semantics is not
-            silently overridden by env-pair or addr-file auto-discovery
-            inside an active Claude session.
-        Path A (env-pair discovery)
-            ``NX_T1_HOST`` + ``NX_T1_PORT`` in env -> ``HttpClient``.
-            Used by MCP-dispatched subprocesses (``claude -p`` shared).
-        Path B (session-id lease discovery)
-            ``resolve_active_session_id`` resolves a session-id whose
-            live lease at ``~/.config/nexus/t1_addr.<session_id>``
-            yields ``(host, port)`` -> ``HttpClient`` (RDR-149 P4).
-            Both the writer (MCP lifespan) and the reader compute the
-            session-id identically from ``current_session``; liveness is
-            lease freshness (TTL), not pid, so a dead owner's lease ages
-            out (pid-reuse immunity). Used by Claude-Code-spawned
-            siblings (Bash tool, hooks) once a session-id resolves. In the
-            cold-start sliver before the SessionStart hook writes
-            ``current_session`` (and with no ``NX_SESSION_ID`` in env), a
-            bare Bash sibling resolves no session-id and falls back to
-            matching the owner's transient lease by its own immediate Claude
-            ancestor pid (``discover_t1_by_claude_ancestor``, nexus-0x16i);
-            a sibling of a different session does not match and fails loud
-            (Path D). MCP-dispatched subprocesses are unaffected (Path A).
+            P4b P0a; dependency-free, genuinely per-process; the flag
+            survives until P3 flips it to the hard default).
         Path D (failure)
-            None of the above -> raise :class:`T1ServerNotFoundError`.
-
-        The flag-on path does NOT fall through to the legacy resolver.
-        Per the RDR §'Phase 2 flag-isolation contract', flag-on and
-        flag-off paths are mutually exclusive per process.
+            Otherwise -> raise :class:`T1ServerNotFoundError`. In
+            service mode T1 never reaches this constructor
+            (``get_t1_database`` routes to ``HttpScratchStore``).
         """
         if _t1_isolated_env():
             # RDR-155 P4b P0a: the isolated leg uses the process-scoped
@@ -257,89 +235,23 @@ class T1Database:
             self._session_id = self._resolve_session_id(session_id)
             return
 
-        host_env = os.environ.get("NX_T1_HOST", "").strip()
-        port_env = os.environ.get("NX_T1_PORT", "").strip()
-        if host_env and port_env:
-            try:
-                port_int = int(port_env)
-            except ValueError as exc:
-                raise T1ServerNotFoundError(
-                    f"NX_T1_HOST is set but NX_T1_PORT={port_env!r} is "
-                    "not a valid integer."
-                ) from exc
-            self._client = chromadb.HttpClient(host=host_env, port=port_int)
-            self._session_id = self._resolve_session_id(session_id)
-            return
-
-        from nexus.session import _nexus_config_dir_at_import  # noqa: PLC0415 — circular-dep avoidance (nexus.session imports from db)
-
-        config_dir = _nexus_config_dir_at_import()
-        resolved_session = resolve_active_session_id(session_id)
-        if resolved_session:
-            from nexus.daemon.t1_lease import discover_t1_lease  # noqa: PLC0415 — circular-dep avoidance (daemon package imports from db)
-
-            addr = discover_t1_lease(resolved_session, config_dir=config_dir)
-            if addr is not None:
-                host, port = addr
-                self._client = chromadb.HttpClient(host=host, port=port)
-                self._session_id = self._resolve_session_id(session_id)
-                return
-
-        # Ancestor-pid fallback when the session-id path missed. Two cases
-        # (nexus-0x16i cold start AND nexus-gff3g session-id divergence): the
-        # sibling may resolve no session-id (before SessionStart writes
-        # current_session) OR a session-id that simply has no live lease
-        # (because the owner's MCP keyed on a divergent NX_SESSION_ID). Either
-        # way, target the owner's own lease — transient or session-keyed — by
-        # the sibling's immediate Claude ancestor pid (RF-6: both sides resolve
-        # it identically). Ancestor-pid-targeted + TTL-bounded, so no
-        # cross-session mis-bind. ``resolved_session`` being non-empty does NOT
-        # mean this path is unreachable: a non-empty-but-unleased id falls here.
-        from nexus.daemon.t1_lease import discover_t1_by_claude_ancestor  # noqa: PLC0415 — circular-dep avoidance (daemon package imports from db)
-        from nexus.session import find_immediate_claude_pid  # noqa: PLC0415 — circular-dep avoidance (nexus.session imports from db)
-
-        addr = discover_t1_by_claude_ancestor(
-            find_immediate_claude_pid(), config_dir=config_dir
-        )
-        if addr is not None:
-            host, port = addr
-            self._client = chromadb.HttpClient(host=host, port=port)
-            self._session_id = self._resolve_session_id(session_id)
-            return
-
         raise T1ServerNotFoundError(
-            "T1 not configured for this process. Either inherit "
-            "NX_T1_HOST and NX_T1_PORT from a parent MCP server "
-            "(MCP-dispatched subprocess), run as a sibling of a "
-            "top-level MCP server so a live session-id lease "
-            "(~/.config/nexus/t1_addr.<session_id>) is discoverable, "
-            "or set NX_T1_ISOLATED=1 to opt in to an in-process "
-            "ephemeral T1.\n"
-            "\n"
-            "If no session-id resolves, ensure the SessionStart hook "
-            "has written ~/.config/nexus/current_session, or pass "
-            "NX_SESSION_ID explicitly."
+            "T1 not configured for this process. The chroma-backed T1 "
+            "server retired at RDR-155 P4b: T1 is service-backed in "
+            "service mode (via get_t1_database), or set NX_T1_ISOLATED=1 "
+            "to opt in to a private in-process T1."
         )
 
     def __init__(self, session_id: str | None = None, client=None) -> None:
-        import chromadb  # noqa: PLC0415 — optional/heavy dep deferred (chromadb)
-
         self._dead: bool = False
 
         if client is not None:
-            # Test-injection / MCP-server path: caller supplies a client
-            # explicitly (EphemeralClient, mock, or its own HttpClient).
-            # Used by the FastMCP lifespan to install a server-lifetime
-            # EphemeralClient as the MCP-tool-side T1 store.
+            # Test-injection path: caller supplies a client explicitly
+            # (InMemoryVectorClient, mock).
             self._client = client
             self._session_id = self._resolve_session_id(session_id)
         else:
-            # RDR-105 P4 (nexus-jnx7): the four-branch fail-loud gate is
-            # the only resolution path. The legacy session-record
-            # resolver chain was deleted along with the multi-writer
-            # coordination machinery that produced the GH #567 / #572 /
-            # #574 / #575 / #576 / #579 bug class.
-            self._init_new_discovery(chromadb, session_id)
+            self._init_new_discovery(session_id)
 
         self._col = self._client.get_or_create_collection(_COLLECTION)
 
@@ -900,7 +812,7 @@ def _cli_dedicated_session_id(config_dir: Path) -> str:
 # the live nx-mcp server -- a detached grandchild launched by
 # nx-session-end-launcher, not a child of the MCP process -- so it never
 # inherits the MCP's in-process os.environ["NX_T1_SESSION"] /
-# ["NX_T1_SESSION_ID"] mutation (mcp/core.py's _t1_chroma_lifespan Branch
+# ["NX_T1_SESSION_ID"] mutation (mcp/core.py's _t1_lifespan Branch
 # 0). Before the CLI-dedicated-session work above, this was harmless: T1
 # defaulted to the Chroma-backed T1Database, whose session_id resolved via
 # resolve_active_session_id() -- the SAME on-disk chain any sibling process
@@ -965,7 +877,7 @@ def publish_t1_session_lease(
 ) -> None:
     """Publish a live MCP session's minted T1 token to a lease file.
 
-    Called by :mod:`nexus.mcp.core`'s ``_t1_chroma_lifespan`` Branch 0
+    Called by :mod:`nexus.mcp.core`'s ``_t1_lifespan`` Branch 0
     immediately after a successful mint (and, nexus-ngcpo, again on every
     periodic refresh -- see ``_t1_session_refresh_loop``). Atomic temp-file +
     ``os.replace`` publish (same pattern as :func:`_cli_dedicated_session_id`'s
@@ -1017,7 +929,7 @@ def read_t1_session_lease(session_id: str, config_dir: Path) -> str | None:
     corruption), is treated as ABSENT -- fail-safe, not fail-open. Every
     existing caller already treats a ``None`` return as "no lease, fall
     through to minting fresh" (``get_t1_database()``'s tier-2 borrow path,
-    and ``mcp.core._t1_chroma_lifespan`` Branch 0's own self-check), so this
+    and ``mcp.core._t1_lifespan`` Branch 0's own self-check), so this
     tightening requires no new caller-side branching: a stale or corrupt
     lease is simply never borrowed blind.
     """
@@ -1052,7 +964,7 @@ def clear_t1_session_lease(session_id: str, config_dir: Path) -> None:
     Best-effort / idempotent: a missing file is not an error (double-clear,
     or a lease that was never published because no resolvable session id
     existed for this process -- see the ``no_resolvable_session`` branch in
-    ``mcp.core._t1_chroma_lifespan``). Removing the lease promptly on
+    ``mcp.core._t1_lifespan``). Removing the lease promptly on
     teardown ensures a stale lease is never read by a later, unrelated
     process once this session has genuinely ended.
     """
@@ -1149,7 +1061,7 @@ def resolve_t1_routing_tiers(config_dir: Path) -> T1RoutingDecision:
     """The shared tier-1/tier-2 T1 session-routing decision (nexus-1si7z).
 
     Both :func:`get_t1_database` (the bare-CLI/detached-process path) and
-    :mod:`nexus.mcp.core`'s ``_t1_chroma_lifespan`` Branch 0 (the live MCP
+    :mod:`nexus.mcp.core`'s ``_t1_lifespan`` Branch 0 (the live MCP
     server path) previously hand-wrote this SAME two-tier check
     independently -- "is there an already-inherited live token? if not, is
     there a fresh published lease for the resolvable session id?" -- kept in
@@ -1620,7 +1532,7 @@ def get_t1_database(
           directly, unchanged from before.
         - No inherited session, but ``resolve_active_session_id()`` resolves
           a real id AND that live MCP session published a lease (nexus-c8yvj:
-          :mod:`nexus.mcp.core`'s ``_t1_chroma_lifespan`` Branch 0 writes one
+          :mod:`nexus.mcp.core`'s ``_t1_lifespan`` Branch 0 writes one
           right after its own mint) → :class:`~nexus.db.http_scratch_store.HttpScratchStore`
           bound to that SAME session/token, read via :func:`read_t1_session_lease`.
           Never mints/rotates -- this is how a detached process (the
@@ -1661,7 +1573,7 @@ def get_t1_database(
         config_dir = nexus_config_dir()
 
         # nexus-1si7z: tiers 1-2 (inherited-wins, then borrow-a-fresh-lease)
-        # are the SAME decision Branch 0 (mcp.core._t1_chroma_lifespan) makes
+        # are the SAME decision Branch 0 (mcp.core._t1_lifespan) makes
         # -- both now call the ONE shared implementation so they cannot
         # silently diverge again. See resolve_t1_routing_tiers's docstring
         # for the full "why one function, why not tier 3 too" reasoning.

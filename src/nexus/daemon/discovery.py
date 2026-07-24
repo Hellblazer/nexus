@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Client-side discovery for the T2 and T3 storage daemons (RDR-120).
+"""Client-side discovery for the T2 storage daemon (RDR-120).
+
+RDR-155 P4b: the T3 (managed ``chroma run``) daemon is retired — the
+``t3`` tier remains only as a legacy discovery-file name; T3 is served
+by the Java storage service.
 
 Discovery file paths:
 - ``<config_dir>/t2_addr.<uid>`` — T2 daemon (memory.db + plan store + ...)
-- ``<config_dir>/t3_addr.<uid>`` — T3 daemon (managed ``chroma run``)
 
 Env-var overrides honoured by ``discovery_resolve``:
 - T2: ``NX_T2_SOCK`` (UDS path) then ``NX_T2_ADDR`` (host:port)
-- T3: ``NX_T3_ADDR`` (host:port) — TCP-only, chromadb upstream constraint
 
 Precedence (RDR-120 C2 contract): env-var wins when set and non-empty;
 file is the fallback when env is unset. An env-var pointing at an
@@ -409,27 +411,6 @@ def find_t2_daemon(config_dir: Optional[Path] = None) -> Optional[dict[str, Any]
     return _validate_discovery_payload(raw, path, tier="t2")
 
 
-def find_t3_daemon(config_dir: Optional[Path] = None) -> Optional[dict[str, Any]]:
-    """Return the T3 daemon's discovery payload, or ``None`` if absent /
-    unreadable / stale. T3 payloads carry ``tcp_host`` + ``tcp_port`` —
-    chromadb's bundled HTTP server is TCP-only.
-
-    RDR-149 P3: T3 now rides the leased registry, heartbeated by the
-    long-lived T3 supervisor (which only re-stamps the lease while its
-    chroma subprocess is alive, so a fresh lease implies a live chroma).
-    A lease record is resolved by freshness; a legacy payload (top-level
-    pid, no ``endpoint``) falls back to the pid-liveness validator for the
-    in-flight upgrade window.
-    """
-    path = discovery_path(config_dir, tier="t3")
-    raw = _read_payload(path, tier="t3")
-    if raw is None:
-        return None
-    if is_lease_record(raw):
-        return _resolve_lease_record(raw, path, tier="t3")
-    return _validate_discovery_payload(raw, path, tier="t3")
-
-
 def _parse_host_port(env_value: str, *, env_name: str) -> tuple[str, int]:
     """Parse a ``host:port`` env value. Raises ``ValueError`` on malformed
     input; the env-var contract is explicit, surface the breakage at the
@@ -456,47 +437,38 @@ def discovery_resolve(
     Resolution order (RDR-120 C2 precedence):
         1. Env-var first; when set and non-empty, return immediately.
            - T2: ``NX_T2_SOCK`` (UDS path) → ``NX_T2_ADDR`` (host:port).
-           - T3: ``NX_T3_ADDR`` (host:port).
-        2. File fallback via ``find_t<tier>_daemon``.
+        2. File fallback via ``find_t2_daemon``.
         3. ``DaemonNotRunningError`` with a recovery hint.
+
+    RDR-155 P4b: the T3 discovery leg (``NX_T3_ADDR`` / the T3 finder)
+    is retired with the managed-chroma daemon — only ``t2`` resolves.
 
     An env-var set to an unreachable target does NOT fall through to the
     discovery file; the connect attempt at the client surfaces the
     error. Silent fallthrough would mask operator misconfiguration.
 
     The returned dict carries a ``source`` key for diagnostics:
-    ``'env:NX_T2_SOCK' | 'env:NX_T2_ADDR' | 'env:NX_T3_ADDR' | 'file'``.
+    ``'env:NX_T2_SOCK' | 'env:NX_T2_ADDR' | 'file'``.
     """
-    if tier not in _VALID_TIERS:
+    if tier != "t2":
         raise ValueError(
-            f"unknown tier {tier!r}; expected one of {_VALID_TIERS}"
+            f"unknown tier {tier!r}; only 't2' resolves (the T3 daemon "
+            "retired at RDR-155 P4b — T3 is served by the storage service)"
         )
 
-    if tier == "t2":
-        sock = os.environ.get("NX_T2_SOCK", "").strip()
-        if sock:
-            return {"uds_path": sock, "source": "env:NX_T2_SOCK"}
-        addr = os.environ.get("NX_T2_ADDR", "").strip()
-        if addr:
-            host, port = _parse_host_port(addr, env_name="NX_T2_ADDR")
-            return {
-                "tcp_host": host,
-                "tcp_port": port,
-                "source": "env:NX_T2_ADDR",
-            }
+    sock = os.environ.get("NX_T2_SOCK", "").strip()
+    if sock:
+        return {"uds_path": sock, "source": "env:NX_T2_SOCK"}
+    addr = os.environ.get("NX_T2_ADDR", "").strip()
+    if addr:
+        host, port = _parse_host_port(addr, env_name="NX_T2_ADDR")
+        return {
+            "tcp_host": host,
+            "tcp_port": port,
+            "source": "env:NX_T2_ADDR",
+        }
 
-    if tier == "t3":
-        addr = os.environ.get("NX_T3_ADDR", "").strip()
-        if addr:
-            host, port = _parse_host_port(addr, env_name="NX_T3_ADDR")
-            return {
-                "tcp_host": host,
-                "tcp_port": port,
-                "source": "env:NX_T3_ADDR",
-            }
-
-    finder = find_t2_daemon if tier == "t2" else find_t3_daemon
-    payload = finder(config_dir)
+    payload = find_t2_daemon(config_dir)
     if payload is not None:
         result = dict(payload)
         result["source"] = "file"
@@ -504,7 +476,7 @@ def discovery_resolve(
 
     raise DaemonNotRunningError(
         f"No {tier} daemon discovery resolved. Tried env-var "
-        f"({'NX_T2_SOCK / NX_T2_ADDR' if tier == 't2' else 'NX_T3_ADDR'}) "
+        f"(NX_T2_SOCK / NX_T2_ADDR) "
         f"and discovery file ({discovery_path(config_dir, tier=tier)}). "
         f"Start with: `nx daemon {tier} start`."
     )

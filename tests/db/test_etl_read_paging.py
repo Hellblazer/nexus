@@ -25,7 +25,7 @@ from nexus.db.t2.telemetry_etl import (
     _iter_rows,
     migrate_telemetry_rows,
 )
-from nexus.migration.migration_report import IssueCollector
+from tests.db._issue_collector import IssueCollector
 
 _TS = "2026-05-15T08:30:00Z"
 _COLL = "knowledge__rehearsal__minilm-l6-v2-384__v1"

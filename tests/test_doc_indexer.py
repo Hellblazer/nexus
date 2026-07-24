@@ -496,7 +496,9 @@ def test_index_raises_credentials_missing_when_cloud_mode_explicit(
             fn(path, corpus="test")
     mock_factory.assert_not_called()
     assert "voyage_api_key" in str(excinfo.value)
-    assert "chroma_api_key" in str(excinfo.value)
+    # RDR-155 P4b: chroma_api_key died with the chroma credential map — the
+    # voyage key is the only cloud-ingest credential named now.
+    assert "chroma_api_key" not in str(excinfo.value)
     assert "NX_LOCAL" in str(excinfo.value)
 
 

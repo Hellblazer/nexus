@@ -104,61 +104,6 @@ class TestManifestOrphansCountRequired:
         assert result["count"] == 3
 
 
-# ── 3. ingest-cloud parity: missing copied/dest is NOT 0 == 0 ────────────────
-
-
-class TestIngestCloudParityRequiresCounts:
-    def _run(self, per_collection: dict) -> tuple[list, list[str]]:
-        from nexus.migration.vector_etl import _delegate_ingest_cloud
-
-        class _Resp:
-            text = ""
-
-            def __init__(self, body: dict, status_code: int) -> None:
-                self._body = body
-                self.status_code = status_code
-
-            def json(self) -> dict:
-                return self._body
-
-        class _Client:
-            def post(self, url: str, **kw: Any) -> Any:
-                return _Resp({"job_id": "j1"}, 202)
-
-            def get(self, url: str, **kw: Any) -> Any:
-                return _Resp(
-                    {"state": "done", "per_collection": per_collection}, 200,
-                )
-
-            def close(self) -> None:
-                pass
-
-        return _delegate_ingest_cloud(
-            ["knowledge__k__stub-cce-1024__v1"],
-            tenant="t", database="d", api_key="k", base_url="http://x",
-            token="tok", nexus_tenant="default", http_client=_Client(),
-            sleep=lambda s: None, now=lambda: 0.0,
-        )
-
-    def test_stripped_counts_route_to_fallback(self) -> None:
-        """An entry with copied/dest stripped must NOT pass parity on the
-        0 == 0 defaults and get certified 'migrated' with zero evidence —
-        it routes to the client-mediated fallback leg."""
-        results, fallback = self._run(
-            {"knowledge__k__stub-cce-1024__v1": {"status": "done"}},
-        )
-        assert results == []
-        assert fallback == ["knowledge__k__stub-cce-1024__v1"]
-
-    def test_intact_counts_still_delegate(self) -> None:
-        results, fallback = self._run(
-            {"knowledge__k__stub-cce-1024__v1": {"copied": 5, "dest": 5}},
-        )
-        assert fallback == []
-        assert len(results) == 1
-        assert results[0].collection == "knowledge__k__stub-cce-1024__v1"
-
-
 # ── 4. merge sort: missing distance sorts LAST, never first ──────────────────
 
 
@@ -220,34 +165,6 @@ class TestDistanceKeySentinel:
 
 
 class TestWriteAckNotAssumed:
-    def test_remap_record_batch_missing_ack_raises(self) -> None:
-        """record_batch's own contract: a map fact that did not durably land
-        must abort before the target write. A response without `recorded`
-        cannot attest durability — raising beats fabricating len(page)."""
-        from nexus.migration.remap_client import HttpRemapStore
-        from nexus.migration.wire_reid import RemapEntry
-
-        store = object.__new__(HttpRemapStore)
-        store._post = lambda path, body: {}  # stripped ack
-        entry = RemapEntry(
-            tenant_id="t", source_collection="s", old_id="o",
-            new_chash="c" * 64, target_collection="tc", provenance="p",
-        )
-        with pytest.raises(RuntimeError, match="recorded"):
-            store.record_batch([entry])
-
-    def test_remap_record_batch_intact_ack_counts(self) -> None:
-        from nexus.migration.remap_client import HttpRemapStore
-        from nexus.migration.wire_reid import RemapEntry
-
-        store = object.__new__(HttpRemapStore)
-        store._post = lambda path, body: {"recorded": len(body["entries"])}
-        entry = RemapEntry(
-            tenant_id="t", source_collection="s", old_id="o",
-            new_chash="c" * 64, target_collection="tc", provenance="p",
-        )
-        assert store.record_batch([entry]) == 1
-
     @pytest.mark.parametrize("method", ["log_relevance_batch", "log_search_batch"])
     def test_telemetry_batch_missing_ack_counts_zero(self, method: str) -> None:
         """Telemetry is advisory — missing `inserted` reads as 0 (visible

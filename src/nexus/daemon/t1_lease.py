@@ -3,7 +3,7 @@
 
 T1 is the per-MCP-process working-memory tier. Unlike T2/T3 it is **not**
 a supervised daemon: it is owned by the MCP server's chroma lifespan
-(``nexus.mcp.core._t1_chroma_lifespan`` Branch 3) and consumes the shared
+(``nexus.mcp.core._t1_lifespan`` Branch 3) and consumes the shared
 ``ServiceRegistry`` primitive directly. This module is that consumer.
 
 The locked RF-2 re-key protocol (the one load-bearing correctness subtlety

@@ -34,14 +34,23 @@ import nexus
 from nexus.cli import main
 from nexus.commands.collection import collection
 
-#: Verbs whose ONLY job was upgrade-cycle work — the ladder now does it.
-#: Hidden from --help; still callable (internal primitive).
-DEMOTED_TOP_LEVEL = (
-    "guided-upgrade",      # provision + migrate  -> preconditions + substrate rung
-    "migrate-to-service",  # the T3 substrate ETL -> the substrate rung
-    "migration",           # sentinel recovery    -> crash-recovery plumbing
-    "migration-audit",     # diagnostic           -> nx doctor is the user surface
+#: RDR-155 P4b re-ground: the P4.1 demotion was the deprecation half; the
+#: deletion half landed with the migration machinery. These verbs are now
+#: fully GONE — not hidden, not callable.
+DELETED_TOP_LEVEL = (
+    "guided-upgrade",      # deleted with migration/guided_upgrade.py
+    "migrate-to-service",  # deleted with migration/vector_etl.py + driver
+    "migration-audit",     # deleted with migration/collision_audit.py
 )
+
+#: Verbs still demoted (hidden, callable): sentinel crash-recovery plumbing.
+DEMOTED_TOP_LEVEL = (
+    "migration",           # sentinel recovery    -> crash-recovery plumbing
+)
+
+#: Union for the advertisement census: neither a hidden verb nor a deleted
+#: one may ever be advertised as a remedy in everyday output.
+_UNADVERTISABLE = DELETED_TOP_LEVEL + DEMOTED_TOP_LEVEL
 
 #: The ENTIRE user-facing upgrade story (RDR-185 Success Criterion).
 USER_FACING_UPGRADE_SURFACE = ("upgrade", "doctor")
@@ -79,11 +88,19 @@ def test_demoted_verbs_are_not_in_the_user_facing_help(runner: CliRunner) -> Non
 def test_demoted_verbs_remain_callable_as_internal_primitives(
     runner: CliRunner, verb: str
 ) -> None:
-    """Demoted, NOT deleted: surgical/dev use and existing scripts keep
-    working (and RDR-155 P4b owns the actual deletion)."""
+    """Demoted, NOT deleted: surgical/dev use keeps working."""
     result = runner.invoke(main, [verb, "--help"])
     assert result.exit_code == 0
     assert "Usage:" in result.output
+
+
+@pytest.mark.parametrize("verb", DELETED_TOP_LEVEL)
+def test_deleted_verbs_are_fully_gone(runner: CliRunner, verb: str) -> None:
+    """RDR-155 P4b: the migration verbs are DELETED, not merely hidden —
+    invoking them must fail as an unknown command."""
+    result = runner.invoke(main, [verb, "--help"])
+    assert result.exit_code != 0
+    assert f"No such command '{verb}'" in result.output
 
 
 def test_collection_upgrade_era_repair_is_demoted(runner: CliRunner) -> None:
@@ -118,14 +135,15 @@ def test_restart_stale_stays_user_facing(runner: CliRunner) -> None:
 
 
 # ── the genuine decisions stay reachable ────────────────────────────────────
+#
+# (RDR-155 P4b: `nx storage migrate vectors --rollback` died with the
+# storage group — Chroma-era rollback now goes through the
+# LAST_MIGRATION_CAPABLE pinned release, per the stranded-install redirect.)
 
 
-def test_rollback_stays_reachable(runner: CliRunner) -> None:
-    """Undo is NEVER derivable — the product cannot know you want it. The
-    rollback flag survives in the surgical storage group and the block path
-    prints it exactly where it is needed."""
-    out = _help(runner, "storage", "migrate", "vectors")
-    assert "--rollback" in out
+def test_storage_group_is_gone(runner: CliRunner) -> None:
+    result = runner.invoke(main, ["storage", "--help"])
+    assert result.exit_code != 0
 
 
 def test_rewrite_ids_was_never_built() -> None:
@@ -210,7 +228,7 @@ def _advertisements(text: str) -> list[str]:
     user to RUN something is the failure mode; talking about migration is
     not.
     """
-    return [verb for verb in DEMOTED_TOP_LEVEL if f"nx {verb}" in text]
+    return [verb for verb in _UNADVERTISABLE if f"nx {verb}" in text]
 
 
 @pytest.mark.parametrize("module", _EVERYDAY_SURFACE_MODULES)

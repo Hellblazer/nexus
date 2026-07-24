@@ -57,8 +57,10 @@ def _sha256(path: Path) -> str:
 
 
 def _has_credentials() -> bool:
+    # RDR-155 P4b: the chroma_api_key half died with the chroma credential
+    # map; the Voyage key is the only client-side cloud-ingest credential.
     from nexus.config import get_credential  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
-    return bool(get_credential("voyage_api_key") and get_credential("chroma_api_key"))
+    return bool(get_credential("voyage_api_key"))
 
 
 def _lookup_existing_doc_id(
@@ -261,18 +263,17 @@ def _register_or_lookup_doc_id(
 
 
 def _missing_credentials() -> list[str]:
-    """Return the list of unset Voyage / Chroma credentials.
+    """Return the list of unset cloud-ingest credentials.
 
     Used to construct precise error messages — callers can tell the
     user EXACTLY which key is missing rather than the generic
-    "credentials not configured" form. Empty list means both are set.
+    "credentials not configured" form. Empty list means all are set.
+    (RDR-155 P4b: chroma_api_key died with the chroma credential map.)
     """
     from nexus.config import get_credential  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
     missing: list[str] = []
     if not get_credential("voyage_api_key"):
         missing.append("voyage_api_key")
-    if not get_credential("chroma_api_key"):
-        missing.append("chroma_api_key")
     return missing
 
 

@@ -30,10 +30,8 @@ _EXPECTED_PROMPT = (
     "resolve the affected legacy-id collections to their repos "
     "(nx catalog owners list) and re-index the file-backed ones "
     "(nx index repo <path> — additive, per-collection), "
-    "run nx upgrade — the substrate-etl rung converges the re-indexed "
-    "collections and the chash-rekey rung recomputes conformant ids "
-    "from stored chunk text for the rest (store_put-only notes "
-    "included), "
+    "run nx upgrade — the chash-rekey rung recomputes conformant ids "
+    "from stored chunk text (store_put-only notes included), "
     "re-run nx doctor and confirm the 'Chunk chash conformance' "
     "warning has cleared, and only then let me upgrade the engine. Do NOT drop "
     "the chash length constraints."
@@ -106,7 +104,9 @@ def test_structured_fields_carry_the_rdr_contract(chash_playbook):
     # rollback branch lives in the escape, conditioned on will-not-boot.
     assert pb.steps[0].startswith("resolve the affected legacy-id collections")
     assert all("--rollback" not in s for s in pb.steps)
-    assert "--rollback" in pb.escape
+    # RDR-155 P4b: the rollback tooling died with the migration machinery;
+    # the will-not-boot escape now routes through the pinned release.
+    assert "LAST_MIGRATION_CAPABLE" in pb.escape
     assert "will NOT BOOT" in pb.escape
     assert pb.deliverable  # structured-deliverable instruction is non-empty
     assert "gone" in pb.escape  # environment-gone escape present
@@ -185,12 +185,14 @@ def test_legacy_ids_remediate_topic_registered_and_emits():
     # load-bearing (note-shaped text has no other copy).
     joined = " ".join(pb.constraints)
     assert "NEVER drop or weaken the chash length CHECK constraints" in joined
-    assert "BEFORE any delete" in joined
-    # Ordered runbook-§8 arc: dry-run enumerate -> classify -> salvage ->
-    # remove+migrate -> rebuild.
-    assert len(pb.steps) == 5
-    assert "dry-run" in pb.steps[0]
-    assert "salvage" in pb.steps[2]
+    # RDR-155 P4b: the salvage choreography moved to the pinned release —
+    # this version's playbook is the two-hop redirect.
+    assert "pinned release" in joined
+    # Ordered pinned-release arc: back up -> install pin -> migrate there ->
+    # verify + return.
+    assert len(pb.steps) == 4
+    assert "back up" in pb.steps[0]
+    assert "LAST_MIGRATION_" in pb.steps[1]
     assert pb.runbook_section == "8"
     assert pb.diagnostic_sql == ()  # chroma-side classification, no SQL leg
     # Both renderings carry the store detail verbatim.

@@ -945,68 +945,6 @@ class TestLiveT2SelfHeal:
             shutil.rmtree(cd, ignore_errors=True)
 
 
-# ---------------------------------------------------------------------------
-# Live-process behavioral proof (integration marker only): a REAL T3 supervisor
-# spawning REAL chroma self-heals a deleted discovery file via its heartbeat.
-# The symmetric counterpart to TestLiveT2SelfHeal (nexus-2nt0z). Unlike the
-# unit coverage in test_t3_supervisor.py (fake chroma + fake clock), this uses
-# a real chroma subprocess, a real wall clock, and the real TCP reachability
-# probe, so the self-heal is proven end to end.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.integration
-class TestLiveT3SelfHeal:
-    def test_real_supervisor_reasserts_deleted_discovery_file(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        import shutil
-        import tempfile
-        import time as _time
-
-        from nexus.daemon.t3_daemon import T3Supervisor, t3_discovery_path
-
-        # The T3 daemon is local-mode only; pin it so the test does not depend
-        # on ambient credentials (cloud mode has no daemon to self-heal).
-        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
-
-        cd = Path(tempfile.mkdtemp(prefix="nx149-t3-", dir="/tmp"))
-        sup = T3Supervisor(
-            config_dir=cd, local_path=cd / "chroma", supervised=True
-        )
-        disc = t3_discovery_path(cd)
-        try:
-            sup.start()  # spawns REAL chroma, publishes the lease
-            assert disc.exists()
-            payload = json.loads(disc.read_text())
-            assert payload["generation"] == 1
-            assert payload["endpoint"]["pid"] > 0
-
-            disc.unlink()
-            assert not disc.exists()
-
-            # The supervisor heartbeat re-stamps the lost record (self-heal),
-            # preserving the generation (a re-assert, not a restart). Retry to
-            # absorb chroma-readiness jitter on the TCP reachability probe.
-            healed = False
-            for _ in range(40):
-                if sup.heartbeat_once() and disc.exists():
-                    healed = True
-                    break
-                _time.sleep(0.05)
-            assert healed and disc.exists(), (
-                "live T3 supervisor failed to self-heal the discovery file"
-            )
-            healed_payload = json.loads(disc.read_text())
-            assert healed_payload["generation"] == 1
-            assert healed_payload["endpoint"]["pid"] == payload["endpoint"]["pid"]
-        finally:
-            sup.stop()
-            shutil.rmtree(cd, ignore_errors=True)
-        # stop() relinquished the lease.
-        assert not disc.exists()
-
-
 class TestDiscoverReapToctou:
     """RDR-149 regression (nexus-2mpns): discover()'s reap of an expired lease
     must not delete a concurrently-published higher-generation live record.
@@ -1243,89 +1181,6 @@ class TestSweepDeadT1Holders:
 
 
 # ---------------------------------------------------------------------------
-# GAP A: sweep_dead_t1_holders must be CALLED from the MCP startup sweep.
-# ---------------------------------------------------------------------------
-
-
-class TestSweepDeadT1HoldersWiredAtStartup:
-    """GAP A fix: sweep_dead_t1_holders must be invoked during the MCP
-    startup sweep block (core.py _t1_chroma_lifespan), not just defined.
-
-    The conformance test wires a spy, triggers the same import-path the
-    lifespan uses, and asserts the spy fired.  It does NOT spin up a real
-    MCP; it imports the startup-sweep helper directly and calls it via the
-    same best-effort trampoline pattern that core.py uses.
-    """
-
-    def test_startup_sweep_calls_sweep_dead_t1_holders(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The startup sweep must invoke sweep_dead_t1_holders.
-
-        Strategy: monkeypatch ``nexus.daemon.service_registry.sweep_dead_t1_holders``
-        with a spy, then call the exported ``_run_mcp_startup_sweep`` helper
-        (which core.py must expose or the test imports the trampoline directly).
-        """
-        calls: list[Path] = []
-
-        from nexus.daemon import service_registry as sr
-
-        original = sr.sweep_dead_t1_holders
-
-        def spy(*, config_dir: Path) -> int:
-            calls.append(config_dir)
-            return original(config_dir=config_dir)
-
-        monkeypatch.setattr(sr, "sweep_dead_t1_holders", spy)
-
-        # Import + call the startup-sweep helper that core.py exposes.
-        from nexus.mcp import core as _core
-        _core._run_mcp_startup_sweep(config_dir=tmp_path)
-
-        assert calls, (
-            "startup sweep (_run_mcp_startup_sweep) did not call "
-            "sweep_dead_t1_holders — GAP A is not fixed."
-        )
-        assert calls[0] == tmp_path
-
-    def test_startup_sweep_reaps_orphan_tmpdir_under_config_t1(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The startup sweep must pass config_dir to sweep_orphan_tmpdirs so
-        that orphan stores under <config>/t1/ are actually reaped.
-
-        Strategy: place an nx_t1_* dir under tmp_path/t1/ with an ancient
-        mtime, call _run_mcp_startup_sweep(config_dir=tmp_path), and assert
-        the orphan is gone.  This proves the config_dir=config_dir argument
-        is wired (not just that the function was called).
-        """
-        import time
-
-        # Create an orphan tmpdir under the config/t1/ location.
-        t1_dir = tmp_path / "t1"
-        t1_dir.mkdir()
-        orphan = t1_dir / "nx_t1_testreap123"
-        orphan.mkdir()
-
-        # Wind mtime back 48 hours so it exceeds the 24h sweep threshold.
-        ancient = time.time() - 48 * 3600
-        os.utime(orphan, (ancient, ancient))
-
-        assert orphan.exists(), "precondition: orphan dir must exist before sweep"
-
-        from nexus.mcp import core as _core
-        _core._run_mcp_startup_sweep(config_dir=tmp_path)
-
-        assert not orphan.exists(), (
-            "startup sweep did not reap orphan under <config>/t1/ — "
-            "sweep_orphan_tmpdirs was likely called without config_dir= "
-            "(the HIGH bug from the code review)"
-        )
-
-
-# ---------------------------------------------------------------------------
-# GAP B: elect-lock sweep — t1_elect.*.lock files for dead owners.
-# ---------------------------------------------------------------------------
 
 
 class TestSweepDeadT1ElectLocks:
@@ -1509,7 +1364,7 @@ class TestRelinquishCleansElectLock:
     t1_elect.*.lock orphan.
 
     The only clean-session-end hook seam that runs before the MCP process
-    exits is the lifespan's ``finally`` block (via ``_t1_chroma_shutdown`` ->
+    exits is the lifespan's ``finally`` block (via ``_t1_shutdown`` ->
     ``publisher.relinquish()``).  Wiring elect-lock cleanup into
     ``relinquish()`` is the correct place per the RDR-149 shared-primitive
     mandate: no per-tier lifecycle code outside service_registry.py.

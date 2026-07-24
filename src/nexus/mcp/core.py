@@ -125,51 +125,34 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
 _hooks = _HookRegistry()
 _install_default_hooks(_hooks)
 
-# ── T1 chroma lifecycle (RDR-105 P4) ────────────────────────────────────────
+# ── T1 session lifecycle (RDR-105 P4 → RDR-155 P4b) ─────────────────────────
 #
-# Single hybrid-discovery code path as of P4 (nexus-jnx7). The lifespan
-# is a three-branch asynccontextmanager mirroring the constructor's
-# four-branch fail-loud gate:
-#
-#   Branch 1 (env): NX_T1_HOST + NX_T1_PORT inherited; the parent MCP
-#       owns chroma. Yield without spawning.
-#   Branch 2 (isolation): NX_T1_ISOLATED=1 (or its deprecated
-#       alias removed at 6.5.2). Stateless one-shot. Yield without spawning.
-#   Branch 3 (top-level / owned): spawn chroma, publish a leased
-#       registry record (~/.config/nexus/t1_addr.<session_id>, RDR-149
-#       P4), populate _t1_state.T1_ADDR, yield, then relinquish the lease
-#       + stop chroma + rmtree tmpdir + reset _t1_state.T1_ADDR on cleanup.
+# RDR-155 P4b: the chroma-backed T1 branches (env-inherit, isolated
+# skip-spawn, owned spawn+publish — the former Branches 1-3) are retired
+# with the chroma substrate. What remains is Branch 0, the SERVICE-backed
+# T1 session path (mint / borrow / inherit a session token against the
+# storage service), plus a plain yield for non-service processes whose T1
+# resolves in-process via nexus.db.t1 (InMemoryVectorClient isolation
+# path; NX_T1_ISOLATED survives until P3 flips it to the hard default).
 #
 # Cleanup is idempotent across three sites: the lifespan async finally
 # (HTTP/SSE clean exit + clean stdin EOF on stdio), _sigterm_handler
 # (stdio SIGTERM where anyio does not install a SIGTERM handler), and
 # atexit (belt-and-braces). _SHUTDOWN_IN_FLIGHT prevents re-entry from
-# a signal handler that interrupted an in-flight stop_t1_server.
-#
-# No session record file. No watchdog. No reconcile. No reuse probe.
-# All deleted in P4 along with the multi-writer coordination layer
-# that produced GH #567 / #572 / #574 / #575 / #576 / #579.
+# a signal handler that interrupted an in-flight teardown.
 
 import os as _os
-
-#: Module-scope state for the owned chroma. Populated by the lifespan
-#: Branch 3 before yield, cleared on cleanup. Used by the SIGTERM /
-#: atexit path so cleanup still runs when the lifespan async finally
-#: cannot fire.
-_OWNED_CHROMA: dict[str, Any] = {}
 
 #: nexus-5daww: module-scope state for the SERVICE-backed T1 session minted
 #: by the lifespan Branch 0 (Postgres-service path). Populated with
 #: ``{"session_id": ...}`` right after a successful mint, cleared by
-#: :func:`_t1_session_shutdown`. Branch-0 counterpart to ``_OWNED_CHROMA``:
-#: Branch 0 and Branch 3 are mutually exclusive per process, so at most one
-#: of these two dicts is ever non-empty. Exists so the SIGTERM / atexit path
+#: :func:`_t1_session_shutdown`. Exists so the SIGTERM / atexit path
 #: (which cannot resume the paused lifespan generator past its ``yield``)
 #: can still revoke the minted token and clear its lease file instead of
 #: leaking both.
 _OWNED_T1_SESSION: dict[str, Any] = {}
 
-#: Sticky flag set by :func:`_t1_chroma_shutdown` on first entry so a
+#: Sticky flag set by :func:`_t1_shutdown` on first entry so a
 #: signal arriving mid-cleanup (the production stdin-EOF + SIGTERM
 #: race that produced spurious ``mcp_server_crashed`` events on every
 #: clean shutdown post-4.12.0) can short-circuit instead of racing
@@ -177,28 +160,11 @@ _OWNED_T1_SESSION: dict[str, Any] = {}
 #: one-shot per process.
 _SHUTDOWN_IN_FLIGHT: bool = False
 
-#: RDR-149 P4: the running T1 heartbeat + lazy re-key task, created in the
-#: lifespan Branch 3 after the lease is published and cancelled on cleanup
-#: BEFORE the lease is relinquished (RDR-129 early-stop ordering, mirroring
-#: the T2 ``_reassert_task`` discipline). ``None`` when no owned T1 is live.
-_T1_HEARTBEAT_TASK: Any = None
-
-#: nexus-zgqxm: minimum seconds between in-process orphan-sweeps driven by the
-#: heartbeat loop. The startup sweeps (lifespan Branch 3) only reap the
-#: PREVIOUS leak before spawning a new chroma; a host losing many MCPs
-#: ungracefully but spawning few new ones never re-enters the sweep and can
-#: exhaust ``kern.posix.sem.max=10000`` (2026-05-08 shakeout cleared 8,359
-#: semaphores). This periodic sweep closes that gap by reaping PPID=1 orphan
-#: resource-trackers / chromadbs WHILE a long-lived MCP runs, not only at its
-#: next startup. 600 s keeps the ``ps`` cost negligible relative to the leak
-#: timescale (orphans accrue over hours/days, not seconds).
-_PERIODIC_SWEEP_INTERVAL_S: float = 600.0
-
 #: nexus-ngcpo Finding 1: the running Branch-0 (SERVICE-backed) T1 session
 #: TOKEN refresh task -- Branch 0's counterpart to ``_T1_HEARTBEAT_TASK``
 #: above. Created right after a successful mint (never for a
 #: borrowed/inherited session -- see the borrow-path commentary in
-#: ``_t1_chroma_lifespan`` for why only the minting OWNER ever refreshes),
+#: ``_t1_lifespan`` for why only the minting OWNER ever refreshes),
 #: cancelled in Branch 0's own ``finally`` BEFORE the session is closed
 #: (mirrors the RDR-129 early-stop ordering already used for
 #: ``_T1_HEARTBEAT_TASK``). ``None`` when no owned SERVICE session is live.
@@ -426,88 +392,6 @@ async def _cancel_t1_session_refresh_task() -> None:
         await task
 
 
-async def _t1_heartbeat_loop(publisher: Any, interval: float) -> None:
-    """Re-stamp the T1 lease every ``interval`` seconds and lazily re-key the
-    transient ``server_pid`` record to the session-id once it resolves.
-
-    RDR-149 P4: this is T1's self-heal re-assert (the #1114 fix) and its
-    RF-2/CA-3 re-key driver. A tick that raises is logged at debug and the
-    loop continues; only cancellation (clean shutdown) stops it.
-
-    nexus-zgqxm: the same loop also drives a periodic orphan sweep (every
-    ``_PERIODIC_SWEEP_INTERVAL_S``) so a long-lived MCP reaps PPID=1 orphan
-    resource-trackers / chromadbs continuously, not only at the next startup.
-    The live chroma's own ``server_pid`` is added to ``protected_pids`` so the
-    sweep can never target this session's own process.
-    """
-    import asyncio  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
-    import time  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
-
-    import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
-    _hb_log = structlog.get_logger("nexus.mcp.core")
-    last_sweep = time.monotonic()
-    while True:
-        await asyncio.sleep(interval)
-        try:
-            publisher.tick()
-        except Exception as exc:  # never let a transient tick failure kill the loop  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
-            _hb_log.debug("t1_heartbeat_tick_failed", error=str(exc))
-        now = time.monotonic()
-        if now - last_sweep >= _PERIODIC_SWEEP_INTERVAL_S:
-            last_sweep = now
-            _periodic_orphan_sweep()
-
-
-def _periodic_orphan_sweep() -> None:
-    """Reap PPID=1 orphan resource-trackers / chromadbs while an MCP is live.
-
-    nexus-zgqxm: the startup sweeps (lifespan Branch 3) run spawn-only and so
-    only ever clean the PREVIOUS leak. Driving the same sweeps from the
-    heartbeat loop closes the "many ungraceful exits, few new spawns" gap that
-    can exhaust the POSIX semaphore namespace. The live chroma's ``server_pid``
-    is protected so the sweep cannot touch this session's own tracker; the
-    parser's PPID=1 + ``min_age_seconds`` gates already exclude live children.
-    Best-effort: every failure is logged at debug and never propagates into the
-    heartbeat loop.
-    """
-    from nexus.session import (  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
-        sweep_orphan_resource_trackers,
-        sweep_orphan_t1_chromadbs,
-    )
-
-    server_pid = _OWNED_CHROMA.get("server_pid")
-    protected = {server_pid} if isinstance(server_pid, int) else set()
-    import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
-    _sweep_log = structlog.get_logger("nexus.mcp.core")
-    try:
-        n_trackers = sweep_orphan_resource_trackers(protected_pids=protected)
-        n_chromas = sweep_orphan_t1_chromadbs(protected_pids=protected)
-        if n_trackers or n_chromas:
-            _sweep_log.info(
-                "periodic_orphan_sweep",
-                trackers_reaped=n_trackers,
-                chromadbs_reaped=n_chromas,
-                protected_pid=server_pid,
-            )
-    except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
-        _sweep_log.debug("periodic_orphan_sweep_failed", error=str(exc))
-
-
-async def _cancel_t1_heartbeat_task() -> None:
-    """Cancel and await the T1 heartbeat task if one is running. Idempotent."""
-    import asyncio  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
-    import contextlib  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
-
-    global _T1_HEARTBEAT_TASK
-    task = _T1_HEARTBEAT_TASK
-    _T1_HEARTBEAT_TASK = None
-    if task is None:
-        return
-    task.cancel()
-    with contextlib.suppress(asyncio.CancelledError, Exception):
-        await task
-
-
 def _tcp_probe_alive(host: str, port: int, timeout: float = 0.5) -> bool:
     """Return True if a TCP connection to ``(host, port)`` succeeds.
 
@@ -528,105 +412,16 @@ from contextlib import asynccontextmanager
 from pathlib import Path as _Path
 
 
-def _run_mcp_startup_sweep(*, config_dir: "_Path") -> None:
-    """Best-effort orphan-cleanup sweep run at MCP startup (Branch 3).
-
-    Extracted into its own function so:
-    1. The lifespan can call it with a single ``try/except`` guard.
-    2. Tests can call it directly with a synthetic config_dir and spy on
-       the inner sweep calls (GAP A conformance test — nexus-ycwec).
-
-    Runs four sweeps in best-effort order; failures on any one are logged
-    at debug and never block startup.  Two surfaces already existed before
-    nexus-ycwec:
-
-    (a) ``sweep_orphan_tmpdirs`` — reaps chroma tmpdir leftovers after
-        ungraceful exit.
-    (b) ``sweep_orphan_resource_trackers`` — reaps PPID=1 multiprocessing
-        resource-tracker processes holding POSIX named semaphores.
-    (c) ``sweep_orphan_t1_chromadbs`` — stops orphaned chroma server
-        processes immediately (rather than waiting 24h for tmpdir reap).
-
-    Two new sweeps added by nexus-ycwec Fix #3 lifecycle GC:
-
-    (d) ``sweep_dead_t1_holders`` — removes ``t1_addr.*`` lease records
-        whose claude_pid AND server_pid are BOTH dead.
-    (e) ``sweep_dead_t1_elect_locks`` — removes ``t1_elect.*.lock`` files
-        whose scope has no live owner (addr absent or both pids dead).
-
-    See docs/rdr/rdr-149-*.md for the shared-primitive mandate.  RDR-149
-    standing gate: all lifecycle GC lives in the shared primitive
-    (service_registry.py) plus this wiring point (core.py), never in
-    per-tier copies.
-    """
-    from nexus.session import (  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
-        sweep_orphan_resource_trackers,
-        sweep_orphan_t1_chromadbs,
-        sweep_orphan_tmpdirs,
-    )
-    from nexus.daemon.service_registry import (  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
-        sweep_dead_t1_holders,
-        sweep_dead_t1_elect_locks,
-    )
-    import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
-
-    _sweep_log = structlog.get_logger(__name__)
-
-    # (a) tmpdirs
-    try:
-        sweep_orphan_tmpdirs(config_dir=config_dir)
-    except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
-        _sweep_log.debug("sweep_orphan_tmpdirs_failed", error=str(exc))
-    # (b) resource_trackers
-    try:
-        sweep_orphan_resource_trackers()
-    except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
-        _sweep_log.debug("sweep_orphan_resource_trackers_failed", error=str(exc))
-    # (c) orphan chroma servers
-    try:
-        sweep_orphan_t1_chromadbs()
-    except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
-        _sweep_log.debug("sweep_orphan_t1_chromadbs_failed", error=str(exc))
-    # (d) dead T1 holder addr records (nexus-ycwec GAP A)
-    try:
-        sweep_dead_t1_holders(config_dir=config_dir)
-    except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
-        _sweep_log.debug("sweep_dead_t1_holders_failed", error=str(exc))
-    # (e) dead T1 elect lock files (nexus-ycwec GAP B)
-    try:
-        sweep_dead_t1_elect_locks(config_dir=config_dir)
-    except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
-        _sweep_log.debug("sweep_dead_t1_elect_locks_failed", error=str(exc))
-
-
 @asynccontextmanager
-async def _t1_chroma_lifespan(_app: Any):
-    """RDR-105 P4 hybrid-discovery lifespan.
+async def _t1_lifespan(_app: Any):
+    """T1 session lifespan (RDR-105 P4, reshaped at RDR-155 P4b).
 
-    Three branches symmetric with the four-branch fail-loud
-    constructor in ``nexus.db.t1.T1Database._init_new_discovery``:
-
-    Branch 1 (env)
-        ``NX_T1_HOST`` + ``NX_T1_PORT`` set: the parent MCP already
-        owns chroma. Yield without spawning.
-
-    Branch 2 (isolation)
-        ``NX_T1_ISOLATED=1``: this MCP is a stateless one-shot. Yield without
-        spawning.
-
-    Branch 3 (top-level / owned)
-        Spawn a fresh chroma; publish a leased registry record via
-        :class:`nexus.daemon.t1_lease.T1LeasePublisher` (RDR-149 P4) —
-        keyed transiently on the chroma ``server_pid`` and re-keyed to
-        the session-id once it resolves (RF-2/CA-3); populate
-        ``_t1_state.T1_ADDR``; start the heartbeat + re-key loop; yield.
-        Cleanup cancels the heartbeat task, relinquishes the lease,
-        stops chroma, rmtrees the chroma tmpdir, and resets
-        ``_t1_state.T1_ADDR``.
-
-    Also runs a best-effort orphan-reaper sweep on entry to clean
-    up any addr files left by a prior session that exited without
-    its lifespan finally running (SIGKILL, OOM).
+    Branch 0 (service): NX_STORAGE_BACKEND_T1=service routes T1 through
+    HttpScratchStore — mint / borrow / inherit a per-session token
+    against the storage service; close the session + revoke the token on
+    exit. Non-service processes just yield: their T1 resolves in-process
+    via ``nexus.db.t1`` (the InMemoryVectorClient isolation path). The
+    chroma-backed Branches 1-3 died with the chroma substrate.
 
     Cleanup is idempotent across three sites:
 
@@ -896,7 +691,7 @@ async def _t1_chroma_lifespan(_app: Any):
                 _os.environ["NX_T1_SESSION"] = _t1_token
                 _os.environ["NX_T1_SESSION_ID"] = _t1_session_id
                 _svc_log.info("t1_session_isolation_minted", session_id=_t1_session_id)
-                # nexus-5daww: track for `_t1_chroma_shutdown`'s Branch-0
+                # nexus-5daww: track for `_t1_shutdown`'s Branch-0
                 # handling so a raw SIGTERM / atexit (which cannot resume
                 # this paused generator past `yield`) still revokes the
                 # token and clears the lease file instead of leaking both.
@@ -964,12 +759,12 @@ async def _t1_chroma_lifespan(_app: Any):
             # Teardown: close the scratch rows (best-effort promptness;
             # backstopped by the service's 24h TTL sweep), then route the
             # session-token close + lease clear through the SAME idempotent
-            # `_t1_chroma_shutdown()` used by Branch 3 and the SIGTERM /
+            # `_t1_shutdown()` used by Branch 3 and the SIGTERM /
             # atexit paths (nexus-5daww). Before this fix the lease-clear +
             # token-close lived ONLY here -- inline, reachable solely via a
             # normal `async with` exit -- so a raw SIGTERM (the documented
             # NORMAL stdio shutdown path; `_sigterm_handler` calls
-            # `os._exit(0)` right after `_t1_chroma_shutdown()` without ever
+            # `os._exit(0)` right after `_t1_shutdown()` without ever
             # resuming this paused generator past `yield`) leaked BOTH an
             # unrevoked, still-valid server-side session token AND its 0600
             # lease file on every SIGTERM'd session.
@@ -982,129 +777,13 @@ async def _t1_chroma_lifespan(_app: Any):
                 _svc_log.info("t1_service_session_close_done", deleted=deleted)
             except Exception as _exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
                 _svc_log.warning("t1_service_session_close_failed", error=str(_exc))
-            _t1_chroma_shutdown()
+            _t1_shutdown()
         return
 
-    if _os.environ.get("NX_T1_HOST", "").strip() and _os.environ.get("NX_T1_PORT", "").strip():
-        # Branch 1: parent MCP owns chroma; subprocess inherits via env.
-        yield
-        return
-
-    from nexus.session import _t1_isolated_env  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
-
-    if _t1_isolated_env():
-        # Branch 2: explicit stateless ephemeral.
-        yield
-        return
-
-    # Branch 3: spawn + publish.
-    from nexus.session import start_t1_server  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
-    from nexus.session import _nexus_config_dir_at_import as _cfg_dir_fn  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
-
-    # Best-effort orphan cleanup before we spawn (nexus-ycwec, nexus-9h1s,
-    # nexus-aigkb). Five sweeps delegated to _run_mcp_startup_sweep:
-    # (a) tmpdirs, (b) resource_trackers, (c) chroma servers,
-    # (d) dead T1 addr records, (e) dead T1 elect lock files.
-    # The sweep comment above this block is preserved in the helper's docstring.
-    # RDR-149 P5 note: leased registry ages stale lease records out via TTL,
-    # but crash-reap scenarios leave pids-dead holders that only the explicit
-    # sweep catches -- that is what (d)+(e) fix.
-    try:
-        _run_mcp_startup_sweep(config_dir=_cfg_dir_fn())
-    except Exception as exc:  # noqa: BLE001 — best-effort path; failure logged via log.debug, must not crash caller
-        import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
-        structlog.get_logger(__name__).debug("mcp_startup_sweep_failed", error=str(exc))
-
-    # Reset the ``_SHUTDOWN_IN_FLIGHT`` sentinel BEFORE
-    # ``start_t1_server`` (which can take up to ``_SERVER_READY_TIMEOUT``
-    # seconds). If the prior lifecycle left the flag set and a SIGTERM
-    # arrives mid-spawn, the handler would short-circuit and the
-    # newly-spawned chroma would orphan. The flag is sticky within
-    # one process exit; each lifespan owns its own shutdown lifecycle.
-    # ``_OWNED_CHROMA`` is empty at this point, so a SIGTERM landing
-    # between the reset and the spawn is also safe (the shutdown sees
-    # the empty dict and short-circuits cleanly).
-    global _SHUTDOWN_IN_FLIGHT
-    _SHUTDOWN_IN_FLIGHT = False
-    host, port, server_pid, tmpdir = start_t1_server()
-    # Record into ``_OWNED_CHROMA`` BEFORE any further work that
-    # might raise so the stdio SIGTERM path
-    # (``_sigterm_handler`` -> ``_t1_chroma_shutdown``) can still
-    # reap chroma if the publish step explodes.
-    _OWNED_CHROMA.clear()
-    _OWNED_CHROMA.update({
-        "server_pid": server_pid,
-        "tmpdir": str(tmpdir),
-    })
-    try:
-        import asyncio  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
-
-        from nexus.mcp import _t1_state  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
-        from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
-        from nexus.daemon.t1_lease import T1LeasePublisher  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
-        from nexus.session import (  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
-            _nexus_config_dir_at_import,
-            find_immediate_claude_pid,
-            resolve_active_session_id,
-        )
-
-        import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
-        _spawn_log = structlog.get_logger()
-
-        # RDR-149 P4: T1 rides the leased registry. Publish under a transient
-        # ``server_pid`` key (never ``unknown``) carrying the resolved-or-None
-        # session-id; the heartbeat loop re-keys to the session-id the instant
-        # it resolves (RF-2/CA-3) and self-heals a lost record (#1114). T1 is
-        # session-scoped (N owners per uid, one T1 server per session), so the
-        # primitive's per-scope election flock IS the whole election (no
-        # spawn-lock daemon, unlike T2/T3).
-        registry = ServiceRegistry(
-            dir=_nexus_config_dir_at_import(), tier="t1"
-        )
-        # nexus-0x16i: stamp the owner's immediate Claude ancestor pid into
-        # the transient record's payload so a bare Bash sibling in the
-        # cold-start window can target this owner by the same pid it resolves
-        # for itself (RF-6). Read-path window hint only; not a scope key.
-        publisher = T1LeasePublisher(
-            registry=registry,
-            server_pid=server_pid,
-            host=host,
-            port=port,
-            session_resolver=resolve_active_session_id,
-            claude_pid=find_immediate_claude_pid(),
-        )
-        # Invariant: ``_t1_state.T1_ADDR`` (in-process readers) and
-        # ``_OWNED_CHROMA["t1_lease_publisher"]`` (the shutdown relinquish
-        # gate) are written together. The shutdown impl gates on the dict key
-        # so ``T1_ADDR`` cannot leak past a clean shutdown.
-        publisher.publish()
-        _t1_state.T1_ADDR = (host, port)
-        _OWNED_CHROMA["t1_lease_publisher"] = publisher
-        # nexus-7m8i: happy-path observability. One ``info`` per owner spawn
-        # so operators can distinguish "MCP started cleanly" from "MCP never
-        # reached the spawn step" by reading the log alone.
-        _spawn_log.info(
-            "t1_chroma_init_owned",
-            host=host,
-            port=port,
-            server_pid=server_pid,
-            scope_key=publisher.active_scope_key,
-            session_keyed=publisher.session_keyed,
-            tmpdir=str(tmpdir),
-        )
-        global _T1_HEARTBEAT_TASK
-        _T1_HEARTBEAT_TASK = asyncio.create_task(
-            _t1_heartbeat_loop(publisher, registry.heartbeat_interval)
-        )
-        yield
-    finally:
-        # Cancel the heartbeat task BEFORE relinquishing the lease so it
-        # cannot re-stamp or re-key a record we are tearing down (RDR-129
-        # early-stop ordering). Idempotent: if the SIGTERM / atexit path
-        # already ran via ``_t1_chroma_shutdown``, ``_OWNED_CHROMA`` is empty
-        # and the cleanup short-circuits.
-        await _cancel_t1_heartbeat_task()
-        _t1_chroma_shutdown()
+    # Non-service path (RDR-155 P4b): no chroma to spawn — T1 resolves
+    # in-process via nexus.db.t1 (InMemoryVectorClient; NX_T1_ISOLATED
+    # keeps its opt-in meaning until P3 flips the hard default).
+    yield
 
 
 def _t1_session_shutdown() -> None:
@@ -1112,9 +791,9 @@ def _t1_session_shutdown() -> None:
 
     nexus-5daww: Branch-0 counterpart to the chroma cleanup below. Reads
     ``_OWNED_T1_SESSION["session_id"]`` (populated by
-    ``_t1_chroma_lifespan``'s Branch 0 right after a successful mint) and,
+    ``_t1_lifespan``'s Branch 0 right after a successful mint) and,
     if present, clears the published lease file then revokes the token
-    server-side. Called from :func:`_t1_chroma_shutdown` so SIGTERM / atexit
+    server-side. Called from :func:`_t1_shutdown` so SIGTERM / atexit
     cleanup -- which cannot resume the paused lifespan generator past its
     ``yield`` -- still runs this instead of leaking an unrevoked token plus
     its 0600 lease file. Idempotent: clears ``_OWNED_T1_SESSION`` on entry
@@ -1159,69 +838,28 @@ def _t1_session_shutdown() -> None:
         _log.warning("t1_session_token_close_failed", session_id=session_id, error=str(_exc))
 
 
-def _t1_chroma_shutdown() -> None:
-    """Stop chroma, rmtree the chroma tmpdir, unlink the addr file, reset
-    ``_t1_state.T1_ADDR``, clear ``_OWNED_CHROMA`` (Branch 3), AND close the
-    SERVICE-backed T1 session token + lease (Branch 0, nexus-5daww) via
-    :func:`_t1_session_shutdown`.
+def _t1_shutdown() -> None:
+    """Close the SERVICE-backed T1 session token + lease (Branch 0,
+    nexus-5daww) via :func:`_t1_session_shutdown`.
+
+    RDR-155 P4b: the chroma leg (stop server, rmtree tmpdir, reset
+    ``_t1_state.T1_ADDR``) died with the owned-chroma Branch 3; this is
+    now the single idempotent teardown for the Branch-0 session state.
 
     Idempotent. Called from three sites (lifespan async finally,
     :func:`_sigterm_handler`, :mod:`atexit`); whichever fires first does
-    the work, the others find both ``_OWNED_CHROMA`` and
-    ``_OWNED_T1_SESSION`` empty and short-circuit. Branch 0 and Branch 3
-    are mutually exclusive per process, so at most one of the two dicts is
-    ever populated -- both are checked so this single shutdown path is
-    correct regardless of which branch the process took.
-
-    ``_SHUTDOWN_IN_FLIGHT`` prevents re-entry from a signal handler
-    that interrupted an in-flight ``stop_t1_server``: once set,
+    the work, the others find ``_OWNED_T1_SESSION`` empty and
+    short-circuit. ``_SHUTDOWN_IN_FLIGHT`` prevents re-entry from a
+    signal handler that interrupted an in-flight teardown: once set,
     never cleared.
     """
     global _SHUTDOWN_IN_FLIGHT
     if _SHUTDOWN_IN_FLIGHT:
         return
-    if not _OWNED_CHROMA and not _OWNED_T1_SESSION:
+    if not _OWNED_T1_SESSION:
         return
     _SHUTDOWN_IN_FLIGHT = True
-
-    if _OWNED_T1_SESSION:
-        _t1_session_shutdown()
-
-    if not _OWNED_CHROMA:
-        return
-
-    import shutil  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
-
-    from nexus.mcp import _t1_state  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
-    from nexus.session import stop_t1_server  # noqa: PLC0415 — circular-dep avoidance (lifecycle module imports mcp at top)
-
-    server_pid = _OWNED_CHROMA.get("server_pid")
-    tmpdir = _OWNED_CHROMA.get("tmpdir")
-    publisher = _OWNED_CHROMA.get("t1_lease_publisher")
-
-    # RDR-149 P4: relinquish the lease (mark shutting-down, then unlink only
-    # if we still own it) BEFORE stopping chroma so discoverers stop resolving
-    # us immediately. ``relinquish`` is sync file I/O, safe from the SIGTERM /
-    # atexit path where no event loop is available to await the heartbeat
-    # task's cancellation.
-    if publisher is not None:
-        try:
-            publisher.relinquish()
-        except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
-            pass
-    if server_pid:
-        try:
-            stop_t1_server(int(server_pid))
-        except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
-            pass
-    if tmpdir:
-        try:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-        except OSError:
-            pass
-
-    _t1_state.T1_ADDR = None
-    _OWNED_CHROMA.clear()
+    _t1_session_shutdown()
 
 
 def _sigterm_handler(_signo: int, _frame: Any) -> None:
@@ -1246,11 +884,11 @@ def _sigterm_handler(_signo: int, _frame: Any) -> None:
         # interfere -- they hold the cleanup contract for this exit.
         return
 
-    _t1_chroma_shutdown()
+    _t1_shutdown()
     _os._exit(0)
 
 
-mcp = FastMCP("nexus", lifespan=_t1_chroma_lifespan)
+mcp = FastMCP("nexus", lifespan=_t1_lifespan)
 
 _DEFAULT_PAGE_SIZE = 10
 
@@ -6762,7 +6400,6 @@ def _resolve_mode_diagnostics() -> dict[str, str | None]:
             ) or None,
             "service_url_found": bool(get_credential("service_url")),
             "pg_credentials_found": (nexus_config_dir() / "pg_credentials").is_file(),
-            "chroma_key_found": bool(get_credential("chroma_api_key")),
             # Informational only — zero mode influence since RDR-188 P3.1.
             "voyage_key_found": bool(get_credential("voyage_api_key")),
         }
@@ -6881,11 +6518,11 @@ def main():
     # and chroma orphans. The watchdog covers it eventually but
     # the MCP-owned cleanup path simply doesn't run. So we install
     # the signal handlers for SIGTERM and SIGINT to call
-    # _t1_chroma_shutdown directly. atexit stays as the third
+    # _t1_shutdown directly. atexit stays as the third
     # belt-and-braces for clean exits via stdin EOF / SystemExit.
-    # _t1_chroma_shutdown is idempotent so all three paths can fire
+    # _t1_shutdown is idempotent so all three paths can fire
     # without double-cleaning.
-    atexit.register(_t1_chroma_shutdown)
+    atexit.register(_t1_shutdown)
     signal.signal(signal.SIGTERM, _sigterm_handler)
     signal.signal(signal.SIGINT, _sigterm_handler)
     try:

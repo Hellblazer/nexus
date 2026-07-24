@@ -183,7 +183,7 @@ class TestRemediateCmd:
         assert consent_recorder.rows == []
         assert _URL in result.output  # runbook URL remains on screen
         # The recovery steps were NOT released:
-        assert "the substrate-etl rung converges" not in result.output
+        assert "recomputes conformant ids" not in result.output
 
     def test_accepted_confirm_records_consent_and_releases(
         self, runner, enabled_config, no_diag, consent_recorder
@@ -194,7 +194,7 @@ class TestRemediateCmd:
         row = consent_recorder.rows[0]
         assert row["scope"] == "remediate:chash-poison"
         assert row["granted"] is True
-        assert "the substrate-etl rung converges" in result.output
+        assert "recomputes conformant ids" in result.output
 
     def test_non_interactive_aborts_without_consent(
         self, runner, enabled_config, no_diag, consent_recorder

@@ -524,8 +524,15 @@ def test_dual_population_baseline_locked():
     # orchestrator.py's chash-rows-by-collection source read (the RDR-178
     # P4 +1 above) removed with the chash ETL leg — the counted sites are
     # deleted code, not re-routed.
+    # 15 = -7 for RDR-155 P4b P2 (nexus-19svb/g37fr): the migration
+    # machinery's counted raw-connect sites (driver.py _open_source_ro,
+    # wire_reid.py ChashRemapStore, remap_cascade.py _connect,
+    # guided_upgrade.py already-migrated ro-connect, vector_etl.py,
+    # rungs/t2_schema.py _open) were whole-file deletions, and health.py's
+    # migration-divergence ro-connect died with the doctor row.
+    # DOWNWARD-only recount; never bump upward.
 
-    assert result.epsilon_allow_connects == 22, (
+    assert result.epsilon_allow_connects == 15, (
         f"raw-connect epsilon-allow baseline moved: {result.epsilon_allow_connects}"
     )
     # P3 endpoint: ZERO un-annotated direct T2Database constructions outside
