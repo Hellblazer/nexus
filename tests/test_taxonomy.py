@@ -2,16 +2,19 @@
 """Tests for persistent topic taxonomy (RDR-061 P3-1, nexus-vk8m; RDR-070 nexus-9k5)."""
 from __future__ import annotations
 
+import itertools
+import os
 from pathlib import Path
+from typing import Any
 
 import chromadb
 import numpy as np
 import pytest
 
+from nexus.db.storage_mode import has_raw_access
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
 from nexus.taxonomy import (
-    assign_topic,
     get_topic_docs,
     get_topic_tree,
     get_topics,
@@ -25,9 +28,130 @@ def chroma_client() -> chromadb.ClientAPI:
     return make_vector_test_client()
 
 
+# ── Substrate-neutral seed/read helpers (RDR-155 P4b P0a') ──────────────────
+#
+# Seeds route through the fidelity-import surface on the engine substrate
+# (import_topic / import_assignment preserve the supplied values verbatim)
+# and keep the historical raw INSERTs on the SQLite twin (which dies with
+# the twin at the flip). Import src_ids start >= 1e9: import_topic preserves
+# ids WITHOUT advancing the engine's topics sequence, so low ids collide
+# order-dependently with later engine-side INSERTs (bisected finding, see
+# tests/test_context.py). The base is module-distinct (1.1e9 here) because
+# the topics PK is global across tenants — two modules restarting the same
+# counter in one engine session 500 on /import/topic.
+
+_seed_src_ids = itertools.count(1_100_000_000)
+
+
+def _seed_topic(
+    taxonomy: Any,
+    label: str,
+    *,
+    collection: str,
+    doc_count: int = 0,
+    parent_id: int | None = None,
+    review_status: str = "pending",
+    terms: str | None = None,
+    created_at: str = "2026-01-01T00:00:00Z",
+) -> int:
+    """Insert one topics row on either substrate; return its id."""
+    if has_raw_access(taxonomy):
+        cur = taxonomy.conn.execute(
+            "INSERT INTO topics "
+            "(label, parent_id, collection, doc_count, created_at, "
+            "review_status, terms) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (label, parent_id, collection, doc_count, created_at,
+             review_status, terms),
+        )
+        taxonomy.conn.commit()
+        return cur.lastrowid
+    return taxonomy.import_topic(
+        src_id=next(_seed_src_ids),
+        label=label,
+        parent_id=parent_id,
+        collection=collection,
+        centroid_hash=None,
+        doc_count=doc_count,
+        created_at=created_at,
+        review_status=review_status,
+        terms=terms,
+    )
+
+
+def _seed_assignment(
+    taxonomy: Any,
+    doc_id: str,
+    topic_id: int,
+    *,
+    assigned_by: str = "hdbscan",
+    similarity: float | None = None,
+    assigned_at: str | None = None,
+    source_collection: str | None = None,
+) -> None:
+    """Insert one topic_assignments row on either substrate."""
+    if has_raw_access(taxonomy):
+        taxonomy.conn.execute(
+            "INSERT OR REPLACE INTO topic_assignments "
+            "(doc_id, topic_id, assigned_by, similarity, assigned_at, "
+            "source_collection) VALUES (?, ?, ?, ?, ?, ?)",
+            (doc_id, topic_id, assigned_by, similarity, assigned_at,
+             source_collection),
+        )
+        taxonomy.conn.commit()
+        return
+    taxonomy.import_assignment(
+        doc_id=doc_id,
+        topic_id=topic_id,
+        assigned_by=assigned_by,
+        similarity=similarity,
+        assigned_at=assigned_at,
+        source_collection=source_collection,
+    )
+
+
+def _link_pairs(taxonomy: Any, topic_ids: list[int]) -> dict[tuple[int, int], int]:
+    """Normalized {(from_id, to_id): link_count} read.
+
+    get_topic_link_pairs returns a dict on the SQLite twin and a list of
+    (from, to, count) triples on the Http twin — normalize both shapes.
+    """
+    raw = taxonomy.get_topic_link_pairs(list(topic_ids))
+    if isinstance(raw, dict):
+        return dict(raw)
+    return {(f, t): c for f, t, c in raw}
+
+
+def _centroid_state(taxonomy: Any, collection: str, chroma_client: Any) -> dict[str, Any]:
+    """Read a collection's centroid state through the public rebuild-state
+    surface (substrate-neutral). The centroid_coll arg is required
+    positionally by the SQLite oracle and ignored by the Http twin
+    (centroids route through the engine's centroid port) — see
+    tests/test_taxonomy_e2e.py for the pattern.
+    """
+    return taxonomy.read_rebuild_old_state(
+        collection,
+        chroma_client.get_or_create_collection("taxonomy__centroids"),
+    )
+
+
+def _collection_topic_ids(taxonomy: Any, collection: str) -> set[int]:
+    return {t["id"] for t in taxonomy.get_topics_for_collection(collection)}
+
+
+def _collection_assignment_count(taxonomy: Any, collection: str) -> int:
+    return sum(
+        len(taxonomy.get_all_topic_doc_ids(tid))
+        for tid in _collection_topic_ids(taxonomy, collection)
+    )
+
+
 # ── schema ──────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.skipif(
+    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    reason="dies-roster: raw sqlite_master schema introspection dies at the RDR-155 P4b flip",
+)
 def test_topics_table_created(db: T2Database) -> None:
     """topics and topic_assignments tables exist after T2Database init."""
     tables = {
@@ -76,24 +200,15 @@ def test_discover_topics_creates_topics_and_centroids(
     assert all(t["doc_count"] > 0 for t in topics)
     assert sum(t["doc_count"] for t in topics) <= 60
 
-    # Centroids upserted to taxonomy__centroids
-    centroid_coll = chroma_client.get_collection(
-        "taxonomy__centroids", embedding_function=None,
-    )
-    # Filter to this collection's centroids (shared EphemeralClient may
-    # carry centroids from other tests in the same process).
-    result = centroid_coll.get(
-        where={"collection": "test__coll"},
-        include=["metadatas", "embeddings"],
-    )
-    assert len(result["ids"]) >= 2
+    # Centroids upserted (chroma coll on the SQLite twin, centroid port on
+    # the engine) — read through the public rebuild-state surface.
+    state = _centroid_state(db.taxonomy, "test__coll", chroma_client)
+    assert len(state["old_centroid_topic_ids"]) >= 2
     # Centroid embeddings are 384d
-    assert len(result["embeddings"][0]) == 384
-    # Metadata has topic_id, label, collection
-    meta = result["metadatas"][0]
-    assert "topic_id" in meta
-    assert "label" in meta
-    assert meta["collection"] == "test__coll"
+    assert state["old_centroids"].shape[1] == 384
+    # Every centroid maps back to a persisted topic id with its label.
+    assert set(state["old_centroid_topic_ids"]) <= {t["id"] for t in topics}
+    assert all(lbl for lbl in state["old_labels"])
 
 
 # ── RDR-128 P1 (fkq5q): assign_batch compute/persist split ───────────────────
@@ -122,15 +237,16 @@ def test_compute_assignments_returns_json_serializable_dicts(
     point of the split."""
     import json
 
-    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
-
     _seed_centroids(db, chroma_client)
     new_embs = [
         (np.random.default_rng(1).standard_normal(384).astype(np.float32) * 0.1
          + np.array([3.0] + [0.0] * 383, dtype=np.float32)).tolist()
         for _ in range(3)
     ]
-    out = CatalogTaxonomy.compute_assignments(
+    # Substrate-neutral COMPUTE half: on the SQLite twin db.taxonomy IS
+    # CatalogTaxonomy (identical staticmethod, centroids from the passed
+    # chroma client); on the Http twin centroids come from the centroid port.
+    out = db.taxonomy.compute_assignments(
         "split__coll", ["a", "b", "c"], new_embs, chroma_client,
         cross_collection=False,
     )
@@ -147,22 +263,18 @@ def test_persist_assignments_writes_rows(
     db: T2Database, chroma_client: chromadb.ClientAPI,
 ) -> None:
     """The PERSIST half writes the computed dicts to topic_assignments."""
-    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
-
     _seed_centroids(db, chroma_client)
     new_embs = [
         (np.random.default_rng(2).standard_normal(384).astype(np.float32) * 0.1
          + np.array([3.0] + [0.0] * 383, dtype=np.float32)).tolist()
     ]
-    out = CatalogTaxonomy.compute_assignments(
+    out = db.taxonomy.compute_assignments(
         "split__coll", ["persist-doc"], new_embs, chroma_client,
     )
+    assert out, "expected an assignment against seeded centroids"
     n = db.taxonomy.persist_assignments(out)
     assert n == len(out)
-    row = db.taxonomy.conn.execute(
-        "SELECT doc_id FROM topic_assignments WHERE doc_id='persist-doc'"
-    ).fetchone()
-    assert row is not None
+    assert "persist-doc" in db.taxonomy.get_assignments_for_docs(["persist-doc"])
 
 
 def test_assign_batch_still_composes_compute_and_persist(
@@ -170,16 +282,15 @@ def test_assign_batch_still_composes_compute_and_persist(
 ) -> None:
     """Back-compat: assign_batch == compute_assignments + persist_assignments,
     same return + same persisted rows (direct callers unchanged)."""
-    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
-
     _seed_centroids(db, chroma_client)
     new_embs = [
         (np.random.default_rng(3).standard_normal(384).astype(np.float32) * 0.1
          + np.array([3.0] + [0.0] * 383, dtype=np.float32)).tolist()
     ]
-    expected = CatalogTaxonomy.compute_assignments(
+    expected = db.taxonomy.compute_assignments(
         "split__coll", ["batch-doc"], new_embs, chroma_client,
     )
+    assert expected, "expected an assignment against seeded centroids"
     assigned = db.taxonomy.assign_batch(
         "split__coll", ["batch-doc"], new_embs, chroma_client,
     )
@@ -187,12 +298,13 @@ def test_assign_batch_still_composes_compute_and_persist(
     # Verify the persisted row matches what compute_assignments produced —
     # not just that "a row exists" (guards against a drift where assign_batch
     # silently computed something different).
-    row = db.taxonomy.conn.execute(
-        "SELECT topic_id, assigned_by FROM topic_assignments WHERE doc_id='batch-doc'"
-    ).fetchone()
-    assert row is not None
-    assert row[0] == expected[0]["topic_id"]
-    assert row[1] == expected[0]["assigned_by"]
+    mapping = db.taxonomy.get_assignments_for_docs(["batch-doc"])
+    assert mapping.get("batch-doc") == expected[0]["topic_id"]
+    if has_raw_access(db.taxonomy):
+        row = db.taxonomy.conn.execute(
+            "SELECT assigned_by FROM topic_assignments WHERE doc_id='batch-doc'"
+        ).fetchone()
+        assert row[0] == expected[0]["assigned_by"]
 
 
 def test_compute_assignments_empty_when_no_centroids(
@@ -283,17 +395,11 @@ def test_persist_discovered_topics_writes_and_returns_ids(db: T2Database) -> Non
     assert all(isinstance(t, int) for t in topic_ids)
 
     # Topic rows exist, one per spec, with the spec's label + doc_count.
-    rows = db.taxonomy.conn.execute(
-        "SELECT id, label, doc_count FROM topics WHERE collection='persist__disc' "
-        "ORDER BY id"
-    ).fetchall()
+    rows = db.taxonomy.get_topics_for_collection("persist__disc")
     assert len(rows) == len(specs)
-    assert {r[0] for r in rows} == set(topic_ids)
+    assert {r["id"] for r in rows} == set(topic_ids)
     # Assignments written for every doc in every spec.
-    total_assigned = db.taxonomy.conn.execute(
-        "SELECT COUNT(*) FROM topic_assignments WHERE topic_id IN "
-        "(SELECT id FROM topics WHERE collection='persist__disc')"
-    ).fetchone()[0]
+    total_assigned = _collection_assignment_count(db.taxonomy, "persist__disc")
     assert total_assigned == sum(s["doc_count"] for s in specs)
 
 
@@ -324,21 +430,13 @@ def test_discover_topics_still_composes(
     )
     assert count >= 2
 
-    t2_topics = db.taxonomy.conn.execute(
-        "SELECT id FROM topics WHERE collection='compose__disc'"
-    ).fetchall()
-    assert len(t2_topics) == count
+    t2_ids = _collection_topic_ids(db.taxonomy, "compose__disc")
+    assert len(t2_ids) == count
 
-    centroid_coll = chroma_client.get_collection(
-        "taxonomy__centroids", embedding_function=None,
-    )
-    centroids = centroid_coll.get(
-        where={"collection": "compose__disc"}, include=["metadatas"],
-    )
-    assert len(centroids["ids"]) == count
-    # Every persisted centroid id maps to a real T2 topic id.
-    t2_ids = {r[0] for r in t2_topics}
-    assert {int(m["topic_id"]) for m in centroids["metadatas"]} == t2_ids
+    state = _centroid_state(db.taxonomy, "compose__disc", chroma_client)
+    assert len(state["old_centroid_topic_ids"]) == count
+    # Every persisted centroid maps to a real T2 topic id.
+    assert {int(t) for t in state["old_centroid_topic_ids"]} == t2_ids
 
 
 def test_taxonomy_hook_routes_persist_through_t2_index_write(monkeypatch) -> None:
@@ -402,39 +500,24 @@ def test_taxonomy_hook_routes_persist_through_t2_index_write(monkeypatch) -> Non
 
 def test_assign_topic(db: T2Database) -> None:
     """Assign a doc_id to a topic."""
-    # Create a topic first
-    db.taxonomy.conn.execute(
-        "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
-        ("test-topic", "proj", 0, "2026-01-01T00:00:00Z"),
-    )
-    db.taxonomy.conn.commit()
-    topic_id = db.taxonomy.conn.execute("SELECT id FROM topics LIMIT 1").fetchone()[0]
+    # Create a topic first. The Http twin's assign_topic requires an
+    # explicit assigned_by, so call the store directly (the deprecated
+    # nexus.taxonomy.assign_topic facade omits it).
+    topic_id = _seed_topic(db.taxonomy, "test-topic", collection="proj")
 
-    assign_topic(db, "doc-123", topic_id)
+    db.taxonomy.assign_topic("doc-123", topic_id, assigned_by="hdbscan")
 
-    row = db.taxonomy.conn.execute(
-        "SELECT * FROM topic_assignments WHERE doc_id='doc-123'"
-    ).fetchone()
-    assert row is not None
-    assert row[1] == topic_id
+    assert db.taxonomy.get_assignments_for_docs(["doc-123"]) == {"doc-123": topic_id}
 
 
 def test_assign_topic_idempotent(db: T2Database) -> None:
     """Assigning same doc to same topic twice doesn't error."""
-    db.taxonomy.conn.execute(
-        "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
-        ("test-topic", "proj", 0, "2026-01-01T00:00:00Z"),
-    )
-    db.taxonomy.conn.commit()
-    topic_id = db.taxonomy.conn.execute("SELECT id FROM topics LIMIT 1").fetchone()[0]
+    topic_id = _seed_topic(db.taxonomy, "test-topic", collection="proj")
 
-    assign_topic(db, "doc-123", topic_id)
-    assign_topic(db, "doc-123", topic_id)  # no error
+    db.taxonomy.assign_topic("doc-123", topic_id, assigned_by="hdbscan")
+    db.taxonomy.assign_topic("doc-123", topic_id, assigned_by="hdbscan")  # no error
 
-    count = db.taxonomy.conn.execute(
-        "SELECT count(*) FROM topic_assignments WHERE doc_id='doc-123'"
-    ).fetchone()[0]
-    assert count == 1
+    assert db.taxonomy.get_all_topic_doc_ids(topic_id) == ["doc-123"]
 
 
 def test_assign_topic_updates_doc_count_cache(db: T2Database) -> None:
@@ -445,22 +528,18 @@ def test_assign_topic_updates_doc_count_cache(db: T2Database) -> None:
     topic_assignments. Stats consumers (`nx taxonomy stats`, ORDER BY
     doc_count) silently under-reported.
     """
-    db.taxonomy.conn.execute(
-        "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
-        ("test-topic", "proj", 0, "2026-01-01T00:00:00Z"),
-    )
-    db.taxonomy.conn.commit()
-    topic_id = db.taxonomy.conn.execute("SELECT id FROM topics LIMIT 1").fetchone()[0]
+    topic_id = _seed_topic(db.taxonomy, "test-topic", collection="proj")
+
+    def _cached_and_derived() -> tuple[int, int]:
+        return (
+            db.taxonomy.get_topic_by_id(topic_id)["doc_count"],
+            len(db.taxonomy.get_all_topic_doc_ids(topic_id)),
+        )
 
     # HDBSCAN path (default assigned_by)
     db.taxonomy.assign_topic("doc-a", topic_id, assigned_by="hdbscan")
     db.taxonomy.assign_topic("doc-b", topic_id, assigned_by="hdbscan")
-    cached = db.taxonomy.conn.execute(
-        "SELECT doc_count FROM topics WHERE id = ?", (topic_id,)
-    ).fetchone()[0]
-    derived = db.taxonomy.conn.execute(
-        "SELECT COUNT(*) FROM topic_assignments WHERE topic_id = ?", (topic_id,)
-    ).fetchone()[0]
+    cached, derived = _cached_and_derived()
     assert cached == derived == 2, f"cached={cached} derived={derived}"
 
     # Projection (UPSERT) path
@@ -471,12 +550,7 @@ def test_assign_topic_updates_doc_count_cache(db: T2Database) -> None:
         similarity=0.9,
         source_collection="proj",
     )
-    cached = db.taxonomy.conn.execute(
-        "SELECT doc_count FROM topics WHERE id = ?", (topic_id,)
-    ).fetchone()[0]
-    derived = db.taxonomy.conn.execute(
-        "SELECT COUNT(*) FROM topic_assignments WHERE topic_id = ?", (topic_id,)
-    ).fetchone()[0]
+    cached, derived = _cached_and_derived()
     assert cached == derived == 3, f"cached={cached} derived={derived}"
 
     # Re-assigning same doc via projection UPSERT must not double-count.
@@ -487,73 +561,46 @@ def test_assign_topic_updates_doc_count_cache(db: T2Database) -> None:
         similarity=0.95,
         source_collection="proj",
     )
-    cached = db.taxonomy.conn.execute(
-        "SELECT doc_count FROM topics WHERE id = ?", (topic_id,)
-    ).fetchone()[0]
-    derived = db.taxonomy.conn.execute(
-        "SELECT COUNT(*) FROM topic_assignments WHERE topic_id = ?", (topic_id,)
-    ).fetchone()[0]
+    cached, derived = _cached_and_derived()
     assert cached == derived == 3, f"cached={cached} derived={derived}"
 
 
+@pytest.mark.skipif(
+    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    reason="dies-roster: CatalogTaxonomy's assign-time topic_links resync (nexus-zq79 F5; the engine maintains links via refresh/cooccurrence passes, not per-assign) dies at the RDR-155 P4b flip",
+)
 def test_assign_topic_resyncs_topic_links_link_count(db: T2Database) -> None:
     """nexus-zq79 F5: topic_links.link_count must track co-occurrence
     count after every assign_topic, not stay stale until the next full
     refresh_projection_links / generate_cooccurrence_links rebuild.
     """
     # Two topics in different collections so co-occurrence is meaningful.
-    db.taxonomy.conn.executemany(
-        "INSERT INTO topics (label, collection, doc_count, created_at) "
-        "VALUES (?, ?, ?, ?)",
-        [
-            ("topic-a", "proj-a", 0, "2026-01-01T00:00:00Z"),
-            ("topic-b", "proj-b", 0, "2026-01-01T00:00:00Z"),
-        ],
-    )
-    db.taxonomy.conn.commit()
-    ids = [
-        row[0]
-        for row in db.taxonomy.conn.execute(
-            "SELECT id FROM topics ORDER BY id"
-        ).fetchall()
-    ]
-    a_id, b_id = ids[0], ids[1]
+    a_id = _seed_topic(db.taxonomy, "topic-a", collection="proj-a")
+    b_id = _seed_topic(db.taxonomy, "topic-b", collection="proj-b")
+    pair = (min(a_id, b_id), max(a_id, b_id))
 
     # Doc X in topic A, then X in topic B — co-occurrence 1.
     db.taxonomy.assign_topic("doc-x", a_id, assigned_by="hdbscan")
     db.taxonomy.assign_topic("doc-x", b_id, assigned_by="hdbscan")
-    link = db.taxonomy.conn.execute(
-        "SELECT link_count FROM topic_links "
-        "WHERE from_topic_id = ? AND to_topic_id = ?",
-        (min(a_id, b_id), max(a_id, b_id)),
-    ).fetchone()
-    assert link is not None and link[0] == 1, (
-        f"expected link_count=1 after first co-occurrence, got "
-        f"{link[0] if link else None}"
+    link = _link_pairs(db.taxonomy, [a_id, b_id]).get(pair)
+    assert link == 1, (
+        f"expected link_count=1 after first co-occurrence, got {link}"
     )
 
     # Doc Y also in both topics — co-occurrence 2.
     db.taxonomy.assign_topic("doc-y", a_id, assigned_by="hdbscan")
     db.taxonomy.assign_topic("doc-y", b_id, assigned_by="hdbscan")
-    link = db.taxonomy.conn.execute(
-        "SELECT link_count FROM topic_links "
-        "WHERE from_topic_id = ? AND to_topic_id = ?",
-        (min(a_id, b_id), max(a_id, b_id)),
-    ).fetchone()
-    assert link[0] == 2, (
-        f"expected link_count=2 after second co-occurrence, got {link[0]}"
+    link = _link_pairs(db.taxonomy, [a_id, b_id]).get(pair)
+    assert link == 2, (
+        f"expected link_count=2 after second co-occurrence, got {link}"
     )
 
     # Re-assigning the same (doc, topic) must not inflate.
     db.taxonomy.assign_topic("doc-y", a_id, assigned_by="hdbscan")
-    link = db.taxonomy.conn.execute(
-        "SELECT link_count FROM topic_links "
-        "WHERE from_topic_id = ? AND to_topic_id = ?",
-        (min(a_id, b_id), max(a_id, b_id)),
-    ).fetchone()
-    assert link[0] == 2, (
+    link = _link_pairs(db.taxonomy, [a_id, b_id]).get(pair)
+    assert link == 2, (
         f"INSERT OR IGNORE on duplicate must not increment link_count; "
-        f"got {link[0]}"
+        f"got {link}"
     )
 
 
@@ -592,10 +639,7 @@ def test_rebuild_taxonomy_clears_and_rediscovers(
     # Topic count should match the second run, not be doubled (no accumulation)
     assert len(ids_after_second) == count2
     # Total assignments should be consistent — not doubled
-    total_assignments = db.taxonomy.conn.execute(
-        "SELECT COUNT(*) FROM topic_assignments WHERE topic_id IN "
-        "(SELECT id FROM topics WHERE collection = 'test__coll')"
-    ).fetchone()[0]
+    total_assignments = _collection_assignment_count(db.taxonomy, "test__coll")
     assert total_assignments <= 60, "rebuild should replace, not accumulate"
 
 
@@ -609,30 +653,22 @@ def test_rebuild_taxonomy_preserves_manual_assignment(
     db.taxonomy.discover_topics(
         "manual__coll", doc_ids, embeddings, texts, chroma_client,
     )
-    # Operator manually assigns the first doc to an existing topic.
-    first_topic = db.taxonomy.conn.execute(
-        "SELECT id FROM topics WHERE collection='manual__coll' ORDER BY id LIMIT 1"
-    ).fetchone()[0]
-    db.taxonomy.conn.execute(
-        "INSERT OR REPLACE INTO topic_assignments (doc_id, topic_id, assigned_by) "
-        "VALUES (?, ?, 'manual')",
-        (doc_ids[0], first_topic),
-    )
-    db.taxonomy.conn.commit()
+    # Operator manually assigns a doc to an existing topic.
+    first_topic = min(_collection_topic_ids(db.taxonomy, "manual__coll"))
+    db.taxonomy.assign_topic("manual-doc", first_topic, assigned_by="manual")
 
     db.taxonomy.rebuild_taxonomy(
         "manual__coll", doc_ids, embeddings, texts, chroma_client,
     )
 
-    # The manual doc still carries exactly one 'manual' assignment to a live topic.
-    rows = db.taxonomy.conn.execute(
-        "SELECT ta.assigned_by FROM topic_assignments ta "
-        "JOIN topics t ON t.id = ta.topic_id "
-        "WHERE ta.doc_id = ? AND t.collection = 'manual__coll' "
-        "AND ta.assigned_by = 'manual'",
-        (doc_ids[0],),
-    ).fetchall()
-    assert len(rows) == 1, "manual assignment must survive rebuild (Route 1/2)"
+    # The manual doc still carries a 'manual' assignment to a live topic —
+    # read through the public rebuild-state surface (manual_assignments is
+    # exactly the assigned_by='manual' row set joined to live topics).
+    manual = _centroid_state(db.taxonomy, "manual__coll", chroma_client)[
+        "manual_assignments"
+    ]
+    assert "manual-doc" in manual, "manual assignment must survive rebuild (Route 1/2)"
+    assert manual["manual-doc"] in _collection_topic_ids(db.taxonomy, "manual__coll")
 
 
 def test_compute_rebuild_plan_is_pure_and_serializable(
@@ -665,16 +701,11 @@ def test_compute_rebuild_plan_is_pure_and_serializable(
 
 def test_get_topics_filtered_by_parent(db: T2Database) -> None:
     """get_topics(parent_id=None) returns only root topics."""
-    db.taxonomy.conn.execute(
-        "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
-        ("root-topic", "proj", 5, "2026-01-01T00:00:00Z"),
+    root_id = _seed_topic(db.taxonomy, "root-topic", collection="proj", doc_count=5)
+    _seed_topic(
+        db.taxonomy, "child-topic", collection="proj", doc_count=2,
+        parent_id=root_id,
     )
-    root_id = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    db.taxonomy.conn.execute(
-        "INSERT INTO topics (label, parent_id, collection, doc_count, created_at) VALUES (?, ?, ?, ?, ?)",
-        ("child-topic", root_id, "proj", 2, "2026-01-01T00:00:00Z"),
-    )
-    db.taxonomy.conn.commit()
 
     roots = get_topics(db, parent_id=None)
     assert len(roots) == 1
@@ -690,16 +721,10 @@ def test_get_topics_filtered_by_parent(db: T2Database) -> None:
 
 def test_get_topic_tree_structure(db: T2Database) -> None:
     """get_topic_tree returns nested dicts with children."""
-    db.taxonomy.conn.execute(
-        "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
-        ("root", "proj", 10, "2026-01-01T00:00:00Z"),
+    root_id = _seed_topic(db.taxonomy, "root", collection="proj", doc_count=10)
+    _seed_topic(
+        db.taxonomy, "child", collection="proj", doc_count=3, parent_id=root_id,
     )
-    root_id = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    db.taxonomy.conn.execute(
-        "INSERT INTO topics (label, parent_id, collection, doc_count, created_at) VALUES (?, ?, ?, ?, ?)",
-        ("child", root_id, "proj", 3, "2026-01-01T00:00:00Z"),
-    )
-    db.taxonomy.conn.commit()
 
     tree = get_topic_tree(db, "proj")
     assert len(tree) == 1
@@ -710,14 +735,9 @@ def test_get_topic_tree_structure(db: T2Database) -> None:
 
 def test_get_topic_docs_returns_assigned(db: T2Database) -> None:
     """get_topic_docs returns doc_ids assigned to the topic."""
-    db.taxonomy.conn.execute(
-        "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
-        ("test", "proj", 2, "2026-01-01T00:00:00Z"),
-    )
-    topic_id = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    db.taxonomy.conn.execute("INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)", ("doc-a", topic_id))
-    db.taxonomy.conn.execute("INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)", ("doc-b", topic_id))
-    db.taxonomy.conn.commit()
+    topic_id = _seed_topic(db.taxonomy, "test", collection="proj", doc_count=2)
+    _seed_assignment(db.taxonomy, "doc-a", topic_id)
+    _seed_assignment(db.taxonomy, "doc-b", topic_id)
 
     docs = get_topic_docs(db, topic_id)
     assert len(docs) == 2
@@ -899,11 +919,13 @@ def test_assign_batch_assigns_multiple_docs(
     assert assigned == 5
 
     # Verify assignments exist in T2
-    rows = db.taxonomy.conn.execute(
-        "SELECT doc_id, assigned_by FROM topic_assignments WHERE doc_id LIKE 'new-doc-%'"
-    ).fetchall()
-    assert len(rows) == 5
-    assert all(r[1] == "centroid" for r in rows)
+    mapping = db.taxonomy.get_assignments_for_docs(new_ids)
+    assert set(mapping) == set(new_ids)
+    if has_raw_access(db.taxonomy):
+        rows = db.taxonomy.conn.execute(
+            "SELECT assigned_by FROM topic_assignments WHERE doc_id LIKE 'new-doc-%'"
+        ).fetchall()
+        assert all(r[0] == "centroid" for r in rows)
 
 
 def test_assign_batch_no_centroids_returns_zero(
@@ -1065,11 +1087,20 @@ def test_assigned_by_column_populated(
 
     db.taxonomy.discover_topics("test__coll", doc_ids, embeddings, texts, chroma_client)
 
-    rows = db.taxonomy.conn.execute(
-        "SELECT DISTINCT assigned_by FROM topic_assignments"
-    ).fetchall()
-    assert len(rows) == 1
-    assert rows[0][0] == "hdbscan"
+    # Assignments landed for the discovered docs on both substrates.
+    assert db.taxonomy.get_assignments_for_docs(doc_ids)
+    if has_raw_access(db.taxonomy):
+        rows = db.taxonomy.conn.execute(
+            "SELECT DISTINCT assigned_by FROM topic_assignments"
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0][0] == "hdbscan"
+    else:
+        # No public assigned_by read on the Http twin; manual_assignments
+        # (the assigned_by='manual' slice) being empty pins the provenance
+        # is not 'manual'.
+        state = _centroid_state(db.taxonomy, "test__coll", chroma_client)
+        assert state["manual_assignments"] == {}
 
 
 def test_get_topic_docs_resolves_title_via_join(db: T2Database) -> None:
@@ -1077,16 +1108,8 @@ def test_get_topic_docs_resolves_title_via_join(db: T2Database) -> None:
     # Insert a memory entry — title must match doc_id AND project must match collection
     db.put(project="test", title="my-research-note", content="some content")
 
-    db.taxonomy.conn.execute(
-        "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
-        ("topic", "test", 1, "2026-01-01T00:00:00Z"),
-    )
-    topic_id = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    db.taxonomy.conn.execute(
-        "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-        ("my-research-note", topic_id),
-    )
-    db.taxonomy.conn.commit()
+    topic_id = _seed_topic(db.taxonomy, "topic", collection="test", doc_count=1)
+    _seed_assignment(db.taxonomy, "my-research-note", topic_id)
 
     docs = get_topic_docs(db, topic_id)
     assert len(docs) == 1
@@ -1094,6 +1117,10 @@ def test_get_topic_docs_resolves_title_via_join(db: T2Database) -> None:
     assert docs[0]["title"] == "my-research-note"
 
 
+@pytest.mark.skipif(
+    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    reason="dies-roster: SQLite memory-title JOIN known-defect documentation (RDR-063) dies at the RDR-155 P4b flip",
+)
 def test_get_topic_docs_known_defect_project_collection_mismatch(db: T2Database) -> None:
     """RDR-063 Known Defect: get_topic_docs() JOIN conflates T3 collection with T2 project.
 
@@ -1162,68 +1189,38 @@ def test_memory_delete_cascades_topic_assignments(db: T2Database) -> None:
     db.put(project="proj", title="doc-b", content="beta content here")
 
     # Seed a topic with both entries assigned
-    db.taxonomy.conn.execute(
-        "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
-        ("test-topic", "proj", 2, "2026-01-01T00:00:00Z"),
-    )
-    topic_id = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    db.taxonomy.conn.executemany(
-        "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-        [("doc-a", topic_id), ("doc-b", topic_id)],
-    )
-    db.taxonomy.conn.commit()
+    topic_id = _seed_topic(db.taxonomy, "test-topic", collection="proj", doc_count=2)
+    _seed_assignment(db.taxonomy, "doc-a", topic_id)
+    _seed_assignment(db.taxonomy, "doc-b", topic_id)
 
     # Sanity: both assignments present
-    pre = db.taxonomy.conn.execute(
-        "SELECT COUNT(*) FROM topic_assignments WHERE topic_id = ?", (topic_id,)
-    ).fetchone()[0]
-    assert pre == 2
+    assert len(db.taxonomy.get_all_topic_doc_ids(topic_id)) == 2
 
     # Delete doc-a via the facade — should cascade-purge its assignment
     assert db.delete(project="proj", title="doc-a") is True
 
-    post = db.taxonomy.conn.execute(
-        "SELECT doc_id FROM topic_assignments WHERE topic_id = ? ORDER BY doc_id",
-        (topic_id,),
-    ).fetchall()
-    assert [r[0] for r in post] == ["doc-b"], (
+    post = sorted(db.taxonomy.get_all_topic_doc_ids(topic_id))
+    assert post == ["doc-b"], (
         "cascade should have removed doc-a's assignment but kept doc-b's"
     )
 
     # Topic still exists because doc-b still references it
-    topics_remaining = db.taxonomy.conn.execute(
-        "SELECT COUNT(*) FROM topics WHERE collection = 'proj'"
-    ).fetchone()[0]
-    assert topics_remaining == 1
+    assert len(_collection_topic_ids(db.taxonomy, "proj")) == 1
 
 
 def test_memory_delete_drops_empty_topics(db: T2Database) -> None:
     """Deleting the last memory entry in a topic also drops the topic."""
     db.put(project="proj", title="solo-doc", content="lonely content")
-    db.taxonomy.conn.execute(
-        "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
-        ("solo-topic", "proj", 1, "2026-01-01T00:00:00Z"),
-    )
-    topic_id = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    db.taxonomy.conn.execute(
-        "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-        ("solo-doc", topic_id),
-    )
-    db.taxonomy.conn.commit()
+    topic_id = _seed_topic(db.taxonomy, "solo-topic", collection="proj", doc_count=1)
+    _seed_assignment(db.taxonomy, "solo-doc", topic_id)
 
     assert db.delete(project="proj", title="solo-doc") is True
 
     # Assignment gone
-    ta_count = db.taxonomy.conn.execute(
-        "SELECT COUNT(*) FROM topic_assignments WHERE topic_id = ?", (topic_id,)
-    ).fetchone()[0]
-    assert ta_count == 0
+    assert db.taxonomy.get_all_topic_doc_ids(topic_id) == []
 
     # Topic also gone (empty after the cascade)
-    topic_count = db.taxonomy.conn.execute(
-        "SELECT COUNT(*) FROM topics WHERE id = ?", (topic_id,)
-    ).fetchone()[0]
-    assert topic_count == 0
+    assert db.taxonomy.get_topic_by_id(topic_id) is None
 
 
 def test_memory_delete_cascade_scoped_to_project(db: T2Database) -> None:
@@ -1237,54 +1234,32 @@ def test_memory_delete_cascade_scoped_to_project(db: T2Database) -> None:
     db.put(project="proj-b", title="shared-title", content="content under proj-b")
 
     # Two topics, one per project, both assigning the shared title
-    db.taxonomy.conn.executemany(
-        "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
-        [
-            ("topic-a", "proj-a", 1, "2026-01-01T00:00:00Z"),
-            ("topic-b", "proj-b", 1, "2026-01-01T00:00:00Z"),
-        ],
-    )
-    topic_a_id, topic_b_id = [
-        r[0] for r in db.taxonomy.conn.execute(
-            "SELECT id FROM topics ORDER BY id DESC LIMIT 2"
-        ).fetchall()
-    ][::-1]
-    db.taxonomy.conn.executemany(
-        "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-        [("shared-title", topic_a_id), ("shared-title", topic_b_id)],
-    )
-    db.taxonomy.conn.commit()
+    topic_a_id = _seed_topic(db.taxonomy, "topic-a", collection="proj-a", doc_count=1)
+    topic_b_id = _seed_topic(db.taxonomy, "topic-b", collection="proj-b", doc_count=1)
+    _seed_assignment(db.taxonomy, "shared-title", topic_a_id)
+    _seed_assignment(db.taxonomy, "shared-title", topic_b_id)
 
     # Delete only the proj-a entry
     assert db.delete(project="proj-a", title="shared-title") is True
 
     # topic-a's assignment removed, topic-b's assignment untouched
-    remaining = db.taxonomy.conn.execute(
-        "SELECT topic_id FROM topic_assignments WHERE doc_id = 'shared-title'"
-    ).fetchall()
-    assert [r[0] for r in remaining] == [topic_b_id]
+    assert db.taxonomy.get_all_topic_doc_ids(topic_a_id) == []
+    assert db.taxonomy.get_all_topic_doc_ids(topic_b_id) == ["shared-title"]
 
 
+@pytest.mark.skipif(
+    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    reason="dies-roster: T2Database.delete(id=...) resolves the row under the raw memory._lock (SQLite-only facade branch) and dies at the RDR-155 P4b flip",
+)
 def test_memory_delete_by_id_cascades(db: T2Database) -> None:
     """Facade resolves project/title from --id before cascading."""
     row_id = db.put(project="proj", title="by-id", content="delete via numeric id")
-    db.taxonomy.conn.execute(
-        "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
-        ("id-topic", "proj", 1, "2026-01-01T00:00:00Z"),
-    )
-    topic_id = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    db.taxonomy.conn.execute(
-        "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-        ("by-id", topic_id),
-    )
-    db.taxonomy.conn.commit()
+    topic_id = _seed_topic(db.taxonomy, "id-topic", collection="proj", doc_count=1)
+    _seed_assignment(db.taxonomy, "by-id", topic_id)
 
     assert db.delete(id=row_id) is True
 
-    ta_count = db.taxonomy.conn.execute(
-        "SELECT COUNT(*) FROM topic_assignments"
-    ).fetchone()[0]
-    assert ta_count == 0
+    assert db.taxonomy.get_all_topic_doc_ids(topic_id) == []
 
 
 def test_cli_taxonomy_list(tmp_path: Path) -> None:
@@ -1297,17 +1272,8 @@ def test_cli_taxonomy_list(tmp_path: Path) -> None:
 
     db_path = tmp_path / "memory.db"
     with T2Database(db_path) as db:
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            ("Search Methods", "proj", 5, "2026-01-01T00:00:00Z"),
-        )
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            ("Database Queries", "proj", 3, "2026-01-01T00:00:00Z"),
-        )
-        db.taxonomy.conn.commit()
+        _seed_topic(db.taxonomy, "Search Methods", collection="proj", doc_count=5)
+        _seed_topic(db.taxonomy, "Database Queries", collection="proj", doc_count=3)
 
     runner = CliRunner()
     with patch(
@@ -1337,11 +1303,7 @@ def test_cli_taxonomy_status_warns_on_missing_projection(tmp_path: Path) -> None
 
     db_path = tmp_path / "memory.db"
     with T2Database(db_path) as db:
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES ('t1', 'docs__alpha', 10, '2026-01-01T00:00:00Z')"
-        )
-        db.taxonomy.conn.commit()
+        _seed_topic(db.taxonomy, "t1", collection="docs__alpha", doc_count=10)
         # No topic_assignments with assigned_by='projection' exist.
 
     runner = CliRunner()
@@ -1376,18 +1338,9 @@ def test_cli_taxonomy_status_missing_projection_count_not_truncated_by_limit(
     with T2Database(db_path) as db:
         # Three collections, descending doc_count. The top-1 has a
         # projection; the other two (below the -n 1 cut-off) do not.
-        db.taxonomy.conn.executescript(
-            """
-            INSERT INTO topics (label, collection, doc_count, created_at) VALUES
-                ('big',    'docs__big',    100, '2026-01-01T00:00:00Z'),
-                ('medium', 'docs__medium',  50, '2026-01-01T00:00:00Z'),
-                ('small',  'docs__small',   10, '2026-01-01T00:00:00Z');
-            """
-        )
-        big_id = db.taxonomy.conn.execute(
-            "SELECT id FROM topics WHERE label='big'"
-        ).fetchone()[0]
-        db.taxonomy.conn.commit()
+        big_id = _seed_topic(db.taxonomy, "big", collection="docs__big", doc_count=100)
+        _seed_topic(db.taxonomy, "medium", collection="docs__medium", doc_count=50)
+        _seed_topic(db.taxonomy, "small", collection="docs__small", doc_count=10)
         db.taxonomy.assign_topic(
             "doc-1", big_id, assigned_by="projection",
             similarity=0.9, source_collection="docs__big",
@@ -1407,6 +1360,10 @@ def test_cli_taxonomy_status_missing_projection_count_not_truncated_by_limit(
     )
 
 
+@pytest.mark.skipif(
+    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    reason="dies-roster: raw-SQLite hook_failures table + migrations (status skips the read in service mode) dies at the RDR-155 P4b flip",
+)
 def test_cli_taxonomy_status_surfaces_recent_hook_failures(tmp_path: Path) -> None:
     """GH #251: status emits an Action line when hook_failures has recent rows.
 
@@ -1474,6 +1431,10 @@ def test_cli_taxonomy_status_surfaces_recent_hook_failures(tmp_path: Path) -> No
     assert "some_old_hook" not in result.output
 
 
+@pytest.mark.skipif(
+    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    reason="dies-roster: raw-SQLite hook_failures table + migrations (status skips the read in service mode) dies at the RDR-155 P4b flip",
+)
 def test_cli_taxonomy_status_surfaces_batch_doc_count(tmp_path: Path) -> None:
     """RDR-095: batch-shape hook_failures rows surface their full
     doc-affected count (one row representing N documents) in the
@@ -1549,6 +1510,10 @@ def test_cli_taxonomy_status_surfaces_batch_doc_count(tmp_path: Path) -> None:
     assert "taxonomy_assign_hook=1" in result.output
 
 
+@pytest.mark.skipif(
+    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    reason="dies-roster: raw-SQLite hook_failures table + migrations (status skips the read in service mode) dies at the RDR-155 P4b flip",
+)
 def test_cli_taxonomy_status_handles_malformed_batch_doc_ids(
     tmp_path: Path,
 ) -> None:
@@ -1620,14 +1585,7 @@ def test_cli_taxonomy_status_silent_when_hook_failures_table_missing(
 
     db_path = tmp_path / "memory.db"
     with T2Database(db_path) as db:
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES ('t1', 'docs__alpha', 10, '2026-01-01T00:00:00Z')"
-        )
-        tid = db.taxonomy.conn.execute(
-            "SELECT id FROM topics WHERE label='t1'"
-        ).fetchone()[0]
-        db.taxonomy.conn.commit()
+        tid = _seed_topic(db.taxonomy, "t1", collection="docs__alpha", doc_count=10)
         db.taxonomy.assign_topic(
             "doc-1", tid, assigned_by="projection",
             similarity=0.9, source_collection="docs__alpha",
@@ -1656,15 +1614,10 @@ def test_cli_taxonomy_status_quiet_when_projection_present(tmp_path: Path) -> No
 
     db_path = tmp_path / "memory.db"
     with T2Database(db_path) as db:
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at, "
-            "review_status) VALUES ('t1', 'docs__alpha', 10, "
-            "'2026-01-01T00:00:00Z', 'accepted')"
+        tid = _seed_topic(
+            db.taxonomy, "t1", collection="docs__alpha", doc_count=10,
+            review_status="accepted",
         )
-        tid = db.taxonomy.conn.execute(
-            "SELECT id FROM topics WHERE label='t1'"
-        ).fetchone()[0]
-        db.taxonomy.conn.commit()
         db.taxonomy.assign_topic(
             "doc-1", tid, assigned_by="projection",
             similarity=0.8, source_collection="docs__alpha",
@@ -1695,17 +1648,8 @@ def test_cli_taxonomy_list_shows_collection_at_root(tmp_path: Path) -> None:
 
     db_path = tmp_path / "memory.db"
     with T2Database(db_path) as db:
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            ("Alpha topic", "docs__alpha", 10, "2026-01-01T00:00:00Z"),
-        )
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            ("Beta topic", "docs__beta", 5, "2026-01-01T00:00:00Z"),
-        )
-        db.taxonomy.conn.commit()
+        _seed_topic(db.taxonomy, "Alpha topic", collection="docs__alpha", doc_count=10)
+        _seed_topic(db.taxonomy, "Beta topic", collection="docs__beta", doc_count=5)
 
     runner = CliRunner()
     with patch(
@@ -1724,6 +1668,10 @@ def test_cli_taxonomy_list_shows_collection_at_root(tmp_path: Path) -> None:
 # ── discover_for_collection + CLI (RDR-070, nexus-2dq) ──────────────────────
 
 
+@pytest.mark.skipif(
+    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    reason="dies-roster: raw-path discover_for_collection over a raw chroma client + t2_index_write routing (service branch routes _discover_via_service against a service T3) dies at the RDR-155 P4b flip",
+)
 def test_discover_for_collection(
     db: T2Database, chroma_client: chromadb.ClientAPI, monkeypatch,
 ) -> None:
@@ -1776,6 +1724,10 @@ def test_discover_for_collection(
     )
 
 
+@pytest.mark.skipif(
+    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    reason="dies-roster: raw-path discover_for_collection over a raw chroma client + t2_index_write routing (service branch routes _discover_via_service against a service T3) dies at the RDR-155 P4b flip",
+)
 def test_discover_for_collection_force(
     db: T2Database, chroma_client: chromadb.ClientAPI, monkeypatch,
 ) -> None:
@@ -1819,10 +1771,7 @@ def test_discover_for_collection_force(
     # force=True should replace topics, not accumulate
     assert len(ids_after_second) == count2
     # Assignments should be consistent — not doubled
-    total_assignments = db.taxonomy.conn.execute(
-        "SELECT COUNT(*) FROM topic_assignments WHERE topic_id IN "
-        "(SELECT id FROM topics WHERE collection = 'test__force')"
-    ).fetchone()[0]
+    total_assignments = _collection_assignment_count(db.taxonomy, "test__force")
     assert total_assignments <= 60, "force rebuild should replace, not accumulate"
 
 
@@ -2120,6 +2069,10 @@ class TestSklearnHdbscanSmoke:
 # ── Review infrastructure (RDR-070, nexus-lbu) ────────────────────────────────
 
 
+@pytest.mark.skipif(
+    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    reason="dies-roster: raw PRAGMA/schema-default introspection of the SQLite twin dies at the RDR-155 P4b flip",
+)
 class TestReviewSchema:
     """Schema migrations for review_status and terms columns."""
 
@@ -2158,16 +2111,12 @@ class TestReviewMethods:
 
     def test_get_unreviewed_topics(self, db: T2Database) -> None:
         """get_unreviewed_topics returns only pending topics."""
-        db.taxonomy.conn.executemany(
-            "INSERT INTO topics (label, collection, doc_count, created_at, review_status) "
-            "VALUES (?, ?, ?, ?, ?)",
-            [
-                ("pending-topic", "proj", 5, "2026-01-01T00:00:00Z", "pending"),
-                ("accepted-topic", "proj", 3, "2026-01-01T00:00:00Z", "accepted"),
-                ("deleted-topic", "proj", 1, "2026-01-01T00:00:00Z", "deleted"),
-            ],
-        )
-        db.taxonomy.conn.commit()
+        _seed_topic(db.taxonomy, "pending-topic", collection="proj", doc_count=5,
+                    review_status="pending")
+        _seed_topic(db.taxonomy, "accepted-topic", collection="proj", doc_count=3,
+                    review_status="accepted")
+        _seed_topic(db.taxonomy, "deleted-topic", collection="proj", doc_count=1,
+                    review_status="deleted")
 
         unreviewed = db.taxonomy.get_unreviewed_topics(collection="proj")
         assert len(unreviewed) == 1
@@ -2176,182 +2125,81 @@ class TestReviewMethods:
     def test_get_unreviewed_topics_limit(self, db: T2Database) -> None:
         """get_unreviewed_topics respects limit."""
         for i in range(10):
-            db.taxonomy.conn.execute(
-                "INSERT INTO topics (label, collection, doc_count, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                (f"topic-{i}", "proj", i + 1, "2026-01-01T00:00:00Z"),
-            )
-        db.taxonomy.conn.commit()
+            _seed_topic(db.taxonomy, f"topic-{i}", collection="proj",
+                        doc_count=i + 1)
 
         result = db.taxonomy.get_unreviewed_topics(collection="proj", limit=3)
         assert len(result) == 3
 
     def test_get_unreviewed_topics_all_collections(self, db: T2Database) -> None:
         """get_unreviewed_topics with empty collection returns all."""
-        db.taxonomy.conn.executemany(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            [
-                ("topic-a", "coll-a", 5, "2026-01-01T00:00:00Z"),
-                ("topic-b", "coll-b", 3, "2026-01-01T00:00:00Z"),
-            ],
-        )
-        db.taxonomy.conn.commit()
+        _seed_topic(db.taxonomy, "topic-a", collection="coll-a", doc_count=5)
+        _seed_topic(db.taxonomy, "topic-b", collection="coll-b", doc_count=3)
 
         result = db.taxonomy.get_unreviewed_topics()
         assert len(result) == 2
 
     def test_mark_topic_reviewed(self, db: T2Database) -> None:
         """mark_topic_reviewed updates review_status."""
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            ("test", "proj", 5, "2026-01-01T00:00:00Z"),
-        )
-        topic_id = db.taxonomy.conn.execute(
-            "SELECT last_insert_rowid()"
-        ).fetchone()[0]
-        db.taxonomy.conn.commit()
+        topic_id = _seed_topic(db.taxonomy, "test", collection="proj", doc_count=5)
 
         db.taxonomy.mark_topic_reviewed(topic_id, "accepted")
 
-        row = db.taxonomy.conn.execute(
-            "SELECT review_status FROM topics WHERE id = ?", (topic_id,)
-        ).fetchone()
-        assert row[0] == "accepted"
+        assert db.taxonomy.get_topic_by_id(topic_id)["review_status"] == "accepted"
 
     def test_rename_topic(self, db: T2Database) -> None:
         """rename_topic updates label and sets review_status='accepted'."""
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            ("old-label", "proj", 5, "2026-01-01T00:00:00Z"),
-        )
-        topic_id = db.taxonomy.conn.execute(
-            "SELECT last_insert_rowid()"
-        ).fetchone()[0]
-        db.taxonomy.conn.commit()
+        topic_id = _seed_topic(db.taxonomy, "old-label", collection="proj",
+                               doc_count=5)
 
         db.taxonomy.rename_topic(topic_id, "new-label")
 
-        row = db.taxonomy.conn.execute(
-            "SELECT label, review_status FROM topics WHERE id = ?", (topic_id,)
-        ).fetchone()
-        assert row[0] == "new-label"
-        assert row[1] == "accepted"
+        topic = db.taxonomy.get_topic_by_id(topic_id)
+        assert topic["label"] == "new-label"
+        assert topic["review_status"] == "accepted"
 
     def test_delete_topic(self, db: T2Database) -> None:
         """delete_topic removes topic and its assignments."""
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            ("doomed", "proj", 1, "2026-01-01T00:00:00Z"),
-        )
-        topic_id = db.taxonomy.conn.execute(
-            "SELECT last_insert_rowid()"
-        ).fetchone()[0]
-        db.taxonomy.conn.execute(
-            "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-            ("doc-1", topic_id),
-        )
-        db.taxonomy.conn.commit()
+        topic_id = _seed_topic(db.taxonomy, "doomed", collection="proj", doc_count=1)
+        _seed_assignment(db.taxonomy, "doc-1", topic_id)
 
         db.taxonomy.delete_topic(topic_id)
 
-        assert (
-            db.taxonomy.conn.execute(
-                "SELECT COUNT(*) FROM topics WHERE id = ?", (topic_id,)
-            ).fetchone()[0]
-            == 0
-        )
-        assert (
-            db.taxonomy.conn.execute(
-                "SELECT COUNT(*) FROM topic_assignments WHERE topic_id = ?",
-                (topic_id,),
-            ).fetchone()[0]
-            == 0
-        )
+        assert db.taxonomy.get_topic_by_id(topic_id) is None
+        assert db.taxonomy.get_all_topic_doc_ids(topic_id) == []
 
     def test_merge_topics(self, db: T2Database) -> None:
         """merge_topics moves assignments from source to target, deletes source."""
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            ("source", "proj", 2, "2026-01-01T00:00:00Z"),
-        )
-        source_id = db.taxonomy.conn.execute(
-            "SELECT last_insert_rowid()"
-        ).fetchone()[0]
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            ("target", "proj", 3, "2026-01-01T00:00:00Z"),
-        )
-        target_id = db.taxonomy.conn.execute(
-            "SELECT last_insert_rowid()"
-        ).fetchone()[0]
-
-        db.taxonomy.conn.executemany(
-            "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-            [("doc-a", source_id), ("doc-b", source_id), ("doc-c", target_id)],
-        )
-        db.taxonomy.conn.commit()
+        source_id = _seed_topic(db.taxonomy, "source", collection="proj", doc_count=2)
+        target_id = _seed_topic(db.taxonomy, "target", collection="proj", doc_count=3)
+        _seed_assignment(db.taxonomy, "doc-a", source_id)
+        _seed_assignment(db.taxonomy, "doc-b", source_id)
+        _seed_assignment(db.taxonomy, "doc-c", target_id)
 
         db.taxonomy.merge_topics(source_id, target_id)
 
         # Source topic deleted
-        assert (
-            db.taxonomy.conn.execute(
-                "SELECT COUNT(*) FROM topics WHERE id = ?", (source_id,)
-            ).fetchone()[0]
-            == 0
-        )
+        assert db.taxonomy.get_topic_by_id(source_id) is None
         # Target doc_count = actual assignment count (3 distinct docs)
-        target_row = db.taxonomy.conn.execute(
-            "SELECT doc_count FROM topics WHERE id = ?", (target_id,)
-        ).fetchone()
-        assert target_row[0] == 3
+        assert db.taxonomy.get_topic_by_id(target_id)["doc_count"] == 3
         # All assignments on target
-        docs = db.taxonomy.conn.execute(
-            "SELECT doc_id FROM topic_assignments WHERE topic_id = ? ORDER BY doc_id",
-            (target_id,),
-        ).fetchall()
-        assert [r[0] for r in docs] == ["doc-a", "doc-b", "doc-c"]
+        assert sorted(db.taxonomy.get_all_topic_doc_ids(target_id)) == [
+            "doc-a", "doc-b", "doc-c",
+        ]
 
     def test_merge_topics_dedup(self, db: T2Database) -> None:
         """merge_topics handles docs assigned to both source and target."""
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            ("source", "proj", 1, "2026-01-01T00:00:00Z"),
-        )
-        source_id = db.taxonomy.conn.execute(
-            "SELECT last_insert_rowid()"
-        ).fetchone()[0]
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            ("target", "proj", 1, "2026-01-01T00:00:00Z"),
-        )
-        target_id = db.taxonomy.conn.execute(
-            "SELECT last_insert_rowid()"
-        ).fetchone()[0]
+        source_id = _seed_topic(db.taxonomy, "source", collection="proj", doc_count=1)
+        target_id = _seed_topic(db.taxonomy, "target", collection="proj", doc_count=1)
 
         # Same doc assigned to both topics
-        db.taxonomy.conn.executemany(
-            "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-            [("shared-doc", source_id), ("shared-doc", target_id)],
-        )
-        db.taxonomy.conn.commit()
+        _seed_assignment(db.taxonomy, "shared-doc", source_id)
+        _seed_assignment(db.taxonomy, "shared-doc", target_id)
 
         db.taxonomy.merge_topics(source_id, target_id)
 
         # Only one assignment for the shared doc on target
-        count = db.taxonomy.conn.execute(
-            "SELECT COUNT(*) FROM topic_assignments WHERE doc_id = 'shared-doc' AND topic_id = ?",
-            (target_id,),
-        ).fetchone()[0]
-        assert count == 1
+        assert db.taxonomy.get_all_topic_doc_ids(target_id) == ["shared-doc"]
 
     # ── RDR-164 P5 (nexus-c6vze): dead Chroma centroid cleanup removed ────────
     # nexus-5kl1b closed obsolete: post-RDR-155 P4a the raw-Chroma
@@ -2361,56 +2209,30 @@ class TestReviewMethods:
     def test_delete_topic_ignores_chroma_client(self, db: T2Database) -> None:
         from unittest.mock import MagicMock
 
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
-            ("doomed", "proj", 1, "2026-01-01T00:00:00Z"),
-        )
-        tid = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        db.taxonomy.conn.commit()
+        tid = _seed_topic(db.taxonomy, "doomed", collection="proj", doc_count=1)
         mock_chroma = MagicMock()
 
         db.taxonomy.delete_topic(tid, chroma_client=mock_chroma)
 
         # Relational delete still happens; the retired Chroma cleanup does not.
-        assert db.taxonomy.conn.execute(
-            "SELECT COUNT(*) FROM topics WHERE id = ?", (tid,)
-        ).fetchone()[0] == 0
+        assert db.taxonomy.get_topic_by_id(tid) is None
         mock_chroma.get_collection.assert_not_called()
 
     def test_merge_topics_ignores_chroma_client(self, db: T2Database) -> None:
         from unittest.mock import MagicMock
 
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
-            ("source", "proj", 1, "2026-01-01T00:00:00Z"),
-        )
-        source_id = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) VALUES (?, ?, ?, ?)",
-            ("target", "proj", 1, "2026-01-01T00:00:00Z"),
-        )
-        target_id = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        db.taxonomy.conn.commit()
+        source_id = _seed_topic(db.taxonomy, "source", collection="proj", doc_count=1)
+        target_id = _seed_topic(db.taxonomy, "target", collection="proj", doc_count=1)
         mock_chroma = MagicMock()
 
         db.taxonomy.merge_topics(source_id, target_id, chroma_client=mock_chroma)
 
-        assert db.taxonomy.conn.execute(
-            "SELECT COUNT(*) FROM topics WHERE id = ?", (source_id,)
-        ).fetchone()[0] == 0
+        assert db.taxonomy.get_topic_by_id(source_id) is None
         mock_chroma.get_collection.assert_not_called()
 
     def test_get_topic_by_id(self, db: T2Database) -> None:
         """get_topic_by_id returns a single topic dict or None."""
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            ("my-topic", "proj", 7, "2026-01-01T00:00:00Z"),
-        )
-        topic_id = db.taxonomy.conn.execute(
-            "SELECT last_insert_rowid()"
-        ).fetchone()[0]
-        db.taxonomy.conn.commit()
+        topic_id = _seed_topic(db.taxonomy, "my-topic", collection="proj", doc_count=7)
 
         result = db.taxonomy.get_topic_by_id(topic_id)
         assert result is not None
@@ -2421,20 +2243,9 @@ class TestReviewMethods:
 
     def test_get_topic_doc_ids(self, db: T2Database) -> None:
         """get_topic_doc_ids returns limited doc_ids for a topic."""
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            ("test", "proj", 5, "2026-01-01T00:00:00Z"),
-        )
-        topic_id = db.taxonomy.conn.execute(
-            "SELECT last_insert_rowid()"
-        ).fetchone()[0]
+        topic_id = _seed_topic(db.taxonomy, "test", collection="proj", doc_count=5)
         for i in range(5):
-            db.taxonomy.conn.execute(
-                "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-                (f"doc-{i}", topic_id),
-            )
-        db.taxonomy.conn.commit()
+            _seed_assignment(db.taxonomy, f"doc-{i}", topic_id)
 
         result = db.taxonomy.get_topic_doc_ids(topic_id, limit=3)
         assert len(result) == 3
@@ -2468,12 +2279,13 @@ class TestDiscoverStoresTerms:
             "test__coll", doc_ids, embeddings, texts, chroma_client,
         )
 
-        rows = db.taxonomy.conn.execute(
-            "SELECT terms FROM topics WHERE terms IS NOT NULL"
-        ).fetchall()
+        rows = [
+            t["terms"] for t in db.taxonomy.get_topics_for_collection("test__coll")
+            if t.get("terms")
+        ]
         assert len(rows) >= 2
-        for row in rows:
-            terms = json.loads(row[0])
+        for raw in rows:
+            terms = json.loads(raw)
             assert isinstance(terms, list)
             assert len(terms) >= 3
 
@@ -2486,28 +2298,16 @@ class TestReviewCLI:
         import json
 
         with T2Database(db_path) as db:
-            db.taxonomy.conn.execute(
-                "INSERT INTO topics "
-                "(label, collection, doc_count, created_at, review_status, terms) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    "machine learning",
-                    "proj",
-                    5,
-                    "2026-01-01T00:00:00Z",
-                    "pending",
-                    json.dumps(["neural", "network", "gradient", "loss", "model"]),
-                ),
+            topic_id = _seed_topic(
+                db.taxonomy,
+                "machine learning",
+                collection="proj",
+                doc_count=5,
+                review_status="pending",
+                terms=json.dumps(["neural", "network", "gradient", "loss", "model"]),
             )
-            topic_id = db.taxonomy.conn.execute(
-                "SELECT last_insert_rowid()"
-            ).fetchone()[0]
             for i in range(3):
-                db.taxonomy.conn.execute(
-                    "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-                    (f"src/model_{i}.py", topic_id),
-                )
-            db.taxonomy.conn.commit()
+                _seed_assignment(db.taxonomy, f"src/model_{i}.py", topic_id)
         return topic_id
 
     @staticmethod
@@ -2533,7 +2333,7 @@ class TestReviewCLI:
         from nexus.commands.taxonomy_cmd import taxonomy
 
         db_path = tmp_path / "memory.db"
-        self._seed_topics(db_path)
+        topic_id = self._seed_topics(db_path)
 
         runner = CliRunner()
         with (
@@ -2546,9 +2346,7 @@ class TestReviewCLI:
 
         assert result.exit_code == 0, result.output
         with T2Database(db_path) as db:
-            status = db.taxonomy.conn.execute(
-                "SELECT review_status FROM topics LIMIT 1"
-            ).fetchone()[0]
+            status = db.taxonomy.get_topic_by_id(topic_id)["review_status"]
         assert status == "accepted"
 
     def test_review_skip(self, tmp_path: Path) -> None:
@@ -2560,7 +2358,7 @@ class TestReviewCLI:
         from nexus.commands.taxonomy_cmd import taxonomy
 
         db_path = tmp_path / "memory.db"
-        self._seed_topics(db_path)
+        topic_id = self._seed_topics(db_path)
 
         runner = CliRunner()
         with patch(
@@ -2572,9 +2370,7 @@ class TestReviewCLI:
 
         assert result.exit_code == 0, result.output
         with T2Database(db_path) as db:
-            status = db.taxonomy.conn.execute(
-                "SELECT review_status FROM topics LIMIT 1"
-            ).fetchone()[0]
+            status = db.taxonomy.get_topic_by_id(topic_id)["review_status"]
         assert status == "pending"
 
     def test_review_rename(self, tmp_path: Path) -> None:
@@ -2587,7 +2383,7 @@ class TestReviewCLI:
         from nexus.commands.taxonomy_cmd import taxonomy
 
         db_path = tmp_path / "memory.db"
-        self._seed_topics(db_path)
+        topic_id = self._seed_topics(db_path)
 
         runner = CliRunner()
         with (
@@ -2602,11 +2398,9 @@ class TestReviewCLI:
 
         assert result.exit_code == 0, result.output
         with T2Database(db_path) as db:
-            row = db.taxonomy.conn.execute(
-                "SELECT label, review_status FROM topics LIMIT 1"
-            ).fetchone()
-        assert row[0] == "deep learning"
-        assert row[1] == "accepted"
+            topic = db.taxonomy.get_topic_by_id(topic_id)
+        assert topic["label"] == "deep learning"
+        assert topic["review_status"] == "accepted"
 
     def test_review_delete(self, tmp_path: Path) -> None:
         """Delete action removes topic and assignments."""
@@ -2618,7 +2412,7 @@ class TestReviewCLI:
         from nexus.commands.taxonomy_cmd import taxonomy
 
         db_path = tmp_path / "memory.db"
-        self._seed_topics(db_path)
+        topic_id = self._seed_topics(db_path)
 
         runner = CliRunner()
         with (
@@ -2631,10 +2425,8 @@ class TestReviewCLI:
 
         assert result.exit_code == 0, result.output
         with T2Database(db_path) as db:
-            count = db.taxonomy.conn.execute(
-                "SELECT COUNT(*) FROM topics"
-            ).fetchone()[0]
-        assert count == 0
+            assert db.taxonomy.get_topic_by_id(topic_id) is None
+            assert db.taxonomy.get_topics_for_collection("proj") == []
 
     def test_review_no_unreviewed(self, tmp_path: Path) -> None:
         """Shows 'all done' message when no topics need review."""
@@ -2673,44 +2465,18 @@ class TestReviewCLI:
         db_path = tmp_path / "memory.db"
         with T2Database(db_path) as db:
             # Source topic (pending)
-            db.taxonomy.conn.execute(
-                "INSERT INTO topics "
-                "(label, collection, doc_count, created_at, review_status, terms) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    "source topic",
-                    "proj",
-                    2,
-                    "2026-01-01T00:00:00Z",
-                    "pending",
-                    json.dumps(["a", "b", "c"]),
-                ),
+            source_id = _seed_topic(
+                db.taxonomy, "source topic", collection="proj", doc_count=2,
+                review_status="pending", terms=json.dumps(["a", "b", "c"]),
             )
-            source_id = db.taxonomy.conn.execute(
-                "SELECT last_insert_rowid()"
-            ).fetchone()[0]
             # Target topic (already accepted)
-            db.taxonomy.conn.execute(
-                "INSERT INTO topics "
-                "(label, collection, doc_count, created_at, review_status, terms) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    "target topic",
-                    "proj",
-                    3,
-                    "2026-01-01T00:00:00Z",
-                    "accepted",
-                    json.dumps(["d", "e", "f"]),
-                ),
+            target_id = _seed_topic(
+                db.taxonomy, "target topic", collection="proj", doc_count=3,
+                review_status="accepted", terms=json.dumps(["d", "e", "f"]),
             )
-            target_id = db.taxonomy.conn.execute(
-                "SELECT last_insert_rowid()"
-            ).fetchone()[0]
-            db.taxonomy.conn.executemany(
-                "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-                [("doc-a", source_id), ("doc-b", source_id), ("doc-c", target_id)],
-            )
-            db.taxonomy.conn.commit()
+            _seed_assignment(db.taxonomy, "doc-a", source_id)
+            _seed_assignment(db.taxonomy, "doc-b", source_id)
+            _seed_assignment(db.taxonomy, "doc-c", target_id)
 
         runner = CliRunner()
         with (
@@ -2727,18 +2493,10 @@ class TestReviewCLI:
         assert result.exit_code == 0, result.output
         with T2Database(db_path) as db:
             # Source deleted
-            assert (
-                db.taxonomy.conn.execute(
-                    "SELECT COUNT(*) FROM topics WHERE id = ?", (source_id,)
-                ).fetchone()[0]
-                == 0
-            )
+            assert db.taxonomy.get_topic_by_id(source_id) is None
             # All docs on target
-            docs = db.taxonomy.conn.execute(
-                "SELECT doc_id FROM topic_assignments WHERE topic_id = ? ORDER BY doc_id",
-                (target_id,),
-            ).fetchall()
-            assert {r[0] for r in docs} == {"doc-a", "doc-b", "doc-c"}
+            docs = db.taxonomy.get_all_topic_doc_ids(target_id)
+            assert set(docs) == {"doc-a", "doc-b", "doc-c"}
 
 
 # ── Manual taxonomy operations CLI (RDR-070, nexus-c3w) ───────────────────
@@ -2748,12 +2506,7 @@ class TestResolveLabel:
     """resolve_label looks up topic_id by label."""
 
     def test_resolve_existing(self, db: T2Database) -> None:
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            ("my-topic", "proj", 5, "2026-01-01T00:00:00Z"),
-        )
-        db.taxonomy.conn.commit()
+        _seed_topic(db.taxonomy, "my-topic", collection="proj", doc_count=5)
         result = db.taxonomy.resolve_label("my-topic", collection="proj")
         assert result is not None
         assert isinstance(result, int)
@@ -2762,15 +2515,8 @@ class TestResolveLabel:
         assert db.taxonomy.resolve_label("nonexistent") is None
 
     def test_resolve_scoped_by_collection(self, db: T2Database) -> None:
-        db.taxonomy.conn.executemany(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            [
-                ("shared-label", "coll-a", 3, "2026-01-01T00:00:00Z"),
-                ("shared-label", "coll-b", 2, "2026-01-01T00:00:00Z"),
-            ],
-        )
-        db.taxonomy.conn.commit()
+        _seed_topic(db.taxonomy, "shared-label", collection="coll-a", doc_count=3)
+        _seed_topic(db.taxonomy, "shared-label", collection="coll-b", doc_count=2)
         result = db.taxonomy.resolve_label("shared-label", collection="coll-b")
         assert result is not None
         topic = db.taxonomy.get_topic_by_id(result)
@@ -2791,14 +2537,9 @@ class TestSplitTopic:
         from nexus.db.local_ef import LocalEmbeddingFunction
 
         # Create parent topic with mixed docs
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            ("mixed-topic", "test__split", 30, "2026-01-01T00:00:00Z"),
+        parent_id = _seed_topic(
+            db.taxonomy, "mixed-topic", collection="test__split", doc_count=30,
         )
-        parent_id = db.taxonomy.conn.execute(
-            "SELECT last_insert_rowid()"
-        ).fetchone()[0]
 
         # Two domains — split should separate them
         texts_a = [f"machine learning gradient descent {i}" for i in range(15)]
@@ -2807,11 +2548,7 @@ class TestSplitTopic:
         doc_ids = [f"doc-{i}" for i in range(30)]
 
         for did in doc_ids:
-            db.taxonomy.conn.execute(
-                "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-                (did, parent_id),
-            )
-        db.taxonomy.conn.commit()
+            _seed_assignment(db.taxonomy, did, parent_id)
 
         # Seed the T3 collection with docs
         ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
@@ -2821,24 +2558,28 @@ class TestSplitTopic:
         emb_list = ef(texts)
         coll.add(ids=doc_ids, documents=texts, embeddings=emb_list)
 
-        # Seed a parent centroid in taxonomy__centroids
-        centroid_coll = chroma.get_or_create_collection(
-            "taxonomy__centroids",
-            embedding_function=None,
-            metadata={"hnsw:space": "cosine"},
-        )
+        # Seed a parent centroid in taxonomy__centroids (raw chroma leg
+        # only — on the engine substrate centroids route through the
+        # centroid port and split does not need the parent centroid to
+        # pre-exist).
         import numpy as _np
-        parent_centroid = _np.array(emb_list).mean(axis=0).tolist()
-        centroid_coll.add(
-            ids=[f"test__split:{parent_id}"],
-            embeddings=[parent_centroid],
-            metadatas=[{
-                "topic_id": parent_id,
-                "label": "mixed-topic",
-                "collection": "test__split",
-                "doc_count": 30,
-            }],
-        )
+        if has_raw_access(db.taxonomy):
+            centroid_coll = chroma.get_or_create_collection(
+                "taxonomy__centroids",
+                embedding_function=None,
+                metadata={"hnsw:space": "cosine"},
+            )
+            parent_centroid = _np.array(emb_list).mean(axis=0).tolist()
+            centroid_coll.add(
+                ids=[f"test__split:{parent_id}"],
+                embeddings=[parent_centroid],
+                metadatas=[{
+                    "topic_id": parent_id,
+                    "label": "mixed-topic",
+                    "collection": "test__split",
+                    "doc_count": 30,
+                }],
+            )
 
         child_count = db.taxonomy.split_topic(
             parent_id, k=2, chroma_client=chroma,
@@ -2855,14 +2596,8 @@ class TestSplitTopic:
         assert len(parent_docs) == 0
 
         # Centroids: parent removed, children added
-        centroid_coll = chroma.get_collection(
-            "taxonomy__centroids", embedding_function=None,
-        )
-        centroid_data = centroid_coll.get(
-            where={"collection": "test__split"},
-            include=["metadatas"],
-        )
-        centroid_topic_ids = {m["topic_id"] for m in centroid_data["metadatas"]}
+        state = _centroid_state(db.taxonomy, "test__split", chroma)
+        centroid_topic_ids = {int(t) for t in state["old_centroid_topic_ids"]}
         child_ids = {c["id"] for c in children}
         # Parent centroid should be gone, child centroids should exist
         assert parent_id not in centroid_topic_ids
@@ -2874,23 +2609,12 @@ class TestSplitTopic:
         GitHub #243 + bead nexus-kxez. label / relabel pre-check used
         get_topics and therefore couldn't see split sub-topics.
         """
-        db.taxonomy.conn.executescript(
-            """
-            INSERT INTO topics (label, parent_id, collection, doc_count, created_at)
-            VALUES
-                ('root-a',  NULL, 'c', 10, '2026-01-01T00:00:00Z'),
-                ('root-b',  NULL, 'c',  8, '2026-01-01T00:00:00Z');
-            """
+        parent_a = _seed_topic(db.taxonomy, "root-a", collection="c", doc_count=10)
+        _seed_topic(db.taxonomy, "root-b", collection="c", doc_count=8)
+        _seed_topic(
+            db.taxonomy, "child-a1", collection="c", doc_count=4,
+            parent_id=parent_a,
         )
-        parent_a = db.taxonomy.conn.execute(
-            "SELECT id FROM topics WHERE label='root-a'"
-        ).fetchone()[0]
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, parent_id, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            ("child-a1", parent_a, "c", 4, "2026-01-01T00:00:00Z"),
-        )
-        db.taxonomy.conn.commit()
 
         roots = db.taxonomy.get_topics()
         assert {t["label"] for t in roots} == {"root-a", "root-b"}
@@ -2900,17 +2624,12 @@ class TestSplitTopic:
 
     def test_get_all_topics_filters_by_collection(self, db: T2Database) -> None:
         """get_all_topics(collection=...) narrows to one collection."""
-        db.taxonomy.conn.executescript(
-            """
-            INSERT INTO topics (label, parent_id, collection, doc_count, created_at)
-            VALUES
-                ('a-root',  NULL, 'c1', 10, '2026-01-01T00:00:00Z'),
-                ('b-root',  NULL, 'c2',  5, '2026-01-01T00:00:00Z');
-            """
-        )
-        db.taxonomy.conn.commit()
-        assert {t["label"] for t in db.taxonomy.get_all_topics("c1")} == {"a-root"}
-        assert {t["label"] for t in db.taxonomy.get_all_topics("c2")} == {"b-root"}
+        _seed_topic(db.taxonomy, "a-root", collection="c1", doc_count=10)
+        _seed_topic(db.taxonomy, "b-root", collection="c2", doc_count=5)
+        # Keyword form: the Http twin's get_all_topics takes collection
+        # keyword-only.
+        assert {t["label"] for t in db.taxonomy.get_all_topics(collection="c1")} == {"a-root"}
+        assert {t["label"] for t in db.taxonomy.get_all_topics(collection="c2")} == {"b-root"}
 
     def test_update_topic_label_preserves_review_status(
         self, db: T2Database,
@@ -2922,19 +2641,14 @@ class TestSplitTopic:
         path but wrong for batch LLM labeling. update_topic_label is
         the label-only helper.
         """
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at, "
-            "review_status) VALUES (?, ?, ?, ?, 'pending')",
-            ("old-label", "c", 5, "2026-01-01T00:00:00Z"),
+        tid = _seed_topic(
+            db.taxonomy, "old-label", collection="c", doc_count=5,
+            review_status="pending",
         )
-        tid = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        db.taxonomy.conn.commit()
 
         db.taxonomy.update_topic_label(tid, "new-label")
-        row = db.taxonomy.conn.execute(
-            "SELECT label, review_status FROM topics WHERE id = ?", (tid,),
-        ).fetchone()
-        assert row == ("new-label", "pending")
+        topic = db.taxonomy.get_topic_by_id(tid)
+        assert (topic["label"], topic["review_status"]) == ("new-label", "pending")
 
     def test_rename_topic_still_accepts(self, db: T2Database) -> None:
         """rename_topic continues to transition review_status → accepted.
@@ -2942,19 +2656,14 @@ class TestSplitTopic:
         Used by the interactive ``nx taxonomy review`` rename path.
         Regression guard: the #241 Item 3 fix does not touch rename_topic.
         """
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at, "
-            "review_status) VALUES (?, ?, ?, ?, 'pending')",
-            ("old", "c", 5, "2026-01-01T00:00:00Z"),
+        tid = _seed_topic(
+            db.taxonomy, "old", collection="c", doc_count=5,
+            review_status="pending",
         )
-        tid = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        db.taxonomy.conn.commit()
 
         db.taxonomy.rename_topic(tid, "renamed")
-        row = db.taxonomy.conn.execute(
-            "SELECT label, review_status FROM topics WHERE id = ?", (tid,),
-        ).fetchone()
-        assert row == ("renamed", "accepted")
+        topic = db.taxonomy.get_topic_by_id(tid)
+        assert (topic["label"], topic["review_status"]) == ("renamed", "accepted")
 
     def test_get_projection_counts_by_collection(self, db: T2Database) -> None:
         """get_projection_counts_by_collection groups by source_collection.
@@ -2963,19 +2672,8 @@ class TestSplitTopic:
         but zero projection assignments.
         """
         # Seed two topics (targets) in different collections
-        db.taxonomy.conn.executescript(
-            """
-            INSERT INTO topics (label, collection, doc_count, created_at) VALUES
-                ('tgt-a', 'c_target_a', 5, '2026-01-01T00:00:00Z'),
-                ('tgt-b', 'c_target_b', 3, '2026-01-01T00:00:00Z');
-            """
-        )
-        tgt_a = db.taxonomy.conn.execute(
-            "SELECT id FROM topics WHERE label='tgt-a'"
-        ).fetchone()[0]
-        tgt_b = db.taxonomy.conn.execute(
-            "SELECT id FROM topics WHERE label='tgt-b'"
-        ).fetchone()[0]
+        tgt_a = _seed_topic(db.taxonomy, "tgt-a", collection="c_target_a", doc_count=5)
+        tgt_b = _seed_topic(db.taxonomy, "tgt-b", collection="c_target_b", doc_count=3)
 
         # Projection assignments originate from two different source collections.
         db.taxonomy.assign_topic(
@@ -3008,20 +2706,8 @@ class TestSplitTopic:
         aggregates per-chunk projection rows into topic-pair counts
         and upserts them into topic_links.
         """
-        db.taxonomy.conn.executescript(
-            """
-            INSERT INTO topics (label, collection, doc_count, created_at) VALUES
-                ('src-topic', 'c_src', 3, '2026-01-01T00:00:00Z'),
-                ('tgt-topic', 'c_tgt', 0, '2026-01-01T00:00:00Z');
-            """
-        )
-        src_id = db.taxonomy.conn.execute(
-            "SELECT id FROM topics WHERE label='src-topic'"
-        ).fetchone()[0]
-        tgt_id = db.taxonomy.conn.execute(
-            "SELECT id FROM topics WHERE label='tgt-topic'"
-        ).fetchone()[0]
-        db.taxonomy.conn.commit()
+        src_id = _seed_topic(db.taxonomy, "src-topic", collection="c_src", doc_count=3)
+        tgt_id = _seed_topic(db.taxonomy, "tgt-topic", collection="c_tgt", doc_count=0)
 
         # Three docs assigned to src-topic via hdbscan, then projected to tgt-topic.
         for doc_id in ("doc-1", "doc-2", "doc-3"):
@@ -3034,14 +2720,16 @@ class TestSplitTopic:
         written = db.taxonomy.refresh_projection_links()
         assert written == 1
 
-        row = db.taxonomy.conn.execute(
-            "SELECT link_count, link_types FROM topic_links "
-            "WHERE from_topic_id = ? AND to_topic_id = ?",
-            (min(src_id, tgt_id), max(src_id, tgt_id)),
-        ).fetchone()
-        assert row is not None
-        assert row[0] == 3  # three per-chunk projection rows
-        assert "projection" in row[1]
+        pair = (min(src_id, tgt_id), max(src_id, tgt_id))
+        count = _link_pairs(db.taxonomy, [src_id, tgt_id]).get(pair)
+        assert count == 3  # three per-chunk projection rows
+        if has_raw_access(db.taxonomy):
+            row = db.taxonomy.conn.execute(
+                "SELECT link_types FROM topic_links "
+                "WHERE from_topic_id = ? AND to_topic_id = ?",
+                pair,
+            ).fetchone()
+            assert "projection" in row[0]
 
     def test_refresh_projection_links_merges_existing_types(
         self, db: T2Database,
@@ -3049,24 +2737,16 @@ class TestSplitTopic:
         """Existing link_types (e.g. 'cites') survive the projection refresh."""
         import json as _json
 
-        db.taxonomy.conn.executescript(
-            """
-            INSERT INTO topics (label, collection, doc_count, created_at) VALUES
-                ('src', 'c1', 1, '2026-01-01T00:00:00Z'),
-                ('tgt', 'c2', 0, '2026-01-01T00:00:00Z');
-            """
-        )
-        src_id = db.taxonomy.conn.execute("SELECT id FROM topics WHERE label='src'").fetchone()[0]
-        tgt_id = db.taxonomy.conn.execute("SELECT id FROM topics WHERE label='tgt'").fetchone()[0]
+        src_id = _seed_topic(db.taxonomy, "src", collection="c1", doc_count=1)
+        tgt_id = _seed_topic(db.taxonomy, "tgt", collection="c2", doc_count=0)
         from_id = min(src_id, tgt_id)
         to_id = max(src_id, tgt_id)
 
         # Seed an existing link_types entry (simulates prior compute_topic_links)
-        db.taxonomy.conn.execute(
-            "INSERT INTO topic_links (from_topic_id, to_topic_id, link_count, link_types) "
-            "VALUES (?, ?, ?, ?)",
-            (from_id, to_id, 5, _json.dumps(["cites"])),
-        )
+        db.taxonomy.upsert_topic_links([
+            {"from_topic_id": from_id, "to_topic_id": to_id,
+             "link_count": 5, "link_types": ["cites"]},
+        ])
 
         # Assign a projection pair
         db.taxonomy.assign_topic("doc-1", src_id, assigned_by="hdbscan")
@@ -3074,44 +2754,32 @@ class TestSplitTopic:
             "doc-1", tgt_id, assigned_by="projection",
             similarity=0.9, source_collection="c1",
         )
-        db.taxonomy.conn.commit()
 
         db.taxonomy.refresh_projection_links()
 
-        row = db.taxonomy.conn.execute(
-            "SELECT link_types FROM topic_links "
-            "WHERE from_topic_id = ? AND to_topic_id = ?",
-            (from_id, to_id),
-        ).fetchone()
-        types = _json.loads(row[0])
-        assert set(types) == {"cites", "projection"}
+        # The pair still exists after the refresh on both substrates.
+        assert (from_id, to_id) in _link_pairs(db.taxonomy, [from_id, to_id])
+        if has_raw_access(db.taxonomy):
+            row = db.taxonomy.conn.execute(
+                "SELECT link_types FROM topic_links "
+                "WHERE from_topic_id = ? AND to_topic_id = ?",
+                (from_id, to_id),
+            ).fetchone()
+            types = _json.loads(row[0])
+            assert set(types) == {"cites", "projection"}
 
     def test_refresh_projection_links_no_op_when_no_projections(
         self, db: T2Database,
     ) -> None:
         """No projection rows → returns 0 and doesn't crash."""
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES ('t', 'c', 0, '2026-01-01T00:00:00Z')"
-        )
-        db.taxonomy.conn.commit()
+        _seed_topic(db.taxonomy, "t", collection="c", doc_count=0)
         assert db.taxonomy.refresh_projection_links() == 0
 
     def test_split_too_few_docs(self, db: T2Database) -> None:
         """Split with fewer docs than k returns 0."""
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            ("tiny", "proj", 2, "2026-01-01T00:00:00Z"),
-        )
-        parent_id = db.taxonomy.conn.execute(
-            "SELECT last_insert_rowid()"
-        ).fetchone()[0]
-        db.taxonomy.conn.executemany(
-            "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-            [("doc-0", parent_id), ("doc-1", parent_id)],
-        )
-        db.taxonomy.conn.commit()
+        parent_id = _seed_topic(db.taxonomy, "tiny", collection="proj", doc_count=2)
+        _seed_assignment(db.taxonomy, "doc-0", parent_id)
+        _seed_assignment(db.taxonomy, "doc-1", parent_id)
 
         result = db.taxonomy.split_topic(
             parent_id, k=3, chroma_client=make_vector_test_client(),
@@ -3166,18 +2834,11 @@ class TestSplitTopic:
         from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
 
         # Seed parent with assignments
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES ('parent', 'test__persist_split', 4, '2026-01-01T00:00:00Z')",
+        parent_id = _seed_topic(
+            db.taxonomy, "parent", collection="test__persist_split", doc_count=4,
         )
-        parent_id = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         for i in range(4):
-            db.taxonomy.conn.execute(
-                "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
-                "VALUES (?, ?, 'hdbscan')",
-                (f"doc-{i}", parent_id),
-            )
-        db.taxonomy.conn.commit()
+            _seed_assignment(db.taxonomy, f"doc-{i}", parent_id)
 
         split_result = {
             "topic_id": parent_id,
@@ -3205,18 +2866,18 @@ class TestSplitTopic:
         child_ids = db.taxonomy.persist_split(split_result)
         assert len(child_ids) == 2
         # Parent assignments gone
-        assert db.taxonomy.conn.execute(
-            "SELECT COUNT(*) FROM topic_assignments WHERE topic_id = ?", (parent_id,),
-        ).fetchone()[0] == 0
+        assert db.taxonomy.get_all_topic_doc_ids(parent_id) == []
         # Each child has its docs
         for cid in child_ids:
-            assert db.taxonomy.conn.execute(
-                "SELECT COUNT(*) FROM topic_assignments WHERE topic_id = ?", (cid,),
-            ).fetchone()[0] == 2
+            assert len(db.taxonomy.get_all_topic_doc_ids(cid)) == 2
         # Parent doc_count is 0
         parent = db.taxonomy.get_topic_by_id(parent_id)
         assert parent["doc_count"] == 0
 
+    @pytest.mark.skipif(
+        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        reason="dies-roster: raw-SQLite split_cmd t2_index_write routing (service branch persists via the engine, not t2_index_write) dies at the RDR-155 P4b flip",
+    )
     def test_split_cmd_routes_persist_via_t2_index_write(
         self, db: T2Database, chroma: chromadb.ClientAPI, monkeypatch,
     ) -> None:
@@ -3306,12 +2967,9 @@ class TestManualOpsCLI:
 
         db_path = tmp_path / "memory.db"
         with T2Database(db_path) as db:
-            db.taxonomy.conn.execute(
-                "INSERT INTO topics (label, collection, doc_count, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                ("target-topic", "proj", 5, "2026-01-01T00:00:00Z"),
+            topic_id = _seed_topic(
+                db.taxonomy, "target-topic", collection="proj", doc_count=5,
             )
-            db.taxonomy.conn.commit()
 
         runner = CliRunner()
         with (
@@ -3325,11 +2983,21 @@ class TestManualOpsCLI:
 
         assert result.exit_code == 0, result.output
         with T2Database(db_path) as db:
-            row = db.taxonomy.conn.execute(
-                "SELECT assigned_by FROM topic_assignments WHERE doc_id = 'my-doc-id'"
-            ).fetchone()
-        assert row is not None
-        assert row[0] == "manual"
+            # The assignment landed on the topic; 'manual' provenance is
+            # only readable on the raw twin (assigned_by='manual' rows are
+            # exactly the manual_assignments slice of the rebuild state).
+            assert db.taxonomy.get_assignments_for_docs(["my-doc-id"]) == {
+                "my-doc-id": topic_id,
+            }
+            if has_raw_access(db.taxonomy):
+                row = db.taxonomy.conn.execute(
+                    "SELECT assigned_by FROM topic_assignments "
+                    "WHERE doc_id = 'my-doc-id'"
+                ).fetchone()
+                assert row[0] == "manual"
+            else:
+                state = db.taxonomy.read_rebuild_old_state("proj")
+                assert state["manual_assignments"].get("my-doc-id") == topic_id
 
     def test_assign_cli_unknown_label(self, tmp_path: Path) -> None:
         """nx taxonomy assign with unknown label prints error."""
@@ -3365,12 +3033,9 @@ class TestManualOpsCLI:
 
         db_path = tmp_path / "memory.db"
         with T2Database(db_path) as db:
-            db.taxonomy.conn.execute(
-                "INSERT INTO topics (label, collection, doc_count, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                ("old-name", "proj", 5, "2026-01-01T00:00:00Z"),
+            topic_id = _seed_topic(
+                db.taxonomy, "old-name", collection="proj", doc_count=5,
             )
-            db.taxonomy.conn.commit()
 
         runner = CliRunner()
         with (
@@ -3384,10 +3049,7 @@ class TestManualOpsCLI:
 
         assert result.exit_code == 0, result.output
         with T2Database(db_path) as db:
-            row = db.taxonomy.conn.execute(
-                "SELECT label FROM topics LIMIT 1"
-            ).fetchone()
-        assert row[0] == "new-name"
+            assert db.taxonomy.get_topic_by_id(topic_id)["label"] == "new-name"
 
     def test_rename_cli_no_accept_preserves_pending_status(
         self, tmp_path: Path,
@@ -3409,12 +3071,10 @@ class TestManualOpsCLI:
 
         db_path = tmp_path / "memory.db"
         with T2Database(db_path) as db:
-            db.taxonomy.conn.execute(
-                "INSERT INTO topics (label, collection, doc_count, created_at, "
-                "review_status) VALUES ('old-label', 'proj', 5, "
-                "'2026-01-01T00:00:00Z', 'pending')"
+            topic_id = _seed_topic(
+                db.taxonomy, "old-label", collection="proj", doc_count=5,
+                review_status="pending",
             )
-            db.taxonomy.conn.commit()
 
         runner = CliRunner()
         with (
@@ -3429,10 +3089,8 @@ class TestManualOpsCLI:
         assert result.exit_code == 0, result.output
         assert "review_status preserved" in result.output
         with T2Database(db_path) as db:
-            row = db.taxonomy.conn.execute(
-                "SELECT label, review_status FROM topics LIMIT 1"
-            ).fetchone()
-        assert row == ("fixed-typo", "pending")
+            topic = db.taxonomy.get_topic_by_id(topic_id)
+        assert (topic["label"], topic["review_status"]) == ("fixed-typo", "pending")
 
     def test_merge_cli(self, tmp_path: Path) -> None:
         """nx taxonomy merge moves docs and deletes source."""
@@ -3445,24 +3103,14 @@ class TestManualOpsCLI:
 
         db_path = tmp_path / "memory.db"
         with T2Database(db_path) as db:
-            db.taxonomy.conn.execute(
-                "INSERT INTO topics (label, collection, doc_count, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                ("source", "proj", 2, "2026-01-01T00:00:00Z"),
+            source_id = _seed_topic(
+                db.taxonomy, "source", collection="proj", doc_count=2,
             )
-            source_id = db.taxonomy.conn.execute(
-                "SELECT last_insert_rowid()"
-            ).fetchone()[0]
-            db.taxonomy.conn.execute(
-                "INSERT INTO topics (label, collection, doc_count, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                ("target", "proj", 1, "2026-01-01T00:00:00Z"),
+            target_id = _seed_topic(
+                db.taxonomy, "target", collection="proj", doc_count=1,
             )
-            db.taxonomy.conn.executemany(
-                "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-                [("doc-a", source_id), ("doc-b", source_id)],
-            )
-            db.taxonomy.conn.commit()
+            _seed_assignment(db.taxonomy, "doc-a", source_id)
+            _seed_assignment(db.taxonomy, "doc-b", source_id)
 
         runner = CliRunner()
         with (
@@ -3477,22 +3125,16 @@ class TestManualOpsCLI:
         assert result.exit_code == 0, result.output
         with T2Database(db_path) as db:
             # Source deleted
-            assert (
-                db.taxonomy.conn.execute(
-                    "SELECT COUNT(*) FROM topics WHERE label = 'source'"
-                ).fetchone()[0]
-                == 0
-            )
+            assert db.taxonomy.get_topic_by_id(source_id) is None
+            assert db.taxonomy.resolve_label("source", collection="proj") is None
             # Target has the docs
-            target_id = db.taxonomy.conn.execute(
-                "SELECT id FROM topics WHERE label = 'target'"
-            ).fetchone()[0]
-            docs = db.taxonomy.conn.execute(
-                "SELECT doc_id FROM topic_assignments WHERE topic_id = ?",
-                (target_id,),
-            ).fetchall()
-            assert {r[0] for r in docs} == {"doc-a", "doc-b"}
+            docs = db.taxonomy.get_all_topic_doc_ids(target_id)
+            assert set(docs) == {"doc-a", "doc-b"}
 
+    @pytest.mark.skipif(
+        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        reason="dies-roster: raw-path split CLI (CatalogTaxonomy.compute_split patch + t2_index_write routing; service branch bypasses both) dies at the RDR-155 P4b flip",
+    )
     def test_split_cli(self, tmp_path: Path) -> None:
         """nx taxonomy split invokes compute_split+persist_split via t2_index_write."""
         import nexus.mcp_infra as _mi
@@ -3598,6 +3240,10 @@ class TestManualOpsCLI:
         assert "nx taxonomy label" in result.output
         assert "-c test__split_cli" in result.output
 
+    @pytest.mark.skipif(
+        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        reason="dies-roster: raw-path split CLI (CatalogTaxonomy.compute_split patch + t2_index_write routing; service branch bypasses both) dies at the RDR-155 P4b flip",
+    )
     def test_split_cli_action_hint_without_collection_flag(self, tmp_path: Path) -> None:
         """GH #250: split without --collection still emits a scoped hint.
 
@@ -3695,6 +3341,10 @@ class TestManualOpsCLI:
         assert "Action:" in result.output
         assert "-c test__parent_scope" in result.output
 
+    @pytest.mark.skipif(
+        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        reason="dies-roster: raw-path split CLI (CatalogTaxonomy.compute_split patch + t2_index_write routing; service branch bypasses both) dies at the RDR-155 P4b flip",
+    )
     def test_split_cli_no_hint_when_child_count_zero(self, tmp_path: Path) -> None:
         """GH #250: no-op split (child_count=0) must NOT print the action hint."""
         from unittest.mock import MagicMock, patch
@@ -3766,6 +3416,10 @@ class TestRebalanceTrigger:
         """First discover always proceeds (no prior count)."""
         assert db.taxonomy.needs_rebalance("test__coll", current_count=100) is True
 
+    @pytest.mark.skipif(
+        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        reason="dies-roster: CatalogTaxonomy's 2x rebalance threshold semantics (engine twin uses 5% growth) dies at the RDR-155 P4b flip",
+    )
     def test_below_threshold_no_rebalance(self, db: T2Database) -> None:
         """Under 2x growth does not trigger rebalance."""
         db.taxonomy.record_discover_count("test__coll", 100)
@@ -3782,10 +3436,17 @@ class TestRebalanceTrigger:
         assert db.taxonomy.needs_rebalance("test__coll", current_count=300) is True
 
     def test_record_updates_count(self, db: T2Database) -> None:
-        """record_discover_count updates the stored count."""
+        """record_discover_count updates the stored count.
+
+        Substrate-neutral assertions: a zero-growth check is False on both
+        twins (SQLite's 2x threshold, the engine's 5% growth threshold),
+        while an unrecorded collection is True on both — so the False
+        answers below prove each record landed.
+        """
         db.taxonomy.record_discover_count("test__coll", 50)
-        assert db.taxonomy.needs_rebalance("test__coll", current_count=80) is False
+        assert db.taxonomy.needs_rebalance("test__coll", current_count=50) is False
         db.taxonomy.record_discover_count("test__coll", 80)
+        assert db.taxonomy.needs_rebalance("test__coll", current_count=80) is False
         assert db.taxonomy.needs_rebalance("test__coll", current_count=160) is True
 
 
@@ -3905,12 +3566,13 @@ class TestManualPreservation:
         # nearest matching centroid (same data -> high similarity)
         assert "operator-approved" in new_labels
 
-        # Manual assignment should be preserved
-        rows = db.taxonomy.conn.execute(
-            "SELECT assigned_by FROM topic_assignments WHERE doc_id = 'manual-doc'"
-        ).fetchall()
-        assert len(rows) >= 1
-        assert any(r[0] == "manual" for r in rows)
+        # Manual assignment should be preserved — read through the public
+        # rebuild-state surface (manual_assignments is the assigned_by='manual'
+        # row set joined to live topics).
+        manual = _centroid_state(db.taxonomy, "test__preserve", chroma)[
+            "manual_assignments"
+        ]
+        assert "manual-doc" in manual
 
 
 class TestRediscoveryCentroidLifecycle:
@@ -3938,31 +3600,23 @@ class TestRediscoveryCentroidLifecycle:
         db.taxonomy.discover_topics(
             "test__lifecycle", doc_ids, embeddings, texts, chroma,
         )
-        centroid_coll = chroma.get_collection(
-            "taxonomy__centroids", embedding_function=None,
-        )
-        first_ids = set(centroid_coll.get()["ids"])
-        assert len(first_ids) >= 2
+        first = _centroid_state(db.taxonomy, "test__lifecycle", chroma)
+        assert len(first["old_centroid_ids"]) >= 2
 
         # Rebuild (clears old, creates new)
         db.taxonomy.rebuild_taxonomy(
             "test__lifecycle", doc_ids, embeddings, texts, chroma,
         )
-        second_ids = set(centroid_coll.get()["ids"])
-        assert len(second_ids) >= 2
+        second = _centroid_state(db.taxonomy, "test__lifecycle", chroma)
+        assert len(second["old_centroid_ids"]) >= 2
 
-        # Old centroid IDs should be replaced (not accumulated)
-        # The IDs use format "collection:topic_id" — topic_ids change on rebuild
-        # so old IDs should not persist
-        all_ids = centroid_coll.get(
-            where={"collection": "test__lifecycle"},
-        )["ids"]
-        # Count should match number of current topics, not 2x
+        # Old centroids should be replaced (not accumulated): count matches
+        # the number of current topics, not 2x.
         current_topics = [
             t for t in db.taxonomy.get_topics()
             if t.get("collection") == "test__lifecycle"
         ]
-        assert len(all_ids) == len(current_topics)
+        assert len(second["old_centroid_ids"]) == len(current_topics)
 
 
 # ── Topic-aware links (RDR-070, nexus-40f) ────────────────────────────────
@@ -3978,30 +3632,12 @@ class TestComputeTopicLinks:
         from nexus.commands.taxonomy_cmd import compute_topic_links
 
         # Set up two topics with docs
-        db.taxonomy.conn.executemany(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            [
-                ("networking", "code__proj", 2, "2026-01-01T00:00:00Z"),
-                ("database", "code__proj", 2, "2026-01-01T00:00:00Z"),
-            ],
-        )
-        t1_id = db.taxonomy.conn.execute(
-            "SELECT id FROM topics WHERE label = 'networking'"
-        ).fetchone()[0]
-        t2_id = db.taxonomy.conn.execute(
-            "SELECT id FROM topics WHERE label = 'database'"
-        ).fetchone()[0]
-        db.taxonomy.conn.executemany(
-            "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-            [
-                ("src/net/server.py", t1_id),
-                ("src/net/client.py", t1_id),
-                ("src/db/store.py", t2_id),
-                ("src/db/query.py", t2_id),
-            ],
-        )
-        db.taxonomy.conn.commit()
+        t1_id = _seed_topic(db.taxonomy, "networking", collection="code__proj", doc_count=2)
+        t2_id = _seed_topic(db.taxonomy, "database", collection="code__proj", doc_count=2)
+        _seed_assignment(db.taxonomy, "src/net/server.py", t1_id)
+        _seed_assignment(db.taxonomy, "src/net/client.py", t1_id)
+        _seed_assignment(db.taxonomy, "src/db/store.py", t2_id)
+        _seed_assignment(db.taxonomy, "src/db/query.py", t2_id)
 
         # Mock catalog with one link between docs in different topics
         mock_catalog = MagicMock()
@@ -4053,17 +3689,9 @@ class TestComputeTopicLinks:
 
         from nexus.commands.taxonomy_cmd import compute_topic_links
 
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            ("single-topic", "code__proj", 2, "2026-01-01T00:00:00Z"),
-        )
-        tid = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        db.taxonomy.conn.executemany(
-            "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-            [("src/a.py", tid), ("src/b.py", tid)],
-        )
-        db.taxonomy.conn.commit()
+        tid = _seed_topic(db.taxonomy, "single-topic", collection="code__proj", doc_count=2)
+        _seed_assignment(db.taxonomy, "src/a.py", tid)
+        _seed_assignment(db.taxonomy, "src/b.py", tid)
 
         mock_catalog = MagicMock()
         entry_a = MagicMock(file_path="src/a.py", physical_collection="code__proj")
@@ -4087,25 +3715,10 @@ class TestComputeTopicLinks:
 
         from nexus.commands.taxonomy_cmd import compute_topic_links
 
-        db.taxonomy.conn.executemany(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            [
-                ("api", "code__proj", 1, "2026-01-01T00:00:00Z"),
-                ("model", "code__proj", 1, "2026-01-01T00:00:00Z"),
-            ],
-        )
-        t1 = db.taxonomy.conn.execute(
-            "SELECT id FROM topics WHERE label = 'api'"
-        ).fetchone()[0]
-        t2 = db.taxonomy.conn.execute(
-            "SELECT id FROM topics WHERE label = 'model'"
-        ).fetchone()[0]
-        db.taxonomy.conn.executemany(
-            "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-            [("src/api.py", t1), ("src/model.py", t2)],
-        )
-        db.taxonomy.conn.commit()
+        t1 = _seed_topic(db.taxonomy, "api", collection="code__proj", doc_count=1)
+        t2 = _seed_topic(db.taxonomy, "model", collection="code__proj", doc_count=1)
+        _seed_assignment(db.taxonomy, "src/api.py", t1)
+        _seed_assignment(db.taxonomy, "src/model.py", t2)
 
         mock_catalog = MagicMock()
         ea = MagicMock(file_path="src/api.py", physical_collection="code__proj")
@@ -4137,62 +3750,26 @@ class TestCooccurrenceLinks:
     def test_cross_collection_cooccurrence(self, db: T2Database) -> None:
         """Docs assigned to topics in different collections generate links."""
         # Create topics in two collections
-        db.taxonomy.conn.executemany(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            [
-                ("neural-nets", "coll_A", 5, "2026-01-01T00:00:00Z"),
-                ("databases", "coll_B", 5, "2026-01-01T00:00:00Z"),
-            ],
-        )
-        t1 = db.taxonomy.conn.execute(
-            "SELECT id FROM topics WHERE label = 'neural-nets'"
-        ).fetchone()[0]
-        t2 = db.taxonomy.conn.execute(
-            "SELECT id FROM topics WHERE label = 'databases'"
-        ).fetchone()[0]
+        t1 = _seed_topic(db.taxonomy, "neural-nets", collection="coll_A", doc_count=5)
+        t2 = _seed_topic(db.taxonomy, "databases", collection="coll_B", doc_count=5)
 
         # Assign one doc to topics in both collections
-        db.taxonomy.conn.executemany(
-            "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
-            "VALUES (?, ?, ?)",
-            [
-                ("doc-shared", t1, "centroid"),
-                ("doc-shared", t2, "projection"),
-            ],
-        )
-        db.taxonomy.conn.commit()
+        _seed_assignment(db.taxonomy, "doc-shared", t1, assigned_by="centroid")
+        _seed_assignment(db.taxonomy, "doc-shared", t2, assigned_by="projection")
 
         count = db.taxonomy.generate_cooccurrence_links()
         assert count == 1
 
-        rows = db.taxonomy.conn.execute(
-            "SELECT from_topic_id, to_topic_id, link_count FROM topic_links"
-        ).fetchall()
-        assert len(rows) == 1
-        assert rows[0][2] == 1  # link_count
+        pairs = _link_pairs(db.taxonomy, [t1, t2])
+        assert len(pairs) == 1
+        assert next(iter(pairs.values())) == 1  # link_count
 
     def test_same_collection_no_links(self, db: T2Database) -> None:
         """Docs assigned to topics in the SAME collection don't generate links."""
-        db.taxonomy.conn.executemany(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            [
-                ("topic-x", "same_coll", 5, "2026-01-01T00:00:00Z"),
-                ("topic-y", "same_coll", 5, "2026-01-01T00:00:00Z"),
-            ],
-        )
-        t1 = db.taxonomy.conn.execute(
-            "SELECT id FROM topics WHERE label = 'topic-x'"
-        ).fetchone()[0]
-        t2 = db.taxonomy.conn.execute(
-            "SELECT id FROM topics WHERE label = 'topic-y'"
-        ).fetchone()[0]
-        db.taxonomy.conn.executemany(
-            "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-            [("doc-same", t1), ("doc-same", t2)],
-        )
-        db.taxonomy.conn.commit()
+        t1 = _seed_topic(db.taxonomy, "topic-x", collection="same_coll", doc_count=5)
+        t2 = _seed_topic(db.taxonomy, "topic-y", collection="same_coll", doc_count=5)
+        _seed_assignment(db.taxonomy, "doc-same", t1)
+        _seed_assignment(db.taxonomy, "doc-same", t2)
 
         count = db.taxonomy.generate_cooccurrence_links()
         assert count == 0
@@ -4232,20 +3809,12 @@ class TestTopicLinksCLI:
 
         db_path = tmp_path / "memory.db"
         with T2Database(db_path) as db:
-            db.taxonomy.conn.executemany(
-                "INSERT INTO topics (id, label, collection, doc_count, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                [
-                    (1, "api", "code__test", 5, "2026-01-01T00:00:00Z"),
-                    (2, "database", "code__test", 5, "2026-01-01T00:00:00Z"),
-                ],
-            )
-            db.taxonomy.conn.execute(
-                "INSERT INTO topic_links "
-                "(from_topic_id, to_topic_id, link_count, link_types) "
-                "VALUES (1, 2, 5, '[\"cites\", \"implements\"]')"
-            )
-            db.taxonomy.conn.commit()
+            api_id = _seed_topic(db.taxonomy, "api", collection="code__test", doc_count=5)
+            db_id = _seed_topic(db.taxonomy, "database", collection="code__test", doc_count=5)
+            db.taxonomy.upsert_topic_links([
+                {"from_topic_id": api_id, "to_topic_id": db_id,
+                 "link_count": 5, "link_types": ["cites", "implements"]},
+            ])
 
         runner = CliRunner()
         with patch(
@@ -4267,17 +3836,9 @@ class TestQueryMethodCoverage:
 
     def test_get_doc_ids_for_topic(self, db: T2Database) -> None:
         """get_doc_ids_for_topic resolves label -> doc_ids via JOIN."""
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            ("search-methods", "proj", 3, "2026-01-01T00:00:00Z"),
-        )
-        tid = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        db.taxonomy.conn.executemany(
-            "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-            [("doc-x", tid), ("doc-y", tid), ("doc-z", tid)],
-        )
-        db.taxonomy.conn.commit()
+        tid = _seed_topic(db.taxonomy, "search-methods", collection="proj", doc_count=3)
+        for did in ("doc-x", "doc-y", "doc-z"):
+            _seed_assignment(db.taxonomy, did, tid)
 
         result = db.taxonomy.get_doc_ids_for_topic("search-methods")
         assert set(result) == {"doc-x", "doc-y", "doc-z"}
@@ -4288,17 +3849,9 @@ class TestQueryMethodCoverage:
 
     def test_get_assignments_for_docs(self, db: T2Database) -> None:
         """get_assignments_for_docs returns {doc_id: topic_id} mapping."""
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            ("topic-a", "proj", 2, "2026-01-01T00:00:00Z"),
-        )
-        tid = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        db.taxonomy.conn.executemany(
-            "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-            [("doc-1", tid), ("doc-2", tid)],
-        )
-        db.taxonomy.conn.commit()
+        tid = _seed_topic(db.taxonomy, "topic-a", collection="proj", doc_count=2)
+        _seed_assignment(db.taxonomy, "doc-1", tid)
+        _seed_assignment(db.taxonomy, "doc-2", tid)
 
         result = db.taxonomy.get_assignments_for_docs(["doc-1", "doc-2", "doc-3"])
         assert result == {"doc-1": tid, "doc-2": tid}
@@ -4309,18 +3862,9 @@ class TestQueryMethodCoverage:
 
     def test_get_labels_for_ids(self, db: T2Database) -> None:
         """get_labels_for_ids returns scoped {id: label} map."""
-        db.taxonomy.conn.executemany(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            [
-                ("alpha", "proj", 1, "2026-01-01T00:00:00Z"),
-                ("beta", "proj", 1, "2026-01-01T00:00:00Z"),
-                ("gamma", "proj", 1, "2026-01-01T00:00:00Z"),
-            ],
-        )
-        db.taxonomy.conn.commit()
         all_ids = [
-            r[0] for r in db.taxonomy.conn.execute("SELECT id FROM topics").fetchall()
+            _seed_topic(db.taxonomy, label, collection="proj", doc_count=1)
+            for label in ("alpha", "beta", "gamma")
         ]
 
         result = db.taxonomy.get_labels_for_ids(all_ids[:2])
@@ -4333,18 +3877,9 @@ class TestQueryMethodCoverage:
 
     def test_get_all_topic_doc_ids(self, db: T2Database) -> None:
         """get_all_topic_doc_ids returns all assigned doc_ids without limit."""
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            ("big-topic", "proj", 10, "2026-01-01T00:00:00Z"),
-        )
-        tid = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        tid = _seed_topic(db.taxonomy, "big-topic", collection="proj", doc_count=10)
         for i in range(10):
-            db.taxonomy.conn.execute(
-                "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-                (f"doc-{i}", tid),
-            )
-        db.taxonomy.conn.commit()
+            _seed_assignment(db.taxonomy, f"doc-{i}", tid)
 
         result = db.taxonomy.get_all_topic_doc_ids(tid)
         assert len(result) == 10
@@ -4373,12 +3908,7 @@ class TestEdgeCases:
         chroma = make_vector_test_client()
 
         # Seed existing topics for the collection
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            ("old-topic", "shrunk__coll", 50, "2026-01-01T00:00:00Z"),
-        )
-        db.taxonomy.conn.commit()
+        _seed_topic(db.taxonomy, "old-topic", collection="shrunk__coll", doc_count=50)
 
         rng = np.random.default_rng(42)
         embeddings = rng.standard_normal((3, 384)).astype(np.float32)
@@ -4393,28 +3923,19 @@ class TestEdgeCases:
         assert result == 0
 
         # Old topics should be cleared
-        count = db.taxonomy.conn.execute(
-            "SELECT COUNT(*) FROM topics WHERE collection = 'shrunk__coll'"
-        ).fetchone()[0]
-        assert count == 0
+        assert db.taxonomy.get_topics_for_collection("shrunk__coll") == []
 
-        # Doc count should be recorded
-        assert db.taxonomy.needs_rebalance("shrunk__coll", current_count=2) is False
+        # Doc count should be recorded: a zero-growth check is False on both
+        # twins, while an unrecorded collection would be True on both.
+        assert db.taxonomy.needs_rebalance("shrunk__coll", current_count=3) is False
 
     def test_split_topic_collection_not_found(self, db: T2Database) -> None:
         """split_topic returns 0 when T3 collection doesn't exist."""
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            ("orphan", "nonexistent__coll", 5, "2026-01-01T00:00:00Z"),
+        tid = _seed_topic(
+            db.taxonomy, "orphan", collection="nonexistent__coll", doc_count=5,
         )
-        tid = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         for i in range(5):
-            db.taxonomy.conn.execute(
-                "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-                (f"doc-{i}", tid),
-            )
-        db.taxonomy.conn.commit()
+            _seed_assignment(db.taxonomy, f"doc-{i}", tid)
 
         chroma = make_vector_test_client()
         result = db.taxonomy.split_topic(tid, k=2, chroma_client=chroma)
@@ -4462,17 +3983,9 @@ class TestEdgeCases:
 
         db_path = tmp_path / "memory.db"
         with T2Database(db_path) as db:
-            db.taxonomy.conn.execute(
-                "INSERT INTO topics (label, collection, doc_count, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                ("test-topic", "proj", 2, "2026-01-01T00:00:00Z"),
-            )
-            tid = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-            db.taxonomy.conn.executemany(
-                "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-                [("doc-a", tid), ("doc-b", tid)],
-            )
-            db.taxonomy.conn.commit()
+            tid = _seed_topic(db.taxonomy, "test-topic", collection="proj", doc_count=2)
+            _seed_assignment(db.taxonomy, "doc-a", tid)
+            _seed_assignment(db.taxonomy, "doc-b", tid)
 
         runner = CliRunner()
         with patch(
@@ -4488,6 +4001,10 @@ class TestEdgeCases:
 class TestTopicLinksTable:
     """topic_links T2 table for search-time linked-topic boost."""
 
+    @pytest.mark.skipif(
+        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        reason="dies-roster: raw sqlite_master schema introspection dies at the RDR-155 P4b flip",
+    )
     def test_topic_links_table_created(self, db: T2Database) -> None:
         """topic_links table exists after init."""
         tables = {
@@ -4501,20 +4018,9 @@ class TestTopicLinksTable:
     def test_upsert_and_read_topic_links(self, db: T2Database) -> None:
         """upsert_topic_links persists, get_topic_link_pairs reads."""
         # Create topics
-        db.taxonomy.conn.executemany(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            [
-                ("api", "proj", 5, "2026-01-01T00:00:00Z"),
-                ("db", "proj", 3, "2026-01-01T00:00:00Z"),
-                ("test", "proj", 2, "2026-01-01T00:00:00Z"),
-            ],
-        )
-        db.taxonomy.conn.commit()
         ids = [
-            r[0] for r in db.taxonomy.conn.execute(
-                "SELECT id FROM topics ORDER BY id"
-            ).fetchall()
+            _seed_topic(db.taxonomy, label, collection="proj", doc_count=n)
+            for label, n in (("api", 5), ("db", 3), ("test", 2))
         ]
 
         links = [
@@ -4534,31 +4040,20 @@ class TestTopicLinksTable:
         count = db.taxonomy.upsert_topic_links(links)
         assert count == 2
 
-        result = db.taxonomy.get_topic_link_pairs(ids)
+        result = _link_pairs(db.taxonomy, ids)
         assert (ids[0], ids[1]) in result
         assert result[(ids[0], ids[1])] == 5
         assert (ids[1], ids[2]) in result
 
     def test_get_topic_link_pairs_empty(self, db: T2Database) -> None:
-        """Empty topic_links returns empty dict."""
-        assert db.taxonomy.get_topic_link_pairs([1, 2, 3]) == {}
+        """Empty topic_links returns an empty mapping (sqlite {} / Http [])."""
+        assert _link_pairs(db.taxonomy, [1, 2, 3]) == {}
 
     def test_get_topic_link_pairs_scoped(self, db: T2Database) -> None:
         """Only returns links where both endpoints are in the requested set."""
-        db.taxonomy.conn.executemany(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            [
-                ("a", "proj", 1, "2026-01-01T00:00:00Z"),
-                ("b", "proj", 1, "2026-01-01T00:00:00Z"),
-                ("c", "proj", 1, "2026-01-01T00:00:00Z"),
-            ],
-        )
-        db.taxonomy.conn.commit()
         ids = [
-            r[0] for r in db.taxonomy.conn.execute(
-                "SELECT id FROM topics ORDER BY id"
-            ).fetchall()
+            _seed_topic(db.taxonomy, label, collection="proj", doc_count=1)
+            for label in ("a", "b", "c")
         ]
 
         db.taxonomy.upsert_topic_links([
@@ -4567,7 +4062,7 @@ class TestTopicLinksTable:
         ])
 
         # Only request ids[0] and ids[1] — should not include the (1,2) link
-        result = db.taxonomy.get_topic_link_pairs([ids[0], ids[1]])
+        result = _link_pairs(db.taxonomy, [ids[0], ids[1]])
         assert (ids[0], ids[1]) in result
         assert (ids[1], ids[2]) not in result
 
@@ -4577,18 +4072,11 @@ class TestGetTopicsForCollection:
 
     def test_includes_children(self, db: T2Database) -> None:
         """Returns both root and child topics for a collection."""
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            ("parent", "proj", 10, "2026-01-01T00:00:00Z"),
+        parent_id = _seed_topic(db.taxonomy, "parent", collection="proj", doc_count=10)
+        _seed_topic(
+            db.taxonomy, "child", collection="proj", doc_count=5,
+            parent_id=parent_id,
         )
-        parent_id = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, parent_id, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            ("child", parent_id, "proj", 5, "2026-01-01T00:00:00Z"),
-        )
-        db.taxonomy.conn.commit()
 
         result = db.taxonomy.get_topics_for_collection("proj")
         assert len(result) == 2
@@ -4597,19 +4085,9 @@ class TestGetTopicsForCollection:
 
     def test_exclude_id(self, db: T2Database) -> None:
         """exclude_id filters out the specified topic."""
-        db.taxonomy.conn.executemany(
-            "INSERT INTO topics (label, collection, doc_count, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            [
-                ("keep-a", "proj", 3, "2026-01-01T00:00:00Z"),
-                ("keep-b", "proj", 2, "2026-01-01T00:00:00Z"),
-                ("exclude-me", "proj", 1, "2026-01-01T00:00:00Z"),
-            ],
-        )
-        db.taxonomy.conn.commit()
-        exclude = db.taxonomy.conn.execute(
-            "SELECT id FROM topics WHERE label = 'exclude-me'"
-        ).fetchone()[0]
+        _seed_topic(db.taxonomy, "keep-a", collection="proj", doc_count=3)
+        _seed_topic(db.taxonomy, "keep-b", collection="proj", doc_count=2)
+        exclude = _seed_topic(db.taxonomy, "exclude-me", collection="proj", doc_count=1)
 
         result = db.taxonomy.get_topics_for_collection("proj", exclude_id=exclude)
         labels = {t["label"] for t in result}
@@ -4756,12 +4234,7 @@ class TestProjectCmd:
             "code__alpha-11112222",
         ]
         for coll in [src, *others]:
-            db.taxonomy.conn.execute(
-                "INSERT INTO topics (label, collection, doc_count, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                (f"t-{coll}", coll, 3, "2026-01-01T00:00:00Z"),
-            )
-        db.taxonomy.conn.commit()
+            _seed_topic(db.taxonomy, f"t-{coll}", collection=coll, doc_count=3)
 
         # T3 still has to resolve the source collection for the
         # project_against fetch; create it empty and short-circuit via

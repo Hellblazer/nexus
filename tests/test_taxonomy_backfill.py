@@ -14,11 +14,22 @@ tmp copy of the real T2 DB.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
+
+# The subject of this whole module is the SQLite-source backfill tool:
+# backfill_source_collection() takes a raw sqlite3 connection
+# (db.taxonomy.conn) and rewrites legacy pre-RDR-077 rows in place. That
+# raw handle — and the legacy-row population it repairs — is exclusive to
+# the SQLite twin, which is a migration SOURCE only.
+pytestmark = pytest.mark.skipif(
+    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    reason="dies-roster: SQLite-source backfill tool (raw .conn rewrite of legacy rows) dies at the RDR-155 P4b flip",
+)
 
 
 @pytest.fixture
