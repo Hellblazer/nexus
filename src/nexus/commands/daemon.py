@@ -1186,6 +1186,11 @@ def t2_uninstall_cmd(autostart: bool) -> None:
     for warning in result.warnings:
         click.echo(f"Warning: {warning}", err=True)
     click.echo(f"Removed {result.dest}")
+    # nexus-dmgvx: same survivor report as the service tier — the shared
+    # primitive scopes the probe by tier, so this is empty for t2 today and
+    # stays correct if t2 ever grows survivors of its own.
+    for survivor in result.survivors:
+        click.echo(f"Still running: {survivor}", err=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1279,6 +1284,13 @@ def service_uninstall_cmd(autostart: bool) -> None:
     for warning in result.warnings:
         click.echo(f"Warning: {warning}", err=True)
     click.echo(f"Removed {result.dest}")
+    # nexus-dmgvx (GH #1419 Issue 2): removing the unit stops it coming BACK,
+    # not what is running NOW. Printing a bare "Removed <path>" over a live
+    # supervisor and a live Postgres is what sent Steve Harris hunting a
+    # postgres process by hand. Exit stays 0 — the uninstall did succeed at
+    # what it claims to do; the defect was silence, not the outcome.
+    for survivor in result.survivors:
+        click.echo(f"Still running: {survivor}", err=True)
 
 
 def ensure_storage_supervisor(config_dir: Path):

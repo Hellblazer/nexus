@@ -67,11 +67,21 @@ class InstallResult:
 
 @dataclass(frozen=True)
 class UninstallResult:
-    """Structured result of an autostart uninstall attempt."""
+    """Structured result of an autostart uninstall attempt.
+
+    ``survivors`` (nexus-dmgvx, GH #1419 Issue 2) names processes still
+    running AFTER the unit is gone. Removing the autostart entry stops the
+    thing from coming BACK; it does not stop what is running NOW, and
+    Postgres is left up deliberately on the stop path too ("independently
+    managed"). Reporting a bare "Removed <path>" while a supervisor and a
+    cluster are both live is how Steve Harris ended up hunting a postgres
+    process by hand. Empty on the happy path.
+    """
 
     status: UninstallStatus
     dest: Path
     warnings: tuple[str, ...] = field(default_factory=tuple)
+    survivors: tuple[str, ...] = field(default_factory=tuple)
 
 
 class InstallerError(Exception):
@@ -509,6 +519,102 @@ def uninstall_autostart(*, tier: str = "t2") -> UninstallResult:
         warnings.append(f"{cmd[0]} not found ({exc}); removing file anyway.")
 
     dest.unlink()
+
+    # nexus-dmgvx: the unit is gone, so nothing will come BACK — but say what
+    # is still running NOW. Probed after the unlink so the report describes
+    # the post-uninstall world, and wrapped because a probe failure must
+    # never strand a unit that has already been removed.
+    survivors: tuple[str, ...] = ()
+    try:
+        survivors = _probe_survivors(tier=tier)
+    except Exception as exc:  # noqa: BLE001 — the removal already happened; never fail it for a probe
+        warnings.append(
+            f"could not check for surviving processes ({exc}) — verify with "
+            "`nx daemon service status` yourself"
+        )
+
     return UninstallResult(
-        status=UninstallStatus.REMOVED, dest=dest, warnings=tuple(warnings)
+        status=UninstallStatus.REMOVED,
+        dest=dest,
+        warnings=tuple(warnings),
+        survivors=survivors,
     )
+
+
+def _discover_service_lease() -> object | None:
+    """Fresh storage-service lease, or ``None``. Never raises.
+
+    Liveness is LEASE FRESHNESS via the RDR-149 primitive, deliberately not a
+    bespoke ``ps`` sweep — reinventing per-tier liveness is exactly what the
+    lifecycle gate (``tests/daemon/test_lifecycle_gate.py``) exists to stop.
+    """
+    try:
+        import os  # noqa: PLC0415 — deferred, branch-local
+
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred
+        from nexus.daemon.service_registry import ServiceRegistry  # noqa: PLC0415 — deferred
+
+        # Same construction service_endpoint.discover_lease uses (tier
+        # "storage_service", scope = uid) — going through the registry rather
+        # than through discover_lease() because that helper returns only
+        # (base_url, token) and the operator line wants supervisor_pid.
+        registry = ServiceRegistry(dir=nexus_config_dir(), tier="storage_service")
+        return registry.discover(str(os.getuid()))
+    except Exception:  # noqa: BLE001 — a probe is never a verdict
+        return None
+
+
+def _probe_live_postgres() -> int | None:
+    """Port of a reachable local Postgres from pg_credentials, else ``None``.
+
+    Never raises. A refused connection means nothing survived, which is the
+    common and desired case.
+    """
+    try:
+        import socket  # noqa: PLC0415 — deferred, branch-local
+
+        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred
+        from nexus.db.pg_provision import CREDENTIALS_FILENAME, _read_credentials  # noqa: PLC0415 — deferred
+
+        creds_path = nexus_config_dir() / CREDENTIALS_FILENAME
+        if not creds_path.exists():
+            return None
+        port = int((_read_credentials(creds_path) or {}).get("PG_PORT", 0) or 0)
+        if port <= 0:
+            return None
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(1.0)
+            return port if s.connect_ex(("127.0.0.1", port)) == 0 else None
+    except Exception:  # noqa: BLE001 — a probe is never a verdict
+        return None
+
+
+def _probe_survivors(*, tier: str) -> tuple[str, ...]:
+    """Processes still alive after the unit was removed, as operator lines.
+
+    Scoped BY TIER: uninstalling the t2 agent must not report the storage
+    service as its survivor — they are different units with different owners,
+    and a misattributed survivor sends the operator after the wrong process.
+    """
+    if tier != "service":
+        return ()
+
+    out: list[str] = []
+    lease = _discover_service_lease()
+    if lease is not None:
+        pid = getattr(lease, "supervisor_pid", None)
+        where = f" (pid {pid})" if pid else ""
+        out.append(
+            f"storage service{where} is still running — the autostart entry is "
+            "gone so it will not restart, but nothing stopped it: "
+            "`nx daemon service stop`"
+        )
+
+    pg_port = _probe_live_postgres()
+    if pg_port is not None:
+        out.append(
+            f"Postgres is still accepting connections on 127.0.0.1:{pg_port} — "
+            "it is independently managed and is NOT stopped by uninstall: "
+            "`nx daemon service stop --with-pg` (or pg_ctl -D <PG_DATA> stop)"
+        )
+    return tuple(out)
