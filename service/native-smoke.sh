@@ -292,20 +292,24 @@ tax.import_topic(
 topics = tax.get_all_topics(collection="native-smoke-py")
 assert any(t.get("label") == "native-smoke-topic" for t in topics), f"taxonomy.get_all_topics did not find the seeded topic: {topics}"
 
-# Post-RDR-187 (chash_index router table dropped): /v1/chash/* writes are
-# accept-and-no-op (deprecated window until the N+1 410 flip, nexus-piwya.11
-# -- at the flip this upsert leg starts 410ing and must be updated) and reads are
-# rerouted over the chunks tables. So the leg pins the reroute contract:
-# the upsert must be ACCEPTED (200, no client exception -- an old client
-# mid-window must not break), and the write must NOT become visible through
-# the rerouted read paths (nothing indexed chunks under this collection).
-# A read-your-write assert here would be asserting the retired router.
+# RDR-187 P6 410-flip (nexus-piwya.11, engine-service-v0.1.53): the
+# /v1/chash/* WRITE endpoints are now 410 Gone (the accept-and-no-op window
+# closed). Chunk ingest is the sole write path; the chash router is retired.
+# So the leg pins the RETIRED-write contract: upsert now RAISES HTTP 410
+# (the production caller dual_write_chash_index swallows this best-effort;
+# the smoke calls the client directly so it observes the raise), while the
+# surviving READ endpoints still respond and surface nothing.
+import httpx
 chash = HttpChashIndex()
-chash.upsert(chash="deadbeef" * 8, collection="native-smoke-py")
+try:
+    chash.upsert(chash="deadbeef" * 8, collection="native-smoke-py")
+    raise AssertionError("chash.upsert must 410 post-RDR-187 P6, but it did not raise")
+except httpx.HTTPStatusError as exc:
+    assert exc.response.status_code == 410, f"chash.upsert must 410 (RDR-187 retirement), got HTTP {exc.response.status_code}"
 collections = chash.distinct_collections()
-assert "native-smoke-py" not in collections, f"chash.upsert must be a no-op post-RDR-187, but the write is visible: {collections}"
+assert "native-smoke-py" not in collections, f"retired chash.upsert must leave no trace: {collections}"
 rows = chash.lookup("deadbeef" * 8)
-assert rows == [], f"chash.lookup must not surface the no-op write post-RDR-187: {rows}"
+assert rows == [], f"retired chash.upsert must leave no readable row: {rows}"
 
 if os.environ.get("NATIVE_SMOKE_CLEANUP_ROWS") == "1":
     # nexus-rxqqd review follow-up (substantive-critic): best-effort row
