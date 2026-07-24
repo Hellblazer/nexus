@@ -3090,3 +3090,50 @@ def _create_base_tables(conn: sqlite3.Connection) -> None:
     conn.executescript(_TAXONOMY_SCHEMA_SQL)
     conn.executescript(_TELEMETRY_SCHEMA_SQL)
     conn.commit()
+
+
+def read_legacy_catalog_counts(path: Path) -> tuple[int | str, int | str]:
+    """Count document / link rows in a FROZEN legacy catalog SQLite file.
+
+    Read-only probe of a pre-PG migration SOURCE, for the ``nx doctor`` row
+    that labels ``<config_dir>/catalog/.catalog.db`` as a frozen snapshot
+    rather than a live mirror. The authoritative catalog is Postgres; these
+    counts exist only so the row can say how much is in the snapshot.
+
+    Lives here, in the ``db/`` substrate, rather than at the call site in
+    ``health.py``: the storage-boundary lint counts raw ``sqlite3.connect``
+    sites outside ``db/`` and its epsilon-allow baseline is a DOWNWARD-only
+    ratchet, so a caller-side connect would have to bump a count that is
+    never permitted to rise. Routing the read to the allowlisted substrate
+    is the fix the ratchet is designed to force.
+
+    Returns ``("unknown", "unknown")`` for anything unreadable — a legacy
+    file that cannot be opened must still be NAMED by the doctor row, never
+    suppressed.
+
+    Args:
+        path: Path to the legacy ``.catalog.db``.
+
+    Returns:
+        ``(documents, links)`` — row counts, or ``"unknown"`` per table when
+        the table is absent or the file cannot be read.
+    """
+    docs: int | str = "unknown"
+    links: int | str = "unknown"
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            for tbl, key in (("documents", "docs"), ("links", "links")):
+                try:
+                    n = conn.execute(f"SELECT count(*) FROM {tbl}").fetchone()[0]
+                except sqlite3.Error:
+                    continue
+                if key == "docs":
+                    docs = n
+                else:
+                    links = n
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 — an unreadable legacy file must still be NAMED
+        pass
+    return docs, links

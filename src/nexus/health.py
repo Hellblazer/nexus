@@ -2723,26 +2723,11 @@ def _check_catalog_legacy_file(*, config_dir: Path | None = None) -> list[Health
 
     legacy = config_dir / "catalog" / ".catalog.db"
     if legacy.is_file():
-        docs: int | str = "unknown"
-        links: int | str = "unknown"
-        try:
-            import sqlite3  # noqa: PLC0415 — deferred; legacy-source probe only
+        from nexus.db.migrations import (  # noqa: PLC0415 — deferred to avoid circular import
+            read_legacy_catalog_counts,
+        )
 
-            conn = sqlite3.connect(f"file:{legacy}?mode=ro", uri=True)
-            try:
-                for tbl, key in (("documents", "docs"), ("links", "links")):
-                    try:
-                        n = conn.execute(f"SELECT count(*) FROM {tbl}").fetchone()[0]
-                    except sqlite3.Error:
-                        continue
-                    if key == "docs":
-                        docs = n
-                    else:
-                        links = n
-            finally:
-                conn.close()
-        except Exception:  # noqa: BLE001 — an unreadable legacy file must still be NAMED
-            pass
+        docs, links = read_legacy_catalog_counts(legacy)
 
         import datetime as _dt  # noqa: PLC0415 — deferred, formatting only
 
