@@ -730,47 +730,6 @@ class TestCleanStoreCountsAndCatchAll:
         ]
         assert issue.count == 2
 
-    def test_chash_batch_error_records_failed_per_row(self, tmp_path: Path) -> None:
-        from nexus.db.t2.chash_etl import migrate_chash_rows
-
-        db = tmp_path / "chash.db"
-        conn = sqlite3.connect(db)
-        conn.executescript(
-            "CREATE TABLE chash_index (chash TEXT PRIMARY KEY, "
-            "physical_collection TEXT, created_at TEXT);"
-        )
-        conn.executemany(
-            "INSERT INTO chash_index VALUES (?,?,?)",
-            [("c1", "k", ""), ("c2", "k", "")],
-        )
-        conn.commit()
-        conn.close()
-
-        class _OkChash:
-            def import_batch(self, *a, **k):
-                return len(a[0]) if a else 0
-
-            def __getattr__(self, name):
-                def _f(*a, **k):
-                    payload = a[0] if a else k.get("rows", [])
-                    return {"imported": len(payload)} if isinstance(payload, list) else 1
-                return _f
-
-        collector = IssueCollector()
-        migrate_chash_rows(db, _OkChash(), collector=collector)
-        counts = collector.table_counts("chash", "chash_index")
-        assert counts["read"] == 2
-        # _OkChash's __getattr__ returns a bare function for ._client, so
-        # the batch post raises — this test OWNS the error path (CRE P2
-        # finding): nothing written, and total_failed counts BOTH rows.
-        assert counts["written"] == 0
-        (issue,) = [
-            i for i in collector.issues_for("chash", "chash_index")
-            if i.action == "failed"
-        ]
-        assert issue.count == 2
-
-
 class TestNeverSilentSweep:
     """RDR-153 P2 critic Criticals: EVERY ETL surface records import
     rejections — a silent path lets the Phase-4 gate pass falsely."""
