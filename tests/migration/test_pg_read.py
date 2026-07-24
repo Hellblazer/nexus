@@ -16,7 +16,7 @@ import inspect
 import pytest
 
 from nexus.migration import pg_read
-from nexus.migration.chroma_read import iter_collection_chunks
+from nexus.db.reconcile import iter_collection_chunks
 from nexus.migration.pg_read import PgReadClient, PgReadError
 
 

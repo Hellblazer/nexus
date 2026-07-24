@@ -115,7 +115,7 @@ class TestIterCollectionChunks:
         """chroma_quotas still governs this leg — the ONE reason it
         survives Phase 4a."""
         self._seed(client, "knowledge__etl_quota_test", 1)
-        with pytest.raises(ValueError, match="chroma_quotas governs"):
+        with pytest.raises(ValueError, match="nexus.db.limits governs"):
             list(
                 iter_collection_chunks(
                     client,

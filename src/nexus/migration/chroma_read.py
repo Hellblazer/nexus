@@ -27,13 +27,12 @@ Full deletion of this module (and the quotas it leans on) is Phase 4b
 """
 from __future__ import annotations
 
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import structlog
 
-from nexus.db.chroma_quotas import QUOTAS
+from nexus.db.chroma_quotas import QUOTAS  # noqa: F401  — dying-set pin (test_rdr155_p4b_quotas_rehome); pagers rehomed to db.reconcile
 
 _log = structlog.get_logger(__name__)
 
@@ -110,60 +109,12 @@ def open_cloud_read_client(
     return client
 
 
-def list_collection_names(client: Any) -> list[str]:
-    """All collection names visible to *client*, sorted."""
-    return sorted(c.name for c in client.list_collections())
-
-
-def iter_collection_chunks(
-    client: Any,
-    collection_name: str,
-    *,
-    page_size: int | None = None,
-    include_embeddings: bool = False,
-    start_offset: int = 0,
-) -> Iterator[dict[str, Any]]:
-    """Yield every chunk of *collection_name* as ``{id, document, metadata}``.
-
-    Pages at ``QUOTAS.MAX_QUERY_RESULTS`` (300) per call — the ChromaCloud
-    free-tier cap that ``chroma_quotas`` still governs for this leg.
-
-    By default the embedding vectors are NOT fetched: the pgvector side
-    re-embeds server-side (Seam B), so dragging legacy vectors through a
-    cross-model migration would invite contamination (RDR-109 hazard class).
-    The SAME-MODEL passthrough (nexus-hxry2) is the deliberate exception: when
-    the source model equals the target's wired model the stored vectors are
-    already correct, so ``include_embeddings=True`` fetches them and each yielded
-    chunk additionally carries ``"embedding"`` (a ``list[float]``, or ``None`` if
-    the source row has no vector). The caller is responsible for only enabling
-    this on the verified same-model branch.
-    """
-    page = page_size or QUOTAS.MAX_QUERY_RESULTS
-    if page > QUOTAS.MAX_QUERY_RESULTS:
-        raise ValueError(
-            f"page_size {page} exceeds the Chroma per-call cap "
-            f"{QUOTAS.MAX_QUERY_RESULTS} (chroma_quotas governs this read leg)"
-        )
-    include = ["documents", "metadatas"]
-    if include_embeddings:
-        include.append("embeddings")
-    col = client.get_collection(collection_name)
-    offset = start_offset
-    while True:
-        batch = col.get(include=include, limit=page, offset=offset)
-        ids = batch.get("ids") or []
-        if not ids:
-            return
-        docs = batch.get("documents") or [None] * len(ids)
-        metas = batch.get("metadatas") or [None] * len(ids)
-        embs = batch.get("embeddings") if include_embeddings else None
-        if embs is None:
-            embs = [None] * len(ids)
-        for chunk_id, doc, meta, emb in zip(ids, docs, metas, embs):
-            chunk = {"id": chunk_id, "document": doc, "metadata": dict(meta or {})}
-            if include_embeddings:
-                chunk["embedding"] = list(emb) if emb is not None else None
-            yield chunk
-        if len(ids) < page:
-            return
-        offset += len(ids)
+# Substrate-neutral pagers REHOMED to nexus.db.reconcile (nexus-jg74b):
+# they operate on any Chroma-SHAPED client (PgReadClient included) and
+# survive the Chroma wave. Re-exported here as a shim so this module's
+# dying consumers (vector_etl, etl_ports, collision_audit + their tests)
+# stay untouched and delete whole-file with it at P2.
+from nexus.db.reconcile import (  # noqa: E402, F401  — re-export shim (dies with this module)
+    iter_collection_chunks,
+    list_collection_names,
+)
