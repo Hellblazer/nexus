@@ -28,6 +28,7 @@ constructs its own registry and asserts against that instance directly.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
@@ -35,6 +36,18 @@ import pytest
 
 from nexus.db.t2 import T2Database
 from nexus.hook_registry import HookRegistry
+
+#: hook_failures has record/trim/import endpoints over HTTP but NO read
+#: surface — the persisted-row assertions below can only be made via a raw
+#: SQLite conn. dies-roster: these die with the raw-read at the RDR-155
+#: P4b flip (the write path itself is engine-covered by
+#: tests/db/test_http_telemetry_store integration).
+_RAW_HOOK_FAILURES_READ = pytest.mark.skipif(
+    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    reason="dies-roster: asserts the persisted hook_failures row via a raw "
+    "SQLite conn; the engine exposes record/trim/import but no read "
+    "surface for hook_failures — dies at the RDR-155 P4b flip",
+)
 
 
 # ── Registration + dispatch ──────────────────────────────────────────────────
@@ -165,6 +178,7 @@ def test_fire_document_exception_nonfatal() -> None:
     assert survived == ["/path/y.md"]
 
 
+@_RAW_HOOK_FAILURES_READ
 def test_fire_document_persists_failure_to_t2(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -274,12 +288,24 @@ def test_migration_4_14_2_adds_chain_column(tmp_path: Path) -> None:
 
     Applies the migration directly because the running package is still
     4.14.1 so T2Database's auto ``apply_pending`` stops one short.
+
+    Builds the base ``hook_failures`` schema with the SQLite migration
+    functions directly (not via ``T2Database``): the migration under
+    test is SQLite-subject, and routing schema creation through
+    ``T2Database`` makes it substrate-dependent — under
+    ``NX_TEST_T2_SUBSTRATE=engine`` no SQLite file is created and the
+    PRAGMA read came back empty (RDR-155 P4b P0a').
     """
-    from nexus.db.migrations import migrate_hook_failures_chain_column
+    from nexus.db.migrations import (
+        migrate_hook_failures,
+        migrate_hook_failures_batch_columns,
+        migrate_hook_failures_chain_column,
+    )
 
     db_path = tmp_path / "post_migrate.db"
-    T2Database(db_path).close()  # base schema through 4.14.1
     raw = sqlite3.connect(str(db_path))
+    migrate_hook_failures(raw)  # base schema through 4.14.1
+    migrate_hook_failures_batch_columns(raw)
     migrate_hook_failures_chain_column(raw)
     cols = {r[1]: r for r in raw.execute("PRAGMA table_info(hook_failures)").fetchall()}
     raw.close()
@@ -364,6 +390,7 @@ def test_migration_4_14_2_no_op_when_table_missing(tmp_path: Path) -> None:
 # ── Existing chains write 'chain' value ──────────────────────────────────────
 
 
+@_RAW_HOOK_FAILURES_READ
 def test_record_hook_failure_writes_chain_single(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -397,6 +424,7 @@ def test_record_hook_failure_writes_chain_single(
     assert row == ("doc-1", "single")
 
 
+@_RAW_HOOK_FAILURES_READ
 def test_record_batch_hook_failure_writes_chain_batch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

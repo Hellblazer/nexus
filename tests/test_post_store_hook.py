@@ -9,6 +9,7 @@ up between tests.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import chromadb
@@ -17,6 +18,18 @@ import pytest
 from nexus.db.t2 import T2Database
 from nexus.hook_registry import HookRegistry
 from tests.conftest import make_vector_test_client
+
+#: hook_failures has record/trim/import endpoints over HTTP but NO read
+#: surface — the persisted-row assertions below can only be made via a raw
+#: SQLite conn. dies-roster: these die with the raw-read at the RDR-155
+#: P4b flip (the write path itself is engine-covered by
+#: tests/db/test_http_telemetry_store integration).
+_RAW_HOOK_FAILURES_READ = pytest.mark.skipif(
+    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    reason="dies-roster: asserts the persisted hook_failures row via a raw "
+    "SQLite conn; the engine exposes record/trim/import but no read "
+    "surface for hook_failures — dies at the RDR-155 P4b flip",
+)
 
 
 @pytest.fixture()
@@ -54,6 +67,7 @@ def test_fire_single_exception_nonfatal(
     registry.fire_single("doc-1", "test__coll", "content")
 
 
+@_RAW_HOOK_FAILURES_READ
 def test_fire_single_persists_failure_to_t2(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -198,6 +212,11 @@ def test_fire_batch_isolation(tmp_path: Path, monkeypatch) -> None:
     Uses a synthetic raising probe (the real taxonomy_assign_batch_hook
     body wraps everything in its own try/except and so cannot exercise the
     framework's failure-capture path).
+
+    The isolation contract is substrate-blind and runs on both substrates;
+    the persisted-row assertion is a raw SQLite read (hook_failures has no
+    HTTP read surface) and is guarded via ``has_raw_access`` — that branch
+    dies with the raw handle at the RDR-155 P4b flip (dies-roster).
     """
     import nexus.mcp_infra as mod
     from nexus.db.migrations import (
@@ -232,7 +251,11 @@ def test_fire_batch_isolation(tmp_path: Path, monkeypatch) -> None:
 
     assert second_calls == [("doc-1", "doc-2", "doc-3")]
 
+    from nexus.db.storage_mode import has_raw_access
+
     with T2Database(db_path) as db:
+        if not has_raw_access(db.taxonomy):
+            return  # engine substrate: no hook_failures read surface
         row = db.taxonomy.conn.execute(
             "SELECT doc_id, collection, hook_name, error, batch_doc_ids, is_batch "
             "FROM hook_failures"
@@ -256,6 +279,10 @@ def test_fire_batch_partial_commit_failure_mode(
     Validates the documented contract: framework writes one hook_failures
     row capturing the full doc_id list and exception text. Per-sub-step
     capture is hook-internal, not framework-level.
+
+    The sub-step contract runs on both substrates; the persisted-row
+    assertion is a raw SQLite read guarded via ``has_raw_access`` — that
+    branch dies with the raw handle at the RDR-155 P4b flip (dies-roster).
     """
     import nexus.mcp_infra as mod
     from nexus.db.migrations import (
@@ -289,7 +316,11 @@ def test_fire_batch_partial_commit_failure_mode(
 
     assert sub_step_log == ["step_a_committed"]
 
+    from nexus.db.storage_mode import has_raw_access
+
     with T2Database(db_path) as db:
+        if not has_raw_access(db.taxonomy):
+            return  # engine substrate: no hook_failures read surface
         rows = db.taxonomy.conn.execute(
             "SELECT batch_doc_ids, is_batch, error FROM hook_failures"
         ).fetchall()
