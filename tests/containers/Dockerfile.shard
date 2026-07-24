@@ -1,0 +1,162 @@
+# syntax=docker/dockerfile:1.7
+# Containerized unit-suite shard image (bead nexus-uq3xs, leg 1).
+#
+# One image, N concurrent `docker run` shards. Each container is a fully
+# isolated sandbox: its own hermetic PG (bundled, baked below), its own
+# engine JAR boot (tests/_engine_substrate.py), its own tmpdirs. The
+# no-parallel-tests rule's isolated-sandbox refinement
+# (feedback_parallelize_isolated_gates) is what blesses this concurrency.
+#
+# Layer ordering = cache-key discipline (CI-cost directive: rebuild only on
+# key miss). From least- to most-frequently changing:
+#   1. base apt + uv binary          — keyed on UV_VERSION
+#   2. PG bundle                     — keyed on ARG PINNED_SERVICE_TAG (+ optional sha assert)
+#   3. MiniLM ONNX artifact          — keyed on MINILM_SHA256 (effectively immutable)
+#   4. uv-managed CPython            — keyed on PY_VERSION
+#   5. dependency layer              — keyed on pyproject.toml + uv.lock content (COPY checksum)
+#   6. source + project install      — changes every edit (cheap: wheels already resolved)
+#   7. service JAR                   — changes on host `mvn package`
+#
+# Build (from repo root; fanout.sh does all of this):
+#   docker build --platform linux/arm64 \
+#     -f tests/containers/Dockerfile.shard \
+#     --build-arg PINNED_SERVICE_TAG=engine-service-v0.1.52 \
+#     -t nexus-test-shard:engine-service-v0.1.52 .
+
+FROM eclipse-temurin:25-jre-noble
+# Java 25 JRE (service/pom.xml maven.compiler.release=25) on Ubuntu 24.04.
+
+ARG PINNED_SERVICE_TAG=engine-service-v0.1.52
+# Optional integrity pin for the PG bundle download. Empty = record-only
+# (the sha is still captured into /opt/nexus-pg/bundle.sha256 for provenance).
+ARG PG_BUNDLE_SHA256=""
+# chroma-S3 MiniLM tarball sha — same constant as src/nexus/db/minilm_direct.py
+# _MODEL_SHA256. Verified, never skipped.
+ARG MINILM_SHA256=913d7300ceae3b2dbc2c50d1de4baacab4be7b9380491c27fab7418616a16ec3
+ARG UV_VERSION=0.8.0
+ARG PY_VERSION=3.12
+# bge-768 fp32 ONNX export the engine's Bge768Embedder hard-requires at boot
+# (RDR-160 P3): same tag + sha pins as src/nexus/db/service_bge_model.py.
+ARG BGE_ASSET_TAG=ci-assets-bge-768-v1
+ARG BGE_MODEL_SHA256=9bc579acdba21c253c62a9bf866891355a63ffa3442b52c8a37d75b2ccb91848
+ARG BGE_TOKENIZER_SHA256=d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66
+
+# ── 1. OS deps + uv ──────────────────────────────────────────────────────────
+# xz-utils: PG bundle is a .txz.  libgomp1: torch/onnxruntime OpenMP runtime.
+# uv from its GitHub release tarball (ghcr.io pulls are denied from some
+# networks; the GitHub asset is the same binary, keyed on UV_VERSION).
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl xz-utils libgomp1; \
+    rm -rf /var/lib/apt/lists/*; \
+    curl -fsSL -o /tmp/uv.tgz \
+      "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-aarch64-unknown-linux-gnu.tar.gz"; \
+    tar -xzf /tmp/uv.tgz -C /tmp; \
+    install -m 0755 /tmp/uv-aarch64-unknown-linux-gnu/uv /usr/local/bin/uv; \
+    rm -rf /tmp/uv.tgz /tmp/uv-aarch64-unknown-linux-gnu; \
+    uv --version
+
+# Non-root user: PostgreSQL initdb refuses to run as root, and
+# tests/_engine_substrate.py reads os.environ["USER"].  uid 1010 avoids the
+# noble base image's builtin `ubuntu` (1000).
+RUN useradd -m -s /bin/bash -u 1010 nexus && install -d -o nexus -g nexus /work
+
+# ── 2. PG bundle (keyed on PINNED_SERVICE_TAG) ───────────────────────────────
+# Bake instead of letting tests/db/_service_fixture.py self-provision at
+# runtime: the runtime path re-downloads ~a hundred MB per fresh container.
+# NEXUS_PG_BIN is the fixture's FIRST discovery leg (pg_provision.
+# discover_pg_binaries), so the baked bundle short-circuits both the
+# config-dir scan and the network self-provisioning leg.  The linux bundle
+# is $ORIGIN-relocatable (scripts/build_pg_bundle.sh), so a plain tar
+# extract to /opt works; the archive's top-level dir is `bundle/`.
+RUN set -eux; \
+    curl -fsSL -o /tmp/nexus-pg.txz \
+      "https://github.com/Hellblazer/nexus/releases/download/${PINNED_SERVICE_TAG}/nexus-pg-linux-arm64.txz"; \
+    sha="$(sha256sum /tmp/nexus-pg.txz | awk '{print $1}')"; \
+    if [ -n "${PG_BUNDLE_SHA256}" ] && [ "${sha}" != "${PG_BUNDLE_SHA256}" ]; then \
+      echo "PG bundle sha256 mismatch: got ${sha}, expected ${PG_BUNDLE_SHA256}" >&2; exit 1; \
+    fi; \
+    mkdir -p /opt/nexus-pg; \
+    tar -xJf /tmp/nexus-pg.txz -C /opt/nexus-pg; \
+    printf '%s  nexus-pg-linux-arm64.txz (%s)\n' "${sha}" "${PINNED_SERVICE_TAG}" \
+      > /opt/nexus-pg/bundle.sha256; \
+    test -x /opt/nexus-pg/bundle/bin/initdb; \
+    test -x /opt/nexus-pg/bundle/bin/pg_ctl; \
+    rm /tmp/nexus-pg.txz
+ENV NEXUS_PG_BIN=/opt/nexus-pg/bundle/bin
+
+# ── 2b. bge-768 ONNX model (engine boot hard-requires it) ────────────────────
+# The service JAR's Bge768Embedder System.exit()s without
+# ~/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx/{model.onnx,tokenizer.json}
+# (found the hard way: first in-container engine boot). Same immutable release
+# assets + sha pins nx init --service provisions (service_bge_model.py).
+RUN set -eux; \
+    d=/home/nexus/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx; \
+    mkdir -p "$d"; cd "$d"; \
+    curl -fsSL -o model.onnx \
+      "https://github.com/Hellblazer/nexus/releases/download/${BGE_ASSET_TAG}/model.onnx"; \
+    echo "${BGE_MODEL_SHA256}  model.onnx" | sha256sum -c -; \
+    curl -fsSL -o tokenizer.json \
+      "https://github.com/Hellblazer/nexus/releases/download/${BGE_ASSET_TAG}/tokenizer.json"; \
+    echo "${BGE_TOKENIZER_SHA256}  tokenizer.json" | sha256sum -c -; \
+    chown -R nexus:nexus /home/nexus/.cache
+
+# ── 3. MiniLM ONNX artifact (chroma + nexus.db.minilm_direct share this) ─────
+# Both the chromadb DefaultEmbeddingFunction and the tier-0 EF resolve
+# ~/.cache/chroma/onnx_models/all-MiniLM-L6-v2/{onnx.tar.gz,onnx/}. Keep the
+# tarball too: chroma re-downloads when the archive hash is absent/mismatched.
+RUN set -eux; \
+    d=/home/nexus/.cache/chroma/onnx_models/all-MiniLM-L6-v2; \
+    mkdir -p "$d"; cd "$d"; \
+    curl -fsSL -o onnx.tar.gz \
+      "https://chroma-onnx-models.s3.amazonaws.com/all-MiniLM-L6-v2/onnx.tar.gz"; \
+    echo "${MINILM_SHA256}  onnx.tar.gz" | sha256sum -c -; \
+    tar -xzf onnx.tar.gz; \
+    test -f onnx/model.onnx; \
+    chown -R nexus:nexus /home/nexus/.cache
+
+# ── 4. Python toolchain ──────────────────────────────────────────────────────
+USER nexus
+ENV HOME=/home/nexus \
+    USER=nexus \
+    UV_LINK_MODE=copy \
+    UV_PYTHON=3.12 \
+    PYTHONUNBUFFERED=1 \
+    PATH=/work/.venv/bin:$PATH
+RUN uv python install "${PY_VERSION}"
+
+# ── 5. Dependency layer (keyed on pyproject.toml + uv.lock) ──────────────────
+WORKDIR /work
+COPY --chown=nexus:nexus pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/home/nexus/.cache/uv,uid=1010,gid=1010 \
+    uv sync --frozen --no-install-project
+
+# ── 6. Source (changes every edit; wheels above stay cached) ─────────────────
+COPY --chown=nexus:nexus README.md LICENSE ./
+COPY --chown=nexus:nexus src ./src
+COPY --chown=nexus:nexus scripts ./scripts
+COPY --chown=nexus:nexus docs ./docs
+COPY --chown=nexus:nexus conexus ./conexus
+# dt/scripts is a hatchling force-include of the conexus wheel (and the
+# src/nexus/_resources/dt-scripts symlink target); uv sync fails without it.
+COPY --chown=nexus:nexus dt ./dt
+COPY --chown=nexus:nexus sn ./sn
+COPY --chown=nexus:nexus .claude-plugin ./.claude-plugin
+# service/src is REQUIRED: tests/db/_service_fixture.jar_freshness_skip_reason
+# compares the JAR mtime against service/src/{main/java,resources/db/changelog};
+# a missing source tree is a loud "cannot verify freshness" failure under the
+# engine substrate. COPY preserves file mtimes, so the host's fresh-JAR
+# relationship carries into the image unchanged.
+COPY --chown=nexus:nexus service/src ./service/src
+COPY --chown=nexus:nexus tests ./tests
+RUN --mount=type=cache,target=/home/nexus/.cache/uv,uid=1010,gid=1010 \
+    uv sync --frozen
+
+# ── 7. Engine JAR (host-built; mvn -f service/pom.xml package -DskipTests) ───
+COPY --chown=nexus:nexus service/target/nexus-service-1.0-SNAPSHOT.jar \
+     ./service/target/nexus-service-1.0-SNAPSHOT.jar
+
+# Default: run the whole (unit) suite; fanout.sh overrides with a shard's
+# file list. -p no:cacheprovider — the container is throwaway, never write
+# .pytest_cache into the image overlay.
+CMD ["python", "-m", "pytest", "-p", "no:cacheprovider", "-q"]
