@@ -288,6 +288,21 @@ def t2_service_env(request: pytest.FixtureRequest,
     becomes the suite default when the pin flips at the end of P0a'.
     """
     from tests._engine_substrate import ensure_engine, mint_test_tenant
+    from tests.db._service_fixture import jar_freshness_skip_reason
+
+    # CI leg (RDR-155 P4b P0a' registered question, now due): the Python
+    # CI job does not build the service JAR, so engine-substrate tests
+    # SKIP there — with a non-vacuity backstop: once CI provisions the
+    # JAR it sets NX_T2_SUBSTRATE_EXPECTED=1, after which an absent JAR
+    # FAILS loudly again (the skip can never silently become permanent).
+    # Provisioning work: bead nexus-CI-substrate (see g37fr).
+    if (
+        os.environ.get("GITHUB_ACTIONS") == "true"
+        and not os.environ.get("NX_T2_SUBSTRATE_EXPECTED")
+        and jar_freshness_skip_reason() is not None
+    ):
+        pytest.skip("engine substrate: service JAR not provisioned on CI "
+                    "(tracked; NX_T2_SUBSTRATE_EXPECTED=1 re-arms fail-loud)")
 
     state = ensure_engine()
     tenant, token = mint_test_tenant(state)
@@ -662,7 +677,7 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # the test proves retry-on-connect-error behavior, which does not
     # depend on deployment mode. No module-level fixtures/marks in this
     # file's header.
-    "test_chroma_retry.py",
+    "test_vector_retry.py",  # renamed from test_chroma_retry.py at RDR-155 P4b P0d
     # Whole-file "nxexp export/import format" class: every flagged test
     # constructs or reads a ``.nxexp`` header/record by hand (or via
     # ``export_collection``/``import_collection`` against a local

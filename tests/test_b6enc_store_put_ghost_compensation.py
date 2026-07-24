@@ -148,7 +148,7 @@ class TestMcpGhostRegisterCompensation:
         owner = cat.register_owner("knowledge", "curator")
         cat.register(
             owner, "b6enc-dedup-mcp", content_type="knowledge",
-            physical_collection="knowledge__knowledge__voyage-context-3__v1",
+            physical_collection="knowledge__knowledge__bge-base-en-v15-768__v1",
             meta={"doc_id": chash},
         )
         cat._db.close()
@@ -399,7 +399,7 @@ class TestPromoteGhostRegisterCompensation:
         owner = cat.register_owner("knowledge", "curator")
         cat.register(
             owner, "b6enc-dedup-promote", content_type="knowledge",
-            physical_collection="knowledge__knowledge__voyage-context-3__v1",
+            physical_collection="knowledge__knowledge__bge-base-en-v15-768__v1",
             meta={"doc_id": chash},
         )
         cat._db.close()
@@ -589,12 +589,12 @@ class TestStoreDeleteAsymmetry:
         cat.register(
             owner, "b6enc-filebacked", content_type="prose",
             file_path="notes/file.md",
-            physical_collection="knowledge__knowledge__voyage-context-3__v1",
+            physical_collection="knowledge__knowledge__bge-base-en-v15-768__v1",
             meta={"doc_id": chash},
         )
         cat._db.close()
 
-        col = "knowledge__knowledge__voyage-context-3__v1"
+        col = "knowledge__knowledge__bge-base-en-v15-768__v1"
         local_t3.put(collection=col, content=content, title="b6enc-filebacked")
 
         from nexus.mcp.core import store_delete
