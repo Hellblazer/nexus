@@ -31,6 +31,16 @@ from tests.conftest import make_vector_test_client
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
 
+@pytest.fixture(autouse=True)
+def _pin_local_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin sqlite/local backend: every test here seeds a LOCAL tmp
+    catalog, so under the ``NX_TEST_T2_SUBSTRATE=engine`` flip (global
+    ``NX_STORAGE_BACKEND=service``) the doctor would read the engine
+    tenant's empty catalog instead of the seeded one (nexus-b6enc:
+    fixed the 2 pre-existing engine-substrate failures in this file)."""
+    monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
+
+
 @pytest.fixture()
 def isolated_nexus(tmp_path: Path) -> Path:
     return tmp_path / "test-catalog"
@@ -444,6 +454,240 @@ class TestT3VsCatalog:
         missing = payload["docs_pointing_at_missing_t3"]
         assert len(missing) == 1
         assert missing[0]["physical_collection"] == "docs__ghost_t3"
+
+
+# ── nexus-b6enc: --store-put-integrity ────────────────────────────────────
+
+
+class TestStorePutIntegrity:
+    """store_put-origin integrity: drift (chunk_count vs manifest) and
+    ghosts (row + zero manifest + zero chunks), fatal on both, with
+    title+tumbler reported for ghosts so content can be re-created."""
+
+    @staticmethod
+    def _seed_doc(
+        isolated_nexus: Path, title: str, *, chash: str,
+        chunk_count: int = 0, with_manifest: bool = False,
+    ) -> str:
+        from nexus.catalog.catalog import Catalog
+        cat = Catalog(isolated_nexus, isolated_nexus / ".catalog.db")
+        owner_t = cat.curator_owner_tumbler_by_name("knowledge")
+        owner = owner_t or cat.register_owner("knowledge", "curator")
+        t = cat.register(
+            owner, title, content_type="knowledge",
+            physical_collection="knowledge__seeded",
+            chunk_count=chunk_count,
+            meta={"doc_id": chash},
+        )
+        if with_manifest:
+            cat.atomic_manifest_replace(str(t), [{
+                "chash": chash, "position": 0, "chunk_index": 0,
+                "line_start": None, "line_end": None,
+                "char_start": None, "char_end": None,
+            }])
+        cat._db.close()
+        return str(t)
+
+    class _FakeT3:
+        def __init__(self, present_ids: set[str] | None = None):
+            self._present = present_ids or set()
+
+        def get_by_id(self, collection, doc_id):
+            return {"id": doc_id} if doc_id in self._present else None
+
+    def test_clean_seeded_doc_passes_non_vacuous(
+        self, isolated_nexus, runner, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A healthy store_put doc (chunk_count==manifest==1, chunk in
+        T3) passes — and ``checked`` proves the scan was non-vacuous."""
+        from nexus.catalog.catalog import Catalog
+        Catalog.init(isolated_nexus)
+        chash = "a" * 64
+        self._seed_doc(
+            isolated_nexus, "healthy-note", chash=chash, with_manifest=True,
+        )
+        monkeypatch.setattr(
+            "nexus.db.make_t3", lambda: self._FakeT3({chash}),
+        )
+        result = runner.invoke(doctor_cmd, ["--store-put-integrity", "--json"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)["store_put_integrity"]
+        assert payload["pass"] is True
+        assert payload["checked"] == 1, (
+            "non-vacuity: the check must have scanned the seeded doc"
+        )
+        assert payload["drift"] == []
+        assert payload["ghosts"] == []
+
+    def test_clean_install_passes(
+        self, isolated_nexus, runner, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Zero store_put-origin docs: PASS with checked=0 reported
+        honestly (no false drift/ghost on a clean install)."""
+        from nexus.catalog.catalog import Catalog
+        Catalog.init(isolated_nexus)
+        monkeypatch.setattr("nexus.db.make_t3", lambda: self._FakeT3())
+        result = runner.invoke(doctor_cmd, ["--store-put-integrity", "--json"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)["store_put_integrity"]
+        assert payload["pass"] is True
+        assert payload["checked"] == 0
+
+    def test_drift_detected(
+        self, isolated_nexus, runner, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """chunk_count=1 with zero manifest rows (the C3 swallow damage
+        class / the migration verbatim-import class) FAILS."""
+        from nexus.catalog.catalog import Catalog
+        Catalog.init(isolated_nexus)
+        chash = "b" * 64
+        self._seed_doc(
+            isolated_nexus, "drifted-note", chash=chash, chunk_count=1,
+        )
+        monkeypatch.setattr(
+            "nexus.db.make_t3", lambda: self._FakeT3({chash}),
+        )
+        result = runner.invoke(doctor_cmd, ["--store-put-integrity", "--json"])
+        assert result.exit_code == 1
+        payload = json.loads(result.stdout)["store_put_integrity"]
+        assert payload["pass"] is False
+        assert len(payload["drift"]) == 1
+        d = payload["drift"][0]
+        assert d["title"] == "drifted-note"
+        assert d["chunk_count"] == 1
+        assert d["manifest_count"] == 0
+
+    def test_ghost_detected_fatal_with_title_and_tumbler(
+        self, isolated_nexus, runner, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Row + zero manifest + zero chunks = ghost: FATAL, reported by
+        TITLE and TUMBLER so the content can be re-created while it is
+        still remembered (nexus-b6enc record section c)."""
+        from nexus.catalog.catalog import Catalog
+        Catalog.init(isolated_nexus)
+        chash = "c" * 64
+        tumbler = self._seed_doc(
+            isolated_nexus, "ghost-note", chash=chash, chunk_count=0,
+        )
+        # T3 has NO chunk for this id.
+        monkeypatch.setattr("nexus.db.make_t3", lambda: self._FakeT3())
+        result = runner.invoke(doctor_cmd, ["--store-put-integrity", "--json"])
+        assert result.exit_code == 1
+        payload = json.loads(result.stdout)["store_put_integrity"]
+        assert payload["pass"] is False
+        assert payload["ghosts"] == [
+            {"tumbler": tumbler, "title": "ghost-note"}
+        ]
+
+    def test_orphan_chunk_without_manifest_is_not_a_ghost(
+        self, isolated_nexus, runner, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """chunk_count==0 and zero manifest but the chunk EXISTS in T3
+        (the C2 catalog-hook-swallow direction — content recoverable):
+        not a ghost; counts agree (0==0) so no drift either."""
+        from nexus.catalog.catalog import Catalog
+        Catalog.init(isolated_nexus)
+        chash = "d" * 64
+        self._seed_doc(
+            isolated_nexus, "recoverable-note", chash=chash, chunk_count=0,
+        )
+        monkeypatch.setattr(
+            "nexus.db.make_t3", lambda: self._FakeT3({chash}),
+        )
+        result = runner.invoke(doctor_cmd, ["--store-put-integrity", "--json"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)["store_put_integrity"]
+        assert payload["ghosts"] == []
+
+    def test_t3_unavailable_routes_to_unverifiable_not_ghost(
+        self, isolated_nexus, runner, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """make_t3() failing (critic Sig 1): a ghost CANDIDATE must land
+        in the non-fatal ``unverifiable`` bucket — never a "content is
+        GONE" verdict the check could not verify."""
+        from nexus.catalog.catalog import Catalog
+        Catalog.init(isolated_nexus)
+        chash = "f" * 64
+        tumbler = self._seed_doc(
+            isolated_nexus, "maybe-ghost", chash=chash, chunk_count=0,
+        )
+        monkeypatch.setattr(
+            "nexus.db.make_t3",
+            lambda: (_ for _ in ()).throw(RuntimeError("T3 down")),
+        )
+        result = runner.invoke(doctor_cmd, ["--store-put-integrity", "--json"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)["store_put_integrity"]
+        assert payload["pass"] is True
+        assert payload["ghosts"] == [], (
+            "an unverified candidate must never be classified as a ghost"
+        )
+        assert len(payload["unverifiable"]) == 1
+        u = payload["unverifiable"][0]
+        assert u["tumbler"] == tumbler and u["title"] == "maybe-ghost"
+        assert "T3 unavailable" in u["reason"]
+
+        # Text mode: WARN with the named doc, and NEVER the GONE claim.
+        text = runner.invoke(doctor_cmd, ["--store-put-integrity"])
+        assert text.exit_code == 0, text.output
+        assert "GONE" not in text.output, (
+            "'content is GONE' must never be printed for unverified docs"
+        )
+        assert "unverifiable" in text.output
+        assert "maybe-ghost" in text.output
+
+    def test_per_doc_transient_error_routes_to_unverifiable_not_ghost(
+        self, isolated_nexus, runner, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """CRE Imp 2: get_by_id already maps a missing collection to
+        ``None``, so a RAISE from the per-doc lookup is transient
+        (timeout/auth/network) — unverifiable, never a false GONE."""
+        from nexus.catalog.catalog import Catalog
+        Catalog.init(isolated_nexus)
+        chash = "9" * 64
+        tumbler = self._seed_doc(
+            isolated_nexus, "flaky-lookup", chash=chash, chunk_count=0,
+        )
+
+        class _FlakyT3:
+            def get_by_id(self, collection, doc_id):
+                raise TimeoutError("engine read timed out")
+
+        monkeypatch.setattr("nexus.db.make_t3", lambda: _FlakyT3())
+        result = runner.invoke(doctor_cmd, ["--store-put-integrity", "--json"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)["store_put_integrity"]
+        assert payload["ghosts"] == []
+        assert len(payload["unverifiable"]) == 1
+        u = payload["unverifiable"][0]
+        assert u["tumbler"] == tumbler and u["title"] == "flaky-lookup"
+        assert "chunk lookup failed" in u["reason"]
+
+        text = runner.invoke(doctor_cmd, ["--store-put-integrity"])
+        assert "GONE" not in text.output
+
+    def test_file_backed_docs_out_of_scope(
+        self, isolated_nexus, runner, monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Indexer-origin docs (file_path set) are not store_put-origin
+        and must not be scanned by this check."""
+        from nexus.catalog.catalog import Catalog
+        Catalog.init(isolated_nexus)
+        cat = Catalog(isolated_nexus, isolated_nexus / ".catalog.db")
+        owner = cat.register_owner("nexus", "repo", repo_hash="abab")
+        cat.register(
+            owner, "indexed.md", content_type="knowledge",
+            file_path="notes/indexed.md",
+            physical_collection="knowledge__seeded",
+            chunk_count=5,  # drift-shaped, but out of scope
+            meta={"doc_id": "e" * 64},
+        )
+        cat._db.close()
+        monkeypatch.setattr("nexus.db.make_t3", lambda: self._FakeT3())
+        result = runner.invoke(doctor_cmd, ["--store-put-integrity", "--json"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.stdout)["store_put_integrity"]
+        assert payload["checked"] == 0
 
 
 # ── Usage ─────────────────────────────────────────────────────────────────

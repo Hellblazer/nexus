@@ -299,13 +299,25 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
         ttl_days: int = entry["ttl"] if entry["ttl"] is not None else 0  # type: ignore[assignment]
         merged_tags = tags if tags else (entry.get("tags") or "")
 
-        # Compute expires_at from the T2 entry's original timestamp so that the
-        # promoted T3 entry honours the remaining TTL rather than resetting it.
+        # Honour the REMAINING TTL rather than resetting it at promote
+        # time. Both real T3 substrates compute expiry as
+        # ``indexed_at + ttl_days`` and accept NO ``expires_at`` kwarg
+        # (nexus-40t: "no separate expires_at field") — the old
+        # ``expires_at=`` pass-through was a TypeError against BOTH
+        # ``T3Database.put`` and ``HttpVectorClient.put``, mock-shielded
+        # until the nexus-v4paa fold's integration tests. The remaining
+        # window is expressed by shrinking ttl_days instead.
         if ttl_days > 0:
+            import math  # noqa: PLC0415 — deliberate function-local import: only needed on promote path
+
             base_ts = datetime.fromisoformat(entry["timestamp"])
-            expires_at = (base_ts + timedelta(days=ttl_days)).isoformat()
-        else:
-            expires_at = ""  # permanent
+            if base_ts.tzinfo is None:
+                base_ts = base_ts.replace(tzinfo=timezone.utc)
+            remaining = (
+                base_ts + timedelta(days=ttl_days)
+                - datetime.now(timezone.utc)
+            )
+            ttl_days = max(1, math.ceil(remaining / timedelta(days=1)))
 
         # nexus-8g79.1: pre-register the catalog entry so the T3 chunk
         # carries the resulting tumbler as ``doc_id`` at write-time and
@@ -313,38 +325,90 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
         # document_chunks + documents.chunk_count for this promotion.
         # Without this, the promoted entry lands in T3 with no catalog
         # identity — same regression class as nexus-zq79 / nexus-lf8f.
-        import hashlib  # noqa: PLC0415 — deliberate function-local import: only needed on promote path
-        from nexus.catalog.store_hook import catalog_store_hook  # noqa: PLC0415 — deliberate function-local import: catalog dep deferred, branch-local
-        chunk_chroma_id = hashlib.sha256(entry["content"].encode()).hexdigest()  # RDR-180: full digest
-        catalog_doc_id = catalog_store_hook(
+        from nexus.catalog.store_hook import (  # noqa: PLC0415 — deliberate function-local import: catalog dep deferred, branch-local
+            catalog_store_hook_tracked,
+            rollback_minted_catalog_entry,
+            single_chunk_manifest_metadata,
+            store_put_manifest_direct,
+        )
+        # single_chunk_manifest_metadata mirrors T3Database.put's natural-id
+        # derivation (full sha256 hex per RDR-180) AND yields the manifest
+        # metadatas the direct write below needs — same pairing as the two
+        # store_put producers.
+        chunk_chroma_id, manifest_metadatas = single_chunk_manifest_metadata(entry["content"])
+        catalog_doc_id, catalog_row_minted = catalog_store_hook_tracked(
             title=entry["title"],
             doc_id=chunk_chroma_id,
             collection_name=collection,
         )
 
-        with make_t3() as t3:
-            doc_id = t3.put(
-                collection=collection,
-                content=entry["content"],
-                title=entry["title"],
-                tags=merged_tags,
-                ttl_days=ttl_days,
-                expires_at=expires_at,
-                catalog_doc_id=catalog_doc_id,
-            )
+        # nexus-b6enc C2 (critic finding nexus-v4paa): promote shared the
+        # ghost-register seam store_put had — a t3.put failure must not
+        # strand a just-minted catalog row (row + zero chunks = the
+        # silent-data-loss class from GH #1419 Issue 8).
+        try:
+            with make_t3() as t3:
+                doc_id = t3.put(
+                    collection=collection,
+                    content=entry["content"],
+                    title=entry["title"],
+                    tags=merged_tags,
+                    ttl_days=ttl_days,
+                    catalog_doc_id=catalog_doc_id,
+                )
+        except Exception as exc:
+            if catalog_row_minted and catalog_doc_id:
+                rollback_minted_catalog_entry(
+                    catalog_doc_id, original_error=str(exc),
+                )
+            raise
+
+        # nexus-b6enc C3 (critic Critical nexus-v4paa): the manifest leg
+        # must not ride the swallowing fire_store_chains chain for this
+        # producer either — write it directly and VERIFY it landed, same
+        # as the two store_put paths. Failure is captured (not raised
+        # here) so the remaining post-store consumers still fire; the
+        # command then fails loudly instead of echoing a bare "Promoted:".
+        manifest_error = ""
+        if catalog_doc_id:
+            try:
+                store_put_manifest_direct(catalog_doc_id, manifest_metadatas)
+            except Exception as manifest_exc:  # noqa: BLE001 — captured for the explicit ClickException below
+                manifest_error = str(manifest_exc)
+                import structlog  # noqa: PLC0415 — branch-local logging
+                structlog.get_logger(__name__).warning(
+                    "store_put_manifest_direct_failed",
+                    doc_id=doc_id,
+                    catalog_doc_id=catalog_doc_id,
+                    collection=collection,
+                    error=manifest_error[:300],
+                    exc_info=True,
+                )
 
         # nexus-9099: fire post-store chains so the promoted T3 row
         # reaches chash_index / taxonomy / aspect queue. RDR-095
         # symmetric-fire; this path was missed by the original commit.
         # nexus-8g79.1: thread catalog_doc_id through so the manifest
-        # hook can populate document_chunks + chunk_count.
+        # hook can populate document_chunks + chunk_count (idempotent
+        # replace over the direct write above — coexistence is safe).
         from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deliberate function-local import: hook-registry dep deferred, branch-local
         hooks = HookRegistry()
         install_default_hooks(hooks)
         hooks.fire_store_chains(
             [doc_id], collection, [entry["content"]],
+            metadatas=manifest_metadatas,
             catalog_doc_id=catalog_doc_id,
         )
+
+        if manifest_error:
+            # Deliberately BEFORE the --remove branch: never delete the
+            # T2 source of a promotion whose catalog leg failed.
+            raise click.ClickException(
+                f"promoted to T3 ({doc_id} in {collection}) but NOT "
+                f"cataloged: {manifest_error}. Catalog row {catalog_doc_id} "
+                f"may show chunk_count=0; retry the promote with the same "
+                f"entry (idempotent dedup makes retry safe)."
+            )
 
         if remove:
             _delete_with_taxonomy_cascade(

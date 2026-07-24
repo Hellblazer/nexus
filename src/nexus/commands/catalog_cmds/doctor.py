@@ -353,6 +353,19 @@ def synthesize_log_cmd(
     ),
 )
 @click.option(
+    "--store-put-integrity",
+    "store_put_integrity",
+    is_flag=True,
+    help=(
+        "nexus-b6enc (GH #1419 Issue 8): store_put-origin integrity. "
+        "For content_type='knowledge' docs with no file_path: FAIL on "
+        "chunk_count != manifest-row count (drift) and on ghosts (row "
+        "with zero manifest AND zero T3 chunks — reported by title + "
+        "tumbler so the content can be re-created while still "
+        "remembered)."
+    ),
+)
+@click.option(
     "--json", "as_json", is_flag=True,
     help="Emit machine-readable JSON instead of text output.",
 )
@@ -365,6 +378,7 @@ def doctor_cmd(
     chunk_text_dedup: bool,
     t3_vs_catalog: bool,
     name_vs_embed_dim: bool,
+    store_put_integrity: bool,
     as_json: bool,
 ) -> None:
     """RDR-101 catalog doctor surface.
@@ -383,14 +397,15 @@ def doctor_cmd(
     any_check = (
         replay_equality or t3_doc_id_coverage or collections_drift
         or chunk_size_distribution or chunk_text_dedup or t3_vs_catalog
-        or name_vs_embed_dim
+        or name_vs_embed_dim or store_put_integrity
     )
     if not any_check:
         raise click.UsageError(
             "Pass a check flag: --replay-equality, "
             "--t3-doc-id-coverage, --collections-drift, "
             "--chunk-size-distribution, --chunk-text-dedup, "
-            "--t3-vs-catalog, or --name-vs-embed-dim."
+            "--t3-vs-catalog, --name-vs-embed-dim, or "
+            "--store-put-integrity."
         )
     if strict_not_in_t3 and not t3_doc_id_coverage:
         raise click.UsageError(
@@ -508,6 +523,17 @@ def doctor_cmd(
             if _printed_anything:
                 click.echo("")
             _print_name_vs_embed_dim_text(report)
+            _printed_anything = True
+        if not report["pass"]:
+            overall_pass = False
+    if store_put_integrity:
+        report = _run_store_put_integrity()
+        if as_json:
+            json_payload["store_put_integrity"] = report
+        else:
+            if _printed_anything:
+                click.echo("")
+            _print_store_put_integrity_text(report)
             _printed_anything = True
         if not report["pass"]:
             overall_pass = False
@@ -1995,6 +2021,184 @@ def _print_t3_doc_id_coverage_text(report: dict) -> None:
             "See docs/rdr/post-mortem/101-event-sourced-catalog-migration.md "
             "for the arc record (verbs retired post Phase 5b)."
         )
+
+
+# ── nexus-b6enc: --store-put-integrity ────────────────────────────────────
+
+
+def _run_store_put_integrity() -> dict:
+    """store_put-origin integrity check (nexus-b6enc / GH #1419 Issue 8).
+
+    Scope: catalog documents with ``content_type='knowledge'``, no
+    ``file_path`` and a ``meta.doc_id`` (the chunk natural id) — the
+    store_put / memory-promote origin signature.
+
+    Two failure classes, both FATAL (``pass=False``):
+      - **drift**: ``documents.chunk_count`` != COUNT of manifest rows
+        (the C3 manifest-swallow damage class).
+      - **ghost**: row with zero manifest rows AND zero T3 chunks (the
+        C2 ghost-register damage class). Reported with TITLE + TUMBLER
+        so the content can be re-created while it is still remembered.
+
+    A third, NON-fatal bucket (critic Sig 1 / CRE Imp 2):
+      - **unverifiable**: a ghost CANDIDATE (zero manifest + zero
+        chunk_count) whose T3 presence could not be confirmed — either
+        ``make_t3()`` itself failed, or this doc's chunk lookup raised
+        (``get_by_id`` already maps a missing collection to ``None``, so
+        a raise here is a transient/environmental error, never the
+        ghost signature). These are WARNED with named docs and never
+        classified as ghosts: "content is GONE" is a claim this check
+        must only make about a VERIFIED zero-chunk doc.
+
+    ``checked`` counts scanned store_put-origin docs so a clean result
+    is provably non-vacuous.
+    """
+    from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
+    from nexus.db import make_t3  # noqa: PLC0415 — command-local import (nexus.db)
+
+    try:
+        cat = _cat_cmd._get_catalog()
+    except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
+        return {
+            "pass": False,
+            "error": f"Failed to open catalog: {exc}",
+            "checked": 0, "drift": [], "ghosts": [],
+        }
+    try:
+        docs = [
+            e for e in cat.all_documents(content_type="knowledge")
+            if not e.file_path and (e.meta or {}).get("doc_id")
+        ]
+    except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
+        return {
+            "pass": False,
+            "error": f"Failed to list knowledge documents: {exc}",
+            "checked": 0, "drift": [], "ghosts": [],
+        }
+
+    t3_db = None
+    t3_error = ""
+    try:
+        t3_db = make_t3()
+    except Exception as exc:  # noqa: BLE001 — T3 unavailable: ghost detection degrades loudly, never a silent all-clean
+        t3_error = str(exc)
+
+    drift: list[dict] = []
+    ghosts: list[dict] = []
+    check_errors: list[dict] = []
+    unverifiable: list[dict] = []
+    for e in docs:
+        tumbler = str(e.tumbler)
+        try:
+            manifest_count = len(cat.get_manifest(tumbler))
+        except Exception as exc:  # noqa: BLE001 — a failed per-doc read must be reported, not silently skipped (false PASS)
+            check_errors.append({"tumbler": tumbler, "error": str(exc)})
+            continue
+        if e.chunk_count != manifest_count:
+            drift.append({
+                "tumbler": tumbler,
+                "title": e.title,
+                "chunk_count": e.chunk_count,
+                "manifest_count": manifest_count,
+            })
+        if e.chunk_count == 0 and manifest_count == 0:
+            # Ghost candidate: confirm zero T3 chunks for the doc's
+            # chunk natural id in its physical_collection. A ghost
+            # verdict ("content is GONE") requires a VERIFIED lookup:
+            # when T3 is unavailable, or this doc's lookup raises
+            # (``get_by_id`` returns None for a missing collection, so
+            # a raise is transient — timeout/auth/network, not the
+            # ghost signature), the doc is UNVERIFIABLE, never a ghost
+            # (critic Sig 1 / CRE Imp 2).
+            chash = (e.meta or {}).get("doc_id", "")
+            if t3_db is None:
+                unverifiable.append({
+                    "tumbler": tumbler, "title": e.title,
+                    "reason": f"T3 unavailable: {t3_error}",
+                })
+                continue
+            if not e.physical_collection or not chash:
+                # No collection/chash to look up — nothing can be in T3.
+                ghosts.append({"tumbler": tumbler, "title": e.title})
+                continue
+            try:
+                chunk_present = (
+                    t3_db.get_by_id(e.physical_collection, chash)
+                    is not None
+                )
+            except Exception as exc:  # noqa: BLE001 — transient per-doc lookup failure: unverifiable, never a false "GONE" verdict
+                unverifiable.append({
+                    "tumbler": tumbler, "title": e.title,
+                    "reason": f"chunk lookup failed: {exc}",
+                })
+                continue
+            if not chunk_present:
+                ghosts.append({"tumbler": tumbler, "title": e.title})
+
+    report = {
+        "pass": not drift and not ghosts and not check_errors,
+        "checked": len(docs),
+        "drift": drift,
+        "ghosts": ghosts,
+        "check_errors": check_errors,
+        "unverifiable": unverifiable,
+    }
+    if t3_error:
+        report["t3_unavailable"] = t3_error
+    return report
+
+
+def _print_store_put_integrity_text(report: dict) -> None:
+    if report.get("error"):
+        click.echo(f"store-put-integrity: ERROR - {report['error']}")
+        return
+    status = "PASS" if report["pass"] else "FAIL"
+    click.echo(
+        f"store-put-integrity: {status} "
+        f"(checked {report['checked']} store_put-origin docs)"
+    )
+    if report.get("t3_unavailable"):
+        click.echo(
+            f"  WARNING: T3 unavailable ({report['t3_unavailable']}) — "
+            "ghost candidates could not be verified (see unverifiable)."
+        )
+    if report["drift"]:
+        click.echo(
+            f"  chunk_count/manifest drift ({len(report['drift'])}):"
+        )
+        for d in report["drift"][:20]:
+            click.echo(
+                f"    {d['tumbler']}  {d['title']!r}  "
+                f"chunk_count={d['chunk_count']} "
+                f"manifest={d['manifest_count']}"
+            )
+        click.echo("  Remediate: nx catalog reconcile")
+    if report["ghosts"]:
+        click.echo(
+            f"  GHOSTS — row with zero manifest AND zero chunks "
+            f"({len(report['ghosts'])}); content is GONE, re-create it "
+            f"from the titles below:"
+        )
+        for g in report["ghosts"][:50]:
+            click.echo(f"    {g['tumbler']}  {g['title']!r}")
+    if report.get("unverifiable"):
+        click.echo(
+            f"  WARNING: unverifiable ghost candidates "
+            f"({len(report['unverifiable'])}) — T3 presence could not "
+            f"be confirmed; NOT claiming their content is gone. Re-run "
+            f"when T3 is reachable:"
+        )
+        for u in report["unverifiable"][:50]:
+            click.echo(
+                f"    {u['tumbler']}  {u['title']!r}  ({u['reason']})"
+            )
+    if report.get("check_errors"):
+        click.echo(
+            f"  Docs that could not be checked "
+            f"({len(report['check_errors'])}):"
+        )
+        for e in report["check_errors"][:20]:
+            click.echo(f"    {e['tumbler']}  ERROR: {e['error']}")
 
 
 def register(group: click.Group) -> None:

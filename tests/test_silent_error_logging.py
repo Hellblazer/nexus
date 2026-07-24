@@ -305,9 +305,10 @@ def test_catalog_store_hook_failed_logs_warning(tmp_path, monkeypatch):
 
         # Force the catalog hook to raise.
         # nexus-8g79.10 (V1): the hook moved to nexus.catalog.store_hook
-        # (lower layer); patch the canonical location.
+        # (lower layer); patch the canonical location. nexus-b6enc: MCP
+        # store_put now calls the TRACKED variant.
         monkeypatch.setattr(
-            "nexus.catalog.store_hook.catalog_store_hook",
+            "nexus.catalog.store_hook.catalog_store_hook_tracked",
             MagicMock(side_effect=RuntimeError("simulated catalog failure")),
         )
 

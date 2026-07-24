@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from nexus.db.t2 import T2Database
 
 
@@ -61,3 +63,65 @@ class TestEngineSubstrateSmoke:
         )
         assert plan_id is not None
         assert db.plans.get_plan(plan_id) is not None
+
+
+class TestB6encStoreHookEngineSubstrate:
+    """nexus-b6enc CRE Minor 6: the C2/C3 primitives against the REAL
+    engine catalog (``HttpCatalogClient``), not the sqlite-pinned local
+    Catalog the main b6enc suite uses. Real registration, real direct
+    manifest write + verify, real rollback — over the per-test engine
+    tenant."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_shared_catalog_client(self):
+        """The service-mode catalog factory memoizes one process-lifetime
+        HttpCatalogClient (nexus-53x7s); it must rebind to THIS test's
+        freshly minted tenant token."""
+        from nexus.catalog.factory import (
+            reset_shared_service_catalog_client_for_tests,
+        )
+
+        reset_shared_service_catalog_client_for_tests()
+        yield
+        reset_shared_service_catalog_client_for_tests()
+
+    def test_register_manifest_rollback_round_trip(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        from nexus.catalog.factory import make_catalog_reader
+        from nexus.catalog.store_hook import (
+            catalog_store_hook_tracked,
+            rollback_minted_catalog_entry,
+            single_chunk_manifest_metadata,
+            store_put_manifest_direct,
+        )
+
+        content = "b6enc engine substrate smoke content"
+        col = "knowledge__engine__voyage-context-3__v1"
+        chash, metadatas = single_chunk_manifest_metadata(content)
+
+        tumbler, created = catalog_store_hook_tracked(
+            title="b6enc-engine-smoke", doc_id=chash, collection_name=col,
+        )
+        assert created is True and tumbler, (
+            "first registration on a fresh tenant must MINT (created=True)"
+        )
+
+        # Idempotent dedup: the same doc_id must NOT mint a second row —
+        # the created-flag contract the C2 compensation keys on.
+        tumbler2, created2 = catalog_store_hook_tracked(
+            title="b6enc-engine-smoke", doc_id=chash, collection_name=col,
+        )
+        assert created2 is False and tumbler2 == tumbler
+
+        # Direct fail-loud manifest write + its verify leg, over the wire.
+        store_put_manifest_direct(tumbler, metadatas)
+        reader = make_catalog_reader()
+        assert {r.chash for r in reader.get_manifest(tumbler)} == {chash}
+
+        # C2 compensation over the wire: the minted row is deleted and
+        # no longer resolvable by its chunk natural id.
+        assert rollback_minted_catalog_entry(
+            tumbler, original_error="engine smoke: simulated put failure",
+        ) is True
+        assert make_catalog_reader().by_doc_id(chash) is None
