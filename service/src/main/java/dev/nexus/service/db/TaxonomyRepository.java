@@ -862,6 +862,14 @@ public final class TaxonomyRepository {
      * the import transaction. The GREATEST against the sequence's own
      * last_value means setval never moves the sequence backward. Requires
      * UPDATE on the sequence (granted to nexus_svc by taxonomy-005).
+     *
+     * NOT atomic against a concurrent nextval() on the same sequence: the
+     * last_value read and the setval are two steps, so a live serial
+     * INSERT racing this import could claim an id above the value setval
+     * then writes. Accepted: fidelity import is a migration/seeding path,
+     * never concurrent with live topic writes for the same tenant; if an
+     * import-during-serving path ever appears, revisit with a lock on the
+     * sequence or an advisory lock keyed on the table.
      */
     // SANCTIONED RAW (rdr155-p4b F-C): setval / pg_get_serial_sequence /
     // sequence last_value are sequence-state functions with no generated

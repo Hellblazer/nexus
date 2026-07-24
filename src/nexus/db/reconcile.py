@@ -28,11 +28,10 @@ What lives here (moved verbatim — pure move, no behavior change):
   (surviving module never imports from the dying one).
 
 The substrate-neutral pagers :func:`iter_collection_chunks` /
-:func:`list_collection_names` live HERE (rehomed from
-``nexus.migration.chroma_read`` at P2 prep, nexus-jg74b). They operate on
-any Chroma-SHAPED client — including the surviving
-:class:`~nexus.migration.pg_read.PgReadClient`; ``chroma_read`` re-exports
-them as a shim until it deletes whole-file with the Chroma wave.
+:func:`list_collection_names` live HERE (rehomed at P2 prep, nexus-jg74b,
+from the migration Chroma read client that deleted whole-file at P2).
+They operate on any Chroma-SHAPED client — including the surviving
+:class:`~nexus.migration.pg_read.PgReadClient`.
 """
 from __future__ import annotations
 

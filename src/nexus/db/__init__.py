@@ -10,8 +10,8 @@ injected ``_client``, T3 serving routes through the pgvector-backed
 nexus-service HTTP API in BOTH modes — the
 :class:`~nexus.db.http_vector_client.HttpVectorClient` singleton. The
 Chroma daemon leg (local mode) and the direct ``chromadb.CloudClient``
-leg (cloud mode) are retired; the ONLY surviving Chroma constructors are
-the Phase-5 ETL read legs in ``nexus.migration.chroma_read``.
+leg (cloud mode) are retired, and the migration-ETL read legs died at
+P4b P2 — no production code constructs a Chroma client any more.
 
 Tests keep the same ``_client`` / ``_ef_override`` injection points: an
 injected client short-circuits service dispatch and returns a
@@ -50,10 +50,8 @@ def make_t3(*, _client=None, _ef_override=None) -> "T3Database | HttpVectorClien
       details come from ``NX_SERVICE_URL`` / ``NX_SERVICE_TOKEN`` at
       request time — constructing the handle performs no I/O.
     - **Injected** ``_client``: return a
-      :class:`~nexus.db.t3.T3Database` facade over it.
-      ``EphemeralClient`` is the canonical test substitute; the Phase-5
-      ETL wraps the ``nexus.migration.chroma_read`` read legs the same
-      way.
+      :class:`~nexus.db.t3.T3Database` facade over it (test-only since
+      P4b P2 — the InMemoryVectorClient is the canonical substitute).
 
     Keyword-only injection points (for tests):
 

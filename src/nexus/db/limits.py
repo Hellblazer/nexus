@@ -13,9 +13,9 @@ pre-authorized by ``chroma_quotas``'s own docstring; this module simply
 gives it a home that survives ``chroma_quotas.py``'s eventual deletion.
 
 ``nexus.db.chroma_quotas`` keeps the Chroma-specific ``QuotaValidator`` and
-its error hierarchy, scoped to the retiring migration read leg
-(``nexus.migration.chroma_read`` / ``vector_etl`` / ``collision_audit``);
-those die together with that module in RDR-155 P4b (bead nexus-g37fr).
+its error hierarchy. The migration read legs it governed died at P4b P2;
+its sole remaining importer is ``nexus.db.t3``, and both die together at
+P3 with the chromadb dependency (bead nexus-g37fr).
 
 Values are frozen at the same 2026-02-28 free-tier snapshot as
 ``chroma_quotas.ChromaQuotas`` for continuity at the moment of rehoming
