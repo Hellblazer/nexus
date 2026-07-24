@@ -433,6 +433,17 @@ class TestStorageServiceSupervisorUnit:
 # ---------------------------------------------------------------------------
 
 
+
+def _ssd_probe():
+    """nexus-7f7gb: the heartbeat's health seam is now the tri-state
+    ``_probe_service_health``; ``_service_healthy`` survives for the STARTUP
+    readiness gate, where UNREADY and UNKNOWN are equivalent. Heartbeat tests
+    stub the tri-state; startup tests keep stubbing the bool."""
+    from nexus.daemon.storage_service_daemon import HealthProbe
+
+    return HealthProbe
+
+
 class TestPGIndependentRecovery:
     """When PG dies while the jar is still alive, the run loop must restart
     PG directly without triggering a jar respawn (SIGNIFICANT-1 fix)."""
@@ -451,7 +462,7 @@ class TestPGIndependentRecovery:
         sup._publish(19001)
 
         import nexus.daemon.storage_service_daemon as ssd_mod
-        with patch.object(sup, "_service_healthy", return_value=True), \
+        with patch.object(sup, "_probe_service_health", return_value=_ssd_probe().OK), \
              patch.object(sup, "_pg_reachable", return_value=False), \
              patch.object(ssd_mod, "_pid_is_alive", return_value=True):
             jar_running, pg_ok = sup.heartbeat_once()
@@ -739,7 +750,7 @@ class TestStuckJvmDetection:
         import nexus.daemon.storage_service_daemon as ssd_mod
 
         # Accumulate some unhealthy beats (below threshold)
-        with patch.object(sup, "_service_healthy", return_value=False), \
+        with patch.object(sup, "_probe_service_health", return_value=_ssd_probe().UNKNOWN), \
              patch.object(sup, "_pg_reachable", return_value=True), \
              patch.object(ssd_mod, "_pid_is_alive", return_value=True):
             for _ in range(_MAX_UNHEALTHY_HEARTBEATS - 1):
@@ -748,7 +759,7 @@ class TestStuckJvmDetection:
         assert sup._consecutive_unhealthy_heartbeats == _MAX_UNHEALTHY_HEARTBEATS - 1
 
         # One healthy beat — counter resets
-        with patch.object(sup, "_service_healthy", return_value=True), \
+        with patch.object(sup, "_probe_service_health", return_value=_ssd_probe().OK), \
              patch.object(sup, "_pg_reachable", return_value=True), \
              patch.object(ssd_mod, "_pid_is_alive", return_value=True):
             jar_running, pg_ok = sup.heartbeat_once()

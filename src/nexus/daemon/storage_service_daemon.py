@@ -65,6 +65,7 @@ import socket
 import subprocess
 import threading
 import time
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -103,6 +104,25 @@ _SERVICE_HOST: str = "127.0.0.1"
 _LIBC = _pdeathsig.LIBC
 _set_pdeathsig_preexec = _pdeathsig.set_pdeathsig_preexec
 
+class HealthProbe(Enum):
+    """Outcome of a ``GET /health`` probe (nexus-7f7gb).
+
+    Three states, because two were not enough to make a restart decision:
+
+    - ``OK``      — 200. Serving.
+    - ``UNREADY`` — answered with a non-200 status. The process is ALIVE and
+      talking; its dependency is unhappy. Restarting cannot fix that and does
+      sever in-flight clients, so this never counts toward a restart.
+    - ``UNKNOWN`` — no answer at all (timeout, refused, unset port). The only
+      evidence consistent with a wedged process, and therefore the only state
+      that advances the restart counter.
+    """
+
+    OK = "ok"
+    UNREADY = "unready"
+    UNKNOWN = "unknown"
+
+
 #: Path suffix of the spawn lock file inside config_dir.
 _SPAWN_LOCK_FILE: str = "storage_service_spawn.lock"
 
@@ -115,8 +135,26 @@ _READY_POLL_INTERVAL: float = 0.5
 #: After SIGTERM, wait this long before escalating to SIGKILL.
 _GRACEFUL_STOP_TIMEOUT: float = 5.0
 
-#: Short HTTP timeout for /health probes.
-_HEALTH_TIMEOUT: float = 2.0
+#: HTTP timeout for /health probes.
+#:
+#: nexus-7f7gb (GH #1419 Issue 3b): was 2.0s, BELOW the contention window it
+#: had to survive. ``GET /health`` is implemented engine-side as
+#: ``dataSource.getConnection()`` + ``SELECT 1`` (HealthHandler.java), so it
+#: takes a HikariCP pool connection — and the pool's own connectionTimeout is
+#: 30s. Under CPU-bound indexing the pool is contended, /health blocks well
+#: past 2s, and a probe budget that small made "the pool is busy"
+#: indistinguishable from "the process is wedged". The probe that decides
+#: whether to KILL the service must not be tighter than the resource it
+#: contends for.
+#:
+#: CEILING (test_ttl_exceeds_worst_case_heartbeat_tick): the probe BLOCKS the
+#: heartbeat thread, so the tick can take _HEALTH_TIMEOUT + heartbeat interval
+#: and the lease TTL must be >= 3x that. With TTL 15s that caps this at 4.0s.
+#: Raising it further requires either a larger TTL (which widens the
+#: post-restart stale-endpoint window, nexus-om64x) or moving the probe OFF
+#: the heartbeat thread — see the follow-up bead. 4.0s is the largest value
+#: the current invariant allows, not the value the problem wants.
+_HEALTH_TIMEOUT: float = 4.0
 
 #: The storage-service lease TTL is a SUBSTRATE parameter — it lives in the shared
 #: primitive (``service_registry.TIER_TTLS["storage_service"]``, resolved via
@@ -133,11 +171,18 @@ _HEALTH_TIMEOUT: float = 2.0
 #: stuck-but-alive states (connection-pool exhaustion, GC pause, internal
 #: deadlock) that are the most common partial-failure mode — and which the OS
 #: watchdog (RDR-175) cannot catch on its own, since it only sees process
-#: death. 3 beats at 1s interval = a 3s grace window before exit — large
-#: enough to absorb transient GC pauses, small enough to recover quickly from
-#: real deadlocks. RDR-175 retired the in-process respawn mechanism; this
+#: death.
+#:
+#: nexus-7f7gb: was 3, which with the old 2s probe gave a ~3s grace window —
+#: an ordinary indexing burst crossed it and cycled the service mid-batch,
+#: severing in-flight clients (which then retried, adding load: the loop was
+#: self-amplifying). Only UNKNOWN beats (no answer AT ALL) advance this
+#: counter now; a 503 means the service ANSWERED and is not a wedge. 4 beats
+#: x ~5s tick = ~20s of total silence before the supervisor exits for
+#: an OS restart — long enough that saturation cannot masquerade as death,
+#: short enough that a real deadlock is still caught. RDR-175 retired the in-process respawn mechanism; this
 #: DETECTION is retained but its action is now exit-for-OS-restart, not respawn.
-_MAX_UNHEALTHY_HEARTBEATS: int = 3
+_MAX_UNHEALTHY_HEARTBEATS: int = 4
 
 
 # ── Errors ─────────────────────────────────────────────────────────────────────
@@ -644,19 +689,43 @@ class StorageServiceSupervisor:
         )
         return proc, port
 
-    def _service_healthy(self, port: int | None = None) -> bool:
-        """Return True iff the service /health endpoint returns HTTP 200."""
+    def _probe_service_health(self, port: int | None = None) -> "HealthProbe":
+        """Classify ``GET /health`` into :class:`HealthProbe`.
+
+        nexus-7f7gb: the predecessor returned a bare bool, collapsing
+        "answered 503" and "did not answer at all" into one False. Those are
+        OPPOSITE pieces of evidence about liveness — a 503 proves the process
+        is alive and answering, while silence is the only thing suggesting a
+        wedge — and treating them alike is what let an indexing burst kill a
+        healthy service.
+        """
         _port = port if port is not None else self._service_port
         if _port <= 0:
-            return False
+            return HealthProbe.UNKNOWN
         url = f"http://{_SERVICE_HOST}:{_port}/health"
         try:
+            import urllib.error  # noqa: PLC0415 — deferred import — branch-local
             import urllib.request  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
             req = urllib.request.Request(url, method="GET")
             with urllib.request.urlopen(req, timeout=_HEALTH_TIMEOUT) as resp:
-                return resp.status == 200
-        except Exception:  # noqa: BLE001 — best-effort reachability probe; returns False on any error
-            return False
+                return HealthProbe.OK if resp.status == 200 else HealthProbe.UNREADY
+        except urllib.error.HTTPError:
+            # An HTTP status IS an answer: the process is up and serving, its
+            # dependency is not. Never a restart reason — restarting cannot
+            # fix a down database and does sever in-flight clients.
+            return HealthProbe.UNREADY
+        except Exception:  # noqa: BLE001 — no answer: timeout, refused, anything
+            return HealthProbe.UNKNOWN
+
+    def _service_healthy(self, port: int | None = None) -> bool:
+        """Back-compat boolean: True iff /health answered 200.
+
+        Retained for the STARTUP readiness gate, which genuinely wants "is it
+        serving yet" and for which UNREADY and UNKNOWN are equivalent. The
+        HEARTBEAT path must use :meth:`_probe_service_health` — there, the
+        distinction is the whole point.
+        """
+        return self._probe_service_health(port) is HealthProbe.OK
 
     def _pg_reachable(self) -> bool:
         """Return True iff the Postgres port accepts TCP."""
@@ -947,12 +1016,29 @@ class StorageServiceSupervisor:
             return False, False  # process exited; signal the run loop to exit
 
         service_alive = _pid_is_alive(self._proc.pid)
-        service_ok = self._service_healthy()
+        probe = self._probe_service_health()
+        # nexus-7f7gb: UNREADY (answered non-200) is NOT a wedge — only total
+        # silence counts toward the restart threshold.
+        service_ok = probe is HealthProbe.OK
         pg_ok = self._pg_reachable()
 
         if not service_alive:
             self._consecutive_unhealthy_heartbeats = 0
             return False, pg_ok
+
+        if probe is HealthProbe.UNREADY:
+            # Answered, therefore alive. Reset the wedge counter, and do NOT
+            # stamp the lease — consumers should not be routed to a service
+            # telling us it cannot serve. It simply is not a restart reason.
+            self._consecutive_unhealthy_heartbeats = 0
+            _log.warning(
+                "storage_service_unready",
+                pg_ok=pg_ok,
+                port=self._service_port,
+                msg="/health answered non-200 — alive, dependency unhappy; "
+                    "not counting toward restart",
+            )
+            return True, pg_ok
 
         if not service_ok:
             self._consecutive_unhealthy_heartbeats += 1
