@@ -9,11 +9,12 @@ metadata are injectable, no real processes are touched.
 """
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from nexus.engine_version import REQUIRED_ENGINE_VERSION
 from nexus.upgrade_finish import (
     PoisonProbe,
+    RunningEngine as _RunningEngine,
     SkewReport,
     StaleProcess,
     _parse_etime,
@@ -489,7 +490,13 @@ class TestConvergeEngine:
                 patch(
                     "nexus.upgrade_finish.subprocess.run",
                     return_value=MagicMock(returncode=0),
-                ) as sp:
+                ) as sp, \
+                patch(
+                    "nexus.upgrade_finish._running_engine",
+                    return_value=_RunningEngine(
+                        up=True, version=REQUIRED_ENGINE_VERSION,
+                    ),
+                ):
             actions = converge_engine(tmp_path)
 
         install.assert_called_once()
@@ -497,7 +504,12 @@ class TestConvergeEngine:
         assert called_tag == _PINNED_TAG
         assert sp.call_count == 2  # stop && start
         assert any("converged engine" in a and _PINNED_TAG in a for a in actions)
-        assert any("restarted the storage service" in a for a in actions)
+        # nexus-4yf4u: this assertion used to read "restarted the storage
+        # service", which the predecessor emitted purely from stop/start both
+        # exiting 0. A returncode proves the commands ran, not that the
+        # service came up on the new engine, so the success line now carries
+        # the OBSERVED running version and the probe is stubbed accordingly.
+        assert any("verified running v" + _REQUIRED_STR in a for a in actions)
 
     def test_poison_gate_blocks_and_surfaces_unblock_text(self, tmp_path):
         class _StubPlaybook:
@@ -637,6 +649,455 @@ class TestConvergeEngine:
         assert "would DEFER" in actions[0]
         assert "would converge" not in actions[0]
         assert "service not up" in actions[0]
+
+
+class TestConvergeEngineLiveVerification:
+    """nexus-4yf4u (GH #1419 Issue 1): restart-stale must never claim or imply
+    progress it did not OBSERVE in the running world.
+
+    Steve Harris ran ``nx daemon restart-stale`` twice against an engine stuck
+    at v0.1.49 under conexus 6.16.0 (requires v0.1.51). No error surfaced, no
+    forward progress, and ``nx doctor`` kept reporting the same mismatch. By
+    elimination over converge_engine's branches — POISONED, install-failure and
+    no-pinned-tag all emit loud NEEDS HUMAN lines, and a successful install
+    would have moved the provenance sidecar that doctor reads — the only branch
+    that yields "no error + no progress + sidecar unmoved" is UNKNOWN/DEFERRED.
+
+    That arm is unbounded and unescalating: ANY store-unverifiability parks
+    convergence forever. His service was pegged at 100-290% CPU with PG under
+    it, so the store could not be verified, and the deferral text told him to
+    wait until "the service is up" — a condition already true on his box.
+
+    The discriminator these tests pin: an unverifiable store means something
+    DIFFERENT depending on whether the service is actually up. Down is the
+    ordinary ordering (defer). Up-but-not-answering is abnormal (say so loudly).
+    Per Hal 2026-07-24 the loud arm does NOT auto-escalate to install-binary —
+    the product does not install under an unverifiable store on its own
+    initiative; it states the situation and names the escape.
+    """
+
+    _OLDER = tuple(int(p) for p in _older_version_str().split("."))
+
+    def _creds(self, tmp_path):
+        (tmp_path / "pg_credentials").write_text("NX_DB_URL=postgresql://x/nexus\n")
+
+    def _mismatch(self, tmp_path):
+        self._creds(tmp_path)
+        return patch(
+            "nexus.daemon.binary_lifecycle.read_installed_provenance",
+            return_value={"version": _older_version_str()},
+        )
+
+    def _disk_current(self, tmp_path):
+        self._creds(tmp_path)
+        return patch(
+            "nexus.daemon.binary_lifecycle.read_installed_provenance",
+            return_value={"version": _REQUIRED_STR},
+        )
+
+    def _running(self, **kw):
+        return _RunningEngine(**kw)
+
+    # ── C1: classify UNKNOWN by whether the service is actually up ──
+
+    def test_unknown_probe_with_service_up_but_unanswerable_is_needs_human(
+        self, tmp_path,
+    ):
+        """THE Steve case. Store unverifiable AND the service is up but not
+        answering /version is not an ordinary ordering — it is a wedged box.
+        Deferring here is what looped him forever."""
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                self._mismatch(tmp_path), \
+                patch(
+                    "nexus.upgrade_finish._poison_probe",
+                    return_value=PoisonProbe(unknown_reason="psql timeout after 30s"),
+                ), \
+                patch(
+                    "nexus.upgrade_finish._running_engine",
+                    return_value=self._running(
+                        up=True, version=None, reason="/version timed out",
+                    ),
+                ), \
+                patch("nexus.daemon.binary_install.install_binary") as install, \
+                patch("nexus.upgrade_finish.subprocess.run") as sp:
+            actions = converge_engine(tmp_path)
+
+        # Loud, and still hands-off: no blind install under an unverifiable store.
+        install.assert_not_called()
+        sp.assert_not_called()
+        assert len(actions) == 1
+        assert "NEEDS HUMAN" in actions[0]
+        assert "DEFERRED" not in actions[0]
+        # It must name the ACTUAL situation, not the already-true "not up yet".
+        assert "up" in actions[0]
+        assert "psql timeout after 30s" in actions[0]
+        assert "/version timed out" in actions[0]
+        # The escape is named (not auto-taken).
+        assert "nx daemon service install-binary" in actions[0]
+
+    def test_unknown_probe_with_service_down_still_defers(self, tmp_path):
+        """Guard against over-correcting: a DOWN service with an unverifiable
+        store is the genuinely ordinary ordering (nexus-pgdcv / GH #1414) and
+        must stay a soft deferral, not become a false alarm on every box that
+        simply has not started its service yet."""
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                self._mismatch(tmp_path), \
+                patch(
+                    "nexus.upgrade_finish._poison_probe",
+                    return_value=PoisonProbe(unknown_reason="service not up"),
+                ), \
+                patch(
+                    "nexus.upgrade_finish._running_engine",
+                    return_value=self._running(up=False, version=None),
+                ), \
+                patch("nexus.daemon.binary_install.install_binary") as install:
+            actions = converge_engine(tmp_path)
+
+        install.assert_not_called()
+        assert len(actions) == 1
+        assert "DEFERRED" in actions[0]
+        assert "NEEDS HUMAN" not in actions[0]
+
+    def test_unknown_probe_with_service_up_reports_the_running_version(
+        self, tmp_path,
+    ):
+        """When the service answers but the store is unverifiable, the deferral
+        stands — but it must REPORT what is actually running. The old text
+        described a condition ("once the service is up") that was already true,
+        which is what made the loop unreadable."""
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                self._mismatch(tmp_path), \
+                patch(
+                    "nexus.upgrade_finish._poison_probe",
+                    return_value=PoisonProbe(unknown_reason="changelog unreadable"),
+                ), \
+                patch(
+                    "nexus.upgrade_finish._running_engine",
+                    return_value=self._running(up=True, version=self._OLDER),
+                ), \
+                patch("nexus.daemon.binary_install.install_binary") as install:
+            actions = converge_engine(tmp_path)
+
+        install.assert_not_called()
+        assert len(actions) == 1
+        assert "DEFERRED" in actions[0]
+        assert _older_version_str() in actions[0]
+        assert "running" in actions[0].lower()
+
+    # ── C2: success is OBSERVED, never inferred from a returncode ──
+
+    def test_restart_that_does_not_converge_is_needs_human_not_success(
+        self, tmp_path,
+    ):
+        """`stop.returncode == 0 and start.returncode == 0` proves the commands
+        exited cleanly, NOT that the restarted service came up on the new
+        engine. Claiming convergence from a returncode is the same fail-quiet
+        class one layer down."""
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                self._mismatch(tmp_path), \
+                patch(
+                    "nexus.upgrade_finish._poison_probe", return_value=PoisonProbe(),
+                ), \
+                patch(
+                    "nexus.daemon.binary_install.install_binary",
+                    return_value=(
+                        tmp_path / "service" / "nexus-service",
+                        {"version": _REQUIRED_STR},
+                    ),
+                ), \
+                patch(
+                    "nexus.upgrade_finish.subprocess.run",
+                    return_value=MagicMock(returncode=0),
+                ), \
+                patch(
+                    "nexus.upgrade_finish._running_engine",
+                    return_value=self._running(up=True, version=self._OLDER),
+                ):
+            actions = converge_engine(tmp_path)
+
+        # The install genuinely happened and is reported.
+        assert any("converged engine" in a for a in actions)
+        # But convergence was NOT observed, so it must not be claimed.
+        assert any("NEEDS HUMAN" in a for a in actions)
+        assert not any("restarted the storage service to pick up" in a for a in actions)
+        assert any(_older_version_str() in a for a in actions)
+
+    def test_restart_verified_at_required_version_reports_converged(self, tmp_path):
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                self._mismatch(tmp_path), \
+                patch(
+                    "nexus.upgrade_finish._poison_probe", return_value=PoisonProbe(),
+                ), \
+                patch(
+                    "nexus.daemon.binary_install.install_binary",
+                    return_value=(
+                        tmp_path / "service" / "nexus-service",
+                        {"version": _REQUIRED_STR},
+                    ),
+                ), \
+                patch(
+                    "nexus.upgrade_finish.subprocess.run",
+                    return_value=MagicMock(returncode=0),
+                ), \
+                patch(
+                    "nexus.upgrade_finish._running_engine",
+                    return_value=self._running(
+                        up=True, version=REQUIRED_ENGINE_VERSION,
+                    ),
+                ):
+            actions = converge_engine(tmp_path)
+
+        assert any("converged engine" in a for a in actions)
+        assert not any("NEEDS HUMAN" in a for a in actions)
+        assert any(_REQUIRED_STR in a and "verified" in a for a in actions)
+
+    # ── C1b: disk is right but the PROCESS is stale ──
+
+    def test_disk_current_but_running_stale_restarts_without_installing(
+        self, tmp_path,
+    ):
+        """The sidecar answers "what is on disk", which is the right question
+        for the crash-loop case it was chosen for — but it is the WRONG sole
+        answer to "is the running system converged". A correct on-disk binary
+        with a stale live process needs a restart, not a reinstall, and today
+        returns [] as "already converged"."""
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                self._disk_current(tmp_path), \
+                patch(
+                    "nexus.upgrade_finish._poison_probe", return_value=PoisonProbe(),
+                ), \
+                patch("nexus.daemon.binary_install.install_binary") as install, \
+                patch(
+                    "nexus.upgrade_finish.subprocess.run",
+                    return_value=MagicMock(returncode=0),
+                ) as sp, \
+                patch(
+                    "nexus.upgrade_finish._running_engine",
+                    side_effect=[
+                        self._running(up=True, version=self._OLDER),
+                        self._running(up=True, version=REQUIRED_ENGINE_VERSION),
+                    ],
+                ):
+            actions = converge_engine(tmp_path)
+
+        install.assert_not_called()          # disk is already correct
+        assert sp.call_count == 2            # stop && start
+        assert actions                       # never a silent "already converged"
+        assert any(_older_version_str() in a for a in actions)
+        assert not any("NEEDS HUMAN" in a for a in actions)
+
+    # ── review CRE-A finding 1 (High): the OTHER converged sub-cases ──
+    #
+    # C1b originally acted only on strictly-older and let every other
+    # sub-case fall into a bare `return []`, which the CLI renders as
+    # "converged". Three of those four sub-cases had NOT observed the
+    # running engine at all, so the reassurance was unearned — the same
+    # defect class as the bug under repair, one layer down. None of them
+    # was covered by a test, which is why it took a reviewer to find.
+
+    def test_disk_current_and_service_down_stays_silent(self, tmp_path):
+        """A STOPPED service is an ordinary state, not an alarm: the on-disk
+        binary governs the next start, so there is nothing to converge and
+        nothing to say. This pins the one sub-case that may stay silent, so a
+        future fix for the noisy ones cannot over-correct into false alarms."""
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                self._disk_current(tmp_path), \
+                patch("nexus.daemon.binary_install.install_binary") as install, \
+                patch("nexus.upgrade_finish.subprocess.run") as sp, \
+                patch(
+                    "nexus.upgrade_finish._running_engine",
+                    return_value=self._running(up=False, version=None),
+                ):
+            actions = converge_engine(tmp_path)
+
+        assert actions == []
+        install.assert_not_called()
+        sp.assert_not_called()
+
+    def test_disk_current_but_service_up_and_unanswerable_is_not_silent(
+        self, tmp_path,
+    ):
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                self._disk_current(tmp_path), \
+                patch("nexus.daemon.binary_install.install_binary") as install, \
+                patch("nexus.upgrade_finish.subprocess.run") as sp, \
+                patch(
+                    "nexus.upgrade_finish._running_engine",
+                    return_value=self._running(
+                        up=True, version=None, reason="/version timed out",
+                    ),
+                ):
+            actions = converge_engine(tmp_path)
+
+        # Must NOT read as converged, and must not act on its own either.
+        assert actions
+        assert any("UNVERIFIED" in a for a in actions)
+        assert any("/version timed out" in a for a in actions)
+        install.assert_not_called()
+        sp.assert_not_called()
+
+    def test_running_newer_than_required_is_reported_never_downgraded(
+        self, tmp_path,
+    ):
+        """A running engine NEWER than the release dependency is not converged
+        either — but restarting into the on-disk binary would silently
+        DOWNGRADE it, so this reports and stops."""
+        major, minor, patchv = REQUIRED_ENGINE_VERSION
+        newer = (major, minor, patchv + 1)
+
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                self._disk_current(tmp_path), \
+                patch("nexus.daemon.binary_install.install_binary") as install, \
+                patch("nexus.upgrade_finish.subprocess.run") as sp, \
+                patch(
+                    "nexus.upgrade_finish._running_engine",
+                    return_value=self._running(up=True, version=newer),
+                ):
+            actions = converge_engine(tmp_path)
+
+        assert actions
+        assert any("NEWER" in a for a in actions)
+        assert any(".".join(str(p) for p in newer) in a for a in actions)
+        install.assert_not_called()
+        sp.assert_not_called()      # never an automatic downgrade
+
+    def test_c1b_restart_is_manual_only_never_from_the_auto_trigger(
+        self, tmp_path,
+    ):
+        """Critic CRITIC-C Significant 3 + Hal decision 2026-07-24.
+
+        C1b bounces a live storage service. It is reachable from BOTH the
+        manual `nx daemon restart-stale` AND `check_version_transition`, the
+        unattended pass that runs on the first `nx <anything>` after a version
+        change — a sub-case that used to be a hard no-op, so the set of
+        conditions producing an autonomous restart had grown without ever
+        being weighed against D2 ("the product does not take disruptive
+        action on its own initiative").
+
+        Steve's OWN GH #1419 Issue 3b is that cycling the service under
+        legitimate load severs a client mid-batch. An unattended bounce
+        landing concurrent with a long index IS that failure. So the
+        unattended path REPORTS and points at the manual verb; it does not
+        act.
+        """
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                self._disk_current(tmp_path), \
+                patch(
+                    "nexus.upgrade_finish._poison_probe", return_value=PoisonProbe(),
+                ), \
+                patch("nexus.daemon.binary_install.install_binary") as install, \
+                patch("nexus.upgrade_finish.subprocess.run") as sp, \
+                patch(
+                    "nexus.upgrade_finish._running_engine",
+                    return_value=self._running(up=True, version=self._OLDER),
+                ):
+            actions = converge_engine(tmp_path, unattended=True)
+
+        sp.assert_not_called()               # THE point: no autonomous bounce
+        install.assert_not_called()
+        assert len(actions) == 1
+        assert "NEEDS HUMAN" not in actions[0]          # nothing is broken
+        assert _older_version_str() in actions[0]       # names what is running
+        assert "nx daemon restart-stale" in actions[0]  # names the manual verb
+
+    def test_c1b_restart_still_fires_on_the_manual_path(self, tmp_path):
+        """The other side of the same contract — the guard must not disarm
+        C1b for the human who explicitly asked for convergence."""
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                self._disk_current(tmp_path), \
+                patch(
+                    "nexus.upgrade_finish._poison_probe", return_value=PoisonProbe(),
+                ), \
+                patch(
+                    "nexus.upgrade_finish.subprocess.run",
+                    return_value=MagicMock(returncode=0),
+                ) as sp, \
+                patch(
+                    "nexus.upgrade_finish._running_engine",
+                    side_effect=[
+                        self._running(up=True, version=self._OLDER),
+                        self._running(up=True, version=REQUIRED_ENGINE_VERSION),
+                    ],
+                ):
+            actions = converge_engine(tmp_path)     # default: attended
+
+        assert sp.call_count == 2
+        assert any("verified running" in a for a in actions)
+
+    # ── review CRE-A finding 2 (Medium): the settle-poll loop itself ──
+
+    def test_settle_poll_retries_until_the_service_publishes_its_version(
+        self, tmp_path,
+    ):
+        """The bounded poll exists because a freshly started service does not
+        publish its lease instantly. Every other test resolves on the FIRST
+        post-restart probe, so the loop body never ran under test."""
+        probes = [
+            self._running(up=True, version=None, reason="lease not published yet"),
+            self._running(up=True, version=None, reason="lease not published yet"),
+            self._running(up=True, version=REQUIRED_ENGINE_VERSION),
+        ]
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                self._mismatch(tmp_path), \
+                patch(
+                    "nexus.upgrade_finish._poison_probe", return_value=PoisonProbe(),
+                ), \
+                patch(
+                    "nexus.daemon.binary_install.install_binary",
+                    return_value=(
+                        tmp_path / "service" / "nexus-service",
+                        {"version": _REQUIRED_STR},
+                    ),
+                ), \
+                patch(
+                    "nexus.upgrade_finish.subprocess.run",
+                    return_value=MagicMock(returncode=0),
+                ), \
+                patch("nexus.upgrade_finish.time.sleep") as slept, \
+                patch(
+                    "nexus.upgrade_finish._running_engine", side_effect=probes,
+                ) as probe:
+            actions = converge_engine(tmp_path)
+
+        assert probe.call_count == 3          # the loop actually iterated
+        assert slept.call_count >= 1          # and it waited between probes
+        assert any("verified running v" + _REQUIRED_STR in a for a in actions)
+        assert not any("NEEDS HUMAN" in a for a in actions)
+
+    def test_settle_poll_exhausted_reports_unverified_never_success(
+        self, tmp_path,
+    ):
+        """When the budget runs out with the version still unknown, the
+        catch-all must say UNVERIFIED — never claim the convergence."""
+        with patch("nexus.config.is_local_mode", return_value=True), \
+                self._mismatch(tmp_path), \
+                patch(
+                    "nexus.upgrade_finish._poison_probe", return_value=PoisonProbe(),
+                ), \
+                patch(
+                    "nexus.daemon.binary_install.install_binary",
+                    return_value=(
+                        tmp_path / "service" / "nexus-service",
+                        {"version": _REQUIRED_STR},
+                    ),
+                ), \
+                patch(
+                    "nexus.upgrade_finish.subprocess.run",
+                    return_value=MagicMock(returncode=0),
+                ), \
+                patch("nexus.upgrade_finish.time.sleep"), \
+                patch(
+                    "nexus.upgrade_finish._running_engine",
+                    return_value=self._running(
+                        up=True, version=None, reason="never came back",
+                    ),
+                ):
+            actions = converge_engine(tmp_path)
+
+        assert any("converged engine" in a for a in actions)   # the install is a fact
+        assert any("UNVERIFIED" in a for a in actions)
+        assert any("NEEDS HUMAN" in a for a in actions)
+        assert not any("verified running" in a for a in actions)
 
 
 class TestPoisonProbe:
@@ -869,8 +1330,6 @@ class TestHealDiagView:
         heal.assert_not_called()
 
     def test_delegates_with_port_and_bootstrap_superuser(self, tmp_path):
-        from unittest.mock import MagicMock
-
         self._creds(tmp_path, port="54321")
         fake_bins = MagicMock()
         with patch("nexus.config.is_local_mode", return_value=True), patch(

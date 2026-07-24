@@ -12,15 +12,39 @@ combined 7.0.0 wave; this family is the ladder's standing
 service-acquisition machinery (RDR-185 convergence, not migration
 plumbing).
 
-CONSUMPTION STATUS (P2, 2026-07-24): the precondition's establish leg
-died WITH the legacy-footprint census at P2 — ``converge_preconditions``
-is report-only (the upgrade path never provisions; ``nx init`` owns
-acquisition, and a stranded pre-PG install gets the stranded-install
-redirect). This family currently has TEST consumers only. It is kept
-deliberately: it is the intended material for nexus-4yf4u
+CONSUMPTION STATUS (updated 2026-07-24, post-nexus-4yf4u): the
+precondition's establish leg died WITH the legacy-footprint census at P2 —
+``converge_preconditions`` is report-only (the upgrade path never
+provisions; ``nx init`` owns acquisition, and a stranded pre-PG install
+gets the stranded-install redirect). This family still has TEST consumers
+only.
+
+The prior note held it as "the intended material for nexus-4yf4u
 (restart-stale must converge the engine through the same path a fresh
-``nx init`` uses), and deleting a Hal-locked D-C rehome without that
-decision would be scope creep. If 4yf4u lands elsewhere, revisit.
+``nx init`` uses)" and said to revisit if 4yf4u landed elsewhere. IT DID.
+4yf4u shipped without consuming this module, for two reasons worth
+recording so the question is not re-opened from scratch:
+
+* ``establish_verified_service`` begins by PROVISIONING
+  (``provision_and_serve``, full ``nx init --service`` reuse). restart-stale
+  converges an install that already exists; routing it through the
+  acquisition path would contradict the same P2 decision recorded above.
+* ``verify_service_version`` is a fail-closed ``>=`` BOOLEAN
+  (:class:`VersionPinOutcome`) and does not surface the OBSERVED version.
+  4yf4u's operator-facing lines must report what is actually running
+  ("the service IS up and running v0.1.49"), and recovering that by
+  text-parsing ``reason`` would be fragile. It probes ``/version`` once via
+  ``binary_lifecycle.fetch_service_version`` and parses with
+  ``engine_version.parse_engine_version`` — the SAME parser this module
+  pins on, so there is still exactly one notion of a parsed engine version.
+
+So this family's remaining justification is NOT 4yf4u. What survives is the
+Hal-locked D-C rehome itself: deleting it is a decision, not a cleanup. The
+live candidate consumer is the "promote engine convergence to a real ladder
+rung" follow-up (deferred out of 4yf4u as an RDR-185 successor) — that IS
+the path that would legitimately provision + health-gate + version-pin.
+If that follow-up is declined, this module has no consumer left and should
+be deleted rather than kept on a lapsed rationale.
 
 Moved verbatim (pure move, no behavior change):
 

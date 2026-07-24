@@ -16,7 +16,8 @@ from unittest.mock import patch
 from click.testing import CliRunner
 
 from nexus.commands.daemon import daemon_group
-from nexus.upgrade_finish import SkewReport
+from nexus.engine_version import REQUIRED_ENGINE_VERSION
+from nexus.upgrade_finish import EngineConvergence, SkewReport
 
 
 def _invoke(
@@ -51,10 +52,39 @@ def _invoke(
 
 
 class TestRestartStaleEngineConvergence:
-    def test_no_action_needed_prints_noop_line(self, tmp_path: Path) -> None:
-        result, converge, heal, unload = _invoke(tmp_path, engine_actions=[])
+    def test_empty_actions_distinguish_converged_from_not_applicable(
+        self, tmp_path: Path,
+    ) -> None:
+        """nexus-4yf4u (GH #1419 Issue 1): an empty action list used to print
+        one line covering BOTH "already converged" and "not on the local
+        service stack". On Steve Harris's box, where convergence was in fact
+        doing nothing at all, that disjunction read as reassurance. The two
+        states must be distinguishable on screen."""
+        req = REQUIRED_ENGINE_VERSION
+
+        with patch(
+            "nexus.upgrade_finish.detect_engine_convergence",
+            return_value=EngineConvergence(
+                applicable=False, installed_version=None, required_version=req,
+                converged=True, reason="cloud mode — the managed handshake governs",
+            ),
+        ):
+            result, _c, _h, _u = _invoke(tmp_path, engine_actions=[])
         assert result.exit_code == 0, result.output
-        assert "engine: no convergence action needed" in result.output
+        assert "not applicable" in result.output
+        assert "cloud mode" in result.output
+
+        with patch(
+            "nexus.upgrade_finish.detect_engine_convergence",
+            return_value=EngineConvergence(
+                applicable=True, installed_version=req, required_version=req,
+                converged=True,
+            ),
+        ):
+            result, converge, _h, _u = _invoke(tmp_path, engine_actions=[])
+        assert result.exit_code == 0, result.output
+        assert "converged" in result.output
+        assert "not applicable" not in result.output
         converge.assert_called_once_with(tmp_path, dry_run=False)
 
     def test_convergence_actions_are_rendered(self, tmp_path: Path) -> None:

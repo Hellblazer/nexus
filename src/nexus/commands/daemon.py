@@ -2062,6 +2062,7 @@ def restart_stale_cmd(dry_run: bool) -> None:
     """
     from nexus.upgrade_finish import (  # noqa: PLC0415 — deferred import
         converge_engine,
+        detect_engine_convergence,
         detect_stale_processes,
         heal_diag_view,
         install_source,
@@ -2099,10 +2100,31 @@ def restart_stale_cmd(dry_run: bool) -> None:
     try:
         engine_actions = converge_engine(config_dir, dry_run=dry_run)
         if not engine_actions:
-            click.echo(
-                "engine: no convergence action needed (already converged, or "
-                "not on the local service stack)."
-            )
+            # nexus-4yf4u (GH #1419 Issue 1): the predecessor printed one line
+            # for an empty action list — "no convergence action needed
+            # (already converged, or not on the local service stack)" —
+            # conflating CONVERGED with NOT-APPLICABLE. On a box where
+            # convergence was silently doing nothing, that line read as
+            # reassurance. EngineConvergence already carries the distinction;
+            # print it rather than the disjunction.
+            status = detect_engine_convergence(config_dir)
+            if not status.applicable:
+                click.echo(
+                    f"engine: not applicable — {status.reason or 'not on the local service stack'}"
+                )
+            else:
+                # Review CRE-A finding 1 (High): this line must claim ONLY what
+                # detect_engine_convergence actually knows — the ON-DISK fact.
+                # It re-derives status from the provenance sidecar and never
+                # probes the running service, so an earlier "on-disk and
+                # running engine are vX" asserted an unobserved fact. Anything
+                # true of the RUNNING engine arrives as an action line from
+                # converge_engine, which is what does the live probe.
+                req_s = ".".join(str(p) for p in status.required_version)
+                click.echo(
+                    f"engine: converged — installed engine is v{req_s} "
+                    "(the release dependency)"
+                )
         else:
             for line in engine_actions:
                 click.echo(f"  {line}")

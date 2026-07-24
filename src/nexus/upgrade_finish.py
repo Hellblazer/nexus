@@ -639,18 +639,209 @@ def _poison_probe(config_dir: Path) -> PoisonProbe:
     return PoisonProbe()
 
 
-def converge_engine(config_dir: Path, *, dry_run: bool = False) -> list[str]:
+@dataclass(frozen=True)
+class RunningEngine:
+    """What the LIVE service reports — as opposed to what is on disk.
+
+    RDR-185 Gap-4 (closed, implemented) pins the property that "am I
+    converged?" is answered from the LIVE world every time, and names the
+    banned form: a freestanding remembered verdict — "a cache file, a second
+    table, a marker". :func:`detect_engine_convergence` answers from the
+    provenance sidecar, which is a cache file. That is the RIGHT answer to
+    "what is on DISK" (and it stays available when the service is down — the
+    crash-looping-engine case it was deliberately chosen for), but it is the
+    WRONG sole answer to "is the running system converged". This type is the
+    other half.
+
+    The Gap-4 pin never caught this because it AST-scans ladder RUNGS, and
+    restart-stale's engine leg is not a rung — it is the bespoke mechanism
+    outside the ladder (nexus-4yf4u, GH #1419 Issue 1).
+
+    - ``up`` — a storage-service lease is discoverable (the canonical
+      resolver, the same path every downstream consumer resolves through).
+    - ``version`` — the ``release_version`` the RUNNING service reports, or
+      ``None`` when the service is up but cannot be asked.
+    - ``reason`` — why ``version`` is ``None``, for the operator-facing line.
+    """
+
+    up: bool
+    version: tuple[int, int, int] | None
+    reason: str | None = None
+
+
+def _running_engine(config_dir: Path) -> RunningEngine:
+    """Observe the live engine: is a service discoverable, and at what version?
+
+    Never raises. Any probe defect degrades to ``up=False`` — the
+    CONSERVATIVE reading: it preserves the ordinary deferral for a box whose
+    service simply is not running, and never manufactures a NEEDS HUMAN out
+    of our own probe failing.
+    """
+    try:
+        from nexus.db import service_endpoint  # noqa: PLC0415 — deferred, heavy dep
+
+        base_url, _token = service_endpoint.discover_lease()
+    except Exception as exc:  # noqa: BLE001 — a probe defect is never a verdict
+        return RunningEngine(
+            up=False, version=None,
+            reason=f"lease discovery failed ({type(exc).__name__}: {exc})"[:200],
+        )
+    if not base_url:
+        return RunningEngine(
+            up=False, version=None,
+            reason="no discoverable storage-service lease",
+        )
+
+    # One probe, one parser: fetch_service_version returns the /version
+    # handshake dict, parse_engine_version is the SAME parser the ladder's
+    # verify_service_version pins on. (verify_service_version itself is a
+    # fail-closed >= BOOLEAN and does not surface the observed number; the
+    # operator-facing lines below need the actual running version, and
+    # text-parsing its reason string would be fragile.)
+    try:
+        from urllib.parse import urlsplit  # noqa: PLC0415 — stdlib, deferred
+
+        from nexus.daemon.binary_lifecycle import fetch_service_version  # noqa: PLC0415 — deferred, CLI startup cost
+
+        parts = urlsplit(base_url)
+        payload = fetch_service_version(
+            parts.hostname or "127.0.0.1",
+            parts.port,
+            scheme=parts.scheme or "http",
+        )
+    except Exception as exc:  # noqa: BLE001 — up, but unaskable
+        return RunningEngine(
+            up=True, version=None,
+            reason=f"/version probe raised {type(exc).__name__}: {exc}"[:200],
+        )
+    if not payload:
+        return RunningEngine(
+            up=True, version=None,
+            reason=f"{base_url}/version did not answer",
+        )
+    raw = payload.get("release_version")
+    parsed = parse_engine_version(raw if isinstance(raw, str) else None)
+    if parsed is None:
+        return RunningEngine(
+            up=True, version=None,
+            reason=f"{base_url}/version reported no usable release_version ({raw!r})",
+        )
+    return RunningEngine(up=True, version=parsed)
+
+
+def _restart_and_verify(
+    config_dir: Path,
+    actions: list[str],
+    req_s: str,
+    *,
+    settle_s: float = 20.0,
+    poll_s: float = 1.0,
+) -> list[str]:
+    """Cycle the storage service, then OBSERVE whether it came up converged.
+
+    nexus-4yf4u: the predecessor claimed "restarted the storage service to
+    pick up the converged engine" whenever ``stop`` and ``start`` both exited
+    0. A returncode proves the commands ran, not that the service came up on
+    the new engine — the same fail-quiet class as the deferral loop above,
+    one layer down. Convergence is now claimed only when the running service
+    reports the required version.
+    """
+    try:
+        stop = subprocess.run(
+            ["nx", "daemon", "service", "stop"], capture_output=True, timeout=60,
+        )
+        start = subprocess.run(
+            ["nx", "daemon", "service", "start"], capture_output=True, timeout=120,
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort cycle; surfaced in the line
+        actions.append(
+            f"NEEDS HUMAN: restarting the storage service raised {exc} — run "
+            "`nx daemon service stop && nx daemon service start` yourself, "
+            "then `nx doctor` to confirm the engine converged"
+        )
+        return actions
+    if stop.returncode != 0 or start.returncode != 0:
+        actions.append(
+            "NEEDS HUMAN: the service restart did not report success — run "
+            "`nx daemon service stop && nx daemon service start` yourself, "
+            "then `nx doctor` to confirm the engine converged"
+        )
+        return actions
+
+    # A freshly started service does not publish its lease instantly, so an
+    # INSTANT verdict here would emit a NEEDS HUMAN on every healthy
+    # convergence that we merely probed too early. False alarms are how real
+    # alarms stop being read — bound the wait instead.
+    after = _running_engine(config_dir)
+    if after.version is None:
+        # Bounded by BOTH an attempt count and a wall-clock deadline. The
+        # attempt cap is what keeps this deterministic and instant under a
+        # patched `time.sleep` (a purely time-bounded loop busy-spins for the
+        # entire budget in tests, and its iteration count then varies with
+        # machine speed); the deadline is what still bounds it in production,
+        # where each probe carries its own timeout on top of the sleep.
+        deadline = time.time() + settle_s
+        for _ in range(max(1, int(settle_s / poll_s) + 1)):
+            if time.time() >= deadline:
+                break
+            time.sleep(poll_s)
+            after = _running_engine(config_dir)
+            if after.version is not None:
+                break
+
+    if after.version is not None and after.version == REQUIRED_ENGINE_VERSION:
+        actions.append(
+            f"restarted the storage service — verified running v{req_s}"
+        )
+        return actions
+    if after.version is not None:
+        got_run = ".".join(str(p) for p in after.version)
+        actions.append(
+            "NEEDS HUMAN: the service restarted but is STILL running "
+            f"v{got_run}, not the required v{req_s}. The restart exited "
+            "cleanly, so something is holding the old engine (a supervisor "
+            "that re-execs a different binary, or a second service process). "
+            "Check `nx doctor` and `nx daemon service status`."
+        )
+        return actions
+    actions.append(
+        "NEEDS HUMAN: the service restarted but its version could not be "
+        f"confirmed ({after.reason or 'no /version answer'}) — convergence to "
+        f"v{req_s} is UNVERIFIED. Check `nx doctor`."
+    )
+    return actions
+
+
+def converge_engine(
+    config_dir: Path, *, dry_run: bool = False, unattended: bool = False,
+) -> list[str]:
     """Install the release-dependency engine and cycle the service on a
-    mismatch. Returns human-readable action lines (empty when not
-    applicable or already converged — the common case, mirroring
-    :func:`restart_stale`'s silence on the happy path).
+    mismatch. Returns human-readable action lines.
+
+    Empty means: not applicable, OR convergence was CONFIRMED (on-disk and
+    running versions both equal the release dependency), OR the service is
+    not running at all (the on-disk binary governs its next start, and a
+    stopped service is an ordinary state rather than an alarm). It no longer
+    means "already converged" unqualified — nexus-4yf4u: a correct on-disk
+    binary with a stale, unanswerable, or NEWER live process each return a
+    line now, because silence there asserted something about the running
+    engine that nothing had observed.
 
     Never raises: a poison-gate block or an install/restart failure is
     reported as a loud ``NEEDS HUMAN`` action line, never a silent skip and
     never a crash that could leave the box worse off.
+
+    ``unattended`` marks the caller as the automatic finish pass
+    (:func:`check_version_transition`, which fires on the first ``nx``
+    invocation after a version change) rather than a human running ``nx
+    daemon restart-stale``. It suppresses ONLY the C1b restart-a-stale-live-
+    process action: bouncing a storage service can sever a client mid-batch
+    (GH #1419 Issue 3b), so that disruption is reserved for a human who
+    explicitly asked for convergence. The unattended pass reports the same
+    facts and names the manual verb. Hal decision, 2026-07-24.
     """
     status = detect_engine_convergence(config_dir)
-    if not status.applicable or status.converged:
+    if not status.applicable:
         return []
 
     req_s = ".".join(str(p) for p in status.required_version)
@@ -658,6 +849,65 @@ def converge_engine(config_dir: Path, *, dry_run: bool = False) -> list[str]:
         ".".join(str(p) for p in status.installed_version)
         if status.installed_version else "unknown"
     )
+    if status.converged:
+        # nexus-4yf4u: the DISK is right — is the PROCESS? A correct on-disk
+        # binary with a stale live service needs a RESTART, not a reinstall,
+        # and the predecessor returned [] here ("already converged"), which
+        # `nx doctor` then echoed as green while the old engine kept serving.
+        running = _running_engine(config_dir)
+
+        if running.version is not None and running.version < status.required_version:
+            got_run = ".".join(str(p) for p in running.version)
+            if unattended:
+                return [
+                    f"NOTE: the on-disk engine is v{req_s} but the RUNNING "
+                    f"service is still v{got_run}. Not restarting it here — "
+                    "this is the automatic post-upgrade pass, and cycling the "
+                    "storage service can sever an in-flight client (GH #1419 "
+                    "Issue 3b). Run `nx daemon restart-stale` when it suits "
+                    "you and it will converge and verify."
+                ]
+            if dry_run:
+                return [
+                    f"would restart the storage service: the on-disk engine "
+                    f"is v{req_s} but the RUNNING service reports v{got_run}"
+                ]
+            return _restart_and_verify(
+                config_dir,
+                [
+                    f"on-disk engine is already v{req_s} but the RUNNING "
+                    f"service reports v{got_run} — restarting to pick it up"
+                ],
+                req_s,
+            )
+
+        # Review CRE-A finding 1 (High): every remaining sub-case used to fall
+        # into a bare `return []`, which the CLI renders as "converged". Three
+        # of the four had NOT observed the running engine at all, so that
+        # reassurance was unearned — the same silent-reassurance class this
+        # bead exists to close, one layer down. Only a CONFIRMED equal
+        # version, or a service that is not running at all (where the on-disk
+        # binary governs the next start, and a stopped service is an ordinary
+        # state rather than an alarm), may stay silent.
+        if running.version is not None and running.version > status.required_version:
+            got_run = ".".join(str(p) for p in running.version)
+            return [
+                f"NOTE: the RUNNING service reports v{got_run}, NEWER than the "
+                f"release dependency v{req_s} on disk. Not converged, and "
+                "deliberately not auto-fixed: restarting would silently "
+                "DOWNGRADE the running engine. Cycle it yourself if that is "
+                "what you want (`nx daemon service stop && nx daemon service "
+                "start`)."
+            ]
+        if running.up and running.version is None:
+            return [
+                f"NOTE: the on-disk engine is v{req_s}, but the RUNNING "
+                "service is not answering /version "
+                f"({running.reason or 'no answer'}), so convergence is "
+                "UNVERIFIED — this reports the disk, not the running system. "
+                "Check `nx doctor` and `nx daemon service status`."
+            ]
+        return []
 
     # nexus-cfgo9 code-review LOW: the poison gate is checked BEFORE the
     # dry-run early-return, never after — a dry-run preview must never
@@ -687,11 +937,60 @@ def converge_engine(config_dir: Path, *, dry_run: bool = False) -> list[str]:
         # NEEDS-HUMAN (nothing is broken) and NOT a hard block: the
         # explicit converge-now escape is install-binary, whose own gate
         # re-checks (and documents --force for the will-not-boot class).
+        # nexus-4yf4u (GH #1419 Issue 1): an unverifiable store means
+        # something DIFFERENT depending on whether the service is actually
+        # up, and the predecessor collapsed both into one unbounded,
+        # unescalating deferral. A DOWN service is the ordinary ordering this
+        # branch was written for. A service that is UP but cannot answer
+        # /version, while the store also cannot be verified, is a WEDGED box
+        # — Steve Harris's was pegged at 100-290% CPU — and deferring there
+        # loops forever: the line reads as no-error, `nx doctor` keeps
+        # reporting the same mismatch, and the remedy text ("once the service
+        # is up, re-run") names a condition that is already true. Say so
+        # loudly instead. Per Hal (2026-07-24) this does NOT auto-escalate to
+        # install-binary: the product does not install an engine under a
+        # store it cannot verify on its own initiative — it states the
+        # situation and names the escape.
+        # Probed HERE, not at the top of the function (review CRE-A finding
+        # 3): this arm and the converged arm above are mutually exclusive, so
+        # a single eager probe spent a lease discovery + /version GET on every
+        # ordinary install path that never reads the result.
+        running = _running_engine(config_dir)
+
+        if running.up and running.version is None:
+            from nexus.daemon.binary_install import PINNED_SERVICE_TAG  # noqa: PLC0415 — deferred, CLI startup cost
+
+            verb = "would be BLOCKED" if dry_run else "NEEDS HUMAN: engine"
+            return [
+                f"{verb} convergence ({got_s} -> {req_s}) — the storage "
+                "service is UP but is not answering /version "
+                f"({running.reason or 'no answer'}), and the store could not "
+                f"be verified either ({probe.unknown_reason}). This is NOT "
+                "the ordinary not-up-yet ordering: a service that is running "
+                "but unresponsive will not converge by re-running this "
+                "command. Investigate the service first (`nx doctor`, "
+                "`nx daemon service status`, and its log); if it is wedged, "
+                "`nx daemon service stop` then `nx daemon service start`. "
+                "Only once the store verifies will convergence proceed "
+                "automatically. The explicit converge-now escape, which "
+                "warns UNVERIFIED when it cannot probe the store: "
+                "nx daemon service install-binary "
+                f"{PINNED_SERVICE_TAG or '<engine-service-tag>'}"
+            ]
+
+        running_clause = ""
+        if running.up and running.version is not None:
+            got_run = ".".join(str(p) for p in running.version)
+            running_clause = (
+                f" The service IS up and running v{got_run}; convergence "
+                "resumes once the store verifies."
+            )
+
         if dry_run:
             return [
                 f"would DEFER engine convergence ({got_s} -> {req_s}): "
                 f"store chash conformance unverifiable "
-                f"({probe.unknown_reason})"
+                f"({probe.unknown_reason}){running_clause}"
             ]
         from nexus.daemon.binary_install import PINNED_SERVICE_TAG  # noqa: PLC0415 — deferred, CLI startup cost
 
@@ -701,12 +1000,18 @@ def converge_engine(config_dir: Path, *, dry_run: bool = False) -> list[str]:
         # check_version_transition stamps seen unconditionally, so the
         # re-attempt is operator-driven. install-binary is named last,
         # strictly for the will-not-boot class.
+        ordering = (
+            "This is the ordinary ordering when the service/PG is not up yet "
+            "(GH #1414). Once the service is up, run"
+            if not running.up else
+            "The store is unverifiable for a reason other than the service "
+            "being down. Once it verifies, run"
+        )
         return [
             f"DEFERRED: engine convergence ({got_s} -> {req_s}) held back — "
             f"the chash-poison gate could not verify the store "
-            f"({probe.unknown_reason}). This is the ordinary ordering when "
-            "the service/PG is not up yet (GH #1414). Once the service is "
-            "up, run `nx doctor` (or `nx daemon restart-stale`) to "
+            f"({probe.unknown_reason}).{running_clause} {ordering} "
+            "`nx doctor` (or `nx daemon restart-stale`) to "
             "converge verified. Only if the service cannot come UP on the "
             "current engine (the will-not-boot class): nx daemon service "
             f"install-binary {PINNED_SERVICE_TAG or '<engine-service-tag>'} "
@@ -747,31 +1052,12 @@ def converge_engine(config_dir: Path, *, dry_run: bool = False) -> list[str]:
         # not just the expected one.
         return [f"NEEDS HUMAN: engine convergence failed installing {tag}: {exc}"]
 
-    actions = [f"converged engine: installed {tag} (was {got_s})"]
-    try:
-        stop = subprocess.run(
-            ["nx", "daemon", "service", "stop"], capture_output=True, timeout=60,
-        )
-        start = subprocess.run(
-            ["nx", "daemon", "service", "start"], capture_output=True, timeout=120,
-        )
-        if stop.returncode == 0 and start.returncode == 0:
-            actions.append(
-                "restarted the storage service to pick up the converged engine"
-            )
-        else:
-            actions.append(
-                "NEEDS HUMAN: engine installed but the service restart did "
-                "not report success — run `nx daemon service stop && nx "
-                "daemon service start` yourself to pick it up"
-            )
-    except Exception as exc:  # noqa: BLE001 — best-effort cycle; failure surfaced in the action line
-        actions.append(
-            f"NEEDS HUMAN: engine installed but restarting the service "
-            f"raised {exc} — run `nx daemon service stop && nx daemon "
-            "service start` yourself to pick it up"
-        )
-    return actions
+    # nexus-4yf4u: the install is a fact (it either raised or it did not);
+    # the CONVERGENCE is a claim, and it is now observed rather than inferred
+    # from the restart's returncodes.
+    return _restart_and_verify(
+        config_dir, [f"converged engine: installed {tag} (was {got_s})"], req_s,
+    )
 
 
 def heal_diag_view(config_dir: Path) -> list[str]:
@@ -1087,7 +1373,7 @@ def check_version_transition(config_dir: Path) -> str | None:
     # one leg's failure never swallows the actions already computed by the
     # others.
     try:
-        actions = actions + converge_engine(config_dir)
+        actions = actions + converge_engine(config_dir, unattended=True)
     except Exception:  # noqa: BLE001 — the finish pass must never break CLI startup
         _log.warning("engine_convergence_failed", exc_info=True)
     try:
