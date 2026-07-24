@@ -540,6 +540,43 @@ means it was killed, not that it chose to exit; check the jar log tail and
 interrupted command: both ETL families are idempotent, and a collection
 interrupted mid-upsert re-converges on `(tenant, collection, chash)`.
 
+## 7.1 Restoring a `pg_dump` into a scratch cluster — GH #1419
+
+Two things bite on the way to a read-only forensic restore. Both were hit
+during a real recovery (GH #1419 issues 5 and 6) and neither is obvious from
+the error text.
+
+**Always restore with `--no-privileges`.** The dump carries `GRANT`
+statements naming the nx service roles (`nexus_svc`, `nexus_diag`), which do
+not exist in a scratch cluster you just `initdb`'d. Without the flag
+`pg_restore` emits one `role "nexus_svc" does not exist` error per grant —
+176 of them in the reported case — none of which matter and all of which
+bury the errors that do:
+
+```bash
+pg_restore --no-privileges --no-owner -d nexus_scratch dump.pgdump
+```
+
+`--no-owner` is the companion flag for the same reason (object ownership
+also references roles that are absent). You are reading data, not
+reproducing an access-control model, so dropping both is correct rather
+than merely convenient.
+
+**Keep the scratch socket directory short.** macOS caps `AF_UNIX` paths at
+**103 bytes**, and Postgres puts its socket in the data directory by
+default. A cluster created under a long project-scoped path — a checkout
+nested a few levels down, or anything under a sandboxed `TMPDIR` — fails to
+start with a socket-path error that does not name the length limit as the
+cause. Point the socket somewhere short:
+
+```bash
+pg_ctl -D "$SCRATCH_PGDATA" -o "-k /tmp/nxr" start
+psql -h /tmp/nxr -d nexus_scratch          # clients need the same -h
+```
+
+Any short directory works; `/tmp/nxr` is arbitrary. The data directory
+itself can stay wherever it is — only the socket path is length-bound.
+
 ## 8. Legacy chunk ids (pre-RDR-108 stores) — GH #1390 / GH #1414
 
 The pgvector chash identity is the **full `sha256(chunk_text)` hexdigest** —
