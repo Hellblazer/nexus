@@ -37,6 +37,7 @@ from pathlib import Path
 from tests.db._service_fixture import SERVICE_ROLES_SQL, create_tenant_token, pg_bin_dir
 
 import pytest
+from tests.conftest import make_vector_test_client
 
 # ── Prerequisite paths ─────────────────────────────────────────────────────────
 
@@ -1552,7 +1553,6 @@ class TestServiceModeIndexMVV:
         Postgres instance.
         """
         import re  # noqa: PLC0415
-        import chromadb  # noqa: PLC0415 — integration-only heavy dep
         from unittest.mock import MagicMock, patch  # noqa: PLC0415
 
         from chromadb.utils.embedding_functions import DefaultEmbeddingFunction  # noqa: PLC0415
@@ -1574,7 +1574,7 @@ class TestServiceModeIndexMVV:
         monkeypatch.setenv("NX_LOCAL", "1")  # T3 + embeddings local
 
         local_t3 = T3Database(
-            _client=chromadb.EphemeralClient(),
+            _client=make_vector_test_client(),
             _ef_override=DefaultEmbeddingFunction(),
         )
         registry = RepoRegistry(fixture_repo.parent / "repos.json")

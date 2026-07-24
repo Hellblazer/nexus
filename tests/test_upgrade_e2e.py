@@ -10,6 +10,8 @@ import sqlite3
 from pathlib import Path
 from unittest.mock import patch
 
+import os
+
 import pytest
 from click.testing import CliRunner
 
@@ -75,6 +77,11 @@ class TestSC1VersionTable:
         assert row[0] == _current_version()
         conn.close()
 
+    @pytest.mark.skipif(
+        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        reason="dies-roster: SQLite schema-version/migration reporting dies at "
+        "the RDR-155 P4b flip (service mode: immutable migration source)",
+    )
     def test_t2database_populates_version(self, tmp_path: Path) -> None:
         from nexus.db.t2 import T2Database
 
@@ -182,6 +189,11 @@ class TestSC3UpgradeFlags:
 
 
 class TestSC4DoctorSchema:
+    @pytest.mark.skipif(
+        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        reason="dies-roster: SQLite schema-version/migration reporting dies at "
+        "the RDR-155 P4b flip (service mode: immutable migration source)",
+    )
     def test_healthy_db_passes(self, runner: CliRunner, tmp_path: Path) -> None:
         from nexus.catalog.catalog import Catalog
         from nexus.commands.upgrade import _current_version
@@ -227,6 +239,11 @@ class TestRDR170FrozenBranchReporting:
         conn.close()
         return db_path
 
+    @pytest.mark.skipif(
+        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        reason="dies-roster: SQLite schema-version/migration reporting dies at "
+        "the RDR-155 P4b flip (service mode: immutable migration source)",
+    )
     def test_doctor_check_schema_reports_ahead_of_version_step(
         self, runner: CliRunner, tmp_path: Path, monkeypatch
     ) -> None:
@@ -241,6 +258,11 @@ class TestRDR170FrozenBranchReporting:
         assert "pending migrations" in out, out
         assert "all checks passed" not in out
 
+    @pytest.mark.skipif(
+        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        reason="dies-roster: SQLite schema-version/migration reporting dies at "
+        "the RDR-155 P4b flip (service mode: immutable migration source)",
+    )
     def test_upgrade_dry_run_reports_ahead_of_version_step(
         self, runner: CliRunner, tmp_path: Path, monkeypatch
     ) -> None:

@@ -20,11 +20,9 @@ deterministically.
 """
 from __future__ import annotations
 
-import chromadb
 import pytest
 
 from nexus.db.embed_migrate import (
-    MigrationOutcome,
     StaleCollection,
     detect_stale_local_collections,
     migrate_collection_safe,
@@ -32,6 +30,7 @@ from nexus.db.embed_migrate import (
     _target_name,
 )
 from nexus.db.t3 import T3Database
+from tests.conftest import make_vector_test_client
 
 _DIM_384 = 384
 _DIM_768 = 768
@@ -56,7 +55,7 @@ def t3() -> T3Database:
     process-shared singleton, so drop every collection this module uses
     on entry — otherwise a prior test's target leaks in and a later
     "nothing created" assertion silently passes."""
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     for name in _TEST_COLLECTIONS:
         try:
             client.delete_collection(name)

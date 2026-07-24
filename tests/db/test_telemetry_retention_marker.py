@@ -8,9 +8,15 @@ the behavior.
 """
 from __future__ import annotations
 
+import os
+
+import pytest
+
 from datetime import UTC, datetime, timedelta
 
 from nexus.db.t2 import T2Database
+
+_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
 
 
 def _db(tmp_path):
@@ -20,12 +26,26 @@ def _db(tmp_path):
 def test_expire_bumps_cumulative_marker(tmp_path):
     db = _db(tmp_path)
     old = (datetime.now(UTC) - timedelta(days=400)).isoformat()
-    for i in range(3):
-        db.telemetry.conn.execute(
-            "INSERT INTO relevance_log (query, chunk_id, action, timestamp) "
-            "VALUES (?, ?, 'click', ?)", (f"q{i}", f"c{i}", old),
-        )
-    db.telemetry.conn.commit()
+    # Backdated rows: the Http store's fidelity-import surface writes
+    # timestamp VERBATIM (on the engine substrate this exercises the REAL
+    # expireRelevanceLog marker bump); the SQLite twin has no import
+    # surface, so its leg seeds raw — that branch dies with the twin at
+    # the RDR-155 P4b flip.
+    from nexus.db.storage_mode import has_raw_access
+
+    if has_raw_access(db.telemetry):
+        for i in range(3):
+            db.telemetry.conn.execute(
+                "INSERT INTO relevance_log (query, chunk_id, action, timestamp) "
+                "VALUES (?, ?, 'click', ?)", (f"q{i}", f"c{i}", old),
+            )
+        db.telemetry.conn.commit()
+    else:
+        for i in range(3):
+            db.telemetry.import_relevance_row(
+                query=f"q{i}", chunk_id=f"c{i}", collection="",
+                action="click", session_id="", timestamp=old,
+            )
     db.telemetry.log_relevance("fresh", "cf", "click")
 
     assert db.telemetry.expire_relevance_log(days=90) == 3
@@ -47,6 +67,11 @@ def test_never_swept_relation_is_absent(tmp_path):
     assert db.telemetry.get_retention_markers([]) == {}
 
 
+@pytest.mark.skipif(
+    _ENGINE_SUBSTRATE,
+    reason="SQLite-twin write-path invariant; dies with the twin at the "
+    "RDR-155 P4b flip (dies-roster)",
+)
 def test_relevance_timestamp_format_invariant(tmp_path):
     """Review 68509ac8 Low: the fresh-window fill compares timestamps
     LEXICOGRAPHICALLY against a datetime.now(UTC).isoformat() cutoff — sound

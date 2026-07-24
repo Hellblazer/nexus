@@ -5,16 +5,16 @@ Uses EphemeralClient + DefaultEmbeddingFunction — no API keys needed.
 """
 from __future__ import annotations
 
-import chromadb
 import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
 from nexus.db.t3 import T3Database, VerifyResult, verify_collection_deep
+from tests.conftest import make_vector_test_client
 
 
 def _make_db() -> T3Database:
     """Fresh T3Database backed by EphemeralClient + ONNX MiniLM."""
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     ef = DefaultEmbeddingFunction()
     return T3Database(_client=client, _ef_override=ef, local_mode=True, local_path="/tmp/test_verify")
 

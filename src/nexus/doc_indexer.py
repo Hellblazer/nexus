@@ -33,7 +33,7 @@ from nexus.checkpoint import (
 )
 from nexus.corpus import index_model_for_collection
 from nexus.db import make_t3
-from nexus.retry import _chroma_with_retry, _voyage_with_retry
+from nexus.retry import _vector_with_retry, _voyage_with_retry
 from nexus.md_chunker import SemanticMarkdownChunker, parse_frontmatter
 from nexus.pdf_chunker import PDFChunker
 from nexus.pdf_extractor import PDFExtractor
@@ -772,7 +772,7 @@ def _index_document(
     # nexus-dcym: prefer doc_id-keyed lookup; content_hash fallback when
     # the catalog is absent (RDR-101 Phase 5c — source_path is gone).
     incremental_where = _identity_where(sp, corpus, content_hash=content_hash)
-    existing = _chroma_with_retry(
+    existing = _vector_with_retry(
         col.get,
         where=incremental_where,
         include=["metadatas"],
@@ -861,7 +861,7 @@ def _index_document(
     stale_ids: list[str] = []
     offset = 0
     while True:
-        batch = _chroma_with_retry(
+        batch = _vector_with_retry(
             col.get,
             where=prune_where,
             include=[],
@@ -876,7 +876,7 @@ def _index_document(
     if stale_ids:
         # Batch deletes at MAX_RECORDS_PER_WRITE=300 (indexing review I4).
         for i in range(0, len(stale_ids), 300):
-            _chroma_with_retry(col.delete, ids=stale_ids[i:i + 300])
+            _vector_with_retry(col.delete, ids=stale_ids[i:i + 300])
 
     if return_metadata:
         return metadatas
@@ -1043,7 +1043,7 @@ def _index_pdf_incremental(
     stale_ids: list[str] = []
     offset = 0
     while True:
-        batch = _chroma_with_retry(
+        batch = _vector_with_retry(
             col.get,
             where=prune_where,
             include=[],
@@ -1058,7 +1058,7 @@ def _index_pdf_incremental(
     if stale_ids:
         # Batch deletes at MAX_RECORDS_PER_WRITE=300 (indexing review I4).
         for i in range(0, len(stale_ids), 300):
-            _chroma_with_retry(col.delete, ids=stale_ids[i:i + 300])
+            _vector_with_retry(col.delete, ids=stale_ids[i:i + 300])
 
     # Clean up checkpoint on success
     delete_checkpoint(content_hash, collection_name)
@@ -1395,7 +1395,7 @@ def index_pdf(
     # nexus-dcym: prefer doc_id-keyed lookup; content_hash fallback when
     # the catalog is absent (RDR-101 Phase 5c — source_path is gone).
     incremental_where = _identity_where(str(pdf_path), corpus, content_hash=content_hash)
-    existing = _chroma_with_retry(
+    existing = _vector_with_retry(
         col.get,
         where=incremental_where,
         include=["metadatas"],
@@ -1439,7 +1439,7 @@ def index_pdf(
                 all_meta: list[dict] = []
                 offset = 0
                 while True:
-                    batch = _chroma_with_retry(
+                    batch = _vector_with_retry(
                         col.get,
                         where=meta_where,
                         include=["metadatas"],
@@ -1594,7 +1594,7 @@ def index_pdf(
         stale_ids: list[str] = []
         offset = 0
         while True:
-            batch = _chroma_with_retry(
+            batch = _vector_with_retry(
                 col.get,
                 where=prune_where,
                 include=[],
@@ -1609,7 +1609,7 @@ def index_pdf(
         if stale_ids:
             # Batch deletes at MAX_RECORDS_PER_WRITE=300 (indexing review I4).
             for i in range(0, len(stale_ids), 300):
-                _chroma_with_retry(col.delete, ids=stale_ids[i:i + 300])
+                _vector_with_retry(col.delete, ids=stale_ids[i:i + 300])
     except Exception:  # noqa: BLE001 — prune must not strand catalog registration
         _log.warning(
             "stale_chunk_prune_failed_registration_still_running",

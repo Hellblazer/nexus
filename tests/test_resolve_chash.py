@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import chromadb
 import pytest
+from tests.conftest import make_vector_test_client
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -26,7 +26,7 @@ def resolve_env(tmp_path: Path):
     cat_dir = tmp_path / "catalog"
     cat_dir.mkdir()
     cat = Catalog(cat_dir, cat_dir / ".catalog.db")
-    t3 = chromadb.EphemeralClient()
+    t3 = make_vector_test_client()
     chash_index = ChashIndex(tmp_path / "t2.db")
 
     yield cat, t3, chash_index

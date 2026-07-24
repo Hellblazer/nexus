@@ -36,6 +36,22 @@ _SVC_ENV: dict[str, str] = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _pin_global_sqlite(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests construct their OWN service-mode fakes: a real tmp-path
+    SQLite T2 with per-store NX_STORAGE_BACKEND_<STORE>=service overrides and
+    spy stores. The engine-substrate flip env (RDR-155 P4b P0a':
+    NX_TEST_T2_SUBSTRATE=engine sets global NX_STORAGE_BACKEND=service plus a
+    real NX_SERVICE_URL) must not bleed into that setup — it makes
+    bootstrap_schema skip the SQLite DDL (_seed_db then fails with "no such
+    table") and flips the deliberately-sqlite control stores to Http. Pin the
+    global backend back to sqlite and drop the real service URL; each test's
+    ``patch.dict`` still applies its per-store service overrides on top.
+    """
+    monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
+    monkeypatch.delenv("NX_SERVICE_URL", raising=False)
+
+
 def _seed_db(db_path: Path) -> None:
     """Bootstrap the schema and insert one row in each store's collection table
     under the OLD collection name so a rename can find rows.

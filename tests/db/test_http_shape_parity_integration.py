@@ -15,7 +15,6 @@ imported, not duplicated).
 """
 from __future__ import annotations
 
-import chromadb
 import pytest
 
 from nexus.db.t1 import T1Database
@@ -27,6 +26,7 @@ from tests.db.test_http_memory_store_integration import (  # noqa: F401, PLC2701
     pg_instance,
     service,
 )
+from tests.conftest import make_vector_test_client
 
 pytestmark = pytest.mark.integration
 
@@ -115,7 +115,7 @@ def test_scratch_search_shape_parity_live(service, _token_env):
     from nexus.db.http_scratch_store import HttpScratchStore
 
     base_url, token, _ = service
-    t1 = T1Database(session_id="shape-live", client=chromadb.EphemeralClient())
+    t1 = T1Database(session_id="shape-live", client=make_vector_test_client())
     # Phase E require-minted: an unminted X-Nexus-T1-Session 401s — mint like
     # the MCP session lifespan does (mirrors test_http_scratch_store_integration).
     session_token = mint_session(base_url, token, "shape-live")

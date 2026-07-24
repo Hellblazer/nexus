@@ -95,12 +95,29 @@ def test_close_releases_connection(store) -> None:
 
 def test_rename_cascade_updates_highlights_collection(tmp_path) -> None:
     """HIGH-2: rename_collection_cascade must carry document_highlights rows."""
+    from nexus.db.storage_mode import has_raw_access
     from nexus.db.t2 import T2Database
 
     db = T2Database(tmp_path / "memory.db")
     try:
+        if has_raw_access(db.document_highlights):
+            doc_id = "1.2.3"
+        else:
+            # Engine substrate: document_highlights.doc_id carries a real FK
+            # to catalog_documents (fk-001-catalog-cross-store), so the
+            # parent document must exist before the highlight upsert. The
+            # server assigns the tumbler; use it as the doc_id.
+            from nexus.catalog.http_catalog_client import HttpCatalogClient
+            with HttpCatalogClient() as cat:
+                owner = cat.register_owner("hlcascade", "repo")
+                doc_id = str(cat.register(
+                    owner, "HL Cascade Doc",
+                    content_type="paper",
+                    physical_collection="docs__old__voyage-context-3__v1",
+                    file_path="/tmp/hl-cascade.md",
+                ))
         db.document_highlights.upsert(HighlightRecord(
-            doc_id="1.2.3", source_uri="x-devonthink-item://A",
+            doc_id=doc_id, source_uri="x-devonthink-item://A",
             collection="docs__old__voyage-context-3__v1",
             highlights_md="## h", mentions_md="",
             ingested_at="2026-05-30T00:00:00Z",
@@ -110,7 +127,7 @@ def test_rename_cascade_updates_highlights_collection(tmp_path) -> None:
             new="docs__new__voyage-context-3__v1",
         )
         assert counts["highlights"] == 1
-        rec = db.document_highlights.get("1.2.3")
+        rec = db.document_highlights.get(doc_id)
         assert rec.collection == "docs__new__voyage-context-3__v1"
     finally:
         db.close()

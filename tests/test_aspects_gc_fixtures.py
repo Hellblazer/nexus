@@ -10,6 +10,7 @@ substrate-vs-consumer boundary.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,17 @@ from nexus.commands.aspects import (
     _FIXTURE_COLLECTION_PATTERNS,
     _is_fixture_collection,
     aspects_group,
+)
+
+#: gc-fixtures is a SQLite-only verb — it refuses service mode with a
+#: UsageError (raw multi-store SQL DELETE via live cursors; tracked
+#: nexus-gmiaf.37), and the tests seed rows via raw sqlite conns.
+#: dies-roster: these die with the SQLite substrate at the RDR-155 P4b flip.
+_SQLITE_ONLY_VERB = pytest.mark.skipif(
+    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    reason="dies-roster: gc-fixtures is a SQLite-only verb (service mode "
+    "raises UsageError, nexus-gmiaf.37) and its fixtures seed via raw "
+    "sqlite cursors — dies at the RDR-155 P4b flip",
 )
 
 
@@ -111,6 +123,7 @@ def t2_with_fixtures(tmp_path: Path, monkeypatch):
 
 
 class TestGcFixturesVerb:
+    @_SQLITE_ONLY_VERB
     def test_dry_run_default_reports_without_deleting(self, t2_with_fixtures) -> None:
         db, _ = t2_with_fixtures
         runner = CliRunner()
@@ -128,6 +141,7 @@ class TestGcFixturesVerb:
         ).fetchone()[0]
         assert qrows == 3
 
+    @_SQLITE_ONLY_VERB
     def test_yes_flag_deletes_only_fixture_rows(self, t2_with_fixtures) -> None:
         db, _ = t2_with_fixtures
         runner = CliRunner()
@@ -144,6 +158,7 @@ class TestGcFixturesVerb:
         ).fetchall()
         assert [r[0] for r in qrows] == ["knowledge__production-corpus"]
 
+    @_SQLITE_ONLY_VERB
     def test_no_fixture_rows_is_clean_noop(
         self, tmp_path: Path, monkeypatch
     ) -> None:

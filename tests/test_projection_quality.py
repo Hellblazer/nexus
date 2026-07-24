@@ -9,6 +9,7 @@ UPSERT, 3-tuple tuple shape across all five call sites.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
@@ -17,6 +18,93 @@ import numpy as np
 import pytest
 
 from nexus.db.t2 import T2Database
+from tests.conftest import make_vector_test_client
+
+_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
+
+#: topic_assignments quality columns (similarity / assigned_at /
+#: source_collection) have NO read surface over the engine HTTP API — the
+#: assertions below can only be made via a raw SQLite conn. dies-roster:
+#: these die with the raw handle at the RDR-155 P4b flip (the engine's
+#: GREATEST/CASE projection upsert parity is pinned by the engine-side
+#: integration suite).
+_RAW_QUALITY_READ = pytest.mark.skipif(
+    _ENGINE_SUBSTRATE,
+    reason="dies-roster: asserts topic_assignments quality columns via a "
+    "raw SQLite conn; the engine exposes no assignment read surface with "
+    "similarity/assigned_at/source_collection — dies at the RDR-155 P4b "
+    "flip",
+)
+
+
+@pytest.fixture(autouse=True)
+def _no_live_claude_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HARD guard (RDR-155 P4b P0a'): nothing in this module may ever reach
+    the real ``claude -p`` subprocess (operators fall back from a failed
+    SQL fast path to live dispatch with a 300s timeout per call — a
+    substrate regression must fail loud, not hang the suite)."""
+    async def _forbidden(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("test must not reach live claude dispatch")
+
+    monkeypatch.setattr(
+        "nexus.operators.dispatch.claude_dispatch", _forbidden,
+    )
+
+
+def _insert_topic(
+    db: T2Database, *, topic_id: int, collection: str,
+    label: str = "seed", created_at: str = "2026-04-14",
+) -> None:
+    """Seed one ``topics`` row with an explicit id on either substrate.
+
+    SQLite: raw INSERT OR IGNORE (the pre-flip shape). Engine: the
+    fidelity-preserving ``import_topic`` surface, which preserves the
+    explicit id (RDR-155 P4b P0a' — raw-conn seeding routed through the
+    import surface instead of psql).
+    """
+    from nexus.db.storage_mode import has_raw_access
+
+    if has_raw_access(db.taxonomy):
+        db.taxonomy.conn.execute(
+            "INSERT OR IGNORE INTO topics (id, label, collection, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (topic_id, label, collection, created_at),
+        )
+        db.taxonomy.conn.commit()
+    else:
+        db.taxonomy.import_topic(
+            src_id=topic_id, label=label, parent_id=None,
+            collection=collection, centroid_hash=None, doc_count=0,
+            created_at=_full_iso(created_at), review_status="pending",
+            terms=None,
+        )
+
+
+def _unique_topic_base() -> int:
+    """Return a session-unique topic-id base.
+
+    The engine's ``topics_pk`` is PRIMARY KEY (id) — GLOBAL across tenants —
+    and the whole pytest session shares ONE engine, so explicit literal ids
+    (1, 2, ...) collide with the BIGSERIAL ids other tests' discover_topics
+    already claimed (409 integrity violation on the fidelity import).
+    Microsecond-monotonic bases keep every test's explicit ids disjoint
+    from each other and from the (small) serial range. Used on both
+    substrates so the two legs assert the same shapes.
+    """
+    import time
+
+    return 1_000_000 + (time.time_ns() // 1_000) % 10**12
+
+
+def _full_iso(ts: str) -> str:
+    """Normalize the fixtures' date / naive-datetime literals to the full
+    ISO-8601 shape the engine's import surface requires (parseTsStrict);
+    SQLite stores the literal verbatim so only the engine branch calls this."""
+    if len(ts) == 10:  # bare date
+        ts = f"{ts}T00:00:00"
+    if not (ts.endswith("Z") or "+" in ts[10:]):
+        ts = f"{ts}Z"
+    return ts
 
 
 def _make_taxonomy_db() -> sqlite3.Connection:
@@ -179,7 +267,7 @@ class TestAddProjectionQualityColumns:
 def chroma_client() -> chromadb.ClientAPI:
     """Ephemeral ChromaDB client per test.
 
-    nexus-alnpa: ``chromadb.EphemeralClient()`` instances share a
+    nexus-alnpa: ``make_vector_test_client()`` instances share a
     process-global in-memory backend, so collections leak across tests and
     across files within the same process. A sibling test that leaves a
     same-named collection (e.g. ``nt_coll``) pollutes this file's
@@ -188,7 +276,7 @@ def chroma_client() -> chromadb.ClientAPI:
     test starts from a clean backend regardless of what ran before. See the
     ``project_chromadb_ephemeral_shared_state`` note.
     """
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     for coll in client.list_collections():
         client.delete_collection(coll.name)
     return client
@@ -203,12 +291,7 @@ def db(tmp_path: Path) -> T2Database:
 
 def _seed_topic(db: T2Database, *, topic_id: int = 1, collection: str = "code__src") -> None:
     """Create a single topic row for assignment tests."""
-    db.taxonomy.conn.execute(
-        "INSERT INTO topics (id, label, collection, created_at) "
-        "VALUES (?, 'seed', ?, '2026-04-14')",
-        (topic_id, collection),
-    )
-    db.taxonomy.conn.commit()
+    _insert_topic(db, topic_id=topic_id, collection=collection)
 
 
 def _read_assignment(db: T2Database, doc_id: str, topic_id: int) -> dict | None:
@@ -230,6 +313,7 @@ def _read_assignment(db: T2Database, doc_id: str, topic_id: int) -> dict | None:
     }
 
 
+@_RAW_QUALITY_READ
 class TestUpsertPreferHigher:
     """SC-2 prefer-higher UPSERT for projection rows."""
 
@@ -290,6 +374,7 @@ class TestUpsertPreferHigher:
         assert row["assigned_at"] == "2026-04-14T12:00:00"
 
 
+@_RAW_QUALITY_READ
 class TestHdbscanPathPreserved:
     def test_hdbscan_keeps_insert_or_ignore(self, db: T2Database) -> None:
         """HDBSCAN assignments stay idempotent, NULL similarity/source."""
@@ -351,6 +436,7 @@ class TestAssignSingleReturnsNamedTuple:
         assert -1.0 <= result.similarity <= 1.0
 
 
+@_RAW_QUALITY_READ
 class TestAssignBatchCrossCollectionSimilarity:
     """C-1 (auditor): cross-collection batch must propagate per-row similarity."""
 
@@ -390,6 +476,13 @@ class TestAssignBatchCrossCollectionSimilarity:
             assert src == "coll_B_c1"
 
 
+@pytest.mark.skipif(
+    _ENGINE_SUBSTRATE,
+    reason="dies-roster: backfill_projection is a nexus.db.migrations "
+    "consumer (SQLite migration path) and the assertion is a raw-conn "
+    "read of quality columns — dies with the SQLite migrations at the "
+    "RDR-155 P4b flip",
+)
 class TestBackfillProjectionRegression:
     """SC-8: ``backfill_projection`` consumes 3-tuples without crashing."""
 
@@ -487,11 +580,11 @@ def _seed_projection_rows(
     """
     topic_ids = {tid for _, tid, _ in rows}
     for tid in topic_ids:
-        db.taxonomy.conn.execute(
-            "INSERT OR IGNORE INTO topics (id, label, collection, created_at) "
-            "VALUES (?, 'seed', 'code__any', '2026-04-14')",
-            (tid,),
-        )
+        # Per-topic label: the engine enforces root-topic uniqueness on
+        # (tenant_id, collection, label) (taxonomy-004), so a shared
+        # 'seed' label 23505s on the second import.
+        _insert_topic(db, topic_id=tid, collection="code__any",
+                      label=f"seed-{tid}")
     for doc_id, tid, src in rows:
         db.taxonomy.assign_topic(
             doc_id, tid, assigned_by="projection",
@@ -508,61 +601,74 @@ class TestICF:
         """N=4, DF=2 → ICF = log2(4/2) = 1.0 exactly."""
         import math
 
-        # Topic 1 appears in 2 of 4 collections; topics 2-4 each in 1.
+        B = _unique_topic_base()
+        # Topic B+1 appears in 2 of 4 collections; B+2..B+4 each in 1.
         _seed_projection_rows(db, [
-            ("docA", 1, "code__c1"),
-            ("docB", 1, "code__c2"),
-            ("docC", 2, "code__c1"),
-            ("docD", 3, "code__c3"),
-            ("docE", 4, "code__c4"),
+            ("docA", B + 1, "code__c1"),
+            ("docB", B + 1, "code__c2"),
+            ("docC", B + 2, "code__c1"),
+            ("docD", B + 3, "code__c3"),
+            ("docE", B + 4, "code__c4"),
         ])
         icf = db.taxonomy.compute_icf_map()
         # N_effective = 4 distinct source_collections.
-        assert icf[1] == pytest.approx(math.log2(4 / 2))
-        assert icf[2] == pytest.approx(math.log2(4 / 1))
-        assert icf[3] == pytest.approx(math.log2(4 / 1))
-        assert icf[4] == pytest.approx(math.log2(4 / 1))
+        assert icf[B + 1] == pytest.approx(math.log2(4 / 2))
+        assert icf[B + 2] == pytest.approx(math.log2(4 / 1))
+        assert icf[B + 3] == pytest.approx(math.log2(4 / 1))
+        assert icf[B + 4] == pytest.approx(math.log2(4 / 1))
 
     def test_icf_df_equals_n_yields_zero(self, db: T2Database) -> None:
         """Ubiquitous topic (appears in every collection) → ICF = 0."""
+        B = _unique_topic_base()
         _seed_projection_rows(db, [
-            ("docA", 1, "code__c1"),
-            ("docB", 1, "code__c2"),
-            ("docC", 1, "code__c3"),
+            ("docA", B + 1, "code__c1"),
+            ("docB", B + 1, "code__c2"),
+            ("docC", B + 1, "code__c3"),
         ])
         icf = db.taxonomy.compute_icf_map()
-        assert icf[1] == pytest.approx(0.0)
+        assert icf[B + 1] == pytest.approx(0.0)
 
     def test_icf_n_effective_excludes_null_source(self, db: T2Database) -> None:
         """Legacy NULL ``source_collection`` rows don't inflate N or DF."""
+        B = _unique_topic_base()
         _seed_projection_rows(db, [
-            ("docA", 1, "code__c1"),
-            ("docB", 1, "code__c2"),
-            ("docC", 2, "code__c1"),
+            ("docA", B + 1, "code__c1"),
+            ("docB", B + 1, "code__c2"),
+            ("docC", B + 2, "code__c1"),
         ])
         # Insert a legacy NULL row directly (simulate pre-migration state).
-        db.taxonomy.conn.execute(
-            "INSERT OR IGNORE INTO topics (id, label, collection, created_at) "
-            "VALUES (99, 'legacy', 'code__any', '2026-04-14')"
-        )
-        db.taxonomy.conn.execute(
-            "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
-            "VALUES ('docLegacy', 99, 'projection')"
-        )
-        db.taxonomy.conn.commit()
+        # SQLite: raw INSERT. Engine: the fidelity import surface writes the
+        # NULL similarity/source_collection verbatim — same legacy shape.
+        from nexus.db.storage_mode import has_raw_access
+
+        _insert_topic(db, topic_id=B + 99, collection="code__any", label="legacy")
+        if has_raw_access(db.taxonomy):
+            db.taxonomy.conn.execute(
+                "INSERT INTO topic_assignments (doc_id, topic_id, assigned_by) "
+                "VALUES ('docLegacy', ?, 'projection')",
+                (B + 99,),
+            )
+            db.taxonomy.conn.commit()
+        else:
+            db.taxonomy.import_assignment(
+                doc_id="docLegacy", topic_id=B + 99, assigned_by="projection",
+                similarity=None, assigned_at=None, source_collection=None,
+            )
         db.taxonomy.clear_icf_cache()
 
         icf = db.taxonomy.compute_icf_map()
-        # Legacy NULL row excluded: N_effective stays 2 (c1, c2); topic 99 absent.
-        assert 99 not in icf
-        # Topic 1 in both collections → ICF = 0.
-        assert icf[1] == pytest.approx(0.0)
+        # Legacy NULL row excluded: N_effective stays 2 (c1, c2); the
+        # legacy topic is absent from the map.
+        assert B + 99 not in icf
+        # Topic B+1 in both collections → ICF = 0.
+        assert icf[B + 1] == pytest.approx(0.0)
 
     def test_icf_disabled_when_n_lt_2(self, db: T2Database) -> None:
         """Single-collection corpus → empty map (ICF undefined)."""
+        B = _unique_topic_base()
         _seed_projection_rows(db, [
-            ("docA", 1, "code__only"),
-            ("docB", 2, "code__only"),
+            ("docA", B + 1, "code__only"),
+            ("docB", B + 2, "code__only"),
         ])
         icf = db.taxonomy.compute_icf_map()
         assert icf == {}
@@ -572,6 +678,13 @@ class TestICF:
         icf = db.taxonomy.compute_icf_map()
         assert icf == {}
 
+    @pytest.mark.skipif(
+        _ENGINE_SUBSTRATE,
+        reason="dies-roster: pins the SQLite store's in-process ICF cache "
+        "object identity; the HTTP store is deliberately cache-free (one "
+        "atomic /icf/map round-trip) — dies with the SQLite store at the "
+        "RDR-155 P4b flip",
+    )
     def test_icf_cache_lifecycle(self, db: T2Database) -> None:
         """Cache populated once, survives multiple calls, cleared on demand."""
         _seed_projection_rows(db, [
@@ -591,6 +704,12 @@ class TestICF:
         third = db.taxonomy.compute_icf_map(use_cache=True)
         assert third is not first, "cache must refresh after clear_icf_cache"
 
+    @pytest.mark.skipif(
+        _ENGINE_SUBSTRATE,
+        reason="dies-roster: pins the SQLite-only log2 scalar registration "
+        "on the raw conn (PG has native log(2, x)) — dies with the raw "
+        "handle at the RDR-155 P4b flip",
+    )
     def test_icf_log2_scalar_registered(self, db: T2Database) -> None:
         """``log2`` is available to arbitrary SQL on CatalogTaxonomy.conn."""
         row = db.taxonomy.conn.execute("SELECT log2(8.0)").fetchone()
@@ -657,19 +776,31 @@ def fixture_icf_ranking(
         src_coll.add(ids=doc_ids, embeddings=embs.tolist(), documents=texts)
 
     # Cross-project every source against every other so N_effective ≈
-    # n_collections for any topic that matches broadly.
+    # n_collections for any topic that matches broadly. Persist through the
+    # BATCHED public surface (persist_assignments — same projection-upsert
+    # semantics on both substrates): the previous per-row assign_topic loop
+    # issued ~1.4k sequential HTTP POSTs on the engine substrate, tripping
+    # the client read timeout and wedging the session engine for every
+    # later test in the file (RDR-155 P4b P0a' hang mechanism).
     collections = [f"code__icfR{i:02d}" for i in range(n_collections)]
+    pending: list[dict] = []
     for src in collections:
         targets = [c for c in collections if c != src]
         result = db.taxonomy.project_against(
             src, targets, chroma_client, threshold=-1.0, top_k=2,
         )
-        for doc_id, topic_id, similarity in result.get("chunk_assignments", []):
-            db.taxonomy.assign_topic(
-                doc_id, topic_id, assigned_by="projection",
-                similarity=similarity, source_collection=src,
-                assigned_at=f"2026-04-10T12:00:{hash(src) % 60:02d}",
-            )
+        pending.extend(
+            {
+                "doc_id": doc_id,
+                "topic_id": topic_id,
+                "assigned_by": "projection",
+                "similarity": similarity,
+                "source_collection": src,
+            }
+            for doc_id, topic_id, similarity
+            in result.get("chunk_assignments", [])
+        )
+    db.taxonomy.persist_assignments(pending)
     db.taxonomy.clear_icf_cache()
     return db
 
@@ -687,14 +818,13 @@ class TestIcfRankingFixture:
         values = sorted(icf.values())
         assert values[0] <= values[-1]  # spread is measurable
         # N_effective should reach the fixture's collection count
-        # (N=12 collections project into each other).
-        n_row = fixture_icf_ranking.taxonomy.conn.execute(
-            "SELECT COUNT(DISTINCT source_collection) "
-            "FROM topic_assignments "
-            "WHERE assigned_by = 'projection' "
-            "AND source_collection IS NOT NULL"
-        ).fetchone()
-        assert int(n_row[0]) == 12
+        # (N=12 collections project into each other). Read through the
+        # public projection-counts surface (substrate-blind) instead of a
+        # raw COUNT(DISTINCT source_collection).
+        counts = (
+            fixture_icf_ranking.taxonomy.get_projection_counts_by_collection()
+        )
+        assert len(counts) == 12
 
     def test_icf_weighted_ranking_differs_from_raw(
         self, fixture_icf_ranking: T2Database, chroma_client: chromadb.ClientAPI,
@@ -853,115 +983,171 @@ class TestProjectCmdFlag:
 # ── Phase 5 (nexus-84v) — nx taxonomy hubs ──────────────────────────────────
 
 
+def _seed_projection_assignments(db: T2Database, rows: list[dict]) -> None:
+    """Seed explicit-``assigned_at`` projection assignments on either
+    substrate.
+
+    SQLite keeps the per-row ``assign_topic`` path (the only public writer
+    that accepts ``assigned_at``). The engine leg routes through the
+    fidelity-preserving ``import_rows_batch`` — one POST instead of
+    hundreds of sequential per-row round-trips (the RDR-155 P4b P0a'
+    read-timeout / engine-wedge mechanism).
+    """
+    from nexus.db.storage_mode import has_raw_access
+
+    if has_raw_access(db.taxonomy):
+        for r in rows:
+            db.taxonomy.assign_topic(
+                r["doc_id"], r["topic_id"],
+                assigned_by="projection",
+                similarity=r["similarity"],
+                source_collection=r["source_collection"],
+                assigned_at=r["assigned_at"],
+            )
+    else:
+        db.taxonomy.import_rows_batch(
+            "assignment",
+            [
+                {
+                    **r,
+                    "assigned_by": "projection",
+                    "assigned_at": _full_iso(r["assigned_at"]),
+                }
+                for r in rows
+            ],
+        )
+
+
 @pytest.fixture()
-def fixture_hub_synthetic(db: T2Database) -> T2Database:
+def fixture_hub_synthetic(db: T2Database) -> tuple[T2Database, int]:
     """5 collections × 100 docs — half assigned to a stopword-labeled hub,
     half spread across 5 distinct domain topics (one per collection).
 
     Deterministic: fixed doc_ids and assigned_at values so tests don't
-    depend on wall-clock drift.
+    depend on wall-clock drift. Yields ``(db, B)`` where ``B`` is the
+    session-unique topic-id base — hub topic is ``B+1``, domain topics
+    ``B+2..B+6`` (see ``_unique_topic_base``).
     """
+    B = _unique_topic_base()
     topics = [
-        (1, "assert helpers",            "code__c0", "2026-04-01"),
-        (2, "ingest-pipeline",           "code__c0", "2026-04-01"),
-        (3, "member-proposal-workflow",  "code__c1", "2026-04-01"),
-        (4, "payroll-audit",             "code__c2", "2026-04-01"),
-        (5, "ballot-scanner",            "code__c3", "2026-04-01"),
-        (6, "treasury-reconciliation",   "code__c4", "2026-04-01"),
+        (B + 1, "assert helpers",            "code__c0", "2026-04-01"),
+        (B + 2, "ingest-pipeline",           "code__c0", "2026-04-01"),
+        (B + 3, "member-proposal-workflow",  "code__c1", "2026-04-01"),
+        (B + 4, "payroll-audit",             "code__c2", "2026-04-01"),
+        (B + 5, "ballot-scanner",            "code__c3", "2026-04-01"),
+        (B + 6, "treasury-reconciliation",   "code__c4", "2026-04-01"),
     ]
     for tid, label, collection, created in topics:
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (id, label, collection, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            (tid, label, collection, created),
+        _insert_topic(
+            db, topic_id=tid, collection=collection,
+            label=label, created_at=created,
         )
 
-    # Hub topic 1: 50 docs from every one of 5 collections.
+    rows: list[dict] = []
+    # Hub topic B+1: 50 docs from every one of 5 collections.
     for col_idx in range(5):
         col = f"code__c{col_idx}"
-        for d in range(50):
-            db.taxonomy.assign_topic(
-                f"{col}-hub-d{d}", 1,
-                assigned_by="projection",
-                similarity=0.85,
-                source_collection=col,
-                assigned_at=f"2026-04-10T12:{col_idx:02d}:00",
-            )
-    # Five domain topics: topic 2..6 each gets 50 docs from one collection.
-    for col_idx, tid in enumerate((2, 3, 4, 5, 6)):
+        rows.extend(
+            {
+                "doc_id": f"{col}-hub-d{d}",
+                "topic_id": B + 1,
+                "similarity": 0.85,
+                "source_collection": col,
+                "assigned_at": f"2026-04-10T12:{col_idx:02d}:00",
+            }
+            for d in range(50)
+        )
+    # Five domain topics: B+2..B+6 each gets 50 docs from one collection.
+    for col_idx, tid in enumerate((B + 2, B + 3, B + 4, B + 5, B + 6)):
         col = f"code__c{col_idx}"
-        for d in range(50):
-            db.taxonomy.assign_topic(
-                f"{col}-dom-d{d}", tid,
-                assigned_by="projection",
-                similarity=0.82,
-                source_collection=col,
-                assigned_at=f"2026-04-10T13:{col_idx:02d}:00",
-            )
+        rows.extend(
+            {
+                "doc_id": f"{col}-dom-d{d}",
+                "topic_id": tid,
+                "similarity": 0.82,
+                "source_collection": col,
+                "assigned_at": f"2026-04-10T13:{col_idx:02d}:00",
+            }
+            for d in range(50)
+        )
+    _seed_projection_assignments(db, rows)
     db.taxonomy.clear_icf_cache()
-    return db
+    return db, B
 
 
 class TestHubs:
     def test_hubs_detects_stopword_topic(
-        self, fixture_hub_synthetic: T2Database,
+        self, fixture_hub_synthetic: tuple[T2Database, int],
     ) -> None:
-        hubs = fixture_hub_synthetic.taxonomy.detect_hubs(min_collections=2)
+        db, B = fixture_hub_synthetic
+        hubs = db.taxonomy.detect_hubs(min_collections=2)
         topic_ids = [h.topic_id for h in hubs]
-        # Only topic 1 spans all 5 collections.
-        assert 1 in topic_ids
-        assert hubs[0].topic_id == 1  # sorted by score desc
+        # Only the hub topic (B+1) spans all 5 collections.
+        assert B + 1 in topic_ids
+        assert hubs[0].topic_id == B + 1  # sorted by score desc
         assert "assert" in hubs[0].matched_stopwords
 
     def test_hubs_excludes_single_collection_domain_topics(
-        self, fixture_hub_synthetic: T2Database,
+        self, fixture_hub_synthetic: tuple[T2Database, int],
     ) -> None:
-        hubs = fixture_hub_synthetic.taxonomy.detect_hubs(min_collections=2)
+        db, B = fixture_hub_synthetic
+        hubs = db.taxonomy.detect_hubs(min_collections=2)
         topic_ids = {h.topic_id for h in hubs}
         # Domain topics each live in a single source collection → DF=1,
         # excluded by min_collections=2.
-        for domain_topic in (2, 3, 4, 5, 6):
+        for domain_topic in (B + 2, B + 3, B + 4, B + 5, B + 6):
             assert domain_topic not in topic_ids
 
     def test_hubs_max_icf_threshold(
-        self, fixture_hub_synthetic: T2Database,
+        self, fixture_hub_synthetic: tuple[T2Database, int],
     ) -> None:
+        db, B = fixture_hub_synthetic
         # With N_effective=5 and the hub topic at DF=5, ICF=log2(1)=0.
-        hubs = fixture_hub_synthetic.taxonomy.detect_hubs(
+        hubs = db.taxonomy.detect_hubs(
             min_collections=2, max_icf=0.5,
         )
-        assert [h.topic_id for h in hubs] == [1]
+        assert [h.topic_id for h in hubs] == [B + 1]
 
         # No ICF filter ever, but also no label stopword filter — so every
-        # DF≥2 topic shows up. In this fixture only topic 1 has DF≥2.
-        hubs_none = fixture_hub_synthetic.taxonomy.detect_hubs(
+        # DF≥2 topic shows up. In this fixture only the hub topic has DF≥2.
+        hubs_none = db.taxonomy.detect_hubs(
             min_collections=2, max_icf=None,
         )
-        assert [h.topic_id for h in hubs_none] == [1]
+        assert [h.topic_id for h in hubs_none] == [B + 1]
 
     def test_hubs_min_collections_threshold(
-        self, fixture_hub_synthetic: T2Database,
+        self, fixture_hub_synthetic: tuple[T2Database, int],
     ) -> None:
+        db, _B = fixture_hub_synthetic
         # Asking for DF>=6 → nothing (we only have 5 collections).
-        hubs = fixture_hub_synthetic.taxonomy.detect_hubs(min_collections=6)
+        hubs = db.taxonomy.detect_hubs(min_collections=6)
         assert hubs == []
 
+    @pytest.mark.skipif(
+        _ENGINE_SUBSTRATE,
+        reason="dies-roster: warn_stale is not implemented over HTTP "
+        "(HttpTaxonomyStore.detect_hubs hardcodes "
+        "max_last_discover_at=None) and the fixture writes taxonomy_meta "
+        "via raw conn — dies with the SQLite store at the RDR-155 P4b "
+        "flip",
+    )
     def test_hubs_warn_stale_compares_to_last_discover(
-        self, fixture_hub_synthetic: T2Database,
+        self, fixture_hub_synthetic: tuple[T2Database, int],
     ) -> None:
         """MAX(last_discover_at) across source collections, not single row."""
+        db, _B = fixture_hub_synthetic
         # Mark each source collection as discovered BEFORE the hub's latest
         # assignment → stale should fire.
         for col_idx in range(5):
-            fixture_hub_synthetic.taxonomy.conn.execute(
+            db.taxonomy.conn.execute(
                 "INSERT INTO taxonomy_meta "
                 "(collection, last_discover_doc_count, last_discover_at) "
                 "VALUES (?, 100, ?)",
                 (f"code__c{col_idx}", "2026-04-09T00:00:00"),
             )
-        fixture_hub_synthetic.taxonomy.conn.commit()
+        db.taxonomy.conn.commit()
 
-        hubs = fixture_hub_synthetic.taxonomy.detect_hubs(
+        hubs = db.taxonomy.detect_hubs(
             min_collections=2, warn_stale=True,
         )
         assert hubs[0].is_stale is True
@@ -972,14 +1158,14 @@ class TestHubs:
         # assigned_at. MAX() aggregation must pick that up across ALL
         # contributing collections (C-2 correctness), not stay stuck on a
         # single-row lookup.
-        fixture_hub_synthetic.taxonomy.conn.execute(
+        db.taxonomy.conn.execute(
             "UPDATE taxonomy_meta SET last_discover_at = ? "
             "WHERE collection = 'code__c0'",
             ("2026-04-11T00:00:00",),
         )
-        fixture_hub_synthetic.taxonomy.conn.commit()
+        db.taxonomy.conn.commit()
 
-        hubs2 = fixture_hub_synthetic.taxonomy.detect_hubs(
+        hubs2 = db.taxonomy.detect_hubs(
             min_collections=2, warn_stale=True,
         )
         # Hub's latest assigned_at is 2026-04-10T13:04:00 (<
@@ -987,21 +1173,30 @@ class TestHubs:
         assert hubs2[0].is_stale is False
         assert hubs2[0].max_last_discover_at == "2026-04-11T00:00:00"
 
+    @pytest.mark.skipif(
+        _ENGINE_SUBSTRATE,
+        reason="dies-roster: warn_stale is not implemented over HTTP "
+        "(HttpTaxonomyStore.detect_hubs hardcodes "
+        "max_last_discover_at=None) and the fixture writes taxonomy_meta "
+        "via raw conn — dies with the SQLite store at the RDR-155 P4b "
+        "flip",
+    )
     def test_hubs_warn_stale_null_handling(
-        self, fixture_hub_synthetic: T2Database,
+        self, fixture_hub_synthetic: tuple[T2Database, int],
     ) -> None:
         """Never-discovered collections count as stale via never_discovered_count."""
+        db, _B = fixture_hub_synthetic
         # Insert NULL rows for some collections; leave others absent entirely.
         for col_idx in range(3):
-            fixture_hub_synthetic.taxonomy.conn.execute(
+            db.taxonomy.conn.execute(
                 "INSERT INTO taxonomy_meta "
                 "(collection, last_discover_doc_count, last_discover_at) "
                 "VALUES (?, 100, NULL)",
                 (f"code__c{col_idx}",),
             )
-        fixture_hub_synthetic.taxonomy.conn.commit()
+        db.taxonomy.conn.commit()
 
-        hubs = fixture_hub_synthetic.taxonomy.detect_hubs(
+        hubs = db.taxonomy.detect_hubs(
             min_collections=2, warn_stale=True,
         )
         # 3 explicit NULL rows + 2 collections with no taxonomy_meta row at
@@ -1011,9 +1206,10 @@ class TestHubs:
         assert hubs[0].is_stale is True
 
     def test_hubs_warn_stale_without_flag_leaves_fields_default(
-        self, fixture_hub_synthetic: T2Database,
+        self, fixture_hub_synthetic: tuple[T2Database, int],
     ) -> None:
-        hubs = fixture_hub_synthetic.taxonomy.detect_hubs(min_collections=2)
+        db, _B = fixture_hub_synthetic
+        hubs = db.taxonomy.detect_hubs(min_collections=2)
         assert hubs[0].max_last_discover_at is None
         assert hubs[0].never_discovered_count == 0
         assert hubs[0].is_stale is False
@@ -1037,54 +1233,60 @@ class TestHubs:
 
 class TestAudit:
     @pytest.fixture()
-    def audit_db(self, db: T2Database) -> T2Database:
-        """Seed a collection with a known similarity distribution."""
+    def audit_db(self, db: T2Database) -> tuple[T2Database, int]:
+        """Seed a collection with a known similarity distribution.
+
+        Yields ``(db, B)``: hub topic is ``B+1``, others ``B+2..B+4``
+        (see ``_unique_topic_base``).
+        """
+        B = _unique_topic_base()
         topics = [
-            (1, "assert helpers",   "code__auditC0", "2026-04-01"),
-            (2, "ingest-pipeline",  "code__auditC0", "2026-04-01"),
-            (3, "payroll-audit",    "code__auditC0", "2026-04-01"),
+            (B + 1, "assert helpers",   "code__auditC0", "2026-04-01"),
+            (B + 2, "ingest-pipeline",  "code__auditC0", "2026-04-01"),
+            (B + 3, "payroll-audit",    "code__auditC0", "2026-04-01"),
             # Cross-collection participant so ICF has N_effective >= 2.
-            (4, "ballot-scanner",   "code__peer",    "2026-04-01"),
+            (B + 4, "ballot-scanner",   "code__peer",    "2026-04-01"),
         ]
         for tid, label, coll, created in topics:
-            db.taxonomy.conn.execute(
-                "INSERT INTO topics (id, label, collection, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                (tid, label, coll, created),
+            _insert_topic(
+                db, topic_id=tid, collection=coll,
+                label=label, created_at=created,
             )
 
         db.taxonomy.assign_topic(
-            "peer-doc-1", 4,
+            "peer-doc-1", B + 4,
             assigned_by="projection", similarity=0.80,
             source_collection="code__peer",
             assigned_at="2026-04-05T00:00:00",
         )
 
-        # code__auditC0 projects 11 rows; 6 → topic 1 (hub), 3 → 2, 2 → 3.
+        # code__auditC0 projects 11 rows; 6 → B+1 (hub), 3 → B+2, 2 → B+3.
         sims = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.95, 0.98]
         topic_per_row = [1, 1, 1, 1, 1, 1, 2, 2, 2, 3, 3]
         for i, (sim, tid) in enumerate(zip(sims, topic_per_row)):
             db.taxonomy.assign_topic(
-                f"auditC0-d{i}", tid,
+                f"auditC0-d{i}", B + tid,
                 assigned_by="projection", similarity=sim,
                 source_collection="code__auditC0",
                 assigned_at=f"2026-04-10T12:{i:02d}:00",
             )
         # HDBSCAN row that must NOT be counted.
-        db.taxonomy.assign_topic("hdbscan-doc", 1, assigned_by="hdbscan")
+        db.taxonomy.assign_topic("hdbscan-doc", B + 1, assigned_by="hdbscan")
         db.taxonomy.clear_icf_cache()
-        return db
+        return db, B
 
-    def test_audit_quantiles(self, audit_db: T2Database) -> None:
-        report = audit_db.taxonomy.audit_collection("code__auditC0")
+    def test_audit_quantiles(self, audit_db: tuple[T2Database, int]) -> None:
+        db, _B = audit_db
+        report = db.taxonomy.audit_collection("code__auditC0")
         # Sorted 0.10..0.98, 11 rows → nearest-rank p10=0.20, p50=0.60, p90=0.95.
         assert report.total_assignments == 11
         assert report.p10 == pytest.approx(0.20)
         assert report.p50 == pytest.approx(0.60)
         assert report.p90 == pytest.approx(0.95)
 
-    def test_audit_below_threshold_count(self, audit_db: T2Database) -> None:
-        report = audit_db.taxonomy.audit_collection(
+    def test_audit_below_threshold_count(self, audit_db: tuple[T2Database, int]) -> None:
+        db, _B = audit_db
+        report = db.taxonomy.audit_collection(
             "code__auditC0", threshold=0.50,
         )
         assert report.threshold == 0.50
@@ -1092,29 +1294,33 @@ class TestAudit:
         assert report.below_threshold_count == 4
 
     def test_audit_uses_per_corpus_default_threshold(
-        self, audit_db: T2Database,
+        self, audit_db: tuple[T2Database, int],
     ) -> None:
-        report = audit_db.taxonomy.audit_collection("code__auditC0")
+        db, _B = audit_db
+        report = db.taxonomy.audit_collection("code__auditC0")
         # code__* default → 0.70; 6 rows below (0.10..0.60).
         assert report.threshold == 0.70
         assert report.below_threshold_count == 6
 
-    def test_audit_top_receiving_hubs(self, audit_db: T2Database) -> None:
-        report = audit_db.taxonomy.audit_collection(
+    def test_audit_top_receiving_hubs(self, audit_db: tuple[T2Database, int]) -> None:
+        db, B = audit_db
+        report = db.taxonomy.audit_collection(
             "code__auditC0", top_n=5,
         )
         ids = [h.topic_id for h in report.top_receiving_hubs]
-        assert ids == [1, 2, 3]
+        assert ids == [B + 1, B + 2, B + 3]
 
-    def test_audit_pattern_pollution_flags(self, audit_db: T2Database) -> None:
-        report = audit_db.taxonomy.audit_collection("code__auditC0")
+    def test_audit_pattern_pollution_flags(self, audit_db: tuple[T2Database, int]) -> None:
+        db, B = audit_db
+        report = db.taxonomy.audit_collection("code__auditC0")
         polluted_ids = [h.topic_id for h in report.pattern_pollution]
-        assert 1 in polluted_ids  # "assert helpers" matches 'assert'
-        assert 2 not in polluted_ids
-        assert 3 not in polluted_ids
+        assert B + 1 in polluted_ids  # "assert helpers" matches 'assert'
+        assert B + 2 not in polluted_ids
+        assert B + 3 not in polluted_ids
 
-    def test_audit_excludes_hdbscan_rows(self, audit_db: T2Database) -> None:
-        report = audit_db.taxonomy.audit_collection("code__auditC0")
+    def test_audit_excludes_hdbscan_rows(self, audit_db: tuple[T2Database, int]) -> None:
+        db, _B = audit_db
+        report = db.taxonomy.audit_collection("code__auditC0")
         # 11 projection rows only — the hdbscan row is ignored.
         assert report.total_assignments == 11
 

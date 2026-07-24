@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from nexus.migration.remap_client import (
+from nexus.db.t2.rekey_client import (
     RekeyJobFailedError,
     RekeyJobLostError,
     RekeyJobTimeoutError,

@@ -31,9 +31,19 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from click.testing import CliRunner
 
+import itertools
+
 import nexus.mcp_infra as _mi
 from nexus.commands.taxonomy_cmd import taxonomy
 from nexus.db.t2 import T2Database
+
+from tests.conftest import next_import_seed_id  # session-unique import ids (see conftest note)
+
+
+@pytest.fixture(autouse=True)
+def _engine_substrate(t2_service_env):
+    """RDR-155 P4b P0a' representative batch: this module runs its T2
+    against the engine-backed substrate (per-test minted tenant)."""
 
 # ── Shared seeding + mocking helpers ────────────────────────────────────────
 
@@ -48,31 +58,38 @@ def _seed_topic(
     review_status: str = "pending",
     n_docs: int | None = None,
 ) -> int:
-    """Insert one topic (+ topic_assignments) and return its id."""
+    """Insert one topic (+ topic_assignments) and return its id.
+
+    RDR-155 P4b P0a': seeds via the taxonomy fidelity-import surface
+    (import_topic / import_assignment write rows verbatim, preserving
+    the supplied id) — the substrate-neutral replacement for the retired
+    raw-conn INSERTs. Ids come from a process-wide counter; per-test
+    minted tenants namespace them server-side anyway.
+    """
     import json as _json
 
     with T2Database(db_path) as db:
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics "
-            "(label, collection, doc_count, created_at, review_status, terms) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (
-                label,
-                collection,
-                doc_count,
-                "2026-01-01T00:00:00Z",
-                review_status,
-                _json.dumps(terms or ["term-a", "term-b"]),
-            ),
+        topic_id = db.taxonomy.import_topic(
+            src_id=next_import_seed_id(),
+            label=label,
+            parent_id=None,
+            collection=collection,
+            centroid_hash=None,
+            doc_count=doc_count,
+            created_at="2026-01-01T00:00:00Z",
+            review_status=review_status,
+            terms=_json.dumps(terms or ["term-a", "term-b"]),
         )
-        topic_id = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         n = n_docs if n_docs is not None else doc_count
         for i in range(n):
-            db.taxonomy.conn.execute(
-                "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
-                (f"{label}-doc-{i}.py", topic_id),
+            db.taxonomy.import_assignment(
+                doc_id=f"{label}-doc-{i}.py",
+                topic_id=topic_id,
+                assigned_by="test-seed",
+                similarity=None,
+                assigned_at=None,
+                source_collection=None,
             )
-        db.taxonomy.conn.commit()
     return topic_id
 
 
@@ -398,7 +415,7 @@ class TestReviewAutoCLI:
 
         assert result.exit_code == 0, result.output
         with T2Database(db_path) as db:
-            count = db.taxonomy.conn.execute("SELECT COUNT(*) FROM topics").fetchone()[0]
+            count = len(db.taxonomy.get_all_topics())
             status = db.taxonomy.get_topic_by_id(tid)["review_status"]
         assert count == 1
         assert status == "pending"
@@ -427,7 +444,7 @@ class TestReviewAutoCLI:
 
         assert result.exit_code == 0, result.output
         with T2Database(db_path) as db:
-            count = db.taxonomy.conn.execute("SELECT COUNT(*) FROM topics").fetchone()[0]
+            count = len(db.taxonomy.get_all_topics())
         assert count == 0
 
     def test_merge_applied_with_confirm(self, tmp_path: Path) -> None:
@@ -477,7 +494,7 @@ class TestReviewAutoCLI:
 
         assert result.exit_code == 0, result.output
         with T2Database(db_path) as db:
-            count = db.taxonomy.conn.execute("SELECT COUNT(*) FROM topics").fetchone()[0]
+            count = len(db.taxonomy.get_all_topics())
             status = db.taxonomy.get_topic_by_id(source_id)["review_status"]
         assert count == 1
         assert status == "pending"
@@ -648,9 +665,7 @@ class TestReviewAutoCLI:
             a_topic = db.taxonomy.get_topic_by_id(a_id)
             b_topic = db.taxonomy.get_topic_by_id(b_id)
             c_topic = db.taxonomy.get_topic_by_id(c_id)
-            a_assignments = db.taxonomy.conn.execute(
-                "SELECT COUNT(*) FROM topic_assignments WHERE topic_id = ?", (a_id,),
-            ).fetchone()[0]
+            a_assignments = len(db.taxonomy.get_all_topic_doc_ids(a_id))
 
         # A stays pending, untouched — no merge was ever attempted against it.
         assert a_topic is not None
@@ -852,9 +867,10 @@ class TestReviewAutoCLI:
 
         assert result.exit_code == 0, result.output
         with T2Database(db_path) as db:
-            accepted_count = db.taxonomy.conn.execute(
-                "SELECT COUNT(*) FROM topics WHERE review_status='accepted'"
-            ).fetchone()[0]
+            accepted_count = sum(
+                1 for t in db.taxonomy.get_all_topics()
+                if t["review_status"] == "accepted"
+            )
         assert accepted_count == 20
 
     def test_auto_limit_5_processes_exactly_5(self, tmp_path: Path) -> None:
@@ -876,12 +892,9 @@ class TestReviewAutoCLI:
 
         assert result.exit_code == 0, result.output
         with T2Database(db_path) as db:
-            accepted_count = db.taxonomy.conn.execute(
-                "SELECT COUNT(*) FROM topics WHERE review_status='accepted'"
-            ).fetchone()[0]
-            pending_count = db.taxonomy.conn.execute(
-                "SELECT COUNT(*) FROM topics WHERE review_status='pending'"
-            ).fetchone()[0]
+            statuses = [t["review_status"] for t in db.taxonomy.get_all_topics()]
+            accepted_count = statuses.count("accepted")
+            pending_count = statuses.count("pending")
         assert accepted_count == 5
         assert pending_count == 15
 

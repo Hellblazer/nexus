@@ -37,31 +37,6 @@ if TYPE_CHECKING:
     from nexus.db.t3 import T3Database
 
 
-def make_ephemeral_chroma_client():
-    """In-process, in-memory chroma client for session-scoped caches
-    (nexus-373jo: the plan-match cache's substrate when T1 is
-    service-backed and carries no chroma client).
-
-    Lives HERE — ``src/nexus/db/`` is the storage-boundary lint's allowed
-    home for substrate-client construction — precisely so callers need no
-    ``# epsilon-allow`` token (the no-new-SQLite census freezes exemption
-    growth; a structural home beats an exemption). NOT storage: nothing
-    persists.
-
-    SHARED-STATE GOTCHA (review-verified, the documented
-    project_chromadb_ephemeral_shared_state class): EphemeralClient
-    instances in one process share backing state (SharedSystemClient
-    caches by settings hash). Callers must scope rows themselves (e.g. a
-    session_id filter); instance boundaries are NOT isolation.
-
-    P4b (Chroma retirement) rehoming target: engine-side embed. Tracked
-    on nexus-373jo and the g37fr rehoming inventory.
-    """
-    import chromadb  # noqa: PLC0415 — deferred; heavy import on a rare init path
-
-    return chromadb.EphemeralClient()
-
-
 def make_t3(*, _client=None, _ef_override=None) -> "T3Database | HttpVectorClient":
     """Return the T3 vector-store handle for the current configuration.
 

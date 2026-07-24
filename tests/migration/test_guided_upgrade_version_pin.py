@@ -18,7 +18,7 @@ branches), not the pin.
 from __future__ import annotations
 
 from nexus.engine_version import REQUIRED_ENGINE_VERSION
-from nexus.migration.guided_upgrade import VersionPinOutcome, verify_service_version
+from nexus.upgrade_ladder.provisioning import VersionPinOutcome, verify_service_version
 
 _URL = "http://127.0.0.1:8099"
 _FLOOR = ".".join(str(n) for n in REQUIRED_ENGINE_VERSION)

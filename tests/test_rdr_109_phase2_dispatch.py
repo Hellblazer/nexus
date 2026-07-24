@@ -23,6 +23,7 @@ from nexus.corpus import (
     embedding_model_for_collection_name,
 )
 from nexus.db.local_ef import LOCAL_EMBEDDING_TOKENS, local_model_token
+from tests.conftest import make_vector_test_client
 
 
 # ── Foundations ──────────────────────────────────────────────────────
@@ -112,12 +113,10 @@ def test_parse_returns_none_for_legacy() -> None:
 
 @pytest.fixture
 def t3_local():
-    import chromadb
-    from nexus.db.local_ef import LocalEmbeddingFunction
     from nexus.db.t3 import T3Database
 
     return T3Database(
-        _client=chromadb.EphemeralClient(),
+        _client=make_vector_test_client(),
         _ef_override=None,
         local_mode=True,
         voyage_api_key=None,
@@ -126,7 +125,6 @@ def t3_local():
 
 @pytest.fixture
 def t3_cloud(monkeypatch):
-    import chromadb
     from nexus.db.t3 import T3Database
 
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
@@ -136,7 +134,7 @@ def t3_cloud(monkeypatch):
     # CloudClient. We only exercise the _build_embedding_fn path, not
     # actually embed.
     return T3Database(
-        _client=chromadb.EphemeralClient(),
+        _client=make_vector_test_client(),
         _ef_override=None,
         local_mode=False,
         voyage_api_key="vk_test",

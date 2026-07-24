@@ -207,7 +207,7 @@ def _default_footprint() -> bool:
 
 
 def _default_establish() -> Any:
-    from nexus.migration.guided_upgrade import establish_verified_service  # noqa: PLC0415 — deferred; the bridge dies at RDR-155 P4b
+    from nexus.upgrade_ladder.provisioning import establish_verified_service  # noqa: PLC0415 — deferred to avoid import cost (P0e rehome: the surviving home)
 
     return establish_verified_service()
 

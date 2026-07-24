@@ -588,10 +588,10 @@ def index_repo_cmd(
                     f"voyage {retry_stats['voyage_seconds']:.1f}s over "
                     f"{retry_stats['voyage_count']} retries"
                 )
-            if retry_stats["chroma_count"]:
+            if retry_stats["vector_count"]:
                 parts.append(
-                    f"chroma {retry_stats['chroma_seconds']:.1f}s over "
-                    f"{retry_stats['chroma_count']} retries"
+                    f"chroma {retry_stats['vector_seconds']:.1f}s over "
+                    f"{retry_stats['vector_count']} retries"
                 )
             click.echo(
                 f"  Transient-error backoff: {retry_stats['total_seconds']:.1f}s total "
@@ -1347,17 +1347,19 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     path = path.resolve()
 
     if dry_run:
-        import chromadb  # noqa: PLC0415 — deliberate function-local import (rare branch: --dry-run local ONNX path only)
-        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction  # noqa: PLC0415 — deliberate function-local import (rare branch: --dry-run local ONNX path only)
+        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction  # noqa: PLC0415 — deliberate function-local import (rare branch: --dry-run local ONNX path only; EF disposition is P4b P0b)
 
         from nexus.db import make_t3  # noqa: PLC0415 — deliberate function-local import (heavy T3 dep deferred; rare branch)
+        from nexus.db.inmemory_vector_store import InMemoryVectorClient  # noqa: PLC0415 — deliberate function-local import (rare branch)
 
         click.echo("Dry-run mode — local ONNX embeddings, no cloud writes.")
         ef = DefaultEmbeddingFunction()
-        local_t3 = make_t3(_client=chromadb.EphemeralClient(), _ef_override=ef)  # epsilon-allow: --dry-run indexing requires in-memory ephemeral client by design
+        local_t3 = make_t3(_client=InMemoryVectorClient(), _ef_override=ef)
 
         def _local_embed(texts: list[str], model: str) -> tuple[list[list[float]], str]:
-            return [v.tolist() for v in ef(texts)], model
+            # MiniLMDirect returns plain list[list[float]] (the retired
+            # chroma EF returned numpy rows needing .tolist()).
+            return ef(texts), model
 
         click.echo(f"Indexing {path}…")
         try:

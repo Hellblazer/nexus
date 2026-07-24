@@ -22,6 +22,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
+from tests.conftest import make_vector_test_client
 
 
 @pytest.fixture()
@@ -155,11 +156,10 @@ def test_probe_against_real_chroma_semantics():
     returns key-absent documents from a `$ne` query, so such a probe reports
     every clean collection as legacy. This exercises the real ChromaDB engine.
     """
-    import chromadb  # noqa: PLC0415
 
     from nexus.commands.doctor import _legacy_fields_present  # noqa: PLC0415
 
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
 
     clean = client.create_collection("clean")
     clean.add(

@@ -256,11 +256,12 @@ class TestInitEfThreadsCacheDir:
         monkeypatch.setattr("nexus.config.fastembed_cache_dir", sentinel)
 
         ef = LocalEmbeddingFunction(model_name=_TIER0_MODEL)
+        # RDR-155 P4b P0b: tier-0 constructs the nexus-owned direct EF.
         fake_onnx = MagicMock()
-        fake_module = MagicMock(ONNXMiniLM_L6_V2=fake_onnx)
+        fake_module = MagicMock(MiniLMDirectEmbeddingFunction=fake_onnx)
         with patch.dict(
             "sys.modules",
-            {"chromadb.utils.embedding_functions": fake_module},
+            {"nexus.db.minilm_direct": fake_module},
         ):
             ef._init_ef()
 

@@ -2,12 +2,23 @@
 import json
 import os
 import subprocess
-import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import chromadb
 import pytest
+
+_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
+
+# Tests below that seed a REAL on-disk SQLite T2 file via T2Database and then
+# probe it with doctor's SQLite integrity check (PRAGMA integrity_check, FTS5,
+# WAL writer-slot contention). On the engine substrate T2Database routes to the
+# Http* stores and never materialises the SQLite file, so the probe sees "not
+# created yet". The probe's SUBJECT is the SQLite substrate itself.
+_sqlite_probe_dies_at_flip = pytest.mark.skipif(
+    _ENGINE_SUBSTRATE,
+    reason="dies-roster: doctor's SQLite T2 integrity probe (on-disk memory.db "
+    "seeded via the SQLite twin) dies at the RDR-155 P4b flip",
+)
 
 from nexus.health import (
     _check_orphan_t1,
@@ -19,6 +30,7 @@ from nexus.health import (
     HealthResult,
 )
 from nexus.db.t2 import T2Database
+from tests.conftest import make_vector_test_client
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -64,6 +76,7 @@ class TestCheckT2Integrity:
         ok, results = self._run(tmp_path / "nonexistent.db")
         assert ok is True and "not created yet" in results[0].detail
 
+    @_sqlite_probe_dies_at_flip
     @pytest.mark.parametrize("populate", [True, False], ids=["with_data", "empty"])
     def test_valid_database_passes(self, tmp_path, populate):
         db_path = tmp_path / "memory.db"
@@ -73,6 +86,7 @@ class TestCheckT2Integrity:
         ok, results = self._run(db_path)
         assert ok is True and "PRAGMA ok" in results[0].detail
 
+    @_sqlite_probe_dies_at_flip
     @pytest.mark.parametrize("corrupt_fn", [
         lambda p: open(str(p), "r+b").truncate(512) or None,
         lambda p: p.write_bytes(b"this is not sqlite" * 100),
@@ -89,6 +103,7 @@ class TestCheckT2Integrity:
         assert results[0].ok is False
         assert results[0].warn is False
 
+    @_sqlite_probe_dies_at_flip
     def test_transient_write_lock_is_soft_warn(self, tmp_path, monkeypatch):
         """RDR-129 B4 (nexus-uq8a4): a held WAL writer slot makes the FTS5
         integrity probe a soft WARN, not a hard red X. The DB is healthy,
@@ -306,7 +321,7 @@ class TestCheckT2DaemonSingleton:
 
 @pytest.fixture()
 def ephemeral_client():
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     for col in client.list_collections():
         client.delete_collection(col.name)
     return client

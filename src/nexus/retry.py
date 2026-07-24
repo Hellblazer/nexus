@@ -37,8 +37,8 @@ _log = structlog.get_logger(__name__)
 _retry_lock = threading.Lock()
 _voyage_retry_seconds: float = 0.0
 _voyage_retry_count: int = 0
-_chroma_retry_seconds: float = 0.0
-_chroma_retry_count: int = 0
+_vector_retry_seconds: float = 0.0
+_vector_retry_count: int = 0
 
 
 def _add_voyage_retry(delay: float) -> None:
@@ -48,31 +48,31 @@ def _add_voyage_retry(delay: float) -> None:
         _voyage_retry_count += 1
 
 
-def _add_chroma_retry(delay: float) -> None:
-    global _chroma_retry_seconds, _chroma_retry_count
+def _add_vector_retry(delay: float) -> None:
+    global _vector_retry_seconds, _vector_retry_count
     with _retry_lock:
-        _chroma_retry_seconds += delay
-        _chroma_retry_count += 1
+        _vector_retry_seconds += delay
+        _vector_retry_count += 1
 
 
 def get_retry_stats() -> dict[str, float | int]:
-    """Return a snapshot of retry counters — voyage + chroma, time + count.
+    """Return a snapshot of retry counters — voyage + vector, time + count.
 
-    Returned keys: ``voyage_seconds``, ``voyage_count``, ``chroma_seconds``,
-    ``chroma_count``, ``etl_seconds``, ``etl_count``, ``total_seconds``,
-    ``total_count``. Resetting the counters is the caller's responsibility via
+    Returned keys: ``voyage_seconds``, ``voyage_count``, ``vector_seconds``
+    (pre-P0d ``chroma_seconds``), ``vector_count``, ``etl_seconds``,
+    ``etl_count``, ``total_seconds``, ``total_count``. Resetting the counters is the caller's responsibility via
     :func:`reset_retry_stats`.
     """
     with _retry_lock:
         return {
             "voyage_seconds": _voyage_retry_seconds,
             "voyage_count": _voyage_retry_count,
-            "chroma_seconds": _chroma_retry_seconds,
-            "chroma_count": _chroma_retry_count,
+            "vector_seconds": _vector_retry_seconds,
+            "vector_count": _vector_retry_count,
             "etl_seconds": _etl_retry_seconds,
             "etl_count": _etl_retry_count,
-            "total_seconds": _voyage_retry_seconds + _chroma_retry_seconds + _etl_retry_seconds,
-            "total_count": _voyage_retry_count + _chroma_retry_count + _etl_retry_count,
+            "total_seconds": _voyage_retry_seconds + _vector_retry_seconds + _etl_retry_seconds,
+            "total_count": _voyage_retry_count + _vector_retry_count + _etl_retry_count,
         }
 
 
@@ -81,13 +81,13 @@ def reset_retry_stats() -> None:
     the start of an indexing run so the end-of-run summary reflects only
     that run's backoffs."""
     global _voyage_retry_seconds, _voyage_retry_count
-    global _chroma_retry_seconds, _chroma_retry_count
+    global _vector_retry_seconds, _vector_retry_count
     global _etl_retry_seconds, _etl_retry_count
     with _retry_lock:
         _voyage_retry_seconds = 0.0
         _voyage_retry_count = 0
-        _chroma_retry_seconds = 0.0
-        _chroma_retry_count = 0
+        _vector_retry_seconds = 0.0
+        _vector_retry_count = 0
         _etl_retry_seconds = 0.0
         _etl_retry_count = 0
 
@@ -101,16 +101,22 @@ _RETRYABLE_FRAGMENTS: frozenset[str] = frozenset({
 _RETRYABLE_HTTP_STATUSES: frozenset[int] = frozenset({429, 502, 503, 504})
 
 
-def _is_retryable_chroma_error(exc: BaseException) -> bool:
-    """Return True if *exc* represents a transient ChromaDB error worth retrying.
+def _is_retryable_vector_error(exc: BaseException) -> bool:
+    """Return True if *exc* is a transient vector-store error worth retrying.
+
+    Renamed from ``_is_retryable_chroma_error`` at RDR-155 P4b P0d — the
+    classification is substrate-generic (httpx transport/status + message
+    fragments) and serves the PG-backed HttpVectorClient path.
 
     Check order:
-    1. sqlite3.OperationalError with 'locked' — PersistentClient concurrent access.
+    1. sqlite3.OperationalError with 'locked' — the Chroma
+       PersistentClient contention leg; dead code once the migration
+       read legs delete at P2 (remove WITH them, not before).
     2. Transport-level errors (ConnectError, ReadTimeout, RemoteProtocolError) — always retry.
     3. Chained httpx.HTTPStatusError — authoritative integer status code check.
-    4. String fallback — plain Exception message body (gateway HTML or chroma JSON).
+    4. String fallback — plain Exception message body (gateway HTML or service JSON).
     """
-    # 1. PersistentClient concurrent write contention.
+    # 1. Chroma PersistentClient concurrent write contention (dies at P2).
     if isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower():
         return True
     # 2. Transport-level errors — no HTTP response, but clearly transient.
@@ -125,26 +131,27 @@ def _is_retryable_chroma_error(exc: BaseException) -> bool:
     return any(fragment in msg for fragment in _RETRYABLE_FRAGMENTS)
 
 
-def _chroma_with_retry(
+def _vector_with_retry(
     fn: Callable[..., Any],
     *args: Any,
     max_attempts: int = 5,
     **kwargs: Any,
 ) -> Any:
-    """Call *fn* with exponential backoff on transient ChromaDB Cloud errors.
+    """Call *fn* with exponential backoff on transient vector-store errors.
 
-    Retries up to *max_attempts* times (default 5).  Backoff starts at 2 s,
-    doubles each attempt, capped at 30 s.  Non-retryable errors raise immediately.
+    Renamed from ``_chroma_with_retry`` at RDR-155 P4b P0d. Retries up to
+    *max_attempts* times (default 5).  Backoff starts at 2 s, doubles each
+    attempt, capped at 30 s.  Non-retryable errors raise immediately.
     """
     delay = 2.0
     for attempt in range(1, max_attempts + 1):
         try:
             return fn(*args, **kwargs)
         except Exception as exc:
-            if attempt == max_attempts or not _is_retryable_chroma_error(exc):
+            if attempt == max_attempts or not _is_retryable_vector_error(exc):
                 raise
             _log.warning(
-                "chroma_transient_error_retry",
+                "vector_transient_error_retry",
                 attempt=attempt,
                 delay=delay,
                 error=str(exc)[:120],
@@ -153,7 +160,7 @@ def _chroma_with_retry(
             # workers retrying after a shared rate-limit do not all wake
             # at the same instant and re-fire the limit. ±20% of delay.
             jittered = delay * (1.0 + (random.random() - 0.5) * 0.4)
-            _add_chroma_retry(jittered)
+            _add_vector_retry(jittered)
             time.sleep(jittered)
             delay = min(delay * 2, 30.0)
 
@@ -202,7 +209,7 @@ def _is_retryable_voyage_error(exc: BaseException) -> bool:
     ServerError, and Timeout are retried — every attempt logs a WARN line so
     operators can tell "slow file" from "being rate-limited" from "network
     stalled." The two error spaces are disjoint; do not add Voyage AI types
-    to :func:`_is_retryable_chroma_error`.
+    to :func:`_is_retryable_vector_error`.
     """
     return isinstance(exc, _get_voyage_error_types())
 

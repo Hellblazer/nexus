@@ -18,6 +18,7 @@ from nexus.doc_indexer import (
     batch_index_markdowns, batch_index_pdfs, index_markdown, index_pdf,
 )
 from tests.conftest import set_credentials
+from tests.conftest import make_vector_test_client
 
 
 # RDR-109 Phase 2: local-token in test collection names varies by whether
@@ -242,7 +243,6 @@ def test_batch_index_markdowns_skips_malformed_frontmatter_and_continues(
     the batch or hang the post-pass. The offending file is marked
     ``failed`` with its path; sibling files complete normally; the whole
     call returns within a wall-clock bound."""
-    import chromadb
     from nexus.catalog.catalog import Catalog
     from nexus.db.t3 import T3Database
 
@@ -266,7 +266,7 @@ def test_batch_index_markdowns_skips_malformed_frontmatter_and_continues(
         encoding="utf-8",
     )
 
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     t3 = T3Database(_client=client, local_mode=True)
 
     t0 = time.monotonic()
@@ -307,7 +307,6 @@ def test_index_md_falls_back_to_local_embedder_when_no_credentials(
     source_path nor doc_id and the staleness check correctly cannot
     detect "unchanged" — re-index would proceed every time.
     """
-    import chromadb
     from nexus.catalog.catalog import Catalog
 
     cat_dir = tmp_path / "test-catalog"
@@ -322,7 +321,7 @@ def test_index_md_falls_back_to_local_embedder_when_no_credentials(
 
     # Inject an EphemeralClient so the test doesn't hit a real
     # PersistentClient on disk.
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     from nexus.db.t3 import T3Database
     local_t3 = T3Database(_client=client, local_mode=True)
 
@@ -380,7 +379,6 @@ def test_index_markdown_auto_inits_catalog_when_absent_and_prunes_on_reindex(
     same ``doc_id`` and prunes stale chunks via the doc_id-keyed where
     filter.
     """
-    import chromadb
 
     from nexus.catalog.catalog import Catalog
     from nexus.config import catalog_path
@@ -398,7 +396,7 @@ def test_index_markdown_auto_inits_catalog_when_absent_and_prunes_on_reindex(
     monkeypatch.setattr(
         "nexus.config._global_config_path", lambda: Path("/nonexistent"),
     )
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     local_t3 = T3Database(_client=client, local_mode=True)
 
     # First index: no catalog yet. Auto-init must fire.
@@ -1008,7 +1006,6 @@ def test_batch_index_marks_failed_on_error(kind, tmp_path):
 
 
 def test_embed_standard_path_batches_over_128_chunks(cloud_mode):
-    from nexus.doc_indexer import _EMBED_BATCH_SIZE
     chunks = [f"chunk_{i}" for i in range(200)]
     mock_client = MagicMock()
     embed_call_count = [0]
@@ -1640,7 +1637,7 @@ class TestStreamingRouting:
             patch("nexus.config.is_local_mode", return_value=False),
             patch("nexus.doc_indexer._sha256", return_value="abc123"),
             patch("nexus.doc_indexer.make_t3"),
-            patch("nexus.doc_indexer._chroma_with_retry", return_value={"metadatas": []}),
+            patch("nexus.doc_indexer._vector_with_retry", return_value={"metadatas": []}),
             patch("nexus.doc_indexer._pdf_chunks", return_value=[]) as mock_chunks,
         ):
             result = index_pdf(pdf, "test", streaming="never")
@@ -1662,7 +1659,7 @@ class TestStreamingRouting:
             patch("nexus.config.is_local_mode", return_value=False),
             patch("nexus.doc_indexer._sha256", return_value="abc123"),
             patch("nexus.doc_indexer.make_t3"),
-            patch("nexus.doc_indexer._chroma_with_retry", return_value={"metadatas": []}),
+            patch("nexus.doc_indexer._vector_with_retry", return_value={"metadatas": []}),
             patch("pymupdf.open") as mock_pymupdf_open,
             patch("nexus.pipeline_stages.pipeline_index_pdf", return_value=expected) as mock_pipeline,
         ):
@@ -1717,7 +1714,6 @@ def _setup_phase_a_catalog(tmp_path, monkeypatch):
     Forces local-mode ingest by clearing Voyage/Chroma credentials so the
     indexer does not attempt to call the real cloud APIs.
     """
-    import chromadb
     from nexus.catalog.catalog import Catalog
     from nexus.db.t3 import T3Database
 
@@ -1728,7 +1724,7 @@ def _setup_phase_a_catalog(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "nexus.config._global_config_path", lambda: Path("/nonexistent"),
     )
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     return cat_dir, T3Database(_client=client, local_mode=True)
 
 

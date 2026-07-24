@@ -4,12 +4,13 @@ import hashlib
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from voyageai.object.embeddings import EmbeddingsObject
 
 from nexus.indexer import CredentialsMissingError, index_repository
+from tests.conftest import make_vector_test_client
 
 # RDR-109 Phase 2: this file asserts cloud-mode canonical behavior
 # (voyage-* embedder names, canonical-set defaults). The cloud_mode
@@ -1211,7 +1212,6 @@ def test_prune_deleted_files_round_trip_with_real_catalog(tmp_path):
     ``chunk_text_hash[:32]``, end-to-end."""
     import hashlib
 
-    import chromadb
 
     from nexus.catalog.catalog import Catalog
     from nexus.indexer import _prune_deleted_files
@@ -1254,7 +1254,7 @@ def test_prune_deleted_files_round_trip_with_real_catalog(tmp_path):
     ])
 
     # Real ChromaDB EphemeralClient with both chunks present.
-    chroma = chromadb.EphemeralClient()
+    chroma = make_vector_test_client()
     col = chroma.get_or_create_collection(coll_name)
     col.upsert(
         ids=[live_chash[:32], orphan_chash[:32]],

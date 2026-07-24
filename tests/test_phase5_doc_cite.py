@@ -19,9 +19,9 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-import chromadb
 import pytest
 from click.testing import CliRunner
+from tests.conftest import make_vector_test_client
 
 
 def _parse_json_payload(stdout: str) -> dict:
@@ -74,7 +74,7 @@ def cite_env(tmp_path: Path):
     cat_dir.mkdir()
     cat = Catalog(cat_dir, cat_dir / ".catalog.db")
 
-    t3 = chromadb.EphemeralClient()
+    t3 = make_vector_test_client()
     chash_hex = "c" * 64
     col = t3.get_or_create_collection("knowledge__cite")
     col.add(
@@ -219,7 +219,7 @@ class TestCiteEmptyIndexShortCircuit:
         cat = Catalog(cat_dir, cat_dir / ".catalog.db")
         # Empty chash_index (no rows).
         chash_index = ChashIndex(tmp_path / "t2.db")
-        t3 = chromadb.EphemeralClient()
+        t3 = make_vector_test_client()
         try:
             with patch(
                 "nexus.commands.doc._phase4_catalog_t3_chash",

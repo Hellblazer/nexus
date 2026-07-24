@@ -7,10 +7,10 @@ import chromadb.errors
 import httpx
 import pytest
 
-from nexus.retry import _chroma_with_retry, _is_retryable_chroma_error
+from nexus.retry import _vector_with_retry, _is_retryable_vector_error
 
 
-# ── _is_retryable_chroma_error ──────────────────────────────────────────────
+# ── _is_retryable_vector_error ──────────────────────────────────────────────
 
 def _make_chained_exc(status_code: int) -> Exception:
     request = httpx.Request("GET", "https://api.trychroma.com/")
@@ -31,17 +31,17 @@ def _make_chained_exc(status_code: int) -> Exception:
     (httpx.RemoteProtocolError("Server disconnected without response"), True),
 ], ids=["504-string", "400-string", "connect-error", "read-timeout", "remote-protocol"])
 def test_retryable_basic(exc: Exception, expected: bool) -> None:
-    assert _is_retryable_chroma_error(exc) is expected
+    assert _is_retryable_vector_error(exc) is expected
 
 
 @pytest.mark.parametrize("status,expected", [
     (429, True), (404, False), (503, True),
 ], ids=["429-retryable", "404-not", "503-retryable"])
 def test_retryable_chained_httpx(status: int, expected: bool) -> None:
-    assert _is_retryable_chroma_error(_make_chained_exc(status)) is expected
+    assert _is_retryable_vector_error(_make_chained_exc(status)) is expected
 
 
-# ── _chroma_with_retry ──────────────────────────────────────────────────────
+# ── _vector_with_retry ──────────────────────────────────────────────────────
 
 def test_retry_connect_error_twice_then_success() -> None:
     call_count = 0
@@ -56,7 +56,7 @@ def test_retry_connect_error_twice_then_success() -> None:
     with patch("nexus.retry.time") as mock_time, patch(
         "nexus.retry.random.random", return_value=0.5,
     ):
-        result = _chroma_with_retry(flaky_fn)
+        result = _vector_with_retry(flaky_fn)
     assert result == "ok" and call_count == 3
     assert mock_time.sleep.call_args_list == [call(2.0), call(4.0)]
 
@@ -64,14 +64,14 @@ def test_retry_connect_error_twice_then_success() -> None:
 def test_all_attempts_exhausted_on_persistent_504() -> None:
     fn = MagicMock(side_effect=Exception("504 Gateway Time-out"))
     with patch("nexus.retry.time"), pytest.raises(Exception, match="504"):
-        _chroma_with_retry(fn, max_attempts=5)
+        _vector_with_retry(fn, max_attempts=5)
     assert fn.call_count == 5
 
 
 def test_non_retryable_400_raises_immediately() -> None:
     fn = MagicMock(side_effect=Exception("400 Bad Request: invalid collection name"))
     with patch("nexus.retry.time") as mock_time, pytest.raises(Exception, match="400"):
-        _chroma_with_retry(fn)
+        _vector_with_retry(fn)
     fn.assert_called_once()
     mock_time.sleep.assert_not_called()
 
@@ -88,7 +88,7 @@ def test_backoff_curve_2_4_8_16() -> None:
     with patch("nexus.retry.time") as mock_time, patch(
         "nexus.retry.random.random", return_value=0.5,
     ):
-        assert _chroma_with_retry(fn_succeeds_on_5th, max_attempts=5) == "done"
+        assert _vector_with_retry(fn_succeeds_on_5th, max_attempts=5) == "done"
     assert mock_time.sleep.call_args_list == [call(2.0), call(4.0), call(8.0), call(16.0)]
 
 
@@ -168,12 +168,12 @@ def test_index_code_file_retries_on_connect_error(tmp_path) -> None:
     (_make_chained_exc(429), True),
 ])
 def test_chroma_error_unchanged(exc, expected) -> None:
-    assert _is_retryable_chroma_error(exc) is expected
+    assert _is_retryable_vector_error(exc) is expected
 
 
 def test_chroma_error_false_for_voyage_error() -> None:
     import voyageai.error as _ve
-    assert _is_retryable_chroma_error(_ve.APIConnectionError("down")) is False
+    assert _is_retryable_vector_error(_ve.APIConnectionError("down")) is False
 
 
 # ── nexus-jgjw: chromadb hardcodes httpx timeout=None — patch on construction ─
@@ -236,14 +236,14 @@ class TestChromadbTimeoutPatch:
     def test_slow_chroma_op_now_raises_readtimeout(self) -> None:
         """End-to-end: a chroma call that the server stalls on now
         raises ``httpx.ReadTimeout`` (after the override fires), which
-        ``_is_retryable_chroma_error`` recognizes as retryable. Pre-fix,
+        ``_is_retryable_vector_error`` recognizes as retryable. Pre-fix,
         this would have hung indefinitely."""
         # ReadTimeout is a httpx.TransportError, classified retryable
-        # by _is_retryable_chroma_error. Wired into _chroma_with_retry.
+        # by _is_retryable_vector_error. Wired into _vector_with_retry.
         readtimeout = httpx.ReadTimeout("simulated chroma stall after override")
-        assert _is_retryable_chroma_error(readtimeout) is True
+        assert _is_retryable_vector_error(readtimeout) is True
         from unittest.mock import MagicMock
         fn = MagicMock(side_effect=[readtimeout, readtimeout, "ok"])
         with patch("nexus.retry.time"):
-            assert _chroma_with_retry(fn, max_attempts=3) == "ok"
+            assert _vector_with_retry(fn, max_attempts=3) == "ok"
         assert fn.call_count == 3

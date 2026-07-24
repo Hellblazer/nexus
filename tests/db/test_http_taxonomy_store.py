@@ -29,6 +29,7 @@ import pytest
 
 from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
 from nexus.db.t2.http_taxonomy_store import DEFAULT_TENANT, HttpTaxonomyStore
+from tests.conftest import make_vector_test_client
 
 TOKEN = "fake-taxonomy-token-abc"
 
@@ -1270,12 +1271,12 @@ class _FakeCentroidStore:
 
 
 def _seed_oracle_chroma(records: list[dict]):
-    """Build an EphemeralClient with a taxonomy__centroids collection seeded from
-    the same records, for oracle-vs-http equality checks. Clears any prior
-    collection (EphemeralClient shares in-process backend state)."""
-    import chromadb
-
-    cl = chromadb.EphemeralClient()
+    """Build an in-memory vector client with a taxonomy__centroids
+    collection seeded from the same records, for oracle-vs-http equality
+    checks. The pre-clear is a no-op safeguard on the per-instance
+    InMemoryVectorClient (the retired EphemeralClient shared in-process
+    backend state)."""
+    cl = make_vector_test_client()
     try:
         cl.delete_collection("taxonomy__centroids")
     except Exception:

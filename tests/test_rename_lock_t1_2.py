@@ -15,6 +15,7 @@ Tests covering:
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 import time
@@ -22,6 +23,21 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
+#: RDR-155 P4b P0a' dies-roster marker: Python-side rename_lock guarding of
+#: the queue MUTATORS is the SQLite AspectExtractionQueue's protocol.
+#: HttpAspectQueue accepts rename_lock for constructor parity but deliberately
+#: ignores it — the engine owns all queue serialization (FOR UPDATE SKIP
+#: LOCKED). Tests asserting mutators block on / acquire rename_lock die with
+#: the SQLite queue at the flip; the facade-level guarantees (complete_aspect
+#: holds T2Database.RENAME_LOCK, claim_batch semantics) stay substrate-neutral
+#: and remain unskipped.
+_SQLITE_QUEUE_LOCK_PROTOCOL = pytest.mark.skipif(
+    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    reason="dies-roster: Python-side rename_lock mutator guarding is the "
+    "SQLite AspectExtractionQueue protocol; HttpAspectQueue delegates "
+    "serialization to the engine — dies at the RDR-155 P4b flip",
+)
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -70,6 +86,7 @@ def _probe_lock_blocked(lock: Any, hold_event: threading.Event, *, timeout: floa
 # ── Mutual exclusion: each mutator blocks while RENAME_LOCK is held ───────────
 
 
+@_SQLITE_QUEUE_LOCK_PROTOCOL
 class TestMutatorMutualExclusion:
     """Each of the 7 queue mutators must block when RENAME_LOCK is externally held.
 
@@ -200,6 +217,7 @@ class TestMutatorMutualExclusion:
 # ── Mutual exclusion inverse: RENAME_LOCK blocks while mutator runs ───────────
 
 
+@_SQLITE_QUEUE_LOCK_PROTOCOL
 class TestRenameLockBlockedByMutators:
     """RENAME_LOCK cannot be acquired while a mutator holds it.
 
@@ -357,6 +375,7 @@ class TestClaimBatchMultiRow:
             except Exception:
                 pass
 
+    @_SQLITE_QUEUE_LOCK_PROTOCOL
     def test_claim_batch_blocked_by_cascade_multi_row(
         self, tmp_path: Path
     ) -> None:
@@ -645,6 +664,7 @@ class TestCompleteAspectAtomicity:
 # ── Lock ordering: RENAME_LOCK always outermost ───────────────────────────────
 
 
+@_SQLITE_QUEUE_LOCK_PROTOCOL
 class TestLockOrderingT12:
     """Verify that RENAME_LOCK is acquired before _lock in all mutators.
 
@@ -796,6 +816,7 @@ class TestMutatorLockGuardStructural:
         db.aspect_queue.rename_lock = tracking  # type: ignore[assignment]
         return tracking
 
+    @_SQLITE_QUEUE_LOCK_PROTOCOL
     def test_enqueue_acquires_rename_lock(self, tmp_path: Path) -> None:
         db = _make_db(tmp_path)
         try:
@@ -808,6 +829,7 @@ class TestMutatorLockGuardStructural:
             except Exception:
                 pass
 
+    @_SQLITE_QUEUE_LOCK_PROTOCOL
     def test_claim_next_acquires_rename_lock(self, tmp_path: Path) -> None:
         db = _make_db(tmp_path)
         try:
@@ -821,6 +843,7 @@ class TestMutatorLockGuardStructural:
             except Exception:
                 pass
 
+    @_SQLITE_QUEUE_LOCK_PROTOCOL
     def test_claim_batch_acquires_rename_lock(self, tmp_path: Path) -> None:
         db = _make_db(tmp_path)
         try:
@@ -834,6 +857,7 @@ class TestMutatorLockGuardStructural:
             except Exception:
                 pass
 
+    @_SQLITE_QUEUE_LOCK_PROTOCOL
     def test_mark_done_acquires_rename_lock(self, tmp_path: Path) -> None:
         db = _make_db(tmp_path)
         try:
@@ -848,6 +872,7 @@ class TestMutatorLockGuardStructural:
             except Exception:
                 pass
 
+    @_SQLITE_QUEUE_LOCK_PROTOCOL
     def test_mark_failed_acquires_rename_lock(self, tmp_path: Path) -> None:
         db = _make_db(tmp_path)
         try:
@@ -862,6 +887,7 @@ class TestMutatorLockGuardStructural:
             except Exception:
                 pass
 
+    @_SQLITE_QUEUE_LOCK_PROTOCOL
     def test_mark_retry_acquires_rename_lock(self, tmp_path: Path) -> None:
         db = _make_db(tmp_path)
         try:
@@ -876,6 +902,7 @@ class TestMutatorLockGuardStructural:
             except Exception:
                 pass
 
+    @_SQLITE_QUEUE_LOCK_PROTOCOL
     def test_reclaim_stale_acquires_rename_lock(self, tmp_path: Path) -> None:
         db = _make_db(tmp_path)
         try:
@@ -888,6 +915,7 @@ class TestMutatorLockGuardStructural:
             except Exception:
                 pass
 
+    @_SQLITE_QUEUE_LOCK_PROTOCOL
     def test_rename_collection_acquires_rename_lock(self, tmp_path: Path) -> None:
         # nexus-k44w4: the standalone queue rename_collection (no prod caller,
         # superseded by the cascade) is guarded for consistency so a direct

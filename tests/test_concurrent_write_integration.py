@@ -29,13 +29,12 @@ import hashlib
 import threading
 import time
 from datetime import UTC, datetime
-from pathlib import Path
 
-import chromadb
 import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
 from nexus.db.t3 import T3Database
+from tests.conftest import make_vector_test_client
 
 
 _PAGE = 300  # chromadb Cloud per-call limit; mirror in tests for clarity
@@ -45,7 +44,7 @@ _PAGE = 300  # chromadb Cloud per-call limit; mirror in tests for clarity
 def t3_db() -> T3Database:
     """Real T3Database backed by an ephemeral local chroma."""
     return T3Database(
-        _client=chromadb.EphemeralClient(),
+        _client=make_vector_test_client(),
         _ef_override=DefaultEmbeddingFunction(),
     )
 

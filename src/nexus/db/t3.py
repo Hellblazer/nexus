@@ -15,9 +15,17 @@ import chromadb.errors
 import httpx
 from chromadb.errors import (
     InvalidArgumentError as _ChromaInvalidArgumentError,
-    NotFoundError as _ChromaNotFoundError,
 )
 import structlog
+
+from nexus.errors import collection_not_found_errors
+
+# Substrate-neutral missing-collection catch tuple (RDR-155 P4b P0c):
+# includes chromadb.errors.NotFoundError while the dependency is present,
+# collapses to CollectionNotFoundError alone when it leaves at P3. Needed
+# here because T3Database wraps BOTH substrates during the transition
+# (EphemeralClient oracle + InMemoryVectorClient).
+_NotFoundErrors = collection_not_found_errors()
 
 # voyageai is imported lazily inside ``__init__`` only when cloud mode
 # is selected. The eager import here was pulling
@@ -53,7 +61,7 @@ _log = structlog.get_logger(__name__)
 # field that propagates to the underlying httpx.Client (track upstream), we
 # override the timeout once after construction. After this patch, a stalled
 # read raises ``httpx.ReadTimeout`` — already classified retryable by
-# ``nexus.retry._is_retryable_chroma_error`` — so the existing retry helper
+# ``nexus.retry._is_retryable_vector_error`` — so the existing retry helper
 # converts the hang into a bounded retry-then-fail loop.
 #
 # Defensive on shape: the override only fires for clients that expose
@@ -204,12 +212,12 @@ def _rewrite_collection_metadata(
 
     while True:
         if where_clause is not None:
-            batch = _chroma_with_retry(
+            batch = _vector_with_retry(
                 col.get, where=where_clause, include=["metadatas"],
                 limit=page, offset=offset,
             )
         else:
-            batch = _chroma_with_retry(
+            batch = _vector_with_retry(
                 col.get, include=["metadatas"], limit=page, offset=offset,
             )
         ids = batch.get("ids") or []
@@ -241,8 +249,8 @@ def _rewrite_collection_metadata(
 
 
 from nexus.retry import (
-    _chroma_with_retry,
-    _is_retryable_chroma_error,
+    _vector_with_retry,
+    _is_retryable_vector_error,
     _is_retryable_voyage_error,
     _voyage_with_retry,
 )
@@ -662,7 +670,7 @@ class T3Database:
                 chunk_docs = documents[start : start + size]
                 chunk_metas = metadatas[start : start + size]
                 if embeddings is not None:
-                    _chroma_with_retry(
+                    _vector_with_retry(
                         col.upsert,
                         ids=chunk_ids,
                         documents=chunk_docs,
@@ -678,7 +686,7 @@ class T3Database:
                     # its registered Voyage EF.
                     chunk_embs = self._maybe_client_embed(chunk_docs, collection_name)
                     if chunk_embs is not None:
-                        _chroma_with_retry(
+                        _vector_with_retry(
                             col.upsert,
                             ids=chunk_ids,
                             documents=chunk_docs,
@@ -686,7 +694,7 @@ class T3Database:
                             metadatas=chunk_metas,
                         )
                     else:
-                        _chroma_with_retry(col.upsert, ids=chunk_ids, documents=chunk_docs, metadatas=chunk_metas)
+                        _vector_with_retry(col.upsert, ids=chunk_ids, documents=chunk_docs, metadatas=chunk_metas)
 
     def _delete_batch(self, col, collection_name: str, ids: list[str]) -> None:
         """Split *ids* into ≤300-record chunks and delete each.
@@ -696,7 +704,7 @@ class T3Database:
         size = QUOTAS.MAX_RECORDS_PER_WRITE
         with self._write_sem(collection_name):
             for start in range(0, len(ids), size):
-                _chroma_with_retry(col.delete, ids=ids[start : start + size])
+                _vector_with_retry(col.delete, ids=ids[start : start + size])
 
     # ── Collection access ─────────────────────────────────────────────────────
 
@@ -767,7 +775,7 @@ class T3Database:
                 cfg = load_config()
                 hnsw_ef = cfg.get("search", {}).get("hnsw_ef", 256)
                 kwargs["metadata"] = {"hnsw:search_ef": hnsw_ef}
-        return _chroma_with_retry(
+        return _vector_with_retry(
             self._client_for(name).get_or_create_collection,
             name, **kwargs,
         )
@@ -781,7 +789,7 @@ class T3Database:
         signal to surface ``ReadFail(reason='unreachable')`` rather
         than create an empty side-effect collection.
         """
-        return _chroma_with_retry(
+        return _vector_with_retry(
             self._client_for(name).get_collection, name,
         )
 
@@ -804,10 +812,10 @@ class T3Database:
         """
         import numpy as np  # noqa: PLC0415 — heavy/optional dep deferred
 
-        col = _chroma_with_retry(
+        col = _vector_with_retry(
             self._client_for(collection_name).get_collection, collection_name,
         )
-        result = _chroma_with_retry(col.get, ids=ids, include=["embeddings"])
+        result = _vector_with_retry(col.get, ids=ids, include=["embeddings"])
         by_id = dict(zip(result["ids"], result["embeddings"]))
         return np.array(
             [by_id[i] for i in ids if i in by_id], dtype=np.float32,
@@ -1037,7 +1045,7 @@ class T3Database:
         size = QUOTAS.MAX_RECORDS_PER_WRITE
         with self._write_sem(collection):
             for start in range(0, len(ids), size):
-                _chroma_with_retry(
+                _vector_with_retry(
                     col.update,
                     ids=ids[start : start + size],
                     metadatas=metadatas[start : start + size],
@@ -1081,9 +1089,9 @@ class T3Database:
                     col = self._client_for(name).get_collection(
                         name, embedding_function=self._embedding_fn(name)
                     )
-            except _ChromaNotFoundError:
+            except _NotFoundErrors:
                 continue  # collection doesn't exist, skip it
-            count = _chroma_with_retry(col.count)
+            count = _vector_with_retry(col.count)
             if count == 0:
                 continue
             if self._local_mode:
@@ -1135,7 +1143,7 @@ class T3Database:
             # dimension-skip path) and are not part of this count by design.
             queried_count += 1
             try:
-                qr = _chroma_with_retry(col.query, **query_kwargs)
+                qr = _vector_with_retry(col.query, **query_kwargs)
             except _ChromaInvalidArgumentError as exc:
                 # Dimension mismatch = collection was indexed with a
                 # different embedding model than the one currently
@@ -1247,7 +1255,7 @@ class T3Database:
         kc = self._client
         try:
             collections = kc.list_collections()
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             _log.warning("expire_skipped_knowledge_store_not_found")
             return 0
         for col_or_name in collections:
@@ -1263,7 +1271,7 @@ class T3Database:
             offset = 0
             page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
             while True:
-                result = _chroma_with_retry(
+                result = _vector_with_retry(
                     col.get,
                     where=ttl_where,
                     include=["metadatas"],
@@ -1297,11 +1305,11 @@ class T3Database:
         """
         try:
             col = self._client_for(collection).get_collection(collection)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return []
         clamped = limit if self._local_mode else min(limit, QUOTAS.MAX_QUERY_RESULTS)
         with self._read_sem(collection):
-            result = _chroma_with_retry(
+            result = _vector_with_retry(
                 col.get, include=["metadatas"], limit=clamped, offset=offset,
             )
         # GH #373 mirror: same None-meta defence as the query path; a
@@ -1321,7 +1329,7 @@ class T3Database:
 
         try:
             raw = self._client.list_collections()
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return []
 
         names = [c if isinstance(c, str) else c.name for c in raw]
@@ -1330,7 +1338,7 @@ class T3Database:
 
         def _count(name: str) -> dict:
             col = self._client.get_collection(name)
-            return {"name": name, "count": _chroma_with_retry(col.count)}
+            return {"name": name, "count": _vector_with_retry(col.count)}
 
         result: list[dict] = []
         with ThreadPoolExecutor(max_workers=min(8, len(names))) as pool:
@@ -1348,7 +1356,7 @@ class T3Database:
         try:
             self._client_for(name).get_collection(name)
             return True
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return False
 
     def delete_collection(self, name: str) -> None:
@@ -1393,13 +1401,13 @@ class T3Database:
         """
         try:
             col = self._client_for(collection_name).get_collection(collection_name)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return []
         seen: set[str] = set()
         offset = 0
         page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
         while True:
-            result = _chroma_with_retry(
+            result = _vector_with_retry(
                 col.get,
                 include=["metadatas"],
                 limit=page_limit,
@@ -1428,13 +1436,13 @@ class T3Database:
         """
         try:
             col = self._client_for(collection_name).get_collection(collection_name)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return []
         ids: list[str] = []
         offset = 0
         page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
         while True:
-            result = _chroma_with_retry(
+            result = _vector_with_retry(
                 col.get,
                 where={"source_path": source_path},
                 include=[],
@@ -1456,7 +1464,7 @@ class T3Database:
         """
         try:
             col = self._client_for(collection_name).get_collection(collection_name)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return 0
         ids = self.ids_for_source(collection_name, source_path)
         if ids:
@@ -1487,7 +1495,7 @@ class T3Database:
         """
         try:
             col = self._client_for(collection_name).get_collection(collection_name)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return []
         chashes = catalog.get_chunk_chashes(doc_id)
         if not chashes:
@@ -1500,7 +1508,7 @@ class T3Database:
         present: list[str] = []
         for i in range(0, len(candidate_ids), page_limit):
             batch = candidate_ids[i : i + page_limit]
-            result = _chroma_with_retry(col.get, ids=batch, include=[])
+            result = _vector_with_retry(col.get, ids=batch, include=[])
             present.extend(result["ids"])
         return present
 
@@ -1521,7 +1529,7 @@ class T3Database:
         """
         try:
             col = self._client_for(collection_name).get_collection(collection_name)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return 0
         ids = self.ids_for_doc_id(collection_name, doc_id, catalog=catalog)
         if ids:
@@ -1545,12 +1553,12 @@ class T3Database:
         """
         try:
             col = self._client_for(collection_name).get_collection(collection_name)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return
         offset = 0
         page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
         while True:
-            result = _chroma_with_retry(
+            result = _vector_with_retry(
                 col.get,
                 include=["metadatas"],
                 limit=page_limit,
@@ -1584,7 +1592,7 @@ class T3Database:
             return 0
         try:
             col = self._client_for(collection_name).get_collection(collection_name)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return 0
         self._delete_batch(col, collection_name, chunk_ids)
         return len(chunk_ids)
@@ -1599,14 +1607,14 @@ class T3Database:
         """
         try:
             col = self._client_for(collection_name).get_collection(collection_name)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return 0
         ids: list[str] = []
         metadatas: list[dict] = []
         offset = 0
         page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
         while True:
-            result = _chroma_with_retry(
+            result = _vector_with_retry(
                 col.get,
                 where={"source_path": old_path},
                 include=["metadatas"],
@@ -1628,7 +1636,7 @@ class T3Database:
         size = QUOTAS.MAX_RECORDS_PER_WRITE
         with self._write_sem(collection_name):
             for start in range(0, len(ids), size):
-                _chroma_with_retry(
+                _vector_with_retry(
                     col.update,
                     ids=ids[start:start + size],
                     metadatas=metadatas[start:start + size],
@@ -1643,10 +1651,10 @@ class T3Database:
         """
         try:
             col = self._client_for(collection).get_collection(collection)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return None
         with self._read_sem(collection):
-            result = _chroma_with_retry(
+            result = _vector_with_retry(
                 col.get, ids=[doc_id], include=["documents", "metadatas"]
             )
         if not result["ids"]:
@@ -1661,12 +1669,12 @@ class T3Database:
         """Delete a single entry by its exact document ID. Returns True if found and deleted."""
         try:
             col = self._client_for(collection).get_collection(collection)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return False
-        result = _chroma_with_retry(col.get, ids=[doc_id], include=[])
+        result = _vector_with_retry(col.get, ids=[doc_id], include=[])
         if not result["ids"]:
             return False
-        _chroma_with_retry(col.delete, ids=[doc_id])
+        _vector_with_retry(col.delete, ids=[doc_id])
         return True
 
     def find_ids_by_title(self, collection: str, title: str) -> list[str]:
@@ -1677,13 +1685,13 @@ class T3Database:
         """
         try:
             col = self._client_for(collection).get_collection(collection)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return []
         ids: list[str] = []
         offset = 0
         page_limit = QUOTAS.MAX_RECORDS_PER_WRITE
         while True:
-            result = _chroma_with_retry(
+            result = _vector_with_retry(
                 col.get,
                 where={"title": title},
                 include=[],
@@ -1713,14 +1721,14 @@ class T3Database:
             return set()
         try:
             col = self._client_for(collection).get_collection(collection)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return set()
         found: set[str] = set()
         page = QUOTAS.MAX_RECORDS_PER_WRITE
         with self._read_sem(collection):
             for i in range(0, len(ids), page):
                 batch = ids[i : i + page]
-                result = _chroma_with_retry(col.get, ids=batch, include=[])
+                result = _vector_with_retry(col.get, ids=batch, include=[])
                 found.update(result["ids"])
         return found
 
@@ -1730,7 +1738,7 @@ class T3Database:
             return
         try:
             col = self._client_for(collection).get_collection(collection)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             return
         self._delete_batch(col, collection, ids)
 
@@ -1741,9 +1749,9 @@ class T3Database:
         """
         try:
             col = self._client_for(name).get_collection(name)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             raise KeyError(f"Collection not found: {name!r}") from None
-        return {"count": _chroma_with_retry(col.count), "metadata": col.metadata or {}}
+        return {"count": _vector_with_retry(col.count), "metadata": col.metadata or {}}
 
     def collection_metadata(self, collection_name: str) -> dict:
         """Return metadata dict for a collection.
@@ -1755,12 +1763,12 @@ class T3Database:
         """
         try:
             col = self._client_for(collection_name).get_collection(collection_name)
-        except _ChromaNotFoundError:
+        except _NotFoundErrors:
             raise KeyError(f"Collection not found: {collection_name!r}") from None
         parsed = embedding_model_for_collection_name(collection_name)
         return {
             "name": collection_name,
-            "count": _chroma_with_retry(col.count),
+            "count": _vector_with_retry(col.count),
             "embedding_model": parsed or embedding_model_for_collection(collection_name),
             "index_model": parsed or index_model_for_collection(collection_name),
         }
@@ -1871,9 +1879,9 @@ def apply_hnsw_ef(db: "T3Database") -> int:
     cfg = load_config()
     hnsw_ef: int = cfg.get("search", {}).get("hnsw_ef", 256)
 
-    collections = _chroma_with_retry(db._client.list_collections)
+    collections = _vector_with_retry(db._client.list_collections)
     count = 0
     for col in collections:
-        _chroma_with_retry(col.modify, metadata={"hnsw:search_ef": hnsw_ef})
+        _vector_with_retry(col.modify, metadata={"hnsw:search_ef": hnsw_ef})
         count += 1
     return count

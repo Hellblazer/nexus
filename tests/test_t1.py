@@ -2,17 +2,12 @@
 """Tests for T1Database — session scratch with per-session server sharing."""
 from __future__ import annotations
 
-import json
-import os
-import time
-import warnings
-from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
-import chromadb
 import pytest
 
 from nexus.db.t1 import T1Database
+from tests.conftest import make_vector_test_client
 
 
 @pytest.fixture(autouse=True)
@@ -32,11 +27,11 @@ def _allow_t1_record_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _ephemeral_t1(session_id: str | None = None) -> T1Database:
-    return T1Database(session_id=session_id or str(uuid4()), client=chromadb.EphemeralClient())
+    return T1Database(session_id=session_id or str(uuid4()), client=make_vector_test_client())
 
 
 def _shared_pair() -> tuple[T1Database, T1Database, str, str]:
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     sid_a, sid_b = str(uuid4()), str(uuid4())
     return T1Database(session_id=sid_a, client=client), T1Database(session_id=sid_b, client=client), sid_a, sid_b
 

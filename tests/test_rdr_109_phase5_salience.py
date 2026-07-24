@@ -10,6 +10,7 @@ behavior is the regression bar).
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 from unittest.mock import patch
@@ -17,6 +18,31 @@ from unittest.mock import patch
 import pytest
 
 from nexus.db.t2.document_aspects import AspectRecord, DocumentAspects
+
+_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
+
+
+def _seed_engine_catalog_docs(*tumblers: str) -> None:
+    """Seed catalog_documents rows for the aspects doc_id FK (engine only).
+
+    The engine enforces fk_doc_aspects_catalog_doc: a non-null
+    document_aspects.doc_id must match a catalog_documents(tenant_id,
+    tumbler) row or the upsert 409s. Seed through the client's
+    fidelity-import surface (HttpCatalogClient POST /import/document —
+    RDR-155 P4b P0a': store surfaces, not psql). No-op on the SQLite
+    substrate, whose schema never carried the FK.
+    """
+    if not _ENGINE_SUBSTRATE:
+        return
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+    client = HttpCatalogClient()
+    try:
+        client._post("/import/document", {
+            "rows": [{"tumbler": t, "title": f"seed-{t}"} for t in tumblers],
+        })
+    finally:
+        client.close()
 from nexus.salience import (
     extract_salient_sentences,
     split_sentences,
@@ -94,6 +120,9 @@ def aspects_db(tmp_path: Path, monkeypatch):
     # <memory_db_parent>/catalog/.catalog.db regardless of
     # NEXUS_CATALOG_PATH; init there so the migration runs.
     Catalog.init(tmp_path / "catalog")
+    # Engine substrate: the doc_ids the tests upsert must exist in
+    # catalog_documents or the aspects FK rejects the write.
+    _seed_engine_catalog_docs("1.1.42", "2.2.42")
     from nexus.db.t2 import T2Database
     db = T2Database(tmp_path / "memory.db")
     try:
@@ -215,6 +244,7 @@ def test_salience_boost_reorders_by_token_overlap(tmp_path: Path, monkeypatch) -
     # <memory_db_parent>/catalog/.catalog.db regardless of
     # NEXUS_CATALOG_PATH; init there so the migration runs.
     Catalog.init(tmp_path / "catalog")
+    _seed_engine_catalog_docs("A", "B")
     from nexus.db.t2 import T2Database
     db = T2Database(tmp_path / "memory.db")
     da = db.document_aspects

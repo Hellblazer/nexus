@@ -127,7 +127,7 @@ def test_retry_accumulator_tracks_chroma_backoff_seconds() -> None:
     """Same contract for the chroma wrapper — its delays (2 → 4 s) also
     roll into the total so the summary captures both backoff paths."""
     from nexus.retry import (
-        _chroma_with_retry,
+        _vector_with_retry,
         get_retry_stats,
         reset_retry_stats,
     )
@@ -137,30 +137,30 @@ def test_retry_accumulator_tracks_chroma_backoff_seconds() -> None:
     with patch("nexus.retry.time.sleep"), patch(
         "nexus.retry.random.random", return_value=0.5,
     ):
-        assert _chroma_with_retry(fn, max_attempts=3) == "ok"
+        assert _vector_with_retry(fn, max_attempts=3) == "ok"
     stats = get_retry_stats()
-    assert stats["chroma_count"] == 2
+    assert stats["vector_count"] == 2
     # Chroma backoff is 2 → 4 s (exponential, capped at 30 s)
-    assert stats["chroma_seconds"] == pytest.approx(2.0 + 4.0)
+    assert stats["vector_seconds"] == pytest.approx(2.0 + 4.0)
     reset_retry_stats()
 
 
 def test_retry_accumulator_reset_zeros_all_counters() -> None:
     from nexus.retry import (
-        _add_chroma_retry,
+        _add_vector_retry,
         _add_voyage_retry,
         get_retry_stats,
         reset_retry_stats,
     )
     _add_voyage_retry(5.0)
-    _add_chroma_retry(3.0)
+    _add_vector_retry(3.0)
     pre = get_retry_stats()
     assert pre["total_seconds"] == pytest.approx(8.0)
     reset_retry_stats()
     post = get_retry_stats()
     assert post == {
         "voyage_seconds": 0.0, "voyage_count": 0,
-        "chroma_seconds": 0.0, "chroma_count": 0,
+        "vector_seconds": 0.0, "vector_count": 0,
         "etl_seconds": 0.0, "etl_count": 0,
         "total_seconds": 0.0, "total_count": 0,
     }

@@ -9,7 +9,6 @@ from __future__ import annotations
 import os
 import threading
 import time
-import warnings
 
 from nexus.config import default_db_path
 
@@ -216,11 +215,18 @@ def get_t1():
             if _t1_instance is None:
                 if _t1_pre_init_hook is not None:
                     _t1_pre_init_hook()  # raises => propagate; cache stays empty
-                with warnings.catch_warnings(record=True) as caught:
-                    warnings.simplefilter("always")
-                    from nexus.db.t1 import get_t1_database  # noqa: PLC0415 — deferred to avoid circular import (db.t1)
-                    _t1_instance = get_t1_database()
-                    _t1_isolated = any("EphemeralClient" in str(w.message) for w in caught)
+                from nexus.db.inmemory_vector_store import InMemoryVectorClient  # noqa: PLC0415 — deferred to avoid circular import
+                from nexus.db.t1 import get_t1_database  # noqa: PLC0415 — deferred to avoid circular import (db.t1)
+                _t1_instance = get_t1_database()
+                # RDR-155 P4b P0a (review finding): detect isolated mode
+                # structurally. The prior warnings-sniff for the string
+                # "EphemeralClient" matched a warning chromadb never
+                # emitted, so `is_isolated` was ALWAYS False and the
+                # "[T1 isolated] " operator prefix never fired.
+                _t1_isolated = isinstance(
+                    getattr(_t1_instance, "_client", None),
+                    InMemoryVectorClient,
+                )
     return _t1_instance, _t1_isolated
 
 

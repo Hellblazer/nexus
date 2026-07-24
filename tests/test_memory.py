@@ -279,7 +279,9 @@ def test_promote_permanent_entry(runner: CliRunner, mem_home: Path, db: T2Databa
     _, mt3 = _promote(runner, db, row_id)
     kw = mt3.put.call_args.kwargs
     assert kw["ttl_days"] == 0
-    assert kw.get("expires_at", "MISSING") == ""
+    # nexus-v4paa fold: neither real T3 substrate accepts expires_at —
+    # promote must not pass it (it was a TypeError, mock-shielded here).
+    assert "expires_at" not in kw
 
 
 def test_promote_remove_deletes_t2(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
@@ -293,18 +295,38 @@ def test_promote_remove_deletes_t2(runner: CliRunner, mem_home: Path, db: T2Data
 # test_promote_missing_database removed (nexus-c7aj3): same as above.
 
 
-def test_promote_expires_at_from_t2_timestamp(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
+def test_promote_honours_remaining_ttl(
+    runner: CliRunner, mem_home: Path, db: T2Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-v4paa fold: the remaining TTL is expressed by SHRINKING
+    ttl_days (the substrates compute expiry as indexed_at + ttl_days and
+    accept no expires_at kwarg — the old pass-through was a TypeError
+    against both real substrates, mock-shielded by this suite).
+
+    The clock is shifted forward (fixed-clock rule) instead of
+    backdating the row via raw SQLite, so this holds on the engine
+    substrate too (Http stores expose no ``.conn``)."""
     row_id = db.put(project="proj", title="dated.md", content="content", ttl=10)
-    past = (datetime.now(UTC) - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    db.memory.conn.execute("UPDATE memory SET timestamp=? WHERE id=?", (past, row_id))
-    db.memory.conn.commit()
+
+    class _FiveDaysLater:
+        @staticmethod
+        def now(tz=None):
+            return datetime.now(tz) + timedelta(days=5)
+
+        @staticmethod
+        def fromisoformat(s):
+            return datetime.fromisoformat(s)
+
+    monkeypatch.setattr("nexus.commands.memory.datetime", _FiveDaysLater)
     result, mt3 = _promote(runner, db, row_id)
     assert result.exit_code == 0, result.output
     kw = mt3.put.call_args.kwargs
-    assert kw.get("expires_at", "") != "", "expires_at must be set for TTL entry"
-    expires = datetime.fromisoformat(kw["expires_at"])
-    now = datetime.now(UTC)
-    assert now < expires < now + timedelta(days=7)
+    assert "expires_at" not in kw
+    assert kw["ttl_days"] == 5, (
+        "5 of the 10 TTL days elapsed in T2 — the promoted entry gets "
+        "the remaining 5, not a reset 10"
+    )
 
 
 # ── Delete CLI command ───────────────────────────────────────────────────────

@@ -28,6 +28,26 @@ import pytest
 from nexus.plans.match import Match
 
 
+@pytest.fixture(autouse=True)
+def _fresh_mcp_singletons():
+    """Reset mcp_infra's lazy singletons around every test (RDR-155 P4b
+    P0a').
+
+    ``t2_index_write`` in service mode routes through the process-lifetime
+    ``_service_t2_db`` singleton, which bakes in the credentials it saw at
+    first use. Under ``NX_TEST_T2_SUBSTRATE=engine`` every test gets a
+    freshly minted tenant token, so a singleton created by an earlier test
+    writes into the WRONG tenant — the live round-trip test below then
+    reads an empty plan library from its own tenant (order-dependent:
+    passes solo, fails in file order). Harmless on the SQLite substrate.
+    """
+    import nexus.mcp_infra as mcp_infra
+
+    mcp_infra.reset_singletons()
+    yield
+    mcp_infra.reset_singletons()
+
+
 def _ad_hoc_match(plan_json: str | None = None) -> Match:
     if plan_json is None:
         plan_json = json.dumps({

@@ -16,17 +16,17 @@ escape hatch (used by backfill / migration verbs).
 """
 from __future__ import annotations
 
-import chromadb
 import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
 from nexus.db.t3 import T3Database
+from tests.conftest import make_vector_test_client
 
 
 @pytest.fixture()
 def t3_db():
     db = T3Database(
-        _client=chromadb.EphemeralClient(),
+        _client=make_vector_test_client(),
         _ef_override=DefaultEmbeddingFunction(),
     )
     for raw in list(db._client.list_collections()):

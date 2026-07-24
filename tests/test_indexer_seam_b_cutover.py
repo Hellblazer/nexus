@@ -324,7 +324,7 @@ def test_index_document_service_mode_skips_embed_fallback(tmp_path, monkeypatch)
 
     with patch("nexus.doc_indexer._embed_with_fallback") as embed_mock, \
          patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value="doc-1"), \
-         patch("nexus.doc_indexer._chroma_with_retry", side_effect=lambda fn, **kw: fn(**kw)), \
+         patch("nexus.doc_indexer._vector_with_retry", side_effect=lambda fn, **kw: fn(**kw)), \
          patch("nexus.hook_registry.HookRegistry", return_value=mock_hooks), \
          patch("nexus.hook_registry.install_default_hooks"):
         _index_document(
@@ -358,7 +358,7 @@ def test_index_document_service_mode_calls_upsert_chunks(tmp_path, monkeypatch):
 
     with patch("nexus.doc_indexer._embed_with_fallback"), \
          patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value="doc-1"), \
-         patch("nexus.doc_indexer._chroma_with_retry", side_effect=lambda fn, **kw: fn(**kw)), \
+         patch("nexus.doc_indexer._vector_with_retry", side_effect=lambda fn, **kw: fn(**kw)), \
          patch("nexus.hook_registry.HookRegistry", return_value=mock_hooks), \
          patch("nexus.hook_registry.install_default_hooks"):
         _index_document(
@@ -408,7 +408,7 @@ def test_index_document_service_mode_t3_none_no_credentials_error(tmp_path, monk
          patch("nexus.doc_indexer._embed_with_fallback") as embed_mock, \
          patch("nexus.doc_indexer._make_local_embed_fn") as local_embed_mock, \
          patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value="doc-1"), \
-         patch("nexus.doc_indexer._chroma_with_retry", side_effect=lambda fn, **kw: fn(**kw)), \
+         patch("nexus.doc_indexer._vector_with_retry", side_effect=lambda fn, **kw: fn(**kw)), \
          patch("nexus.hook_registry.HookRegistry", return_value=mock_hooks), \
          patch("nexus.hook_registry.install_default_hooks"):
         # Must NOT raise CredentialsMissingError or any credential-related error
@@ -452,7 +452,7 @@ def test_index_pdf_incremental_service_mode_skips_embed_fallback(tmp_path, monke
          patch("nexus.doc_indexer.write_checkpoint"), \
          patch("nexus.doc_indexer.delete_checkpoint"), \
          patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value="doc-1"), \
-         patch("nexus.doc_indexer._chroma_with_retry", side_effect=lambda fn, **kw: fn(**kw)):
+         patch("nexus.doc_indexer._vector_with_retry", side_effect=lambda fn, **kw: fn(**kw)):
         _index_pdf_incremental(
             tmp_path / "test.pdf",
             corpus="test-corpus",

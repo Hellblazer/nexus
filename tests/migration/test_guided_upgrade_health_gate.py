@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from nexus.migration.guided_upgrade import (
+from nexus.upgrade_ladder.provisioning import (
     HealthGateResult,
     wait_for_service_health,
 )

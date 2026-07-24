@@ -14,6 +14,7 @@ multi-process (cross-nx-mcp) WAL case. This file covers the in-process
 """
 from __future__ import annotations
 
+import os
 import statistics
 import threading
 import time
@@ -22,6 +23,7 @@ from pathlib import Path
 import numpy as np
 
 from nexus.db.t2 import T2Database
+from tests.conftest import make_vector_test_client
 
 
 # ── Cross-domain parallelism ─────────────────────────────────────────────────
@@ -208,11 +210,10 @@ def test_memory_search_under_discover_topics_load(tmp_path: Path) -> None:
     taxonomy path) would inflate the median by 50-100x, well above 10x.
     The p95 figures are still printed for diagnostic reference.
     """
-    import chromadb
 
     db_path = tmp_path / "discover_underload.db"
     db = T2Database(db_path)
-    chroma_client = chromadb.EphemeralClient()
+    chroma_client = make_vector_test_client()
     try:
         # Seed memory entries for the search baseline
         vocab_words = (
@@ -554,6 +555,12 @@ def test_serving_busy_timeout_constant_matches_bootstrap() -> None:
     assert SERVING_BUSY_TIMEOUT_MS == _BOOTSTRAP_BUSY_TIMEOUT_MS
 
 
+@_pytest.mark.skipif(
+    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    reason="dies-roster: the 30s serving busy_timeout PRAGMA is a property of "
+    "the raw SQLite store connections; dies with the twins at the RDR-155 "
+    "P4b flip (the engine's PG pool owns its own timeouts)",
+)
 @_pytest.mark.parametrize(
     "store_attr,conn_attr",
     [

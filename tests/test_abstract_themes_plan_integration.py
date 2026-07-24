@@ -95,6 +95,7 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
+from tests.conftest import make_vector_test_client
 
 pytestmark = [pytest.mark.integration, pytest.mark.lived_in]
 
@@ -383,10 +384,9 @@ def builtin_plans_library(tmp_path_factory: pytest.TempPathFactory):
 @pytest.fixture(scope="module")
 def populated_session_cache(builtin_plans_library):
     """Real-EphemeralClient cache populated from the loaded library."""
-    import chromadb
     from nexus.plans.session_cache import PlanSessionCache
 
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     cache = PlanSessionCache(
         client=client, session_id="abstract-themes-integration",
     )

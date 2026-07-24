@@ -125,7 +125,7 @@ class TestCallerLoopsIsolatePerItem:
         ("src/nexus/doc_indexer.py", "stale_chunk_prune_failed_registration_still_running"),
         ("src/nexus/commands/catalog_cmds/integrity.py", "catalog_verify_collection_unreadable"),
         ("src/nexus/migration/collision_audit.py", "collision_audit_page_degraded"),
-        ("src/nexus/migration/vector_etl.py", "vector_etl_verify_fill_page_unreachable"),
+        ("src/nexus/db/reconcile.py", "vector_etl_verify_fill_page_unreachable"),
     ]
 
     @pytest.mark.parametrize(("path", "marker"), SITES)

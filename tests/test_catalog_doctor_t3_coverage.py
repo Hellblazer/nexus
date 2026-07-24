@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import chromadb
 import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from click.testing import CliRunner
@@ -27,6 +26,7 @@ from nexus.catalog import events as ev
 from nexus.catalog.catalog import Catalog
 from nexus.catalog.event_log import EventLog
 from nexus.commands.catalog_cmds.doctor import doctor_cmd
+from tests.conftest import make_vector_test_client
 
 
 @pytest.fixture()
@@ -41,7 +41,7 @@ def runner() -> CliRunner:
 
 @pytest.fixture()
 def chroma_client():
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     for col in list(client.list_collections()):
         try:
             client.delete_collection(col.name)

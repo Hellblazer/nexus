@@ -127,7 +127,7 @@ _DOI = "10.1038/nature12373"
 
 
 def _two_chunk_collection(mock_retry: MagicMock) -> MagicMock:
-    """Wire _chroma_with_retry for a single-title two-chunk collection."""
+    """Wire _vector_with_retry for a single-title two-chunk collection."""
     mock_retry.side_effect = [
         {"ids": ["c1", "c2"], "metadatas": [dict(_CHUNK_META), dict(_CHUNK_META)]},
         # identifier scan (documents + metadatas) — DOI lives in the body text
@@ -145,7 +145,7 @@ def _two_chunk_collection(mock_retry: MagicMock) -> MagicMock:
 @patch("nexus.mcp_client.devonthink.dt_resolve_doi")
 @patch("nexus.bib_enricher_openalex.enrich")
 @patch("nexus.bib_enricher_openalex.enrich_by_doi")
-@patch("nexus.retry._chroma_with_retry")
+@patch("nexus.retry._vector_with_retry")
 @patch("nexus.db.make_t3")
 def test_source_dt_gapfills_when_primary_misses(
     mock_t3: MagicMock,
@@ -169,7 +169,7 @@ def test_source_dt_gapfills_when_primary_misses(
     # make_t3() returns the service-backed HttpVectorClient
     # unconditionally in production since RDR-155 P4a.2.
     # get_or_create_collection() is a direct call on both handles;
-    # _chroma_with_retry is patched above so the rest is bypassed.
+    # _vector_with_retry is patched above so the rest is bypassed.
     mock_db = MagicMock(spec=HttpVectorClient)
     mock_db.get_or_create_collection.return_value = MagicMock()
     mock_t3.return_value = mock_db
@@ -191,7 +191,7 @@ def test_source_dt_gapfills_when_primary_misses(
 @patch("nexus.mcp_client.devonthink.available", return_value=False)
 @patch("nexus.bib_enricher_openalex.enrich")
 @patch("nexus.bib_enricher_openalex.enrich_by_doi")
-@patch("nexus.retry._chroma_with_retry")
+@patch("nexus.retry._vector_with_retry")
 @patch("nexus.db.make_t3")
 def test_source_dt_unavailable_degrades_to_primary_only(
     mock_t3: MagicMock,
@@ -213,7 +213,7 @@ def test_source_dt_unavailable_degrades_to_primary_only(
     # make_t3() returns the service-backed HttpVectorClient
     # unconditionally in production since RDR-155 P4a.2.
     # get_or_create_collection() is a direct call on both handles;
-    # _chroma_with_retry is patched above so the rest is bypassed.
+    # _vector_with_retry is patched above so the rest is bypassed.
     mock_db = MagicMock(spec=HttpVectorClient)
     mock_db.get_or_create_collection.return_value = MagicMock()
     mock_t3.return_value = mock_db

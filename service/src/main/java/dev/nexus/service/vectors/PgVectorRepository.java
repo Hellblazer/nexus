@@ -1494,6 +1494,16 @@ public final class PgVectorRepository {
     public static final int GET_ALL_METADATA_MAX_ROWS = 200_000;
 
     /**
+     * Batch cap for the sourceUrisByChash IN-clause join — bounds the
+     * per-query bind-parameter budget. Rehomed from
+     * ChromaQuotaValidator.MAX_RECORDS_PER_WRITE at RDR-155 P4b P0e
+     * (same own-the-constant precedent as RemapRepository.MAX_BATCH):
+     * the value is a generic bind-param ceiling, not a Chroma quota,
+     * and ChromaQuotaValidator deletes with the chroma trio at P2-J.
+     */
+    public static final int SOURCE_URI_JOIN_BATCH = 300;
+
+    /**
      * Fetch ids + metadata for EVERY chunk in *collection* in ONE round trip
      * (nexus-duoak follow-up: staleness-cache-build phase). No {@code
      * documents} column (staleness only needs metadata: {@code
@@ -2803,11 +2813,11 @@ public final class PgVectorRepository {
         sourceUriJoinCalls.incrementAndGet();
         if (chashes.isEmpty()) return Map.of();
 
-        // Batch into ≤300 chashes per IN-clause (ChromaQuotaValidator.MAX_RECORDS_PER_WRITE)
+        // Batch into ≤300 chashes per IN-clause (SOURCE_URI_JOIN_BATCH)
         // so large get-envelope id lists never overflow the bind-param budget.
         List<String> chashList = new ArrayList<>(chashes);
         Map<String, String> out = new HashMap<>(chashList.size() * 2);
-        int batchSize = ChromaQuotaValidator.MAX_RECORDS_PER_WRITE;
+        int batchSize = SOURCE_URI_JOIN_BATCH;
 
         for (int start = 0; start < chashList.size(); start += batchSize) {
             List<String> batch = chashList.subList(start, Math.min(start + batchSize, chashList.size()));

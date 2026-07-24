@@ -16,7 +16,6 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
-import chromadb
 import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from click.testing import CliRunner
@@ -30,6 +29,7 @@ from nexus.mcp_infra import (
     manifest_write_batch_hook,
     reset_manifest_identity_drops,
 )
+from tests.conftest import make_vector_test_client
 
 
 @pytest.fixture(autouse=True)
@@ -46,13 +46,19 @@ def git_identity(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def local_t3() -> T3Database:
     return T3Database(
-        _client=chromadb.EphemeralClient(),
+        _client=make_vector_test_client(),
         _ef_override=DefaultEmbeddingFunction(),
     )
 
 
 @pytest.fixture
 def catalog_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    # nexus-b6enc: pin sqlite/local so the CLI store-put path targets
+    # THIS seeded local catalog even under the NX_TEST_T2_SUBSTRATE=engine
+    # flip (which sets NX_STORAGE_BACKEND=service globally and re-routed
+    # the catalog hooks at the engine tenant — pre-existing engine-run
+    # failure of test_cli_store_put_writes_manifest_linkage).
+    monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
     catalog_dir = tmp_path / "catalog"
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
     Catalog.init(catalog_dir)

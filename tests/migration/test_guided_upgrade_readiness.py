@@ -14,7 +14,7 @@ never silently emit a url without a real pin.
 
 from __future__ import annotations
 
-from nexus.migration.guided_upgrade import (
+from nexus.upgrade_ladder.provisioning import (
     HealthGateResult,
     ProvisionResult,
     ServiceReadiness,

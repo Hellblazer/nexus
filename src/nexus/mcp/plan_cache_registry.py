@@ -130,20 +130,15 @@ class PlanCacheRegistry:
                             # PlanSessionCache AttributeError'd and silently
                             # flipped EVERY production plan match to FTS5-only.
                             # The cache is session-scoped and in-memory by
-                            # contract; an in-process EphemeralClient restores
-                            # the calibrated cosine gate. ISOLATION NOTE
-                            # (review-verified): EphemeralClient instances in
-                            # one process SHARE backing state (SharedSystemClient
-                            # caches by settings hash — the known
-                            # project_chromadb_ephemeral_shared_state gotcha),
-                            # so isolation comes from PlanSessionCache's
-                            # session_id row filter, NOT from client instance
-                            # boundaries; the plans__session collection is
-                            # process-global across registry resets. P4b
-                            # rehoming (engine-side embed) tracked on the bead.
-                            from nexus.db import make_ephemeral_chroma_client  # noqa: PLC0415 — deferred; rare init path
+                            # contract; the in-process InMemoryVectorClient
+                            # (RDR-155 P4b P0a) restores the calibrated cosine
+                            # gate with REAL per-instance isolation (unlike the
+                            # retired EphemeralClient, whose SharedSystemClient
+                            # shared process state by settings hash). The
+                            # session_id row filter stays as a safety net.
+                            from nexus.db.inmemory_vector_store import InMemoryVectorClient  # noqa: PLC0415 — deferred; rare init path
 
-                            chroma_client = make_ephemeral_chroma_client()
+                            chroma_client = InMemoryVectorClient()
                             _log.info(
                                 "plan_session_cache_ephemeral_substrate",
                                 reason="service-backed T1 has no chroma client",

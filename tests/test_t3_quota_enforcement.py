@@ -5,12 +5,12 @@ import threading
 import time
 from unittest.mock import MagicMock
 
-import chromadb
 import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
 from nexus.db.chroma_quotas import QUOTAS, NameTooLong, RecordTooLarge
 from nexus.db.t3 import T3Database
+from tests.conftest import make_vector_test_client
 
 
 def _make_db_with_mock_col() -> tuple[T3Database, MagicMock]:
@@ -25,7 +25,7 @@ def _make_db_with_mock_col() -> tuple[T3Database, MagicMock]:
 
 
 def _make_real_db(col_name: str) -> tuple[T3Database, object]:
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     ef = DefaultEmbeddingFunction()
     db = T3Database(_client=client, _ef_override=ef)
     # RDR-103 Phase 5: quota tests use legacy 2-segment fixture names;

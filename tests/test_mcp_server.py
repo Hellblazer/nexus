@@ -47,6 +47,7 @@ from nexus.mcp_server import (
     store_put,
 )
 from nexus.types import SearchResult
+from tests.conftest import make_vector_test_client
 
 # RDR-109 Phase 2: this file asserts cloud-mode canonical behavior
 # (voyage-* embedder names, canonical-set defaults). The cloud_mode
@@ -81,7 +82,7 @@ def _reset():
 
 @pytest.fixture()
 def t1():
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     db = T1Database(session_id="test-session", client=client)
     _inject_t1(db)
     return db
@@ -89,7 +90,7 @@ def t1():
 
 @pytest.fixture()
 def t1_isolated():
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     db = T1Database(session_id="test-session-iso", client=client)
     _inject_t1(db, isolated=True)
     return db
@@ -102,11 +103,13 @@ def t2_path():
 
 
 def _clear_ephemeral_collections(client) -> None:
-    """Delete every collection in the shared in-process Ephemeral backend.
+    """Delete every collection in the client.
 
-    nexus-st976: ``chromadb.EphemeralClient()`` instances share ONE
-    in-memory backend within a process, so collections created by another
-    test file's T3 fixture survive into this "fresh" client. ``store_put``
+    Historical (nexus-st976): ``chromadb.EphemeralClient`` instances
+    shared ONE in-process backend, so collections created by another
+    test file's T3 fixture survived into a "fresh" client. The RDR-155
+    P4b ``InMemoryVectorClient`` has real per-instance isolation, making
+    this a no-op safeguard on a fresh client. ``store_put``
     resolves ``collection="knowledge"`` via ``t3_collection_name``, which
     probes ``list_collections()`` for a unique ``knowledge__*`` match and
     returns it verbatim — so a single leaked ``knowledge__<owner>__...``
@@ -124,7 +127,7 @@ def _clear_ephemeral_collections(client) -> None:
 
 @pytest.fixture()
 def t3():
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     _clear_ephemeral_collections(client)
     ef = chromadb.utils.embedding_functions.DefaultEmbeddingFunction()
     db = T3Database(_client=client, _ef_override=ef)
@@ -984,6 +987,14 @@ def catalog_with_docs(tmp_path, monkeypatch):
     cat.link(cat.find("Attention Paper")[0].tumbler,
              cat.find("BERT Paper")[0].tumbler, "cites", created_by="test")
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+    # Pin query()'s catalog to THIS local fixture instance (same pattern as
+    # test_catalog_params_without_catalog). The SUBJECT here is query()'s
+    # catalog-routing logic over these registered docs; without the pin, the
+    # engine substrate's global NX_STORAGE_BACKEND=service makes
+    # make_catalog_reader() return the service catalog client — an empty
+    # per-test tenant that never sees the fixture's registrations.
+    import nexus.mcp.core as _core_mod
+    monkeypatch.setattr(_core_mod, "_get_catalog", lambda: cat)
     return cat
 
 
@@ -1077,7 +1088,7 @@ def test_flat_search_no_cluster_headers():
 # ── T1 session sharing ──────────────────────────────────────────────────────
 
 def test_t1_shared_session():
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     t1a = T1Database(session_id="shared-42", client=client)
     t1b = T1Database(session_id="shared-42", client=client)
     doc_id = t1a.put("shared entry from A")
@@ -1087,7 +1098,7 @@ def test_t1_shared_session():
 
 
 def test_t1_session_isolation():
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     t1a = T1Database(session_id="session-alpha", client=client)
     t1b = T1Database(session_id="session-beta", client=client)
     t1a.put("alpha only")

@@ -21,16 +21,15 @@ Contracts pinned here:
 """
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import patch
 
-import chromadb
 import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from click.testing import CliRunner
 
 from nexus.cli import main
 from nexus.db.t3 import T3Database
+from tests.conftest import make_vector_test_client
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
@@ -40,7 +39,7 @@ from nexus.db.t3 import T3Database
 def t3_db():
     """Real T3Database backed by an ephemeral local Chroma."""
     return T3Database(
-        _client=chromadb.EphemeralClient(),
+        _client=make_vector_test_client(),
         _ef_override=DefaultEmbeddingFunction(),
     )
 

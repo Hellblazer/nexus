@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import chromadb
@@ -12,6 +13,20 @@ from nexus.catalog.tumbler import Tumbler
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
 from nexus.mcp_server import _inject_t3, _reset_singletons, query
+from tests.conftest import make_vector_test_client
+
+_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
+
+# These tests seed the rich SQLite Catalog (Catalog.init via the ``catalog``
+# fixture) and assert that catalog-filtered query() routing finds those rows.
+# On the engine substrate ``_get_catalog`` resolves the service catalog (a
+# freshly minted, empty tenant) instead, so the filters legitimately match
+# nothing ("No documents found matching catalog filters").
+_rich_catalog_dies_at_flip = pytest.mark.skipif(
+    _ENGINE_SUBSTRATE,
+    reason="dies-roster: rich SQLite Catalog stack (Catalog.init-seeded "
+    "catalog-param query routing) dies at the RDR-155 P4b flip",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -23,7 +38,7 @@ def _reset():
 
 @pytest.fixture()
 def t3():
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     ef = chromadb.utils.embedding_functions.DefaultEmbeddingFunction()
     db = T3Database(_client=client, _ef_override=ef)
     _inject_t3(db)
@@ -66,6 +81,7 @@ def _seed_templates(tmp_path, monkeypatch):
 
 
 class TestPathRouting:
+    @_rich_catalog_dies_at_flip
     @pytest.mark.parametrize("put_col,put_content,query_kw,assert_in", [
         ("knowledge__delos", "chase procedure schema", {"author": "Fagin"}, "knowledge__delos"),
         ("code__nexus", "def index_repo(): pipeline", {"content_type": "code"}, "code__nexus"),
@@ -115,7 +131,12 @@ class TestPathRouting:
 
 class TestReferenceQuestions:
     @pytest.mark.parametrize("question,kw,assert_check", [
-        ("papers by Fagin", {"author": "Fagin"}, lambda r: "knowledge__delos" in r),
+        pytest.param(
+            "papers by Fagin", {"author": "Fagin"},
+            lambda r: "knowledge__delos" in r,
+            marks=_rich_catalog_dies_at_flip,
+            id="papers by Fagin-kw0-<lambda>",
+        ),
         ("schema mappings", {"author": "Fagin"}, lambda r: not r.startswith("Error:")),
         ("RDR about streaming", {"content_type": "rdr"}, lambda r: not r.startswith("Error:")),
         ("what cites schema mappings", {"follow_links": "cites"}, lambda r: not r.startswith("Error:")),
@@ -167,8 +188,11 @@ class TestPlanTTL:
     def test_save_plan_ttl(self, tmp_path, ttl, expected_ttl):
         db = T2Database(tmp_path / "t2.db")
         row_id = db.save_plan(query="plan", plan_json='{}', **({} if ttl is None else {"ttl": ttl}))
-        row = db.plans.conn.execute("SELECT ttl FROM plans WHERE id = ?", (row_id,)).fetchone()
-        assert row[0] == expected_ttl
+        # Read back through the public surface (works on both the SQLite
+        # and the service-backed substrate — RDR-155 P4b P0a').
+        row = db.plans.get_plan(row_id)
+        assert row is not None
+        assert row["ttl"] == expected_ttl
         db.close()
 
     @pytest.mark.parametrize("method", ["search_plans", "list_plans"])
@@ -182,20 +206,48 @@ class TestPlanTTL:
 
 
 class TestPlanTTLEnforcement:
+    @staticmethod
+    def _save_backdated(db, query: str, *, days_old: int, ttl: int | None):
+        """Land a plan whose created_at is *days_old* days in the past.
+
+        SQLite leg: save + raw-conn backdate (the historical idiom).
+        Service leg: the store has no raw handle; use the fidelity-import
+        surface (``import_plan``) which persists ``created_at`` verbatim
+        (RDR-155 P4b P0a', idiom: has_raw_access branch).
+        """
+        from datetime import UTC, datetime, timedelta
+
+        from nexus.db.storage_mode import has_raw_access
+
+        if has_raw_access(db.plans):
+            row_id = db.save_plan(
+                query=query, plan_json='{}',
+                **({} if ttl is None else {"ttl": ttl}),
+            )
+            db.plans.conn.execute(
+                f"UPDATE plans SET created_at = datetime('now', '-{days_old} days') WHERE id = ?",
+                (row_id,),
+            )
+            db.plans.conn.commit()
+            return row_id
+        created_at = (
+            datetime.now(UTC) - timedelta(days=days_old)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return db.plans.import_plan(
+            project="", query=query, plan_json='{}', outcome="success",
+            tags="", created_at=created_at, ttl=ttl,
+        )
+
     @pytest.mark.parametrize("method", ["search_plans", "list_plans"])
     def test_expired_plan_excluded(self, tmp_path, method):
         db = T2Database(tmp_path / "t2.db")
-        row_id = db.save_plan(query="old cached plan", plan_json='{}', ttl=1)
-        db.plans.conn.execute("UPDATE plans SET created_at = datetime('now', '-10 days') WHERE id = ?", (row_id,))
-        db.plans.conn.commit()
+        self._save_backdated(db, "old cached plan", days_old=10, ttl=1)
         results = getattr(db, method)("old cached plan") if method == "search_plans" else getattr(db, method)()
         assert len(results) == 0
 
     def test_permanent_plan_never_expires(self, tmp_path):
         db = T2Database(tmp_path / "t2.db")
-        db.save_plan(query="permanent plan", plan_json='{}')
-        db.plans.conn.execute("UPDATE plans SET created_at = datetime('now', '-365 days') WHERE id = 1")
-        db.plans.conn.commit()
+        self._save_backdated(db, "permanent plan", days_old=365, ttl=None)
         assert len(db.list_plans()) == 1
 
     def test_fresh_plan_with_ttl_included(self, tmp_path):

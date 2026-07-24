@@ -197,7 +197,7 @@ def test_index_pdf_resolves_path(tmp_path: Path, monkeypatch) -> None:
 
     monkeypatch.setattr("nexus.doc_indexer.make_t3", lambda: mock_db)
     monkeypatch.setattr("nexus.doc_indexer.index_model_for_collection", lambda n: "model")
-    monkeypatch.setattr("nexus.doc_indexer._chroma_with_retry", fake_chroma_retry)
+    monkeypatch.setattr("nexus.doc_indexer._vector_with_retry", fake_chroma_retry)
     monkeypatch.setattr("nexus.doc_indexer._register_or_lookup_doc_id", fake_register)
 
     result = index_pdf(pdf, "test")
@@ -685,7 +685,7 @@ class TestStalenessCache:
         }
 
         with patch(
-            "nexus.indexer_utils._chroma_with_retry",
+            "nexus.indexer_utils._vector_with_retry",
             side_effect=lambda fn, **kw: fn(**kw),
         ):
             result = check_staleness(

@@ -162,7 +162,7 @@ class TestLayerCFallback:
              patch("nexus.bib_enricher_openalex.enrich", return_value={}), \
              patch("nexus.bib_enricher_openalex.enrich_by_doi", return_value={}), \
              patch("nexus.db.make_t3") as mock_t3, \
-             patch("nexus.retry._chroma_with_retry") as mock_retry:
+             patch("nexus.retry._vector_with_retry") as mock_retry:
             mock_retry.side_effect = [
                 {"ids": ["c1"], "metadatas": [dict(meta)]},
                 {"ids": ["c1"], "documents": ["body"], "metadatas": [dict(meta)]},

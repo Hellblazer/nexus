@@ -34,6 +34,7 @@ from nexus.corpus import is_conformant_collection_name
 from nexus.db.t3 import T3Database
 from nexus.indexer import _legacy_collection_name
 from nexus.registry import RepoRegistry
+from tests.conftest import make_vector_test_client
 
 # RDR-109 Phase 2: this file asserts cloud-mode canonical behavior
 # (voyage-* embedder names, canonical-set defaults). The cloud_mode
@@ -51,12 +52,12 @@ def t3():
     """T3 backed by ``EphemeralClient`` with a ChromaDB default
     embedding function (no Voyage API key required).
 
-    NOTE: ``chromadb.EphemeralClient()`` shares process-level state
+    NOTE: ``make_vector_test_client()`` shares process-level state
     across instances (the name is misleading), so the fixture clears
     every collection on entry to keep tests isolated. Mirrors the
     pattern used in ``test_t3_strict_collection_naming.py``.
     """
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     ef = chromadb.utils.embedding_functions.DefaultEmbeddingFunction()
     db = T3Database(_client=client, _ef_override=ef)
     for raw in list(db._client.list_collections()):

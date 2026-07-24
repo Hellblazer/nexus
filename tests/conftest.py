@@ -1,4 +1,5 @@
 import logging
+import os
 
 import pytest
 from pathlib import Path
@@ -54,6 +55,11 @@ def _disable_aspect_worker_autostart() -> None:
 
 _enable_t2_test_auto_migrate()
 _disable_aspect_worker_autostart()
+
+# RDR-155 P4b P0a': import at collection start so the engine substrate
+# resolves PG binaries against the AMBIENT env (per-test fixtures patch
+# HOME/NEXUS_CONFIG_DIR before the lazy first ensure_engine() call).
+import tests._engine_substrate  # noqa: E402, F401
 
 
 def pytest_configure(config):
@@ -242,10 +248,11 @@ def _isolate_t1_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     the constructor raises ``T1ServerNotFoundError``. Tests that
     previously relied on the legacy EphemeralClient fallback opt
     in via ``NX_T1_ISOLATED=1`` Path C; this autouse fixture sets
-    it process-wide so the suite gets a per-test
-    EphemeralClient by default. Tests that need a different mode
-    (env-passdown, addr file, fail-loud raise) override the env
-    inside the test.
+    it process-wide so the suite gets the process-scoped
+    ``InMemoryVectorClient`` singleton by default (RDR-155 P4b
+    P0a; session_id metadata filtering provides per-test scoping).
+    Tests that need a different mode (env-passdown, addr file,
+    fail-loud raise) override the env inside the test.
     """
     monkeypatch.setenv("NX_T1_ISOLATED", "1")
 
@@ -263,9 +270,60 @@ def _pin_mineru_autostart_off(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NX_MINERU_AUTOSTART", "0")
 
 
+@pytest.fixture
+def t2_service_env(request: pytest.FixtureRequest,
+                   monkeypatch: pytest.MonkeyPatch) -> str:
+    """Engine-backed T2 substrate env for one test (RDR-155 P4b P0a', D-A).
+
+    Boots the session-scoped hermetic PG + service JAR on first use
+    (tests/_engine_substrate.py, memoized) and points this test's env at
+    it with a freshly MINTED tenant + tenant-bound token — the engine
+    binds tenant to the BEARER server-side (AuthFilter Decision 1; the
+    X-Nexus-Tenant header is ignored), so per-test isolation is a
+    per-test token. Tests never share or clean up state. Returns the
+    tenant name.
+
+    Opt-in during the incremental migration; replaces the sqlite pin
+    (set AFTER _pin_storage_backend_sqlite — later setenv wins) and
+    becomes the suite default when the pin flips at the end of P0a'.
+    """
+    from tests._engine_substrate import ensure_engine, mint_test_tenant
+    from tests.db._service_fixture import jar_freshness_skip_reason
+
+    # CI leg (RDR-155 P4b P0a' registered question, now due): the Python
+    # CI job does not build the service JAR, so engine-substrate tests
+    # SKIP there — with a non-vacuity backstop: once CI provisions the
+    # JAR it sets NX_T2_SUBSTRATE_EXPECTED=1, after which an absent JAR
+    # FAILS loudly again (the skip can never silently become permanent).
+    # Provisioning work: bead nexus-CI-substrate (see g37fr).
+    if (
+        os.environ.get("GITHUB_ACTIONS") == "true"
+        and not os.environ.get("NX_T2_SUBSTRATE_EXPECTED")
+        and jar_freshness_skip_reason() is not None
+    ):
+        pytest.skip("engine substrate: service JAR not provisioned on CI "
+                    "(tracked; NX_T2_SUBSTRATE_EXPECTED=1 re-arms fail-loud)")
+
+    state = ensure_engine()
+    tenant, token = mint_test_tenant(state)
+    monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+    monkeypatch.setenv("NX_SERVICE_URL", state["base_url"])
+    monkeypatch.setenv("NX_SERVICE_TOKEN", token)
+    return tenant
+
+
 @pytest.fixture(autouse=True)
-def _pin_storage_backend_sqlite(monkeypatch: pytest.MonkeyPatch) -> None:
+def _pin_storage_backend_sqlite(request: pytest.FixtureRequest,
+                                monkeypatch: pytest.MonkeyPatch) -> None:
     """Pin the unit suite to the SQLite storage backend (RDR-152 nexus-fjwxh).
+
+    FLIP MECHANISM (RDR-155 P4b P0a'): ``NX_TEST_T2_SUBSTRATE=engine``
+    routes this autouse pin to the engine-backed substrate instead —
+    every test gets the session PG+JAR with a freshly minted tenant
+    (exactly what the ``t2_service_env`` opt-in fixture provides). This
+    is both the flip dry-run switch (run any subset against the engine
+    without editing files) and, when the migration completes, the
+    default this fixture body becomes.
 
     ``storage_backend_for`` defaults to ``service`` since the T2 cutover, so a
     bare ``T2Database(path)`` would construct the Http* stores and try to reach
@@ -280,6 +338,9 @@ def _pin_storage_backend_sqlite(monkeypatch: pytest.MonkeyPatch) -> None:
     test that wants service mode sets ``NX_STORAGE_BACKEND[_<store>]`` itself,
     which overrides this pin (later ``setenv`` wins).
     """
+    if os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine":
+        request.getfixturevalue("t2_service_env")
+        return
     monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
 
 
@@ -616,7 +677,7 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # the test proves retry-on-connect-error behavior, which does not
     # depend on deployment mode. No module-level fixtures/marks in this
     # file's header.
-    "test_chroma_retry.py",
+    "test_vector_retry.py",  # renamed from test_chroma_retry.py at RDR-155 P4b P0d
     # Whole-file "nxexp export/import format" class: every flagged test
     # constructs or reads a ``.nxexp`` header/record by hand (or via
     # ``export_collection``/``import_collection`` against a local
@@ -1046,17 +1107,57 @@ def db(tmp_path: Path) -> T2Database:
     database.close()
 
 
+#: Process-wide unique id source for fidelity-import seeding (RDR-155
+#: P4b P0a'). import_topic/import_plan preserve ids VERBATIM without
+#: advancing the engine's serial sequences, and the topics PK is GLOBAL
+#: across tenants on the shared session engine — so per-module counters
+#: collide across modules in one pytest session (bisected finding).
+#: Every module that seeds preserved ids MUST draw from THIS counter.
+import itertools
+
+_import_seed_ids = itertools.count(1_000_000_000)
+
+
+def next_import_seed_id() -> int:
+    """Session-unique id for fidelity-import seeding (see note above)."""
+    return next(_import_seed_ids)
+
+
+def make_vector_test_client():
+    """THE test vector substrate (RDR-155 P4b P0a): a fresh
+    ``InMemoryVectorClient`` with the real MiniLM default EF.
+
+    The single replacement idiom for inline ``chromadb.EphemeralClient()``
+    test constructions — semantics pinned differentially against the
+    chroma oracle by ``tests/test_vector_substrate_contract.py``. Real
+    per-instance isolation (no SharedSystemClient shared-state gotcha).
+    EF (P0b decision, settled): the nexus-owned MiniLMDirect — real
+    semantics (ranking snapshots and cosine gates are load-bearing),
+    byte-parity with chroma's retired default EF pinned by
+    tests/db/test_minilm_direct.py, zero chromadb involvement.
+    """
+    from nexus.db.inmemory_vector_store import InMemoryVectorClient
+    from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction
+
+    return InMemoryVectorClient(
+        default_embedding_function=MiniLMDirectEmbeddingFunction()
+    )
+
+
 @pytest.fixture
 def local_t3() -> T3Database:
-    """T3Database backed by an in-memory EphemeralClient and DefaultEmbeddingFunction.
+    """T3Database backed by a fresh InMemoryVectorClient and DefaultEmbeddingFunction.
 
     Each test gets a fresh, isolated database — no API keys required.
     DefaultEmbeddingFunction uses the bundled ONNX MiniLM-L6-v2 model,
     so semantic similarity works correctly without Voyage AI.
     """
-    client = chromadb.EphemeralClient()
-    ef = DefaultEmbeddingFunction()
-    return T3Database(_client=client, _ef_override=ef)
+    from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction
+
+    return T3Database(
+        _client=make_vector_test_client(),
+        _ef_override=MiniLMDirectEmbeddingFunction(),
+    )
 
 
 # ── PDF fixture generators ─────────────────────────────────────────────────

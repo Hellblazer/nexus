@@ -2922,13 +2922,16 @@ def store_put(
         # unconditionally (not just on the catalog-present path) since
         # fire_batch below needs real metadatas regardless of catalog_doc_id.
         from nexus.catalog.store_hook import (  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
-            catalog_store_hook,
+            catalog_store_hook_tracked,
+            rollback_minted_catalog_entry,
             single_chunk_manifest_metadata,
+            store_put_manifest_direct,
         )
         chunk_chroma_id, manifest_metadatas = single_chunk_manifest_metadata(content)
         catalog_doc_id = ""
+        catalog_row_minted = False
         try:
-            catalog_doc_id = catalog_store_hook(
+            catalog_doc_id, catalog_row_minted = catalog_store_hook_tracked(
                 title=title, doc_id=chunk_chroma_id, collection_name=col_name,
             )
         except Exception:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
@@ -2940,15 +2943,51 @@ def store_put(
                 exc_info=True,
             )
 
-        doc_id = t3.put(
-            collection=col_name,
-            content=content,
-            title=title,
-            tags=tags,
-            category=category,
-            ttl_days=ttl_days,
-            catalog_doc_id=catalog_doc_id,
-        )
+        # nexus-b6enc C2: the catalog row is registered BEFORE t3.put, so
+        # a put failure (engine skew / timeout / 500) would strand a ghost
+        # row — chunk_count=0, zero manifest, zero chunks — while the
+        # content existed only in the failed request. Compensate by
+        # deleting the row minted IN THIS CALL (never a pre-existing row
+        # the put deduped onto), then surface the original error. The
+        # compensation never raises, so it cannot mask the put failure.
+        try:
+            doc_id = t3.put(
+                collection=col_name,
+                content=content,
+                title=title,
+                tags=tags,
+                category=category,
+                ttl_days=ttl_days,
+                catalog_doc_id=catalog_doc_id,
+            )
+        except Exception as put_exc:
+            if catalog_doc_id and catalog_row_minted:
+                rollback_minted_catalog_entry(
+                    catalog_doc_id, original_error=str(put_exc),
+                )
+            raise
+
+        # nexus-b6enc C3 / F2: the manifest leg must not ride the
+        # swallowing fire_batch chain for this producer — write it
+        # directly and verify it landed. Failure is captured (not
+        # raised) so the remaining post-store consumers still fire; the
+        # final result then reports "stored but NOT cataloged" instead
+        # of a bare "Stored:".
+        manifest_error = ""
+        if catalog_doc_id:
+            try:
+                store_put_manifest_direct(catalog_doc_id, manifest_metadatas)
+            except Exception as manifest_exc:  # noqa: BLE001 — captured for the explicit non-"Stored:" result below
+                manifest_error = str(manifest_exc)
+                import structlog  # noqa: PLC0415 — branch-local logging
+                structlog.get_logger().warning(
+                    "store_put_manifest_direct_failed",
+                    doc_id=doc_id,
+                    catalog_doc_id=catalog_doc_id,
+                    collection=col_name,
+                    error=manifest_error[:300],
+                    exc_info=True,
+                )
         # A committed write makes any cached page burst stale — drop it so a
         # same-identity search re-fetches (batch-f1655f55 critique).
         _page_cache_invalidate()
@@ -3033,6 +3072,21 @@ def store_put(
             tool="store_put", tier="T3",
             target_title=title or doc_id,
         )
+        if manifest_error:
+            # nexus-b6enc C3: never a bare "Stored:" when the catalog
+            # manifest did not land — the content IS in T3 (recoverable
+            # by doc_id) but catalog-aware consumers will not see it.
+            # CRE Imp 3: do NOT suggest 'nx catalog reconcile' here —
+            # heal_manifest_gaps' candidate filter (chunk_count>0 OR
+            # meta.content_hash) excludes exactly these rows, making it
+            # a verified no-op for this failure mode. Retry IS effective
+            # (by_doc_id dedup + idempotent t3.put).
+            return (
+                f"Error: stored to T3 ({doc_id} in {col_name}) but NOT "
+                f"cataloged: {manifest_error}. Catalog row {catalog_doc_id} "
+                f"may show chunk_count=0; retry store_put with the same "
+                f"content (idempotent dedup makes retry safe)."
+            )
         return f"Stored: {doc_id} -> {col_name}"
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("store_put", e)
@@ -4055,6 +4109,20 @@ def store_delete(doc_id: str, collection: str = "knowledge") -> str:
         deleted = t3.delete_by_id(col_name, doc_id)
         if deleted:
             _page_cache_invalidate()
+            # nexus-b6enc C4: delete asymmetry — the T3 chunk is gone, so
+            # a store_put-origin catalog row (knowledge, no file_path)
+            # keyed on this chunk id must not survive with a stale
+            # chunk_count. delete_document cascades the manifest rows on
+            # both backends. Cleanup failure is surfaced, never silent.
+            from nexus.catalog.store_hook import store_delete_catalog_cleanup  # noqa: PLC0415 — deferred for startup cost
+            tumbler, cleanup_error = store_delete_catalog_cleanup(doc_id)
+            if cleanup_error:
+                return (
+                    f"Deleted: {doc_id} from {col_name} (WARNING: catalog "
+                    f"row {tumbler or '?'} NOT removed: {cleanup_error} — "
+                    f"a stale catalog entry may survive; run "
+                    f"'nx catalog reconcile')"
+                )
             return f"Deleted: {doc_id} from {col_name}"
         return f"Not found: {doc_id!r} in {col_name}"
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)

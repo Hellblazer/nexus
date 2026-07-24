@@ -9,6 +9,7 @@ import chromadb.errors
 import pytest
 
 from nexus.db.t3 import T3Database
+from tests.conftest import make_vector_test_client
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
@@ -543,11 +544,10 @@ def test_put_then_delete_by_title_cross_collapses_shared_content():
     mocked ``mock_db`` fixture above only proves id parity, not the
     delete-side consequence).
     """
-    import chromadb
     from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
     db = T3Database(
-        _client=chromadb.EphemeralClient(),
+        _client=make_vector_test_client(),
         _ef_override=DefaultEmbeddingFunction(),
     )
     collection = "knowledge__crosscollapse"

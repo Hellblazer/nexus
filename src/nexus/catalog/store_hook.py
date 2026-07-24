@@ -100,12 +100,31 @@ def _find_ghost_by_title(reader, owner, title: str):
 def catalog_store_hook(
     title: str, doc_id: str, collection_name: str,
 ) -> str:
+    """Back-compat wrapper over :func:`catalog_store_hook_tracked`.
+
+    Returns only the tumbler string; callers that need to know whether
+    the row was minted in this call (nexus-b6enc C2 ghost-register
+    compensation) use the tracked variant directly.
+    """
+    tumbler, _created = catalog_store_hook_tracked(title, doc_id, collection_name)
+    return tumbler
+
+
+def catalog_store_hook_tracked(
+    title: str, doc_id: str, collection_name: str,
+) -> tuple[str, bool]:
     """Register a knowledge entry in the catalog.
 
-    Returns the catalog ``Document.doc_id`` (Tumbler string) so the
-    caller can pass it to ``T3Database.put()`` as ``catalog_doc_id``
-    for chunk-write-time embedding (RDR-101 Phase 3 PR δ Stage B.4).
-    Returns ``""`` when an error occurs, or in the SQLite opt-out mode
+    Returns ``(tumbler, created)`` — *tumbler* is the catalog
+    ``Document.doc_id`` (Tumbler string) so the caller can pass it to
+    ``T3Database.put()`` as ``catalog_doc_id`` for chunk-write-time
+    embedding (RDR-101 Phase 3 PR δ Stage B.4); *created* is True only
+    when this call MINTED a brand-new document row (the
+    ``writer.register`` path). Dedup hits (``by_doc_id`` or the
+    GH #1370 ghost-by-title reconcile) return ``created=False`` so the
+    nexus-b6enc C2 compensation never deletes a pre-existing row the
+    put deduped onto. Returns ``("", False)`` when an error occurs, or
+    in the SQLite opt-out mode
     when no local catalog is initialised (service mode always has a
     catalog — the Java service owns it; nexus-f1itv) — the schema
     funnel drops empty ``doc_id`` at the boundary.
@@ -142,12 +161,12 @@ def catalog_store_hook(
         # opt-out mode with an uninitialised local catalog.
         reader = make_catalog_reader()
         if reader is None:
-            return ""
+            return "", False
 
         # Dedup by chunk_chroma_id stored in legacy meta.doc_id.
         existing = reader.by_doc_id(doc_id)
         if existing is not None:
-            return str(existing.tumbler)
+            return str(existing.tumbler), False
 
         # Get or create "knowledge" curator owner, filtered on owner_type so
         # a same-named REPO owner cannot shadow the intended curator (same
@@ -182,14 +201,14 @@ def catalog_store_hook(
                 "catalog_store_hook_deduped",
                 deduped_by="title", tumbler=str(ghost.tumbler),
             )
-            return str(ghost.tumbler)
+            return str(ghost.tumbler), False
 
         tumbler = writer.register(
             owner=owner, title=title, content_type="knowledge",
             physical_collection=collection_name,
             meta={"doc_id": doc_id},
         )
-        return str(tumbler)
+        return str(tumbler), True
     except Exception as exc:  # noqa: BLE001 - best-effort post-store catalog hook must not crash caller; logged + audited
         # nexus-ou4tb: the "" return is indistinguishable from "no tumbler
         # assigned", so at DEBUG this was a silent non-registration. WARNING +
@@ -201,12 +220,206 @@ def catalog_store_hook(
             source_path=doc_id or title or "", collection=collection_name or "",
             hook_name="catalog_store_hook", error=str(exc),
         )
-        return ""
+        return "", False
     finally:
         if writer is not None:
-            writer.close()
+            try:
+                writer.close()
+            except Exception:  # noqa: BLE001 — best-effort handle cleanup in finally; a raising close AFTER a successful register would DISCARD the (tumbler, created=True) return (return-in-try + raising-finally semantics) and orphan the created-flag the nexus-b6enc C2 compensation depends on
+                _log.warning("catalog_store_hook_writer_close_failed", exc_info=True)
         if reader is not None:
             try:
                 reader._db.close()
             except Exception:  # noqa: BLE001 — best-effort handle cleanup in finally; close failure is non-critical and intentionally silent
+                pass
+
+
+def rollback_minted_catalog_entry(tumbler: str, *, original_error: str = "") -> bool:
+    """Best-effort delete of a catalog row minted earlier IN THIS CALL
+    (nexus-b6enc C2 ghost-register compensation).
+
+    Both ``store_put`` paths register the catalog row BEFORE ``t3.put``;
+    when the put fails the just-minted row must not survive as a ghost
+    (row + zero manifest + zero chunks — unrecoverable content loss for
+    agent callers that drop MCP error strings). Callers invoke this ONLY
+    when :func:`catalog_store_hook_tracked` reported ``created=True`` —
+    a dedup hit must never be deleted.
+
+    Fail-loud discipline: this compensation must never MASK the original
+    put error, so it never raises — its own failure is logged at WARNING
+    with *original_error* attached so both failures are visible.
+
+    Returns True when the row was deleted.
+    """
+    writer = None
+    try:
+        from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred to avoid circular import at module load
+        from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — deferred, avoids import cycle
+
+        writer = make_catalog_writer(priority="interactive")
+        deleted = bool(writer.delete_document(Tumbler.parse(tumbler)))
+        _log.warning(
+            "store_put_ghost_register_compensated",
+            tumbler=tumbler,
+            deleted=deleted,
+            original_error=original_error[:300],
+        )
+        return deleted
+    except Exception:  # noqa: BLE001 — compensation must not mask the original t3.put error; both are logged
+        _log.warning(
+            "store_put_ghost_register_compensation_failed",
+            tumbler=tumbler,
+            original_error=original_error[:300],
+            exc_info=True,
+        )
+        return False
+    finally:
+        if writer is not None:
+            try:
+                writer.close()
+            except Exception:  # noqa: BLE001 — best-effort handle cleanup in finally
+                pass
+
+
+def store_put_manifest_direct(catalog_doc_id: str, metadatas: list[dict]) -> None:
+    """Direct, fail-loud manifest write for the store_put path
+    (nexus-b6enc C3 / F2).
+
+    The generic ``fire_batch`` chain swallows every hook exception by
+    contract (best-effort, correct for indexer batches). For store_put
+    the manifest leg is load-bearing — a swallowed failure leaves the
+    catalog row at ``chunk_count=0`` with zero manifest rows while the
+    tool still returns "Stored:". This helper writes the manifest
+    DIRECTLY via the whitelisted write ops (``atomic_manifest_replace``
+    + ``resync_chunk_count_cache`` — both implemented on the local
+    Catalog and the service ``HttpCatalogClient``) and then VERIFIES the
+    rows landed via a fresh reader. Any failure RAISES so the caller can
+    return an explicit "stored but NOT cataloged" result instead of a
+    bare success.
+
+    Does not replace the fire_batch manifest hook for other producers;
+    the store_put re-write it implies is an idempotent replace.
+    """
+    if not catalog_doc_id:
+        return
+    chunks = [
+        {
+            "chash": m.get("chunk_text_hash", ""),
+            "position": int(m.get("chunk_index", i)),
+            "chunk_index": m.get("chunk_index"),
+            "line_start": m.get("line_start") or None,
+            "line_end": m.get("line_end") or None,
+            "char_start": m.get("chunk_start_char") or None,
+            "char_end": m.get("chunk_end_char") or None,
+        }
+        for i, m in enumerate(metadatas or [])
+    ]
+    chunks = [c for c in chunks if c["chash"]]
+    if not chunks:
+        raise RuntimeError(
+            f"manifest write for {catalog_doc_id}: no chunk_text_hash in "
+            "metadatas — nothing to catalog"
+        )
+    from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred to avoid circular import at module load
+
+    writer = make_catalog_writer(priority="interactive")
+    try:
+        writer.atomic_manifest_replace(catalog_doc_id, chunks)
+        writer.resync_chunk_count_cache(catalog_doc_id)
+    finally:
+        try:
+            writer.close()
+        except Exception:  # noqa: BLE001 — best-effort handle cleanup
+            pass
+
+    # VERIFY the rows landed (nexus-b6enc F2: never trust a silent path).
+    reader = make_catalog_reader()
+    if reader is None:
+        raise RuntimeError(
+            f"manifest write for {catalog_doc_id}: catalog reader "
+            "unavailable — cannot verify the manifest landed"
+        )
+    try:
+        landed = {row.chash for row in reader.get_manifest(catalog_doc_id)}
+    finally:
+        try:
+            reader._db.close()
+        except Exception:  # noqa: BLE001 — service-mode reader has no SQLite handle (property raises)
+            pass
+    expected = {c["chash"] for c in chunks}
+    missing = expected - landed
+    if missing:
+        raise RuntimeError(
+            f"manifest write for {catalog_doc_id} did not land: "
+            f"{len(missing)} of {len(expected)} chunk hashes missing "
+            f"after write (e.g. {sorted(missing)[0][:16]}…)"
+        )
+
+
+def store_delete_catalog_cleanup(chash_doc_id: str) -> tuple[str, str]:
+    """Delete-asymmetry compensation for ``store_delete`` (nexus-b6enc C4).
+
+    MCP ``store_delete`` historically removed only the T3 chunk; the
+    catalog row + manifest survived with a stale ``chunk_count`` — a
+    permanent ghost. For store_put-origin docs (``content_type ==
+    'knowledge'`` with no ``file_path``) whose ``meta.doc_id`` matches
+    the deleted chunk's natural id, delete the catalog row too
+    (``delete_document`` cascades the manifest on both backends: the
+    local Catalog deletes ``document_chunks`` explicitly, the engine via
+    the fk-001 CASCADE).
+
+    Returns ``(tumbler, error)`` — ``("", "")`` when no matching
+    store_put-origin row exists (nothing to clean), ``(tumbler, "")`` on
+    successful cleanup, ``(tumbler, error)`` when a row was found but
+    cleanup failed (caller surfaces it — fail loud, never silent).
+    """
+    reader = None
+    entry = None
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import at module load
+
+        reader = make_catalog_reader()
+        if reader is None:
+            return "", ""
+        entry = reader.by_doc_id(chash_doc_id)
+    except Exception as exc:  # noqa: BLE001 — lookup failure must not mask the successful T3 delete; surfaced to caller
+        _log.warning(
+            "store_delete_catalog_lookup_failed",
+            doc_id=chash_doc_id, exc_info=True,
+        )
+        return "", f"catalog lookup failed: {exc}"
+    finally:
+        if reader is not None:
+            try:
+                reader._db.close()
+            except Exception:  # noqa: BLE001 — best-effort handle cleanup in finally
+                pass
+
+    if entry is None or entry.content_type != "knowledge" or entry.file_path:
+        return "", ""
+
+    tumbler = str(entry.tumbler)
+    writer = None
+    try:
+        from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred to avoid circular import at module load
+        from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — deferred, avoids import cycle
+
+        writer = make_catalog_writer(priority="interactive")
+        writer.delete_document(Tumbler.parse(tumbler))
+        _log.info(
+            "store_delete_catalog_row_removed",
+            tumbler=tumbler, doc_id=chash_doc_id,
+        )
+        return tumbler, ""
+    except Exception as exc:  # noqa: BLE001 — cleanup failure surfaced to the caller, never silently swallowed
+        _log.warning(
+            "store_delete_catalog_cleanup_failed",
+            tumbler=tumbler, doc_id=chash_doc_id, exc_info=True,
+        )
+        return tumbler, str(exc)
+    finally:
+        if writer is not None:
+            try:
+                writer.close()
+            except Exception:  # noqa: BLE001 — best-effort handle cleanup in finally
                 pass

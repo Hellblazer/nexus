@@ -15,7 +15,7 @@
   0.0837  code__snapshot  /repo/auth_login.py
   0.0802  code__snapshot  /repo/auth_register.py
   0.0534  code__snapshot  /repo/db_migration.py
-  0.0000  code__snapshot  /repo/search_index.py
+  d=1.0623  code__snapshot  /repo/search_index.py
   '''
 # ---
 # name: test_search_ranking_snapshot[database connection pool management]
@@ -34,7 +34,7 @@
   0.1618  code__snapshot  /repo/cache_layer.py
   0.1394  code__snapshot  /repo/http_handler.py
   0.0407  code__snapshot  /repo/logging_setup.py
-  0.0000  code__snapshot  /repo/search_index.py
+  d=1.0973  code__snapshot  /repo/search_index.py
   '''
 # ---
 # name: test_search_ranking_snapshot[deployment docker configuration]
@@ -53,7 +53,7 @@
   0.0808  code__snapshot  /repo/logging_setup.py
   0.0792  knowledge__snapshot  /docs/arch_decision_002.md
   0.0776  knowledge__snapshot  /docs/security_policy.md
-  0.0000  code__snapshot  /repo/auth_logout.py
+  d=1.0720  code__snapshot  /repo/auth_logout.py
   '''
 # ---
 # name: test_search_ranking_snapshot[search and indexing with embeddings]
@@ -72,7 +72,7 @@
   0.0186  code__snapshot  /repo/auth_login.py
   0.0154  knowledge__snapshot  /docs/api_design.md
   0.0074  code__snapshot  /repo/logging_setup.py
-  0.0000  code__snapshot  /repo/auth_logout.py
+  d=1.0653  code__snapshot  /repo/auth_logout.py
   '''
 # ---
 # name: test_search_ranking_snapshot[security password hashing bcrypt]
@@ -91,7 +91,7 @@
   0.0320  code__snapshot  /repo/search_index.py
   0.0166  code__snapshot  /repo/http_handler.py
   0.0013  knowledge__snapshot  /docs/deployment_guide.md
-  0.0000  code__snapshot  /repo/logging_setup.py
+  d=1.0498  code__snapshot  /repo/logging_setup.py
   '''
 # ---
 # name: test_search_ranking_snapshot[user authentication login password]
@@ -110,7 +110,7 @@
   0.1115  knowledge__snapshot  /docs/deployment_guide.md
   0.0910  code__snapshot  /repo/config_loader.py
   0.0151  code__snapshot  /repo/search_index.py
-  0.0000  code__snapshot  /repo/db_migration.py
+  d=1.0870  code__snapshot  /repo/db_migration.py
   '''
 # ---
 # name: test_search_single_corpus_snapshot[caching strategy with TTL expiry]
@@ -124,7 +124,7 @@
   0.1624  code__snapshot  /repo/auth_login.py
   0.1556  code__snapshot  /repo/auth_register.py
   0.1037  code__snapshot  /repo/db_migration.py
-  0.0000  code__snapshot  /repo/search_index.py
+  d=1.0623  code__snapshot  /repo/search_index.py
   '''
 # ---
 # name: test_search_single_corpus_snapshot[database connection pool management]
@@ -138,7 +138,7 @@
   0.2311  code__snapshot  /repo/cache_layer.py
   0.1992  code__snapshot  /repo/http_handler.py
   0.0581  code__snapshot  /repo/logging_setup.py
-  0.0000  code__snapshot  /repo/search_index.py
+  d=1.0973  code__snapshot  /repo/search_index.py
   '''
 # ---
 # name: test_search_single_corpus_snapshot[user authentication login password]
@@ -152,6 +152,6 @@
   0.1777  code__snapshot  /repo/http_handler.py
   0.1301  code__snapshot  /repo/config_loader.py
   0.0216  code__snapshot  /repo/search_index.py
-  0.0000  code__snapshot  /repo/db_migration.py
+  d=1.0870  code__snapshot  /repo/db_migration.py
   '''
 # ---

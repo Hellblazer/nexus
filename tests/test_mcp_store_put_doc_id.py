@@ -18,18 +18,18 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
-import chromadb
 import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
 from nexus.catalog.catalog import Catalog
 from nexus.db.t3 import T3Database
+from tests.conftest import make_vector_test_client
 
 
 @pytest.fixture
 def local_t3() -> T3Database:
     return T3Database(
-        _client=chromadb.EphemeralClient(),
+        _client=make_vector_test_client(),
         _ef_override=DefaultEmbeddingFunction(),
     )
 
@@ -224,7 +224,9 @@ def test_mcp_store_put_forwards_blank_doc_id_when_no_catalog(
     # exception that would ALSO leave catalog_doc_id='' (substantive-critic
     # finding): both forward doc_id='', so without this spy a future refactor
     # that broke the hook would pass vacuously.
-    from nexus.catalog.store_hook import catalog_store_hook as _real_hook
+    # nexus-b6enc: MCP store_put now calls the TRACKED variant (created
+    # flag drives the ghost-register compensation); spy on that.
+    from nexus.catalog.store_hook import catalog_store_hook_tracked as _real_hook
     spy: dict[str, object] = {}
 
     def _spy_hook(*a, **k):
@@ -233,7 +235,7 @@ def test_mcp_store_put_forwards_blank_doc_id_when_no_catalog(
         spy["ret"] = rv
         return rv
 
-    with patch("nexus.catalog.store_hook.catalog_store_hook",
+    with patch("nexus.catalog.store_hook.catalog_store_hook_tracked",
                side_effect=_spy_hook), \
          patch("nexus.mcp.core._get_t3", return_value=local_t3), \
          patch("nexus.mcp.core._hooks.fire_single", side_effect=_no_op), \
@@ -252,8 +254,8 @@ def test_mcp_store_put_forwards_blank_doc_id_when_no_catalog(
     # The hook actually RAN and RETURNED '' — this is the no-catalog path,
     # not a never-called or raised path that defaulted to '' by accident.
     assert spy.get("calls") == 1, "catalog_store_hook must actually run once"
-    assert spy.get("ret") == "", (
-        f"hook must return '' on the no-catalog path, got {spy.get('ret')!r}"
+    assert spy.get("ret") == ("", False), (
+        f"hook must return ('', False) on the no-catalog path, got {spy.get('ret')!r}"
     )
 
     chunk_id = hashlib.sha256(content.encode()).hexdigest()[:32]
@@ -292,7 +294,7 @@ def test_mcp_store_put_forwards_blank_doc_id_when_catalog_hook_raises(
     ) -> None:
         captured["doc_id"] = doc_id
 
-    with patch("nexus.catalog.store_hook.catalog_store_hook",
+    with patch("nexus.catalog.store_hook.catalog_store_hook_tracked",
                side_effect=RuntimeError("catalog boom")), \
          patch("nexus.mcp.core._get_t3", return_value=local_t3), \
          patch("nexus.mcp.core._hooks.fire_single", side_effect=_no_op), \

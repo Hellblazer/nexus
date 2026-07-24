@@ -6,6 +6,51 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+
+## [6.18.1] - 2026-07-24
+
+### Fixed
+- **`store_put` catalog rows can no longer outlive their chunks** (GH #1419 Issue 8, the
+  silent-data-loss class from the 2026-07-23 field postmortem). All three producers —
+  MCP `store_put`, CLI `nx store put`, and `nx memory promote` — now roll back a
+  catalog row minted in the same call when the vector write fails, and write the
+  manifest through a direct, verified, fail-loud path instead of the best-effort hook
+  chain: a failure surfaces as "stored to T3 but NOT cataloged — retry with the same
+  content", never a false "Stored:". `store_delete` symmetrically purges the manifest
+  and catalog row for `store_put`-origin documents.
+- `nx memory promote` passed `expires_at=` to a T3 API that does not accept it — the
+  verb raised `TypeError` against any real substrate (masked by mocks in tests).
+  Remaining TTL is now expressed through `ttl_days`.
+- A failed catalog leg during `nx memory promote --remove` can no longer delete the T2
+  source entry: the error is raised before the removal branch.
+
+### Added
+- `nx catalog doctor --store-put-integrity`: detects `chunk_count`-vs-manifest drift
+  and ghost documents (catalog row with zero manifest rows and zero chunks) for
+  `store_put`-origin knowledge documents, reporting title + tumbler so content can be
+  re-created while it is still remembered. Documents that cannot be verified (T3
+  unreachable, transient lookup errors) are reported in a separate non-fatal
+  "unverifiable" bucket — never as a false "content is gone".
+
+### Changed
+- The local tier-0 embedding function (`all-MiniLM-L6-v2`, 384d) is now a nexus-owned
+  direct ONNX implementation (`onnxruntime` + `tokenizers`, declared as first-class
+  dependencies — previously supplied transitively). Same model artifact, same cache
+  location, byte-identical embeddings (pinned by a differential parity suite against
+  the previous implementation); no re-download on upgrade. Part of the RDR-155 P4b
+  ChromaDB retirement (Phase 0); ChromaDB itself remains a dependency in this release.
+- Internal Phase-0 preparation for the upcoming 7.0.0 substrate retirement: surviving
+  code rehomed out of migration-era modules (`nexus.db.reconcile`,
+  `nexus.upgrade_ladder.provisioning`, `nexus.db.t2.rekey_client`), transient
+  vector-store retry helpers renamed off chroma-era names, and the unit-test suite
+  gained an opt-in engine-backed T2 substrate. No user-visible behavior change.
+
+### Engine
+- Engine remains `engine-service-v0.1.52` (no floor change). Four engine-side issues
+  discovered during this cycle (request-wedge under sustained traffic, JSON-null
+  confidence NPE on aspects upsert, import id-sequence advance, migration
+  chunk-count resync) are queued for the next engine tag.
+
 ## [6.18.0] - 2026-07-23
 
 Engine unchanged: ships with (and requires) engine-service-v0.1.52.

@@ -38,7 +38,7 @@ from typing import Any
 
 import structlog
 
-from nexus.migration.remap_client import RekeyJobLostError
+from nexus.db.t2.rekey_client import RekeyJobLostError
 from nexus.upgrade_ladder.protocol import (
     ConvergeOutcome,
     ConvergeResult,
@@ -203,7 +203,7 @@ class ChashRekeyRung:
     def _rekey_with_restart_retry(self, report: ProgressReporter) -> dict[str, Any]:
         """Drive the rekey, retrying ONCE if the engine restarted under it.
 
-        nexus-sfgqi. ``HttpRemapStore.rekey`` distinguishes three outcomes, but
+        nexus-sfgqi. ``HttpRekeyClient.rekey`` distinguishes three outcomes, but
         the ladder runner wraps ``converge()`` in a blanket
         ``except Exception -> RungOutcome.FAILED``, so a could-not-tell landed
         as a hard rung failure identical to a genuine one. For
@@ -358,14 +358,15 @@ class ChashRekeyRung:
 
 
 def default_chash_rekey_rung() -> "ChashRekeyRung":
-    """Production wiring: engine rekey via ``HttpRemapStore``; local-mode
+    """Production wiring: engine rekey via ``HttpRekeyClient`` (the P0e
+    surviving rekey surface, ``nexus.db.t2.rekey_client``); local-mode
     VALIDATE + diag probe + view re-provision through the admin/diag
     connections; managed mode degrades each to its honest None/no-op."""
 
     def _rekey(orphan_policy: str) -> dict[str, Any]:
-        from nexus.migration.remap_client import HttpRemapStore  # noqa: PLC0415 — deferred import cost
+        from nexus.db.t2.rekey_client import HttpRekeyClient  # noqa: PLC0415 — deferred import cost
 
-        with HttpRemapStore() as store:
+        with HttpRekeyClient() as store:
             return store.rekey(orphan_policy)
 
     def _detect_probe() -> int | None:

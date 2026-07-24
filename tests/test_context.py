@@ -2,7 +2,9 @@
 """Tests for L1 context cache generator (RDR-072)."""
 from __future__ import annotations
 
+import itertools
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -16,6 +18,61 @@ def db(tmp_path: Path) -> T2Database:
     database.close()
 
 
+#: Monotonic source-ids for the fidelity-import seeding leg — unique across
+#: the module so parent/child links stay valid within any one test's tenant.
+#: Starts at 1e9: import_topic preserves the given id VERBATIM without
+#: advancing the engine's topics id sequence, so low imported ids on the
+#: fresh session PG would sit exactly in the path of a later tenant's
+#: sequence-issued INSERT (persist_rebuild) and 409 on the PK — observed
+#: order-dependently against test_t2_concurrency's rebuild loop.
+from tests.conftest import next_import_seed_id  # session-unique import ids (see conftest note)
+
+
+def _seed_topics(taxonomy: Any, rows: list[dict[str, Any]]) -> list[int]:
+    """Seed ``topics`` rows on either substrate (RDR-155 P4b P0a').
+
+    Raw-SQLite leg keeps the historical INSERT (dies with the twin at the
+    flip); the service leg routes through the fidelity-import surface
+    ``import_topic`` which preserves label/collection/doc_count/created_at/
+    review_status verbatim. Returns the topic ids in row order so callers
+    can link children via ``parent_id``.
+    """
+    from nexus.db.storage_mode import has_raw_access
+
+    ids: list[int] = []
+    if has_raw_access(taxonomy):
+        for r in rows:
+            cur = taxonomy.conn.execute(
+                "INSERT INTO topics "
+                "(label, parent_id, collection, doc_count, created_at, review_status) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    r["label"],
+                    r.get("parent_id"),
+                    r["collection"],
+                    r["doc_count"],
+                    r.get("created_at", "2026-01-01T00:00:00Z"),
+                    r.get("review_status", "accepted"),
+                ),
+            )
+            ids.append(cur.lastrowid)
+        taxonomy.conn.commit()
+    else:
+        for r in rows:
+            ids.append(taxonomy.import_topic(
+                src_id=next_import_seed_id(),
+                label=r["label"],
+                parent_id=r.get("parent_id"),
+                collection=r["collection"],
+                centroid_hash=None,
+                doc_count=r["doc_count"],
+                created_at=r.get("created_at", "2026-01-01T00:00:00Z"),
+                review_status=r.get("review_status", "accepted"),
+                terms=None,
+            ))
+    return ids
+
+
 class TestGenerateContextL1:
     """Core L1 cache generation from taxonomy topics."""
 
@@ -24,18 +81,13 @@ class TestGenerateContextL1:
         from nexus.context import generate_context_l1
 
         # Seed topics across collections
-        db.taxonomy.conn.executemany(
-            "INSERT INTO topics (label, collection, doc_count, created_at, review_status) "
-            "VALUES (?, ?, ?, ?, ?)",
-            [
-                ("GPU Kernels", "code__art", 100, "2026-01-01T00:00:00Z", "accepted"),
-                ("HTTP Handlers", "code__nexus", 50, "2026-01-01T00:00:00Z", "accepted"),
-                ("BFT Consensus", "knowledge__delos", 80, "2026-01-01T00:00:00Z", "accepted"),
-                ("PDF Extraction", "docs__nexus", 60, "2026-01-01T00:00:00Z", "accepted"),
-                ("Catalog Design", "rdr__nexus", 40, "2026-01-01T00:00:00Z", "accepted"),
-            ],
-        )
-        db.taxonomy.conn.commit()
+        _seed_topics(db.taxonomy, [
+            {"label": "GPU Kernels", "collection": "code__art", "doc_count": 100},
+            {"label": "HTTP Handlers", "collection": "code__nexus", "doc_count": 50},
+            {"label": "BFT Consensus", "collection": "knowledge__delos", "doc_count": 80},
+            {"label": "PDF Extraction", "collection": "docs__nexus", "doc_count": 60},
+            {"label": "Catalog Design", "collection": "rdr__nexus", "doc_count": 40},
+        ])
 
         out = tmp_path / "context_l1.txt"
         result = generate_context_l1(db.taxonomy, output_path=out)
@@ -62,17 +114,12 @@ class TestGenerateContextL1:
         """Topics grouped by collection prefix (code/docs/knowledge/rdr)."""
         from nexus.context import generate_context_l1
 
-        db.taxonomy.conn.executemany(
-            "INSERT INTO topics (label, collection, doc_count, created_at, review_status) "
-            "VALUES (?, ?, ?, ?, ?)",
-            [
-                ("Topic A", "code__repo1", 10, "2026-01-01T00:00:00Z", "accepted"),
-                ("Topic B", "docs__repo1", 20, "2026-01-01T00:00:00Z", "accepted"),
-                ("Topic C", "knowledge__kb", 30, "2026-01-01T00:00:00Z", "accepted"),
-                ("Topic D", "rdr__repo1", 40, "2026-01-01T00:00:00Z", "accepted"),
-            ],
-        )
-        db.taxonomy.conn.commit()
+        _seed_topics(db.taxonomy, [
+            {"label": "Topic A", "collection": "code__repo1", "doc_count": 10},
+            {"label": "Topic B", "collection": "docs__repo1", "doc_count": 20},
+            {"label": "Topic C", "collection": "knowledge__kb", "doc_count": 30},
+            {"label": "Topic D", "collection": "rdr__repo1", "doc_count": 40},
+        ])
 
         out = tmp_path / "context_l1.txt"
         generate_context_l1(db.taxonomy, output_path=out)
@@ -87,13 +134,11 @@ class TestGenerateContextL1:
         """Only top 5 topics per prefix by doc_count."""
         from nexus.context import generate_context_l1
 
-        for i in range(8):
-            db.taxonomy.conn.execute(
-                "INSERT INTO topics (label, collection, doc_count, created_at, review_status) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (f"Code Topic {i}", "code__repo", (8 - i) * 10, "2026-01-01T00:00:00Z", "accepted"),
-            )
-        db.taxonomy.conn.commit()
+        _seed_topics(db.taxonomy, [
+            {"label": f"Code Topic {i}", "collection": "code__repo",
+             "doc_count": (8 - i) * 10}
+            for i in range(8)
+        ])
 
         out = tmp_path / "context_l1.txt"
         generate_context_l1(db.taxonomy, output_path=out)
@@ -127,14 +172,11 @@ class TestGenerateContextL1:
         from nexus.context import _TOPICS_PER_PREFIX
         from nexus.context import generate_context_l1
 
-        for i in range(5):
-            db.taxonomy.conn.execute(
-                "INSERT INTO topics (label, collection, doc_count, created_at, review_status) "
-                "VALUES (?, ?, ?, ?, ?)",
-                ("Phantom Duplicate", f"docs__phantom{i}", 144,
-                 "2026-05-28T00:00:00Z", "accepted"),
-            )
-        db.taxonomy.conn.commit()
+        _seed_topics(db.taxonomy, [
+            {"label": "Phantom Duplicate", "collection": f"docs__phantom{i}",
+             "doc_count": 144, "created_at": "2026-05-28T00:00:00Z"}
+            for i in range(5)
+        ])
 
         out = tmp_path / "context_l1.txt"
         generate_context_l1(db.taxonomy, output_path=out)
@@ -158,15 +200,12 @@ class TestGenerateContextL1:
         """
         from nexus.context import generate_context_l1
 
-        db.taxonomy.conn.executemany(
-            "INSERT INTO topics (label, collection, doc_count, created_at, review_status) "
-            "VALUES (?, ?, ?, ?, ?)",
-            [
-                ("Shared Label", "docs__a", 100, "2026-05-28T00:00:00Z", "accepted"),
-                ("Shared Label", "docs__b", 50, "2026-05-28T00:00:00Z", "accepted"),
-            ],
-        )
-        db.taxonomy.conn.commit()
+        _seed_topics(db.taxonomy, [
+            {"label": "Shared Label", "collection": "docs__a", "doc_count": 100,
+             "created_at": "2026-05-28T00:00:00Z"},
+            {"label": "Shared Label", "collection": "docs__b", "doc_count": 50,
+             "created_at": "2026-05-28T00:00:00Z"},
+        ])
 
         out = tmp_path / "context_l1.txt"
         generate_context_l1(db.taxonomy, output_path=out)
@@ -179,18 +218,13 @@ class TestGenerateContextL1:
         """Only root topics (parent_id IS NULL), not children from split."""
         from nexus.context import generate_context_l1
 
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at, review_status) "
-            "VALUES (?, ?, ?, ?, ?)",
-            ("Root Topic", "code__repo", 100, "2026-01-01T00:00:00Z", "accepted"),
-        )
-        root_id = db.taxonomy.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, parent_id, collection, doc_count, created_at, review_status) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            ("Child Topic", root_id, "code__repo", 50, "2026-01-01T00:00:00Z", "accepted"),
-        )
-        db.taxonomy.conn.commit()
+        [root_id] = _seed_topics(db.taxonomy, [
+            {"label": "Root Topic", "collection": "code__repo", "doc_count": 100},
+        ])
+        _seed_topics(db.taxonomy, [
+            {"label": "Child Topic", "collection": "code__repo", "doc_count": 50,
+             "parent_id": root_id},
+        ])
 
         out = tmp_path / "context_l1.txt"
         generate_context_l1(db.taxonomy, output_path=out)
@@ -203,12 +237,9 @@ class TestGenerateContextL1:
         """Cache file is written atomically (no partial reads)."""
         from nexus.context import generate_context_l1
 
-        db.taxonomy.conn.execute(
-            "INSERT INTO topics (label, collection, doc_count, created_at, review_status) "
-            "VALUES (?, ?, ?, ?, ?)",
-            ("Test Topic", "code__repo", 10, "2026-01-01T00:00:00Z", "accepted"),
-        )
-        db.taxonomy.conn.commit()
+        _seed_topics(db.taxonomy, [
+            {"label": "Test Topic", "collection": "code__repo", "doc_count": 10},
+        ])
 
         out = tmp_path / "context_l1.txt"
         # Write initial content
@@ -229,15 +260,12 @@ class TestGenerateContextL1:
         from nexus.context import generate_context_l1
 
         # Topics from two different repos
-        db.taxonomy.conn.executemany(
-            "INSERT INTO topics (label, collection, doc_count, created_at, review_status) "
-            "VALUES (?, ?, ?, ?, ?)",
-            [
-                ("My Repo Topic", "code__myrepo-abc123", 100, "2026-01-01T00:00:00Z", "accepted"),
-                ("Other Repo Topic", "code__other-def456", 50, "2026-01-01T00:00:00Z", "accepted"),
-            ],
-        )
-        db.taxonomy.conn.commit()
+        _seed_topics(db.taxonomy, [
+            {"label": "My Repo Topic", "collection": "code__myrepo-abc123",
+             "doc_count": 100},
+            {"label": "Other Repo Topic", "collection": "code__other-def456",
+             "doc_count": 50},
+        ])
 
         # Mock registry to return myrepo collections only
         mock_entry = {"collection": "code__myrepo-abc123", "docs_collection": "docs__myrepo-abc123"}
@@ -370,12 +398,9 @@ class TestRefreshContextL1:
 
         # Create DB with a topic
         with T2Database(db_path) as db:
-            db.taxonomy.conn.execute(
-                "INSERT INTO topics (label, collection, doc_count, created_at, review_status) "
-                "VALUES (?, ?, ?, ?, ?)",
-                ("Refresh Test", "code__repo", 10, "2026-01-01T00:00:00Z", "accepted"),
-            )
-            db.taxonomy.conn.commit()
+            _seed_topics(db.taxonomy, [
+                {"label": "Refresh Test", "collection": "code__repo", "doc_count": 10},
+            ])
 
         result = refresh_context_l1(db_path=db_path, output_path=out)
         assert result == out

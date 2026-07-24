@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import structlog
 from structlog.testing import capture_logs
+from tests.conftest import make_vector_test_client
 
 
 @pytest.fixture(autouse=True)
@@ -295,18 +296,19 @@ def test_catalog_store_hook_failed_logs_warning(tmp_path, monkeypatch):
         t2_path = tmp_path / "t2.db"
         monkeypatch.setattr(core_mod, "_t2_ctx", lambda: T2Database(t2_path))
 
-        t1_client = chromadb.EphemeralClient()
+        t1_client = make_vector_test_client()
         _inject_t1(T1Database(session_id="hook-fail", client=t1_client))
 
-        t3_client = chromadb.EphemeralClient()
+        t3_client = make_vector_test_client()
         ef = chromadb.utils.embedding_functions.DefaultEmbeddingFunction()
         _inject_t3(T3Database(_client=t3_client, _ef_override=ef))
 
         # Force the catalog hook to raise.
         # nexus-8g79.10 (V1): the hook moved to nexus.catalog.store_hook
-        # (lower layer); patch the canonical location.
+        # (lower layer); patch the canonical location. nexus-b6enc: MCP
+        # store_put now calls the TRACKED variant.
         monkeypatch.setattr(
-            "nexus.catalog.store_hook.catalog_store_hook",
+            "nexus.catalog.store_hook.catalog_store_hook_tracked",
             MagicMock(side_effect=RuntimeError("simulated catalog failure")),
         )
 
@@ -411,11 +413,17 @@ def test_set_owner_head_hash_failed_logs_warning(tmp_path, monkeypatch):
     )
 
 
-def test_catalog_registry_adapter_register_failed_logs_warning(tmp_path):
+def test_catalog_registry_adapter_register_failed_logs_warning(tmp_path, monkeypatch):
     """_CatalogBackedRegistry.update catches Exception around
     cat.register_collection and emits
     catalog_registry_adapter_register_failed before returning
     success=False to the caller."""
+    # RDR-155 P4b P0a': the test builds a LOCAL file catalog; under the
+    # engine substrate the service backend opens it frozen-readonly and
+    # the owner write fails before the mocked register path. Pin the
+    # catalog backend so the adapter's catch-and-warn contract stays
+    # exercised (dies with the rich catalog at flip).
+    monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "sqlite")
     from nexus.commands.index import _CatalogBackedRegistry
     from nexus.catalog.catalog import Catalog
 

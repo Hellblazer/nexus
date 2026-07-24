@@ -939,7 +939,7 @@ T3 chunks are NOT moved by this verb. Operators repopulate the target via `nx in
 ```
 nx catalog doctor [--replay-equality] [--t3-doc-id-coverage] [--collections-drift]
                   [--strict-not-in-t3] [--chunk-size-distribution] [--chunk-text-dedup]
-                  [--t3-vs-catalog] [--name-vs-embed-dim] [--json]
+                  [--t3-vs-catalog] [--name-vs-embed-dim] [--store-put-integrity] [--json]
 ```
 
 RDR-101 catalog doctor surface; pass at least one check flag.
@@ -951,6 +951,7 @@ RDR-101 catalog doctor surface; pass at least one check flag.
 - `--chunk-text-dedup`: chunk-text-hash duplication ratios — within-collection dupes >5% signal a chunker bug; >100 cross-collection dupes flag a cross-ingest investigation lead.
 - `--t3-vs-catalog`: projection-vs-T3 triage — T3 collections with no catalog documents (orphan), projected collections with 0 chunks (zombie), and catalog documents whose `physical_collection` is gone from T3.
 - `--name-vs-embed-dim`: samples one chunk per conformant collection and compares the actual embedding dimension to the one implied by the collection name's `__<model>__` segment; FAIL suggests `nx collection rename` (cosmetic, no re-embed).
+- `--store-put-integrity`: store_put-origin integrity (nexus-b6enc, GH #1419 Issue 8) — for `content_type='knowledge'` documents with no `file_path`: FAIL on `chunk_count` != manifest-row count (drift) and on ghosts (catalog row with zero manifest rows AND zero T3 chunks), reporting title + tumbler so the content can be re-created while it is still remembered.
 
 Returns non-zero on any check failure. `--json` emits the per-check result for CI consumption.
 

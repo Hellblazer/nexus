@@ -18,9 +18,10 @@ ever becomes a burden.
 
 Stack:
 
-- ``onnxruntime``    runtime (already a core dep via chromadb's bundled
-  ONNX MiniLM EF).
-- ``tokenizers``     HuggingFace Rust tokenizer (already a core dep).
+- ``onnxruntime``    runtime (FIRST-CLASS core dep as of RDR-155 P4b
+  P0b — previously transitive via chromadb).
+- ``tokenizers``     HuggingFace Rust tokenizer (first-class core dep,
+  same P0b change).
 - ``huggingface_hub``  pulls the ONNX + tokenizer.json artifacts on
   first call. Already a core dep via chromadb / docling.
 

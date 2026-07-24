@@ -40,6 +40,7 @@ suite (T1 scratch ``rdr-138 nexus-troas pre-write empirical findings``):
 """
 from __future__ import annotations
 
+import os
 import statistics
 import threading
 import time
@@ -101,28 +102,35 @@ def _queue_counts(db_path: Path, old: str, new: str) -> tuple[int, int]:
     return aq_old, aq_new
 
 
-def _full_counts(
-    db_path: Path, old: str, new: str
-) -> tuple[int, int, int, int]:
-    """(da_old, da_new, aq_old, aq_new) from a fresh connection."""
+def _aspect_presence(db_path: Path, old: str, new: str, src: str) -> tuple[bool, bool]:
+    """(row under OLD?, row under NEW?) via the PUBLIC ``document_aspects.get``
+    keyed read — substrate-neutral (RDR-155 P4b P0a'). ``(collection,
+    source_path)`` is the store's unique key, so presence is exact-count 1.
+
+    A fresh open is required on the sqlite leg: the cascade commits on its own
+    dedicated connection, and an already-open reader may hold a stale WAL
+    snapshot (test_collection_rename.py precedent).
+    """
     with _make_db(db_path) as v:
-        da_old = v.document_aspects.conn.execute(
-            "SELECT COUNT(*) FROM document_aspects WHERE collection = ?",
-            (old,),
-        ).fetchone()[0]
-        da_new = v.document_aspects.conn.execute(
-            "SELECT COUNT(*) FROM document_aspects WHERE collection = ?",
-            (new,),
-        ).fetchone()[0]
-        aq_old = v.aspect_queue.conn.execute(
-            "SELECT COUNT(*) FROM aspect_extraction_queue WHERE collection = ?",
-            (old,),
-        ).fetchone()[0]
-        aq_new = v.aspect_queue.conn.execute(
-            "SELECT COUNT(*) FROM aspect_extraction_queue WHERE collection = ?",
-            (new,),
-        ).fetchone()[0]
-    return da_old, da_new, aq_old, aq_new
+        return (
+            v.document_aspects.get(old, src) is not None,
+            v.document_aspects.get(new, src) is not None,
+        )
+
+
+def _assert_queue_fully_cleared(db_path: Path) -> None:
+    """Assert the queue holds NO rows in any actionable status — public surface.
+
+    ``pending_count() == 0`` covers pending; ``is_drained()`` covers pending +
+    in_progress (rows with status != 'failed'); these tests never produce
+    failed rows, so together they pin "queue cleared" exactly on both
+    substrates.
+    """
+    with _make_db(db_path) as v:
+        assert v.aspect_queue.pending_count() == 0, "pending row left in queue"
+        assert v.aspect_queue.is_drained(), (
+            "queue not cleared by mark_done — in-flight orphan left"
+        )
 
 
 _OLD = "knowledge__old"
@@ -149,6 +157,14 @@ class TestInflightRowPreservation:
 
     _ITERATIONS = 30
 
+    @pytest.mark.skipif(
+        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        reason="dies-roster: the deterministic claim-vs-cascade race outcome "
+        "is the SQLite RENAME_LOCK serialization's guarantee and the harness "
+        "needs a fresh DB file per iteration (the engine tenant is per-TEST, "
+        "so 30 iterations would collide on the (collection, source_path) "
+        "key) — dies at the RDR-155 P4b flip",
+    )
     def test_inflight_claim_racing_cascade_never_loses_row(
         self, tmp_path: Path
     ) -> None:
@@ -242,13 +258,10 @@ class TestCompleteAspectCascadeAtomicity:
         finally:
             db.close()
 
-        da_old, da_new, aq_old, aq_new = _full_counts(db_path, _OLD, _NEW)
-        assert da_old == 0, "document_aspects drifted: row left under OLD"
-        assert da_new == 1, "extraction not preserved under NEW"
-        assert aq_old == 0 and aq_new == 0, (
-            f"queue not cleared by mark_done — orphan left: "
-            f"old={aq_old} new={aq_new}"
-        )
+        da_old, da_new = _aspect_presence(db_path, _OLD, _NEW, _SRC)
+        assert not da_old, "document_aspects drifted: row left under OLD"
+        assert da_new, "extraction not preserved under NEW"
+        _assert_queue_fully_cleared(db_path)
 
     def test_cascade_blocked_mid_complete_aspect_then_consistent(
         self, tmp_path: Path
@@ -312,13 +325,11 @@ class TestCompleteAspectCascadeAtomicity:
         finally:
             db.close()
 
-        da_old, da_new, aq_old, aq_new = _full_counts(db_path, _OLD, _NEW)
-        assert da_old == 0 and da_new == 1, (
+        da_old, da_new = _aspect_presence(db_path, _OLD, _NEW, _SRC)
+        assert (not da_old) and da_new, (
             f"document_aspects inconsistent: old={da_old} new={da_new}"
         )
-        assert aq_old == 0 and aq_new == 0, (
-            f"queue not cleared — orphan: old={aq_old} new={aq_new}"
-        )
+        _assert_queue_fully_cleared(db_path)
 
 
 # ── Scenario 2b: documented self-healing residue (cascade before complete) ────
@@ -343,6 +354,8 @@ class TestGap3StaleCollectionResidue:
     def test_cascade_before_complete_drifts_then_reclaim_self_heals(
         self, tmp_path: Path
     ) -> None:
+        from nexus.db.storage_mode import has_raw_access
+
         db_path = tmp_path / "memory.db"
         db = _make_db(db_path)
         try:
@@ -352,36 +365,60 @@ class TestGap3StaleCollectionResidue:
             # complete_aspect with the stale OLD collection captured at claim.
             db.complete_aspect(_aspect_fields(_OLD, _SRC))
 
-            da_old, da_new, aq_old, aq_new = _full_counts(db_path, _OLD, _NEW)
-            # EXACT residue state (documented, not desired):
-            assert da_old == 1 and da_new == 0, (
+            # EXACT residue state (documented, not desired): document_aspects
+            # drifted under OLD; the queue orphan sits in_progress under NEW.
+            da_old, da_new = _aspect_presence(db_path, _OLD, _NEW, _SRC)
+            assert da_old and not da_new, (
                 f"unexpected document_aspects residue: old={da_old} new={da_new}"
             )
-            assert aq_old == 0 and aq_new == 1, (
-                f"unexpected queue residue: old={aq_old} new={aq_new}"
+            assert db.aspect_queue.pending_count() == 0, (
+                "orphan should be in_progress, not pending"
             )
-            status = db.aspect_queue.conn.execute(
-                "SELECT status FROM aspect_extraction_queue WHERE collection = ?",
-                (_NEW,),
-            ).fetchone()[0]
-            assert status == "in_progress", "orphan not in_progress"
+            assert not db.aspect_queue.is_drained(), (
+                "expected an in_progress orphan row under NEW"
+            )
 
-            # Self-heal: backdate last_attempt_at so the orphan is stale, then
-            # reclaim. reclaim_stale re-pends it under NEW -> re-extraction.
-            db.aspect_queue.conn.execute(
-                "UPDATE aspect_extraction_queue "
-                "SET last_attempt_at = '2020-01-01T00:00:00+00:00'"
-            )
-            db.aspect_queue.conn.commit()
-            reclaimed = db.aspect_queue.reclaim_stale(timeout_seconds=60)
-            assert reclaimed == 1, "reclaim_stale did not re-pend the orphan"
+            if has_raw_access(db.aspect_queue):
+                # Raw leg (dies with the SQLite twin at the RDR-155 P4b flip):
+                # exact row/status probe + realistic staleness backdate.
+                status = db.aspect_queue.conn.execute(
+                    "SELECT status FROM aspect_extraction_queue WHERE collection = ?",
+                    (_NEW,),
+                ).fetchone()[0]
+                assert status == "in_progress", "orphan not in_progress"
 
-            healed = db.aspect_queue.conn.execute(
-                "SELECT collection, status FROM aspect_extraction_queue"
-            ).fetchall()
-            assert healed == [(_NEW, "pending")], (
-                f"orphan not self-healed to (NEW, pending): {healed}"
-            )
+                # Self-heal: backdate last_attempt_at so the orphan is stale,
+                # then reclaim. reclaim_stale re-pends it under NEW ->
+                # re-extraction.
+                db.aspect_queue.conn.execute(
+                    "UPDATE aspect_extraction_queue "
+                    "SET last_attempt_at = '2020-01-01T00:00:00+00:00'"
+                )
+                db.aspect_queue.conn.commit()
+                reclaimed = db.aspect_queue.reclaim_stale(timeout_seconds=60)
+                assert reclaimed == 1, "reclaim_stale did not re-pend the orphan"
+
+                healed = db.aspect_queue.conn.execute(
+                    "SELECT collection, status FROM aspect_extraction_queue"
+                ).fetchall()
+                assert healed == [(_NEW, "pending")], (
+                    f"orphan not self-healed to (NEW, pending): {healed}"
+                )
+            else:
+                # Public leg: no backdate surface exists, so make everything
+                # in_progress immediately stale (timeout 0). reclaimed == 1
+                # proves exactly one in_progress orphan existed; the healed
+                # pending row must carry the NEW collection.
+                reclaimed = db.aspect_queue.reclaim_stale(timeout_seconds=0)
+                assert reclaimed == 1, "reclaim_stale did not re-pend the orphan"
+
+                healed = [
+                    (r.collection, "pending")
+                    for r in db.aspect_queue.list_pending()
+                ]
+                assert healed == [(_NEW, "pending")], (
+                    f"orphan not self-healed to (NEW, pending): {healed}"
+                )
         finally:
             db.close()
 

@@ -102,7 +102,8 @@ class TestVictimScenarioEndToEnd:
         db = _fake_t3()
         with patch("nexus.commands.store.make_t3", return_value=db), \
              patch("nexus.corpus.t3_collection_name", return_value="knowledge__t__x__v1"), \
-             patch("nexus.commands.store._catalog_store_hook", return_value=""), \
+             patch("nexus.commands.store._catalog_store_hook_tracked",
+                   return_value=("", False)), \
              patch("nexus.commands.store._single_chunk_manifest_metadata",
                    return_value=("cid", [{}])), \
              patch("nexus.hook_registry.HookRegistry"), \

@@ -515,7 +515,7 @@ wheels = [
 
 [[package]]
 name = "conexus"
-version = "6.18.0"
+version = "6.18.1"
 source = { editable = "." }
 dependencies = [
     { name = "chromadb" },
@@ -530,6 +530,7 @@ dependencies = [
     { name = "msgpack" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13' or sys_platform == 'linux'" },
     { name = "numpy", version = "2.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13' and sys_platform != 'linux'" },
+    { name = "onnxruntime" },
     { name = "opencv-python-headless" },
     { name = "pymupdf" },
     { name = "python-pptx" },
@@ -537,6 +538,7 @@ dependencies = [
     { name = "scikit-learn" },
     { name = "sigstore" },
     { name = "structlog" },
+    { name = "tokenizers" },
     { name = "tqdm" },
     { name = "tree-sitter-language-pack" },
     { name = "uuid7-standard" },
@@ -573,6 +575,7 @@ requires-dist = [
     { name = "mineru", extras = ["pipeline"] },
     { name = "msgpack", specifier = ">=1.0" },
     { name = "numpy", specifier = ">=1.24" },
+    { name = "onnxruntime", specifier = ">=1.20" },
     { name = "opencv-python-headless", specifier = ">=4.0.0" },
     { name = "pymupdf", specifier = ">=1.26.6" },
     { name = "python-pptx", specifier = ">=1.0.0" },
@@ -580,6 +583,7 @@ requires-dist = [
     { name = "scikit-learn", specifier = ">=1.3" },
     { name = "sigstore", specifier = ">=3.0,<5" },
     { name = "structlog", specifier = ">=24.0" },
+    { name = "tokenizers", specifier = ">=0.20" },
     { name = "tqdm", specifier = ">=4.65" },
     { name = "tree-sitter-language-pack", specifier = ">=0.7.1,<1.0" },
     { name = "uuid7-standard", marker = "python_full_version < '3.14'", specifier = ">=1.1.0" },

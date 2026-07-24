@@ -23,6 +23,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from tests.conftest import make_vector_test_client
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -566,11 +567,10 @@ class TestUriDispatch:
         reassembles, the extractor parses, and an ``AspectRecord``
         emerges with non-null fields.
         """
-        import chromadb
 
         from nexus.aspect_extractor import AspectRecord, extract_aspects
 
-        client = chromadb.EphemeralClient()
+        client = make_vector_test_client()
         try:
             client.delete_collection("knowledge__uri_dispatch")
         except Exception:
@@ -605,11 +605,10 @@ class TestUriDispatch:
         match the queried identity. Returns ``ExtractFail(reason='empty')``;
         no row written; subprocess never invoked.
         """
-        import chromadb
 
         from nexus.aspect_extractor import ExtractFail, extract_aspects
 
-        client = chromadb.EphemeralClient()
+        client = make_vector_test_client()
         try:
             client.delete_collection("knowledge__ghost")
         except Exception:
@@ -1439,7 +1438,6 @@ class TestDocumentShapeClassifier:
     def test_single_doc_prose_routes_and_stamps_general_prose(self, monkeypatch):
         """End-to-end single-doc: prose content in knowledge__ produces a row
         stamped general-prose-v1 (nexus-kmbys)."""
-        import subprocess as _sp
         from nexus.aspect_extractor import extract_aspects
 
         def fake_run(args, **kwargs):

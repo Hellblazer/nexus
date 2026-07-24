@@ -487,15 +487,16 @@ class TestT1DatabaseFlagOffPreservesLegacyBehaviour:
 
 class TestT1DatabaseFlagOnIsolationPath:
     """Path C (RDR-105 P2 / nexus-mj2o): explicit ``NX_T1_ISOLATED=1``
-    opts into a per-process ``EphemeralClient``. No HTTP discovery
-    attempted. (The legacy ``NEXUS_SKIP_T1`` alias was removed at 6.5.2.)
+    opts into the process-scoped ``InMemoryVectorClient`` (RDR-155 P4b
+    P0a — previously a per-process ``EphemeralClient``). No HTTP
+    discovery attempted. (The legacy ``NEXUS_SKIP_T1`` alias was removed
+    at 6.5.2.)
     """
 
-    def test_nx_t1_isolated_uses_ephemeral(self, tmp_path, monkeypatch):
+    def test_nx_t1_isolated_uses_inmemory_store(self, tmp_path, monkeypatch):
         from unittest.mock import MagicMock
 
         fake_chromadb = MagicMock()
-        fake_chromadb.EphemeralClient.return_value = MagicMock()
         monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
@@ -504,12 +505,28 @@ class TestT1DatabaseFlagOnIsolationPath:
         monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
         monkeypatch.setenv("NX_T1_ISOLATED", "1")
 
+        from nexus.db.inmemory_vector_store import InMemoryVectorClient
         from nexus.db.t1 import T1Database
         db = T1Database()
 
         fake_chromadb.HttpClient.assert_not_called()
-        fake_chromadb.EphemeralClient.assert_called_once()
+        fake_chromadb.EphemeralClient.assert_not_called()
+        assert isinstance(db._client, InMemoryVectorClient)
         assert db.session_id
+
+    def test_isolated_leg_shares_one_client_per_process(self, tmp_path, monkeypatch):
+        """Chroma-parity contract (RDR-155 P4b P0a): the legacy
+        EphemeralClient leg shared backing state per process (the
+        SharedSystemClient settings-hash cache), and the scratch CLI
+        journey (put in one invocation, flag/unflag in the next, same
+        process) depends on it. Two constructions must see one store."""
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        monkeypatch.setenv("NX_T1_ISOLATED", "1")
+
+        from nexus.db.t1 import T1Database
+        db1 = T1Database()
+        db2 = T1Database()
+        assert db1._client is db2._client
 
     def test_legacy_nexus_skip_t1_alias_removed(
         self, tmp_path, monkeypatch
@@ -643,7 +660,7 @@ class TestT1DatabaseIsolatedOverridesDiscovery:
     auto-discovery. Pre-fix, Path C only fired when Paths A and B both
     missed, so an operator setting the flag from inside a Claude session
     silently wrote into the live MCP-owned T1 instead of a sealed
-    EphemeralClient.
+    in-process store.
     """
 
     def test_isolated_wins_over_env_pair(self, tmp_path, monkeypatch):
@@ -651,7 +668,6 @@ class TestT1DatabaseIsolatedOverridesDiscovery:
 
         fake_chromadb = MagicMock()
         fake_chromadb.HttpClient.return_value = MagicMock()
-        fake_chromadb.EphemeralClient.return_value = MagicMock()
         monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
@@ -659,10 +675,11 @@ class TestT1DatabaseIsolatedOverridesDiscovery:
         monkeypatch.setenv("NX_T1_PORT", "1111")
         monkeypatch.setenv("NX_T1_ISOLATED", "1")
 
+        from nexus.db.inmemory_vector_store import InMemoryVectorClient
         from nexus.db.t1 import T1Database
-        T1Database()
+        db = T1Database()
 
-        fake_chromadb.EphemeralClient.assert_called_once()
+        assert isinstance(db._client, InMemoryVectorClient)
         fake_chromadb.HttpClient.assert_not_called()
 
     def test_isolated_wins_over_addr_file(self, tmp_path, monkeypatch):
@@ -670,7 +687,6 @@ class TestT1DatabaseIsolatedOverridesDiscovery:
 
         fake_chromadb = MagicMock()
         fake_chromadb.HttpClient.return_value = MagicMock()
-        fake_chromadb.EphemeralClient.return_value = MagicMock()
         monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
@@ -682,10 +698,11 @@ class TestT1DatabaseIsolatedOverridesDiscovery:
         _publish_t1_session_lease(tmp_path, "sess-A", "10.0.0.2", 2222)
         monkeypatch.setenv("NX_SESSION_ID", "sess-A")
 
+        from nexus.db.inmemory_vector_store import InMemoryVectorClient
         from nexus.db.t1 import T1Database
-        T1Database()
+        db = T1Database()
 
-        fake_chromadb.EphemeralClient.assert_called_once()
+        assert isinstance(db._client, InMemoryVectorClient)
         fake_chromadb.HttpClient.assert_not_called()
 
     def test_isolated_wins_over_env_pair_and_addr_file(self, tmp_path, monkeypatch):
@@ -693,7 +710,6 @@ class TestT1DatabaseIsolatedOverridesDiscovery:
 
         fake_chromadb = MagicMock()
         fake_chromadb.HttpClient.return_value = MagicMock()
-        fake_chromadb.EphemeralClient.return_value = MagicMock()
         monkeypatch.setitem(sys.modules, "chromadb", fake_chromadb)
 
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
@@ -705,10 +721,11 @@ class TestT1DatabaseIsolatedOverridesDiscovery:
         _publish_t1_session_lease(tmp_path, "sess-A", "10.0.0.3", 3333)
         monkeypatch.setenv("NX_SESSION_ID", "sess-A")
 
+        from nexus.db.inmemory_vector_store import InMemoryVectorClient
         from nexus.db.t1 import T1Database
-        T1Database()
+        db = T1Database()
 
-        fake_chromadb.EphemeralClient.assert_called_once()
+        assert isinstance(db._client, InMemoryVectorClient)
         fake_chromadb.HttpClient.assert_not_called()
 
     def test_legacy_skip_t1_alias_no_longer_overrides_discovery(self, tmp_path, monkeypatch):
@@ -1544,7 +1561,7 @@ class TestE2EFileDiscovery:
                     f"subprocess failed (rc={proc.returncode}): "
                     f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
                 )
-                assert proc.stdout.startswith("OK"), proc.stdout
+                assert "OK" in proc.stdout, proc.stdout  # line-tolerant: EF lazy-init may log before OK (P0b)
             finally:
                 publisher.relinquish()
         finally:
@@ -1590,7 +1607,7 @@ class TestE2EEnvDiscovery:
                 f"subprocess failed (rc={proc.returncode}): "
                 f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
             )
-            assert proc.stdout.startswith("OK"), proc.stdout
+            assert "OK" in proc.stdout, proc.stdout  # line-tolerant: EF lazy-init may log before OK (P0b)
         finally:
             stop_t1_server(server_pid)
             shutil.rmtree(chroma_tmpdir, ignore_errors=True)
@@ -1673,7 +1690,7 @@ class TestE2EParallelStress:
                 assert rc == 0, (
                     f"worker {i} exited rc={rc}: stdout={out!r} stderr={err!r}"
                 )
-                assert out.startswith("OK"), out
+                assert "OK" in out, out  # line-tolerant: EF lazy-init may log before OK (P0b)
         finally:
             stop_t1_server(server_pid)
             shutil.rmtree(chroma_tmpdir, ignore_errors=True)

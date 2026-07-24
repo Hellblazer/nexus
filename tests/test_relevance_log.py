@@ -10,12 +10,11 @@ Verifies:
 """
 from __future__ import annotations
 
+import os
 import tempfile
-import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import chromadb
 import pytest
 
 from nexus.db.t1 import T1Database
@@ -26,6 +25,7 @@ from nexus.mcp_infra import (
     record_search_trace,
     reset_singletons,
 )
+from tests.conftest import make_vector_test_client
 
 
 # ── T2 relevance_log schema + methods ────────────────────────────────────────
@@ -38,6 +38,12 @@ def t2():
         yield db
 
 
+@pytest.mark.skipif(
+    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    reason="dies-roster: SQLite migration DDL introspection (PRAGMA table_info) "
+    "dies with the twin at the RDR-155 P4b flip; the engine schema is "
+    "Liquibase-governed",
+)
 def test_relevance_log_table_exists(t2):
     """Migration creates the relevance_log table with correct columns."""
     cols = {r[1] for r in t2.telemetry.conn.execute("PRAGMA table_info(relevance_log)").fetchall()}
@@ -54,8 +60,10 @@ def test_log_relevance_inserts_row(t2):
         collection="knowledge__notes",
     )
     assert row_id is not None
-    rows = t2.telemetry.conn.execute("SELECT query, chunk_id, action FROM relevance_log").fetchall()
-    assert rows == [("vector search", "chunk-abc", "stored")]
+    rows = t2.get_relevance_log()
+    assert [(r["query"], r["chunk_id"], r["action"]) for r in rows] == [
+        ("vector search", "chunk-abc", "stored")
+    ]
 
 
 def test_get_relevance_log_no_filter(t2):
@@ -183,7 +191,7 @@ def test_clear_search_traces():
 @pytest.fixture()
 def t1():
     reset_singletons()
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     db = T1Database(session_id="test-session-e2", client=client)
     from nexus.mcp_infra import inject_t1
     inject_t1(db)
@@ -325,8 +333,14 @@ def test_t1_public_session_id_property(t1):
 def test_catalog_link_logs_relevance_with_collection_match(t1, tmp_path, monkeypatch):
     """catalog_link logs relevance when target collection matches a recent search chunk."""
     from nexus.catalog import Catalog
-    from nexus.catalog.tumbler import Tumbler
     from nexus.mcp.catalog import catalog_link
+
+    # The test builds its own LOCAL file catalog; pin the catalog backend to
+    # sqlite so the engine-substrate env (global NX_STORAGE_BACKEND=service,
+    # RDR-155 P4b P0a') doesn't route catalog reads/writes to the engine's
+    # catalog where these tumblers don't exist. T2 relevance logging still
+    # follows the ambient substrate.
+    monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "sqlite")
 
     # Set up a catalog with two documents in the same collection
     catalog_dir = tmp_path / "catalog"
@@ -368,6 +382,10 @@ def test_catalog_link_no_log_when_collection_mismatch(t1, tmp_path, monkeypatch)
     """catalog_link does NOT log when no trace chunks match the target collection."""
     from nexus.catalog import Catalog
     from nexus.mcp.catalog import catalog_link
+
+    # Local file catalog under test — pin the catalog backend (see the
+    # collection-match test above for the RDR-155 P4b P0a' rationale).
+    monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "sqlite")
 
     catalog_dir = tmp_path / "catalog"
     cat = Catalog.init(catalog_dir)

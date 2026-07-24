@@ -4,6 +4,10 @@ All notable changes to the conexus plugin are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.18.1] - 2026-07-24
+
+Plugin version aligned with conexus 6.18.1. No plugin-side changes.
+
 ## [6.18.0] - 2026-07-23
 Plugin version aligned with conexus 6.18.0. Plugin-side: release skill gains
 the mandatory post-tag back-merge step (11b) that keeps develop's manifests

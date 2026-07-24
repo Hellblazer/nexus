@@ -35,6 +35,17 @@ import pytest
 from nexus.db.t2 import T2Database
 from nexus.db.t2.aspect_extraction_queue import QueueRow
 from nexus.db.t2.document_aspects import AspectRecord
+import os
+
+# RDR-155 P4b P0a' dies-roster: this module tests the T2-daemon aspect-persist routing — machinery
+# on the [21098] DELETE list. Skipped under the engine substrate; the file
+# itself dies at the flip.
+pytestmark = [
+    pytest.mark.skipif(
+        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        reason="dies-roster: T2-daemon aspect-persist routing dies at the RDR-155 P4b flip",
+    ),
+]
 
 
 def _record(collection: str, source_path: str) -> AspectRecord:

@@ -19,6 +19,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import os
+
 import pytest
 
 
@@ -54,6 +56,11 @@ class TestRenameDedupCol:
 # ── #1057b: cascade works on the MIGRATED schema (the reported repro) ────────
 
 
+@pytest.mark.skipif(
+    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    reason="dies-roster: SQLite schema-era rename/dedup semantics (doc_id "
+    "PK migration, #1057) die at the RDR-155 P4b flip",
+)
 class TestRenameMigratedSchema:
     def test_rename_with_aspect_row_succeeds_no_source_path_error(self, tmp_path: Path) -> None:
         """With a catalog present the aspect PK migrates to doc_id and
@@ -99,6 +106,11 @@ class TestRenameMigratedSchema:
 # ── #1057c: cascade still works + dedups on the UNMIGRATED schema ────────────
 
 
+@pytest.mark.skipif(
+    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    reason="dies-roster: SQLite schema-era rename/dedup semantics (doc_id "
+    "PK migration, #1057) die at the RDR-155 P4b flip",
+)
 class TestRenameUnmigratedSchema:
     def _aspect(self, collection: str, source_path: str):
         from nexus.db.t2.document_aspects import AspectRecord

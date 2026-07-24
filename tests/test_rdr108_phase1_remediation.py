@@ -14,16 +14,11 @@ Tests cover:
 from __future__ import annotations
 
 import os
-import signal
 import sqlite3
-import threading
-import time
 import uuid
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock, patch
 
-import chromadb
 import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from click.testing import CliRunner
@@ -31,6 +26,7 @@ from click.testing import CliRunner
 from nexus.catalog.catalog import Catalog
 from nexus.cli import main
 from nexus.db.t3 import T3Database
+from tests.conftest import make_vector_test_client
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -43,7 +39,7 @@ def _unique_coll(prefix: str = "code") -> str:
 @pytest.fixture()
 def t3_db():
     return T3Database(
-        _client=chromadb.EphemeralClient(),
+        _client=make_vector_test_client(),
         _ef_override=DefaultEmbeddingFunction(),
     )
 
@@ -223,6 +219,12 @@ class TestOBS2MigrationUX:
     """OBS-2: T2Database.__init__ must emit a migration-start message on
     stderr when apply_pending runs, so users don't see a silent hang."""
 
+    @pytest.mark.skipif(
+        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        reason="dies-roster: the SQLite T2 migration (apply_pending on a fresh "
+        "memory.db) and its OBS-2 progress message die at the RDR-155 P4b "
+        "flip — service-backed T2Database construction runs no migrations",
+    )
     def test_migration_emits_progress_message(self, tmp_path, capsys, monkeypatch):
         """First construction of T2Database on a fresh DB emits a 'migrating'
         message to stderr when stderr is a tty.

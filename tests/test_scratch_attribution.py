@@ -13,8 +13,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-import chromadb
 import pytest
+from tests.conftest import make_vector_test_client
 
 
 @pytest.fixture
@@ -26,7 +26,7 @@ def t1_with_agent_capture(monkeypatch: pytest.MonkeyPatch):
 
     reset_singletons()
     monkeypatch.delenv("NX_AGENT", raising=False)
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     db = T1Database(session_id="scratch-attr-test", client=client)
     inject_t1(db)
     yield db

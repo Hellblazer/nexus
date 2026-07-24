@@ -27,13 +27,13 @@ import uuid
 from typing import Any
 from unittest.mock import patch
 
-import chromadb
 import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from click.testing import CliRunner
 
 from nexus.cli import main
 from nexus.db.t3 import T3Database
+from tests.conftest import make_vector_test_client
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -88,7 +88,7 @@ def _ids_in(t3_db: T3Database, collection: str) -> set[str]:
 def t3_db():
     """Real T3Database backed by an ephemeral local Chroma."""
     return T3Database(
-        _client=chromadb.EphemeralClient(),
+        _client=make_vector_test_client(),
         _ef_override=DefaultEmbeddingFunction(),
     )
 
@@ -933,7 +933,6 @@ class TestReidentifyCLI:
         """
         import threading
         import time
-        from collections import defaultdict
         from unittest.mock import patch as _patch
 
         # Seed three collections; each will need migration.

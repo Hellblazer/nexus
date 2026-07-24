@@ -7,7 +7,6 @@ import json
 from pathlib import Path
 from typing import Generator
 
-import chromadb
 import msgpack
 import numpy as np
 import pytest
@@ -29,6 +28,7 @@ from nexus.exporter import (
     export_collection,
     import_collection,
 )
+from tests.conftest import make_vector_test_client
 
 _EF = DefaultEmbeddingFunction()
 
@@ -38,7 +38,7 @@ _EF = DefaultEmbeddingFunction()
 
 @pytest.fixture
 def ephemeral_db() -> Generator[T3Database, None, None]:
-    yield T3Database(_client=chromadb.EphemeralClient(), _ef_override=_EF)
+    yield T3Database(_client=make_vector_test_client(), _ef_override=_EF)
 
 
 @pytest.fixture

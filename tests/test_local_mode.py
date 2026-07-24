@@ -5,12 +5,12 @@ import sqlite3
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import chromadb
 import pytest
 
 from nexus.config import is_local_mode, _default_local_path
 from nexus.db.local_ef import LocalEmbeddingFunction
 from nexus.db.t3 import T3Database
+from tests.conftest import make_vector_test_client
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -27,7 +27,7 @@ def local_db(tmp_path: Path, local_ef: LocalEmbeddingFunction) -> T3Database:
     # retired — local-mode T3Database requires an injected client now.
     # EphemeralClient instances share one in-process backend, so clear any
     # collections left by earlier tests before handing the facade out.
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     for col in client.list_collections():
         client.delete_collection(col.name)
     return T3Database(
@@ -266,8 +266,12 @@ class TestLocalEmbeddingFunction:
 
 class TestT3DatabaseLocalMode:
     def test_local_mode_init(self, local_db: T3Database) -> None:
+        from nexus.db.inmemory_vector_store import InMemoryVectorClient
+
         assert local_db._local_mode is True
-        assert isinstance(local_db._client, chromadb.ClientAPI)
+        # RDR-155 P4b P0a: the injected test substrate is the in-memory
+        # client (was chromadb.ClientAPI).
+        assert isinstance(local_db._client, InMemoryVectorClient)
         assert local_db._voyage_client is None
 
     def test_local_mode_no_cloud_probe(self, tmp_path: Path, local_ef: LocalEmbeddingFunction) -> None:
@@ -340,7 +344,7 @@ class TestT3DatabaseLocalMode:
         T3Database(
             local_mode=True,
             local_path=str(chroma_dir),
-            _client=chromadb.EphemeralClient(),
+            _client=make_vector_test_client(),
             _ef_override=local_ef,
         )
         assert chroma_dir.exists()
@@ -403,11 +407,11 @@ class TestRetryableSqliteError:
         ids=["locked", "other"],
     )
     def test_retryable_classification(self, msg: str, expected: bool) -> None:
-        from nexus.retry import _is_retryable_chroma_error
-        assert _is_retryable_chroma_error(sqlite3.OperationalError(msg)) is expected
+        from nexus.retry import _is_retryable_vector_error
+        assert _is_retryable_vector_error(sqlite3.OperationalError(msg)) is expected
 
-    def test_chroma_with_retry_retries_locked(self) -> None:
-        from nexus.retry import _chroma_with_retry
+    def test_vector_with_retry_retries_locked(self) -> None:
+        from nexus.retry import _vector_with_retry
         call_count = 0
 
         def flaky_fn():
@@ -418,7 +422,7 @@ class TestRetryableSqliteError:
             return "success"
 
         with patch("nexus.retry.time.sleep"):
-            result = _chroma_with_retry(flaky_fn)
+            result = _vector_with_retry(flaky_fn)
         assert result == "success"
         assert call_count == 3
 
@@ -555,14 +559,13 @@ class TestFrecencyOnlyLocalMode:
         # RDR-155 P4a.2 (nexus-1k8s1): local mode without injected _client
         # routes to the pgvector service. Stub make_t3 so this test
         # exercises the frecency code path without a running service.
-        import chromadb
         from nexus.db.t3 import T3Database
 
         def _stub_make_t3(*, _client=None, _ef_override=None):
             ef = MagicMock()
             ef.return_value = [[0.1, 0.2, 0.3]]
             return T3Database(
-                _client=chromadb.EphemeralClient(),
+                _client=make_vector_test_client(),
                 _ef_override=ef,
                 local_mode=True,
             )

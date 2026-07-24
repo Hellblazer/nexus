@@ -20,7 +20,6 @@ import socket
 import threading
 from http.server import HTTPServer
 
-import chromadb
 import pytest
 
 from nexus.db.t1 import T1Database
@@ -30,6 +29,7 @@ from nexus.db.t2.http_memory_store import HttpMemoryStore
 
 from tests.db import test_http_memory_store as fake_mem
 from tests.db import test_http_scratch_store as fake_scratch
+from tests.conftest import make_vector_test_client
 
 
 def _serve(handler_cls) -> tuple[HTTPServer, str]:
@@ -108,7 +108,7 @@ _SCRATCH_ROW_DIVERGENCES: frozenset[str] = frozenset({"ts"})
 
 @pytest.fixture()
 def scratch_pair():
-    t1 = T1Database(session_id="shape-parity", client=chromadb.EphemeralClient())
+    t1 = T1Database(session_id="shape-parity", client=make_vector_test_client())
     with fake_scratch._STORE_LOCK:
         fake_scratch._STORE.clear()
     server, url = _serve(fake_scratch._FakeScratchHandler)

@@ -20,6 +20,7 @@ accepts both tumblers and titles, matching ``nx catalog show``.
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -30,6 +31,18 @@ from nexus.aspect_extractor import AspectRecord
 from nexus.catalog import Catalog
 from nexus.commands.enrich import enrich
 from nexus.db.t2 import T2Database
+
+_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
+
+# These tests seed the rich SQLite Catalog (Catalog.init + cat.register) and
+# expect the CLI's make_catalog_reader() to resolve those rows. On the engine
+# substrate the factory returns the service catalog client instead, which
+# cannot see the local rich-catalog rows ("Not found: <tumbler>").
+_rich_catalog_dies_at_flip = pytest.mark.skipif(
+    _ENGINE_SUBSTRATE,
+    reason="dies-roster: rich SQLite Catalog stack (Catalog.init-seeded CLI "
+    "catalog resolution) dies at the RDR-155 P4b flip",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -92,6 +105,7 @@ def _seed_one(env, *, source_path: str = "docs/papers/p.pdf") -> str:
 
 
 class TestAspectsShow:
+    @_rich_catalog_dies_at_flip
     def test_show_displays_all_fields_by_tumbler(self, env) -> None:
         tumbler = _seed_one(env)
         runner = CliRunner()
@@ -112,6 +126,7 @@ class TestAspectsShow:
         assert "scholarly-paper-v1" in result.output
         assert "claude-haiku-4-5" in result.output
 
+    @_rich_catalog_dies_at_flip
     def test_show_resolves_by_title(self, env) -> None:
         _seed_one(env)
         runner = CliRunner()
@@ -119,6 +134,7 @@ class TestAspectsShow:
         assert result.exit_code == 0, result.output
         assert "Stale-reads" in result.output
 
+    @_rich_catalog_dies_at_flip
     def test_show_json_emits_structured(self, env) -> None:
         tumbler = _seed_one(env)
         runner = CliRunner()
@@ -132,6 +148,7 @@ class TestAspectsShow:
         assert data["extras"]["venue"] == "VLDB 2024"
         assert data["confidence"] == 0.92
 
+    @_rich_catalog_dies_at_flip
     def test_show_field_projection(self, env) -> None:
         tumbler = _seed_one(env)
         runner = CliRunner()
@@ -144,6 +161,7 @@ class TestAspectsShow:
         assert "YCSB-A" not in result.output
         assert "scholarly-paper-v1" not in result.output
 
+    @_rich_catalog_dies_at_flip
     def test_show_unknown_field_errors(self, env) -> None:
         tumbler = _seed_one(env)
         runner = CliRunner()
@@ -153,6 +171,7 @@ class TestAspectsShow:
         assert result.exit_code != 0
         assert "made_up" in result.output
 
+    @_rich_catalog_dies_at_flip
     def test_show_no_aspect_record_friendly_message(self, env) -> None:
         """Catalog row exists but no aspect data extracted yet."""
         cat_dir, db_path, cat = env
@@ -244,6 +263,7 @@ class TestAspectsList:
         )
         assert appearances == 2
 
+    @_rich_catalog_dies_at_flip
     def test_list_missing_shows_catalog_rows_without_aspects(self, env) -> None:
         """``--missing`` filters to catalog rows in the collection that
         have NO matching aspect record. Used to find gaps after partial

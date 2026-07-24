@@ -4,20 +4,20 @@ import uuid
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import chromadb
 import pytest
 
 from nexus.errors import CredentialsMissingError
 from nexus.index_context import IndexContext
 from nexus.indexer_utils import build_context_prefix, check_credentials, check_staleness
+from tests.conftest import make_vector_test_client
 
 
 def _real_col(name: str | None = None):
     """nexus-8g79.28: build a real EphemeralClient collection so
     staleness probes round-trip against real ChromaDB return shapes
-    instead of synthetic ``_chroma_with_retry`` mocks."""
+    instead of synthetic ``_vector_with_retry`` mocks."""
     coll_name = name or f"code__t_{uuid.uuid4().hex[:12]}"
-    return chromadb.EphemeralClient().get_or_create_collection(coll_name)
+    return make_vector_test_client().get_or_create_collection(coll_name)
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────

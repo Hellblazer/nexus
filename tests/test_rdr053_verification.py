@@ -6,10 +6,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import chromadb
-import pytest
 
 from nexus.catalog.catalog import Catalog
+from tests.conftest import make_vector_test_client
 
 
 def _make_catalog(tmp_path: Path) -> Catalog:
@@ -32,7 +31,7 @@ class TestLinkAuditChashVerification:
         """chash span pointing to an existing chunk → not stale."""
         col_name = _col_name(tmp_path)
         cat = _make_catalog(tmp_path)
-        t3 = chromadb.EphemeralClient()
+        t3 = make_vector_test_client()
         col = t3.get_or_create_collection(col_name)
         col.add(
             ids=["chunk-1"],
@@ -59,7 +58,7 @@ class TestLinkAuditChashVerification:
         """chash span pointing to a missing chunk → stale with reason='missing'."""
         col_name = _col_name(tmp_path)
         cat = _make_catalog(tmp_path)
-        t3 = chromadb.EphemeralClient()
+        t3 = make_vector_test_client()
         t3.get_or_create_collection(col_name)  # empty collection
 
         owner = cat.register_owner("nexus", "repo", repo_hash="abc123")
@@ -113,7 +112,7 @@ class TestLinkAuditChashVerification:
         """chash: spans are excluded from stale_spans — they survive re-indexing."""
         col_name = _col_name(tmp_path)
         cat = _make_catalog(tmp_path)
-        t3 = chromadb.EphemeralClient()
+        t3 = make_vector_test_client()
         col = t3.get_or_create_collection(col_name)
         col.add(
             ids=["chunk-1"],
@@ -182,7 +181,7 @@ class TestResolveSpanText:
         """resolve_span_text() returns chunk text for chash: spans."""
         col_name = _col_name(tmp_path)
         cat = _make_catalog(tmp_path)
-        t3 = chromadb.EphemeralClient()
+        t3 = make_vector_test_client()
         col = t3.get_or_create_collection(col_name)
         chunk_text = "def hello(): pass"
         col.add(
@@ -208,7 +207,7 @@ class TestResolveSpanText:
         """resolve_span_text() returns sliced text for chash: span with char range."""
         col_name = _col_name(tmp_path)
         cat = _make_catalog(tmp_path)
-        t3 = chromadb.EphemeralClient()
+        t3 = make_vector_test_client()
         col = t3.get_or_create_collection(col_name)
         chunk_text = "def hello(): pass"
         col.add(
@@ -234,7 +233,7 @@ class TestResolveSpanText:
         """resolve_span_text() returns None for missing chash: span."""
         col_name = _col_name(tmp_path)
         cat = _make_catalog(tmp_path)
-        t3 = chromadb.EphemeralClient()
+        t3 = make_vector_test_client()
         t3.get_or_create_collection(col_name)
 
         owner = cat.register_owner("nexus", "repo", repo_hash="abc123")
@@ -261,7 +260,7 @@ class TestResolveSpanText:
         """
         col_name = _col_name(tmp_path)
         cat = _make_catalog(tmp_path)
-        t3 = chromadb.EphemeralClient()
+        t3 = make_vector_test_client()
         col = t3.get_or_create_collection(col_name)
 
         owner_a = cat.register_owner("nexus", "repo-a", repo_hash="aaaa")

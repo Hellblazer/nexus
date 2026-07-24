@@ -119,7 +119,9 @@ EPSILON_CENSUS: dict[str, int] = {
     "src/nexus/commands/doc.py": 3,
     "src/nexus/commands/doctor.py": 6,
     "src/nexus/commands/enrich.py": 9,
-    "src/nexus/commands/index.py": 3,
+    # index.py 3 -> 2 (RDR-155 P4b P0a): the --dry-run epsilon-allow
+    # retired with the InMemoryVectorClient cutover.
+    "src/nexus/commands/index.py": 2,
     "src/nexus/commands/plan.py": 2,
     "src/nexus/commands/rdr.py": 1,
     "src/nexus/commands/search_cmd.py": 1,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import click
 import pytest
@@ -12,6 +13,21 @@ from nexus.catalog.catalog import Catalog
 from nexus.cli import main
 from nexus.daemon.catalog_write_shim import CATALOG_WRITE_OPS
 from nexus.db.http_vector_client import HttpVectorClient
+
+_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
+
+# RDR-155 P4b P0a' dies-roster: these tests seed the rich SQLite Catalog
+# (Catalog.init / NEXUS_CATALOG_PATH, direct ``cat.*`` writes) and assert
+# CLI behavior over that local state — including local-only semantics like
+# "catalog not initialized", register-boundary URI validation, and gc /
+# verify / link-density walks of the local .catalog.db. On the engine
+# substrate the CLI routes catalog commands to the service catalog (a
+# freshly minted, empty tenant) which cannot see the seeded local rows.
+_rich_catalog_dies_at_flip = pytest.mark.skipif(
+    _ENGINE_SUBSTRATE,
+    reason="dies-roster: rich SQLite Catalog stack (Catalog.init-seeded CLI "
+    "catalog behavior) dies at the RDR-155 P4b flip",
+)
 
 # RDR-109 Phase 2: this file asserts cloud-mode canonical behavior
 # (voyage-* embedder names, canonical-set defaults). The cloud_mode
@@ -59,6 +75,7 @@ class TestInitCommand:
 
 
 class TestNotInitialized:
+    @_rich_catalog_dies_at_flip
     def test_list_without_init(self, catalog_env):
         runner = CliRunner()
         result = runner.invoke(main, ["catalog", "list"])
@@ -101,6 +118,7 @@ class TestRegisterAndShow:
         data = json.loads(result.stdout)
         assert data["title"] == "Test Paper"
 
+    @_rich_catalog_dies_at_flip
     def test_register_with_explicit_source_uri(
         self, initialized_catalog, catalog_env,
     ):
@@ -120,6 +138,7 @@ class TestRegisterAndShow:
         assert "URI:" in show.output
         assert "chroma://knowledge__delos//papers/aleph.pdf" in show.output
 
+    @_rich_catalog_dies_at_flip
     def test_register_rejects_malformed_uri(
         self, initialized_catalog, catalog_env,
     ):
@@ -155,6 +174,7 @@ class TestRegisterAndShow:
         assert result.exit_code == 0
         assert "URI:" not in result.output
 
+    @_rich_catalog_dies_at_flip
     def test_show_prints_bib_fields_when_enriched(
         self, initialized_catalog, catalog_env,
     ):
@@ -222,6 +242,7 @@ class TestListCommand:
         assert isinstance(data, list)
         assert len(data) >= 1
 
+    @_rich_catalog_dies_at_flip
     def test_list_owner_by_name_resolves_to_tumbler(
         self, initialized_catalog, catalog_env,
     ):
@@ -286,6 +307,7 @@ class TestListCommand:
         # And no code rows leaked.
         assert "code-" not in result.output, result.output
 
+    @_rich_catalog_dies_at_flip
     def test_list_type_filter_with_owner(
         self, initialized_catalog, catalog_env,
     ):
@@ -406,6 +428,7 @@ class TestLinksFilterCommand:
         assert result.exit_code == 0
         assert "No links found." in result.output
 
+    @_rich_catalog_dies_at_flip
     def test_links_resolve_renders_title_and_path(
         self, initialized_catalog, catalog_env,
     ):
@@ -454,6 +477,7 @@ class TestLinksFilterCommand:
         )
         assert _endpoint_label(cat, tumbler) == f"src/nexus/session.py ({tumbler})"
 
+    @_rich_catalog_dies_at_flip
     def test_links_unique_targets_dedupes_by_file_path(
         self, initialized_catalog, catalog_env,
     ):
@@ -530,6 +554,7 @@ class TestUpdateCommand:
         show = runner.invoke(main, ["catalog", "show", "1.1.1"])
         assert "x-devonthink-item://8EDC855D" in show.output
 
+    @_rich_catalog_dies_at_flip
     def test_update_source_uri_validates_scheme(
         self, initialized_catalog, catalog_env,
     ):
@@ -636,6 +661,7 @@ class TestLinkBulkDeleteCommand:
 
 
 class TestLinkAuditCommand:
+    @_rich_catalog_dies_at_flip
     def test_link_audit_cli(self, initialized_catalog, catalog_env):
         runner = CliRunner()
         runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1"])
@@ -646,6 +672,7 @@ class TestLinkAuditCommand:
         assert "Total links" in result.output
         assert "cites" in result.output
 
+    @_rich_catalog_dies_at_flip
     def test_link_audit_cli_json(self, initialized_catalog, catalog_env):
         runner = CliRunner()
         runner.invoke(main, ["catalog", "register", "--title", "A", "--owner", "1.1"])
@@ -658,6 +685,7 @@ class TestLinkAuditCommand:
 
 
 class TestOwnersCommand:
+    @_rich_catalog_dies_at_flip
     def test_owners(self, initialized_catalog, catalog_env):
         runner = CliRunner()
         result = runner.invoke(main, ["catalog", "owners"])
@@ -878,6 +906,7 @@ class TestStatsCommand:
         assert result.exit_code == 0
         assert "1" in result.output  # at least 1 document
 
+    @_rich_catalog_dies_at_flip
     def test_stats_includes_topics_block_when_available(
         self, initialized_catalog, catalog_env, tmp_path, monkeypatch,
     ):
@@ -980,6 +1009,7 @@ class TestDiscoveryTools:
         assert result.exit_code == 0
         assert "Orphan Doc" in result.output
 
+    @_rich_catalog_dies_at_flip
     def test_orphans_all_linked(self, initialized_catalog, catalog_env):
         """When all entries have links, report zero orphans."""
         runner = CliRunner()
@@ -990,6 +1020,7 @@ class TestDiscoveryTools:
         assert result.exit_code == 0
         assert "No orphan" in result.output
 
+    @_rich_catalog_dies_at_flip
     def test_orphans_empty_catalog(self, initialized_catalog, catalog_env):
         """Empty catalog handles gracefully."""
         runner = CliRunner()
@@ -1031,6 +1062,7 @@ class TestVerifyCommand:
         )
         return fake
 
+    @_rich_catalog_dies_at_flip
     def test_verify_clean(self, initialized_catalog, catalog_env, monkeypatch):
         """All tumblers present in ChromaDB → '0 ghosts' summary, exit 0."""
         self._register_with_doc_id(
@@ -1045,6 +1077,7 @@ class TestVerifyCommand:
         assert result.exit_code == 0, result.output
         assert "0 ghosts" in result.output
 
+    @_rich_catalog_dies_at_flip
     def test_verify_flags_ghosts(
         self, initialized_catalog, catalog_env, monkeypatch,
     ):
@@ -1071,6 +1104,7 @@ class TestVerifyCommand:
         # The present doc must NOT be reported as a ghost.
         assert "Present Doc" not in result.output
 
+    @_rich_catalog_dies_at_flip
     def test_verify_missing_collection_is_all_ghosts(
         self, initialized_catalog, catalog_env, monkeypatch,
     ):
@@ -1089,6 +1123,7 @@ class TestVerifyCommand:
         assert "1 ghost(s) found" in result.output
         assert "knowledge__gone" in result.output
 
+    @_rich_catalog_dies_at_flip
     def test_verify_collection_filter(
         self, initialized_catalog, catalog_env, monkeypatch,
     ):
@@ -1113,6 +1148,7 @@ class TestVerifyCommand:
         assert "In Scope" in result.output
         assert "Out Of Scope" not in result.output
 
+    @_rich_catalog_dies_at_flip
     def test_verify_json_output(
         self, initialized_catalog, catalog_env, monkeypatch,
     ):
@@ -1155,6 +1191,7 @@ class TestVerifyCommand:
         # No tumblers to verify, since doc_id was missing.
         assert "nothing to verify" in result.output.lower()
 
+    @_rich_catalog_dies_at_flip
     def test_verify_excludes_alias_rows(
         self, initialized_catalog, catalog_env, monkeypatch,
     ):
@@ -1205,6 +1242,7 @@ class TestVerifyCommand:
             f"Alias row 'Alias Doc' appeared in verify output — alias filter broken:\n{result.output}"
         )
 
+    @_rich_catalog_dies_at_flip
     def test_verify_heal_drops_ghost(
         self, initialized_catalog, catalog_env, monkeypatch,
     ):
@@ -1244,6 +1282,7 @@ class TestVerifyCommand:
         assert "code" in result.output
         assert "%" in result.output
 
+    @_rich_catalog_dies_at_flip
     def test_coverage_empty_catalog(self, initialized_catalog, catalog_env):
         """Empty catalog shows a graceful message."""
         runner = CliRunner()
@@ -1268,6 +1307,7 @@ class TestVerifyCommand:
         assert result.exit_code == 0
         assert "0" in result.output or "No suggestions" in result.output
 
+    @_rich_catalog_dies_at_flip
     def test_suggest_links_finds_unlinked_pair(self, initialized_catalog, catalog_env):
         """Finds a code-RDR pair by module name overlap that has no existing link."""
         runner = CliRunner()
@@ -1308,6 +1348,7 @@ class TestLinkDensity:
         assert result.exit_code == 0
         assert "No collections" in result.output
 
+    @_rich_catalog_dies_at_flip
     def test_dense_collection_reports_nonzero_p50(
         self, initialized_catalog, catalog_env
     ):
@@ -1357,6 +1398,7 @@ class TestLinkDensity:
                 assert float(cols[2]) > 0.0, f"p50 should be > 0: {line}"
                 break
 
+    @_rich_catalog_dies_at_flip
     def test_isolated_collection_reports_zero_density(
         self, initialized_catalog, catalog_env
     ):
@@ -1454,6 +1496,7 @@ class TestAgentIntegration:
         cat.link(t1, t2, "implements", created_by="test")
         return cat
 
+    @_rich_catalog_dies_at_flip
     def test_links_for_file_found(self, catalog_env):
         runner = CliRunner()
         self._make_catalog_with_links(catalog_env)
@@ -1469,6 +1512,7 @@ class TestAgentIntegration:
         assert result.exit_code == 0
         assert "No catalog entry" in result.output
 
+    @_rich_catalog_dies_at_flip
     def test_links_for_file_shows_direction(self, catalog_env):
         """Incoming and outgoing links are shown with arrow direction."""
         runner = CliRunner()
@@ -1480,6 +1524,7 @@ class TestAgentIntegration:
         # Arrow direction — incoming or outgoing arrow
         assert ("→" in result.output or "←" in result.output)
 
+    @_rich_catalog_dies_at_flip
     def test_links_for_file_not_initialized(self, tmp_path, monkeypatch):
         """Graceful failure when catalog not initialized."""
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "nocat"))
@@ -1525,6 +1570,7 @@ class TestGcCommand:
         assert result.exit_code == 0
         assert "No orphan" in result.output
 
+    @_rich_catalog_dies_at_flip
     def test_gc_dry_run_does_not_delete(self, catalog_env):
         """nexus-tnz3: 4.29.1 dry-run is the DEFAULT — no flags = report-only.
         Entry must remain after a default invocation."""
@@ -1539,6 +1585,7 @@ class TestGcCommand:
         assert "would be deleted" in result.output
         assert cat.resolve(t) is not None
 
+    @_rich_catalog_dies_at_flip
     def test_gc_deletes_orphans(self, catalog_env):
         """4.29.1 requires --no-dry-run --confirm to actually delete."""
         runner = CliRunner()
@@ -1566,6 +1613,7 @@ class TestGcCommand:
         assert "No orphan" in result.output
         assert cat.resolve(t) is not None
 
+    @_rich_catalog_dies_at_flip
     def test_gc_mixed_entries(self, catalog_env):
         """Only entries with miss_count >= 2 are deleted; others survive.
 
@@ -1594,6 +1642,7 @@ class TestCollectionNameCommand:
     without constructing the legacy 2-segment shape themselves.
     """
 
+    @_rich_catalog_dies_at_flip
     def test_emits_conformant_name_for_registered_repo(
         self, catalog_env, tmp_path, monkeypatch,
     ):
@@ -1621,6 +1670,7 @@ class TestCollectionNameCommand:
         # is voyage-context-3; new tuple lands at v1.
         assert result.output.strip() == "knowledge__1-1__voyage-context-3__v1"
 
+    @_rich_catalog_dies_at_flip
     def test_emits_conformant_name_for_code(
         self, catalog_env, tmp_path, monkeypatch,
     ):
@@ -1688,6 +1738,7 @@ class TestCollectionNameCommand:
         # owner row).
         assert "owner" in result.output.lower() or "index" in result.output.lower()
 
+    @_rich_catalog_dies_at_flip
     def test_fails_when_catalog_not_initialized(
         self, catalog_env, tmp_path,
     ):
@@ -1704,6 +1755,7 @@ class TestCollectionNameCommand:
         assert result.exit_code != 0
         assert "not initialized" in result.output.lower()
 
+    @_rich_catalog_dies_at_flip
     def test_default_repo_is_cwd(
         self, catalog_env, tmp_path, monkeypatch,
     ):

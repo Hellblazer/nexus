@@ -15,9 +15,7 @@ Conservative: a non-empty unreferenced collection is preserved
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
 
-import chromadb
 import pytest
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from click.testing import CliRunner
@@ -25,6 +23,7 @@ from click.testing import CliRunner
 from nexus.catalog.catalog import Catalog
 from nexus.cli import main
 from nexus.db.t3 import T3Database
+from tests.conftest import make_vector_test_client
 
 
 class TestCollectionGCCli:
@@ -37,7 +36,7 @@ class TestCollectionGCCli:
         # Mirror test_chash_reconcile.py: clear collections on entry
         # because EphemeralClient instances share an in-memory backend
         # across the test session.
-        client = chromadb.EphemeralClient()
+        client = make_vector_test_client()
         for c in list(client.list_collections()):
             name = c if isinstance(c, str) else c.name
             try:

@@ -99,22 +99,55 @@ def put_cmd(
     # The hook returns the catalog tumbler string (or "" when the
     # catalog is absent).
     chunk_chroma_id, manifest_metadatas = _single_chunk_manifest_metadata(content)
-    catalog_doc_id = _catalog_store_hook(
+    catalog_doc_id, catalog_row_minted = _catalog_store_hook_tracked(
         title=title, doc_id=chunk_chroma_id, collection_name=col_name,
     )
 
-    doc_id = db.put(
-        collection=col_name,
-        content=content,
-        title=title,
-        tags=tags,
-        category=category,
-        session_id=session_id,
-        source_agent=agent,
-        ttl_days=ttl_days,
-        catalog_doc_id=catalog_doc_id,
-    )
-    click.echo(f"Stored: {doc_id}  →  {col_name}")
+    # nexus-b6enc C2: the catalog row is registered BEFORE db.put — on a
+    # put failure, delete the row minted IN THIS CALL (never a
+    # pre-existing dedup target) so no ghost row survives, then surface
+    # the original error. The compensation never raises.
+    try:
+        doc_id = db.put(
+            collection=col_name,
+            content=content,
+            title=title,
+            tags=tags,
+            category=category,
+            session_id=session_id,
+            source_agent=agent,
+            ttl_days=ttl_days,
+            catalog_doc_id=catalog_doc_id,
+        )
+    except Exception as put_exc:
+        if catalog_doc_id and catalog_row_minted:
+            _rollback_minted_catalog_entry(
+                catalog_doc_id, original_error=str(put_exc),
+            )
+        raise
+
+    # nexus-b6enc C3: manifest leg off the swallowing fire_batch chain —
+    # direct write + verify; failure becomes an explicit non-"Stored:"
+    # error after the remaining hook chains fire.
+    manifest_error = ""
+    if catalog_doc_id:
+        try:
+            _store_put_manifest_direct(catalog_doc_id, manifest_metadatas)
+        except Exception as manifest_exc:  # noqa: BLE001 — captured for the explicit error below
+            manifest_error = str(manifest_exc)
+            # CRE Minor 5: structlog twin of the MCP path's
+            # store_put_manifest_direct_failed — the ClickException below
+            # reaches the interactive user but must also reach structured
+            # logs for cross-caller grep parity.
+            import structlog  # noqa: PLC0415 — branch-local logging
+            structlog.get_logger(__name__).warning(
+                "store_put_manifest_direct_failed",
+                doc_id=doc_id,
+                catalog_doc_id=catalog_doc_id,
+                collection=col_name,
+                error=manifest_error[:300],
+                exc_info=True,
+            )
     # nexus-9099: fire the three post-store hook chains so the chash
     # index, taxonomy assignment, and aspect-extraction queue see CLI
     # store-put events. RDR-095 symmetric-fire; this path was missed by
@@ -134,6 +167,18 @@ def put_cmd(
         metadatas=manifest_metadatas,
         catalog_doc_id=catalog_doc_id,
     )
+    if manifest_error:
+        # CRE Imp 3: 'nx catalog reconcile' is a verified no-op for this
+        # failure mode (heal_manifest_gaps' candidate filter excludes
+        # chunk_count=0 rows without meta.content_hash) — suggest the
+        # retry, which IS effective (by_doc_id dedup + idempotent put).
+        raise click.ClickException(
+            f"stored to T3 ({doc_id} in {col_name}) but NOT cataloged: "
+            f"{manifest_error}. Catalog row {catalog_doc_id} may show "
+            f"chunk_count=0; retry 'nx store put' with the same content "
+            f"(idempotent dedup makes retry safe)."
+        )
+    click.echo(f"Stored: {doc_id}  →  {col_name}")
 
 
 # nexus-8g79.10 (V1): catalog_store_hook moved to
@@ -141,6 +186,11 @@ def put_cmd(
 # without the MCP layer reaching up into this CLI module. Re-exported
 # here under the legacy private name for back-compat.
 from nexus.catalog.store_hook import catalog_store_hook as _catalog_store_hook  # noqa: E402
+# nexus-b6enc: tracked variant (created-vs-deduped) + compensation +
+# direct fail-loud manifest write for the store_put path.
+from nexus.catalog.store_hook import catalog_store_hook_tracked as _catalog_store_hook_tracked  # noqa: E402
+from nexus.catalog.store_hook import rollback_minted_catalog_entry as _rollback_minted_catalog_entry  # noqa: E402
+from nexus.catalog.store_hook import store_put_manifest_direct as _store_put_manifest_direct  # noqa: E402
 # GH #1370 Defect 4b: shared with MCP store_put — see store_hook.py's
 # docstring for why real metadatas (not None) must reach fire_store_chains.
 from nexus.catalog.store_hook import single_chunk_manifest_metadata as _single_chunk_manifest_metadata  # noqa: E402

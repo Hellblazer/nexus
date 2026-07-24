@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from nexus.migration.guided_upgrade import ProvisionResult, provision_and_serve
+from nexus.upgrade_ladder.provisioning import ProvisionResult, provision_and_serve
 
 
 class _FakeLease:

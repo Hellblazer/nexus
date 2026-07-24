@@ -8,17 +8,17 @@ regression both P4-follow-up reviewers flagged).
 """
 from __future__ import annotations
 
-import chromadb
 import pytest
 
 from nexus.db.collection_purge import CascadeCounts, purge_collection_cascade
 from nexus.db.storage_mode import StorageBackend
 from nexus.db.t3 import T3Database
+from tests.conftest import make_vector_test_client
 
 
 @pytest.fixture()
 def t3() -> T3Database:
-    client = chromadb.EphemeralClient()
+    client = make_vector_test_client()
     return T3Database(_client=client)
 
 

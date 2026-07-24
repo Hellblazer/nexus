@@ -12,6 +12,7 @@ covered.
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -20,6 +21,23 @@ import pytest
 from nexus.aspect_extractor import AspectRecord
 from nexus.db.t2 import T2Database
 from nexus.operators import aspect_sql
+
+_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
+
+
+@pytest.fixture(autouse=True)
+def _no_live_claude_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HARD guard (RDR-155 P4b P0a'): nothing in this module may ever reach
+    the real ``claude -p`` subprocess. The operator wrappers fall back from
+    a failed SQL fast path to live LLM dispatch (300s timeout per call) —
+    on a substrate regression that fallback turns a fast failure into a
+    multi-minute suite hang. Fail loud instead."""
+    async def _forbidden(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("test must not reach live claude dispatch")
+
+    monkeypatch.setattr(
+        "nexus.operators.dispatch.claude_dispatch", _forbidden,
+    )
 
 
 def _make_record(
@@ -105,21 +123,27 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             extras={"venue": "OSDI", "year": 2023},
             confidence=0.78,
         ))
-        # A paper with null fields (extractor failed 3x).
-        db.document_aspects.upsert(AspectRecord(
-            collection="knowledge__delos",
-            source_path="/papers/null.pdf",
-            problem_formulation=None,
-            proposed_method=None,
-            experimental_datasets=[],
-            experimental_baselines=[],
-            experimental_results=None,
-            extras={},
-            confidence=None,
-            extracted_at=datetime.now(UTC).isoformat(),
-            model_version="claude-haiku-4-5-20251001",
-            extractor_name="scholarly-paper-v1",
-        ))
+        # A paper with null fields (extractor failed 3x). The SQLite
+        # store silently DROPS a confidence=None record (nexus-17wf), so
+        # the row is absent on both substrates; the engine's /upsert
+        # 500s on a JSON-null confidence (NPE in the handler) instead of
+        # dropping, so the engine leg skips the call — same end state
+        # (row absent), which is what every test below asserts against.
+        if not _ENGINE_SUBSTRATE:
+            db.document_aspects.upsert(AspectRecord(
+                collection="knowledge__delos",
+                source_path="/papers/null.pdf",
+                problem_formulation=None,
+                proposed_method=None,
+                experimental_datasets=[],
+                experimental_baselines=[],
+                experimental_results=None,
+                extras={},
+                confidence=None,
+                extracted_at=datetime.now(UTC).isoformat(),
+                model_version="claude-haiku-4-5-20251001",
+                extractor_name="scholarly-paper-v1",
+            ))
         # A paper from a different collection (must be excluded).
         db.document_aspects.upsert(_make_record(
             source_path="/papers/other.pdf",
@@ -372,6 +396,13 @@ class TestDualRead:
             "chroma://knowledge__delos//papers/paxos.pdf"
         )
 
+    @pytest.mark.skipif(
+        _ENGINE_SUBSTRATE,
+        reason="dies-roster: simulates the legacy SQLite NULL-source_uri "
+        "state via a raw conn UPDATE; the engine schema cannot represent "
+        "it (source_uri is the write-path identity) — dies at the "
+        "RDR-155 P4b flip",
+    )
     def test_filter_legacy_null_uri_row_is_unreachable_post_drop(
         self, env: Path, monkeypatch,
     ) -> None:
