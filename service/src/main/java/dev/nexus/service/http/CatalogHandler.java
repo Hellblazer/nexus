@@ -145,6 +145,10 @@ public final class CatalogHandler implements HttpHandler {
                 case "/manifest/resync"       -> handleManifestResync(exchange, tenant, method);
                 case "/manifest/backfill"     -> handleManifestBackfill(exchange, tenant, method);
                 case "/manifest/orphans"      -> handleManifestOrphans(exchange, tenant, method);
+                // nexus-ysrwi: the third sibling. /manifest/orphans and
+                // /docs/orphaned already existed; links had no equivalent,
+                // which is why the client could not build a doctor check.
+                case "/links/orphaned"        -> handleLinksOrphaned(exchange, tenant, method);
 
                 // ── Owners ────────────────────────────────────────────────────
                 case "/owners/upsert"         -> handleOwnerUpsert(exchange, tenant, method);
@@ -673,7 +677,16 @@ public final class CatalogHandler implements HttpHandler {
             HttpUtil.send(exchange, 400, "{\"error\":\"collection query param required\"}"); return;
         }
         var chashes = repo.chashesForCollection(tenant, collection);
-        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("chashes", new ArrayList<>(chashes))));
+        // nexus-ir6eh: the count is a TRUNCATION DEFENCE, not a convenience.
+        // The client classifies chunks absent from this list as orphans and the
+        // indexer GC deletes them, so a PARTIALLY-delivered list silently
+        // destroys live data. A fully-missing list is already guarded client-side
+        // (indexer manifest_empty_skipping_gc); a short one was not detectable at
+        // all. The client reconciles len(chashes) == count before any orphan
+        // classification and aborts on mismatch.
+        var list = new ArrayList<>(chashes);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
+            Map.of("chashes", list, "count", list.size())));
     }
 
     /** POST /v1/catalog/manifest/docs_for_chashes */
@@ -1259,6 +1272,21 @@ public final class CatalogHandler implements HttpHandler {
         if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         var docs = repo.orphanedDocs(tenant);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("documents", docs)));
+    }
+
+    /**
+     * GET /v1/catalog/links/orphaned — links with an endpoint that resolves to no
+     * live document (nexus-ysrwi, GH #1419 issue 7).
+     *
+     * <p>Mirrors {@link #handleDocsOrphaned} in shape. Each row carries {@code side}
+     * ("from" / "to" / "both") so the caller can distinguish a deleted target from
+     * a deleted source without a follow-up query.
+     */
+    private void handleLinksOrphaned(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        var links = repo.orphanedLinks(tenant);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
+            Map.of("links", links, "count", links.size())));
     }
 
     /** GET /v1/catalog/docs/absolute-paths — documents whose file_path starts with '/'. */

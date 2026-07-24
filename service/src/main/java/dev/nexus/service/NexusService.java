@@ -20,6 +20,7 @@ import dev.nexus.service.http.AuthFilter;
 import dev.nexus.service.http.CatalogHandler;
 import dev.nexus.service.http.ChashHandler;
 import dev.nexus.service.http.HealthHandler;
+import dev.nexus.service.http.LivezHandler;
 import dev.nexus.service.http.VersionHandler;
 import dev.nexus.service.http.LadderHandler;
 import dev.nexus.service.http.MemoryHandler;
@@ -57,7 +58,8 @@ import java.util.concurrent.TimeUnit;
  *
  * <p>Route table:
  * <ul>
- *   <li>{@code GET /health} — no auth; liveness + DB probe via SELECT 1.</li>
+ *   <li>{@code GET /health} — no auth; READINESS: DB probe via SELECT 1.</li>
+ *   <li>{@code GET /livez} — no auth; LIVENESS only, zero dependencies.</li>
  *   <li>{@code GET /v1/_whoami} — auth filter + tenant extraction + GUC stamp.</li>
  *   <li>{@code /v1/t1/*} — T1 scratch: put/get/search/list/flag/session-close (bead nexus-gmiaf.13).</li>
  * </ul>
@@ -260,8 +262,13 @@ public final class NexusService {
         this.server = HttpServer.create(
             new InetSocketAddress(resolveBindHost(), port), /* backlog */ 10);
 
-        // /health — unauthenticated
+        // /health — unauthenticated. READINESS: includes a DB probe.
         server.createContext("/health", new HealthHandler(dataSource));
+        // /livez — unauthenticated. LIVENESS: no dependency of any kind, so a
+        // saturated pool cannot make a live process look dead (nexus-hubc0 /
+        // nexus-7f7gb). This is the supervisor's restart authority; /health is
+        // not, because a 503 from it means "alive but not serving".
+        server.createContext("/livez", new LivezHandler());
 
         // /version — unauthenticated app+schema+embedding-mode handshake
         // (nexus-pebfx.4 + nexus-pebfx.5)

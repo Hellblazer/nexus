@@ -165,15 +165,32 @@ public final class VersionHandler implements HttpHandler {
         return v;
     }
 
-    @Override
-    public void handle(HttpExchange exchange) throws IOException {
-        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
-            HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}");
-            return;
+    /** Immutable-for-the-process schema identity (nexus-hubc0). */
+    private record SchemaIdentity(String latestId, long count, String error) {}
+
+    private volatile SchemaIdentity schemaIdentity;
+
+    /**
+     * Read the changelog identity at most once per process.
+     *
+     * <p>Double-checked on a volatile field: a benign race can run the read
+     * twice on first contact, which is harmless (it is idempotent and the
+     * values are identical). Deliberately NOT synchronized — a lock here would
+     * reintroduce exactly the head-of-line blocking this change removes.
+     *
+     * <p>A failed read is memoized too. The alternative — retrying per request —
+     * would restore the unbounded pool wait on precisely the boxes where the
+     * pool is already in trouble, which is the failure mode being fixed. The
+     * error text still reaches the response, so the condition stays visible.
+     */
+    private SchemaIdentity schemaIdentity() {
+        SchemaIdentity cached = schemaIdentity;
+        if (cached != null) {
+            return cached;
         }
         String latestId = null;
         long count = 0;
-        String schemaError = null;
+        String error = null;
         try (Connection conn = dataSource.getConnection()) {
             var dsl = DSL.using(conn, SQLDialect.POSTGRES);
             latestId = dsl.select(DBCL_ID).from(DATABASECHANGELOG)
@@ -183,8 +200,36 @@ public final class VersionHandler implements HttpHandler {
             count = dsl.fetchCount(DATABASECHANGELOG);
         } catch (Exception e) {
             log.warn("event=version_schema_read_failed error={}", e.getMessage());
-            schemaError = e.getMessage();
+            error = e.getMessage();
         }
+        SchemaIdentity fresh = new SchemaIdentity(latestId, count, error);
+        schemaIdentity = fresh;
+        return fresh;
+    }
+
+    @Override
+    public void handle(HttpExchange exchange) throws IOException {
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}");
+            return;
+        }
+        // nexus-hubc0: the schema identity is read ONCE and memoized, so no
+        // /version request ever waits on the connection pool.
+        //
+        // This used to open a pooled connection per request. HikariCP's own
+        // connectionTimeout is 30s, so under indexing load /version could block
+        // far longer than any sane client timeout — and /version is what the
+        // client's engine-version handshake and the supervisor's convergence
+        // check both call (found while fixing nexus-4yf4u and nexus-7f7gb: an
+        // unauthenticated probe endpoint must never contend for the pool).
+        //
+        // Memoizing is correct rather than merely convenient: Liquibase runs at
+        // startup, before this server accepts requests, so databasechangelog is
+        // immutable for the process lifetime. A migration means a new process.
+        SchemaIdentity schema = schemaIdentity();
+        String latestId = schema.latestId;
+        long count = schema.count;
+        String schemaError = schema.error;
 
         StringBuilder body = new StringBuilder(192);
         body.append("{\"app_version\":").append(HttpUtil.jsonString(appVersion));

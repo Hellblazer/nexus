@@ -2571,6 +2571,73 @@ public final class CatalogRepository {
      * Replaces direct SQLite LEFT JOIN query in orphans_cmd.
      * Returns list of dicts with tumbler, title, content_type, file_path.
      */
+    /**
+     * Links whose {@code from_tumbler} or {@code to_tumbler} resolves to no live
+     * document (nexus-ysrwi, GH #1419 issue 7).
+     *
+     * <p>Steve Harris's backup held 5 of 52 links pointing at tumblers with no
+     * document anywhere in the same {@code pg_dump} — orphans left by document
+     * deletion without link cleanup. {@code catalog_links} carries a PK and a
+     * UNIQUE constraint but NO foreign key to {@code catalog_documents}
+     * (catalog-001-baseline.xml), so nothing structurally prevents them.
+     *
+     * <p>This is the DETECTION half. Enforcement (an FK with ON DELETE, or
+     * delete-time cleanup) is nexus-tk070's FK-census decision — a check the
+     * client can render is useful either way, and remains useful after an FK
+     * lands because an FK does not retroactively clean rows already orphaned.
+     *
+     * <p>The client cannot compute this itself: {@code HttpCatalogClient.link_audit}
+     * is a service-mode stub, and the only batch existence primitive available
+     * ({@code chunk_counts_for_docs}) omits documents that merely lack a
+     * chunk_count, which would report live documents as dangling.
+     *
+     * <p>{@code side} names which endpoint dangles ({@code "from"}, {@code "to"},
+     * or {@code "both"}) so an operator can tell a deleted target from a
+     * deleted source without a second query.
+     */
+    public List<Map<String, Object>> orphanedLinks(String tenant) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            // NOT EXISTS rather than a LEFT JOIN: RLS-safe by construction (the
+            // subquery is tenant-scoped by the same GUC) and it cannot multiply
+            // rows when a tumbler somehow has duplicate document rows.
+            var fromMissing = DSL.notExists(
+                ctx.selectOne().from(CATALOG_DOCUMENTS)
+                   .where(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_LINKS.FROM_TUMBLER))
+            );
+            var toMissing = DSL.notExists(
+                ctx.selectOne().from(CATALOG_DOCUMENTS)
+                   .where(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_LINKS.TO_TUMBLER))
+            );
+            return ctx.select(CATALOG_LINKS.ID, CATALOG_LINKS.FROM_TUMBLER,
+                              CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
+                              CATALOG_LINKS.CREATED_BY)
+                      .from(CATALOG_LINKS)
+                      .where(fromMissing.or(toMissing))
+                      .orderBy(CATALOG_LINKS.ID)
+                      .fetch()
+                      .map(r -> {
+                          boolean fm = r.get(CATALOG_LINKS.FROM_TUMBLER) != null
+                              && !documentExists(ctx, r.get(CATALOG_LINKS.FROM_TUMBLER));
+                          boolean tm = r.get(CATALOG_LINKS.TO_TUMBLER) != null
+                              && !documentExists(ctx, r.get(CATALOG_LINKS.TO_TUMBLER));
+                          Map<String, Object> m = new LinkedHashMap<>();
+                          m.put("id", r.get(CATALOG_LINKS.ID));
+                          m.put("from_tumbler", r.get(CATALOG_LINKS.FROM_TUMBLER));
+                          m.put("to_tumbler", r.get(CATALOG_LINKS.TO_TUMBLER));
+                          m.put("link_type", r.get(CATALOG_LINKS.LINK_TYPE));
+                          m.put("created_by", r.get(CATALOG_LINKS.CREATED_BY));
+                          m.put("side", fm && tm ? "both" : (fm ? "from" : "to"));
+                          return m;
+                      });
+        });
+    }
+
+    private boolean documentExists(org.jooq.DSLContext ctx, String tumbler) {
+        return ctx.fetchExists(
+            ctx.selectOne().from(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
+        );
+    }
+
     public List<Map<String, Object>> orphanedDocs(String tenant) {
         return tenantScope.withTenant(tenant, ctx -> {
             // Documents with no outgoing links (from_tumbler not in links)

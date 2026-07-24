@@ -697,6 +697,62 @@ class CatalogRepositoryTest {
         assertThat(links.get(0).get("link_type")).isEqualTo("cites");
     }
 
+    @Test @Order(95)
+    void orphanedLinks_findsDanglingEndpointsAndNamesTheSide() {
+        // nexus-ysrwi (GH #1419 issue 7): Steve's backup held 5 of 52 links
+        // pointing at tumblers with no document anywhere in the same pg_dump.
+        // catalog_links has a PK and a UNIQUE but NO foreign key to
+        // catalog_documents (catalog-001-baseline.xml), so nothing structurally
+        // prevents this — detection has to exist regardless of whether tk070
+        // later adds enforcement, because an FK does not retroactively clean
+        // rows that are already orphaned.
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "orph.live", "title", "Live",
+            "content_type", "paper", "corpus", "knowledge"));
+
+        // A fully-resolvable link: must NOT be reported. Uses its OWN tumblers —
+        // this class is @Order-ed and shares state, so borrowing lnk.1/lnk.2
+        // would change the link counts that link_linksTo/link_filterByType assert.
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "orph.src", "title", "Resolvable Src",
+            "content_type", "paper", "corpus", "knowledge"));
+        repo.upsertLink(TENANT_A, Map.of("from_tumbler", "orph.src", "to_tumbler", "orph.live",
+            "link_type", "relates", "from_span", "", "to_span", "",
+            "created_by", "user", "created_at", "2026-06-01T00:00:00Z"));
+
+        // Dangling TARGET (the document-deletion shape Steve hit).
+        repo.upsertLink(TENANT_A, Map.of("from_tumbler", "orph.live", "to_tumbler", "orph.gone",
+            "link_type", "cites", "from_span", "", "to_span", "",
+            "created_by", "user", "created_at", "2026-06-01T00:00:00Z"));
+        // Dangling SOURCE.
+        repo.upsertLink(TENANT_A, Map.of("from_tumbler", "orph.vanished", "to_tumbler", "orph.live",
+            "link_type", "cites", "from_span", "", "to_span", "",
+            "created_by", "user", "created_at", "2026-06-01T00:00:00Z"));
+        // BOTH endpoints gone.
+        repo.upsertLink(TENANT_A, Map.of("from_tumbler", "orph.x", "to_tumbler", "orph.y",
+            "link_type", "cites", "from_span", "", "to_span", "",
+            "created_by", "user", "created_at", "2026-06-01T00:00:00Z"));
+
+        var orphans = repo.orphanedLinks(TENANT_A);
+
+        var pairs = orphans.stream()
+            .map(m -> m.get("from_tumbler") + "->" + m.get("to_tumbler") + ":" + m.get("side"))
+            .toList();
+        assertThat(pairs).contains(
+            "orph.live->orph.gone:to",
+            "orph.vanished->orph.live:from",
+            "orph.x->orph.y:both");
+        // The resolvable link must never appear — a check that cries wolf gets
+        // ignored, which is how a real orphan gets missed.
+        assertThat(pairs).noneMatch(x -> x.startsWith("orph.src->orph.live"));
+    }
+
+    @Test @Order(96)
+    void orphanedLinks_isTenantScoped() {
+        // RLS safety: tenant B must not see tenant A's orphans.
+        var bOrphans = repo.orphanedLinks(TENANT_B);
+        assertThat(bOrphans).noneMatch(m ->
+            String.valueOf(m.get("from_tumbler")).startsWith("orph."));
+    }
+
     @Test @Order(31)
     void link_linksTo() {
         var links = repo.linksTo(TENANT_A, "lnk.2", (java.util.List<String>) null);
