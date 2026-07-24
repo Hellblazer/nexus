@@ -19,6 +19,21 @@
 # inside the box by nx itself.
 set -euo pipefail
 
+# ── Machine-readable output, always (2026-07-24) ─────────────────────────────
+# This harness redirects CLI stdout into files that are later parsed by other
+# tools (requirements.txt -> `uv pip install -r` inside the image). An agent
+# shell exports FORCE_COLOR (Claude Code sets it for its own rendering), which
+# makes uv emit ANSI escapes EVEN WHEN stdout is a file — so byte 0 of
+# requirements.txt became ESC and the container build died with
+# "Unexpected '<ESC>', expected '-c', '-e', '-r' ..." at 1:1.
+#
+# The asymmetry is the dangerous part: this gate passes when Hal runs it by
+# hand and fails only when an agent runs it, which is precisely when nobody is
+# watching a terminal. Neutralize color for the whole script rather than per
+# call site, so a future redirect cannot reintroduce the class.
+export NO_COLOR=1
+unset FORCE_COLOR CLICOLOR_FORCE
+
 # Captured BEFORE the `cd` below so it is robust to the invocation cwd (RDR-184
 # P0.2, nexus-ccs9v.2): BASH_SOURCE is relative to wherever this script was
 # invoked FROM, not the repo root the next line cd's into.
@@ -355,7 +370,17 @@ cp "$(ls -t dist/conexus-*.whl | head -1)"            "$STAGE/"   # keep real PE
 # Runs unconditionally for every leg: era-hop/package-upgrade/chash-window
 # never COPY it (they install deps at runtime from real PyPI — that is those
 # scenarios' point), so for them it is a 1ms offline no-op in the context dir.
-uv export --locked --no-dev --no-emit-project --no-hashes -q > "$STAGE/requirements.txt"
+# --color never is belt-and-braces over the script-level NO_COLOR above:
+# this particular redirect is the one that is PARSED, so state the
+# requirement locally too rather than relying on ambient env hygiene.
+uv export --color never --locked --no-dev --no-emit-project --no-hashes -q > "$STAGE/requirements.txt"
+# Fail loud if it is still not machine-clean — a corrupt requirements.txt
+# otherwise surfaces as an opaque failure minutes later, deep in a
+# container build (2026-07-24).
+if LC_ALL=C grep -q '[^[:print:][:space:]]' "$STAGE/requirements.txt"; then
+  echo "FATAL: requirements.txt contains control bytes (ANSI colour leaked into a parsed file); check NO_COLOR/FORCE_COLOR" >&2
+  exit 2
+fi
 if [ "$ERA_HOP" = 1 ]; then
   # nexus-n7u38.30: same posture as --package-upgrade (working-tree wheel in its
   # own subdirectory, real PEP 427 name preserved, no engine artifact staged at
