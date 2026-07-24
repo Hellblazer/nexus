@@ -110,21 +110,36 @@ def _boot() -> dict:
          "-o", f"-p {pg_port} -k {pgdata}", "start", "-w"],
         check=True, capture_output=True,
     )
-    subprocess.run(
-        [str(bin_dir / "createdb"), "-h", "127.0.0.1", "-p", str(pg_port),
-         "-U", pg_user, _DBNAME],
-        check=True, capture_output=True,
-    )
-    proc = subprocess.run(
-        [str(bin_dir / "psql"), "-h", "127.0.0.1", "-p", str(pg_port),
-         "-U", pg_user, "-d", _DBNAME, "-v", "ON_ERROR_STOP=1",
-         "-c", SERVICE_ROLES_SQL],
-        capture_output=True, text=True,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"T2 engine substrate: role bootstrap failed:\n{proc.stderr}"
+    def _kill_pg() -> None:
+        # Review finding (P0 remainder, Important 1): any failure after
+        # pg_ctl start must stop PG before re-raising, or repeated failed
+        # boots accumulate zombie postgres + tempdirs (the exact leak
+        # class observed live during the flip dry-runs).
+        subprocess.run(
+            [str(bin_dir / "pg_ctl"), "-D", pgdata, "stop", "-m", "immediate"],
+            capture_output=True,
         )
+        shutil.rmtree(pgdata, ignore_errors=True)
+
+    try:
+        subprocess.run(
+            [str(bin_dir / "createdb"), "-h", "127.0.0.1", "-p", str(pg_port),
+             "-U", pg_user, _DBNAME],
+            check=True, capture_output=True,
+        )
+        proc = subprocess.run(
+            [str(bin_dir / "psql"), "-h", "127.0.0.1", "-p", str(pg_port),
+             "-U", pg_user, "-d", _DBNAME, "-v", "ON_ERROR_STOP=1",
+             "-c", SERVICE_ROLES_SQL],
+            capture_output=True, text=True,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"T2 engine substrate: role bootstrap failed:\n{proc.stderr}"
+            )
+    except BaseException:
+        _kill_pg()
+        raise
 
     svc_port = _free_port()
     env = {
@@ -142,6 +157,7 @@ def _boot() -> dict:
     env.pop("NX_STORAGE_BACKEND", None)
     java = shutil.which("java")
     if java is None:
+        _kill_pg()
         raise RuntimeError("T2 engine substrate: no java on PATH")
     svc = subprocess.Popen(
         [java, "-jar", str(_JAR)], env=env,
@@ -156,6 +172,7 @@ def _boot() -> dict:
         except ProcessLookupError:
             pass
         out = svc.stderr.read().decode(errors="replace")[-2000:] if svc.stderr else ""
+        _kill_pg()
         raise RuntimeError(
             f"T2 engine substrate: service did not bind port {svc_port}. "
             f"Tail of stderr:\n{out}"

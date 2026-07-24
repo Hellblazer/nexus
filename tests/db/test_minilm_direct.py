@@ -28,20 +28,20 @@ _TEXTS = [
 ]
 
 
-def _artifact_present() -> bool:
-    return (ARTIFACT_DIR / "model.onnx").is_file() and (
-        ARTIFACT_DIR / "tokenizer.json"
-    ).is_file()
+@pytest.fixture(scope="module", autouse=True)
+def _provision_artifact():
+    """Self-provisioning, not ambient (review finding: a skipif here would
+    silently vacuous-skip forever once chromadb stops populating the
+    shared cache at P3). ensure_artifact() is idempotent; a genuinely
+    offline box fails LOUD with the download error, never skip-passes
+    the permanent conformance suite."""
+    from nexus.db.minilm_direct import ensure_artifact
+
+    ensure_artifact()
 
 
-requires_artifact = pytest.mark.skipif(
-    not _artifact_present(),
-    reason="MiniLM ONNX artifact not cached (ensure_artifact() downloads it; "
-    "CI provisions via the chroma-S3 fetch, same as service-ci)",
-)
 
 
-@requires_artifact
 class TestBehavioralPins:
     def test_shape_dtype_and_norm(self) -> None:
         ef = MiniLMDirectEmbeddingFunction()
@@ -77,7 +77,6 @@ class TestBehavioralPins:
         ).all()
 
 
-@requires_artifact
 class TestDifferentialParityAgainstChroma:
     """Deletes with the dependency at P3 (import guarded)."""
 

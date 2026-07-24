@@ -138,7 +138,13 @@ def _self_provision_pg_bundle() -> Path | None:
         return ensure_pg_bundle(
             cache_dir, search_dirs=[cache_dir / "service"]
         )
-    except Exception as exc:  # noqa: BLE001 — provisioning is best-effort; miss degrades to the documented skip-sentinel
+    except Exception as exc:  # noqa: BLE001 — connectivity-class miss degrades to the documented skip-sentinel; verification failures re-raise below
+        # Review finding (P0 remainder, Important 2): a signature/digest
+        # verification failure is a security signal, categorically NOT a
+        # benign offline-box condition — fail loud, never skip past it.
+        name = type(exc).__name__
+        if "Verification" in name or "sha256" in str(exc).lower():
+            raise
         import warnings
 
         warnings.warn(
