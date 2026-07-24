@@ -1573,9 +1573,10 @@ public final class CatalogRepository {
      * Shared REPLACE body (delete all rows for docId, then insert the provided
      * rows) used by both {@link #writeManifest} (one doc per transaction) and
      * {@link #writeManifestMany} (N docs, one transaction each). Assumes
-     * {@code ctx} is already scoped to {@code tenant}. Does NOT touch
-     * documents.chunk_count — {@code writeManifest}'s public behavior is unchanged;
-     * the chunk_count fold-in is {@code writeManifestMany}'s addition.
+     * {@code ctx} is already scoped to {@code tenant}. Folds
+     * {@code documents.chunk_count = rows.size()} in the SAME transaction
+     * (nexus-b6enc F5 — previously only {@code writeManifestMany} folded the
+     * count, so the single-doc REPLACE left a stale count behind).
      */
     /**
      * nexus-x6kdz: the doc's physical_collection, stamped onto every manifest
@@ -1636,6 +1637,12 @@ public final class CatalogRepository {
                        coll)
                .execute();
         }
+        // nexus-b6enc F5: the manifest IS the count's source of truth — fold
+        // it in the same transaction so no REPLACE can leave a stale count.
+        ctx.update(CATALOG_DOCUMENTS)
+           .set(CATALOG_DOCUMENTS.CHUNK_COUNT, rows.size())
+           .where(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+           .execute();
     }
 
     /**
@@ -1669,12 +1676,10 @@ public final class CatalogRepository {
                     if (docId == null || docId.isBlank()) {
                         throw new IllegalArgumentException("'doc_id' required");
                     }
+                    // (chunk_count folds inside writeManifestRows — nexus-b6enc
+                    // F5 unified the fold for the single-doc and batch paths.)
                     tenantScope.withTenant(tenant, ctx -> {
                         writeManifestRows(ctx, tenant, docId, rows);
-                        ctx.update(CATALOG_DOCUMENTS)
-                           .set(CATALOG_DOCUMENTS.CHUNK_COUNT, rows.size())
-                           .where(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
-                           .execute();
                         return null;
                     });
                     okDocs++;
@@ -1798,11 +1803,22 @@ public final class CatalogRepository {
         );
     }
 
-    /** Purge all manifest rows for a document. */
+    /**
+     * Purge all manifest rows for a document, zeroing the parent's
+     * {@code chunk_count} in the SAME transaction (nexus-b6enc F5 — a purge
+     * that leaves the count standing manufactures a ghost: a document
+     * claiming chunks with no manifest rows behind it).
+     */
     public int purgeManifest(String tenant, String docId) {
-        return tenantScope.withTenant(tenant, ctx ->
-            ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId)).execute()
-        );
+        return tenantScope.withTenant(tenant, ctx -> {
+            int deleted = ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS)
+                             .where(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId)).execute();
+            ctx.update(CATALOG_DOCUMENTS)
+               .set(CATALOG_DOCUMENTS.CHUNK_COUNT, 0)
+               .where(CATALOG_DOCUMENTS.TUMBLER.eq(docId))
+               .execute();
+            return deleted;
+        });
     }
 
     /** Get chashes for a physical_collection via manifest join. */

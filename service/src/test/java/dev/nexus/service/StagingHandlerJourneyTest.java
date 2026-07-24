@@ -192,7 +192,7 @@ class StagingHandlerJourneyTest {
         assertThat(((Number) landed.get("landed")).intValue()).isEqualTo(2);
 
         // A manifest row + its FK parent doc (docs ride the catalog ETL leg;
-        // the journey stands in for it) + a chash_index row.
+        // the journey stands in for it).
         scope.withTenant(TENANT, ctx -> {
             ctx.execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title) "
                 + "VALUES (?, '9.9.1', 'journey-doc') ON CONFLICT DO NOTHING", TENANT);
@@ -201,15 +201,20 @@ class StagingHandlerJourneyTest {
         postOk("/v1/staging/load/document_chunks", Map.of("rows", List.of(
             Map.of("doc_id", "9.9.1", "position", 0,
                    "chash", digestHex(TEXT_REUSE).substring(0, 32)))));
-        postOk("/v1/staging/load/chash_index", Map.of("rows", List.of(
+        // RDR-187 nexus-piwya.11: the chash_index staging store is retired —
+        // an old client's landing attempt answers 400 unknown-store, and the
+        // counts envelope no longer carries the key.
+        assertThat(post("/v1/staging/load/chash_index", Map.of("rows", List.of(
             Map.of("chash", digestHex(TEXT_REUSE).substring(0, 32),
                    "physical_collection", COLL,
-                   "created_at", "2026-07-01T00:00:00Z"))));
+                   "created_at", "2026-07-01T00:00:00Z")))).statusCode())
+            .as("chash_index landing store retired (nexus-piwya.11)")
+            .isEqualTo(400);
 
         Map<String, Object> counts = getOk("/v1/staging/counts");
         assertThat(((Number) counts.get("chunks")).intValue()).isEqualTo(2);
         assertThat(((Number) counts.get("document_chunks")).intValue()).isEqualTo(1);
-        assertThat(((Number) counts.get("chash_index")).intValue()).isEqualTo(1);
+        assertThat(counts).doesNotContainKey("chash_index");
     }
 
     @Test
@@ -233,13 +238,16 @@ class StagingHandlerJourneyTest {
             + "WHERE encode(chash,'hex') = '" + canon + "'")).isEqualTo(1);
         assertThat(count("SELECT count(*) FROM nexus.catalog_document_chunks "
             + "WHERE doc_id = '9.9.1' AND encode(chash,'hex') = '" + canon + "'")).isEqualTo(1);
-        // RDR-187 (nexus-piwya.7/.9): the staging chash promote leg is
-        // retired and the router TABLE is dropped — the landed
-        // staging.chash_index row (asserted above) is a dead sink with no
-        // possible destination; the chunks promote IS the registration.
+        // RDR-187 (nexus-piwya.7/.9/.11): the staging chash promote leg is
+        // retired, the router TABLE is dropped, and the staging landing twin
+        // is dropped too; the chunks promote IS the registration.
         assertThat(count("SELECT count(*) FROM information_schema.tables "
             + "WHERE table_schema = 'nexus' AND table_name = 'chash_index'"))
             .as("the router table stays dropped; a resurrected promote target fails here")
+            .isZero();
+        assertThat(count("SELECT count(*) FROM information_schema.tables "
+            + "WHERE table_schema = 'staging' AND table_name = 'chash_index'"))
+            .as("the staging landing twin stays dropped (nexus-piwya.11)")
             .isZero();
     }
 

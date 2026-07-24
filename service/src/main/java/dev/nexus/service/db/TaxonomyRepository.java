@@ -854,6 +854,27 @@ public final class TaxonomyRepository {
     // ── Fidelity ETL import ────────────────────────────────────────────────────
 
     /**
+     * g37fr FINDING 2 (RDR-155 P4b, engine v0.1.53): fidelity import
+     * preserves source ids verbatim, which leaves the topics BIGSERIAL
+     * sequence BEHIND the imported ids — the next live serial INSERT
+     * (persist_rebuild) then collides 409 on a shared store. Standard PG
+     * import discipline: advance the sequence past the imported id inside
+     * the import transaction. The GREATEST against the sequence's own
+     * last_value means setval never moves the sequence backward. Requires
+     * UPDATE on the sequence (granted to nexus_svc by taxonomy-005).
+     */
+    // SANCTIONED RAW (rdr155-p4b F-C): setval / pg_get_serial_sequence /
+    // sequence last_value are sequence-state functions with no generated
+    // jOOQ form (codegen models tables, not sequences); one statement,
+    // import-path only, never serving-path.
+    private static void advanceTopicsIdSequence(DSLContext ctx, long maxImportedId) {
+        ctx.execute(
+            "SELECT setval(pg_get_serial_sequence('nexus.topics', 'id'), "
+            + "GREATEST((SELECT last_value FROM nexus.topics_id_seq), ?))",
+            maxImportedId);
+    }
+
+    /**
      * Fidelity-preserving import for a topics row.
      * Uses OVERRIDING SYSTEM VALUE to preserve the source integer id so
      * FK references in topic_assignments / topic_links remain consistent.
@@ -883,6 +904,7 @@ public final class TaxonomyRepository {
                .set(TOPICS.CENTROID_HASH, field("EXCLUDED.centroid_hash", String.class))
                .set(TOPICS.TERMS,         field("EXCLUDED.terms",         String.class))
                .execute();
+            advanceTopicsIdSequence(ctx, srcId);
             return null;
         });
         return srcId;
@@ -1078,6 +1100,8 @@ public final class TaxonomyRepository {
                   .set(TOPICS.TERMS,         field("EXCLUDED.terms",         String.class))
                   .execute();
         }
+        // Deduped list is id-sorted — the last element carries the max id.
+        advanceTopicsIdSequence(ctx, reqL(deduped.get(deduped.size() - 1), "id"));
         return rows.size();
     }
 

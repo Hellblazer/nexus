@@ -124,18 +124,6 @@ else
     echo "WARNING: no pg_credentials — skipping Postgres checks"
 fi
 
-# ── CHROMA STATUS ─────────────────────────────────────────────────────────────
-echo ""
-echo "=== Sandbox Chroma ==="
-CHROMA_SQLITE="${NX_CHROMA_PATH}/chroma.sqlite3"
-if [[ -f "${CHROMA_SQLITE}" ]]; then
-    CHROMA_JSON="$(cd "${REPO_ROOT}" && uv run python "${SCRIPT_DIR}/sandbox_helper.py" \
-        chroma-counts --chroma-sqlite "${CHROMA_SQLITE}" 2>/dev/null || echo '{}')"
-    echo "  ${CHROMA_JSON}"
-else
-    echo "  Chroma not seeded yet (run prod-copy.sh to seed)"
-fi
-
 echo ""
 if [[ "${FAIL}" -ne 0 ]]; then
     echo "OVERALL: FAIL"

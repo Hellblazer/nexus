@@ -208,6 +208,34 @@ class AspectRepositoryTest {
         assertThat(rec).as("low-confidence row must NOT be stored").isEmpty();
     }
 
+    @Test @Order(2)
+    void upsertAspect_nullConfidence_droppedNotNpe() {
+        // nexus-j0nec: JSON body carrying "confidence": null used to NPE
+        // (containsKey true -> ((Number) null).doubleValue()) and surface as
+        // HTTP 500. Mirror the Python gate (document_aspects._MIN_CONFIDENCE:
+        // confidence None is dropped with a structured warning, no row).
+        var body = makeAspect("coll-nullconf", "nullconf.pdf");
+        body.put("confidence", null);
+        long id = repo.upsertAspect(TENANT_A, body);
+        assertThat(id).as("null-confidence upsert must drop (-1), not NPE").isEqualTo(-1L);
+
+        Optional<Map<String, Object>> rec = repo.getAspect(TENANT_A, "coll-nullconf", "nullconf.pdf");
+        assertThat(rec).as("null-confidence row must NOT be stored").isEmpty();
+    }
+
+    @Test @Order(2)
+    void importAspectsBatch_nullConfidence_droppedNotNpe() {
+        // Batch variant of the null-confidence gate: the kept-filter treats
+        // null as -1.0 (drop) and the write loop must never see a null.
+        var ok = makeAspect("coll-nullconf-batch", "ok.pdf", 0.9, "v1", "ext");
+        var nullConf = makeAspect("coll-nullconf-batch", "null.pdf");
+        nullConf.put("confidence", null);
+        int written = repo.importAspectsBatch(TENANT_A, List.of(ok, nullConf));
+        assertThat(written).as("only the non-null-confidence row is written").isEqualTo(1);
+        assertThat(repo.getAspect(TENANT_A, "coll-nullconf-batch", "null.pdf")).isEmpty();
+        assertThat(repo.getAspect(TENANT_A, "coll-nullconf-batch", "ok.pdf")).isPresent();
+    }
+
     @Test @Order(3)
     void upsertAspect_onConflict_overwritesRow() {
         repo.upsertAspect(TENANT_A, makeAspect("coll-overwrite", "ow.pdf", 0.80, "v1", "v1-extractor"));

@@ -36,7 +36,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>This is the wiring test for the validation seam the conexus xr7.8.9 go-live gate
  * drives: the pgvector hybrid fusion exposed through the EXISTING /v1/vectors surface
  * (no new public surface). The fusion semantics themselves are locked by the P3.1
- * suites ({@code PgVectorHybridSearchContractTest}, {@code HybridParityIntegrationTest});
+ * suites ({@code PgVectorHybridSearchContractTest}, plus the Chroma-era
+ * {@code HybridParityIntegrationTest}, deleted at RDR-155 P4b);
  * this class pins only the HTTP envelope:
  * <ul>
  *   <li>Route exists, request body matches /search, response is the flat row list.

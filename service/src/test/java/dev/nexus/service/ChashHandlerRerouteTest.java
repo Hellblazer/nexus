@@ -38,18 +38,16 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       {@code {"rows":[{"collection","created_at"}],"chash"}} with
  *       second-precision UTC timestamps; registered_chashes / distinct
  *       collections / count / is_empty keep their keys</li>
- *   <li>DEPRECATED writes (upsert, upsert_many, import, delete_collection,
- *       delete_stale) keep their old success shapes, add
- *       {@code "deprecated":true}, perform ZERO database work — and
- *       delete_collection specifically does NOT destroy chunk content</li>
- *   <li>validation still fails loud during the window: malformed chash 400,
- *       missing params 400, wrong method 405</li>
+ *   <li>RETIRED writes (upsert, upsert_many, import, delete_stale) answer
+ *       410 Gone with a body naming the RDR-187 retirement, and perform
+ *       ZERO database work (nexus-piwya.11 — the no-op deprecation window
+ *       closed with the nexus-piwya.9 DROP)</li>
+ *   <li>delete_collection stays a deprecated no-op and specifically does
+ *       NOT destroy chunk content</li>
+ *   <li>validation still fails loud on the live routes: missing params 400,
+ *       wrong method 405</li>
  *   <li>rename_collection stays REAL (re-homes chunks; Q3)</li>
  * </ol>
- *
- * <p>Survives nexus-piwya.9 (no {@code chash_index} references — the no-op
- * assertions check chunk-table state only); the write-endpoint tests are
- * updated at nexus-piwya.11 when the 410 flip lands.
  *
  * <p>Hermetic: Testcontainers pgvector, port 0, requires Docker.
  */
@@ -189,52 +187,46 @@ class ChashHandlerRerouteTest {
         assertThat(empty.get("empty")).isEqualTo(false);
     }
 
-    // ── DEPRECATED writes: old shape + marker + zero DB work ─────────────────
+    // ── RETIRED writes: 410 Gone + zero DB work (nexus-piwya.11) ─────────────
 
     @Test
-    void upsert_acceptsAndNoOps_withDeprecationMarker() throws Exception {
+    void upsert_isGone_withRetirementMessage() throws Exception {
         long before = chunkRowCount();
         var resp = post("/v1/chash/upsert",
             "{\"chash\":\"" + ABSENT.toHex() + "\",\"collection\":\"" + COLL_384 + "\"}");
-        assertThat(resp.statusCode()).isEqualTo(200);
+        assertThat(resp.statusCode()).isEqualTo(410);
         Map<String, Object> body = mapper.readValue(resp.body(), MAP_T);
-        assertThat(body).containsOnlyKeys("ok", "deprecated");
-        assertThat(body.get("ok")).isEqualTo(true);
-        assertThat(body.get("deprecated")).isEqualTo(true);
+        assertThat((String) body.get("error"))
+            .as("the 410 body must be self-diagnosing: name the retirement")
+            .contains("RDR-187").contains("/v1/chash/upsert");
         assertThat(chunkRowCount()).as("no database work").isEqualTo(before);
-        // The no-op'd chash stays unresolvable — nothing was registered anywhere.
+        // The refused chash stays unresolvable — nothing was registered anywhere.
         Map<String, Object> lookup = mapper.readValue(
             get("/v1/chash/lookup?chash=" + ABSENT.toHex()).body(), MAP_T);
         assertThat((List<?>) lookup.get("rows")).isEmpty();
     }
 
     @Test
-    void upsertMany_acceptsAndNoOps_countIsAcceptedCount() throws Exception {
+    void upsertMany_isGone() throws Exception {
         long before = chunkRowCount();
         var resp = post("/v1/chash/upsert_many",
             "{\"chashes\":[\"" + ABSENT.toHex() + "\",\"" + MULTI.toHex() + "\"]," +
             "\"collection\":\"" + COLL_384 + "\"}");
-        assertThat(resp.statusCode()).isEqualTo(200);
+        assertThat(resp.statusCode()).isEqualTo(410);
         Map<String, Object> body = mapper.readValue(resp.body(), MAP_T);
-        assertThat(body).containsOnlyKeys("ok", "count", "deprecated");
-        assertThat(body.get("count")).isEqualTo(2);
-        assertThat(body.get("deprecated")).isEqualTo(true);
+        assertThat((String) body.get("error")).contains("RDR-187").contains("upsert_many");
         assertThat(chunkRowCount()).isEqualTo(before);
     }
 
     @Test
-    void import_returnsHonestZero_withDeprecationMarker() throws Exception {
+    void import_isGone() throws Exception {
         long before = chunkRowCount();
         var resp = post("/v1/chash/import",
             "{\"rows\":[{\"chash\":\"" + ABSENT.toHex() + "\",\"collection\":\"" + COLL_384 +
             "\",\"created_at\":\"2025-06-01T10:30:00Z\"}]}");
-        assertThat(resp.statusCode()).isEqualTo(200);
+        assertThat(resp.statusCode()).isEqualTo(410);
         Map<String, Object> body = mapper.readValue(resp.body(), MAP_T);
-        assertThat(body).containsOnlyKeys("imported", "deprecated");
-        assertThat(body.get("imported"))
-            .as("honest: nothing was persisted — never a fabricated success count")
-            .isEqualTo(0);
-        assertThat(body.get("deprecated")).isEqualTo(true);
+        assertThat((String) body.get("error")).contains("RDR-187").contains("/v1/chash/import");
         assertThat(chunkRowCount()).isEqualTo(before);
     }
 
@@ -258,15 +250,13 @@ class ChashHandlerRerouteTest {
     }
 
     @Test
-    void deleteStale_noOps_withDeprecationMarker() throws Exception {
+    void deleteStale_isGone() throws Exception {
         long before = chunkRowCount();
         var resp = post("/v1/chash/delete_stale",
             "{\"chash\":\"" + MULTI.toHex() + "\",\"collection\":\"" + COLL_384 + "\"}");
-        assertThat(resp.statusCode()).isEqualTo(200);
+        assertThat(resp.statusCode()).isEqualTo(410);
         Map<String, Object> body = mapper.readValue(resp.body(), MAP_T);
-        assertThat(body).containsOnlyKeys("deleted", "deprecated");
-        assertThat(body.get("deleted")).isEqualTo(0);
-        assertThat(body.get("deprecated")).isEqualTo(true);
+        assertThat((String) body.get("error")).contains("RDR-187").contains("delete_stale");
         assertThat(chunkRowCount()).isEqualTo(before);
     }
 
@@ -300,21 +290,19 @@ class ChashHandlerRerouteTest {
     // ── validation still fails loud during the window ────────────────────────
 
     @Test
-    void validation_survivesTheDeprecationWindow() throws Exception {
-        // Malformed chash on a deprecated write: still 400, not a silent ok.
+    void validation_failsLoudOnLiveRoutes_and410WinsOnRetiredOnes() throws Exception {
+        // Retired writes are 410 regardless of payload shape or method — the
+        // route is gone; there is no validation tier left to reach.
         assertThat(post("/v1/chash/upsert",
-            "{\"chash\":\"not-hex\",\"collection\":\"c\"}").statusCode()).isEqualTo(400);
+            "{\"chash\":\"not-hex\",\"collection\":\"c\"}").statusCode()).isEqualTo(410);
         assertThat(post("/v1/chash/upsert_many",
-            "{\"chashes\":[\"zz\"],\"collection\":\"c\"}").statusCode()).isEqualTo(400);
+            "{\"chashes\":[\"zz\"],\"collection\":\"c\"}").statusCode()).isEqualTo(410);
         assertThat(post("/v1/chash/import",
-            "{\"rows\":[{\"chash\":\"beef\",\"collection\":\"c\"}]}").statusCode()).isEqualTo(400);
-        // Missing required fields.
-        assertThat(post("/v1/chash/upsert",
-            "{\"chash\":\"" + MULTI.toHex() + "\"}").statusCode()).isEqualTo(400);
+            "{\"rows\":[{\"chash\":\"beef\",\"collection\":\"c\"}]}").statusCode()).isEqualTo(410);
+        assertThat(get("/v1/chash/upsert").statusCode()).isEqualTo(410);
+        // Live routes still validate loud.
         assertThat(post("/v1/chash/delete_collection", "{}").statusCode()).isEqualTo(400);
         assertThat(get("/v1/chash/lookup").statusCode()).isEqualTo(400);
-        // Wrong method.
-        assertThat(get("/v1/chash/upsert").statusCode()).isEqualTo(405);
         assertThat(post("/v1/chash/lookup", "{}").statusCode()).isEqualTo(405);
     }
 

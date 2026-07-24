@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-187 (bead nexus-piwya.11) — DROP staging.chash_index, the landing
+    twin of the retired router table.
+
+    nexus.chash_index was dropped at rdr187-2 (nexus-piwya.9). The staging
+    landing table outlived it one release as an accepted dead sink: the
+    promote leg was already retired (nexus-piwya.7), so landed rows went
+    nowhere, and the /v1/staging load spec kept accepting them only for the
+    mixed-version window. This tag closes the window: the /v1/chash write
+    endpoints flip to 410 Gone, the "chash_index" staging store spec is
+    removed from StagingHandler.STORES (an old client's load now answers
+    400 unknown-store), and the dead sink drops here.
+
+    PRECONDITION (catalog-013 discipline): sqlCheck-gated, MARK_RAN-safe —
+    a store where the table is already gone (a future fresh-install
+    generation whose baseline stops creating it, or an out-of-band cleanup)
+    marks ran instead of erroring. The RLS policy and PK die with the table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="rdr187-3-drop-staging-chash-index" author="nexus-piwya.11">
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="1">SELECT count(*) FROM information_schema.tables WHERE table_schema = 'staging' AND table_name = 'chash_index'</sqlCheck>
+        </preConditions>
+        <comment>DROP staging.chash_index — the router's landing twin. The promote leg retired at nexus-piwya.7 made every landed row a dead sink; with the /v1/chash writes now 410 and the staging store spec removed, nothing can land here.</comment>
+        <sql>
+DROP TABLE staging.chash_index;
+        </sql>
+        <!-- Landed rows were a dead sink by construction (no promote leg since
+             nexus-piwya.7); nothing to preserve. Rollback is a documented no-op. -->
+        <rollback/>
+    </changeSet>
+
+</databaseChangeLog>

@@ -39,7 +39,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>The combined-query SQL functions ({@code nexus.search_metadata_scoped_<dim>} /
  * {@code search_topic_scoped_<dim>}, catalog-006) collapse the app-side catalog dance
  * into one statement. This suite is the cross-layer parity seam the RDR-155 P3.E
- * DualRunHarness was meant to host (Finding 4) — built as a focused sibling because the
+ * DualRunHarness (Chroma-era, deleted at RDR-155 P4b) was meant to host (Finding 4) —
+ * built as a focused sibling because the
  * DualRunHarness's Chroma baseline leg is unrelated to combined-query parity (and
  * currently can't embed the {@code all-minilm-l6-v2} collection token with the
  * minilm-only router; tracked separately). Combined-query parity is pgvector-only:
@@ -150,7 +151,7 @@ class CombinedQueryParityIntegrationTest {
             while (words.size() < len) words.add(WORD_BANK.get(rnd.nextInt(WORD_BANK.size())));
             docs.add(new CqDoc(
                 "cq-doc-" + d,
-                sha256Hex32("cq-chash-" + d),
+                sha256Hex("cq-chash-" + d),
                 String.join(" ", words) + " cqdoc" + d,
                 (d % 2 == 0) ? "paper" : "code",
                 (d % 2 == 0) ? "ada" : "bob",
@@ -165,7 +166,7 @@ class CombinedQueryParityIntegrationTest {
         // would rank at/near the top for that query if the deleted_at guard were missing.
         // Both the live-only app stitch and the combined function must exclude it; a
         // function that dropped `deleted_at IS NULL` would surface it → divergence.
-        docs.add(new CqDoc(TOMB_TUMBLER, sha256Hex32("cq-tomb"), queries.get(0),
+        docs.add(new CqDoc(TOMB_TUMBLER, sha256Hex("cq-tomb"), queries.get(0),
             "paper", "ada", false, true));
 
         // Load chunks via the repo (real ONNX embeddings; chash = our 32-char id).
@@ -193,11 +194,12 @@ class CombinedQueryParityIntegrationTest {
                     + "', '" + c.contentType() + "', '" + COLL + "', "
                     + (c.tombstoned() ? "now()" : "NULL") + ") "
                     + "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+                // RDR-180: chash is bytea (32 octets) — decode the 64-hex string.
                 su.createStatement().execute(
                     "INSERT INTO nexus.catalog_document_chunks "
                     + "(tenant_id, doc_id, position, chash, collection) "
-                    + "VALUES ('" + TENANT + "', '" + c.tumbler() + "', 0, '" + c.chash()
-                    + "', '" + COLL + "') ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
+                    + "VALUES ('" + TENANT + "', '" + c.tumbler() + "', 0, decode('" + c.chash()
+                    + "', 'hex'), '" + COLL + "') ON CONFLICT (tenant_id, doc_id, position) DO NOTHING");
                 if (c.inTopic()) {
                     su.createStatement().execute(
                         "INSERT INTO nexus.topic_assignments "
@@ -304,11 +306,13 @@ class CombinedQueryParityIntegrationTest {
         return rows.stream().map(r -> (String) r.get("id")).toList();
     }
 
-    private static String sha256Hex32(String seed) throws Exception {
+    private static String sha256Hex(String seed) throws Exception {
         byte[] h = java.security.MessageDigest.getInstance("SHA-256")
             .digest(seed.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         StringBuilder sb = new StringBuilder(64);
         for (byte b : h) sb.append(String.format("%02x", b));
-        return sb.substring(0, 32);
+        // RDR-180: the FULL 64-hex digest is the canonical chash — the old
+        // [:32] truncation now violates chunks_<dim>_chash_octet_check.
+        return sb.toString();
     }
 }

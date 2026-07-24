@@ -120,37 +120,6 @@ def _cmd_sqlite_counts(args: argparse.Namespace) -> None:
     print(json.dumps(counts))
 
 
-def _cmd_chroma_counts(args: argparse.Namespace) -> None:
-    """Print JSON counts from a Chroma sqlite3 file.
-
-    Opens the file in read-only mode (mode=ro URI) to prevent SQLite from
-    creating or updating the -shm sidecar on a WAL-mode database.
-    Chroma uses 'delete' journal mode rather than WAL so the sidecar risk is
-    lower here than for memory.db, but mode=ro is still the correct default
-    for any prod-path read.
-    """
-    sqlite_path = Path(args.chroma_sqlite)
-    if not sqlite_path.exists():
-        print(json.dumps({"error": f"not found: {sqlite_path}"}))
-        sys.exit(1)
-
-    uri = f"file:{sqlite_path}?mode=ro"
-    try:
-        conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
-    except sqlite3.OperationalError as e:
-        print(json.dumps({"error": str(e)}))
-        sys.exit(1)
-    try:
-        collections = conn.execute("SELECT COUNT(*) FROM collections").fetchone()[0]
-        embeddings = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
-    except Exception as e:
-        print(json.dumps({"error": str(e)}))
-        sys.exit(1)
-    finally:
-        conn.close()
-    print(json.dumps({"collections": collections, "embeddings": embeddings}))
-
-
 def main() -> None:
     p = argparse.ArgumentParser(description="RDR-152 sandbox helper")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -165,15 +134,11 @@ def main() -> None:
     sc = sub.add_parser("sqlite-counts", help="Row counts for T2 SQLite db")
     sc.add_argument("--db", required=True)
 
-    cc = sub.add_parser("chroma-counts", help="Count Chroma collections and embeddings")
-    cc.add_argument("--chroma-sqlite", required=True)
-
     args = p.parse_args()
     dispatch = {
         "provision": _cmd_provision,
         "pg-bin": _cmd_pg_bin,
         "sqlite-counts": _cmd_sqlite_counts,
-        "chroma-counts": _cmd_chroma_counts,
     }
     dispatch[args.cmd](args)
 

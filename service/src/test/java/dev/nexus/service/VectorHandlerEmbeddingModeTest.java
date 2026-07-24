@@ -147,30 +147,50 @@ class VectorHandlerEmbeddingModeTest {
     // boots the FULL NexusService (all handlers registered), and the chash
     // routes need exactly that.
 
-    // POLARITY NOTE (RDR-180, nexus-jxizy.7/.8): pre-flip the migration/upsert
-    // routes NORMALIZED an incoming 64-char row to its [:32] key (the SQLite-era
-    // full-hash shape). Post-flip the FULL 64-hex digest IS the canonical chash —
-    // never truncated — and a bare 32-hex value is a legacy reference that must
-    // resolve through nexus.chash_alias, never accepted fresh at these seams.
-    // These tests REPLACE the pre-flip truncation-contract tests (inverted, not
-    // deleted, mirroring ChashTypeTest / PgVectorServingContractTest).
+    // RDR-187 nexus-piwya.11: the one-release no-op deprecation window CLOSED
+    // with the nexus-piwya.9 DROP — the /v1/chash write routes (upsert,
+    // upsert_many, import, delete_stale) are 410 Gone regardless of payload
+    // shape (no validation tier is reachable behind a gone route). These pins
+    // REPLACE the window-era acceptance/width-validation tests (which
+    // themselves replaced the pre-flip truncation-contract tests); the full
+    // wire contract lives in ChashHandlerRerouteTest.
 
     @Test
-    void chashImport_full64CharRow_acceptedAsDeprecatedNoOp() throws Exception {
-        // RDR-187 (nexus-piwya.3): the router is retired — /v1/chash/import
-        // ACCEPTS the canonical 64-hex shape (boundary validation unchanged,
-        // the point of this test) but persists nothing during the one-release
-        // no-op window. The full wire contract lives in ChashHandlerRerouteTest.
+    void chashWrites_areGone410_regardlessOfPayloadShape() throws Exception {
+        // Canonical 64-hex, legacy 32-hex, malformed length, bad element type:
+        // every payload class answers the SAME 410 naming the retirement.
+        var canonical = post("/v1/chash/upsert", Map.of(
+            "chash", "b".repeat(64), "collection", "code__norm64"));
+        assertThat(canonical.statusCode()).isEqualTo(410);
+        assertThat(canonical.body()).contains("RDR-187");
+        assertThat(post("/v1/chash/upsert", Map.of(
+            "chash", "b".repeat(32), "collection", "code__legacy32")).statusCode())
+            .isEqualTo(410);
+        assertThat(post("/v1/chash/upsert", Map.of(
+            "chash", "c".repeat(40), "collection", "code__strict")).statusCode())
+            .isEqualTo(410);
+        assertThat(post("/v1/chash/upsert_many", Map.of(
+            "chashes", java.util.Arrays.asList("a".repeat(64), 42),
+            "collection", "code__strict")).statusCode())
+            .isEqualTo(410);
+        assertThat(post("/v1/chash/import", Map.of(
+            "rows", List.of(Map.of(
+                "chash", "e".repeat(64),
+                "collection", "code__legacy64",
+                "created_at", "2025-01-01T00:00:00Z")))).statusCode())
+            .isEqualTo(410);
+    }
+
+    @Test
+    void chashLookup_unaffectedByTheGoneWrites() throws Exception {
+        // The read path stays live and chunk-backed; a gone write persisted
+        // nothing, so an arbitrary canonical chash still answers empty rows.
         String full = "e".repeat(64);
-        var resp = post("/v1/chash/import", Map.of(
+        post("/v1/chash/import", Map.of(
             "rows", List.of(Map.of(
                 "chash", full,
                 "collection", "code__legacy64",
                 "created_at", "2025-01-01T00:00:00Z"))));
-        assertThat(resp.statusCode()).isEqualTo(200);
-        assertThat(resp.body()).contains("\"deprecated\":true").contains("\"imported\":0");
-        // Nothing stored: the lookup answers from the chunks tables, which
-        // this import never touched.
         var req = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + service.getPort()
                 + "/v1/chash/lookup?chash=" + full))
@@ -179,67 +199,6 @@ class VectorHandlerEmbeddingModeTest {
         var lookup = http.send(req, HttpResponse.BodyHandlers.ofString());
         assertThat(lookup.statusCode()).isEqualTo(200);
         assertThat(lookup.body()).contains("\"rows\":[]");
-    }
-
-    @Test
-    void chashImport_legacy32CharRow_rejected400() throws Exception {
-        var resp = post("/v1/chash/import", Map.of(
-            "rows", List.of(Map.of(
-                "chash", "e".repeat(32),
-                "collection", "code__legacy32",
-                "created_at", "2025-01-01T00:00:00Z"))));
-        assertThat(resp.statusCode()).isEqualTo(400);
-        assertThat(resp.body()).contains("chash").contains("legacy 32-hex");
-    }
-
-    @Test
-    void chashUpsertMany_nonStringElement_400WithIndex() throws Exception {
-        // nexus-e0hd2: the old loop silently DROPPED non-string elements
-        // (the castRows disease) — now a loud 400 naming the index. Index 0
-        // must be a VALID canonical chash so the assertion actually reaches
-        // index 1's type violation (a non-canonical index 0 would 400 first
-        // on its own, masking this test's intent).
-        var resp = post("/v1/chash/upsert_many", Map.of(
-            "chashes", java.util.Arrays.asList("a".repeat(64), 42),
-            "collection", "code__strict"));
-        assertThat(resp.statusCode()).isEqualTo(400);
-        assertThat(resp.body()).contains("chashes[1]").contains("must be a string");
-    }
-
-    @Test
-    void chashUpsert_full64CharRow_acceptedAsDeprecatedNoOp() throws Exception {
-        // RDR-187 (nexus-piwya.3): same window contract as the import test
-        // above — 64-hex ACCEPTED at the boundary, nothing persisted.
-        var resp = post("/v1/chash/upsert", Map.of(
-            "chash", "b".repeat(64), "collection", "code__norm64"));
-        assertThat(resp.statusCode()).isEqualTo(200);
-        assertThat(resp.body()).contains("\"deprecated\":true");
-        var req = HttpRequest.newBuilder()
-            .uri(URI.create("http://127.0.0.1:" + service.getPort()
-                + "/v1/chash/lookup?chash=" + "b".repeat(64)))
-            .header("Authorization", "Bearer " + TOKEN)
-            .GET().build();
-        var lookup = http.send(req, HttpResponse.BodyHandlers.ofString());
-        assertThat(lookup.statusCode()).isEqualTo(200);
-        assertThat(lookup.body()).contains("\"rows\":[]");
-    }
-
-    @Test
-    void chashUpsert_legacy32CharRow_rejected400() throws Exception {
-        var resp = post("/v1/chash/upsert", Map.of(
-            "chash", "b".repeat(32), "collection", "code__legacy32"));
-        assertThat(resp.statusCode()).isEqualTo(400);
-        assertThat(resp.body()).contains("legacy 32-hex").contains("chash_alias");
-    }
-
-    @Test
-    void chashUpsert_otherBadLength_still400() throws Exception {
-        // Any non-32, non-64 length is genuinely malformed and 400s with the
-        // offending length.
-        var resp = post("/v1/chash/upsert", Map.of(
-            "chash", "c".repeat(40), "collection", "code__strict"));
-        assertThat(resp.statusCode()).isEqualTo(400);
-        assertThat(resp.body()).contains("got 40 chars");
     }
 
     @Test

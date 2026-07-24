@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    g37fr FINDING 2 (RDR-155 P4b, engine v0.1.53) — grant UPDATE on the
+    topics id sequence to nexus_svc.
+
+    The taxonomy fidelity import (importTopic / importBatch kind=topic)
+    preserves source ids verbatim, which leaves the BIGSERIAL sequence
+    behind the imported ids; the next live serial INSERT (persist_rebuild)
+    then collides 409 on a shared store. The fix advances the sequence via
+    setval(pg_get_serial_sequence('nexus.topics','id'), GREATEST(...))
+    inside the import transaction — and setval requires UPDATE on the
+    sequence, which the grants-nexus-svc-1 sequence grants (USAGE, SELECT)
+    deliberately do not include. This grants UPDATE on EXACTLY the one
+    sequence the import discipline needs — not a blanket widening of the
+    sequence surface.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="taxonomy-005-topics-seq-update-grant" author="rdr155-p4b">
+        <comment>GRANT UPDATE on the nexus.topics id sequence to nexus_svc so the fidelity import can setval the sequence past imported ids (g37fr FINDING 2 serial-collision fix)</comment>
+        <sql splitStatements="false">
+DO $$
+DECLARE
+    seq text;
+BEGIN
+    seq := pg_get_serial_sequence('nexus.topics', 'id');
+    IF seq IS NULL THEN
+        RAISE EXCEPTION 'taxonomy-005: nexus.topics.id has no owned sequence — schema drift';
+    END IF;
+    EXECUTE format('GRANT UPDATE ON SEQUENCE %s TO nexus_svc', seq);
+END
+$$;
+        </sql>
+        <rollback>
+            <!-- Revoke is a DBA operation; not automated (grants-nexus-svc precedent). -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

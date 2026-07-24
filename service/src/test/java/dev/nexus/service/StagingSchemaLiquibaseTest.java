@@ -55,8 +55,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class StagingSchemaLiquibaseTest {
 
+    // chash_index left the list at RDR-187 nexus-piwya.11 (staging landing
+    // twin dropped by rdr187-002; see the dedicated absence assertion below).
     private static final List<String> STAGING_TABLES = List.of(
-        "chunks", "document_chunks", "chash_index", "topic_assignments",
+        "chunks", "document_chunks", "topic_assignments",
         "frecency", "relevance_log", "document_aspects", "aspect_extraction_queue");
 
     private static final String T_A = "staging-tenant-a";
@@ -171,21 +173,37 @@ class StagingSchemaLiquibaseTest {
 
     @Test
     void tenantIsolation_holdsForStagingChunks() {
+        // (Re-pointed from staging.chash_index to staging.frecency at RDR-187
+        // nexus-piwya.11 — the chash_index landing twin is dropped; the RLS
+        // shape under test is identical across the staging tables.)
         tenantScope.withTenant(T_B, ctx -> {
-            ctx.execute("INSERT INTO staging.chash_index (tenant_id, chash, physical_collection) "
-                + "VALUES (?, 'feedbeef' , 'c1')", T_B);
+            ctx.execute("INSERT INTO staging.frecency (tenant_id, chunk_id) "
+                + "VALUES (?, 'feedbeef')", T_B);
             return null;
         });
         Integer aSees = tenantScope.withTenant(T_A, ctx ->
-            ctx.fetchOne("SELECT count(*) FROM staging.chash_index").get(0, Integer.class));
+            ctx.fetchOne("SELECT count(*) FROM staging.frecency").get(0, Integer.class));
         assertThat(aSees).as("tenant A must not see tenant B's staged rows").isEqualTo(0);
         // WITH CHECK: cross-tenant INSERT rejected.
         assertThatThrownBy(() -> tenantScope.withTenant(T_A, ctx -> {
-            ctx.execute("INSERT INTO staging.chash_index (tenant_id, chash, physical_collection) "
-                + "VALUES (?, 'feedbee2', 'c1')", T_B);
+            ctx.execute("INSERT INTO staging.frecency (tenant_id, chunk_id) "
+                + "VALUES (?, 'feedbee2')", T_B);
             return null;
         })).as("cross-tenant INSERT must violate the WITH CHECK policy")
            .hasMessageContaining("row-level security");
+    }
+
+    @Test
+    void stagingChashIndex_isDropped() {
+        // RDR-187 nexus-piwya.11 (rdr187-002): the dead-sink landing twin of
+        // the retired router is gone.
+        Integer present = tenantScope.withTenant(T_A, ctx ->
+            ctx.fetchOne("SELECT count(*) FROM information_schema.tables "
+                + "WHERE table_schema = 'staging' AND table_name = 'chash_index'")
+               .get(0, Integer.class));
+        assertThat(present)
+            .as("staging.chash_index must be dropped (rdr187-002)")
+            .isZero();
     }
 
     @Test

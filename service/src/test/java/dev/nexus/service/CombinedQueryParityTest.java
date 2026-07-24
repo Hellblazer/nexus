@@ -57,7 +57,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       query vector, asserted with an EXACT count ({@code == N}, never
  *       {@code >= threshold}). At container scale this is the correctness pin (exact
  *       recall, no silent under-return); the production-scale {@code max_scan_tuples}
- *       ceiling reproduction stays conexus xr7.8.9 / the integration DualRunHarness,
+ *       ceiling reproduction stayed conexus xr7.8.9 / the Chroma-era DualRunHarness
+ *       (deleted at RDR-155 P4b),
  *       same scope split as RDR-155 P3.E.</li>
  *   <li><strong>Parity vs the stitched path</strong> — GROUP 5: each combined query
  *       returns IDENTICAL results to the app-side stitch it retires (catalog filter →
