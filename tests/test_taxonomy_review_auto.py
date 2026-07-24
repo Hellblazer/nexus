@@ -37,7 +37,7 @@ import nexus.mcp_infra as _mi
 from nexus.commands.taxonomy_cmd import taxonomy
 from nexus.db.t2 import T2Database
 
-_seed_topic_ids = itertools.count(1)
+from tests.conftest import next_import_seed_id  # session-unique import ids (see conftest note)
 
 
 @pytest.fixture(autouse=True)
@@ -70,7 +70,7 @@ def _seed_topic(
 
     with T2Database(db_path) as db:
         topic_id = db.taxonomy.import_topic(
-            src_id=next(_seed_topic_ids),
+            src_id=next_import_seed_id(),
             label=label,
             parent_id=None,
             collection=collection,

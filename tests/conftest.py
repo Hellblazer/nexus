@@ -1092,6 +1092,22 @@ def db(tmp_path: Path) -> T2Database:
     database.close()
 
 
+#: Process-wide unique id source for fidelity-import seeding (RDR-155
+#: P4b P0a'). import_topic/import_plan preserve ids VERBATIM without
+#: advancing the engine's serial sequences, and the topics PK is GLOBAL
+#: across tenants on the shared session engine — so per-module counters
+#: collide across modules in one pytest session (bisected finding).
+#: Every module that seeds preserved ids MUST draw from THIS counter.
+import itertools
+
+_import_seed_ids = itertools.count(1_000_000_000)
+
+
+def next_import_seed_id() -> int:
+    """Session-unique id for fidelity-import seeding (see note above)."""
+    return next(_import_seed_ids)
+
+
 def make_vector_test_client():
     """THE test vector substrate (RDR-155 P4b P0a): a fresh
     ``InMemoryVectorClient`` with the real MiniLM default EF.

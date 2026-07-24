@@ -30,7 +30,7 @@ def db(tmp_path: Path) -> T2Database:
 # the engine's topics sequence (see tests/test_context.py). Module-distinct
 # base (1.2e9) — the topics PK is global across tenants, so per-module
 # counters restarting at the same value collide within one engine session.
-_seed_src_ids = itertools.count(1_200_000_000)
+from tests.conftest import next_import_seed_id  # session-unique import ids (see conftest note)
 
 #: Every topic id seeded in the current test — the scope for the public
 #: link-pairs read (get_topic_link_pairs only returns pairs whose BOTH
@@ -54,7 +54,7 @@ def _seed_topic(db: T2Database, label: str, collection: str) -> int:
         tid = cur.lastrowid
     else:
         tid = db.taxonomy.import_topic(
-            src_id=next(_seed_src_ids),
+            src_id=next_import_seed_id(),
             label=label,
             parent_id=None,
             collection=collection,

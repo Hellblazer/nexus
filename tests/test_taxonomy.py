@@ -40,7 +40,7 @@ def chroma_client() -> chromadb.ClientAPI:
 # the topics PK is global across tenants — two modules restarting the same
 # counter in one engine session 500 on /import/topic.
 
-_seed_src_ids = itertools.count(1_100_000_000)
+from tests.conftest import next_import_seed_id  # session-unique import ids (see conftest note)
 
 
 def _seed_topic(
@@ -66,7 +66,7 @@ def _seed_topic(
         taxonomy.conn.commit()
         return cur.lastrowid
     return taxonomy.import_topic(
-        src_id=next(_seed_src_ids),
+        src_id=next_import_seed_id(),
         label=label,
         parent_id=parent_id,
         collection=collection,

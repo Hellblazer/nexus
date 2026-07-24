@@ -26,7 +26,7 @@ from nexus.db.t2 import T2Database
 # the engine's topics sequence (see tests/test_context.py). Module-distinct
 # base (1.3e9) — the topics PK is global across tenants, so per-module
 # counters restarting at the same value collide within one engine session.
-_seed_src_ids = itertools.count(1_300_000_000)
+from tests.conftest import next_import_seed_id  # session-unique import ids (see conftest note)
 
 
 def _seed(db_path: Path) -> None:
@@ -43,7 +43,7 @@ def _seed(db_path: Path) -> None:
                 ids.append(cur.lastrowid)
             else:
                 ids.append(db.taxonomy.import_topic(
-                    src_id=next(_seed_src_ids),
+                    src_id=next_import_seed_id(),
                     label=label,
                     parent_id=None,
                     collection="docs__alpha",

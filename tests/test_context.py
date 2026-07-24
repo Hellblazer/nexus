@@ -25,7 +25,7 @@ def db(tmp_path: Path) -> T2Database:
 #: fresh session PG would sit exactly in the path of a later tenant's
 #: sequence-issued INSERT (persist_rebuild) and 409 on the PK — observed
 #: order-dependently against test_t2_concurrency's rebuild loop.
-_seed_src_ids = itertools.count(1_000_000_000)
+from tests.conftest import next_import_seed_id  # session-unique import ids (see conftest note)
 
 
 def _seed_topics(taxonomy: Any, rows: list[dict[str, Any]]) -> list[int]:
@@ -60,7 +60,7 @@ def _seed_topics(taxonomy: Any, rows: list[dict[str, Any]]) -> list[int]:
     else:
         for r in rows:
             ids.append(taxonomy.import_topic(
-                src_id=next(_seed_src_ids),
+                src_id=next_import_seed_id(),
                 label=r["label"],
                 parent_id=r.get("parent_id"),
                 collection=r["collection"],
