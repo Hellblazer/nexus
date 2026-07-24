@@ -32,10 +32,11 @@ local install to match rather than merely raising a refusal threshold.
 
 **Leaf module contract**: this file MUST NOT import anything from the
 ``nexus`` package (stdlib only). Both ``nexus.db.managed_endpoint`` and
-``nexus.migration.guided_upgrade`` import from here, and those two packages
-have no dependency relationship with each other — a leaf module is what lets
-both import the shared floor without introducing a ``db`` <-> ``migration``
-circular-import risk. Enforced by ``tests/test_engine_version.py::
+``nexus.upgrade_ladder.provisioning`` (the version-pin's home since the
+RDR-155 P4b P0e rehome out of ``nexus.migration.guided_upgrade``) import
+from here, and those two packages have no dependency relationship with each
+other — a leaf module is what lets both import the shared floor without
+introducing a ``db`` <-> ``upgrade_ladder`` circular-import risk. Enforced by ``tests/test_engine_version.py::
 test_module_is_stdlib_only_leaf`` (AST-walks this file's imports) and by the
 release-checklist grep gate over this file for any intra-package import
 statement, which must report nothing.

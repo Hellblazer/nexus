@@ -16,9 +16,12 @@ from nexus.migration.detection import (
     CollectionClassification,
     DetectionReport,
 )
-from nexus.migration.guided_upgrade import (
+# footprint_has_voyage_collections stays in guided_upgrade (it dies with the
+# detection footprint at P2); the capability probe moved to the surviving
+# provisioning module (RDR-155 P4b P0e rehome).
+from nexus.migration.guided_upgrade import footprint_has_voyage_collections
+from nexus.upgrade_ladder.provisioning import (
     VoyageCapabilityOutcome,
-    footprint_has_voyage_collections,
     verify_voyage_capability,
 )
 

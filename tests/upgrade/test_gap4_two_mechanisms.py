@@ -30,6 +30,13 @@ REPO_ROOT = pathlib.Path(__file__).parent.parent.parent
 LADDER_ROOT = REPO_ROOT / "src" / "nexus" / "upgrade_ladder"
 COMPLETION = LADDER_ROOT / "completion.py"
 PRECONDITIONS = LADDER_ROOT / "preconditions.py"
+# RDR-155 P4b P0e rehome: the provision→verify family moved INTO the ladder
+# package (guided_upgrade dies whole-file at P2). provision_and_serve READS
+# the serve step's lease endpoint (host/port → service_url) as an
+# acquisition INPUT — the same read-only character the preconditions
+# exemption covers; it never re-publishes or stores lease state. Exempted
+# alongside preconditions.py rather than widening the write-verb heuristic.
+PROVISIONING = LADDER_ROOT / "provisioning.py"
 
 _ALLOW_TOKEN = "# gap4-allow:"
 
@@ -284,7 +291,7 @@ def test_lease_survives_only_as_comparison_input() -> None:
     functions (no write-verbs near it), and no OTHER ladder module touches
     the lease at all."""
     for path in _ladder_files():
-        if path == PRECONDITIONS:
+        if path in (PRECONDITIONS, PROVISIONING):
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
@@ -298,8 +305,9 @@ def test_lease_survives_only_as_comparison_input() -> None:
             if "lease" in ident.lower():
                 pytest.fail(
                     f"{path.relative_to(REPO_ROOT)}:{node.lineno} touches the "
-                    f"lease ({ident!r}) — only preconditions.py may consume "
-                    "it, as an input"
+                    f"lease ({ident!r}) — only preconditions.py (comparison "
+                    "input) and provisioning.py (acquisition input, P0e "
+                    "rehome) may consume it"
                 )
 
 

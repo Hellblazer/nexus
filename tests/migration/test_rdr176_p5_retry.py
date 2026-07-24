@@ -144,10 +144,17 @@ def test_vector_etl_retries_transient_403(monkeypatch) -> None:
     monkeypatch.setattr(retry.time, "sleep", lambda _s: None)
     # Decouple from the dim/passthrough model maps: force a resolvable dim and
     # the non-passthrough (embeddings=None) path.
-    monkeypatch.setattr(vetl, "_dim_for_collection", lambda _n: (1024, ""))
+    # RDR-155 P4b P0e rehome: _migrate_one's helper closure now resolves in
+    # nexus.db.reconcile (_skip_result_for_nonconformant -> _dim_for_collection,
+    # _iter_id_pages -> iter_collection_chunks), so those seams are patched on
+    # the reconcile module; _is_same_model_passthrough is still looked up as a
+    # vector_etl module global by _migrate_one itself.
+    import nexus.db.reconcile as reconcile  # noqa: PLC0415 — scoped to this wiring test
+
+    monkeypatch.setattr(reconcile, "_dim_for_collection", lambda _n: (1024, ""))
     monkeypatch.setattr(vetl, "_is_same_model_passthrough", lambda _n, _t: False)
     monkeypatch.setattr(
-        vetl, "iter_collection_chunks",
+        reconcile, "iter_collection_chunks",
         lambda *a, **k: iter([
             # 64-char ids (RDR-180 full digest): the fake must model the
             # chash identity or the nexus-sot7v legacy-id guard (correctly)

@@ -7,8 +7,8 @@ all — the substrate behind the 2026-07-01 nexus-te885.1 incident. This
 module proves three things:
 
 1. ``verify_fill_pg_source`` wires a :class:`~nexus.migration.pg_read.PgReadClient`
-   (opened via :func:`~nexus.migration.vector_etl.resolve_local_service_endpoint`)
-   into the UNCHANGED :func:`~nexus.migration.vector_etl.verify_fill_collections`
+   (opened via :func:`~nexus.db.reconcile.resolve_local_service_endpoint`)
+   into the UNCHANGED :func:`~nexus.db.reconcile.verify_fill_collections`
    with ``leg="pg"`` — mirroring ``verify_fill_local``/``verify_fill_cloud``'s
    own wiring tests (``TestVerifyFillLegRouting`` in ``test_vector_etl.py``).
 2. ``resolve_local_service_endpoint`` prioritizes an explicit override,
@@ -36,7 +36,11 @@ import hashlib
 import pytest
 
 from nexus.migration import pg_read
-from nexus.migration.vector_etl import (
+
+# RDR-155 P4b P0e rehome: the pg-reconcile core moved to nexus.db.reconcile
+# (its surviving home — vector_etl deletes at P2); this suite re-points to
+# the new module per the partition record [21098].
+from nexus.db.reconcile import (
     MigrationReport,
     resolve_local_service_endpoint,
     verify_fill_collections,
@@ -79,7 +83,7 @@ class TestVerifyFillPgSourceWiring:
                 constructed.append((base_url, token))
 
         monkeypatch.setattr(
-            "nexus.migration.vector_etl.PgReadClient", FakePgReadClient
+            "nexus.db.reconcile.PgReadClient", FakePgReadClient
         )
 
         captured: dict[str, object] = {}
@@ -92,7 +96,7 @@ class TestVerifyFillPgSourceWiring:
             return MigrationReport(leg=leg, results=())
 
         monkeypatch.setattr(
-            "nexus.migration.vector_etl.verify_fill_collections",
+            "nexus.db.reconcile.verify_fill_collections",
             fake_verify_fill_collections,
         )
 
@@ -119,7 +123,7 @@ class TestVerifyFillPgSourceWiring:
             return "http://resolved:1234", "resolved-tok"
 
         monkeypatch.setattr(
-            "nexus.migration.vector_etl.resolve_local_service_endpoint",
+            "nexus.db.reconcile.resolve_local_service_endpoint",
             fake_resolver,
         )
 
@@ -130,10 +134,10 @@ class TestVerifyFillPgSourceWiring:
                 constructed.append((base_url, token))
 
         monkeypatch.setattr(
-            "nexus.migration.vector_etl.PgReadClient", FakePgReadClient
+            "nexus.db.reconcile.PgReadClient", FakePgReadClient
         )
         monkeypatch.setattr(
-            "nexus.migration.vector_etl.verify_fill_collections",
+            "nexus.db.reconcile.verify_fill_collections",
             lambda read_client, vector_client, *, leg, **kwargs: MigrationReport(
                 leg=leg, results=()
             ),
