@@ -41,6 +41,12 @@ dependencies = [
     # next major so a future breaking bump can't ship silently again.
     "chromadb>=0.6,<2",
     "click>=8.1",
+    # RDR-155 P4b P0b (Hal decision 3): first-class, no longer transitive
+    # via chromadb — consumed by nexus.cross_encoder (salience) and
+    # nexus.db.minilm_direct (the tier-0 EF). Must survive chromadb's
+    # departure at P3.
+    "onnxruntime>=1.20",
+    "tokenizers>=0.20",
     "llama-index-core>=0.12.7,<0.15",
     "markdown-it-py>=4.0.0",
     "msgpack>=1.0",

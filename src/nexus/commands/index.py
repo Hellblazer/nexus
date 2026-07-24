@@ -1357,7 +1357,9 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         local_t3 = make_t3(_client=InMemoryVectorClient(), _ef_override=ef)
 
         def _local_embed(texts: list[str], model: str) -> tuple[list[list[float]], str]:
-            return [v.tolist() for v in ef(texts)], model
+            # MiniLMDirect returns plain list[list[float]] (the retired
+            # chroma EF returned numpy rows needing .tolist()).
+            return ef(texts), model
 
         click.echo(f"Indexing {path}…")
         try:

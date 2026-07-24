@@ -125,6 +125,11 @@ def test_pg_bin_dir_returns_nonexistent_sentinel_when_nothing_found(
     monkeypatch.delenv("NEXUS_PG_BIN", raising=False)
     monkeypatch.setattr(pg_provision, "_CANDIDATE_DIRS", [])
     monkeypatch.setattr(pg_provision.shutil, "which", lambda _name: None)
+    # RDR-155 P4b P0a': discovery-miss now self-provisions the pinned
+    # bundle; the sentinel contract applies only when that too is
+    # impossible.
+    import tests.db._service_fixture as sf
+    monkeypatch.setattr(sf, "_self_provision_pg_bundle", lambda: None)
     result = pg_bin_dir()
     # The sentinel's whole contract: every per-module prereq check skips.
     assert not any((result / name).exists() for name in _PG_TOOL_NAMES)

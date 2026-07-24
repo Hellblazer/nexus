@@ -1116,13 +1116,16 @@ def make_vector_test_client():
     test constructions — semantics pinned differentially against the
     chroma oracle by ``tests/test_vector_substrate_contract.py``. Real
     per-instance isolation (no SharedSystemClient shared-state gotcha).
-    The EF choice is centralised here so the P0b test-EF decision edits
-    ONE line; the chromadb import dies with the dependency at P3.
+    EF (P0b decision, settled): the nexus-owned MiniLMDirect — real
+    semantics (ranking snapshots and cosine gates are load-bearing),
+    byte-parity with chroma's retired default EF pinned by
+    tests/db/test_minilm_direct.py, zero chromadb involvement.
     """
     from nexus.db.inmemory_vector_store import InMemoryVectorClient
+    from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction
 
     return InMemoryVectorClient(
-        default_embedding_function=DefaultEmbeddingFunction()
+        default_embedding_function=MiniLMDirectEmbeddingFunction()
     )
 
 
@@ -1134,8 +1137,11 @@ def local_t3() -> T3Database:
     DefaultEmbeddingFunction uses the bundled ONNX MiniLM-L6-v2 model,
     so semantic similarity works correctly without Voyage AI.
     """
+    from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction
+
     return T3Database(
-        _client=make_vector_test_client(), _ef_override=DefaultEmbeddingFunction()
+        _client=make_vector_test_client(),
+        _ef_override=MiniLMDirectEmbeddingFunction(),
     )
 
 

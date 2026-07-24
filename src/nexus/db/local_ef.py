@@ -2,7 +2,8 @@
 """Local embedding function for zero-config T3 (RDR-038).
 
 Implements the ChromaDB ``EmbeddingFunction`` protocol using local models:
-- Tier 0: bundled ``chromadb.utils.embedding_functions.ONNXMiniLM_L6_V2`` (384d)
+- Tier 0: ``nexus.db.minilm_direct.MiniLMDirectEmbeddingFunction`` (384d,
+  onnxruntime-direct — RDR-155 P4b P0b; formerly chroma's bundled EF)
 - Tier 1: ``fastembed`` bge-base-en-v1.5 (768d) — requires ``pip install conexus[local]``
 
 Auto-selection: tier 1 if fastembed is importable, else tier 0.
@@ -210,9 +211,12 @@ class LocalEmbeddingFunction:
     def _init_ef(self) -> None:
         """Lazy-initialise the underlying embedding function."""
         if self._model_name == _TIER0_MODEL:
-            from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2  # noqa: PLC0415 — heavy/optional dep (chromadb) deferred to call time to keep module import cheap
+            # RDR-155 P4b P0b (Hal decision 3): the nexus-owned direct
+            # ONNX implementation — same artifact, byte-parity pinned by
+            # tests/db/test_minilm_direct.py. No chromadb involvement.
+            from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction  # noqa: PLC0415 — heavy dep deferred to call time to keep module import cheap
 
-            self._ef = ONNXMiniLM_L6_V2()
+            self._ef = MiniLMDirectEmbeddingFunction()
         else:
             # Tier 1: fastembed. Thread a stable, XDG-respecting cache_dir so
             # the bge-768 model is not re-downloaded to a volatile $TMPDIR on
@@ -239,7 +243,7 @@ class LocalEmbeddingFunction:
                     self._init_ef()
 
         if self._model_name == _TIER0_MODEL:
-            # ONNXMiniLM_L6_V2 already returns list[list[float]]
+            # MiniLMDirectEmbeddingFunction returns list[list[float]]
             return self._ef(input)
         else:
             # fastembed TextEmbedding.embed() returns a generator of numpy
