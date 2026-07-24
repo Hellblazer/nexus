@@ -1561,7 +1561,7 @@ class TestE2EFileDiscovery:
                     f"subprocess failed (rc={proc.returncode}): "
                     f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
                 )
-                assert proc.stdout.startswith("OK"), proc.stdout
+                assert "OK" in proc.stdout, proc.stdout  # line-tolerant: EF lazy-init may log before OK (P0b)
             finally:
                 publisher.relinquish()
         finally:
@@ -1607,7 +1607,7 @@ class TestE2EEnvDiscovery:
                 f"subprocess failed (rc={proc.returncode}): "
                 f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
             )
-            assert proc.stdout.startswith("OK"), proc.stdout
+            assert "OK" in proc.stdout, proc.stdout  # line-tolerant: EF lazy-init may log before OK (P0b)
         finally:
             stop_t1_server(server_pid)
             shutil.rmtree(chroma_tmpdir, ignore_errors=True)
@@ -1690,7 +1690,7 @@ class TestE2EParallelStress:
                 assert rc == 0, (
                     f"worker {i} exited rc={rc}: stdout={out!r} stderr={err!r}"
                 )
-                assert out.startswith("OK"), out
+                assert "OK" in out, out  # line-tolerant: EF lazy-init may log before OK (P0b)
         finally:
             stop_t1_server(server_pid)
             shutil.rmtree(chroma_tmpdir, ignore_errors=True)
