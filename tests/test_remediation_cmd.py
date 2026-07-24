@@ -375,11 +375,24 @@ def test_list_consents_reads_back_in_order(tmp_path):
         scope="flag:claude_assisted_remediation", ts="2026-07-13T00:02:00Z",
         granted=False,
     )
-    assert db.telemetry.list_consents() == [
+    # Compare as INSTANTS: the engine round-trips ts through timestamptz
+    # and renders with a local offset (same moment, different string);
+    # the sqlite twin echoes the Z-form verbatim (RDR-155 P4b P0a').
+    from datetime import datetime
+
+    def _norm(rows):
+        return [
+            (r["scope"],
+             datetime.fromisoformat(r["ts"].replace("Z", "+00:00")),
+             r["granted"])
+            for r in rows
+        ]
+
+    assert _norm(db.telemetry.list_consents()) == _norm([
         {"scope": "flag:claude_assisted_remediation",
          "ts": "2026-07-13T00:00:00Z", "granted": True},
         {"scope": "remediate:chash-poison",
          "ts": "2026-07-13T00:01:00Z", "granted": True},
         {"scope": "flag:claude_assisted_remediation",
          "ts": "2026-07-13T00:02:00Z", "granted": False},
-    ]
+    ])

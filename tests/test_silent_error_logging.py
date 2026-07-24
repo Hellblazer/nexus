@@ -412,11 +412,17 @@ def test_set_owner_head_hash_failed_logs_warning(tmp_path, monkeypatch):
     )
 
 
-def test_catalog_registry_adapter_register_failed_logs_warning(tmp_path):
+def test_catalog_registry_adapter_register_failed_logs_warning(tmp_path, monkeypatch):
     """_CatalogBackedRegistry.update catches Exception around
     cat.register_collection and emits
     catalog_registry_adapter_register_failed before returning
     success=False to the caller."""
+    # RDR-155 P4b P0a': the test builds a LOCAL file catalog; under the
+    # engine substrate the service backend opens it frozen-readonly and
+    # the owner write fails before the mocked register path. Pin the
+    # catalog backend so the adapter's catch-and-warn contract stays
+    # exercised (dies with the rich catalog at flip).
+    monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "sqlite")
     from nexus.commands.index import _CatalogBackedRegistry
     from nexus.catalog.catalog import Catalog
 
