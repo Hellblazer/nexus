@@ -1387,3 +1387,118 @@ def require_docling(docling_available: bool) -> None:
             "genuine regression from a missing local cache. This skip only fires on "
             "a local run."
         )
+
+
+# ── nexus-1odsl: reap aspect-worker daemons the suite leaked ──────────────────
+#
+# `stop_worker()` stops the IN-PROCESS singleton thread. It does not touch the
+# DETACHED `nx daemon aspect-worker start` subprocess that
+# `ensure_aspect_worker_daemon` spawns (Popen + start_new_session), so any test
+# that exercises the auto-spawn path leaves a real daemon running after pytest
+# exits. Nothing reaps a daemon, so they accumulate across runs.
+#
+# They are not inert: on 2026-07-24 five leaked workers were found still polling,
+# and leaked workers produced a 1,375-entry burst of 401s against the PRODUCTION
+# cloud endpoint on 2026-07-10 — test daemons hammering prod with a stale token.
+#
+# SCOPE IS THE WHOLE POINT: only processes whose --config-dir lies under the
+# pytest tmp root are signalled. A broad "kill anything named aspect-worker"
+# would kill the developer's real worker.
+
+def _ps_aspect_workers() -> list[tuple[int, str]]:
+    """(pid, cmdline) for every live aspect-worker-ish process. Never raises."""
+    import subprocess  # noqa: PLC0415 — deferred; teardown-only path
+
+    out = subprocess.run(
+        ["ps", "-eo", "pid=,command="], capture_output=True, text=True, timeout=10,
+    ).stdout
+    rows: list[tuple[int, str]] = []
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        pid_s, _, cmd = line.partition(" ")
+        if not pid_s.isdigit():
+            continue
+        rows.append((int(pid_s), cmd))
+    return rows
+
+
+def reap_leaked_aspect_workers(
+    *,
+    tmp_root: Path,
+    _list_procs=_ps_aspect_workers,
+    _kill=None,
+) -> list[int]:
+    """SIGTERM aspect-worker daemons whose ``--config-dir`` is under *tmp_root*.
+
+    Returns the pids actually signalled. Never raises: this runs at session
+    teardown, where an exception would turn a tidy-up into a suite error and
+    mask the real result.
+
+    A process qualifies only if BOTH hold: its command line looks like an
+    aspect-worker daemon AND its ``--config-dir`` is under *tmp_root*. Matching
+    on the tmp root alone would sweep up unrelated pytest-spawned processes
+    (postgres, shells) that merely carry the same path.
+    """
+    if _kill is None:
+        import os as _os  # noqa: PLC0415 — deferred; teardown-only path
+        import signal as _signal  # noqa: PLC0415 — deferred; teardown-only path
+
+        def _kill(pid: int) -> None:  # noqa: ANN202 — local default
+            _os.kill(pid, _signal.SIGTERM)
+
+    try:
+        procs = list(_list_procs())
+    except Exception:  # noqa: BLE001 — a teardown probe is never a verdict
+        return []
+
+    # RESOLVE both sides. On macOS the tmp root is handed to us as
+    # /var/folders/... while the spawned process carries the realpath
+    # /private/var/folders/... (/var is a symlink to /private/var). A plain
+    # string prefix compare silently matches NOTHING — which is exactly how
+    # this reaper passed its unit tests and still reaped zero real daemons on
+    # its first end-to-end run.
+    try:
+        root = Path(tmp_root).resolve()
+    except Exception:  # noqa: BLE001 — teardown probe
+        root = Path(tmp_root)
+
+    reaped: list[int] = []
+    for pid, cmd in procs:
+        if "aspect-worker" not in cmd and "aspect_worker" not in cmd:
+            continue
+        marker = "--config-dir "
+        idx = cmd.find(marker)
+        if idx < 0:
+            continue
+        tail = cmd[idx + len(marker):].split()
+        if not tail:
+            continue
+        try:
+            cfg_path = Path(tail[0]).resolve()
+        except Exception:  # noqa: BLE001 — unparseable path is not ours
+            continue
+        if not cfg_path.is_relative_to(root):
+            continue
+        try:
+            _kill(pid)
+        except Exception:  # noqa: BLE001 — already exited / not ours anymore
+            continue
+        reaped.append(pid)
+    return reaped
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _reap_leaked_workers_at_session_end(tmp_path_factory):
+    """Backstop, not a substitute for per-test teardown.
+
+    Deliberately session-scoped and autouse: more than one test can reach the
+    auto-spawn path, and a per-test fixture would have to be remembered by each
+    of them — which is exactly what failed. This catches the class.
+    """
+    yield
+    root = Path(tmp_path_factory.getbasetemp())
+    reaped = reap_leaked_aspect_workers(tmp_root=root)
+    if reaped:
+        print(f"\n[nexus-1odsl] reaped {len(reaped)} leaked aspect-worker daemon(s): {reaped}")
