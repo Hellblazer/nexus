@@ -1574,9 +1574,15 @@ def index_rdr_cmd(path: Path, force: bool, monitor: bool) -> None:
             click.echo(f"Not a markdown file: {path.name}")
             return
         try:
+            # nexus-gbt5u: bounded, matching indexer_utils.find_repo_root's
+            # timeout=10 on the IDENTICAL command. This site was unbounded, so
+            # a stalled git (filesystem hang, held .git lock) blocked the index
+            # run forever. The except below already treats failure as
+            # "fall back to the layout heuristic", so a timeout is free.
             repo_root = Path(subprocess.check_output(
                 ["git", "rev-parse", "--show-toplevel"],
                 cwd=path.parent, text=True, stderr=subprocess.DEVNULL,
+                timeout=10,
             ).strip()).resolve()
         except Exception:  # noqa: BLE001 — fallback path: git toplevel resolution failed (non-repo / git absent); recovers via conventional docs/rdr/ layout heuristic
             # Fallback: assume conventional docs/rdr/<file>.md layout.

@@ -208,6 +208,102 @@ def _is_retryable_endpoint_error(exc: Exception) -> bool:
 
 
 # ── HTTP transport ────────────────────────────────────────────────────────────
+#
+# nexus-gbt5u (GH #1419 Issue 3a): every request below is already bounded by
+# an explicit ``timeout``, and that was NOT enough — Steve Harris's indexing
+# run hung silently for 2+ hours without one firing.
+#
+# Python derives socket-timeout deadlines from the MONOTONIC clock, and on
+# Darwin that is ``mach_absolute_time()``, which does not advance while the
+# system is asleep. So a socket timeout budgets AWAKE time, not wall-clock
+# time: a laptop that sleeps mid-request burns almost none of a 600s budget.
+# On wake the peer is long gone, but the TCP connection is a zombie with no
+# RST coming, so the read simply never completes and the timeout — measured
+# in a clock that stood still — never fires. Bounded timeout, unbounded hang.
+#
+# TCP keepalive is what closes it: the OS probes an idle connection and tears
+# it down when the peer does not answer, surfacing as an ordinary connection
+# error that ``_request``'s existing retry path already handles. The idle
+# knob is the load-bearing part — bare SO_KEEPALIVE inherits a 2-HOUR OS
+# default on both Darwin and Linux, which would not have helped Steve at all.
+
+#: Seconds of idle before the first keepalive probe. Must beat the 2h OS
+#: default by a wide margin (that default is longer than the hang it is
+#: supposed to catch). 60s is well above any legitimate inter-packet gap on
+#: a live request — the engine streams responses continuously — while still
+#: detecting a dead peer within ~2 minutes of wake.
+_KEEPALIVE_IDLE_S = 60
+#: Seconds between probes once the peer stops answering.
+_KEEPALIVE_INTERVAL_S = 15
+#: Unanswered probes before the connection is declared dead (~2 min total).
+_KEEPALIVE_PROBES = 4
+
+
+def _enable_tcp_keepalive(sock: Any) -> None:
+    """Turn on TCP keepalive with a SHORT idle time. Never raises.
+
+    Best-effort by construction: a platform or transport that lacks any of
+    these options degrades to an unkeepalived-but-working connection. This is
+    a resilience improvement to the sleep/wake path, not a correctness gate —
+    failing a request because a socket option did not apply would trade a rare
+    hang for a common outage.
+    """
+    import socket as _socket  # noqa: PLC0415 — deferred import — branch-local
+
+    try:
+        sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_KEEPALIVE, 1)
+    except Exception:  # noqa: BLE001 — see docstring: never gate a request on this
+        return
+    # Darwin spells the idle knob TCP_KEEPALIVE; Linux spells it TCP_KEEPIDLE.
+    idle_opt = getattr(_socket, "TCP_KEEPALIVE", None) or getattr(
+        _socket, "TCP_KEEPIDLE", None
+    )
+    for opt, value in (
+        (idle_opt, _KEEPALIVE_IDLE_S),
+        (getattr(_socket, "TCP_KEEPINTVL", None), _KEEPALIVE_INTERVAL_S),
+        (getattr(_socket, "TCP_KEEPCNT", None), _KEEPALIVE_PROBES),
+    ):
+        if opt is None:
+            continue
+        try:
+            sock.setsockopt(_socket.IPPROTO_TCP, opt, value)
+        except Exception:  # noqa: BLE001 — partial application is still an improvement
+            continue
+
+
+def _keepalive_opener() -> Any:
+    """A urllib opener whose connections carry :func:`_enable_tcp_keepalive`.
+
+    urllib offers no socket-options hook, so the connection classes are
+    subclassed to set the options immediately after ``connect()``. Built
+    fresh per call: openers are cheap, and caching one would pin the
+    endpoint/proxy resolution that ``_resolve_endpoint`` may change between
+    requests (RDR-149 lease rotation).
+    """
+    import http.client  # noqa: PLC0415 — deferred import — branch-local
+    import urllib.request  # noqa: PLC0415 — deferred import — branch-local
+
+    class _KeepAliveHTTPConnection(http.client.HTTPConnection):
+        def connect(self) -> None:
+            super().connect()
+            _enable_tcp_keepalive(self.sock)
+
+    class _KeepAliveHTTPSConnection(http.client.HTTPSConnection):
+        def connect(self) -> None:
+            super().connect()
+            _enable_tcp_keepalive(self.sock)
+
+    class _KeepAliveHTTPHandler(urllib.request.HTTPHandler):
+        def http_open(self, req: Any) -> Any:
+            return self.do_open(_KeepAliveHTTPConnection, req)
+
+    class _KeepAliveHTTPSHandler(urllib.request.HTTPSHandler):
+        def https_open(self, req: Any) -> Any:
+            return self.do_open(_KeepAliveHTTPSConnection, req)
+
+    return urllib.request.build_opener(
+        _KeepAliveHTTPHandler, _KeepAliveHTTPSHandler,
+    )
 
 
 def _request_once(
@@ -233,7 +329,10 @@ def _request_once(
     req = urllib.request.Request(
         base_url + path, data=data, headers=headers, method=method
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    # nexus-gbt5u: NOT urlopen — the module-level opener has no socket-options
+    # hook, so a sleep-orphaned connection could never be detected. See the
+    # transport-section comment above.
+    with _keepalive_opener().open(req, timeout=timeout) as resp:
         return json.loads(resp.read())
 
 
