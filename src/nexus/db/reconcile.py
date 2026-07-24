@@ -45,7 +45,7 @@ from typing import Any, Callable, Literal
 
 import structlog
 
-from nexus.db.chroma_quotas import QUOTAS
+from nexus.db.limits import QUOTAS
 from nexus.retry import EtlCircuitBreaker, _etl_batch_with_breaker
 from nexus.migration.chroma_read import (
     iter_collection_chunks,

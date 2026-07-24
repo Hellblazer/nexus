@@ -102,10 +102,10 @@ def _is_retryable(exc: BaseException) -> bool:
     each predicate is guarded and defaults to "not retryable".
     """
     from nexus.retry import (  # noqa: PLC0415 — deferred to avoid import cost at module load
-        _is_retryable_chroma_error,
+        _is_retryable_vector_error,
         _is_retryable_voyage_error,
     )
-    for predicate in (_is_retryable_chroma_error, _is_retryable_voyage_error):
+    for predicate in (_is_retryable_vector_error, _is_retryable_voyage_error):
         try:
             if predicate(exc):
                 return True
