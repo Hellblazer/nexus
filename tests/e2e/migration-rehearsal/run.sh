@@ -51,6 +51,7 @@ STRESS=0
 FULLSTACK=0
 HOLE_PUNCH=0
 SHAKEOUT=0
+ACQUIRE=0
 PACKAGE_UPGRADE=0
 ERA_HOP=0
 CHASH_WINDOW=0
@@ -130,6 +131,7 @@ for a in "$@"; do
     --stress)     STRESS=1 ;;            # Phase E: concurrency + queue-drain stress on the default rehearse.sh
     --fullstack)  FULLSTACK=1 ;;         # standalone: full topology (service + nx-mcp + claude) MCP-driven enqueue + worker drain
     --hole-punch) HOLE_PUNCH=1 ;;        # standalone: verify-fill delta-fill proof against a real fault-injected PG target (nexus-s3dd4.7)
+    --acquire)    ACQUIRE=1 ;;         # nexus-1ddsy: PUBLISHED-artifact gate — cold-acquire NEXUS_SERVICE_TAG on a bare box and drive it
     --shakeout)   SHAKEOUT=1 ;;          # standalone: CANDIDATE shakeout — CLI verb matrix + incremental index + concurrent load against the locally-built -Ob binary (nexus-h8rf6)
     --package-upgrade) PACKAGE_UPGRADE=1 ;;  # standalone: nexus-cfgo9 ONE-engine convergence MVV — package-only upgrade from a real previous release, engine acquired for real by the product, never supplied by this harness
     --era-hop)    ERA_HOP=1 ;;           # standalone: RDR-185 nexus-n7u38.30 — ancient install (old release + old engine + pre-RDR-108 ids + Chroma substrate) -> current via `nx upgrade` ALONE, unattended
@@ -158,6 +160,12 @@ _guided_restore() {
 trap '_guided_restore' EXIT
 
 [ "$COLD" = 1 ] && [ "$GUIDED" = 1 ] && { echo "--cold and --guided are different flows; pick one" >&2; exit 2; }
+
+# nexus-1ddsy: --acquire is a standalone published-artifact gate.
+[ "$ACQUIRE" = 1 ] && { [ "$COLD" = 1 ] || [ "$GUIDED" = 1 ] || [ "$WITH_CLOUD" = 1 ] || [ "$SHAKEOUT" = 1 ] || [ "$PACKAGE_UPGRADE" = 1 ] || [ "$ERA_HOP" = 1 ] || [ "$FULLSTACK" = 1 ] || [ "$CHASH_WINDOW" = 1 ]; } && { echo "--acquire is a standalone published-artifact gate (its own entrypoint); do not combine with other legs" >&2; exit 2; }
+# It validates a PUBLISHED tag, so the tag is mandatory and there is nothing to
+# infer: NEXUS_SERVICE_TAG is the artifact under test, never a default.
+[ "$ACQUIRE" = 1 ] && [ -z "${NEXUS_SERVICE_TAG:-}" ] && { echo "--acquire requires NEXUS_SERVICE_TAG=<published tag>, e.g. NEXUS_SERVICE_TAG=engine-service-v0.1.55 (it exercises the PUBLISHED artifact, not a local build)" >&2; exit 2; }
 
 # ── RETIRED journeys (RDR-155 P4b, 2026-07-24, nexus-8nlj4) ──────────────────
 # --guided / --cold / --hole-punch drive `nx guided-upgrade`, and the DEFAULT
@@ -276,7 +284,7 @@ if [ "$GUIDED" = 1 ] || [ "$CHASH_WINDOW" = 1 ]; then
 fi
 
 GRAAL_IMAGE="container-registry.oracle.com/graalvm/native-image-community:25"
-if [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ] || [ "$PACKAGE_UPGRADE" = 1 ] || [ "$ERA_HOP" = 1 ]; then
+if [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ] || [ "$PACKAGE_UPGRADE" = 1 ] || [ "$ERA_HOP" = 1 ] || [ "$ACQUIRE" = 1 ]; then
   # nexus-4mm24 / nexus-s3dd4.7 / nexus-cfgo9 / nexus-n7u38.30: these boxes acquire every
   # engine binary at runtime (PUBLISHED release) — NO local native build, NO
   # stamping. Just the wheel.
@@ -417,6 +425,12 @@ elif [ "$PACKAGE_UPGRADE" = 1 ]; then
   cp "$(ls -t dist/conexus-*.whl | head -1)" "$STAGE/worktree-wheel/"
   cp "$HERE/Dockerfile.package-upgrade" "$STAGE/Dockerfile"
   cp "$HERE/rehearse_package_upgrade.sh" "$STAGE/"
+elif [ "$ACQUIRE" = 1 ]; then
+  # nexus-1ddsy: same bare-box image as the retired cold leg — nothing the
+  # service needs is staged, because acquiring it from the PUBLISHED release IS
+  # the thing under test.
+  cp "$HERE/Dockerfile.cold" "$STAGE/Dockerfile"
+  cp "$HERE/rehearse_cold.sh" "$HERE/rehearse_hole_punch.sh" "$HERE/rehearse_acquire.sh" "$HERE/seed_legacy.py" "$STAGE/"
 elif [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ]; then
   # nexus-4mm24: NOTHING the service needs is staged — the cold box acquires the
   # binary + PG bundle from the published release at runtime. Only the wheel +
@@ -473,7 +487,11 @@ BUILD_ARGS=()
 docker build ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} -f "$STAGE/Dockerfile" -t "$IMAGE" "$STAGE"
 
 run_env=(-e "WITH_CLOUD=$WITH_CLOUD" -e "COMPREHENSIVE=$COMPREHENSIVE" -e "STRESS=$STRESS")
-if [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ]; then
+if [ "$ACQUIRE" = 1 ]; then
+  # nexus-1ddsy: the tag under test is supplied by the operator and is NOT
+  # defaulted — the whole point is to exercise a specific published artifact.
+  run_env+=(-e "NEXUS_SERVICE_TAG=$NEXUS_SERVICE_TAG")
+elif [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ]; then
   # nexus-4mm24 / nexus-s3dd4.7: tell the cold box which published release to
   # acquire from (--hole-punch needs v0.1.18+ for /v1/telemetry/ids/probe).
   run_env+=(-e "NEXUS_SERVICE_TAG=$COLD_TAG")
@@ -537,6 +555,10 @@ elif [ "$CHASH_WINDOW" = 1 ]; then
 elif [ "$COLD" = 1 ]; then
   # nexus-4mm24: Dockerfile.cold's default entrypoint IS rehearse_cold.sh.
   docker run --rm "${run_env[@]}" "$IMAGE"
+elif [ "$ACQUIRE" = 1 ]; then
+  # nexus-1ddsy: drive the PUBLISHED artifact acquired at runtime.
+  docker run --rm "${run_env[@]}" --entrypoint /bin/bash "$IMAGE" \
+    /home/nexus/rehearse_acquire.sh
 elif [ "$SHAKEOUT" = 1 ]; then
   # nexus-h8rf6: candidate shakeout — verb matrix + incremental-index +
   # concurrent-load assertions against the locally-built candidate binary.
