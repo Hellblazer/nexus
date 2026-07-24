@@ -35,42 +35,44 @@ cd service && ./mvnw -q test
 
 The Java CI (`service-ci.yml`) is **advisory** — it does not block auto-merge — so verify it actually passed on this tree rather than assuming.
 
-### 3. PRE-TAG gate: `--guided` ONLY (the only leg that builds the candidate)
+### 3. PRE-TAG gate: `--shakeout` (the leg that builds the candidate)
 
-> **Ordering, load-bearing (corrected 2026-06-29).** Of the three rehearsal
-> legs, **only `--guided` builds the candidate binary locally** (a GraalVM
-> `-Ob` native build of the current `service/` tree, `rm -f
-> service/target/nexus-service` then rebuild). `--cold` and the `--with-cloud`
-> cloud leg **ACQUIRE the *published* binary** — so before the tag exists they
-> can only acquire the **previous** release and would validate the **old**
-> engine as a "gate" for the new one. That is incoherent; do NOT run them
-> pre-tag. The `--cold`/`--with-cloud` validation of the actual release artifact
-> happens **post-publish** (Step 5), once the workflow has built + published it.
+> **`--guided` IS RETIRED — do not use it.** RDR-155 P4b (commit `7e47c285`,
+> 2026-07-24) deleted `nx guided-upgrade` / `migrate-to-service` / `storage
+> migrate all`, so `--guided`, `--cold` and `--hole-punch` now refuse at the
+> arg loop with a RETIRED message and exit 2. This step named `--guided` for
+> one cut after the retirement and would have failed the next engine cut at the
+> gate. Surviving journeys: `--era-hop`, `--package-upgrade`, `--shakeout`,
+> `--fullstack`, `--chash-window`, and the default `rehearse.sh` (Phases A/D/E).
 
-```bash
-tests/e2e/migration-rehearsal/run.sh --guided      # local -Ob native build → nx guided-upgrade MVV
-```
-
-Must end `GUIDED LAND-THEN-TRANSFORM GATE PASSED` (marker renamed at the RDR-180 gate rewrite, nexus-jxizy.10.10).
-
-**Optional but recommended when the cut carries CLI-visible or concurrency-relevant service changes**: also run the candidate shakeout — the full CLI-verb matrix + incremental-index + concurrent-load journey against the SAME locally-built candidate (nexus-h8rf6; born from the 2026-07-03 post-release shakeout, whose findings were all locally discoverable):
+> **Ordering, still load-bearing.** `--shakeout` BUILDS the candidate locally
+> (`run.sh` does the GraalVM `-Ob` native build; only the retired `--cold` path
+> skipped it and acquired a PUBLISHED binary instead). `--with-cloud` exercises
+> the conexus-DEPLOYED service, so it cannot run pre-tag either — it is part of
+> the post-deploy cloud gate (Step 6).
 
 ```bash
-tests/e2e/migration-rehearsal/run.sh --shakeout   # verb matrix + staleness + zero-5xx-under-load
+tests/e2e/migration-rehearsal/run.sh --shakeout
 ```
 
-Must end `CANDIDATE SHAKEOUT PASSED`. A FAIL here is a product finding, not a harness formality — its maiden runs caught two production bugs the unit suites missed. This proves the candidate `service/` tree
-compiles + serves under GraalVM native-image (the `-Ob` build has the **same**
-reachability requirements as the full release build, so it catches a broken
-native build before the tag burns a release-workflow run). It is a *proxy* for
-the published binary — the canonical native binaries are built by the workflow in
-Step 4; the published artifact itself is validated in Step 5.
+Must end `CANDIDATE SHAKEOUT PASSED`.
+
+This is strictly stronger than the `--guided` gate it replaces. It performs the
+same native-image build — the `-Ob` quick build has the SAME reachability
+requirements as the full release build, so it catches a broken native build
+before the tag burns a release-workflow run — and then adds the full CLI-verb
+matrix, incremental index, and a zero-5xx-under-load assertion against that
+binary. A FAIL here is a product finding, not a harness formality: its maiden
+runs caught two production bugs the unit suites missed (nexus-h8rf6).
 
 Notes:
 - The host JVM suite (`cd service && ./mvnw -q test`, Step 2) validates the Java
-  on the JVM; `--guided` adds the native-image build + serve.
+  on the JVM; `--shakeout` adds the native-image build + serve + drive.
 - **Do NOT use `release-sandbox.sh`** — it swaps the uv tool venv and can break
   the live install. The container rehearsal is the safe, isolated one.
+- When the two-hop stranded-redirect rehearsal lands (nexus-8nlj4) it becomes
+  the acceptance journey that replaced the retired guided legs; add it here
+  then, alongside `--shakeout` rather than instead of it.
 
 ### 4. Push the tag (human, or AI when explicitly authorized)
 
@@ -84,22 +86,38 @@ git push origin engine-service-vX.Y.Z
 
 Tag-push fires `engine-service-release.yml` → builds + cosign-signs the 3 native binaries for the supported targets (`linux-amd64`, `linux-arm64`, `mac-arm64`) plus their PG bundles, and publishes the GitHub release. (Intel macOS / `mac-amd64` is NOT a supported target — not built.) Publishes nothing to PyPI. Wait for the workflow to finish publishing before Step 5 (prior runs ~30 min).
 
-### 5. POST-PUBLISH validation: `--cold` against the new tag (REQUIRED)
+### 5. POST-PUBLISH validation of the published artifact — ⚠️ CURRENTLY NO LEG
 
-Now the candidate is published, validate the **actual release artifact** by
-acquiring it — this is the gate that catches what unit tests miss (it found
-`nexus-pi3s3` + `nexus-qeoxf` on 2026-06-26). Fully isolated (own PG in-box,
-wheel installed in-container, never touches `~/.config/nexus` or prod).
-
-```bash
-export NEXUS_SERVICE_TAG=engine-service-vX.Y.Z      # point the cold-acquire at the JUST-published candidate
-tests/e2e/migration-rehearsal/run.sh --cold         # bare box → install-binary <new tag> → init → guided-upgrade
-```
-
-Must end `... MVV PASSED`. `--cold` rebuilds the wheel and cold-acquires the
-published binary + PG bundle (it does **not** build a native binary). If it
-fails, the published tag is bad — fix and cut a new patch tag (a published tag
-is immutable; do not re-point it).
+> **BROKEN, needs a decision. Do not skip silently; escalate to Hal.**
+> This step used to be `run.sh --cold`, which cold-acquired the just-published
+> binary on a bare box. `--cold` was RETIRED by RDR-155 P4b (commit `7e47c285`,
+> 2026-07-24) along with `--guided` and `--hole-punch`, because it drove the
+> deleted `nx guided-upgrade`. **There is currently no leg that acquires and
+> validates an arbitrary just-published engine tag.**
+>
+> This matters: this is the gate that caught `nexus-pi3s3` + `nexus-qeoxf` on
+> 2026-06-26 — defects in the PUBLISHED artifact that every local suite missed.
+> Losing it silently is exactly the class that burned `engine-service-v0.1.53`
+> (a release-only script nobody swept when the contract under it changed).
+>
+> Why the obvious candidate does NOT substitute: `--package-upgrade` does
+> acquire the engine for real, but it converges to `NEW_ENGINE_TAG`, which
+> `run.sh` DERIVES from `REQUIRED_ENGINE_VERSION` — the floor, not an arbitrary
+> new tag. It therefore cannot validate a tag until the PyPI release has already
+> pinned it, which is after the point this step exists to protect.
+>
+> OPTIONS for whoever resolves this (nexus-8nlj4 is the likely home, since it
+> already owns the replacement acceptance rehearsal):
+> 1. Teach `--package-upgrade` to honour an explicit `NEXUS_SERVICE_TAG`
+>    override so it can acquire and converge to a specific published tag.
+> 2. Build the two-hop stranded-redirect rehearsal (nexus-8nlj4) with a
+>    published-artifact acquire leg, restoring this coverage by construction.
+> 3. Accept the gap explicitly and record it — the cost is that a bad published
+>    binary is first discovered by conexus at deploy time (Step 6) rather than
+>    by us, which is a worse place to find it.
+>
+> Until one of those lands, Step 6's conexus cloud gate is the FIRST validation
+> the published artifact receives. Say so out loud when handing the tag over.
 
 > **`--with-cloud` does NOT belong here.** It is NOT a local/acquire leg — it
 > exercises the **conexus-DEPLOYED** cloud service, so it can only run AFTER the
