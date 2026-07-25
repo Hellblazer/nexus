@@ -595,7 +595,7 @@ class TestChashCoverageSection:
         audit catches and returns total_chunks=None.
         ``get_or_create_collection`` MUST NOT be called.
         """
-        from chromadb.errors import NotFoundError as _ChromaNotFoundError
+        from nexus.errors import CollectionNotFoundError as _ChromaNotFoundError
 
         from nexus.collection_audit import compute_chash_coverage
 
