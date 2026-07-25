@@ -127,7 +127,11 @@ def gather_titled_chunks(
     returned as a single group; callers can branch on them (use chash
     grouping or skip).
     """
-    col = t3_db._client.get_collection(name=collection)
+    # nexus-at2ff: was ``t3_db._client.get_collection`` — production make_t3()
+    # returns HttpVectorClient, which has no ``_client`` (only the T3Database
+    # test facade does), so these verbs raised AttributeError in service mode.
+    # Both handles expose get_collection directly.
+    col = t3_db.get_collection(name=collection)
     n = col.count()
     by_title: dict[str, list[ChunkRef]] = defaultdict(list)
     offset = 0
@@ -655,7 +659,11 @@ def link_by_content_hash(
     if not by_head:
         return 0, 0, 0
 
-    col = t3_db._client.get_collection(name=collection)
+    # nexus-at2ff: was ``t3_db._client.get_collection`` — production make_t3()
+    # returns HttpVectorClient, which has no ``_client`` (only the T3Database
+    # test facade does), so these verbs raised AttributeError in service mode.
+    # Both handles expose get_collection directly.
+    col = t3_db.get_collection(name=collection)
     n = col.count()
     # Group chunks by content_hash so we batch one append_manifest per doc.
     by_hash: dict[str, list[ChunkRef]] = defaultdict(list)

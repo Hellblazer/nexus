@@ -637,7 +637,12 @@ def catalog_link_audit() -> dict:
         return {"error": err}
     try:
         t3 = _get_t3()
-        return cat.link_audit(t3=t3._client)
+        # nexus-at2ff: pass the HANDLE, not ``._client``. HttpVectorClient has
+        # no such attribute, so this tool returned
+        # "'HttpVectorClient' object has no attribute '_client'" in production
+        # (swallowed into the error dict by the except below). link_audit's
+        # contract now documents the handle explicitly.
+        return cat.link_audit(t3=t3)
     except Exception as e:  # noqa: BLE001 — demoted tool handler: catch-and-return-error-dict so the call never crashes the caller
         return {"error": str(e)}
 

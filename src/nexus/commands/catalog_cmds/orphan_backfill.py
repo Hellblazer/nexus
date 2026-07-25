@@ -342,7 +342,8 @@ def link_existing_cmd(
         click.echo(
             f"Existing catalog Documents with {match_by}: {count}"
         )
-        col = t3._client.get_collection(name=collection)
+        # nexus-at2ff: the handle, not ``._client`` (absent on HttpVectorClient).
+        col = t3.get_collection(name=collection)
         click.echo(f"T3 chunks in {collection}: {col.count()}")
         click.echo("\n(dry-run) --no-dry-run to write manifest rows.")
         return

@@ -192,15 +192,26 @@ class _LinkOps:
                         from nexus.db import make_t3  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
                         t3 = make_t3()
                         result = cat.resolve_span(
-                            span, entry.physical_collection, t3._client,
+                            span, entry.physical_collection, t3,
                         )
                         if result is None:
                             errors.append(
                                 f"{label} {span!r} does not resolve in "
                                 f"collection {entry.physical_collection}"
                             )
-                    except Exception:  # noqa: BLE001 — best-effort cleanup; failure is non-fatal and intentionally swallowed
-                        pass  # T3 unavailable — skip validation
+                    except (AttributeError, TypeError):
+                        # nexus-at2ff: NOT swallowed. The wrong-attribute bug that
+                        # disabled this validation in production presented exactly
+                        # here and was labelled "T3 unavailable". A shape error is a
+                        # defect in this code, not a degraded environment.
+                        raise
+                    except Exception as exc:  # noqa: BLE001 — genuine T3 unreachability; validation degrades rather than blocking the write
+                        _log.warning(
+                            "catalog_links.span_validation_skipped",
+                            span=span, collection=entry.physical_collection,
+                            error=str(exc)[:200],
+                            reason="T3 unreachable — chash span NOT validated",
+                        )
             if errors:
                 raise ValueError(f"unresolvable span: {'; '.join(errors)}")
         now = datetime.now(UTC).isoformat()
@@ -378,15 +389,22 @@ class _LinkOps:
                             from nexus.db import make_t3  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
                             t3 = make_t3()
                             result = cat.resolve_span(
-                                span, entry.physical_collection, t3._client,
+                                span, entry.physical_collection, t3,
                             )
                             if result is None:
                                 errors.append(
                                     f"{label} {span!r} does not resolve in "
                                     f"collection {entry.physical_collection}"
                                 )
-                        except Exception:  # noqa: BLE001 — best-effort cleanup; failure is non-fatal and intentionally swallowed
-                            pass
+                        except (AttributeError, TypeError):
+                            raise  # nexus-at2ff: see the sibling site — shape errors are defects
+                        except Exception as exc:  # noqa: BLE001 — genuine T3 unreachability; validation degrades rather than blocking the write
+                            _log.warning(
+                                "catalog_links.span_validation_skipped",
+                                span=span, collection=entry.physical_collection,
+                                error=str(exc)[:200],
+                                reason="T3 unreachable — chash span NOT validated",
+                            )
                 if errors:
                     raise ValueError(f"unresolvable span: {'; '.join(errors)}")
             now = datetime.now(UTC).isoformat()
@@ -736,9 +754,12 @@ class _LinkOps:
         """Audit the links table.
 
         When ``t3`` is provided, verifies each ``chash:`` span
-        resolves to a chunk in the corresponding ChromaDB
-        collection. Pass a raw ``ClientAPI`` (production callers
-        use ``t3_db._client``; tests pass an ``EphemeralClient``).
+        resolves to a chunk in the corresponding collection. Pass the
+        T3 HANDLE itself — ``make_t3()`` (HttpVectorClient in
+        production, T3Database in tests). Both expose
+        ``get_collection``, which is all the resolution needs. Do NOT
+        unwrap ``._client``: that is Chroma-era, exists only on the
+        test facade, and reintroduces nexus-at2ff.
         Returns a dict with ``total``, ``by_type``, ``by_creator``,
         ``orphaned``, ``duplicates``, ``stale_spans``, and
         ``stale_chash`` lists plus their counts.

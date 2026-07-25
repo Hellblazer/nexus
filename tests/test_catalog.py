@@ -954,6 +954,17 @@ class TestLinkChashSpans:
 
 
 class TestLinkChashValidation:
+    """nexus-at2ff: these tests used to wrap the client as
+    ``mock_t3 = MagicMock(); mock_t3._client = t3`` — a shape that existed
+    ONLY in tests. Production's make_t3() returns HttpVectorClient, which has
+    no ``_client``, so the code under test raised AttributeError there and
+    swallowed it as "T3 unavailable"; span validation was dead in production
+    while these tests proved it worked. The wrapper WAS the blind spot.
+
+    make_vector_test_client() is already production-shaped (get_collection
+    present, no _client), so it is now passed directly.
+    """
+
     def _setup_val_env(self, cat, tmp_path):
         t3 = make_vector_test_client()
         col_name = f"code__val_{tmp_path.name}"
@@ -965,9 +976,7 @@ class TestLinkChashValidation:
 
     def test_rejects_unresolvable_chash_span(self, cat, tmp_path):
         t3, col_name, col, a, b = self._setup_val_env(cat, tmp_path)
-        mock_t3 = MagicMock()
-        mock_t3._client = t3
-        with patch("nexus.db.make_t3", return_value=mock_t3):
+        with patch("nexus.db.make_t3", return_value=t3):
             with pytest.raises(ValueError, match="unresolvable span"):
                 cat.link(a, b, "cites", "test-agent", from_span="chash:" + "a" * 64)
 
@@ -975,9 +984,7 @@ class TestLinkChashValidation:
         t3, col_name, col, a, b = self._setup_val_env(cat, tmp_path)
         h = "b" * 64
         col.add(ids=["c1"], documents=["some code"], metadatas=[{"chunk_text_hash": h}])
-        mock_t3 = MagicMock()
-        mock_t3._client = t3
-        with patch("nexus.db.make_t3", return_value=mock_t3):
+        with patch("nexus.db.make_t3", return_value=t3):
             assert cat.link(a, b, "cites", "test-agent", from_span=f"chash:{h}") is True
 
     def test_allow_dangling_skips_chash_validation(self, cat_with_two_docs):

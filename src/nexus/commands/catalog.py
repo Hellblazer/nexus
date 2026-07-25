@@ -1303,6 +1303,9 @@ def _backfill_all_chunk_text_hashes(t3) -> int:
 
     hash_updated = 0
     for col_info in t3.list_collections():
+        # NOT an at2ff site: the is_service_backed(t3) guard above already
+        # returned for HttpVectorClient, so this branch only ever sees the
+        # legacy chroma-backed T3Database, where ``._client`` is correct.
         col = t3._client.get_collection(col_info["name"])
         updated, _, _ = _backfill_chunk_text_hash(col)
         hash_updated += updated
