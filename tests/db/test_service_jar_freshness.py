@@ -145,3 +145,56 @@ def test_pg_bin_dir_raises_on_set_but_broken_nexus_pg_bin(
     monkeypatch.setenv("NEXUS_PG_BIN", str(tmp_path / "nowhere"))
     with pytest.raises(PgBinaryNotFoundError):
         pg_bin_dir()
+
+
+# ── Session-start banner (nexus-zryqm) ──────────────────────────────────────
+#
+# The per-test guard below is authoritative and unchanged. What it is BAD at is
+# a full-suite run: it surfaces as ~73 identical errors thirteen minutes in,
+# after which the run is discarded and repeated. That happened three times in
+# one day (2026-07-25), twice after the operator had read a handoff note warning
+# about exactly it. The banner delivers the same fact at second 2.
+
+
+def test_banner_is_silent_when_the_jar_is_current(capsys, monkeypatch) -> None:
+    """It must not cry wolf — a false banner every run trains people to ignore
+    the real one, which is how the per-test guard's message got tuned out."""
+    import tests.conftest as ct
+
+    monkeypatch.setattr(
+        "tests.db._service_fixture.jar_freshness_skip_reason", lambda *a, **k: None
+    )
+    ct._warn_if_service_jar_is_stale()
+    assert "SERVICE JAR STALE" not in capsys.readouterr().err
+
+
+def test_banner_fires_and_names_the_rebuild_command(capsys, monkeypatch) -> None:
+    import tests.conftest as ct
+
+    monkeypatch.setattr(
+        "tests.db._service_fixture.jar_freshness_skip_reason",
+        lambda *a, **k: "service jar is STALE: predates TaxonomyHandler.java",
+    )
+    ct._warn_if_service_jar_is_stale()
+    err = capsys.readouterr().err
+
+    assert "SERVICE JAR STALE" in err
+    # The actionable half: a warning that does not carry the fix is one the
+    # reader has to go look up, which is what makes it skippable.
+    assert "mvn -f service/pom.xml package -DskipTests" in err
+    assert "TaxonomyHandler.java" in err, "must pass through the concrete reason"
+
+
+def test_banner_never_breaks_collection(capsys, monkeypatch) -> None:
+    """Advisory only. If the freshness probe itself explodes, the suite must
+    still run — a broken advisory must never become a broken test session."""
+    import tests.conftest as ct
+
+    def _boom(*_a, **_k):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(
+        "tests.db._service_fixture.jar_freshness_skip_reason", _boom
+    )
+    ct._warn_if_service_jar_is_stale()  # must not raise
+    assert "SERVICE JAR STALE" not in capsys.readouterr().err

@@ -225,15 +225,35 @@ def test_newest_published_engine_parses_the_tag_namespace(tmp_path) -> None:
 
 
 def test_newest_published_engine_reads_real_tags() -> None:
-    """Non-vacuity: the discovery function must actually parse this repo's tags.
+    """Reads THIS repo's tags — and tolerates a checkout that has none.
 
-    Guards the bug this code shipped with on its first run — parse_engine_version
-    takes a VERSION string, not the `engine-service-vX.Y.Z` tag form, so every
-    tag silently failed to parse and the gate reported "zero tags visible".
+    nexus-dhs30, and the reason this is a skip rather than an assertion: what it
+    can prove depends on the CHECKOUT, not on the code. CI clones shallow with
+    no tags, so the strict version failed on every push for four commits while
+    the local full-clone run was green — the mechanization's own test broken by
+    the environment it runs in. `fetch-tags: true` does NOT fix that: the tags
+    point at commits outside a depth-1 history, so the refs never materialise.
+
+    The PARSE bug this was written to catch (parse_engine_version takes
+    "0.1.56", not "engine-service-v0.1.56", which silently made every tag
+    unparseable on this code's first run) is now caught HERMETICALLY by
+    test_newest_published_engine_parses_the_tag_namespace, which builds its own
+    repo. So nothing is lost by skipping here — and a skip states the
+    environment fact out loud instead of asserting something the environment
+    controls.
+
+    NOT made unconditional-skip: where tags DO exist (every developer clone, and
+    release.yml, which uses fetch-depth: 0 precisely so the gate can see them),
+    this still checks the real repo end to end.
     """
     newest = gate.newest_published_engine()
-    assert newest is not gate._TAGS_UNAVAILABLE, "git tag lookup failed in-repo"
-    assert newest is not None, "engine-service-v* tags exist in this repo"
+    if newest is gate._TAGS_UNAVAILABLE or newest is None:
+        pytest.skip(
+            "checkout has no engine-service-v* tags (shallow CI clone). The "
+            "parse path is covered hermetically by "
+            "test_newest_published_engine_parses_the_tag_namespace; the release "
+            "GATE gets real tags via release.yml's fetch-depth: 0."
+        )
     assert isinstance(newest, tuple) and len(newest) == 3
     assert newest >= (0, 1, 52)
 

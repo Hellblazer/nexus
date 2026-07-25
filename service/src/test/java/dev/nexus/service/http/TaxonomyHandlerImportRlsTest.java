@@ -219,6 +219,46 @@ class TaxonomyHandlerImportRlsTest {
     }
 
     @Test
+    void genuineGrantFault_stillReturns500_notA409() throws Exception {
+        // nexus-5ctw8: the whole fix rests on a DISCRIMINATION — 42501 + the RLS
+        // message is a caller conflict (409), while a 42501 from a broken GRANT is
+        // a DEPLOYMENT fault that must keep surfacing as 500. Until now that was
+        // proven only at the unit level, by handing a synthetic SQLException to
+        // HttpUtil.isRlsRowRejection. This drives it end-to-end through the real
+        // handler against the real PG.
+        //
+        // Why it matters: a 42501 mislabelled as 409 tells an operator their
+        // deployment is healthy when their role grants are broken — the same
+        // false-clean class, wearing an HTTP status code.
+        //
+        // The revoke is on the SEQUENCE, which /import/topic touches via the
+        // BIGSERIAL default. Restored in a finally so ordering cannot leak a
+        // broken grant into a sibling test.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "REVOKE INSERT ON nexus.topics FROM " + SVC_ROLE);
+        }
+        try {
+            CapturingExchange ex = importTopic(CONTESTED_ID + 500, "grant-fault");
+            handleAs(TENANT_A, ex);
+
+            assertThat(ex.status)
+                .as("a genuine grant fault is a DEPLOYMENT error, not a caller conflict")
+                .isEqualTo(500);
+            assertThat(ex.bodyString())
+                .as("must not be dressed up as the caller's id conflict")
+                .doesNotContain("not available");
+        } finally {
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                su.createStatement().execute(
+                    "GRANT INSERT ON nexus.topics TO " + SVC_ROLE);
+            }
+        }
+    }
+
+    @Test
     void rlsDetector_requiresBothTheSqlstateAndTheRlsMessage() {
         // DISCRIMINATION — the reason isRlsRowRejection is not a bare SQLSTATE check.
         // 42501 also means "this role genuinely lacks a privilege", a DEPLOYMENT fault

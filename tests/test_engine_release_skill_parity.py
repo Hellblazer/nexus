@@ -231,6 +231,49 @@ GOVERNANCE_DOCS = (
     ".claude/skills/engine-release/SKILL.md",
 )
 
+#: Conditional-bump connectives. The BANNED_DOCTRINE list below catches the four
+#: phrasings that have literally recurred; it does NOT survive a rewrite — the
+#: test-validator built a working bypass on 2026-07-25:
+#:
+#:   "...follows the ONE engine identity model... REQUIRED_ENGINE_VERSION should
+#:    be treated as a lower bound: bump it only when a shipped feature genuinely
+#:    needs the newer engine..."
+#:
+#: which contains the required phrase, none of the banned ones, and means exactly
+#: the retired thing. So the semantic being smuggled back in is targeted directly:
+#: CONDITIONALITY attached to the bump. Scoped to a window around
+#: REQUIRED_ENGINE_VERSION so ordinary conditional prose elsewhere is untouched.
+_CONDITIONAL_BUMP_CUES = (
+    "lower bound",
+    "upper bound",
+    "minimum",
+    "only when",
+    "only if",
+    "unless the release",
+    "as needed",
+    "when necessary",
+    "if required",
+)
+
+#: Negations of the retired concept. Prose that says the pin is NOT a minimum /
+#: NOT a floor / NOT a lower bound is stating the rule correctly and must not be
+#: flagged for containing the word it is rejecting.
+#: Matched against the text IMMEDIATELY PRECEDING a cue. A cue introduced by a
+#: negator is the rule being stated correctly — including the common form where
+#: the doc QUOTES the retired phrasing in order to reject it:
+#:     unconditionally, not "only if the release needs the features"
+#: which is why the optional quote mark is part of the pattern.
+_NEGATED_RE = re.compile(
+    r"\b(?:not|no|never|no longer|rather than|instead of)\s+"
+    r"(?:a\s+|an\s+|the\s+)?"
+    r"(?:\w+\s+){0,2}"          # "not a COMPATIBILITY minimum"
+    r"[\"'\u201c\u2018]?\s*$",  # "not \"only if ...\""
+)
+
+#: Lines either side of a REQUIRED_ENGINE_VERSION mention that count as "near".
+#: Narrow on purpose: the whole doc legitimately contains "only if" elsewhere.
+_NEAR_WINDOW = 4
+
 #: Phrases that re-establish floor/minimum semantics as CURRENT doctrine.
 #: Deliberately NOT the bare word "floor": these files legitimately narrate the
 #: incidents that produced the directive ("the floor moved to v0.1.34 while the
@@ -298,4 +341,55 @@ def test_the_pin_currency_gate_exists_and_is_wired_into_the_release_workflow() -
     assert "fetch-tags: true" in wf, (
         "release.yml checkout must fetch tags or the pin-currency half cannot "
         "see any engine-service-v* tag"
+    )
+
+
+@pytest.mark.parametrize("doc", GOVERNANCE_DOCS)
+def test_no_conditional_bump_language_near_the_engine_constant(doc: str) -> None:
+    """Catches the PARAPHRASE the literal ban cannot (nexus-15iib).
+
+    The banned-phrase list is a regression pin for wording that actually
+    recurred four times; this targets the MEANING instead. The retired doctrine
+    always reduces to one idea — that bumping REQUIRED_ENGINE_VERSION is
+    conditional on need — so conditional connectives within a few lines of that
+    constant are the signature, whatever words carry them.
+
+    Deliberately windowed and deliberately narrow: these docs legitimately use
+    "only if" in unrelated paragraphs, and a whole-file ban would be noise that
+    gets suppressed. Both halves are needed — a paraphrase evades the literal
+    list, and a novel literal phrasing evades this one.
+    """
+    lines = (REPO_ROOT / doc).read_text(encoding="utf-8").splitlines()
+    anchors = [i for i, ln in enumerate(lines) if "REQUIRED_ENGINE_VERSION" in ln]
+    assert anchors, f"{doc} no longer mentions REQUIRED_ENGINE_VERSION at all"
+
+    offenders: list[str] = []
+    for i in anchors:
+        lo, hi = max(0, i - _NEAR_WINDOW), min(len(lines), i + _NEAR_WINDOW + 1)
+        window = " ".join(lines[lo:hi]).lower()
+        # Negation is checked PER CUE, not per window. The first cut skipped the
+        # whole window if it contained any negation anywhere — so a window
+        # holding BOTH the correct statement and a smuggled conditional clause
+        # was waved through entirely. The validator's demonstrated bypass
+        # survived that version; this is what actually catches it.
+        for cue in _CONDITIONAL_BUMP_CUES:
+            start = 0
+            while (pos := window.find(cue, start)) != -1:
+                start = pos + len(cue)
+                lead = window[max(0, pos - 32):pos]
+                if _NEGATED_RE.search(lead):
+                    continue  # "...unconditionally, not \"only if...\"" — the FIX
+                offenders.append(
+                    f"{doc}:{i + 1} near REQUIRED_ENGINE_VERSION: {cue!r}"
+                )
+
+    assert not offenders, (
+        f"conditional-bump language reappeared: {offenders}\n"
+        "The directive (Hal, 2026-07-15) is that a release installs the engine "
+        "it was built and gated with, on EVERY install path — the bump is "
+        "UNCONDITIONAL. Any 'lower bound' / 'only when needed' framing is the "
+        "retired carve-out returning in new words; it is what left local-mode "
+        "installs on v0.1.52 across four gated engine tags.\n"
+        "If a window is a false positive, say 'unconditional' or 'not a "
+        "minimum' in it — stating the rule positively is the point."
     )

@@ -85,16 +85,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
-        with:
-          # nexus-dhs30: the suite includes a NON-VACUITY test that reads
-          # `git tag -l engine-service-v*` (tests/scripts/
-          # test_check_engine_release_floor.py::test_newest_published_engine_reads_real_tags).
-          # Default checkout is shallow and fetches NO tags, so that test saw an
-          # empty tag list and failed on every push from a797dbd4 onward — four
-          # commits landed on red CI because the local full-clone run was green
-          # and nobody read the CI result. release.yml got `fetch-tags: true` in
-          # the same commit; this job did not.
-          fetch-tags: true
+        # NO fetch-tags/fetch-depth here, deliberately (nexus-dhs30). The
+        # engine-tag reader is exercised HERMETICALLY by
+        # test_newest_published_engine_parses_the_tag_namespace, which builds its
+        # own repo with known tags — so the parse bug it guards is caught without
+        # this job paying for a tag or history fetch on every single push.
+        # `fetch-tags: true` was tried here first and does NOT work: the
+        # engine-service-v* tags point at commits outside a depth-1 history, so
+        # the refs never materialise and the test still saw an empty list.
+        # Tag visibility is needed only where the GATE runs — release.yml.
 
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7
         with:

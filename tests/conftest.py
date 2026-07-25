@@ -123,13 +123,61 @@ def _scan_fixture_cache_files() -> set[Path]:
 _fixture_cache_baseline: set[Path] = set()
 
 
+def _warn_if_service_jar_is_stale() -> None:
+    """Say ONCE, at session start, that the service jar is stale (nexus-zryqm).
+
+    The information already exists: ``jar_freshness_skip_reason`` is consulted
+    per-test by the engine-substrate fixtures, which fail LOUD with a directive
+    message. That is right for a targeted run and wrong for a full suite — it
+    surfaces as ~73 identical errors THIRTEEN MINUTES IN, after which the whole
+    run has to be discarded and repeated.
+
+    That happened three times in one day (2026-07-25), twice after the operator
+    had read a handoff note explicitly warning about it. A documented
+    precondition that a human must remember is not a mechanism; this makes the
+    same fact arrive at second 2 instead of minute 13.
+
+    Deliberately a WARNING, not a hard stop: the stale jar only affects the
+    engine-substrate tests, and someone iterating on unrelated Python must not
+    be blocked by a Java artifact they never touched. The per-test fail-loud
+    guard is unchanged and still authoritative.
+    """
+    try:
+        from tests.db._service_fixture import jar_freshness_skip_reason
+    except Exception:  # noqa: BLE001 — advisory only; never break collection
+        return
+    try:
+        reason = jar_freshness_skip_reason()
+    except Exception:  # noqa: BLE001 — advisory only
+        return
+    if not reason:
+        return
+    import sys as _sys
+
+    banner = (
+        "\n"
+        "=" * 78 + "\n"
+        f"SERVICE JAR STALE — engine-substrate tests will error: {reason}\n"
+        "Rebuild BEFORE trusting this run, or ~73 errors will surface at the END:\n"
+        "    mvn -f service/pom.xml package -DskipTests\n"
+        "(nexus-zryqm: this notice exists because the same 13-minute run was\n"
+        " discarded three times in one day for exactly this reason.)\n"
+        + "=" * 78 + "\n"
+    )
+    print(banner, file=_sys.stderr)  # noqa: T201 — session banner, must be seen before the run
+
+
 def pytest_sessionstart(session):
     """Snapshot fixture cache files in ~/.config/nexus/ at session
     start so ``pytest_sessionfinish`` can detect leaks introduced
     during the session (nexus-nifd).
+
+    Also emits the stale-service-jar banner (nexus-zryqm) so a doomed
+    engine-substrate run is visible immediately rather than 13 minutes later.
     """
     global _fixture_cache_baseline
     _fixture_cache_baseline = _scan_fixture_cache_files()
+    _warn_if_service_jar_is_stale()
 
 
 def pytest_sessionfinish(session, exitstatus):
