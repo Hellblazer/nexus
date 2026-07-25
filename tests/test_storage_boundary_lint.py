@@ -578,7 +578,13 @@ def test_dual_population_baseline_locked():
     # `T2Database(default_db_path())` to probe per-collection topic existence
     # for the no-change index gate; read-only, WAL-safe. Carries an
     # `# epsilon-allow:` reason.
-    assert result.t2database_constructions == 35, (
+    #
+    # nexus-70x7y: 35 -> 34. DOWNWARD. `nx enrich aspects-promote-field` opened
+    # TWO T2Databases — a read-only one for `--history` and a WRITE one for the
+    # promotion's raw DDL. The runtime promotion verb is retired (schema changes
+    # go through Liquibase in every mode), so the write construction is gone;
+    # only the read-only `--history` open survives.
+    assert result.t2database_constructions == 34, (
         f"T2Database documented-construction baseline moved: {result.t2database_constructions}"
     )
 

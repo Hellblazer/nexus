@@ -1013,11 +1013,13 @@ def migrate_aspect_promotion_log_table(conn: sqlite3.Connection) -> None:
     """Create the ``aspect_promotion_log`` audit table for RDR-089
     Phase E (extras → fixed-column promotion).
 
-    Replaces lazy ``CREATE IF NOT EXISTS`` in
-    ``nexus.aspect_promotion._ensure_audit_table`` with a registered
-    migration so ``nx doctor --check-schema`` can audit the table's
-    presence and operators restoring T2 from backup get the table
-    even before a first promotion call.
+    Replaced the lazy bootstrap that used to live in
+    ``nexus.aspect_promotion`` with a registered migration so
+    ``nx doctor --check-schema`` can audit the table's presence and
+    operators restoring T2 from backup get the table even before a
+    first promotion call. Since nexus-70x7y this is the SOLE creator:
+    the runtime promotion verb (and its lazy bootstrap) are retired, and
+    ``aspect_promotion.list_promotions`` only ever reads.
 
     Substantive critic finding: lazy table creation was breaking
     the auditability claim — a backup-restored DB had no record of
