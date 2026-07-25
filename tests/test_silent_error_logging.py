@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Phase 1 — verify formerly-silent catch blocks now emit structlog events."""
 from __future__ import annotations
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction
 
 import logging
 from pathlib import Path
@@ -278,8 +279,6 @@ def test_catalog_store_hook_failed_logs_warning(tmp_path, monkeypatch):
     failures, creating the inverse-of-#244 orphan shape (T3 row with no
     catalog tumbler) with zero observability.
     """
-    import chromadb
-
     from nexus.db.t1 import T1Database
     from nexus.db.t2 import T2Database
     from nexus.db.t3 import T3Database
@@ -300,7 +299,7 @@ def test_catalog_store_hook_failed_logs_warning(tmp_path, monkeypatch):
         _inject_t1(T1Database(session_id="hook-fail", client=t1_client))
 
         t3_client = make_vector_test_client()
-        ef = chromadb.utils.embedding_functions.DefaultEmbeddingFunction()
+        ef = MiniLMDirectEmbeddingFunction()
         _inject_t3(T3Database(_client=t3_client, _ef_override=ef))
 
         # Force the catalog hook to raise.

@@ -46,7 +46,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
 from nexus.catalog.catalog import Catalog
 from nexus.db.t3 import T3Database

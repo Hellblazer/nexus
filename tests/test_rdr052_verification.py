@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 from __future__ import annotations
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction
 
 import json
 import os
 from pathlib import Path
 
-import chromadb
 import pytest
 
 from nexus.catalog.catalog import Catalog
@@ -39,7 +39,7 @@ def _reset():
 @pytest.fixture()
 def t3():
     client = make_vector_test_client()
-    ef = chromadb.utils.embedding_functions.DefaultEmbeddingFunction()
+    ef = MiniLMDirectEmbeddingFunction()
     db = T3Database(_client=client, _ef_override=ef)
     _inject_t3(db)
     return db

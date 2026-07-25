@@ -122,7 +122,7 @@ class FakeVectorClient:
         return col.pop(doc_id, None) is not None
 
     def get_collection(self, name: str) -> _FakeCollectionHandle:
-        from chromadb.errors import NotFoundError
+        from nexus.errors import CollectionNotFoundError as NotFoundError
 
         if name not in self.store:
             raise NotFoundError(f"collection {name!r} not found")

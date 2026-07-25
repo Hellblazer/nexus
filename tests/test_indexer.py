@@ -794,7 +794,7 @@ def test_prune_deleted_files_does_not_create_zombie_collections(tmp_path):
     up. Post-fix, prune uses ``get_collection`` and silently skips
     when the collection is absent.
     """
-    from chromadb.errors import NotFoundError as _ChromaNotFoundError
+    from nexus.errors import CollectionNotFoundError as _ChromaNotFoundError
     from nexus.indexer import _prune_deleted_files
 
     catalog = _gc_catalog({"code__repo": set(), "docs__repo": set()})
@@ -818,7 +818,7 @@ def test_prune_misclassified_does_not_create_zombie_collections(tmp_path):
     contract as above. Absent T3 collections must NOT trip
     speculative creation; the corresponding sweep is a no-op.
     """
-    from chromadb.errors import NotFoundError as _ChromaNotFoundError
+    from nexus.errors import CollectionNotFoundError as _ChromaNotFoundError
     from nexus.indexer import _prune_misclassified
 
     db = MagicMock()

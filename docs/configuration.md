@@ -18,7 +18,7 @@ Nexus auto-detects local mode when cloud credentials are absent. The recommended
 | Env var | Default | Description |
 |---|---|---|
 | `NX_LOCAL` | (auto) | `1` = force local, `0` = force cloud, unset = auto-detect |
-| `NX_LOCAL_CHROMA_PATH` | `~/.local/share/nexus/chroma` | Path to the legacy ChromaDB store. As of 6.0 this is read only as the **migration source** for the ladder's substrate rung (`nx upgrade`); T3 serves from the Postgres+pgvector service, not this path. |
+| `NX_LOCAL_CHROMA_PATH` | `~/.local/share/nexus/chroma` | Path to a legacy ChromaDB store. **Inert as of 7.0.0** — the migration reader was deleted with the `chromadb` dependency (RDR-155 P4b). The directory is left on disk untouched as a rollback source; T3 serves from the Postgres+pgvector service. |
 | `NEXUS_CATALOG_PATH` | `~/.config/nexus/catalog` | Override catalog git repo location |
 | `NEXUS_CATALOG_ALLOW_CROSS_PROJECT` | unset | Set to `1` to bypass the register-time cross-project source_uri guard. Emergency-only escape hatch for known-good recovery scripts that legitimately need to register rows across project boundaries; never the right answer for normal indexing |
 
@@ -33,7 +33,7 @@ Nexus auto-detects local mode when cloud credentials are absent. The recommended
 
 **Embedding tiers**: Tier 0 (bundled MiniLM-L6-v2, 384d) is always available. Install `uv tool install "conexus[local]"` for tier 1 (bge-base-en-v1.5, 768d, better quality; downloads the model on first embed). To add the extra to an existing install: `uv tool install --reinstall "conexus[local]"`. Upgrade later with `uv tool upgrade conexus`, which preserves the extra — never `uv tool install --force`, which drops it.
 
-**Legacy ChromaDB store path**: Defaults to `$XDG_DATA_HOME/nexus/chroma` or `~/.local/share/nexus/chroma`, overridable with `NX_LOCAL_CHROMA_PATH`. As of 6.0 this path is read only as the **migration source** for the ladder's substrate rung (`nx upgrade`); live T3 serves from the Postgres+pgvector service.
+**Legacy ChromaDB store path**: Defaults to `$XDG_DATA_HOME/nexus/chroma` or `~/.local/share/nexus/chroma`, overridable with `NX_LOCAL_CHROMA_PATH`. **No longer read as of 7.0.0** — the migration reader was deleted with the `chromadb` dependency. The directory is orphaned by design (rollback source, no cleanup verb); live T3 serves from the Postgres+pgvector service.
 
 **Switching embedders or modes**: Changing the embedding model (switching local↔cloud, *or* switching local tiers 384-dim MiniLM ↔ 768-dim bge) makes the existing vectors incompatible (different dimensions/space). On the next `nx index repo .` the staleness check detects the model change and re-embeds into **new** collections under the new model token. **It does NOT automatically delete or migrate the old collections**: they remain behind under the previous token and silently return no results (their dimension no longer matches the active embedder).
 
@@ -50,15 +50,13 @@ As of 6.0, managed-cloud mode points `nx` at a hosted nexus service that owns it
 
 Export both in your shell profile or process manager. You do not supply a Voyage key in managed-cloud mode (the service owns it).
 
-### Migration-source credentials (pre-6.0 only)
+### Migration-source credentials — RETIRED as of 7.0.0
 
-These ChromaDB Cloud keys are **not** used for live T3 serving in 6.0. They are read only when the ladder's substrate rung (`nx upgrade`) needs to read an existing ChromaDB Cloud store as the migration source:
+`CHROMA_API_KEY`, `CHROMA_DATABASE` and `CHROMA_TENANT` are **inert**. Setting them does nothing.
 
-| Config key | Env var | Notes |
-|---|---|---|
-| `chroma_api_key` | `CHROMA_API_KEY` | ChromaDB Cloud API key (migration source) |
-| `chroma_database` | `CHROMA_DATABASE` | ChromaDB Cloud database name, e.g. `nexus` (migration source) |
-| `chroma_tenant` | `CHROMA_TENANT` | Auto-inferred from the API key; only for multi-workspace setups |
+Through 6.x they were read by the ladder's substrate rung so `nx upgrade` could read an existing ChromaDB Cloud store as a migration source. RDR-155 P4b deleted the Chroma read client, the migration ETL and finally the `chromadb` dependency itself, so there is no code left that could consume them. They are documented here only so an operator who finds them in an old `config.yml` or shell profile knows they are dead rather than broken — they can be deleted.
+
+**If you are still on a pre-migration install**, do not set these and expect an upgrade to work. Upgrading straight from a Chroma-era install into 7.0.0 is detected and refused with a loud two-hop redirect (`nexus.stranded_install`): migrate on a 6.x release first, which still ships the migration tool, then upgrade to 7.0.0. Frozen Chroma directories on disk are left untouched by design as rollback sources; there is no cleanup verb.
 
 ## Semantic Scholar (Enrichment)
 
@@ -68,11 +66,7 @@ These ChromaDB Cloud keys are **not** used for live T3 serving in 6.0. They are 
 
 Used by `nx enrich bib` to fetch bibliographic metadata (year, venue, authors, citation count). Without the key, enrichment works but is ~50x slower due to rate limiting.
 
-The notes below apply only to a pre-6.0 ChromaDB Cloud store being read as a **migration source**. In 6.0 live T3 serving is the managed nexus service (`service_url` + `service_token` above); these no longer describe the active backend.
-
-**`chroma_database` is the database name** of the ChromaDB Cloud store the migration reads from. All collection prefixes (`code__*`, `docs__*`, `rdr__*`, `knowledge__*`) coexisted in it.
-
-**`chroma_tenant` is optional.** The ChromaDB `CloudClient` infers the tenant UUID directly from your API key. You only need to set it explicitly if you belong to multiple Chroma Cloud workspaces.
+**Historical note (7.0.0: no longer operative).** `chroma_database` named the ChromaDB Cloud database the migration read from; all collection prefixes (`code__*`, `docs__*`, `rdr__*`, `knowledge__*`) coexisted in it, and `chroma_tenant` was inferred from the API key except in multi-workspace setups. Retained as provenance for the collection-naming scheme, which outlived the backend.
 
 **Single-database architecture (history).** RDR-037 (2026-03-14) consolidated the legacy four-database layout (`{base}_code` / `{base}_docs` / `{base}_rdr` / `{base}_knowledge`) into a single database with collection prefixes. The transitional auto-detect probe was retired in 4.14.2 once the migration window closed.
 

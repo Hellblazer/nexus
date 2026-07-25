@@ -10,7 +10,7 @@ from typing import Generator
 import msgpack
 import numpy as np
 import pytest
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
 from nexus.db.http_vector_client import HttpVectorClient
 from nexus.db.t3 import T3Database
@@ -378,7 +378,7 @@ class TestGzipCompression:
 
 class TestPagination:
     def _seed_large(self, db, col_name, prefix):
-        from nexus.db.chroma_quotas import QUOTAS
+        from nexus.db.limits import QUOTAS
         n = QUOTAS.MAX_RECORDS_PER_WRITE + 50
         # See ``populated_db`` for why ``strict=False``.
         col = db.get_or_create_collection(col_name, strict=False)

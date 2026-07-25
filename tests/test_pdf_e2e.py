@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import pytest
 import pytest
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
 from nexus.corpus import index_model_for_collection
 from nexus.doc_indexer import index_pdf
@@ -55,9 +55,15 @@ def _local_embed(chunks, model, api_key, input_type="document", timeout=120.0, o
     (list[list[float]], str) signature.  Passing model through (not "test-local")
     keeps the stored embedding_model matching target_model, which is required for
     the staleness guard (AC-E3) to trigger correctly on re-index.
-    Uses .tolist() to convert numpy float32 to Python native floats.
+
+    RDR-155 P4b P3: this used ``[v.tolist() for v in _local_ef(chunks)]``
+    because chroma's ONNX EF returned numpy float32 rows. The nexus EF
+    (minilm_direct) already returns plain ``list[list[float]]``, so the
+    conversion is not just unnecessary — it raised AttributeError on a list.
+    Coerce defensively rather than assuming either shape, so the stub survives
+    an EF that goes back to returning arrays.
     """
-    return [v.tolist() for v in _local_ef(chunks)], model
+    return [list(v) for v in _local_ef(chunks)], model
 
 
 # ── AC-E1 / AC-E2 / AC-E3 — index_pdf E2E ────────────────────────────────────

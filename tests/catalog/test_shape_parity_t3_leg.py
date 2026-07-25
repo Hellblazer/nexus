@@ -31,9 +31,8 @@ for exactly which server-side branch each one drives.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
-import chromadb
 import pytest
 
 from nexus.catalog.catalog import Catalog
@@ -65,7 +64,7 @@ _CHASH_COLLECTION = "code__t3leg-chash__v1"
 
 
 @pytest.fixture()
-def env(tmp_path: Path) -> Iterator[tuple[Catalog, "chromadb.ClientAPI", ChashIndex]]:
+def env(tmp_path: Path) -> Iterator[tuple[Catalog, "Any", ChashIndex]]:
     """Real Catalog (SQLite) + real EphemeralClient T3 + real ChashIndex (T2),
     seeded with a registered doc+manifest (resolve_chash's "real usage" shape)
     plus the two raw T3 chunks each method under test actually queries."""
@@ -131,7 +130,7 @@ def http_client() -> Iterator[HttpCatalogClient]:
 
 
 def test_resolve_span_t3_parity(
-    env: tuple[Catalog, "chromadb.ClientAPI", ChashIndex],
+    env: tuple[Catalog, "Any", ChashIndex],
     http_client: HttpCatalogClient,
 ) -> None:
     cat, t3, _chash_idx = env
@@ -151,7 +150,7 @@ def test_resolve_span_t3_parity(
 
 
 def test_resolve_chash_t3_parity(
-    env: tuple[Catalog, "chromadb.ClientAPI", ChashIndex],
+    env: tuple[Catalog, "Any", ChashIndex],
     http_client: HttpCatalogClient,
 ) -> None:
     cat, t3, chash_idx = env

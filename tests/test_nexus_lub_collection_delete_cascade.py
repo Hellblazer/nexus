@@ -310,7 +310,7 @@ class TestCollectionDeleteCommandCascades:
         terminates and users are stuck with manual sqlite surgery per
         the pre-fix workaround."""
         from click.testing import CliRunner
-        from chromadb.errors import NotFoundError
+        from nexus.errors import CollectionNotFoundError as NotFoundError
         from unittest.mock import MagicMock, patch
 
         from nexus.db.t2 import T2Database
@@ -475,7 +475,7 @@ class TestChashIndexDeleteCascade:
         """
         from click.testing import CliRunner
         from unittest.mock import MagicMock, patch
-        from chromadb.errors import NotFoundError
+        from nexus.errors import CollectionNotFoundError as NotFoundError
 
         from nexus.db.t2 import T2Database
         from nexus.commands.collection import delete_cmd
@@ -624,7 +624,7 @@ class TestPipelineDeleteCascade:
         when the T3 collection is already gone (recovery path)."""
         from click.testing import CliRunner
         from unittest.mock import MagicMock, patch
-        from chromadb.errors import NotFoundError
+        from nexus.errors import CollectionNotFoundError as NotFoundError
 
         from nexus.commands.collection import delete_cmd
         from nexus.db.t2 import T2Database

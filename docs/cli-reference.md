@@ -896,16 +896,6 @@ nx catalog collection-gc [--apply]
 
 Sweep zombie T3 collections, the junkyard pattern flagged by `nx catalog doctor --collections-drift`: collections pre-created by an interrupted index or deleted worktree (`get_or_create_collection`) that never received a chunk. Conservative: a collection is deleted only when it has 0 chunks AND is not in the collections projection AND is not referenced by any `documents.physical_collection` row AND is not bypass-schema (`taxonomy__*`). Dry-run by default; `--apply` deletes. Stale projection rows (row exists, T3 collection gone) are NOT handled here (the event log is append-only), so those need an explicit `supersede_collection`; use the recipe printed by `nx catalog doctor --collections-drift`.
 
-### nx catalog chash-reconcile
-
-```
-nx catalog chash-reconcile [--apply]
-```
-
-Sweep stale rows from the LOCAL SQLite `chash_index`, the routing table that resolves `chash:<hex>` link spans to their (collection, chunk). Rows are not cascaded when a collection is deleted from T3, so they linger as ghosts pointing at non-existent collections. Dry-run by default; `--apply` deletes; reports per-ghost-collection row counts.
-
-Scope (RDR-187): meaningful only on pre-migration installs whose SQLite router still routes. On a migrated (service-mode) install there is no local router to sweep: the verb exits at the "No T2 db" guard, and server-side the question "which collections hold chunks" is answered from the chunks tables themselves, which cannot go stale.
-
 ### nx catalog rename-collection
 
 ```

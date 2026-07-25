@@ -50,7 +50,7 @@ def _make_svc_client(
     chunk_metas: list[dict] | None = None,
 ) -> MagicMock:
     """Build a MagicMock HttpVectorClient for service-mode assertions."""
-    from chromadb.errors import NotFoundError as _ChromaNotFoundError
+    from nexus.errors import CollectionNotFoundError as _ChromaNotFoundError
 
     svc = MagicMock()
     if collection_exists:
@@ -228,7 +228,7 @@ class TestFrecencyNonServiceMode:
         """make_t3 must be called in local (non-service) mode."""
         fake_db = MagicMock()
         # get_collection raises so the inner loop exits immediately — but make_t3 WAS called
-        from chromadb.errors import NotFoundError as _ChromaNotFoundError
+        from nexus.errors import CollectionNotFoundError as _ChromaNotFoundError
         fake_db.get_collection.side_effect = _ChromaNotFoundError("collection not found")
 
         with (

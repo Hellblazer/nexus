@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import chromadb
 import numpy as np
 import pytest
 
@@ -22,6 +21,7 @@ from nexus.db.local_ef import LocalEmbeddingFunction
 from nexus.db.t2 import T2Database
 from nexus.types import SearchResult
 from tests.conftest import make_vector_test_client
+from typing import Any
 
 # Full e2e pipeline: real ChromaDB clients (Ephemeral + Persistent), real
 # MiniLM embeddings, real HDBSCAN clustering. ~2.9s/test average on CI,
@@ -40,13 +40,21 @@ def ef() -> LocalEmbeddingFunction:
 
 
 @pytest.fixture()
-def ephemeral_chroma() -> chromadb.ClientAPI:
+def ephemeral_chroma() -> Any:
     return make_vector_test_client()
 
 
 @pytest.fixture()
-def persistent_chroma(tmp_path: Path) -> chromadb.ClientAPI:
-    return chromadb.PersistentClient(path=str(tmp_path / "chroma"))
+def isolated_vector_client() -> Any:
+    """A vector client isolated from every other test's.
+
+    Was ``chromadb.PersistentClient(tmp_path)`` — on-disk purely to dodge
+    EphemeralClient's process-wide shared backend, never because these tests
+    need durability. ``make_vector_test_client()`` returns a fresh
+    InMemoryVectorClient per call, so isolation is now by construction and the
+    tmp_path is no longer needed.
+    """
+    return make_vector_test_client()
 
 
 # ── Test corpus ───────────────────────────────────────────────────────────────
@@ -103,7 +111,7 @@ class TestFullPipelineEphemeral:
     """Complete taxonomy pipeline with EphemeralClient (in-memory HNSW)."""
 
     def test_discover_produces_coherent_topics(
-        self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: chromadb.ClientAPI,
+        self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: Any,
     ) -> None:
         """Discover → topics have coherent c-TF-IDF labels from real embeddings."""
         doc_ids, texts = _build_corpus()
@@ -129,7 +137,7 @@ class TestFullPipelineEphemeral:
             assert total_assigned >= 30, f"Expected >=30 assigned, got {total_assigned}"
 
     def test_incremental_assignment_correct_topic(
-        self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: chromadb.ClientAPI,
+        self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: Any,
     ) -> None:
         """assign_single routes a new doc to the semantically nearest topic."""
         doc_ids, texts = _build_corpus()
@@ -158,7 +166,7 @@ class TestFullPipelineEphemeral:
             )
 
     def test_rebuild_preserves_operator_label(
-        self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: chromadb.ClientAPI,
+        self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: Any,
     ) -> None:
         """Rebuild with merge strategy preserves renamed labels."""
         doc_ids, texts = _build_corpus()
@@ -186,7 +194,7 @@ class TestFullPipelineEphemeral:
             )
 
     def test_manual_assign_preserved_across_rebuild(
-        self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: chromadb.ClientAPI,
+        self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: Any,
     ) -> None:
         """Manual assignment survives rebuild via old→new topic mapping."""
         doc_ids, texts = _build_corpus()
@@ -215,7 +223,7 @@ class TestFullPipelineEphemeral:
             assert "manual-doc" in manual, "Manual assignment lost"
 
     def test_merge_and_split_roundtrip(
-        self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: chromadb.ClientAPI,
+        self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: Any,
     ) -> None:
         """Merge two topics → split result → verify doc assignment integrity."""
         doc_ids, texts = _build_corpus()
@@ -262,7 +270,7 @@ class TestFullPipelineEphemeral:
             assert len(db.taxonomy.get_topic_doc_ids(t1["id"])) == 0
 
     def test_topic_boost_reduces_distance(
-        self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: chromadb.ClientAPI,
+        self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: Any,
     ) -> None:
         """apply_topic_boost reduces distance for same-topic results."""
         from nexus.scoring import _TOPIC_SAME_BOOST, apply_topic_boost
@@ -306,7 +314,7 @@ class TestFullPipelineEphemeral:
                     assert abs((orig - r.distance) - _TOPIC_SAME_BOOST) < 0.001
 
     def test_review_workflow(
-        self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: chromadb.ClientAPI,
+        self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: Any,
     ) -> None:
         """Review → accept/rename/delete → verify state changes."""
         doc_ids, texts = _build_corpus()
@@ -333,7 +341,7 @@ class TestFullPipelineEphemeral:
             assert topic["review_status"] == "accepted"
 
     def test_rebalance_trigger(
-        self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: chromadb.ClientAPI,
+        self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: Any,
     ) -> None:
         """Rebalance detects 2x growth after discover."""
         doc_ids, texts = _build_corpus()
@@ -352,7 +360,7 @@ class TestFullPipelineEphemeral:
             assert db.taxonomy.needs_rebalance("code__e2e", current_count=120) is True
 
     def test_topic_links_persist_and_read(
-        self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: chromadb.ClientAPI,
+        self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: Any,
     ) -> None:
         """topic_links table persists and is readable at search time."""
         doc_ids, texts = _build_corpus()
@@ -388,7 +396,7 @@ class TestFullPipelinePersistent:
     """Same pipeline with PersistentClient (on-disk HNSW)."""
 
     def test_discover_and_assign_persistent(
-        self, tmp_path: Path, ef: LocalEmbeddingFunction, persistent_chroma: chromadb.ClientAPI,
+        self, tmp_path: Path, ef: LocalEmbeddingFunction, isolated_vector_client: Any,
     ) -> None:
         """Full discover + incremental assign works with PersistentClient."""
         doc_ids, texts = _build_corpus()
@@ -396,7 +404,7 @@ class TestFullPipelinePersistent:
 
         with T2Database(tmp_path / "e2e.db") as db:
             count = db.taxonomy.discover_topics(
-                "code__e2e", doc_ids, embeddings, texts, persistent_chroma,
+                "code__e2e", doc_ids, embeddings, texts, isolated_vector_client,
             )
             assert count >= 2
 
@@ -405,19 +413,19 @@ class TestFullPipelinePersistent:
             new_emb = np.array(ef([new_text])[0], dtype=np.float32)
 
             result = db.taxonomy.assign_single(
-                "code__e2e", new_emb, persistent_chroma,
+                "code__e2e", new_emb, isolated_vector_client,
             )
             assert result is not None
 
             # Verify centroid collection uses cosine space
-            centroid_coll = persistent_chroma.get_collection(
+            centroid_coll = isolated_vector_client.get_collection(
                 "taxonomy__centroids", embedding_function=None,
             )
             meta = centroid_coll.metadata
             assert meta.get("hnsw:space") == "cosine"
 
     def test_rebuild_persistent(
-        self, tmp_path: Path, ef: LocalEmbeddingFunction, persistent_chroma: chromadb.ClientAPI,
+        self, tmp_path: Path, ef: LocalEmbeddingFunction, isolated_vector_client: Any,
     ) -> None:
         """Rebuild with merge strategy works on persistent storage."""
         doc_ids, texts = _build_corpus()
@@ -425,14 +433,14 @@ class TestFullPipelinePersistent:
 
         with T2Database(tmp_path / "e2e.db") as db:
             db.taxonomy.discover_topics(
-                "code__e2e", doc_ids, embeddings, texts, persistent_chroma,
+                "code__e2e", doc_ids, embeddings, texts, isolated_vector_client,
             )
             db.taxonomy.rename_topic(
                 db.taxonomy.get_topics()[0]["id"], "persistent-label",
             )
 
             count = db.taxonomy.rebuild_taxonomy(
-                "code__e2e", doc_ids, embeddings, texts, persistent_chroma,
+                "code__e2e", doc_ids, embeddings, texts, isolated_vector_client,
             )
             assert count >= 2
 
@@ -444,7 +452,7 @@ class TestCentroidSpaceConsistency:
     """Verify centroid collection uses cosine space across all operations."""
 
     def test_discover_creates_cosine_centroids(
-        self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: chromadb.ClientAPI,
+        self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: Any,
     ) -> None:
         doc_ids, texts = _build_corpus()
         embeddings = np.array(ef(texts), dtype=np.float32)
@@ -460,7 +468,7 @@ class TestCentroidSpaceConsistency:
         assert coll.metadata.get("hnsw:space") == "cosine"
 
     def test_split_creates_cosine_child_centroids(
-        self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: chromadb.ClientAPI,
+        self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: Any,
     ) -> None:
         doc_ids, texts = _build_corpus()
         coll = ephemeral_chroma.get_or_create_collection(
@@ -495,7 +503,7 @@ class TestCrossCollectionIsolation:
     """Topics from different collections must not leak into each other."""
 
     def test_assign_single_isolated(
-        self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: chromadb.ClientAPI,
+        self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: Any,
     ) -> None:
         """assign_single for collection B returns None when only A has centroids."""
         doc_ids, texts = _build_corpus()
@@ -514,7 +522,7 @@ class TestCrossCollectionIsolation:
             assert result is None
 
     def test_discover_separate_collections(
-        self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: chromadb.ClientAPI,
+        self, tmp_path: Path, ef: LocalEmbeddingFunction, ephemeral_chroma: Any,
     ) -> None:
         """Two collections get independent topic sets."""
         doc_ids, texts = _build_corpus()

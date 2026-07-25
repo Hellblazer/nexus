@@ -264,13 +264,25 @@ def _default_chash_coverage_fn(col: str) -> float | None:
     """
     from nexus.config import default_db_path  # noqa: PLC0415 — function-local import avoids config/db import cost at module load
     from nexus.db import make_t3  # noqa: PLC0415 — function-local import defers heavy db/T3 init until called
-    from nexus.db.t2.chash_index import ChashIndex  # noqa: PLC0415 — function-local import defers T2 chash-index init until called
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — function-local import defers config/db import cost at module load
 
-    db_path = default_db_path()
-    if not db_path.exists():
-        return None
-
-    idx = ChashIndex(db_path)
+    # RDR-152 nexus-gmiaf.16 seam, applied here at RDR-155 P4b P3: this call
+    # site opened the SQLite ChashIndex unconditionally while collection_audit.
+    # py's identical coverage computation already routed through
+    # HttpChashIndex in service mode. The asymmetry mattered once RDR-187
+    # DROPped nexus.chash_index: a service-mode install was reading coverage
+    # from a client-local SQLite file with no counterpart behind it, so the
+    # ratio it reported described nothing. Reads are the surviving half of the
+    # /v1/chash surface (writes are 410 Gone) and serve from the chunks tables.
+    if storage_backend_for("chash_index") == StorageBackend.SERVICE:
+        from nexus.db.t2.http_chash_index import HttpChashIndex  # noqa: PLC0415 — function-local import defers the HTTP store import until called
+        idx: Any = HttpChashIndex()
+    else:
+        from nexus.db.t2.chash_index import ChashIndex  # noqa: PLC0415 — function-local import defers T2 chash-index init until called
+        db_path = default_db_path()
+        if not db_path.exists():
+            return None
+        idx = ChashIndex(db_path)
     try:
         chash_count = idx.count_for_collection(col)
     finally:

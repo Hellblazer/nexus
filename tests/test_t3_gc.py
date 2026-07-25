@@ -25,7 +25,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import pytest
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 from click.testing import CliRunner
 
 from nexus.catalog.catalog import Catalog
@@ -565,7 +565,7 @@ class TestGetEmbeddingsRequestOrder:
 
     def test_rows_follow_request_order_not_insertion_order(self):
         import numpy as np
-        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+        from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
         from nexus.db.t3 import T3Database
 
@@ -588,7 +588,7 @@ class TestGetEmbeddingsRequestOrder:
         assert np.allclose(result[1], np.array(by_id["id-b"], dtype=np.float32))
 
     def test_missing_ids_dropped(self):
-        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+        from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
         from nexus.db.t3 import T3Database
 

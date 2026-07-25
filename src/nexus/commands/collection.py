@@ -835,20 +835,20 @@ _DOCUMENTLESS_COLLECTIONS: frozenset[str] = frozenset({"taxonomy__centroids"})
 def _backfill_chunk_text_hash(
     col,
     on_progress: Callable[[int, int, int], None] | None = None,
-    *,
-    chash_index: "ChashIndex | None" = None,
 ) -> tuple[int, int, int]:
     """Add chunk_text_hash to chunks that are missing it. Returns (updated, skipped, total).
 
     Args:
         col: ChromaDB collection.
         on_progress: Optional callback(updated, skipped, total) called after each batch.
-        chash_index: Optional T2 store (RDR-086 Phase 1.3). When provided, every
-            chunk that has, or gains, a chunk_text_hash is registered as a
-            ``(chash, physical_collection)`` row. Reconciles gaps left by
-            Phase 1.2 dual-write failures and pre-Phase-1 collections. Pass
-            ``None`` (default) to preserve the T3-only behaviour that legacy
-            callers in ``commands/catalog.py`` still rely on.
+
+    RDR-155 P4b P3 / RDR-187: the ``chash_index`` kwarg and its T2 dual-write
+    are GONE. RDR-187 dropped ``nexus.chash_index`` (the chunks tables ARE the
+    chash-keyed store) and 410'd the /v1/chash writes, so registering
+    ``(chash, physical_collection)`` rows could not land in either mode --
+    service writes 410, local mode wrote a SQLite file nothing reads. What
+    survives is the half that was always independently meaningful: backfilling
+    ``chunk_text_hash`` into the T3 chunks themselves (RDR-180 widths).
 
     Implementation (nexus-o9an): two-pass walk, mirrors
     ``reidentify_collection``. Pass 1 paginates ``col.get(include=[])``
@@ -873,7 +873,6 @@ def _backfill_chunk_text_hash(
     if getattr(col, "name", "") in _DOCUMENTLESS_COLLECTIONS:
         return (0, 0, 0)
 
-    from nexus.db.t2.chash_index import dual_write_chash_index  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.db.t3 import _normalize_for_write  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     # Pass 1: collect every chunk id. Lightweight payload (no metadata,
@@ -922,19 +921,11 @@ def _backfill_chunk_text_hash(
         upsert_embs: list = []
         upsert_metas: list[dict] = []
         # Parallel lists for the T2 reconciliation write: ids + metas for
-        # every row whose metadata ends this batch with a chunk_text_hash,
-        # whether newly computed or previously present.
-        t2_ids: list[str] = []
-        t2_metas: list[dict] = []
-
         for chunk_id, doc, emb, meta in zip(
             page_ids, page_docs, page_embs, page_metas
         ):
             if meta and meta.get("chunk_text_hash"):
                 skipped += 1
-                # Reconciliation path: T3 already has the hash but T2 may not.
-                t2_ids.append(chunk_id)
-                t2_metas.append(dict(meta))
                 continue
             if doc is None:
                 # nexus-p03z: Cloud T3 occasionally returns rows whose
@@ -960,8 +951,6 @@ def _backfill_chunk_text_hash(
             upsert_docs.append(doc)
             upsert_embs.append(emb)
             upsert_metas.append(normalized)
-            t2_ids.append(chunk_id)
-            t2_metas.append(normalized)
 
         if upsert_ids:
             try:
@@ -986,9 +975,6 @@ def _backfill_chunk_text_hash(
                     )
                 else:
                     raise
-        if chash_index is not None and t2_ids:
-            # Best-effort: dual_write_chash_index swallows per-row failures.
-            dual_write_chash_index(chash_index, coll_name, t2_ids, t2_metas)
         if on_progress:
             on_progress(updated, skipped, total)
 
@@ -1025,62 +1011,56 @@ def backfill_hash_cmd(name: str | None, all_collections: bool) -> None:
     else:
         targets = [name]
 
-    # RDR-086 Phase 1.3: open a single long-lived ChashIndex connection for
-    # the whole backfill run so each collection reuses it instead of opening
-    # a fresh sqlite3 connection per chunk batch.
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-    from nexus.db.t2.chash_index import ChashIndex  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    # RDR-155 P4b P3: the long-lived ChashIndex connection this used to open
+    # for the whole run is gone with the T2 dual-write (see
+    # _backfill_chunk_text_hash). The backfill is now purely a T3 operation.
     from tqdm import tqdm  # noqa: PLC0415 — heavy/optional dep deferred
 
-    chash_index = ChashIndex(default_db_path())
-    try:
-        grand_updated = 0
-        for i, col_name in enumerate(sorted(targets), 1):
-            try:
-                col = db.get_collection(col_name)
-            except Exception as exc:  # noqa: BLE001 — per-collection resolution failure surfaced via click.echo, loop continues
-                click.echo(f"  [{i}/{len(targets)}] {col_name}: {type(exc).__name__}, skipping", err=True)
-                continue
+    grand_updated = 0
+    for i, col_name in enumerate(sorted(targets), 1):
+        try:
+            col = db.get_collection(col_name)
+        except Exception as exc:  # noqa: BLE001 — per-collection resolution failure surfaced via click.echo, loop continues
+            click.echo(f"  [{i}/{len(targets)}] {col_name}: {type(exc).__name__}, skipping", err=True)
+            continue
 
-            # Query collection count so tqdm has a known total. On quota
-            # failure, fall back to an indeterminate bar.
-            try:
-                col_total = col.count()
-            except Exception:  # noqa: BLE001 — best-effort count() for progress bar; indeterminate bar on failure
-                col_total = 0
+        # Query collection count so tqdm has a known total. On quota
+        # failure, fall back to an indeterminate bar.
+        try:
+            col_total = col.count()
+        except Exception:  # noqa: BLE001 — best-effort count() for progress bar; indeterminate bar on failure
+            col_total = 0
 
-            # disable=None lets tqdm auto-detect TTY — bar shows in an
-            # interactive terminal, silently no-ops in CI logs. The
-            # per-collection click.echo summary below is always emitted.
-            bar = tqdm(
-                total=col_total or None,
-                disable=None,
-                desc=f"[{i}/{len(targets)}] {col_name}",
-                unit="chunk",
-                leave=False,
+        # disable=None lets tqdm auto-detect TTY — bar shows in an
+        # interactive terminal, silently no-ops in CI logs. The
+        # per-collection click.echo summary below is always emitted.
+        bar = tqdm(
+            total=col_total or None,
+            disable=None,
+            desc=f"[{i}/{len(targets)}] {col_name}",
+            unit="chunk",
+            leave=False,
+        )
+
+        def _progress(updated: int, skipped: int, total: int) -> None:
+            # total = cumulative scanned so far; update bar position.
+            bar.n = total
+            bar.refresh()
+
+        try:
+            updated, skipped, total_count = _backfill_chunk_text_hash(
+                col, on_progress=_progress,
             )
+        finally:
+            bar.close()
 
-            def _progress(updated: int, skipped: int, total: int) -> None:
-                # total = cumulative scanned so far; update bar position.
-                bar.n = total
-                bar.refresh()
+        grand_updated += updated
+        if updated:
+            click.echo(f"  [{i}/{len(targets)}] {col_name}: {updated} updated, {skipped} already had hash ({total_count} total)")
+        else:
+            click.echo(f"  [{i}/{len(targets)}] {col_name}: all {total_count} chunks already have hash")
 
-            try:
-                updated, skipped, total_count = _backfill_chunk_text_hash(
-                    col, on_progress=_progress, chash_index=chash_index,
-                )
-            finally:
-                bar.close()
-
-            grand_updated += updated
-            if updated:
-                click.echo(f"  [{i}/{len(targets)}] {col_name}: {updated} updated, {skipped} already had hash ({total_count} total)")
-            else:
-                click.echo(f"  [{i}/{len(targets)}] {col_name}: all {total_count} chunks already have hash")
-
-        click.echo(f"Done: {grand_updated} chunks updated across {len(targets)} collection(s)")
-    finally:
-        chash_index.close()
+    click.echo(f"Done: {grand_updated} chunks updated across {len(targets)} collection(s)")
 
 
 _REEMBED_SUPPORTED_MODELS = ("voyage-3", "voyage-code-3")

@@ -64,18 +64,25 @@ def test_service_backed_cache_round_trips_a_plan() -> None:
     assert hits[0][0] == 1
 
 
-def test_chroma_shaped_client_still_used_directly() -> None:
-    """Control: a chroma-shaped T1 client (local-mode T1 chroma) is handed
-    through unchanged — the Ephemeral fallback is service-path only."""
+def test_local_shaped_client_still_used_directly() -> None:
+    """Control: a NON-service T1 client is handed through unchanged — the
+    in-process fallback is service-path only.
+
+    P4b P3: the client used to be a chromadb.EphemeralClient (the local-mode
+    T1 substrate). That substrate is gone, but the behaviour under test is
+    substrate-neutral — a client that arrives already built must be passed
+    through, not replaced — so the control keeps its meaning with the
+    in-process store standing in.
+    """
     from nexus.mcp.plan_cache_registry import PlanCacheRegistry
 
-    import chromadb
+    from tests.conftest import make_vector_test_client
 
-    class _ChromaT1:
+    class _LocalT1:
         session_id = "local-session"
-        _client = chromadb.EphemeralClient()
+        _client = make_vector_test_client()
 
-    sentinel = _ChromaT1()
+    sentinel = _LocalT1()
     registry = PlanCacheRegistry()
     with patch("nexus.mcp_infra.get_t1", return_value=(sentinel, None)):
         cache = registry.get()

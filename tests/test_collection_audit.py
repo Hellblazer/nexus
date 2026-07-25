@@ -319,7 +319,7 @@ class TestLiveDistanceProbe:
     def _ephemeral_collection_with_embeddings(self, name: str):
         """Seed a Chroma EphemeralClient collection with N deterministic
         embeddings so ``col.query`` returns repeatable distances."""
-        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+        from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
         client = _clean_ephemeral_client()
         ef = DefaultEmbeddingFunction()
@@ -373,7 +373,7 @@ class TestLiveDistanceProbe:
 
     def test_live_histogram_empty_when_collection_empty(self) -> None:
         from nexus.collection_audit import compute_live_distance_histogram
-        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+        from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
         client = _clean_ephemeral_client()
         ef = DefaultEmbeddingFunction()
@@ -595,7 +595,7 @@ class TestChashCoverageSection:
         audit catches and returns total_chunks=None.
         ``get_or_create_collection`` MUST NOT be called.
         """
-        from chromadb.errors import NotFoundError as _ChromaNotFoundError
+        from nexus.errors import CollectionNotFoundError as _ChromaNotFoundError
 
         from nexus.collection_audit import compute_chash_coverage
 
@@ -697,7 +697,7 @@ class TestCollectionAuditCli:
         """nexus-fx2d — ``--live`` promotes source="empty" → source="live"
         by probing ChromaDB for chunks that have never been searched."""
         import json
-        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+        from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
         from unittest.mock import patch
 
         from nexus.cli import main

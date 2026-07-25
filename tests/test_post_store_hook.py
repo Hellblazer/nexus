@@ -12,12 +12,12 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-import chromadb
 import pytest
 
 from nexus.db.t2 import T2Database
 from nexus.hook_registry import HookRegistry
 from tests.conftest import make_vector_test_client
+from typing import Any
 
 #: hook_failures has record/trim/import endpoints over HTTP but NO read
 #: surface — the persisted-row assertions below can only be made via a raw
@@ -33,7 +33,7 @@ _RAW_HOOK_FAILURES_READ = pytest.mark.skipif(
 
 
 @pytest.fixture()
-def chroma_client() -> chromadb.ClientAPI:
+def chroma_client() -> Any:
     return make_vector_test_client()
 
 
@@ -41,7 +41,7 @@ def chroma_client() -> chromadb.ClientAPI:
 
 
 def test_fire_single_calls_registered(
-    tmp_path: Path, chroma_client: chromadb.ClientAPI,
+    tmp_path: Path, chroma_client: Any,
 ) -> None:
     """HookRegistry.fire_single invokes all registered callables."""
     registry = HookRegistry()

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, call, patch
 
-import chromadb.errors
 import httpx
 import pytest
 
@@ -99,7 +98,9 @@ def t3_mock():
     # RDR-155 P4a.2 (nexus-1k8s1): the CloudClient construction is retired —
     # inject the mock client directly (the retry machinery under test is
     # downstream of construction and unchanged).
-    with patch("nexus.db.t3.chromadb"):
+    # P4b P3: nexus.db.t3 no longer imports chromadb, so there is no module to
+    # patch; the Voyage EF is patched instead so construction needs no key.
+    with patch("nexus.db.voyage_ef.VoyageEmbeddingFunction"):
         mock_client = MagicMock()
         from nexus.db.t3 import T3Database
         yield T3Database(tenant="t", database="d", api_key="k", _client=mock_client), mock_client
@@ -176,74 +177,26 @@ def test_chroma_error_false_for_voyage_error() -> None:
     assert _is_retryable_vector_error(_ve.APIConnectionError("down")) is False
 
 
-# ── nexus-jgjw: chromadb hardcodes httpx timeout=None — patch on construction ─
+# ── Transport-stall retryability (was nexus-jgjw's end-to-end leg) ──────────
+#
+# RDR-155 P4b P3: the surrounding TestChromadbTimeoutPatch class tested
+# T3Database's override of chromadb's hardcoded ``httpx.Client(timeout=None)``
+# (chromadb/api/fastapi.py:86,91). That override — and the client shape it
+# reached into (``_server._session``) — were deleted with the chroma client
+# legs; T3Database can no longer be handed such a client. The two tests that
+# asserted the override itself died with it.
+#
+# This leg survives because it never depended on chroma: a stalled transport
+# surfacing as ``httpx.ReadTimeout`` must still be classified retryable and
+# must still be retried by ``_vector_with_retry``. That is a live contract for
+# the HTTP vector client today.
 
-class TestChromadbTimeoutPatch:
-    """Regression guard for nexus-jgjw.
 
-    chromadb >=1.5 constructs its internal ``httpx.Client`` with
-    ``timeout=None`` (chromadb/api/fastapi.py:86,91). That means a
-    Chroma cloud op blocks indefinitely on any read where the server
-    has closed the connection — the failure mode observed during the
-    2026-05-03 orphan recovery (10+ min CPU=0% process state, one TCP
-    socket in CLOSE_WAIT, the other ESTABLISHED, no recovery without
-    SIGTERM).
-
-    T3Database overrides the timeout post-construction. These tests
-    assert the override is in place and that a slow chroma op now
-    surfaces as ``httpx.ReadTimeout`` (which ``_is_retryable_chroma_
-    error`` already classifies as retryable, so the existing retry
-    helper just works).
-    """
-
-    def test_cloud_client_timeout_is_finite(self) -> None:
-        """T3Database overrides an injected HTTP-shaped client's httpx
-        timeout to something finite, not chromadb's hardcoded None.
-        (RDR-155 P4a.2: the client is injected — construction retired —
-        but the ETL wrapper still relies on this override.)"""
-        from nexus.db.t3 import T3Database
-        from unittest.mock import MagicMock
-        # Build a real CloudClient-shaped mock with the same _server._session
-        # path the patch reaches into. Anything not matching that shape gets
-        # left alone (the defensive hasattr in T3Database).
-        fake_session = MagicMock()
-        fake_session.timeout = httpx.Timeout(timeout=None)  # the bug condition
-        fake_server = MagicMock()
-        fake_server._session = fake_session
-        fake_client = MagicMock()
-        fake_client._server = fake_server
-        T3Database(tenant="t", database="d", api_key="k", _client=fake_client)
-        # Post-construction: timeout must NOT be None (the bug condition).
-        # Specific values are policy; this test only asserts "not the bug."
-        assert fake_session.timeout is not None
-        assert fake_session.timeout != httpx.Timeout(timeout=None), (
-            "T3Database failed to override chromadb's hardcoded timeout=None "
-            "(nexus-jgjw): a slow chroma op will hang indefinitely."
-        )
-
-    def test_local_persistent_client_unaffected(self) -> None:
-        """The override is conditional — local PersistentClient has no
-        ``_server._session`` attribute and must not be touched."""
-        from nexus.db.t3 import T3Database
-        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
-        # Real EphemeralClient — same code path as PersistentClient w/r/t
-        # not having _server._session, but no disk I/O.
-        ephemeral = chromadb.EphemeralClient()
-        # Should not raise even though ephemeral has no _server attribute.
-        db = T3Database(_client=ephemeral, _ef_override=DefaultEmbeddingFunction())
-        assert db._client is ephemeral
-
-    def test_slow_chroma_op_now_raises_readtimeout(self) -> None:
-        """End-to-end: a chroma call that the server stalls on now
-        raises ``httpx.ReadTimeout`` (after the override fires), which
-        ``_is_retryable_vector_error`` recognizes as retryable. Pre-fix,
-        this would have hung indefinitely."""
-        # ReadTimeout is a httpx.TransportError, classified retryable
-        # by _is_retryable_vector_error. Wired into _vector_with_retry.
-        readtimeout = httpx.ReadTimeout("simulated chroma stall after override")
-        assert _is_retryable_vector_error(readtimeout) is True
-        from unittest.mock import MagicMock
-        fn = MagicMock(side_effect=[readtimeout, readtimeout, "ok"])
-        with patch("nexus.retry.time"):
-            assert _vector_with_retry(fn, max_attempts=3) == "ok"
-        assert fn.call_count == 3
+def test_transport_readtimeout_is_retryable_and_retried() -> None:
+    readtimeout = httpx.ReadTimeout("simulated transport stall")
+    assert _is_retryable_vector_error(readtimeout) is True
+    from unittest.mock import MagicMock
+    fn = MagicMock(side_effect=[readtimeout, readtimeout, "ok"])
+    with patch("nexus.retry.time"):
+        assert _vector_with_retry(fn, max_attempts=3) == "ok"
+    assert fn.call_count == 3

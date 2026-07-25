@@ -33,7 +33,7 @@ def test_chunk_returns_textchunk_instances():
 
 def test_pdf_chunker_byte_cap_enforced() -> None:
     """Chunks exceeding SAFE_CHUNK_BYTES must be truncated in the post-pass."""
-    from nexus.db.chroma_quotas import SAFE_CHUNK_BYTES
+    from nexus.db.limits import SAFE_CHUNK_BYTES
     # chunk_chars > SAFE_CHUNK_BYTES forces chunks that exceed the byte cap.
     big_text = "a" * 20_000  # 20 KB ASCII
     chunker = PDFChunker(chunk_chars=15_000)  # 15 KB per chunk > 12 288

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from chromadb.errors import InvalidArgumentError
+InvalidArgumentError = ValueError  # RDR-155 P4b P3: the substrate-neutral bad-argument type (was chromadb.errors.InvalidArgumentError)
 
 from nexus.db.t3 import T3Database
 

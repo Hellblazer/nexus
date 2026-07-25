@@ -14,7 +14,7 @@ import math
 from pathlib import Path
 
 import pytest
-from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as ONNXMiniLM_L6_V2
 from tests.conftest import make_vector_test_client
 
 # ── NDCG math ────────────────────────────────────────────────────────────────

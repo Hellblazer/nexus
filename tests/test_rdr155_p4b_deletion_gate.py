@@ -47,6 +47,13 @@ GATE_FILE = Path(__file__).resolve()
 # ---------------------------------------------------------------------------
 
 DELETED_SRC = [
+    # P3 (2026-07-25): the quota module. Chroma-NAMED rather than
+    # chroma-dependent (zero imports beyond stdlib), so it outlived the
+    # dependency drop by one commit. The load-bearing constants
+    # (SAFE_CHUNK_BYTES, MAX_QUERY_RESULTS) were rehomed to db/limits.py at
+    # rn3wo.2; QuotaValidator died with no replacement — T3Database.put still
+    # enforces MAX_DOCUMENT_BYTES via limits.QUOTAS and the chunkers cap upstream.
+    "db/chroma_quotas.py",
     # migration/ Chroma legs ([21094])
     "migration/chroma_read.py",
     "migration/collision_audit.py",
@@ -129,6 +136,12 @@ DELETED_MODULE_IMPORTS = [
 # ---------------------------------------------------------------------------
 
 DELETED_TESTS = [
+    # P3: suites whose SUBJECT was the deleted QuotaValidator, plus the
+    # rehome-window audit that its own comment instructed be deleted once P3
+    # landed ("if this flips, either P3 landed (delete this suite with it)").
+    "test_chroma_quotas.py",
+    "test_t3_quota_enforcement.py",
+    "test_rdr155_p4b_quotas_rehome.py",
     "migration/test_chash_disposition.py",
     "migration/test_chroma_read.py",
     "migration/test_collision_audit.py",

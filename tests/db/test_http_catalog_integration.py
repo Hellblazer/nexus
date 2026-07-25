@@ -1555,7 +1555,7 @@ class TestServiceModeIndexMVV:
         import re  # noqa: PLC0415
         from unittest.mock import MagicMock, patch  # noqa: PLC0415
 
-        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction  # noqa: PLC0415
+        from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction  # noqa: PLC0415
         from nexus.db.t3 import T3Database  # noqa: PLC0415
         from nexus.indexer import index_repository  # noqa: PLC0415
         from nexus.registry import RepoRegistry  # noqa: PLC0415

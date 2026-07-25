@@ -21,12 +21,11 @@ migration:
 Tests pin the decision tree per the bead's scope (`nexus-yqnr.6`).
 """
 from __future__ import annotations
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction
 
 from pathlib import Path
 from unittest.mock import patch
 
-import chromadb
-import chromadb.utils.embedding_functions
 import pytest
 
 from nexus.catalog.catalog import Catalog
@@ -58,7 +57,7 @@ def t3():
     pattern used in ``test_t3_strict_collection_naming.py``.
     """
     client = make_vector_test_client()
-    ef = chromadb.utils.embedding_functions.DefaultEmbeddingFunction()
+    ef = MiniLMDirectEmbeddingFunction()
     db = T3Database(_client=client, _ef_override=ef)
     for raw in list(db._client.list_collections()):
         name = raw if isinstance(raw, str) else getattr(raw, "name", str(raw))

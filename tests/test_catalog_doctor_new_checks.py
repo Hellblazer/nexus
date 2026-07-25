@@ -18,7 +18,7 @@ import json
 from pathlib import Path
 
 import pytest
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 from click.testing import CliRunner
 
 from nexus.commands.catalog_cmds.doctor import (
@@ -176,7 +176,7 @@ class TestChunkSizeDistribution:
         """A chunk over MAX_DOCUMENT_BYTES is a hard FAIL — Voyage
         rejects these, so they must surface as a release blocker.
         """
-        from nexus.db.chroma_quotas import QUOTAS
+        from nexus.db.limits import QUOTAS
         big = "x" * (QUOTAS.MAX_DOCUMENT_BYTES + 100)
         _seed(chroma_client, "code__big", [
             {"id": "c1", "content": "tiny"},

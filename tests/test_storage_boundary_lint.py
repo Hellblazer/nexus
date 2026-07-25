@@ -177,23 +177,30 @@ def test_aliased_sqlite_import_caught(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("client_class", [
-    "PersistentClient",
-    "CloudClient",
-    "EphemeralClient",
-])
-def test_all_chromadb_classes_in_banlist(client_class, tmp_path):
-    """The lint covers all three chromadb client classes."""
-    target = tmp_path / f"chromabad_{client_class.lower()}.py"
-    target.write_text(
-        "import chromadb\n"
-        "def bad():\n"
-        f"    return chromadb.{client_class}()\n"
+def test_chromadb_arms_retired_from_banlist():
+    """RDR-155 P4b P3: the three chromadb client arms are GONE from BANLIST.
+
+    Was test_all_chromadb_classes_in_banlist, which asserted the opposite —
+    correct while chromadb was a dependency. It is not one any more, so a call
+    to chromadb.PersistentClient() cannot resolve at all and banning it was
+    redundant with reality.
+
+    This is NOT a weakened guarantee: the resurrection tripwire moved somewhere
+    stronger. tests/test_rdr155_p4b_deletion_gate.py bans any chromadb IMPORT
+    anywhere in the package, which catches a re-introduction that these three
+    call-shape bans would have missed (e.g. `from chromadb import Client`).
+    """
+    from nexus.storage_boundary_lint import BANLIST
+
+    chroma_entries = [(m, a) for m, a in BANLIST if m == "chromadb"]
+    assert chroma_entries == [], (
+        f"chromadb arms are back in BANLIST: {chroma_entries}. The dependency "
+        "was removed at P4b P3; if it has returned, that is the finding."
     )
-    result = _check(extra_files=[target])
-    matched = [v for v in result.violations if v.file == str(target)]
-    assert len(matched) == 1, f"missed {client_class}"
-    assert client_class in matched[0].symbol
+    # Non-vacuity: the surviving arms must still be there, or this file is
+    # asserting the absence of everything.
+    assert ("sqlite3", "connect") in BANLIST
+    assert ("voyageai", "Client") in BANLIST
 
 
 # ---------------------------------------------------------------------------

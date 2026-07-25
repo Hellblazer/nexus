@@ -6,7 +6,7 @@ Uses EphemeralClient + DefaultEmbeddingFunction — no API keys needed.
 from __future__ import annotations
 
 import pytest
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
 from nexus.db.t3 import T3Database, VerifyResult, verify_collection_deep
 from tests.conftest import make_vector_test_client

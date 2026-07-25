@@ -20,7 +20,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 from click.testing import CliRunner
 
 from nexus.catalog.catalog import Catalog
@@ -104,7 +104,7 @@ class TestK10BareExceptFix:
     def test_quota_error_propagates(self, catalog, t3_db):
         """A ChromaDB quota/auth error during get_collection must propagate,
         not be silently swallowed as 'collection not found'."""
-        from chromadb.errors import InvalidArgumentError
+        InvalidArgumentError = ValueError  # RDR-155 P4b P3: the substrate-neutral bad-argument type (was chromadb.errors.InvalidArgumentError)
         from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
 
         coll = _unique_coll()
@@ -128,7 +128,7 @@ class TestK10BareExceptFix:
 
     def test_not_found_still_treated_as_missing(self, catalog, t3_db):
         """NotFoundError during get_collection is still treated as 'col is None'."""
-        from chromadb.errors import NotFoundError
+        from nexus.errors import CollectionNotFoundError as NotFoundError
         from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
 
         coll = _unique_coll()
@@ -161,7 +161,7 @@ class TestS2DocsSkippedNoT3:
 
     def test_missing_collection_increments_docs_skipped_no_t3(self, catalog, t3_db):
         """If the T3 collection doesn't exist, docs_skipped_no_t3 is incremented."""
-        from chromadb.errors import NotFoundError
+        from nexus.errors import CollectionNotFoundError as NotFoundError
         from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
 
         coll = _unique_coll()
@@ -185,7 +185,7 @@ class TestS2DocsSkippedNoT3:
 
     def test_docs_skipped_no_t3_surfaced_in_cli_output(self, catalog, t3_db, runner):
         """CLI output includes docs_skipped_no_t3 when collection is absent."""
-        from chromadb.errors import NotFoundError
+        from nexus.errors import CollectionNotFoundError as NotFoundError
 
         coll = _unique_coll()
         _insert_doc(catalog, "1.1.1", coll)

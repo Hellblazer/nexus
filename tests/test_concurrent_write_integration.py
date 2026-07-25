@@ -31,7 +31,7 @@ import time
 from datetime import UTC, datetime
 
 import pytest
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
 from nexus.db.t3 import T3Database
 from tests.conftest import make_vector_test_client

@@ -7,6 +7,7 @@ All tests use injected clients -- no API keys or network required.
 - T3: chromadb.EphemeralClient with DefaultEmbeddingFunction override
 """
 from __future__ import annotations
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction
 
 import json
 import os
@@ -17,7 +18,6 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import chromadb
 import pytest
 
 from nexus.db.t1 import T1Database
@@ -129,7 +129,7 @@ def _clear_ephemeral_collections(client) -> None:
 def t3():
     client = make_vector_test_client()
     _clear_ephemeral_collections(client)
-    ef = chromadb.utils.embedding_functions.DefaultEmbeddingFunction()
+    ef = MiniLMDirectEmbeddingFunction()
     db = T3Database(_client=client, _ef_override=ef)
     _inject_t3(db)
     yield db

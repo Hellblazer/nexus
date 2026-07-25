@@ -7,10 +7,10 @@ import os
 from pathlib import Path
 from typing import Any
 
-import chromadb
 import numpy as np
 import pytest
 
+from nexus.db.inmemory_vector_store import InMemoryVectorClient
 from nexus.db.storage_mode import has_raw_access
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
@@ -23,7 +23,7 @@ from tests.conftest import make_vector_test_client
 
 
 @pytest.fixture()
-def chroma_client() -> chromadb.ClientAPI:
+def chroma_client() -> Any:
     """Ephemeral ChromaDB client for taxonomy centroid tests."""
     return make_vector_test_client()
 
@@ -172,7 +172,7 @@ def test_get_topics_empty(db: T2Database) -> None:
 
 
 def test_discover_topics_creates_topics_and_centroids(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """discover_topics persists topics to T2 and upserts centroids to ChromaDB."""
     rng = np.random.default_rng(42)
@@ -230,7 +230,7 @@ def _seed_centroids(db: T2Database, chroma_client) -> list[str]:
 
 
 def test_compute_assignments_returns_json_serializable_dicts(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """The COMPUTE half returns plain dicts (no chroma objects) that survive
     JSON — i.e. they can cross the daemon RPC boundary, which is the whole
@@ -260,7 +260,7 @@ def test_compute_assignments_returns_json_serializable_dicts(
 
 
 def test_persist_assignments_writes_rows(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """The PERSIST half writes the computed dicts to topic_assignments."""
     _seed_centroids(db, chroma_client)
@@ -278,7 +278,7 @@ def test_persist_assignments_writes_rows(
 
 
 def test_assign_batch_still_composes_compute_and_persist(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """Back-compat: assign_batch == compute_assignments + persist_assignments,
     same return + same persisted rows (direct callers unchanged)."""
@@ -308,7 +308,7 @@ def test_assign_batch_still_composes_compute_and_persist(
 
 
 def test_compute_assignments_empty_when_no_centroids(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """No centroids for the collection → empty (the old no-op-returns-0 case)."""
     from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
@@ -419,7 +419,7 @@ def test_persist_discovered_topics_skips_existing(db: T2Database) -> None:
 
 
 def test_discover_topics_still_composes(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """Back-compat: discover_topics == compute + persist + centroid upsert.
     Same end state (topic rows in T2 AND centroids in chroma) so direct
@@ -605,7 +605,7 @@ def test_assign_topic_resyncs_topic_links_link_count(db: T2Database) -> None:
 
 
 def test_rebuild_taxonomy_clears_and_rediscovers(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """rebuild_taxonomy deletes old topics, then re-discovers fresh ones."""
     rng = np.random.default_rng(42)
@@ -644,7 +644,7 @@ def test_rebuild_taxonomy_clears_and_rediscovers(
 
 
 def test_rebuild_taxonomy_preserves_manual_assignment(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """RDR-151 Phase 3 regression: rebuild must carry a manually-assigned doc
     onto the rebuilt topic (Route 1 — old topic matched to new via _merge_labels).
@@ -672,7 +672,7 @@ def test_rebuild_taxonomy_preserves_manual_assignment(
 
 
 def test_compute_rebuild_plan_is_pure_and_serializable(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """The rebuild COMPUTE half returns a JSON-serializable plan (specs +
     manual-transfer decisions keyed to spec index) and touches no T2 write."""
@@ -745,7 +745,7 @@ def test_get_topic_docs_returns_assigned(db: T2Database) -> None:
 
 
 def test_discover_topics_all_noise_returns_zero(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """When HDBSCAN assigns all docs to noise (-1), return 0 and skip centroids."""
     rng = np.random.default_rng(42)
@@ -762,7 +762,7 @@ def test_discover_topics_all_noise_returns_zero(
 
 
 def test_assign_single_returns_nearest_topic(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """assign_single returns the nearest topic_id via centroid ANN lookup."""
     rng = np.random.default_rng(42)
@@ -794,7 +794,7 @@ def test_assign_single_returns_nearest_topic(
 
 
 def test_assign_single_no_centroids_returns_none(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """assign_single returns None when no centroids exist for the collection."""
     emb = np.random.default_rng(42).standard_normal(384).astype(np.float32)
@@ -805,7 +805,7 @@ def test_assign_single_no_centroids_returns_none(
 
 
 def test_assign_single_cross_collection_isolation(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """assign_single returns None for collection B when centroids only exist for A."""
     rng = np.random.default_rng(42)
@@ -829,7 +829,7 @@ def test_assign_single_cross_collection_isolation(
 
 
 def test_assign_single_cross_collection_finds_foreign_topic(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """assign_single with cross_collection=True returns topics from other collections."""
     rng = np.random.default_rng(42)
@@ -857,7 +857,7 @@ def test_assign_single_cross_collection_finds_foreign_topic(
 
 
 def test_assign_batch_cross_collection(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """assign_batch with cross_collection=True assigns from foreign centroids."""
     rng = np.random.default_rng(42)
@@ -892,7 +892,7 @@ def test_assign_batch_cross_collection(
 
 
 def test_assign_batch_assigns_multiple_docs(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """assign_batch assigns multiple new docs to nearest topics."""
     rng = np.random.default_rng(42)
@@ -929,7 +929,7 @@ def test_assign_batch_assigns_multiple_docs(
 
 
 def test_assign_batch_no_centroids_returns_zero(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """assign_batch returns 0 when no centroids exist."""
     embs = np.random.default_rng(42).standard_normal((3, 384)).astype(np.float32)
@@ -940,7 +940,7 @@ def test_assign_batch_no_centroids_returns_zero(
 
 
 def test_assign_single_dimension_mismatch(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """assign_single returns None with warning on embedding dimension mismatch."""
     rng = np.random.default_rng(42)
@@ -959,7 +959,7 @@ def test_assign_single_dimension_mismatch(
 
 
 def test_assign_batch_dimension_mismatch(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """assign_batch returns 0 on embedding dimension mismatch."""
     rng = np.random.default_rng(42)
@@ -980,7 +980,7 @@ def test_assign_batch_dimension_mismatch(
 
 
 def test_project_against_basic(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """project_against returns matched topics and novel chunks."""
     rng = np.random.default_rng(42)
@@ -1023,7 +1023,7 @@ def test_project_against_basic(
 
 
 def test_project_against_empty_target(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """project_against with no target centroids returns all chunks as novel."""
     rng = np.random.default_rng(42)
@@ -1045,7 +1045,7 @@ def test_project_against_empty_target(
 
 
 def test_project_against_dimension_mismatch(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """project_against raises ValueError on dimension mismatch."""
     rng = np.random.default_rng(42)
@@ -1072,7 +1072,7 @@ def test_project_against_dimension_mismatch(
 
 
 def test_assigned_by_column_populated(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> None:
     """discover_topics sets assigned_by='hdbscan' on topic_assignment rows."""
     rng = np.random.default_rng(42)
@@ -1673,7 +1673,7 @@ def test_cli_taxonomy_list_shows_collection_at_root(tmp_path: Path) -> None:
     reason="dies-roster: raw-path discover_for_collection over a raw chroma client + t2_index_write routing (service branch routes _discover_via_service against a service T3) dies at the RDR-155 P4b flip",
 )
 def test_discover_for_collection(
-    db: T2Database, chroma_client: chromadb.ClientAPI, monkeypatch,
+    db: T2Database, chroma_client: Any, monkeypatch,
 ) -> None:
     """discover_for_collection fetches texts, embeds with MiniLM, runs discover_topics.
 
@@ -1729,7 +1729,7 @@ def test_discover_for_collection(
     reason="dies-roster: raw-path discover_for_collection over a raw chroma client + t2_index_write routing (service branch routes _discover_via_service against a service T3) dies at the RDR-155 P4b flip",
 )
 def test_discover_for_collection_force(
-    db: T2Database, chroma_client: chromadb.ClientAPI, monkeypatch,
+    db: T2Database, chroma_client: Any, monkeypatch,
 ) -> None:
     """force=True clears existing topics before re-discovering fresh ones."""
     from nexus.commands.taxonomy_cmd import discover_for_collection
@@ -2256,11 +2256,11 @@ class TestDiscoverStoresTerms:
     """discover_topics stores c-TF-IDF terms in the terms column."""
 
     @pytest.fixture()
-    def chroma_client(self) -> chromadb.ClientAPI:
+    def chroma_client(self) -> Any:
         return make_vector_test_client()
 
     def test_terms_stored_as_json(
-        self, db: T2Database, chroma_client: chromadb.ClientAPI,
+        self, db: T2Database, chroma_client: Any,
     ) -> None:
         """discover_topics persists top c-TF-IDF terms as JSON."""
         import json
@@ -2527,11 +2527,11 @@ class TestSplitTopic:
     """split_topic creates child topics via KMeans sub-clustering."""
 
     @pytest.fixture()
-    def chroma(self) -> chromadb.ClientAPI:
+    def chroma(self) -> Any:
         return make_vector_test_client()
 
     def test_split_creates_children(
-        self, db: T2Database, chroma: chromadb.ClientAPI,
+        self, db: T2Database, chroma: Any,
     ) -> None:
         """Split a parent topic into k children via KMeans."""
         from nexus.db.local_ef import LocalEmbeddingFunction
@@ -2787,7 +2787,7 @@ class TestSplitTopic:
         assert result == 0
 
     def test_compute_split_returns_child_specs(
-        self, db: T2Database, chroma: chromadb.ClientAPI,
+        self, db: T2Database, chroma: Any,
     ) -> None:
         """compute_split returns serializable child specs (no T2 writes)."""
         import numpy as _np
@@ -2879,7 +2879,7 @@ class TestSplitTopic:
         reason="dies-roster: raw-SQLite split_cmd t2_index_write routing (service branch persists via the engine, not t2_index_write) dies at the RDR-155 P4b flip",
     )
     def test_split_cmd_routes_persist_via_t2_index_write(
-        self, db: T2Database, chroma: chromadb.ClientAPI, monkeypatch,
+        self, db: T2Database, chroma: Any, monkeypatch,
     ) -> None:
         """split_cmd (Phase C) must route the T2 persist through t2_index_write.
 
@@ -3206,7 +3206,7 @@ class TestManualOpsCLI:
         # __dict__ rather than the spec-restricted __getattr__. spec= the
         # child too (chromadb.api.ClientAPI) so a method that real Chroma
         # clients don't have can't hide behind a bare MagicMock.
-        mock_t3._client = MagicMock(spec=chromadb.api.ClientAPI)
+        mock_t3._client = MagicMock(spec=InMemoryVectorClient)
         mock_t3._client.get_collection.return_value = mock_coll
         mock_t3._client.get_or_create_collection.return_value = MagicMock()
 
@@ -3315,7 +3315,7 @@ class TestManualOpsCLI:
             "ids": [f"doc-{i}" for i in range(10)],
             "documents": [f"text {i}" for i in range(10)],
         }
-        mock_t3._client = MagicMock(spec=chromadb.api.ClientAPI)
+        mock_t3._client = MagicMock(spec=InMemoryVectorClient)
         mock_t3._client.get_collection.return_value = mock_coll
         mock_t3._client.get_or_create_collection.return_value = MagicMock()
         fake_persist = MagicMock(return_value=[201, 202, 203])
@@ -3383,7 +3383,7 @@ class TestManualOpsCLI:
             "ids": [f"doc-{i}" for i in range(5)],
             "documents": [f"text {i}" for i in range(5)],
         }
-        mock_t3._client = MagicMock(spec=chromadb.api.ClientAPI)
+        mock_t3._client = MagicMock(spec=InMemoryVectorClient)
         mock_t3._client.get_collection.return_value = mock_coll
         import numpy as _np
 
@@ -3525,11 +3525,11 @@ class TestManualPreservation:
     """Manual assignments preserved across re-discovery."""
 
     @pytest.fixture()
-    def chroma(self) -> chromadb.ClientAPI:
+    def chroma(self) -> Any:
         return make_vector_test_client()
 
     def test_manual_assignments_survive_rebuild(
-        self, db: T2Database, chroma: chromadb.ClientAPI,
+        self, db: T2Database, chroma: Any,
     ) -> None:
         """Rebuild with merge strategy preserves manual assignments."""
         from nexus.db.local_ef import LocalEmbeddingFunction
@@ -3579,11 +3579,11 @@ class TestRediscoveryCentroidLifecycle:
     """Centroid lifecycle: clear before re-upsert on --force."""
 
     @pytest.fixture()
-    def chroma(self) -> chromadb.ClientAPI:
+    def chroma(self) -> Any:
         return make_vector_test_client()
 
     def test_force_clears_old_centroids(
-        self, db: T2Database, chroma: chromadb.ClientAPI,
+        self, db: T2Database, chroma: Any,
     ) -> None:
         """rebuild_taxonomy clears old centroids before upserting new."""
         rng = np.random.default_rng(42)
@@ -4102,7 +4102,7 @@ class TestProjectCmd:
     """Tests for nx taxonomy project CLI command."""
 
     def test_project_cmd_output(
-        self, db: T2Database, chroma_client: chromadb.ClientAPI, tmp_path: Path,
+        self, db: T2Database, chroma_client: Any, tmp_path: Path,
     ) -> None:
         """project command shows matched topics and novel chunks."""
         from unittest.mock import MagicMock, patch
@@ -4152,7 +4152,7 @@ class TestProjectCmd:
         assert "matched topics" in result.output.lower() or "novel chunks" in result.output.lower()
 
     def test_project_cmd_persist(
-        self, db: T2Database, chroma_client: chromadb.ClientAPI, tmp_path: Path,
+        self, db: T2Database, chroma_client: Any, tmp_path: Path,
     ) -> None:
         """--persist writes assignments with assigned_by='projection'."""
         from unittest.mock import MagicMock, patch
@@ -4201,7 +4201,7 @@ class TestProjectCmd:
         assert "persisted" in result.output.lower()
 
     def test_project_single_source_default_matches_backfill_target_set(
-        self, db: T2Database, chroma_client: chromadb.ClientAPI, tmp_path: Path,
+        self, db: T2Database, chroma_client: Any, tmp_path: Path,
     ) -> None:
         """project <src> default targets every collection with topics minus src.
 
@@ -4265,7 +4265,7 @@ class TestProjectCmd:
 class TestListSiblingCollections:
     """Tests for list_sibling_collections (RDR-075 SC-8)."""
 
-    def test_finds_siblings_by_hash8(self, chroma_client: chromadb.ClientAPI) -> None:
+    def test_finds_siblings_by_hash8(self, chroma_client: Any) -> None:
         from nexus.registry import list_sibling_collections
 
         # Create collections with shared hash suffix
@@ -4280,7 +4280,7 @@ class TestListSiblingCollections:
         assert "code__myrepo-abc12345" not in siblings  # excludes self
         assert "code__other-def67890" not in siblings  # different hash
 
-    def test_excludes_taxonomy_collections(self, chroma_client: chromadb.ClientAPI) -> None:
+    def test_excludes_taxonomy_collections(self, chroma_client: Any) -> None:
         from nexus.registry import list_sibling_collections
 
         chroma_client.get_or_create_collection("code__repo-aaa11111")
@@ -4289,7 +4289,7 @@ class TestListSiblingCollections:
         siblings = list_sibling_collections("code__repo-aaa11111", chroma_client)
         assert not any(s.startswith("taxonomy__") for s in siblings)
 
-    def test_no_hash_suffix_returns_empty(self, chroma_client: chromadb.ClientAPI) -> None:
+    def test_no_hash_suffix_returns_empty(self, chroma_client: Any) -> None:
         from nexus.registry import list_sibling_collections
 
         siblings = list_sibling_collections("knowledge__art", chroma_client)
