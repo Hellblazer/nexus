@@ -108,10 +108,6 @@ T2_STORE_CONTRACT: dict[str, dict[str, list[str]]] = {
         'get_salient_sentences': ['doc_id'],
         'list_by_collection': ['collection', 'limit', 'offset'],
         'list_by_extractor_version': ['extractor_name', 'max_version'],
-        # nexus-70x7y: the promotion-log read moved behind the store interface
-        # (it used to reach into document_aspects.conn from aspect_promotion.py),
-        # so it is now part of the surface both substrates must implement.
-        'list_promotions': [],
         'rename_collection': ['old', 'new'],
         'set_salient_sentences': ['doc_id', 'sentences'],
         'set_salient_sentences_by_key': ['collection', 'source_path', 'sentences'],

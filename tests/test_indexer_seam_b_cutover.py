@@ -613,11 +613,7 @@ def test_lint_baseline_unchanged_after_voyageai_extension():
     # read-only T2Database open, mirrors `aspects gc`).
     # nexus-qgc4b: 34 -> 35 (`_taxonomy_incomplete` epsilon-allow'd read-only
     # T2Database open — no-change index gate topic-existence probe).
-    # 35 -> 34 (nexus-70x7y): the retired runtime promotion verb took the
-    # aspects-promote-field WRITE open with it; only the read-only --history
-    # open survives. Kept in lockstep with test_storage_boundary_lint's copy —
-    # same number, same commit (see the derive-don't-paste note above).
-    assert result.t2database_constructions == 34, (
+    assert result.t2database_constructions == 35, (
         f"t2database_constructions baseline changed: {result.t2database_constructions}"
     )
 

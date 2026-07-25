@@ -865,48 +865,6 @@ class DocumentAspects:
             ]
         return records
 
-    def list_promotions(self) -> list[dict]:
-        """Return the ``aspect_promotion_log`` history, oldest first.
-
-        The extras→column promotion verb is retired (nexus-70x7y); nothing
-        in Python creates or appends to this table any more. What remains
-        is the read path over rows written by promotions that ran while the
-        SQLite mechanic was live, so ``nx enrich aspects-promote-field
-        --history`` keeps answering on an existing install.
-
-        Returns ``[]`` when the table is absent — the normal state for a
-        handle opened without the migration registry. Deliberately does NOT
-        create the table on read (the retired mechanic's behaviour):
-        bootstrapping client-side SQLite tables is exactly what the NO-SQLITE
-        directive retires. The sanctioned creator is
-        ``migrations.migrate_aspect_promotion_log_table``.
-        """
-        with self._lock:
-            present = self.conn.execute(
-                "SELECT 1 FROM sqlite_master "
-                "WHERE type = 'table' AND name = 'aspect_promotion_log'"
-            ).fetchone()
-            if present is None:
-                return []
-            rows = self.conn.execute(
-                "SELECT field_name, sql_type, column_added, rows_backfilled, "
-                "       rows_pruned, pruned, promoted_at "
-                "FROM aspect_promotion_log "
-                "ORDER BY promoted_at ASC, id ASC"
-            ).fetchall()
-        return [
-            {
-                "field_name": r[0],
-                "sql_type": r[1],
-                "column_added": bool(r[2]),
-                "rows_backfilled": r[3],
-                "rows_pruned": r[4],
-                "pruned": bool(r[5]),
-                "promoted_at": r[6],
-            }
-            for r in rows
-        ]
-
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 

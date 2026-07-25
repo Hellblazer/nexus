@@ -1745,73 +1745,120 @@ def enrich_aspects_delete(
         )
 
 
-# ── extras → fixed-column promotion: history only (RDR-089 Phase E) ─────────
-#
-# The runtime promotion verb is RETIRED (Hal decision 2026-07-25, bead
-# nexus-70x7y): schema changes go through Liquibase in every mode, so there is
-# no runtime ALTER TABLE left to run. The command keeps its name so an operator
-# reaching for the old verb lands on the changeset recipe instead of a
-# "no such command", and so --history stays where it has always been.
+# ── extras → fixed-column promotion (RDR-089 Phase E) ───────────────────────
 
 
 @enrich.command(name="aspects-promote-field")
-@click.argument("field_name", required=False)
+@click.argument("field_name")
+@click.option(
+    "--type", "sql_type",
+    type=click.Choice(["TEXT", "INTEGER", "REAL"], case_sensitive=False),
+    default="TEXT",
+    show_default=True,
+    help="SQL type for the new column.",
+)
+@click.option(
+    "--prune",
+    is_flag=True,
+    help=(
+        "After backfilling, remove the key from extras. Only run "
+        "after every reader has been updated to consume the typed "
+        "column."
+    ),
+)
 @click.option(
     "--history",
     is_flag=True,
-    help="Print the promotion audit log and exit.",
+    help="Print the promotion audit log and exit (no promotion).",
 )
-def enrich_aspects_promote_field(field_name: str | None, history: bool) -> None:
-    """Show the extras->column promotion history.
+def enrich_aspects_promote_field(
+    field_name: str, sql_type: str, prune: bool, history: bool,
+) -> None:
+    """Promote ``extras['<FIELD_NAME>']`` to its own typed column.
 
-    Promoting a field is a Liquibase changeset, not a runtime command —
-    invoking this with a FIELD_NAME prints the changeset recipe and exits
-    non-zero. See ``src/nexus/aspect_promotion.py`` for the full template.
+    Three-phase mechanic (see ``src/nexus/aspect_promotion.py`` for
+    the full contract):
 
-    ``--history`` reads ``aspect_promotion_log`` on whichever
-    ``document_aspects`` backend is configured.
+      1. ALTER TABLE document_aspects ADD COLUMN <field_name> <type>
+         (idempotent)
+      2. Backfill the new column from ``extras[<field_name>]`` for
+         rows where the column is currently NULL and the extras
+         key is set
+      3. If ``--prune``: remove the key from ``extras`` so future
+         readers always go to the typed column
+
+    Phase 3 is opt-in. The default (no --prune) leaves ``extras``
+    untouched, supporting a dual-read cutover where readers are
+    updated incrementally.
+
+    Each invocation logs to T2 ``aspect_promotion_log``; the
+    promotion history is queryable via ``--history``.
     """
     from nexus.aspect_promotion import (  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
-        PROMOTION_RETIRED, list_promotions,
+        list_promotions, promote_extras_field,
     )
-    import httpx  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
-
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance; command-local import
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
-    if not history:
-        # A bare invocation with no field and no --history is a usage error;
-        # with a field it is the retired verb. Both end at the recipe.
-        click.echo(
-            PROMOTION_RETIRED.format(field=field_name or "<field>"), err=True,
-        )
-        raise click.exceptions.Exit(2)
+    if history:
+        try:
+            with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
+                entries = list_promotions(db)
+        except (NotImplementedError, RuntimeError) as exc:
+            # nexus-gmiaf.35: NotImplementedError from list_promotions guard;
+            # RuntimeError from T2Database init when NX_SERVICE_PORT is absent.
+            click.echo(f"Error: {exc}", err=True)
+            raise click.exceptions.Exit(2)
+        if not entries:
+            click.echo("No promotion history.")
+            return
+        for e in entries:
+            note = " (pruned)" if e["pruned"] else ""
+            click.echo(
+                f"  {e['promoted_at']}  {e['field_name']:32s} "
+                f"{e['sql_type']:8s} +{e['rows_backfilled']:>4d} rows"
+                f"{note}"
+            )
+        return
 
     try:
-        with T2Database(default_db_path()) as db:  # epsilon-allow: read-only T2 access, no WAL writer contention (RDR-128 P3)
-            entries = list_promotions(db)
+        with T2Database(default_db_path()) as db:  # epsilon-allow: promote_extras_field runs raw DDL plus aspect_promotion_log writes on the live connection; not a routable store op (RDR-128 P3 documented-irreducible)
+            try:
+                result = promote_extras_field(
+                    db, field_name,
+                    sql_type=sql_type.upper(),
+                    prune=prune,
+                )
+            except ValueError as exc:
+                click.echo(f"Error: {exc}", err=True)
+                raise click.exceptions.Exit(2)
+            except NotImplementedError as exc:
+                # nexus-gmiaf.35: promote_extras_field is not supported on the
+                # service backend (document_aspects=service). Fail with a clear
+                # message and non-zero exit rather than an unhandled traceback.
+                click.echo(f"Error: {exc}", err=True)
+                raise click.exceptions.Exit(2)
+    except click.exceptions.Exit:
+        raise
     except RuntimeError as exc:
-        # RuntimeError from T2Database init when the service backend is
-        # configured but NX_SERVICE_PORT/NX_SERVICE_TOKEN are missing.
+        # nexus-gmiaf.35: T2Database init fails with RuntimeError when the
+        # service backend is configured (NX_STORAGE_BACKEND_DOCUMENT_ASPECTS=service)
+        # but NX_SERVICE_PORT/NX_SERVICE_TOKEN are missing. Surface clearly.
         click.echo(f"Error: {exc}", err=True)
         raise click.exceptions.Exit(2)
-    except httpx.HTTPError as exc:
-        # Service backend with a RESOLVABLE endpoint that is down, wedged, or
-        # answering non-2xx. The SQLite path could only ever fail at open
-        # time; the HTTP read path adds a whole transport-error class that
-        # would otherwise reach the operator as a traceback.
-        click.echo(f"Error: promotion history unavailable: {exc}", err=True)
-        raise click.exceptions.Exit(2)
-    if not entries:
-        click.echo("No promotion history.")
-        return
-    for e in entries:
-        note = " (pruned)" if e["pruned"] else ""
+
+    if result.column_added:
         click.echo(
-            f"  {e['promoted_at']}  {e['field_name']:32s} "
-            f"{e['sql_type']:8s} +{e['rows_backfilled']:>4d} rows"
-            f"{note}"
+            f"Added column {result.field_name} {result.sql_type}."
         )
+    else:
+        click.echo(
+            f"Column {result.field_name} already exists "
+            f"(promotion is idempotent)."
+        )
+    click.echo(f"Backfilled {result.rows_backfilled} row(s).")
+    if result.pruned:
+        click.echo(f"Pruned {result.rows_pruned} extras key(s).")
 
 
 # ── nexus-bkvk: aspect read verbs (show / list) ─────────────────────────────

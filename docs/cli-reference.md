@@ -523,25 +523,23 @@ Day 2 Ops: remove a single aspect row. Use when re-indexing a document with a co
 ### nx enrich aspects-promote-field
 
 ```
-nx enrich aspects-promote-field [--history]
+nx enrich aspects-promote-field NAME [--type {TEXT|INTEGER|REAL}] [--prune] [--history]
 ```
 
-Show the `extras` -> fixed-column promotion history (RDR-089 Phase E).
+Promote a recurring `extras.<name>` key into a fixed column on `document_aspects` (RDR-089 Phase E). Three-phase mechanic:
 
-**The runtime promotion verb is retired** (nexus-70x7y, 2026-07-25). It ran an `ALTER TABLE` + backfill directly against SQLite; under the ALL-DDL-through-Liquibase directive there is no substrate where that is legal, so it was deleted rather than reimplemented service-side. Invoking the command with a field name prints the replacement recipe and exits 2.
+1. `ALTER TABLE document_aspects ADD COLUMN <name> <type>` (idempotent — re-running on an already-promoted field is a no-op).
+2. Backfill: copy the value of `extras.<name>` into the new column for every existing row via `json_extract`.
+3. (Optional) `--prune` removes the `extras.<name>` key after backfill so the source of truth is the new column.
 
-Promoting `extras.<name>` is now ONE Liquibase changeset that does all three phases together:
-
-1. `ALTER TABLE nexus.document_aspects ADD COLUMN <name> <TYPE>;`
-2. `UPDATE nexus.document_aspects SET <name> = extras->>'<name>' WHERE <name> IS NULL AND extras ? '<name>';`
-3. `INSERT` the promotion event into `nexus.aspect_promotion_log`, so `--history` still reports it.
-
-The optional extras prune (`SET extras = extras - '<name>'`) is a **separate, later** changeset — run it only once every reader consumes the typed column, preserving the dual-read cutover. Record it with `pruned = 1`. The full changeset template lives in `src/nexus/aspect_promotion.py`.
+The promotion is logged to `aspect_promotion_log` (registry-managed) for audit. `--history` lists past promotions instead of running a new one. Reserved names (the 12 RDR-locked column names) and unsafe identifiers (digit prefix, hyphen, quote, semicolon, SQL-injection patterns, empty) are rejected before any DDL runs.
 
 | Flag | Description |
 |------|-------------|
-| `--history` | List prior promotions from `aspect_promotion_log`, oldest first. Reads whichever `document_aspects` backend is configured: the local table on SQLite, `GET /v1/aspects/promotion/list` on the service backend |
-| `FIELD_NAME` (positional, optional) | Accepted for compatibility with the retired form. Supplying it prints the changeset recipe and exits 2 |
+| `NAME` (positional) | The `extras.<name>` key to promote into a fixed column. Validated against an alphanumeric+underscore identifier rule |
+| `--type {TEXT|INTEGER|REAL}` | SQL column type. Default `TEXT`. `BLOB`, `JSON`, and other types are rejected |
+| `--prune` | After backfill, remove the `extras.<name>` key from every row. Use when the new column should replace the extras key as the source of truth. **Destructive** — re-running with `--prune` after data has been written to the new column has no effect, but rolling back requires reverting the schema change manually |
+| `--history` | List prior promotions from the audit log instead of running a new promotion |
 
 ---
 

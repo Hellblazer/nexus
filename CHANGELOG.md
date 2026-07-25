@@ -6,24 +6,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Changed
-- **`nx enrich aspects-promote-field` no longer promotes; it reports history** (nexus-70x7y).
-  The RDR-089 Phase E mechanic ran a runtime `ALTER TABLE` + backfill against SQLite. Under
-  the ALL-DDL-through-Liquibase directive that has no legal implementation in either mode, so
-  the verb is retired rather than ported to the service backend: promoting `extras.<name>` is
-  now ONE Liquibase changeset that adds the column, backfills it from `extras`, and appends to
-  `aspect_promotion_log` together (template in `src/nexus/aspect_promotion.py`; the optional
-  extras prune stays a separate later changeset so the dual-read cutover is preserved).
-  Invoking the command with a field name prints that recipe and exits 2; `--type` and `--prune`
-  are gone rather than left as flags that silently do nothing.
-
-### Added
-- **Promotion history now works on the service backend** (nexus-70x7y). `list_promotions`
-  is implemented on `HttpDocumentAspectsStore` over `GET /v1/aspects/promotion/list` (the
-  engine endpoint already existed), and on the SQLite store as a plain read. Both callers go
-  through the store instead of reaching into a raw connection, and neither creates the table
-  on read — `migrations.migrate_aspect_promotion_log_table` is the sole creator.
-
 
 ## [6.18.1] - 2026-07-24
 
