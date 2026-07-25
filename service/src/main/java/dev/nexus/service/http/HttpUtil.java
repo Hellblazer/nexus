@@ -156,4 +156,50 @@ public final class HttpUtil {
         }
         return false;
     }
+
+    /** PostgreSQL SQLSTATE for insufficient_privilege — what an RLS refusal raises. */
+    private static final String SQLSTATE_INSUFFICIENT_PRIVILEGE = "42501";
+
+    /**
+     * True when *t* wraps a PostgreSQL row-level-security REFUSAL of a specific row,
+     * as opposed to a genuine privilege misconfiguration.
+     *
+     * <p>Bead nexus-asaod. A fidelity-ETL import carries a CLIENT-SUPPLIED id
+     * (``POST /v1/taxonomy/import/topic`` preserves ids verbatim so a migration
+     * round-trips). ``nexus.topics`` has a global ``BIGSERIAL`` primary key — global
+     * because ``topics_parent_fk`` is self-referential, so a composite
+     * ``(tenant_id, id)`` key would force every ``parent_id`` to carry a tenant too.
+     * When two tenants supply the same id, the second INSERT is refused by the RLS
+     * policy rather than by the PK, because RLS is evaluated first: the row exists but
+     * is invisible to this tenant.
+     *
+     * <p>That is tenant isolation WORKING, and it is a caller-resolvable conflict — so
+     * it deserves a 409, not the opaque 500 it produced before this fix. It does NOT
+     * come through {@link #sqlState23}: an RLS refusal is SQLSTATE 42501
+     * (insufficient_privilege), not class 23, so the shared ladder correctly declined
+     * it and it fell through.
+     *
+     * <p>DISCRIMINATION, and why it is not a bare SQLSTATE check: 42501 ALSO fires when
+     * the connecting role genuinely lacks a table privilege — a deployment fault that
+     * must stay a 500 so it is not silently reported to callers as their conflict.
+     * The PostgreSQL RLS refusal is distinguished by its message ("row-level security
+     * policy"), so both signals are required. This couples to a PG message string; if
+     * a future PG release rewords it this returns false and the behaviour degrades to
+     * the previous 500 — wrong status, never a wrong success. The paired
+     * ``rejectsCrossTenantIdWith409`` test pins the live wording so the coupling
+     * cannot rot silently.
+     */
+    public static boolean isRlsRowRejection(Throwable t) {
+        Throwable c = t;
+        for (int depth = 0; c != null && depth < 32; depth++, c = c.getCause()) {
+            if (c instanceof SQLException se
+                    && SQLSTATE_INSUFFICIENT_PRIVILEGE.equals(se.getSQLState())) {
+                String msg = se.getMessage();
+                if (msg != null && msg.contains("row-level security policy")) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
 }

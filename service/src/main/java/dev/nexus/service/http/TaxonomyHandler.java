@@ -190,11 +190,33 @@ public final class TaxonomyHandler implements HttpHandler {
         } catch (Exception e) {
             // Shared typed-DB-error ladder: pool-exhaustion 503 + class-23 409
             // (nexus-h8rf6.2 / nexus-7e057) — see HttpUtil.sendTypedDbError.
-            if (!HttpUtil.sendTypedDbError(exchange, e, log, "taxonomy_handler",
+            if (HttpUtil.sendTypedDbError(exchange, e, log, "taxonomy_handler",
                     "tenant=" + tenant + " op=" + op)) {
-                log.error("event=taxonomy_handler_error tenant={} op={}", tenant, op, e);
-                HttpUtil.send(exchange, 500, json(Map.of("error", "internal server error")));
+                return;
             }
+            // nexus-asaod: the /import/* verbs preserve CLIENT-SUPPLIED ids verbatim
+            // (fidelity ETL), and nexus.topics has a global BIGSERIAL PK. A second
+            // tenant supplying an id another tenant already holds is refused by the RLS
+            // policy — SQLSTATE 42501, which is NOT class 23, so the ladder above
+            // declines it and it used to become an opaque 500. It is a caller-resolvable
+            // conflict, so it is a 409.
+            //
+            // Scoped to /import/ deliberately: elsewhere a 42501 is far more likely to
+            // be a genuine grant/role fault, which must keep surfacing as 500 rather
+            // than being mislabelled as the caller's conflict.
+            //
+            // The body must NOT reveal that the id exists under another tenant — that
+            // would be cross-tenant information disclosure. "not available" is all the
+            // caller is entitled to, and all it needs (pick another id / re-key the
+            // import).
+            if (op != null && op.startsWith("/import/") && HttpUtil.isRlsRowRejection(e)) {
+                log.warn("event=taxonomy_import_id_unavailable tenant={} op={}", tenant, op);
+                HttpUtil.send(exchange, 409, json(Map.of(
+                    "error", "supplied id is not available in this tenant")));
+                return;
+            }
+            log.error("event=taxonomy_handler_error tenant={} op={}", tenant, op, e);
+            HttpUtil.send(exchange, 500, json(Map.of("error", "internal server error")));
         }
     }
 
