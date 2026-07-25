@@ -86,38 +86,48 @@ git push origin engine-service-vX.Y.Z
 
 Tag-push fires `engine-service-release.yml` → builds + cosign-signs the 3 native binaries for the supported targets (`linux-amd64`, `linux-arm64`, `mac-arm64`) plus their PG bundles, and publishes the GitHub release. (Intel macOS / `mac-amd64` is NOT a supported target — not built.) Publishes nothing to PyPI. Wait for the workflow to finish publishing before Step 5 (prior runs ~30 min).
 
-### 5. POST-PUBLISH validation of the published artifact — ⚠️ CURRENTLY NO LEG
+### 5. POST-PUBLISH gate: `--acquire` (the leg that drives the PUBLISHED bytes)
 
-> **BROKEN, needs a decision. Do not skip silently; escalate to Hal.**
-> This step used to be `run.sh --cold`, which cold-acquired the just-published
-> binary on a bare box. `--cold` was RETIRED by RDR-155 P4b (commit `7e47c285`,
-> 2026-07-24) along with `--guided` and `--hole-punch`, because it drove the
-> deleted `nx guided-upgrade`. **There is currently no leg that acquires and
-> validates an arbitrary just-published engine tag.**
->
-> This matters: this is the gate that caught `nexus-pi3s3` + `nexus-qeoxf` on
-> 2026-06-26 — defects in the PUBLISHED artifact that every local suite missed.
-> Losing it silently is exactly the class that burned `engine-service-v0.1.53`
-> (a release-only script nobody swept when the contract under it changed).
->
-> Why the obvious candidate does NOT substitute: `--package-upgrade` does
-> acquire the engine for real, but it converges to `NEW_ENGINE_TAG`, which
-> `run.sh` DERIVES from `REQUIRED_ENGINE_VERSION` — the floor, not an arbitrary
-> new tag. It therefore cannot validate a tag until the PyPI release has already
-> pinned it, which is after the point this step exists to protect.
->
-> OPTIONS for whoever resolves this (nexus-8nlj4 is the likely home, since it
-> already owns the replacement acceptance rehearsal):
-> 1. Teach `--package-upgrade` to honour an explicit `NEXUS_SERVICE_TAG`
->    override so it can acquire and converge to a specific published tag.
-> 2. Build the two-hop stranded-redirect rehearsal (nexus-8nlj4) with a
->    published-artifact acquire leg, restoring this coverage by construction.
-> 3. Accept the gap explicitly and record it — the cost is that a bad published
->    binary is first discovered by conexus at deploy time (Step 6) rather than
->    by us, which is a worse place to find it.
->
-> Until one of those lands, Step 6's conexus cloud gate is the FIRST validation
-> the published artifact receives. Say so out loud when handing the tag over.
+Wait for `engine-service-release.yml` to finish publishing, then:
+
+```bash
+NEXUS_SERVICE_TAG=engine-service-vX.Y.Z tests/e2e/migration-rehearsal/run.sh --acquire
+```
+
+Must end `ACQUIRE GATE PASSED`. Standalone — do not combine with other legs. The
+tag is REQUIRED and never defaulted (the point is a specific published artifact);
+`run.sh` exits 2 without it.
+
+What it does on a bare box: quarantine asserts (no `nx` binary pre-staged, no
+system PostgreSQL) -> `nx daemon service install-binary <tag>` cold-acquires the
+native binary + PG bundle, cosign-verified -> `init --service` -> `/version`
+asserts `release_version` equals the acquired tag -> store / index / search drive
+it -> `doctor` with no ✗.
+
+**Why `--shakeout` does not cover this.** Step 3 drives the LOCALLY BUILT `-Ob`
+candidate. The published artifact is different bytes from a different builder:
+full native build (not quick-build), codesign, cosign, PG-bundle packaging. A
+defect introduced by the release workflow is invisible to the local shakeout BY
+CONSTRUCTION — `nexus-2oh5q` is exactly that hazard (signing breaking JNI dlopen
+of the bundled onnxruntime/DJL), dormant only while the Apple secrets are
+unprovisioned. Historically this gate caught `nexus-pi3s3` + `nexus-qeoxf`
+(2026-06-26), defects every local suite missed.
+
+**Scope limit, carried from `nexus-1ddsy`'s close:** the container is Linux, so
+this exercises the linux artifact. The mac-arm64 post-signing path is NOT covered
+here — tracked on `nexus-2oh5q`.
+
+`--package-upgrade` is NOT a substitute (checked; do not re-derive): it converges
+to `NEW_ENGINE_TAG`, which `run.sh` derives from `REQUIRED_ENGINE_VERSION` — the
+floor, not an arbitrary tag — so it can only validate a tag a PyPI release has
+already pinned, strictly after the moment this gate protects.
+
+History: this step said "CURRENTLY NO LEG / escalate to Hal" for one cut after
+RDR-155 P4b retired `run.sh --cold` (whose TAIL drove the deleted
+`nx guided-upgrade`; its acquire half never did). `nexus-1ddsy` rebuilt the
+acquire half as `--acquire` and it gated `engine-service-v0.1.55` in production
+(11 PASS / 0 FAIL). Hal REFUSED "accept the gap" on 2026-07-24 — do not
+re-propose it. Instance of `nexus-1e2eh` (release-only procedures rot silently).
 
 > **`--with-cloud` does NOT belong here.** It is NOT a local/acquire leg — it
 > exercises the **conexus-DEPLOYED** cloud service, so it can only run AFTER the
