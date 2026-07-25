@@ -7,10 +7,10 @@ import os
 from pathlib import Path
 from typing import Any
 
-import chromadb
 import numpy as np
 import pytest
 
+from nexus.db.inmemory_vector_store import InMemoryVectorClient
 from nexus.db.storage_mode import has_raw_access
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
@@ -3206,7 +3206,7 @@ class TestManualOpsCLI:
         # __dict__ rather than the spec-restricted __getattr__. spec= the
         # child too (chromadb.api.ClientAPI) so a method that real Chroma
         # clients don't have can't hide behind a bare MagicMock.
-        mock_t3._client = MagicMock(spec=chromadb.api.ClientAPI)
+        mock_t3._client = MagicMock(spec=InMemoryVectorClient)
         mock_t3._client.get_collection.return_value = mock_coll
         mock_t3._client.get_or_create_collection.return_value = MagicMock()
 
@@ -3315,7 +3315,7 @@ class TestManualOpsCLI:
             "ids": [f"doc-{i}" for i in range(10)],
             "documents": [f"text {i}" for i in range(10)],
         }
-        mock_t3._client = MagicMock(spec=chromadb.api.ClientAPI)
+        mock_t3._client = MagicMock(spec=InMemoryVectorClient)
         mock_t3._client.get_collection.return_value = mock_coll
         mock_t3._client.get_or_create_collection.return_value = MagicMock()
         fake_persist = MagicMock(return_value=[201, 202, 203])
@@ -3383,7 +3383,7 @@ class TestManualOpsCLI:
             "ids": [f"doc-{i}" for i in range(5)],
             "documents": [f"text {i}" for i in range(5)],
         }
-        mock_t3._client = MagicMock(spec=chromadb.api.ClientAPI)
+        mock_t3._client = MagicMock(spec=InMemoryVectorClient)
         mock_t3._client.get_collection.return_value = mock_coll
         import numpy as _np
 
