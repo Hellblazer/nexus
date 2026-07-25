@@ -23,7 +23,13 @@ import structlog
 from nexus._locking import acquire_directory_lock, release_lock
 
 if TYPE_CHECKING:
-    from chromadb.api import ClientAPI
+    # RDR-155 P4b P3: was ``chromadb.api.ClientAPI``. The annotated parameters
+    # are duck-typed over whatever vector client the caller holds —
+    # HttpVectorClient (production), InMemoryVectorClient (tests), or the
+    # T3Database facade. Chroma is no longer one of them, and no single
+    # nexus type spans the three, so the alias degrades to Any rather than
+    # inventing a Protocol for three annotation sites.
+    ClientAPI = Any
 
 
 # Heartbeat cadence for long catalog operations. The first heartbeat

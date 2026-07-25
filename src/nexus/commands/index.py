@@ -1347,13 +1347,13 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     path = path.resolve()
 
     if dry_run:
-        from chromadb.utils.embedding_functions import DefaultEmbeddingFunction  # noqa: PLC0415 — deliberate function-local import (rare branch: --dry-run local ONNX path only; EF disposition is P4b P0b)
+        from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction  # noqa: PLC0415 — deliberate function-local import (rare branch: --dry-run local ONNX path only)
 
         from nexus.db import make_t3  # noqa: PLC0415 — deliberate function-local import (heavy T3 dep deferred; rare branch)
         from nexus.db.inmemory_vector_store import InMemoryVectorClient  # noqa: PLC0415 — deliberate function-local import (rare branch)
 
         click.echo("Dry-run mode — local ONNX embeddings, no cloud writes.")
-        ef = DefaultEmbeddingFunction()
+        ef = MiniLMDirectEmbeddingFunction()
         local_t3 = make_t3(_client=InMemoryVectorClient(), _ef_override=ef)
 
         def _local_embed(texts: list[str], model: str) -> tuple[list[list[float]], str]:

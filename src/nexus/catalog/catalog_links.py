@@ -33,7 +33,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -49,7 +49,13 @@ import structlog
 from nexus.catalog import catalog as _cat_mod
 
 if TYPE_CHECKING:
-    from chromadb.api import ClientAPI
+    # RDR-155 P4b P3: was ``chromadb.api.ClientAPI``. The annotated parameters
+    # are duck-typed over whatever vector client the caller holds —
+    # HttpVectorClient (production), InMemoryVectorClient (tests), or the
+    # T3Database facade. Chroma is no longer one of them, and no single
+    # nexus type spans the three, so the alias degrades to Any rather than
+    # inventing a Protocol for three annotation sites.
+    ClientAPI = Any
 
     from nexus.catalog.catalog import Catalog, CatalogLink
     from nexus.catalog.tumbler import Tumbler
