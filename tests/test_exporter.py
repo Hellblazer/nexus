@@ -378,7 +378,7 @@ class TestGzipCompression:
 
 class TestPagination:
     def _seed_large(self, db, col_name, prefix):
-        from nexus.db.chroma_quotas import QUOTAS
+        from nexus.db.limits import QUOTAS
         n = QUOTAS.MAX_RECORDS_PER_WRITE + 50
         # See ``populated_db`` for why ``strict=False``.
         col = db.get_or_create_collection(col_name, strict=False)

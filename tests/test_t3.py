@@ -602,7 +602,7 @@ def test_put_raises_on_oversized_content(mock_db):
     but the caller (``store_put`` MCP tool) went on to register the
     doc_id in the catalog, producing a ghost entry: catalog says the doc
     exists, but ChromaDB has no row for the id."""
-    from nexus.db.chroma_quotas import QUOTAS
+    from nexus.db.limits import QUOTAS
     from nexus.errors import PutOversizedError
 
     db, mock_col, _ = mock_db
@@ -637,7 +637,7 @@ def test_write_batch_indexer_path_still_drops_oversized(mock_db):
     pipeline should keep running (drop-and-warn) because a chunker
     upstream was supposed to guard against this and a pipeline-wide
     raise is worse than dropping one record."""
-    from nexus.db.chroma_quotas import QUOTAS
+    from nexus.db.limits import QUOTAS
 
     db, mock_col, _ = mock_db
     oversized = "x" * (QUOTAS.MAX_DOCUMENT_BYTES + 1)

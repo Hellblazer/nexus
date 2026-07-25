@@ -8,7 +8,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from nexus.db.chroma_quotas import QuotaValidator
 from nexus.db.http_vector_client import HttpVectorClient
 from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction
 from nexus.db.t3 import T3Database, apply_hnsw_ef
@@ -52,7 +51,6 @@ def _cloud_db_with_ef() -> T3Database:
     db._write_sems = {}
     db._read_sems = {}
     db._sems_lock = threading.Lock()
-    db._quota_validator = QuotaValidator()
     db._client = make_vector_test_client()
     db._voyage_client = None
     return db

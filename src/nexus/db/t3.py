@@ -41,7 +41,6 @@ from nexus.corpus import (
     embedding_model_for_collection_name,
     index_model_for_collection,
 )
-from nexus.db.chroma_quotas import QuotaValidator
 from nexus.db.limits import QUOTAS
 from nexus.metadata_schema import CONTENT_TYPES, normalize, validate
 
@@ -276,7 +275,6 @@ class T3Database:
         self._write_sems: dict[str, threading.BoundedSemaphore] = {}
         self._read_sems: dict[str, threading.BoundedSemaphore] = {}
         self._sems_lock = threading.Lock()
-        self._quota_validator = QuotaValidator()
 
         # ── Local mode: injected client over a local-EF dispatch ──────────
         if local_mode:
@@ -434,19 +432,6 @@ class T3Database:
             if name not in self._read_sems:
                 self._read_sems[name] = threading.BoundedSemaphore(QUOTAS.MAX_CONCURRENT_READS)
             return self._read_sems[name]
-
-    def _validate_record(
-        self,
-        id: str,
-        document: str,
-        embedding: list[float] | None,
-        metadata: dict,
-        uri: str | None = None,
-    ) -> None:
-        """Validate a single record against ChromaDB Cloud quota limits."""
-        self._quota_validator.validate_record(
-            id=id, document=document, embedding=embedding, metadata=metadata, uri=uri
-        )
 
     def _maybe_client_embed(
         self, texts: list[str], collection_name: str
@@ -921,8 +906,6 @@ class T3Database:
         mode has no such skip to bypass — ``col.upsert()`` always re-embeds
         via the collection's own embedding function regardless of this flag.
         """
-        for doc_id, doc, meta in zip(ids, documents, metadatas):
-            self._validate_record(id=doc_id, document=doc, embedding=None, metadata=meta)
         col = self.get_or_create_collection(collection, strict=False)
         self._write_batch(col, collection, ids, documents, metadatas)
 

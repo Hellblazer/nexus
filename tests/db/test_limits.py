@@ -17,22 +17,22 @@ from pathlib import Path
 
 import pytest
 
-from nexus.db import chroma_quotas, limits
+from nexus.db import limits
 
 
-def test_quotas_values_identical_to_chroma_quotas() -> None:
-    for field in chroma_quotas.QUOTAS.__dataclass_fields__:
-        assert getattr(limits.QUOTAS, field) == getattr(chroma_quotas.QUOTAS, field), (
-            f"limits.QUOTAS.{field} drifted from chroma_quotas.QUOTAS.{field}"
-        )
+# RDR-155 P4b P3: three tests here mirrored these values against
+# chroma_quotas.QUOTAS to catch drift during the rehome window. That module is
+# DELETED, so there is nothing left to drift against — these values are now
+# limits' OWN contract. Pinned as literals so a silent edit still fails, which
+# is what the parity tests were really buying.
 
 
-def test_safe_chunk_bytes_identical() -> None:
-    assert limits.SAFE_CHUNK_BYTES == chroma_quotas.SAFE_CHUNK_BYTES == 12_288
+def test_safe_chunk_bytes_is_pinned() -> None:
+    assert limits.SAFE_CHUNK_BYTES == limits.QUOTAS.SAFE_CHUNK_BYTES == 12_288
 
 
-def test_max_query_results_identical() -> None:
-    assert limits.MAX_QUERY_RESULTS == chroma_quotas.QUOTAS.MAX_QUERY_RESULTS == 300
+def test_max_query_results_is_pinned() -> None:
+    assert limits.MAX_QUERY_RESULTS == limits.QUOTAS.MAX_QUERY_RESULTS == 300
 
 
 def test_quotas_is_frozen() -> None:
@@ -41,8 +41,8 @@ def test_quotas_is_frozen() -> None:
 
 
 def test_limits_module_does_not_import_chroma_quotas() -> None:
-    # The rehoming's entire point is independence from chroma_quotas.py so
-    # that nexus-g37fr can delete it without breaking this module.
+    # Kept after chroma_quotas.py's deletion: an AST ban on the module name is
+    # what stops it being resurrected as an import target, and it is cheap.
     src = Path(limits.__file__).read_text(encoding="utf-8")
     tree = ast.parse(src)
     for node in ast.walk(tree):

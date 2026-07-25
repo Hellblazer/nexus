@@ -216,7 +216,7 @@ def test_spurious_split_resolved():
     "```python\n{code}\n```",
 ], ids=["with-heading", "no-heading"])
 def test_md_chunker_byte_cap_enforced(text):
-    from nexus.db.chroma_quotas import SAFE_CHUNK_BYTES
+    from nexus.db.limits import SAFE_CHUNK_BYTES
     text = text.format(code="x" * 15_000)
     chunks = SemanticMarkdownChunker(preserve_code_blocks=True).chunk(text, {})
     # Byte-cap contract: at least one chunk, every chunk under the cap.

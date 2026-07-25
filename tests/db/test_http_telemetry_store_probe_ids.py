@@ -25,7 +25,7 @@ import json
 import httpx
 import pytest
 
-from nexus.db.chroma_quotas import QUOTAS
+from nexus.db.limits import QUOTAS
 from nexus.db.t2.http_telemetry_store import HttpTelemetryStore
 
 TOKEN = "fake-telemetry-token-probe"

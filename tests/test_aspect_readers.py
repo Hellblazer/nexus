@@ -597,7 +597,7 @@ class TestReadChromaUri:
         pages in chunk_index order.
         """
         from nexus.aspect_readers import ReadOk, _read_chroma_uri
-        from nexus.db.chroma_quotas import QUOTAS
+        from nexus.db.limits import QUOTAS
 
         n = QUOTAS.MAX_QUERY_RESULTS + 5  # 305
         title = "paginated-paper"

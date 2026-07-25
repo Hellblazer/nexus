@@ -130,12 +130,19 @@ class TestJavaServingWiringChromaFree:
 class TestPhase4aSurvivalPins:
     """GREEN by design — these guard against PREMATURE Phase-4b deletions."""
 
-    def test_chroma_quotas_survives_phase_4a(self) -> None:
+    def test_chroma_quotas_died_at_phase_4b_p3(self) -> None:
+        """Was test_chroma_quotas_survives_phase_4a — a PREMATURE-deletion
+        guard, correct until P3 actually arrived. It has now flipped to its
+        successor assertion: the module is GONE, and the constants that were
+        load-bearing (SAFE_CHUNK_BYTES, MAX_QUERY_RESULTS) live in
+        nexus.db.limits. QuotaValidator died with no replacement — the
+        document-size ceiling it enforced is still checked by T3Database.put
+        via limits.QUOTAS.MAX_DOCUMENT_BYTES, and the chunkers cap upstream.
+        """
         quotas = SRC / "db" / "chroma_quotas.py"
-        assert quotas.is_file(), (
-            "chroma_quotas.py must SURVIVE P2 of the P4b wave — it dies at "
-            "P3 together with db/t3.py and the chromadb dependency "
-            "(tests/test_rdr155_p4b_quotas_rehome.py pins its sole importer)."
+        assert not quotas.exists(), (
+            "chroma_quotas.py is back — the P4b P3 deletion (nexus-g37fr) "
+            "removed it; constants belong in nexus.db.limits."
         )
 
     def test_skp06_app_layer_guard_stays_unbuilt(self) -> None:
