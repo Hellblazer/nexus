@@ -208,3 +208,94 @@ def test_the_two_release_gates_are_prescribed_as_commands(flag: str) -> None:
         f"the gate historically caught nexus-pi3s3 + nexus-qeoxf, defects in "
         f"published bytes that every local suite missed."
     )
+
+
+# ── The one-engine-identity directive, as a test (Hal 2026-07-15) ────────────
+#
+# "A conexus release installs the engine it was built and validated with. Every
+# install path. There is no 'floor.' ... Treat any reappearance of 'compatibility
+# floor' semantics in code, docs, or checklists as a defect and flag it."
+#
+# That directive was issued emphatically after the 14h GH #1402 incident and
+# lived only as prose. Nine days later the checklists still carried the exact
+# clause it bans ("the floor is a minimum, not 'latest'", "ONLY if the release
+# hard-requires the new engine's features"), which is what authorized leaving
+# REQUIRED_ENGINE_VERSION at v0.1.52 across engine tags .53 .54 .55 .56 — the
+# 2026-07-14 v0.1.42 incident, recurring, for the same stated reason.
+#
+# Prose directives depend on a reader noticing. This does not.
+
+GOVERNANCE_DOCS = (
+    "AGENTS.md",
+    ".claude/skills/release/SKILL.md",
+    ".claude/skills/engine-release/SKILL.md",
+)
+
+#: Phrases that re-establish floor/minimum semantics as CURRENT doctrine.
+#: Deliberately NOT the bare word "floor": these files legitimately narrate the
+#: incidents that produced the directive ("the floor moved to v0.1.34 while the
+#: pin sat at v0.1.36"), and banning the word would force deleting the very
+#: history that explains why the rule exists.
+_BANNED_DOCTRINE = (
+    "floor is a minimum",
+    "compatibility floor",
+    "ONLY if the release hard-requires",
+    "advertises engine-side fixes",
+    "only when the compatible engine-service version advances",
+    "not bumped every release",
+)
+
+#: At least one must appear in each governance doc — the positive half. Without
+#: it, deleting the guidance entirely would pass the ban check.
+_REQUIRED_DOCTRINE = (
+    "ONE engine identity",
+    "ONE engine IDENTITY",
+    "engine it was built and gated with",
+    "built and validated with",
+)
+
+
+@pytest.mark.parametrize("doc", GOVERNANCE_DOCS)
+def test_governance_doc_carries_no_floor_semantics(doc: str) -> None:
+    path = REPO_ROOT / doc
+    assert path.is_file(), f"governance doc moved: {doc}"
+    text = path.read_text(encoding="utf-8")
+    found = sorted(p for p in _BANNED_DOCTRINE if p.lower() in text.lower())
+    assert not found, (
+        f"{doc} reintroduces compatibility-floor semantics: {found}. Hal directive "
+        f"2026-07-15: a release installs the engine it was built and gated with, on "
+        f"EVERY install path — not a minimum, not a range. That carve-out is what "
+        f"left local-mode installs on v0.1.52 across four gated engine tags."
+    )
+
+
+@pytest.mark.parametrize("doc", GOVERNANCE_DOCS)
+def test_governance_doc_states_the_one_engine_rule(doc: str) -> None:
+    """Non-vacuity for the ban above: silence must not read as compliance."""
+    text = (REPO_ROOT / doc).read_text(encoding="utf-8")
+    assert any(p in text for p in _REQUIRED_DOCTRINE), (
+        f"{doc} no longer states the one-engine-identity rule. Deleting the "
+        f"guidance passes the banned-phrase check while leaving the next release "
+        f"with nothing to follow."
+    )
+
+
+def test_the_pin_currency_gate_exists_and_is_wired_into_the_release_workflow() -> None:
+    """The directive is only as strong as the check that enforces it.
+
+    Three things must hold together: the gate implements the pin direction, the
+    release workflow runs the gate, and the checkout fetches tags (without which
+    the gate sees no tags — it fails closed by design, so a missing fetch-tags
+    breaks every release rather than passing vacuously, but either way the
+    release is not protected as intended).
+    """
+    gate_src = (REPO_ROOT / "scripts" / "check_engine_release_floor.py").read_text(encoding="utf-8")
+    assert "def check_pin_currency" in gate_src
+    assert "def newest_published_engine" in gate_src
+
+    wf = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    assert "check_engine_release_floor.py" in wf, "release workflow no longer runs the gate"
+    assert "fetch-tags: true" in wf, (
+        "release.yml checkout must fetch tags or the pin-currency half cannot "
+        "see any engine-service-v* tag"
+    )

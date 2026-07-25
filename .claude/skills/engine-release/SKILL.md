@@ -119,7 +119,7 @@ here — tracked on `nexus-2oh5q`.
 
 `--package-upgrade` is NOT a substitute (checked; do not re-derive): it converges
 to `NEW_ENGINE_TAG`, which `run.sh` derives from `REQUIRED_ENGINE_VERSION` — the
-floor, not an arbitrary tag — so it can only validate a tag a PyPI release has
+release's engine identity, not an arbitrary tag — so it can only validate a tag a PyPI release has
 already pinned, strictly after the moment this gate protects.
 
 History: this step said "CURRENTLY NO LEG / escalate to Hal" for one cut after
@@ -148,7 +148,8 @@ The post-deploy `--with-cloud` rehearsal (`run.sh --with-cloud`, the cloud → c
 - `tests/e2e/migration-rehearsal/run.sh` `COLD_TAG` default → the new published tag (or override via `NEXUS_SERVICE_TAG`).
 - When the NEXT PyPI release bumps `REQUIRED_ENGINE_VERSION` to this tag, also rotate `run.sh`'s `NEXUS_PREV_RELEASE`/`NEXUS_PREV_ENGINE_TAG` defaults (the `--package-upgrade` convergence leg's starting point — must stay one release BEHIND the new dependency or its staleness guard fails loud; nexus-cfgo9). The `--package-upgrade` leg itself runs in the PyPI `release` skill's Step 1, not here — this skill only keeps its inputs fresh.
 - `SchemaUpgradeRehearsalIntegrationTest.OLD_TAG` (`service/src/test/java/dev/nexus/service/`) → the PREVIOUSLY-deployed tag (nexus-7z6s7 rotation policy: the old→HEAD rehearsal's "real aged box" realism rots as the fleet moves on; re-verify the two structural preconditions documented on the constant when bumping) OLD_TAG rotation is a THREE-part edit (nexus-gm38i): regenerate the changeset snapshot (`uv run python scripts/gen_rehearsal_hop_manifest.py`), re-derive the new hop's row-DML seed coverage, and re-point the data leg's seeding + its SEED-COVERAGE block + the lint's `DECLARED_SEED_COVERAGE` together — `tests/test_rehearsal_seed_coverage_lint.py` fails loudly until all three agree.
-- When the **next PyPI release** pins this engine: `PINNED_SERVICE_TAG` (`src/nexus/daemon/binary_install.py`) and — ONLY if the release hard-requires the new engine's features — `REQUIRED_ENGINE_VERSION` (`src/nexus/engine_version.py`; the floor is a minimum, not "latest"). These are the `release` skill's job, not this one.
+- **`REQUIRED_ENGINE_VERSION` (`src/nexus/engine_version.py`) MUST move to this tag** — unconditionally, not "only if the release needs the features". There is ONE engine identity per release: the engine it was built and gated with, on EVERY install path (Hal directive 2026-07-15, after the 14h GH #1402 incident). It is NOT a compatibility minimum. For local-mode installs this constant is the ONLY delivery vehicle — an engine tag that is cut, gated, and never pinned reaches nobody. `PINNED_SERVICE_TAG` is DERIVED from it, so the one edit moves both.
+  Sequencing: the bump lands with the NEXT PyPI release, AFTER conexus deploys this tag (Step 6). Bumping before the deploy makes every cloud client refuse the managed service as below-identity — GH #1402 inverted. Until then the owed bump is tracked, not applied; `scripts/check_engine_release_floor.py` fails the release if a gated tag was never pinned.
 
 ### 8. Record state (T2) — guarded by a live /version read (DO NOT SKIP)
 
