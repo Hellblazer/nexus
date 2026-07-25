@@ -115,14 +115,14 @@ class HttpDocumentAspectsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     class's constructor signature matches the mixin's pinned contract
     exactly, so no override is needed).
 
-    NOTE: ``promote_extras_field`` and ``list_promotions`` in
-    ``aspect_promotion.py`` reach into ``db.document_aspects.conn`` and
-    ``db.document_aspects._lock`` for raw SQLite access. When this store is
-    active those attributes raise ``AttributeError`` — callers using the
-    promotion ETL against the service backend must use the
-    ``/v1/aspects/promotion/record`` endpoint directly. The ``aspect_promotion``
-    module is SQLite-specific and is intentionally NOT forwarded over HTTP
-    (the Postgres tier owns the promotion_log table via AspectRepository).
+    Promotion log (nexus-70x7y, 2026-07-25): ``list_promotions`` IS
+    forwarded, over ``GET /v1/aspects/promotion/list``. Its former sibling
+    ``promote_extras_field`` is retired rather than forwarded — runtime
+    schema DDL has no valid implementation under the
+    ALL-DDL-through-Liquibase directive, so field promotion is now a
+    changeset that adds the column, backfills it, and appends to
+    ``aspect_promotion_log`` together (recipe in
+    ``src/nexus/aspect_promotion.py``).
 
     Args:
         base_url: Optional override for the service base URL.
@@ -256,6 +256,18 @@ class HttpDocumentAspectsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             "max_version": max_version,
         })
         return [_body_to_record(r) for r in rows]
+
+    def list_promotions(self) -> list[dict]:
+        """Return the ``aspect_promotion_log`` history, oldest first.
+
+        Mirrors ``DocumentAspects.list_promotions``. The engine reads
+        ``nexus.aspect_promotion_log`` tenant-scoped and already returns the
+        SQLite key shape verbatim (``field_name``, ``sql_type``,
+        ``column_added``, ``rows_backfilled``, ``rows_pruned``, ``pruned``,
+        ``promoted_at``), so no per-key translation is needed here.
+        """
+        rows = self._get("/promotion/list")
+        return list(rows) if isinstance(rows, list) else []
 
     def set_salient_sentences(self, doc_id: str, sentences: list[str]) -> bool:
         """Write salient_sentences for doc_id. Returns True on update."""
