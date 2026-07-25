@@ -581,12 +581,21 @@ def _phase4_catalog_t3_chash() -> tuple[Any, Any, Any]:
     """
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
     from nexus.db import make_t3  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-    from nexus.db.t2.chash_index import ChashIndex  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
-    db_path = default_db_path()
+    # RDR-152 nexus-gmiaf.16 seam, applied at RDR-155 P4b P3: this trio fed
+    # `cat.resolve_chash(...)` a SQLite ChashIndex unconditionally. Post-RDR-187
+    # a service-mode box has no nexus.chash_index behind that file, so span/chash
+    # resolution silently resolved against nothing. The reads are the surviving
+    # half of /v1/chash and answer from the chunks tables.
     cat: Any = make_catalog_reader()
     t3: Any = make_t3()
-    chash_index: Any = ChashIndex(db_path)
+    if storage_backend_for("chash_index") == StorageBackend.SERVICE:
+        from nexus.db.t2.http_chash_index import HttpChashIndex  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+        chash_index: Any = HttpChashIndex()
+    else:
+        from nexus.db.t2.chash_index import ChashIndex  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+        chash_index = ChashIndex(default_db_path())
     return cat, t3, chash_index
 
 
