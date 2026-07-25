@@ -48,6 +48,27 @@ def collection_not_found_errors() -> tuple[type[BaseException], ...]:
     return (CollectionNotFoundError, _chroma_not_found)
 
 
+def vector_argument_errors() -> tuple[type[BaseException], ...]:
+    """The exception types that mean "the vector store rejected the call".
+
+    Sibling of :func:`collection_not_found_errors` and same transition
+    contract (RDR-155 P4b P3): chroma raised ``InvalidArgumentError``; the
+    substrate-neutral stores raise ``ValueError`` (see
+    ``InMemoryCollection._check_dimension``). The chroma member drops out
+    automatically when the dependency leaves.
+
+    Deliberately broad on the nexus side: the only caller
+    (``T3Database.search``) classifies on ``"dimension" in str(exc)`` and
+    re-raises everything else, so a wider catch cannot swallow an unrelated
+    failure -- it can only route a dimension-mismatch skip correctly.
+    """
+    try:
+        from chromadb.errors import InvalidArgumentError as _chroma_invalid_arg  # noqa: PLC0415 — transition-window optional dep; absence is the designed P3 end state
+    except ImportError:
+        return (ValueError,)
+    return (ValueError, _chroma_invalid_arg)
+
+
 class EmbeddingModelMismatch(NexusError):
     """Export embedding model is incompatible with the target collection's model.
 
