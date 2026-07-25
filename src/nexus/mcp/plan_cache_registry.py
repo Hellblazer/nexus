@@ -54,13 +54,34 @@ _UNAVAILABLE = object()
 def _plan_library_mtime(library: Any) -> float:
     """Return the SQLite file mtime for *library*, or 0.0 when unknown.
 
-    Falls back to 0.0 when the library does not expose a ``path``
-    attribute (in-memory or test-stub libraries) or when the file is
-    missing; both produce a stable repopulate-never-runs fallback that
-    matches the legacy single-populate contract.
+    Falls back to 0.0 when the library does not expose a ``path`` attribute or
+    when the file is missing; both produce a stable repopulate-never-runs
+    fallback matching the legacy single-populate contract.
+
+    nexus-at2ff sweep (2026-07-25) — READ THIS BEFORE TRUSTING THE STALENESS
+    TIER. The docstring used to describe the no-``path`` case as covering
+    "in-memory or test-stub libraries", i.e. an abstract edge case. It is in
+    fact the ONLY production case: ``populate_from`` is called with
+    ``db.plans`` (mcp/core.py), which is ``HttpPlanLibrary`` in service mode,
+    and only the SQLite ``PlanLibrary`` has ``path``. So this returns 0.0
+    always, the staleness comparison can never fire, and nexus-qgjr's
+    repopulate-on-change tier is DEAD in production — the T1 plan-session cache
+    is populated once per MCP process and never refreshed.
+
+    This is left as a 0.0 fallback rather than silently "fixed", because the
+    service backend has no file mtime to read and inventing one would be worse.
+    Making the staleness tier actually work on the service backend needs a
+    server-side change (an ETag / last-modified on the plan-list endpoint) and
+    is tracked separately — but the behaviour is now DECLARED here instead of
+    being misdescribed as an edge case.
     """
     path = getattr(library, "path", None)
     if path is None:
+        _log.debug(
+            "plan_cache_staleness_unavailable",
+            library=type(library).__name__,
+            reason="no file mtime on this backend; staleness tier inert",
+        )
         return 0.0
     try:
         return path.stat().st_mtime

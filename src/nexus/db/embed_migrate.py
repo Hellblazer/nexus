@@ -124,7 +124,13 @@ def detect_stale_local_collections(
         if not count:
             continue
         try:
-            col = db._client_for(name).get_collection(name)
+            # nexus-d4ac1 / nexus-at2ff: was ``db._client_for(name)``, which only
+            # the T3Database facade has — a production HttpVectorClient handle
+            # would AttributeError here, get swallowed by the except below, and
+            # report ZERO stale collections. A false-clean, not a crash. Fixed
+            # while the module is still dead code (no src/ caller today) because
+            # the trap arms itself the moment anyone wires it up.
+            col = db.get_collection(name)
         except Exception:  # noqa: BLE001 — best-effort probe; skip collection on any failure
             continue
         try:
@@ -173,10 +179,12 @@ def collection_source_paths(
     or — post RDR-108 Phase 3 — only ``chunk_text_hash``, resolved via the
     catalog chash->doc_id manifest. Returns ``(source_paths, sourceless_ids)``.
     """
-    # Raw client handle: we only read metadata via ``.get()``, so we must
-    # not attach the active EF (it would conflict with the collection's
-    # persisted EF config for cross-embedder names — the whole point here).
-    col = db._client_for(name).get_collection(name)
+    # Read metadata via ``.get()`` only — no active EF attached (it would
+    # conflict with the collection's persisted EF config for cross-embedder
+    # names, which is the whole point here).
+    # nexus-d4ac1 / nexus-at2ff: was ``db._client_for(name)`` (test-facade-only
+    # attribute); the handle exposes get_collection directly on both backends.
+    col = db.get_collection(name)
     source_paths: set[str] = set()
     sourceless: list[str] = []
     offset = 0

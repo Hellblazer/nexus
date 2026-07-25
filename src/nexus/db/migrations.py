@@ -2701,8 +2701,16 @@ def backfill_projection(t3_db: Any, taxonomy: Any) -> None:
             continue
         t0 = time.monotonic()
         try:
+            # nexus-at2ff (review sweep 2026-07-25): was ``t3_db._client``.
+            # `nx upgrade` builds t3_db via make_t3() -> HttpVectorClient, which
+            # has no ``_client``; only the T3Database test facade does. The
+            # AttributeError was caught by the per-collection `except Exception`
+            # below and printed "SKIPPED (AttributeError)" for EVERY collection,
+            # so this backfill silently did nothing on any service-mode install.
+            # HttpTaxonomyStore.project_against takes the handle as its
+            # ``chroma_client`` argument (its own docstring says so, nexus-9pqoj).
             result = taxonomy.project_against(
-                src, targets, t3_db._client, threshold=0.85,
+                src, targets, t3_db, threshold=0.85,
             )
             assignments = result.get("chunk_assignments", [])
             # RDR-077 RF-3: 3-tuple (doc_id, topic_id, raw_cosine_similarity).
@@ -2743,13 +2751,34 @@ def backfill_projection(t3_db: Any, taxonomy: Any) -> None:
     # 'attempted' counts may exceed actual writes). Lock taken per storage
     # review I-1 — this runs in a long upgrade context where concurrent
     # writes on the same connection are plausible.
-    with taxonomy._lock:
-        actual_written = taxonomy.conn.execute(
-            "SELECT COUNT(*) FROM topic_assignments WHERE assigned_by = 'projection'"
-        ).fetchone()[0]
+    # nexus-at2ff: this raw read is the SECOND half of the same breakage, and
+    # fixing only the first leaves the step still unable to pass. On a
+    # service-backed taxonomy store RawHandleGuardMixin raises AttributeError
+    # here, OUTSIDE the per-collection except above, so the whole upgrade step
+    # failed — and upgrade.py then printed "will retry on next `nx upgrade`"
+    # for a retry that could never succeed.
+    #
+    # The count is a progress/audit figure, not a correctness input: it exists
+    # only because INSERT OR IGNORE dedupes, so `attempted` can overstate
+    # `written`. In service mode we report the attempted count and SAY it is
+    # attempted rather than inventing a precise number we cannot obtain — a
+    # silently-wrong "actual" would be the false-clean class.
+    # The raw ``taxonomy._lock`` / ``taxonomy.conn`` count that used to live here
+    # is DELETED rather than guarded. It re-read the table to turn "attempted"
+    # into "actually stored" (INSERT OR IGNORE dedupes, so attempted can
+    # overstate) — a progress-line nicety, never a correctness input.
+    #
+    # Guarding it with has_raw_access would have worked but required two new
+    # self-service raw-access overrides, GROWING a census that may only shrink,
+    # and adding two more raw-SQLite sites for RDR-158 P4 to delete later.
+    # Removing it costs one decimal place in a stderr line and takes the site
+    # off the retirement backlog instead of adding to it.
+    # (Comment deliberately avoids the literal override token: the NO-SQLITE
+    # scanner is a dumb regex by design, so even PROSE naming it counts.)
     print(  # noqa: T201 — long-running upgrade progress to stderr; structured event emitted via log.info below
-        f"  Backfill complete: {actual_written} projection assignments stored "
-        f"({total_assigned} attempted) in {total_elapsed:.1f}s across {n} collections.",
+        f"  Backfill complete: {total_assigned} projection assignments attempted "
+        f"in {total_elapsed:.1f}s across {n} collections. (Attempted, not stored: "
+        f"INSERT OR IGNORE dedupes, so the stored count may be lower.)",
         file=sys.stderr,
     )
     log.info("backfill_projection_complete",

@@ -593,11 +593,31 @@ def _run_trim_telemetry(days: int) -> None:
     # .trimSearchTelemetry / .trimHookFailures); only this call site never
     # routed to it. Same branch shape already used by _run_tier_writes below.
     if storage_backend_for("telemetry") == StorageBackend.SERVICE:
+        import httpx  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
         from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
-        store = HttpTelemetryStore()
-        deleted_search = store.trim_search_telemetry(days=days)
-        deleted_hooks = store.trim_hook_failures(days=days)
+        try:
+            store = HttpTelemetryStore()
+            deleted_search = store.trim_search_telemetry(days=days)
+            deleted_hooks = store.trim_hook_failures(days=days)
+        except (httpx.HTTPError, RuntimeError) as exc:
+            # Same class as _report_aspect_queue_service above (review
+            # 2026-07-25): store CONSTRUCTION resolves the endpoint and raises
+            # ServiceEndpointUnresolvableError (a RuntimeError, not an
+            # httpx error) when it cannot. This branch originally had NO
+            # handling at all, so an unresolvable endpoint or a transport blip
+            # crashed `nx doctor --trim` outright.
+            #
+            # Reporting nothing trimmed would be the false-clean this whole
+            # commit exists to remove — say UNKNOWN and exit non-zero so a
+            # scripted caller cannot mistake a failed trim for a completed one.
+            click.echo(
+                f"Error: telemetry trim unavailable ({exc}). Nothing was "
+                "trimmed and the live retention state is UNKNOWN.",
+                err=True,
+            )
+            raise click.exceptions.Exit(2)
     else:
         from nexus.db.t2.telemetry import Telemetry  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
@@ -644,7 +664,17 @@ def _report_aspect_queue_service() -> None:
         q = HttpAspectQueue()
         pending = q.pending_count()
         failed = q.list_failed()
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, RuntimeError) as exc:
+        # RuntimeError is NOT redundant with httpx.HTTPError: constructing the
+        # store resolves the endpoint, and an unresolvable one raises
+        # ServiceEndpointUnresolvableError, which subclasses RuntimeError and
+        # NOT httpx.HTTPError (review 2026-07-25). Catching only the transport
+        # error let a missing supervisor lease / absent NX_SERVICE_TOKEN escape
+        # as a traceback out of `nx doctor` — turning a health check into a
+        # crash, in the very commit whose purpose was to stop doctor from
+        # misreporting health. The console twin
+        # (console/routes/health.py::_collect_aspect_queue_data_service) had
+        # this right; this call site did not.
         click.echo(
             f"aspect_extraction_queue: service backend unreachable ({exc}). "
             "Queue depth UNKNOWN — not reporting a count.",

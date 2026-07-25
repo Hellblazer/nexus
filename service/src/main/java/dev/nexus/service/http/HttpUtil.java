@@ -188,6 +188,14 @@ public final class HttpUtil {
      * the previous 500 — wrong status, never a wrong success. The paired
      * ``rejectsCrossTenantIdWith409`` test pins the live wording so the coupling
      * cannot rot silently.
+     *
+     * <p>LOCALE COUPLING (review, 2026-07-25): the message match assumes the PG
+     * server reports in English. A server with a non-English {@code lc_messages}
+     * localises "row-level security policy", the match silently fails, and every
+     * RLS refusal degrades back to an opaque 500 — the exact defect this exists to
+     * remove, reappearing as a config-dependent regression rather than a crash.
+     * Acceptable for a controlled hosted instance; state it rather than rediscover
+     * it. Same fragility class as a future PG rewording.
      */
     public static boolean isRlsRowRejection(Throwable t) {
         Throwable c = t;

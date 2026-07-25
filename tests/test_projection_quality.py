@@ -491,9 +491,14 @@ class TestBackfillProjectionRegression:
     ) -> None:
         from nexus.db.migrations import backfill_projection
 
-        class _StubT3:
-            def __init__(self, client: Any) -> None:
-                self._client = client
+        # nexus-at2ff: this stub used to be `class _StubT3: self._client = client`
+        # — the SAME wrapper shape that hid the production bug in
+        # tests/test_catalog.py. backfill_projection now passes the HANDLE to
+        # project_against (production's make_t3() returns HttpVectorClient,
+        # which has no `_client`), so a stub that only exposes `_client` no
+        # longer matches production and the test would assert against a shape
+        # that cannot occur. InMemoryVectorClient is already production-shaped,
+        # so it is passed directly.
 
         # Seed two collections with distinct clusters so projection has targets.
         # Upload source docs to the T3 collection too — project_against fetches
@@ -518,7 +523,7 @@ class TestBackfillProjectionRegression:
             )
 
         # Must not raise — previously would ValueError on tuple unpack.
-        backfill_projection(_StubT3(chroma_client), db.taxonomy)
+        backfill_projection(chroma_client, db.taxonomy)
 
         rows = db.taxonomy.conn.execute(
             "SELECT similarity, source_collection FROM topic_assignments "

@@ -209,7 +209,29 @@ public final class TaxonomyHandler implements HttpHandler {
             // would be cross-tenant information disclosure. "not available" is all the
             // caller is entitled to, and all it needs (pick another id / re-key the
             // import).
-            if (op != null && op.startsWith("/import/") && HttpUtil.isRlsRowRejection(e)) {
+            //
+            // ACCEPTED RISK, stated so it is not re-derived (review 2026-07-25, Hal
+            // decision): the 409-vs-200 STATUS ITSELF is a weaker signal of the same
+            // fact. nexus.topics has a GLOBAL BIGSERIAL primary key — RLS scopes rows,
+            // not the id space — so an authenticated tenant can probe whether an
+            // arbitrary id is claimed SOMEWHERE in the system without any read access
+            // to the holder's data. What leaks is existence only: not the holding
+            // tenant, not the label, not any row content (the body and the log line
+            // above are both id-free and tenant-B-free). Probed at scale it reveals
+            // roughly how densely the global id space is populated.
+            //
+            // Accepted because: the route requires Bearer auth + tenant, it is a
+            // fidelity-ETL/migration path rather than a hot API, and ids are normally
+            // each tenant's own prior sequential rowids — collisions happen by accident
+            // rather than by choosing. The enumeration surface is NOT closed: there is
+            // no rate limiting on this route (AuthFilter has none). Tracked separately.
+            //
+            // Removing the oracle at source would mean a composite (tenant_id, id) key
+            // so ids cannot collide across tenants — which deletes this whole class.
+            // That was already considered and REJECTED: topics_parent_fk is
+            // self-referential, so a composite key forces every parent_id to carry a
+            // tenant too. The global BIGSERIAL is deliberate, not an oversight.
+            if (isImportOp(op) && HttpUtil.isRlsRowRejection(e)) {
                 log.warn("event=taxonomy_import_id_unavailable tenant={} op={}", tenant, op);
                 HttpUtil.send(exchange, 409, json(Map.of(
                     "error", "supplied id is not available in this tenant")));
@@ -218,6 +240,32 @@ public final class TaxonomyHandler implements HttpHandler {
             log.error("event=taxonomy_handler_error tenant={} op={}", tenant, op, e);
             HttpUtil.send(exchange, 500, json(Map.of("error", "internal server error")));
         }
+    }
+
+    /**
+     * True for the fidelity-ETL routes that preserve CLIENT-SUPPLIED ids.
+     *
+     * <p>Both the per-kind routes ({@code /import/topic}, {@code /import/assignment},
+     * {@code /import/link}, {@code /import/meta}) and the BULK route
+     * ({@code /import_batch}) insert caller-chosen primary keys, so both can be
+     * refused by RLS with SQLSTATE 42501 when a second tenant contests an id that
+     * {@code nexus.topics}' global BIGSERIAL PK already holds.
+     *
+     * <p>Extracted because the original guard was {@code op.startsWith("/import/")},
+     * which silently EXCLUDED {@code /import_batch} — there is no slash after
+     * "import" in that route, so the bulk path kept returning the opaque 500 the fix
+     * was cut to remove. That is the heavier real-world path: {@code importTopicsBatch}
+     * is the 190k-row dogfood leg, and it shares the identical
+     * {@code insertInto(TOPICS, TOPICS.ID, ...).onConflict(TOPICS.ID)} shape as the
+     * single-row importer. Found in review, 2026-07-25.
+     *
+     * <p>Not qualified by {@code kind}: the assignment/link/meta batch importers key
+     * on tenant-scoped composite conflict targets, so a cross-tenant RLS refusal is
+     * structurally impossible for them and {@link HttpUtil#isRlsRowRejection} simply
+     * never fires.
+     */
+    private static boolean isImportOp(String op) {
+        return op != null && (op.startsWith("/import/") || op.equals("/import_batch"));
     }
 
     // ── Topics handlers ────────────────────────────────────────────────────────

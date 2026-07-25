@@ -161,6 +161,32 @@ class TaxonomyHandlerImportRlsTest {
     }
 
     @Test
+    void importBatch_secondTenantClaimingSameId_returns409_not500() throws Exception {
+        // nexus-asaod review H1: the fix guarded op.startsWith("/import/"), which
+        // EXCLUDES "/import_batch" — no slash after "import". The bulk route reaches
+        // importTopicsBatch, which does the identical
+        // insertInto(TOPICS, TOPICS.ID, ...).onConflict(TOPICS.ID) against the same
+        // global BIGSERIAL PK, so it raised the same 42501 and returned the same
+        // opaque 500 the fix was cut to remove. It is also the HEAVIER real path (the
+        // 190k-row dogfood leg), so the fix was half-applied to the less-used route.
+        long id = CONTESTED_ID + 1;
+        CapturingExchange seed = importTopicBatch(id, "batch-a");
+        handleAs(TENANT_A, seed);
+        assertThat(seed.status).as("precondition: tenant A holds the id").isIn(200, 409);
+
+        CapturingExchange ex = importTopicBatch(id, "batch-b");
+        handleAs(TENANT_B, ex);
+
+        assertThat(ex.status)
+            .as("bulk import must classify an RLS row refusal the same as the single-row route")
+            .isEqualTo(409);
+        assertThat(ex.bodyString()).contains("not available");
+        assertThat(ex.bodyString())
+            .as("must not leak that the id belongs to another tenant")
+            .doesNotContain(TENANT_A);
+    }
+
+    @Test
     void importTopic_conflictBodyDoesNotLeakTheOtherTenant() throws Exception {
         CapturingExchange seed = importTopic(CONTESTED_ID + 1, "leak-probe-a");
         handleAs(TENANT_A, seed);
@@ -228,6 +254,22 @@ class TaxonomyHandlerImportRlsTest {
         } finally {
             RequestContext.clear();
         }
+    }
+
+    /**
+     * The BULK route (nexus-asaod review, H1). Same client-supplied id, same global
+     * BIGSERIAL PK, same {@code onConflict(TOPICS.ID)} in importTopicsBatch — but a
+     * different op string, which the original {@code startsWith("/import/")} guard
+     * did not match.
+     */
+    private static CapturingExchange importTopicBatch(long id, String label) {
+        String row = "{\"id\":" + id + ",\"label\":\"" + label + "\","
+            + "\"parent_id\":null,\"collection\":\"knowledge__rls\","
+            + "\"centroid_hash\":null,\"doc_count\":1,"
+            + "\"created_at\":\"2026-07-25T00:00:00Z\","
+            + "\"review_status\":\"pending\",\"terms\":\"[]\"}";
+        String body = "{\"kind\":\"topic\",\"rows\":[" + row + "]}";
+        return new CapturingExchange("POST", URI.create("/v1/taxonomy/import_batch"), body);
     }
 
     private static CapturingExchange importTopic(long id, String label) {

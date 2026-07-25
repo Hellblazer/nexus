@@ -1169,6 +1169,25 @@ def _no_results_message(diagnostics: list, *, base: str = "No results.") -> str:
 # Note: catalog server also registers a "search" tool. No collision — Claude Code
 # disambiguates by server prefix (mcp__plugin_conexus_nexus__search vs
 # mcp__plugin_conexus_nexus-catalog__search).
+def _is_missing_route_error(exc: BaseException) -> bool:
+    """True when *exc* says the ENGINE lacks the route, not that the write failed.
+
+    nexus-huaef. Distinguishes a version-skew engine (404 / 405 on a route that
+    a newer build serves) from a genuine audit-store failure, so the operator
+    is told to upgrade rather than to go fix a healthy store.
+
+    Deliberately narrow: only 404/405 count. A 500 from the consents route is a
+    real write failure and must keep the generic message. Both paths REFUSE —
+    this only chooses which explanation the operator is given, so a
+    misclassification here can never release the playbook unaudited.
+    """
+    import httpx  # noqa: PLC0415 — deferred, startup cost
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in (404, 405)
+    return False
+
+
 @mcp.tool(
     title="Semantic Search",
     annotations={"readOnlyHint": True},
@@ -6225,6 +6244,8 @@ def _live_store_detail(diagnostic_sql) -> str:  # noqa: ANN001, ANN202 — share
     # timed-out call on an idempotency promise would multiply consent rows.
     annotations={"destructiveHint": True},
 )
+
+
 def remediate(topic: str = "chash-poison", confirm: bool = False) -> str:
     """Consent-gated guided-recovery playbook for an upgrade-edge *topic*
     (RDR-182 P3.2, nexus-ykzbj.11).
@@ -6319,25 +6340,34 @@ def remediate(topic: str = "chash-poison", confirm: bool = False) -> str:
 
     try:
         with _t2_ctx() as _db:
-            # hasattr pre-check (review-p3 M1), not `except AttributeError`:
-            # an unrelated AttributeError from _t2_ctx/record_consent
-            # internals must NOT be misdiagnosed as the service-mode parity
-            # gap — it falls to the generic fail-closed refusal below.
-            if not hasattr(_db.telemetry, "record_consent"):
-                return (
-                    "Cannot record the consent audit in this deployment "
-                    "(this engine build lacks the consent-audit route — upgrade the "
-                    "engine to one with nexus-ng2sy) "
-                    "— REFUSING to release the recovery playbook unaudited. "
-                    "Run the CLI path on the local install, or wait for the "
-                    "engine-side consent-audit parity."
-                )
+            # nexus-huaef: this was `if not hasattr(_db.telemetry,
+            # "record_consent")`, which could NEVER fire — record_consent is
+            # present on BOTH Telemetry and HttpTelemetryStore, so the
+            # version-skew branch was structurally unreachable and its
+            # actionable "upgrade the engine" message was dead.
+            #
+            # The fail-closed CONTRACT was never at risk: HttpTelemetryStore
+            # .record_consent posts and _raise_for_status raises
+            # httpx.HTTPStatusError on any non-2xx, so an engine lacking the
+            # consents route lands in the generic refusal below. What was lost
+            # was the DIAGNOSIS — the operator got a bare 404 instead of being
+            # told to upgrade. So the skew check moves to a condition that can
+            # actually occur: the route reporting itself absent.
             _db.telemetry.record_consent(
                 scope=consent_scope("remediate", topic),
                 ts=datetime.now(timezone.utc).isoformat(),
                 granted=True,
             )
     except Exception as exc:  # noqa: BLE001 — fail-closed auditing: no unaudited release, ever
+        if _is_missing_route_error(exc):
+            return (
+                "Cannot record the consent audit in this deployment "
+                "(this engine build lacks the consent-audit route — upgrade the "
+                "engine to one with nexus-ng2sy) "
+                "— REFUSING to release the recovery playbook unaudited. "
+                "Run the CLI path on the local install, or wait for the "
+                "engine-side consent-audit parity."
+            )
         return (
             f"Consent audit write FAILED ({exc}) — REFUSING to release the "
             "recovery playbook unaudited. Fix the audit store (T2 memory.db) "

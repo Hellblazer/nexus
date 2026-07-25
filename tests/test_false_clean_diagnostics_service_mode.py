@@ -282,3 +282,93 @@ class TestConsoleHealthTwin:
             data = health_mod._collect_health_data()
 
         assert data["catalog"]["scope"] == "local-cache-frozen", data["catalog"]
+
+
+# ── Endpoint-unresolvable, not just transport-down (review 2026-07-25) ──────
+#
+# The first cut of these two fixes caught only httpx.HTTPError. Constructing an
+# Http* store RESOLVES the endpoint, and an unresolvable one raises
+# ServiceEndpointUnresolvableError — which subclasses RuntimeError and NOT
+# httpx.HTTPError. So a missing supervisor lease or an absent NX_SERVICE_TOKEN
+# escaped as a traceback out of `nx doctor`, in the commit whose entire purpose
+# was to stop doctor misreporting health.
+#
+# The console twin written in the SAME commit caught (httpx.HTTPError,
+# RuntimeError) correctly, which is why these tests assert on the exception
+# TYPE rather than on any particular transport failure: the two call sites must
+# not be able to drift apart again.
+
+
+class TestEndpointUnresolvableDegradesCleanly:
+    def test_unresolvable_error_is_a_runtime_not_an_httpx_error(self) -> None:
+        """Pins the premise. If this ever becomes an httpx.HTTPError subclass,
+        the narrower except clauses would have been sufficient after all and
+        these guards can be revisited — but until then they are load-bearing."""
+        import httpx
+
+        from nexus.db.service_endpoint import ServiceEndpointUnresolvableError
+
+        assert issubclass(ServiceEndpointUnresolvableError, RuntimeError)
+        assert not issubclass(ServiceEndpointUnresolvableError, httpx.HTTPError)
+
+    def test_aspect_queue_check_survives_unresolvable_endpoint(
+        self, service_mode: None,
+    ) -> None:
+        from nexus.commands import doctor as doctor_mod
+        from nexus.db.service_endpoint import ServiceEndpointUnresolvableError
+
+        with patch("nexus.db.t2.http_aspect_queue.HttpAspectQueue") as q:
+            q.side_effect = ServiceEndpointUnresolvableError("no lease, no token")
+            runner = CliRunner()
+            with runner.isolation() as (out, err, _):
+                doctor_mod._run_check_aspect_queue()
+                printed = out.getvalue().decode() + err.getvalue().decode()
+
+        assert "UNKNOWN" in printed, printed
+        assert "0 pending" not in printed
+
+    def test_trim_reports_UNKNOWN_and_exits_nonzero_on_unresolvable_endpoint(
+        self, service_mode: None,
+    ) -> None:
+        """Trim had NO handling at all. Reporting nothing-trimmed would be the
+        false-clean being fixed, so it must say UNKNOWN and exit non-zero —
+        a scripted caller must not read a failed trim as a completed one."""
+        import click
+
+        from nexus.commands import doctor as doctor_mod
+        from nexus.db.service_endpoint import ServiceEndpointUnresolvableError
+
+        with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as store:
+            store.side_effect = ServiceEndpointUnresolvableError("no lease, no token")
+            runner = CliRunner()
+            with runner.isolation() as (out, err, _):
+                with pytest.raises(click.exceptions.Exit) as exc:
+                    doctor_mod._run_trim_telemetry(days=30)
+                printed = out.getvalue().decode() + err.getvalue().decode()
+
+        assert exc.value.exit_code == 2
+        assert "UNKNOWN" in printed, printed
+        assert "Trimmed" not in printed
+
+    def test_trim_survives_a_transport_error_mid_call(
+        self, service_mode: None,
+    ) -> None:
+        """Not only construction: a blip between the two trim calls must not
+        leave a partial trim reported as a whole one."""
+        import click
+
+        from nexus.commands import doctor as doctor_mod
+
+        with patch("nexus.db.t2.http_telemetry_store.HttpTelemetryStore") as store:
+            store.return_value.trim_search_telemetry.return_value = 5
+            store.return_value.trim_hook_failures.side_effect = httpx.ConnectError("boom")
+            runner = CliRunner()
+            with runner.isolation() as (out, err, _):
+                with pytest.raises(click.exceptions.Exit):
+                    doctor_mod._run_trim_telemetry(days=30)
+                printed = out.getvalue().decode() + err.getvalue().decode()
+
+        assert "UNKNOWN" in printed
+        assert "search_telemetry" not in printed, (
+            f"must not report the partial success as a completed trim: {printed}"
+        )

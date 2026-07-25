@@ -261,8 +261,17 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
 
         Bead nexus-xnz0o is a HARD BLOCKER of Phase-4 catalog deletion
         (nexus-gmiaf.24).
+
+        RAISES AttributeError, NEVER RuntimeError (nexus-xj744). ``hasattr()``
+        only swallows ``AttributeError``; anything else propagates. A
+        ``RuntimeError`` here means a caller writing the sanctioned
+        ``hasattr(cat, "_db")`` / ``has_raw_access(cat)`` probe would CRASH in
+        service mode instead of getting ``False`` and taking the service branch
+        — the guard idiom that exists to make such checks safe would become the
+        thing that breaks them. ``db/t2/_raw_handle_guard.py`` states this
+        contract explicitly; this property was the one place violating it.
         """
-        raise RuntimeError(
+        raise AttributeError(
             "catalog._db is unavailable in service mode "
             "(NX_STORAGE_BACKEND_CATALOG=service).  "
             "This command path is not yet ported to the public catalog API — "

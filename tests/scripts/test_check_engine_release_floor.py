@@ -194,6 +194,36 @@ def test_pin_check_runs_before_the_network_probe() -> None:
     mock_probe.assert_not_called()
 
 
+def test_newest_published_engine_parses_the_tag_namespace(tmp_path) -> None:
+    """HERMETIC parser check — the important half, decoupled from the checkout.
+
+    The sibling test below reads THIS repo's tags, which conflated two things:
+    "the parser works" and "this checkout has tags". A shallow CI checkout
+    fetches no tags, so the sibling failed on every push from a797dbd4 onward
+    and four commits landed on red CI (nexus-dhs30). This one builds its own
+    repo, so the parse bug it exists to catch — parse_engine_version takes
+    "0.1.56", NOT "engine-service-v0.1.56", which silently made every tag
+    unparseable on this code's first run — is caught in ANY environment.
+    """
+    import subprocess
+
+    repo = tmp_path / "r"
+    repo.mkdir()
+    run = lambda *a: subprocess.run(a, cwd=repo, check=True, capture_output=True)  # noqa: E731
+    run("git", "init", "-q")
+    (repo / "f").write_text("x")
+    run("git", "add", "f")
+    run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "i")
+    for tag in ("engine-service-v0.1.9", "engine-service-v0.1.56", "engine-service-v0.1.7",
+                "v9.9.9", "not-an-engine-tag"):
+        run("git", "tag", tag)
+
+    newest = gate.newest_published_engine(repo_root=repo)
+
+    assert newest == (0, 1, 56), newest  # numeric max, not lexicographic
+    # The non-engine tags must be ignored, not crash the parse.
+
+
 def test_newest_published_engine_reads_real_tags() -> None:
     """Non-vacuity: the discovery function must actually parse this repo's tags.
 
@@ -206,3 +236,27 @@ def test_newest_published_engine_reads_real_tags() -> None:
     assert newest is not None, "engine-service-v* tags exist in this repo"
     assert isinstance(newest, tuple) and len(newest) == 3
     assert newest >= (0, 1, 52)
+
+
+def test_incompatible_service_error_fails_loud(capsys: pytest.CaptureFixture[str]) -> None:
+    """The generic ManagedServiceError branch had ZERO coverage.
+
+    Demonstrated by the test-validator: replacing that branch's body with
+    `return 0` left all 14 tests green. It is reachable in production —
+    probe_managed_service raises ManagedServiceIncompatible (a
+    ManagedServiceError, NOT a ManagedServiceUnreachable) for a below-floor,
+    missing, or unparseable release_version. An uncovered branch that returns
+    the SUCCESS code would report a stale cloud engine as current, which is the
+    exact failure this gate exists to prevent.
+    """
+    from nexus.db.managed_endpoint import ManagedServiceError
+
+    with patch.object(gate, "probe_managed_service",
+                      side_effect=ManagedServiceError("release_version 0.0.1 below floor")), \
+         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION):
+        rc = gate.check_floor(url=_TEST_URL)
+
+    assert rc == 1, "an incompatible managed service must FAIL the gate, not pass it"
+    err = capsys.readouterr().err
+    assert "FLOOR CHECK FAILED" in err
+    assert _floor_str() in err, "the message must name the required floor"
