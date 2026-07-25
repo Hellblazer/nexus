@@ -133,7 +133,26 @@ from __future__ import annotations
 #: per-query-diff cloud-gated GREEN 2026-07-23Z (parity 106/113 ==
 #: baseline with zero per-query regressions, recall AC-3 identical,
 #: reranker=rerank-2.5 active with zero degrade events, T2 [21062]).
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 52)
+#: -> (0,1,56) 2026-07-25: ONE-ENGINE-IDENTITY bump, not a feature dependency.
+#: v0.1.53-.56 were cut, gated and deployed while this constant sat at
+#: (0,1,52), so four tags of engine work reached NO local-mode install —
+#: cloud users get whatever conexus deployed, local installs get ONLY what
+#: this constant names. Carries: v0.1.53 the P2-J chroma-trio + ingest-cloud
+#: deletion (RDR-155 P4b) and the chash-410 recut; v0.1.55 the manifest
+#: count guard (nexus-ir6eh, partial-truncation defense), /livez and
+#: /version off the pool (nexus-hubc0), /links/orphaned; v0.1.56 the
+#: nexus-asaod fix — an RLS row refusal on /import/* is a caller-resolvable
+#: 409, not an opaque 500, without leaking that the id exists under another
+#: tenant. Gates: --shakeout PASSED, published-artifact --acquire PASSED
+#: 11/11 on a bare box (/version == the tag, store/index/search, doctor
+#: clean), deployed to api.conexus-nexus.com and cloud-gated GREEN
+#: 2026-07-25 (recall@20 12/12 local==cloud, hybrid parity 113/105 zero
+#: per-query regressions, p95 1873ms < v0.1.55's 1886ms). Deploy verified
+#: independently via `nx service probe` before this bump; record-deploy
+#: written [21141]. Bumped AFTER the deploy on purpose — bumping first makes
+#: every cloud client refuse the managed service as below-identity (GH #1402
+#: inverted). Detection for the gap that let this drift: nexus-6igii.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 56)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:

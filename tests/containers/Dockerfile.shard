@@ -20,13 +20,13 @@
 # Build (from repo root; fanout.sh does all of this):
 #   docker build --platform linux/arm64 \
 #     -f tests/containers/Dockerfile.shard \
-#     --build-arg PINNED_SERVICE_TAG=engine-service-v0.1.52 \
-#     -t nexus-test-shard:engine-service-v0.1.52 .
+#     --build-arg PINNED_SERVICE_TAG=engine-service-v0.1.56 \
+#     -t nexus-test-shard:engine-service-v0.1.56 .
 
 FROM eclipse-temurin:25-jre-noble
 # Java 25 JRE (service/pom.xml maven.compiler.release=25) on Ubuntu 24.04.
 
-ARG PINNED_SERVICE_TAG=engine-service-v0.1.52
+ARG PINNED_SERVICE_TAG=engine-service-v0.1.56
 # Optional integrity pin for the PG bundle download. Empty = record-only
 # (the sha is still captured into /opt/nexus-pg/bundle.sha256 for provenance).
 ARG PG_BUNDLE_SHA256=""

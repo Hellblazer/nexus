@@ -79,7 +79,17 @@ class TestRequiredEngineVersion:
         # 2026-07-23Z: parity 106/113 == baseline, zero per-query
         # regressions, reranker=rerank-2.5 active, zero degrades (T2
         # [21062]).
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 52)
+        # ->(0,1,56) 2026-07-25: ONE-ENGINE-IDENTITY bump, NOT a feature
+        # dependency — and that distinction is the point. v0.1.53-.56 were
+        # cut, gated and deployed while this sat at (0,1,52), delivering
+        # four tags of engine work to zero local-mode installs. The old
+        # "bump only if the release hard-requires the features" carve-out
+        # is what allowed that; it is retired (Hal directive 2026-07-15,
+        # swept from the checklists 2026-07-25) and
+        # scripts/check_engine_release_floor.py now FAILS the release when
+        # a published tag is ahead of this constant. Deployed + cloud-gated
+        # GREEN 2026-07-25, deploy verified independently before the bump.
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 56)
 
 
 class TestParseEngineVersion:
