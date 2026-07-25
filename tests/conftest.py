@@ -4,9 +4,8 @@ import os
 import pytest
 from pathlib import Path
 
-import chromadb
 import structlog
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
 from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database

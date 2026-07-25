@@ -28,7 +28,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 from click.testing import CliRunner
 
 from nexus.cli import main

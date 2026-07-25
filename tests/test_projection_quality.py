@@ -13,12 +13,12 @@ import os
 import sqlite3
 from pathlib import Path
 
-import chromadb
 import numpy as np
 import pytest
 
 from nexus.db.t2 import T2Database
 from tests.conftest import make_vector_test_client
+from typing import Any
 
 _ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
 
@@ -264,7 +264,7 @@ class TestAddProjectionQualityColumns:
 
 
 @pytest.fixture()
-def chroma_client() -> chromadb.ClientAPI:
+def chroma_client() -> Any:
     """Ephemeral ChromaDB client per test.
 
     nexus-alnpa: ``make_vector_test_client()`` instances share a
@@ -396,7 +396,7 @@ class TestHdbscanPathPreserved:
 
 
 def _build_two_clusters_in_chroma(
-    client: chromadb.ClientAPI, collection_name: str = "coll_A",
+    client: Any, collection_name: str = "coll_A",
 ) -> list[dict]:
     """Seed ``collection_name`` centroids for two well-separated clusters."""
     rng = np.random.default_rng(42)
@@ -410,7 +410,7 @@ class TestAssignSingleReturnsNamedTuple:
     """SC-2 case 4: AssignResult shape + distance→similarity inversion."""
 
     def test_assign_single_returns_namedtuple(
-        self, db: T2Database, chroma_client: chromadb.ClientAPI,
+        self, db: T2Database, chroma_client: Any,
     ) -> None:
         from nexus.db.t2.catalog_taxonomy import AssignResult
 
@@ -441,7 +441,7 @@ class TestAssignBatchCrossCollectionSimilarity:
     """C-1 (auditor): cross-collection batch must propagate per-row similarity."""
 
     def test_assign_batch_cross_collection_populates_similarity(
-        self, db: T2Database, chroma_client: chromadb.ClientAPI,
+        self, db: T2Database, chroma_client: Any,
     ) -> None:
         rng = np.random.default_rng(42)
         embeddings = rng.standard_normal((60, 384)).astype(np.float32) * 0.1
@@ -487,12 +487,12 @@ class TestBackfillProjectionRegression:
     """SC-8: ``backfill_projection`` consumes 3-tuples without crashing."""
 
     def test_backfill_projection_3tuple(
-        self, db: T2Database, chroma_client: chromadb.ClientAPI,
+        self, db: T2Database, chroma_client: Any,
     ) -> None:
         from nexus.db.migrations import backfill_projection
 
         class _StubT3:
-            def __init__(self, client: chromadb.ClientAPI) -> None:
+            def __init__(self, client: Any) -> None:
                 self._client = client
 
         # Seed two collections with distinct clusters so projection has targets.
@@ -534,7 +534,7 @@ class TestProjectAgainst3Tuple:
     """``project_against`` emits 3-tuples with raw cosine similarity."""
 
     def test_chunk_assignments_carry_similarity(
-        self, db: T2Database, chroma_client: chromadb.ClientAPI,
+        self, db: T2Database, chroma_client: Any,
     ) -> None:
         rng = np.random.default_rng(42)
         for name in ("code__pA", "code__pB"):
@@ -748,7 +748,7 @@ class TestDefaultProjectionThreshold:
 
 @pytest.fixture()
 def fixture_icf_ranking(
-    db: T2Database, chroma_client: chromadb.ClientAPI,
+    db: T2Database, chroma_client: Any,
 ) -> T2Database:
     """≥10 collections — calibration spread for ICF ranking tests (SC-3, S-3).
 
@@ -827,7 +827,7 @@ class TestIcfRankingFixture:
         assert len(counts) == 12
 
     def test_icf_weighted_ranking_differs_from_raw(
-        self, fixture_icf_ranking: T2Database, chroma_client: chromadb.ClientAPI,
+        self, fixture_icf_ranking: T2Database, chroma_client: Any,
     ) -> None:
         """SC-3 calibration spread: icf_map reorders the top-K topics for
         a source vs. the unweighted baseline. Uses a generous threshold so
@@ -862,7 +862,7 @@ class TestProjectAgainstIcf:
     """``project_against(icf_map=...)`` — weighting at filter time only."""
 
     def _seed_two_corpora(
-        self, db: T2Database, chroma_client: chromadb.ClientAPI,
+        self, db: T2Database, chroma_client: Any,
     ) -> None:
         rng = np.random.default_rng(42)
         for name in ("code__icfA", "code__icfB"):
@@ -884,7 +884,7 @@ class TestProjectAgainstIcf:
             )
 
     def test_icf_suppresses_hub_topics_below_threshold(
-        self, db: T2Database, chroma_client: chromadb.ClientAPI,
+        self, db: T2Database, chroma_client: Any,
     ) -> None:
         """A topic with ICF=0 must fail threshold regardless of raw cosine."""
         self._seed_two_corpora(db, chroma_client)
@@ -909,7 +909,7 @@ class TestProjectAgainstIcf:
         assert len(result["novel_chunks"]) == result["total_chunks"]
 
     def test_stored_similarity_is_raw_cosine_even_with_icf(
-        self, db: T2Database, chroma_client: chromadb.ClientAPI,
+        self, db: T2Database, chroma_client: Any,
     ) -> None:
         """Raw cosine stored; ICF only affects what gets through the filter."""
         self._seed_two_corpora(db, chroma_client)
@@ -932,7 +932,7 @@ class TestProjectAgainstIcf:
                 )
 
     def test_missing_topic_in_icf_map_defaults_to_one(
-        self, db: T2Database, chroma_client: chromadb.ClientAPI,
+        self, db: T2Database, chroma_client: Any,
     ) -> None:
         """ICF map lookup missing entries → weight 1.0 (no suppression)."""
         self._seed_two_corpora(db, chroma_client)

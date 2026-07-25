@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import pytest
 import pytest
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
 from nexus.corpus import index_model_for_collection
 from nexus.doc_indexer import index_pdf

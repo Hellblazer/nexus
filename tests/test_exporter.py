@@ -10,7 +10,7 @@ from typing import Generator
 import msgpack
 import numpy as np
 import pytest
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
 from nexus.db.http_vector_client import HttpVectorClient
 from nexus.db.t3 import T3Database

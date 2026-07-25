@@ -6,7 +6,7 @@ import time
 from unittest.mock import MagicMock
 
 import pytest
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
 from nexus.db.chroma_quotas import QUOTAS, NameTooLong, RecordTooLarge
 from nexus.db.t3 import T3Database

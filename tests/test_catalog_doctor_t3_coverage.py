@@ -19,7 +19,7 @@ import json
 from pathlib import Path
 
 import pytest
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 from click.testing import CliRunner
 
 from nexus.catalog import events as ev
