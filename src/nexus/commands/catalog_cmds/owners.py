@@ -79,10 +79,16 @@ def dedupe_owners_cmd(apply: bool, as_json: bool) -> None:
     # apply write.
     from nexus.catalog.factory import (  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
         CatalogAdminDaemonLiveError,
+        CatalogAdminServiceModeError,
         make_catalog_admin,
     )
     try:
         cat = make_catalog_admin()
+    except CatalogAdminServiceModeError as exc:
+        # nexus-aoqnb: no retry exists for this one — the verb has no
+        # service-mode implementation and the local file is frozen. Surfaced
+        # as a clean CLI error, never a traceback.
+        raise click.ClickException(str(exc)) from exc
     except CatalogAdminDaemonLiveError as exc:
         raise click.ClickException(str(exc)) from exc
     if cat is None:

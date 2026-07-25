@@ -848,22 +848,36 @@ def _run_check_t3_legacy_metadata(*, strict: bool = False) -> None:
     expose arbitrary-metadata ``where`` filters, so the check reports *not
     applicable* in service mode rather than producing a misleading result.
     """
-    from nexus.config import is_local_mode  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-
-    if not is_local_mode():
-        click.echo(
-            "T3 legacy-metadata check: not applicable in service/cloud mode "
-            "(legacy doc_id/source_path chunk metadata is a local-Chroma "
-            "concern; the pgvector service path uses a different schema)."
-        )
-        return
-
+    # nexus-cv6jp: gate on the HANDLE, not on install mode.
+    #
+    # This was `if not is_local_mode(): return "not applicable"`. That equated
+    # "local install" with "local Chroma", which stopped being true at RDR-155:
+    # a local install now runs the bundled PG + pgvector service too. So on a
+    # MIGRATED LOCAL box is_local_mode() is True, the guard did not fire, and
+    # the survey ran against pgvector with a Chroma frame — reporting on
+    # arbitrary-metadata `where` filters that backend does not expose.
+    #
+    # is_service_backed(db) asks the question that actually matters — is this
+    # handle the HTTP client? — and is the documented instance-based guard
+    # (RDR-155 P4a.2), so injected chroma-backed T3Database test fixtures keep
+    # taking the legacy branch regardless of env state.
     from nexus.db import make_t3  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
     try:
         db = make_t3()
     except Exception as exc:  # noqa: BLE001 — diagnostic: report unavailability, never crash doctor
         click.echo(f"T3 legacy-metadata check: T3 unavailable ({exc}).")
+        return
+
+    if is_service_backed(db):
+        click.echo(
+            "T3 legacy-metadata check: not applicable — T3 is service-backed "
+            "(pgvector). Legacy doc_id/source_path chunk metadata is a "
+            "local-Chroma concern and that backend uses a different schema. "
+            "NOTE: since the RDR-155 P4b Chroma deletion this is the normal "
+            "answer on every production install, local or cloud."
+        )
         return
 
     cols = db.list_collections()

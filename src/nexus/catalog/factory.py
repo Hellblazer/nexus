@@ -126,6 +126,17 @@ def _is_catalog_service_mode() -> bool:
     return storage_backend_for("catalog") == StorageBackend.SERVICE
 
 
+class CatalogAdminServiceModeError(RuntimeError):
+    """Raised by :func:`make_catalog_admin` in service mode (nexus-aoqnb).
+
+    Distinct from :class:`CatalogAdminDaemonLiveError`: that one says "stop the
+    daemon and retry", which is a real recovery. This one has no retry — the
+    verb has no service-mode implementation, and the local file it would touch
+    is a frozen migration source. Separate type so a caller cannot accidentally
+    offer the daemon-stop remedy for a situation it does not fix.
+    """
+
+
 class CatalogAdminDaemonLiveError(Exception):
     """Raised by :func:`make_catalog_admin` when a T2 daemon is live.
 
@@ -197,6 +208,35 @@ def make_catalog_admin(*, config_dir: Optional[Path] = None) -> Optional[Catalog
     boundary lint stays satisfied; callers must NOT bare-construct Catalog.
     """
     from nexus.config import catalog_path  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+
+    # nexus-aoqnb: SERVICE-MODE REFUSAL, checked before anything else.
+    #
+    # make_catalog_writer/make_catalog_reader both route to the HTTP client in
+    # service mode; this admin opener did NOT, so it handed back a direct
+    # writer on ``.catalog.db`` — the FROZEN migration source — while the
+    # authoritative catalog lives in Postgres. Its two callers are
+    # `nx catalog dedupe-owners --apply` and the backup restore verb, i.e. the
+    # two that MUTATE. On a migrated box the operator would see a successful
+    # restore whose documents landed in a file nothing reads.
+    #
+    # That is the split-brain writer GH #1419.4 asked to be ruled out: at one
+    # backup timestamp .catalog.db showed 532 docs/13 links against PG's
+    # 592/52. Refuse loudly rather than routing: these verbs mutate through the
+    # catalog's low-level event log, not the 22 daemon write ops, so there is
+    # no equivalent service path to send them to — a silent no-op or a partial
+    # port would both be worse than saying so.
+    if _is_catalog_service_mode():
+        raise CatalogAdminServiceModeError(
+            "Deep-maintenance catalog commands (dedupe-owners --apply, restore) "
+            "are unavailable in service mode. They mutate the local "
+            "`.catalog.db` through the catalog's low-level event log, and on a "
+            "migrated install that file is a FROZEN migration source — the "
+            "authoritative catalog is in Postgres, so the write would land "
+            "where nothing reads it and report success.\n"
+            "There is no service-mode equivalent for these verbs yet "
+            "(nexus-aoqnb). Do not work around this by unsetting the backend: "
+            "that would resurrect the two-writer split-brain."
+        )
 
     path = catalog_path()
     if not Catalog.is_initialized(path):

@@ -72,19 +72,57 @@ def _patch(monkeypatch, *, local: bool, t3: _FakeT3 | None) -> None:
         monkeypatch.setattr("nexus.db.make_t3", lambda: t3)
 
 
-def test_service_mode_reports_not_applicable(runner, monkeypatch):
-    called = {"made": False}
+def test_service_backed_handle_reports_not_applicable(runner, monkeypatch):
+    """Successor to test_service_mode_reports_not_applicable (nexus-cv6jp).
 
-    def _boom():
-        called["made"] = True
-        raise AssertionError("make_t3 must not be called in service mode")
+    The old test asserted make_t3() must NOT be called, pinning the mechanism
+    (an env check short-circuiting first) rather than the contract (the survey
+    does not run against a backend whose schema it cannot read). That mechanism
+    was the bug: is_local_mode() means "local install", which since RDR-155
+    ALSO uses the pgvector service — so on a migrated local box the guard did
+    not fire and the survey ran with the wrong frame.
 
-    monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
-    monkeypatch.setattr("nexus.db.make_t3", _boom)
+    Gating on the handle necessarily requires obtaining the handle. That is
+    free: constructing HttpVectorClient performs no I/O (connection details are
+    resolved per request), so calling make_t3() costs nothing and is now the
+    correct thing to do.
+    """
+    from nexus.db.http_vector_client import HttpVectorClient
+
+    made = {"count": 0}
+
+    def _service_handle():
+        made["count"] += 1
+        return HttpVectorClient.__new__(HttpVectorClient)  # no I/O
+
+    monkeypatch.setattr("nexus.db.make_t3", _service_handle)
+    # is_local_mode deliberately TRUE — the migrated-local-box shape that the
+    # old gate got wrong. The verdict must come from the handle regardless.
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+
+    res = runner.invoke(main, ["doctor", "--check-t3-legacy-metadata"])
+
+    assert res.exit_code == 0, res.output
+    assert "not applicable" in res.output.lower()
+    assert made["count"] == 1, "the handle IS obtained now — that is the gate"
+
+
+def test_local_mode_true_does_not_force_the_survey(runner, monkeypatch):
+    """The exact regression: a migrated LOCAL install must not be surveyed.
+
+    is_local_mode() is True here, which is what the old gate keyed on. If the
+    verdict ever goes back to install mode, this fails.
+    """
+    from nexus.db.http_vector_client import HttpVectorClient
+
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+    monkeypatch.setattr(
+        "nexus.db.make_t3", lambda: HttpVectorClient.__new__(HttpVectorClient)
+    )
     res = runner.invoke(main, ["doctor", "--check-t3-legacy-metadata"])
     assert res.exit_code == 0, res.output
     assert "not applicable" in res.output.lower()
-    assert called["made"] is False
+    assert "legacy doc_id" not in res.output or "not applicable" in res.output.lower()
 
 
 def test_no_collections(runner, monkeypatch):
