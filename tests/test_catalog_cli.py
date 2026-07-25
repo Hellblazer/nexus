@@ -2164,13 +2164,30 @@ class TestWhh61MigrationCarve:
 
 
 class TestWhh61MaintenanceCarve:
-    """Contract pins for the nexus-whh61.4 maintenance (gc + chash-reconcile) carve.
+    """Contract pins for the nexus-whh61.4 maintenance carve.
 
     Non-vacuous: fails on re-inline into ``commands.catalog``, a dropped
     ``register`` call, or import-bound (non-module-routed) ``_get_catalog``.
+
+    RDR-155 P4b P3: ``chash-reconcile`` was the carve's second command and is
+    RETIRED — it swept stale rows from the local SQLite chash router, a table
+    RDR-187 DROPped, and it already refused service-mode installs outright. The
+    carve contract itself is unchanged and still worth pinning; ``gc`` is simply
+    the only inhabitant now.
     """
 
-    MAINT_COMMANDS = ["gc", "chash-reconcile"]
+    MAINT_COMMANDS = ["gc"]
+
+    def test_chash_reconcile_is_retired(self):
+        """Successor to the removed second MAINT_COMMANDS entry: the verb must
+        stay gone. Without this, `chash-reconcile` could be re-registered and
+        the shrunk MAINT_COMMANDS list would say nothing about it."""
+        from nexus.cli import main
+        catalog_group = main.commands["catalog"]
+        assert "chash-reconcile" not in catalog_group.commands, (
+            "nx catalog chash-reconcile is back — it was retired at RDR-155 "
+            "P4b P3 because RDR-187 dropped the chash_index router it swept."
+        )
 
     def test_maintenance_commands_registered_on_group(self):
         from nexus.cli import main

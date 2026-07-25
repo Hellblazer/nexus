@@ -86,7 +86,15 @@ def test_mode_declarations_are_explicit(request: pytest.FixtureRequest) -> None:
 # rationale comment (matching the style used throughout
 # `_MODE_LINT_EXCLUDE_FILES` / `_MODE_LINT_EXCLUDE_NODEIDS` above), then
 # consciously bump the corresponding constant below in the same diff.
-_MODE_LINT_EXCLUDE_FILES_CEILING = 72
+# 72 -> 73 (RDR-155 P4b P3, 2026-07-25): + test_voyage_ef.py. The nexus-owned
+# Voyage EF replaced chromadb's at P3.1, and its unit tests assert the exact
+# `embed()` kwargs — including `model_name="voyage-code-3"` / `"voyage-context-3"`
+# — against a MOCKED voyageai.Client. Reason class "string-literal-as-name": the
+# tokens are the wire contract under test, not an embedder that runs. Requesting
+# `cloud_mode` would add a live-credential dependency to a fully mocked test,
+# which is the opposite of what that fixture is for. Rationale also recorded
+# beside the entry in conftest.py.
+_MODE_LINT_EXCLUDE_FILES_CEILING = 73
 # 43 -> 46 (6.10.1): +3 real keyed integration tests in test_integration.py
 # — cloud_mode's fake credentials broke them against the live Voyage API
 # (their mode declaration is the requires-key gating; see conftest entry).
