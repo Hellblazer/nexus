@@ -220,7 +220,7 @@ class T3Database:
     survives for callers that INJECT a chroma client:
 
     - tests only, since P4b P2 (the migration ETL that wrapped the
-      Chroma read legs died with them; this facade + chroma_quotas die
+      Chroma read legs died with them; chroma_quotas died at P3 and this facade dies
       at P3 with the chromadb dependency).
 
     The two historical modes still shape embedding-function dispatch:

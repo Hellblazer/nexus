@@ -23,7 +23,7 @@ The function is **idempotent**: re-running it on output is a no-op.
 Post-pass enrichers rely on this so they can merge additions with an
 existing row without accreting keys.
 
-Also see ``src/nexus/db/chroma_quotas.py`` for the upstream Chroma
+Also see ``src/nexus/db/limits.py`` for the upstream
 quota that this module keeps us under.
 """
 from __future__ import annotations
@@ -117,7 +117,7 @@ ALLOWED_TOP_LEVEL: frozenset[str] = frozenset({
 #: ``(store_type, category)``.
 CONTENT_TYPES: frozenset[str] = frozenset({"code", "pdf", "markdown", "prose"})
 
-#: Safety margin below Chroma's 32-key cap (:data:`~nexus.db.chroma_quotas.
+#: Safety margin below the historical 32-key cap (:data:`~nexus.db.limits.
 #: QUOTAS.MAX_RECORD_METADATA_KEYS`). Any write producing more than this
 #: many keys raises :class:`MetadataSchemaError`. RDR-101 Phase 3 PR δ
 #: bumped this to 32 to admit the new ``doc_id`` field; RDR-102 D2 then
