@@ -76,11 +76,23 @@ def _collect_health_data() -> dict[str, Any]:
         data["mineru"] = {"running": False}
 
     # Catalog status
+    # nexus-k0luu: age_seconds is the mtime of the LOCAL .catalog.db cache. On a
+    # migrated box that file is frozen, so the age grows without bound and reads
+    # as "the catalog has not been touched in weeks" when the authoritative
+    # catalog is in PG and current. Marked local-only rather than deleted (it is
+    # still a real signal pre-migration) so a reader cannot mistake it for the
+    # live catalog's age.
     cat_db = nexus_config_dir() / "catalog" / ".catalog.db"
     if cat_db.exists():
+        from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+        frozen = storage_backend_for("catalog") == StorageBackend.SERVICE
         mtime = cat_db.stat().st_mtime
         age = time.time() - mtime
-        data["catalog"] = {"exists": True, "age_seconds": int(age)}
+        data["catalog"] = {
+            "exists": True,
+            "age_seconds": int(age),
+            "scope": "local-cache-frozen" if frozen else "local",
+        }
     else:
         data["catalog"] = {"exists": False}
 
@@ -111,6 +123,42 @@ def _collect_health_data() -> dict[str, Any]:
     return data
 
 
+def _collect_aspect_queue_data_service() -> dict[str, Any]:
+    """Aspect-queue depth from the LIVE PG queue over HTTP (nexus-k0luu).
+
+    ``{"present": True, "backend": "service", "total": N, "failed_count": N}``.
+
+    Two deliberate shape differences from the sqlite collector, both because the
+    service list endpoint does not carry the data — declared rather than filled
+    with zeros, since a zero here is exactly the false-clean being fixed:
+      * ``by_status`` is omitted (no per-status aggregate endpoint).
+      * ``oldest_pending`` is None (enqueued_at is not in the projection).
+
+    On a transport error this returns ``{"present": True, "unavailable": True}``
+    — NOT ``{"present": False}`` and NOT a zero count. "I could not reach the
+    queue" and "the queue is empty" must not render identically.
+    """
+    import httpx  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
+
+    from nexus.db.t2.http_aspect_queue import HttpAspectQueue  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+
+    try:
+        q = HttpAspectQueue()
+        pending = q.pending_count()
+        failed = len(q.list_failed())
+    except (httpx.HTTPError, RuntimeError) as exc:
+        return {"present": True, "backend": "service", "unavailable": True,
+                "error": str(exc)[:200]}
+    return {
+        "present": True,
+        "backend": "service",
+        "total": pending + failed,
+        "pending": pending,
+        "failed_count": failed,
+        "oldest_pending": None,
+    }
+
+
 def _collect_aspect_queue_data() -> dict[str, Any]:
     """Return aspect_extraction_queue depth + per-status breakdown.
 
@@ -122,6 +170,13 @@ def _collect_aspect_queue_data() -> dict[str, Any]:
     import sqlite3 as _sqlite3  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
 
     from nexus.config import default_db_path  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
+
+    # nexus-k0luu (console twin of the doctor fix): without this branch the
+    # console reported the FROZEN SQLite queue as current on a migrated box,
+    # while the live queue was in PG. Same false-clean, second surface.
+    if storage_backend_for("aspect_queue") == StorageBackend.SERVICE:
+        return _collect_aspect_queue_data_service()
 
     db_path = default_db_path()
     if not db_path.exists():

@@ -226,19 +226,46 @@ class HttpDocumentAspectsStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         *,
         dry_run: bool = True,
     ) -> tuple[int, int]:
-        """Orphan deletion is SQLite-specific (ATTACH DATABASE).
+        """Orphan deletion is SQLite-specific (ATTACH DATABASE) — REFUSES here.
 
-        Over HTTP the service does not have catalog path access. Returns
-        (0, 0) to preserve the call signature without silently deleting
-        rows on a backend that cannot confirm orphan status.
+        Raises :class:`NotImplementedError`. It used to return ``(0, 0)`` with
+        only a structlog note, on the reasoning that a noop is safer than a
+        delete on a backend that cannot confirm orphan status. The delete half
+        of that reasoning still holds; the RETURN half did not.
+
+        ``(0, 0)`` is indistinguishable from "examined every row, found nothing
+        wrong". ``nx aspects gc`` consumed it and printed "examined 0 row(s)...
+        deleted 0 orphan(s)" — a clean bill of health for a check that never
+        ran (nexus-ingey). A caller cannot tell the two apart, so the value is
+        withheld rather than made ambiguous: no silent fallbacks for
+        data-correctness questions.
+
+        What is true on this backend, and why the refusal is not a coverage
+        loss for the main class: rows orphaned by a document delete cannot
+        accumulate, because fk-001-catalog-cross-store binds
+        ``document_aspects (tenant_id, doc_id)`` to
+        ``catalog_documents (tenant_id, tumbler)`` ``ON DELETE CASCADE``.
+
+        What is NOT covered, and must not be claimed clean: the
+        ``source_uri``-keyed sweep this method performs on SQLite. That
+        changeset deliberately leaves ``source_uri`` unconstrained ("a URI path
+        string, not a catalog tumbler reference").
         """
-        _log.info(
-            "http_document_aspects_store.delete_orphans_noop",
+        _log.warning(
+            "http_document_aspects_store.delete_orphans_refused",
             catalog_db_path=str(catalog_db_path),
             dry_run=dry_run,
             reason="orphan deletion requires catalog ATTACH which is SQLite-specific",
         )
-        return (0, 0)
+        raise NotImplementedError(
+            "delete_orphans is not supported on the service backend: the sweep "
+            "ATTACHes the catalog SQLite cache, which is unavailable over HTTP. "
+            "Document-delete orphans cannot accumulate here (document_aspects."
+            "doc_id is FK-bound to catalog_documents ON DELETE CASCADE), but the "
+            "source_uri-keyed class this method sweeps is deliberately "
+            "unconstrained and is NOT certified clean by this refusal. "
+            "Track: nexus-ingey."
+        )
 
     def rename_collection(self, *, old: str, new: str) -> int:
         """Re-point every row's collection from *old* to *new*."""

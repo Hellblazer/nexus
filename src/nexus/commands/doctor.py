@@ -583,18 +583,37 @@ def _run_trim_telemetry(days: int) -> None:
     audit-table TTL parity) — the two age-reaped, no-cascade audit tables.
     """
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
-    from nexus.db.t2.telemetry import Telemetry  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
-    db_path = default_db_path()
-    if not db_path.exists():
-        click.echo("T2 database not found — nothing to trim.")
-        return
-    telemetry = Telemetry(db_path)
-    try:
-        deleted_search = telemetry.trim_search_telemetry(days=days)
-        deleted_hooks = telemetry.trim_hook_failures(days=days)
-    finally:
-        telemetry.close()
+    # nexus-ingey: this used to construct Telemetry(db_path) unconditionally.
+    # On a migrated box that is the FROZEN SQLite — the verb trimmed a file
+    # nothing reads, printed "Trimmed N rows", and left the live PG audit tables
+    # growing untrimmed. The engine has exposed the operation the whole time
+    # (POST /v1/telemetry/{search,hook_failures}/trim -> TelemetryRepository
+    # .trimSearchTelemetry / .trimHookFailures); only this call site never
+    # routed to it. Same branch shape already used by _run_tier_writes below.
+    if storage_backend_for("telemetry") == StorageBackend.SERVICE:
+        from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+        store = HttpTelemetryStore()
+        deleted_search = store.trim_search_telemetry(days=days)
+        deleted_hooks = store.trim_hook_failures(days=days)
+    else:
+        from nexus.db.t2.telemetry import Telemetry  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+        db_path = default_db_path()
+        if not db_path.exists():
+            # Only truthful in sqlite mode. Reaching this in service mode was
+            # the second false-clean here: no local file meant "nothing to
+            # trim" even though the real tables were elsewhere and untrimmed.
+            click.echo("T2 database not found — nothing to trim.")
+            return
+        telemetry = Telemetry(db_path)
+        try:
+            deleted_search = telemetry.trim_search_telemetry(days=days)
+            deleted_hooks = telemetry.trim_hook_failures(days=days)
+        finally:
+            telemetry.close()
     for table, deleted in (
         ("search_telemetry", deleted_search),
         ("hook_failures", deleted_hooks),
@@ -604,6 +623,56 @@ def _run_trim_telemetry(days: int) -> None:
 
 
 # ── --check-aspect-queue (nexus-1pfq) ────────────────────────────────────────
+
+
+def _report_aspect_queue_service() -> None:
+    """Aspect-queue depth from the LIVE PG queue over HTTP (nexus-k0luu).
+
+    Mirrors the sqlite branch's output shape (total, per-status breakdown,
+    failed rows with last_error) so the operator reads one report regardless of
+    backend. Sourced from HttpAspectQueue, never from the frozen local file.
+
+    Fails LOUD on a transport error rather than degrading to the sqlite path:
+    silently falling back would reproduce the exact defect being fixed — a
+    frozen-file reading presented as the live queue.
+    """
+    import httpx  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    from nexus.db.t2.http_aspect_queue import HttpAspectQueue  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    try:
+        q = HttpAspectQueue()
+        pending = q.pending_count()
+        failed = q.list_failed()
+    except httpx.HTTPError as exc:
+        click.echo(
+            f"aspect_extraction_queue: service backend unreachable ({exc}). "
+            "Queue depth UNKNOWN — not reporting a count.",
+            err=True,
+        )
+        return
+
+    click.echo(f"aspect_extraction_queue: {pending} pending, {len(failed)} failed (service backend)")
+    if failed:
+        click.echo(f"\nFailed rows (showing top {min(len(failed), 20)}):")
+        for row in failed[:20]:
+            click.echo(
+                f"  {row.collection or '?'} :: {row.source_path or '?'} "
+                f"(retries {row.retry_count})"
+            )
+        # KNOWN GAP, stated rather than silently omitted: the sqlite branch
+        # prints each row's last_error, this one cannot. AspectRepository
+        # .listFailed does not select LAST_ERROR, so it never crosses the wire
+        # — QueueRow has no field for it either. Omitting it quietly would make
+        # a failing queue look like it had no recorded errors, which is the same
+        # false-clean class this fix exists to remove. Closing it needs an
+        # engine change (add LAST_ERROR to the projection) + a tag; tracked on
+        # nexus-k0luu.
+        click.echo(
+            "\n  (last_error is not carried by the service list endpoint — "
+            "see the worker logs for the failure text)"
+        )
+        click.echo("\nRe-enqueue them with: nx aspects requeue-failed")
 
 
 def _run_check_aspect_queue() -> None:
@@ -618,6 +687,16 @@ def _run_check_aspect_queue() -> None:
     """
     import sqlite3 as _sqlite3  # noqa: PLC0415 — deferred to keep CLI startup fast
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — circular-dep avoidance (nexus.commands._helpers)
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — circular-dep avoidance; deferred CLI-startup cost
+
+    # nexus-k0luu: this check had no service branch — on a migrated box it read
+    # the FROZEN SQLite queue and reported it as current, while the live queue
+    # was in PG. That is worse than useless here: `nx aspects requeue-failed`
+    # directs operators to this very check for backlog visibility, so a real
+    # failed-row backlog rendered as a clean queue.
+    if storage_backend_for("aspect_queue") == StorageBackend.SERVICE:
+        _report_aspect_queue_service()
+        return
 
     db_path = default_db_path()
     if not db_path.exists():

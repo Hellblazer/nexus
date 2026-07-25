@@ -151,7 +151,40 @@ def aspects_gc(apply: bool) -> None:
     """
     from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
     from nexus.config import catalog_path  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+    # nexus-ingey: on the service backend HttpDocumentAspectsStore.delete_orphans
+    # is a documented (0, 0) noop, and (0, 0) is INDISTINGUISHABLE downstream from
+    # "examined every row, found nothing wrong" — this verb printed
+    # "examined 0 row(s) ... deleted 0 orphan(s)", which reads as a clean bill of
+    # health on a box the check never actually inspected. Refuse loud instead,
+    # mirroring the gc-fixtures guard below.
+    #
+    # State BOTH halves, because the honest answer is not simply "unavailable":
+    #   - Rows orphaned by a DOCUMENT DELETE cannot accumulate on the service
+    #     backend: fk-001-catalog-cross-store binds
+    #     document_aspects (tenant_id, doc_id) -> catalog_documents
+    #     (tenant_id, tumbler) ON DELETE CASCADE.
+    #   - The sweep THIS verb performs keys on source_uri, which that changeset
+    #     deliberately does NOT constrain ("a URI path string, not a catalog
+    #     tumbler reference"). So it has no service equivalent, and claiming a
+    #     clean sweep here would be a different lie from the one being fixed.
+    if storage_backend_for("document_aspects") == StorageBackend.SERVICE:
+        raise click.UsageError(
+            "aspects gc requires sqlite mode (document_aspects=service not "
+            "supported; the orphan sweep ATTACHes the .catalog.db SQLite cache, "
+            "which is unavailable over HTTP).\n"
+            "\n"
+            "On the service backend, aspect rows orphaned by a document delete "
+            "cannot accumulate: document_aspects.doc_id is FK-bound to "
+            "catalog_documents ON DELETE CASCADE (fk-001-catalog-cross-store).\n"
+            "\n"
+            "NOT covered by that FK: the source_uri-keyed sweep this verb "
+            "performs. source_uri is a path string, not a tumbler reference, and "
+            "is deliberately unconstrained — so this command can neither run nor "
+            "certify that class clean. Track: nexus-ingey."
+        )
 
     mem_path = default_db_path()
     cat_db = catalog_path() / ".catalog.db"

@@ -188,10 +188,19 @@ class TestHttpDocumentAspectsStore:
         store = self._store({"/v1/aspects/delete": {"deleted": 1}})
         assert store.delete("coll", "doc.pdf") == 1
 
-    def test_delete_orphans_returns_zero_zero(self):
+    def test_delete_orphans_refuses_instead_of_returning_zero_zero(self):
+        """Successor to test_delete_orphans_returns_zero_zero (nexus-ingey).
+
+        The old contract returned (0, 0) so a caller could keep the signature
+        without a delete happening on a backend that cannot confirm orphan
+        status. The no-delete half was right; the RETURN was not. (0, 0) is
+        indistinguishable from "examined everything, found nothing wrong", and
+        `nx aspects gc` consumed it and printed a clean bill of health for a
+        check that never ran. The value is withheld rather than made ambiguous.
+        """
         store = self._store({})
-        result = store.delete_orphans(Path("/some/path.db"))
-        assert result == (0, 0)
+        with pytest.raises(NotImplementedError, match="nexus-ingey"):
+            store.delete_orphans(Path("/some/path.db"))
 
     def test_rename_collection(self):
         store = self._store({"/v1/aspects/rename_collection": {"updated": 5}})
