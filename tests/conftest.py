@@ -298,6 +298,52 @@ def t2_service_env(request: pytest.FixtureRequest,
 
 
 @pytest.fixture(autouse=True)
+def _isolate_service_endpoint_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Strip ambient service-endpoint env from every unit test (nexus-dvom6).
+
+    Same ambient-pollution class as ``_isolate_config_dir`` /
+    ``_isolate_t1_sessions`` / the ``CLAUDE_CODE_SESSION_ID`` scrub above, and
+    the missing half of ``_pin_storage_backend_sqlite``'s stated intent
+    ("independent of ambient service/lease state"): that fixture pins the
+    BACKEND, but a developer shell that has sourced the managed-service
+    credentials still leaks the ENDPOINT into every test.
+
+    ``NX_SERVICE_HOST`` / ``NX_SERVICE_PORT`` / ``NX_SERVICE_TOKEN`` are tier 1
+    of :mod:`nexus.db.service_endpoint`'s resolution order, and
+    ``NX_SERVICE_URL`` is the ``service_url`` credential override
+    (``config.CREDENTIALS``). With any of them present, tests that assert on
+    the "nothing is resolvable" failure modes instead resolve a real endpoint:
+    ``test_missing_port_raises`` gets the "service_url is set but no token"
+    error rather than the ``NX_SERVICE_PORT`` one it matches on, and the
+    om64x lease-recovery tests never reach the lease tier they exist to
+    exercise, because env-first already won.
+
+    This is not a hypothetical: sourcing ``~/.config/nexus/activate.sh`` is the
+    documented way to get a working token, and ``nx doctor``'s 401 advice
+    (nexus-srt1m) sends operators straight to it. So before this fixture, the
+    more correctly a developer configured their shell, the more of the suite
+    failed -- and it failed as though the checked-out branch had broken
+    something.
+
+    ORDERING: must be defined BEFORE ``_pin_storage_backend_sqlite``. Autouse
+    function-scoped fixtures run in definition order, and that fixture may pull
+    in ``t2_service_env`` (via ``getfixturevalue``), which ``setenv``s
+    ``NX_SERVICE_URL`` / ``NX_SERVICE_TOKEN`` for the engine substrate. Tests
+    requesting ``t2_service_env`` directly are also safe: non-autouse fixtures
+    resolve after autouse ones. Either way the explicit ``setenv`` lands after
+    this ``delenv`` and wins -- the same "later call on the same monkeypatch
+    wins" contract documented on ``_isolate_config_dir``.
+    """
+    for var in (
+        "NX_SERVICE_URL",
+        "NX_SERVICE_TOKEN",
+        "NX_SERVICE_HOST",
+        "NX_SERVICE_PORT",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _pin_storage_backend_sqlite(request: pytest.FixtureRequest,
                                 monkeypatch: pytest.MonkeyPatch) -> None:
     """Pin the unit suite to the SQLite storage backend (RDR-152 nexus-fjwxh).
