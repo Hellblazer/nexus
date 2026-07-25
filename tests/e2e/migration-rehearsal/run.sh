@@ -289,11 +289,25 @@ if [ "$COLD" = 1 ] || [ "$HOLE_PUNCH" = 1 ] || [ "$PACKAGE_UPGRADE" = 1 ] || [ "
   # engine binary at runtime (PUBLISHED release) — NO local native build, NO
   # stamping. Just the wheel.
   echo "[1/2] Building the conexus wheel (host)…"
-  uv build --wheel >/dev/null 2>&1
+  # Do NOT suppress this unconditionally: under `set -e` a failed build
+  # exits the harness with no diagnosis at all (2026-07-25 — the
+  # v0.1.55 acquire gate died here having logged only its own banner).
+  if ! uv build --wheel > "${TMPDIR:-/tmp}/nexus-wheel-build.log" 2>&1; then
+    echo "uv build --wheel FAILED:" >&2
+    sed 's/^/    /' "${TMPDIR:-/tmp}/nexus-wheel-build.log" >&2
+    exit 1
+  fi
   ls dist/conexus-*.whl >/dev/null 2>&1 || { echo "no wheel in dist/" >&2; exit 1; }
 elif [ "$DO_BUILD" = 1 ]; then
   echo "[1/3] Building the conexus wheel (host)…"
-  uv build --wheel >/dev/null 2>&1
+  # Do NOT suppress this unconditionally: under `set -e` a failed build
+  # exits the harness with no diagnosis at all (2026-07-25 — the
+  # v0.1.55 acquire gate died here having logged only its own banner).
+  if ! uv build --wheel > "${TMPDIR:-/tmp}/nexus-wheel-build.log" 2>&1; then
+    echo "uv build --wheel FAILED:" >&2
+    sed 's/^/    /' "${TMPDIR:-/tmp}/nexus-wheel-build.log" >&2
+    exit 1
+  fi
   echo "[2/3] Building the LINUX native nexus-service binary (GraalVM container, ~2-3m)…"
   if [ ! -x service/target/nexus-service ]; then
     # Native build in a linux GraalVM container. The mounted Docker socket lets
