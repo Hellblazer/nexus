@@ -47,10 +47,18 @@ rules:
     matcher: Bash
     mode: block
     rationale: >-
-      subagents never git add/commit in the shared tree — hand-back is
-      diffs+paths and the orchestrator commits pathspec-limited (RDR-184
-      Gap-4, nexus-s88vq); linked-worktree agents are exempt.
+      subagents never write the index/history OR destroy the working tree in
+      the shared tree — hand-back is diffs+paths and the orchestrator commits
+      pathspec-limited (RDR-184 Gap-4, nexus-s88vq; verb set widened by
+      nexus-ays2l from {commit,add} to also cover checkout/restore/stash/
+      clean/reset/rm, which delete uncommitted work outright). Read-only
+      spellings (git stash list/show, status, diff, log, show) stay allowed;
+      linked-worktree agents are exempt.
     escape_token: "# routing-allow:"
+    # Hook-level: a crash in the guard must not brick every agent's Bash.
+    # NOTE the split INSIDE the hook (nexus-ays2l item 3, Hal 2026-07-25):
+    # an UNDETERMINABLE worktree state fails OPEN for commit/add (hygiene)
+    # and CLOSED for the working-tree destroyers (silent data loss).
     fail_closed: false
   phase_review_close_requires_gate:
     hook_script: phase_review_close_requires_gate.py

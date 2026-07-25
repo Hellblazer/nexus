@@ -175,3 +175,116 @@ class TestAllow:
             env={**os.environ},
         )
         assert proc.returncode == 0
+
+
+# ── nexus-ays2l: the WORKING-TREE-DESTROYING verbs ──────────────────────────
+#
+# The original verb set was {"commit", "add"} — strictly narrower than the set
+# of git verbs that can destroy an orchestrator's uncommitted work. `git add`
+# mutates only the INDEX and destroys nothing; `git checkout -- <path>` and
+# `git restore <path>` and `git stash` mutate the WORKING TREE and delete
+# uncommitted edits outright. The guard blocked the harmless-but-untidy verbs
+# and permitted the destructive ones.
+#
+# Damage signature that produced the bead (2026-07-24): three silent reversions
+# of src/nexus/upgrade_finish.py over ~10 minutes with two subagents live,
+# sibling files edited in the same window untouched, NO stash entry and NO
+# reflog entry — the trace `git checkout -- <path>` leaves and `git stash`
+# does not. Attribution was never proven; what IS established is that the
+# guard would not have stopped any subagent that ran those verbs.
+
+
+_DESTRUCTIVE_INVOCATIONS = [
+    "git checkout -- src/nexus/upgrade_finish.py",
+    "git checkout HEAD -- src/nexus/upgrade_finish.py",
+    "git restore src/nexus/upgrade_finish.py",
+    "git stash",
+    "git stash push -m wip",
+    "git clean -fd",
+    "git reset --hard HEAD",
+    "git rm -f src/nexus/upgrade_finish.py",
+]
+
+
+@pytest.mark.parametrize("cmd", _DESTRUCTIVE_INVOCATIONS)
+def test_destructive_verbs_denied_in_shared_tree(cmd, shared_repo):
+    out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
+    assert out["permissionDecision"] == "deny", f"{cmd} was permitted: {out}"
+    assert "uncommitted" in out["permissionDecisionReason"].lower()
+
+
+@pytest.mark.parametrize("cmd", [
+    "git stash list",
+    "git stash show -p",
+    "git show HEAD:src/nexus/upgrade_finish.py",
+    "git status",
+    "git diff",
+    "git log --oneline -5",
+])
+def test_read_only_inspection_still_allowed(cmd, shared_repo):
+    """Reviewers must keep working. The bead's stated preference: allowlist the
+    read-only invocations rather than blanket-denying the verb."""
+    out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
+    assert out["permissionDecision"] == "allow", f"{cmd} was blocked: {out}"
+
+
+@pytest.mark.parametrize("cmd", _DESTRUCTIVE_INVOCATIONS)
+def test_destructive_verbs_allowed_in_linked_worktree(cmd, linked_worktree):
+    """A worktree-isolated agent owns its tree — including destroying it."""
+    out = _decision(_run(_bash(cmd, cwd=str(linked_worktree))))
+    assert out["permissionDecision"] == "allow", f"{cmd} was blocked: {out}"
+
+
+def test_main_conversation_unaffected_by_the_widening(shared_repo):
+    """The rule targets subagents. The orchestrator resets its own tree."""
+    out = _decision(_run(_bash("git checkout -- x.py", agent=False, cwd=str(shared_repo))))
+    assert out["permissionDecision"] == "allow"
+
+
+def test_routing_allow_escape_still_works(shared_repo):
+    out = _decision(_run(_bash(
+        "git checkout -- x.py  # routing-allow: orchestrator asked me to revert this",
+        cwd=str(shared_repo),
+    )))
+    assert out["permissionDecision"] == "allow"
+
+
+# ── Fail mode is SPLIT by what is at stake (Hal ruling 2026-07-25, item 3) ──
+
+
+def test_destructive_verb_fails_CLOSED_when_worktree_undeterminable(tmp_path):
+    """A non-repo cwd makes `git rev-parse` fail, so worktree state is
+    undeterminable. Destroyers deny anyway: 'I could not tell whether this tree
+    is shared' is not a licence to destroy one."""
+    not_a_repo = tmp_path / "bare"
+    not_a_repo.mkdir()
+    out = _decision(_run(_bash("git checkout -- x.py", cwd=str(not_a_repo))))
+    assert out["permissionDecision"] == "deny", out
+    reason = out["permissionDecisionReason"].lower()
+    assert "could not be determined" in reason and "fail closed" in reason
+
+
+def test_index_verbs_still_fail_OPEN_when_worktree_undeterminable(tmp_path):
+    """Unchanged for commit/add: a flaky `git rev-parse` must never wedge agent
+    work over tidiness, and `add` destroys nothing."""
+    not_a_repo = tmp_path / "bare2"
+    not_a_repo.mkdir()
+    for cmd in ("git add -A", "git commit -m x"):
+        out = _decision(_run(_bash(cmd, cwd=str(not_a_repo))))
+        assert out["permissionDecision"] == "allow", f"{cmd}: {out}"
+
+
+def test_bare_stash_is_not_mistaken_for_a_read(shared_repo):
+    """`git stash list` reads; `git stash` STASHES. Only an exact match against
+    the read-only allowlist may pass."""
+    assert _decision(_run(_bash("git stash", cwd=str(shared_repo))))["permissionDecision"] == "deny"
+    assert _decision(_run(_bash("git stash list", cwd=str(shared_repo))))["permissionDecision"] == "allow"
+
+
+def test_destructive_verb_hidden_in_a_compound_command_is_caught(shared_repo):
+    """Segment splitting must see past `&&` — the realistic shape is a cleanup
+    tail on an otherwise innocuous command."""
+    out = _decision(_run(_bash(
+        "pytest -q && git checkout -- src/nexus/upgrade_finish.py", cwd=str(shared_repo),
+    )))
+    assert out["permissionDecision"] == "deny", out
