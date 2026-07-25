@@ -4,8 +4,7 @@
 AST-scan that catches direct storage opens outside the allowed
 daemon-internal substrate. The lint protects the boundary that
 RDR-120's daemon design enforces: only ``src/nexus/db/`` (and during
-P0-P4, ``src/nexus/catalog/``) may open SQLite or chromadb clients
-directly. Every other caller must go through the ``T2Database`` /
+P0-P4, ``src/nexus/catalog/``) may open SQLite clients directly. Every other caller must go through the ``T2Database`` /
 ``T3Database`` facades or, post-P3 cutover, through the daemon-
 backed ``T2Client`` / ``T3Client`` wrappers.
 
@@ -13,9 +12,13 @@ Banlist (configurable via :data:`BANLIST`):
 
 * ``sqlite3.connect(...)`` plus any aliased form (``import sqlite3 as
   X; X.connect(...)``). Alias resolution is per-file.
-* ``chromadb.PersistentClient(...)``
-* ``chromadb.CloudClient(...)``
-* ``chromadb.EphemeralClient(...)``
+* ``voyageai.Client(...)`` (RDR-152 Seam B).
+
+The three ``chromadb.*Client(...)`` entries were REMOVED at RDR-155 P4b P3:
+chromadb left pyproject, so those calls cannot resolve at all and the ban was
+redundant with reality. The resurrection tripwire is stronger elsewhere —
+``tests/test_rdr155_p4b_deletion_gate.py`` bans any chromadb IMPORT anywhere in
+the package, not just three call shapes.
 
 Allowlist:
 
@@ -239,9 +242,6 @@ T2_RAW_HANDLE_BASELINE: int = 0
 #: must carry a valid ``# epsilon-allow: <reason>`` annotation.
 BANLIST: tuple[tuple[str, str], ...] = (
     ("sqlite3", "connect"),
-    ("chromadb", "PersistentClient"),
-    ("chromadb", "CloudClient"),
-    ("chromadb", "EphemeralClient"),
     ("voyageai", "Client"),
 )
 
@@ -389,7 +389,7 @@ def _collect_module_aliases(tree: ast.AST) -> dict[str, str]:
     """Return ``{alias_name: canonical_module}`` for matched bare imports.
 
     ``import sqlite3 as _sqlite3`` -> ``{"_sqlite3": "sqlite3"}``.
-    ``import chromadb`` -> ``{"chromadb": "chromadb"}`` (identity).
+    ``import sqlite3`` -> ``{"sqlite3": "sqlite3"}`` (identity).
     Submodules are ignored — we match by top-level name only because
     that's what shows up as ``Name`` in the AST.
     """
@@ -475,7 +475,7 @@ def _scan_file_full(
         func = node.func
         line = node.lineno
 
-        # ── Banned module.attr calls: sqlite3.connect, chromadb.* ──
+        # ── Banned module.attr calls: sqlite3.connect, voyageai.Client ──
         if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
             canonical = aliases.get(func.value.id)
             if canonical is not None and func.attr in banlist_map.get(
@@ -655,7 +655,7 @@ def scan_repo(
 
     ``allowlist_prefixes`` defaults to :data:`DEFAULT_ALLOWLIST_PREFIXES`
     plus the catalog phase-allowlist; it scopes the hard ``sqlite3.connect``
-    / ``chromadb.*`` violations and the epsilon-allow'd-connect count. Pass
+    / ``voyageai.Client`` violations and the epsilon-allow'd-connect count. Pass
     an empty tuple to disable path-prefix allowlisting (useful for tests).
 
     ``construction_allowlist_prefixes`` defaults to
