@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import pytest
+
 from nexus.health import HealthResult, format_health_for_cli
 
 
@@ -432,6 +434,119 @@ def test_vector_service_reachable_never_surfaces_stale_boot_failure(
     assert line.ok is True
     assert line.detail == "reachable"
     assert "catalog-013-2" not in line.detail
+
+
+def _raise_vector_service_error(code: int | None):
+    """Build a ``_get`` stub that fails the way the real client fails.
+
+    ``VectorServiceError`` carries ``code`` for HTTP-error responses and
+    ``None`` for transport-level failures — the discriminator the health
+    probe keys on.
+    """
+    from nexus.db.http_vector_client import VectorServiceError
+
+    def _boom(*a, **kw):
+        raise VectorServiceError(
+            f"GET /v1/vectors/collections → HTTP {code}: Unauthorized", code=code
+        )
+
+    return _boom
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_vector_service_auth_failure_is_not_reported_as_unreachable(
+    monkeypatch, tmp_path, code: int
+) -> None:
+    """nexus-srt1m: a 401/403 is an AUTHENTICATION failure, not unreachability.
+
+    The 2026-07-25 incident: a rotated bearer token made doctor print
+    'Vector service: not reachable' with the fix 'Start the nexus-service'
+    three lines above a green '✓ Managed/remote service — release_version
+    0.1.55'. The service was provably up; the advice pointed at the wrong
+    subsystem entirely (and in cloud mode there is no local service to start).
+    """
+    from nexus.health import _check_vector_service
+
+    monkeypatch.setattr(
+        "nexus.db.http_vector_client._get", _raise_vector_service_error(code)
+    )
+    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+
+    line = _check_vector_service()
+    assert line.ok is False
+    assert line.fatal is True
+    # The whole point: must NOT claim unreachability.
+    assert "not reachable" not in line.detail
+    assert "authentication" in line.detail.lower()
+    assert str(code) in line.detail
+    # Fix must point at the token, and at the stale-process-env aggravator —
+    # a rotated token never reaches an already-running MCP server.
+    fixes = " ".join(line.fix_suggestions).lower()
+    assert "nx_service_token" in fixes
+    assert "restart" in fixes
+    # Must NOT tell the operator to start a service that is answering HTTP.
+    assert "start the nexus-service" not in fixes
+
+
+def test_vector_service_auth_failure_never_surfaces_stale_boot_failure(
+    monkeypatch, tmp_path
+) -> None:
+    """A service that answers 401 is RUNNING — a boot-failure line scraped from
+    an old log would be stale and actively misleading. The advisory belongs to
+    the transport branch only."""
+    from nexus.health import _check_vector_service
+
+    monkeypatch.setattr(
+        "nexus.db.http_vector_client._get", _raise_vector_service_error(401)
+    )
+    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    _write_service_log(tmp_path, _REAL_INCIDENT_LOG_TAIL)
+
+    line = _check_vector_service()
+    assert "catalog-013-2" not in line.detail
+    assert "not reachable" not in line.detail
+
+
+def test_vector_service_other_http_status_surfaces_the_code(
+    monkeypatch, tmp_path
+) -> None:
+    """Any other HTTP status means the service answered — surface the code
+    rather than laundering it into 'not reachable'."""
+    from nexus.health import _check_vector_service
+
+    monkeypatch.setattr(
+        "nexus.db.http_vector_client._get", _raise_vector_service_error(500)
+    )
+    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+
+    line = _check_vector_service()
+    assert line.ok is False
+    assert line.fatal is True
+    assert "500" in line.detail
+    assert "not reachable" not in line.detail
+
+
+def test_vector_service_transport_failure_still_reports_unreachable(
+    monkeypatch, tmp_path
+) -> None:
+    """Regression guard on the discriminator: a VectorServiceError with
+    ``code=None`` is a transport failure and MUST keep the original
+    'not reachable' + boot-advisory behaviour. Without this, a fix that
+    keys on the exception TYPE instead of the STATUS would silently
+    reclassify every connection refusal as an auth problem."""
+    from nexus.health import _check_vector_service
+
+    monkeypatch.setattr(
+        "nexus.db.http_vector_client._get", _raise_vector_service_error(None)
+    )
+    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
+    _write_service_log(tmp_path, _REAL_INCIDENT_LOG_TAIL)
+
+    line = _check_vector_service()
+    assert line.ok is False
+    assert "not reachable" in line.detail
+    assert "catalog-013-2" in line.detail
+    assert "authentication" not in line.detail.lower()
 
 
 def test_check_t3_local_surfaces_state2_degraded_bge(tmp_path, monkeypatch) -> None:

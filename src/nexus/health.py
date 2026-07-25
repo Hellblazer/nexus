@@ -590,13 +590,56 @@ def _check_vector_service() -> HealthResult:
             label="Vector service (/v1/vectors)", ok=True, detail="reachable",
         )
     except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash caller
+        # nexus-srt1m: discriminate on the HTTP status before calling anything
+        # "not reachable". ``VectorServiceError.code`` carries the status for an
+        # HTTP-error response and ``None`` for a transport failure — a service
+        # that answers 401 is RUNNING, so reporting unreachability (and
+        # prescribing "start the service") points at the wrong subsystem. The
+        # 2026-07-25 incident: a rotated bearer token printed
+        # "not reachable / Fix: Start the nexus-service" three lines above a
+        # green "✓ Managed/remote service — release_version 0.1.55", and in
+        # cloud mode there is no local service to start in the first place.
+        code = getattr(exc, "code", None)
+        if code in (401, 403):
+            _log.debug("vector_service_auth_failed", status=code, error=str(exc))
+            return HealthResult(
+                label="Vector service (/v1/vectors)",
+                ok=False,
+                detail=f"authentication failed (HTTP {code}) — the service is "
+                "reachable but rejected the token",
+                fix_suggestions=[
+                    "Refresh NX_SERVICE_TOKEN (a rotated/revoked token 401s "
+                    "while an unauthenticated probe like /version still 200s).",
+                    "Then restart any long-lived process holding the old token "
+                    "— MCP servers and editor sessions capture env at spawn, so "
+                    "they keep failing after a rotation while a freshly sourced "
+                    "shell succeeds, which misreads as intermittent.",
+                ],
+                fatal=True,
+            )
+        if code is not None:
+            # The service answered, just not successfully. Surface the status
+            # instead of laundering it into a reachability claim.
+            _log.debug("vector_service_http_error", status=code, error=str(exc))
+            return HealthResult(
+                label="Vector service (/v1/vectors)",
+                ok=False,
+                detail=f"service returned HTTP {code}",
+                fix_suggestions=[
+                    "Check the service logs for the failing request — the "
+                    "endpoint is reachable, so this is not a startup problem.",
+                ],
+                fatal=True,
+            )
         _log.debug("vector_service_not_reachable", error=str(exc))
         # nexus-4m6i0.7: the service can crash-loop before answering any
         # request (a Liquibase VALIDATE failure on boot, GH #1390) — surface
         # the root cause from the local service log when one is available,
         # instead of leaving the operator to spelunk storage_service_native.log
         # by hand. Strictly best-effort/soft: any failure here degrades
-        # silently back to the bare "not reachable" message.
+        # silently back to the bare "not reachable" message. Only reached for
+        # transport failures now, so a boot advisory can never be scraped from
+        # a stale log while the service is actually up and answering.
         detail = "not reachable"
         boot_advisory = _boot_failure_advisory()
         if boot_advisory:
