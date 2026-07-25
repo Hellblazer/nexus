@@ -6,16 +6,20 @@ import threading
 import uuid
 from unittest.mock import MagicMock, patch
 
-import chromadb
 import pytest
 
-from nexus.db.http_vector_client import HttpVectorClient
-from nexus.db.t3 import T3Database, apply_hnsw_ef
 from nexus.db.chroma_quotas import QuotaValidator
+from nexus.db.http_vector_client import HttpVectorClient
+from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction
+from nexus.db.t3 import T3Database, apply_hnsw_ef
+from tests.conftest import make_vector_test_client
 
 
-# EphemeralClient is a process-wide singleton — collections persist across
-# test instances.  Use unique suffixes so tests don't collide.
+# RDR-155 P4b P3: was chromadb.EphemeralClient, a process-wide singleton whose
+# collections persisted across test instances — which is why every fixture name
+# here is uniquified. make_vector_test_client() returns a FRESH
+# InMemoryVectorClient per call, so cross-test collision is no longer possible.
+# _unique() is kept anyway: it costs nothing and the tests read the same.
 
 def _unique(prefix: str = "code__test") -> str:
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
@@ -24,7 +28,7 @@ def _unique(prefix: str = "code__test") -> str:
 def _local_db() -> T3Database:
     """Create a local-mode T3Database backed by the shared EphemeralClient."""
     return T3Database(
-        _client=chromadb.EphemeralClient(),
+        _client=make_vector_test_client(),
         local_mode=True,
         local_path="/tmp/test",
     )
@@ -33,7 +37,7 @@ def _local_db() -> T3Database:
 def _local_db_with_ef() -> T3Database:
     """Local-mode T3Database with DefaultEmbeddingFunction override (no Voyage)."""
     db = _local_db()
-    db._ef_override = chromadb.utils.embedding_functions.DefaultEmbeddingFunction()
+    db._ef_override = MiniLMDirectEmbeddingFunction()
     return db
 
 
@@ -42,14 +46,14 @@ def _cloud_db_with_ef() -> T3Database:
     db = T3Database.__new__(T3Database)
     db._local_mode = False
     db._voyage_api_key = ""
-    db._ef_override = chromadb.utils.embedding_functions.DefaultEmbeddingFunction()
+    db._ef_override = MiniLMDirectEmbeddingFunction()
     db._ef_cache = {}
     db._ef_lock = threading.Lock()
     db._write_sems = {}
     db._read_sems = {}
     db._sems_lock = threading.Lock()
     db._quota_validator = QuotaValidator()
-    db._client = chromadb.EphemeralClient()
+    db._client = make_vector_test_client()
     db._voyage_client = None
     return db
 
@@ -84,7 +88,7 @@ class TestApplyHnswEf:
     def test_apply_hnsw_ef_local_mode_modifies_collections(self) -> None:
         """apply_hnsw_ef() modifies collections and returns correct count."""
         # Create collections directly via EphemeralClient (no T3 metadata)
-        client = chromadb.EphemeralClient()
+        client = make_vector_test_client()
         name1 = _unique("code__apply1")
         name2 = _unique("docs__apply2")
         col1 = client.get_or_create_collection(name1)
