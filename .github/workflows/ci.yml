@@ -110,13 +110,19 @@ jobs:
           restore-keys: |
             uv-${{ runner.os }}-${{ matrix.python-version }}-
 
-      - name: Cache ChromaDB ONNX model
+      - name: Cache MiniLM ONNX model
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
         with:
           path: ~/.cache/chroma
-          # nexus-8g79.33: include uv.lock hash so a chromadb bump that
-          # ships a new ONNX model invalidates the cache; pre-fix the
-          # bare runner-OS key reused stale models across upgrades.
+          # RDR-155 P4b P3: the ~/.cache/chroma PATH survives chromadb's removal
+          # by design — nexus.db.minilm_direct (the P0b tier-0 EF) keeps its
+          # artifact there and fetches it straight from chroma's S3, with no
+          # chromadb code involved. The cache KEY still says "chromadb-onnx" on
+          # purpose: renaming it would force a cold re-download on every runner
+          # for zero behaviour change (CI-cost discipline). The uv.lock hash no
+          # longer tracks a chromadb bump (it is not in the lock) but still
+          # invalidates on onnxruntime/tokenizers moves, which is the live
+          # coupling.
           key: chromadb-onnx-${{ runner.os }}-${{ hashFiles('uv.lock') }}
           # nexus-c7gnx: fall back to the last ONNX cache for this OS so a
           # routine uv.lock bump (which rarely changes the bundled ONNX model)
@@ -747,7 +753,7 @@ jobs:
           restore-keys: |
             uv-${{ runner.os }}-write-seam-3.12-
 
-      - name: Cache ChromaDB ONNX model
+      - name: Cache MiniLM ONNX model
         if: steps.changes.outputs.seam == 'true'
         uses: actions/cache@v5
         with:

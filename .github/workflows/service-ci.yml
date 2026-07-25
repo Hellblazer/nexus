@@ -45,7 +45,7 @@ jobs:
           # Cache Maven local repo across runs; bust when pom.xml changes.
           cache: 'maven'
 
-      - name: Cache ChromaDB ONNX model
+      - name: Cache MiniLM ONNX model
         # EmbedParityTest constructs OnnxEmbedder, which loads the
         # all-MiniLM-L6-v2 model from ~/.cache/chroma. Mirror the SAME
         # cache key as ci.yml (the Python suite) so this Java-only runner

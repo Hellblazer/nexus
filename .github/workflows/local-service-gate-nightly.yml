@@ -12,12 +12,17 @@ name: Local-service functional gate (nightly)
 # every deterministic artifact cached (PG bundle, ONNX models, Maven repo,
 # uv wheels). One run per day + manual dispatch.
 #
-# SECRETS REQUIRED (repo settings): VOYAGE_API_KEY, CHROMA_API_KEY,
-# CHROMA_TENANT, CHROMA_DATABASE — same four as .env.example. The gate is
+# SECRETS REQUIRED (repo settings): VOYAGE_API_KEY. The gate is
 # infra-hermetic but NOT credential-independent: the voyage/CCE subset
-# hard-fails (by design, fail-loud) without a real VOYAGE_API_KEY. The
-# CHROMA_* trio drives cloud-mode detection plus one idempotent
-# ensure-databases probe against the real ChromaCloud tenant.
+# hard-fails (by design, fail-loud) without a real VOYAGE_API_KEY.
+#
+# RDR-155 P4b P3: the CHROMA_API_KEY / CHROMA_TENANT / CHROMA_DATABASE trio was
+# REMOVED here. It was described as driving "cloud-mode detection plus one
+# idempotent ensure-databases probe against the real ChromaCloud tenant" — but
+# tests/e2e/local-service-gate.sh contains ZERO chroma references, so the probe
+# had already gone and three live credentials were being injected into a nightly
+# run that could not consume them. The repo secrets themselves can be deleted;
+# nothing reads them.
 #
 # Guard bounds: the script's built-in FLOOR/BUDGET were pinned on macOS
 # (446 passed / 31 skipped). This runner differs (CA-3 bundle present
@@ -154,9 +159,6 @@ jobs:
       - name: Run the local-service functional gate
         env:
           VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
-          CHROMA_API_KEY: ${{ secrets.CHROMA_API_KEY }}
-          CHROMA_TENANT: ${{ secrets.CHROMA_TENANT }}
-          CHROMA_DATABASE: ${{ secrets.CHROMA_DATABASE }}
           # Pinned from the first green linux baseline (nexus-f4wcg, run
           # 28875352534: 459 passed / 19 skipped). Same allowance style as
           # the script's macOS pins: floor slightly under observed for
