@@ -66,7 +66,10 @@ _DIRECTIVE = (
 #: 2026-07-18 census — per-file counts of inline SQLite DDL statements.
 #: Retirement targets (epic nexus-146xx), never precedents.
 DDL_CENSUS: dict[str, int] = {
-    "src/nexus/aspect_promotion.py": 1,           # aspect_promotion_log stray (dodges migrations.py)
+    # aspect_promotion.py entry removed (nexus-70x7y): the lazy
+    # aspect_promotion_log bootstrap died with the retired runtime promotion
+    # verb; migrations.migrate_aspect_promotion_log_table is now the sole
+    # creator. DOWNWARD-only edit.
     "src/nexus/db/migrations.py": 25,             # the sanctioned-until-retired T2 registry
     "src/nexus/db/t2/aspect_extraction_queue.py": 3,
     "src/nexus/db/t2/catalog.py": 9,
@@ -87,8 +90,12 @@ DDL_CENSUS: dict[str, int] = {
 #: exactly how the reverted ``leg_convergence`` near-miss would have
 #: landed on a second attempt; bead nexus-146xx.2).
 ALTER_CENSUS: dict[str, int] = {
-    "src/nexus/aspect_promotion.py": 5,           # 1 real + 4 prose self-mentions
-    "src/nexus/commands/enrich.py": 1,            # docstring mirror of aspect_promotion's DDL (censused there) — not own debt
+    # aspect_promotion.py 5 -> 2 (nexus-70x7y): the runtime promotion verb is
+    # retired, so ZERO are executed. Both remaining hits are the PG changeset
+    # RECIPE an operator must hand to Liquibase (module docstring template +
+    # PROMOTION_RETIRED message) — not SQLite debt. DOWNWARD-only edit.
+    "src/nexus/aspect_promotion.py": 2,
+    "src/nexus/commands/enrich.py": 1,            # nexus-70x7y: comment saying the runtime statement is GONE — not own debt
     "src/nexus/db/admin_sql.py": 2,                # RDR-180 .6: PG `ALTER TABLE ... VALIDATE CONSTRAINT` allowlist regex + docstring — not SQLite debt
     "src/nexus/db/migrations.py": 36,             # 27 real + 9 prose self-mentions
     "src/nexus/db/t2/aspect_extraction_queue.py": 2,
@@ -106,7 +113,9 @@ ALTER_CENSUS: dict[str, int] = {
 #: the directive retires going forward.
 EPSILON_CENSUS: dict[str, int] = {
     "src/nexus/_session_end_launcher.py": 1,
-    "src/nexus/aspect_promotion.py": 6,
+    # aspect_promotion.py entry removed (nexus-70x7y): all six raw-.conn
+    # overrides died with the retired promotion verb; the surviving read path
+    # delegates to the configured store. DOWNWARD-only edit.
     "src/nexus/catalog/catalog_owners.py": 1,
     "src/nexus/collection_audit.py": 3,
     "src/nexus/collection_health.py": 3,
@@ -119,7 +128,10 @@ EPSILON_CENSUS: dict[str, int] = {
     "src/nexus/commands/daemon.py": 1,
     "src/nexus/commands/doc.py": 3,
     "src/nexus/commands/doctor.py": 6,
-    "src/nexus/commands/enrich.py": 9,
+    # enrich.py 9 -> 8 (nexus-70x7y): the aspects-promote-field write path
+    # carried one raw-connection override; only the read-only --history
+    # open remains. DOWNWARD-only edit.
+    "src/nexus/commands/enrich.py": 8,
     # index.py 3 -> 2 (RDR-155 P4b P0a): the --dry-run epsilon-allow
     # retired with the InMemoryVectorClient cutover.
     "src/nexus/commands/index.py": 2,
