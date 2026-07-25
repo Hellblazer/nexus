@@ -75,25 +75,21 @@ class TestServiceDispatch:
         assert isinstance(result, T3Database)
         assert result._client is ephemeral
 
-    def test_cloud_mode_returns_service_client_no_cloudclient(
-        self, monkeypatch
-    ) -> None:
-        """Cloud mode + no injected client → the service client too;
-        ``chromadb.CloudClient`` is never constructed (the direct
-        cloud serving leg is retired)."""
+    def test_cloud_mode_returns_service_client(self, monkeypatch) -> None:
+        """Cloud mode + no injected client → the service client.
+
+        P3: this carried a ``monkeypatch.setattr("chromadb.CloudClient", ...)``
+        tripwire counting constructions. chromadb is no longer installed, so
+        the tripwire could not be installed either — and the property it
+        guarded ("the direct cloud serving leg is retired") is now guaranteed
+        by the dependency's absence rather than by a counter. Module-absence is
+        asserted in test_rdr155_p4b_deletion_gate.py; what this test still owns
+        is the dispatch itself.
+        """
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
-
-        constructed = {"count": 0}
-
-        class _TripwireCloudClient:
-            def __init__(self, *args, **kwargs) -> None:
-                constructed["count"] += 1
-
-        monkeypatch.setattr("chromadb.CloudClient", _TripwireCloudClient)
 
         from nexus.db import make_t3
         from nexus.db.http_vector_client import HttpVectorClient
 
         result = make_t3()
         assert isinstance(result, HttpVectorClient)
-        assert constructed["count"] == 0

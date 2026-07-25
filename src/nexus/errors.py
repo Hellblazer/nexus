@@ -33,40 +33,34 @@ class CollectionNotFoundError(NexusError):
 def collection_not_found_errors() -> tuple[type[BaseException], ...]:
     """The exception types that mean "collection does not exist".
 
-    Transition contract (RDR-155 P4b P0c): during the deletion window the
-    chroma-backed TEST substrate (``T3Database`` over ``EphemeralClient``)
-    still raises ``chromadb.errors.NotFoundError`` natively, so catchers
-    must tolerate both types. The chroma member drops out AUTOMATICALLY
-    when the dependency leaves the tree at P3 (the deferred import fails
-    and the tuple collapses to the nexus-native type) — catchers need no
-    edit at removal time.
+    P3 (2026-07-25): the transition window is CLOSED. This returned
+    ``(CollectionNotFoundError, chromadb.errors.NotFoundError)`` while the
+    chroma-backed test substrate could still raise the latter natively; the
+    chroma member dropped out when the dependency left the tree, and the
+    promise held — not one catcher needed an edit at removal time.
+
+    The function survives deliberately rather than collapsing into a bare
+    ``except CollectionNotFoundError``: it is the single place a second
+    missing-collection type would be added if another substrate ever raises
+    its own, and ~10 call sites already spell the catch this way.
     """
-    try:
-        from chromadb.errors import NotFoundError as _chroma_not_found  # noqa: PLC0415 — transition-window optional dep; absence is the designed P3 end state
-    except ImportError:
-        return (CollectionNotFoundError,)
-    return (CollectionNotFoundError, _chroma_not_found)
+    return (CollectionNotFoundError,)
 
 
 def vector_argument_errors() -> tuple[type[BaseException], ...]:
     """The exception types that mean "the vector store rejected the call".
 
-    Sibling of :func:`collection_not_found_errors` and same transition
-    contract (RDR-155 P4b P3): chroma raised ``InvalidArgumentError``; the
-    substrate-neutral stores raise ``ValueError`` (see
-    ``InMemoryCollection._check_dimension``). The chroma member drops out
-    automatically when the dependency leaves.
+    Sibling of :func:`collection_not_found_errors`. Chroma raised
+    ``InvalidArgumentError``; the substrate-neutral stores raise
+    ``ValueError`` (see ``InMemoryCollection._check_dimension``). The chroma
+    member dropped out with the dependency at P3.
 
     Deliberately broad on the nexus side: the only caller
     (``T3Database.search``) classifies on ``"dimension" in str(exc)`` and
     re-raises everything else, so a wider catch cannot swallow an unrelated
     failure -- it can only route a dimension-mismatch skip correctly.
     """
-    try:
-        from chromadb.errors import InvalidArgumentError as _chroma_invalid_arg  # noqa: PLC0415 — transition-window optional dep; absence is the designed P3 end state
-    except ImportError:
-        return (ValueError,)
-    return (ValueError, _chroma_invalid_arg)
+    return (ValueError,)
 
 
 class EmbeddingModelMismatch(NexusError):

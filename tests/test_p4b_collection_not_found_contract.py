@@ -3,15 +3,17 @@
 The raiser (``HttpVectorClient.get_collection``) and every catcher
 (indexer x3, collection_purge, t3_reidentify, manifest_backfill) speak
 ``nexus.errors.CollectionNotFoundError`` instead of
-``chromadb.errors.NotFoundError``. During the deletion window the
-chroma-backed TEST substrate still raises chroma's type natively, so the
-catchers tolerate both via ``collection_not_found_errors()`` — whose chroma
-member drops out AUTOMATICALLY at P3 when the dependency leaves (the
-deferred import fails closed to the nexus-native type alone).
+``chromadb.errors.NotFoundError``.
+
+P3 (2026-07-25): the deletion window is CLOSED and the transition worked as
+designed — the chroma member dropped out of ``collection_not_found_errors()``
+when the dependency left, and not one catcher needed an edit. The tests that
+pinned the two-member window are replaced below by their end-state
+counterparts; the census tripwire is TIGHTENED, because the sanctioned
+deferred import in ``errors.py`` is gone too, so there is now no allow-list at
+all.
 """
 from __future__ import annotations
-
-import builtins
 
 import pytest
 
@@ -44,45 +46,45 @@ def test_service_unavailable_maps_to_collection_not_found(
         client.get_collection("any")
 
 
-def test_transition_tuple_contains_both_types() -> None:
-    import chromadb.errors
+def test_tuple_is_the_nexus_native_type_alone() -> None:
+    """The P3 end state, no longer simulated.
 
-    types_ = collection_not_found_errors()
-    assert CollectionNotFoundError in types_
-    assert chromadb.errors.NotFoundError in types_
-
-
-def test_tuple_collapses_when_chromadb_absent(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The P3 end state, simulated: chromadb unimportable -> the tuple is
-    the nexus-native type alone, catchers need zero edits at removal."""
-    real_import = builtins.__import__
-
-    def _no_chroma(name, *args, **kwargs):
-        if name.startswith("chromadb"):
-            raise ImportError("chromadb removed (P4b P3 end state)")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", _no_chroma)
+    Was two tests: one pinning that chroma's NotFoundError was IN the tuple
+    during the window, one simulating its absence by patching __import__.
+    Both premises are gone — the dependency is actually absent — so this is
+    the direct assertion.
+    """
     assert collection_not_found_errors() == (CollectionNotFoundError,)
 
 
+def test_chromadb_is_not_importable() -> None:
+    """Non-vacuity guard for the test above.
+
+    ``collection_not_found_errors()`` returning a 1-tuple proves nothing on
+    its own if chromadb merely happens to be installed and the function were
+    quietly reverted to the two-member form. Pin the actual precondition: the
+    dependency is gone from the environment.
+    """
+    with pytest.raises(ImportError):
+        import chromadb  # noqa: F401, PLC0415 — the import failing IS the assertion
+
+
 def test_no_raw_chroma_notfound_contract_sites_remain() -> None:
-    """Census tripwire: the raiser/catcher contract must not re-grow direct
-    chromadb.errors.NotFoundError couplings outside the dying modules
-    (t3.py dies whole at P4b; errors.py holds the sanctioned deferred
-    import)."""
+    """Census tripwire: no direct chromadb.errors.NotFoundError coupling
+    anywhere in the package.
+
+    P3 TIGHTENED this. It used to allow two files — errors.py (the sanctioned
+    deferred import) and db/t3.py (slated to die whole). errors.py's shim is
+    collapsed and t3.py is chroma-free, so the allow-list is now EMPTY and any
+    reappearance anywhere is a failure.
+    """
     import pathlib
 
     import nexus
 
     root = pathlib.Path(nexus.__file__).parent
-    allowed = {root / "errors.py", root / "db" / "t3.py"}
     offenders = []
     for py in root.rglob("*.py"):
-        if py in allowed:
-            continue
         text = py.read_text()
         if "from chromadb.errors import NotFoundError" in text:
             offenders.append(str(py.relative_to(root)))
@@ -92,14 +94,15 @@ def test_no_raw_chroma_notfound_contract_sites_remain() -> None:
     )
 
 
-def test_catchers_tolerate_both_members() -> None:
+def test_catchers_catch_the_native_raiser() -> None:
     """A catcher written as `except collection_not_found_errors():` handles
-    the nexus-native raiser AND the chroma-native test substrate."""
-    import chromadb.errors
+    the nexus-native raiser.
 
-    for exc in (CollectionNotFoundError("x"),
-                chromadb.errors.NotFoundError("y")):
-        try:
-            raise exc
-        except collection_not_found_errors():
-            pass
+    Was `test_catchers_tolerate_both_members`, which also raised chroma's
+    type. That arm died with the dependency; the surviving arm is the one
+    every production catcher actually depends on.
+    """
+    try:
+        raise CollectionNotFoundError("x")
+    except collection_not_found_errors():
+        pass

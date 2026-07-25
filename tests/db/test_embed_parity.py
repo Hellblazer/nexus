@@ -555,14 +555,19 @@ class TestEmbedParity:
         variants 4.19e-05 cosine apart; the "linux gate failure" was the two
         legs coin-flipping between the same two variants).
         """
-        import chromadb.utils.embedding_functions as cef
+        from nexus.db.voyage_ef import VoyageEmbeddingFunction
 
         base_url, token = cloud_service
         api_key = os.environ["VOYAGE_API_KEY"]
 
-        # Python PRODUCTION path: VoyageAIEmbeddingFunction (what t3.py uses)
+        # Python PRODUCTION path: VoyageEmbeddingFunction (what t3.py uses).
+        # P3: was chromadb's VoyageAIEmbeddingFunction. That swap KEEPS this
+        # comment true — t3.py moved to the nexus EF, so continuing to gate
+        # against chroma's would have compared Java to something production no
+        # longer calls. The nexus EF mirrors chroma's embed() kwargs and float32
+        # output precisely so this leg stays a like-for-like comparison.
         # input_type=None (default), truncation=True (default), returns np.float32
-        ef = cef.VoyageAIEmbeddingFunction(model_name="voyage-code-3", api_key=api_key)
+        ef = VoyageEmbeddingFunction(model_name="voyage-code-3", api_key=api_key)
         python_f32 = [np.array(v, dtype=np.float32) for v in ef(CORPUS)]
 
         # Java path: VoyageEmbedder via code__ prefix routing
@@ -677,9 +682,14 @@ class TestEmbedParity:
     # ── Self-check: ONNX Python determinism (no service needed) ───────────────
 
     def test_onnx_python_determinism(self) -> None:
-        """Python ONNXMiniLM must return bit-identical vectors on repeated calls."""
-        from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
-        ef = ONNXMiniLM_L6_V2()
+        """Python ONNX MiniLM must return bit-identical vectors on repeated calls.
+
+        P3: was chromadb's ONNXMiniLM_L6_V2. nexus.db.minilm_direct is the
+        drop-in that replaced it (P0b) and is what the local EF tier now runs,
+        so this determinism self-check follows the code it is meant to guard.
+        """
+        from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction
+        ef = MiniLMDirectEmbeddingFunction()
         for text in CORPUS:
             v1 = np.array(ef([text])[0], dtype=np.float32)
             v2 = np.array(ef([text])[0], dtype=np.float32)

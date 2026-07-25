@@ -587,6 +587,13 @@ def cloud_mode(monkeypatch: pytest.MonkeyPatch) -> None:
 # at module scope instead. See ``docs/contributing.md`` and
 # ``tests/AGENTS.md``.
 _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
+    # RDR-155 P4b P3: the nexus-owned Voyage EF's own unit tests. Reason class
+    # "string-literal-as-name" — the voyage tokens are ``model_name=`` values
+    # asserted against the mocked ``voyageai.Client.embed`` kwargs, which is
+    # the wire contract under test. Every test patches the client, so no
+    # embedding, no credential and no cloud mode is involved; requesting
+    # cloud_mode would add a live-credential dependency to a fully mocked test.
+    "test_voyage_ef.py",
     # Cloud-behavior files — Phase 1 ships the lint mechanism with these
     # excluded; subsequent PRs promote each to module-level
     # ``pytestmark = pytest.mark.usefixtures("cloud_mode")``. Promotion is

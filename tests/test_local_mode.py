@@ -259,10 +259,16 @@ class TestT3DatabaseLocalMode:
     def test_local_mode_no_cloud_probe(self, tmp_path: Path, local_ef: LocalEmbeddingFunction) -> None:
         # RDR-155 P4a.2: local mode without an injected client fails loud (the
         # PersistentClient serving open is retired) and never probes the cloud.
-        with patch("nexus.db.t3.chromadb.CloudClient") as mock_cloud:
-            with pytest.raises(RuntimeError, match="RDR-155 Phase 4a"):
-                T3Database(local_mode=True, local_path=str(tmp_path / "chroma"), _ef_override=local_ef)
-            mock_cloud.assert_not_called()
+        #
+        # P3: the `patch("nexus.db.t3.chromadb.CloudClient")` tripwire that
+        # wrapped this is GONE — there is no chromadb to patch, so "never
+        # constructs a CloudClient" is structural rather than observable. That
+        # half is now owned by test_rdr155_p4b_deletion_gate.py (module
+        # absence) and test_p4b_collection_not_found_contract.py
+        # (test_chromadb_is_not_importable). What remains is the live
+        # behaviour: local mode without an injected client fails loud.
+        with pytest.raises(RuntimeError, match="RDR-155 Phase 4a"):
+            T3Database(local_mode=True, local_path=str(tmp_path / "chroma"), _ef_override=local_ef)
 
     def test_local_mode_put_and_search(self, local_db: T3Database) -> None:
         doc_id = local_db.put(
