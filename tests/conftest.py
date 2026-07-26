@@ -485,6 +485,41 @@ def _pin_storage_backend_sqlite(request: pytest.FixtureRequest,
 
 
 @pytest.fixture(autouse=True)
+def _reset_shared_service_catalog_client() -> None:
+    """Drop the process-lifetime shared SERVICE catalog client between tests
+    (nexus-aqbrk).
+
+    ``nexus.catalog.factory`` memoises ONE ``HttpCatalogClient`` for the life
+    of the process (nexus-5en9j — it was the largest reconstruction count in
+    the nexus-53x7s shakeout, 394 constructions in one run). Correct in
+    production, where the tenant never changes mid-process. Wrong for a
+    pytest session, where the engine substrate mints a FRESH TENANT AND TOKEN
+    per test: the memoised client keeps the FIRST test's token, so every
+    later test's catalog reads and writes land in the first test's tenant.
+
+    The visible symptom is not "wrong tenant" — it is accumulation. Rows pile
+    up in tenant #1 across the whole module, and eventually a
+    ``register_owner`` that is the first of its name IN ITS OWN TEST hits a
+    row an earlier test already wrote, and the engine correctly refuses:
+    ``HTTP 409: integrity constraint violation`` on ``/v1/catalog/owners/
+    upsert`` (catalog_owners_unique_name_type). Order-dependent, passes in
+    isolation, and the error names a constraint rather than the cause — the
+    same profile as the import-seed-id defect, and the same trap.
+
+    ``reset_shared_service_catalog_client_for_tests`` already existed for
+    exactly this; nothing called it outside the one test that owns the
+    caching behaviour itself. Reset on BOTH sides so a test that constructs
+    the client cannot leak it forward, and a test that inherits one cannot
+    start dirty.
+    """
+    from nexus.catalog import factory
+
+    factory.reset_shared_service_catalog_client_for_tests()
+    yield
+    factory.reset_shared_service_catalog_client_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def _reset_lease_resolution_history() -> None:
     """Reset ``service_endpoint``'s process-wide "ever resolved a lease"
     signal before AND after every test (nexus-7dsgp, critic round 1
