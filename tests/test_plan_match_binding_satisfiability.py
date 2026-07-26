@@ -43,6 +43,7 @@ def library(tmp_path: Path):
 def _seed_with_bindings(
     library, *, query: str, required: list[str],
     defaults: dict | None = None, name: str = "p",
+    scope_tags: str | None = None,
 ) -> int:
     from nexus.plans.schema import canonical_dimensions_json
 
@@ -55,6 +56,7 @@ def _seed_with_bindings(
         # default_bindings is its own column — Match.from_plan_row reads
         # row['default_bindings'], never plan_json.
         default_bindings=json.dumps(defaults) if defaults else None,
+        scope_tags=scope_tags,
     )
 
 
@@ -250,3 +252,62 @@ def test_the_fts5_fallback_still_offers_runnable_plans(library) -> None:
         available_bindings=frozenset({"intent"}),
     )
     assert [m.plan_id for m in matches] == [pid]
+
+
+# ── nexus-czoeu: the two pre-existing counters share the same gap ──────────
+#
+# scope_conflict_drops and always_failing_drops were reported only on the
+# fallthrough path, so like binding_drops before nexus-eedj4 they were
+# invisible whenever a runnable candidate won. Both records also sat at
+# DEBUG, which _resolve_level never emits in MCP (INFO) or CLI (WARNING)
+# mode, so they were unobservable on the fallthrough path too.
+
+
+def test_scope_conflict_drop_is_logged_when_a_sibling_wins(library) -> None:
+    """RDR-091 I-4 added this record so operators could see scope degrading."""
+    from nexus.plans.matcher import plan_match
+
+    conflicting = _seed_with_bindings(
+        library, query="scoped plan", required=["question"], name="scoped",
+        scope_tags="code__other",
+    )
+    winner = _seed_with_bindings(
+        library, query="matching plan", required=["question"], name="matching",
+        scope_tags="rdr__nexus",
+    )
+    structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
+    with capture_logs() as logs:
+        matches = plan_match(
+            intent="scoped plan", library=library,
+            cache=_FakeCache(hits=[(conflicting, 0.03), (winner, 0.05)]),
+            min_confidence=0.85, scope_preference="rdr__nexus",
+        )
+    assert [m.plan_id for m in matches] == [winner], "fixture did not drop the scoped plan"
+    assert any(
+        e.get("event") == "plan_match_scope_conflict_fallthrough" for e in logs
+    ), "scope conflict dropped a candidate on the winning-sibling path with no record"
+
+
+def test_always_failing_drop_is_logged_when_a_sibling_wins(library) -> None:
+    """nexus-vtp8h's skip must be visible when it is not the only candidate."""
+    from nexus.plans.matcher import plan_match
+
+    doomed = _seed_with_bindings(
+        library, query="broken plan", required=["question"], name="broken",
+    )
+    for _ in range(3):
+        library.increment_run_outcome(doomed, success=False)
+    winner = _seed_with_bindings(
+        library, query="working plan", required=["question"], name="working",
+    )
+    structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
+    with capture_logs() as logs:
+        matches = plan_match(
+            intent="broken plan", library=library,
+            cache=_FakeCache(hits=[(doomed, 0.03), (winner, 0.05)]),
+            min_confidence=0.85,
+        )
+    assert [m.plan_id for m in matches] == [winner], "fixture did not drop the failing plan"
+    assert any(
+        e.get("event") == "plan_match_always_failing_dropped" for e in logs
+    ), "an always-failing plan was skipped on the winning-sibling path with no record"

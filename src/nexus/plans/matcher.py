@@ -143,6 +143,43 @@ def _unmet_typed_binding(
     )
 
 
+def _log_t1_drops(
+    *,
+    hits: list,
+    scope_conflict_drops: int,
+    always_failing_drops: int,
+    scope_pref: str,
+) -> None:
+    """Report the T1 path's scope-conflict and always-failing drops.
+
+    nexus-czoeu. Both records existed before but were emitted only after
+    the ``if scored:`` early return, so they fired only when EVERY
+    candidate was dropped. RDR-091's code-review finding I-4 added the
+    scope record specifically so "operators can see when
+    scope_preference is silently degrading matches" — which it could not
+    do in the case where a degraded match is actually returned.
+
+    INFO, not DEBUG, for the same reason as
+    :func:`_log_binding_drops`: ``_resolve_level``
+    (``logging_setup.py:36``) defaults MCP to INFO and CLI to WARNING,
+    so the original DEBUG records never reached a log in normal
+    operation — they were unobservable on the fallthrough path too.
+    """
+    if hits and scope_conflict_drops > 0:
+        _log.info(
+            "plan_match_scope_conflict_fallthrough",
+            t1_hits=len(hits),
+            dropped=scope_conflict_drops,
+            scope_pref=scope_pref,
+        )
+    if always_failing_drops:
+        _log.info(
+            "plan_match_always_failing_dropped",
+            dropped=always_failing_drops,
+            remedy="nx plan hygiene --apply retires these durably",
+        )
+
+
 def _log_binding_drops(drops: list[tuple[int, str]]) -> None:
     """Surface unrunnable-plan drops.
 
@@ -464,36 +501,27 @@ def plan_match(
             adjusted = confidence * (1.0 + _SCOPE_FIT_WEIGHT * fit)
             scored.append((adjusted, _specificity(m.scope_tags), m))
 
+        # nexus-czoeu: report EVERY drop reason before either exit, not
+        # only on the fallthrough. All three counters previously logged
+        # after the early return below, so a drop was invisible whenever
+        # a runnable sibling won — the common case, and the one where a
+        # degraded (rather than absent) match is what an operator needs
+        # to understand. binding_drops was fixed first (nexus-eedj4);
+        # these two carried the identical gap it was copied from.
+        _log_t1_drops(
+            hits=hits,
+            scope_conflict_drops=scope_conflict_drops,
+            always_failing_drops=always_failing_drops,
+            scope_pref=scope_pref,
+        )
+        _log_binding_drops(binding_drops)
+
         if scored:
             scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
             matches = [m for _, _, m in scored[:n]]
-            # Drain BEFORE returning. This early return is the common
-            # case — a runnable sibling outscores the dropped plan — and
-            # logging only on the fallthrough path below made the drop
-            # invisible in exactly the situation the record exists for.
-            _log_binding_drops(binding_drops)
             for m in matches:
                 library.increment_match_metrics(m.plan_id, confidence=m.confidence)
             return matches
-
-        # T1 returned hits but every admissible plan was scope-filtered.
-        # Log so operators can see when scope_preference is silently
-        # degrading matches to FTS5 / inline planner (RDR-091 code-review
-        # finding I-4).
-        if hits and scope_conflict_drops > 0:
-            _log.debug(
-                "plan_match_scope_conflict_fallthrough",
-                t1_hits=len(hits),
-                dropped=scope_conflict_drops,
-                scope_pref=scope_pref,
-            )
-        if always_failing_drops:
-            _log.debug(
-                "plan_match_always_failing_dropped",
-                dropped=always_failing_drops,
-                remedy="nx plan hygiene --apply retires these durably",
-            )
-        _log_binding_drops(binding_drops)
 
     # FTS5 fallback: either cache unavailable or T1 returned no hits.
     # Over-fetch so the dimension post-filter doesn't starve the caller.
