@@ -28,6 +28,13 @@ from nexus.catalog.event_log import EventLog
 from nexus.commands.catalog_cmds.doctor import doctor_cmd
 from tests.conftest import make_vector_test_client
 
+# nexus-aqbrk: the catalog doctor verbs are local-only BY DESIGN — they
+# diagnose the LOCAL artifacts (event log / JSONL / .catalog.db projection)
+# and say so in their own uninitialised-catalog error, which explicitly
+# warns against creating a divergent local catalog in service mode
+# (nexus-kmo9h, commands/catalog_cmds/doctor.py:42).
+pytestmark = pytest.mark.usefixtures("local_catalog_backend")
+
 
 @pytest.fixture()
 def isolated_nexus(tmp_path: Path) -> Path:

@@ -11,6 +11,7 @@ import pytest
 from nexus.catalog.catalog import Catalog, _SPAN_PATTERN
 from nexus.catalog.tumbler import Tumbler
 from tests.conftest import make_vector_test_client
+from tests._t2_fixture_ops import require_sqlite_substrate
 
 
 @pytest.fixture
@@ -480,6 +481,12 @@ class TestAliasResolution:
         upgraded silently on open. Simulated by creating a documents
         table with the pre-migration schema and then re-opening via
         Catalog."""
+        # nexus-aqbrk: this hand-builds a PRE-MIGRATION SQLite schema and
+        # asserts the on-open ALTER adds the column. There is no service-mode
+        # analogue — PG's catalog schema is Liquibase-managed and there is no
+        # "old .catalog.db" to upgrade — and the migration path it tests is
+        # deleted with the store in nexus-i711w.
+        require_sqlite_substrate("upgrades a hand-built pre-migration SQLite schema")
         import sqlite3
 
         d = tmp_path / "oldcat"
