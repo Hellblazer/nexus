@@ -2015,3 +2015,43 @@ def _reap_leaked_test_daemons(tmp_path_factory):
     if reaped:
         print(f"\n[nexus-1odsl] reaped {len(reaped)} leaked daemon(s): {reaped}")
         print(f"\n[nexus-1odsl] reaped {len(reaped)} leaked aspect-worker daemon(s): {reaped}")
+
+
+def fake_credentials(value: str = "test-key", *, passthrough: tuple[str, ...] = (
+    "service_url", "service_token",
+)):
+    """A ``get_credential`` side_effect that does NOT poison the endpoint.
+
+    nexus-aqbrk. The common form in indexer tests is::
+
+        patch("nexus.config.get_credential", side_effect=lambda k: "test-key")
+
+    which answers EVERY key — including ``service_url``. That key is not a
+    generic credential: it is the authoritative FULL service endpoint
+    (``service_endpoint.py``: "used VERBATIM ... NX_SERVICE_URL env FIRST,
+    then nx config set service_url"). So the blanket stub hands endpoint
+    resolution the literal string "test-key", every client builds
+    ``base_url="test-key"``, and the first request dies on
+    ``httpx.UnsupportedProtocol: Request URL is missing an 'http://' or
+    'https://' protocol``.
+
+    Invisible on the SQLite arm, because nothing resolves a service endpoint
+    there. Under the engine substrate it was the single largest failure
+    cause found in this port — 29 of 32 in tests/test_indexer_e2e.py plus 4
+    in tests/test_indexer_duplicate_content.py.
+
+    This keeps the blanket answer for the credential the tests actually care
+    about (embedder routing keys on ``voyage_api_key`` PRESENCE) while
+    delegating the endpoint keys to the real resolver, so the substrate's
+    own configuration survives the mock. It is the same orthogonality bug
+    ``t2_service_env``'s NX_LOCAL pin documents: a stub chosen for one axis
+    silently perturbing a neighbouring one.
+    """
+    from nexus.config import get_credential as _real
+
+    def _side_effect(key: str):
+        if key in passthrough:
+            return _real(key)
+        return value
+
+    return _side_effect
