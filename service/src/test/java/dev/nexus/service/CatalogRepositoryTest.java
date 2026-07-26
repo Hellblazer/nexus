@@ -3179,4 +3179,222 @@ class CatalogRepositoryTest {
             pool.shutdownNow();
         }
     }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // nexus-23wlw — tombstone visibility parity contract
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * nexus-23wlw: a tombstoned document is invisible to EVERY read.
+     *
+     * <p>THE DEFECT. {@code delete_document} tombstones (sets
+     * {@code deleted_at}); it does not remove the row. The POINT lookups
+     * filtered correctly — {@code getDocument}, {@code resolveMany}, the
+     * {@code registerDocument} idempotency probes — but the LIST reads did
+     * not. So {@code audit-membership --purge-non-canonical} reported
+     * "Deleted 3 of 3" and {@code list_by_collection} still returned all 8:
+     * a delete that reports success and appears not to have happened, which
+     * reads as a broken delete rather than a broken list. Every count derived
+     * from these reads was inflated by exactly the tombstone population.
+     *
+     * <p>SQLite has no equivalent because it HARD-deletes, so the row is
+     * physically absent from {@code documents}. That is also why the fix is a
+     * blanket filter rather than an {@code include_deleted} parameter: each of
+     * these methods documents itself as replacing a {@code FROM documents}
+     * SQLite query, and that table never contains tombstones. Matching it is
+     * parity, not a new policy.
+     *
+     * <p>WHY NO CALLER LOSES ANYTHING, checked before filtering rather than
+     * assumed: {@code nx catalog undelete} restores from a BACKUP FILE
+     * (re-registering), not from live tombstones; {@code purge_trash} reads
+     * {@code deleted_at IS NOT NULL} directly in PL/pgSQL; the catalog-004
+     * manifest functions were already tombstone-aware in SQL. No surface in
+     * this class exists to LIST the trash, so nothing here needed to see it.
+     *
+     * <p>The bead named nine sites. An audit of every {@code CATALOG_DOCUMENTS}
+     * read found twenty-two unfiltered, including {@code countDocuments} (the
+     * inflated-counts symptom itself) and
+     * {@code lookupDocByCollectionAndPath}, which resolves a tumbler for
+     * WRITES — a tombstone match there hands a caller a deleted document to
+     * write into. Fixing the nine and leaving the rest is the recurring shape
+     * of this bug: catalog-015 fixed the catalog and left memory, j0nec was
+     * fixed in one file and left in twenty-three.
+     *
+     * <p>Exactly ONE read is deliberately unfiltered — {@code
+     * physicalCollectionOf}, which is a manifest WRITE helper, not a reader.
+     * Its exclusion is argued at its own declaration.
+     */
+    @Test
+    void tombstonedDocument_isInvisibleToEveryRead() {
+        String tenant = "tomb-tenant-" + System.nanoTime();
+        String live = "9.1";
+        String dead = "9.2";
+
+        for (String[] d : new String[][] {
+                {live, "Live Doc",  "live.py"},
+                {dead, "Dead Doc",  "dead.py"}}) {
+            repo.upsertDocument(tenant, Map.of(
+                "tumbler",             d[0],
+                "title",               d[1],
+                "content_type",        "code",
+                "corpus",              "tombcorpus",
+                "physical_collection", "tombcoll",
+                "file_path",           "/abs/" + d[2],
+                "source_uri",          "file:///abs/" + d[2]));
+        }
+        repo.upsertLink(tenant, Map.of(
+            "from_tumbler", live,
+            "to_tumbler",   dead,
+            "link_type",    "relates",
+            "created_by",   "nexus-23wlw-test"));
+
+        assertThat(repo.deleteDocument(tenant, dead))
+            .as("precondition: the delete must actually tombstone one row")
+            .isEqualTo(1);
+
+        // Every list/lookup surface, named so a failure says WHICH one leaked.
+        assertThat(tumblersOf(repo.listDocuments(tenant, 200, 0)))
+            .as("listDocuments").containsExactly(live);
+        assertThat(repo.countDocuments(tenant))
+            .as("countDocuments — the inflated-counts symptom").isEqualTo(1);
+        assertThat(tumblersOf(repo.documentsByCollection(tenant, "tombcoll")))
+            .as("documentsByCollection — the bead's own repro").containsExactly(live);
+        assertThat(tumblersOf(repo.documentsByFilePath(tenant, "/abs/dead.py")))
+            .as("documentsByFilePath").isEmpty();
+        assertThat(tumblersOf(repo.documentsBySourceUri(tenant, "file:///abs/dead.py")))
+            .as("documentsBySourceUri").isEmpty();
+        assertThat(tumblersOf(repo.documentsByOwner(tenant, "9")))
+            .as("documentsByOwner").containsExactly(live);
+        assertThat(tumblersOf(repo.documentsByOwnerAndFilePath(tenant, "9", "/abs/dead.py")))
+            .as("documentsByOwnerAndFilePath").isEmpty();
+        assertThat(tumblersOf(repo.documentsByContentType(tenant, "code")))
+            .as("documentsByContentType").containsExactly(live);
+        assertThat(tumblersOf(repo.documentsByCorpus(tenant, "tombcorpus")))
+            .as("documentsByCorpus").containsExactly(live);
+        assertThat(tumblersOf(repo.descendants(tenant, "9")))
+            .as("descendants").containsExactly(live);
+        assertThat(repo.lookupDocByCollectionAndPath(tenant, "tombcoll", "/abs/dead.py"))
+            .as("lookupDocByCollectionAndPath — resolves a tumbler for WRITES, so a "
+                + "tombstone match hands the caller a deleted document")
+            .isNull();
+        assertThat(tumblersOf(repo.searchDocuments(tenant, "Dead", null, 50)))
+            .as("searchDocuments").isEmpty();
+        assertThat(repo.chunkCountsForDocs(tenant, List.of(live, dead)))
+            .as("chunkCountsForDocs").doesNotContainKey(dead);
+        assertThat(tumblersOf(repo.docsWithAbsolutePaths(tenant)))
+            .as("docsWithAbsolutePaths").containsExactly(live);
+        assertThat(tumblersOf(repo.orphanedDocs(tenant)))
+            .as("orphanedDocs — a tombstone must not be reported as an orphan")
+            .doesNotContain(dead);
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> nodes =
+            (List<Map<String, Object>>) repo.graphBFS(
+                tenant, List.of(live), List.of(), "both", 1).get("nodes");
+        assertThat(tumblersOf(nodes))
+            .as("graphBFS nodes — a tombstoned neighbour must not surface as a node")
+            .doesNotContain(dead);
+
+        long codeCount = repo.coverageByContentType(tenant, "9").stream()
+            .filter(r -> "code".equals(r.get("content_type")))
+            .mapToLong(r -> ((Number) r.get("total")).longValue())
+            .sum();
+        assertThat(codeCount).as("coverageByContentType").isEqualTo(1);
+
+        // NON-VACUITY. Every assertion above is satisfied by a tenant that is
+        // simply empty, so without this the whole test passes against a
+        // seeding bug — and it would have passed against the ORIGINAL defect
+        // too if `live` were missing for an unrelated reason.
+        assertThat(tumblersOf(repo.documentsByCollection(tenant, "tombcoll")))
+            .as("the LIVE doc is still returned — this test is not passing "
+                + "because the tenant is empty")
+            .containsExactly(live);
+        assertThat(repo.getDocument(tenant, live))
+            .as("and it is still individually resolvable").isNotNull();
+    }
+
+    /** Tumblers of a document-row list, in order, for the nexus-23wlw contract. */
+    private static List<String> tumblersOf(List<Map<String, Object>> rows) {
+        return rows.stream().map(r -> String.valueOf(r.get("tumbler"))).toList();
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // nexus-ybj1b — include_heuristic parity contract
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * nexus-ybj1b: graph traversal excludes {@code implements-heuristic} by
+     * default and includes it on explicit opt-in.
+     *
+     * <p>THE DEFECT. {@code Catalog.graph}/{@code graph_many} have always
+     * excluded heuristic edges by default. The HTTP client sent
+     * {@code include_heuristic} with the comment "forwarded to service for
+     * future support; currently informational", and the server read only
+     * {@code link_types} — the string appeared NOWHERE in the Java module. So
+     * BOTH directions were broken, which is why this test asserts both: the
+     * default did not exclude, and the opt-in was indistinguishable from the
+     * default.
+     *
+     * <p>Not a subtle ranking shift. The 2026-05-08 production probe measured
+     * 15,490 heuristic edges out of 23,582 — 66% — with 500-660 inbound on a
+     * single high-traffic RDR. That is the flood the local default exists to
+     * suppress, silently reinstated for every user on the 6.0 default backend.
+     *
+     * <p>The third case is the one a deny-list implementation would get wrong:
+     * an explicit {@code link_types} naming the heuristic type must WIN, since
+     * the local contract trusts a caller who names types.
+     */
+    @Test
+    void graphBFS_excludesHeuristicByDefault_andHonoursOptIn() {
+        String tenant = "heur-tenant-" + System.nanoTime();
+        String seed = "8.1", curated = "8.2", heuristic = "8.3", custom = "8.4";
+
+        for (String t : List.of(seed, curated, heuristic, custom)) {
+            repo.upsertDocument(tenant, Map.of(
+                "tumbler", t, "title", "Doc " + t, "content_type", "code"));
+        }
+        for (String[] e : new String[][] {
+                {curated,   "cites"},
+                {heuristic, "implements-heuristic"},
+                {custom,    "invented-by-a-user"}}) {
+            repo.upsertLink(tenant, Map.of(
+                "from_tumbler", seed, "to_tumbler", e[0],
+                "link_type", e[1], "created_by", "nexus-ybj1b-test"));
+        }
+
+        assertThat(neighbours(repo.graphBFS(tenant, List.of(seed), List.of(), "both", 1, false)))
+            .as("DEFAULT: the curated edge survives, the heuristic flood does not — "
+                + "and a CUSTOM type is excluded too, because the contract is an "
+                + "allow-list, not a deny-list")
+            .contains(curated)
+            .doesNotContain(heuristic)
+            .doesNotContain(custom);
+
+        assertThat(neighbours(repo.graphBFS(tenant, List.of(seed), List.of(), "both", 1, true)))
+            .as("OPT-IN: include_heuristic reaches the query and lifts the filter "
+                + "entirely — previously indistinguishable from the default")
+            .contains(curated, heuristic, custom);
+
+        assertThat(neighbours(repo.graphBFS(
+                tenant, List.of(seed), List.of("implements-heuristic"), "both", 1, false)))
+            .as("EXPLICIT TYPES WIN: naming the heuristic type returns it even with "
+                + "includeHeuristic=false — the caller knows what they asked for")
+            .containsExactly(heuristic);
+
+        assertThat(neighbours(repo.graphBFS(tenant, List.of(seed), List.of(), "both", 1, false)))
+            .as("non-vacuity: the traversal finds SOMETHING by default, so the "
+                + "doesNotContain assertions above are not passing on an empty graph")
+            .isNotEmpty();
+    }
+
+    /**
+     * The non-seed nodes reached by a {@link CatalogRepository#graphBFS} result.
+     * Seeds are always present in {@code visited}, so comparing raw node sets
+     * would report a hit for a neighbour that was never actually traversed.
+     */
+    private static List<String> neighbours(Map<String, Object> graph) {
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> nodes = (List<Map<String, Object>>) graph.get("nodes");
+        return tumblersOf(nodes).stream().filter(t -> !"8.1".equals(t)).toList();
+    }
 }

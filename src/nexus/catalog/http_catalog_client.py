@@ -1621,7 +1621,12 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             effective_link_types.insert(0, link_type)
         if effective_link_types:
             payload["link_types"] = effective_link_types
-        # include_heuristic: forwarded to service for future support; currently informational
+        # nexus-ybj1b: the service HONOURS this now (CatalogHandler.handleTraverse
+        # -> CatalogRepository.graphBFS). Sending it only when True is correct:
+        # absent means false server-side, and false is the default that EXCLUDES
+        # implements-heuristic. It was previously "informational" — the server
+        # ignored it entirely, so the default silently included the heuristic
+        # flood and the opt-in did nothing.
         if include_heuristic:
             payload["include_heuristic"] = True
         return self._traverse(payload)
@@ -1647,7 +1652,12 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             effective_link_types.insert(0, link_type)
         if effective_link_types:
             payload["link_types"] = effective_link_types
-        # include_heuristic: forwarded to service for future support; currently informational
+        # nexus-ybj1b: the service HONOURS this now (CatalogHandler.handleTraverse
+        # -> CatalogRepository.graphBFS). Sending it only when True is correct:
+        # absent means false server-side, and false is the default that EXCLUDES
+        # implements-heuristic. It was previously "informational" — the server
+        # ignored it entirely, so the default silently included the heuristic
+        # flood and the opt-in did nothing.
         if include_heuristic:
             payload["include_heuristic"] = True
         return self._traverse(payload)

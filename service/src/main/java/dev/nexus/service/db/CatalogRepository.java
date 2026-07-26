@@ -1100,7 +1100,7 @@ public final class CatalogRepository {
                     "fts_vector @@ plainto_tsquery('english', {0}) "
                     + "OR fts_vector @@ plainto_tsquery('simple', {0})",
                     DSL.val(query));
-            Condition where = ftsMatch;
+            Condition where = ftsMatch.and(CATALOG_DOCUMENTS.DELETED_AT.isNull());
             if (contentType != null && !contentType.isBlank()) {
                 where = where.and(CATALOG_DOCUMENTS.CONTENT_TYPE.eq(contentType));
             }
@@ -1118,6 +1118,7 @@ public final class CatalogRepository {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(documentFields())
                .from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.DELETED_AT.isNull())
                .orderBy(CATALOG_DOCUMENTS.TUMBLER)
                .limit(limit <= 0 ? 200 : limit)
                .offset(offset)
@@ -1129,7 +1130,9 @@ public final class CatalogRepository {
     /** Count all documents for this tenant. */
     public long countDocuments(String tenant) {
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.selectCount().from(CATALOG_DOCUMENTS).fetchOne(0, Long.class)
+            ctx.selectCount().from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.DELETED_AT.isNull())
+               .fetchOne(0, Long.class)
         );
     }
 
@@ -1251,7 +1254,8 @@ public final class CatalogRepository {
     public List<Map<String, Object>> documentsByCollection(String tenant, String collection) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
-               .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection)).orderBy(CATALOG_DOCUMENTS.TUMBLER)
+               .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection)
+                   .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())).orderBy(CATALOG_DOCUMENTS.TUMBLER)
                .fetch().map(r -> docRowFromRecord(r.intoMap()))
         );
     }
@@ -1260,7 +1264,7 @@ public final class CatalogRepository {
     public List<Map<String, Object>> documentsByFilePath(String tenant, String filePath) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
-               .where(CATALOG_DOCUMENTS.FILE_PATH.eq(filePath))
+               .where(CATALOG_DOCUMENTS.FILE_PATH.eq(filePath).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                .fetch().map(r -> docRowFromRecord(r.intoMap()))
         );
     }
@@ -1269,7 +1273,7 @@ public final class CatalogRepository {
     public List<Map<String, Object>> documentsBySourceUri(String tenant, String uri) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
-               .where(CATALOG_DOCUMENTS.SOURCE_URI.eq(uri))
+               .where(CATALOG_DOCUMENTS.SOURCE_URI.eq(uri).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                .fetch().map(r -> docRowFromRecord(r.intoMap()))
         );
     }
@@ -1278,7 +1282,7 @@ public final class CatalogRepository {
     public List<Map<String, Object>> documentsByOwner(String tenant, String ownerPrefix) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
-               .where(CATALOG_DOCUMENTS.TUMBLER.like(ownerPrefix + ".%"))
+               .where(CATALOG_DOCUMENTS.TUMBLER.like(ownerPrefix + ".%").and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                .orderBy(CATALOG_DOCUMENTS.TUMBLER)
                .fetch().map(r -> docRowFromRecord(r.intoMap()))
         );
@@ -1296,7 +1300,8 @@ public final class CatalogRepository {
             String tenant, String ownerPrefix, String filePath) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
-               .where(CATALOG_DOCUMENTS.TUMBLER.like(ownerPrefix + ".%").and(CATALOG_DOCUMENTS.FILE_PATH.eq(filePath)))
+               .where(CATALOG_DOCUMENTS.TUMBLER.like(ownerPrefix + ".%").and(CATALOG_DOCUMENTS.FILE_PATH.eq(filePath))
+                   .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                .orderBy(CATALOG_DOCUMENTS.TUMBLER)
                .fetch().map(r -> docRowFromRecord(r.intoMap()))
         );
@@ -1306,7 +1311,7 @@ public final class CatalogRepository {
     public List<Map<String, Object>> documentsByContentType(String tenant, String contentType) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
-               .where(CATALOG_DOCUMENTS.CONTENT_TYPE.eq(contentType))
+               .where(CATALOG_DOCUMENTS.CONTENT_TYPE.eq(contentType).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                .orderBy(CATALOG_DOCUMENTS.TUMBLER)
                .fetch().map(r -> docRowFromRecord(r.intoMap()))
         );
@@ -1316,7 +1321,7 @@ public final class CatalogRepository {
     public List<Map<String, Object>> documentsByCorpus(String tenant, String corpus) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
-               .where(CATALOG_DOCUMENTS.CORPUS.eq(corpus))
+               .where(CATALOG_DOCUMENTS.CORPUS.eq(corpus).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                .orderBy(CATALOG_DOCUMENTS.TUMBLER)
                .fetch().map(r -> docRowFromRecord(r.intoMap()))
         );
@@ -1326,7 +1331,7 @@ public final class CatalogRepository {
     public List<Map<String, Object>> descendants(String tenant, String prefix) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
-               .where(CATALOG_DOCUMENTS.TUMBLER.like(prefix + ".%"))
+               .where(CATALOG_DOCUMENTS.TUMBLER.like(prefix + ".%").and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                .orderBy(CATALOG_DOCUMENTS.TUMBLER)
                .fetch().map(r -> docRowFromRecord(r.intoMap()))
         );
@@ -1358,7 +1363,8 @@ public final class CatalogRepository {
     public String lookupDocByCollectionAndPath(String tenant, String collection, String filePath) {
         return tenantScope.withTenant(tenant, ctx -> {
             var r = ctx.select(CATALOG_DOCUMENTS.TUMBLER).from(CATALOG_DOCUMENTS)
-                       .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection).and(CATALOG_DOCUMENTS.FILE_PATH.eq(filePath)))
+                       .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection).and(CATALOG_DOCUMENTS.FILE_PATH.eq(filePath))
+                           .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                        .fetchOne();
             return r != null ? r.value1() : null;
         });
@@ -1497,19 +1503,82 @@ public final class CatalogRepository {
     }
 
     /**
+     * The default graph-traversal link-type allow-list (nexus-ybj1b).
+     *
+     * <p>A faithful port of {@code catalog_links._filter_link_types}'s default
+     * branch — the SERVER is the owner now, because the Python local path it
+     * mirrors is RDR-158 P4 retirement debt.
+     *
+     * <p>Note this is an ALLOW-list, not "everything except
+     * implements-heuristic". That distinction is load-bearing and is the local
+     * contract: a CUSTOM link type is also excluded from default traversal,
+     * and callers who want it must name it in {@code link_types} (or pass
+     * {@code include_heuristic}). Implementing this as a deny-list would look
+     * equivalent on the heuristic repro and silently diverge on custom types.
+     *
+     * <p>Why any of it exists (nexus-6ppk): {@code implements-heuristic} is
+     * auto-emitted whenever a code chunk's symbols match an RDR's terminology,
+     * so high-traffic infrastructure RDRs accumulate 500-660 inbound heuristic
+     * edges each. The 2026-05-08 production probe measured 15,490 of them —
+     * 66% of all 23,582 links — which drowns the ~6% hand-curated edges and
+     * makes the node cap return mostly noise.
+     */
+    private static final List<String> DEFAULT_GRAPH_LINK_TYPES = List.of(
+        "cites", "implements", "relates", "contains",
+        "supersedes", "describes", "quotes", "comments",
+        "formalizes", "same-as");
+
+    /**
      * BFS graph traversal from seed tumblers.
      * Mirrors Catalog.graph() / Catalog.graph_many(): breadth-first up to maxDepth hops.
      *
      * @param seeds      starting tumblers
-     * @param linkTypes  empty = all types; non-empty = only these types
+     * @param linkTypes  empty = server default (see below); non-empty = only these types
      * @param direction  "out"=from only, "in"=to only, "both"=both
      * @param maxDepth   BFS depth cap (1-3)
      * @return map with "nodes" (list of tumblers) and "edges" (list of link maps)
      */
     public Map<String, Object> graphBFS(String tenant, List<String> seeds,
                                          List<String> linkTypes, String direction, int maxDepth) {
+        return graphBFS(tenant, seeds, linkTypes, direction, maxDepth, false);
+    }
+
+    /**
+     * BFS graph traversal, honouring {@code includeHeuristic} (nexus-ybj1b).
+     *
+     * <p>THE DEFECT THIS CLOSES. {@code Catalog.graph}/{@code graph_many}
+     * exclude {@code implements-heuristic} by default and let callers opt back
+     * in. The HTTP client sent the flag with the comment "forwarded to service
+     * for future support; currently informational" — and the server read only
+     * {@code link_types}, so {@code include_heuristic} appeared NOWHERE in
+     * this module. Both directions were broken: the default did not exclude
+     * (the 2:1 flood was silently reinstated for every service-mode user, on
+     * the 6.0 default backend) and the opt-in was indistinguishable from it.
+     *
+     * <p>A flag the client sends and the server ignores is a silent contract
+     * break, which is why this is fixed server-side where the traversal and
+     * the semantics both live, rather than by having the client enumerate
+     * types — that stopgap only works when the caller supplied none, and turns
+     * "all types except one" into a list that goes stale as link types are
+     * added.
+     *
+     * <p>Three cases, matching {@code _filter_link_types} exactly:
+     * <ul>
+     *   <li>caller named types — they win untouched, heuristic included if
+     *       they asked for it. The caller knows what they want.</li>
+     *   <li>no types, {@code includeHeuristic} — no filter at all, every type.</li>
+     *   <li>no types, default — {@link #DEFAULT_GRAPH_LINK_TYPES}.</li>
+     * </ul>
+     */
+    public Map<String, Object> graphBFS(String tenant, List<String> seeds,
+                                         List<String> linkTypes, String direction, int maxDepth,
+                                         boolean includeHeuristic) {
         if (seeds == null || seeds.isEmpty()) return Map.of("nodes", List.of(), "edges", List.of());
         int depth = Math.min(Math.max(maxDepth, 1), 3);
+        final List<String> effectiveTypes =
+            (linkTypes != null && !linkTypes.isEmpty()) ? linkTypes
+            : includeHeuristic                          ? List.of()
+            :                                             DEFAULT_GRAPH_LINK_TYPES;
 
         return tenantScope.withTenant(tenant, ctx -> {
             Set<String> visited = new LinkedHashSet<>(seeds);
@@ -1528,8 +1597,8 @@ public final class CatalogRepository {
                 } else {
                     dirCond = CATALOG_LINKS.FROM_TUMBLER.in(fl).or(CATALOG_LINKS.TO_TUMBLER.in(fl));
                 }
-                if (!linkTypes.isEmpty()) {
-                    dirCond = dirCond.and(CATALOG_LINKS.LINK_TYPE.in(linkTypes));
+                if (!effectiveTypes.isEmpty()) {
+                    dirCond = dirCond.and(CATALOG_LINKS.LINK_TYPE.in(effectiveTypes));
                 }
 
                 var rows = ctx.select(CATALOG_LINKS.ID, CATALOG_LINKS.FROM_TUMBLER, CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
@@ -1550,7 +1619,7 @@ public final class CatalogRepository {
             List<Map<String, Object>> nodes = new ArrayList<>();
             if (!visited.isEmpty()) {
                 nodes = ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
-                           .where(CATALOG_DOCUMENTS.TUMBLER.in(new ArrayList<>(visited)))
+                           .where(CATALOG_DOCUMENTS.TUMBLER.in(new ArrayList<>(visited)).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                            .fetch().map(r -> docRowFromRecord(r.intoMap()));
             }
             return Map.of("nodes", nodes, "edges", edges);
@@ -1588,6 +1657,19 @@ public final class CatalogRepository {
      * (silent-empty, found by the 6.5.0 live shakeout). Returns null when the
      * doc has no physical_collection (ghost/sourceless docs) — those rows stay
      * NULL, same as the backfill's own skip semantics.
+     *
+     * <p>nexus-23wlw: DELIBERATELY NOT tombstone-filtered — the ONE
+     * {@code CATALOG_DOCUMENTS} read in this class that is not. Every other
+     * read gained {@code deleted_at IS NULL} because a tombstone must be
+     * invisible to readers; this is not a reader. Its only callers are the
+     * manifest WRITE paths ({@code writeManifestRows},
+     * {@code appendManifestChunks}, and the two import-chunk paths), where
+     * filtering would silently stamp NULL onto rows being written for a
+     * tombstoned doc — re-introducing the exact silent-empty class the
+     * nexus-x6kdz stamp above exists to fix, and doing it on the ETL/import
+     * leg, which legitimately writes manifests for documents whose live state
+     * it does not control. If a future caller uses this as a read, filter it
+     * there rather than here.
      */
     private static String physicalCollectionOf(DSLContext ctx, String tenant, String docId) {
         String pc = ctx.select(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
@@ -2413,7 +2495,7 @@ public final class CatalogRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             var rows = ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.CHUNK_COUNT)
                           .from(CATALOG_DOCUMENTS)
-                          .where(CATALOG_DOCUMENTS.TUMBLER.in(docIds))
+                          .where(CATALOG_DOCUMENTS.TUMBLER.in(docIds).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                           .fetch();
             Map<String, Integer> result = new LinkedHashMap<>();
             for (var r : rows) {
@@ -2538,7 +2620,7 @@ public final class CatalogRepository {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.selectDistinct(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
                .from(CATALOG_DOCUMENTS)
-               .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.ne(""))
+               .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.ne("").and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                .orderBy(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
                .fetch(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
         );
@@ -2602,11 +2684,11 @@ public final class CatalogRepository {
             // rows when a tumbler somehow has duplicate document rows.
             var fromMissing = DSL.notExists(
                 ctx.selectOne().from(CATALOG_DOCUMENTS)
-                   .where(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_LINKS.FROM_TUMBLER))
+                   .where(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_LINKS.FROM_TUMBLER).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
             );
             var toMissing = DSL.notExists(
                 ctx.selectOne().from(CATALOG_DOCUMENTS)
-                   .where(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_LINKS.TO_TUMBLER))
+                   .where(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_LINKS.TO_TUMBLER).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
             );
             return ctx.select(CATALOG_LINKS.ID, CATALOG_LINKS.FROM_TUMBLER,
                               CATALOG_LINKS.TO_TUMBLER, CATALOG_LINKS.LINK_TYPE,
@@ -2632,9 +2714,18 @@ public final class CatalogRepository {
         });
     }
 
+    /**
+     * nexus-23wlw: LIVE-only, and it MUST stay in lockstep with the
+     * {@code fromMissing}/{@code toMissing} predicates in {@link #orphanedLinks}.
+     * That method uses those predicates to select the dangling links and this
+     * one to label WHICH side dangles; if the two disagree about tombstones, a
+     * link is reported as orphaned with {@code side} naming neither endpoint.
+     */
     private boolean documentExists(org.jooq.DSLContext ctx, String tumbler) {
         return ctx.fetchExists(
-            ctx.selectOne().from(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
+            ctx.selectOne().from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)
+                   .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
         );
     }
 
@@ -2651,7 +2742,7 @@ public final class CatalogRepository {
             );
             return ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH)
                       .from(CATALOG_DOCUMENTS)
-                      .where(noOut.and(noIn))
+                      .where(noOut.and(noIn).and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                       .orderBy(CATALOG_DOCUMENTS.TUMBLER)
                       .fetch()
                       .map(r -> {
@@ -2676,7 +2767,7 @@ public final class CatalogRepository {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
                .from(CATALOG_DOCUMENTS)
-               .where(CATALOG_DOCUMENTS.FILE_PATH.startsWith("/"))
+               .where(CATALOG_DOCUMENTS.FILE_PATH.startsWith("/").and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                .orderBy(CATALOG_DOCUMENTS.TUMBLER)
                .fetch()
                .map(r -> {
@@ -2794,7 +2885,8 @@ public final class CatalogRepository {
                 var rows = ctx.select(contentType, DSL.count().cast(Long.class), linkedCount)
                               .from(CATALOG_DOCUMENTS)
                               .where(CATALOG_DOCUMENTS.TUMBLER.like(likePat)
-                                  .or(CATALOG_DOCUMENTS.TUMBLER.eq(ownerPrefix)))
+                                  .or(CATALOG_DOCUMENTS.TUMBLER.eq(ownerPrefix))
+                                  .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                               .groupBy(contentType)
                               .fetch();
                 for (var r : rows) {

@@ -562,7 +562,13 @@ public final class CatalogHandler implements HttpHandler {
             : List.of();
         String direction = (String) body.getOrDefault("direction", "both");
         int depth = body.get("depth") instanceof Number n ? n.intValue() : 1;
-        var result = repo.graphBFS(tenant, seeds, linkTypes, direction, depth);
+        // nexus-ybj1b: the client has always sent this; the server used to drop
+        // it on the floor, which broke the contract in BOTH directions — the
+        // default stopped excluding implements-heuristic (reinstating the 2:1
+        // flood for every service-mode user) and the opt-in became a no-op.
+        // ABSENT means false, which is the correct default: exclude.
+        boolean includeHeuristic = Boolean.TRUE.equals(body.get("include_heuristic"));
+        var result = repo.graphBFS(tenant, seeds, linkTypes, direction, depth, includeHeuristic);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
     }
 
