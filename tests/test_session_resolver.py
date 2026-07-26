@@ -347,6 +347,7 @@ class TestSessionEndLauncherRoutesThroughHelper:
         _print_tier_status_summary()
         assert called["connect"] is False
 
+    @pytest.mark.usefixtures("local_t2_backend")
     def test_launcher_uses_helper_value_for_query(
         self, tmp_path, monkeypatch
     ):

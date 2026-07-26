@@ -65,6 +65,7 @@ class TestUpgradeAdvisory:
         assert "mislabeled" not in result.output
         assert "Advisory" not in result.output
 
+    @pytest.mark.usefixtures("local_t2_backend")
     def test_advisory_surfaces_mismatch_count(
         self, runner: CliRunner, tmp_path: Path,
     ) -> None:
