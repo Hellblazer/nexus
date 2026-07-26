@@ -390,6 +390,38 @@ def _isolate_service_endpoint_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(var, raising=False)
 
 
+@pytest.fixture
+def local_catalog_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the CATALOG store to SQLite for tests that drive the local catalog.
+
+    Opt in per file with::
+
+        pytestmark = pytest.mark.usefixtures("local_catalog_backend")
+
+    NOT a substrate workaround. A family of catalog verbs is local-only BY
+    DESIGN and says so in its own error text — ``nx catalog synthesize-log``
+    and the doctor replay/consistency verbs "operate on the LOCAL catalog
+    (event log / JSONL / projection); in service mode the live catalog is
+    owned by the nexus service" (nexus-kmo9h). The same seam that makes that
+    true also makes these tests fail under the engine substrate: ``Catalog``
+    forces ``read_only=True`` whenever ``storage_backend_for("catalog")`` is
+    SERVICE and the file exists, because in service mode the local
+    ``.catalog.db`` is a FROZEN MIGRATION SOURCE that must not be mutated
+    (RDR-176 Phase 1 Gap 2, enforced by
+    tests/catalog/test_rdr176_catalog_non_mutation.py). A test that calls
+    ``Catalog.init`` and then registers anything therefore dies on
+    "attempt to write a readonly database" — the invariant working exactly as
+    designed, against a test that wants the local catalog on purpose.
+
+    So this fixture states the intent the test always had, and keeps coverage
+    of a verb family that still works, rather than skipping it.
+
+    Retirement note: these tests go with the local catalog itself, in
+    nexus-i711w — not before, and not silently.
+    """
+    monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "sqlite")
+
+
 def engine_substrate_selected() -> bool:
     """True when the suite's autouse pin routes tests to the engine substrate.
 
@@ -980,6 +1012,18 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
 _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # Reserved for individual mixed-file exclusions. Format:
     # "tests/test_file.py::test_func"  (no parametrize suffix).
+    #
+    # nexus-9n485 tombstone probe — reason: "string-literal-as-name". Both
+    # tests pass "knowledge__1-1__voyage-context-3__v1" as the rename TARGET
+    # of `nx catalog rename-collection`; the voyage token is one segment of a
+    # conformant RDR-103 name, and what is asserted is the three-state
+    # tombstone guard's refusal (exit != 0, "tombstoned"/"restore" in the
+    # message). The HttpVectorClient's network boundary is patched in both,
+    # so no embedder is constructed and no credential is read — cloud_mode
+    # would add a live-credential dependency to a fully patched test without
+    # changing a single assertion.
+    "tests/test_catalog_rename_collection_tombstone_probe.py::test_rename_rejects_tombstoned_old_with_actionable_message",
+    "tests/test_catalog_rename_collection_tombstone_probe.py::test_rename_rejects_tombstoned_new_as_not_free_to_claim",
     #
     # RDR-185 ladder — reason: "string-literal-as-name". Every one of these
     # builds a conformant RDR-103 collection NAME (or a

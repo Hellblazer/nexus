@@ -25,6 +25,11 @@ from click.testing import CliRunner
 from nexus.catalog.catalog import Catalog
 from nexus.cli import main
 
+# nexus-aqbrk: `nx catalog synthesize-log` is local-only by design — it
+# rebuilds the LOCAL event log / JSONL / projection, which in service mode is
+# a frozen migration source the product deliberately opens read-only.
+pytestmark = pytest.mark.usefixtures("local_catalog_backend")
+
 
 # ─────────────────────────────────────────────────────────────────────
 # Fixtures

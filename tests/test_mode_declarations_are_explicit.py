@@ -121,7 +121,13 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 73
 # "string-literal-as-config-value"; the supervisor env-plumbing mirror case
 # needs the literal voyage model name as a CONFIG value, Popen mocked, no
 # embedder constructed. Rationale in conftest.py beside the entry.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 56
+# 56→58 (nexus-9n485, 2026-07-25): the two rename-collection tombstone-probe
+# tests — "string-literal-as-name"; the voyage token is one segment of the
+# conformant RDR-103 name passed as the rename TARGET, and both tests patch
+# HttpVectorClient's network boundary so no embedder is constructed. Landed
+# red on develop (the tripwire only fires on a whole-session collection, so
+# the authoring run never saw it). Rationale in conftest.py beside the entries.
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 58
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:

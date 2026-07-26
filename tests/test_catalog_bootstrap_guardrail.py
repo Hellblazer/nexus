@@ -36,6 +36,11 @@ from click.testing import CliRunner
 from nexus.catalog.catalog import Catalog
 from nexus.commands.catalog_cmds.doctor import doctor_cmd
 
+# nexus-aqbrk: exercises the LOCAL catalog's own machinery (event log /
+# JSONL / .catalog.db projection), which service mode deliberately opens
+# read-only as a frozen migration source (RDR-176 P1 Gap 2).
+pytestmark = pytest.mark.usefixtures("local_catalog_backend")
+
 
 def _init_catalog(tmp_path: Path) -> Path:
     d = tmp_path / "test-catalog"
