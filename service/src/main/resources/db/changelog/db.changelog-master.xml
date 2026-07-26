@@ -274,6 +274,13 @@
          post-rdr180/post-187 shape of catalog_documents; before grants. -->
     <include file="db/changelog/catalog-016-source-uri-unique.xml"/>
 
+    <!-- nexus-22r1f: memory FTS separator tokens — the memory-side twin of
+         catalog-015. Dotted titles (auth-design.md) were unfindable by any
+         word inside them on the SERVICE substrate, which has been the
+         default since 6.0. Ordered after catalog-016 simply as the next
+         appended changeset; it touches only nexus.memory. -->
+    <include file="db/changelog/memory-002-fts-separator-tokens.xml"/>
+
     <!-- g37fr FINDING 2 (RDR-155 P4b): UPDATE on the topics id sequence so
          the taxonomy fidelity import can setval past imported ids (the
          serial-collision fix). Needs role-001 (nexus_svc) + taxonomy-001

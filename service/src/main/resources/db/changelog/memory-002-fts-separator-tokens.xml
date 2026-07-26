@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-22r1f (P0, reproduced against the DEPLOYED cloud engine 0.1.56).
+
+    nexus.memory.fts_vector tokenized titles as SINGLE opaque lexemes:
+    PostgreSQL's text-search parser classifies 'auth-design.md' as a FILE
+    token and keeps it whole, whereas SQLite FTS5's unicode61 tokenizer
+    splits on every non-alphanumeric and emits 'auth', 'design', 'md'.
+    plainto_tsquery('english','auth') therefore had nothing to match, and a
+    title was findable in service mode ONLY by its exact full string, or when
+    it contained no separator at all.
+
+    Measured, same store method, same inputs (bead table):
+
+        title                       query          sqlite  service
+        RDR-025-implementation.md   RDR-025             1        0
+        auth-design.md              auth                1        0
+        auth-design.md              auth-design         1        0
+        auth-design.md              auth-design.md      1        1
+        plaintitle                  plaintitle          1        1
+
+    '<name>.md' is the dominant T2 title convention, and SERVICE has been the
+    storage default since 6.0 — so this is a silent wrong answer on a
+    default-on read path: the search succeeds, returns 200, and reports zero
+    hits. Confirmed on a real populated install, not a fresh test tenant:
+    memory_search('nonrelocatable') returned nothing while memory_search
+    ('dyld') returned the very entry whose TITLE contains 'nonrelocatable'.
+
+    THIS IS THE SECOND FALSIFICATION OF THE SAME PARITY CLAIM. catalog-015
+    fixed the identical bug on catalog_documents in 2026-07-13 (nexus-8gue1,
+    GH #1397) and its comment already recorded that "the catalog-001 'PG >=
+    FTS5 superset' claim was false for filenames". memory-001 makes the same
+    superset claim (docs/rdr/rdr-152-fts-parity-contract.md Store 1) and it is
+    false for exactly the same reason. This changeset is deliberately a
+    line-for-line application of the catalog-015 shape so the two tables stay
+    reasoned about together.
+
+    Fix: a fourth OR'd segment that normalizes the separator characters
+    / . - _ to spaces before tokenizing, so 'auth-design.md' also yields
+    'auth','design','md'. Weight 'A' matches the title segment it augments —
+    a title-fragment hit should rank like a title hit, not below content.
+    Existing segments are untouched, so every previously-matching query still
+    matches (superset preserved, never narrowed).
+
+    SCOPE, deliberately narrow: TITLE only. content is prose and already
+    tokenizes correctly; tags already use the 'simple' config. The measured
+    defect is the title column, and widening the STORED expression beyond the
+    evidence would grow the index for no demonstrated gain.
+
+    PG cannot ALTER a generated column's expression: DROP + re-ADD (table
+    rewrite) + recreate the GIN index. ACCESS EXCLUSIVE for the rewrite is
+    fine in the single-instance rm-then-run deploy window (nothing serves
+    during boot — same framing as catalog-014/015); Liquibase runs the
+    changeset in one transaction, so an interrupted rewrite rolls back whole,
+    never a dropped-column limbo. DDL only, no row DML, so the FORCE-RLS
+    silent-no-op class (nexus-1wjmq) does not apply.
+
+    DOES NOT FIX the other two divergences recorded on nexus-22r1f — accent
+    folding (needs the unaccent extension on BOTH sides) and prefix-query
+    syntax ('auth*', query-side only). Those are separate changes with
+    separate risks; see the bead.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="memory-002-0" author="nexus-22r1f">
+        <comment>fts_vector: add separator-normalized title segment so dotted titles (auth-design.md) are findable by any word inside them (auth)</comment>
+        <sql splitStatements="true">
+DROP INDEX IF EXISTS nexus.idx_memory_fts;
+ALTER TABLE nexus.memory DROP COLUMN fts_vector;
+ALTER TABLE nexus.memory
+    ADD COLUMN fts_vector TSVECTOR GENERATED ALWAYS AS (
+        setweight(to_tsvector('english', coalesce(title,   '')), 'A') ||
+        setweight(to_tsvector('english', coalesce(content, '')), 'B') ||
+        setweight(to_tsvector('simple',  coalesce(tags,    '')), 'C') ||
+        setweight(to_tsvector('simple',
+            translate(coalesce(title, ''), '/.-_', '    ')), 'A')
+    ) STORED;
+CREATE INDEX idx_memory_fts ON nexus.memory USING GIN (fts_vector);
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+DROP INDEX IF EXISTS nexus.idx_memory_fts;
+ALTER TABLE nexus.memory DROP COLUMN fts_vector;
+ALTER TABLE nexus.memory
+    ADD COLUMN fts_vector TSVECTOR GENERATED ALWAYS AS (
+        setweight(to_tsvector('english', coalesce(title,   '')), 'A') ||
+        setweight(to_tsvector('english', coalesce(content, '')), 'B') ||
+        setweight(to_tsvector('simple',  coalesce(tags,    '')), 'C')
+    ) STORED;
+CREATE INDEX idx_memory_fts ON nexus.memory USING GIN (fts_vector);
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

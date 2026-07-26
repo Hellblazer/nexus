@@ -323,4 +323,80 @@ class MemoryRepositoryTest {
             .isEqualTo(Math.min(idA, idB));
         assertThat(rows.get(1).getId()).isEqualTo(Math.max(idA, idB));
     }
+
+    /**
+     * nexus-22r1f: the FTS5-parity rows for dotted titles.
+     *
+     * <p>PostgreSQL's text-search parser classifies {@code auth-design.md} as
+     * a FILE token and keeps it WHOLE; SQLite FTS5's unicode61 tokenizer
+     * splits on every non-alphanumeric. So before memory-002 a title was
+     * findable in service mode ONLY by its exact full string, and
+     * {@code nx memory search auth} silently returned nothing for an entry
+     * titled {@code auth-design.md} — a wrong answer with a 200 status, on the
+     * DEFAULT substrate since 6.0, reproduced against the deployed cloud
+     * engine at 0.1.56.
+     *
+     * <p>These are the exact rows measured on the bead against the SQLite
+     * baseline. The last two are the NON-VACUITY half: they passed BEFORE the
+     * fix too, so their presence proves this test would still fail if the new
+     * segment merely broke the old behaviour instead of adding to it.
+     */
+    @Test
+    void search_dottedTitle_isFindableByAnyWordInside() {
+        String proj = "fts-parity-" + System.nanoTime();
+        repo.upsert(TENANT_A, proj, "auth-design.md",
+                "body text with no shared words", "t", null, null, 30);
+        repo.upsert(TENANT_A, proj, "RDR-025-implementation.md",
+                "body text with no shared words", "t", null, null, 30);
+        repo.upsert(TENANT_A, proj, "plaintitle",
+                "body text with no shared words", "t", null, null, 30);
+
+        // --- the rows that were BROKEN (service 0, sqlite 1) ---
+        assertThat(repo.search(TENANT_A, "auth", proj))
+            .as("a word inside a dotted title must be findable (was: 0 hits)")
+            .extracting(r -> r.getTitle()).contains("auth-design.md");
+        assertThat(repo.search(TENANT_A, "design", proj))
+            .as("a LATER word inside a dotted title must be findable too")
+            .extracting(r -> r.getTitle()).contains("auth-design.md");
+        assertThat(repo.search(TENANT_A, "RDR-025", proj))
+            .as("a separator-bearing QUERY must match the separator-normalized "
+                + "stored segment — this is the leg ftsQuery() adds")
+            .extracting(r -> r.getTitle()).contains("RDR-025-implementation.md");
+        assertThat(repo.search(TENANT_A, "auth-design", proj))
+            .as("separator-bearing query, separator-bearing title")
+            .extracting(r -> r.getTitle()).contains("auth-design.md");
+
+        // --- the rows that ALREADY worked: prove nothing was narrowed ---
+        assertThat(repo.search(TENANT_A, "auth-design.md", proj))
+            .as("exact full title still matches (superset preserved, never traded)")
+            .extracting(r -> r.getTitle()).contains("auth-design.md");
+        assertThat(repo.search(TENANT_A, "plaintitle", proj))
+            .as("a title with no separator at all still matches")
+            .extracting(r -> r.getTitle()).contains("plaintitle");
+    }
+
+    /**
+     * nexus-22r1f: the same parity must hold on EVERY memory FTS surface, not
+     * just {@code search}.
+     *
+     * <p>{@code search}, {@code searchGlob} and {@code searchByTag} each
+     * carried the tsquery expression inline — seven copies of one decision.
+     * Fixing only the one that was noticed is exactly how catalog-015 came to
+     * fix {@code catalog_documents} in 2026-07-13 while {@code nexus.memory}
+     * kept the identical bug until now. This pins the other two so the next
+     * divergence cannot hide in the surface nobody tested.
+     */
+    @Test
+    void search_dottedTitle_parityHoldsOnGlobAndTagSurfacesToo() {
+        String proj = "fts-parity-glob-" + System.nanoTime();
+        repo.upsert(TENANT_A, proj, "auth-design.md",
+                "body text with no shared words", "authtag", null, null, 30);
+
+        assertThat(repo.searchGlob(TENANT_A, "auth", proj.substring(0, 10) + "*"))
+            .as("searchGlob must resolve a dotted title by an inside word")
+            .extracting(r -> r.getTitle()).contains("auth-design.md");
+        assertThat(repo.searchByTag(TENANT_A, "auth", "authtag"))
+            .as("searchByTag must resolve a dotted title by an inside word")
+            .extracting(r -> r.getTitle()).contains("auth-design.md");
+    }
 }
