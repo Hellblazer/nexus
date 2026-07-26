@@ -5108,7 +5108,8 @@ def _autoalias_bindings(
     fallback, whose constructed plans get every binding filled from the
     question text. That remains correct for free text.
 
-    A binding in :data:`_TYPED_FILTER_BINDINGS` cannot be derived from a
+    A binding in :data:`nexus.plans.schema.TYPED_FILTER_BINDINGS`
+    cannot be derived from a
     question, so an unsatisfied one raises
     :class:`PlanBindingUnsatisfiableError` rather than being guessed. The
     raise happens before any binding is handed to the runner, so a plan
