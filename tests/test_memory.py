@@ -160,13 +160,25 @@ def test_malformed_fts5_query_raises_valueerror(db: T2Database, method: str, arg
 
 
 def test_t2_uses_session_module_for_session_id(db: T2Database) -> None:
-    # After RDR-063 Phase 1 step 2, memory-domain methods (including put())
-    # live in nexus.db.t2.memory_store, so the session-id import binding
-    # moved with them. Patch the new location to verify the wiring.
-    import nexus.db.t2.memory_store as mem_mod
-    import nexus.session as sess_mod
-    assert mem_mod._read_session_id is sess_mod.read_claude_session_id
-    with patch("nexus.db.t2.memory_store._read_session_id", return_value="test-sid-xyz"):
+    """``put`` resolves an unset session through the session module.
+
+    nexus-aqbrk: this used to patch a module-local alias
+    (``memory_store._read_session_id``) and assert its identity against
+    ``nexus.session.read_claude_session_id``. The fallback chain now has ONE
+    owner shared by both the SQLite and service stores
+    (``nexus.db.t2._attribution.resolve_attribution``), so that alias no
+    longer exists — and patching a name nothing calls is worse than not
+    patching at all: the test would have gone green against the REAL
+    resolver, which returns ``None`` under the suite's isolated config dir,
+    and the assertion would have been vacuous rather than failing.
+
+    Patching the canonical function is also strictly better than the alias
+    form it replaces: it no longer depends on an import-binding detail that
+    was itself a documented footgun (``from X import Y as Z`` captures the
+    object at import time, so patching the source module would NOT have
+    propagated).
+    """
+    with patch("nexus.session.read_claude_session_id", return_value="test-sid-xyz"):
         row_id = db.put(project="p", title="t.md", content="x")
     assert db.get(id=row_id)["session"] == "test-sid-xyz"
 

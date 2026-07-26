@@ -38,8 +38,8 @@ from typing import Any, Literal
 
 import structlog
 
+from nexus.db.t2._attribution import resolve_attribution
 from nexus.db.t2._tuning import SERVING_BUSY_TIMEOUT_MS
-from nexus.session import read_claude_session_id as _read_session_id
 
 _log = structlog.get_logger()
 
@@ -338,10 +338,7 @@ class MemoryStore:
         session: str | None = None,
     ) -> int:
         """Upsert a memory entry keyed by (project, title). Returns the row ID."""
-        if agent is None:
-            agent = os.environ.get("NX_AGENT")
-        if session is None:
-            session = _read_session_id()
+        agent, session = resolve_attribution(agent, session)
         timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         with self._lock:
