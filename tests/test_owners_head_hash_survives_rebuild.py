@@ -52,6 +52,19 @@ def _enable_debug_logging():
     )
 
 
+# nexus-aqbrk: PINNED to the local catalog, whole-file. Every class builds a
+# real Catalog and registers owners into it; under the engine substrate Catalog
+# forces read_only=True whenever the catalog backend is SERVICE and the file
+# exists (RDR-176 Phase 1 Gap 2 — the local .catalog.db is a FROZEN migration
+# source), so every seed died on "attempt to write a readonly database".
+#
+# SERVICE HALF IS OWNED: tests/catalog/test_http_catalog_client.py covers
+# set_owner_head_hash on the wire (::test_set_owner_head_hash_returns_int_count
+# and ::test_set_owner_head_hash), and the method is in the shape-parity
+# tripwire's shared surface.
+pytestmark = pytest.mark.usefixtures("local_catalog_backend")
+
+
 class TestCriticalOneOwnerRecordCarriesHeadHash:
     def test_head_hash_survives_catalog_rebuild(
         self, cat: Catalog, tmp_path: Path,

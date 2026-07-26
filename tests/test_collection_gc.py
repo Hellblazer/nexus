@@ -26,7 +26,31 @@ from nexus.db.t3 import T3Database
 from tests.conftest import make_vector_test_client
 
 
+@pytest.mark.usefixtures("local_catalog_backend")
 class TestCollectionGCCli:
+    """``nx catalog collection-gc`` over LOCAL, INJECTED artifacts.
+
+    nexus-aqbrk: PINNED. Every test here patches ``nexus.db.make_t3`` to a
+    local EphemeralClient T3 (it has to — the subject is zombie collections,
+    which the test must be able to create) and seeds a real local Catalog.
+    Under the engine substrate the catalog half diverged: the seed went to
+    the local .catalog.db while the CLI's ``_get_catalog()`` read the SERVICE
+    catalog, and the writes died on the frozen-migration-source invariant —
+    ``sqlite3.OperationalError: attempt to write a readonly database``.
+
+    Pinning the catalog makes both halves local again, matching the T3
+    injection the test already required. Converting instead would leave a
+    local T3 reconciled against a service catalog, which is neither the
+    production shape nor a coherent test.
+
+    NO SERVICE COVERAGE IS LOST, and that is checked rather than asserted:
+    the verb's only substrate-touching operations are ``list_collections``
+    and ``distinct_doc_collections``, BOTH parity-registered in
+    tests/catalog/test_shape_parity_tripwire.py. Everything else in
+    ``collection_gc_cmd`` is set arithmetic over collection names, which is
+    substrate-independent by construction.
+    """
+
     @pytest.fixture()
     def runner(self) -> CliRunner:
         return CliRunner()
