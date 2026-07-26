@@ -82,6 +82,12 @@ def _make_aspect(*, source_uri: str, source_path: str = "") -> AspectRecord:
 class TestDocumentAspectsDeleteOrphans:
     """Pin the contract for the new ``delete_orphans`` method."""
 
+    # nexus-aqbrk: this test was MISSING the file's own marker. Its 7 siblings
+    # in the same two classes carry @_attach_gc_dies_at_flip; these two were a
+    # decorator oversight, not a different disposition — delete_orphans is
+    # SQLite-ATTACH-only by design (NotImplementedError on the service backend,
+    # bead nexus-ingey), so the whole family dies at the flip together.
+    @_attach_gc_dies_at_flip
     def test_no_catalog_returns_zero(self, tmp_path: Path) -> None:
         """Catalog-absent is a safe no-op (cannot detect orphans without
         the live document set)."""
@@ -283,6 +289,7 @@ class TestAspectsGcCLI:
             )
             assert surviving == ["file:///a.pdf"]
 
+    @_attach_gc_dies_at_flip
     def test_no_catalog_exits_nonzero(
         self, tmp_path: Path, monkeypatch, runner,
     ) -> None:
