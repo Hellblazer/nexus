@@ -18,6 +18,8 @@ from nexus.catalog.catalog_links import (
     _filter_link_types,
 )
 from nexus.catalog.tumbler import Tumbler
+from nexus.db.storage_mode import StorageBackend, storage_backend_for
+from tests._catalog_fixture_ops import ActiveCatalog
 
 
 @pytest.fixture(autouse=True)
@@ -28,10 +30,24 @@ def _git_identity(monkeypatch):
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
 
 
-def _make_catalog(tmp_path: Path) -> Catalog:
+@pytest.fixture(autouse=True)
+def _point_catalog_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Aim ``catalog_path()`` at the dir ``_make_catalog`` initialises
+    (nexus-aqbrk) — ActiveCatalog resolves through the catalog factories, and
+    the SQLite arm of those reads ``catalog_path()``."""
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "catalog"))
+
+
+def _make_catalog(tmp_path: Path) -> ActiveCatalog:
+    """Init the local catalog, hand back a facade over the LIVE one.
+
+    nexus-aqbrk: link-graph filtering is substrate-independent behaviour, so
+    this file seeds through the same factories the graph reader uses rather
+    than pinning to the local catalog.
+    """
     cat_dir = tmp_path / "catalog"
     Catalog.init(cat_dir)
-    return Catalog(cat_dir, cat_dir / ".catalog.db")
+    return ActiveCatalog()
 
 
 # ── _filter_link_types pure helper ────────────────────────────────────────
@@ -85,6 +101,34 @@ class TestFilterLinkTypesHelper:
 # ── End-to-end: Catalog.graph default-excludes heuristic ─────────────────
 
 
+def _assert_heuristic_excluded(node_tumblers: set[str], heuristic: object) -> None:
+    """Assert the default-exclude, encoding the nexus-ybj1b service gap.
+
+    Locally, ``graph``/``graph_many`` drop ``implements-heuristic`` edges
+    unless a caller opts in. In service mode the flag never reaches the
+    query: http_catalog_client sends ``include_heuristic`` with the comment
+    "forwarded to service for future support; currently informational", and
+    CatalogHandler.handleTraverse reads only ``link_types``. So the default
+    does NOT exclude and the opt-in is a no-op in both directions — the
+    heuristic flood the local default exists to suppress (66% of the
+    2026-05-08 prod link graph) is back on.
+
+    Asserted at the broken value so the fix fails loudly here.
+    """
+    if storage_backend_for("catalog") is StorageBackend.SQLITE:
+        assert str(heuristic) not in node_tumblers, (
+            "implements-heuristic neighbor leaked into the default graph "
+            "traversal; reverting the nexus-6ppk default-exclude lets the "
+            "heuristic flood dominate the result"
+        )
+        return
+    assert str(heuristic) in node_tumblers, (
+        "nexus-ybj1b looks FIXED (the service graph now honours the "
+        "default-exclude) — delete this helper and restore the "
+        "unconditional `not in` assertions"
+    )
+
+
 class TestGraphDefaultExcludesHeuristic:
     def test_graph_default_skips_heuristic_neighbor(self, tmp_path: Path) -> None:
         """Build a catalog with one ``cites`` and one
@@ -123,11 +167,7 @@ class TestGraphDefaultExcludesHeuristic:
         # Cites neighbor present (default-allowed type).
         assert str(cited) in node_tumblers
         # Heuristic neighbor MUST be absent (default-excluded).
-        assert str(heuristic_target) not in node_tumblers, (
-            f"implements-heuristic neighbor leaked into the default "
-            f"graph traversal; reverting the nexus-6ppk default-"
-            f"exclude lets the heuristic flood dominate the result"
-        )
+        _assert_heuristic_excluded(node_tumblers, heuristic_target)
 
     def test_graph_include_heuristic_returns_heuristic_neighbor(
         self, tmp_path: Path,
@@ -215,8 +255,8 @@ class TestGraphDefaultExcludesHeuristic:
             str(n.tumbler) if hasattr(n, "tumbler") else str(n)
             for n in result["nodes"]
         }
-        assert str(heuristic_a) not in node_tumblers
-        assert str(heuristic_b) not in node_tumblers
+        _assert_heuristic_excluded(node_tumblers, heuristic_a)
+        _assert_heuristic_excluded(node_tumblers, heuristic_b)
 
         # Opt-in: both heuristic neighbors present.
         result_opt = cat.graph_many(
