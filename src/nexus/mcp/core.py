@@ -5010,6 +5010,27 @@ def _nx_answer_record_run(
         _warn_telemetry_drop("nx_answer_runs", exc)
 
 
+#: Literal no-result texts the single-step reroute path can synthesize. Kept as
+#: an explicit set rather than a substring/emptiness heuristic: an answer that
+#: merely MENTIONS "no results" is a real answer, and a heuristic that demoted
+#: it would swap one wrong signal for another.
+_EMPTY_ANSWER_TEXTS: frozenset[str] = frozenset({
+    "no results.",
+    "no results",
+    "",
+})
+
+
+def _nx_answer_text_is_empty(text: str) -> bool:
+    """True when *text* is one of the synthesized no-result placeholders.
+
+    nexus-yg49g. Deliberately EXACT-match, not "startswith" or "contains":
+    over-matching would record a genuine answer discussing empty results as a
+    failure, which is the same class of wrong signal in the other direction.
+    """
+    return text.strip().lower() in _EMPTY_ANSWER_TEXTS
+
+
 def _nx_answer_record_outcome(plan_id: int, *, success: bool) -> None:
     """Bump ``success_count`` or ``failure_count`` for a library-matched plan.
 
@@ -5595,7 +5616,14 @@ async def nx_answer(
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
-            _nx_answer_record_outcome(best.plan_id, success=True)
+            # nexus-yg49g: outcome must reflect whether the run ANSWERED, not
+            # merely that it did not raise. This branch can hand back the literal
+            # string "No results." (built a dozen lines above), and recording that
+            # as a success is what let a plan be 100%-success and 0%-useful.
+            _nx_answer_record_outcome(
+                best.plan_id,
+                success=not _nx_answer_text_is_empty(str(result_text)),
+            )
             return _result(
                 str(result_text),
                 plan_id=best.plan_id,
@@ -5675,7 +5703,11 @@ async def nx_answer(
             f"Error during plan execution: {exc}",
             plan_id=best.plan_id,
         )
-    _nx_answer_record_outcome(best.plan_id, success=True)
+    # nexus-yg49g: the success record USED to be here — before final_text is
+    # even extracted (below) and ~60 lines before the empty-retrieval guard that
+    # already knows the run produced nothing. It could not have been right: at
+    # this point the outcome is literally not yet computed. Moved to the two
+    # branches that DO know, further down.
 
     # ── Step 5: extract final answer ─────────────────────────────────────
     elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -5746,6 +5778,20 @@ async def nx_answer(
             plan_id=best.plan_id,
             scope=scope or "(unscoped)",
         )
+        # nexus-yg49g: counts as a FAILURE, not a success and not nothing.
+        #
+        # The store is strictly binary (success_count / failure_count; a third
+        # "empty" column needs a Liquibase changeset + an engine tag), so the
+        # choice is forced. Recording NOTHING was considered and rejected:
+        # plans/promote.py gates on success/(success+failure) >= 0.80, so a plan
+        # that always returns empty would keep a perfect 1.0 rate and still be
+        # promoted — precisely the "preferentially promote plans that return
+        # nothing quickly" outcome this bead was filed about.
+        #
+        # The lost distinction (errored vs found-nothing) is recoverable from
+        # telemetry: _nx_answer_record_run below stores the final_text, and the
+        # structured event above marks this branch specifically.
+        _nx_answer_record_outcome(best.plan_id, success=False)
         no_match = (
             f"No matching evidence found for {question!r}"
             + (f" in scope {scope!r}" if scope else "")
@@ -5768,6 +5814,12 @@ async def nx_answer(
             no_match, plan_id=best.plan_id,
             step_count=len(result.steps), chunks=[],
         )
+
+    # nexus-yg49g: SUCCESS is recorded HERE — past the empty-retrieval guard,
+    # with final_text extracted and an actual answer in hand. This is the only
+    # point in the plan path where "the plan answered the question" is a
+    # statement the code can make truthfully.
+    _nx_answer_record_outcome(best.plan_id, success=True)
 
     _log.info(
         "nx_answer_complete",

@@ -10,6 +10,15 @@ that surfaces the verdict to stdout and — when the gate passes and
 Shipped defaults:
   * ``use_count >= 3`` — three actual runs.
   * ``success_count / (success_count + failure_count) >= 0.80`` —
+    NOTE (nexus-yg49g, 2026-07-25): these counters used to be an EXCEPTION
+    counter, not an outcome counter — ``nx_answer`` recorded success on any run
+    that did not raise, including one whose retrieval steps returned zero
+    evidence. A plan could therefore sit at 100% success and 0% usefulness, and
+    this gate would happily promote it. Since that fix a zero-evidence run
+    increments ``failure_count``, so this ratio means what it reads as. Counters
+    recorded BEFORE that date still carry the old semantics — plan_etl copies
+    them verbatim through migration — so a high rate on an old plan is not
+    evidence of usefulness.
     eighty percent success rate.
   * description clarity — ``query`` is non-empty and ≥ 20 chars.
 

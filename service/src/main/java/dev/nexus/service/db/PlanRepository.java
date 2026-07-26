@@ -229,8 +229,25 @@ public final class PlanRepository {
      */
     public List<PlansRecord> listActivePlans(String tenant, String outcome, String project) {
         return tenantScope.withTenant(tenant, ctx -> {
+            // nexus-sbl4m: expiry measures DISUSE, not age.
+            //
+            // This was anchored on created_at alone, so a plan matched every
+            // single day still died at TTL days old. RDR-084 shipped auto-save
+            // of successful ad-hoc plans so "the library compounds and the
+            // plan-match hit rate should climb without any human curation
+            // step" — that sentence cannot be true under an age anchor. A
+            // grown plan got a fixed window from birth to be re-matched, and
+            // then left the matcher's pool no matter how useful it had proven.
+            // Measured 2026-07-25 on the live library: 17 plans, 15 builtin
+            // seeds and exactly 2 grown ones, both inside the 30-day window.
+            // Nothing older had ever survived.
+            //
+            // COALESCE, not last_used alone: a plan that has NEVER been used
+            // must still age out from creation, or the library would accrete
+            // every never-matched experiment forever.
             Condition expiry = PLANS.TTL.isNull().or(
-                field("extract(epoch from now() - created_at) / 86400", Double.class)
+                field("extract(epoch from now() - coalesce(last_used, created_at)) / 86400",
+                      Double.class)
                     .le(PLANS.TTL.cast(Double.class)));
             Condition active = PLANS.DISABLED_AT.isNull();
             Condition cond = PLANS.OUTCOME.eq(outcome).and(expiry).and(active);
@@ -264,8 +281,25 @@ public final class PlanRepository {
      */
     public List<PlansRecord> searchPlans(String tenant, String query, String project, int limit) {
         return tenantScope.withTenant(tenant, ctx -> {
+            // nexus-sbl4m: expiry measures DISUSE, not age.
+            //
+            // This was anchored on created_at alone, so a plan matched every
+            // single day still died at TTL days old. RDR-084 shipped auto-save
+            // of successful ad-hoc plans so "the library compounds and the
+            // plan-match hit rate should climb without any human curation
+            // step" — that sentence cannot be true under an age anchor. A
+            // grown plan got a fixed window from birth to be re-matched, and
+            // then left the matcher's pool no matter how useful it had proven.
+            // Measured 2026-07-25 on the live library: 17 plans, 15 builtin
+            // seeds and exactly 2 grown ones, both inside the 30-day window.
+            // Nothing older had ever survived.
+            //
+            // COALESCE, not last_used alone: a plan that has NEVER been used
+            // must still age out from creation, or the library would accrete
+            // every never-matched experiment forever.
             Condition expiry = PLANS.TTL.isNull().or(
-                field("extract(epoch from now() - created_at) / 86400", Double.class)
+                field("extract(epoch from now() - coalesce(last_used, created_at)) / 86400",
+                      Double.class)
                     .le(PLANS.TTL.cast(Double.class)));
             Condition active = PLANS.DISABLED_AT.isNull();
             // OR'd tsquery: prose stemming (english) + exact identifier match (simple)
@@ -293,8 +327,25 @@ public final class PlanRepository {
      */
     public List<PlansRecord> listPlans(String tenant, String project, int limit, boolean includeDisabled) {
         return tenantScope.withTenant(tenant, ctx -> {
+            // nexus-sbl4m: expiry measures DISUSE, not age.
+            //
+            // This was anchored on created_at alone, so a plan matched every
+            // single day still died at TTL days old. RDR-084 shipped auto-save
+            // of successful ad-hoc plans so "the library compounds and the
+            // plan-match hit rate should climb without any human curation
+            // step" — that sentence cannot be true under an age anchor. A
+            // grown plan got a fixed window from birth to be re-matched, and
+            // then left the matcher's pool no matter how useful it had proven.
+            // Measured 2026-07-25 on the live library: 17 plans, 15 builtin
+            // seeds and exactly 2 grown ones, both inside the 30-day window.
+            // Nothing older had ever survived.
+            //
+            // COALESCE, not last_used alone: a plan that has NEVER been used
+            // must still age out from creation, or the library would accrete
+            // every never-matched experiment forever.
             Condition expiry = PLANS.TTL.isNull().or(
-                field("extract(epoch from now() - created_at) / 86400", Double.class)
+                field("extract(epoch from now() - coalesce(last_used, created_at)) / 86400",
+                      Double.class)
                     .le(PLANS.TTL.cast(Double.class)));
             Condition cond = expiry;
             if (!includeDisabled) {

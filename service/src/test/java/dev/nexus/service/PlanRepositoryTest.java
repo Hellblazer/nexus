@@ -180,6 +180,98 @@ class PlanRepositoryTest {
         assertThat(notFound).as("delete of already-deleted row returns false").isFalse();
     }
 
+
+    // ── TTL expiry: measures DISUSE, not age (nexus-sbl4m) ──────────────────
+    //
+    // There was NO engine-side expiry test before this. That is how a clause
+    // anchored on created_at alone survived while directly contradicting
+    // RDR-084's stated goal ("the library compounds ... without any human
+    // curation step"): nothing asserted what expiry was supposed to mean.
+    //
+    // Ordered LAST (20+) and scoped to their own project names so the
+    // backdating UPDATEs cannot perturb the earlier ordered tests sharing this
+    // container.
+
+    /** Backdate a plan's created_at / last_used to simulate an aged row. */
+    private void backdatePlan(long id, int createdDaysAgo, Integer usedDaysAgo)
+            throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            String used = usedDaysAgo == null
+                ? "NULL"
+                : "now() - interval '" + usedDaysAgo + " days'";
+            su.createStatement().execute(
+                "UPDATE nexus.plans SET created_at = now() - interval '"
+                + createdDaysAgo + " days', last_used = " + used
+                + " WHERE id = " + id);
+        }
+    }
+
+    private long savePlanWithTtl(String project, String query, Integer ttlDays) {
+        return repo.savePlan(TENANT_A, project, query, "{\"steps\":[]}", "success",
+                             "t", ttlDays, query, "research", "personal",
+                             "{\"verb\":\"research\"}", null, null, "t", query);
+    }
+
+    @Test
+    @Order(20)
+    void ttl_agedButRecentlyUsedPlan_survives() throws Exception {
+        // THE COMPOUNDING CASE, and the one the old clause got wrong: created
+        // long before the TTL window but matched yesterday. A library meant to
+        // compound must keep the plans earning their place; an age anchor
+        // discarded them on a birthday no matter how useful they had proven.
+        long id = savePlanWithTtl("proj-ttl-used", "aged but used", 30);
+        backdatePlan(id, 400, 1);
+
+        var active = repo.listActivePlans(TENANT_A, "success", "proj-ttl-used");
+
+        assertThat(active).extracting(r -> r.getId())
+            .as("a plan used yesterday must not expire merely for being old")
+            .contains(id);
+    }
+
+    @Test
+    @Order(21)
+    void ttl_agedAndNeverUsedPlan_expires() throws Exception {
+        // COALESCE, not last_used alone: a never-matched experiment must still
+        // age out from creation, or the library accretes everything forever.
+        long id = savePlanWithTtl("proj-ttl-unused", "aged and unused", 30);
+        backdatePlan(id, 400, null);
+
+        var active = repo.listActivePlans(TENANT_A, "success", "proj-ttl-unused");
+
+        assertThat(active).extracting(r -> r.getId())
+            .as("a never-used plan past its TTL must still expire")
+            .doesNotContain(id);
+    }
+
+    @Test
+    @Order(22)
+    void ttl_agedAndLongUnusedPlan_expires() throws Exception {
+        long id = savePlanWithTtl("proj-ttl-stale", "aged and stale", 30);
+        backdatePlan(id, 400, 200);
+
+        var active = repo.listActivePlans(TENANT_A, "success", "proj-ttl-stale");
+
+        assertThat(active).extracting(r -> r.getId())
+            .as("last use 200 days ago is past a 30-day TTL — disuse is the clock")
+            .doesNotContain(id);
+    }
+
+    @Test
+    @Order(23)
+    void ttl_nullTtlPlan_neverExpires() throws Exception {
+        // Non-regression: builtin seeds carry no TTL and must be unaffected.
+        long id = savePlanWithTtl("proj-ttl-null", "permanent plan", null);
+        backdatePlan(id, 4000, 4000);
+
+        var active = repo.listActivePlans(TENANT_A, "success", "proj-ttl-null");
+
+        assertThat(active).extracting(r -> r.getId())
+            .as("a NULL ttl means permanent, regardless of age or disuse")
+            .contains(id);
+    }
+
     @Test
     @Order(5)
     void disable_and_enable_softDisable() {
