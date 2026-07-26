@@ -39,6 +39,23 @@ _CANARIES = [
     "tests/db/test_om64x_stale_port_recovery.py::TestScratchStoreRecovery",
 ]
 
+#: Child processes run on the SQLITE substrate, always (nexus-aqbrk).
+#:
+#: The subject here is ``_isolate_service_endpoint_env``, which is
+#: substrate-INDEPENDENT — it scrubs four env vars. But a child that inherits
+#: NX_TEST_T2_SUBSTRATE=engine boots its OWN PG + JVM session engine, and in a
+#: FULL RUN the parent already has one. Measured: every subprocess errored at
+#: exactly 60.3s — ``_engine_substrate.py``'s ``_wait_tcp(timeout=60.0)`` —
+#: and the parent then reported "the scrub is not covering it", which is not
+#: what happened at all. Five failures, one resource collision, and a
+#: misleading message on top.
+#:
+#: Standalone this file passed 6/6 because no parent engine was competing, so
+#: the per-file verification could not see it. Pinning the child makes the test
+#: hermetic AND fast: it stops spawning a database and a JVM to check that four
+#: environment variables were unset.
+_CHILD_ENV = {"NX_TEST_T2_SUBSTRATE": "sqlite"}
+
 #: The DIRECT proof, run in the same polluted subprocess (nexus-aqbrk).
 #:
 #: The canaries above are INDIRECT: they assert "a test that would break under
@@ -75,7 +92,7 @@ def test_scrub_actually_scrubs_under_real_pollution() -> None:
     """
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", _SCRUB_PROBE, "-q", "--no-header"],
-        env={**os.environ, **_POLLUTED},
+        env={**os.environ, **_POLLUTED, **_CHILD_ENV},
         cwd=_REPO_ROOT,
         capture_output=True,
         text=True,
@@ -93,7 +110,7 @@ def test_scrub_actually_scrubs_under_real_pollution() -> None:
 def test_polluted_env_does_not_break_endpoint_tests(target: str) -> None:
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", target, "-q", "--no-header"],
-        env={**os.environ, **_POLLUTED},
+        env={**os.environ, **_POLLUTED, **_CHILD_ENV},
         cwd=_REPO_ROOT,
         capture_output=True,
         text=True,
