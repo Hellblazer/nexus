@@ -3124,7 +3124,13 @@ def memory_put(
         project: Project namespace (e.g. "nexus", "nexus_active")
         title: Entry title (unique within project)
         tags: Comma-separated tags
-        ttl: Time-to-live in days (default 30, 0 for permanent)
+        ttl: Time-to-live in days (default 30). 0 is accepted as "permanent"
+            and coerced to NULL by THIS tool (see ``ttl if ttl > 0 else None``
+            below) — but that coercion is the MCP layer's, not the store's.
+            A caller that bypasses MCP and writes ttl=0 directly (the store
+            API, or POST /v1/memory/put) gets effective_ttl = 0 and the row is
+            deleted on the next expire() sweep. PERMANENT AT THE STORE IS NULL.
+            Do not carry "0 means permanent" outside this function.
         agent: Optional subagent / role attribution (e.g. "developer",
             "architect-planner"). When empty, falls back to
             ``NX_AGENT`` env, then NULL. Phase 1B (nexus-9clx) — lets

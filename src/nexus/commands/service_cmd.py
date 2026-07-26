@@ -148,7 +148,18 @@ def record_deploy(tag: str, commit: str, gate: str, url: str | None) -> None:
             title="deployed-engine-version",
             content=content,
             tags="engine,deploy,tracker,rdr-179",
-            ttl=0,  # permanent operational record
+            # PERMANENT IS None, NOT 0 (nexus-6igii recurrence, 2026-07-26).
+            # This called handle.memory.put DIRECTLY — store level, below the
+            # MCP layer that coerces ``ttl if ttl > 0 else None`` — so 0 was
+            # written verbatim. Both expire() implementations then read it as
+            # effective_ttl = 0 * (1 + log(access_count + 1)) = 0, and delete
+            # any row older than an instant on the next sweep.
+            #
+            # That is why the tracker kept vanishing after a successful,
+            # read-back-verified write: 0 does not mean "never expires", it
+            # means "expire immediately". NULL (None) is what "never" is —
+            # both expire() paths filter on ``WHERE ttl IS NOT NULL``.
+            ttl=None,
         )
 
     _log.info("service.record_deploy", tag=tag, live=live, base_url=caps.base_url)
