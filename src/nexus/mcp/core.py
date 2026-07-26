@@ -5568,6 +5568,15 @@ async def nx_answer(
                     context={"user_context": context} if context else None,
                     min_confidence=effective_min_confidence,
                     n=5,
+                    # nexus-0yrjr: declare what this call can actually
+                    # bind so the matcher never offers a plan that cannot
+                    # run. nx_answer supplies ``intent`` always and
+                    # ``_nx_scope`` when the caller passed a scope; every
+                    # free-text binding is aliased from the question, so
+                    # only typed bindings can make a plan unrunnable.
+                    available_bindings=frozenset(
+                        {"intent", "_nx_scope"} if scope else {"intent"},
+                    ),
                 )
         except Exception as exc:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             return _result(f"Error during plan match: {exc}")
