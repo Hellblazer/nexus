@@ -21,13 +21,14 @@ from nexus.commands.aspects import (
     _is_fixture_collection,
     aspects_group,
 )
+from tests.conftest import engine_substrate_selected
 
 #: gc-fixtures is a SQLite-only verb — it refuses service mode with a
 #: UsageError (raw multi-store SQL DELETE via live cursors; tracked
 #: nexus-gmiaf.37), and the tests seed rows via raw sqlite conns.
 #: dies-roster: these die with the SQLite substrate at the RDR-155 P4b flip.
 _SQLITE_ONLY_VERB = pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    engine_substrate_selected(),
     reason="dies-roster: gc-fixtures is a SQLite-only verb (service mode "
     "raises UsageError, nexus-gmiaf.37) and its fixtures seed via raw "
     "sqlite cursors — dies at the RDR-155 P4b flip",

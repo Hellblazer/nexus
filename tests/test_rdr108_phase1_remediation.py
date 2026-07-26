@@ -27,6 +27,7 @@ from nexus.catalog.catalog import Catalog
 from nexus.cli import main
 from nexus.db.t3 import T3Database
 from tests.conftest import make_vector_test_client
+from tests.conftest import engine_substrate_selected
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -220,7 +221,7 @@ class TestOBS2MigrationUX:
     stderr when apply_pending runs, so users don't see a silent hang."""
 
     @pytest.mark.skipif(
-        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        engine_substrate_selected(),
         reason="dies-roster: the SQLite T2 migration (apply_pending on a fresh "
         "memory.db) and its OBS-2 progress message die at the RDR-155 P4b "
         "flip — service-backed T2Database construction runs no migrations",

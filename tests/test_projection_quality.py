@@ -19,8 +19,9 @@ import pytest
 from nexus.db.t2 import T2Database
 from tests.conftest import make_vector_test_client
 from typing import Any
+from tests.conftest import engine_substrate_selected
 
-_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
+_ENGINE_SUBSTRATE = engine_substrate_selected()
 
 #: topic_assignments quality columns (similarity / assigned_at /
 #: source_collection) have NO read surface over the engine HTTP API — the

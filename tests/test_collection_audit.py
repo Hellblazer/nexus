@@ -15,8 +15,9 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 from tests.conftest import make_vector_test_client
+from tests.conftest import engine_substrate_selected
 
-_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
+_ENGINE_SUBSTRATE = engine_substrate_selected()
 
 # RDR-155 P4b P0a' dies-roster: the collection-audit T2 diagnostic sections
 # (distance histogram / cross-projections / hubs) are raw-SQLite SELECTs over

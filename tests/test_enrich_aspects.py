@@ -27,8 +27,9 @@ from click.testing import CliRunner
 from nexus.aspect_extractor import AspectRecord
 from nexus.catalog import Catalog
 from nexus.commands.enrich import enrich
+from tests.conftest import engine_substrate_selected
 
-_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
+_ENGINE_SUBSTRATE = engine_substrate_selected()
 
 # These tests seed the rich SQLite Catalog (Catalog.init + cat.register via the
 # env fixture) and expect the CLI's catalog reader to iterate those rows. On

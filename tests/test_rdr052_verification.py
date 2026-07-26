@@ -14,8 +14,9 @@ from nexus.db.t2 import T2Database
 from nexus.db.t3 import T3Database
 from nexus.mcp_server import _inject_t3, _reset_singletons, query
 from tests.conftest import make_vector_test_client
+from tests.conftest import engine_substrate_selected
 
-_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
+_ENGINE_SUBSTRATE = engine_substrate_selected()
 
 # These tests seed the rich SQLite Catalog (Catalog.init via the ``catalog``
 # fixture) and assert that catalog-filtered query() routing finds those rows.

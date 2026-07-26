@@ -390,6 +390,36 @@ def _isolate_service_endpoint_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(var, raising=False)
 
 
+def engine_substrate_selected() -> bool:
+    """True when the suite's autouse pin routes tests to the engine substrate.
+
+    THE SINGLE SOURCE OF TRUTH for "which T2 substrate is this session on".
+    ``_pin_storage_backend_sqlite`` below calls it, and so does every
+    dies-roster ``skipif`` marker across the suite — so the flip changes this
+    one function and nothing else, and the pin and the rosters cannot drift
+    apart.
+
+    WHY THIS EXISTS (nexus-aqbrk, 2026-07-25). 111 sites across 36 files each
+    spelled the predicate inline as
+    ``os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"``. That is the
+    PRE-flip spelling: today the engine is opt-IN, so the var is set when the
+    engine is wanted. After the flip the engine is the default and
+    ``NX_TEST_T2_SUBSTRATE=sqlite`` becomes the opt-OUT, so a default engine
+    run leaves the var UNSET and every one of those predicates evaluates
+    False. The dies-roster would then un-skip its entire population at the
+    exact moment the flip lands — the event it exists to survive.
+
+    Not a projection: simulated by flipping this fixture's body and running
+    tests/test_catalog_cli.py with the var unset. The 36 rostered tests
+    un-skipped and all 36 failed.
+
+    AT FLIP TIME, this function becomes::
+
+        return os.environ.get("NX_TEST_T2_SUBSTRATE") != "sqlite"
+    """
+    return os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
+
+
 @pytest.fixture(autouse=True)
 def _pin_storage_backend_sqlite(request: pytest.FixtureRequest,
                                 monkeypatch: pytest.MonkeyPatch) -> None:
@@ -416,7 +446,7 @@ def _pin_storage_backend_sqlite(request: pytest.FixtureRequest,
     test that wants service mode sets ``NX_STORAGE_BACKEND[_<store>]`` itself,
     which overrides this pin (later ``setenv`` wins).
     """
-    if os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine":
+    if engine_substrate_selected():
         request.getfixturevalue("t2_service_env")
         return
     monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")

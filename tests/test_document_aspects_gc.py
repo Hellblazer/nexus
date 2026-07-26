@@ -22,8 +22,9 @@ from click.testing import CliRunner
 
 from nexus.aspect_extractor import AspectRecord
 from nexus.db.t2 import T2Database
+from tests.conftest import engine_substrate_selected
 
-_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
+_ENGINE_SUBSTRATE = engine_substrate_selected()
 
 # delete_orphans is SQLite-specific by design: it ATTACHes the catalog SQLite
 # cache to join against document_aspects. HttpDocumentAspectsStore.delete_orphans

@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.conftest import engine_substrate_selected
 
 #: RDR-155 P4b P0a' dies-roster marker: Python-side rename_lock guarding of
 #: the queue MUTATORS is the SQLite AspectExtractionQueue's protocol.
@@ -33,7 +34,7 @@ import pytest
 #: holds T2Database.RENAME_LOCK, claim_batch semantics) stay substrate-neutral
 #: and remain unskipped.
 _SQLITE_QUEUE_LOCK_PROTOCOL = pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    engine_substrate_selected(),
     reason="dies-roster: Python-side rename_lock mutator guarding is the "
     "SQLite AspectExtractionQueue protocol; HttpAspectQueue delegates "
     "serialization to the engine — dies at the RDR-155 P4b flip",

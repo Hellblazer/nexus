@@ -13,8 +13,9 @@ from nexus.catalog.catalog import Catalog
 from nexus.cli import main
 from nexus.daemon.catalog_write_shim import CATALOG_WRITE_OPS
 from nexus.db.http_vector_client import HttpVectorClient
+from tests.conftest import engine_substrate_selected
 
-_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
+_ENGINE_SUBSTRATE = engine_substrate_selected()
 
 # RDR-155 P4b P0a' dies-roster: these tests seed the rich SQLite Catalog
 # (Catalog.init / NEXUS_CATALOG_PATH, direct ``cat.*`` writes) and assert

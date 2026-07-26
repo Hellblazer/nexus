@@ -26,6 +26,7 @@ from nexus.mcp_infra import (
     reset_singletons,
 )
 from tests.conftest import make_vector_test_client
+from tests.conftest import engine_substrate_selected
 
 
 # ── T2 relevance_log schema + methods ────────────────────────────────────────
@@ -39,7 +40,7 @@ def t2():
 
 
 @pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    engine_substrate_selected(),
     reason="dies-roster: SQLite migration DDL introspection (PRAGMA table_info) "
     "dies with the twin at the RDR-155 P4b flip; the engine schema is "
     "Liquibase-governed",

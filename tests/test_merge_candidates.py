@@ -18,9 +18,10 @@ from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
+from tests.conftest import engine_substrate_selected
 
 pytestmark = pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    engine_substrate_selected(),
     reason="dies-roster: compute_merge_candidates is a raw-SQLite taxonomy "
     "analysis (run_merge_candidates degrades explicitly in service mode); "
     "dies with the twin at the RDR-155 P4b flip",
