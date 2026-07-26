@@ -119,6 +119,9 @@ class TestDaemonDispatch:
                 f"round-trip framed JSON"
             )
 
+        # nexus-aqbrk: PINNED. The T2 daemon dispatch table is SQLite-daemon
+    # machinery; no Python daemon runs in service mode (RDR-152).
+    @pytest.mark.usefixtures("local_t2_backend")
     def test_dispatch_table_builds_with_catalog_store(
         self, tmp_path: Path,
     ) -> None:

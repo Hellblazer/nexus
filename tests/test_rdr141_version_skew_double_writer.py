@@ -27,6 +27,18 @@ from pathlib import Path
 
 import pytest
 
+# nexus-aqbrk: PINNED. mcp_infra.t2_index_write short-circuits to
+# _service_t2_write_locked BEFORE the daemon-probe/version-skew logic when the
+# memory store is SERVICE-backed (RDR-152 nexus-fjwxh), so the entire
+# SQLite-single-writer-daemon re-assert dance these tests drive never executes.
+# PG is the write arbiter in service mode — there is no daemon to version-skew.
+#
+# SERVICE HALF: the _service_t2_write_locked branch is exercised by every T2
+# write on the engine arm rather than by one dedicated test; naming that
+# honestly instead of inventing an owner.
+pytestmark = pytest.mark.usefixtures("local_t2_backend")
+
+
 
 class _MismatchThenOkProxy:
     """`database` proxy: first `hello()` raises version-mismatch, then OK.
