@@ -31,6 +31,7 @@ __all__ = [
     "ActiveCatalog",
     "active_reader",
     "count_documents",
+    "documents_by_file_path",
     "only_document",
     "unroutable_write_target",
 ]
@@ -58,6 +59,26 @@ def count_documents(collection: str | None = None) -> int:
     if collection is not None:
         return len(reader.list_by_collection(collection))
     return sum(1 for _ in reader.all_documents())
+
+
+def documents_by_file_path(file_path: str) -> list[Any]:
+    """Every document whose ``file_path`` equals *file_path*, in catalog order.
+
+    Replaces ``cat._db.execute("SELECT <col> FROM documents WHERE file_path =
+    ?").fetchall()``. ``find_by_file_path`` is the nearest single-shot public
+    equivalent, but it is ``LIMIT 1`` on BOTH substrates
+    (``catalog.py::find_by_file_path``, ``HttpCatalogClient.find_by_file_path``),
+    so it cannot express the "exactly one row" cardinality that the
+    double-registration guards assert — the whole point of those tests is that
+    a second row would mean pre-flight and the post-hook both registered. A
+    scan states it.
+
+    Scanning is affordable here because the catalogs these run against hold a
+    handful of rows: the SQLite arm gets a per-test tmp catalog, and the engine
+    arm gets a per-test tenant (``tests/conftest.py::t2_service_env`` mints one
+    tenant-bound token per test).
+    """
+    return [d for d in active_reader().all_documents() if d.file_path == file_path]
 
 
 def only_document() -> Any:
