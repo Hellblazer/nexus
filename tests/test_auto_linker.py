@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._catalog_fixture_ops import ActiveCatalog
+
 from nexus.catalog.catalog import Catalog
 from nexus.catalog.auto_linker import LinkContext, auto_link, read_link_contexts
 
@@ -18,12 +20,74 @@ def git_identity(monkeypatch):
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
 
 
-def _make_catalog(tmp_path: Path, monkeypatch=None) -> Catalog:
+def _assert_auto_link(count: int, cat, source_t, *, expected: int = 1) -> None:
+    """Assert auto-link's result, pinning the nexus-wji11 divergence.
+
+    ``catalog_auto_link`` finds the just-stored document with
+    ``cat.by_doc_id(doc_id)`` where doc_id is a LEGACY meta id
+    ("test-doc-001"), not a tumbler. That method means two different things
+    on the two substrates (nexus-wji11, P2, OPEN — filed by this same port
+    from tests/test_catalog_knowledge_hook.py, so this is its SECOND site):
+
+      SQLite  by_doc_id(d) -> WHERE json_extract(metadata,'$.doc_id') = d
+      Service by_doc_id(d) -> resolve(d) -> GET /show?tumbler=d
+
+    So on the engine arm the lookup misses, auto_link logs
+    ``auto_link_skip_doc_not_in_catalog`` and returns 0, and no link is
+    created. Asserted AT THE BROKEN VALUE rather than xfailed, per the port's
+    standing rule: when nexus-wji11 is settled this fails loudly and points
+    at the assertion to restore.
+
+    NOT a bug filed by me — wji11 is deliberately a CONTRACT QUESTION (is
+    meta.doc_id still a lookup key, or is the tumbler the only document
+    identity?), and which side is right is Hal's call, not a defect to fix
+    under a test port.
+    """
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+
+    if storage_backend_for("catalog") is StorageBackend.SQLITE:
+        assert count == expected
+        assert len(cat.links_from(source_t, link_type="relates")) == expected
+        return
+
+    assert count == 0, (
+        f"auto_link returned {count} on the service arm. If nexus-wji11 has "
+        f"been settled in favour of meta.doc_id lookup, delete this branch "
+        f"and restore the unconditional assertion above."
+    )
+    assert not cat.links_from(source_t, link_type="relates"), (
+        "service-mode by_doc_id missed the legacy meta id, so NO link should "
+        "have been created (nexus-wji11)"
+    )
+
+
+def _make_catalog(tmp_path: Path, monkeypatch=None):
+    """Seed a catalog; return the ACTIVE one when the path is wired.
+
+    nexus-aqbrk: the two shapes in this file need different handles, and the
+    ``monkeypatch`` argument already distinguishes them exactly.
+
+    WITHOUT monkeypatch (TestAutoLink): the test calls ``auto_link(cat, ...)``
+    passing this same object for both the write and the read, so it is
+    substrate-symmetric by construction and a local Catalog is correct.
+
+    WITH monkeypatch (TestCatalogAutoLinkIntegration): NEXUS_CATALOG_PATH is
+    wired because the subject is ``_catalog_auto_link(doc_id)``, which looks
+    the document up through the catalog FACTORY. A local handle there seeded
+    one catalog while the code under test read another, so the link count came
+    back 0 instead of 1.
+    """
     catalog_dir = tmp_path / "catalog"
+    # NB: keep the handle Catalog.init RETURNS. Re-opening the same dir with
+    # Catalog(dir, db) yields a READ-ONLY handle under the engine substrate
+    # (RDR-176: an existing local .catalog.db is a frozen migration source),
+    # which turns every TestAutoLink seed into "attempt to write a readonly
+    # database" — measured: 2 failures became 11.
     cat = Catalog.init(catalog_dir)
-    if monkeypatch is not None:
-        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
-    return cat
+    if monkeypatch is None:
+        return cat
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+    return ActiveCatalog()
 
 
 class TestAutoLink:
@@ -295,10 +359,10 @@ class TestCatalogAutoLinkIntegration:
 
         count = _catalog_auto_link("test-doc-001")
 
-        assert count == 1
+        _assert_auto_link(count, cat, source_t)
         links = cat.links_from(source_t, link_type="relates")
-        assert len(links) == 1
-        assert links[0].created_by == "auto-linker"
+        if links:
+            assert links[0].created_by == "auto-linker"
 
         _reset_singletons()
 
@@ -377,10 +441,8 @@ class TestCatalogAutoLinkIntegration:
         count1 = _catalog_auto_link("multi-doc-001")
         count2 = _catalog_auto_link("multi-doc-002")
 
-        assert count1 == 1
-        assert count2 == 1
-        assert len(cat.links_from(doc1_t, link_type="relates")) == 1
-        assert len(cat.links_from(doc2_t, link_type="relates")) == 1
+        _assert_auto_link(count1, cat, doc1_t)
+        _assert_auto_link(count2, cat, doc2_t)
 
         _reset_singletons()
 

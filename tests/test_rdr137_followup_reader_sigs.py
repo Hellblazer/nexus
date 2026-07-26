@@ -27,6 +27,8 @@ import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests._catalog_fixture_ops import ActiveCatalog
 import structlog
 from structlog.testing import capture_logs
 
@@ -53,8 +55,13 @@ def cat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Catalog:
     cat_dir.mkdir(parents=True)
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
+    # nexus-aqbrk: return the ACTIVE catalog. The code under test resolves
+    # through the factories, so a local-only handle left the service
+    # catalog empty (or, for writes, hit the RDR-176 read-only guard).
+    # Catalog.init stays: the SQLite arm's factory writer needs the
+    # directory to exist, and it is inert on the engine arm.
     Catalog.init(cat_dir)
-    return Catalog(cat_dir, cat_dir / ".catalog.db")
+    return ActiveCatalog()
 
 
 @pytest.fixture
