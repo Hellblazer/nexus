@@ -26,6 +26,31 @@ from click.testing import CliRunner
 from nexus.commands.plan import plan as plan_cmd
 
 
+@pytest.fixture(autouse=True)
+def _pin_plans_to_local_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the plans backend to SQLite for this whole module (nexus-aqbrk).
+
+    NOT a substrate workaround — it is the verb's documented contract. Every
+    ``nx plan repair`` subcommand refuses outright in service mode
+    ("plans are served by the storage service; `nx plan repair` operates on
+    the local SQLite snapshot only. Set NX_STORAGE_BACKEND=sqlite to
+    deliberately repair the local file..."), because the local file there is
+    a frozen pre-migration snapshot and repairing it would be a silent no-op
+    against the live library (nexus-o02xe / RDR-179 Phase 1).
+
+    So these tests exercise a deliberately local-only tool, and this fixture
+    does exactly what the refusal message tells an operator to do. Skipping
+    them under the engine substrate would drop coverage of a verb that still
+    works; asserting the refusal instead would duplicate
+    ``test_plan_cmd.py::test_plan_repair_refuses_in_service_mode``, which
+    already owns that half and pins the backend itself.
+
+    Retirement note: this module goes away with the local snapshot it
+    repairs, in nexus-i711w — not before.
+    """
+    monkeypatch.setenv("NX_STORAGE_BACKEND_PLANS", "sqlite")
+
+
 def _seed_plans_schema(db_path: Path) -> sqlite3.Connection:
     """Open *db_path* and seed the full post-RDR-092 plans schema with
     the columns each repair verb touches."""

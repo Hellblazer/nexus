@@ -13,31 +13,11 @@ from nexus.db.t2.plan_library import PlanLibrary
 from tests._t2_fixture_ops import (
     backdate_memory,
     memory_row,
+    require_sqlite_substrate as _require_sqlite_substrate,
     rewrite_memory_row,
     seed_relevance,
     set_memory_access_count,
 )
-
-
-def _require_sqlite_substrate() -> None:
-    """Skip when the T2 substrate is the engine (RDR-158/155, nexus-aqbrk).
-
-    For tests that probe SQLite machinery with no service-mode counterpart:
-    WAL journal mode, the FTS5 rebuild migration, the sqlite3 connection
-    lifecycle, the cross-process migration guard. These are not SQLite-shaped
-    assertions about substrate-independent behaviour — they are tests OF the
-    SQLite substrate, and nexus-i711w deletes them outright along with the
-    stores they probe.
-
-    Resolved at call time from ``storage_backend_for`` rather than from
-    ``NX_TEST_T2_SUBSTRATE``, so it stays correct when the conftest pin flips
-    its default and the env var's meaning inverts.
-    """
-    if storage_backend_for("memory") is not StorageBackend.SQLITE:
-        pytest.skip(
-            "probes SQLite-only machinery with no service-mode equivalent "
-            "(deleted with the SQLite stores in nexus-i711w)"
-        )
 
 
 def _assert_fts_hits(hits: int, expected: int) -> None:

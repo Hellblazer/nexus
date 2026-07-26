@@ -33,17 +33,47 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from nexus.db.storage_mode import has_raw_access
+import pytest
+
+from nexus.db.storage_mode import StorageBackend, has_raw_access, storage_backend_for
 from nexus.db.t2 import T2Database
 
 __all__ = [
     "backdate_memory",
     "memory_row",
+    "require_sqlite_substrate",
     "rewrite_memory_row",
+    "seed_plan",
     "seed_relevance",
     "set_memory_access_count",
     "utc_stamp",
 ]
+
+
+def require_sqlite_substrate(detail: str = "") -> None:
+    """Skip when the T2 substrate is the engine.
+
+    For tests that probe SQLite machinery with no service-mode counterpart —
+    WAL journal mode, FTS5 rebuild migrations, the sqlite3 connection
+    lifecycle, the cross-process migration guard, raw-INSERT column defaults.
+    These are not SQLite-shaped assertions about substrate-independent
+    behaviour; they are tests OF the SQLite substrate, and nexus-i711w deletes
+    them outright along with the stores they probe.
+
+    Resolved at call time via ``storage_backend_for`` rather than from
+    ``NX_TEST_T2_SUBSTRATE``, so it stays correct when the conftest pin flips
+    its default and the env var's meaning inverts.
+
+    Pass *detail* to say what specifically has no counterpart — the skip
+    reasons are audited per file, and an undifferentiated reason makes an
+    unintended skip indistinguishable from an intended one.
+    """
+    if storage_backend_for("memory") is StorageBackend.SQLITE:
+        return
+    reason = "probes SQLite-only machinery with no service-mode equivalent"
+    if detail:
+        reason = f"{reason}: {detail}"
+    pytest.skip(f"{reason} (deleted with the SQLite stores in nexus-i711w)")
 
 
 def utc_stamp(*, days: float = 0, seconds: float = 0) -> str:
@@ -180,6 +210,51 @@ def set_memory_access_count(
     behaviour under test and N reads would be pure ceremony.
     """
     rewrite_memory_row(db, project, title, access_count=count)
+
+
+def seed_plan(
+    db: T2Database,
+    *,
+    query: str,
+    plan_json: str = "{}",
+    created_at: str,
+    project: str = "",
+    outcome: str = "success",
+    tags: str = "",
+) -> int:
+    """Save one plan carrying an explicit *created_at*. Returns its row id.
+
+    The plan-ordering fixture primitive. ``save_plan`` stamps
+    ``created_at=now()`` on both substrates, and second-granularity stamps in
+    a fast test tie, so a list-ordering assertion needs the timestamps placed
+    deliberately.
+
+    The arms differ in shape, not just in mechanism: the service store's
+    ``import_plan`` writes ``created_at`` verbatim at INSERT time, whereas the
+    SQLite store has no import path, so it saves first and rewrites after.
+    Both end with one row at the requested timestamp.
+    """
+    store = db.plans
+
+    if has_raw_access(store):
+        plan_id = db.save_plan(
+            query=query, plan_json=plan_json, project=project,
+            outcome=outcome, tags=tags,
+        )
+        store.conn.execute(
+            "UPDATE plans SET created_at = ? WHERE id = ?", (created_at, plan_id)
+        )
+        store.conn.commit()
+        return plan_id
+
+    return store.import_plan(
+        project=project,
+        query=query,
+        plan_json=plan_json,
+        outcome=outcome,
+        tags=tags,
+        created_at=created_at,
+    )
 
 
 def seed_relevance(

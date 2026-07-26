@@ -5,6 +5,10 @@ from pathlib import Path
 import pytest
 
 from nexus.db.t2 import T2Database
+from tests._t2_fixture_ops import (
+    require_sqlite_substrate as _require_sqlite_substrate,
+    seed_plan,
+)
 
 
 @pytest.fixture
@@ -24,11 +28,11 @@ def test_save_plan(plan_db: T2Database) -> None:
     assert isinstance(row_id, int)
     assert row_id > 0
 
-    row = plan_db.plans.conn.execute("SELECT query, outcome, tags FROM plans WHERE id = ?", (row_id,)).fetchone()
+    row = plan_db.plans.get_plan(row_id)
     assert row is not None
-    assert row[0] == "how to index code"
-    assert row[1] == "success"
-    assert row[2] == ""
+    assert row["query"] == "how to index code"
+    assert row["outcome"] == "success"
+    assert row["tags"] == ""
 
 
 def test_save_plan_json_stored(plan_db: T2Database) -> None:
@@ -36,9 +40,9 @@ def test_save_plan_json_stored(plan_db: T2Database) -> None:
     json_payload = '{"steps": ["step1", "step2"], "meta": {"version": 2}}'
     row_id = plan_db.save_plan(query="complex query", plan_json=json_payload)
 
-    row = plan_db.plans.conn.execute("SELECT plan_json FROM plans WHERE id = ?", (row_id,)).fetchone()
+    row = plan_db.plans.get_plan(row_id)
     assert row is not None
-    assert row[0] == json_payload
+    assert row["plan_json"] == json_payload
 
 
 def test_search_plans_match(plan_db: T2Database) -> None:
@@ -71,22 +75,16 @@ def test_search_plans_no_match(plan_db: T2Database) -> None:
 
 def test_list_plans_ordered(plan_db: T2Database) -> None:
     """list_plans() returns plans ordered by created_at DESC (most recent first)."""
-    plan_db.save_plan(query="first plan", plan_json='{}')
-    plan_db.save_plan(query="second plan", plan_json='{}')
-    plan_db.save_plan(query="third plan", plan_json='{}')
+    # Timestamps are placed deliberately: save_plan stamps now() on both
+    # substrates at second granularity, so three saves in a fast test tie and
+    # the ordering assertion below would be reading insertion order, not
+    # created_at (nexus-aqbrk).
+    seed_plan(plan_db, query="first plan", created_at="2020-01-01T00:00:00Z")
+    seed_plan(plan_db, query="second plan", created_at="2020-01-02T00:00:00Z")
+    seed_plan(plan_db, query="third plan", created_at="2020-01-03T00:00:00Z")
 
     results = plan_db.list_plans()
     assert len(results) == 3
-    # Backdate first two to ensure deterministic ordering
-    plan_db.plans.conn.execute(
-        "UPDATE plans SET created_at='2020-01-01T00:00:00Z' WHERE query='first plan'"
-    )
-    plan_db.plans.conn.execute(
-        "UPDATE plans SET created_at='2020-01-02T00:00:00Z' WHERE query='second plan'"
-    )
-    plan_db.plans.conn.commit()
-
-    results = plan_db.list_plans()
     assert results[0]["query"] == "third plan"
     assert results[1]["query"] == "second plan"
     assert results[2]["query"] == "first plan"
@@ -114,8 +112,8 @@ def test_save_plan_with_project(plan_db: T2Database) -> None:
         plan_json='{"steps":[]}',
         project="nexus",
     )
-    row = plan_db.plans.conn.execute("SELECT project FROM plans WHERE id = ?", (row_id,)).fetchone()
-    assert row[0] == "nexus"
+    row = plan_db.plans.get_plan(row_id)
+    assert row["project"] == "nexus"
 
 
 def test_search_plans_project_filter(plan_db: T2Database) -> None:
@@ -150,15 +148,15 @@ def test_save_plan_with_ttl(plan_db: T2Database) -> None:
         plan_json='{"steps":[]}',
         ttl=30,
     )
-    row = plan_db.plans.conn.execute("SELECT ttl FROM plans WHERE id = ?", (row_id,)).fetchone()
-    assert row[0] == 30
+    row = plan_db.plans.get_plan(row_id)
+    assert row["ttl"] == 30
 
 
 def test_save_plan_ttl_none_by_default(plan_db: T2Database) -> None:
     """save_plan() without ttl stores NULL (permanent)."""
     row_id = plan_db.save_plan(query="permanent plan", plan_json='{}')
-    row = plan_db.plans.conn.execute("SELECT ttl FROM plans WHERE id = ?", (row_id,)).fetchone()
-    assert row[0] is None
+    row = plan_db.plans.get_plan(row_id)
+    assert row["ttl"] is None
 
 
 def test_search_plans_includes_ttl(plan_db: T2Database) -> None:
@@ -436,10 +434,8 @@ def test_save_plan_explicit_scope_tags_round_trip(plan_db: T2Database) -> None:
         plan_json='{"steps":[]}',
         scope_tags="rdr__arcaneum",
     )
-    row = plan_db.plans.conn.execute(
-        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
-    ).fetchone()
-    assert row[0] == "rdr__arcaneum"
+    row = plan_db.plans.get_plan(row_id)
+    assert row["scope_tags"] == "rdr__arcaneum"
 
 
 def test_save_plan_explicit_scope_tags_normalized(plan_db: T2Database) -> None:
@@ -449,10 +445,8 @@ def test_save_plan_explicit_scope_tags_normalized(plan_db: T2Database) -> None:
         plan_json='{"steps":[]}',
         scope_tags="rdr__arcaneum-2ad2825c",
     )
-    row = plan_db.plans.conn.execute(
-        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
-    ).fetchone()
-    assert row[0] == "rdr__arcaneum"
+    row = plan_db.plans.get_plan(row_id)
+    assert row["scope_tags"] == "rdr__arcaneum"
 
 
 def test_save_plan_omitted_scope_tags_infers(plan_db: T2Database) -> None:
@@ -461,10 +455,8 @@ def test_save_plan_omitted_scope_tags_infers(plan_db: T2Database) -> None:
         query="q",
         plan_json='{"steps":[{"tool":"search","args":{"corpus":"rdr__arcaneum"}}]}',
     )
-    row = plan_db.plans.conn.execute(
-        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
-    ).fetchone()
-    assert row[0] == "rdr__arcaneum"
+    row = plan_db.plans.get_plan(row_id)
+    assert row["scope_tags"] == "rdr__arcaneum"
 
 
 def test_save_plan_omitted_scope_tags_traverse_only(plan_db: T2Database) -> None:
@@ -473,14 +465,19 @@ def test_save_plan_omitted_scope_tags_traverse_only(plan_db: T2Database) -> None
         query="q",
         plan_json='{"steps":[{"tool":"traverse","args":{"start":"$d"}}]}',
     )
-    row = plan_db.plans.conn.execute(
-        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
-    ).fetchone()
-    assert row[0] == ""
+    row = plan_db.plans.get_plan(row_id)
+    assert row["scope_tags"] == ""
 
 
 def test_save_plan_scope_tags_column_default_empty(plan_db: T2Database) -> None:
     """The scope_tags column defaults to '' (load-bearing: pre-backfill rows)."""
+    # nexus-aqbrk: this drives a raw INSERT that omits the column, which no
+    # client-side service path can express — every service write goes through
+    # save_plan/import_plan, both of which always send scope_tags. The
+    # service-side twin of this guarantee is the column default in the plans
+    # Liquibase changeset plus HttpPlanLibrary._normalize's '' fallback for a
+    # NULL read; neither is reachable from here.
+    _require_sqlite_substrate()
     # The INSERT below omits scope_tags, so the SQL DEFAULT '' fires.
     # This pins the load-bearing default: any INSERT path that forgets
     # scope_tags produces '' (treated as agnostic), not NULL.
@@ -769,10 +766,8 @@ def test_save_plan_explicit_scope_tags_filters_all_sentinel(plan_db: T2Database)
         plan_json='{"steps":[]}',
         scope_tags="all",
     )
-    row = plan_db.plans.conn.execute(
-        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
-    ).fetchone()
-    assert row[0] == ""
+    row = plan_db.plans.get_plan(row_id)
+    assert row["scope_tags"] == ""
 
 
 def test_save_plan_explicit_scope_tags_drops_all_mixed_with_specific(
@@ -784,10 +779,8 @@ def test_save_plan_explicit_scope_tags_drops_all_mixed_with_specific(
         plan_json='{"steps":[]}',
         scope_tags="all,rdr__arcaneum",
     )
-    row = plan_db.plans.conn.execute(
-        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
-    ).fetchone()
-    assert row[0] == "rdr__arcaneum"
+    row = plan_db.plans.get_plan(row_id)
+    assert row["scope_tags"] == "rdr__arcaneum"
 
 
 def test_rewash_migration_fixes_trailing_all_variant(tmp_path: Path) -> None:
@@ -862,11 +855,9 @@ def test_save_plan_computes_match_text_on_dimensional_insert(
         scope="global",
         name="find-by-author",
     )
-    row = plan_db.plans.conn.execute(
-        "SELECT match_text FROM plans WHERE id = ?", (row_id,)
-    ).fetchone()
+    row = plan_db.plans.get_plan(row_id)
     assert row is not None
-    assert "research find-by-author scope global" in row[0]
+    assert "research find-by-author scope global" in row["match_text"]
 
 
 def test_save_plan_match_text_falls_back_to_query_on_legacy_row(
@@ -877,10 +868,8 @@ def test_save_plan_match_text_falls_back_to_query_on_legacy_row(
         query="legacy plan about chunking",
         plan_json='{"steps":[]}',
     )
-    row = plan_db.plans.conn.execute(
-        "SELECT match_text FROM plans WHERE id = ?", (row_id,)
-    ).fetchone()
-    assert row[0] == "legacy plan about chunking"
+    row = plan_db.plans.get_plan(row_id)
+    assert row["match_text"] == "legacy plan about chunking"
 
 
 def test_search_plans_hits_on_dimensional_suffix(plan_db: T2Database) -> None:
@@ -939,10 +928,8 @@ def test_save_plan_corpus_all_with_project_derives_scope_from_project(
         plan_json=corpus_all_json,
         project="canon-chat",
     )
-    row = plan_db.plans.conn.execute(
-        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
-    ).fetchone()
-    assert row[0] == "canon-chat", (
+    row = plan_db.plans.get_plan(row_id)
+    assert row["scope_tags"] == "canon-chat", (
         "corpus:all plan with project='canon-chat' must store 'canon-chat' "
         "as scope_tags, not empty string"
     )
@@ -962,10 +949,8 @@ def test_save_plan_corpus_all_without_project_stays_empty(
         plan_json=corpus_all_json,
         project="",
     )
-    row = plan_db.plans.conn.execute(
-        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
-    ).fetchone()
-    assert row[0] == ""
+    row = plan_db.plans.get_plan(row_id)
+    assert row["scope_tags"] == ""
 
 
 def test_save_plan_corpus_all_project_normalized(
@@ -982,10 +967,8 @@ def test_save_plan_corpus_all_project_normalized(
         plan_json=corpus_all_json,
         project="all",
     )
-    row = plan_db.plans.conn.execute(
-        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
-    ).fetchone()
-    assert row[0] == "", (
+    row = plan_db.plans.get_plan(row_id)
+    assert row["scope_tags"] == "", (
         "project='all' is an agnostic sentinel and must NOT contribute to scope_tags"
     )
 
@@ -1001,10 +984,8 @@ def test_save_plan_specific_corpus_unaffected_by_project(
         plan_json='{"steps":[{"tool":"search","args":{"corpus":"rdr__arcaneum"}}]}',
         project="some-project",
     )
-    row = plan_db.plans.conn.execute(
-        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
-    ).fetchone()
-    assert row[0] == "rdr__arcaneum", (
+    row = plan_db.plans.get_plan(row_id)
+    assert row["scope_tags"] == "rdr__arcaneum", (
         "specific-corpus plan must infer from retrieval steps, not fall back to project"
     )
 
@@ -1019,18 +1000,14 @@ def test_set_scope_tags_writes_normalized_value(plan_db: T2Database) -> None:
         plan_json='{"steps":[{"tool":"search","args":{"corpus":"all"}}]}',
         project="",
     )
-    before = plan_db.plans.conn.execute(
-        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
-    ).fetchone()
-    assert before[0] == ""
+    before = plan_db.plans.get_plan(row_id)
+    assert before["scope_tags"] == ""
 
     updated = plan_db.plans.set_scope_tags(row_id, "canon-chat")
     assert updated is True
 
-    after = plan_db.plans.conn.execute(
-        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
-    ).fetchone()
-    assert after[0] == "canon-chat"
+    after = plan_db.plans.get_plan(row_id)
+    assert after["scope_tags"] == "canon-chat"
 
 
 def test_set_scope_tags_normalizes_hash_suffix(plan_db: T2Database) -> None:
@@ -1039,10 +1016,8 @@ def test_set_scope_tags_normalizes_hash_suffix(plan_db: T2Database) -> None:
         query="q", plan_json='{"steps":[]}', project="",
     )
     plan_db.plans.set_scope_tags(row_id, "rdr__arcaneum-2ad2825c,knowledge__delos-deadbeef")
-    row = plan_db.plans.conn.execute(
-        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
-    ).fetchone()
-    assert row[0] == "knowledge__delos,rdr__arcaneum"
+    row = plan_db.plans.get_plan(row_id)
+    assert row["scope_tags"] == "knowledge__delos,rdr__arcaneum"
 
 
 def test_set_scope_tags_drops_all_sentinel(plan_db: T2Database) -> None:
@@ -1050,10 +1025,8 @@ def test_set_scope_tags_drops_all_sentinel(plan_db: T2Database) -> None:
     row_id = plan_db.save_plan(query="q", plan_json='{"steps":[]}', project="")
     updated = plan_db.plans.set_scope_tags(row_id, "all,rdr__arcaneum")
     assert updated is True
-    row = plan_db.plans.conn.execute(
-        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
-    ).fetchone()
-    assert row[0] == "rdr__arcaneum"
+    row = plan_db.plans.get_plan(row_id)
+    assert row["scope_tags"] == "rdr__arcaneum"
 
 
 def test_set_scope_tags_idempotent(plan_db: T2Database) -> None:
@@ -1061,10 +1034,8 @@ def test_set_scope_tags_idempotent(plan_db: T2Database) -> None:
     row_id = plan_db.save_plan(query="q", plan_json='{"steps":[]}', project="")
     plan_db.plans.set_scope_tags(row_id, "canon-chat")
     plan_db.plans.set_scope_tags(row_id, "canon-chat")
-    row = plan_db.plans.conn.execute(
-        "SELECT scope_tags FROM plans WHERE id = ?", (row_id,)
-    ).fetchone()
-    assert row[0] == "canon-chat"
+    row = plan_db.plans.get_plan(row_id)
+    assert row["scope_tags"] == "canon-chat"
 
 
 def test_set_scope_tags_missing_plan_returns_false(plan_db: T2Database) -> None:
