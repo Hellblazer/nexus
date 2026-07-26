@@ -10,6 +10,9 @@ from unittest.mock import MagicMock, create_autospec, patch
 
 import pytest
 
+from tests._catalog_fixture_ops import active_reader
+from tests.conftest import fake_credentials
+
 from nexus.pdf_chunker import TextChunk
 from nexus.pdf_extractor import ExtractionResult
 from nexus.db.t3 import T3Database
@@ -149,7 +152,7 @@ def _run_service_mode(db, fake_result, fake_chunks, *, service=True, voyage=None
     with patch(_P_EXT) as ME, patch(_P_CHK) as MC, \
             patch("nexus.db.http_vector_client.is_vector_service_mode",
                   return_value=service), \
-            patch("nexus.config.get_credential", return_value=voyage):
+            patch("nexus.config.get_credential", side_effect=fake_credentials(voyage)):
         ME.return_value.extract.side_effect = _fx(pc, fake_result)
         MC.return_value.chunk.return_value = fake_chunks
         pipeline_index_pdf(Path(pdf_path), content_hash, collection, t3,
@@ -613,7 +616,7 @@ class TestPipelineIndexPdf:
         with (patch(_P_EXT) as ME, patch(_P_CHK) as MC,
               patch("nexus.db.http_vector_client.is_vector_service_mode",
                     return_value=False),
-              patch("nexus.config.get_credential", return_value="fake-key"),
+              patch("nexus.config.get_credential", side_effect=fake_credentials("fake-key")),
               patch("nexus.config.load_config", return_value={}),
               patch("nexus.doc_indexer._embed_with_fallback") as me):
             me.return_value = ([[0.1] * 4], "voyage-context-3")
@@ -627,7 +630,7 @@ class TestPipelineIndexPdf:
         # Legacy (non-service) path: no Voyage key must still fail loud.
         with (patch("nexus.db.http_vector_client.is_vector_service_mode",
                     return_value=False),
-              patch("nexus.config.get_credential", return_value=None)):
+              patch("nexus.config.get_credential", side_effect=fake_credentials(None))):
             with pytest.raises(RuntimeError, match="voyage_api_key not configured"):
                 pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", mock_t3, db=db)
 
@@ -740,15 +743,17 @@ class TestPipelineIndexPdf:
 
         # Manifest carries the doc-to-chunk binding instead.
         cat = Catalog(cat_dir, cat_dir / ".catalog.db")
-        documents = cat._db.execute(
-            "SELECT tumbler FROM documents WHERE physical_collection = ?",
-            (f"docs__rdr102-stream__{_local_token()}__v1",),
-        ).fetchall()
+        # nexus-aqbrk: pipeline_index_pdf registers via the factory, so the raw
+        # local .catalog.db read was empty on the engine arm.
+        documents = active_reader().list_by_collection(
+            f"docs__rdr102-stream__{_local_token()}__v1"
+        )
         assert documents, "catalog must register a Document for the streaming PDF"
-        for row in documents:
-            assert cat.get_manifest(row[0]), (
+        for entry in documents:
+            tumbler = str(entry.tumbler)
+            assert active_reader().get_manifest(tumbler), (
                 f"manifest_write_batch_hook must populate document_chunks "
-                f"for doc_id={row[0]!r}"
+                f"for doc_id={tumbler!r}"
             )
 
 
