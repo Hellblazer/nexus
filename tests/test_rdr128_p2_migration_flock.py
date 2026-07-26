@@ -110,6 +110,19 @@ def test_flock_not_stranded_after_holder_thread_finishes(tmp_path: Path) -> None
 # ── bootstrap_schema honors the flock ────────────────────────────────────────
 
 
+# nexus-aqbrk: PINNED, per-test. The subject is bootstrap_schema's LOCK-WAITING
+# behaviour, which does not exist in service mode: the function early-returns
+# (RDR-176 Gap 2 — the local .db is a frozen migration source) and therefore
+# never takes the flock at all, so the test measured a ~0.0002s "wait".
+#
+# SERVICE HALF IS OWNED by tests/db/test_rdr176_non_mutation.py
+# ::test_service_mode_bootstrap_does_not_mutate_legacy_source_db, which asserts
+# that early-return leaves the legacy DB byte-identical. NOTE: that owner was
+# ITSELF broken on the engine arm until earlier in this same commit — it built
+# its fixture with the very function it is asserting about. Pinning against a
+# red owner would have claimed coverage that did not hold, so it was fixed
+# first.
+@pytest.mark.usefixtures("local_t2_backend")
 def test_bootstrap_schema_waits_on_held_migration_flock(tmp_path: Path) -> None:
     """The daemon's startup migration (bootstrap_schema) takes the same
     flock — while an external holder holds it, bootstrap_schema BLOCKS, then

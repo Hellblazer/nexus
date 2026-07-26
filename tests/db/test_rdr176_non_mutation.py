@@ -34,6 +34,8 @@ import pytest
 
 from nexus.db.t2 import T2Database
 
+from tests._t2_fixture_ops import bootstrap_migration_source
+
 #: The legacy version we stamp the seeded source DB to. Strictly below the
 #: current ``expected_t2_schema_version()`` (5.10.7 at authoring time) so the
 #: DB is "pending" and current code's bootstrap path would migrate + re-stamp
@@ -77,7 +79,12 @@ def _seed_legacy_source_db(build_path: Path, dest_path: Path) -> None:
     down to :data:`_LEGACY_VERSION`, then copies the self-contained ``.db`` to
     *dest_path* (a fresh path the migration machinery has never seen).
     """
-    T2Database.bootstrap_schema(build_path)
+    # nexus-aqbrk: NOT bootstrap_schema. This file's SUBJECT is the
+    # service-mode non-mutation guard, so it must RUN in service mode —
+    # where bootstrap_schema early-returns by design and the legacy source
+    # was therefore never built ('no such table: _nexus_version'). Pinning
+    # would disable the branch under test; build the source directly.
+    bootstrap_migration_source(build_path)
     conn = sqlite3.connect(str(build_path))
     try:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
