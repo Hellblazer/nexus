@@ -16,9 +16,11 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from nexus.commands.upgrade import _current_version
+from nexus.db.migrations import apply_pending
+
 import nexus.db.t2.taxonomy_etl as tax
 import nexus.db.t2.telemetry_etl as tel
-from nexus.db.t2 import T2Database
 from nexus.db.t2.taxonomy_etl import migrate_taxonomy_rows
 from nexus.db.t2.telemetry_etl import (
     _HOOK_FAILURES_COLS,
@@ -31,6 +33,33 @@ _TS = "2026-05-15T08:30:00Z"
 _COLL = "knowledge__rehearsal__minilm-l6-v2-384__v1"
 
 
+
+def _bootstrap_migration_source(db: Path) -> None:
+    """Build a pre-migration SQLite source db for the ETL to read.
+
+    nexus-aqbrk: this was ``T2Database.bootstrap_schema``, which early-returns
+    when the T2 store is service-backed (RDR-176 Phase 1 Gap 2 — the local .db
+    is a migration SOURCE and must stay immutable, so ``apply_pending`` must
+    not re-stamp ``_nexus_version`` on it). Under the engine substrate that
+    guard fired, no schema was created, and every test here died on
+    ``no such table: hook_failures`` / ``topics`` / ``relevance_log``.
+
+    NOT PINNED, because the guard is not the thing under test and the subject
+    is not substrate-dependent: these tests assert that the taxonomy and
+    telemetry ETLs PAGE their SQLite read with LIMIT/OFFSET rather than
+    fetchall-ing the whole table. The ETL reads SQLite by definition — it IS
+    the migration source — no matter where T2 rows currently live. What the
+    tests need is a source file that exists, and calling the migration chain
+    directly says exactly that, on both arms, without asking the substrate for
+    permission to write a throwaway fixture.
+    """
+    conn = sqlite3.connect(str(db))
+    try:
+        apply_pending(conn, _current_version())
+    finally:
+        conn.close()
+
+
 def _paged_selects(sqls: list[str], table: str) -> list[str]:
     return [
         s for s in sqls
@@ -40,7 +69,7 @@ def _paged_selects(sqls: list[str], table: str) -> list[str]:
 
 def test_telemetry_iter_rows_pages_the_read(tmp_path: Path) -> None:
     db = tmp_path / "t.db"
-    T2Database.bootstrap_schema(db)
+    _bootstrap_migration_source(db)
     conn = sqlite3.connect(str(db))
     conn.executemany(
         "INSERT INTO hook_failures (doc_id, collection, hook_name, error, "
@@ -63,7 +92,7 @@ def test_telemetry_iter_rows_pages_the_read(tmp_path: Path) -> None:
 
 def test_telemetry_iter_rows_absent_table_yields_nothing(tmp_path: Path) -> None:
     db = tmp_path / "t.db"
-    T2Database.bootstrap_schema(db)
+    _bootstrap_migration_source(db)
     conn = sqlite3.connect(str(db))
     assert list(_iter_rows(conn, "no_such_table", _HOOK_FAILURES_COLS, page_size=2)) == []
 
@@ -71,7 +100,7 @@ def test_telemetry_iter_rows_absent_table_yields_nothing(tmp_path: Path) -> None
 def _seed_taxonomy_db(tmp_path: Path) -> Path:
     """2 topics; 5 assignments, 5 links, 5 meta rows — all non-orphan."""
     db = tmp_path / "tax.db"
-    T2Database.bootstrap_schema(db)
+    _bootstrap_migration_source(db)
     conn = sqlite3.connect(str(db))
     conn.executemany(
         "INSERT INTO topics (id, label, parent_id, collection, centroid_hash, "
@@ -144,7 +173,7 @@ def test_taxonomy_all_orphans_read_equals_source_via_collector(tmp_path: Path) -
     recorded, written == 0, and the collector's read still == source cardinality
     (the orphan count is added after the stream drains)."""
     db = tmp_path / "tax.db"
-    T2Database.bootstrap_schema(db)
+    _bootstrap_migration_source(db)
     conn = sqlite3.connect(str(db))
     conn.execute(
         "INSERT INTO topics (id, label, parent_id, collection, centroid_hash, "
@@ -186,7 +215,7 @@ def test_telemetry_migrate_pages_end_to_end(tmp_path: Path, monkeypatch) -> None
     monkeypatch.setattr(tel, "_READ_PAGE", 2)  # call-site resolves this at runtime
 
     db = tmp_path / "tel.db"
-    T2Database.bootstrap_schema(db)
+    _bootstrap_migration_source(db)
     conn = sqlite3.connect(str(db))
     conn.executemany(
         "INSERT INTO relevance_log (query, chunk_id, action, timestamp) VALUES (?,?,?,?)",
@@ -217,7 +246,7 @@ def test_iter_rows_exact_page_multiple_reads_all(tmp_path: Path) -> None:
     """Exact multiple of page_size: the loop must issue a trailing empty-page
     query to terminate, never stop after the last full page and drop rows."""
     db = tmp_path / "t.db"
-    T2Database.bootstrap_schema(db)
+    _bootstrap_migration_source(db)
     conn = sqlite3.connect(str(db))
     conn.executemany(
         "INSERT INTO hook_failures (doc_id, collection, hook_name, error, "
