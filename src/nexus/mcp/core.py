@@ -5057,6 +5057,39 @@ class PlanBindingUnsatisfiableError(ValueError):
         )
 
 
+def _nx_answer_caller_bindings(
+    *,
+    question: str,
+    scope: str,
+    bindings: dict[str, Any] | None,
+) -> tuple[dict[str, Any], frozenset[str]]:
+    """Build ``nx_answer``'s run bindings and declare what it can supply.
+
+    Returns ``(run_bindings, available)``. ``available`` is handed to
+    ``plan_match`` so it never offers a plan this call cannot run
+    (nexus-0yrjr); ``run_bindings`` is what the runner receives. The two
+    are derived together so they cannot disagree — a binding declared
+    available but not bound would let the matcher offer a plan that then
+    fails at dispatch.
+
+    ``intent`` and ``_nx_scope`` are owned by ``nx_answer`` and applied
+    last, so a caller cannot shadow the question or redirect the scope
+    through *bindings*.
+
+    ``None``-valued entries are dropped rather than declared: a null
+    slips through JSON tool arguments easily, and treating it as supplied
+    would reopen the offer-a-plan-that-cannot-run hole from the other
+    side.
+    """
+    run: dict[str, Any] = {
+        k: v for k, v in (bindings or {}).items() if v is not None
+    }
+    run["intent"] = question
+    if scope:
+        run["_nx_scope"] = scope
+    return run, frozenset(run)
+
+
 def _autoalias_bindings(
     *,
     required: list[str],
@@ -5424,6 +5457,7 @@ async def nx_answer(
     structured: bool = False,
     min_confidence: float | None = None,
     force_dynamic: bool = False,
+    bindings: dict[str, Any] | None = None,
 ) -> "str | dict":
     """Answer a knowledge question using plan-match-first retrieval. RDR-080 P1.
 
@@ -5476,6 +5510,19 @@ async def nx_answer(
             tighter value per-call without moving the global knob; the
             global default waits on Phase 5's larger-corpus
             validation. Must be in ``[0.0, 1.0]`` when supplied.
+        bindings: Caller-supplied plan bindings, e.g.
+            ``{"content_type": "rdr"}``. A sibling of ``dimensions`` /
+            ``scope``, not a new verb. Two effects: the value reaches the
+            plan runner, AND the matcher is told the binding is available
+            so it will offer plans that require it. Without this,
+            type-scoped builtins (``type-scoped-search`` needs
+            ``content_type``, ``find-by-author`` needs ``author``) are
+            unreachable, because nx_answer will not infer a typed value
+            from the question text (nexus-0yrjr). Values are NOT
+            validated: the catalog's ``content_type`` has no closed
+            domain (``code``, ``prose``, ``rdr``, ``paper``,
+            ``knowledge``, ``blog_post``, ... and it grows), so
+            rejecting against a fixed set would refuse legitimate values.
         force_dynamic: RDR-090 P1.1 (nexus-dslg). When True, skip the
             plan-match gate entirely and route directly to the inline
             LLM planner / dynamic-generation path. Default False
@@ -5507,6 +5554,16 @@ async def nx_answer(
     scope, _scope_warning = _nx_answer_normalize_scope(scope)
     if _scope_warning:
         _log.warning("nx_answer_scope_normalized", detail=_scope_warning)
+
+    # nexus-0yrjr: derive the run bindings and the availability set
+    # together, AFTER scope normalization so ``_nx_scope`` carries the
+    # normalized value. The matcher is told exactly what this call can
+    # bind, so it never offers a plan that cannot run — and a caller
+    # supplying ``content_type`` / ``author`` makes the type-scoped
+    # builtins reachable again.
+    _caller_run, _caller_available = _nx_answer_caller_bindings(
+        question=question, scope=scope, bindings=bindings,
+    )
 
     # RDR-086 Phase 3.3: envelope builder. String mode returns the text
     # directly; structured mode wraps it into the documented envelope.
@@ -5562,9 +5619,7 @@ async def nx_answer(
                     # ``_nx_scope`` when the caller passed a scope; every
                     # free-text binding is aliased from the question, so
                     # only typed bindings can make a plan unrunnable.
-                    available_bindings=frozenset(
-                        {"intent", "_nx_scope"} if scope else {"intent"},
-                    ),
+                    available_bindings=_caller_available,
                 )
         except Exception as exc:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             return _result(f"Error during plan match: {exc}")
@@ -5750,9 +5805,7 @@ async def nx_answer(
     # ``_nx_scope`` binding so retrieval steps in library-matched plans
     # honour the caller's corpus intent. Plans that pin their own corpus
     # still win; this only fills in the gap when a plan is agnostic.
-    run_bindings: dict[str, Any] = {"intent": question}
-    if scope:
-        run_bindings["_nx_scope"] = scope
+    run_bindings = dict(_caller_run)
 
     # Auto-alias the question text into any required binding the plan
     # declares but the caller didn't pre-supply. This mirrors what the

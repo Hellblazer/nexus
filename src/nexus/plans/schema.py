@@ -58,7 +58,10 @@ TYPED_FILTER_BINDINGS: frozenset[str] = frozenset({
 #: Legal values for the typed bindings with a small closed domain,
 #: surfaced in errors so a caller knows what a satisfying value is.
 TYPED_BINDING_DOMAINS: dict[str, str] = {
-    "content_type": "code / paper / rdr / knowledge",
+    # NOT a closed domain — the live catalog also carries prose,
+    # blog_post and others, and grows as new content is indexed. Phrased
+    # as examples so the hint cannot become quietly wrong.
+    "content_type": "a catalog content type, e.g. code / prose / rdr / paper / knowledge",
     "year": "a four-digit year",
     "depth": "a positive integer",
     "limit": "a positive integer",
