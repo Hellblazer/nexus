@@ -63,9 +63,85 @@ jobs:
         # is read automatically.
         run: uvx ruff@0.15.18 check src/
 
+  service-jar:
+    # nexus-eqxxh: provision the shaded service JAR for the pytest matrix.
+    #
+    # WHY THIS EXISTS. The engine-substrate tests (t2_engine_substrate,
+    # memory_consolidation, taxonomy_review_auto, the b6enc engine smoke) SKIP
+    # on CI today, because tests/conftest.py::t2_service_env gates on
+    # GITHUB_ACTIONS + an absent jar. That skip is the last thing standing
+    # between the RDR-155 P4b autouse flip and a CI board that means something:
+    # flip the default with no jar and EVERY engine-substrate test skips, so a
+    # green board proves nothing.
+    #
+    # CI-COST SHAPE, per the standing directives:
+    #  - ONE build for the whole matrix. The jar is a DETERMINISTIC ARTIFACT of
+    #    service/pom.xml + service/src/main/**, so it is CACHED on exactly that
+    #    input and rebuilt only on a key miss — which is precisely when a fresh
+    #    build proves something.
+    #  - The build step is skipped outright on a cache hit; the job then costs
+    #    a checkout plus a cache restore.
+    #  - JVM package, NOT the native image. `engine-service-build` above already
+    #    owns the ~40min GraalVM trip-wire and is path-gated to service/**
+    #    changes; this job needs only a runnable jar, which is minutes.
+    #  - ubuntu-latest only. No premium runner: the artifact is
+    #    platform-neutral bytecode.
+    #
+    # A clean checkout runs the testcontainers jOOQ codegen (Docker) because
+    # the generated sources are NOT committed — which is exactly why the cache
+    # is load-bearing rather than a nicety.
+    name: service jar (pytest substrate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+
+      - name: Cache service jar
+        id: jar-cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        with:
+          path: service/target/nexus-service-1.0-SNAPSHOT.jar
+          # Keyed on the EXACT inputs the jar is a function of. No restore-keys:
+          # a partial-match jar would be built from different sources, which is
+          # the stale-jar class tests/db/_service_fixture.py::
+          # jar_freshness_skip_reason exists to catch.
+          key: service-jar-${{ runner.os }}-${{ hashFiles('service/pom.xml', 'service/src/main/**') }}
+
+      - name: Set up GraalVM 25.0.3
+        if: steps.jar-cache.outputs.cache-hit != 'true'
+        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f  # v1
+        with:
+          java-version: '25.0.3'
+          distribution: 'graalvm'
+          cache: 'maven'
+
+      - name: Build shaded jar (no tests, no native)
+        if: steps.jar-cache.outputs.cache-hit != 'true'
+        working-directory: service
+        run: ./mvnw -q -DskipTests package
+
+      - name: Upload jar for the pytest matrix
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: service-jar
+          path: service/target/nexus-service-1.0-SNAPSHOT.jar
+          retention-days: 1
+          if-no-files-found: error
+
   test:
     name: pytest (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    # nexus-eqxxh: the engine-substrate tests need the shaded jar. One build,
+    # shared by every matrix leg (see the service-jar job's cost note).
+    needs: service-jar
+    env:
+      # NON-VACUITY BACKSTOP, armed in the SAME change that provisions — which
+      # is the whole point. tests/conftest.py::t2_service_env skips
+      # engine-substrate tests on CI only while this is unset; with it set, an
+      # ABSENT OR STALE JAR FAILS LOUDLY instead of silently reverting to the
+      # skip. Provisioning without arming would leave the skip able to become
+      # permanent the first time provisioning quietly broke.
+      NX_T2_SUBSTRATE_EXPECTED: "1"
     # 30m: the suite runs ~16m on the runners and the post-job cache-save
     # step counts toward this budget. At 20m a v5.4.2 release run timed
     # out DURING the cache upload (tests had already passed). Raised 25->30
@@ -157,6 +233,45 @@ jobs:
           key: huggingface-models-${{ runner.os }}-${{ hashFiles('uv.lock') }}
           restore-keys: |
             huggingface-models-${{ runner.os }}-
+
+      - name: Fetch the service jar
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7
+        with:
+          name: service-jar
+          path: service/target
+
+      - name: Re-stamp the jar mtime
+        # tests/db/_service_fixture.py::jar_freshness_skip_reason compares the
+        # jar's mtime against the newest file under service/src — a good check
+        # locally, where a forgotten rebuild is the real risk.
+        #
+        # On CI it is MEANINGLESS: git stamps every checked-out file at
+        # checkout time, so a downloaded jar is always "older" than sources it
+        # was in fact built from, and the gate would skip the whole
+        # engine-substrate family for a reason that does not exist here.
+        #
+        # Touching is not a bypass. The service-jar cache key is
+        # hashFiles('service/pom.xml', 'service/src/main/**') with NO
+        # restore-keys, so a hit already proves the jar was built from exactly
+        # these sources — a strictly stronger guarantee than the mtime proxy it
+        # replaces.
+        run: touch service/target/nexus-service-1.0-SNAPSHOT.jar
+
+      - name: Set up Java (to launch the service jar)
+        uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f  # v1
+        with:
+          java-version: '25.0.3'
+          distribution: 'graalvm'
+
+      - name: Cache the pinned PG bundle
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5
+        with:
+          # tests/db/_service_fixture.py::_self_provision_pg_bundle downloads
+          # OUR pinned, sigstore-verified PG bundle into this per-tag dir. Cache
+          # it so the engine substrate does not re-download it on every run;
+          # keyed on the file that PINS the tag, so a floor bump re-fetches.
+          path: ~/.cache/nexus-test-substrate
+          key: pg-bundle-${{ runner.os }}-${{ hashFiles('src/nexus/engine_version.py') }}
 
       - name: Install ripgrep
         run: sudo apt-get install -y ripgrep
