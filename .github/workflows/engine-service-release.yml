@@ -505,9 +505,9 @@ jobs:
             "mac-arm64 signing: Developer-ID signed + notarized WHEN the APPLE_*" \
             "secrets are provisioned (see the build job summary for this run's" \
             "actual status); otherwise ad-hoc-signed — browser downloads are then" \
-            "Gatekeeper-blocked, but nx install-binary (urllib fetch, no quarantine" \
-            "xattr) works either way. Ticket is checked online; bare Mach-O cannot" \
-            "be stapled." \
+            "Gatekeeper-blocked, but 'nx daemon service install-binary' (urllib" \
+            "fetch, no quarantine xattr) works either way. Ticket is checked" \
+            "online; bare Mach-O cannot be stapled." \
             "" \
             "glibc floor: linux binaries built on ubuntu-latest (~2.39). The runtime" \
             "base must have glibc >= that (conexus uses debian:trixie-slim = 2.41);" \
