@@ -951,6 +951,18 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # Reserved for individual mixed-file exclusions. Format:
     # "tests/test_file.py::test_func"  (no parametrize suffix).
     #
+    # nexus-9n485 tombstone probe — reason: "string-literal-as-name". Both
+    # tests pass "knowledge__1-1__voyage-context-3__v1" as the rename TARGET
+    # of `nx catalog rename-collection`; the voyage token is one segment of a
+    # conformant RDR-103 name, and what is asserted is the three-state
+    # tombstone guard's refusal (exit != 0, "tombstoned"/"restore" in the
+    # message). The HttpVectorClient's network boundary is patched in both,
+    # so no embedder is constructed and no credential is read — cloud_mode
+    # would add a live-credential dependency to a fully patched test without
+    # changing a single assertion.
+    "tests/test_catalog_rename_collection_tombstone_probe.py::test_rename_rejects_tombstoned_old_with_actionable_message",
+    "tests/test_catalog_rename_collection_tombstone_probe.py::test_rename_rejects_tombstoned_new_as_not_free_to_claim",
+    #
     # RDR-185 ladder — reason: "string-literal-as-name". Every one of these
     # builds a conformant RDR-103 collection NAME (or a
     # CollectionClassification carrying the name's model SEGMENT) and asserts
