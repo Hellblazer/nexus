@@ -171,13 +171,28 @@ def _targets_protected(tokens: list[str], cwd: str) -> bool:
             continue
         positional.append(tok)
 
-    # A pure tag push is not a branch update. `--tags` carries no branch
-    # refspec, and `git push origin vX.Y.Z` is the release publish step.
-    if any(t in {"--tags", "--follow-tags"} for t in tokens):
-        return False
-
     # positional = [remote, refspec...]; refspecs may be "src:dst".
     refspecs = positional[1:] if len(positional) > 1 else []
+
+    # TAG FLAGS DO NOT EXEMPT A BRANCH PUSH. The first cut of this returned
+    # False the instant `--tags` or `--follow-tags` appeared anywhere in the
+    # command, BEFORE refspecs were even computed. Verified against real git
+    # (dry-run, checkout on main with an upstream):
+    #
+    #   git push --follow-tags        ->  main -> main  AND the tags
+    #   git push --tags origin main   ->  main -> main  AND the tags
+    #   git push --tags               ->  tags only
+    #
+    # So two of the three exempted forms push the branch, and `--follow-tags`
+    # is BY DEFINITION a branch push that also carries tags -- it is the
+    # incident's own bare-push shape with a flag appended. Only a BARE `--tags`
+    # with no non-tag refspec is a pure tag push.
+    #
+    # Found by review, not by the tests: this hook shipped with zero
+    # `--follow-tags` coverage, so the guard for the 2026-07-23 direct-push
+    # incident exempted the exact case it exists to block.
+    if "--follow-tags" not in tokens and "--tags" in tokens and not refspecs:
+        return False
     if refspecs:
         for spec in refspecs:
             if spec.startswith("refs/tags/") or re.fullmatch(r"v\d+\.\d+\.\d+", spec):

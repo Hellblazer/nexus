@@ -1628,11 +1628,35 @@ def reap_leaked_test_daemons(
             tail = cmd[idx + len(marker):].split()
             if not tail:
                 continue
-            try:
-                own_dir = Path(tail[0]).resolve()
-            except Exception:  # noqa: BLE001 -- unparseable path is not ours
-                continue
-            if not own_dir.is_relative_to(root):
+            # `ps -eo command=` returns argv joined by spaces, UNQUOTED, so a
+            # directory containing a space is split across tokens. Taking
+            # tail[0] truncates it, the path resolves somewhere else, the
+            # containment test fails, and a real leaked daemon is left running
+            # with NO error -- a silent false negative. Found by review; the
+            # fake-ps unit tests all used space-free tmp paths.
+            #
+            # So try progressively longer token joins until one resolves under
+            # the root, stopping at the next flag.
+            own_dir = None
+            for k in range(1, len(tail) + 1):
+                if k > 1 and tail[k - 1].startswith("-"):
+                    break                       # ran into the next flag
+                candidate = " ".join(tail[:k])
+                # Absolute only: a relative value would resolve against the
+                # REAPER's cwd, not the target process's cwd at spawn time.
+                # Both current call sites pass absolute paths; refusing
+                # relative ones keeps a future call site from silently
+                # matching the wrong directory.
+                if not candidate.startswith("/"):
+                    break
+                try:
+                    resolved = Path(candidate).resolve()
+                except Exception:  # noqa: BLE001 -- unparseable is not ours
+                    continue
+                if resolved.is_relative_to(root):
+                    own_dir = resolved
+                    break
+            if own_dir is None:
                 continue
             try:
                 _kill(pid, sig)

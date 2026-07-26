@@ -269,3 +269,56 @@ class TestServiceBranchRoutesToTheEngine:
             with pytest.raises(SystemExit) as exc:
                 doctor_mod._run_check_dangling_links(strict=True)
         assert exc.value.code == 1
+
+
+# --- review findings, 2026-07-25 (CRE-DAY2) ---------------------------------
+#
+# Both of these are the SAME defect class the four doctor checks were rewritten
+# for earlier the same day: a check that appears to have run and found nothing,
+# when in fact it could not run or could not read what came back.
+
+
+class TestWireShapeIsNotTrusted:
+    def test_a_non_dict_response_raises_the_type_doctor_handles(self) -> None:
+        """A bare JSON array would make `.get()` raise AttributeError, which is
+        NOT in doctor's `except (httpx.HTTPError, RuntimeError)` -- so the
+        caller would crash with a raw traceback instead of the UNKNOWN/exit(2)
+        contract this check exists to guarantee."""
+        from unittest.mock import patch
+
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+        client = HttpCatalogClient.__new__(HttpCatalogClient)
+        with patch.object(HttpCatalogClient, "_get", return_value=[1, 2, 3]):
+            with pytest.raises(RuntimeError) as exc:
+                client.orphaned_links()
+        assert "wire shape" in str(exc.value).lower()
+        assert "list" in str(exc.value), "the error must name what actually arrived"
+
+    def test_an_empty_response_is_still_an_empty_list_not_an_error(self) -> None:
+        """Non-regression: no orphans is a legitimate, common answer."""
+        from unittest.mock import patch
+
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+        client = HttpCatalogClient.__new__(HttpCatalogClient)
+        for empty in ({}, {"links": []}, None):
+            with patch.object(HttpCatalogClient, "_get", return_value=empty):
+                assert client.orphaned_links() == []
+
+    @pytest.mark.parametrize("missing", ["from_tumbler", "to_tumbler", "link_type"])
+    def test_a_row_missing_an_endpoint_is_named_loudly(self, missing: str) -> None:
+        """Silent `.get()` defaults degraded a drifted shape to
+        `[?] None --None--> None`, which reads as a clean report."""
+        from nexus.commands.doctor import _require
+
+        row = {"from_tumbler": "1.1.1", "to_tumbler": "1.1.2", "link_type": "cites"}
+        del row[missing]
+        assert _require(row, missing) == f"<MISSING:{missing}>"
+
+    def test_a_complete_row_renders_its_real_values(self) -> None:
+        from nexus.commands.doctor import _require
+
+        row = {"from_tumbler": "1.1.1", "to_tumbler": "1.1.2", "link_type": "cites"}
+        assert _require(row, "from_tumbler") == "1.1.1"
+        assert _require(row, "link_type") == "cites"

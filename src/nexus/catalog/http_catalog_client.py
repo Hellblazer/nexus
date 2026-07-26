@@ -694,6 +694,17 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         (``"from"``/``"to"``/``"both"``) naming which endpoint is missing.
         """
         result = self._get("/links/orphaned")
+        # Shape-guard the response. A truthy NON-dict (a bare JSON array, say)
+        # would make .get() raise AttributeError, which is NOT in doctor.py's
+        # `except (httpx.HTTPError, RuntimeError)` -- so the caller would crash
+        # with a raw traceback instead of the UNKNOWN/exit(2) contract that this
+        # check and its three same-day siblings exist to guarantee. Raise the
+        # type the caller already handles, and say what arrived.
+        if result and not isinstance(result, dict):
+            raise RuntimeError(
+                f"/links/orphaned returned {type(result).__name__}, expected an "
+                f"object with a 'links' key -- the engine's wire shape changed"
+            )
         return (result or {}).get("links", [])
 
     def docs_with_absolute_paths(self) -> list[dict]:

@@ -929,6 +929,19 @@ def _run_check_t3_legacy_metadata(*, strict: bool = False) -> None:
 # ── --check-dangling-links (nexus-ysrwi, GH #1419 issue 7) ──────────────────
 
 
+def _require(row: dict, field: str) -> str:
+    """Return *field* from a dangling-link row, or a LOUD marker if absent.
+
+    The endpoints are the whole content of a dangling-link report; a row
+    missing one means the engine's wire shape drifted, and printing None for
+    it would read as a successful check (nexus-ysrwi review, 2026-07-25).
+    """
+    value = row.get(field)
+    if value is None or value == "":
+        return f"<MISSING:{field}>"
+    return str(value)
+
+
 def _report_dangling_links_service(*, strict: bool) -> None:
     """Dangling catalog_links from the LIVE PG, over HTTP (nexus-ysrwi).
 
@@ -994,8 +1007,14 @@ def _report_dangling_links_service(*, strict: bool) -> None:
     click.echo(f"\nSample (showing up to {min(count, 20)}):")
     for row in links[:20]:
         click.echo(
-            f"  [{row.get('side', '?')}] {row.get('from_tumbler')} "
-            f"--{row.get('link_type')}--> {row.get('to_tumbler')} "
+            # NOT silent .get() defaults. With them, a drifted engine shape
+            # degrades to "[?] None --None--> None" -- a check that looks like
+            # it ran and found nothing wrong, which is the precise failure mode
+            # this whole family of doctor checks was rewritten to remove
+            # (nexus-ingey / k0luu, 2026-07-25). Missing endpoints are a
+            # CONTRACT break, so name them.
+            f"  [{row.get('side') or '?'}] {_require(row, 'from_tumbler')} "
+            f"--{_require(row, 'link_type')}--> {_require(row, 'to_tumbler')} "
             f"(created_by={row.get('created_by') or '?'})"
         )
     click.echo(

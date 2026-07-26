@@ -252,3 +252,70 @@ class TestStaleRootDiscovery:
 
     def test_survives_a_missing_root(self, tmp_path: Path) -> None:
         assert stale_pytest_roots(tmp_path / "nope" / "pytest-1") == []
+
+
+class TestPathsWithSpaces:
+    """`ps -eo command=` returns argv joined by spaces, UNQUOTED.
+
+    Found by review (2026-07-25), not by the tests above: every one of them
+    builds paths from pytest's `tmp_path`, which never contains a space, so the
+    naive `split()[0]` looked correct forever. On a box whose temp root does
+    contain one, the path truncates, containment fails, and a real leaked
+    daemon is left running with NO error -- a silent false negative, which is
+    the worst shape for a reaper to fail in.
+    """
+
+    def test_a_data_dir_containing_a_space_is_still_matched(self, tmp_path) -> None:
+        root = tmp_path / "sp ace"
+        root.mkdir()
+        killed: list[tuple[int, str]] = []
+        pg = _FakeProc(70, f"/opt/pg/bin/postgres -D {root}/pgdata -p 5433")
+        reaped = reap_leaked_test_daemons(
+            tmp_root=root, _list_procs=_lister2(pg),
+            _kill=lambda pid, sig: killed.append((pid, sig)),
+        )
+        assert reaped == [("postgres", 70)], (
+            "a data dir with a space in it was not matched -- the leak would be "
+            "left running silently"
+        )
+
+    def test_a_config_dir_containing_a_space_is_still_matched(self, tmp_path) -> None:
+        root = tmp_path / "sp ace"
+        root.mkdir()
+        killed: list[tuple[int, str]] = []
+        w = _FakeProc(
+            71,
+            f"nx daemon aspect-worker start --config-dir {root}/x/.config/nexus --tenant default",
+        )
+        reaped = reap_leaked_test_daemons(
+            tmp_root=root, _list_procs=_lister2(w),
+            _kill=lambda pid, sig: killed.append((pid, sig)),
+        )
+        assert reaped == [("aspect-worker", 71)]
+
+    def test_the_safety_property_survives_the_space_handling(self, tmp_path) -> None:
+        """Widening the match must not widen it past the root.
+
+        The join-more-tokens loop is the risky part of this fix: it must stop
+        rather than keep swallowing tokens until something matches.
+        """
+        root = tmp_path / "sp ace"
+        root.mkdir()
+        killed: list[tuple[int, str]] = []
+        real = _FakeProc(72, "/usr/local/pgsql/bin/postgres -D /Users/dev/pgdata")
+        reaped = reap_leaked_test_daemons(
+            tmp_root=root, _list_procs=_lister2(real),
+            _kill=lambda pid, sig: killed.append((pid, sig)),
+        )
+        assert reaped == [] and killed == []
+
+    def test_a_relative_path_is_refused(self, tmp_path) -> None:
+        """A relative value would resolve against the REAPER's cwd, not the
+        target process's cwd at spawn time -- a different directory entirely."""
+        killed: list[tuple[int, str]] = []
+        rel = _FakeProc(73, "postgres -D relative/pgdata")
+        reaped = reap_leaked_test_daemons(
+            tmp_root=tmp_path, _list_procs=_lister2(rel),
+            _kill=lambda pid, sig: killed.append((pid, sig)),
+        )
+        assert reaped == [] and killed == []

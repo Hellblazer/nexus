@@ -158,6 +158,56 @@ def test_tag_pushes_are_allowed_even_from_main(cmd, repo_on):
     assert out["permissionDecision"] == "allow", f"{cmd}: {out}"
 
 
+# ── Tag FLAGS are not a blanket exemption (found by review, not by tests) ──
+#
+# The first cut returned "not protected" the instant `--tags` or
+# `--follow-tags` appeared ANYWHERE, before refspecs were computed. Verified
+# against real git (dry-run, on main with an upstream configured):
+#
+#   git push --follow-tags       ->  main -> main  AND the tags
+#   git push --tags origin main  ->  main -> main  AND the tags
+#   git push --tags              ->  tags only
+#
+# Two of the three exempted forms push the branch. `--follow-tags` is BY
+# DEFINITION a branch push that also carries tags -- the incident's own bare
+# push with a flag appended. The guard for the 2026-07-23 incident therefore
+# exempted the exact case it exists to block, and shipped with no coverage of
+# it at all.
+
+
+@pytest.mark.parametrize("cmd", [
+    "git push --follow-tags",              # bare: pushes the branch too
+    "git push --follow-tags origin main",
+    "git push --tags origin main",         # explicit branch refspec alongside tags
+    "git push --tags origin HEAD:main",
+])
+def test_tag_flags_do_not_exempt_a_branch_push(cmd, repo_on):
+    work = repo_on("main")
+    out = _decision(_run(_bash(cmd, str(work))))
+    assert out["permissionDecision"] == "deny", (
+        f"{cmd!r} pushes the BRANCH as well as tags -- a tag flag must not "
+        f"blanket-exempt it: {out}"
+    )
+
+
+@pytest.mark.parametrize("cmd", [
+    "git push --tags",                     # genuinely tags-only
+    "git push --tags origin",              # remote only, still no branch refspec
+])
+def test_a_bare_tags_push_is_still_allowed(cmd, repo_on):
+    """Non-regression: the release publish step must keep working."""
+    work = repo_on("main")
+    out = _decision(_run(_bash(cmd, str(work))))
+    assert out["permissionDecision"] == "allow", f"{cmd}: {out}"
+
+
+def test_follow_tags_from_a_feature_branch_is_allowed(repo_on):
+    """The flag is not itself suspicious -- the TARGET is what matters."""
+    work = repo_on("feature/x")
+    out = _decision(_run(_bash("git push --follow-tags", str(work))))
+    assert out["permissionDecision"] == "allow", out
+
+
 # ── Escape + compound + fail-open ──────────────────────────────────────────
 
 
