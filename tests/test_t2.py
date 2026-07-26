@@ -7,8 +7,69 @@ from pathlib import Path
 
 import pytest
 
+from nexus.db.storage_mode import StorageBackend, storage_backend_for
 from nexus.db.t2 import T2Database, _sanitize_fts5
 from nexus.db.t2.plan_library import PlanLibrary
+from tests._t2_fixture_ops import (
+    backdate_memory,
+    memory_row,
+    rewrite_memory_row,
+    seed_relevance,
+    set_memory_access_count,
+)
+
+
+def _require_sqlite_substrate() -> None:
+    """Skip when the T2 substrate is the engine (RDR-158/155, nexus-aqbrk).
+
+    For tests that probe SQLite machinery with no service-mode counterpart:
+    WAL journal mode, the FTS5 rebuild migration, the sqlite3 connection
+    lifecycle, the cross-process migration guard. These are not SQLite-shaped
+    assertions about substrate-independent behaviour — they are tests OF the
+    SQLite substrate, and nexus-i711w deletes them outright along with the
+    stores they probe.
+
+    Resolved at call time from ``storage_backend_for`` rather than from
+    ``NX_TEST_T2_SUBSTRATE``, so it stays correct when the conftest pin flips
+    its default and the env var's meaning inverts.
+    """
+    if storage_backend_for("memory") is not StorageBackend.SQLITE:
+        pytest.skip(
+            "probes SQLite-only machinery with no service-mode equivalent "
+            "(deleted with the SQLite stores in nexus-i711w)"
+        )
+
+
+def _assert_fts_hits(hits: int, expected: int) -> None:
+    """Assert a memory-search hit count, encoding the nexus-22r1f parity gap.
+
+    Service-mode search diverges from FTS5 in three measured ways, all of
+    them user-visible defects rather than SQLite-shaped test assumptions:
+
+    - dotted titles: PostgreSQL's parser keeps ``auth-design.md`` whole as one
+      FILE token, so no word inside a ``.md`` title is findable; FTS5's
+      unicode61 tokenizer splits it into ``auth`` / ``design`` / ``md``
+    - accent folding: ``resume`` finds ``résumé`` under FTS5, not under
+      ``to_tsvector('english', ...)`` (needs ``unaccent``)
+    - prefix syntax: FTS5's trailing ``*`` operator is discarded as
+      punctuation by ``plainto_tsquery``
+
+    The first is reproduced against Hal's real, populated install — this is
+    live, not a test artifact. So these tests keep asserting the correct
+    user-facing intent and are NOT rewritten to accommodate the gap.
+
+    Rather than ``xfail``, the service arm asserts the known-broken value, so
+    the day nexus-22r1f lands this fails loudly and names its own cleanup
+    instead of silently going green with the workaround still in place.
+    """
+    if storage_backend_for("memory") is StorageBackend.SQLITE:
+        assert hits == expected
+        return
+    assert hits == 0, (
+        f"nexus-22r1f looks FIXED (got {hits} hits in service mode, expected "
+        f"the broken 0) — delete this helper and restore `assert hits == "
+        f"{expected}` at every call site"
+    )
 
 
 # nexus-9eaz family flake-skip helper: was retired at RDR-120 P3b
@@ -56,11 +117,12 @@ CREATE TRIGGER IF NOT EXISTS memory_au AFTER UPDATE ON memory BEGIN
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 def _backdate(db: T2Database, title: str, days: float = 0, seconds: float = 0) -> None:
-    past = (datetime.now(UTC) - timedelta(days=days, seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    # Phase 2: memory rows live on db.memory.conn (each store owns its
-    # own sqlite3.Connection after the per-domain split).
-    db.memory.conn.execute("UPDATE memory SET timestamp=? WHERE title=?", (past, title))
-    db.memory.conn.commit()
+    """Age an entry in the fixture's ``proj`` namespace.
+
+    Every caller here backdates a row it just wrote under ``project="proj"``;
+    the substrate branch lives in ``tests._t2_fixture_ops`` (nexus-aqbrk).
+    """
+    backdate_memory(db, "proj", title, days=days, seconds=seconds)
 
 
 def _create_old_schema_db(path: Path) -> None:
@@ -78,21 +140,27 @@ def _create_old_schema_db(path: Path) -> None:
 # ── context manager ──────────────────────────────────────────────────────────
 
 def test_context_manager_closes_on_exit(tmp_path: Path) -> None:
+    _require_sqlite_substrate()
     with T2Database(tmp_path / "cm.db") as db:
         row_id = db.put(project="test", title="cm-entry", content="hello")
         assert row_id is not None
     # Phase 2: each store owns its own connection. Probe the memory
     # store's connection to verify the facade closed its children.
-    with pytest.raises(Exception):
+    # nexus-aqbrk: ProgrammingError specifically, not bare Exception — the
+    # service-backed store's .conn guard raises AttributeError, which a bare
+    # `pytest.raises(Exception)` would have accepted as proof of a close that
+    # never happened.
+    with pytest.raises(sqlite3.ProgrammingError):
         db.memory.conn.execute("SELECT 1")
 
 
 def test_context_manager_closes_on_exception(tmp_path: Path) -> None:
+    _require_sqlite_substrate()
     with pytest.raises(ValueError, match="intentional"):
         with T2Database(tmp_path / "cm_exc.db") as db:
             db.put(project="test", title="exc-entry", content="before error")
             raise ValueError("intentional")
-    with pytest.raises(Exception):
+    with pytest.raises(sqlite3.ProgrammingError):
         db.memory.conn.execute("SELECT 1")
 
 
@@ -117,6 +185,7 @@ def test_get_missing_args_raises_valueerror(db: T2Database, kwargs: dict) -> Non
 # ── WAL mode ─────────────────────────────────────────────────────────────────
 
 def test_wal_mode_enabled(db: T2Database) -> None:
+    _require_sqlite_substrate()
     # WAL is per-database-file — any store's connection reports the
     # same mode. Probe memory since it's the first store constructed
     # by the facade.
@@ -212,10 +281,9 @@ def test_get_projects_with_prefix_returns_last_updated(db: T2Database) -> None:
 def test_get_projects_with_prefix_ordered_by_most_recent(db: T2Database) -> None:
     db.put(project="repo_knowledge", title="old.md", content="older entry")
     db.put(project="repo_rdr", title="new.md", content="newer entry")
-    db.memory.conn.execute(
-        "UPDATE memory SET timestamp='2020-01-01T00:00:00Z' WHERE project='repo_knowledge'"
+    rewrite_memory_row(
+        db, "repo_knowledge", "old.md", timestamp="2020-01-01T00:00:00Z"
     )
-    db.memory.conn.commit()
 
     results = db.get_projects_with_prefix("repo")
     assert results[0]["project"] == "repo_rdr"
@@ -295,19 +363,25 @@ def test_search_by_tag_single_letter(db: T2Database) -> None:
 
 # ── FTS5 special characters ─────────────────────────────────────────────────
 
-@pytest.mark.parametrize("title,content,query,expect_found", [
-    ("cn.md", "训练神经网络 🚀", None, True),       # unicode roundtrip (checked via get)
-    ("fr.md", "résumé cafetière naïve", "resume", True),
-    ("quotes.md", 'He said "hello world" to everyone', "hello", True),
-    ("auth.md", "authentication authorization tokens", "auth*", True),
+# ``parity_gap`` marks the cases service mode gets wrong today (nexus-22r1f):
+# accent folding and the trailing-* prefix operator. Both are FTS5 features
+# with no ``plainto_tsquery`` equivalent, and both are user-visible.
+@pytest.mark.parametrize("title,content,query,expect_found,parity_gap", [
+    ("cn.md", "训练神经网络 🚀", None, True, False),   # unicode roundtrip (via get)
+    ("fr.md", "résumé cafetière naïve", "resume", True, True),
+    ("quotes.md", 'He said "hello world" to everyone', "hello", True, False),
+    ("auth.md", "authentication authorization tokens", "auth*", True, True),
 ])
 def test_fts_special_characters(
-    db: T2Database, title: str, content: str, query: str | None, expect_found: bool,
+    db: T2Database, title: str, content: str, query: str | None,
+    expect_found: bool, parity_gap: bool,
 ) -> None:
     db.put(project="proj", title=title, content=content)
     if query is None:
         entry = db.get(project="proj", title=title)
         assert entry is not None and entry["content"] == content
+    elif parity_gap:
+        _assert_fts_hits(len(db.search(query)), 1)
     else:
         assert (len(db.search(query)) >= 1) == expect_found
 
@@ -385,17 +459,26 @@ def test_search_finds_by_title(
 ) -> None:
     db.put(project="proj", title=title, content=content)
     results = db.search(query, project=project_filter)
-    assert len(results) == expect_count
+    _assert_fts_hits(len(results), expect_count)
 
 
 def test_search_title_with_project_filter(db: T2Database) -> None:
     db.put(project="proj_a", title="auth-design.md", content="generic text")
     db.put(project="proj_b", title="auth-notes.md", content="generic text")
     results = db.search("auth", project="proj_a")
-    assert len(results) == 1 and results[0]["project"] == "proj_a"
+    _assert_fts_hits(len(results), 1)
+    if results:
+        assert results[0]["project"] == "proj_a"
 
 
 def test_search_title_update_triggers_reindex(db: T2Database) -> None:
+    # nexus-aqbrk: an out-of-band UPDATE is the only way to rename a row —
+    # `put` upserts on (project, title), so the title IS the key. What this
+    # asserts is the SQLite AFTER UPDATE trigger that rebuilds memory_fts;
+    # the service side has no equivalent seam to drive (PG maintains its
+    # tsvector inside the same statement), so there is no service-mode
+    # rewrite of this test, only its deletion with the trigger in i711w.
+    _require_sqlite_substrate()
     db.put(project="proj", title="olduniquetitleword.md", content="content")
     assert len(db.search("olduniquetitleword")) == 1
 
@@ -412,6 +495,7 @@ def test_search_title_update_triggers_reindex(db: T2Database) -> None:
 # ── FTS5 migration (old schema without title) ───────────────────────────────
 
 def test_fts_migration_enables_title_search(tmp_path: Path) -> None:
+    _require_sqlite_substrate()
     db_path = tmp_path / "old_schema.db"
     _create_old_schema_db(db_path)
 
@@ -444,16 +528,27 @@ def test_fts_migration_is_idempotent(tmp_path: Path) -> None:
 
     with T2Database(db_path) as db:
         results = db.search("existing-entry")
-        assert len(results) == 1 and results[0]["title"] == "existing-entry.md"
+        _assert_fts_hits(len(results), 1)
+        if results:
+            assert results[0]["title"] == "existing-entry.md"
 
 
 # ── T2 access tracking (RDR-057 P2-2a, nexus-b4x0) ────────────────────────
 
 
 def test_access_tracking_columns_exist(db: T2Database) -> None:
-    """access_count and last_accessed columns are present after init."""
-    db.memory.conn.execute("SELECT access_count FROM memory LIMIT 0")
-    db.memory.conn.execute("SELECT last_accessed FROM memory LIMIT 0")
+    """access_count and last_accessed are present on a stored entry.
+
+    nexus-aqbrk: was a ``SELECT <col> FROM memory LIMIT 0`` schema probe.
+    Asserting them on a real row is the substrate-independent form of the
+    same claim — and a stronger one, since a column the store never
+    populates would satisfy the schema probe.
+    """
+    db.put(project="proj", title="cols.md", content="body")
+    row = memory_row(db, "proj", "cols.md")
+    assert row is not None
+    assert "access_count" in row
+    assert "last_accessed" in row
 
 
 def test_access_tracking_migration_idempotent(tmp_path: Path) -> None:
@@ -466,20 +561,18 @@ def test_access_tracking_migration_idempotent(tmp_path: Path) -> None:
 def test_new_entry_access_count_zero(db: T2Database) -> None:
     """New entries start with access_count=0."""
     db.put(project="proj", title="fresh.md", content="new content")
-    row = db.memory.conn.execute(
-        "SELECT access_count FROM memory WHERE title='fresh.md'"
-    ).fetchone()
-    assert row[0] == 0
+    # memory_row (get_all) is the non-mutating read: get()/search() would
+    # increment the very counter under test (nexus-aqbrk).
+    row = memory_row(db, "proj", "fresh.md")
+    assert row is not None and row["access_count"] == 0
 
 
 def test_get_increments_access_count(db: T2Database) -> None:
     """get() increments access_count by 1."""
     db.put(project="proj", title="tracked.md", content="trackable")
     db.get(project="proj", title="tracked.md")
-    row = db.memory.conn.execute(
-        "SELECT access_count FROM memory WHERE title='tracked.md'"
-    ).fetchone()
-    assert row[0] == 1
+    row = memory_row(db, "proj", "tracked.md")
+    assert row is not None and row["access_count"] == 1
 
 
 def test_get_increments_access_count_three_times(db: T2Database) -> None:
@@ -488,32 +581,29 @@ def test_get_increments_access_count_three_times(db: T2Database) -> None:
     db.get(project="proj", title="multi.md")
     db.get(project="proj", title="multi.md")
     db.get(project="proj", title="multi.md")
-    row = db.memory.conn.execute(
-        "SELECT access_count FROM memory WHERE title='multi.md'"
-    ).fetchone()
-    assert row[0] == 3
+    row = memory_row(db, "proj", "multi.md")
+    assert row is not None and row["access_count"] == 3
 
 
 def test_search_increments_access_count(db: T2Database) -> None:
     """search() increments access_count for returned entries."""
     db.put(project="proj", title="searchable.md", content="unique xyzzy keyword")
     db.search("xyzzy")
-    row = db.memory.conn.execute(
-        "SELECT access_count FROM memory WHERE title='searchable.md'"
-    ).fetchone()
-    assert row[0] == 1
+    row = memory_row(db, "proj", "searchable.md")
+    assert row is not None and row["access_count"] == 1
 
 
 def test_get_sets_last_accessed(db: T2Database) -> None:
     """get() updates last_accessed to a non-empty ISO timestamp."""
     db.put(project="proj", title="ts.md", content="timestamp check")
     db.get(project="proj", title="ts.md")
-    row = db.memory.conn.execute(
-        "SELECT last_accessed FROM memory WHERE title='ts.md'"
-    ).fetchone()
-    assert row[0] != ""
-    from datetime import datetime
-    datetime.fromisoformat(row[0])  # validates format
+    row = memory_row(db, "proj", "ts.md")
+    assert row is not None
+    last_accessed = row["last_accessed"]
+    assert last_accessed != ""
+    # Service mode stamps a trailing "Z"; fromisoformat only learned to parse
+    # that in 3.11+, which is below this project's 3.12 floor.
+    datetime.fromisoformat(last_accessed)  # validates format
 
 
 # ── heat-weighted expiry ────────────────────────────────────────────────────
@@ -529,8 +619,7 @@ def test_expire_unaccessed_entry_base_behavior(db: T2Database) -> None:
 def test_expire_hot_entry_survives_past_base_ttl(db: T2Database) -> None:
     """access_count=9 → effective_ttl ≈ 3.3 days. Entry at 1.5 days survives."""
     db.put(project="proj", title="hot.md", content="frequently accessed", ttl=1)
-    db.memory.conn.execute("UPDATE memory SET access_count=9 WHERE title='hot.md'")
-    db.memory.conn.commit()
+    set_memory_access_count(db, "proj", "hot.md", 9)
     _backdate(db, "hot.md", days=1.5)
     assert db.expire() == 0  # survives due to heat
 
@@ -538,8 +627,7 @@ def test_expire_hot_entry_survives_past_base_ttl(db: T2Database) -> None:
 def test_expire_hot_entry_eventually_expires(db: T2Database) -> None:
     """access_count=9, effective_ttl ≈ 3.3 days. Entry at 4 days expires."""
     db.put(project="proj", title="hot-old.md", content="hot but stale", ttl=1)
-    db.memory.conn.execute("UPDATE memory SET access_count=9 WHERE title='hot-old.md'")
-    db.memory.conn.commit()
+    set_memory_access_count(db, "proj", "hot-old.md", 9)
     _backdate(db, "hot-old.md", days=4)
     assert db.expire() == 1
 
@@ -554,15 +642,8 @@ def test_expire_permanent_entries_preserved(db: T2Database) -> None:
 def test_expire_relevance_log_purges_old_entries(db: T2Database) -> None:
     """expire_relevance_log() deletes entries older than the retention window."""
     # Insert rows with timestamps spanning fresh and stale
-    db.log_relevance("q1", "c1", "stored", session_id="s1")
+    seed_relevance(db, query="q1", chunk_id="c1", session_id="s1", age_days=100)
     db.log_relevance("q2", "c2", "stored", session_id="s1")
-    # Backdate one row to 100 days ago — relevance_log lives on
-    # db.telemetry.conn after the Phase 2 per-store split.
-    db.telemetry.conn.execute(
-        "UPDATE relevance_log SET timestamp = datetime('now', '-100 days') WHERE chunk_id = ?",
-        ("c1",),
-    )
-    db.telemetry.conn.commit()
 
     purged = db.expire_relevance_log(days=90)
     assert purged == 1
@@ -578,15 +659,13 @@ def test_expire_relevance_log_no_op_when_empty(db: T2Database) -> None:
 
 def test_expire_relevance_log_partial_purge(db: T2Database) -> None:
     """Partial purge: some rows stale, some fresh."""
-    # Insert 4 rows
-    for i in range(4):
+    # Rows 0 and 1 stale, rows 2 and 3 fresh
+    for i in range(2):
+        seed_relevance(
+            db, query=f"q{i}", chunk_id=f"c{i}", session_id="s1", age_days=100
+        )
+    for i in range(2, 4):
         db.log_relevance(f"q{i}", f"c{i}", "stored", session_id="s1")
-    # Backdate rows 0 and 1 to 100 days ago
-    db.telemetry.conn.execute(
-        "UPDATE relevance_log SET timestamp = datetime('now', '-100 days') "
-        "WHERE chunk_id IN ('c0', 'c1')"
-    )
-    db.telemetry.conn.commit()
 
     purged = db.expire_relevance_log(days=90)
     assert purged == 2
@@ -614,11 +693,7 @@ def test_expire_relevance_log_days_negative_purges_all(db: T2Database) -> None:
 def test_expire_also_purges_relevance_log(db: T2Database) -> None:
     """expire() calls expire_relevance_log() to purge telemetry."""
     # Stale relevance_log row
-    db.log_relevance("q", "c", "stored", session_id="s1")
-    db.telemetry.conn.execute(
-        "UPDATE relevance_log SET timestamp = datetime('now', '-100 days')"
-    )
-    db.telemetry.conn.commit()
+    seed_relevance(db, query="q", chunk_id="c", session_id="s1", age_days=100)
 
     db.expire()  # default relevance_log_days=90
 
@@ -628,6 +703,7 @@ def test_expire_also_purges_relevance_log(db: T2Database) -> None:
 @_skip_on_gha_flake
 def test_migration_guard_sequential_construction(tmp_path: Path, monkeypatch) -> None:
     """Two T2Database instances on the same path do not re-run migrations sequentially."""
+    _require_sqlite_substrate()
     from nexus.db.t2 import plan_library
 
     # Clear any prior migration state for this path. Each store owns its
@@ -676,6 +752,7 @@ def test_migration_guard_path_normalization(tmp_path: Path, monkeypatch) -> None
     and doesn't exercise normalization. This test uses a real symlink so the
     two string paths genuinely differ — only ``resolve()`` can reconcile them.
     """
+    _require_sqlite_substrate()
     import os
 
     from nexus.db.t2 import plan_library
@@ -730,6 +807,7 @@ def test_migration_guard_concurrent_threads(tmp_path: Path, monkeypatch) -> None
     This is the regression test for F2 (round 2) — the race where two
     concurrent constructors could both enter the migration functions.
     """
+    _require_sqlite_substrate()
     import threading
 
     from nexus.db.t2 import plan_library
@@ -792,10 +870,9 @@ def test_get_by_id_increments_access_count(db: T2Database) -> None:
     """get(id=...) also increments access_count."""
     row_id = db.put(project="proj", title="byid.md", content="data")
     db.get(id=row_id)
-    row = db.memory.conn.execute(
-        "SELECT access_count FROM memory WHERE id=?", (row_id,)
-    ).fetchone()
-    assert row[0] == 1
+    row = memory_row(db, "proj", "byid.md")
+    assert row is not None and row["id"] == row_id
+    assert row["access_count"] == 1
 
 
 def test_upsert_preserves_access_count(db: T2Database) -> None:
@@ -805,17 +882,13 @@ def test_upsert_preserves_access_count(db: T2Database) -> None:
     db.get(project="proj", title="upsert.md")
     # access_count is now 2
     db.put(project="proj", title="upsert.md", content="v2")
-    row = db.memory.conn.execute(
-        "SELECT access_count FROM memory WHERE title='upsert.md'"
-    ).fetchone()
-    assert row[0] == 2  # preserved through upsert
+    row = memory_row(db, "proj", "upsert.md")
+    assert row is not None and row["access_count"] == 2  # preserved through upsert
 
 
 def test_search_glob_does_not_increment_access_count(db: T2Database) -> None:
     """search_glob is an admin operation — does not track access."""
     db.put(project="nexus_rdr", title="scan.md", content="scan content")
     db.search_glob("scan", "*_rdr")
-    row = db.memory.conn.execute(
-        "SELECT access_count FROM memory WHERE title='scan.md'"
-    ).fetchone()
-    assert row[0] == 0
+    row = memory_row(db, "nexus_rdr", "scan.md")
+    assert row is not None and row["access_count"] == 0
