@@ -140,3 +140,115 @@ class TestReaperScoping:
         assert reap_leaked_aspect_workers(
             tmp_root=tmp_path, _list_procs=_boom, _kill=lambda _p: None,
         ) == []
+
+
+# --- the postgres half (nexus-1odsl, 2026-07-25) -----------------------------
+#
+# The bead reported SIX workers and THREE postmasters. Only the worker half was
+# fixed. postgres leaks for a DIFFERENT reason and so needs different coverage:
+# tests/_engine_substrate.py does register an atexit teardown, but atexit does
+# not run on SIGKILL, a double Ctrl-C, or a crash -- i.e. exactly how a long
+# suite actually gets aborted. 21 stale pytest session dirs were present on the
+# dev box when this landed.
+
+from tests.conftest import reap_leaked_test_daemons, stale_pytest_roots  # noqa: E402
+
+
+def _lister2(*procs: _FakeProc):
+    return lambda: [(p.pid, p.cmdline) for p in procs]
+
+
+class TestPostgresLeakClass:
+    def test_reaps_a_postmaster_rooted_in_the_tmp_root(self, tmp_path: Path) -> None:
+        killed: list[tuple[int, str]] = []
+        pg = _FakeProc(31, f"/opt/pg/bin/postgres -D {tmp_path}/pgdata -p 5433")
+        reaped = reap_leaked_test_daemons(
+            tmp_root=tmp_path, _list_procs=_lister2(pg),
+            _kill=lambda pid, sig: killed.append((pid, sig)),
+        )
+        assert reaped == [("postgres", 31)]
+
+    def test_postgres_gets_SIGQUIT_not_SIGTERM(self, tmp_path: Path) -> None:
+        """SIGTERM is postgres's SMART shutdown: it waits for clients to
+        disconnect and can hang forever on a stranded cluster. These clusters
+        are throwaway (fsync=off), so immediate shutdown is correct and a
+        graceful one buys nothing while risking a hung teardown."""
+        killed: list[tuple[int, str]] = []
+        procs = _lister2(
+            _FakeProc(31, f"/opt/pg/bin/postgres -D {tmp_path}/pgdata"),
+            _FakeProc(32, f"nx daemon aspect-worker start --config-dir {tmp_path}/.config/nexus"),
+        )
+        reap_leaked_test_daemons(
+            tmp_root=tmp_path, _list_procs=procs,
+            _kill=lambda pid, sig: killed.append((pid, sig)),
+        )
+        assert (31, "QUIT") in killed, f"postgres must get SIGQUIT: {killed}"
+        assert (32, "TERM") in killed, f"the worker must still get SIGTERM: {killed}"
+
+    def test_spares_the_developers_real_postgres(self, tmp_path: Path) -> None:
+        """The whole reason the original reaper refused to match postgres."""
+        killed: list[tuple[int, str]] = []
+        real = _FakeProc(40, "/usr/local/pgsql/bin/postgres -D /Users/dev/pgdata")
+        reaped = reap_leaked_test_daemons(
+            tmp_root=tmp_path, _list_procs=_lister2(real),
+            _kill=lambda pid, sig: killed.append((pid, sig)),
+        )
+        assert reaped == []
+        assert killed == [], "never signal a database outside the pytest tmp root"
+
+    def test_spares_pg_ctl_which_also_carries_dash_D(self, tmp_path: Path) -> None:
+        """pg_ctl is a transient CLI that takes the SAME -D flag. Matching on
+        the flag alone would sweep it up, which is why the class test keys on
+        the executable's basename."""
+        killed: list[tuple[int, str]] = []
+        ctl = _FakeProc(41, f"/opt/pg/bin/pg_ctl -D {tmp_path}/pgdata status")
+        reaped = reap_leaked_test_daemons(
+            tmp_root=tmp_path, _list_procs=_lister2(ctl),
+            _kill=lambda pid, sig: killed.append((pid, sig)),
+        )
+        assert reaped == [] and killed == []
+
+    def test_spares_postgres_worker_subprocesses(self, tmp_path: Path) -> None:
+        """postgres's own children appear as `postgres: checkpointer`. Killing
+        the postmaster reaps them, so signalling each individually is both
+        redundant and a way to half-kill a cluster."""
+        killed: list[tuple[int, str]] = []
+        child = _FakeProc(42, f"postgres: checkpointer -D {tmp_path}/pgdata")
+        reaped = reap_leaked_test_daemons(
+            tmp_root=tmp_path, _list_procs=_lister2(child),
+            _kill=lambda pid, sig: killed.append((pid, sig)),
+        )
+        assert reaped == [] and killed == []
+
+
+class TestStaleRootDiscovery:
+    """The START pass. A session-END reaper cannot fire when the run is KILLED,
+    which is the case that leaks -- so stranded daemons are only ever reachable
+    from a LATER session."""
+
+    def test_finds_sibling_sessions_and_excludes_the_current_one(
+        self, tmp_path: Path,
+    ) -> None:
+        root = tmp_path / "pytest-of-dev"
+        root.mkdir()
+        current = root / "pytest-9"
+        for name in ("pytest-7", "pytest-8", "pytest-9"):
+            (root / name).mkdir()
+
+        found = {p.name for p in stale_pytest_roots(current)}
+        assert found == {"pytest-7", "pytest-8"}
+        assert "pytest-9" not in found, (
+            "reaping the CURRENT session's own root would kill the run in progress"
+        )
+
+    def test_returns_nothing_when_the_parent_is_not_a_pytest_root(
+        self, tmp_path: Path,
+    ) -> None:
+        """Guards against pointing the reaper at an arbitrary directory whose
+        children merely look session-shaped."""
+        odd = tmp_path / "somewhere" / "pytest-1"
+        odd.mkdir(parents=True)
+        assert stale_pytest_roots(odd) == []
+
+    def test_survives_a_missing_root(self, tmp_path: Path) -> None:
+        assert stale_pytest_roots(tmp_path / "nope" / "pytest-1") == []

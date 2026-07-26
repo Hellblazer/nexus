@@ -1489,25 +1489,58 @@ def require_docling(docling_available: bool) -> None:
         )
 
 
-# ── nexus-1odsl: reap aspect-worker daemons the suite leaked ──────────────────
+# --- nexus-1odsl: reap test daemons the suite leaked --------------------------
 #
-# `stop_worker()` stops the IN-PROCESS singleton thread. It does not touch the
-# DETACHED `nx daemon aspect-worker start` subprocess that
-# `ensure_aspect_worker_daemon` spawns (Popen + start_new_session), so any test
-# that exercises the auto-spawn path leaves a real daemon running after pytest
-# exits. Nothing reaps a daemon, so they accumulate across runs.
+# TWO process classes leak, for two DIFFERENT reasons, and a fix for one does
+# not touch the other:
 #
-# They are not inert: on 2026-07-24 five leaked workers were found still polling,
-# and leaked workers produced a 1,375-entry burst of 401s against the PRODUCTION
-# cloud endpoint on 2026-07-10 — test daemons hammering prod with a stale token.
+#   aspect-worker  `stop_worker()` stops the IN-PROCESS singleton thread. It
+#                  does not touch the DETACHED `nx daemon aspect-worker start`
+#                  subprocess that `ensure_aspect_worker_daemon` spawns (Popen
+#                  + start_new_session), so any test exercising the auto-spawn
+#                  path leaves a real daemon behind. Nothing reaps a daemon.
 #
-# SCOPE IS THE WHOLE POINT: only processes whose --config-dir lies under the
-# pytest tmp root are signalled. A broad "kill anything named aspect-worker"
-# would kill the developer's real worker.
+#   postgres       tests/_engine_substrate.py DOES clean up, via
+#                  atexit.register(_teardown). But atexit does not run on
+#                  SIGKILL, on a double Ctrl-C, or on a hard crash -- i.e.
+#                  exactly how a long suite actually gets aborted. So the
+#                  cluster survives with its postmaster still listening.
+#
+# They are not inert. On 2026-07-24, six workers and three postmasters were
+# found still running from finished runs, and leaked workers produced a
+# 1,375-entry burst of 401s against the PRODUCTION cloud endpoint on
+# 2026-07-10: test daemons polling prod with a stale token.
+#
+# WHY A SESSION-START PASS AND NOT ONLY SESSION-END. A session-END reaper can
+# only see its OWN basetemp, and by construction cannot run at all when the
+# run is killed -- which is the case that leaks. Everything stranded by an
+# aborted run is therefore reachable only from a LATER session, so the start
+# pass is what actually drains the backlog (21 stale session dirs were present
+# on this box when the bead was fixed). The end pass is kept for the
+# aspect-worker case, which leaks even on a clean exit.
+#
+# SCOPE IS THE WHOLE POINT. Only processes whose own path argument lies under
+# a pytest tmp root are signalled. A broad "kill anything named postgres"
+# would kill the developer's real database.
 
-def _ps_aspect_workers() -> list[tuple[int, str]]:
-    """(pid, cmdline) for every live aspect-worker-ish process. Never raises."""
-    import subprocess  # noqa: PLC0415 — deferred; teardown-only path
+#: (label, argument flag naming the process's own directory, signal to send).
+#: The flag is what makes the match precise: it is the process's OWN state
+#: directory, so a match cannot be a coincidence of some unrelated process
+#: merely mentioning a tmp path.
+_LEAK_SPECS: tuple[tuple[str, str, str], ...] = (
+    # SIGTERM: the worker's normal shutdown signal.
+    ("aspect-worker", "--config-dir ", "TERM"),
+    # SIGQUIT is postgres's IMMEDIATE shutdown. SIGTERM would be a "smart"
+    # shutdown that WAITS for clients to disconnect, which can hang forever on
+    # a stranded cluster. These clusters are throwaway (fsync=off), so there is
+    # nothing to protect by shutting down gracefully.
+    ("postgres", "-D ", "QUIT"),
+)
+
+
+def _ps_all() -> list[tuple[int, str]]:
+    """(pid, cmdline) for every live process. Never raises."""
+    import subprocess  # noqa: PLC0415 -- deferred; teardown-only path
 
     out = subprocess.run(
         ["ps", "-eo", "pid=,command="], capture_output=True, text=True, timeout=10,
@@ -1524,81 +1557,191 @@ def _ps_aspect_workers() -> list[tuple[int, str]]:
     return rows
 
 
-def reap_leaked_aspect_workers(
+# Back-compat alias: the reaper's own tests import this name.
+_ps_aspect_workers = _ps_all
+
+
+def _matches_class(cmd: str, label: str) -> bool:
+    """Is *cmd* an instance of the *label* process class?
+
+    postgres is matched on the executable's BASENAME rather than a substring so
+    that neither `pg_ctl -D ...` (transient, also carries -D) nor postgres's own
+    `postgres: checkpointer` worker processes are swept up. Killing the
+    postmaster reaps its children anyway.
+    """
+    if label == "postgres":
+        head = cmd.split(maxsplit=1)[0] if cmd.split() else ""
+        return Path(head).name == "postgres"
+    return "aspect-worker" in cmd or "aspect_worker" in cmd
+
+
+def reap_leaked_test_daemons(
     *,
     tmp_root: Path,
-    _list_procs=_ps_aspect_workers,
+    labels: tuple[str, ...] | None = None,
+    _list_procs=_ps_all,
     _kill=None,
-) -> list[int]:
-    """SIGTERM aspect-worker daemons whose ``--config-dir`` is under *tmp_root*.
+) -> list[tuple[str, int]]:
+    """SIGNAL test daemons whose own state directory is under *tmp_root*.
 
-    Returns the pids actually signalled. Never raises: this runs at session
-    teardown, where an exception would turn a tidy-up into a suite error and
-    mask the real result.
+    Returns (label, pid) for each process actually signalled. Never raises:
+    this runs at session setup/teardown, where an exception would turn a
+    tidy-up into a suite error and mask the real result.
 
-    A process qualifies only if BOTH hold: its command line looks like an
-    aspect-worker daemon AND its ``--config-dir`` is under *tmp_root*. Matching
-    on the tmp root alone would sweep up unrelated pytest-spawned processes
-    (postgres, shells) that merely carry the same path.
+    *labels* restricts which classes are considered. It gates the KILL, not the
+    return value -- filtering afterwards would signal a process and then omit it
+    from the report, which is strictly worse than not filtering at all.
     """
     if _kill is None:
-        import os as _os  # noqa: PLC0415 — deferred; teardown-only path
-        import signal as _signal  # noqa: PLC0415 — deferred; teardown-only path
+        import os as _os  # noqa: PLC0415 -- deferred; teardown-only path
+        import signal as _signal  # noqa: PLC0415 -- deferred; teardown-only path
 
-        def _kill(pid: int) -> None:  # noqa: ANN202 — local default
-            _os.kill(pid, _signal.SIGTERM)
+        def _kill(pid: int, sig: str) -> None:  # noqa: ANN202 -- local default
+            _os.kill(pid, getattr(_signal, f"SIG{sig}"))
 
     try:
         procs = list(_list_procs())
-    except Exception:  # noqa: BLE001 — a teardown probe is never a verdict
+    except Exception:  # noqa: BLE001 -- a teardown probe is never a verdict
         return []
 
     # RESOLVE both sides. On macOS the tmp root is handed to us as
     # /var/folders/... while the spawned process carries the realpath
     # /private/var/folders/... (/var is a symlink to /private/var). A plain
-    # string prefix compare silently matches NOTHING — which is exactly how
+    # string prefix compare silently matches NOTHING -- which is exactly how
     # this reaper passed its unit tests and still reaped zero real daemons on
     # its first end-to-end run.
     try:
         root = Path(tmp_root).resolve()
-    except Exception:  # noqa: BLE001 — teardown probe
+    except Exception:  # noqa: BLE001 -- teardown probe
         root = Path(tmp_root)
 
-    reaped: list[int] = []
+    reaped: list[tuple[str, int]] = []
     for pid, cmd in procs:
-        if "aspect-worker" not in cmd and "aspect_worker" not in cmd:
-            continue
-        marker = "--config-dir "
-        idx = cmd.find(marker)
-        if idx < 0:
-            continue
-        tail = cmd[idx + len(marker):].split()
-        if not tail:
-            continue
-        try:
-            cfg_path = Path(tail[0]).resolve()
-        except Exception:  # noqa: BLE001 — unparseable path is not ours
-            continue
-        if not cfg_path.is_relative_to(root):
-            continue
-        try:
-            _kill(pid)
-        except Exception:  # noqa: BLE001 — already exited / not ours anymore
-            continue
-        reaped.append(pid)
+        for label, marker, sig in _LEAK_SPECS:
+            if labels is not None and label not in labels:
+                continue
+            if not _matches_class(cmd, label):
+                continue
+            idx = cmd.find(marker)
+            if idx < 0:
+                continue
+            tail = cmd[idx + len(marker):].split()
+            if not tail:
+                continue
+            try:
+                own_dir = Path(tail[0]).resolve()
+            except Exception:  # noqa: BLE001 -- unparseable path is not ours
+                continue
+            if not own_dir.is_relative_to(root):
+                continue
+            try:
+                _kill(pid, sig)
+            except Exception:  # noqa: BLE001 -- already exited / not ours anymore
+                continue
+            reaped.append((label, pid))
+            break
     return reaped
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _reap_leaked_workers_at_session_end(tmp_path_factory):
-    """Backstop, not a substitute for per-test teardown.
+def reap_leaked_aspect_workers(
+    *,
+    tmp_root: Path,
+    _list_procs=_ps_all,
+    _kill=None,
+) -> list[int]:
+    """Aspect-worker-only view of :func:`reap_leaked_test_daemons`.
 
-    Deliberately session-scoped and autouse: more than one test can reach the
-    auto-spawn path, and a per-test fixture would have to be remembered by each
-    of them — which is exactly what failed. This catches the class.
+    Retained because it is the documented entry point and its ``_kill`` takes a
+    single pid; the generalised reaper's takes (pid, signal).
+
+    Passes ``labels`` through rather than filtering the RESULT: filtering after
+    the fact would still have signalled every postgres it walked past while
+    reporting none of them. The pre-existing
+    ``test_spares_unrelated_processes_that_mention_the_tmp_root`` asserts on the
+    kill list, not the return value, and caught exactly that.
     """
+    def _shim(pid: int, _sig: str) -> None:
+        if _kill is None:
+            import os as _os  # noqa: PLC0415 -- deferred
+            import signal as _signal  # noqa: PLC0415 -- deferred
+            _os.kill(pid, _signal.SIGTERM)
+        else:
+            _kill(pid)
+
+    return [
+        pid
+        for _label, pid in reap_leaked_test_daemons(
+            tmp_root=tmp_root, labels=("aspect-worker",),
+            _list_procs=_list_procs, _kill=_shim,
+        )
+    ]
+
+
+def stale_pytest_roots(basetemp: Path) -> list[Path]:
+    """Sibling pytest session dirs from OTHER runs, newest-first.
+
+    pytest lays sessions out as ``<tmp>/pytest-of-<user>/pytest-<n>``. The
+    current session's own dir is excluded -- reaping it would kill the run in
+    progress.
+
+    Assumes ONE pytest run at a time on a box, which is this project's standing
+    rule (feedback_no_parallel_tests). A second concurrent run's daemons would
+    be reaped by this. That is why every reap is PRINTED rather than silent.
+    """
+    try:
+        parent = Path(basetemp).resolve().parent
+        current = Path(basetemp).resolve()
+    except Exception:  # noqa: BLE001 -- probe
+        return []
+    if not parent.is_dir() or not parent.name.startswith("pytest-of-"):
+        return []
+    try:
+        sibs = [
+            d for d in parent.iterdir()
+            if d.is_dir() and d.name.startswith("pytest-") and d.resolve() != current
+        ]
+    except Exception:  # noqa: BLE001 -- probe
+        return []
+    return sorted(sibs, key=lambda d: d.name, reverse=True)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _reap_leaked_test_daemons(tmp_path_factory):
+    """Drain the backlog at START; catch this run's own leaks at END.
+
+    Deliberately session-scoped and autouse: more than one test reaches the
+    spawn paths, and a per-test fixture would have to be remembered by each of
+    them -- which is exactly what failed. This catches the class.
+    """
+    basetemp = Path(tmp_path_factory.getbasetemp())
+
+    # START: everything stranded by earlier aborted runs. This is the only
+    # place those are reachable -- the run that leaked them was killed before
+    # any teardown of its own could run.
+    # ONE `ps` for the whole scan. The naive loop calls it once per stale root,
+    # and there were 21 stale roots on the dev box when this landed -- 21 process
+    # listings before the first test runs. The snapshot going stale mid-scan is
+    # harmless: killing an already-exited pid raises, and that is caught.
+    stale_roots = stale_pytest_roots(basetemp)
+    drained: list[tuple[str, int]] = []
+    if stale_roots:
+        try:
+            snapshot = _ps_all()
+        except Exception:  # noqa: BLE001 -- a startup probe is never a verdict
+            snapshot = []
+        for stale in stale_roots:
+            drained.extend(
+                reap_leaked_test_daemons(tmp_root=stale, _list_procs=lambda: snapshot)
+            )
+    if drained:
+        print(f"\n[nexus-1odsl] reaped {len(drained)} daemon(s) stranded by "
+              f"earlier runs: {drained}")
+
     yield
-    root = Path(tmp_path_factory.getbasetemp())
-    reaped = reap_leaked_aspect_workers(tmp_root=root)
+
+    # END: this run's own leaks, on a clean exit. Cannot fire on a kill; that
+    # is what the START pass above is for.
+    reaped = reap_leaked_test_daemons(tmp_root=basetemp)
     if reaped:
+        print(f"\n[nexus-1odsl] reaped {len(reaped)} leaked daemon(s): {reaped}")
         print(f"\n[nexus-1odsl] reaped {len(reaped)} leaked aspect-worker daemon(s): {reaped}")
