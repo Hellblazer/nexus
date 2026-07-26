@@ -360,6 +360,65 @@ def test_verb_resolution_correctly_accepts_known_live_verbs() -> None:
         assert _verb_exists(tok1, tok2, tree), f"nx {tok1} {tok2 or ''} unexpectedly failed to resolve"
 
 
+#: Whole-file allowlist entries whose REASON asserts a specific code pattern.
+#: The claim is what earns the exemption, so the claim is what must be checked.
+#: Maps relpath -> a substring that MUST still appear in that file.
+#:
+#: Review finding (2026-07-25): the staleness check verified an entry's SHAPE
+#: (reason non-empty, file exists) and never its TRUTH. Every retired-script
+#: entry here is exempted because the script SELF-GUARDS on the deleted verb's
+#: --help exit code before any real use. Nothing asserted that guard clause was
+#: still present. Delete it in an unrelated edit and the whole-file exemption
+#: keeps silencing every invocation in that file forever, with no test noticing
+#: -- an allowlist entry outliving its justification, which is precisely how
+#: the /links/orphaned census exclusion went stale the same day.
+_REASON_CLAIMS: dict[str, str] = {
+    # Each reason asserts the script self-guards on the deleted verb's --help
+    # exit code, making every later invocation unreachable. Assert the guard.
+    "tests/e2e/migration-rehearsal/rehearse_guided.sh": "nx guided-upgrade --help",
+    "tests/e2e/migration-rehearsal/rehearse_cold.sh": "--help",
+    "tests/e2e/migration-rehearsal/rehearse_hole_punch.sh": "--help",
+    # "Phase B is internally guarded ('if nx migrate-to-service --help ...')".
+    "tests/e2e/migration-rehearsal/rehearse.sh": "nx migrate-to-service --help",
+    # "Two lines only NAME the deleted verb ... the RETIRED echo message
+    # itself". The claim is that the mention is a retirement NOTICE, not a use,
+    # so assert the notice is still what is there.
+    "tests/e2e/migration-rehearsal/run.sh": "RETIRED",
+}
+
+
+def test_allowlist_reasons_are_still_TRUE_not_merely_present() -> None:
+    """A reason that names a guard must be checkable against the guard.
+
+    This is the half the original staleness check was missing. Shape-checking a
+    justification string proves the string exists, never that it is still
+    accurate -- and an inaccurate justification is exactly what a silently
+    over-broad exemption looks like.
+    """
+    # Non-vacuity: if the claims map drifts out of sync with the allowlist it
+    # is meant to police, this check quietly stops covering entries.
+    unpoliced = sorted(set(_RETIRED_SCRIPT_ALLOWLIST) - set(_REASON_CLAIMS))
+    assert not unpoliced, (
+        f"_RETIRED_SCRIPT_ALLOWLIST entries with no verifiable claim in "
+        f"_REASON_CLAIMS: {unpoliced}. Either add the code pattern its reason "
+        f"asserts, or say explicitly why the reason is not mechanically "
+        f"checkable. An unchecked reason is an exemption on trust."
+    )
+
+    for relpath, must_contain in _REASON_CLAIMS.items():
+        path = REPO_ROOT / relpath
+        if not path.is_file():
+            continue  # covered by test_allowlists_are_not_stale
+        body = path.read_text(encoding="utf-8", errors="replace")
+        assert must_contain in body, (
+            f"{relpath} is whole-file allowlisted because its reason claims it "
+            f"self-guards, but {must_contain!r} is NO LONGER IN THE FILE. The "
+            f"exemption is now silencing invocations that may be genuinely "
+            f"reachable.\nFIX: restore the guard, or remove the allowlist entry "
+            f"so the sweep checks the file again."
+        )
+
+
 def test_allowlists_are_not_stale() -> None:
     """Every allowlist entry must carry a non-empty reason, and every
     file-keyed entry must point at a file that still exists — an allowlist

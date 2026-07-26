@@ -214,15 +214,6 @@ ROUTE_EXCLUSIONS: dict[str, str] = {
         "backs HttpCatalogClient.resync_chunk_count_cache() via raw _post "
         "— unit-tested against a mocked _post, not the live fake server"
     ),
-    "/links/orphaned": (
-        "no Python caller exists yet (grep across src/ and tests/ finds "
-        "none); added server-side ahead of client wiring (nexus-ysrwi: "
-        "\"...which is why the client could not build a doctor check\"). "
-        "When a client method lands, it needs either a REGISTRY parity "
-        "entry (if it joins the Catalog/HttpCatalogClient shared surface) "
-        "or a FakeCatalogHandler branch, whichever comes first — this "
-        "exclusion must be removed at that point"
-    ),
     "/import/chunk": (
         "ETL bulk-import path called via raw client._post() from "
         "src/nexus/db/t2/catalog_etl.py, not through a named "

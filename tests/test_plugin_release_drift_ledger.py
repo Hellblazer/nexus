@@ -33,7 +33,9 @@ effect immediately; they did not.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
+import re
 import subprocess
 
 import pytest
@@ -42,15 +44,58 @@ REPO_ROOT = pathlib.Path(__file__).parent.parent
 LEDGER = REPO_ROOT / "conexus" / "PENDING_RELEASE.md"
 MARKETPLACE = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 
-#: The plugin's BEHAVIOURAL surface -- what a session actually executes or reads.
-#: Deliberately excludes CHANGELOG.md / README.md: stale docs in a shipped
-#: plugin are harmless, whereas a stale hook is a guard that is not guarding.
-SURFACE: tuple[str, ...] = (
-    "conexus/hooks/",
-    "conexus/commands/",
-    "conexus/skills/",
-    "conexus/agents/",
+#: Per-plugin BEHAVIOURAL surface -- what a session actually executes or reads
+#: from the INSTALLED (pinned) copy. Keyed by the plugin name in
+#: marketplace.json; ``test_every_marketplace_plugin_has_a_surface`` fails if a
+#: plugin ships without an entry here, so a third plugin cannot arrive
+#: unnoticed.
+#:
+#: WHY EACH CONEXUS ENTRY IS IN. hooks/commands/skills/agents are loaded or read
+#: by Claude Code from $CLAUDE_PLUGIN_ROOT. resources/ is here because it is
+#: dereferenced AT RUNTIME by files that are themselves in the surface --
+#: conexus/commands/rdr-create.md and conexus/skills/rdr-create/SKILL.md both
+#: copy templates from `$CLAUDE_PLUGIN_ROOT/resources/rdr/`, so a template edit
+#: is exactly as inert as a hook edit. (Review finding, 2026-07-25: it was
+#: originally omitted with no stated reason.)
+#:
+#: WHY THE REST OF conexus/ IS OUT, stated rather than left to luck:
+#:   CHANGELOG.md / README.md  docs; stale docs in a shipped plugin are
+#:                             harmless, a stale hook is a guard not guarding.
+#:   plans/ daemon/            consumed by the separately-versioned PyPI
+#:                             package (src/nexus/plans/loader.py), not by the
+#:                             plugin loader.
+#:   registry.yaml             top-level; only markdown cross-links reference
+#:                             it. (Distinct from the nested
+#:                             hooks/scripts/routing/registry.yaml, which IS
+#:                             covered via the hooks/ prefix.)
+#:   retrieval-agents.txt      no live reference in the tree.
+#:
+#: sn ships its own routing guard (grep_for_symbols_redirects_to_serena.py) and
+#: is pinned independently, so it is exposed to the identical inertness class.
+SURFACE_BY_PLUGIN: dict[str, tuple[str, ...]] = {
+    "conexus": (
+        "conexus/hooks/",
+        "conexus/commands/",
+        "conexus/skills/",
+        "conexus/agents/",
+        "conexus/resources/",
+    ),
+    "sn": (
+        "sn/hooks/",
+    ),
+}
+
+#: Flattened, for the checks that do not care which plugin a path belongs to.
+SURFACE: tuple[str, ...] = tuple(
+    prefix for prefixes in SURFACE_BY_PLUGIN.values() for prefix in prefixes
 )
+
+#: A declared ledger entry: a bullet whose backtick spans contain the path.
+#: ONE canonical parser feeds BOTH directions of the contract. The first cut
+#: used a raw substring test for "is it declared" and a different bullet parse
+#: for "is it stale" -- two mechanisms answering the same question, which let an
+#: entry be leniently declared while never being strictly checked for staleness.
+_BULLET_SPAN = re.compile(r"^\s*-\s+(.*)$")
 
 
 def _git(*args: str) -> subprocess.CompletedProcess[str]:
@@ -59,18 +104,50 @@ def _git(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _pinned_ref() -> str:
+def _pinned_refs() -> dict[str, str]:
+    """Every plugin's pinned release ref, keyed by plugin name.
+
+    The first cut read only the plugin named "conexus", which silently exempted
+    sn -- a second, independently-pinned plugin that ships its own routing guard
+    and is exposed to the identical inertness class (review finding).
+    """
     data = json.loads(MARKETPLACE.read_text(encoding="utf-8"))
+    refs: dict[str, str] = {}
     for plugin in data.get("plugins", []):
-        if plugin.get("name") == "conexus":
-            source = plugin.get("source")
-            if isinstance(source, dict) and source.get("ref"):
-                return str(source["ref"])
-    raise AssertionError(
-        "marketplace.json has no conexus plugin with a source.ref -- the pinned "
+        name, source = plugin.get("name"), plugin.get("source")
+        if name and isinstance(source, dict) and source.get("ref"):
+            refs[str(name)] = str(source["ref"])
+    assert refs, (
+        "marketplace.json declares no plugin with a source.ref -- the pinned "
         "release model this test depends on has changed shape. Do not delete "
         "this test; update it to the new shape."
     )
+    return refs
+
+
+def _declared_paths() -> set[str]:
+    """Exact set of repo paths declared in the ledger.
+
+    EXACT, not substring. `p in ledger_text` reported an UNDECLARED file as
+    declared whenever its path was a textual prefix of a declared one -- e.g.
+    `conexus/hooks/scripts/expectations` (no extension) rides on the declared
+    `conexus/hooks/scripts/expectations.sh`. Reproduced during review.
+
+    Reads EVERY backtick span on a bullet, not just the first, so an entry that
+    leads with a non-path span (`` - `git stash -u` is covered by `path` ``)
+    still has its path captured. The first cut took span[1] only, which meant
+    such an entry escaped staleness detection permanently.
+    """
+    declared: set[str] = set()
+    for line in _ledger_text().splitlines():
+        m = _BULLET_SPAN.match(line)
+        if not m:
+            continue
+        for span in re.findall(r"`([^`]+)`", m.group(1)):
+            span = span.strip()
+            if any(span.startswith(prefix) for prefix in SURFACE):
+                declared.add(span)
+    return declared
 
 
 def _has_any_tags() -> bool:
@@ -92,20 +169,44 @@ def _ledger_text() -> str:
     return LEDGER.read_text(encoding="utf-8") if LEDGER.exists() else ""
 
 
+# --- taglessness: skip locally, but NEVER silently in CI ---------------------
+#
+# The drift checks need the pinned tag resolvable. On a developer's shallow
+# clone it is not, and skipping is right. In CI it MUST NOT be: if the job's
+# tag-fetch step ever breaks, a skip would report green having checked nothing
+# -- the identical believed-live-but-inert bug, one level up, inside the very
+# thing built to detect it. So the dedicated CI job sets this flag and
+# taglessness becomes a hard failure there.
+_REQUIRE_ENV = "NX_REQUIRE_PLUGIN_DRIFT_CHECK"
+
+
+def _require_or_skip() -> None:
+    if _has_any_tags():
+        return
+    if os.environ.get(_REQUIRE_ENV) == "1":
+        raise AssertionError(
+            f"{_REQUIRE_ENV}=1 but this checkout has NO tags, so the pinned ref "
+            "cannot be resolved and drift is UNKNOWN. In CI this means the "
+            "tag-fetch step did not do its job. Failing loudly rather than "
+            "skipping, because a skip here reports green while checking nothing."
+        )
+    pytest.skip(
+        "no tags in this checkout (shallow clone) -- drift unresolvable. "
+        f"Verified genuinely tagless, not assumed. CI sets {_REQUIRE_ENV}=1 so "
+        "this path cannot go unnoticed there."
+    )
+
+
 # --- non-vacuity: this file must not pass by checking nothing ----------------
 
 
 def test_the_surface_prefixes_all_exist() -> None:
-    """A renamed or deleted directory would silently shrink coverage to zero.
-
-    Without this, moving conexus/hooks/ elsewhere leaves every other test here
-    passing forever while watching an empty set.
-    """
+    """A renamed or deleted directory would silently shrink coverage to zero."""
     missing = [p for p in SURFACE if not (REPO_ROOT / p).is_dir()]
     assert not missing, (
         f"SURFACE names directories that do not exist: {missing}. Either the "
         "plugin layout moved (update SURFACE) or a directory was deleted. Until "
-        "this is corrected the drift check is watching nothing."
+        "corrected, the drift check is watching nothing."
     )
 
 
@@ -117,84 +218,161 @@ def test_the_ledger_file_exists() -> None:
     )
 
 
-# --- the pin itself ----------------------------------------------------------
+def test_every_marketplace_plugin_has_a_surface() -> None:
+    """A third plugin must not arrive unnoticed.
 
-
-def test_the_pinned_ref_is_a_real_tag() -> None:
-    """marketplace.json must not name a tag that does not exist.
-
-    Distinguishes two very different situations that look alike:
-      * no tags at all  -> shallow CI checkout, skip (and say so)
-      * tags, but not THIS one -> a real defect: users would install from a ref
-        that cannot be resolved.
+    sn was originally outside this file entirely, despite shipping its own
+    routing guard and being pinned independently -- the identical inertness
+    class, silently exempt (review finding, 2026-07-25).
     """
-    ref = _pinned_ref()
-    if not _has_any_tags():
-        pytest.skip(
-            "no tags in this checkout (shallow clone) -- cannot resolve the "
-            "pinned ref. Verified genuinely tagless rather than assumed."
-        )
-    proc = _git("rev-parse", "--verify", f"{ref}^{{commit}}")
-    assert proc.returncode == 0, (
-        f"marketplace.json pins source.ref={ref!r}, but that tag does not exist "
-        f"in this repository. Installed users resolve the plugin from that ref, "
-        f"so it must be a real, pushed tag."
+    unmapped = sorted(set(_pinned_refs()) - set(SURFACE_BY_PLUGIN))
+    assert not unmapped, (
+        f"marketplace.json ships plugin(s) with no SURFACE entry: {unmapped}. "
+        "Their behavioural files are pinned exactly like conexus's, so they are "
+        "equally inert when edited -- and currently unchecked. Add a surface."
     )
 
 
-# --- the ledger contract, both directions -----------------------------------
+# --- the pin itself ----------------------------------------------------------
+
+
+def test_every_pinned_ref_is_a_real_tag() -> None:
+    _require_or_skip()
+    for name, ref in sorted(_pinned_refs().items()):
+        proc = _git("rev-parse", "--verify", f"{ref}^{{commit}}")
+        assert proc.returncode == 0, (
+            f"marketplace.json pins {name} at source.ref={ref!r}, but that tag "
+            f"does not exist. Installed users resolve the plugin from that ref, "
+            f"so it must be a real, pushed tag."
+        )
+
+
+# --- the ledger contract, both directions off ONE parsed set ----------------
 
 
 def test_every_drifted_file_is_declared_in_the_ledger() -> None:
-    """Undeclared drift is the failure -- drift itself is not.
-
-    A guard merged without a ledger entry is a guard someone will believe is
-    protecting them. One line here is the whole cost of saying otherwise.
-    """
-    if not _has_any_tags():
-        pytest.skip("no tags in this checkout (shallow clone); drift unresolvable")
-    ref = _pinned_ref()
-    drifted = _drifted_paths(ref)
+    """Undeclared drift is the failure -- drift itself is not."""
+    _require_or_skip()
+    declared = _declared_paths()
+    drifted: set[str] = set()
+    for ref in set(_pinned_refs().values()):
+        drifted |= set(_drifted_paths(ref))
     if not drifted:
-        return  # nothing pending; the stale-entry test covers the other side
+        return
 
-    ledger = _ledger_text()
-    undeclared = [p for p in drifted if p not in ledger]
+    undeclared = sorted(drifted - declared)
     assert not undeclared, (
-        "These plugin files differ from the pinned release tag "
-        f"({ref}) but are NOT declared in conexus/PENDING_RELEASE.md:\n"
+        "These plugin files differ from the pinned release tag but are NOT "
+        "declared in conexus/PENDING_RELEASE.md:\n"
         + "\n".join(f"  {p}" for p in undeclared)
-        + "\n\nThey are INERT: Claude Code loads this plugin from the pinned "
-        "tag, so these changes do not run in any session until the next "
-        "release ships.\n"
-        "FIX: add each path to conexus/PENDING_RELEASE.md with one line saying "
-        "what it changes and which bead. Do NOT weaken this test instead -- the "
-        "entry is the honest statement that the change is not yet live."
+        + "\n\nThey are INERT: Claude Code loads the plugin from the pinned "
+        "tag, so these changes do not run in ANY session until the next release "
+        "ships.\nFIX: add each path to conexus/PENDING_RELEASE.md with one line "
+        "saying what it changes and which bead. Do NOT weaken this test instead "
+        "-- the entry is the honest statement that the change is not yet live."
     )
 
 
 def test_the_ledger_has_no_stale_entries() -> None:
     """After a release the pin advances, drift goes to zero, and this empties.
 
-    Without this half the ledger rots into a permanent list of things that
-    already shipped, which reads exactly like a list of things that have not --
-    the same believed-vs-actual confusion, one level up.
+    Uses the SAME parsed set as the check above. The first cut used a lenient
+    substring test one way and a stricter bullet parse the other, so an entry
+    could count as declared while never being checked for staleness.
     """
-    if not _has_any_tags():
-        pytest.skip("no tags in this checkout (shallow clone); drift unresolvable")
-    ref = _pinned_ref()
-    drifted = set(_drifted_paths(ref))
+    _require_or_skip()
+    declared = _declared_paths()
+    drifted: set[str] = set()
+    for ref in set(_pinned_refs().values()):
+        drifted |= set(_drifted_paths(ref))
 
-    stale = [
-        line.split("`")[1]
-        for line in _ledger_text().splitlines()
-        if line.lstrip().startswith("- `") and "`" in line.lstrip()[3:]
-    ]
-    stale = [p for p in stale if p.startswith("conexus/") and p not in drifted]
+    stale = sorted(declared - drifted)
     assert not stale, (
-        f"conexus/PENDING_RELEASE.md lists files that NO LONGER differ from the "
-        f"pinned tag ({ref}) -- they have shipped:\n"
+        "conexus/PENDING_RELEASE.md lists files that NO LONGER differ from the "
+        "pinned tag -- they have shipped:\n"
         + "\n".join(f"  {p}" for p in stale)
         + "\n\nRemove them. A ledger of already-shipped changes is "
         "indistinguishable from a ledger of pending ones."
     )
+
+
+# --- the skip/require mechanism is itself tested ----------------------------
+
+
+class TestTaglessBehaviour:
+    """An untested safety mechanism is not a safety mechanism."""
+
+    def test_tagless_without_the_flag_skips(self, monkeypatch) -> None:
+        monkeypatch.delenv(_REQUIRE_ENV, raising=False)
+        monkeypatch.setattr(
+            "tests.test_plugin_release_drift_ledger._has_any_tags", lambda: False
+        )
+        with pytest.raises(BaseException) as exc:
+            _require_or_skip()
+        assert exc.typename == "Skipped", f"expected a skip, got {exc.typename}"
+
+    def test_tagless_with_the_flag_fails_loudly(self, monkeypatch) -> None:
+        monkeypatch.setenv(_REQUIRE_ENV, "1")
+        monkeypatch.setattr(
+            "tests.test_plugin_release_drift_ledger._has_any_tags", lambda: False
+        )
+        with pytest.raises(AssertionError, match="tag-fetch step"):
+            _require_or_skip()
+
+
+class TestTheCIWiringItself:
+    """The guard guards its own wiring.
+
+    Everything above is worthless if the workflow that runs it loses the flag,
+    stops fetching tags, or stops targeting this file. Each of those reverts it
+    to skipping silently in CI -- the original defect. These are cheap YAML
+    assertions and they close the loop.
+    """
+
+    @staticmethod
+    def _workflow() -> dict:
+        yaml = pytest.importorskip("yaml")
+        path = REPO_ROOT / ".github" / "workflows" / "plugin-drift-ledger.yml"
+        assert path.exists(), (
+            "the dedicated drift-ledger workflow is gone. Without it these "
+            "tests only ever run on a developer's machine, which is exactly "
+            "how this guard was found to be inert in the first place."
+        )
+        return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    def test_the_workflow_sets_the_require_flag(self) -> None:
+        steps = self._workflow()["jobs"]["ledger"]["steps"]
+        envs = [s.get("env", {}) for s in steps]
+        assert any(e.get(_REQUIRE_ENV) == "1" for e in envs), (
+            f"the workflow no longer sets {_REQUIRE_ENV}=1, so a broken "
+            "tag-fetch would make these tests SKIP and the job report green "
+            "having checked nothing."
+        )
+
+    def test_the_workflow_actually_fetches_tags(self) -> None:
+        steps = self._workflow()["jobs"]["ledger"]["steps"]
+        runs = " ".join(s.get("run", "") for s in steps)
+        assert "refs/tags/" in runs and "git fetch" in runs, (
+            "the workflow no longer fetches the pinned tags; every drift test "
+            "would fail on the require-flag instead of actually checking drift"
+        )
+
+    def test_the_workflow_runs_this_file(self) -> None:
+        steps = self._workflow()["jobs"]["ledger"]["steps"]
+        runs = " ".join(s.get("run", "") for s in steps)
+        assert "test_plugin_release_drift_ledger.py" in runs, (
+            "the workflow no longer targets this test file"
+        )
+
+    def test_the_path_filter_covers_every_surface_prefix(self) -> None:
+        """A surface prefix outside the trigger paths is a surface whose drift
+        never triggers the check -- undeclared drift merging on a green PR."""
+        wf = self._workflow()
+        on = wf[True] if True in wf else wf["on"]
+        patterns = " ".join(on["push"]["paths"])
+        missing = [p for p in SURFACE if p.rstrip("/") not in patterns]
+        assert not missing, (
+            f"SURFACE prefixes not covered by the workflow's path filter: "
+            f"{missing}. Drift there would never trigger this workflow, so it "
+            f"could merge undeclared on a green PR."
+        )

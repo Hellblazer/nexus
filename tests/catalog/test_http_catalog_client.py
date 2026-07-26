@@ -203,6 +203,24 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                     "links_from": [out_row] if match else [],
                     "links_to": [in_row] if match else [],
                 })
+        elif op == "/links/orphaned":
+            # nexus-ysrwi review (2026-07-25): the route census EXCLUDED this
+            # route with the reason "no Python caller exists yet ... this
+            # exclusion must be removed" when one lands. HttpCatalogClient
+            # .orphaned_links() then landed one commit later and the exclusion
+            # was not removed -- the census cannot see its own trigger
+            # condition, since it only asks "is there a fake branch?", never
+            # "is there a caller?". This branch mirrors
+            # CatalogRepository.orphanedLinks(): id / from_tumbler / to_tumbler
+            # / link_type / created_by / side, under a {"links": [...]} envelope.
+            self._send_json({"links": [{
+                "id": 1,
+                "from_tumbler": "1.1.1",
+                "to_tumbler": "9.9.9",
+                "link_type": "cites",
+                "created_by": "user",
+                "side": "to",
+            }]})
         elif op == "/link_query":
             params = self._query_params()
             if params.get("from_tumbler") == FakeCatalogHandler.link_absent_from:
