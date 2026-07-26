@@ -140,23 +140,64 @@ def test_doctor_shows_all_checks(runner: CliRunner, fake_home: Path) -> None:
 def test_doctor_missing_voyage_key_reports_warning(
     runner: CliRunner, fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """nx doctor reports warning and exits 1 when VOYAGE_API_KEY is unset."""
+    """nx doctor REPORTS an unset VOYAGE_API_KEY without failing on it.
+
+    nexus-aqbrk: this asserted ``exit_code == 1`` and was GREEN ON THE SQLITE
+    ARM FOR AN UNRELATED REASON. Probed on both arms: sqlite exits 1 because
+    of "✗ Vector service (/v1/vectors): not reachable" — nothing to do with
+    the credential — while on the engine arm that service IS reachable, the
+    check passes, doctor exits 0, and the assertion failed. The docstring's
+    claim had been false since the credential rows became informational; a
+    different failing check was masking it.
+
+    IT ALSO CONTRADICTED tests/test_doctor_cmd.py::test_doctor_missing_
+    credentials_informational, which asserts in so many words that "absent
+    creds are never a failing/fatal doctor result (the exit-1 false-positive
+    on migrated installs)" per RDR-155 P4a.2 / RDR-188. The suite held both
+    expectations at once and only the accident above kept them from colliding.
+
+    Now asserts what the product actually contracts: the row is REPORTED, and
+    it is NOT fatal.
+    """
     monkeypatch.setenv("NX_LOCAL", "0")  # force cloud mode
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     result = runner.invoke(main, ["doctor"])
-    assert result.exit_code == 1
     assert "VOYAGE_API_KEY" in result.output or "voyage" in result.output.lower()
+    # The credential line is informational (✓), never the fatal ✗ shape.
+    voyage_lines = [
+        ln for ln in result.output.splitlines() if "VOYAGE_API_KEY" in ln
+    ]
+    assert voyage_lines, result.output
+    assert not any("\u2717" in ln for ln in voyage_lines), (
+        f"an absent Voyage key must not render as a FAILED check: {voyage_lines}"
+    )
 
 
 def test_doctor_missing_chroma_key_reports_warning(
     runner: CliRunner, fake_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """nx doctor reports warning and exits 1 when CHROMA_API_KEY is unset."""
+    """The CHROMA_API_KEY row is GONE — retired with the migration machinery.
+
+    nexus-aqbrk: this asserted ``exit_code == 1`` (same coincidental green as
+    the Voyage test above) AND that CHROMA_API_KEY appears in the output. The
+    second claim is now false by design: tests/test_doctor_cmd.py
+    ::test_doctor_missing_credentials_informational asserts the opposite —
+    ``"CHROMA_API_KEY" not in result.output  # row deleted at P4b`` — because
+    the CHROMA_* credential rows died with the migration machinery
+    (nexus-nmw3i / c7aj3, RDR-155 P4b).
+
+    The old form survived only because of its ``or "chroma" in output.lower()``
+    escape hatch, which any unrelated mention of chroma satisfies. Re-pointed
+    at the surviving invariant so this file agrees with test_doctor_cmd instead
+    of contradicting it.
+    """
     monkeypatch.setenv("NX_LOCAL", "0")  # force cloud mode
     monkeypatch.delenv("CHROMA_API_KEY", raising=False)
     result = runner.invoke(main, ["doctor"])
-    assert result.exit_code == 1
-    assert "CHROMA_API_KEY" in result.output or "chroma" in result.output.lower()
+    assert "CHROMA_API_KEY" not in result.output, (
+        "the CHROMA_API_KEY credential row was retired at RDR-155 P4b; its "
+        "reappearance means the migration machinery is back"
+    )
 
 
 def test_doctor_ripgrep_present(runner: CliRunner, fake_home: Path) -> None:
