@@ -8,6 +8,7 @@ from click.testing import CliRunner
 
 from nexus.cli import main
 from nexus.db.t2 import T2Database
+from tests._t2_fixture_ops import backdate_memory, memory_row
 
 
 # ── T2 database layer ───────────────────────────────────────────────────────
@@ -16,10 +17,11 @@ from nexus.db.t2 import T2Database
 def test_memory_put_upsert(db: T2Database) -> None:
     db.put(project="proj", title="file.md", content="first")
     db.put(project="proj", title="file.md", content="updated")
-    row = db.memory.conn.execute(
-        "SELECT COUNT(*), MAX(content) FROM memory WHERE project='proj' AND title='file.md'"
-    ).fetchone()
-    assert row == (1, "updated")
+    rows = [r for r in db.memory.get_all("proj") if r["title"] == "file.md"]
+    assert len(rows) == 1, (
+        f"put must UPSERT on (project, title), not append; got {len(rows)} rows"
+    )
+    assert rows[0]["content"] == "updated"
 
 
 def test_memory_get_by_project_title(db: T2Database) -> None:
@@ -120,20 +122,18 @@ def test_memory_search_scoped_to_project(db: T2Database) -> None:
 
 def test_memory_expire_ttl(db: T2Database) -> None:
     db.put(project="proj", title="old.md", content="stale", ttl=1)
-    past = (datetime.now(UTC) - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    db.memory.conn.execute("UPDATE memory SET timestamp=? WHERE title='old.md'", (past,))
-    db.memory.conn.commit()
+    backdate_memory(db, "proj", "old.md", days=2)
     assert db.expire() == 1
-    assert db.memory.conn.execute("SELECT COUNT(*) FROM memory WHERE title='old.md'").fetchone()[0] == 0
+    assert memory_row(db, "proj", "old.md") is None
 
 
 def test_memory_expire_permanent_not_deleted(db: T2Database) -> None:
     db.put(project="proj", title="perm.md", content="keep forever", ttl=None)
-    past = (datetime.now(UTC) - timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    db.memory.conn.execute("UPDATE memory SET timestamp=? WHERE title='perm.md'", (past,))
-    db.memory.conn.commit()
+    backdate_memory(db, "proj", "perm.md", days=365)
     db.expire()
-    assert db.memory.conn.execute("SELECT COUNT(*) FROM memory WHERE title='perm.md'").fetchone()[0] == 1
+    assert memory_row(db, "proj", "perm.md") is not None, (
+        "ttl=None means permanent; expire() must not delete it at any age"
+    )
 
 
 def test_memory_list_by_project(db: T2Database) -> None:
@@ -146,14 +146,53 @@ def test_memory_list_by_project(db: T2Database) -> None:
 # ── FTS5 safety ──────────────────────────────────────────────────────────────
 
 
+def _assert_malformed_query_rejected(
+    db: T2Database, method: str, args: tuple,
+) -> None:
+    """Assert the substrate's CURRENT handling of a malformed FTS5 query.
+
+    SQLite rejects it loudly (``ValueError: Invalid search query 'AND':
+    fts5: syntax error near "AND"``, raised by ``_sanitize_fts5``). The
+    service silently returns zero rows — nexus-senub. Both are pinned so
+    neither can drift unnoticed, and so the service arm's assertion FAILS
+    the moment nexus-senub is fixed.
+    """
+    from nexus.db.storage_mode import has_raw_access
+
+    call = getattr(db, method)
+
+    if has_raw_access(db.memory):
+        with pytest.raises(ValueError, match="Invalid search query"):
+            call(*args)
+        return
+
+    result = call(*args)
+    assert result == [], (
+        f"{method}{args!r} returned {len(result)} rows on the service arm. "
+        f"If nexus-senub is FIXED, this assertion is now wrong: delete this "
+        f"branch and restore the unconditional pytest.raises(ValueError, "
+        f"match='Invalid search query') above. If it returned MATCHES, that "
+        f"is a third behaviour and neither the SQLite contract nor the "
+        f"recorded gap — investigate before touching this test."
+    )
+
+
 @pytest.mark.parametrize("method,args", [
     ("search", ("AND",)),
     ("search_glob", ("NOT", "*_rdr")),
 ])
 def test_malformed_fts5_query_raises_valueerror(db: T2Database, method: str, args: tuple) -> None:
+    """A malformed FTS5 query must be REPORTED, not answered with silence.
+
+    nexus-senub (P1, open): the service arm does not validate the query and
+    returns an empty result set instead — a false 'no matches' for a syntax
+    error, indistinguishable by the caller from a genuinely empty store. The
+    gap is asserted AT ITS BROKEN VALUE rather than xfailed, so fixing
+    nexus-senub fails this test loudly and points at the strict assertion to
+    restore.
+    """
     db.put(project="proj_rdr", title="doc.md", content="some content")
-    with pytest.raises(ValueError, match="Invalid search query"):
-        getattr(db, method)(*args)
+    _assert_malformed_query_rejected(db, method, args)
 
 
 # ── T2 session delegation ───────────────────────────────────────────────────
