@@ -671,6 +671,31 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         result = self._get("/docs/orphaned")
         return result.get("documents", []) if result else []
 
+    def orphaned_links(self) -> list[dict]:
+        """Return catalog_links rows whose from_tumbler or to_tumbler
+        resolves to no document (nexus-ysrwi, GH #1419 issue 7).
+
+        ``catalog_links`` carries a PK and a UNIQUE constraint but NO
+        foreign key to ``catalog_documents`` (catalog-001-baseline.xml), so
+        a link survives when its referenced document is hard-deleted. The
+        only production hard-delete of document rows is
+        ``CatalogRepository.deleteCollectionTxn``'s per-collection
+        ``catalog_documents`` delete (called from :meth:`delete_collection`)
+        — it has no corresponding ``catalog_links`` cleanup step, so a
+        cross-collection link whose endpoint's collection gets deleted
+        dangles forever. Closing that write-time gap needs an engine change
+        (a new step in that transaction) — this method is the DETECTION
+        half only.
+
+        Uses GET /v1/catalog/links/orphaned (v0.1.55,
+        ``CatalogRepository.orphanedLinks`` / ``CatalogHandler
+        .handleLinksOrphaned``). Each dict carries ``id``, ``from_tumbler``,
+        ``to_tumbler``, ``link_type``, ``created_by``, and ``side``
+        (``"from"``/``"to"``/``"both"``) naming which endpoint is missing.
+        """
+        result = self._get("/links/orphaned")
+        return (result or {}).get("links", [])
+
     def docs_with_absolute_paths(self) -> list[dict]:
         """Return documents whose file_path begins with '/'.
 
