@@ -138,6 +138,14 @@ class PlanCacheRegistry:
         every :data:`_HTTP_PLAN_LIBRARY_STALENESS_SECONDS` seconds
         (nexus-ie7o8 bounded-staleness fallback — NOT change detection;
         see that constant's docstring for why no cheaper signal exists).
+    - The actual repopulate is single-flight and runs UNLOCKED (review
+      finding on f3b02373): only one thread ever executes
+      ``PlanSessionCache.populate()`` (one HTTP round-trip plus one ONNX
+      embed per active plan) at a time; concurrent callers arriving
+      mid-populate get the current, stale-but-usable cache immediately
+      rather than blocking or each launching their own populate. See
+      :meth:`get` for the full single-flight / failure-path / clear()
+      coherence contract.
 
     Test isolation: :func:`reset_plan_cache_registry_for_tests` drops
     the module-level singleton so the next ``get_plan_cache_registry()``
@@ -154,6 +162,16 @@ class PlanCacheRegistry:
         # fallback for libraries with no ``.path`` (HttpPlanLibrary).
         # time.monotonic(), not time.time() — immune to wall-clock jumps.
         self._last_populate_monotonic: float = 0.0
+        # Single-flight guard (review finding on f3b02373): True while some
+        # thread is inside the unlocked ``populate()`` call below. Only
+        # ``_lock``-holding sections may read/write this.
+        self._populating: bool = False
+        # Bumped by clear(). A populate that started before a clear() must
+        # not stamp its (now-stale) success/failure bookkeeping onto the
+        # post-clear state, and must not clobber a *different* populate's
+        # ``_populating=True`` that the post-clear epoch may have already
+        # set. See :meth:`get` and :meth:`clear`.
+        self._epoch: int = 0
 
     def get(self, *, populate_from: Any = None) -> Any:
         """Return the T1 ``plans__session`` cache, lazy-populated on first call.
@@ -180,6 +198,44 @@ class PlanCacheRegistry:
         re-embedding. The expensive part (one HTTP list call plus one
         ONNX embed per active plan, see ``PlanSessionCache.populate``)
         only runs when actually stale.
+
+        **Lock granularity (review finding on f3b02373).** Before this
+        method's staleness check and the actual repopulate shared one
+        ``with self._lock`` block. That was harmless when populate ran
+        once per process; once nexus-ie7o8 made it recurring (every
+        :data:`_HTTP_PLAN_LIBRARY_STALENESS_SECONDS`, 90s, for the
+        service-mode production default), every concurrent MCP tool
+        call touching plan matching would queue up behind whichever
+        thread happened to be repopulating, for the full duration of
+        one HTTP round-trip plus N ONNX embeds. The staleness decision
+        now takes the lock only briefly; the expensive ``populate()``
+        call runs UNLOCKED, guarded instead by a ``_populating``
+        single-flight flag:
+
+        - The thread that finds the cache stale AND ``_populating`` is
+          False wins the single-flight slot (sets ``_populating = True``
+          under the lock) and calls ``populate()`` unlocked.
+        - Any other thread arriving while ``_populating`` is True does
+          NOT block and does NOT launch its own populate — it falls
+          straight through to ``return self._cache`` and gets the
+          stale-but-usable cache immediately. This is the deliberate
+          choice: this is a CACHE under a bounded-staleness contract by
+          design (nexus-ie7o8); a concurrent caller blocking on, or
+          duplicating, an in-flight repopulate would either add tail
+          latency this fix exists to remove, or turn one recurring
+          populate into a thundering herd of N (one per waiter) — both
+          strictly worse than serving the cache that is, at most, one
+          TTL window old.
+        - On both success and failure the populating thread reacquires
+          the lock briefly to clear ``_populating`` — unconditionally,
+          in a ``finally``, so a populate that raises can never
+          deadlock the single-flight slot for the rest of the process.
+          Bookkeeping (``_populated`` / ``_mtime`` /
+          ``_last_populate_monotonic``) is only stamped on success, and
+          only if :meth:`clear` has not run since this populate started
+          (see the ``_epoch`` check) — a failure (or a stale populate
+          whose epoch was clear()'d away) must not silence the next
+          call's retry.
 
         Returns ``None`` when no T1 client is reachable; the matcher
         falls back to FTS5 in that case. Subsequent calls after an
@@ -240,55 +296,118 @@ class PlanCacheRegistry:
             has_mtime_signal = getattr(populate_from, "path", None) is not None
             current_mtime = _plan_library_mtime(populate_from)
             now_monotonic = time.monotonic()
+            should_populate = False
+            cache_obj: Any = None
+            epoch_at_start = 0
             with self._lock:
-                if has_mtime_signal:
-                    stale = (
-                        not self._populated
-                        or (current_mtime > 0.0 and current_mtime > self._mtime)
-                    )
-                else:
-                    # Bounded-staleness fallback: no file mtime to compare
-                    # (HttpPlanLibrary / service-mode production default),
-                    # so repopulate at least once per
-                    # _HTTP_PLAN_LIBRARY_STALENESS_SECONDS instead of
-                    # never again after the first populate.
-                    stale = (
-                        not self._populated
-                        or (now_monotonic - self._last_populate_monotonic)
-                        >= _HTTP_PLAN_LIBRARY_STALENESS_SECONDS
-                    )
-                if stale:
-                    # Only mark populated/mtime/monotonic-clock on success.
-                    # Pre-refactor code used `try/finally` which permanently
-                    # suppressed populate failures (a transient network blip
-                    # during plan-embedding would set `_populated = True`
-                    # and `_mtime = current_mtime`, so the next call saw
-                    # stale=False and never retried). The fix keeps the
-                    # cache instance available (we don't reset
-                    # `self._cache`) but leaves `_populated` / `_mtime` /
-                    # `_last_populate_monotonic` unchanged so the next call
-                    # retries the populate.
-                    try:
-                        self._cache.populate(populate_from)
-                    except Exception:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
-                        _log.warning(
-                            "plan_cache_populate_failed",
-                            library=str(populate_from),
-                            exc_info=True,
+                # Single-flight: someone else is already inside the
+                # unlocked populate() call below. Don't queue up behind
+                # it and don't launch a duplicate — fall through to
+                # `return self._cache` and hand back the stale-but-
+                # usable cache. See the class/method docstrings for why
+                # this (not blocking, not a per-waiter populate) is the
+                # right shape for a bounded-staleness cache.
+                if not self._populating:
+                    if has_mtime_signal:
+                        stale = (
+                            not self._populated
+                            or (current_mtime > 0.0 and current_mtime > self._mtime)
                         )
                     else:
-                        self._populated = True
-                        self._mtime = current_mtime
-                        self._last_populate_monotonic = now_monotonic
+                        # Bounded-staleness fallback: no file mtime to
+                        # compare (HttpPlanLibrary / service-mode
+                        # production default), so repopulate at least
+                        # once per _HTTP_PLAN_LIBRARY_STALENESS_SECONDS
+                        # instead of never again after the first populate.
+                        stale = (
+                            not self._populated
+                            or (now_monotonic - self._last_populate_monotonic)
+                            >= _HTTP_PLAN_LIBRARY_STALENESS_SECONDS
+                        )
+                    if stale:
+                        self._populating = True
+                        should_populate = True
+                        # Snapshot the cache object and epoch under the
+                        # lock: if clear() runs while we're populating
+                        # unlocked, we still finish populating THIS
+                        # object (harmless — nothing references it once
+                        # clear() has moved self._cache on) without
+                        # mistaking a later epoch's state for our own.
+                        cache_obj = self._cache
+                        epoch_at_start = self._epoch
+            if should_populate:
+                # Only mark populated/mtime/monotonic-clock on success.
+                # Pre-refactor code used `try/finally` which permanently
+                # suppressed populate failures (a transient network blip
+                # during plan-embedding would set `_populated = True`
+                # and `_mtime = current_mtime`, so the next call saw
+                # stale=False and never retried). The fix keeps the
+                # cache instance available (we don't reset
+                # `self._cache`) but leaves `_populated` / `_mtime` /
+                # `_last_populate_monotonic` unchanged on failure so the
+                # next call retries the populate.
+                #
+                # `_populating` is cleared in `finally` — unconditionally,
+                # on success AND failure — so a populate that raises can
+                # never leave the single-flight slot stuck forever (the
+                # cache would otherwise deadlock: every future caller
+                # would see `_populating=True` and never repopulate again).
+                populate_ok = False
+                try:
+                    cache_obj.populate(populate_from)
+                    populate_ok = True
+                except Exception:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
+                    _log.warning(
+                        "plan_cache_populate_failed",
+                        library=str(populate_from),
+                        exc_info=True,
+                    )
+                finally:
+                    with self._lock:
+                        if self._epoch == epoch_at_start:
+                            # UNCONDITIONAL, on success AND failure. A populate
+                            # that raises must still free the single-flight
+                            # slot, or every future caller sees
+                            # `_populating=True`, believes a populate is in
+                            # flight, and the cache never repopulates again --
+                            # a permanent self-deadlock that no retry can clear.
+                            self._populating = False
+                            if populate_ok:
+                                self._populated = True
+                                self._mtime = current_mtime
+                                self._last_populate_monotonic = now_monotonic
+                        # else: clear() ran while we were populating
+                        # unlocked. Our epoch's bookkeeping (and our
+                        # `_populating` slot) are both moot — the post-
+                        # clear epoch already reset `_populating` to
+                        # False itself and may since have started its
+                        # own populate; touching either field here
+                        # would either resurrect stale success/failure
+                        # state or clobber that newer populate's flag.
         return self._cache
 
     def clear(self) -> None:
-        """Drop the cache state. Used by ``reset_plan_cache_registry_for_tests``."""
+        """Drop the cache state. Used by ``reset_plan_cache_registry_for_tests``.
+
+        Coherent with an in-flight populate: bumping ``_epoch`` means a
+        populate that started before this call (running unlocked, see
+        :meth:`get`) will recognise on completion that its epoch is
+        stale and skip touching ``_populating`` / ``_populated`` /
+        ``_mtime`` — it neither resurrects the state this call just
+        cleared nor clobbers a fresh populate the new epoch may have
+        already started. Resetting ``_populating`` here (rather than
+        leaving it for the stale populate to clear) means a caller
+        arriving right after ``clear()`` never gets wrongly told "a
+        populate is already in flight" by a populate that, from this
+        epoch's perspective, no longer exists.
+        """
         with self._lock:
             self._cache = None
             self._populated = False
             self._mtime = 0.0
             self._last_populate_monotonic = 0.0
+            self._populating = False
+            self._epoch += 1
 
 
 # Module-level singleton. The cache MUST be process-scoped (the whole
