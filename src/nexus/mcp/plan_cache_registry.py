@@ -38,6 +38,7 @@ for the approved design and the honest scoping note.
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any
 
 import structlog
@@ -51,36 +52,62 @@ _log = structlog.get_logger(__name__)
 _UNAVAILABLE = object()
 
 
+# nexus-ie7o8: bounded-staleness refresh interval for PlanLibrary backends
+# that expose no file mtime (HttpPlanLibrary — the SERVICE-mode PRODUCTION
+# DEFAULT; see the module-level docstring on ``_plan_library_mtime``).
+#
+# This is NOT change detection. It is the honest fallback the bead calls
+# for: the Java plans service (``service/.../http/PlanHandler.java`` —
+# save/get/delete/disable/enable/list_active/search/list/exists/metrics/
+# import) exposes no ETag, Last-Modified header, or cheap version/counter
+# on any plan-listing route, so there is nothing free to poll. Instead,
+# the cache is guaranteed to repopulate no less often than once per this
+# many seconds, converting UNBOUNDED staleness (populate-once-per-process,
+# forever) into a BOUNDED window. A plan added or edited elsewhere is
+# invisible for at most this long, not for the life of the MCP process.
+#
+# 90s: short enough that a plan edited mid-session becomes visible within
+# a couple of tool calls in a typical interactive session, long enough
+# that back-to-back MCP tool calls (the common case — many calls per
+# minute) don't pay the populate cost (one ONNX embed per active plan,
+# see PlanSessionCache.populate) on every single call. Tracked via
+# time.monotonic() specifically (not wall-clock time.time()) so the
+# window can't be perturbed by NTP adjustments or DST changes.
+_HTTP_PLAN_LIBRARY_STALENESS_SECONDS: float = 90.0
+
+
 def _plan_library_mtime(library: Any) -> float:
     """Return the SQLite file mtime for *library*, or 0.0 when unknown.
 
-    Falls back to 0.0 when the library does not expose a ``path`` attribute or
-    when the file is missing; both produce a stable repopulate-never-runs
-    fallback matching the legacy single-populate contract.
+    Falls back to 0.0 when the library does not expose a ``path`` attribute
+    (the ``HttpPlanLibrary`` / service-mode production-default shape — see
+    below) or when the file is missing.
 
-    nexus-at2ff sweep (2026-07-25) — READ THIS BEFORE TRUSTING THE STALENESS
-    TIER. The docstring used to describe the no-``path`` case as covering
-    "in-memory or test-stub libraries", i.e. an abstract edge case. It is in
-    fact the ONLY production case: ``populate_from`` is called with
-    ``db.plans`` (mcp/core.py), which is ``HttpPlanLibrary`` in service mode,
-    and only the SQLite ``PlanLibrary`` has ``path``. So this returns 0.0
-    always, the staleness comparison can never fire, and nexus-qgjr's
-    repopulate-on-change tier is DEAD in production — the T1 plan-session cache
-    is populated once per MCP process and never refreshed.
+    nexus-at2ff sweep (2026-07-25) / nexus-ie7o8 fix — READ THIS BEFORE
+    TRUSTING THE STALENESS TIER. ``populate_from`` is called with
+    ``db.plans`` (mcp/core.py), which is ``HttpPlanLibrary`` in service
+    mode (the PRODUCTION DEFAULT), and only the SQLite ``PlanLibrary`` has
+    ``.path``. So THIS FUNCTION always returns 0.0 for the production
+    case — there is no file mtime to read here, full stop, and inventing
+    one would be worse than being honest about it.
 
-    This is left as a 0.0 fallback rather than silently "fixed", because the
-    service backend has no file mtime to read and inventing one would be worse.
-    Making the staleness tier actually work on the service backend needs a
-    server-side change (an ETag / last-modified on the plan-list endpoint) and
-    is tracked separately — but the behaviour is now DECLARED here instead of
-    being misdescribed as an edge case.
+    That no longer means the staleness tier is dead, though: callers (see
+    :meth:`PlanCacheRegistry.get`) treat "no ``.path``" as a distinct
+    signal from "``.path`` exists but mtime is 0.0" and fall back to the
+    bounded-staleness TTL (:data:`_HTTP_PLAN_LIBRARY_STALENESS_SECONDS`)
+    instead of this mtime comparison. This function's 0.0 return value is
+    consumed only on the mtime-signal branch; it is not itself the
+    staleness decision for a path-less library.
     """
     path = getattr(library, "path", None)
     if path is None:
         _log.debug(
             "plan_cache_staleness_unavailable",
             library=type(library).__name__,
-            reason="no file mtime on this backend; staleness tier inert",
+            reason=(
+                "no file mtime on this backend; falling back to bounded-"
+                "staleness TTL, not change detection"
+            ),
         )
         return 0.0
     try:
@@ -101,9 +128,16 @@ class PlanCacheRegistry:
     - On init failure, the registry's ``cache`` slot is set to the
       ``_UNAVAILABLE`` sentinel; subsequent :meth:`get` calls
       short-circuit and return None without re-entering the lock.
-    - When ``populate_from`` is supplied, the cache is repopulated
-      whenever the underlying PlanLibrary SQLite file mtime advances
-      (nexus-qgjr mtime-guarded refresh).
+    - When ``populate_from`` is supplied, the cache is repopulated using
+      one of two signals depending on what the library exposes:
+      * SQLite ``PlanLibrary`` (has ``.path``): repopulated whenever the
+        underlying file's mtime advances (nexus-qgjr exact change
+        detection).
+      * ``HttpPlanLibrary`` / any library without ``.path`` (the
+        SERVICE-mode PRODUCTION DEFAULT): repopulated no less often than
+        every :data:`_HTTP_PLAN_LIBRARY_STALENESS_SECONDS` seconds
+        (nexus-ie7o8 bounded-staleness fallback — NOT change detection;
+        see that constant's docstring for why no cheaper signal exists).
 
     Test isolation: :func:`reset_plan_cache_registry_for_tests` drops
     the module-level singleton so the next ``get_plan_cache_registry()``
@@ -115,19 +149,37 @@ class PlanCacheRegistry:
         self._lock = threading.Lock()
         self._populated: bool = False
         self._mtime: float = 0.0  # SQLite file mtime captured at most recent populate
+        # nexus-ie7o8: monotonic-clock timestamp of the most recent
+        # successful populate, used ONLY by the bounded-staleness TTL
+        # fallback for libraries with no ``.path`` (HttpPlanLibrary).
+        # time.monotonic(), not time.time() — immune to wall-clock jumps.
+        self._last_populate_monotonic: float = 0.0
 
     def get(self, *, populate_from: Any = None) -> Any:
         """Return the T1 ``plans__session`` cache, lazy-populated on first call.
 
         When *populate_from* (a PlanLibrary) is supplied, the cache is
-        populated from its rows on first call and repopulated whenever
-        the underlying SQLite file mtime advances (nexus-qgjr). The
-        mtime check mirrors the catalog's ``_last_consistency_mtime``
-        pattern at ``catalog.py:405``: cheap when nothing changed,
-        rebuilds when a write moves the file's stat-time.
+        populated from its rows on first call and repopulated using
+        whichever staleness signal the library supports:
 
-        Libraries without a ``path`` attribute fall back to populate-
-        once semantics; the mtime tier costs them nothing.
+        - Has ``.path`` (SQLite ``PlanLibrary``): repopulated whenever
+          the underlying file mtime advances (nexus-qgjr). Mirrors the
+          catalog's ``_last_consistency_mtime`` pattern at
+          ``catalog.py:405``: cheap when nothing changed (one ``stat()``
+          call), rebuilds when a write moves the file's stat-time.
+        - No ``.path`` (``HttpPlanLibrary`` — the SERVICE-mode
+          PRODUCTION DEFAULT): repopulated no less often than every
+          :data:`_HTTP_PLAN_LIBRARY_STALENESS_SECONDS` seconds
+          (nexus-ie7o8). Bounded staleness, not change detection — see
+          that constant's docstring for why no cheaper server-side
+          signal exists today.
+
+        Per-call cost when NOT stale: one ``getattr`` (attribute lookup)
+        plus either a ``stat()`` syscall (mtime path) or a
+        ``time.monotonic()`` call (TTL path) — no network round-trip, no
+        re-embedding. The expensive part (one HTTP list call plus one
+        ONNX embed per active plan, see ``PlanSessionCache.populate``)
+        only runs when actually stale.
 
         Returns ``None`` when no T1 client is reachable; the matcher
         falls back to FTS5 in that case. Subsequent calls after an
@@ -179,22 +231,43 @@ class PlanCacheRegistry:
         if self._cache is _UNAVAILABLE:
             return None
         if populate_from is not None:
+            # nexus-ie7o8: which staleness signal applies depends on
+            # whether *populate_from* exposes a file mtime at all — NOT
+            # on whether that mtime happens to be 0.0 (an OSError'd stat
+            # on a SQLite library legitimately returns 0.0 too, and that
+            # case should still use the mtime branch, not silently fall
+            # back to the TTL).
+            has_mtime_signal = getattr(populate_from, "path", None) is not None
             current_mtime = _plan_library_mtime(populate_from)
+            now_monotonic = time.monotonic()
             with self._lock:
-                stale = (
-                    not self._populated
-                    or (current_mtime > 0.0 and current_mtime > self._mtime)
-                )
+                if has_mtime_signal:
+                    stale = (
+                        not self._populated
+                        or (current_mtime > 0.0 and current_mtime > self._mtime)
+                    )
+                else:
+                    # Bounded-staleness fallback: no file mtime to compare
+                    # (HttpPlanLibrary / service-mode production default),
+                    # so repopulate at least once per
+                    # _HTTP_PLAN_LIBRARY_STALENESS_SECONDS instead of
+                    # never again after the first populate.
+                    stale = (
+                        not self._populated
+                        or (now_monotonic - self._last_populate_monotonic)
+                        >= _HTTP_PLAN_LIBRARY_STALENESS_SECONDS
+                    )
                 if stale:
-                    # Only mark populated/mtime on success. Pre-refactor
-                    # code used `try/finally` which permanently suppressed
-                    # populate failures (a transient network blip during
-                    # plan-embedding would set `_populated = True` and
-                    # `_mtime = current_mtime`, so the next call saw
+                    # Only mark populated/mtime/monotonic-clock on success.
+                    # Pre-refactor code used `try/finally` which permanently
+                    # suppressed populate failures (a transient network blip
+                    # during plan-embedding would set `_populated = True`
+                    # and `_mtime = current_mtime`, so the next call saw
                     # stale=False and never retried). The fix keeps the
                     # cache instance available (we don't reset
-                    # `self._cache`) but leaves `_populated` / `_mtime`
-                    # unchanged so the next call retries the populate.
+                    # `self._cache`) but leaves `_populated` / `_mtime` /
+                    # `_last_populate_monotonic` unchanged so the next call
+                    # retries the populate.
                     try:
                         self._cache.populate(populate_from)
                     except Exception:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
@@ -206,6 +279,7 @@ class PlanCacheRegistry:
                     else:
                         self._populated = True
                         self._mtime = current_mtime
+                        self._last_populate_monotonic = now_monotonic
         return self._cache
 
     def clear(self) -> None:
@@ -214,6 +288,7 @@ class PlanCacheRegistry:
             self._cache = None
             self._populated = False
             self._mtime = 0.0
+            self._last_populate_monotonic = 0.0
 
 
 # Module-level singleton. The cache MUST be process-scoped (the whole
