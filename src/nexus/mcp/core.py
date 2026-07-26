@@ -5022,17 +5022,53 @@ _EMPTY_ANSWER_TEXTS: frozenset[str] = frozenset({
 
 
 #: Plan bindings whose domain is enumerated or numeric rather than free
-#: text — catalog metadata filters and retrieval knobs. Filling one of
-#: these with the question string does not widen a retrieval, it narrows
-#: it to nothing: ``content_type`` accepts ``code`` / ``paper`` / ``rdr``
-#: / ``knowledge``, so a 90-character question matches no document at all
-#: (observed 2026-07-25 on builtin plan 14, which returned zero results
-#: while the identical query with no ``content_type`` returned the
-#: correct paper as its top hit).
+#: text — catalog metadata filters and retrieval knobs. There is no
+#: defensible way to derive one of these from a question string:
+#: ``content_type`` accepts ``code`` / ``paper`` / ``rdr`` / ``knowledge``,
+#: so a 90-character sentence matches no document at all (observed
+#: 2026-07-25 on builtin plan 14, which returned zero results while the
+#: identical query with no ``content_type`` returned the correct paper as
+#: its top hit).
 _TYPED_FILTER_BINDINGS: frozenset[str] = frozenset({
     "content_type", "author", "subtree", "year",
     "corpus", "collection", "follow_links", "depth", "limit",
 })
+
+#: Legal values for the typed bindings that have a small closed domain,
+#: surfaced in the error so a caller knows what a satisfying value is.
+_TYPED_BINDING_DOMAINS: dict[str, str] = {
+    "content_type": "code / paper / rdr / knowledge",
+    "year": "a four-digit year",
+    "depth": "a positive integer",
+    "limit": "a positive integer",
+}
+
+
+class PlanBindingUnsatisfiableError(ValueError):
+    """A matched plan requires a typed binding nothing can supply.
+
+    Raised instead of guessing. The alternative — binding ``""`` so the
+    filter coerces to no-filter — restores results but lets a plan that
+    MEANT to be type-scoped silently widen to the whole corpus, which is
+    a data-correctness fallback of exactly the kind the project forbids.
+    """
+
+    def __init__(self, *, binding: str, plan_id: int, plan_name: str) -> None:
+        self.binding = binding
+        self.plan_id = plan_id
+        self.plan_name = plan_name
+        domain = _TYPED_BINDING_DOMAINS.get(binding)
+        hint = f" Its domain is {domain}." if domain else ""
+        super().__init__(
+            f"plan {plan_id} ({plan_name}) requires the binding "
+            f"'{binding}', which has an enumerated or numeric domain and "
+            f"was not supplied by the caller or by a plan default.{hint} "
+            f"nx_answer will not infer it from the question text — doing "
+            f"so filters the retrieval to nothing. Either call plan_run "
+            f"directly with an explicit '{binding}', or treat this as a "
+            f"mis-match: a plan requiring '{binding}' should not have been "
+            f"selected for a question that does not specify one."
+        )
 
 
 def _autoalias_bindings(
@@ -5041,29 +5077,36 @@ def _autoalias_bindings(
     run_bindings: dict[str, Any],
     defaults: dict[str, Any],
     question: str,
+    plan_id: int,
+    plan_name: str,
 ) -> dict[str, Any]:
-    """Fill unsupplied required bindings, free-text ones from *question*.
+    """Fill unsupplied required bindings from *question*; refuse typed ones.
 
     The alias exists because library plans declaring
     ``required_bindings: [concept]`` (or ``area``, ``topic``, ...) failed
     at dispatch with ``missing required bindings`` even though ``$intent``
     already carried the equivalent value. It mirrors the inline-planner
     fallback, whose constructed plans get every binding filled from the
-    question text.
+    question text. That remains correct for free text.
 
-    Bindings in :data:`_TYPED_FILTER_BINDINGS` are filled with ``""``
-    instead. That satisfies ``plan_run``'s presence-only gate (it tests
-    ``name not in bindings``, not truthiness) while the retrieval tools
-    coerce the empty value away (``content_type or None``), so the step
-    runs unfiltered rather than filtered-to-nothing.
+    A binding in :data:`_TYPED_FILTER_BINDINGS` cannot be derived from a
+    question, so an unsatisfied one raises
+    :class:`PlanBindingUnsatisfiableError` rather than being guessed. The
+    raise happens before any binding is handed to the runner, so a plan
+    never executes half-bound.
 
-    Caller-supplied values and plan defaults are never overwritten.
+    Caller-supplied values and plan defaults are never overwritten, and
+    either one satisfies a typed binding.
     """
     out = dict(run_bindings)
     for req in required:
         if req in out or req in defaults:
             continue
-        out[req] = "" if req in _TYPED_FILTER_BINDINGS else question
+        if req in _TYPED_FILTER_BINDINGS:
+            raise PlanBindingUnsatisfiableError(
+                binding=req, plan_id=plan_id, plan_name=plan_name,
+            )
+        out[req] = question
     return out
 
 
@@ -5724,13 +5767,44 @@ async def nx_answer(
     # equivalent value. Skills that pre-extract entities (e.g.,
     # find-by-author with ``$author``) bypass this path by calling
     # ``plan_run`` directly with explicit bindings.
+    #
+    # A TYPED binding (content_type, author, ...) is refused rather than
+    # guessed — see _autoalias_bindings. That is a loud failure by
+    # design: the honest signal is "this plan should not have been
+    # selected for this question", and inventing a value to keep the run
+    # alive is what produced a zero-result answer that still recorded as
+    # a success (nexus-0yrjr, nexus-yg49g).
     defaults = best.default_bindings or {}
-    run_bindings = _autoalias_bindings(
-        required=best.required_bindings,
-        run_bindings=run_bindings,
-        defaults=defaults,
-        question=question,
-    )
+    try:
+        run_bindings = _autoalias_bindings(
+            required=best.required_bindings,
+            run_bindings=run_bindings,
+            defaults=defaults,
+            question=question,
+            plan_id=best.plan_id,
+            plan_name=best.name or "",
+        )
+    except PlanBindingUnsatisfiableError as exc:
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        _log.warning(
+            "nx_answer_plan_binding_unsatisfiable",
+            plan_id=best.plan_id, plan_name=best.name,
+            binding=exc.binding, confidence=best.confidence,
+        )
+        try:
+            with _t2_ctx() as db:
+                _nx_answer_record_run(
+                    db.telemetry, question=question, plan_id=best.plan_id,
+                    matched_confidence=best.confidence, step_count=0,
+                    final_text=f"Error: {exc}", cost_usd=0.0,
+                    duration_ms=elapsed_ms, trace=trace,
+                )
+        except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
+            pass
+        # Counts as a failure so a chronically mis-matched plan accrues a
+        # real failure rate and stops clearing promote.py's threshold.
+        _nx_answer_record_outcome(best.plan_id, success=False)
+        return _result(str(exc), plan_id=best.plan_id, step_count=0)
 
     try:
         result = await _plan_run(best, run_bindings)

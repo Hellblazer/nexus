@@ -1,39 +1,43 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""nx_answer must not stuff free text into typed catalog-filter bindings.
+"""nx_answer must refuse to guess a typed catalog-filter binding.
 
 Regression for the defect observed live on 2026-07-25/26: a research
 question routed through ``nx_answer`` matched builtin plan 14
 (``type-scoped-search``), which declares
 ``required_bindings: ["question", "content_type"]``. The caller supplied
 no ``content_type``, so the auto-alias filled it with the entire question
-string. Step 1 then ran
+string. The retrieval then filtered on a 90-character sentence against a
+domain of ``code`` / ``paper`` / ``rdr`` / ``knowledge`` and matched zero
+documents, while the identical query with no ``content_type`` returned
+the correct paper as its top hit.
 
-    query(question=$question, content_type=$content_type, corpus="all")
+The plan is not at fault — its own description says it is "useful when the
+caller knows the artefact kind", so requiring ``content_type`` is correct.
+The fault was upstream: a type-scoped plan was selected for a
+type-agnostic question, and the alias concealed the mismatch by inventing
+a value.
 
-with ``content_type="Which indexed papers discuss intermediate
-representations for compiling natural-language queries?"`` — a catalog
-metadata filter whose real domain is ``code`` / ``paper`` / ``rdr`` /
-``knowledge``. It matched zero documents and the run reported "the plan's
-retrieval steps returned zero results", while the identical query with no
-``content_type`` returned the correct paper as the top hit.
+Two remedies were considered. Binding ``""`` (no filter) restores results
+but lets a plan that MEANT to be type-scoped silently widen. The chosen
+behaviour is to fail loudly: nx_answer will not guess a value whose domain
+is enumerated or numeric. The run is recorded as a failure so a
+chronically mis-matched plan accrues a real failure rate and stops being
+promoted (``plans/promote.py`` gates on success/(success+failure)).
 
-The auto-alias itself is correct and load-bearing for free-text bindings
-(``concept``, ``area``, ``topic``); without it library plans failed at
-dispatch with ``missing required bindings``. The defect is that it did not
-distinguish free-text bindings from typed ones.
-
-Binding ``""`` (rather than omitting) is deliberate and depends on two
-verified properties:
-
-* ``plan_run``'s gate is presence-only — ``name not in bindings``
-  (``runner.py:668-672``) — so ``""`` satisfies a required binding.
-* the retrieval tools coerce empty filters away — ``content_type or None``
-  (``core.py:1730-1731``) — so ``""`` means "no filter", not "match ''".
+The alias remains correct and load-bearing for FREE-TEXT bindings
+(``concept``, ``area``, ``topic``) — without it, library plans failed at
+dispatch with ``missing required bindings``.
 """
 
 from __future__ import annotations
 
-from nexus.mcp.core import _TYPED_FILTER_BINDINGS, _autoalias_bindings
+import pytest
+
+from nexus.mcp.core import (
+    _TYPED_FILTER_BINDINGS,
+    PlanBindingUnsatisfiableError,
+    _autoalias_bindings,
+)
 
 QUESTION = "Which indexed papers discuss intermediate representations?"
 
@@ -42,54 +46,65 @@ def test_free_text_binding_still_receives_the_question() -> None:
     """The behaviour the auto-alias was added for must survive."""
     out = _autoalias_bindings(
         required=["concept"], run_bindings={"intent": QUESTION},
-        defaults={}, question=QUESTION,
+        defaults={}, question=QUESTION, plan_id=1, plan_name="x",
     )
     assert out["concept"] == QUESTION
 
 
-def test_typed_filter_binding_is_emptied_not_stuffed() -> None:
-    """The defect: content_type must never receive the question text."""
-    out = _autoalias_bindings(
-        required=["question", "content_type"],
-        run_bindings={"intent": QUESTION}, defaults={}, question=QUESTION,
-    )
-    assert out["content_type"] == "", (
-        "content_type was filled with free text — this is the exact "
-        "condition that made plan 14 retrieve zero documents"
-    )
-    # presence is what plan_run's gate checks, so it must still be there
-    assert "content_type" in out
-    # and the free-text one alongside it is unaffected
-    assert out["question"] == QUESTION
+def test_unsatisfiable_typed_binding_raises() -> None:
+    """The defect: content_type must never be guessed from free text."""
+    with pytest.raises(PlanBindingUnsatisfiableError) as exc:
+        _autoalias_bindings(
+            required=["question", "content_type"],
+            run_bindings={"intent": QUESTION}, defaults={},
+            question=QUESTION, plan_id=14, plan_name="type-scoped-search",
+        )
+    assert exc.value.binding == "content_type"
+    assert exc.value.plan_id == 14
 
 
-def test_caller_supplied_values_are_never_overwritten() -> None:
-    """An explicit content_type must win over both the alias and the blank."""
+def test_the_error_is_actionable() -> None:
+    """A caller reading only the message must know what went wrong."""
+    with pytest.raises(PlanBindingUnsatisfiableError) as exc:
+        _autoalias_bindings(
+            required=["content_type"], run_bindings={}, defaults={},
+            question=QUESTION, plan_id=14, plan_name="type-scoped-search",
+        )
+    msg = str(exc.value)
+    assert "content_type" in msg
+    assert "type-scoped-search" in msg
+    assert "14" in msg
+    # names the domain so the caller knows what a legal value looks like
+    assert "paper" in msg
+
+
+def test_caller_supplied_typed_value_is_accepted() -> None:
+    """An explicit content_type is the satisfied path — no raise."""
     out = _autoalias_bindings(
-        required=["content_type"],
-        run_bindings={"content_type": "paper"}, defaults={},
-        question=QUESTION,
+        required=["content_type"], run_bindings={"content_type": "paper"},
+        defaults={}, question=QUESTION, plan_id=14, plan_name="t",
     )
     assert out["content_type"] == "paper"
 
 
-def test_plan_defaults_are_respected() -> None:
-    """A binding carrying a plan default is left for the runner to resolve."""
+def test_plan_default_satisfies_a_typed_binding() -> None:
+    """A plan default is a legitimate source — no raise, no injection."""
     out = _autoalias_bindings(
-        required=["content_type"], run_bindings={}, defaults={"content_type": "rdr"},
-        question=QUESTION,
+        required=["content_type"], run_bindings={},
+        defaults={"content_type": "rdr"}, question=QUESTION,
+        plan_id=14, plan_name="t",
     )
-    assert "content_type" not in out
+    assert "content_type" not in out  # runner resolves it from defaults
 
 
-def test_every_typed_filter_binding_is_covered() -> None:
-    """Each name in the typed set is blanked, not stuffed — no partial cover."""
-    out = _autoalias_bindings(
-        required=sorted(_TYPED_FILTER_BINDINGS), run_bindings={},
-        defaults={}, question=QUESTION,
-    )
-    for name in _TYPED_FILTER_BINDINGS:
-        assert out[name] == "", f"{name} received free text"
+def test_every_typed_filter_binding_refuses_the_question() -> None:
+    """No partial cover — each typed name raises rather than being stuffed."""
+    for name in sorted(_TYPED_FILTER_BINDINGS):
+        with pytest.raises(PlanBindingUnsatisfiableError):
+            _autoalias_bindings(
+                required=[name], run_bindings={}, defaults={},
+                question=QUESTION, plan_id=1, plan_name="p",
+            )
 
 
 def test_numeric_bindings_are_in_the_typed_set() -> None:
@@ -97,13 +112,10 @@ def test_numeric_bindings_are_in_the_typed_set() -> None:
     assert {"limit", "depth"} <= _TYPED_FILTER_BINDINGS
 
 
-def test_the_live_plan14_shape_end_to_end() -> None:
-    """Exact reproduction of the observed failure's binding computation."""
-    out = _autoalias_bindings(
-        required=["question", "content_type"],
-        run_bindings={"intent": QUESTION, "_nx_scope": "knowledge__semantic-operators"},
-        defaults={}, question=QUESTION,
-    )
-    # the retrieval step would resolve content_type -> "" -> None -> no filter
-    assert out["content_type"] == ""
-    assert out["_nx_scope"] == "knowledge__semantic-operators"
+def test_free_text_bindings_are_unaffected_by_a_typed_sibling() -> None:
+    """The raise happens before any partial binding is handed to the runner."""
+    with pytest.raises(PlanBindingUnsatisfiableError):
+        _autoalias_bindings(
+            required=["concept", "content_type"], run_bindings={},
+            defaults={}, question=QUESTION, plan_id=1, plan_name="p",
+        )
