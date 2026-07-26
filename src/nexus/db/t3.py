@@ -1285,6 +1285,23 @@ class T3Database:
         except _NotFoundErrors:
             return False
 
+    def collection_probe(self, name: str) -> "CollectionState":
+        """Three-state existence probe: PRESENT / TOMBSTONED / ABSENT (nexus-9n485).
+
+        T3Database (Chroma / InMemoryVectorClient) has no collection-level
+        soft-delete concept at all — :meth:`collection_exists` is already a
+        raw physical check, unlike :class:`~nexus.db.http_vector_client.HttpVectorClient`'s
+        tombstone-filtered read. This degrades to the same two-state answer
+        :meth:`collection_exists` gives: :data:`CollectionState.TOMBSTONED` is
+        never returned here. Provided for interface parity so callers that
+        accept either backend can call ``.collection_probe()`` uniformly
+        (see :func:`nexus.db.collection_state.probe_collection_state`, which
+        dispatches correctly without needing this method to exist).
+        """
+        from nexus.db.collection_state import CollectionState  # noqa: PLC0415 — deferred to avoid an import cycle (collection_state -> t3)
+
+        return CollectionState.PRESENT if self.collection_exists(name) else CollectionState.ABSENT
+
     def delete_collection(self, name: str) -> None:
         """Delete a T3 collection entirely."""
         self._client_for(name).delete_collection(name)

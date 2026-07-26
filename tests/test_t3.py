@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from nexus.errors import CollectionNotFoundError
+from nexus.db.collection_state import CollectionState
 from nexus.db.t3 import T3Database
 from tests.conftest import make_vector_test_client
 
@@ -1280,6 +1281,30 @@ def test_collection_exists(local_t3: T3Database, setup, collection, expected):
     if setup:
         local_t3.put(collection=collection, content="some content", title="exists.md")
     assert local_t3.collection_exists(collection) is expected
+
+
+# ── local_t3: collection_probe (nexus-9n485) ────────────────────────────────
+#
+# T3Database (Chroma / InMemoryVectorClient) has no soft-delete concept at
+# the collection level -- collection_exists() is already a raw physical
+# check. collection_probe() therefore degrades to the same two-state
+# PRESENT/ABSENT answer collection_exists() gives; TOMBSTONED is reachable
+# only on HttpVectorClient (tests/test_http_vector_client_stats.py).
+
+
+@pytest.mark.parametrize("setup,collection,expected", [
+    (True, "knowledge__probe_present", CollectionState.PRESENT),
+    (False, "knowledge__probe_absent", CollectionState.ABSENT),
+])
+def test_collection_probe_two_state(local_t3: T3Database, setup, collection, expected):
+    if setup:
+        local_t3.put(collection=collection, content="some content", title="exists.md")
+    assert local_t3.collection_probe(collection) is expected
+
+
+def test_collection_probe_never_tombstoned_on_chroma_backend(local_t3: T3Database):
+    local_t3.put(collection="knowledge__probe_never_tomb", content="x", title="d.md")
+    assert local_t3.collection_probe("knowledge__probe_never_tomb") is not CollectionState.TOMBSTONED
 
 
 # ── local_t3: verify_collection_deep ────────────────────────────────────────

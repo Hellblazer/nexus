@@ -1558,8 +1558,56 @@ class HttpVectorClient:
         :meth:`list_collections`: a collection whose every chunk belongs to
         trashed documents reads as absent — the Decision 6 single-enforcement
         -point semantics (consumers see live state only).
+
+        This conflates TOMBSTONED with truly ABSENT under one boolean. Callers
+        that must tell the two apart (rename/migration collision guards) use
+        :meth:`collection_probe` — or the module-level
+        :func:`nexus.db.collection_state.probe_collection_state`, which also
+        degrades cleanly for non-HttpVectorClient backends — instead of this
+        method alone (nexus-9n485).
         """
         return any(c.get("name") == name for c in self.list_collections())
+
+    def collection_exists_raw(self, name: str) -> bool:
+        """True if *name* has ANY physical chunk row for this tenant — LIVE or TOMBSTONED.
+
+        Hits ``GET /v1/vectors/collections`` directly — a bare ``SELECT
+        DISTINCT collection`` union over ``chunks_384``/``chunks_768``/
+        ``chunks_1024`` (:meth:`PgVectorRepository.listCollections` on the
+        Java side), NOT the tombstone-filtered ``collection_vector_stats``
+        view :meth:`collection_exists` reads. Trashing a document
+        (catalog-003) only sets ``catalog_documents.deleted_at`` — it never
+        deletes rows from the physical chunk tables (that is ``purge_trash``'s
+        job, a separate later step) — so a collection whose every document is
+        trashed still appears in this raw listing even though
+        :meth:`collection_exists` reads it as absent.
+
+        Raises rather than degrading to False on a service error: a caller
+        using this to distinguish "tombstoned" from "absent" must not read a
+        transient failure as a confident ABSENT (nexus-9n485; mirrors the
+        no-silent-fallback-for-correctness directive).
+        """
+        result = _get("/v1/vectors/collections", tenant=self._tenant)
+        names = {c.get("name", "") for c in result} if isinstance(result, list) else set()
+        return name in names
+
+    def collection_probe(self, name: str) -> "CollectionState":
+        """Three-state existence probe: PRESENT / TOMBSTONED / ABSENT.
+
+        Distinguishes "trashed — restore it first" (:data:`CollectionState.TOMBSTONED`)
+        from "never existed" (:data:`CollectionState.ABSENT`) — the ambiguity
+        :meth:`collection_exists` alone cannot resolve (nexus-9n485, RDR-156 P3
+        gate finding nexus-70r3c.13). The raw probe only runs when the live
+        check already says no — the common case (a name with live data) never
+        pays the extra round trip.
+        """
+        from nexus.db.collection_state import CollectionState  # noqa: PLC0415 — deferred to avoid an import cycle (collection_state -> http_vector_client)
+
+        if self.collection_exists(name):
+            return CollectionState.PRESENT
+        if self.collection_exists_raw(name):
+            return CollectionState.TOMBSTONED
+        return CollectionState.ABSENT
 
     def count(self, collection: str) -> int:
         """Number of chunks in *collection* visible to this tenant."""

@@ -276,13 +276,30 @@ def rename_collection_cmd(
     # Source-exists check fires BEFORE collision check so an operator
     # who typoes the old name gets "old not found" rather than "new
     # already exists" (the latter is misleading when old never existed).
-    if not t3_db.collection_exists(old):
+    #
+    # Tombstone-vs-absent (RDR-156 P3, Decision 6; nexus-9n485): on the
+    # service path collection_exists() reads the tombstone-filtered stats
+    # view, so a collection whose every chunk belongs to a trashed document
+    # reads exactly like one that never existed. probe_collection_state
+    # tells the two apart via the RAW /v1/vectors/collections listing
+    # (never tombstone-filtered) for a real HttpVectorClient; every other
+    # backend (T3Database, test fakes) keeps the prior two-state behaviour.
+    from nexus.db.collection_state import CollectionState, probe_collection_state  # noqa: PLC0415  — command-local import (nexus.db.collection_state)
+
+    old_state = probe_collection_state(t3_db, old)
+    if old_state is CollectionState.ABSENT:
         raise click.ClickException(f"old name {old!r} does not exist in T3.")
+    if old_state is CollectionState.TOMBSTONED:
+        raise click.ClickException(
+            f"old name {old!r} is tombstoned (every chunk belongs to a "
+            f"trashed document) — restore the trashed document(s) before renaming."
+        )
     if old == new:
         raise click.ClickException(
             f"old and new names are identical ({old!r}); rename is a no-op."
         )
-    if t3_db.collection_exists(new):
+    new_state = probe_collection_state(t3_db, new)
+    if new_state is not CollectionState.ABSENT:
         raise click.ClickException(
             f"new name {new!r} already exists in T3. "
             f"Refusing to rename {old!r} on top of an existing collection."

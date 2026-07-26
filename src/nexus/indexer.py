@@ -647,6 +647,7 @@ def _migrate_legacy_collections(
         rename_collection_data_plane,
     )
     from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
+    from nexus.db.collection_state import CollectionState, probe_collection_state  # noqa: PLC0415  — circular-dep avoidance (nexus.db.collection_state)
     from nexus.repo_identity import _repo_identity  # noqa: PLC0415  — circular-dep avoidance (nexus.repo_identity)
 
     result: dict[str, str] = {}
@@ -685,6 +686,15 @@ def _migrate_legacy_collections(
         # If both exist, prefer the legacy 2-segment (rename happens
         # first; the synth becomes the case-3 partial-state collision
         # message and is left for operator cleanup).
+        # nexus-9n485: collection_exists() alone can't tell "no chunks ever
+        # existed here" from "every chunk here belongs to a trashed
+        # document" (HttpVectorClient reads the tombstone-filtered stats
+        # view). Both currently fall through this loop identically —
+        # a tombstoned candidate is not treated as migratable, same as
+        # before this fix — but a tombstoned candidate is no longer
+        # silent: it used to vanish from the logs entirely, orphaning the
+        # collection with no trace ("trash-then-reindex would create a
+        # duplicate fresh collection beside the tombstoned one").
         legacy = None
         for candidate in _migration_source_candidates(repo, ct):
             if candidate == conformant:
@@ -692,7 +702,21 @@ def _migrate_legacy_collections(
                 # because the indexer is already writing to the right
                 # place.
                 continue
-            if t3_db.collection_exists(candidate):  # type: ignore[attr-defined]
+            candidate_state = probe_collection_state(t3_db, candidate)
+            if candidate_state is CollectionState.TOMBSTONED:
+                _log.warning(
+                    "phase4_migration_candidate_tombstoned",
+                    repo=str(repo), ct=ct, candidate=candidate,
+                    message=(
+                        "candidate has physical chunk rows but every one "
+                        "belongs to a trashed document; not treated as "
+                        "migratable (skipping to the next candidate / "
+                        "greenfield). Restore the trashed document(s) and "
+                        "rename manually if this data should not be orphaned."
+                    ),
+                )
+                continue
+            if candidate_state is CollectionState.PRESENT:
                 legacy = candidate
                 break
         if legacy is None:
@@ -700,7 +724,19 @@ def _migrate_legacy_collections(
             legacy_exists = False
         else:
             legacy_exists = True
-        conformant_exists = bool(t3_db.collection_exists(conformant))  # type: ignore[attr-defined]
+        conformant_state = probe_collection_state(t3_db, conformant)
+        if conformant_state is CollectionState.TOMBSTONED:
+            _log.warning(
+                "phase4_migration_conformant_tombstoned",
+                repo=str(repo), ct=ct, conformant=conformant,
+                message=(
+                    "target collection has physical chunk rows but every "
+                    "one belongs to a trashed document; treated as NOT "
+                    "present so a fresh write is not silently merged with "
+                    "trashed data under the same name."
+                ),
+            )
+        conformant_exists = conformant_state is CollectionState.PRESENT
 
         if legacy_exists and not conformant_exists:
             # Decision tree case 1: rename legacy → conformant.

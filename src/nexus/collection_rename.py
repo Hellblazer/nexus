@@ -18,6 +18,8 @@ from typing import Any
 
 import click
 
+from nexus.db.collection_state import CollectionState, probe_collection_state
+
 
 def rename_collection_data_plane(
     old: str,
@@ -62,15 +64,34 @@ def rename_collection_data_plane(
     if on_warn is None:
         on_warn = lambda msg: click.echo(msg, err=True)  # noqa: E731
 
-    # Tombstone caveat (RDR-156 P3, Decision 6): on the service path
-    # collection_exists() reads the tombstone-filtered stats view, so a
-    # collection whose every chunk belongs to trashed documents reads as
-    # ABSENT here — "not found" may mean "trashed; restore it first".
-    # Distinguishing the two needs a raw existence probe (bead nexus-9n485;
-    # materializes only once trash verbs ship).
-    if not t3_db.collection_exists(old):
+    # Tombstone-vs-absent guard (RDR-156 P3, Decision 6; nexus-9n485). On the
+    # service path collection_exists() reads the tombstone-filtered stats
+    # view, so a collection whose every chunk belongs to a trashed document
+    # reads exactly like one that never existed. probe_collection_state
+    # additionally consults the RAW /v1/vectors/collections listing (never
+    # tombstone-filtered — trashing sets catalog_documents.deleted_at, it
+    # never touches the physical chunks_<dim> rows) to tell the two apart:
+    #   - old ABSENT -> "not found" (accurate).
+    #   - old TOMBSTONED -> "not found" would hide the real remedy
+    #     ("restore the trashed documents first"); say so instead.
+    #   - new PRESENT or TOMBSTONED -> refuse. This rename path has no
+    #     cross_model escape valve (unlike remap_collection_references), so
+    #     claiming a tombstoned name would silently land live/fresh data on
+    #     top of dead rows sharing the same collection name.
+    # No-op for any t3_db that is not literally an HttpVectorClient (T3Database
+    # and the MagicMock fakes throughout the existing rename test suite) —
+    # those backends have no tombstone concept and keep the prior two-state
+    # collection_exists() behaviour unchanged.
+    old_state = probe_collection_state(t3_db, old)
+    if old_state is CollectionState.ABSENT:
         raise click.ClickException(f"collection not found: {old!r}")
-    if t3_db.collection_exists(new):
+    if old_state is CollectionState.TOMBSTONED:
+        raise click.ClickException(
+            f"collection {old!r} is tombstoned (every chunk belongs to a "
+            f"trashed document) — restore the trashed document(s) before renaming."
+        )
+    new_state = probe_collection_state(t3_db, new)
+    if new_state is not CollectionState.ABSENT:
         raise click.ClickException(f"collection already exists: {new!r}")
 
     counts = {

@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 
+from nexus.db.collection_state import CollectionState
 from nexus.db.http_vector_client import HttpVectorClient, VectorServiceError
 
 STATS_PATH = "/v1/vectors/stats"
@@ -206,3 +207,85 @@ class TestCollectionExistsLiveSemantics:
         client = HttpVectorClient()
         assert client.collection_exists("live__coll") is True
         assert client.collection_exists("tombstoned__coll") is False
+
+
+class TestCollectionExistsRaw:
+    """collection_exists_raw() -- RAW /v1/vectors/collections listing.
+
+    Unfiltered by tombstone status (trashing sets catalog_documents.deleted_at;
+    it never removes rows from chunks_384/768/1024), unlike collection_exists()
+    which reads the tombstone-filtered stats view (nexus-9n485).
+    """
+
+    def test_true_when_name_in_raw_listing(self, monkeypatch):
+        paths = _patch_get(monkeypatch, lambda p: [{"name": "tombstoned__coll"}])
+
+        assert HttpVectorClient().collection_exists_raw("tombstoned__coll") is True
+        assert paths == [COLLECTIONS_PATH]
+
+    def test_false_when_name_absent_from_raw_listing(self, monkeypatch):
+        _patch_get(monkeypatch, lambda p: [{"name": "other__coll"}])
+
+        assert HttpVectorClient().collection_exists_raw("missing__coll") is False
+
+    def test_non_list_response_returns_false(self, monkeypatch):
+        _patch_get(monkeypatch, lambda p: {"error": "weird"})
+
+        assert HttpVectorClient().collection_exists_raw("x__coll") is False
+
+    def test_propagates_service_error(self, monkeypatch):
+        def handler(path: str) -> Any:
+            raise VectorServiceError("GET /collections → HTTP 503: down", code=503)
+
+        _patch_get(monkeypatch, handler)
+        with pytest.raises(VectorServiceError):
+            HttpVectorClient().collection_exists_raw("x__coll")
+
+
+class TestCollectionProbeThreeState:
+    """collection_probe() -- the PRESENT/TOMBSTONED/ABSENT trichotomy."""
+
+    def test_present_when_live_in_stats(self, monkeypatch):
+        def handler(path: str) -> Any:
+            if path == STATS_PATH:
+                return [{"name": "live__coll", "dim": 384, "count": 1, "last_write": "x"}]
+            if path == COLLECTIONS_PATH:
+                return [{"name": "live__coll"}]
+            raise AssertionError(f"unexpected path {path}")
+
+        _patch_get(monkeypatch, handler)
+        assert HttpVectorClient().collection_probe("live__coll") is CollectionState.PRESENT
+
+    def test_tombstoned_when_absent_from_stats_but_present_raw(self, monkeypatch):
+        def handler(path: str) -> Any:
+            if path == STATS_PATH:
+                return []  # no live chunks anywhere -- every doc trashed
+            if path == COLLECTIONS_PATH:
+                return [{"name": "trashed__coll"}]
+            raise AssertionError(f"unexpected path {path}")
+
+        _patch_get(monkeypatch, handler)
+        assert HttpVectorClient().collection_probe("trashed__coll") is CollectionState.TOMBSTONED
+
+    def test_absent_when_missing_from_both(self, monkeypatch):
+        def handler(path: str) -> Any:
+            if path == STATS_PATH:
+                return []
+            if path == COLLECTIONS_PATH:
+                return []
+            raise AssertionError(f"unexpected path {path}")
+
+        _patch_get(monkeypatch, handler)
+        assert HttpVectorClient().collection_probe("never__existed") is CollectionState.ABSENT
+
+    def test_does_not_call_raw_when_present(self, monkeypatch):
+        """PRESENT is decided from stats alone -- no need to hit /collections too."""
+        paths = _patch_get(
+            monkeypatch,
+            lambda p: [{"name": "live__coll", "dim": 384, "count": 1, "last_write": "x"}]
+            if p == STATS_PATH else (_ for _ in ()).throw(AssertionError(p)),
+        )
+
+        HttpVectorClient().collection_probe("live__coll")
+
+        assert paths == [STATS_PATH]
