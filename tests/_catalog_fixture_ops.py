@@ -27,7 +27,7 @@ from typing import Any
 
 from nexus.daemon.catalog_write_shim import CATALOG_WRITE_OPS
 
-__all__ = ["ActiveCatalog", "active_reader", "count_documents"]
+__all__ = ["ActiveCatalog", "active_reader", "count_documents", "only_document"]
 
 
 def active_reader() -> Any:
@@ -52,6 +52,19 @@ def count_documents(collection: str | None = None) -> int:
     if collection is not None:
         return len(reader.list_by_collection(collection))
     return sum(1 for _ in reader.all_documents())
+
+
+def only_document() -> Any:
+    """The single document in the catalog, asserting there is exactly one.
+
+    Replaces ``cat._db.execute("SELECT <col> FROM documents").fetchone()`` in
+    tests that register one entry and read a column back. ``fetchone()``
+    silently took the first of N; this states the "exactly one" the tests
+    already meant.
+    """
+    docs = list(active_reader().all_documents())
+    assert len(docs) == 1, f"expected exactly one document, got {len(docs)}"
+    return docs[0]
 
 
 class ActiveCatalog:

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from nexus.catalog.catalog import Catalog
+from tests._catalog_fixture_ops import ActiveCatalog, active_reader
 
 
 @pytest.fixture(autouse=True)
@@ -17,10 +18,26 @@ def git_identity(monkeypatch):
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
 
 
-def _make_catalog(tmp_path: Path) -> tuple[Path, Catalog]:
+@pytest.fixture(autouse=True)
+def _point_catalog_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Aim ``catalog_path()`` at the dir ``_make_catalog`` initialises
+    (nexus-aqbrk). ActiveCatalog resolves through the same factories
+    ``_catalog_hook`` uses, and on the SQLite arm those read
+    ``catalog_path()``. Tests that point elsewhere still win — their in-body
+    ``setenv`` runs after this."""
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "catalog"))
+
+
+def _make_catalog(tmp_path: Path) -> tuple[Path, ActiveCatalog]:
+    """Init the local catalog, hand back a facade over the LIVE one.
+
+    nexus-aqbrk: previously returned the local ``Catalog``, so under the
+    engine substrate the assertions read an empty local file while
+    ``_catalog_hook`` wrote the service catalog.
+    """
     catalog_dir = tmp_path / "catalog"
-    cat = Catalog.init(catalog_dir)
-    return catalog_dir, cat
+    Catalog.init(catalog_dir)
+    return catalog_dir, ActiveCatalog()
 
 
 class TestCatalogHookSkipped:
@@ -69,7 +86,7 @@ class TestCatalogHookOwner:
             head_hash="def", indexed_files=[],
         )
         # Should still be the same owner
-        rows = cat._db.execute("SELECT count(*) FROM owners").fetchone()
+        rows = (len(cat.list_owners()),)
         assert rows[0] == 1
 
 
@@ -189,6 +206,19 @@ def _spy_factories(monkeypatch) -> tuple[list["_SpyProxy"], list["_SpyProxy"]]:
     return readers, writers
 
 
+def _update_calls(spy: "_SpyProxy") -> int:
+    """Count update operations regardless of which batching shape ran.
+
+    nexus-aqbrk: ``update_many`` is service-mode-only BY DESIGN (nexus-xedhp
+    — it is in _SERVICE_ONLY_WRITE_OPS, and the indexer picks it via a
+    ``callable(getattr(writer, "update_many", None))`` capability check). So
+    the same one logical update is ``update`` on the SQLite writer and
+    ``update_many`` on the service writer. Asserting the method NAME pins the
+    substrate; asserting that exactly one update happened pins the contract.
+    """
+    return spy.calls.get("update", 0) + spy.calls.get("update_many", 0)
+
+
 class TestCatalogHookBatchedLookups:
     """nexus-dst5h: the pre-index sweep must not do per-file catalog
     round-trips — one owner-scoped list + local join, and no writes for
@@ -244,7 +274,7 @@ class TestCatalogHookBatchedLookups:
         _, writers = _spy_factories(monkeypatch)
         self._index(tmp_path, [f], head_hash="bbb")
 
-        assert writers[0].calls.get("update", 0) == 1
+        assert _update_calls(writers[0]) == 1
         owner = cat.owner_for_repo("571b8edd")
         assert cat.by_file_path(owner, "a.py").head_hash == "bbb"
 
@@ -259,7 +289,7 @@ class TestCatalogHookBatchedLookups:
         _, writers = _spy_factories(monkeypatch)
         self._index(tmp_path, [f], head_hash="same")
 
-        assert writers[0].calls.get("update", 0) == 1
+        assert _update_calls(writers[0]) == 1
 
     def test_new_file_still_registers_alongside_warm_files(self, tmp_path, monkeypatch):
         catalog_dir, cat = _make_catalog(tmp_path)
@@ -416,10 +446,17 @@ class TestCatalogHookOwnerListFailure:
 
         # Failing variant: housekeeping's by_owner also fails; the hook
         # must still register the file via the per-file fallback.
+        #
+        # nexus-aqbrk: the spy must wrap the LIVE reader captured BEFORE the
+        # patch, not the ActiveCatalog facade. The facade resolves each read
+        # through make_catalog_reader — the very function being patched — so
+        # wrapping it builds a spy whose target resolves back through the spy
+        # (RecursionError at commands/catalog.py:165).
         import nexus.catalog.factory as factory
+        live_reader = active_reader()
         monkeypatch.setattr(
             factory, "make_catalog_reader",
-            lambda **kw: _FailingOwnerList(cat),
+            lambda **kw: _FailingOwnerList(live_reader),
         )
 
         result = _catalog_hook(
