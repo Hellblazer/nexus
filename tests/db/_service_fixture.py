@@ -37,6 +37,11 @@ from __future__ import annotations
 
 import json as _json
 import os
+import signal
+import socket
+import subprocess
+import tempfile
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -292,3 +297,98 @@ def mint_session(base_url: str, bearer: str, session_id: str,
     if not token:
         raise RuntimeError(f"/v1/sessions/start returned no session_token: {resp}")
     return token
+
+
+# ── service spawn: FILE-backed output, never a PIPE (nexus-lom9g / j0nec) ────
+
+
+def spawn_service(
+    cmd: list[str],
+    env: dict[str, str],
+    *,
+    log_dir: str | Path | None = None,
+) -> tuple[subprocess.Popen, Path]:
+    """Spawn the engine with its output going to a FILE, and return the log path.
+
+    THE PIPE IS THE BUG. ``stdout=subprocess.PIPE`` without a reader deadlocks
+    the service: the 64KB pipe buffer fills with Logback console output,
+    ``write(2)`` blocks while holding the PrintStream monitor, and every
+    logging thread pins behind it — the process wedges before it ever binds
+    its port, so the caller sees only a timeout. This is nexus-j0nec, already
+    diagnosed by jstack (pin in ``FileOutputStream.writeBytes`` from
+    ``TokenStore.issueToken``'s log.info; draining exactly the 65,702 buffered
+    bytes instantly unwedged it) and already fixed in
+    ``tests/_engine_substrate.py`` — but that fix landed in ONE copy while 22
+    per-file fixtures under tests/db/ kept the un-fixed form. Hoisted here so
+    there is a single owner, per the standing rule that lifecycle fixes live
+    in the shared primitive rather than one tier's copy.
+
+    No timeout value fixes a wedge, which is why raising the per-file 40s
+    waits would not have helped.
+
+    Returns ``(proc, log_path)``. Pair with :func:`wait_for_service`, which
+    surfaces the tail of *log_path* when the port never opens — the diagnostic
+    the PIPE form threw away.
+    """
+    d = Path(log_dir) if log_dir is not None else Path(tempfile.mkdtemp(prefix="nexus-svc-log-"))
+    d.mkdir(parents=True, exist_ok=True)
+    log_path = d / "engine.log"
+    # Deliberately not a context manager: the handle's lifetime is the
+    # service process's, and the caller owns termination.
+    fh = open(log_path, "wb")  # noqa: SIM115 — lifetime spans the spawned process
+    proc = subprocess.Popen(
+        cmd,
+        env=env,
+        stdout=fh,
+        stderr=subprocess.STDOUT,
+        preexec_fn=os.setsid,
+    )
+    return proc, log_path
+
+
+def wait_for_service(
+    host: str,
+    port: int,
+    *,
+    proc: subprocess.Popen | None = None,
+    log_path: str | Path | None = None,
+    timeout: float = 60.0,
+) -> None:
+    """Block until *port* accepts a connection, or raise WITH the engine log.
+
+    The per-file ``_wait_tcp`` helpers this replaces raised a bare
+    ``TimeoutError: port N on H not reachable after 40.0s`` and discarded
+    everything the service had said — which is why nexus-lom9g sat for a day
+    with a guessed mechanism instead of a known one. On timeout this kills the
+    process group and includes the log tail, matching what
+    ``tests/_engine_substrate.py`` already does.
+
+    Default is 60s, the same budget the shared session engine uses; the copies
+    used 40s.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.3):
+                return
+        except OSError:
+            time.sleep(0.1)
+
+    detail = ""
+    if proc is not None:
+        rc = proc.poll()
+        detail += f"\nprocess exit code: {rc if rc is not None else 'still running (wedged?)'}"
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    if log_path is not None:
+        try:
+            with open(log_path, encoding="utf-8", errors="replace") as fh:
+                tail = fh.read()[-2000:]
+            detail += f"\nTail of engine log ({log_path}):\n{tail}"
+        except OSError as exc:
+            detail += f"\n(engine log unreadable: {exc})"
+    raise TimeoutError(
+        f"port {port} on {host} not reachable after {timeout}s{detail}"
+    )
