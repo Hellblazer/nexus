@@ -24,6 +24,8 @@ import subprocess
 from pathlib import Path
 
 import pytest
+
+from tests._catalog_fixture_ops import ActiveCatalog
 import structlog
 
 from nexus.catalog.catalog import Catalog
@@ -65,8 +67,11 @@ def cat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Catalog:
     cat_dir.mkdir(parents=True)
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(cfg))
     monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
+    # nexus-aqbrk: return the ACTIVE catalog — the code under test resolves
+    # through the factories, and a local handle hit the RDR-176 read-only guard
+    # on writes. Catalog.init stays for the SQLite arm's factory writer.
     Catalog.init(cat_dir)
-    return Catalog(cat_dir, cat_dir / ".catalog.db")
+    return ActiveCatalog()
 
 
 def _register_owner_with_docs(cat: Catalog, repo: Path, docs_name: str) -> None:
