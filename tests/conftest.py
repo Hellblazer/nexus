@@ -1193,14 +1193,38 @@ def db(tmp_path: Path) -> T2Database:
 
 
 #: Process-wide unique id source for fidelity-import seeding (RDR-155
-#: P4b P0a'). import_topic/import_plan preserve ids VERBATIM without
-#: advancing the engine's serial sequences, and the topics PK is GLOBAL
-#: across tenants on the shared session engine — so per-module counters
-#: collide across modules in one pytest session (bisected finding).
-#: Every module that seeds preserved ids MUST draw from THIS counter.
+#: P4b P0a'). The topics PK is GLOBAL across tenants on the shared session
+#: engine, so per-module counters collide across modules in one pytest
+#: session (bisected finding). Every module that seeds preserved ids MUST
+#: draw from THIS counter.
+#:
+#: THE STRIDE IS LOAD-BEARING (nexus-aqbrk, 2026-07-25). The note here used
+#: to claim imports "preserve ids VERBATIM without advancing the engine's
+#: serial sequences". That is false: TaxonomyRepository.importTopic ends with
+#: advanceTopicsIdSequence(ctx, srcId), a setval to GREATEST(last_value,
+#: srcId) — deliberately, so a migrated tenant's next live topic cannot
+#: collide with its own imported ids. The consequence for a shared session
+#: engine is that ONE import at N drags the global serial sequence to N, and
+#: every subsequent ORDINARY topic creation (persist_discovered,
+#: persist_rebuild, ...) in ANY tenant then consumes N+1, N+2, ... — walking
+#: straight into the ids this counter is about to hand out. The next import
+#: to draw an already-consumed id hits ON CONFLICT (id) against a row owned
+#: by a different tenant, which RLS rejects as a WITH CHECK violation and the
+#: handler reports as "supplied id is not available in this tenant".
+#:
+#: Symptom when this breaks: a cascade of HTTP 409s that looks like an
+#: engine defect and is order-dependent (test_taxonomy.py failed at test 20;
+#: deselecting three topic-creating tests moved it to test 33). A larger
+#: starting offset does NOT help — the serial path just follows the counter
+#: up from wherever it lands. The STRIDE is what fixes it: after an import
+#: at N, ordinary inserts would have to burn a million ids to reach N + STEP,
+#: and a pytest session creates thousands.
 import itertools
 
-_import_seed_ids = itertools.count(1_000_000_000)
+_IMPORT_SEED_ID_BASE = 1_000_000_000
+_IMPORT_SEED_ID_STEP = 1_000_000
+
+_import_seed_ids = itertools.count(_IMPORT_SEED_ID_BASE, _IMPORT_SEED_ID_STEP)
 
 
 def next_import_seed_id() -> int:
