@@ -520,6 +520,53 @@ def _reset_shared_service_catalog_client() -> None:
 
 
 @pytest.fixture(autouse=True)
+def _reset_service_t2_db() -> None:
+    """Drop the process-lifetime service ``T2Database`` singleton between tests
+    (nexus-aqbrk).
+
+    THE SAME DEFECT AS ``_reset_shared_service_catalog_client`` ABOVE, one
+    tier over, and named as such in nexus-5en9j: ``mcp_infra`` memoises ONE
+    service-backed ``T2Database`` in ``_service_t2_db`` and every service-mode
+    ``t2_index_write`` runs against it (``_service_t2_write_locked``). Its
+    ``Http*Store`` clients bake in the endpoint and BEARER TOKEN they saw at
+    construction, and the engine substrate mints a fresh tenant + token per
+    test — so a singleton built by the first test writes every later test's
+    rows into the FIRST test's tenant.
+
+    The symptom is a test reading an empty store it just wrote to: the write
+    landed in tenant #1, the read-back runs in its own tenant. Order-dependent
+    — passes solo, fails in file order — and harmless on the SQLite substrate,
+    where ``t2_index_write`` never takes the service branch and this reset is
+    a no-op.
+
+    Already diagnosed once, per-file: ``tests/test_rdr_084_plan_grow.py``
+    carries a local autouse fixture calling ``reset_singletons()`` for exactly
+    this reason. That is the same shape the catalog client had before the
+    fixture above — one file working around a session-wide hazard. This
+    promotes the eviction to the whole suite.
+
+    SCOPE IS DELIBERATELY NARROWER THAN ``reset_singletons()``. That helper
+    also drops ``_t1_instance`` / ``_t3_instance`` / ``_collections_cache`` /
+    the plan cache / the vector client; making all of that autouse would
+    invalidate module-scoped T1/T3 injections that tests legitimately expect
+    to survive across a file. Only the credential-bearing T2 handle is evicted
+    here. Reset on BOTH sides, for the same reason as the catalog client: a
+    test cannot leak one forward, and cannot start dirty.
+    """
+    import nexus.mcp_infra as mcp_infra
+
+    def _evict() -> None:
+        with mcp_infra._service_t2_lock:
+            if mcp_infra._service_t2_db is not None:
+                mcp_infra._service_t2_db.close()
+            mcp_infra._service_t2_db = None
+
+    _evict()
+    yield
+    _evict()
+
+
+@pytest.fixture(autouse=True)
 def _reset_lease_resolution_history() -> None:
     """Reset ``service_endpoint``'s process-wide "ever resolved a lease"
     signal before AND after every test (nexus-7dsgp, critic round 1
