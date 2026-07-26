@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-23wlw census follow-up (2026-07-26) — the catalog-side twin of
+    memory-002's diacritic folding.
+
+    THE GAP. catalog-015 fixed catalog_documents' SEPARATOR half in 2026-07-13
+    (nexus-8gue1, GH #1397) and stopped there. Nothing in the expression folds
+    diacritics, so the catalog diverges from the SQLite FTS5 baseline exactly
+    the way nexus.memory did:
+
+        column   content        query      sqlite  service
+        author   Kurt Gödel     Godel           1        0
+        author   Müller         Muller          1        0
+        author   Schröder       Schroder        1        0
+
+    This is the THIRD time this parity claim has been falsified, and the
+    second time on THIS table. catalog-015's own comment recorded that
+    catalog-001's "PG >= FTS5 superset" claim was false for filenames; it is
+    also false for diacritics, and fixing only the half that had been reported
+    is what left this behind.
+
+    WHY author IS THE FIELD THAT MATTERS. Academic author names are where
+    diacritics actually live. Measured against the LIVE catalog rather than
+    assumed — 51 sampled papers, 5 with non-ASCII authors:
+
+        Sven Groß, Arnold Reusken               ß      NOT a divergence
+        Ángel Plaza, Maŕıa-Cecilia Rivara       Á      DIVERGENCE
+        Jan Brandts, Sergey Korotov, M. Křížek  ř í ž  NOT a divergence
+        Sergey Korotov, Michal Křížek           ř í ž  NOT a divergence
+        Miroslav S. Petrov, Тодор Д. Тодоров    Cyril  NOT a divergence
+
+    Only ONE genuinely diverges: searching 'Angel' finds 'Ángel Plaza' under
+    FTS5 and returns nothing here. The other four are unfolded by BOTH
+    substrates — ß is not expanded, Latin Extended-A (Křížek) and Cyrillic are
+    outside FTS5's default remove_diacritics=1 range — so they agree already.
+    Stating that plainly because the raw "5 of 51 have non-ASCII authors"
+    number overstates the defect by 5x; the real incidence in the sample is
+    1 in 51.
+
+    SCOPE. Folding wraps EVERY segment, not just author: title carries
+    diacritics at least as often as author does (a paper's title repeats the
+    accented terms of its field), and file_path can too. Cheap to include
+    because replace-not-add is index-size-neutral. The separator segment keeps
+    its existing title+file_path scope — no new evidence widened it, and
+    catalog-015's reasoning for that scope still holds.
+
+    fold_diacritics is created by memory-002-0, which this changeset is
+    ordered after in db.changelog-master.xml. It is a 1:1 translate() over the
+    Latin-1 supplement, chosen over the unaccent extension because unaccent is
+    absent from every shipped PG bundle (CREATE EXTENSION aborts Liquibase at
+    boot) and because it folds Latin-Ext-A/Greek/Cyrillic that FTS5 leaves
+    alone — see memory-002's comment for the full measurement.
+
+    QUERY SIDE. CatalogRepository.searchDocuments applies the identical fold.
+    Both halves are required: the stored lexemes are folded, so an unfolded
+    query leg stops matching accented input that matched before.
+
+    MECHANICS. PG cannot ALTER a generated column's expression: DROP + re-ADD
+    (table rewrite) + recreate the GIN index. Same ACCESS EXCLUSIVE framing as
+    catalog-014/-015 — nothing serves during the single-instance rm-then-run
+    boot window — and Liquibase runs the changeset in one transaction, so an
+    interrupted rewrite rolls back whole rather than leaving a dropped-column
+    limbo. DDL only, no row DML, so the FORCE-RLS silent-no-op class
+    (nexus-1wjmq) does not apply.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="catalog-017-0" author="nexus-23wlw">
+        <comment>catalog_documents.fts_vector: fold Latin-1 diacritics on every segment so 'Godel' finds 'Gödel' (the half catalog-015 left behind)</comment>
+        <sql splitStatements="true">
+DROP INDEX IF EXISTS nexus.idx_catalog_documents_fts;
+ALTER TABLE nexus.catalog_documents DROP COLUMN fts_vector;
+ALTER TABLE nexus.catalog_documents
+    ADD COLUMN fts_vector tsvector GENERATED ALWAYS AS (
+        to_tsvector('english', nexus.fold_diacritics(coalesce(title, '')))
+        || to_tsvector('simple',  nexus.fold_diacritics(coalesce(author, '')))
+        || to_tsvector('simple',  nexus.fold_diacritics(coalesce(corpus, '')))
+        || to_tsvector('simple',  nexus.fold_diacritics(coalesce(file_path, '')))
+        || to_tsvector('simple',
+               nexus.fold_diacritics(
+                   translate(coalesce(title, '') || ' ' || coalesce(file_path, ''),
+                             '/.-_', '    ')))
+    ) STORED;
+CREATE INDEX idx_catalog_documents_fts
+    ON nexus.catalog_documents USING GIN (fts_vector);
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+DROP INDEX IF EXISTS nexus.idx_catalog_documents_fts;
+ALTER TABLE nexus.catalog_documents DROP COLUMN fts_vector;
+ALTER TABLE nexus.catalog_documents
+    ADD COLUMN fts_vector tsvector GENERATED ALWAYS AS (
+        to_tsvector('english', coalesce(title, ''))
+        || to_tsvector('simple',  coalesce(author, ''))
+        || to_tsvector('simple',  coalesce(corpus, ''))
+        || to_tsvector('simple',  coalesce(file_path, ''))
+        || to_tsvector('simple',
+               translate(coalesce(title, '') || ' ' || coalesce(file_path, ''),
+                         '/.-_', '    '))
+    ) STORED;
+CREATE INDEX idx_catalog_documents_fts
+    ON nexus.catalog_documents USING GIN (fts_vector);
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

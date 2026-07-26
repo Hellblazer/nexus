@@ -3388,6 +3388,62 @@ class CatalogRepositoryTest {
     }
 
     /**
+     * nexus-23wlw census: catalog document search folds diacritics, the half
+     * catalog-015 left behind.
+     *
+     * <p>catalog-015 fixed this table's SEPARATOR divergence in 2026-07-13 and
+     * stopped there, so {@code Godel} still did not find {@code Gödel} — the
+     * third falsification of catalog-001's "PG >= FTS5 superset" claim and the
+     * second on this table. Author is where it bites: academic names are where
+     * diacritics live.
+     *
+     * <p>Measured against the LIVE catalog rather than assumed. Of 51 sampled
+     * papers, five had non-ASCII authors but only ONE genuinely diverged
+     * ({@code Ángel Plaza} — searching {@code Angel} found it under FTS5 and
+     * returned nothing here). The other four — {@code Groß}, two
+     * {@code Křížek}s, and a Cyrillic name — are unfolded by BOTH substrates
+     * and already agreed. The boundary cases below pin exactly that, so the
+     * fold cannot later be "improved" into unaccent and start returning rows
+     * the baseline never would.
+     */
+    @Test
+    void searchDocuments_foldsDiacritics_withinTheFts5Range() {
+        String tenant = "dia-tenant-" + System.nanoTime();
+        repo.upsertDocument(tenant, Map.of(
+            "tumbler", "7.1", "title", "On Formally Undecidable Propositions",
+            "author", "Kurt Gödel", "content_type", "paper", "corpus", "knowledge"));
+        repo.upsertDocument(tenant, Map.of(
+            "tumbler", "7.2", "title", "Numerical Methods",
+            "author", "Sven Groß", "content_type", "paper", "corpus", "knowledge"));
+        repo.upsertDocument(tenant, Map.of(
+            "tumbler", "7.3", "title", "Mesh Refinement",
+            "author", "Michal Křížek", "content_type", "paper", "corpus", "knowledge"));
+
+        assertThat(tumblersOf(repo.searchDocuments(tenant, "Godel", null, 20)))
+            .as("the measured divergence: an unaccented author query must hit")
+            .contains("7.1");
+        assertThat(tumblersOf(repo.searchDocuments(tenant, "Gödel", null, 20)))
+            .as("non-vacuity: the ACCENTED spelling still matches, so folding "
+                + "both sides is a superset rather than a swap")
+            .contains("7.1");
+
+        assertThat(tumblersOf(repo.searchDocuments(tenant, "Gross", null, 20)))
+            .as("ß is NOT expanded — FTS5 does not expand it either, so this "
+                + "MISS is parity, not a gap")
+            .doesNotContain("7.2");
+        assertThat(tumblersOf(repo.searchDocuments(tenant, "Krizek", null, 20)))
+            .as("Latin Extended-A is NOT folded — outside FTS5's default "
+                + "remove_diacritics=1 range; unaccent would fold it and "
+                + "overshoot the baseline")
+            .doesNotContain("7.3");
+
+        assertThat(tumblersOf(repo.searchDocuments(tenant, "Mesh", null, 20)))
+            .as("non-vacuity: plain ASCII search still works, so the MISSes "
+                + "above are not a dead search path")
+            .contains("7.3");
+    }
+
+    /**
      * The non-seed nodes reached by a {@link CatalogRepository#graphBFS} result.
      * Seeds are always present in {@code visited}, so comparing raw node sets
      * would report a hit for a neighbour that was never actually traversed.

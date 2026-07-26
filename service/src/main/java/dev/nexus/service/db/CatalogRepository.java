@@ -1088,17 +1088,26 @@ public final class CatalogRepository {
             // opaque filename lexeme never satisfies). Skipped when the
             // query has no separator: translate() would be a no-op and the
             // leg identical to the plain simple leg.
+            //
+            // nexus-23wlw census: EVERY leg is folded, because catalog-017
+            // folds the STORED column. Both halves are required and a
+            // one-sided change is silently wrong in a way tests without an
+            // accented query would not catch — the stored lexemes become
+            // folded, so an unfolded query stops matching accented input that
+            // matched before. Injection safety is unchanged: fold_diacritics
+            // and translate wrap the BIND PARAMETER, never the literal.
             boolean hasSeparator = query.chars()
                 .anyMatch(c -> c == '/' || c == '.' || c == '-' || c == '_');
             Condition ftsMatch = hasSeparator
                 ? DSL.condition(
-                    "fts_vector @@ plainto_tsquery('english', {0}) "
-                    + "OR fts_vector @@ plainto_tsquery('simple', {0}) "
-                    + "OR fts_vector @@ plainto_tsquery('simple', translate({0}, '/.-_', '    '))",
+                    "fts_vector @@ plainto_tsquery('english', nexus.fold_diacritics({0})) "
+                    + "OR fts_vector @@ plainto_tsquery('simple', nexus.fold_diacritics({0})) "
+                    + "OR fts_vector @@ plainto_tsquery('simple', "
+                    + "nexus.fold_diacritics(translate({0}, '/.-_', '    ')))",
                     DSL.val(query))
                 : DSL.condition(
-                    "fts_vector @@ plainto_tsquery('english', {0}) "
-                    + "OR fts_vector @@ plainto_tsquery('simple', {0})",
+                    "fts_vector @@ plainto_tsquery('english', nexus.fold_diacritics({0})) "
+                    + "OR fts_vector @@ plainto_tsquery('simple', nexus.fold_diacritics({0}))",
                     DSL.val(query));
             Condition where = ftsMatch.and(CATALOG_DOCUMENTS.DELETED_AT.isNull());
             if (contentType != null && !contentType.isBlank()) {
