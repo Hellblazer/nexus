@@ -13,6 +13,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+from tests.conftest import fake_credentials
 import pytest
 from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
@@ -73,7 +75,7 @@ class TestIndexPdfE2E:
 
     def test_e2e_simple_pdf_queryable(self, simple_pdf: Path, local_t3, cloud_mode) -> None:
         """AC-E1: simple.pdf indexed → query returns a pdf chunk with distance < 1.0."""
-        with patch("nexus.config.get_credential", side_effect=lambda k: "test-key"), \
+        with patch("nexus.config.get_credential", side_effect=fake_credentials()), \
              patch("nexus.doc_indexer._embed_with_fallback", side_effect=_local_embed):
             count = index_pdf(simple_pdf, "pdf-e2e-simple", t3=local_t3)
 
@@ -86,7 +88,7 @@ class TestIndexPdfE2E:
 
     def test_e2e_multipage_page_attribution(self, multipage_pdf: Path, local_t3, cloud_mode) -> None:
         """AC-E2: multipage.pdf → query for 'database transactions' returns page 2 chunk."""
-        with patch("nexus.config.get_credential", side_effect=lambda k: "test-key"), \
+        with patch("nexus.config.get_credential", side_effect=fake_credentials()), \
              patch("nexus.doc_indexer._embed_with_fallback", side_effect=_local_embed):
             count = index_pdf(multipage_pdf, "pdf-e2e-multipage", t3=local_t3)
 
@@ -106,7 +108,7 @@ class TestIndexPdfE2E:
 
     def test_e2e_staleness_guard(self, simple_pdf: Path, local_t3, cloud_mode) -> None:
         """AC-E3: Re-indexing the same PDF returns 0 and document count is unchanged."""
-        with patch("nexus.config.get_credential", side_effect=lambda k: "test-key"), \
+        with patch("nexus.config.get_credential", side_effect=fake_credentials()), \
              patch("nexus.doc_indexer._embed_with_fallback", side_effect=_local_embed):
             first = index_pdf(simple_pdf, "pdf-e2e-staleness", t3=local_t3)
             second = index_pdf(simple_pdf, "pdf-e2e-staleness", t3=local_t3)
