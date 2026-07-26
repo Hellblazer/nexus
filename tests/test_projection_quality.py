@@ -31,10 +31,10 @@ _ENGINE_SUBSTRATE = engine_substrate_selected()
 #: integration suite).
 _RAW_QUALITY_READ = pytest.mark.skipif(
     _ENGINE_SUBSTRATE,
-    reason="dies-roster: asserts topic_assignments quality columns via a "
-    "raw SQLite conn; the engine exposes no assignment read surface with "
-    "similarity/assigned_at/source_collection — dies at the RDR-155 P4b "
-    "flip",
+    reason="nexus-onjvy: topic_assignments similarity/assigned_at/"
+    "source_collection are WRITE-ONLY on the engine — "
+    "getAssignmentsForDocs selects doc_id+topic_id only, and no other route "
+    "returns them. Not a retirement: an engine gap with nothing to read yet",
 )
 
 
@@ -1131,7 +1131,7 @@ class TestHubs:
 
     @pytest.mark.skipif(
         _ENGINE_SUBSTRATE,
-        reason="dies-roster: warn_stale is not implemented over HTTP "
+        reason="nexus-onjvy: warn_stale is accepted and SILENTLY DROPPED over HTTP "
         "(HttpTaxonomyStore.detect_hubs hardcodes "
         "max_last_discover_at=None) and the fixture writes taxonomy_meta "
         "via raw conn — dies with the SQLite store at the RDR-155 P4b "
@@ -1181,7 +1181,7 @@ class TestHubs:
 
     @pytest.mark.skipif(
         _ENGINE_SUBSTRATE,
-        reason="dies-roster: warn_stale is not implemented over HTTP "
+        reason="nexus-onjvy: warn_stale is accepted and SILENTLY DROPPED over HTTP "
         "(HttpTaxonomyStore.detect_hubs hardcodes "
         "max_last_discover_at=None) and the fixture writes taxonomy_meta "
         "via raw conn — dies with the SQLite store at the RDR-155 P4b "

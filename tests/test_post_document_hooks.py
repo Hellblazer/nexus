@@ -45,9 +45,10 @@ from tests.conftest import engine_substrate_selected
 #: tests/db/test_http_telemetry_store integration).
 _RAW_HOOK_FAILURES_READ = pytest.mark.skipif(
     engine_substrate_selected(),
-    reason="dies-roster: asserts the persisted hook_failures row via a raw "
-    "SQLite conn; the engine exposes record/trim/import but no read "
-    "surface for hook_failures — dies at the RDR-155 P4b flip",
+    reason="nexus-onjvy: hook_failures is WRITE-ONLY on the engine — "
+    "TelemetryHandler exposes /hook_failures/record and /trim and no read "
+    "route at all. Not a retirement: the failure log that exists to "
+    "surface silent hook failures cannot be inspected in service mode",
 )
 
 
