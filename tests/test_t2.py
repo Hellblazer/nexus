@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-from nexus.db.storage_mode import StorageBackend, storage_backend_for
 from nexus.db.t2 import T2Database, _sanitize_fts5
 from nexus.db.t2.plan_library import PlanLibrary
 from tests._t2_fixture_ops import (
@@ -20,36 +19,32 @@ from tests._t2_fixture_ops import (
 )
 
 
-def _assert_fts_hits(hits: int, expected: int) -> None:
-    """Assert a memory-search hit count, encoding the nexus-22r1f parity gap.
-
-    Service-mode search diverges from FTS5 in three measured ways, all of
-    them user-visible defects rather than SQLite-shaped test assumptions:
-
-    - dotted titles: PostgreSQL's parser keeps ``auth-design.md`` whole as one
-      FILE token, so no word inside a ``.md`` title is findable; FTS5's
-      unicode61 tokenizer splits it into ``auth`` / ``design`` / ``md``
-    - accent folding: ``resume`` finds ``résumé`` under FTS5, not under
-      ``to_tsvector('english', ...)`` (needs ``unaccent``)
-    - prefix syntax: FTS5's trailing ``*`` operator is discarded as
-      punctuation by ``plainto_tsquery``
-
-    The first is reproduced against Hal's real, populated install — this is
-    live, not a test artifact. So these tests keep asserting the correct
-    user-facing intent and are NOT rewritten to accommodate the gap.
-
-    Rather than ``xfail``, the service arm asserts the known-broken value, so
-    the day nexus-22r1f lands this fails loudly and names its own cleanup
-    instead of silently going green with the workaround still in place.
-    """
-    if storage_backend_for("memory") is StorageBackend.SQLITE:
-        assert hits == expected
-        return
-    assert hits == 0, (
-        f"nexus-22r1f looks FIXED (got {hits} hits in service mode, expected "
-        f"the broken 0) — delete this helper and restore `assert hits == "
-        f"{expected}` at every call site"
-    )
+# nexus-22r1f RESOLVED — the ``_assert_fts_hits`` parity-gap helper that used
+# to live here is gone, and its call sites assert the real expected counts on
+# BOTH substrates again. It existed because service-mode memory search
+# diverged from the FTS5 baseline; the engine now matches, so the assertions
+# below are plain equality and any regression fails on the engine arm rather
+# than being absorbed by a helper.
+#
+# Two of the three recorded divergences were real and are fixed in the engine
+# (memory-002 + MemoryRepository.ftsQuery):
+#
+# - dotted titles: PostgreSQL's parser kept ``auth-design.md`` whole as one
+#   FILE token, so no word inside a ``.md`` title was findable. memory-002
+#   adds a separator-normalized title segment.
+# - accent folding: ``resume`` finds ``résumé`` under FTS5's unicode61 but not
+#   under ``to_tsvector('english', ...)``. memory-002 folds accents on the
+#   stored side and ftsQuery folds them on the query side.
+#
+# The third — FTS5's trailing ``*`` prefix operator — was a MISDIAGNOSIS, and
+# knowing why keeps it from being re-filed. The client's own sanitizer quotes
+# it (``*`` is in ``_sanitize_fts5``'s ``_FTS5_SPECIAL``), and a star inside
+# quotes is not FTS5's prefix operator, so ``auth*`` reaches SQLite as the
+# phrase ``"auth*"`` and matches the CONTENT column zero times there too. The
+# SQLite arm's apparent hit came entirely from the fixture's TITLE ``auth.md``
+# tokenizing to ``auth`` — the same title-token path memory-002 now gives the
+# service arm. So that row is asserted below with no ``*``-specific handling
+# anywhere: it is a title hit on both substrates, for the same reason.
 
 
 # nexus-9eaz family flake-skip helper: was retired at RDR-120 P3b
@@ -343,25 +338,34 @@ def test_search_by_tag_single_letter(db: T2Database) -> None:
 
 # ── FTS5 special characters ─────────────────────────────────────────────────
 
-# ``parity_gap`` marks the cases service mode gets wrong today (nexus-22r1f):
-# accent folding and the trailing-* prefix operator. Both are FTS5 features
-# with no ``plainto_tsquery`` equivalent, and both are user-visible.
-@pytest.mark.parametrize("title,content,query,expect_found,parity_gap", [
-    ("cn.md", "训练神经网络 🚀", None, True, False),   # unicode roundtrip (via get)
-    ("fr.md", "résumé cafetière naïve", "resume", True, True),
-    ("quotes.md", 'He said "hello world" to everyone', "hello", True, False),
-    ("auth.md", "authentication authorization tokens", "auth*", True, True),
+# All four rows now hold on BOTH substrates — the ``parity_gap`` branch that
+# used to split them is gone with nexus-22r1f (see the note at the top of this
+# module). Two of these earn a word about WHY they pass, because neither is
+# obvious and both were misread once:
+#
+# - ``resume`` -> ``résumé`` is genuine accent folding, matched in the CONTENT
+#   column with the title uninvolved. FTS5's unicode61 folds diacritics; the
+#   engine now folds them on both the stored and the query side (memory-002).
+# - ``auth*`` does NOT exercise prefix search on either substrate. The client
+#   sanitizer quotes the ``*``, and a star inside quotes is a phrase, not
+#   FTS5's prefix operator — against this CONTENT it matches zero times on
+#   SQLite too. What both arms actually match is the TITLE ``auth.md``
+#   tokenizing to ``auth``. Kept as-is deliberately: it is a real regression
+#   guard for title tokenization, just not for the feature its query implies.
+@pytest.mark.parametrize("title,content,query,expect_found", [
+    ("cn.md", "训练神经网络 🚀", None, True),   # unicode roundtrip (via get)
+    ("fr.md", "résumé cafetière naïve", "resume", True),
+    ("quotes.md", 'He said "hello world" to everyone', "hello", True),
+    ("auth.md", "authentication authorization tokens", "auth*", True),
 ])
 def test_fts_special_characters(
     db: T2Database, title: str, content: str, query: str | None,
-    expect_found: bool, parity_gap: bool,
+    expect_found: bool,
 ) -> None:
     db.put(project="proj", title=title, content=content)
     if query is None:
         entry = db.get(project="proj", title=title)
         assert entry is not None and entry["content"] == content
-    elif parity_gap:
-        _assert_fts_hits(len(db.search(query)), 1)
     else:
         assert (len(db.search(query)) >= 1) == expect_found
 
@@ -439,16 +443,15 @@ def test_search_finds_by_title(
 ) -> None:
     db.put(project="proj", title=title, content=content)
     results = db.search(query, project=project_filter)
-    _assert_fts_hits(len(results), expect_count)
+    assert len(results) == expect_count
 
 
 def test_search_title_with_project_filter(db: T2Database) -> None:
     db.put(project="proj_a", title="auth-design.md", content="generic text")
     db.put(project="proj_b", title="auth-notes.md", content="generic text")
     results = db.search("auth", project="proj_a")
-    _assert_fts_hits(len(results), 1)
-    if results:
-        assert results[0]["project"] == "proj_a"
+    assert len(results) == 1
+    assert results[0]["project"] == "proj_a"
 
 
 def test_search_title_update_triggers_reindex(db: T2Database) -> None:
@@ -508,9 +511,8 @@ def test_fts_migration_is_idempotent(tmp_path: Path) -> None:
 
     with T2Database(db_path) as db:
         results = db.search("existing-entry")
-        _assert_fts_hits(len(results), 1)
-        if results:
-            assert results[0]["title"] == "existing-entry.md"
+        assert len(results) == 1
+        assert results[0]["title"] == "existing-entry.md"
 
 
 # ── T2 access tracking (RDR-057 P2-2a, nexus-b4x0) ────────────────────────

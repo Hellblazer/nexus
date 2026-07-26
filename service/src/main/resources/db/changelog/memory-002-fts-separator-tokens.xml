@@ -2,15 +2,18 @@
 <!--
     nexus-22r1f (P0, reproduced against the DEPLOYED cloud engine 0.1.56).
 
-    nexus.memory.fts_vector tokenized titles as SINGLE opaque lexemes:
-    PostgreSQL's text-search parser classifies 'auth-design.md' as a FILE
-    token and keeps it whole, whereas SQLite FTS5's unicode61 tokenizer
-    splits on every non-alphanumeric and emits 'auth', 'design', 'md'.
-    plainto_tsquery('english','auth') therefore had nothing to match, and a
-    title was findable in service mode ONLY by its exact full string, or when
-    it contained no separator at all.
+    TWO measured divergences between service-mode memory search and the SQLite
+    FTS5 baseline it replaced, both rooted in the same place — PostgreSQL's
+    text-search parser versus FTS5's unicode61 tokenizer. Both are fixed here,
+    in ONE regenerated column, because each fix rewrites the same generated
+    column and two changesets would rewrite the table twice.
 
-    Measured, same store method, same inputs (bead table):
+    DIVERGENCE 1 — SEPARATOR TOKENS. PostgreSQL classifies 'auth-design.md' as
+    a FILE token and keeps it WHOLE, whereas FTS5 splits on every
+    non-alphanumeric and emits 'auth', 'design', 'md'. plainto_tsquery
+    ('english','auth') therefore had nothing to match, and a title was
+    findable in service mode ONLY by its exact full string, or when it
+    contained no separator at all.
 
         title                       query          sqlite  service
         RDR-025-implementation.md   RDR-025             1        0
@@ -26,26 +29,111 @@
     memory_search('nonrelocatable') returned nothing while memory_search
     ('dyld') returned the very entry whose TITLE contains 'nonrelocatable'.
 
+    DIVERGENCE 2 — DIACRITIC FOLDING. FTS5's unicode61 folds diacritics, so
+    'resume' finds 'résumé'; to_tsvector('english', ...) does not. Measured on
+    the content column with no title involvement, so unlike the rows above
+    this one is not a tokenization artifact:
+
+        content                     query          sqlite  service
+        résumé cafetière naïve      resume              1        0
+
     THIS IS THE SECOND FALSIFICATION OF THE SAME PARITY CLAIM. catalog-015
-    fixed the identical bug on catalog_documents in 2026-07-13 (nexus-8gue1,
-    GH #1397) and its comment already recorded that "the catalog-001 'PG >=
-    FTS5 superset' claim was false for filenames". memory-001 makes the same
-    superset claim (docs/rdr/rdr-152-fts-parity-contract.md Store 1) and it is
-    false for exactly the same reason. This changeset is deliberately a
-    line-for-line application of the catalog-015 shape so the two tables stay
-    reasoned about together.
+    fixed the identical separator bug on catalog_documents in 2026-07-13
+    (nexus-8gue1, GH #1397) and its comment already recorded that "the
+    catalog-001 'PG >= FTS5 superset' claim was false for filenames".
+    memory-001 makes the same superset claim (docs/rdr/rdr-152-fts-parity-
+    contract.md Store 1) and it is false for exactly the same reason, plus
+    diacritics. The separator segment below is deliberately a line-for-line
+    application of the catalog-015 shape so the two tables stay reasoned about
+    together.
 
-    Fix: a fourth OR'd segment that normalizes the separator characters
-    / . - _ to spaces before tokenizing, so 'auth-design.md' also yields
-    'auth','design','md'. Weight 'A' matches the title segment it augments —
-    a title-fragment hit should rank like a title hit, not below content.
-    Existing segments are untouched, so every previously-matching query still
-    matches (superset preserved, never narrowed).
+    NOT A DIVERGENCE, despite what the bead first recorded: the trailing-*
+    prefix operator. The CLIENT's own sanitizer quotes it ('*' is in
+    _sanitize_fts5's _FTS5_SPECIAL), and a star inside quotes is not FTS5's
+    prefix operator — 'auth*' reaches SQLite as the phrase "auth*" and matches
+    the CONTENT column 0 times there too. The SQLite arm's apparent hit came
+    entirely from the fixture's TITLE 'auth.md' tokenizing to 'auth'. The
+    separator segment below reproduces that title hit on the service side, so
+    that parity row closes here with no query-side parser and no change to
+    plainto_tsquery's injection safety.
 
-    SCOPE, deliberately narrow: TITLE only. content is prose and already
-    tokenizes correctly; tags already use the 'simple' config. The measured
-    defect is the title column, and widening the STORED expression beyond the
-    evidence would grow the index for no demonstrated gain.
+    ── WHY translate() AND NOT THE unaccent EXTENSION ────────────────────────
+
+    unaccent is the obvious reach for diacritic folding and it is the WRONG
+    tool here, on two independently sufficient grounds. Both were measured
+    AFTER the unaccent version had already been written and passed the full
+    Java suite — the testcontainer image (pgvector/pgvector:pg17) carries the
+    full contrib set, so nothing in mvn could see either problem.
+
+    1. IT BRICKS EVERY EXISTING INSTALL. The shipped PG bundle is built by
+       scripts/build_pg_bundle.sh, which installs exactly contrib/pg_trgm.
+       Checked against the actual published artifacts:
+
+           engine-service-v0.1.52  pg_trgm.control plpgsql.control vector.control
+           engine-service-v0.1.56  pg_trgm.control plpgsql.control vector.control
+
+       So CREATE EXTENSION unaccent aborts Liquibase at engine boot and the
+       service never binds. Caught by the pytest engine arm, which boots the
+       real bundle rather than a container image:
+           "Failed SQL: (0) CREATE EXTENSION IF NOT EXISTS unaccent ...
+            must first be installed on the system where PostgreSQL is running"
+       Adding contrib/unaccent to the bundle is possible, but it couples this
+       changeset to a rebuilt-and-reseeded PG bundle on every platform and
+       makes any ordering slip an engine that will not start.
+
+    2. IT OVERSHOOTS THE PARITY TARGET. FTS5's default remove_diacritics=1
+       folds the Latin-1 range ONLY. Measured against the FTS5 baseline this
+       column is supposed to match:
+
+           query      finds        what it is
+           resume     résumé    ✓  Latin-1
+           cafetiere  cafetière ✓  Latin-1
+           naive      naïve     ✓  Latin-1
+           angstrom   Ångström  ✓  Latin-1
+           strasse    Straße    ✗  no ß expansion
+           lodz       Łódź      ✗  Latin Extended-A
+           zolw       żółw      ✗  Latin Extended-A
+           ellada     Ελλάδα    ✗  Greek
+           privet     привет    ✗  Cyrillic
+
+       unaccent folds all nine. Using it would make service BROADER than the
+       baseline in a parity contract whose entire purpose is to make the two
+       agree — trading a missing-results divergence for an extra-results one.
+
+    fold_diacritics below is a 1:1 translate() over exactly the Latin-1
+    supplement letters, which reproduces the measured FTS5 column above
+    row-for-row: Latin-1 folded, ß / Latin-Ext-A / Greek / Cyrillic untouched.
+    It is genuinely IMMUTABLE (translate is), so unlike an unaccent wrapper it
+    needs no deliberate misstatement to the planner — unaccent is only STABLE
+    (BOTH overloads in PG17, including the two-arg regdictionary form widely
+    documented as immutable), and a generated column referencing it is
+    rejected outright with "generation expression is not immutable".
+
+    Deliberately NOT handling the expanding folds (ß->ss, æ->ae): translate is
+    1:1 by construction, and FTS5 does not expand them either, so matching its
+    behaviour and matching translate's capability happen to coincide.
+
+    ── DESIGN: REPLACE, DO NOT ADD ───────────────────────────────────────────
+
+    Diacritic folding wraps the EXISTING segments rather than adding a fifth.
+    Replace-not-add is index-size-neutral, and it cannot narrow anything: the
+    fold is a deterministic mapping applied identically to the stored side and
+    the query side (MemoryRepository.ftsQuery), so any query that matched
+    before still matches. An added segment would instead have doubled the
+    stored lexemes for title and content.
+
+    The separator segment IS additive, because it is a genuinely different
+    projection of the same text — weight 'A' matches the title segment it
+    augments, so a title-fragment hit ranks like a title hit, not below
+    content. Existing segments are untouched by it (superset preserved).
+
+    SCOPE of the separator segment, deliberately narrow: TITLE only. content
+    is prose and already tokenizes correctly; tags already use 'simple'. The
+    measured defect is the title column, and widening the STORED expression
+    beyond the evidence would grow the index for no demonstrated gain.
+    Folding, by contrast, is measured on CONTENT, so it covers every segment.
+
+    ── MECHANICS ─────────────────────────────────────────────────────────────
 
     PG cannot ALTER a generated column's expression: DROP + re-ADD (table
     rewrite) + recreate the GIN index. ACCESS EXCLUSIVE for the rewrite is
@@ -54,11 +142,6 @@
     changeset in one transaction, so an interrupted rewrite rolls back whole,
     never a dropped-column limbo. DDL only, no row DML, so the FORCE-RLS
     silent-no-op class (nexus-1wjmq) does not apply.
-
-    DOES NOT FIX the other two divergences recorded on nexus-22r1f — accent
-    folding (needs the unaccent extension on BOTH sides) and prefix-query
-    syntax ('auth*', query-side only). Those are separate changes with
-    separate risks; see the bead.
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
@@ -67,17 +150,37 @@
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
     <changeSet id="memory-002-0" author="nexus-22r1f">
-        <comment>fts_vector: add separator-normalized title segment so dotted titles (auth-design.md) are findable by any word inside them (auth)</comment>
+        <comment>fold_diacritics: Latin-1 folding matching FTS5 unicode61 remove_diacritics=1, as pure IMMUTABLE translate() so no contrib extension is needed at boot</comment>
+        <sql splitStatements="true">
+CREATE OR REPLACE FUNCTION nexus.fold_diacritics(text) RETURNS text
+    LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS
+    $$ SELECT translate($1,
+         'ÀÁÂÃÄÅÇÈÉÊËÌÍÎÏÑÒÓÔÕÖØÙÚÛÜÝàáâãäåçèéêëìíîïñòóôõöøùúûüýÿ',
+         'AAAAAACEEEEIIIINOOOOOOUUUUYaaaaaaceeeeiiiinoooooouuuuyy') $$;
+        </sql>
+        <rollback>
+            <sql splitStatements="true">
+DROP FUNCTION IF EXISTS nexus.fold_diacritics(text);
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="memory-002-1" author="nexus-22r1f">
+        <comment>fts_vector: separator-normalized title segment (auth-design.md findable by auth) + diacritic folding on every segment (resume finds résumé)</comment>
         <sql splitStatements="true">
 DROP INDEX IF EXISTS nexus.idx_memory_fts;
 ALTER TABLE nexus.memory DROP COLUMN fts_vector;
 ALTER TABLE nexus.memory
     ADD COLUMN fts_vector TSVECTOR GENERATED ALWAYS AS (
-        setweight(to_tsvector('english', coalesce(title,   '')), 'A') ||
-        setweight(to_tsvector('english', coalesce(content, '')), 'B') ||
-        setweight(to_tsvector('simple',  coalesce(tags,    '')), 'C') ||
+        setweight(to_tsvector('english',
+            nexus.fold_diacritics(coalesce(title,   ''))), 'A') ||
+        setweight(to_tsvector('english',
+            nexus.fold_diacritics(coalesce(content, ''))), 'B') ||
         setweight(to_tsvector('simple',
-            translate(coalesce(title, ''), '/.-_', '    ')), 'A')
+            nexus.fold_diacritics(coalesce(tags,    ''))), 'C') ||
+        setweight(to_tsvector('simple',
+            nexus.fold_diacritics(
+                translate(coalesce(title, ''), '/.-_', '    '))), 'A')
     ) STORED;
 CREATE INDEX idx_memory_fts ON nexus.memory USING GIN (fts_vector);
         </sql>

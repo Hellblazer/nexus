@@ -219,9 +219,21 @@ public final class MemoryRepository {
      * a no-op and the leg identical to the plain 'simple' one, so adding it
      * unconditionally would cost a redundant tsquery on every search.
      *
+     * <p>DIACRITIC FOLDING. Every leg runs the query through
+     * {@code nexus.fold_diacritics} because memory-002 runs the STORED column
+     * through it too. This is the load-bearing half of the replace-not-add
+     * decision: the stored lexemes are now folded, so a query leg that skipped
+     * the mapping would stop matching accented input that matched before.
+     * Applying the identical deterministic mapping to both sides is what makes
+     * the change incapable of narrowing anything — {@code résumé} and
+     * {@code resume} both reduce to {@code resum} on both sides. Diverging the
+     * two sides is the whole failure mode, and it is a SILENT one: the
+     * stored-side-only version of this change still passed every test that did
+     * not query with an accent.
+     *
      * <p>Injection-safety is preserved: the query is still bound via
-     * {@code {0}} and never concatenated — {@code translate()} wraps the
-     * BIND PARAMETER, not the literal.
+     * {@code {0}} and never concatenated — {@code translate()} and
+     * {@code fold_diacritics()} wrap the BIND PARAMETER, not the literal.
      *
      * <p>WHERE and ORDER BY must use the SAME expression; ranking by a
      * narrower tsquery than the one that matched puts translated-only hits at
@@ -230,10 +242,13 @@ public final class MemoryRepository {
     private static String ftsQuery(String query) {
         boolean hasSeparator = query != null && query.chars()
             .anyMatch(c -> c == '/' || c == '.' || c == '-' || c == '_');
+        String q = "nexus.fold_diacritics({0})";
+        String base = "(plainto_tsquery('english', " + q + ") "
+                    + "|| plainto_tsquery('simple', " + q + ")";
         return hasSeparator
-            ? "(plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0}) "
-              + "|| plainto_tsquery('simple', translate({0}, '/.-_', '    ')))"
-            : "(plainto_tsquery('english', {0}) || plainto_tsquery('simple', {0}))";
+            ? base + " || plainto_tsquery('simple', "
+                   + "nexus.fold_diacritics(translate({0}, '/.-_', '    '))))"
+            : base + ")";
     }
 
     /**

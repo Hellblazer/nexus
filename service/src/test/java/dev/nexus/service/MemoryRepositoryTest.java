@@ -399,4 +399,96 @@ class MemoryRepositoryTest {
             .as("searchByTag must resolve a dotted title by an inside word")
             .extracting(r -> r.getTitle()).contains("auth-design.md");
     }
+
+    /**
+     * nexus-22r1f: the diacritic-folding parity row.
+     *
+     * <p>FTS5's unicode61 tokenizer folds diacritics by default, so
+     * {@code resume} finds {@code résumé}; {@code to_tsvector('english', ...)}
+     * does not. Measured on the CONTENT column with no title involvement, so
+     * unlike the dotted-title rows this one is not a tokenization artifact.
+     *
+     * <p>memory-002 folds on the STORED side and {@link #ftsQuery} folds on
+     * the QUERY side. Both halves are required and neither is sufficient —
+     * proven by mutation, and the two halves fail DIFFERENT assertions below:
+     * dropping the stored fold breaks the unaccented query (the original
+     * defect), dropping the query fold breaks the accented one.
+     *
+     * <p>{@code résumé} and {@code zzznotpresent} are the NON-VACUITY half.
+     * The former passed BEFORE the fix, so it proves the change did not merely
+     * trade accented matching for unaccented matching; the latter proves the
+     * OR'd tsquery has not degenerated into something that matches everything.
+     */
+    @Test
+    void search_accentedContent_isFindableWithoutAccents() {
+        String proj = "fts-accent-" + System.nanoTime();
+        repo.upsert(TENANT_A, proj, "fr.md",
+                "résumé cafetière naïve", "t", null, null, 30);
+
+        // --- the row that was BROKEN (service 0, sqlite 1) ---
+        assertThat(repo.search(TENANT_A, "resume", proj))
+            .as("an unaccented query must find accented content (was: 0 hits)")
+            .extracting(r -> r.getTitle()).contains("fr.md");
+        assertThat(repo.search(TENANT_A, "cafetiere", proj))
+            .as("folding is not special-cased to one word")
+            .extracting(r -> r.getTitle()).contains("fr.md");
+
+        // --- non-vacuity: nothing was traded away, nothing matches everything ---
+        assertThat(repo.search(TENANT_A, "résumé", proj))
+            .as("the ACCENTED query still matches — folding both sides is a "
+                + "superset, not a swap")
+            .extracting(r -> r.getTitle()).contains("fr.md");
+        assertThat(repo.search(TENANT_A, "zzznotpresent", proj))
+            .as("an absent word still misses — the OR'd tsquery has not "
+                + "degenerated into a match-all")
+            .isEmpty();
+    }
+
+    /**
+     * nexus-22r1f: the fold stops where FTS5's fold stops.
+     *
+     * <p>This pins a DELIBERATE design boundary, not an implementation detail.
+     * {@code fold_diacritics} is a 1:1 translate over the Latin-1 supplement
+     * because that is precisely what FTS5's default
+     * {@code remove_diacritics=1} covers — measured against the SQLite
+     * baseline this column exists to match:
+     *
+     * <pre>
+     *   angstrom -> Ångström  HIT   (Latin-1)
+     *   strasse  -> Straße    MISS  (no ß expansion)
+     *   lodz     -> Łódź      MISS  (Latin Extended-A)
+     *   privet   -> привет    MISS  (Cyrillic)
+     * </pre>
+     *
+     * <p>The obvious alternative, the {@code unaccent} extension, folds ALL of
+     * those. Adopting it would make service BROADER than the baseline in a
+     * contract whose entire purpose is to make the two agree — and it is
+     * absent from every shipped PG bundle, so it would abort Liquibase at
+     * boot. Without this test the next person "improves" the fold to unaccent,
+     * both parity divergences silently invert from missing-results to
+     * extra-results, and nothing goes red.
+     */
+    @Test
+    void search_diacriticFold_stopsWhereFts5Stops() {
+        String proj = "fts-fold-edge-" + System.nanoTime();
+        repo.upsert(TENANT_A, proj, "wide.md",
+                "Ångström Straße Łódź привет", "t", null, null, 30);
+
+        assertThat(repo.search(TENANT_A, "angstrom", proj))
+            .as("Latin-1 IS folded — the range FTS5 covers")
+            .extracting(r -> r.getTitle()).contains("wide.md");
+
+        assertThat(repo.search(TENANT_A, "strasse", proj))
+            .as("ß is NOT expanded to ss — FTS5 does not either, and translate "
+                + "is 1:1 by construction")
+            .isEmpty();
+        assertThat(repo.search(TENANT_A, "lodz", proj))
+            .as("Latin Extended-A is NOT folded — unaccent would fold it and "
+                + "overshoot the FTS5 baseline")
+            .isEmpty();
+        assertThat(repo.search(TENANT_A, "privet", proj))
+            .as("Cyrillic is NOT transliterated — likewise unaccent-only "
+                + "behaviour the baseline does not have")
+            .isEmpty();
+    }
 }
