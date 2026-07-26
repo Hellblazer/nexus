@@ -37,7 +37,7 @@ source tests/e2e/lib/expectations.sh   # plugin copy: conexus/hooks/scripts/expe
    (write-before-dispatch is load-bearing; a fast teammate can stop before a post-dispatch write lands)
 2. Give every background teammate a UNIQUE name and put the completion protocol (SendMessage report: outcome, artifacts, blockers) in its dispatch prompt.
 3. At retro / session end:
-   `expectations_census <session_id>` — scripted counts, never hand-count (nexus-hybv1); `expectations_undeclared <session_id>` — any UNDECLARED row files a mechanization bead (Gap-1 escalation).
+   `expectations_census <session_id>` — scripted counts, never hand-count (nexus-hybv1); `expectations_undeclared <session_id>` — any UNDECLARED row files a mechanization bead (Gap-1 escalation). CHECK ITS EXIT CODE: exit 1 + `BLINDSPOT` means it recognised none of the dispatches it saw, which is a false-clean, not a pass (nexus-mk3tw).
 
 `BLOCKED` followed by `REPORTED` in the ledger means the stop-guard nudged the report out (guard success); a bare `BLOCKED` is genuinely unresolved.
 

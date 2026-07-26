@@ -200,6 +200,37 @@ expectations_already_blocked() {
 # START rows lack the morphology, and finding 4 already proves sync
 # dispatches cannot idle-without-report. Missing/unreadable file => no
 # output, exit 0 (fail-open, like every consult surface here).
+#
+# BLIND-SPOT DISCLOSURE (bead nexus-mk3tw): a "prompt-named" dispatch —
+# a unique name embedded in the Agent-tool PROMPT text rather than in an
+# actual name= field the framework threads into the hook payload — never
+# acquires the "a<name>-<hash>" morphology this audit keys on. Its START
+# row arrives with agent_type == the bare subagent_type and agent_id ==
+# "a<hash>" — structurally IDENTICAL to an ordinary anonymous sync
+# dispatch. There is no field in the payload that tells these two apart
+# (scenario 27); the guard cannot recover the orchestrator's intent from
+# data that was never sent. Silently reporting "no UNDECLARED lines" in
+# that case (the pre-mk3tw behavior) reads as "all clear" when it is
+# really "recognised nothing" — confirmed reproduced 2026-07-25,
+# 4-then-6 named background dispatches / 0 EXPECT rows / undeclared=0.
+#
+# The fix does not (cannot) recover per-dispatch detection. It makes the
+# aggregate honest: every call now ALSO prints one
+#   SUMMARY\tchecked=<N> recognized=<M> unrecognized=<N-M> undeclared=<K>
+# line, where checked = every unique START'd agent_id regardless of
+# morphology, recognized = the subset with named morphology (the only
+# ones this audit can classify at all), unrecognized = the rest (could
+# be ordinary sync dispatches OR blind-spotted prompt-named background
+# ones — indistinguishable from here, by construction).
+#
+# HARD FAILURE (never a silent pass): when checked > 0 and recognized ==
+# 0 — the guard saw dispatches but its morphology filter matched NONE of
+# them — that is the exact false-clean shape from the bead. The function
+# still prints every line (UNDECLARED rows if any, plus SUMMARY) but
+# returns exit 1 instead of 0, and prints a BLINDSPOT line calling it
+# out by name. A caller that only greps for "UNDECLARED" and ignores the
+# exit code repeats the original mistake; the exit code is the part that
+# cannot be misread as silence.
 expectations_undeclared() {
     local sid="$1"
     [[ -n "$sid" ]] || return 0
@@ -207,11 +238,27 @@ expectations_undeclared() {
     file="$(expectations_file "$sid" 2>/dev/null)" || return 0
     [[ -r "$file" ]] || return 0
     awk -F'\t' '
-        $2 == "START" && index($3, "a" $4 "-") == 1 && length($3) > length($4) + 2 { s[$3] = $4 }
+        $2 == "START" {
+            if (!($3 in allstart)) { allstart[$3] = 1; checked++ }
+        }
+        $2 == "START" && index($3, "a" $4 "-") == 1 && length($3) > length($4) + 2 {
+            if (!($3 in namedstart)) { namedstart[$3] = 1; recognized++ }
+            s[$3] = $4
+        }
         $2 == "EXPECT" { e[$3] = 1 }
-        END { for (id in s) if (!(s[id] in e)) print "UNDECLARED\t" id "\t" s[id] }
+        END {
+            undeclared = 0
+            for (id in s) if (!(s[id] in e)) { print "UNDECLARED\t" id "\t" s[id]; undeclared++ }
+            unrecognized = checked - recognized
+            printf "SUMMARY\tchecked=%d recognized=%d unrecognized=%d undeclared=%d\n", \
+                checked, recognized, unrecognized, undeclared
+            if (checked > 0 && recognized == 0) {
+                print "BLINDSPOT\tguard recognised 0 of " checked " dispatched agent(s) by name-morphology - undeclared=" undeclared " here is NOT evidence of compliance, it means nothing was checkable"
+                exit 1
+            }
+        }
     ' "$file" 2>/dev/null
-    return 0
+    return $?
 }
 
 # expectations_census <session_id> — the scripted census (nexus-hybv1: the
@@ -228,10 +275,29 @@ expectations_undeclared() {
 #   ROWS expect=N start=N reported=N blocked=N wouldblock=N
 #   CLASSIFIED reported=N blocked_resolved=N blocked_unresolved=N \
 #       wouldblock=N no_terminal=N undeclared=N expected_no_start=N
+#   BLINDSPOT checked=N recognized=M unrecognized=N-M
 # Exact-duplicate lines (the nexus-3h0u6 doubling, legacy files) are
 # dropped; legitimate repeats (same verb, different timestamp — e.g. one
 # REPORTED per round) are kept in ROWS counts. Missing/unreadable file =>
 # no output, exit 0 (fail-open, like every consult surface here).
+#
+# BLIND-SPOT DISCLOSURE + HARD FAILURE (bead nexus-mk3tw — same defect
+# class as expectations_undeclared above, see its header for the full
+# mechanism writeup: a "prompt-named" background dispatch never acquires
+# the "a<name>-<hash>" morphology this census's per-agent view keys on,
+# so it is structurally indistinguishable from an anonymous sync
+# dispatch. Reproduced 2026-07-25: expect=0 start=6, and
+# "undeclared=0"/"no_terminal=0" read as clean while the census had in
+# fact classified NONE of the 6 by name — a guard reporting undeclared=0
+# when it recognised 0 of N dispatches is worse than reporting nothing.
+#
+# checked = every unique agent_id that ever got a START row, regardless
+# of morphology. recognized = the subset with named morphology (the only
+# ones the AGENT/CLASSIFIED lines above can say anything about at all).
+# When checked > 0 and recognized == 0 this function still prints every
+# line it would normally print, but ALSO exits 1 instead of 0 — the exit
+# code is the part a caller cannot mistake for a clean run even if it
+# only skims stdout.
 expectations_census() {
     local sid="$1"
     [[ -n "$sid" ]] || return 0
@@ -254,8 +320,12 @@ expectations_census() {
         seen[$0]++ { next }                     # 3h0u6 exact-duplicate rows
         { rows[$2]++ }
         $2 == "EXPECT"  { expect[$3] = 1 }
+        $2 == "START" {
+            if (!($3 in allstart)) { allstart[$3] = 1; checked++ }
+        }
         $2 == "START" && index($3, "a" $4 "-") == 1 && length($3) > length($4) + 2 {
             if (!($3 in listed)) { order[++n] = $3; listed[$3] = 1 }
+            if (!($3 in namedstart)) { namedstart[$3] = 1; recognized++ }
             name[$3] = $4
         }
         $2 == "START"   { started[$4] = 1 }
@@ -303,9 +373,12 @@ expectations_census() {
                 cls["REPORTED"], cls["BLOCKED_RESOLVED"], res_immediate, res_later, \
                 cls["BLOCKED_UNRESOLVED"], \
                 cls["WOULDBLOCK"], cls["NO_TERMINAL"], undeclared, nostart, ens
+            unrecognized = checked - recognized
+            printf "BLINDSPOT\tchecked=%d recognized=%d unrecognized=%d\n", checked, recognized, unrecognized
+            if (checked > 0 && recognized == 0) exit 1
         }
     ' "$file" 2>/dev/null
-    return 0
+    return $?
 }
 
 # expectations_last_terminal <session_id> <agent_id> — echo the LAST
