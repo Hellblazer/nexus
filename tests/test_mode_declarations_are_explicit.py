@@ -125,8 +125,9 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 73
 # tests — "string-literal-as-name"; the voyage token is one segment of the
 # conformant RDR-103 name passed as the rename TARGET, and both tests patch
 # HttpVectorClient's network boundary so no embedder is constructed. Landed
-# red on develop (the tripwire only fires on a whole-session collection, so
-# the authoring run never saw it). Rationale in conftest.py beside the entries.
+# red on develop: like the RDR-185 P4 pair above, the authoring run used a
+# path-scoped selection, and this lint only fires on a whole-session
+# collection. Rationale in conftest.py beside the entries.
 _MODE_LINT_EXCLUDE_NODEIDS_CEILING = 58
 
 
