@@ -4,11 +4,16 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+from tests._catalog_fixture_ops import active_reader
+from tests.conftest import engine_substrate_selected
 from click.testing import CliRunner
 
 from nexus.cli import main
 from nexus.db.http_vector_client import HttpVectorClient
 from tests.conftest import make_vector_test_client
+
+_ENGINE_SUBSTRATE = engine_substrate_selected()
 
 
 @pytest.fixture
@@ -122,6 +127,14 @@ def test_info_shows_unknown_when_no_indexed_at(runner, env_creds, mock_db) -> No
 
 
 @pytest.mark.parametrize("flag", ["--yes", "--confirm"])
+@pytest.mark.skipif(
+    _ENGINE_SUBSTRATE,
+    reason="dies-roster: RDR-164 P2 routes the whole collection delete through "
+           "ONE atomic engine transaction (make_catalog_reader().delete_collection), "
+           "so the mocked/local T3 handle this asserts on is never called. Same "
+           "mechanism and same precedent as test_nexus_lub_collection_delete_cascade"
+           ".py::TestCollectionDeleteCommandCascades (nexus-aqbrk).",
+)
 def test_delete_with_confirmation_flag(runner, env_creds, mock_db, flag) -> None:
     result = _invoke(runner, mock_db, ["delete", "old", flag])
     assert result.exit_code == 0
@@ -872,13 +885,14 @@ def test_corpus_knowledge_rewrites_docs_collection(tmp_path, monkeypatch) -> Non
         "RDR-137: --corpus knowledge must not write the legacy registry"
     )
 
-    cat = Catalog(cat_dir, cat_dir / ".catalog.db")
-    rows = cat._db.execute(
-        "SELECT name FROM collections WHERE name LIKE 'knowledge__%'"
-    ).fetchall()
-    assert any(r[0].startswith("knowledge__") for r in rows), (
+    # nexus-aqbrk: read through the ACTIVE catalog — index_repo_cmd registers
+    # via the factory, so the raw local .catalog.db was empty on the engine
+    # arm. list_collections() is the public equivalent of the raw
+    # "SELECT name FROM collections" and is parity-registered.
+    names = [c["name"] for c in active_reader().list_collections()]
+    assert any(n.startswith("knowledge__") for n in names), (
         f"--corpus knowledge did not register a knowledge__ collection "
-        f"on the catalog; saw: {[r[0] for r in rows]}"
+        f"on the catalog; saw: {names}"
     )
     # Output mentions the routing decision.
     assert "knowledge__" in result.output

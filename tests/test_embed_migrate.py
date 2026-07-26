@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import pytest
 
+from tests.conftest import engine_substrate_selected
+
 from nexus.db.embed_migrate import (
     StaleCollection,
     detect_stale_local_collections,
@@ -31,6 +33,8 @@ from nexus.db.embed_migrate import (
 )
 from nexus.db.t3 import T3Database
 from tests.conftest import make_vector_test_client
+
+_ENGINE_SUBSTRATE = engine_substrate_selected()
 
 _DIM_384 = 384
 _DIM_768 = 768
@@ -189,6 +193,15 @@ class TestMigrateSafe:
         assert t3.collection_info(old)["count"] == 2  # old untouched
         assert not t3.collection_exists(target)  # nothing created
 
+    @pytest.mark.skipif(
+        _ENGINE_SUBSTRATE,
+        reason="dies-roster: migrate_collection_safe calls purge_collection_cascade, "
+               "which under RDR-164 P2 deletes via ONE atomic engine transaction "
+               "against the real service — leaving this test's local in-memory T3 "
+               "collection untouched, so `assert not collection_exists(old)` cannot "
+               "hold. Same mechanism as test_collection_cmd / test_store_cmd "
+               "(nexus-aqbrk).",
+    )
     def test_success_reindexes_then_deletes_old(self, t3: T3Database) -> None:
         old = "docs__proj__minilm-l6-v2-384__v1"
         target = "docs__proj__bge-base-en-v15-768__v1"
@@ -315,6 +328,15 @@ class TestMigrateSafe:
         assert t3.collection_exists(old)  # notes preserved
         assert t3.collection_info(old)["count"] == 2
 
+    @pytest.mark.skipif(
+        _ENGINE_SUBSTRATE,
+        reason="dies-roster: migrate_collection_safe calls purge_collection_cascade, "
+               "which under RDR-164 P2 deletes via ONE atomic engine transaction "
+               "against the real service — leaving this test's local in-memory T3 "
+               "collection untouched, so `assert not collection_exists(old)` cannot "
+               "hold. Same mechanism as test_collection_cmd / test_store_cmd "
+               "(nexus-aqbrk).",
+    )
     def test_mixed_sourceless_migrates_with_explicit_optin(self, t3: T3Database) -> None:
         """With allow_sourceless_loss=True the mixed collection migrates (the
         caller has accepted the documented note loss)."""
