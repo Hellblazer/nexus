@@ -27,7 +27,13 @@ from typing import Any
 
 from nexus.daemon.catalog_write_shim import CATALOG_WRITE_OPS
 
-__all__ = ["ActiveCatalog", "active_reader", "count_documents", "only_document"]
+__all__ = [
+    "ActiveCatalog",
+    "active_reader",
+    "count_documents",
+    "only_document",
+    "unroutable_write_target",
+]
 
 
 def active_reader() -> Any:
@@ -65,6 +71,38 @@ def only_document() -> Any:
     docs = list(active_reader().all_documents())
     assert len(docs) == 1, f"expected exactly one document, got {len(docs)}"
     return docs[0]
+
+
+def unroutable_write_target() -> Any:
+    """A target for a catalog WRITE that is not on ``CATALOG_WRITE_OPS``.
+
+    ``set_alias`` is the known case (nexus-iltyk): it mutates, but it is not
+    whitelisted, so ``CatalogWriter.__getattr__`` will not forward it on the
+    SQLite arm — while in service mode ``_SharedServiceCatalogHandle`` proxies
+    every attribute and therefore performs the write through what the factory
+    calls a READER.
+
+    So there is no single object that can do it on both substrates:
+      - service: the shared handle, which proxies it (and is what production
+        would end up using today, whether or not that is intended)
+      - sqlite:  a directly-constructed WRITABLE ``Catalog``, since the
+                 factory reader is ``mode=ro``
+
+    This exists so a test can perform such a write on either substrate without
+    the facade pretending the typed factories support it. It is deliberately
+    ugly and deliberately named: if nexus-iltyk is resolved by whitelisting
+    the op, every caller of this should collapse back to ``ActiveCatalog``.
+    """
+    from nexus.db.storage_mode import StorageBackend, storage_backend_for
+
+    if storage_backend_for("catalog") is not StorageBackend.SQLITE:
+        return active_reader()
+
+    from nexus.catalog.catalog import Catalog
+    from nexus.config import catalog_path
+
+    path = catalog_path()
+    return Catalog(path, path / ".catalog.db")
 
 
 class ActiveCatalog:
