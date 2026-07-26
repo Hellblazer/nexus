@@ -123,6 +123,7 @@ CI enforces parity. Missing any one of these fails the marketplace-version-match
 - `mcpb/manifest.json`: `version`
 - `.claude-plugin/marketplace.json`: **both `version` fields** (one for conexus, one for sn)
 - `.claude-plugin/marketplace.json`: **both `plugins[].source.ref` fields** — must be `"vX.Y.Z"` (the tag form). Easy to forget. This is what decouples installed users from main HEAD: plugin installs follow the pinned tag, not whatever main currently is. **CRITICAL: nexus-mkj6u 2026-05-23**
+- `conexus/PENDING_RELEASE.md`: **empty the pending list.** Advancing `source.ref` is exactly what makes those plugin changes live, so the ledger's entries stop being pending at this step. `tests/test_plugin_release_drift_ledger.py` FAILS on a stale entry, so a forgotten clear blocks the release rather than rotting silently. The list you are deleting is also the honest "what becomes active in this release" note for the CHANGELOG (nexus-mk3tw / the 2026-07-25 inert-guard incident: three guards were merged, closed as "mechanized", and protecting nothing because the pin had not moved).
 - `conexus/.claude-plugin/plugin.json`: `version`
 - `sn/.claude-plugin/plugin.json`: `version`
 
