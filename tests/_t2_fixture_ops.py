@@ -42,6 +42,7 @@ __all__ = [
     "backdate_memory",
     "memory_row",
     "require_sqlite_substrate",
+    "seed_tier_write",
     "rewrite_memory_row",
     "seed_plan",
     "seed_relevance",
@@ -210,6 +211,65 @@ def set_memory_access_count(
     behaviour under test and N reads would be pure ceremony.
     """
     rewrite_memory_row(db, project, title, access_count=count)
+
+
+def seed_tier_write(
+    db: T2Database,
+    *,
+    session_id: str,
+    tool: str,
+    tier: str,
+    agent: str | None = None,
+    project: str | None = None,
+    target_title: str | None = None,
+    ts: str | None = None,
+) -> None:
+    """Insert one ``tier_writes`` row on either substrate.
+
+    The tier-status fixture primitive. ``nx tier-status`` is service-aware
+    (``HttpTelemetryStore.query_tier_writes`` is the documented twin of
+    ``tier_status._query``), so its tests must be able to seed whichever
+    store the CLI will actually read — a raw ``sqlite3`` INSERT seeds a local
+    file the service-mode CLI never opens, and every assertion then reads
+    "(no writes)".
+
+    SQLite arm: ``migrate_tier_writes`` + a direct INSERT, because there is no
+    ``import_tier_write`` on the local store. Service arm:
+    ``import_tier_write`` (``POST /v1/telemetry/import``, ``table=tier_writes``),
+    whose purpose is writing the row's fields — ``ts`` included — VERBATIM
+    rather than letting the service stamp them, which is exactly what fixture
+    seeding needs.
+
+    *ts* defaults to now; pass it explicitly when the test's subject is
+    ordering or a time window.
+    """
+    from datetime import UTC, datetime
+
+    stamp = ts or datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    store = db.telemetry
+
+    if has_raw_access(store):
+        from nexus.db.migrations import migrate_tier_writes
+
+        migrate_tier_writes(store.conn)
+        store.conn.execute(
+            "INSERT INTO tier_writes "
+            "(session_id, ts, tool, tier, agent, project, target_title) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (session_id, stamp, tool, tier, agent, project, target_title),
+        )
+        store.conn.commit()
+        return
+
+    store.import_tier_write(
+        session_id=session_id,
+        ts=stamp,
+        tool=tool,
+        tier=tier,
+        agent=agent,
+        project=project,
+        target_title=target_title,
+    )
 
 
 def seed_plan(
