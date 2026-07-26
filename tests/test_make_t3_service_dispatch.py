@@ -17,6 +17,31 @@ from __future__ import annotations
 
 import pytest
 from tests.conftest import make_vector_test_client
+@pytest.fixture(autouse=True)
+def _stub_managed_service_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neutralise the RDR-002 engine-version pin (nexus-aqbrk).
+
+    These tests construct a real vector client against the session test
+    engine, whose jar is built by `mvn package` and therefore carries NO
+    stamped release_version — blank in source, stamped only at native-build
+    time from the tag. VersionHandler reports release_version=null and the
+    client's version pin FAIL-CLOSES by design:
+
+        ManagedServiceIncompatible: ... reported no usable release_version on
+        /version (got None) — a dev/unstamped or pre-release engine is older
+        than the minimum this client supports (v0.1.56)
+
+    That is an ENVIRONMENT artifact of testing against a dev build, not a
+    substrate semantic, and the pin is NOT the subject of this file — dispatch
+    is. Stubbed via the same seam tests/test_health.py already uses.
+
+    RELATED: nexus-12m77 category (a) is the same collision at integration
+    scope, where its recommended fix is to STAMP the test jar. If that lands,
+    this stub becomes unnecessary and should be deleted rather than kept.
+    """
+    import nexus.db.managed_endpoint as _me
+
+    monkeypatch.setattr(_me, "probe_managed_service", lambda **_kw: None)
 
 
 @pytest.fixture(autouse=True)
