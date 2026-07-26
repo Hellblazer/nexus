@@ -31,6 +31,7 @@ should call :func:`memory_row`, which is a true non-mutating read on both.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -40,6 +41,7 @@ from nexus.db.t2 import T2Database
 
 __all__ = [
     "backdate_memory",
+    "bootstrap_migration_source",
     "memory_row",
     "require_sqlite_substrate",
     "seed_tier_write",
@@ -361,3 +363,43 @@ def seed_relevance(
         session_id=session_id,
         timestamp=stamp,
     )
+
+
+def bootstrap_migration_source(db: "Path") -> None:
+    """Create a pre-migration SQLite source DB for a test to read or guard.
+
+    Use INSTEAD OF ``T2Database.bootstrap_schema`` in any test that needs a
+    legacy .db to EXIST. bootstrap_schema early-returns when the T2 store is
+    service-backed (RDR-176 Phase 1 Gap 2 — the local .db is a migration
+    SOURCE and must stay immutable, so apply_pending must not re-stamp
+    ``_nexus_version`` on it). Under the engine substrate that guard fires and
+    no schema is created, so the test dies on ``no such table:
+    _nexus_version`` before reaching its subject.
+
+    WHY THIS IS NOT A PIN. Two kinds of test need this, and BOTH must keep
+    running in service mode:
+
+      - tests whose subject reads SQLite by definition (the migration ETLs —
+        tests/db/test_etl_read_paging.py)
+      - tests whose subject is a SERVICE-MODE GUARD over a legacy DB
+        (tests/db/../test_rdr176_guard_coverage.py). Pinning those to SQLite
+        would disable the very branch under test.
+
+    Calling the migration chain directly says "build me a legacy source" —
+    which is what the fixture means — without asking the substrate for
+    permission to write a throwaway file.
+
+    Distinct from bootstrap_schema's PRODUCTION contract, deliberately: this
+    is a test-fixture builder, and using it in production code would defeat
+    the Gap 2 immutability guarantee.
+    """
+    import sqlite3  # noqa: PLC0415 — test-fixture helper; keep module import cheap
+
+    from nexus.commands.upgrade import _current_version  # noqa: PLC0415 — deferred, avoids CLI import cost at collection
+    from nexus.db.migrations import apply_pending  # noqa: PLC0415 — deferred
+
+    conn = sqlite3.connect(str(db))
+    try:
+        apply_pending(conn, _current_version())
+    finally:
+        conn.close()
