@@ -5021,6 +5021,52 @@ _EMPTY_ANSWER_TEXTS: frozenset[str] = frozenset({
 })
 
 
+#: Plan bindings whose domain is enumerated or numeric rather than free
+#: text — catalog metadata filters and retrieval knobs. Filling one of
+#: these with the question string does not widen a retrieval, it narrows
+#: it to nothing: ``content_type`` accepts ``code`` / ``paper`` / ``rdr``
+#: / ``knowledge``, so a 90-character question matches no document at all
+#: (observed 2026-07-25 on builtin plan 14, which returned zero results
+#: while the identical query with no ``content_type`` returned the
+#: correct paper as its top hit).
+_TYPED_FILTER_BINDINGS: frozenset[str] = frozenset({
+    "content_type", "author", "subtree", "year",
+    "corpus", "collection", "follow_links", "depth", "limit",
+})
+
+
+def _autoalias_bindings(
+    *,
+    required: list[str],
+    run_bindings: dict[str, Any],
+    defaults: dict[str, Any],
+    question: str,
+) -> dict[str, Any]:
+    """Fill unsupplied required bindings, free-text ones from *question*.
+
+    The alias exists because library plans declaring
+    ``required_bindings: [concept]`` (or ``area``, ``topic``, ...) failed
+    at dispatch with ``missing required bindings`` even though ``$intent``
+    already carried the equivalent value. It mirrors the inline-planner
+    fallback, whose constructed plans get every binding filled from the
+    question text.
+
+    Bindings in :data:`_TYPED_FILTER_BINDINGS` are filled with ``""``
+    instead. That satisfies ``plan_run``'s presence-only gate (it tests
+    ``name not in bindings``, not truthiness) while the retrieval tools
+    coerce the empty value away (``content_type or None``), so the step
+    runs unfiltered rather than filtered-to-nothing.
+
+    Caller-supplied values and plan defaults are never overwritten.
+    """
+    out = dict(run_bindings)
+    for req in required:
+        if req in out or req in defaults:
+            continue
+        out[req] = "" if req in _TYPED_FILTER_BINDINGS else question
+    return out
+
+
 def _nx_answer_text_is_empty(text: str) -> bool:
     """True when *text* is one of the synthesized no-result placeholders.
 
@@ -5679,9 +5725,12 @@ async def nx_answer(
     # find-by-author with ``$author``) bypass this path by calling
     # ``plan_run`` directly with explicit bindings.
     defaults = best.default_bindings or {}
-    for req in best.required_bindings:
-        if req not in run_bindings and req not in defaults:
-            run_bindings[req] = question
+    run_bindings = _autoalias_bindings(
+        required=best.required_bindings,
+        run_bindings=run_bindings,
+        defaults=defaults,
+        question=question,
+    )
 
     try:
         result = await _plan_run(best, run_bindings)
