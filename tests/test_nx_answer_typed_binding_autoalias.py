@@ -33,11 +33,10 @@ from __future__ import annotations
 
 import pytest
 
-from nexus.mcp.core import (
-    _TYPED_FILTER_BINDINGS,
-    PlanBindingUnsatisfiableError,
-    _autoalias_bindings,
-)
+from nexus.mcp.core import PlanBindingUnsatisfiableError, _autoalias_bindings
+# The taxonomy has ONE home (nexus-0yrjr review): importing it from
+# nexus.mcp.core would let a re-duplicated copy pass this suite.
+from nexus.plans.schema import TYPED_FILTER_BINDINGS
 
 QUESTION = "Which indexed papers discuss intermediate representations?"
 
@@ -99,7 +98,7 @@ def test_plan_default_satisfies_a_typed_binding() -> None:
 
 def test_every_typed_filter_binding_refuses_the_question() -> None:
     """No partial cover — each typed name raises rather than being stuffed."""
-    for name in sorted(_TYPED_FILTER_BINDINGS):
+    for name in sorted(TYPED_FILTER_BINDINGS):
         with pytest.raises(PlanBindingUnsatisfiableError):
             _autoalias_bindings(
                 required=[name], run_bindings={}, defaults={},
@@ -109,7 +108,7 @@ def test_every_typed_filter_binding_refuses_the_question() -> None:
 
 def test_numeric_bindings_are_in_the_typed_set() -> None:
     """limit/depth are numeric; a question string there is nonsense too."""
-    assert {"limit", "depth"} <= _TYPED_FILTER_BINDINGS
+    assert {"limit", "depth"} <= TYPED_FILTER_BINDINGS
 
 
 def test_free_text_bindings_are_unaffected_by_a_typed_sibling() -> None:

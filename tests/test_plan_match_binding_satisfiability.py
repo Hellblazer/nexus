@@ -192,12 +192,61 @@ def test_a_satisfiable_plan_still_wins_when_a_sibling_is_dropped(library) -> Non
         library, query="search everything", required=["question"],
         name="plain",
     )
-    matches = plan_match(
-        intent="which papers discuss this", library=library,
-        cache=_FakeCache(hits=[(typed, 0.03), (plain, 0.05)]),
-        min_confidence=0.85, available_bindings=frozenset({"intent"}),
-    )
+    structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
+    with capture_logs() as logs:
+        matches = plan_match(
+            intent="which papers discuss this", library=library,
+            cache=_FakeCache(hits=[(typed, 0.03), (plain, 0.05)]),
+            min_confidence=0.85, available_bindings=frozenset({"intent"}),
+        )
     assert [m.plan_id for m in matches] == [plain], (
         "the better-scoring but unrunnable plan should be dropped and the "
         "runnable one returned, not an empty pool"
     )
+    # Regression (nexus-eedj4, found in review): this is the COMMON case —
+    # a runnable sibling wins — and it returns early, before the
+    # fallthrough logging. The drop was invisible here while the
+    # single-plan test above passed, so the pool shrank silently in
+    # exactly the situation the record exists for.
+    dropped = [e for e in logs
+               if e.get("event") == "plan_match_unrunnable_binding_dropped"]
+    assert dropped, (
+        "a candidate was dropped on the winning-sibling path with no log "
+        "record — the early return skipped the drain"
+    )
+    assert dropped[0]["detail"][0]["plan_id"] == typed
+    # drained exactly once, not re-reported by a later return path
+    assert len(dropped) == 1
+
+
+def test_the_fts5_fallback_path_also_drops_unrunnable_plans(library) -> None:
+    """No T1 cache: the keyword path must apply the same gate."""
+    from nexus.plans.matcher import plan_match
+
+    _seed_with_bindings(
+        library, query="content type scoped search",
+        required=["content_type"], name="type-scoped",
+    )
+    matches = plan_match(
+        intent="content type scoped search", library=library, cache=None,
+        available_bindings=frozenset({"intent"}),
+    )
+    assert matches == [], (
+        "the FTS5 fallback offered a plan requiring content_type to a "
+        "caller that cannot supply one"
+    )
+
+
+def test_the_fts5_fallback_still_offers_runnable_plans(library) -> None:
+    """Non-vacuity for the FTS5 gate — the drop is the binding, not the path."""
+    from nexus.plans.matcher import plan_match
+
+    pid = _seed_with_bindings(
+        library, query="content type scoped search",
+        required=["question"], name="plain",
+    )
+    matches = plan_match(
+        intent="content type scoped search", library=library, cache=None,
+        available_bindings=frozenset({"intent"}),
+    )
+    assert [m.plan_id for m in matches] == [pid]

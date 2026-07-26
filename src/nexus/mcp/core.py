@@ -5021,29 +5021,6 @@ _EMPTY_ANSWER_TEXTS: frozenset[str] = frozenset({
 })
 
 
-#: Plan bindings whose domain is enumerated or numeric rather than free
-#: text — catalog metadata filters and retrieval knobs. There is no
-#: defensible way to derive one of these from a question string:
-#: ``content_type`` accepts ``code`` / ``paper`` / ``rdr`` / ``knowledge``,
-#: so a 90-character sentence matches no document at all (observed
-#: 2026-07-25 on builtin plan 14, which returned zero results while the
-#: identical query with no ``content_type`` returned the correct paper as
-#: its top hit).
-_TYPED_FILTER_BINDINGS: frozenset[str] = frozenset({
-    "content_type", "author", "subtree", "year",
-    "corpus", "collection", "follow_links", "depth", "limit",
-})
-
-#: Legal values for the typed bindings that have a small closed domain,
-#: surfaced in the error so a caller knows what a satisfying value is.
-_TYPED_BINDING_DOMAINS: dict[str, str] = {
-    "content_type": "code / paper / rdr / knowledge",
-    "year": "a four-digit year",
-    "depth": "a positive integer",
-    "limit": "a positive integer",
-}
-
-
 class PlanBindingUnsatisfiableError(ValueError):
     """A matched plan requires a typed binding nothing can supply.
 
@@ -5057,7 +5034,16 @@ class PlanBindingUnsatisfiableError(ValueError):
         self.binding = binding
         self.plan_id = plan_id
         self.plan_name = plan_name
-        domain = _TYPED_BINDING_DOMAINS.get(binding)
+        # nexus-0yrjr review: ONE definition of the taxonomy, in
+        # nexus.plans.schema. It was briefly duplicated here — the same
+        # two-hand-typed-constants drift the project already paid for
+        # once (REQUIRED_ENGINE_VERSION / PINNED_SERVICE_TAG,
+        # nexus-b6qlf). The matcher's offer-time gate and this run-time
+        # refusal MUST agree, so they read the same object. Imported at
+        # call time to match this module's deferred-import convention.
+        from nexus.plans.schema import TYPED_BINDING_DOMAINS  # noqa: PLC0415 — deferred; matches this module's convention
+
+        domain = TYPED_BINDING_DOMAINS.get(binding)
         hint = f" Its domain is {domain}." if domain else ""
         super().__init__(
             f"plan {plan_id} ({plan_name}) requires the binding "
@@ -5098,11 +5084,13 @@ def _autoalias_bindings(
     Caller-supplied values and plan defaults are never overwritten, and
     either one satisfies a typed binding.
     """
+    from nexus.plans.schema import TYPED_FILTER_BINDINGS  # noqa: PLC0415 — deferred; matches this module's convention
+
     out = dict(run_bindings)
     for req in required:
         if req in out or req in defaults:
             continue
-        if req in _TYPED_FILTER_BINDINGS:
+        if req in TYPED_FILTER_BINDINGS:
             raise PlanBindingUnsatisfiableError(
                 binding=req, plan_id=plan_id, plan_name=plan_name,
             )

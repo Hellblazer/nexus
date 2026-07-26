@@ -467,6 +467,11 @@ def plan_match(
         if scored:
             scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
             matches = [m for _, _, m in scored[:n]]
+            # Drain BEFORE returning. This early return is the common
+            # case — a runnable sibling outscores the dropped plan — and
+            # logging only on the fallthrough path below made the drop
+            # invisible in exactly the situation the record exists for.
+            _log_binding_drops(binding_drops)
             for m in matches:
                 library.increment_match_metrics(m.plan_id, confidence=m.confidence)
             return matches
@@ -494,6 +499,11 @@ def plan_match(
     # Over-fetch so the dimension post-filter doesn't starve the caller.
     _fts_over = max(n * 2, n + len(filter_dims) * 3)
     if scope_pref:
+        _fts_over += n
+    if available_bindings is not None:
+        # Symmetry with the T1 budget above: every other drop reason on
+        # this path carries compensating headroom, so binding drops must
+        # too or a caller asking for n silently receives fewer.
         _fts_over += n
     rows = library.search_plans(intent, limit=_fts_over, project=project)
     matches: list[Match] = []
