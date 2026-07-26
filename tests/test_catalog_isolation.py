@@ -29,6 +29,10 @@ import pytest
 from nexus.catalog import Catalog
 from nexus.config import catalog_path
 
+# nexus-aqbrk: asserts writes land in the tmp catalog DIRECTORY rather than the user's home — a local-file claim.
+pytestmark = pytest.mark.usefixtures("local_catalog_backend")
+
+
 
 def test_autouse_isolate_catalog_redirects_env(tmp_path: Path) -> None:
     """The autouse fixture must set NEXUS_CATALOG_PATH to a tmp location."""

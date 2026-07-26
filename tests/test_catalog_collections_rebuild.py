@@ -26,6 +26,10 @@ import pytest
 from nexus.catalog.catalog import Catalog
 from nexus.catalog.catalog_db import CatalogDB
 
+# nexus-aqbrk: event-sourced rebuild replays the local events.jsonl into the local projection.
+pytestmark = pytest.mark.usefixtures("local_catalog_backend")
+
+
 
 def _seed_catalog_with_collection(catalog_dir: Path) -> str:
     """Populate a catalog dir with one owner, one doc, one collection.
