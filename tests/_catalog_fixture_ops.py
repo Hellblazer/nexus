@@ -32,6 +32,7 @@ __all__ = [
     "active_reader",
     "count_documents",
     "documents_by_file_path",
+    "documents_by_title",
     "only_document",
     "unroutable_write_target",
 ]
@@ -79,6 +80,23 @@ def documents_by_file_path(file_path: str) -> list[Any]:
     tenant-bound token per test).
     """
     return [d for d in active_reader().all_documents() if d.file_path == file_path]
+
+
+def documents_by_title(title: str) -> list[Any]:
+    """Every document whose ``title`` equals *title* EXACTLY, via the reader.
+
+    Replaces ``cat._db.execute("SELECT ... FROM documents WHERE title = ?")``.
+
+    Deliberately NOT ``find(title)``: ``find`` is a SUBSTRING search on both
+    substrates with no ordering contract, so a title that is a prefix of
+    another matches both and the caller's ``[0]`` silently picks whichever
+    the backend happened to return first. That exact trap cost a
+    misdiagnosis in tests/test_enrich_command.py, where "Enriched Paper"
+    also matched "Non-Enriched Paper" and the engine arm reversed the two
+    after an update. Exact comparison over ``all_documents()`` has neither
+    failure mode.
+    """
+    return [d for d in active_reader().all_documents() if d.title == title]
 
 
 def only_document() -> Any:
