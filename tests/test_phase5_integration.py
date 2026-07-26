@@ -283,7 +283,23 @@ class TestPluginCliVersionCheck:
 # ── doctor --check-schema tests ─────────────────────────────────────────────
 
 
+@pytest.mark.usefixtures("local_t2_backend")
 class TestDoctorCheckSchema:
+    """``doctor --check-schema`` against a REAL local memory.db.
+
+    PINNED, not converted (nexus-aqbrk). Every test here seeds a local
+    SQLite file with ``sqlite3.connect`` + ``apply_pending`` and then
+    asserts what the verb says about THAT file. In service mode the T2
+    schema is Postgres, Liquibase-managed by the nexus-service, and the
+    verb reports N/A by design (nexus-p0clh) — so these assertions are
+    unsatisfiable there rather than wrong.
+
+    SERVICE HALF IS OWNED: tests/test_doctor_check_schema_service_mode.py
+    ::test_check_schema_reports_na_in_service_mode, which asserts the
+    "service-backed / N/A in service mode" text AND that the misleading
+    "T2 database not found" is not emitted.
+    """
+
     def test_no_db_file(self, runner: CliRunner, tmp_path: Path) -> None:
         db_path = tmp_path / "nonexistent" / "memory.db"
         with patch("nexus.config.default_db_path", return_value=db_path):
@@ -525,7 +541,28 @@ class TestDoctorCheckTaxonomy:
 # ── RDR-087 Phase 2.4: nx doctor --trim-telemetry ───────────────────────────
 
 
+@pytest.mark.usefixtures("local_t2_backend")
 class TestDoctorTrimTelemetry:
+    """``doctor --trim-telemetry`` against a REAL local memory.db.
+
+    PINNED, not converted (nexus-aqbrk). These seed aged rows into a local
+    ``search_telemetry`` and assert the local row count afterwards. In
+    service mode the verb correctly routes to
+    ``HttpTelemetryStore.trim_search_telemetry`` and never opens the frozen
+    local file (nexus-ingey) — so the seeded rows survive and the counts
+    cannot match.
+
+    Note this class contained a VACUOUS PASS before the pin:
+    ``test_empty_table_is_safe`` asserts "Trimmed 0 search_telemetry" and
+    passed under the engine substrate for the wrong reason — the service
+    trimmed its own empty tenant, not the local table the test seeded. The
+    pin makes it test its subject again.
+
+    SERVICE HALF IS OWNED: tests/test_false_clean_diagnostics_service_mode.py
+    ::test_trim_routes_to_the_service_and_never_opens_sqlite, plus the
+    unresolvable-endpoint and mid-call transport-error cases in the same file.
+    """
+
     """``nx doctor --trim-telemetry [--days N]`` deletes ``search_telemetry``
     rows older than the retention window. Default 30d; --days validates min=1.
     """
