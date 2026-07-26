@@ -40,6 +40,17 @@ def _write(repo, rel, content):
     (repo / rel).write_text(content, encoding="utf-8")
 
 
+# nexus-aqbrk: this file is a LOCAL-MODE journey by construction — _do_index
+# sets NX_LOCAL=1, patches nexus.db.make_t3 to an in-process vector store, and
+# stubs the credential lookup. Its catalog has to be local for the same reason
+# its T3 is: the journey under test is the local one end to end. Under the
+# engine substrate the catalog store alone would resolve to the service while
+# NX_LOCAL=1 leaves no endpoint to resolve, so the client is built with an
+# empty base_url and every request dies as
+# "Request URL is missing an 'http://' or 'https://' protocol."
+pytestmark = pytest.mark.usefixtures("local_catalog_backend")
+
+
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
 
@@ -453,15 +464,19 @@ def test_spans_overlap(s1, e1, s2, e2, expected):
 
 
 def test_catalog_plan_templates_exist(db):
-    rows = db.plans.conn.execute(
-        "SELECT count(*) FROM plans WHERE tags LIKE '%catalog%'"
-    ).fetchall()
-    # nexus-8g79.23: the assertion ``rows[0][0] >= 0`` was meaningless —
-    # SQLite COUNT(*) is always non-negative. The real intent of this
-    # test is "plan-template SQL is queryable without error"; tighten
-    # the assertion to that.
-    assert isinstance(rows, list) and len(rows) == 1
-    assert isinstance(rows[0][0], int)
+    # nexus-8g79.23: the original ``rows[0][0] >= 0`` was meaningless — a
+    # SQLite COUNT(*) is always non-negative — so it was tightened to "the
+    # plan-template SQL is queryable without error".
+    #
+    # nexus-aqbrk: that phrasing still reached for db.plans.conn, which the
+    # service-backed store does not have. list_plans() is the public read on
+    # both stores, and it makes the intent stronger rather than weaker: the
+    # library answers, and every row it returns is well-formed enough to be
+    # filtered on its tags.
+    plans = db.plans.list_plans(limit=300)
+    assert isinstance(plans, list)
+    catalog_tagged = [p for p in plans if "catalog" in (p.get("tags") or "")]
+    assert all(isinstance(p.get("id"), int) for p in catalog_tagged)
 
 
 # ── 'formalizes' link type (RDR-057 P1-1a, nexus-807l) ─────────────────────
