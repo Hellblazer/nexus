@@ -118,6 +118,33 @@ UPDATE nexus.catalog_documents d
    AND r.rn &gt; 1;
 ALTER TABLE nexus.catalog_documents FORCE ROW LEVEL SECURITY;
         </sql>
+        <!--
+            INTENTIONALLY IRREVERSIBLE (nexus-a0m60). The losers here are
+            duplicate documents that were SOFT-deleted; a SCHEMA rollback must
+            not resurrect them, and it could not do so correctly anyway — this
+            changeset records nothing about which rows it tombstoned, so there
+            is no honest inverse to write.
+
+            The empty <rollback/> DECLARES that, rather than leaving it implied.
+            Without it Liquibase treats a RawSQLChange as having no inverse and
+            aborts the whole chain here with "No inverse to
+            liquibase.change.core.RawSQLChange created" — which is exactly what
+            it did: this single changeset was the wall that made the rollback
+            path untestable past it, and staging-4-svc-grants' broken rollback
+            sat undiscovered behind it.
+
+            The SCHEMA still fully reverts: catalog-016-1's own <rollback> drops
+            ux_catalog_documents_live_source_uri, so rolling back this file
+            leaves the table shaped exactly as it was before the file ran. Only
+            the dedup DATA persists, which is the correct outcome.
+
+            Checksum-safe on deployed clusters: Liquibase excludes <rollback>
+            from the changeset md5sum (measured — staging-4 kept
+            9:84da10127f33beb3b1602f9cb0b30163 across its own rollback fix), so
+            adding this to an already-executed changeset needs no validCheckSum
+            and disturbs nothing.
+        -->
+        <rollback/>
     </changeSet>
 
     <changeSet id="catalog-016-1" author="nexus-78n33">

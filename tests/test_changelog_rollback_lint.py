@@ -47,8 +47,25 @@ from tests.test_changelog_rls_lint import CHANGELOG_DIR
 _NS = "{http://www.liquibase.org/xml/ns/dbchangelog}"
 
 
-def _rollback_bodies() -> list[tuple[str, str, str, list[str | None]]]:
-    """(file, changeset id, body text, splitStatements attrs of <sql> children)."""
+def _rollback_bodies() -> list[tuple[str, str, str, list[tuple[str, str | None]]]]:
+    """(file, changeset id, RAW text under <rollback>, [(child text, splitStatements)]).
+
+    Reported PER ELEMENT, not as one concatenated body (nexus-a0m60).
+    ``splitStatements`` is an attribute of each ``<sql>`` change, so the
+    splitting decision is per element — and aggregating hid a fault in BOTH
+    directions:
+
+    * false POSITIVE — a rollback that puts its ``$$`` block in
+      ``<sql splitStatements="false">`` and its plain statements in a sibling
+      ``<sql splitStatements="true">`` is correct, but looked like a violation
+      because one sibling attr was not ``"false"``. rdr180-11's guarded rollback
+      is exactly that shape.
+    * false NEGATIVE, the one that mattered — raw ``$$`` text sitting DIRECTLY
+      under ``<rollback>`` alongside any compliant ``<sql>`` child passed,
+      because the child's attr satisfied the all() check while the raw text
+      (which cannot carry the attribute at all) was never examined on its own.
+      That is the staging-4 shape, surviving in a mixed block.
+    """
     out = []
     for path in sorted(CHANGELOG_DIR.glob("*.xml")):
         # NO `except ParseError: continue` here, deliberately. Skipping an
@@ -63,34 +80,37 @@ def _rollback_bodies() -> list[tuple[str, str, str, list[str | None]]]:
             rb = cs.find(f"{_NS}rollback")
             if rb is None:
                 continue
-            children = rb.findall(f"{_NS}sql")
-            body = (rb.text or "") + "".join((e.text or "") for e in children)
-            out.append((path.name, cs.get("id", ""), body,
-                        [e.get("splitStatements") for e in children]))
+            out.append((
+                path.name,
+                cs.get("id", ""),
+                rb.text or "",
+                [(e.text or "", e.get("splitStatements")) for e in rb.findall(f"{_NS}sql")],
+            ))
     return out
 
 
 def test_dollar_quoted_rollbacks_disable_statement_splitting() -> None:
-    """Any rollback body containing ``$$`` must be inside
-    ``<sql splitStatements="false">``.
+    """Every ``$$`` in a rollback must sit inside ``<sql splitStatements="false">``.
 
-    Falsify by unwrapping any of the seven currently-compliant blocks back to
-    raw text — it reappears here immediately.
+    Evaluated per element: raw text under ``<rollback>`` can never carry the
+    attribute, and each ``<sql>`` child stands or falls on its own attr.
+
+    Falsify by unwrapping any currently-compliant block back to raw text — it
+    reappears here immediately.
     """
     violations = []
-    for fname, cs_id, body, attrs in _rollback_bodies():
-        if "$$" not in body:
-            continue
-        if not attrs:
+    for fname, cs_id, raw, children in _rollback_bodies():
+        if "$$" in raw:
             violations.append(
                 f"  {fname}::{cs_id} — raw-text <rollback> with a $$ body; it "
                 f"CANNOT carry splitStatements and will be split on ';'"
             )
-        elif not all(a == "false" for a in attrs):
-            violations.append(
-                f"  {fname}::{cs_id} — <sql splitStatements={attrs}>; a $$ body "
-                f"needs splitStatements=\"false\""
-            )
+        for text, attr in children:
+            if "$$" in text and attr != "false":
+                violations.append(
+                    f"  {fname}::{cs_id} — <sql splitStatements={attr!r}> holds a "
+                    f"$$ body; it needs splitStatements=\"false\""
+                )
 
     assert not violations, (
         "Rollback bodies containing $$ must disable statement splitting.\n"
@@ -109,23 +129,49 @@ def test_dollar_quoted_rollbacks_disable_statement_splitting() -> None:
     )
 
 
+def _violations_for(xml: str) -> list[str]:
+    """Run the rule's exact logic over one synthetic <rollback>."""
+    rb = ET.fromstring(xml.replace("<rollback>", f"<rollback xmlns='{_NS[1:-1]}'>"))
+    raw = rb.text or ""
+    children = [(e.text or "", e.get("splitStatements")) for e in rb.findall(f"{_NS}sql")]
+    found = []
+    if "$$" in raw:
+        found.append("raw")
+    found += [f"child:{attr!r}" for text, attr in children if "$$" in text and attr != "false"]
+    return found
+
+
 def test_lint_detects_a_synthetic_violation() -> None:
-    """NON-VACUITY — a matcher that found nothing would pass the test above."""
+    """NON-VACUITY — a matcher that found nothing would pass the test above.
+
+    The mixed cases are the ones the earlier concatenated-body form got wrong in
+    both directions (see :func:`_rollback_bodies`), so they are pinned here.
+    """
     raw_bad = "<rollback>DO $$ DECLARE x int; BEGIN END $$;</rollback>"
     wrapped_ok = ('<rollback><sql splitStatements="false">DO $$ DECLARE x int; '
                   "BEGIN END $$;</sql></rollback>")
+    # Correct, and previously a FALSE POSITIVE: the $$ is confined to the
+    # non-splitting element; the sibling holds only plain statements.
+    mixed_ok = ('<rollback>'
+                '<sql splitStatements="false">DO $$ BEGIN END $$;</sql>'
+                '<sql splitStatements="true">ALTER TABLE t DROP CONSTRAINT IF EXISTS c;</sql>'
+                '</rollback>')
+    # Broken, and previously a FALSE NEGATIVE: raw $$ text rode along beside a
+    # compliant child, and the old all()-over-children check never looked at it.
+    mixed_bad = ('<rollback>DO $$ BEGIN END $$;'
+                 '<sql splitStatements="false">SELECT 1;</sql>'
+                 '</rollback>')
 
-    def parse(xml: str):
-        rb = ET.fromstring(xml.replace("<rollback>", f"<rollback xmlns='{_NS[1:-1]}'>"))
-        children = rb.findall(f"{_NS}sql")
-        body = (rb.text or "") + "".join((e.text or "") for e in children)
-        return body, [e.get("splitStatements") for e in children]
-
-    body, attrs = parse(raw_bad)
-    assert "$$" in body and not attrs, "raw-text $$ rollback must look violating"
-
-    body, attrs = parse(wrapped_ok)
-    assert "$$" in body and attrs == ["false"], "wrapped $$ rollback must look compliant"
+    assert _violations_for(raw_bad) == ["raw"], "raw-text $$ rollback must violate"
+    assert _violations_for(wrapped_ok) == [], "wrapped $$ rollback must be compliant"
+    assert _violations_for(mixed_ok) == [], (
+        "a $$ body confined to <sql splitStatements=\"false\"> is compliant even when a "
+        "sibling <sql> splits — splitStatements is per element"
+    )
+    assert _violations_for(mixed_bad) == ["raw"], (
+        "raw $$ text directly under <rollback> must violate even when a compliant "
+        "<sql> child is present — this is the staging-4 shape hiding in a mixed block"
+    )
 
 
 def test_the_rule_is_load_bearing_not_vacuous() -> None:
@@ -136,7 +182,9 @@ def test_the_rule_is_load_bearing_not_vacuous() -> None:
     so the lint cannot rot into a no-op unnoticed.
     """
     dollar_rollbacks = [
-        f"{f}::{c}" for f, c, body, _ in _rollback_bodies() if "$$" in body
+        f"{f}::{c}"
+        for f, c, raw, children in _rollback_bodies()
+        if "$$" in raw or any("$$" in text for text, _ in children)
     ]
     assert dollar_rollbacks, (
         "no <rollback> contains $$ any more — this lint now protects nothing "
