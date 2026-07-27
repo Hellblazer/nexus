@@ -117,44 +117,43 @@ def pg_bin_dir() -> Path:
     """
     from nexus.db.pg_provision import PgBinaryNotFoundError, discover_pg_binaries
 
+    # An EXPLICIT override is a user statement and is honoured verbatim, before
+    # any usability opinion is applied. The pgvector guard below deliberately
+    # does NOT gate it: callers point NEXUS_PG_BIN at synthetic trees that never
+    # launch PG (path-resolution tests do exactly this), and silently
+    # substituting the bundle would hand a developer debugging one PG the
+    # results of a different one. Making the guard raise here instead broke
+    # test_pg_bin_dir_honors_nexus_pg_bin_override and 5 sibling fixtures on the
+    # first attempt (PR #1426 run 2) — the override contract predates the guard
+    # and outranks it.
+    explicit = os.environ.get("NEXUS_PG_BIN", "").strip()
+
     try:
         discovered = discover_pg_binaries().initdb.parent
     except PgBinaryNotFoundError:
+        if explicit:
+            raise
         discovered = None
 
-    # nexus-eqxxh: a discovered PG is only USABLE if it can load pgvector.
+    # nexus-eqxxh: an AMBIENT PG is only usable if it can load pgvector.
     # Discovery answering first is what made this a CI-only defect: on a dev box
     # with no host PG it raises and the self-provision leg runs, but GitHub
     # runners ship PostgreSQL, so discovery succeeded, returned a pgvector-less
     # system PG, and every engine-substrate test died at boot with
     # `CREATE EXTENSION IF NOT EXISTS vector` -> "extension vector is not
-    # available" (PR #1426: 73 errors on BOTH python jobs, 0 test-logic
+    # available" (PR #1426 run 1: 73 errors on BOTH python jobs, 0 test-logic
     # failures). The pinned bundle was never even downloaded.
     #
     # Finding a PG is therefore not the question — finding one that can SERVE is.
-    # An engine substrate without pgvector cannot run at all, so a discovered PG
+    # An engine substrate without pgvector cannot run at all, so an ambient PG
     # missing it is not a usable answer and we fall through to our own bundle.
     # This is the standing rule that functional gates are self-provisioning
     # scripts, never ambient machine state; discovery-first quietly inverted it.
-    if discovered is not None and not _has_pgvector(discovered):
-        if os.environ.get("NEXUS_PG_BIN", "").strip():
-            # Product policy (unchanged): an explicit override is a user
-            # statement, so a broken one fails LOUD rather than being silently
-            # swapped for the bundle underneath the caller.
-            raise RuntimeError(
-                f"NEXUS_PG_BIN points at {discovered}, which cannot load pgvector "
-                "(no vector.control in its sharedir). The engine substrate needs "
-                "pgvector; either point it at a pgvector-capable PG or unset it "
-                "and let the pinned bundle self-provision."
-            )
-        discovered = None
-
-    if discovered is not None:
+    if explicit:
         return discovered
-    if os.environ.get("NEXUS_PG_BIN", "").strip():
-        raise PgBinaryNotFoundError(
-            f"NEXUS_PG_BIN is set but no usable PG was found at it: {os.environ['NEXUS_PG_BIN']}"
-        )
+    if discovered is not None and _has_pgvector(discovered):
+        return discovered
+
     provisioned = _self_provision_pg_bundle()
     if provisioned is not None:
         return provisioned

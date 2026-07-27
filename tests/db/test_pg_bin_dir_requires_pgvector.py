@@ -25,7 +25,6 @@ trees, which is the part that was wrong.
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
@@ -113,14 +112,22 @@ class TestPgBinDirRejectsPgvectorLessDiscovery:
 
         assert pg_bin_dir() == ambient
 
-    def test_explicit_override_without_pgvector_fails_loud(
+    def test_explicit_override_is_honoured_verbatim_even_without_pgvector(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Product policy, preserved: an explicit NEXUS_PG_BIN is a user
-        statement, so a broken one raises rather than being silently swapped for
-        the bundle underneath the caller. Silently substituting here would mean
-        a developer debugging against a specific PG gets results from a
-        different one.
+        """The guard must NOT gate an explicit NEXUS_PG_BIN.
+
+        My first attempt raised here, on the theory that a broken override
+        should fail loud. That was wrong and CI said so immediately: it broke
+        ``test_pg_bin_dir_honors_nexus_pg_bin_override`` plus 5 sibling fixtures
+        (PR #1426 run 2), because callers legitimately point NEXUS_PG_BIN at
+        SYNTHETIC trees that never launch PG — path-resolution tests do exactly
+        that, and a tree with no pgvector is fine when nothing ever starts a
+        server.
+
+        The override contract predates this guard and outranks it. Substituting
+        the bundle underneath an explicit override would also mean a developer
+        debugging against one PG silently gets results from another.
         """
         ambient = _fake_pg(tmp_path / "ambient", with_pgvector=False)
         monkeypatch.setenv("NEXUS_PG_BIN", str(ambient))
@@ -128,6 +135,9 @@ class TestPgBinDirRejectsPgvectorLessDiscovery:
             "nexus.db.pg_provision.discover_pg_binaries",
             lambda: type("R", (), {"initdb": ambient / "initdb"})(),
         )
+        monkeypatch.setattr(
+            "tests.db._service_fixture._self_provision_pg_bundle",
+            lambda: pytest.fail("must not self-provision over an explicit override"),
+        )
 
-        with pytest.raises(RuntimeError, match=re.compile("pgvector", re.I)):
-            pg_bin_dir()
+        assert pg_bin_dir() == ambient

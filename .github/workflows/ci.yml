@@ -276,6 +276,28 @@ jobs:
       - name: Install ripgrep
         run: sudo apt-get install -y ripgrep
 
+      - name: Prime bge-768 ONNX (cache or self-hosted asset)
+        # nexus-eqxxh: the engine substrate boots the SAME jar the write-seam
+        # gate does, so it has the SAME startup dependency — Main constructs
+        # Bge768Embedder before binding the port (RDR-160 local-mode embedder),
+        # and without the model it throws IllegalStateException and the service
+        # never listens. write-seam-gate already primes it for exactly this
+        # reason (nexus-h29w1); the pytest matrix did not, so once the pgvector
+        # fix let migration complete, all 206 changesets applied and the engine
+        # then died here instead:
+        #
+        #   event=schema_migration_complete applied_changesets=206
+        #   Exception in thread "main" java.lang.IllegalStateException:
+        #     Bge768Embedder: bge ONNX model not found at
+        #     ~/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx/model.onnx
+        #
+        # Same composite action, same self-hosted release asset (no HuggingFace
+        # 429 dependency), same target path the jar reads. Unconditional: this
+        # job's engine-substrate tests need it on every run, not behind a
+        # paths-filter, since NX_T2_SUBSTRATE_EXPECTED=1 makes the substrate
+        # REQUIRED and a missing model is 73 hard errors rather than a skip.
+        uses: ./.github/actions/prime-bge-onnx
+
       - name: Install project + dev deps
         run: uv sync --group dev
 
