@@ -104,18 +104,99 @@ def pg_bin_dir() -> Path:
     ``NEXUS_PG_BIN`` re-raises at import/collection time (product
     policy: a misconfigured explicit override is a user error — fail
     loud, never mass-skip).
+
+    USABILITY, NOT MERE PRESENCE (nexus-eqxxh, PR #1426). Discovery is not
+    trusted on its own: a discovered PG that cannot load pgvector is rejected
+    and the self-provisioning leg runs instead. The paragraph above used to be
+    the whole story, and it made the self-provisioning leg conditional on
+    discovery FAILING — which is a property of the box, not of the substrate's
+    needs. On a dev box with no host PG that reads as correct; on a GitHub
+    runner, which ships PostgreSQL, discovery succeeded and handed back a
+    pgvector-less system PG, so every engine-substrate test died at boot and
+    the pinned bundle was never downloaded. See :func:`_has_pgvector`.
     """
     from nexus.db.pg_provision import PgBinaryNotFoundError, discover_pg_binaries
 
     try:
-        return discover_pg_binaries().initdb.parent
+        discovered = discover_pg_binaries().initdb.parent
     except PgBinaryNotFoundError:
+        discovered = None
+
+    # nexus-eqxxh: a discovered PG is only USABLE if it can load pgvector.
+    # Discovery answering first is what made this a CI-only defect: on a dev box
+    # with no host PG it raises and the self-provision leg runs, but GitHub
+    # runners ship PostgreSQL, so discovery succeeded, returned a pgvector-less
+    # system PG, and every engine-substrate test died at boot with
+    # `CREATE EXTENSION IF NOT EXISTS vector` -> "extension vector is not
+    # available" (PR #1426: 73 errors on BOTH python jobs, 0 test-logic
+    # failures). The pinned bundle was never even downloaded.
+    #
+    # Finding a PG is therefore not the question — finding one that can SERVE is.
+    # An engine substrate without pgvector cannot run at all, so a discovered PG
+    # missing it is not a usable answer and we fall through to our own bundle.
+    # This is the standing rule that functional gates are self-provisioning
+    # scripts, never ambient machine state; discovery-first quietly inverted it.
+    if discovered is not None and not _has_pgvector(discovered):
         if os.environ.get("NEXUS_PG_BIN", "").strip():
-            raise
-        provisioned = _self_provision_pg_bundle()
-        if provisioned is not None:
-            return provisioned
-        return Path("/nexus-pg-binaries-not-found")
+            # Product policy (unchanged): an explicit override is a user
+            # statement, so a broken one fails LOUD rather than being silently
+            # swapped for the bundle underneath the caller.
+            raise RuntimeError(
+                f"NEXUS_PG_BIN points at {discovered}, which cannot load pgvector "
+                "(no vector.control in its sharedir). The engine substrate needs "
+                "pgvector; either point it at a pgvector-capable PG or unset it "
+                "and let the pinned bundle self-provision."
+            )
+        discovered = None
+
+    if discovered is not None:
+        return discovered
+    if os.environ.get("NEXUS_PG_BIN", "").strip():
+        raise PgBinaryNotFoundError(
+            f"NEXUS_PG_BIN is set but no usable PG was found at it: {os.environ['NEXUS_PG_BIN']}"
+        )
+    provisioned = _self_provision_pg_bundle()
+    if provisioned is not None:
+        return provisioned
+    return Path("/nexus-pg-binaries-not-found")
+
+
+def _has_pgvector(bin_dir: Path) -> bool:
+    """Can the PG at *bin_dir* load the ``vector`` extension?
+
+    nexus-eqxxh. Presence of ``vector.control`` in the sharedir is the same
+    check ``scripts/build_pg_bundle.sh`` asserts after building the bundle, and
+    the same one that showed the shipped bundles carry exactly
+    ``pg_trgm``/``plpgsql``/``vector`` — so the two agree by construction on
+    what "has the extension" means.
+
+    Resolved via ``pg_config --sharedir`` when that binary exists, because
+    PostgreSQL reports paths relative to the executable and a RELOCATED bundle's
+    compiled-in sharedir is wrong. Falls back to the conventional
+    ``<prefix>/share/postgresql`` and ``<prefix>/share`` layouts for trees whose
+    ``pg_config`` was stripped (the zonky-style reduced builds RDR-157 rejected
+    for exactly this reason).
+
+    Returns False rather than raising on any probe failure: an unusable answer
+    and an unreadable one lead to the same decision — fall through to the
+    bundle.
+    """
+    candidates: list[Path] = []
+    pg_config = bin_dir / "pg_config"
+    if pg_config.exists():
+        try:
+            out = subprocess.run(
+                [str(pg_config), "--sharedir"],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            if out.returncode == 0 and out.stdout.strip():
+                candidates.append(Path(out.stdout.strip()))
+        except (OSError, subprocess.SubprocessError):
+            pass
+    prefix = bin_dir.parent
+    candidates += [prefix / "share" / "postgresql", prefix / "share"]
+
+    return any((c / "extension" / "vector.control").exists() for c in candidates)
 
 
 def _self_provision_pg_bundle() -> Path | None:
