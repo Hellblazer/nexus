@@ -28,6 +28,8 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
+
+from tests._catalog_fixture_ops import ActiveCatalog
 from click.testing import CliRunner
 
 # RDR-109 Phase 2: this file asserts cloud-mode canonical behavior
@@ -865,13 +867,24 @@ class TestStampDtUriOnEntry:
     runs afterwards to overwrite both fields with the DT identity.
     """
 
-    def _setup_catalog_with_entry(self, tmp_path, file_path):
+    def _setup_catalog_with_entry(self, tmp_path, file_path, monkeypatch=None):
         """Stand up a catalog with a single registered entry pointing
         at ``file_path`` (mimics the post-index state before the
         stamp helper runs). Returns the catalog instance."""
         from nexus.catalog.catalog import Catalog  # noqa: PLC0415
 
-        cat = Catalog.init(tmp_path / "catalog")
+        # nexus-aqbrk: seed through the ACTIVE catalog — _stamp_dt_uri_on_entry
+        # resolves via the factory, so a local-only seed left the service
+        # catalog empty and the read-back found the pre-stamp source_uri.
+        #
+        # The env must be wired BEFORE the seed: ActiveCatalog resolves through
+        # catalog_path(), and the caller's catalog_path patch lands AFTER this
+        # helper runs — so without this the SQLite arm seeded one directory and
+        # read another (StopIteration on the read-back).
+        if monkeypatch is not None:
+            monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "catalog"))
+        Catalog.init(tmp_path / "catalog")
+        cat = ActiveCatalog()
         owner = cat.register_owner(
             "test-repo", "repo", repo_hash="cafebabe",
         )
@@ -892,7 +905,7 @@ class TestStampDtUriOnEntry:
 
         file_path = tmp_path / "a.pdf"
         file_path.write_bytes(b"%PDF-1.4 dt-stamp")
-        cat = self._setup_catalog_with_entry(tmp_path, file_path)
+        cat = self._setup_catalog_with_entry(tmp_path, file_path, monkeypatch)
         cat_dir = tmp_path / "catalog"
         monkeypatch.setattr(
             "nexus.config.catalog_path", lambda: cat_dir,
@@ -904,7 +917,7 @@ class TestStampDtUriOnEntry:
         # Reopen so we read post-write state.
         from nexus.catalog.catalog import Catalog  # noqa: PLC0415
 
-        cat2 = Catalog(cat_dir, cat_dir / ".catalog.db")
+        cat2 = ActiveCatalog()
         try:
             entries = cat2.all_documents()
             target = next(
@@ -915,7 +928,11 @@ class TestStampDtUriOnEntry:
                 f"x-devonthink-item://{uuid}"
             )
         finally:
-            cat2._db.close()
+            # ActiveCatalog resolves a fresh reader per call and owns no handle
+            # to close (its __getattr__ refuses _-prefixed attributes on
+            # purpose); the SQLite arm's factory reader is closed by the
+            # factory.
+            pass
 
     def test_no_entry_match_logs_and_returns(
         self, tmp_path, monkeypatch,

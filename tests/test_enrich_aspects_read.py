@@ -31,8 +31,9 @@ from nexus.aspect_extractor import AspectRecord
 from nexus.catalog import Catalog
 from nexus.commands.enrich import enrich
 from nexus.db.t2 import T2Database
+from tests.conftest import engine_substrate_selected
 
-_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
+_ENGINE_SUBSTRATE = engine_substrate_selected()
 
 # These tests seed the rich SQLite Catalog (Catalog.init + cat.register) and
 # expect the CLI's make_catalog_reader() to resolve those rows. On the engine

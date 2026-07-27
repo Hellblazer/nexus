@@ -17,9 +17,11 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.conftest import engine_substrate_selected
+
 from nexus.db.t2.document_aspects import AspectRecord, DocumentAspects
 
-_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
+_ENGINE_SUBSTRATE = engine_substrate_selected()
 
 
 def _seed_engine_catalog_docs(*tumblers: str) -> None:

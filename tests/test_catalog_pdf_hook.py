@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from nexus.catalog.catalog import Catalog
+from tests._catalog_fixture_ops import ActiveCatalog, count_documents, only_document
 
 
 @pytest.fixture(autouse=True)
@@ -17,10 +18,18 @@ def git_identity(monkeypatch):
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
 
 
-def _make_catalog(tmp_path: Path) -> tuple[Path, Catalog]:
+@pytest.fixture(autouse=True)
+def _point_catalog_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Aim ``catalog_path()`` at the dir ``_make_catalog`` initialises
+    (nexus-aqbrk) — ActiveCatalog resolves through the same factories the
+    PDF hook uses, and the SQLite arm of those reads ``catalog_path()``."""
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "catalog"))
+
+
+def _make_catalog(tmp_path: Path) -> tuple[Path, ActiveCatalog]:
     catalog_dir = tmp_path / "catalog"
-    cat = Catalog.init(catalog_dir)
-    return catalog_dir, cat
+    Catalog.init(catalog_dir)
+    return catalog_dir, ActiveCatalog()
 
 
 class TestPdfCatalogHook:
@@ -39,9 +48,9 @@ class TestPdfCatalogHook:
             corpus="papers",
         )
         # Should have created curator owner + document
-        rows = cat._db.execute("SELECT count(*) FROM documents").fetchone()
+        rows = (count_documents(),)
         assert rows[0] == 1
-        rows = cat._db.execute("SELECT title FROM documents").fetchone()
+        rows = (only_document().title,)
         assert rows[0] == "Attention Is All You Need"
 
     def test_skipped_when_not_initialized(self, tmp_path, monkeypatch):
@@ -66,7 +75,7 @@ class TestPdfCatalogHook:
             collection_name="docs__test",
             title="",
         )
-        rows = cat._db.execute("SELECT title FROM documents").fetchone()
+        rows = (only_document().title,)
         assert rows[0] == "my-paper"
 
     def test_update_on_reindex(self, tmp_path, monkeypatch):
@@ -86,7 +95,7 @@ class TestPdfCatalogHook:
             title="Paper",
         )
         # Should still be 1 document, updated collection
-        rows = cat._db.execute("SELECT count(*) FROM documents").fetchone()
+        rows = (count_documents(),)
         assert rows[0] == 1
-        rows = cat._db.execute("SELECT physical_collection FROM documents").fetchone()
+        rows = (only_document().physical_collection,)
         assert rows[0] == "docs__v2"

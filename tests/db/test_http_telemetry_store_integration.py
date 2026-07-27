@@ -45,7 +45,12 @@ from pathlib import Path
 
 import pytest
 
-from tests.db._service_fixture import SERVICE_ROLES_SQL, create_tenant_token, pg_bin_dir
+from tests.db._service_fixture import (
+    SERVICE_ROLES_SQL,
+    create_tenant_token,
+    pg_bin_dir,
+    spawn_service,
+)
 
 # ── Prerequisite paths ────────────────────────────────────────────────────────
 
@@ -207,12 +212,11 @@ def java_service(pg_service):
     env.pop("NX_STORAGE_BACKEND", None)
 
     java_bin = str(_JAVA)
-    svc_proc = subprocess.Popen(
-        [java_bin, "-jar", str(_JAR)],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    # nexus-lom9g: FILE-backed output via the shared primitive. This file was
+    # the only one of the 22 with ANY drain at all — but its communicate()
+    # runs only AFTER the process has already exited, so a service that wedged
+    # on a full 64KB pipe (nexus-j0nec) was never drained and never diagnosed.
+    svc_proc, _svc_log = spawn_service([java_bin, "-jar", str(_JAR)], env)
 
     # Wait for service to be up
     base_url = f"http://127.0.0.1:{svc_port}"
@@ -225,14 +229,23 @@ def java_service(pg_service):
         except Exception:
             pass
         if svc_proc.poll() is not None:
-            out, err = svc_proc.communicate()
+            # Output is now file-backed, so communicate() would return
+            # (None, None) — read the log instead.
+            with open(_svc_log, encoding="utf-8", errors="replace") as _fh:
+                _tail = _fh.read()[-2000:]
             raise RuntimeError(
-                f"Java service exited early: {err.decode()[:500]}"
+                f"Java service exited early (rc={svc_proc.returncode}). "
+                f"Tail of engine log ({_svc_log}):\n{_tail}"
             )
         time.sleep(0.5)
     else:
         svc_proc.terminate()
-        raise RuntimeError("Java service didn't come up in time")
+        with open(_svc_log, encoding="utf-8", errors="replace") as _fh:
+            _tail = _fh.read()[-2000:]
+        raise RuntimeError(
+            f"Java service didn't come up in time. "
+            f"Tail of engine log ({_svc_log}):\n{_tail}"
+        )
 
     yield base_url, svc_token
 

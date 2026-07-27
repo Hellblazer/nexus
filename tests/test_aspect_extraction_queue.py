@@ -655,6 +655,10 @@ class TestConcurrency:
 
 
 class TestFacadeWiring:
+        # nexus-aqbrk: PINNED. Same facade-dispatch shape as
+    # test_document_aspects_store; SERVICE HALF IS OWNED by
+    # tests/db/test_http_t2_store_parity.py.
+    @pytest.mark.usefixtures("local_t2_backend")
     def test_t2database_exposes_aspect_queue(self, tmp_path: Path) -> None:
         with T2Database(tmp_path / "t2.db") as db:
             assert hasattr(db, "aspect_queue")

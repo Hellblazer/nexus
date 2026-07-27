@@ -21,13 +21,15 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+from tests._catalog_fixture_ops import active_reader
 from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
 from nexus.catalog.catalog import Catalog
 from nexus.catalog.tumbler import Tumbler
 from nexus.db.t3 import T3Database
 from nexus.registry import RepoRegistry
-from tests.conftest import make_vector_test_client
+from tests.conftest import fake_credentials, make_vector_test_client
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -126,7 +128,7 @@ def _do_index(repo: Path, registry: RepoRegistry, t3: T3Database, monkeypatch) -
 
     monkeypatch.setenv("NX_LOCAL", "1")
     with patch("nexus.db.make_t3", return_value=t3), \
-         patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
+         patch("nexus.config.get_credential", side_effect=fake_credentials()):
         index_repository(repo, registry, force=False)
 
 
@@ -148,7 +150,6 @@ def test_prose_indexer_writes_manifest_rows_for_each_document(
     """
     _do_index(prose_repo, registry, local_t3, monkeypatch)
 
-    cat = Catalog(catalog_env, catalog_env / ".catalog.db")
     info = registry.get(prose_repo)
     assert info is not None
     docs_collection = info.get("docs_collection")
@@ -168,19 +169,15 @@ def test_prose_indexer_writes_manifest_rows_for_each_document(
         assert "chunk_count" not in meta
 
     # Each registered Document in the docs collection must have a manifest.
-    documents = cat._db.execute(
-        "SELECT tumbler, file_path FROM documents "
-        "WHERE physical_collection = ?",
-        (docs_collection,),
-    ).fetchall()
+    documents = active_reader().list_by_collection(docs_collection)
     assert documents, "expected catalog Documents for the docs collection"
 
     md_seen = False
     rst_seen = False
-    for row in documents:
-        tumbler = row[0]
-        file_path = row[1] or ""
-        manifest_rows = cat.get_manifest(tumbler)
+    for entry in documents:
+        tumbler = str(entry.tumbler)
+        file_path = entry.file_path or ""
+        manifest_rows = active_reader().get_manifest(tumbler)
         assert manifest_rows, (
             f"manifest_write_batch_hook must populate document_chunks "
             f"for doc_id={tumbler!r} (file_path={file_path!r})"
@@ -188,7 +185,7 @@ def test_prose_indexer_writes_manifest_rows_for_each_document(
         # nexus-zq79: documents.chunk_count must stay in sync with
         # the manifest (it's a denormalised cache; cache-invalidation
         # bug regression test).
-        entry = cat.resolve(Tumbler.parse(tumbler))
+        entry = active_reader().resolve(Tumbler.parse(tumbler))
         assert entry is not None and entry.chunk_count == len(manifest_rows), (
             f"chunk_count={entry.chunk_count if entry else None} != "
             f"manifest_size={len(manifest_rows)} for doc_id={tumbler!r}"

@@ -16,6 +16,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
+from tests.conftest import engine_substrate_selected
 
 
 @pytest.fixture()
@@ -78,7 +79,7 @@ class TestSC1VersionTable:
         conn.close()
 
     @pytest.mark.skipif(
-        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        engine_substrate_selected(),
         reason="dies-roster: SQLite schema-version/migration reporting dies at "
         "the RDR-155 P4b flip (service mode: immutable migration source)",
     )
@@ -190,7 +191,7 @@ class TestSC3UpgradeFlags:
 
 class TestSC4DoctorSchema:
     @pytest.mark.skipif(
-        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        engine_substrate_selected(),
         reason="dies-roster: SQLite schema-version/migration reporting dies at "
         "the RDR-155 P4b flip (service mode: immutable migration source)",
     )
@@ -240,7 +241,7 @@ class TestRDR170FrozenBranchReporting:
         return db_path
 
     @pytest.mark.skipif(
-        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        engine_substrate_selected(),
         reason="dies-roster: SQLite schema-version/migration reporting dies at "
         "the RDR-155 P4b flip (service mode: immutable migration source)",
     )
@@ -259,7 +260,7 @@ class TestRDR170FrozenBranchReporting:
         assert "all checks passed" not in out
 
     @pytest.mark.skipif(
-        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        engine_substrate_selected(),
         reason="dies-roster: SQLite schema-version/migration reporting dies at "
         "the RDR-155 P4b flip (service mode: immutable migration source)",
     )

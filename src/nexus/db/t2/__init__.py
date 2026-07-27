@@ -1117,17 +1117,38 @@ class T2Database:
         convention established here. No current caller violates this
         rule; the docstring is a contract for future edits.
         """
-        # Resolve (project, title) for cascade scoping. Cheap indexed
-        # lookup via the memory connection directly to avoid the
-        # access_count side-effect of ``memory.get(id=...)`` on a row
-        # we're about to delete. Only executes when the caller used --id.
+        # Resolve (project, title) for cascade scoping. Only executes when
+        # the caller used --id.
+        #
+        # nexus-aqbrk: this was an unconditional ``self.memory._lock`` +
+        # ``self.memory.conn.execute``, which raises AttributeError against
+        # HttpMemoryStore — the id-only path was unreachable in service mode.
+        # Latent rather than live (the sole production caller,
+        # mcp/core.py::memory_delete, always passes project+title), but the
+        # facade is public API and the cascade below is the load-bearing
+        # part: without this resolution, ``purge_assignments_for_doc`` never
+        # runs and topic_assignments leak silently, which no FK covers.
         if id is not None and (project is None or title is None):
-            with self.memory._lock:
-                row = self.memory.conn.execute(
-                    "SELECT project, title FROM memory WHERE id = ?", (id,)
-                ).fetchone()
-            if row is not None:
-                project, title = row[0], row[1]
+            # Function-local: this module deliberately keeps its top-level
+            # imports cheap for the CLI cold-start path (see the
+            # _sanitize_fts5 comment above).
+            from nexus.db.storage_mode import has_raw_access  # noqa: PLC0415 — cold-start import discipline
+
+            if has_raw_access(self.memory):
+                # SQLite arm: indexed lookup on the raw connection, avoiding
+                # the access_count side-effect of ``memory.get(id=...)``.
+                with self.memory._lock:
+                    row = self.memory.conn.execute(
+                        "SELECT project, title FROM memory WHERE id = ?", (id,)
+                    ).fetchone()
+                if row is not None:
+                    project, title = row[0], row[1]
+            else:
+                # Service arm: the public read. Its access_count increment is
+                # immaterial on a row this call is about to delete.
+                entry = self.memory.get(id=id)
+                if entry is not None:
+                    project, title = entry["project"], entry["title"]
         deleted = self.memory.delete(project=project, title=title, id=id)
         if deleted and project and title:
             self.taxonomy.purge_assignments_for_doc(project=project, title=title)

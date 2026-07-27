@@ -48,6 +48,13 @@ from nexus.mcp_server import (
     catalog_show,
 )
 
+# nexus-aqbrk: the bootstrap-fallback state IS a local-artifact state — it is
+# defined by events.jsonl being materially sparser than documents.jsonl, both
+# of which exist only in the local catalog directory. Service mode has no such
+# state (the Java service owns the live catalog; there is no event log to be
+# sparse), so this file drives the local catalog by definition.
+pytestmark = pytest.mark.usefixtures("local_catalog_backend")
+
 
 @pytest.fixture(autouse=True)
 def _git_identity(monkeypatch):

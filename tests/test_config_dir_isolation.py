@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 
 import pytest
+from tests.conftest import engine_substrate_selected
 
 
 @pytest.fixture
@@ -284,7 +285,7 @@ class TestNoProductionT2Writes:
     writes ONLY under the override, never under the user's home."""
 
     @pytest.mark.skipif(
-        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        engine_substrate_selected(),
         reason="dies-roster: the on-disk sandbox memory.db placement assertion "
         "(SQLite T2 file substrate) dies at the RDR-155 P4b flip — service-"
         "backed T2 writes produce no local file to assert on",

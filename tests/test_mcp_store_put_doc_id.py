@@ -19,6 +19,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+from tests._catalog_fixture_ops import ActiveCatalog, documents_by_title
 from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
 from nexus.catalog.catalog import Catalog
@@ -100,12 +102,9 @@ def test_mcp_store_put_writes_catalog_doc_id_into_t3_chunk_metadata(
     # exact collection this MCP invocation wrote to.
     stored_col_name = result.split("->")[-1].strip()
 
-    cat = Catalog(catalog_env, catalog_env / ".catalog.db")
-    rows = cat._db.execute(
-        "SELECT tumbler FROM documents WHERE title = 'mcp-finding-doc-id'"
-    ).fetchall()
+    rows = documents_by_title("mcp-finding-doc-id")
     assert rows, "expected catalog entry for the mcp-stored doc"
-    expected_doc_id = rows[0][0]
+    expected_doc_id = str(rows[0].tumbler)
 
     stored_col = local_t3._client.get_collection(stored_col_name)
     chunk_result = stored_col.get(include=["metadatas"])
@@ -170,12 +169,9 @@ def test_mcp_store_put_forwards_catalog_tumbler_as_fire_document_doc_id(
     assert "Stored" in result, f"store_put failed: {result}"
 
     # The catalog tumbler the store hook minted for this doc.
-    cat = Catalog(catalog_env, catalog_env / ".catalog.db")
-    rows = cat._db.execute(
-        "SELECT tumbler FROM documents WHERE title = 'pyn35-tumbler-forward'"
-    ).fetchall()
+    rows = documents_by_title("pyn35-tumbler-forward")
     assert rows, "expected a catalog entry for the mcp-stored doc"
-    expected_tumbler = rows[0][0]
+    expected_tumbler = str(rows[0].tumbler)
     assert expected_tumbler, "expected a non-empty catalog tumbler"
 
     # The t3.put chunk natural-id — the value the pre-fix code (wrongly)
@@ -193,6 +189,7 @@ def test_mcp_store_put_forwards_catalog_tumbler_as_fire_document_doc_id(
     )
 
 
+@pytest.mark.usefixtures("local_catalog_backend")
 def test_mcp_store_put_forwards_blank_doc_id_when_no_catalog(
     inject_local_t3: T3Database,
     tmp_path: Path,
@@ -202,6 +199,20 @@ def test_mcp_store_put_forwards_blank_doc_id_when_no_catalog(
     forwards ``doc_id=''`` — the blank sentinel the service NULL-coerces
     (``nullIfBlank``), which satisfies the FK and still extracts from the
     queued content. It must NOT fall back to the chunk natural-id.
+
+    PINNED to the local catalog (nexus-aqbrk). The premise is an ABSENT
+    catalog: the test points NEXUS_CATALOG_PATH at an uninitialised dir so
+    the store hook mints nothing and returns ``('', False)``. That state
+    cannot exist in service mode — ``make_catalog_reader()`` always returns
+    a ``_SharedServiceCatalogHandle``, the hook registers, and it returned
+    ``('1.1.1', True)``. Unsatisfiable rather than wrong: this is the
+    canonical shape nexus-aqbrk's own description names ("assert
+    make_catalog_reader() is None means 'no catalog file' under SQLite").
+
+    SERVICE HALF IS OWNED: tests/test_e9ru2_catalog_gate_sweep.py
+    ::test_register_or_lookup_fresh_box_no_local_catalog_created — service
+    mode on a virgin box registers to the SERVICE and creates NO local
+    catalog, which is the deliberate counterpart behaviour (nexus-e9ru2).
     """
     import hashlib
 
@@ -342,7 +353,7 @@ def test_mcp_store_put_ghost_reconciliation_and_manifest_linkage(
     from nexus.mcp.core import store_put
     local_t3 = inject_local_t3
 
-    cat = Catalog(catalog_env, catalog_env / ".catalog.db")
+    cat = ActiveCatalog()
     owner = cat.register_owner("knowledge", "curator")
     ghost = cat.register(
         owner, "ghost-reconcile-e2e", content_type="knowledge",
@@ -361,12 +372,11 @@ def test_mcp_store_put_ghost_reconciliation_and_manifest_linkage(
         )
     assert "Stored" in result, f"store_put failed: {result}"
 
-    cat2 = Catalog(catalog_env, catalog_env / ".catalog.db")
-    rows = cat2._db.execute(
-        "SELECT count(*) FROM documents WHERE title = 'ghost-reconcile-e2e'"
-    ).fetchone()
-    assert rows[0] == 1, "the ghost must be reconciled, not duplicated"
+    assert len(documents_by_title("ghost-reconcile-e2e")) == 1, (
+        "the ghost must be reconciled, not duplicated"
+    )
 
+    cat2 = ActiveCatalog()
     entry = cat2.resolve(ghost)
     assert entry is not None
     assert entry.meta.get("doc_id") != "stale-legacy-doc-id", (

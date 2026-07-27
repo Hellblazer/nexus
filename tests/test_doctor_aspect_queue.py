@@ -33,6 +33,30 @@ from nexus.db.migrations import apply_pending
 from nexus.commands.upgrade import _current_version
 
 
+# nexus-aqbrk: PINNED to the local T2 backend. Every test here seeds via raw
+# ``INSERT INTO aspect_extraction_queue`` on a local memory.db and asserts what
+# the verb says about THOSE rows. In service mode ``_run_check_aspect_queue``
+# dispatches to ``_report_aspect_queue_service`` (doctor.py:728) and reads the
+# engine's queue, so the seeded rows are invisible and every count reads
+# "0 pending, 0 failed (service backend)".
+#
+# The raw INSERT is the giveaway: there is no service-mode equivalent of it
+# exposed to this file, so converting would mean inventing a seeding path for a
+# branch that already has its own tests.
+#
+# NOTE ``test_empty_queue_reports_zero`` was PASSING on the engine arm and was
+# not in the failing set — vacuously, since it asserts only ``"0" in output``
+# and the service dutifully reports 0 pending / 0 failed for a fresh tenant.
+# The pin restores its subject.
+#
+# SERVICE HALF IS OWNED: tests/test_false_clean_diagnostics_service_mode.py
+# drives ``doctor_mod._run_check_aspect_queue()`` against a patched
+# HttpAspectQueue, including the unresolvable-endpoint case
+# (::test_aspect_queue_check_survives_unresolvable_endpoint) — the false-clean
+# family (nexus-ingey / nexus-k0luu) this check belongs to.
+pytestmark = pytest.mark.usefixtures("local_t2_backend")
+
+
 @pytest.fixture()
 def runner() -> CliRunner:
     return CliRunner()

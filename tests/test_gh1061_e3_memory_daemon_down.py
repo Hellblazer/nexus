@@ -32,6 +32,33 @@ from nexus.cli import main
 from nexus.daemon.t2_client import T2DaemonNotReachableError, T2SchemaVersionMismatchError
 
 
+# nexus-aqbrk: the four daemon-down classes below are PINNED to the local T2
+# backend. They inject the failure at ``T2Client.call`` — the SQLite-era daemon
+# RPC socket — and in service mode ``nx memory`` never touches T2Client at all;
+# it goes over HTTP to the engine. So the patch intercepts NOTHING and every
+# command succeeds, which is why all six failed as ``exit_code != 0`` -> got 0.
+# A dead patch target, exactly the class this file's own module docstring warns
+# about ("if the catch were moved back to wrap make_t2_client() only, these
+# tests would fail").
+#
+# T2Client and the daemon it speaks to are retirement debt (nexus-gmiaf.24
+# deletes the SQLite daemon lifecycle), so these are pinned rather than
+# rewritten — they test a real mechanism that still exists today.
+#
+# SERVICE HALF: unowned before this commit. Nothing anywhere drove an
+# ``nx memory`` verb with the ENGINE unreachable, even though that is the more
+# likely failure now that the backend is a REMOTE service (restart, network
+# blip, expired bearer) rather than a local socket. Verified by probe that the
+# behaviour is already correct — exit 1, no traceback, clean one-liner with a
+# recovery hint — so this adds the missing ASSERTION, not a fix.
+# ``TestMemoryEngineUnreachable`` at the bottom owns it.
+#
+# PER-CLASS, not a module ``pytestmark``: a module-level mark also lands on
+# TestMemoryEngineUnreachable, and local_t2_backend (non-autouse) then
+# resolves AFTER that class's autouse _engine_down fixture and overwrites
+# service with sqlite. The classes want opposite backends.
+
+
 @pytest.fixture()
 def runner() -> CliRunner:
     return CliRunner()
@@ -48,6 +75,7 @@ def _patch_t2_client_call_raising(exc):
     return patch("nexus.daemon.t2_client.T2Client.call", side_effect=exc)
 
 
+@pytest.mark.usefixtures("local_t2_backend")
 class TestMemoryListDaemonDown:
     """nx memory list must print a clean one-liner and exit non-zero when daemon is down."""
 
@@ -102,6 +130,7 @@ class TestMemoryListDaemonDown:
         assert result.exit_code != 0
 
 
+@pytest.mark.usefixtures("local_t2_backend")
 class TestMemorySearchDaemonDown:
     """nx memory search must also handle daemon-down cleanly."""
 
@@ -115,6 +144,7 @@ class TestMemorySearchDaemonDown:
         assert "nx daemon t2 start" in result.output
 
 
+@pytest.mark.usefixtures("local_t2_backend")
 class TestMemoryPutDaemonDown:
     """nx memory put must handle daemon-down cleanly."""
 
@@ -130,6 +160,7 @@ class TestMemoryPutDaemonDown:
         assert "nx daemon t2 start" in result.output
 
 
+@pytest.mark.usefixtures("local_t2_backend")
 class TestMemoryVersionSkewDaemonDown:
     """T2SchemaVersionMismatchError (version-skewed daemon) must also be handled cleanly.
 
@@ -152,4 +183,86 @@ class TestMemoryVersionSkewDaemonDown:
         # __str__ of T2SchemaVersionMismatchError contains "5.6.0" and "5.5.0"
         assert "5.6.0" in result.output or "mismatch" in result.output.lower() or "schema" in result.output.lower(), (
             f"Expected version mismatch info in output:\n{result.output}"
+        )
+
+
+class TestMemoryEngineUnreachable:
+    """GH-1061 E3, service-mode half: the ENGINE down, not the T2 daemon.
+
+    nexus-aqbrk. The classes above inject ``T2DaemonNotReachableError`` at
+    ``T2Client.call``, which is the local daemon's RPC socket. In service
+    mode that socket does not exist — ``nx memory`` reaches the engine over
+    HTTP — so the whole file was silent about the failure mode that actually
+    matters on the new substrate. E3's concern (a raw traceback instead of an
+    actionable one-liner) does not shrink when the backend moves off-box; it
+    grows, because a remote service is unreachable for far more ordinary
+    reasons than a local socket.
+
+    These do NOT request ``local_t2_backend``; they set the backend to
+    service themselves, which wins as the later ``setenv``. And they use a
+    REAL closed port rather than a mock, so the assertion covers the genuine
+    httpx/errno path the user hits — a mocked ConnectError would prove the
+    handler catches what we chose to throw at it, which is not the question.
+    """
+
+    @staticmethod
+    def _closed_port() -> int:
+        """A port that is definitely not listening.
+
+        Bind :0, read the assigned port, close it. Per the project's
+        port-0 rule — never hardcode, and never assume a low port is
+        refused (in a container it may be filtered and hang instead).
+        """
+        import socket
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            return int(s.getsockname()[1])
+
+    @pytest.fixture(autouse=True)
+    def _engine_down(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
+        monkeypatch.setenv("NX_SERVICE_URL", f"http://127.0.0.1:{self._closed_port()}")
+        monkeypatch.setenv("NX_SERVICE_TOKEN", "unused-the-connect-fails-first")
+
+    @pytest.mark.parametrize("argv", [
+        ["memory", "list"],
+        ["memory", "search", "anything"],
+        ["memory", "get", "-p", "proj", "-t", "some.md"],
+    ])
+    def test_clean_one_liner_not_traceback(
+        self, runner: CliRunner, argv: list[str],
+    ) -> None:
+        result = runner.invoke(main, argv)
+
+        assert result.exit_code != 0, (
+            f"`nx {' '.join(argv)}` exited 0 with the engine unreachable — a "
+            f"silent success is the worst outcome here, because a scripted "
+            f"caller reads it as 'no entries'.\nOutput: {result.output}"
+        )
+        assert "Traceback" not in result.output, (
+            f"raw traceback instead of a clean error:\n{result.output}"
+        )
+        for leaked in ("ConnectError", "httpx.", "HTTPStatusError"):
+            assert leaked not in result.output, (
+                f"leaked the transport exception {leaked!r} into user-facing "
+                f"output:\n{result.output}"
+            )
+
+    def test_error_names_the_subsystem_and_a_recovery_action(
+        self, runner: CliRunner,
+    ) -> None:
+        """E3's actual requirement: actionable, not merely non-crashing.
+
+        Pins both halves of the current message — that it identifies the
+        storage service as the failing subsystem, and that it points at a
+        command the user can actually run.
+        """
+        result = runner.invoke(main, ["memory", "list"])
+        out = result.output.lower()
+        assert "storage service" in out, (
+            f"error does not say WHICH subsystem failed: {result.output!r}"
+        )
+        assert "nx doctor" in out, (
+            f"error gives the user no next step: {result.output!r}"
         )

@@ -31,7 +31,13 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from tests.db._service_fixture import SERVICE_ROLES_SQL, jar_freshness_skip_reason, pg_bin_dir
+from tests.db._service_fixture import (
+    SERVICE_ROLES_SQL,
+    jar_freshness_skip_reason,
+    pg_bin_dir,
+    spawn_service,
+    wait_for_service,
+)
 
 # ── Prerequisites (mirrors test_health_service_integration) ──────────────────
 
@@ -150,13 +156,12 @@ def service(pg_instance):
         "NX_CHROMA_PATH": tempfile.mkdtemp(prefix="nexus-dtmint-chroma-"),
     }
     env.pop("NX_STORAGE_BACKEND", None)
-    proc = subprocess.Popen(
-        [str(_JAVA), "-jar", str(_JAR)],
-        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        preexec_fn=os.setsid,
-    )
+    # nexus-lom9g: FILE-backed output via the shared primitive; the old
+    # stdout=PIPE/stderr=PIPE form wedged the service once 64KB of Logback
+    # output accumulated before the port bound (nexus-j0nec).
+    proc, _svc_log = spawn_service([str(_JAVA), "-jar", str(_JAR)], env)
     try:
-        _wait_tcp("127.0.0.1", svc_port, timeout=30.0)
+        wait_for_service("127.0.0.1", svc_port, proc=proc, log_path=_svc_log, timeout=60.0)
         yield {"port": svc_port, "token": _ROOT_TOKEN}
     finally:
         try:

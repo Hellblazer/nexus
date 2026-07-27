@@ -22,6 +22,35 @@ from nexus.catalog.factory import (
 )
 from nexus.catalog.tumbler import Tumbler
 
+# nexus-aqbrk: this file is the LOCAL factory's own test — read-only Catalog
+# mode over .catalog.db, the daemon-vs-direct writer fallback, and the admin
+# refusals. Service mode answers all three differently AND ON PURPOSE:
+# make_catalog_reader always returns a _SharedServiceCatalogHandle (so
+# "None when uninitialised" is unsatisfiable rather than wrong), the handle
+# has no _read_only or _db, and make_catalog_admin raises
+# CatalogAdminServiceModeError outright. The service half of this surface is
+# owned by tests/test_catalog_factory_service_mode_cache.py, which exercises
+# make_catalog_reader/make_catalog_writer under _is_catalog_service_mode and
+# pins the shared-client contract.
+pytestmark = pytest.mark.usefixtures("local_catalog_backend")
+
+
+@pytest.fixture(autouse=True)
+def _local_t2_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Also pin the T2 stores local, not just the catalog (nexus-aqbrk).
+
+    TestWriterDaemonRouted starts a real T2 daemon to prove the writer routes
+    through it. The daemon's ``_build_dispatch_table`` enumerates every store
+    with ``dir()`` + a bare ``getattr``, which trips the fail-loud ``.conn``
+    guard on any service-backed store and kills startup (tracked separately
+    as nexus-uqiyo — the daemon is the SQLite single-writer, so what it
+    should do in service mode is a design call, not a test concern).
+
+    This file tests the LOCAL daemon-routed writer, so it needs the local T2
+    it has always assumed.
+    """
+    monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
+
 
 def _seed_catalog(d: Path) -> tuple[str, str]:
     """Init the catalog, write an owner + a document; return (owner, doc)."""

@@ -38,8 +38,9 @@ import pytest
 
 from nexus.db.storage_mode import has_raw_access
 from nexus.db.t2 import T2Database
+from tests.conftest import engine_substrate_selected
 
-_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
+_ENGINE_SUBSTRATE = engine_substrate_selected()
 
 
 @pytest.fixture(autouse=True)

@@ -9,6 +9,7 @@ from click.testing import CliRunner
 
 from nexus.cli import main
 from nexus.db.http_vector_client import HttpVectorClient
+from tests._catalog_fixture_ops import ActiveCatalog, only_document
 
 SENTINEL_BEGIN = "# >>> nexus managed begin >>>"
 
@@ -439,15 +440,46 @@ class TestFixPaths:
         monkeypatch.setenv("GIT_COMMITTER_NAME", "Test")
         monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
 
+    @pytest.fixture(autouse=True)
+    def _point_catalog_path(self, tmp_path, monkeypatch):
+        """Aim ``catalog_path()`` at the dir these tests seed (nexus-aqbrk).
+
+        The tests patch ``nexus.config.catalog_path`` inside their ``with``
+        block, but :class:`ActiveCatalog` resolves through the same factories
+        the verb uses and those read the env on the SQLite arm, so the two
+        have to agree from fixture time.
+        """
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "catalog"))
+
     def _make_catalog_with_entries(self, tmp_path, entries):
-        """Create catalog with specified entries.
+        """Seed the ACTIVE catalog with the given entries (nexus-aqbrk).
+
+        CONVERTED, not pinned, because ``doctor --fix-paths`` genuinely runs
+        on both substrates: it reads ``reader.docs_with_absolute_paths()``,
+        which doctor.py:1856 documents as "uniform across SQLite and service
+        mode" (one of the endpoints nexus-xnz0o ported). The old form built a
+        LOCAL ``Catalog.init`` and the verb then read the SERVICE catalog, so
+        it found nothing.
+
+        That mismatch did not only fail two tests — it made two others pass
+        VACUOUSLY: ``test_fix_paths_skips_curator`` asserts
+        ``update_source_path.assert_not_called()`` and
+        ``test_fix_paths_idempotent`` asserts ``"No absolute" in output``,
+        both trivially true against an empty catalog. Seeding the active
+        catalog restores their subject.
 
         entries: list of (owner_type, repo_hash, repo_root, file_path, collection).
         """
         from nexus.catalog.catalog import Catalog
 
-        cat_dir = tmp_path / "catalog"
-        cat = Catalog.init(cat_dir)
+        # Still init the LOCAL catalog. On the SQLite arm the factory writer
+        # needs it to exist (without it the verb reports "Catalog not
+        # initialized — run: nx catalog setup" and the seeding silently goes
+        # nowhere); on the engine arm it is inert, because the writer resolves
+        # to the service and never opens this directory.
+        Catalog.init(tmp_path / "catalog")
+
+        cat = ActiveCatalog()
         for owner_type, repo_hash, repo_root, file_path, collection in entries:
             owner = cat.register_owner(
                 f"test-{repo_hash or 'curator'}",
@@ -462,7 +494,7 @@ class TestFixPaths:
                 file_path=file_path,
                 physical_collection=collection,
             )
-        return cat, cat_dir
+        return cat, tmp_path / "catalog"
 
     def test_fix_paths_dry_run(self, tmp_path, runner):
         cat, cat_dir = self._make_catalog_with_entries(tmp_path, [
@@ -485,8 +517,7 @@ class TestFixPaths:
         assert "[dry-run]" in result.output
         assert "src/foo.py" in result.output
         # Verify nothing was actually changed
-        row = cat._db.execute("SELECT file_path FROM documents").fetchone()
-        assert row[0].startswith("/")  # still absolute
+        assert only_document().file_path.startswith("/"), "dry-run must not rewrite"
 
     def test_fix_paths_writes_relative(self, tmp_path, runner):
         repo_dir = tmp_path / "repo"
@@ -504,8 +535,7 @@ class TestFixPaths:
             result = runner.invoke(main, ["doctor", "--fix-paths"])
         assert result.exit_code == 0
         assert "Fixed 1" in result.output
-        row = cat._db.execute("SELECT file_path FROM documents").fetchone()
-        assert row[0] == "src/foo.py"
+        assert only_document().file_path == "src/foo.py"
         mock_t3.update_source_path.assert_called_once()
 
     def test_fix_paths_skips_curator(self, tmp_path, runner):
@@ -519,6 +549,16 @@ class TestFixPaths:
         ):
             result = runner.invoke(main, ["doctor", "--fix-paths"])
         assert result.exit_code == 0
+        # NON-VACUITY (nexus-aqbrk): assert_not_called() holds trivially when
+        # nothing was seeded, which is exactly how this passed before the
+        # conversion — against an empty service catalog. Prove the curator row
+        # with an absolute path IS present, so "not called" means "skipped by
+        # owner_type", not "found nothing".
+        seeded = only_document()
+        assert seeded.file_path == "/abs/path/paper.pdf", (
+            f"seed did not land; the skip assertion below would be vacuous "
+            f"(got {seeded.file_path!r})"
+        )
         mock_t3.update_source_path.assert_not_called()
 
     def test_fix_paths_idempotent(self, tmp_path, runner):
@@ -534,6 +574,11 @@ class TestFixPaths:
             result = runner.invoke(main, ["doctor", "--fix-paths"])
         assert result.exit_code == 0
         assert "No absolute" in result.output
+        # NON-VACUITY (nexus-aqbrk): "No absolute" is also what an EMPTY
+        # catalog reports, so pin that the already-relative row exists and was
+        # left alone — otherwise this asserts nothing about idempotence.
+        assert only_document().file_path == "src/foo.py"
+        mock_t3.update_source_path.assert_not_called()
 
 
 # ── --check-quotas (nexus-c590) ─────────────────────────────────────────────
@@ -679,7 +724,23 @@ class TestCheckQuotas:
         assert data["voyage"]["api_key_set"] is True
         assert data["retry"]["total_count"] == 0
 
+@pytest.mark.usefixtures("local_t2_backend")
 class TestCheckPlanLibrary:
+    """``doctor --check-plan-library`` against a REAL local plan library.
+
+    PINNED, not converted (nexus-aqbrk). The verb's census is explicitly a
+    LOCAL SQLite dimensional count and refuses in service mode: "Plan
+    library is service-backed (Postgres) — local SQLite dimensional census
+    N/A in service mode." These tests seed local rows and assert on that
+    census, so the assertions are unsatisfiable there rather than wrong.
+
+    SERVICE HALF IS OWNED: tests/test_doctor_check_plan_library_service_mode
+    .py::test_check_plan_library_reports_na_in_service_mode (asserts the N/A
+    text and that "T2 database not found" is not emitted), with
+    ::test_check_plan_library_sqlite_mode_still_fails_loud covering the
+    other side of the same branch.
+    """
+
     """RDR-092 Phase 0c.2: nx doctor --check-plan-library. Reports
     authored vs backfilled vs non-dimensional plan row counts; exits
     non-zero when the global-tier builtin count falls below the 9 shipped

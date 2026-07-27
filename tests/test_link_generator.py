@@ -480,6 +480,10 @@ class TestCitationLinksReaderWriterSplit:
         cat._db.close()
         return cat_dir
 
+        # nexus-aqbrk: PINNED (catalog). Asserts the RDR-146 P1.2 reads-via-cat /
+    # writes-via-writer SPLIT against a local Catalog handle; under the engine
+    # substrate the writes hit the RDR-176 frozen-source read-only guard.
+    @pytest.mark.usefixtures("local_catalog_backend")
     def test_reads_via_cat_writes_via_writer(self, tmp_path: Path) -> None:
         """The read-only reader supplies all_documents; the writer takes the
         link_if_absent. A 'cites' edge is created."""

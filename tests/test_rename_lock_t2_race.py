@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.conftest import engine_substrate_selected
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -158,7 +159,7 @@ class TestInflightRowPreservation:
     _ITERATIONS = 30
 
     @pytest.mark.skipif(
-        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        engine_substrate_selected(),
         reason="dies-roster: the deterministic claim-vs-cascade race outcome "
         "is the SQLite RENAME_LOCK serialization's guarantee and the harness "
         "needs a fresh DB file per iteration (the engine tenant is per-TEST, "

@@ -68,6 +68,33 @@ def test_long_body_opening_with_sentinel_phrase_is_kept() -> None:
 
 # ── _ingest_highlights_record ───────────────────────────────────────────────
 
+def _register_real_doc(tmp_path, monkeypatch, collection: str) -> str:
+    """Register a REAL catalog document and return its tumbler (nexus-aqbrk).
+
+    The highlights store enforces a foreign key to catalog_documents.tumbler on
+    the engine. _patch_catalog's MagicMock hands back a FABRICATED tumbler
+    ("1.2.3") that was never registered anywhere, so the write failed the FK
+    with an HTTP 409 — invisible on the SQLite arm, which has no such
+    constraint.
+
+    Must run BEFORE _patch_catalog: that helper repoints make_catalog_reader at
+    the mock, so ActiveCatalog would resolve to the mock afterwards.
+    """
+    from nexus.catalog.catalog import Catalog
+
+    from tests._catalog_fixture_ops import ActiveCatalog
+
+    cat_dir = tmp_path / "catalog"
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
+    Catalog.init(cat_dir)
+    cat = ActiveCatalog()
+    owner = cat.register_owner("dt-highlights", "curator")
+    return str(cat.register(
+        owner, "A DT Doc", content_type="paper",
+        file_path="dt/a.pdf", physical_collection=collection,
+    ))
+
+
 def _patch_catalog(monkeypatch, tmp_path, tumbler="1.2.3", collection="c"):
     """Patch nexus.catalog.catalog.Catalog (lazy-imported inside the helper)."""
     entry = MagicMock()
@@ -95,8 +122,9 @@ def test_ingest_highlights_record_writes_store(tmp_path, monkeypatch) -> None:
     from nexus.commands import dt as dt_mod
     from nexus.db.t2.document_highlights import DocumentHighlights
 
-    _patch_catalog(monkeypatch, tmp_path,
-                   collection="knowledge__dt__voyage-context-3__v1")
+    _coll = "knowledge__dt__voyage-context-3__v1"
+    real_tumbler = _register_real_doc(tmp_path, monkeypatch, _coll)
+    _patch_catalog(monkeypatch, tmp_path, tumbler=real_tumbler, collection=_coll)
     monkeypatch.setattr("nexus.config.default_db_path", lambda: tmp_path / "memory.db")
     monkeypatch.setattr("nexus.mcp_client.devonthink.dt_extract_highlights",
                         lambda u: "## Highlights\n- x")
@@ -104,7 +132,13 @@ def test_ingest_highlights_record_writes_store(tmp_path, monkeypatch) -> None:
                         lambda u: None)
 
     assert dt_mod._ingest_highlights_record("ABC") is True
-    rec = DocumentHighlights(tmp_path / "memory.db").get("1.2.3")
+    # nexus-aqbrk: read through the T2 FACADE, not a raw DocumentHighlights —
+    # the latter always opens local SQLite, while the write routed to whichever
+    # store is live.
+    from nexus.db.t2 import T2Database
+
+    with T2Database(tmp_path / "memory.db") as _t2:
+        rec = _t2.document_highlights.get(real_tumbler)
     assert rec is not None
     assert rec.highlights_md == "## Highlights\n- x"
     assert rec.source_uri == "x-devonthink-item://ABC"
@@ -169,13 +203,22 @@ def test_highlights_show_command(runner, tmp_path, monkeypatch) -> None:
     from nexus.db.t2.document_highlights import DocumentHighlights, HighlightRecord
 
     db = tmp_path / "memory.db"
-    DocumentHighlights(db).upsert(HighlightRecord(
-        doc_id="1.2.3", source_uri="x-devonthink-item://ABC", collection="c",
-        highlights_md="## Highlights\n- the point", mentions_md="",
-        ingested_at="2026-05-30T00:00:00Z",
-    ))
+    # nexus-aqbrk: seed through the T2 FACADE against a REAL tumbler. The raw
+    # DocumentHighlights(db) form always writes local SQLite, while `nx dt
+    # highlights` reads via the facade — so on the engine arm the row was
+    # invisible. The tumbler must exist for the engine's FK.
+    real_tumbler = _register_real_doc(tmp_path, monkeypatch, "c")
+    from nexus.db.t2 import T2Database
+
+    with T2Database(db) as _t2:
+        _t2.document_highlights.upsert(HighlightRecord(
+            doc_id=real_tumbler, source_uri="x-devonthink-item://ABC",
+            collection="c",
+            highlights_md="## Highlights\n- the point", mentions_md="",
+            ingested_at="2026-05-30T00:00:00Z",
+        ))
     monkeypatch.setattr("nexus.config.default_db_path", lambda: db)
-    result = runner.invoke(main, ["dt", "highlights", "1.2.3"])
+    result = runner.invoke(main, ["dt", "highlights", real_tumbler])
     assert result.exit_code == 0, result.output
     assert "the point" in result.output
     # unknown tumbler -> clean error

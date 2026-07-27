@@ -12,7 +12,7 @@ from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbed
 
 from nexus.db.t3 import T3Database
 from nexus.registry import RepoRegistry
-from tests.conftest import make_vector_test_client
+from tests.conftest import fake_credentials, make_vector_test_client
 
 # All tests in this module are end-to-end: real ChromaDB, real local
 # embeddings, real CLI subprocesses. They average ~5.8s/test on CI and
@@ -178,7 +178,7 @@ def rich_registry(tmp_path: Path, rich_repo: Path) -> RepoRegistry:
 def _index(repo: Path, registry: RepoRegistry, t3: T3Database, **kw) -> None:
     from nexus.indexer import index_repository
     with patch("nexus.db.make_t3", return_value=t3), \
-         patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
+         patch("nexus.config.get_credential", side_effect=fake_credentials()):
         index_repository(repo, registry, **kw)
 
 
@@ -709,7 +709,7 @@ def test_cli_index_repo(
     monkeypatch.setenv("HOME", str(tmp_path))
     runner = CliRunner()
     with patch("nexus.db.make_t3", return_value=local_t3), \
-         patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
+         patch("nexus.config.get_credential", side_effect=fake_credentials()):
         result = runner.invoke(main, ["index", "repo", str(mini_repo)])
     assert result.exit_code == 0
     assert "Done" in result.output
@@ -724,7 +724,7 @@ def test_cli_index_then_search(
     runner = CliRunner()
     col_name = f"code__{mini_repo.name}-{hashlib.sha256(str(mini_repo).encode()).hexdigest()[:8]}"
     with patch("nexus.db.make_t3", return_value=local_t3), \
-         patch("nexus.config.get_credential", side_effect=lambda k: "test-key"), \
+         patch("nexus.config.get_credential", side_effect=fake_credentials()), \
          patch("nexus.commands.search_cmd._t3", return_value=local_t3):
         idx = runner.invoke(main, ["index", "repo", str(mini_repo)])
         assert idx.exit_code == 0
@@ -741,7 +741,7 @@ def test_cli_index_frecency_only(
     monkeypatch.setenv("HOME", str(tmp_path))
     runner = CliRunner()
     with patch("nexus.db.make_t3", return_value=local_t3), \
-         patch("nexus.config.get_credential", side_effect=lambda k: "test-key"):
+         patch("nexus.config.get_credential", side_effect=fake_credentials()):
         runner.invoke(main, ["index", "repo", str(mini_repo)])
         result = runner.invoke(main, ["index", "repo", str(mini_repo), "--frecency-only"])
     assert result.exit_code == 0

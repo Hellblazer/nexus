@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
+from tests.conftest import engine_substrate_selected
 
 # The subject of this whole module is the SQLite-source backfill tool:
 # backfill_source_collection() takes a raw sqlite3 connection
@@ -27,7 +28,7 @@ from click.testing import CliRunner
 # raw handle — and the legacy-row population it repairs — is exclusive to
 # the SQLite twin, which is a migration SOURCE only.
 pytestmark = pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    engine_substrate_selected(),
     reason="dies-roster: SQLite-source backfill tool (raw .conn rewrite of legacy rows) dies at the RDR-155 P4b flip",
 )
 

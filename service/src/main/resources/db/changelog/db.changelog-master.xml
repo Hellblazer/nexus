@@ -274,6 +274,29 @@
          post-rdr180/post-187 shape of catalog_documents; before grants. -->
     <include file="db/changelog/catalog-016-source-uri-unique.xml"/>
 
+    <!-- nexus-22r1f: memory FTS separator tokens + diacritic folding — the
+         memory-side twin of catalog-015. Dotted titles (auth-design.md) were
+         unfindable by any word inside them on the SERVICE substrate, which
+         has been the default since 6.0. Ordered after catalog-016 simply as
+         the next appended changeset; it touches only nexus.memory. ALSO
+         creates nexus.fold_diacritics, which catalog-017 below depends on —
+         these two must not be reordered. -->
+    <include file="db/changelog/memory-002-fts-separator-tokens.xml"/>
+
+    <!-- nexus-23wlw census follow-up: the catalog-side twin of memory-002's
+         folding. catalog-015 fixed catalog_documents' SEPARATOR half and left
+         diacritics, so 'Godel' did not find 'Gödel' — measured against the
+         live catalog, not assumed. MUST follow memory-002, which declares the
+         nexus.fold_diacritics function this expression calls. -->
+    <include file="db/changelog/catalog-017-fts-diacritic-folding.xml"/>
+
+    <!-- BUG-0148 invariant, second occurrence: memory-002-1 and catalog-017-0
+         both REWRITE their table (re-adding a STORED generated column) and
+         neither ANALYZEd it, so planner stats described the pre-rewrite shape.
+         Measured stale on the live cluster after the v0.1.57 boot (conexus
+         relay, T2 [21164]). MUST follow both of them. -->
+    <include file="db/changelog/analyze-002-fts-rewritten-tables.xml"/>
+
     <!-- g37fr FINDING 2 (RDR-155 P4b): UPDATE on the topics id sequence so
          the taxonomy fidelity import can setval past imported ids (the
          serial-collision fix). Needs role-001 (nexus_svc) + taxonomy-001

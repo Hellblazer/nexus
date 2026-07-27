@@ -1,7 +1,15 @@
 """AC2: T2 SQLite creates schema with WAL mode, FTS5 table, and all 3 triggers."""
+import pytest
+
 from nexus.db.t2 import T2Database
 
 
+# nexus-aqbrk: PINNED. A pure SQLite schema smoke test — it reaches
+# HttpMemoryStore's raw handle in service mode, where there is none.
+# SERVICE HALF: UNOWNED and arguably N/A — the Java service owns its own
+# Postgres schema via Liquibase, so there is no Python-side twin to name.
+# Stated rather than guessed.
+@pytest.mark.usefixtures("local_t2_backend")
 def test_schema_creation(db: T2Database) -> None:
     # Phase 2: the memory table, memory_fts, indexes, and triggers all
     # live on the memory store's dedicated connection.
