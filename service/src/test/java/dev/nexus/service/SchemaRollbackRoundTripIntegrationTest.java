@@ -179,16 +179,21 @@ class SchemaRollbackRoundTripIntegrationTest {
      * execution order instead of the round trip failing somewhere deep in a
      * rollback with a misleading cause.
      *
-     * <p><strong>What this test found on its first run (nexus-ixsxa).</strong>
-     * Four of the five {@code runAlways} changesets are recorded {@code RERAN}
-     * and update in place. {@code grants-nexus-diag-2} resolves its precondition
-     * {@code onFail="MARK_RAN"} wherever {@code nexus.diag_chash_conformance}
-     * is absent (the view comes from the superuser provisioning path, not from
-     * Liquibase) — and Liquibase records a MARK_RAN by INSERTING a row, so the
-     * changelog grows by one row on every boot of such a cluster, without
-     * bound. That is a forward-path defect tracked on its own bead, not
-     * something this test asserts; it is logged loudly here instead, because it
-     * also skews any rollback-depth arithmetic computed from row counts.
+     * <p><strong>What this test found on its first run, and now guards
+     * (nexus-ixsxa).</strong> A {@code runAlways} changeset whose
+     * {@code <preConditions onFail="MARK_RAN">} is unmet grows the changelog by
+     * one row per boot, without bound: {@code ExecType.MARK_RAN} carries
+     * {@code ranBefore=false} and {@code MarkChangeSetRanGenerator} branches on
+     * that flag to {@code InsertStatement}, where {@code RERAN}
+     * ({@code ranBefore=true}) updates in place. Both {@code grants-nexus-diag}
+     * changesets were shaped that way, era-exclusive on the same probe, so
+     * exactly one of them accumulated on every cluster — {@code -2} in the
+     * legacy era, {@code -1} in the view era. Fixed by moving both era tests
+     * into the {@code DO $$} bodies; the row-count invariant is asserted here
+     * (legacy era) and in {@link #eraTransitionRevokesTableSelectWithoutGrowingTheChangelog}
+     * (view era, and the transition between them). It is a hard assertion
+     * rather than a log line because it also skews any rollback-depth
+     * arithmetic computed from row counts.
      */
     @Test
     void runAlwaysChangesetsFloatToTheExecutionTail() throws Exception {
@@ -224,31 +229,119 @@ class SchemaRollbackRoundTripIntegrationTest {
                     afterSecond = changelogRowCount(c);
                     tailAfterSecond = executionTail(c, RUN_ALWAYS_IDS.size());
                 }
-                // nexus-ixsxa, found by this test's first-ever run: a runAlways
-                // changeset whose precondition resolves onFail=MARK_RAN gets a
-                // NEW row per boot instead of an in-place update, so the
-                // changelog grows without bound wherever that precondition is
-                // unmet. Reported here rather than asserted, because the fix is
-                // a forward-path change tracked on its own bead — but reported
-                // LOUDLY rather than tolerated in silence, since it also skews
-                // any rollback-depth arithmetic done by row count.
+                // nexus-ixsxa: re-booting must RE-STAMP the runAlways rows, not
+                // append new ones. This container has no
+                // nexus.diag_chash_conformance (it comes from the superuser
+                // provisioning path, never from Liquibase), so it is the LEGACY
+                // era — the arm where grants-nexus-diag-2 used to accumulate.
                 List<String> duplicated;
                 try (Connection c = ds.getConnection()) {
-                    duplicated = query(c,
-                        "SELECT id || ' (' || author || ') x' || count(*) FROM databasechangelog "
-                            + "GROUP BY id, author HAVING count(*) > 1 ORDER BY 1");
+                    duplicated = duplicateChangelogRows(c);
                 }
-                if (afterSecond != afterFirst) {
-                    log.warn("event=changelog_row_growth_on_reboot bead=nexus-ixsxa "
-                            + "first={} second={} duplicated={}",
-                        afterFirst, afterSecond, duplicated);
-                }
+                assertThat(duplicated)
+                    .as("no changeset may occupy more than one DATABASECHANGELOG row: a "
+                        + "runAlways changeset with an unmet <preConditions onFail=\"MARK_RAN\"> "
+                        + "INSERTS per boot instead of updating in place (nexus-ixsxa)")
+                    .isEmpty();
+                assertThat(afterSecond)
+                    .as("a second boot must re-stamp the runAlways rows in place, leaving the "
+                        + "row count unchanged — unbounded growth also skews every rollback "
+                        + "depth computed by row count (nexus-ixsxa)")
+                    .isEqualTo(afterFirst);
                 assertThat(tailAfterSecond)
                     .as("after a second boot the %d runAlways changesets must occupy the LAST %d "
                         + "execution slots — this is what puts staging-4-svc-grants (master pos "
                         + "193) within reach of a rollback, and the whole rollback leg depends "
                         + "on it", RUN_ALWAYS_IDS.size(), RUN_ALWAYS_IDS.size())
                     .containsExactlyInAnyOrderElementsOf(RUN_ALWAYS_IDS);
+            }
+        } finally {
+            pg.stop();
+        }
+    }
+
+    /**
+     * The nexus_diag ERA TRANSITION, executed for the first time: legacy grants
+     * → the superuser provisioning path creates
+     * {@code nexus.diag_chash_conformance} → the view-era REVOKE fires. Two
+     * properties are asserted together because they share one cause.
+     *
+     * <p><strong>The boundary (RDR-182 s5).</strong> {@code grants-nexus-diag-2}
+     * is what turns the diagnostic role's content boundary from a product-level
+     * lint into a DB-enforced one, by revoking the direct table SELECT that
+     * {@code grants-nexus-diag-1} granted in the legacy era. Nothing had ever
+     * executed that transition. It is also precisely what a {@code runOnChange}
+     * "fix" for nexus-ixsxa would have silently forfeited:
+     * {@code ShouldRunChangeSetFilter} rejects an already-ran
+     * {@code runOnChange} changeset outright, so the era would never be
+     * re-evaluated and the revoke would never fire.
+     *
+     * <p><strong>The row invariant (nexus-ixsxa).</strong> The view era is the
+     * arm nobody had measured — the bead recorded it as safe because
+     * {@code grants-nexus-diag-2}'s precondition passes there. It does, and
+     * {@code grants-nexus-diag-1}'s, being the exclusive complement on the same
+     * probe, then fails: that era accumulated too, just under a different id.
+     */
+    @Test
+    void eraTransitionRevokesTableSelectWithoutGrowingTheChangelog() throws Exception {
+        PostgreSQLContainer<?> pg = PgContainerHelper.start();
+        try {
+            try (Connection su = pg.createConnection("")) {
+                dbaBootstrap(su);
+                // BYPASSRLS is why this role is superuser-created and never
+                // created by the changelog (nexus-vounk): a policy-subject
+                // session with no nexus.tenant GUC counts ZERO rows.
+                su.createStatement().execute(
+                    "CREATE ROLE nexus_diag LOGIN PASSWORD 'nexus_diag_pass' "
+                        + "NOSUPERUSER NOCREATEDB NOCREATEROLE BYPASSRLS");
+            }
+            try (HikariDataSource ds = newAdminPool(pg, "nexus-admin-era-transition")) {
+                // ── LEGACY era: no counts view, so diag-1 grants table SELECT.
+                SchemaMigrator.migrate(ds);
+                try (Connection c = ds.getConnection()) {
+                    assertThat(diagBaseTableGrants(c))
+                        .as("legacy era: grants-nexus-diag-1 must grant nexus_diag direct table "
+                            + "SELECT — without this the revoke asserted below would pass "
+                            + "vacuously against a role that never had the grant")
+                        .isNotEmpty();
+                }
+
+                // ── The provisioning path creates the view. SUPERUSER-owned on
+                // purpose: under FORCE RLS a counts view sees every tenant's
+                // rows only when its owner is RLS-exempt, and diag-2's revoke
+                // loop is owner-restricted precisely so it never touches this
+                // foreign-owned relation (nexus-46yy3, a live-reproduced P0).
+                try (Connection su = pg.createConnection("")) {
+                    su.createStatement().execute(
+                        "CREATE VIEW nexus.diag_chash_conformance AS "
+                            + "SELECT 'stub'::text AS table_name, 0::bigint AS non_conformant");
+                    su.createStatement().execute(
+                        "GRANT SELECT ON nexus.diag_chash_conformance TO nexus_diag");
+                }
+
+                // ── VIEW era: diag-2 fires, diag-1 stands down.
+                int viewEraRows;
+                SchemaMigrator.migrate(ds);
+                try (Connection c = ds.getConnection()) {
+                    assertThat(diagBaseTableGrants(c))
+                        .as("view era: grants-nexus-diag-2 must revoke every direct BASE TABLE "
+                            + "SELECT, leaving the counts view as nexus_diag's only content "
+                            + "path — the RDR-182 s5 boundary becoming structural")
+                        .isEmpty();
+                    viewEraRows = changelogRowCount(c);
+                }
+
+                SchemaMigrator.migrate(ds);
+                try (Connection c = ds.getConnection()) {
+                    assertThat(duplicateChangelogRows(c))
+                        .as("view era: grants-nexus-diag-1 is the exclusive complement of "
+                            + "grants-nexus-diag-2 on the same probe, so as a MARK_RAN "
+                            + "precondition it appended a row here on every boot (nexus-ixsxa)")
+                        .isEmpty();
+                    assertThat(changelogRowCount(c))
+                        .as("view era: a reboot must re-stamp the runAlways rows in place")
+                        .isEqualTo(viewEraRows);
+                }
             }
         } finally {
             pg.stop();
@@ -506,6 +599,34 @@ class SchemaRollbackRoundTripIntegrationTest {
     private static List<String> executionTail(Connection c, int n) throws Exception {
         return query(c,
             "SELECT id FROM databasechangelog ORDER BY orderexecuted DESC LIMIT " + n);
+    }
+
+    /**
+     * Changeset ids occupying more than one DATABASECHANGELOG row, with their
+     * row counts — the direct signal for nexus-ixsxa. Empty is the invariant.
+     */
+    private static List<String> duplicateChangelogRows(Connection c) throws Exception {
+        return query(c,
+            "SELECT id || ' (' || author || ') x' || count(*) FROM databasechangelog "
+                + "GROUP BY id, author HAVING count(*) > 1 ORDER BY 1");
+    }
+
+    /**
+     * nexus_diag's direct SELECT grants on BASE TABLES only. The relkind filter
+     * is load-bearing: the counts view is granted by its superuser owner and
+     * must SURVIVE the view-era revoke, so counting it would make the
+     * post-revoke assertion unsatisfiable.
+     */
+    private static List<String> diagBaseTableGrants(Connection c) throws Exception {
+        return query(c,
+            "SELECT g.table_schema || '.' || g.table_name "
+                + "FROM information_schema.role_table_grants g "
+                + "JOIN pg_namespace n ON n.nspname = g.table_schema "
+                + "JOIN pg_class cl ON cl.relname = g.table_name "
+                + "  AND cl.relnamespace = n.oid "
+                + "WHERE g.grantee = 'nexus_diag' AND g.privilege_type = 'SELECT' "
+                + "AND g.table_schema IN ('nexus','t1') AND cl.relkind IN ('r','p') "
+                + "ORDER BY 1");
     }
 
     private static int changelogRowCount(Connection c) throws Exception {
