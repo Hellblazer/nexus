@@ -208,3 +208,78 @@ T2_STORE_CONTRACT: dict[str, dict[str, list[str]]] = {
     },
 }
 
+
+# ── Supplemental contract: service-mode-only methods (nexus-tdkg1.1) ─────────
+#
+# T2_STORE_CONTRACT above is a snapshot of the SQLITE oracle's surface, so by
+# construction it can only ever describe methods that HAVE a SQLite twin. These
+# do not: they are production-called methods that exist ONLY on the Http store.
+# They are therefore invisible to both the coverage tripwire AND to the live
+# oracle behind it, and could be deleted silently — the exact class RF-158-1
+# was built to prevent, arriving through the one door it does not watch.
+#
+# THE GATING RELATIONSHIP. Today `test_contract_matches_live_sqlite_oracle`
+# still cross-checks the primary contract against the live SQLite classes.
+# RDR-158 P4 (nexus-i711w) DELETES that guard along with the SQLite classes,
+# after which the frozen artifacts are the sole authority. This supplemental
+# contract must therefore land BEFORE i711w, not with it — afterwards there is
+# no oracle left to notice these four were never covered.
+#
+# NOT THE FIVE THE BEAD LISTS. nexus-tdkg1.1 names five, including
+# `document_aspects.rename_collection`. Measured 2026-07-27: that one IS in
+# T2_STORE_CONTRACT['document_aspects'] — it has a SQLite twin and is already
+# covered by the primary tripwire. Adding it here would be a duplicate claiming
+# service-mode-only status it does not have, which
+# `test_supplemental_is_service_mode_only` now rejects outright. RDR-158's Open
+# Questions (the document the bead itself calls canonical) lists four, not five;
+# where the two disagree the RDR wins.
+#
+# NOR ONLY THOSE FOUR. The first cut of this dict stopped at the bead's list
+# minus that one, which was an unvalidated assumption — the bead was a starting
+# point, not an enumeration. A substantive critique (2026-07-27) enumerated ALL
+# NINE Http* stores against `primary ∪ supplemental` by script and found four
+# more that meet every entry criterion below, each on a permanent production
+# path, none with a SQLite twin:
+#   scratch.close_session          mcp/core.py:775,835 — every MCP session teardown
+#   aspect_queue.enqueue_many      indexer.py:3583 — the core aspect-enqueue path
+#   telemetry.query_tier_writes    doctor.py:1129, tier_status.py:204
+#   telemetry.query_tier_writes_once  _session_end_launcher.py:250
+# Landing only the first four would have left the blind spot half-open while the
+# comments here asserted it closed. Verified independently before adding.
+#
+# DELIBERATELY EXCLUDED: the ~20 uncovered `import_*` ETL methods across
+# memory/plans/telemetry/chash_index/document_aspects/document_highlights/
+# aspect_queue/taxonomy. They meet the mechanical criteria but are slated for
+# whole-file deletion alongside their `*_etl.py` callers and the engine's
+# /import routes in the same 7.0.0 wave (nexus-i711w recon, T2 [21098]). Freezing
+# a contract for methods being retired would manufacture work for the bead that
+# deletes them. If that disposition changes, they belong here.
+#
+# ENTRY CRITERIA — all enforced by tests, not convention:
+#   1. present on the Http store (a typo cannot silently cover nothing);
+#   2. ABSENT from T2_STORE_CONTRACT for that label (else it belongs there);
+#   3. production-called in src/ on a path that SURVIVES the 7.0.0 wave.
+#
+# Same shape as the primary contract — {label: {method: [ordered non-self
+# params]}} — so the coverage and param-prefix checks consume the union
+# without special-casing.
+T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
+    'aspect_queue': {
+        'enqueue_many': ['rows'],
+    },
+    'document_aspects': {
+        'operator_confidence_aggregate': ['source_uris', 'reducer_kind'],
+        'operator_filter': ['source_uris', 'field', 'predicate'],
+        'operator_groupby': ['source_uris', 'field'],
+    },
+    'document_highlights': {
+        'rename_collection': ['old', 'new'],
+    },
+    'scratch': {
+        'close_session': [],
+    },
+    'telemetry': {
+        'query_tier_writes': ['session_id', 'since', 'last_n'],
+        'query_tier_writes_once': ['session_id', 'timeout'],
+    },
+}

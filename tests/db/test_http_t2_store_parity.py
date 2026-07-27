@@ -35,7 +35,25 @@ import inspect
 
 import pytest
 
-from tests.db.t2_store_contract import _UNIVERSAL_IGNORE, T2_STORE_CONTRACT
+from tests.db.t2_store_contract import (
+    _UNIVERSAL_IGNORE,
+    T2_STORE_CONTRACT,
+    T2_SUPPLEMENTAL_CONTRACT,
+)
+
+
+def _required(label: str) -> dict[str, list[str]]:
+    """The full surface the Http store owes for *label*.
+
+    The primary contract can only describe methods with a SQLite twin, since it
+    was snapshotted from the SQLite oracle. Service-mode-only methods have no
+    twin and are invisible to it — so the checks below consume the UNION
+    (nexus-tdkg1.1). Merged here rather than at each call site so coverage and
+    param-prefix cannot drift apart over which surface they enforce.
+    """
+    merged = dict(T2_STORE_CONTRACT[label])
+    merged.update(T2_SUPPLEMENTAL_CONTRACT.get(label, {}))
+    return merged
 
 # (label, http_class_path). The SQLite oracle path is no longer needed at
 # tripwire time — the frozen contract IS the oracle. The mapping from label to
@@ -117,8 +135,11 @@ def _public_methods(cls: type) -> set[str]:
                          ids=[p[0] for p in _STORE_PAIRS])
 def test_http_store_covers_contract(label, http_path):
     """Every contract public method (minus documented exclusions) exists on the
-    HTTP store — a method the CLI/MCP can call must not vanish in service mode."""
-    contract_methods = set(T2_STORE_CONTRACT[label])
+    HTTP store — a method the CLI/MCP can call must not vanish in service mode.
+
+    Covers the primary contract UNION the supplemental one, so service-mode-only
+    methods are guarded too (nexus-tdkg1.1)."""
+    contract_methods = set(_required(label))
     http_methods = _public_methods(_load(http_path))
     excluded = set(_EXCLUSIONS.get(label, {}))
 
@@ -141,7 +162,7 @@ def test_shared_method_param_prefix_matches(label, http_path):
     params, never reorder/rename the prefix) — the drift that broke git-hook
     indexing in nexus-7zuzz."""
     http_cls = _load(http_path)
-    contract = T2_STORE_CONTRACT[label]
+    contract = _required(label)
 
     # Only methods absent from the HTTP store (the _EXCLUSIONS set) are excused
     # from the param check — they literally cannot be param-compared. Methods
@@ -175,12 +196,198 @@ def test_exclusions_are_real_contract_methods():
     """Guard the guard: every excluded name must actually be a method in the
     frozen contract, so a typo can't silently neuter the coverage check."""
     for label, excl in _EXCLUSIONS.items():
-        methods = set(T2_STORE_CONTRACT[label])
+        # Against the UNION, not the primary contract alone. _EXCLUSIONS is
+        # consumed against _required(label) by both live checks, so validating
+        # it against a narrower set would reject a legitimate exclusion for a
+        # service-mode-only method as "not a real contract method" (code review,
+        # nexus-tdkg1.1). Inert today (_EXCLUSIONS is empty) and it fails loud
+        # rather than permitting drift — but the two must agree on one surface.
+        methods = set(_required(label))
         bogus = set(excl) - methods
         assert not bogus, (
             f"{label}: _EXCLUSIONS lists names that are not contract methods "
             f"(typo / stale?): {sorted(bogus)}"
         )
+
+
+@pytest.mark.parametrize("label,http_path", _STORE_PAIRS,
+                         ids=[p[0] for p in _STORE_PAIRS])
+def test_supplemental_is_service_mode_only(label, http_path):
+    """Guard the guard (nexus-tdkg1.1). Two ways the supplemental contract could
+    silently cover nothing, both rejected here:
+
+    * a name that is NOT on the Http store — a typo or a rename would otherwise
+      sit in the dict forever, looking like protection while guarding a method
+      that does not exist;
+    * a name that IS in the primary contract — that method has a SQLite twin and
+      is already covered, so listing it here is a duplicate whose real effect is
+      to imply service-mode-only status it does not have. The bead that
+      commissioned this listed exactly one such entry
+      (``document_aspects.rename_collection``), which is why this check exists
+      rather than a comment asking people to be careful.
+    """
+    supplemental = T2_SUPPLEMENTAL_CONTRACT.get(label, {})
+    if not supplemental:
+        pytest.skip(f"{label} declares no service-mode-only methods")
+
+    http_methods = _public_methods(_load(http_path))
+    missing = set(supplemental) - http_methods
+    assert not missing, (
+        f"{label}: T2_SUPPLEMENTAL_CONTRACT names methods absent from the Http "
+        f"store {sorted(missing)} — a supplemental entry that matches nothing "
+        f"guards nothing. Fix the name, or drop it if the method really went."
+    )
+
+    duplicated = set(supplemental) & set(T2_STORE_CONTRACT[label])
+    assert not duplicated, (
+        f"{label}: {sorted(duplicated)} are in BOTH contracts. The primary "
+        f"contract is the SQLite oracle's surface, so anything in it has a "
+        f"SQLite twin and is already covered — it is not service-mode-only. "
+        f"Remove it from T2_SUPPLEMENTAL_CONTRACT."
+    )
+
+
+def test_supplemental_contract_is_not_empty():
+    """Non-vacuity. Every assertion above passes trivially against an empty
+    supplemental dict, so an accidental truncation would read as green while
+    restoring exactly the blind spot this bead closed."""
+    total = sum(len(v) for v in T2_SUPPLEMENTAL_CONTRACT.values())
+    assert total >= 8, (
+        f"T2_SUPPLEMENTAL_CONTRACT covers {total} methods; 8 permanent "
+        "service-mode-only methods were identified across all nine Http* stores "
+        "by full enumeration. A drop means coverage was lost, not that the "
+        "problem went away — re-enumerate against the Http stores before "
+        "lowering this floor.\n"
+        "  NOTE this floor is DIRECTIONAL: it catches truncation, and cannot "
+        "detect INCOMPLETENESS. The first cut of this dict passed a >= 4 floor "
+        "while missing half the real set; only enumerating every store against "
+        "`primary | supplemental` found the rest."
+    )
+
+
+@pytest.mark.parametrize(
+    "label,victim",
+    [(lbl, m) for lbl, ms in sorted(T2_SUPPLEMENTAL_CONTRACT.items())
+     for m in sorted(ms)],
+    ids=[f"{lbl}.{m}" for lbl, ms in sorted(T2_SUPPLEMENTAL_CONTRACT.items())
+         for m in sorted(ms)],
+)
+def test_removing_a_supplemental_method_is_detected(label, victim):
+    """Falsification: the coverage check must actually FAIL when a guarded
+    service-mode-only method disappears.
+
+    Without this, the union could be wired up wrongly — reading the supplemental
+    dict but never comparing it — and every other test in this file would still
+    pass. Runs the SAME predicate the real coverage check uses
+    (``required - http_methods``) against a method set with the victim removed,
+    and asserts it is reported missing. Set arithmetic, not a monkeypatched or
+    subclassed store: an earlier docstring here claimed it shadowed the class,
+    which would have sent a reader hunting for a fixture that does not exist
+    (code review). Parametrized over EVERY supplemental entry, so adding one
+    without wiring cannot pass on the strength of an older entry.
+
+    The real deletion was also exercised by hand once: renaming
+    ``rename_collection`` out of ``HttpDocumentHighlightsStore`` failed both
+    ``test_http_store_covers_contract[document_highlights]`` and
+    ``test_supplemental_is_service_mode_only[document_highlights]``.
+    """
+    http_cls = _load(dict(_STORE_PAIRS)[label])
+    surviving = _public_methods(http_cls) - {victim}
+    required = set(_required(label)) - set(_EXCLUSIONS.get(label, {}))
+
+    assert victim in (required - surviving), (
+        f"deleting {label}.{victim} went UNDETECTED — the coverage check is not "
+        "consuming T2_SUPPLEMENTAL_CONTRACT, so this whole mechanism is "
+        "decorative"
+    )
+
+
+# Uncovered by BOTH contracts, and deliberately so: the migration ETL family.
+# These meet the mechanical entry criteria for T2_SUPPLEMENTAL_CONTRACT, but they
+# are slated for whole-file deletion in the same 7.0.0 wave, alongside their
+# ``*_etl.py`` callers and the engine's ``/import`` routes (nexus-i711w recon,
+# T2 [21098]). Freezing a contract for methods being retired would manufacture
+# work for the bead that deletes them. ``telemetry.probe_ids`` is in the family
+# despite its name: its only src/ caller is telemetry_etl.py:725 (verify-fill).
+#
+# If the wave's disposition changes and any of these survive, MOVE it to
+# T2_SUPPLEMENTAL_CONTRACT — do not simply delete the entry here, which would
+# leave it silently uncovered.
+_ETL_DYING_WITH_THE_WAVE: dict[str, set[str]] = {
+    'aspect_queue': {'import_queue_batch', 'import_queue_row'},
+    'chash_index': {'import_rows'},
+    'document_aspects': {
+        'import_aspect', 'import_aspects_batch', 'import_promotion_batch',
+    },
+    'document_highlights': {'import_highlight', 'import_highlights_batch'},
+    'memory': {'build_import_row', 'import_entries_batch', 'import_entry'},
+    'plans': {'build_import_row', 'import_plan', 'import_plans_batch'},
+    'taxonomy': {
+        'import_assignment', 'import_rows_batch', 'import_taxonomy_meta',
+        'import_topic', 'import_topic_link',
+    },
+    'telemetry': {
+        'import_frecency_row', 'import_hook_failure', 'import_nx_answer_run',
+        'import_relevance_row', 'import_rows_batch', 'import_search_row',
+        'import_tier_write', 'probe_ids',
+    },
+}
+
+
+@pytest.mark.parametrize("label,http_path", _STORE_PAIRS,
+                         ids=[p[0] for p in _STORE_PAIRS])
+def test_every_http_method_is_accounted_for(label, http_path):
+    """THE ENUMERATION GATE (nexus-tdkg1.1, after critique). Every public method
+    on every Http* store must be in the primary contract, the supplemental
+    contract, or the dying-ETL allowlist — nothing may be merely unlisted.
+
+    WHY THIS EXISTS AND THE NON-VACUITY FLOOR DOES NOT SUFFICE. That floor is
+    DIRECTIONAL: it catches truncation of the supplemental dict and is blind to
+    incompleteness. The first cut of this work satisfied a `>= 4` floor, every
+    other test in this file, and a full code review — while covering only four
+    of the eight permanent service-mode-only methods. It took enumerating all
+    nine stores by script to find the rest. This test IS that script, run every
+    time, so the next method that appears must be classified rather than
+    silently join the blind spot.
+
+    A new Http method therefore fails CI until someone decides which it is:
+    contract-covered, service-mode-only, or dying with the wave.
+    """
+    http_methods = _public_methods(_load(http_path))
+    covered = (
+        set(T2_STORE_CONTRACT[label])
+        | set(T2_SUPPLEMENTAL_CONTRACT.get(label, {}))
+        | _ETL_DYING_WITH_THE_WAVE.get(label, set())
+    )
+    unaccounted = http_methods - covered
+
+    assert not unaccounted, (
+        f"{label}: public Http methods classified nowhere: {sorted(unaccounted)}.\n"
+        f"  Pick one and record it:\n"
+        f"   - has a SQLite twin -> it belongs in T2_STORE_CONTRACT (regenerate);\n"
+        f"   - service-mode-only and SURVIVES the 7.0.0 wave -> "
+        f"T2_SUPPLEMENTAL_CONTRACT, with its frozen param list;\n"
+        f"   - dies with the migration ETL -> _ETL_DYING_WITH_THE_WAVE.\n"
+        f"  Leaving it unlisted means it has no detection path once "
+        f"nexus-i711w deletes the SQLite oracle."
+    )
+
+
+@pytest.mark.parametrize("label", sorted(_ETL_DYING_WITH_THE_WAVE),
+                         ids=sorted(_ETL_DYING_WITH_THE_WAVE))
+def test_dying_allowlist_has_no_stale_entries(label):
+    """The allowlist must not outlive the methods it excuses.
+
+    A stale name here is a standing exemption that covers nothing — and worse,
+    it would silently absorb a FUTURE method that happens to reuse the name.
+    """
+    http_methods = _public_methods(_load(dict(_STORE_PAIRS)[label]))
+    stale = _ETL_DYING_WITH_THE_WAVE[label] - http_methods
+    assert not stale, (
+        f"{label}: _ETL_DYING_WITH_THE_WAVE names methods no longer on the Http "
+        f"store {sorted(stale)}. If the wave deleted them, drop the entries; "
+        f"the allowlist should shrink to nothing as the ETL family goes."
+    )
 
 
 def test_contract_covers_all_store_pairs():
