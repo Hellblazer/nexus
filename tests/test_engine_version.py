@@ -89,7 +89,25 @@ class TestRequiredEngineVersion:
         # scripts/check_engine_release_floor.py now FAILS the release when
         # a published tag is ahead of this constant. Deployed + cloud-gated
         # GREEN 2026-07-25, deploy verified independently before the bump.
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 56)
+        # ->(0,1,57) 2026-07-27: the T2/catalog read-correctness cohort —
+        # four SILENT-WRONG-ANSWER defects, none of which raised: memory
+        # FTS could not find a word inside a dotted title, so every
+        # .md-suffixed T2 note was unfindable by title fragment
+        # (nexus-22r1f); memory and catalog search did not fold Latin-1
+        # diacritics, so 'resume' missed 'résumé' where the SQLite baseline
+        # matched; tombstoned documents stayed visible to 21 catalog LIST
+        # reads (nexus-23wlw); graph traversal ignored include_heuristic
+        # (nexus-ybj1b). Fix-delivery rule applied: cloud users already
+        # have these, local installs get ONLY what this constant names.
+        # STEP-6 structurally cannot see any of it (its legs read
+        # chunks_{384,768,1024}; these touch nexus.memory and
+        # nexus.catalog_documents), so the evidence is conexus's separate
+        # read-only probe: 11/11 live, Cyrillic UNCHANGED at the Latin-1
+        # boundary. Deployed + cloud-gated GREEN 2026-07-27 (parity 105/113
+        # byte-identical to the v0.1.56 baseline, recall AC-3 12/12),
+        # record-deploy verified against the live /version before this bump
+        # (T2 [21164]).
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 57)
 
 
 class TestParseEngineVersion:

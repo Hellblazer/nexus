@@ -152,7 +152,33 @@ from __future__ import annotations
 #: written [21141]. Bumped AFTER the deploy on purpose — bumping first makes
 #: every cloud client refuse the managed service as below-identity (GH #1402
 #: inverted). Detection for the gap that let this drift: nexus-6igii.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 56)
+#: -> (0,1,57) 2026-07-27: the T2/catalog read-correctness cohort. Four engine
+#: defects, all of them silent-wrong-answer rather than error, all found while
+#: porting the test suite onto the engine substrate (nexus-aqbrk):
+#: memory FTS could not find a word INSIDE a dotted title, so every
+#: .md-suffixed T2 note was unfindable by title fragment (nexus-22r1f,
+#: 73fdd124); memory and catalog search did not fold Latin-1 diacritics, so
+#: 'resume' missed 'résumé' where the SQLite baseline matched (c52068bb,
+#: 0bd62f93); tombstoned documents stayed visible to 21 catalog LIST reads
+#: (nexus-23wlw, 12614bdb); and graph traversal ignored include_heuristic, so
+#: the implements-heuristic flood was back on by default (nexus-ybj1b,
+#: 12614bdb). The floor IS the fix-delivery vehicle: cloud users already have
+#: these, local-mode installs get ONLY what this constant names.
+#: Gates: deployed to api.conexus-nexus.com (digest sha256:eeab1cad..., cosign
+#: KMS verified at redeploy), STEP-6 GREEN — parity 105/113 BYTE-IDENTICAL to
+#: the v0.1.56 baseline with zero per-query regressions, recall AC-3 12/12
+#: local==cloud with zero vacuous legs. STEP-6 structurally CANNOT see this
+#: release's behaviour change (its legs read chunks_{384,768,1024}; these
+#: changesets touch nexus.memory and nexus.catalog_documents), so conexus wrote
+#: a separate read-only probe: 11/11 PASS live, including the Latin-1 boundary
+#: (Cyrillic 'Тодор' UNCHANGED — the fold is a 1:1 translate() matching FTS5's
+#: remove_diacritics=1 exactly, NOT unaccent, which is absent from every
+#: shipped PG bundle and over-folds). record-deploy written and verified
+#: against the live /version before this bump; relay T2 [21164].
+#: NOT in this tag, so do not assume them from the floor: analyze-002
+#: (the BUG-0148 ANALYZE invariant, 308522b3) and the staging-4 rollback-split
+#: fix (c13d0c84) both landed AFTER the cut.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 57)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:
