@@ -88,25 +88,29 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  * {@link #runAlwaysChangesetsFloatToTheExecutionTail} pins the mechanism
  * explicitly rather than leaving it as an assumption.
  *
- * <p><strong>To a tag, not a count.</strong> {@code rollbackCount(N)} is wrong
- * three ways here: N must be re-derived whenever a changeset lands, it covers
- * the wrong set the first time one is INSERTED rather than appended, and it
- * counts DATABASECHANGELOG ROWS — so on any cluster carrying the nexus-ixsxa
- * duplicate rows it reaches a different depth than intended, drifting further
- * every boot. {@code floor-001-rollback-floor.xml} tags the boundary instead.
+ * <p><strong>All the way down, by count.</strong> The rollback goes to ZERO —
+ * every DATABASECHANGELOG row. That is the guarantee this test exists to give:
+ * if the chain can walk all the way back, it can certainly walk back to any
+ * intermediate point, which is what "a future release can get back to here"
+ * means in practice.
  *
- * <p><strong>Where the floor sits, and why not at the extensions.</strong> The
- * tag is included second in master, immediately after the must-be-first role
- * bootstrap. It cannot sit just above the extension baseline, which would be the
- * intuitive place: {@code vectors-001} is MID-tree — role-001, memory-001,
- * plans-001, telemetry-*, t1-001, taxonomy-001, aspects-* , chash-001 and
- * catalog-001 all precede it — so no position is both above the extensions and
- * below every migration-owned table. A floor placed there leaves 26 tables
- * beneath it, never rolled back, while the rollback still reports success
- * (measured, 2026-07-27). So the floor goes at the bottom and the two changesets
- * that are genuinely DBA-owned provisioning declare their own rollbacks no-ops:
- * {@code role-001-nexus-svc} (roles are cluster-level) and {@code vectors-001-1}
- * (untrusted extensions a NOSUPERUSER role can neither create nor drop).
+ * <p>Full depth is reachable at all only because the three changesets with no
+ * executable inverse declare themselves irreversible: {@code role-001-1} (roles
+ * are cluster-level), {@code vectors-001-1} (untrusted extensions a NOSUPERUSER
+ * role can neither create nor drop) and {@code catalog-016-0} (dedup tombstones,
+ * with no honest inverse to write).
+ *
+ * <p><strong>There is deliberately no floor TAG.</strong> One existed for a few
+ * hours on 2026-07-27 and was removed — {@code tagDatabase} tags the most
+ * recently EXECUTED row rather than its own, so a floor retrofitted into an
+ * already-migrated cluster lands at the tail and a rollback to it reverts almost
+ * nothing while exiting 0. It behaved as documented only on a freshly
+ * initialised database, which is the one case that does not matter. Schema
+ * rollback is not an operational path here in any event — the engine never calls
+ * it — so a named operator target bought nothing and promised something false.
+ * See nexus-9vg5g before re-introducing one. Counting rows is honest by
+ * comparison: the count is read from the database the test just built, so it
+ * neither rots as changesets land nor cares about nexus-ixsxa's duplicate rows.
  *
  * <p><strong>What this found on its first runs.</strong> Every defect below
  * passed the shape lint, the full Java suite, and every deploy:
@@ -151,31 +155,6 @@ class SchemaRollbackRoundTripIntegrationTest {
     private static final String ADMIN_ROLE = "nexus_admin_rollback";
     private static final String ADMIN_PASS = "nexus_admin_rollback_pass";
 
-    /**
-     * The rollback floor, applied by {@code floor-1-rollback-floor} in
-     * {@code floor-001-rollback-floor.xml} (include #2 of master). The only
-     * changeset below it is {@code role-001-1}, the must-be-first role
-     * bootstrap — so a rollback to this tag reverts every migration-owned
-     * table.
-     *
-     * <p>The extensions are NOT below the floor. {@code vectors-001} is include
-     * #19, well above it; {@code vector} and {@code pg_trgm} survive a rollback
-     * because {@code vectors-001-1} declares its rollback irreversible, not
-     * because of any positional relationship. (An earlier design did put the
-     * floor at the extensions; it cannot work — see the class javadoc.)
-     *
-     * <p><strong>FRESH-INIT ONLY — see nexus-9vg5g.</strong> {@code tagDatabase}
-     * tags the MOST RECENTLY EXECUTED DATABASECHANGELOG row, not its own. On a
-     * fresh database that row is {@code role-001-1}, which is what makes this
-     * test's rollback reach the bottom (and why the floor changeset is itself
-     * rolled back — visible in the run log). On an ALREADY-MIGRATED cluster the
-     * floor changeset is unrun, so when it executes the most recent row is the
-     * previous boot's tail, and the tag lands there; a rollback to it reverts
-     * only the handful of changesets since. This harness always starts fresh
-     * and therefore cannot observe that. Do not read a green run here as
-     * evidence that rollback-to-tag works on a deployed cluster.
-     */
-    private static final String ROLLBACK_FLOOR_TAG = "rollback-floor";
 
     /**
      * The five {@code runAlways} changesets, in master order. Their identity is
@@ -329,27 +308,25 @@ class SchemaRollbackRoundTripIntegrationTest {
                 // ── ROLLBACK: everything down to the floor tag. This is the
                 //    leg nothing had ever executed. A changeset whose
                 //    <rollback> cannot run fails HERE, naming itself. ───────
-                assertThatCode(() -> rollbackToFloor(ds))
-                    .as("the ENTIRE migration-owned rollback chain must execute, down to the "
-                        + "'%s' tag. A failure here names the first changeset whose <rollback> is "
-                        + "broken, missing, or references an object a later changeset retired — "
-                        + "the staging-4 class, invisible to every other signal we have",
-                        ROLLBACK_FLOOR_TAG)
+                assertThatCode(() -> rollbackEverything(ds, applied))
+                    .as("the ENTIRE rollback chain must execute, all %d rows of it. A failure "
+                        + "here names the first changeset whose <rollback> is broken, missing, or "
+                        + "references an object a later changeset retired — the staging-4 class, "
+                        + "invisible to every other signal we have", applied)
                     .doesNotThrowAnyException();
 
                 try (Connection c = ds.getConnection()) {
-                    // EXACTLY one, not merely fewer. role-001-1 is the sole
-                    // changeset below the floor (role-001-nexus-svc.xml holds
-                    // one changeset, and it is pinned must-be-first in master),
-                    // and the floor changeset itself is rolled back because
-                    // tagDatabase tagged role-001-1's row rather than its own.
-                    // `isLessThan(applied)` was satisfied by rolling back a
-                    // SINGLE changeset — it did not check depth at all.
+                    // ZERO, not merely fewer. This is the whole guarantee: from
+                    // any state the chain can walk all the way back, so it can
+                    // certainly walk back to any intermediate point — which is
+                    // what "we can get back to here" means for future releases.
+                    // The earlier `isLessThan(applied)` was satisfied by rolling
+                    // back a SINGLE changeset; it did not check depth at all.
                     assertThat(changelogRowCount(c))
-                        .as("rolling back to '%s' must leave EXACTLY role-001-1 — a rollback that "
+                        .as("a full rollback must leave DATABASECHANGELOG EMPTY — a rollback that "
                             + "silently stops early and reports success is the failure mode this "
-                            + "test exists to catch", ROLLBACK_FLOOR_TAG)
-                        .isEqualTo(1);
+                            + "test exists to catch")
+                        .isZero();
                     for (String schema : new String[] {"nexus", "staging"}) {
                         assertThat(tablesInSchema(c, schema))
                             .as("every migration-owned table in the %s schema must be gone after "
@@ -411,18 +388,26 @@ class SchemaRollbackRoundTripIntegrationTest {
     // ── Liquibase drive ──────────────────────────────────────────────────────
 
     /**
-     * Roll the whole migration-owned schema back to {@link #ROLLBACK_FLOOR_TAG}.
-     * There is deliberately no production code path for this — the engine only
-     * ever calls {@code update} — so the test drives {@code liquibase.Liquibase}
-     * itself, the same way an operator would from the CLI.
+     * Roll the ENTIRE chain back — every row in DATABASECHANGELOG. There is
+     * deliberately no production code path for this: the engine only ever calls
+     * {@code update}, so the test drives {@code liquibase.Liquibase} itself.
      *
-     * <p>To a TAG, not a count. A numeric depth would have to be re-derived
-     * every time a changeset landed, and would silently cover the wrong set the
-     * first time one was inserted rather than appended. It would also be wrong
-     * on any cluster carrying the nexus-ixsxa duplicate rows, since
-     * {@code rollbackCount} counts ROWS. The tag is immune to both.
+     * <p>By COUNT, and to zero. An earlier revision rolled back to a
+     * {@code tagDatabase} floor; that tag was removed (nexus-9vg5g) because
+     * {@code tagDatabase} tags the most recently EXECUTED row rather than its
+     * own, so a retrofitted floor is positionally meaningless on exactly the
+     * clusters that already exist. Counting rows is honest here because the test
+     * reads the count from the database it just built rather than hard-coding a
+     * depth — so it neither rots as changesets land nor cares about the
+     * nexus-ixsxa duplicate rows, which are simply more rows to revert.
+     *
+     * <p>Full depth is reachable at all only because the two changesets that had
+     * no executable inverse now declare themselves irreversible:
+     * {@code catalog-016-0} (dedup tombstones, no honest inverse to write) and
+     * {@code vectors-001-1} (untrusted extensions a NOSUPERUSER role can neither
+     * create nor drop). {@code role-001-1} already declared the same for roles.
      */
-    private static void rollbackToFloor(HikariDataSource ds) throws Exception {
+    private static void rollbackEverything(HikariDataSource ds, int rows) throws Exception {
         try (Connection conn = ds.getConnection()) {
             Database database = DatabaseFactory.getInstance()
                 .findCorrectDatabaseImplementation(new JdbcConnection(conn));
@@ -430,7 +415,7 @@ class SchemaRollbackRoundTripIntegrationTest {
                     MASTER_CHANGELOG_RELATIVE,
                     new ClassLoaderResourceAccessor(),
                     database)) {
-                liquibase.rollback(ROLLBACK_FLOOR_TAG, new Contexts(), new LabelExpression());
+                liquibase.rollback(rows, new Contexts(), new LabelExpression());
             }
         }
     }
