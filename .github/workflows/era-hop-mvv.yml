@@ -45,23 +45,32 @@ name: Era-spanning upgrade hop (weekly + on ladder-path changes)
 # gate, like guided-upgrade-mvv.yml beside it — that one protects the demoted
 # primitive, this one protects the verb that replaced it.
 
+# ── AUTOMATIC TRIGGERS REMOVED 2026-07-27 (nexus-x7xjj) ──────────────────────
+# This gate cannot pass on develop today, and that is BY DESIGN, not a defect
+# to patch green.
+#
+# 88d91bd5 (2026-07-24, "P2 — delete the Chroma client legs and dead migration
+# machinery", RDR-155 P4b) deleted the substrate-ETL rung; upgrade_ladder/
+# registry.py now reads RUNG_ORDER = (RUNG_CHASH_REKEY,). This journey's
+# non-vacuity gate greps for "rung 'substrate-etl' pending", which can never
+# appear again, so it aborts before Stage 5 with "vacuous fixture — refusing to
+# report a pass over work that never existed". The gate is behaving correctly.
+#
+# The post-P4b successor is the two-hop stranded-redirect journey, and it is
+# CUT-TIME GATED: the stranded-install detector is wired into every entry point
+# but disarmed, because stranded_install.LAST_MIGRATION_CAPABLE is None on
+# every migration-capable release and is stamped at the N+1 cut. Until that
+# stamp lands, an ancient Chroma install gets neither a substrate migration nor
+# a stranding redirect, and no rewrite of this file can honestly assert either.
+#
+# So it runs on DISPATCH ONLY rather than being deleted: Stages 1-4 (era
+# install, old-engine pre-stage, package upgrade, engine-untouched assert) all
+# still PASS and are the raw material for the reshape. nexus-8nlj4 owns
+# rebuilding it at cut time; restoring the schedule/push block below is the
+# one-line revert. Left red on a schedule it would only have taught readers to
+# ignore red.
 on:
-  schedule:
-    - cron: "17 11 * * 3"   # Wednesdays 11:17 UTC — off the guided-MVV (Mon) and nightly-gate paths
   workflow_dispatch:
-  push:
-    branches: [develop]
-    paths:
-      - "src/nexus/upgrade_ladder/**"
-      - "src/nexus/migration/**"
-      - "src/nexus/commands/upgrade.py"
-      - "src/nexus/commands/doctor.py"
-      - "src/nexus/engine_version.py"
-      - "src/nexus/daemon/binary_install.py"
-      - "src/nexus/db/pg_provision.py"
-      - "src/nexus/db/pg_bundle.py"
-      - "tests/e2e/migration-rehearsal/**"
-      - ".github/workflows/era-hop-mvv.yml"
 
 permissions:
   contents: read

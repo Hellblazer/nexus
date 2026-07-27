@@ -16,6 +16,13 @@ name: Cold-acquire fresh-install rehearsal
 # Manual-dispatch only (deferred from CI-required per nexus-myk4e / the luxe6
 # release boundary): run it on demand against a published engine-service tag.
 
+# ── DORMANT AND BROKEN 2026-07-27 (nexus-x7xjj) ──────────────────────────────
+# Already dispatch-only, so this never went red on a schedule — but it drives
+# `run.sh --cold`, which 88d91bd5 (2026-07-24, RDR-155 P4b P2) retired together
+# with --guided and --hole-punch. It would exit 2 the moment anyone dispatched
+# it. Kept for the same reason as guided-upgrade-mvv.yml: nexus-8nlj4 owns the
+# post-P4b replacement journey, and the cold-acquire wiring here is its raw
+# material. Do not dispatch this expecting a result until 8nlj4 lands.
 on:
   workflow_dispatch:
     inputs:

@@ -46,6 +46,29 @@ resources_dir="$PWD/service/src/main/resources"
 test -f "$resources_dir/db/changelog/db.changelog-master.xml" \
   || { echo "FAIL: master changelog not found under $resources_dir"; exit 1; }
 
+# Pull EXPLICITLY, with bounded retries, before running. Docker Hub times out
+# on runners: 2026-07-27 this job died with
+#   docker: Error response from daemon: Get "https://registry-1.docker.io/v2/":
+#   context deadline exceeded   (exit 125)
+# AFTER provisioning had fully succeeded, and the same job passed on the other
+# two platforms in the same run. An implicit pull inside `docker run` makes a
+# registry blip indistinguishable from a schema failure — the exit code is the
+# container runtime's, and the error text scrolls past above the real work.
+# Separating the pull gives a registry outage its own message and its own
+# non-zero exit, and gives the retry somewhere to live.
+echo "==> pulling $LIQUIBASE_IMAGE"
+pulled=0
+for attempt in 1 2 3; do
+  if docker pull "$LIQUIBASE_IMAGE"; then pulled=1; break; fi
+  delay=$((attempt * 10))
+  echo "==> docker pull failed (attempt ${attempt}/3); retrying in ${delay}s" >&2
+  sleep "$delay"
+done
+[ "$pulled" = 1 ] || {
+  echo "FAIL: could not pull $LIQUIBASE_IMAGE after 3 attempts — container registry unreachable, NOT a schema failure" >&2
+  exit 1
+}
+
 echo "==> applying master changelog via liquibase CLI ($LIQUIBASE_IMAGE)"
 docker run --rm --network host -v "$resources_dir:/cl:ro" "$LIQUIBASE_IMAGE" \
   --searchPath=/cl \
