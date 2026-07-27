@@ -68,21 +68,24 @@ def _cmd_pg_bin(args: argparse.Namespace) -> None:
     try:
         bins = discover_pg_binaries()
         val = getattr(bins, args.binary, None)
-    except PgBinaryNotFoundError:
-        # nexus-r0esi: discovery failure must not silently yield an empty
-        # path (the prod-copy.sh count verification then SKIPped every
-        # check and reported 'all passed'). Fall back to PATH; fail LOUD
-        # with a non-zero exit when nothing resolves.
-        import shutil
-
-        val = shutil.which(args.binary) if args.binary != "bin_dir" else None
-        if val is None:
-            print(
-                f"pg-bin: {args.binary} not found via discovery or PATH "
-                "(install postgresql@16 or set NEXUS_PG_BIN)",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+    except PgBinaryNotFoundError as exc:
+        # nexus-r0esi: discovery failure must not silently yield an empty path
+        # (the prod-copy.sh count verification then SKIPped every check and
+        # reported 'all passed'). That requirement is preserved — this exits
+        # non-zero, loudly.
+        #
+        # What was REMOVED is the shutil.which(...) PATH fallback that used to
+        # sit here. PATH is the HOST's PostgreSQL, and nexus never uses one
+        # (see _NO_HOST_FALLBACK in nexus/db/pg_provision.py). Resolving a
+        # sandbox's psql off PATH means verifying counts against a different
+        # PostgreSQL than the one under test — a quieter version of the very
+        # false-'all passed' this branch exists to prevent.
+        print(
+            f"pg-bin: {args.binary} not found. nexus uses the PostgreSQL it "
+            f"builds, never a host install.\n{exc}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     if val is None:
         print(f"Unknown binary: {args.binary}", file=sys.stderr)
         sys.exit(1)
