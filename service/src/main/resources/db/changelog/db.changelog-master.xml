@@ -19,12 +19,20 @@
     <include file="db/changelog/role-001-nexus-svc.xml"/>
 
     <!-- THE ROLLBACK FLOOR (nexus-a0m60) — immediately after the role bootstrap
-         and before every migration-owned object. Rolling back TO this tag reverts
-         the entire schema we own while leaving DBA/cluster-level provisioning
-         (the nexus_svc role above; the vector and pg_trgm extensions created by
-         vectors-001-1 further down) untouched — neither of which a NOSUPERUSER
-         migration role can create or drop, and both of which already declare
-         their own rollbacks no-ops for that reason.
+         and before every migration-owned object. On a database initialised at or
+         after this changelog, rolling back TO this tag reverts every
+         migration-owned TABLE — not literally everything: 49 of 208 changesets
+         declare an empty <rollback/> and are deliberately not reverted — while
+         leaving DBA/cluster-level provisioning (the nexus_svc role above; the
+         vector and pg_trgm extensions created by vectors-001-1 further down)
+         untouched. Neither of those can be created or dropped by a NOSUPERUSER
+         migration role, and both already declare their own rollbacks no-ops for
+         that reason.
+         ⚠ ON AN ALREADY-MIGRATED CLUSTER THE TAG DOES NOT MEAN THIS. tagDatabase
+         tags the most recently EXECUTED row, not its own, so a retrofitted floor
+         lands at the tail and a rollback to it reverts almost nothing while
+         exiting 0 — and revokes nexus_svc's staging grants on the way past.
+         Read nexus-9vg5g before using this as an operator procedure.
          Not placed at the extensions: vectors-001 sits MID-tree, so a floor
          there strands 26 tables below it (measured). See the file header. -->
     <include file="db/changelog/floor-001-rollback-floor.xml"/>

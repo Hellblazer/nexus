@@ -56,34 +56,37 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  * recreate it, or revert a column to a different definition. Only execution
  * proves otherwise.
  *
- * <p><strong>WHY THIS TEST BOOTS TWICE BEFORE ROLLING BACK — the load-bearing
- * design point.</strong> Liquibase rolls back in DATABASECHANGELOG
- * <em>execution</em> order ({@code ORDEREXECUTED}), NOT in master-file order.
- * The tree has exactly five {@code runAlways} changesets, and they re-execute on
- * every boot, so on any cluster that has booted more than once they float to the
- * tail of execution order:
+ * <p><strong>WHY THIS TEST BOOTS TWICE BEFORE ROLLING BACK — order fidelity.</strong>
+ * Liquibase rolls back in DATABASECHANGELOG <em>execution</em> order
+ * ({@code ORDEREXECUTED}), NOT in master-file order. The tree has exactly five
+ * {@code runAlways} changesets, and they re-execute on every boot, so on any
+ * cluster that has booted more than once they float to the tail of execution
+ * order (master positions as of this commit, which the floor changeset shifted
+ * by one):
  *
  * <pre>
- *   master pos 193  staging-4-svc-grants
- *   master pos 204  grants-nexus-svc-1
- *   master pos 205  grants-002-changelog-read
- *   master pos 206  grants-nexus-diag-1
- *   master pos 207  grants-nexus-diag-2
+ *   master pos 194  staging-4-svc-grants
+ *   master pos 205  grants-nexus-svc-1
+ *   master pos 206  grants-002-changelog-read
+ *   master pos 207  grants-nexus-diag-1
+ *   master pos 208  grants-nexus-diag-2
  * </pre>
  *
  * That is exactly, and in order, the five changesets the manual {@code
  * rollbackCount(10)} repro rolled back before dying on staging-4 — it was run
  * against a re-booted cluster, where staging-4 had floated from master position
- * 193 to execution depth 5.
+ * 194 to execution depth 5.
  *
- * <p>A FRESH single-pass container has execution order == master order, which
- * puts staging-4 at depth 15 — so a naive fresh-apply-then-roll-back harness
- * would NOT have caught the defect that motivated this test. The second {@link
- * SchemaMigrator#migrate} call is what reproduces a real cluster's rollback
- * order. {@link #runAlwaysChangesetsFloatToTheExecutionTail} pins that mechanism
- * explicitly rather than leaving it as an assumption: if Liquibase ever stops
- * re-stamping {@code ORDEREXECUTED} on a re-run, this test's premise is void and
- * that assertion — not a mysterious rollback failure — is what says so.
+ * <p>Rolling back to a TAG reaches every changeset above the floor regardless of
+ * execution order, so the second boot is NOT what makes staging-4 reachable —
+ * an earlier draft of this test used a bounded {@code rollbackCount} where it
+ * would have been, and that rationale outlived the design. What the second boot
+ * buys is ORDER FIDELITY: it reproduces the execution order a real cluster
+ * actually has, which is where order-dependent rollback failures live (a
+ * rollback whose target was already removed by a changeset that, on a fresh
+ * single-pass apply, would have been reverted first).
+ * {@link #runAlwaysChangesetsFloatToTheExecutionTail} pins the mechanism
+ * explicitly rather than leaving it as an assumption.
  *
  * <p><strong>To a tag, not a count.</strong> {@code rollbackCount(N)} is wrong
  * three ways here: N must be re-derived whenever a changeset lands, it covers
@@ -128,10 +131,15 @@ import static org.assertj.core.api.Assertions.assertThatCode;
  * editing rollbacks needs no {@code validCheckSum} ceremony and does not disturb
  * any deployed cluster.
  *
- * <p><strong>CI placement.</strong> {@code service-ci.yml} is path-gated on
- * {@code service/**}, which includes {@code service/src/main/resources/db/changelog/**}.
- * So this test runs on exactly the changes that can break a rollback block and
- * never otherwise — no new workflow and no every-PR cost.
+ * <p><strong>CI placement, stated at its real cost.</strong> {@code service-ci.yml}
+ * is path-gated on {@code service/**} — NOT on the changelog subtree — so this
+ * runs on every service PR, not only on changelog changes. Two testcontainers
+ * (one per {@code @Test}), five Liquibase {@code update} passes and a
+ * 208-statement rollback, ~13s locally. Accepted deliberately rather than
+ * defaulted: it needs no new workflow, and a changelog-only filter would miss
+ * the case where Java code and a changeset land together. If that cost stops
+ * being worth it, the lever is a job-level {@code dorny/paths-filter} on
+ * {@code service/src/main/resources/db/changelog/**} — not deleting the test.
  */
 class SchemaRollbackRoundTripIntegrationTest {
 
@@ -144,11 +152,28 @@ class SchemaRollbackRoundTripIntegrationTest {
     private static final String ADMIN_PASS = "nexus_admin_rollback_pass";
 
     /**
-     * The boundary between DBA-owned provisioning and migration-owned schema,
-     * tagged by {@code vectors-001-1a-rollback-floor}. Everything below it is
-     * the untrusted extensions {@code vector} and {@code pg_trgm}, which a
-     * NOSUPERUSER migration role can neither create nor drop — so no supported
-     * rollback goes past it, and neither does this test.
+     * The rollback floor, applied by {@code floor-1-rollback-floor} in
+     * {@code floor-001-rollback-floor.xml} (include #2 of master). The only
+     * changeset below it is {@code role-001-1}, the must-be-first role
+     * bootstrap — so a rollback to this tag reverts every migration-owned
+     * table.
+     *
+     * <p>The extensions are NOT below the floor. {@code vectors-001} is include
+     * #19, well above it; {@code vector} and {@code pg_trgm} survive a rollback
+     * because {@code vectors-001-1} declares its rollback irreversible, not
+     * because of any positional relationship. (An earlier design did put the
+     * floor at the extensions; it cannot work — see the class javadoc.)
+     *
+     * <p><strong>FRESH-INIT ONLY — see nexus-9vg5g.</strong> {@code tagDatabase}
+     * tags the MOST RECENTLY EXECUTED DATABASECHANGELOG row, not its own. On a
+     * fresh database that row is {@code role-001-1}, which is what makes this
+     * test's rollback reach the bottom (and why the floor changeset is itself
+     * rolled back — visible in the run log). On an ALREADY-MIGRATED cluster the
+     * floor changeset is unrun, so when it executes the most recent row is the
+     * previous boot's tail, and the tag lands there; a rollback to it reverts
+     * only the handful of changesets since. This harness always starts fresh
+     * and therefore cannot observe that. Do not read a green run here as
+     * evidence that rollback-to-tag works on a deployed cluster.
      */
     private static final String ROLLBACK_FLOOR_TAG = "rollback-floor";
 
@@ -207,7 +232,7 @@ class SchemaRollbackRoundTripIntegrationTest {
                     .isGreaterThan(0);
                 assertThat(tailAfterFirst)
                     .as("on a FRESH single-pass apply, execution order == master order, so the "
-                        + "execution tail is the master tail — staging-4 (master pos 193) is NOT "
+                        + "execution tail is the master tail — staging-4 (master pos 194) is NOT "
                         + "here yet, which is exactly why one boot is not enough")
                     .doesNotContain("staging-4-svc-grants");
 
@@ -252,8 +277,16 @@ class SchemaRollbackRoundTripIntegrationTest {
     }
 
     /**
-     * The round trip: update → update → roll back EVERYTHING → update, asserting
-     * the schema the database ends with is the schema it started with.
+     * The round trip: update → update → roll back to the floor → update,
+     * asserting the schema the database ends with is the schema it started with.
+     *
+     * <p>NOT "everything", and the distinction matters: 49 of the 208 changesets
+     * carry an empty {@code <rollback/>} and are by construction not reverted.
+     * What is asserted is that the full TABLE set goes and comes back
+     * identically, minus that declared-irreversible cohort. Nothing currently
+     * bounds that cohort, and this test structurally REWARDS growing it — a new
+     * changeset creating an index, view or function with an empty
+     * {@code <rollback/>} passes every assertion here. Tracked separately.
      */
     @Test
     void fullChangelog_rollsBackCompletely_andReappliesToTheSameSchema() throws Exception {
@@ -277,15 +310,19 @@ class SchemaRollbackRoundTripIntegrationTest {
                 }
                 assertThat(applied).as("nonzero changesets must be applied before rolling back")
                     .isGreaterThan(0);
-                assertThat(before.get("generatedColumns"))
-                    .as("the FTS generated columns are the specific thing the v0.1.57 rollback "
-                        + "blocks revert — if they are absent the round trip proves nothing "
-                        + "about the changesets that motivated this test")
-                    .isNotEmpty();
-                assertThat(before.get("grants"))
-                    .as("staging/service grants are what staging-4-svc-grants restores; an empty "
-                        + "grant set would make its rollback leg vacuous")
-                    .isNotEmpty();
+                // EVERY category must be populated, not just the two that were
+                // guarded originally. containsExactlyElementsOf() passes
+                // trivially when both sides are empty, so a category whose query
+                // silently returns nothing (a renamed catalog view, a typo)
+                // would compare empty-to-empty and keep passing forever.
+                for (String category : before.keySet()) {
+                    assertThat(before.get(category))
+                        .as("schemaShape category '%s' is EMPTY before the rollback — the round "
+                            + "trip would then compare nothing to nothing and pass vacuously "
+                            + "forever. Either the query is broken or the objects it covers are "
+                            + "gone; both are findings", category)
+                        .isNotEmpty();
+                }
                 log.info("event=rollback_roundtrip_forward_done applied={} tables={} indexes={}",
                     applied, before.get("tables").size(), before.get("indexes").size());
 
@@ -301,21 +338,48 @@ class SchemaRollbackRoundTripIntegrationTest {
                     .doesNotThrowAnyException();
 
                 try (Connection c = ds.getConnection()) {
+                    // EXACTLY one, not merely fewer. role-001-1 is the sole
+                    // changeset below the floor (role-001-nexus-svc.xml holds
+                    // one changeset, and it is pinned must-be-first in master),
+                    // and the floor changeset itself is rolled back because
+                    // tagDatabase tagged role-001-1's row rather than its own.
+                    // `isLessThan(applied)` was satisfied by rolling back a
+                    // SINGLE changeset — it did not check depth at all.
                     assertThat(changelogRowCount(c))
-                        .as("rolling back to '%s' must leave ONLY the changesets at or below the "
-                            + "floor — a rollback that silently stops early and reports success is "
-                            + "the failure mode this test exists to catch", ROLLBACK_FLOOR_TAG)
-                        .isLessThan(applied);
-                    assertThat(tablesInSchema(c, "nexus"))
-                        .as("every migration-owned table in the nexus schema must be gone after "
-                            + "rolling back to the floor; survivors mean some rollback dropped its "
-                            + "bookkeeping without dropping its object")
-                        .isEmpty();
+                        .as("rolling back to '%s' must leave EXACTLY role-001-1 — a rollback that "
+                            + "silently stops early and reports success is the failure mode this "
+                            + "test exists to catch", ROLLBACK_FLOOR_TAG)
+                        .isEqualTo(1);
+                    for (String schema : new String[] {"nexus", "staging"}) {
+                        assertThat(tablesInSchema(c, schema))
+                            .as("every migration-owned table in the %s schema must be gone after "
+                                + "rolling back to the floor; survivors mean some rollback dropped "
+                                + "its bookkeeping without dropping its object", schema)
+                            .isEmpty();
+                    }
                     assertThat(query(c, "SELECT extname FROM pg_extension ORDER BY 1"))
                         .as("the DBA-owned extensions must SURVIVE a rollback to the floor — that "
                             + "boundary is the whole reason the floor exists, and a rollback that "
                             + "reached past it would be uninstalling the DBA's provisioning")
                         .contains("vector", "pg_trgm");
+                    // THE BEAD'S OWN ACCEPTANCE CRITERION, which the first cut
+                    // of this test omitted: prove staging-4-svc-grants' DO block
+                    // actually EXECUTED, not merely parsed. Its rollback REVOKEs
+                    // nexus_svc's schema USAGE and table privileges; all five
+                    // runAlways changesets are idempotent going forward, so a
+                    // rollback that reverts NOTHING still round-trips to an
+                    // identical schema. Without this, "does not throw" was the
+                    // only thing proven for exactly the changeset that motivated
+                    // the bead.
+                    assertThat(query(c,
+                            "SELECT grantee || ' ' || privilege_type "
+                                + "FROM information_schema.role_table_grants "
+                                + "WHERE grantee = 'nexus_svc' AND table_schema = 'staging'"))
+                        .as("staging-4-svc-grants' rollback must have EXECUTED, not merely parsed "
+                            + "— nexus_svc must hold zero privileges in the staging schema after "
+                            + "the rollback. This is the assertion the manual repro used and the "
+                            + "only thing that distinguishes a real revert from a silent no-op")
+                        .isEmpty();
                 }
 
                 // ── FORWARD AGAIN: the schema must come back identical. ─────
@@ -414,6 +478,32 @@ class SchemaRollbackRoundTripIntegrationTest {
                 + "FROM information_schema.role_table_grants "
                 + "WHERE table_schema IN ('nexus','staging') "
                 + "AND grantee NOT IN ('PUBLIC', current_user) ORDER BY 1"));
+        // RLS is the highest-value category for THIS codebase and was missing
+        // from the first cut. chash-001-2's rollback (rewritten in this commit)
+        // does DROP POLICY / NO FORCE / DISABLE ROW LEVEL SECURITY, and
+        // catalog-016-0 brackets its UPDATE with NO FORCE / FORCE. Without these
+        // two categories a round trip that ends with FORCE RLS off on a tenant
+        // table, or a policy whose USING expression drifted, passes green — and
+        // "FORCE-RLS silently no-ops migration DML" is already a recorded
+        // incident class here.
+        shape.put("policies", query(c,
+            "SELECT schemaname || '.' || tablename || '.' || policyname || ' = ' "
+                + "|| coalesce(qual,'') || ' | ' || coalesce(with_check,'') "
+                + "FROM pg_policies WHERE schemaname IN ('nexus','staging') ORDER BY 1"));
+        shape.put("rlsFlags", query(c,
+            "SELECT n.nspname || '.' || cl.relname || ' rls=' || cl.relrowsecurity "
+                + "|| ' force=' || cl.relforcerowsecurity "
+                + "FROM pg_class cl JOIN pg_namespace n ON n.oid = cl.relnamespace "
+                + "WHERE n.nspname IN ('nexus','staging') AND cl.relkind = 'r' ORDER BY 1"));
+        // rdr180-3..7 are ALTER COLUMN ... TYPE bytea conversions carrying empty
+        // <rollback/>, and the octet_length CHECK renders identically for text
+        // and bytea — so nothing else here would notice a column that came back
+        // as the wrong type.
+        shape.put("columns", query(c,
+            "SELECT table_schema || '.' || table_name || '.' || column_name || ' ' "
+                + "|| data_type || ' null=' || is_nullable "
+                + "FROM information_schema.columns "
+                + "WHERE table_schema IN ('nexus','staging') ORDER BY 1"));
         return shape;
     }
 

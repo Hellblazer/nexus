@@ -80,12 +80,53 @@ def _rollback_bodies() -> list[tuple[str, str, str, list[tuple[str, str | None]]
             rb = cs.find(f"{_NS}rollback")
             if rb is None:
                 continue
-            out.append((
-                path.name,
-                cs.get("id", ""),
-                rb.text or "",
-                [(e.text or "", e.get("splitStatements")) for e in rb.findall(f"{_NS}sql")],
-            ))
+            out.append((path.name, cs.get("id", ""), *_split_rollback(rb)))
+    return out
+
+
+def _split_rollback(rb: ET.Element) -> tuple[str, list[tuple[str, str | None]]]:
+    """(raw text NOT inside any <sql>, [(child text incl. nested, splitStatements)]).
+
+    ``.text`` alone is WRONG and was a live hole in the first version of this
+    lint: ElementTree puts only the text BEFORE the first child in ``.text``;
+    text after a child lands in that child's ``.tail``. So
+
+        <rollback><sql splitStatements="false">SELECT 1;</sql>DO $$ ... $$;</rollback>
+
+    has ``rb.text is None`` and the ``$$`` hiding in the <sql> child's tail —
+    invisible, and the staging-4 shape all over again, just reordered. Tails are
+    folded into the raw bucket here.
+
+    Child text uses ``itertext()`` for the mirror reason: <comment> is a legal
+    child of <sql>, so ``e.text`` stops at it and a ``$$`` body written after a
+    comment would be missed.
+    """
+    raw = (rb.text or "") + "".join(ch.tail or "" for ch in rb)
+    children = [
+        ("".join(e.itertext()), e.get("splitStatements"))
+        for e in rb.findall(f"{_NS}sql")
+    ]
+    return raw, children
+
+
+def _violations(raw: str, children: list[tuple[str, str | None]]) -> list[str]:
+    """THE RULE. One implementation, used by the corpus test and the synthetic one.
+
+    The synthetic non-vacuity test previously re-implemented this logic, which
+    meant it pinned a COPY — the two could drift and the guard would stop
+    binding. Both call this now.
+    """
+    out = []
+    if "$$" in raw:
+        out.append(
+            "raw text under <rollback> holds a $$ body; it CANNOT carry "
+            "splitStatements and will be split on ';'"
+        )
+    out += [
+        f"<sql splitStatements={attr!r}> holds a $$ body; it needs splitStatements=\"false\""
+        for text, attr in children
+        if "$$" in text and attr != "false"
+    ]
     return out
 
 
@@ -100,17 +141,7 @@ def test_dollar_quoted_rollbacks_disable_statement_splitting() -> None:
     """
     violations = []
     for fname, cs_id, raw, children in _rollback_bodies():
-        if "$$" in raw:
-            violations.append(
-                f"  {fname}::{cs_id} — raw-text <rollback> with a $$ body; it "
-                f"CANNOT carry splitStatements and will be split on ';'"
-            )
-        for text, attr in children:
-            if "$$" in text and attr != "false":
-                violations.append(
-                    f"  {fname}::{cs_id} — <sql splitStatements={attr!r}> holds a "
-                    f"$$ body; it needs splitStatements=\"false\""
-                )
+        violations += [f"  {fname}::{cs_id} — {why}" for why in _violations(raw, children)]
 
     assert not violations, (
         "Rollback bodies containing $$ must disable statement splitting.\n"
@@ -130,15 +161,11 @@ def test_dollar_quoted_rollbacks_disable_statement_splitting() -> None:
 
 
 def _violations_for(xml: str) -> list[str]:
-    """Run the rule's exact logic over one synthetic <rollback>."""
+    """Run THE RULE — the same functions the corpus test uses — over one synthetic
+    ``<rollback>``. Deliberately not a re-implementation: a copy would let the
+    non-vacuity guard drift away from the rule it claims to pin."""
     rb = ET.fromstring(xml.replace("<rollback>", f"<rollback xmlns='{_NS[1:-1]}'>"))
-    raw = rb.text or ""
-    children = [(e.text or "", e.get("splitStatements")) for e in rb.findall(f"{_NS}sql")]
-    found = []
-    if "$$" in raw:
-        found.append("raw")
-    found += [f"child:{attr!r}" for text, attr in children if "$$" in text and attr != "false"]
-    return found
+    return _violations(*_split_rollback(rb))
 
 
 def test_lint_detects_a_synthetic_violation() -> None:
@@ -161,14 +188,31 @@ def test_lint_detects_a_synthetic_violation() -> None:
     mixed_bad = ('<rollback>DO $$ BEGIN END $$;'
                  '<sql splitStatements="false">SELECT 1;</sql>'
                  '</rollback>')
+    # Same hole, REORDERED — and it survived the first rewrite of this lint.
+    # ElementTree puts text AFTER a child in that child's .tail, not in
+    # rb.text, so a rule reading only rb.text sees nothing here.
+    tail_bad = ('<rollback><sql splitStatements="false">SELECT 1;</sql>'
+                'DO $$ DECLARE x int; BEGIN END $$;</rollback>')
+    # And the mirror inside a child: <comment> is a legal <sql> child, so
+    # e.text stops at it and a $$ body written after it would be missed.
+    comment_bad = ('<rollback><sql splitStatements="true">'
+                   '<comment>why</comment>DO $$ BEGIN END $$;</sql></rollback>')
 
-    assert _violations_for(raw_bad) == ["raw"], "raw-text $$ rollback must violate"
+    assert len(_violations_for(raw_bad)) == 1, "raw-text $$ rollback must violate"
     assert _violations_for(wrapped_ok) == [], "wrapped $$ rollback must be compliant"
     assert _violations_for(mixed_ok) == [], (
         "a $$ body confined to <sql splitStatements=\"false\"> is compliant even when a "
         "sibling <sql> splits — splitStatements is per element"
     )
-    assert _violations_for(mixed_bad) == ["raw"], (
+    assert len(_violations_for(tail_bad)) == 1, (
+        "raw $$ text AFTER an <sql> child must violate — it lives in the child's .tail, "
+        "which is the hole the first rewrite of this lint still had"
+    )
+    assert len(_violations_for(comment_bad)) == 1, (
+        "a $$ body after a <comment> inside <sql splitStatements=\"true\"> must violate — "
+        "e.text stops at the comment, so itertext() is required"
+    )
+    assert len(_violations_for(mixed_bad)) == 1, (
         "raw $$ text directly under <rollback> must violate even when a compliant "
         "<sql> child is present — this is the staging-4 shape hiding in a mixed block"
     )

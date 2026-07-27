@@ -2,10 +2,28 @@
 <!--
     THE ROLLBACK FLOOR (nexus-a0m60).
 
-    A single tagDatabase changeset, included FIRST in db.changelog-master.xml,
-    marking the bottom of the migration-owned schema. SchemaRollbackRoundTripIntegrationTest
-    rolls back TO this tag; an operator performing a real rollback can aim at it
-    by name.
+    A single tagDatabase changeset, included SECOND in db.changelog-master.xml
+    (immediately after the must-be-first role bootstrap), marking the bottom of
+    the migration-owned schema. SchemaRollbackRoundTripIntegrationTest rolls
+    back TO this tag.
+
+    ⚠ THE TAG IS MEANINGFUL ONLY ON DATABASES INITIALISED AT OR AFTER THIS
+    CHANGELOG — nexus-9vg5g. DO NOT hand an operator "roll back to
+    rollback-floor" as a procedure without reading that bead first.
+
+    tagDatabase tags the MOST RECENTLY EXECUTED DATABASECHANGELOG row, not its
+    own row. On a FRESH database that row is role-001-1, the tag lands at the
+    bottom, and a rollback to it reverts the whole migration-owned schema —
+    which is what the test exercises. On an ALREADY-MIGRATED cluster this
+    changeset is unrun, so it executes on the next boot at max(orderexecuted)+1
+    and the five runAlways changesets then re-stamp above it; a rollback to the
+    tag reverts only those, exits 0, and leaves the schema at HEAD.
+
+    That is not harmless. staging-4-svc-grants' rollback REVOKEs nexus_svc's
+    USAGE on schema staging and all privileges on its tables, so the "successful"
+    rollback breaks land/promote until the next restart re-grants. On such a
+    cluster the substitute is rollbackToDate against the deploy timestamp, or a
+    manually placed tag — never this one.
 
     WHY A TAG AND NOT A COUNT. rollbackCount(N) is wrong in three separate ways
     here. N has to be re-derived every time a changeset lands. It silently covers
@@ -15,7 +33,7 @@
     reaches a different depth than the operator intended, drifting further with
     every boot. A tag is immune to all three and needs no maintenance.
 
-    WHY FIRST IN MASTER, rather than just above the extension baseline. The
+    WHY AT THE BOTTOM, rather than just above the extension baseline. The
     extensions are created by vectors-001-1, which sits in the MIDDLE of master
     order — role-001, memory-001, plans-001, telemetry-*, t1-001, taxonomy-001,
     aspects-*, chash-001 and catalog-001 all precede it. So there is NO position
