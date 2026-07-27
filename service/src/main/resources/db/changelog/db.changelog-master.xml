@@ -290,6 +290,13 @@
          nexus.fold_diacritics function this expression calls. -->
     <include file="db/changelog/catalog-017-fts-diacritic-folding.xml"/>
 
+    <!-- BUG-0148 invariant, second occurrence: memory-002-1 and catalog-017-0
+         both REWRITE their table (re-adding a STORED generated column) and
+         neither ANALYZEd it, so planner stats described the pre-rewrite shape.
+         Measured stale on the live cluster after the v0.1.57 boot (conexus
+         relay, T2 [21164]). MUST follow both of them. -->
+    <include file="db/changelog/analyze-002-fts-rewritten-tables.xml"/>
+
     <!-- g37fr FINDING 2 (RDR-155 P4b): UPDATE on the topics id sequence so
          the taxonomy fidelity import can setval past imported ids (the
          serial-collision fix). Needs role-001 (nexus_svc) + taxonomy-001
