@@ -65,7 +65,19 @@ def repo(tmp_path: Path) -> Path:
     return r
 
 
+@pytest.mark.usefixtures("local_catalog_backend")
 class TestCriticalThreeModelVersionV1:
+    """CRITICAL-3, against a WRITABLE local catalog.
+
+    nexus-aqbrk: PINNED. These build a real ``Catalog`` and register into
+    it. Under the engine substrate ``Catalog`` forces ``read_only=True``
+    whenever the catalog backend is SERVICE and the file exists — the local
+    .catalog.db is a FROZEN migration source (RDR-176 Phase 1 Gap 2) — so
+    every write died on ``sqlite3.OperationalError: attempt to write a
+    readonly database``. That is the invariant working exactly as designed,
+    against a test that wants the local catalog on purpose.
+    """
+
     def test_corpus_knowledge_register_uses_v1_form(
         self, cat: Catalog, repo: Path, tmp_path: Path,
     ) -> None:
@@ -195,7 +207,25 @@ class TestCriticalFourMalformedReposJsonNotDeleted:
                 pass
 
 
+@pytest.mark.usefixtures("local_catalog_backend")
 class TestCriticalFiveTOCTOUOwnerRace:
+    """CRITICAL-5, against a WRITABLE local catalog. Same pin, same reason.
+
+    SERVICE HALF IS A KNOWN OPEN BUG, NOT A TEST — stated plainly rather
+    than claimed as coverage. The engine has its own version of this race:
+    nexus-jq53b (P1, OPEN) — every owner-ensure site uses
+    ``(tenant_id, tumbler_prefix)`` as its ON CONFLICT arbiter while
+    ``catalog_owners`` also carries ``catalog_owners_unique_name_type``, so
+    a concurrent register raises 23505 instead of converging. It surfaced as
+    a CI flake on PR #1423.
+
+    So after this pin NOTHING exercises the service-mode owner race. That is
+    a deliberate, recorded gap: the client-side TOCTOU this class covers was
+    fixed in the SQLite schema path, and the engine-side equivalent is
+    tracked as a defect to fix rather than a behaviour to pin. Do not read
+    the pin as "the race is handled on both substrates".
+    """
+
     def test_concurrent_ensure_owner_for_repo_no_duplicate_rows(
         self, cat: Catalog, repo: Path,
     ) -> None:

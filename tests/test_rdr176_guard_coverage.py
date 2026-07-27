@@ -14,6 +14,8 @@ import pytest
 
 from nexus.commands import doctor, upgrade
 from nexus.daemon import t2_daemon
+
+from tests._t2_fixture_ops import bootstrap_migration_source
 from nexus.db.t2 import T2Database
 
 
@@ -28,7 +30,11 @@ def _content_digest(path: Path) -> str:
 def _seed_legacy_db(tmp_path: Path) -> Path:
     """Build a real T2 schema, stamp it to a legacy version, return the path."""
     build = tmp_path / "seed.db"
-    T2Database.bootstrap_schema(build)
+    # nexus-aqbrk: NOT bootstrap_schema — it early-returns in service mode
+    # (RDR-176 Gap 2), and this file's whole subject is the SERVICE-MODE
+    # guards over a legacy DB, so pinning to SQLite would disable the
+    # branch under test. Build the legacy source directly instead.
+    bootstrap_migration_source(build)
     conn = sqlite3.connect(str(build))
     try:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")

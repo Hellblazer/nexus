@@ -949,8 +949,27 @@ class TestConstants:
 # ── T2Database integration tests (Phase 3) ──────────────────────────────────
 
 
+@pytest.mark.usefixtures("local_t2_backend")
 class TestT2DatabaseIntegration:
-    """Test T2Database.__init__() with transient connection and _upgrade_done fast path."""
+    """Test T2Database.__init__() with transient connection and _upgrade_done fast path.
+
+    nexus-aqbrk: PINNED. Every test here constructs ``T2Database(path)`` and
+    asserts what happened to that LOCAL SQLite FILE — the _nexus_version row,
+    the four base tables, the ``_upgrade_done`` path key. In service mode
+    T2Database builds the Http* stores and never touches the file, so those
+    assertions read empty sets.
+
+    This is SQLite-substrate machinery outright: the transient-connection
+    bootstrap and the ``_upgrade_done`` fast path have no service-mode
+    counterpart to test, because the Java service owns its own Postgres
+    schema. It retires with the stores themselves in nexus-i711w.
+
+    Pinned rather than skipped so the machinery keeps being tested while it
+    still exists — and because the pin also DE-VACUUMS the class's passing
+    tests: ``test_t2database_fast_path_second_construction`` asserts a second
+    construction short-circuits, which is trivially true in service mode where
+    no migration runs at all.
+    """
 
     @pytest.fixture(autouse=True)
     def _clear_module_state(self) -> None:

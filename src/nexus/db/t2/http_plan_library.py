@@ -113,6 +113,7 @@ class HttpPlanLibrary(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             _infer_scope_tags,
             _normalize_scope_string,
             _SCOPE_AGNOSTIC_SENTINELS,
+            normalize_scope_tags,
         )
 
         match_text = _synthesize_match_text(
@@ -121,12 +122,7 @@ class HttpPlanLibrary(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
         # Scope-tag normalization mirrors PlanLibrary.save_plan exactly.
         if scope_tags:
-            parts = [
-                _normalize_scope_string(p.strip())
-                for p in scope_tags.split(",")
-                if p.strip() and p.strip() not in _SCOPE_AGNOSTIC_SENTINELS
-            ]
-            stored_scope_tags = ",".join(sorted({p for p in parts if p}))
+            stored_scope_tags = normalize_scope_tags(scope_tags)
         elif scope_tags is None:
             stored_scope_tags = _infer_scope_tags(plan_json)
             if not stored_scope_tags and project:
@@ -339,8 +335,24 @@ class HttpPlanLibrary(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     # ── Scope tags ─────────────────────────────────────────────────────────────
 
     def set_scope_tags(self, plan_id: int, scope_tags: str) -> bool:
-        """Write explicit *scope_tags*. Returns True if updated."""
-        resp = self._post("/v1/plans/set_scope_tags", {"id": plan_id, "scope_tags": scope_tags})
+        """Write explicit *scope_tags*, normalized. Returns True if updated.
+
+        Normalization is client-side and is NOT optional: the service writes
+        ``scope_tags`` verbatim (``PlanHandler.handleSetScopeTags`` ->
+        ``PlanRepository.setScopeTags``), exactly as it does for
+        ``/v1/plans/save`` — where :meth:`save_plan` already normalizes before
+        POSTing. This method did not, so in service mode ``nx plan set-scope``
+        stored hash suffixes and the ``"all"`` sentinel raw, which the matcher
+        then reads as a scope literally named ``all`` (nexus-aqbrk).
+        """
+        from nexus.db.t2.plan_library import (  # noqa: PLC0415 — deferred to avoid circular import (plan_library)
+            normalize_scope_tags,
+        )
+
+        resp = self._post(
+            "/v1/plans/set_scope_tags",
+            {"id": plan_id, "scope_tags": normalize_scope_tags(scope_tags)},
+        )
         return bool(resp.get("updated"))
 
     # ── List / search ──────────────────────────────────────────────────────────

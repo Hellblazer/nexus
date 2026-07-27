@@ -18,6 +18,7 @@ from nexus.catalog.catalog_links import (
     _filter_link_types,
 )
 from nexus.catalog.tumbler import Tumbler
+from tests._catalog_fixture_ops import ActiveCatalog
 
 
 @pytest.fixture(autouse=True)
@@ -28,10 +29,24 @@ def _git_identity(monkeypatch):
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@test.invalid")
 
 
-def _make_catalog(tmp_path: Path) -> Catalog:
+@pytest.fixture(autouse=True)
+def _point_catalog_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Aim ``catalog_path()`` at the dir ``_make_catalog`` initialises
+    (nexus-aqbrk) — ActiveCatalog resolves through the catalog factories, and
+    the SQLite arm of those reads ``catalog_path()``."""
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "catalog"))
+
+
+def _make_catalog(tmp_path: Path) -> ActiveCatalog:
+    """Init the local catalog, hand back a facade over the LIVE one.
+
+    nexus-aqbrk: link-graph filtering is substrate-independent behaviour, so
+    this file seeds through the same factories the graph reader uses rather
+    than pinning to the local catalog.
+    """
     cat_dir = tmp_path / "catalog"
     Catalog.init(cat_dir)
-    return Catalog(cat_dir, cat_dir / ".catalog.db")
+    return ActiveCatalog()
 
 
 # ── _filter_link_types pure helper ────────────────────────────────────────
@@ -85,6 +100,29 @@ class TestFilterLinkTypesHelper:
 # ── End-to-end: Catalog.graph default-excludes heuristic ─────────────────
 
 
+def _assert_heuristic_excluded(node_tumblers: set[str], heuristic: object) -> None:
+    """Assert the default-exclude — now unconditional on both substrates.
+
+    nexus-ybj1b RESOLVED 2026-07-26. This used to branch: SQLite asserted the
+    real expectation while the SERVICE arm asserted the INVERSE, because the
+    flag never reached the query. http_catalog_client sent
+    ``include_heuristic`` with the comment "forwarded to service for future
+    support; currently informational", and CatalogHandler.handleTraverse read
+    only ``link_types`` — so the default did NOT exclude and the opt-in was a
+    no-op in both directions, putting the heuristic flood back on (66% of the
+    2026-05-08 production link graph).
+
+    The server honours it now, so the branch is gone. Asserting the inverse
+    rather than xfail is what made the fix fail loudly here instead of going
+    quietly green.
+    """
+    assert str(heuristic) not in node_tumblers, (
+        "implements-heuristic neighbor leaked into the default graph "
+        "traversal; reverting the nexus-6ppk default-exclude lets the "
+        "heuristic flood dominate the result"
+    )
+
+
 class TestGraphDefaultExcludesHeuristic:
     def test_graph_default_skips_heuristic_neighbor(self, tmp_path: Path) -> None:
         """Build a catalog with one ``cites`` and one
@@ -123,11 +161,7 @@ class TestGraphDefaultExcludesHeuristic:
         # Cites neighbor present (default-allowed type).
         assert str(cited) in node_tumblers
         # Heuristic neighbor MUST be absent (default-excluded).
-        assert str(heuristic_target) not in node_tumblers, (
-            f"implements-heuristic neighbor leaked into the default "
-            f"graph traversal; reverting the nexus-6ppk default-"
-            f"exclude lets the heuristic flood dominate the result"
-        )
+        _assert_heuristic_excluded(node_tumblers, heuristic_target)
 
     def test_graph_include_heuristic_returns_heuristic_neighbor(
         self, tmp_path: Path,
@@ -215,8 +249,8 @@ class TestGraphDefaultExcludesHeuristic:
             str(n.tumbler) if hasattr(n, "tumbler") else str(n)
             for n in result["nodes"]
         }
-        assert str(heuristic_a) not in node_tumblers
-        assert str(heuristic_b) not in node_tumblers
+        _assert_heuristic_excluded(node_tumblers, heuristic_a)
+        _assert_heuristic_excluded(node_tumblers, heuristic_b)
 
         # Opt-in: both heuristic neighbors present.
         result_opt = cat.graph_many(

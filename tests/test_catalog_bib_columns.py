@@ -23,6 +23,7 @@ import pytest
 
 from nexus.catalog.catalog import Catalog, CatalogEntry
 from nexus.catalog.tumbler import read_documents
+from tests._t2_fixture_ops import require_sqlite_substrate
 
 
 @pytest.fixture(autouse=True)
@@ -204,6 +205,15 @@ class TestUpdatePreservesAndSetsBibColumns:
     def test_update_bib_columns_on_fresh_and_migrated_schema(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        # nexus-aqbrk: leg (b) hand-builds a LEGACY documents table without
+        # the eight bib columns and re-opens it via Catalog to prove the
+        # on-open ALTER adds them. PG's catalog schema is Liquibase-managed
+        # and there is no legacy .catalog.db to upgrade, so the migration half
+        # has no service-mode analogue and is deleted with the store in
+        # nexus-i711w. Leg (a) — that update() round-trips all eight on a
+        # FRESH schema — is substrate-independent and is covered by the other
+        # tests in this class, which run on both.
+        require_sqlite_substrate("re-opens a hand-built legacy schema to assert the on-open ALTER")
         monkeypatch.setenv("NEXUS_EVENT_SOURCED", "0")
         # (a) fresh schema — CREATE TABLE already ships all 8 columns.
         _, fresh_cat = _make_catalog(tmp_path / "fresh")

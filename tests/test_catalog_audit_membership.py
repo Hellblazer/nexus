@@ -29,6 +29,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.catalog import Catalog
+from nexus.db.storage_mode import StorageBackend, storage_backend_for
 from nexus.commands.catalog import catalog
 
 
@@ -42,13 +43,63 @@ def _git_identity(monkeypatch):
 
 @pytest.fixture()
 def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Seed through the ACTIVE catalog writer, whichever substrate is live.
+
+    nexus-aqbrk: this used to hand back the local ``Catalog`` object and the
+    tests wrote to it directly, so under the engine substrate they seeded a
+    local catalog while ``nx catalog audit-membership`` (via
+    ``_get_catalog()``) read the SERVICE catalog — every audit then reported
+    "0 contaminated, 5 clean" over rows it could not see.
+
+    ``make_catalog_writer()`` returns the writer for the live backend
+    (``CatalogWriter`` on SQLite, ``_ServiceCatalogWriter`` on the engine),
+    and ``register_owner`` / ``register`` are both on the CATALOG_WRITE_OPS
+    whitelist, returning identical ``Tumbler`` values either way. So the same
+    test body now exercises the audit against whichever catalog is real —
+    which is strictly more than it covered before, since audit-membership is
+    service-aware and its service path had no coverage at all.
+    """
+    from nexus.catalog.factory import make_catalog_writer
+
     catalog_dir = tmp_path / "catalog"
-    cat = Catalog.init(catalog_dir)
+    Catalog.init(catalog_dir)
 
     import nexus.config
     monkeypatch.setattr(nexus.config, "catalog_path", lambda: catalog_dir)
 
-    return cat
+    writer = make_catalog_writer()
+    yield writer
+    writer.close()
+
+
+def _docs_in(collection: str):
+    """Read back a collection's documents through the ACTIVE catalog reader.
+
+    Replaces ``env._db.execute("SELECT ... FROM documents WHERE
+    physical_collection = ?")``. ``list_by_collection`` has the same
+    signature and return shape on ``Catalog`` and ``HttpCatalogClient``.
+    """
+    from nexus.commands import catalog as _cat_cmd
+
+    return _cat_cmd._get_catalog().list_by_collection(collection)
+
+
+def _assert_survivors(collection: str, expected: int) -> None:
+    """Assert the post-purge population — now the SAME on both substrates.
+
+    nexus-23wlw RESOLVED 2026-07-26. This used to take a second ``seeded``
+    argument and assert the BROKEN value on the service arm: SQLite
+    hard-deletes so a purged document left the collection, while the service
+    TOMBSTONED it and ``documentsByCollection`` — along with twenty sibling
+    reads — had no ``deleted_at IS NULL`` filter, so every purged row was still
+    listed and the CLI reported "Deleted 3 of 3" over an unchanged listing.
+
+    Asserting the broken value rather than xfail is what made this fail loudly
+    the day the fix landed instead of going quietly green with the workaround
+    still in place. It did exactly that, so the branch is gone and both
+    substrates assert the real expectation.
+    """
+    assert len(_docs_in(collection)) == expected
 
 
 def _seed_contamination(cat: Catalog, *, collection: str = "rdr__myproject") -> None:
@@ -145,10 +196,7 @@ class TestPurge:
         ])
         assert result.exit_code == 0, result.output
         # Nothing actually deleted.
-        rows = env._db.execute(
-            "SELECT COUNT(*) FROM documents WHERE physical_collection = ?",
-            ("rdr__myproject",),
-        ).fetchone()[0]
+        rows = len(_docs_in("rdr__myproject"))
         assert rows == 8, "dry-run must not delete anything"
         assert "would delete" in result.output.lower() or "dry-run" in result.output.lower()
 
@@ -161,20 +209,12 @@ class TestPurge:
         ])
         assert result.exit_code == 0, result.output
         # Only 5 canonical entries should remain (5 myproject, 3 elsewhere → 5).
-        rows = env._db.execute(
-            "SELECT COUNT(*) FROM documents WHERE physical_collection = ?",
-            ("rdr__myproject",),
-        ).fetchone()[0]
-        assert rows == 5
+        _assert_survivors("rdr__myproject", expected=5)
         # And the surviving rows all point at the canonical home.
-        homes = {
-            r[0] for r in env._db.execute(
-                "SELECT source_uri FROM documents WHERE physical_collection = ?",
-                ("rdr__myproject",),
-            ).fetchall()
-        }
-        for uri in homes:
-            assert "/projects/myproject/" in uri, uri
+        if storage_backend_for("catalog") is StorageBackend.SQLITE:
+            homes = {e.source_uri for e in _docs_in("rdr__myproject")}
+            for uri in homes:
+                assert "/projects/myproject/" in uri, uri
 
     def test_canonical_home_override_when_contaminant_dominates(
         self, env: Catalog,
@@ -215,20 +255,12 @@ class TestPurge:
         ])
         assert result.exit_code == 0, result.output
         # Only the 3 legit entries should remain.
-        rows = env._db.execute(
-            "SELECT COUNT(*) FROM documents WHERE physical_collection = ?",
-            ("rdr__inverted",),
-        ).fetchone()[0]
-        assert rows == 3
+        _assert_survivors("rdr__inverted", expected=3)
         # And the survivors all match the canonical substring.
-        homes = {
-            r[0] for r in env._db.execute(
-                "SELECT source_uri FROM documents WHERE physical_collection = ?",
-                ("rdr__inverted",),
-            ).fetchall()
-        }
-        for uri in homes:
-            assert "/projects/legit/" in uri
+        if storage_backend_for("catalog") is StorageBackend.SQLITE:
+            homes = {e.source_uri for e in _docs_in("rdr__inverted")}
+            for uri in homes:
+                assert "/projects/legit/" in uri
 
     def test_canonical_home_substring_no_match_errors(
         self, env: Catalog,
@@ -261,10 +293,7 @@ class TestPurge:
             "--purge-non-canonical", "--yes",
         ])
         assert result.exit_code == 0, result.output
-        rows = env._db.execute(
-            "SELECT COUNT(*) FROM documents WHERE physical_collection = ?",
-            ("rdr__clean",),
-        ).fetchone()[0]
+        rows = len(_docs_in("rdr__clean"))
         assert rows == 1
 
 

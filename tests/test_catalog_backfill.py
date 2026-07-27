@@ -13,6 +13,11 @@ from nexus.catalog.catalog import Catalog
 from nexus.cli import main
 from nexus.db.http_vector_client import HttpVectorClient
 
+# nexus-aqbrk: exercises the LOCAL catalog's own machinery (event log /
+# JSONL / .catalog.db projection), which service mode deliberately opens
+# read-only as a frozen migration source (RDR-176 P1 Gap 2).
+pytestmark = pytest.mark.usefixtures("local_catalog_backend")
+
 
 @pytest.fixture(autouse=True)
 def git_identity(monkeypatch):

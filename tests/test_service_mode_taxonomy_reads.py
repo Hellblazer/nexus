@@ -13,16 +13,16 @@ from __future__ import annotations
 
 import pytest
 import os
+from tests.conftest import engine_substrate_selected
 
-# RDR-155 P4b P0a' dies-roster: this module tests the sqlite-vs-service backend probe matrix — machinery
-# on the [21098] DELETE list. Skipped under the engine substrate; the file
-# itself dies at the flip.
-pytestmark = [
-    pytest.mark.skipif(
-        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
-        reason="dies-roster: sqlite-vs-service backend probe matrix dies at the RDR-155 P4b flip",
-    ),
-]
+# nexus-aqbrk: this module's dies-roster was WRONG, and measurably so — 6 of
+# its 7 tests pass on the engine substrate. The reason read "sqlite-vs-service
+# backend probe matrix dies at the RDR-155 P4b flip", but what this file
+# actually tests is the has_raw_access GUARDS (see the module docstring): that
+# collection_health / collection_audit / merge_candidates degrade instead of
+# crashing when taxonomy has no raw .conn. Those guards are what SURVIVES the
+# flip, not what dies with it — and the file proves it against its own
+# _ServiceTaxonomy stub, so it is substrate-independent by construction.
 
 
 class _ServiceTaxonomy:
@@ -38,14 +38,24 @@ class _FakeServiceT2:
 
 
 def test_has_raw_access_true_for_sqlite_false_for_service(tmp_path):
+    """has_raw_access reports what the store actually is, on either substrate.
+
+    nexus-aqbrk: the True leg needs a store that IS SQLite-backed. Under the
+    engine substrate ``T2Database(path).taxonomy`` is an HttpTaxonomyStore, so
+    the leg has to pin the backend rather than assume the ambient one — the
+    assertion is about has_raw_access's detection, not about which backend the
+    suite happens to be running.
+    """
     from nexus.db.storage_mode import has_raw_access
     from nexus.db.t2 import T2Database
 
-    db = T2Database(tmp_path / "t2.db")  # epsilon-allow: test asserts raw-access detection on a real SQLite store
-    try:
-        assert has_raw_access(db.taxonomy) is True
-    finally:
-        db.close()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("NX_STORAGE_BACKEND", "sqlite")
+        db = T2Database(tmp_path / "t2.db")  # epsilon-allow: test asserts raw-access detection on a real SQLite store
+        try:
+            assert has_raw_access(db.taxonomy) is True
+        finally:
+            db.close()
     assert has_raw_access(_ServiceTaxonomy()) is False
 
 

@@ -90,8 +90,18 @@ def _insert_row(
 # ── _collect_aspect_queue_data ──────────────────────────────────────────────
 
 
+@pytest.mark.usefixtures("local_t2_backend")
 class TestCollectAspectQueueData:
-    """Direct unit tests for the helper."""
+    """Direct unit tests for the helper.
+
+    nexus-aqbrk: PINNED (class-level, below) for the same reason as
+    tests/test_doctor_aspect_queue.py — these seed via raw
+    ``INSERT INTO aspect_extraction_queue`` on a local memory.db and assert
+    on ``_collect_aspect_queue_data()``'s reading of THAT file. In service
+    mode the helper routes to HttpAspectQueue and the seeded rows are
+    invisible, so ``{"present": False}`` becomes a populated service dict and
+    ``by_status`` is absent from the shape the SQLite branch returns.
+    """
 
     def test_returns_absent_when_db_missing(self, isolated_config_dir: Path) -> None:
         from nexus.console.routes.health import _collect_aspect_queue_data

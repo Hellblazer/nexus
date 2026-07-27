@@ -39,6 +39,26 @@ def _current_version() -> str:
     return expected_t2_schema_version()
 
 
+# nexus-aqbrk: PINNED to the local T2 backend, whole-file. Unlike
+# tests/db/test_etl_read_paging.py — where bootstrap_schema was incidental
+# fixture plumbing and the fix was to call the migration chain directly — here
+# ``T2Database.bootstrap_schema`` IS THE SUBJECT: this file pins its cold-start
+# fast path (no writer lock on an already-migrated DB).
+#
+# In service mode that function's entire body is skipped by design: it
+# early-returns so ``apply_pending`` cannot re-stamp ``_nexus_version`` on the
+# local .db, which is a FROZEN migration source (RDR-176 Phase 1 Gap 2). So the
+# schema was never created and every test died on
+# ``no such table: _nexus_version``. There is no service-mode fast path to
+# test, because there is no service-mode body.
+#
+# SERVICE HALF IS OWNED, and it is the exact counterpart:
+# tests/db/test_rdr176_non_mutation.py
+# ::test_service_mode_bootstrap_does_not_mutate_legacy_source_db asserts the
+# early-return leaves the legacy DB untouched.
+pytestmark = pytest.mark.usefixtures("local_t2_backend")
+
+
 def _stored_version(db_path: Path) -> str:
     conn = sqlite3.connect(str(db_path))
     try:

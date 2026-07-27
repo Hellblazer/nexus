@@ -61,6 +61,18 @@ def isolated_t2(
 
 
 class TestPrintTierStatusSummary:
+    # nexus-aqbrk: PINNED. The session-end tier summary reads the LOCAL
+    # tier_writes table via a raw sqlite3 connection carrying an explicit
+    # `epsilon-allow: session-end best-effort observation — must not block
+    # on daemon availability` marker. That local-by-design choice means it
+    # finds nothing in service mode, where the writes went to the engine,
+    # so the summary renders empty.
+    #
+    # SERVICE SIDE EXISTS BUT IS NOT USED HERE: HttpTelemetryStore
+    # .query_tier_writes (GET /v1/telemetry/tier_writes/query) can answer
+    # it; the launcher deliberately does not call it. See the note filed
+    # against this arc — on a migrated install this summary never prints.
+    @pytest.mark.usefixtures("local_t2_backend")
     def test_prints_summary_when_session_has_writes(
         self,
         isolated_t2: Path,

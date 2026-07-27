@@ -19,6 +19,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from tests.conftest import engine_substrate_selected
 
 
 # ── T2Database has RENAME_LOCK ────────────────────────────────────────────────
@@ -300,7 +301,7 @@ class TestLockOrdering:
             db.close()
 
     @pytest.mark.skipif(
-        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        engine_substrate_selected(),
         reason="dies-roster: per-store SQLite self._lock ordering is the "
         "SQLite queue's protocol; HttpAspectQueue exposes no raw '_lock' "
         "(the engine owns serialization) — dies at the RDR-155 P4b flip",

@@ -85,23 +85,26 @@ AS $$
 $$;
         </sql>
         <rollback>
-DROP FUNCTION IF EXISTS nexus.search_metadata_scoped_384(vector, text[], text, text, int, text, text, jsonb, int);
-CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_384(
-    p_query vector(384), p_collections text[], p_content_type text, p_author text,
-    p_year int, p_corpus text, p_n int
-) RETURNS TABLE(id text, content text, collection text, distance float8)
-LANGUAGE sql STABLE SECURITY INVOKER AS $$
-    SELECT d.tumbler, c.chunk_text, c.collection, (c.embedding &lt;=&gt; p_query)::float8
-      FROM nexus.chunks_384 c
-      JOIN nexus.catalog_document_chunks m ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
-      JOIN nexus.catalog_documents d ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
-     WHERE c.collection = ANY(p_collections) AND d.deleted_at IS NULL
-       AND (p_content_type IS NULL OR d.content_type = p_content_type)
-       AND (p_author IS NULL OR d.author = p_author)
-       AND (p_year IS NULL OR d.year = p_year)
-       AND (p_corpus IS NULL OR d.corpus = p_corpus)
-     ORDER BY c.embedding &lt;=&gt; p_query LIMIT p_n
-$$;
+            <sql splitStatements="false" stripComments="false">
+    DROP FUNCTION IF EXISTS nexus.search_metadata_scoped_384(vector, text[], text, text, int, text, text, jsonb, int);
+    CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_384(
+        p_query vector(384), p_collections text[], p_content_type text, p_author text,
+        p_year int, p_corpus text, p_n int
+    ) RETURNS TABLE(id text, content text, collection text, distance float8)
+    LANGUAGE sql STABLE SECURITY INVOKER AS $$
+        SELECT d.tumbler, c.chunk_text, c.collection, (c.embedding &lt;=&gt; p_query)::float8
+          FROM nexus.chunks_384 c
+          JOIN nexus.catalog_document_chunks m ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+          JOIN nexus.catalog_documents d ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+         WHERE c.collection = ANY(p_collections) AND d.deleted_at IS NULL
+           AND (p_content_type IS NULL OR d.content_type = p_content_type)
+           AND (p_author IS NULL OR d.author = p_author)
+           AND (p_year IS NULL OR d.year = p_year)
+           AND (p_corpus IS NULL OR d.corpus = p_corpus)
+         ORDER BY c.embedding &lt;=&gt; p_query LIMIT p_n
+    $$;
+        
+            </sql>
         </rollback>
     </changeSet>
 
@@ -148,23 +151,26 @@ AS $$
 $$;
         </sql>
         <rollback>
-DROP FUNCTION IF EXISTS nexus.search_metadata_scoped_768(vector, text[], text, text, int, text, text, jsonb, int);
-CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_768(
-    p_query vector(768), p_collections text[], p_content_type text, p_author text,
-    p_year int, p_corpus text, p_n int
-) RETURNS TABLE(id text, content text, collection text, distance float8)
-LANGUAGE sql STABLE SECURITY INVOKER AS $$
-    SELECT d.tumbler, c.chunk_text, c.collection, (c.embedding &lt;=&gt; p_query)::float8
-      FROM nexus.chunks_768 c
-      JOIN nexus.catalog_document_chunks m ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
-      JOIN nexus.catalog_documents d ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
-     WHERE c.collection = ANY(p_collections) AND d.deleted_at IS NULL
-       AND (p_content_type IS NULL OR d.content_type = p_content_type)
-       AND (p_author IS NULL OR d.author = p_author)
-       AND (p_year IS NULL OR d.year = p_year)
-       AND (p_corpus IS NULL OR d.corpus = p_corpus)
-     ORDER BY c.embedding &lt;=&gt; p_query LIMIT p_n
-$$;
+            <sql splitStatements="false" stripComments="false">
+    DROP FUNCTION IF EXISTS nexus.search_metadata_scoped_768(vector, text[], text, text, int, text, text, jsonb, int);
+    CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_768(
+        p_query vector(768), p_collections text[], p_content_type text, p_author text,
+        p_year int, p_corpus text, p_n int
+    ) RETURNS TABLE(id text, content text, collection text, distance float8)
+    LANGUAGE sql STABLE SECURITY INVOKER AS $$
+        SELECT d.tumbler, c.chunk_text, c.collection, (c.embedding &lt;=&gt; p_query)::float8
+          FROM nexus.chunks_768 c
+          JOIN nexus.catalog_document_chunks m ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+          JOIN nexus.catalog_documents d ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+         WHERE c.collection = ANY(p_collections) AND d.deleted_at IS NULL
+           AND (p_content_type IS NULL OR d.content_type = p_content_type)
+           AND (p_author IS NULL OR d.author = p_author)
+           AND (p_year IS NULL OR d.year = p_year)
+           AND (p_corpus IS NULL OR d.corpus = p_corpus)
+         ORDER BY c.embedding &lt;=&gt; p_query LIMIT p_n
+    $$;
+        
+            </sql>
         </rollback>
     </changeSet>
 
@@ -211,23 +217,26 @@ AS $$
 $$;
         </sql>
         <rollback>
-DROP FUNCTION IF EXISTS nexus.search_metadata_scoped_1024(vector, text[], text, text, int, text, text, jsonb, int);
-CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_1024(
-    p_query vector(1024), p_collections text[], p_content_type text, p_author text,
-    p_year int, p_corpus text, p_n int
-) RETURNS TABLE(id text, content text, collection text, distance float8)
-LANGUAGE sql STABLE SECURITY INVOKER AS $$
-    SELECT d.tumbler, c.chunk_text, c.collection, (c.embedding &lt;=&gt; p_query)::float8
-      FROM nexus.chunks_1024 c
-      JOIN nexus.catalog_document_chunks m ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
-      JOIN nexus.catalog_documents d ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
-     WHERE c.collection = ANY(p_collections) AND d.deleted_at IS NULL
-       AND (p_content_type IS NULL OR d.content_type = p_content_type)
-       AND (p_author IS NULL OR d.author = p_author)
-       AND (p_year IS NULL OR d.year = p_year)
-       AND (p_corpus IS NULL OR d.corpus = p_corpus)
-     ORDER BY c.embedding &lt;=&gt; p_query LIMIT p_n
-$$;
+            <sql splitStatements="false" stripComments="false">
+    DROP FUNCTION IF EXISTS nexus.search_metadata_scoped_1024(vector, text[], text, text, int, text, text, jsonb, int);
+    CREATE OR REPLACE FUNCTION nexus.search_metadata_scoped_1024(
+        p_query vector(1024), p_collections text[], p_content_type text, p_author text,
+        p_year int, p_corpus text, p_n int
+    ) RETURNS TABLE(id text, content text, collection text, distance float8)
+    LANGUAGE sql STABLE SECURITY INVOKER AS $$
+        SELECT d.tumbler, c.chunk_text, c.collection, (c.embedding &lt;=&gt; p_query)::float8
+          FROM nexus.chunks_1024 c
+          JOIN nexus.catalog_document_chunks m ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+          JOIN nexus.catalog_documents d ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+         WHERE c.collection = ANY(p_collections) AND d.deleted_at IS NULL
+           AND (p_content_type IS NULL OR d.content_type = p_content_type)
+           AND (p_author IS NULL OR d.author = p_author)
+           AND (p_year IS NULL OR d.year = p_year)
+           AND (p_corpus IS NULL OR d.corpus = p_corpus)
+         ORDER BY c.embedding &lt;=&gt; p_query LIMIT p_n
+    $$;
+        
+            </sql>
         </rollback>
     </changeSet>
 

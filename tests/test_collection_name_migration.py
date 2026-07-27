@@ -39,7 +39,35 @@ from tests.conftest import make_vector_test_client
 # (voyage-* embedder names, canonical-set defaults). The cloud_mode
 # fixture sets credentials and forces ``is_local_mode()`` to False so
 # the assertions hold regardless of the host environment.
-pytestmark = pytest.mark.usefixtures("cloud_mode")
+#
+# nexus-aqbrk: ``local_catalog_backend`` FOLDED INTO the existing mark, not
+# added as a second ``pytestmark`` — a second assignment REPLACES rather than
+# appends, which would silently drop the cloud_mode pin this file depends on.
+#
+# WHY PINNED. This file tests the SQLite-era data-plane rename: the FAN-OUT of
+# T2 cascade -> T3 native modify(name=) -> catalog cascade, driven from the
+# client with an injected local Catalog and an in-memory T3. Service mode does
+# not have that shape at all — collection_rename.py:124 branches to a single
+# transactional ``client.rename_collection_cascade(old, new)`` on the engine,
+# which re-homes the pgvector chunks inside the same transaction and never
+# calls ``t3_db.rename_collection``. So the injected local T3 is not merely
+# unused there, it is meaningless.
+#
+# That branch is also why the failures LOOKED like test-setup drift: the tests
+# pass ``cat=<local Catalog>``, the service branch checks
+# ``hasattr(client, "rename_collection_cascade")``, a local Catalog has no such
+# method, so it silently falls back to ``make_catalog_reader()`` and asks the
+# SERVICE to rename a collection only the local fixtures ever knew about ->
+# "HTTP 404: collection not found: code__myproject-cafef00d".
+#
+# SERVICE HALF IS OWNED, and substantively:
+#   tests/test_collection_rename_service_mode.py — single-endpoint routing,
+#     count mapping, atomic-failure -> ClickException, and both guard paths
+#     (unknown source, target collision) asserting the endpoint is NOT called
+#   tests/test_t2_rename_cascade_service_mode.py — per-store routing for
+#     chash / aspects / queue / highlights, each paired with a
+#     ``sqlite_not_updated_in_service_mode`` counterpart
+pytestmark = pytest.mark.usefixtures("cloud_mode", "local_catalog_backend")
 
 
 def _collection_name(repo):

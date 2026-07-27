@@ -26,8 +26,9 @@ from pathlib import Path
 import pytest
 
 from nexus.db.http_vector_client import HttpVectorClient
+from tests.conftest import engine_substrate_selected
 
-_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
+_ENGINE_SUBSTRATE = engine_substrate_selected()
 
 
 def _chash(seed: str) -> str:

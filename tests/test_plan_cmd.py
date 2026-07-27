@@ -23,6 +23,32 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def _pin_plans_to_local_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default this module's plans backend to SQLite (nexus-aqbrk).
+
+    Most tests here seed rows with a direct ``sqlite3.connect`` to a
+    ``tmp_path`` file and then invoke the CLI with ``default_db_path`` patched
+    at it — i.e. they assert the CLI's behaviour AGAINST THE LOCAL FILE. Under
+    the engine substrate the CLI reads the service instead, so the seeded rows
+    are simply not there and the assertions fail for a reason that has nothing
+    to do with the code under test.
+
+    The service half of this surface is already covered, deliberately and
+    separately, by ``test_plan_list_routes_to_service`` /
+    ``test_plan_delete_routes_to_service`` (stubbed HttpPlanLibrary) and the
+    two ``*_refuses_in_service_mode`` tests. Those set
+    ``NX_STORAGE_BACKEND_PLANS=service`` themselves, and a later ``setenv``
+    wins over this autouse one — non-autouse fixtures resolve after autouse
+    fixtures, and in-body setenv later still — so pinning here does not
+    weaken them.
+
+    Retirement note: the file-seeding tests go with the local snapshot in
+    nexus-i711w; the service-routing ones stay.
+    """
+    monkeypatch.setenv("NX_STORAGE_BACKEND_PLANS", "sqlite")
+
+
 def _seed_plans(tmp_path: Path) -> Path:
     """Return a DB path with a minimal schema + a NULL-dimension row."""
     from nexus.db.migrations import apply_pending

@@ -316,7 +316,7 @@ def t2_service_env(request: pytest.FixtureRequest,
     tenant name.
 
     Opt-in during the incremental migration; replaces the sqlite pin
-    (set AFTER _pin_storage_backend_sqlite — later setenv wins) and
+    (set AFTER _pin_t2_substrate — later setenv wins) and
     becomes the suite default when the pin flips at the end of P0a'.
     """
     from tests._engine_substrate import ensure_engine, mint_test_tenant
@@ -341,6 +341,30 @@ def t2_service_env(request: pytest.FixtureRequest,
     monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
     monkeypatch.setenv("NX_SERVICE_URL", state["base_url"])
     monkeypatch.setenv("NX_SERVICE_TOKEN", token)
+    # ORTHOGONALITY PIN (nexus-aqbrk): this fixture selects a T2 SUBSTRATE.
+    # It must not also change the install's cloud/local POSTURE — a different
+    # axis entirely.
+    #
+    # ``NX_SERVICE_URL`` is overloaded. The T2 Http*Stores need it to find the
+    # engine, but ``config.is_local_mode()`` also reads ``service_url`` as the
+    # "this is a managed/cloud install" signal (nexus-3k43p, so a greenfield
+    # managed user is not mis-detected as local). Setting it therefore flips
+    # EVERY test in the suite from local to cloud posture as a side effect of
+    # choosing where T2 rows live. The sqlite arm has no service_url, so it is
+    # local — meaning the two arms were not comparing like with like.
+    #
+    # Measured, not assumed: tests/test_doc_indexer.py failed 12 on the engine
+    # arm, 8 of them ``CredentialsMissingError: cannot index in cloud mode
+    # without voyage_api_key``. Re-running with NX_LOCAL=1 took it to 8 — the
+    # 4 mode-posture failures are a pure artifact of the substrate pin, and the
+    # remainder are genuine catalog work.
+    #
+    # NX_LOCAL=1 restores the suite's default posture. Tests that WANT cloud
+    # posture use the ``cloud_mode`` fixture, which setenvs NX_LOCAL=0 and
+    # still wins: non-autouse fixtures resolve AFTER autouse ones, so its
+    # setenv lands later on the same monkeypatch — the same ordering contract
+    # documented on ``_isolate_service_endpoint_env`` below.
+    monkeypatch.setenv("NX_LOCAL", "1")
     return tenant
 
 
@@ -350,7 +374,7 @@ def _isolate_service_endpoint_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
     Same ambient-pollution class as ``_isolate_config_dir`` /
     ``_isolate_t1_sessions`` / the ``CLAUDE_CODE_SESSION_ID`` scrub above, and
-    the missing half of ``_pin_storage_backend_sqlite``'s stated intent
+    the missing half of ``_pin_t2_substrate``'s stated intent
     ("independent of ambient service/lease state"): that fixture pins the
     BACKEND, but a developer shell that has sourced the managed-service
     credentials still leaks the ENDPOINT into every test.
@@ -372,7 +396,7 @@ def _isolate_service_endpoint_env(monkeypatch: pytest.MonkeyPatch) -> None:
     failed -- and it failed as though the checked-out branch had broken
     something.
 
-    ORDERING: must be defined BEFORE ``_pin_storage_backend_sqlite``. Autouse
+    ORDERING: must be defined BEFORE ``_pin_t2_substrate``. Autouse
     function-scoped fixtures run in definition order, and that fixture may pull
     in ``t2_service_env`` (via ``getfixturevalue``), which ``setenv``s
     ``NX_SERVICE_URL`` / ``NX_SERVICE_TOKEN`` for the engine substrate. Tests
@@ -390,25 +414,113 @@ def _isolate_service_endpoint_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(var, raising=False)
 
 
+@pytest.fixture
+def local_catalog_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the CATALOG store to SQLite for tests that drive the local catalog.
+
+    Opt in per file with::
+
+        pytestmark = pytest.mark.usefixtures("local_catalog_backend")
+
+    NOT a substrate workaround. A family of catalog verbs is local-only BY
+    DESIGN and says so in its own error text — ``nx catalog synthesize-log``
+    and the doctor replay/consistency verbs "operate on the LOCAL catalog
+    (event log / JSONL / projection); in service mode the live catalog is
+    owned by the nexus service" (nexus-kmo9h). The same seam that makes that
+    true also makes these tests fail under the engine substrate: ``Catalog``
+    forces ``read_only=True`` whenever ``storage_backend_for("catalog")`` is
+    SERVICE and the file exists, because in service mode the local
+    ``.catalog.db`` is a FROZEN MIGRATION SOURCE that must not be mutated
+    (RDR-176 Phase 1 Gap 2, enforced by
+    tests/catalog/test_rdr176_catalog_non_mutation.py). A test that calls
+    ``Catalog.init`` and then registers anything therefore dies on
+    "attempt to write a readonly database" — the invariant working exactly as
+    designed, against a test that wants the local catalog on purpose.
+
+    So this fixture states the intent the test always had, and keeps coverage
+    of a verb family that still works, rather than skipping it.
+
+    Retirement note: these tests go with the local catalog itself, in
+    nexus-i711w — not before, and not silently.
+    """
+    monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "sqlite")
+
+
+def engine_substrate_selected() -> bool:
+    """True when the suite's autouse pin routes tests to the engine substrate.
+
+    THE SINGLE SOURCE OF TRUTH for "which T2 substrate is this session on".
+    ``_pin_t2_substrate`` below calls it, and so does every
+    dies-roster ``skipif`` marker across the suite — so the flip changes this
+    one function and nothing else, and the pin and the rosters cannot drift
+    apart.
+
+    WHY THIS EXISTS (nexus-aqbrk, 2026-07-25). 111 sites across 36 files each
+    spelled the predicate inline as
+    ``os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"``. That was the
+    PRE-flip spelling: the engine was opt-IN, so the var was set when the
+    engine was wanted. Now the engine is the DEFAULT and
+    ``NX_TEST_T2_SUBSTRATE=sqlite`` is the opt-OUT, so a default engine run
+    leaves the var UNSET — and every one of those inline predicates would have
+    evaluated False, un-skipping the entire dies-roster at the exact moment the
+    flip landed, the event it exists to survive.
+
+    Not a projection: simulated by flipping this fixture's body and running
+    tests/test_catalog_cli.py with the var unset. The 36 rostered tests
+    un-skipped and all 36 failed. Hoisting the predicate here is what made the
+    flip below a ONE-LINE change instead of 111.
+
+    FLIPPED 2026-07-26 (nexus-aqbrk). The engine substrate is now the default;
+    ``NX_TEST_T2_SUBSTRATE=sqlite`` opts out. Gated on nexus-eqxxh proving green
+    on CI first — it had never executed anywhere before PR #1426, and when it
+    did it showed the CI pytest job could not boot an engine at all (ambient
+    pgvector-less PG, then a missing bge ONNX model). Flipping before that would
+    have turned a broken-by-construction CI job into a red default.
+
+    The inverse spelling is deliberate: ``!= "sqlite"`` rather than
+    ``== "engine"`` means an unset var, a typo'd value, or a stale
+    ``NX_TEST_T2_SUBSTRATE=engine`` from a pre-flip shell ALL resolve to the
+    engine. Only the explicit opt-out reaches SQLite, so the escape hatch is
+    the only thing that can be misspelled into silence — and it fails toward
+    the substrate the product actually ships on.
+    """
+    return os.environ.get("NX_TEST_T2_SUBSTRATE") != "sqlite"
+
+
 @pytest.fixture(autouse=True)
-def _pin_storage_backend_sqlite(request: pytest.FixtureRequest,
+def _pin_t2_substrate(request: pytest.FixtureRequest,
                                 monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin the unit suite to the SQLite storage backend (RDR-152 nexus-fjwxh).
+    """Route every test to the session's T2 substrate — ENGINE by default.
 
-    FLIP MECHANISM (RDR-155 P4b P0a'): ``NX_TEST_T2_SUBSTRATE=engine``
-    routes this autouse pin to the engine-backed substrate instead —
-    every test gets the session PG+JAR with a freshly minted tenant
-    (exactly what the ``t2_service_env`` opt-in fixture provides). This
-    is both the flip dry-run switch (run any subset against the engine
-    without editing files) and, when the migration completes, the
-    default this fixture body becomes.
+    Renamed from ``_pin_storage_backend_sqlite`` at the flip (nexus-aqbrk,
+    2026-07-26): the old name described the branch that is now the OPT-OUT, and
+    a fixture whose name says "sqlite" while it hands out a PG-backed engine
+    tenant is the kind of lie that costs someone an hour. Autouse fixtures
+    resolve by decorator rather than by name, so the rename carries no
+    behavioural risk.
 
-    ``storage_backend_for`` defaults to ``service`` since the T2 cutover, so a
-    bare ``T2Database(path)`` would construct the Http* stores and try to reach
-    the nexus-service — which unit tests neither run nor want. Pinning sqlite
-    here keeps the ~116 T2Database-constructing unit tests deterministic and
-    independent of ambient service/lease state (a dev box with the supervisor
-    running would otherwise auto-discover a real lease mid-unit-test).
+    DEFAULT (var unset) — the engine substrate: every test gets the session
+    PG+JAR with a freshly minted tenant, exactly what the ``t2_service_env``
+    opt-in fixture provides. This is what the product actually ships on;
+    ``storage_backend_for`` has defaulted to ``service`` since the T2 cutover,
+    so the suite now agrees with the shipping default instead of contradicting
+    it.
+
+    OPT-OUT — ``NX_TEST_T2_SUBSTRATE=sqlite`` pins SQLite. Kept for the tests
+    whose SUBJECT is the local substrate (migration sources, the SQLite-only
+    trigger paths) and as the escape hatch for bisecting a suspected
+    engine-side regression against the old baseline. It retires with the
+    SQLite stores themselves in nexus-i711w.
+
+    HISTORY, because the old body's rationale is still worth knowing: this
+    fixture used to pin SQLite so a bare ``T2Database(path)`` would not
+    construct Http* stores and try to reach the nexus-service — which unit
+    tests neither ran nor wanted. That kept ~116 T2Database-constructing tests
+    deterministic and independent of ambient service/lease state (a dev box
+    with the supervisor running would otherwise auto-discover a real lease
+    mid-unit-test). The engine substrate solves the same problem the other way:
+    a per-session JAR + PG with a per-test tenant is hermetic, so ambient
+    leases cannot leak in either.
 
     Tests that exercise the resolver itself (``test_storage_mode.py``) carry
     their own ``_clean_storage_env`` autouse fixture that ``delenv``s the
@@ -416,10 +528,134 @@ def _pin_storage_backend_sqlite(request: pytest.FixtureRequest,
     test that wants service mode sets ``NX_STORAGE_BACKEND[_<store>]`` itself,
     which overrides this pin (later ``setenv`` wins).
     """
-    if os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine":
+    if engine_substrate_selected():
         request.getfixturevalue("t2_service_env")
         return
     monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
+
+
+@pytest.fixture
+def local_t2_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the T2 stores to SQLite for tests that drive the LOCAL T2 database.
+
+    Opt in per file or per class with::
+
+        pytestmark = pytest.mark.usefixtures("local_t2_backend")
+        @pytest.mark.usefixtures("local_t2_backend")
+        class TestSomethingLocal: ...
+
+    The T2 counterpart of :func:`local_catalog_backend`, and NOT a substrate
+    workaround. A family of doctor verbs operates on the LOCAL SQLite artifact
+    by design and says so in its own output — ``doctor --check-schema`` reports
+    "T2 schema is service-backed (Postgres, Liquibase-managed) — local SQLite
+    schema check N/A in service mode" (nexus-p0clh), and ``--trim-telemetry``
+    routes to ``HttpTelemetryStore`` rather than touching the frozen local file
+    (nexus-ingey). Tests that seed a real ``memory.db`` with ``sqlite3.connect``
+    + ``apply_pending`` and then assert on that file are testing the LOCAL arm
+    on purpose; under the engine substrate the verb correctly looks elsewhere,
+    so the assertion becomes unsatisfiable rather than wrong.
+
+    ORDERING: this is deliberately NOT autouse. Non-autouse fixtures resolve
+    AFTER autouse ones, so its ``setenv`` lands later than
+    ``_pin_t2_substrate`` / ``t2_service_env`` on the same
+    monkeypatch and wins — the same contract ``cloud_mode`` relies on. Setting
+    the GLOBAL ``NX_STORAGE_BACKEND`` (not a per-domain override) is
+    intentional: it re-pins every T2 domain at once, including ``telemetry``,
+    which ``t2_service_env`` only ever set globally.
+
+    BEFORE ADDING A CALLER, verify the SERVICE half is owned somewhere and name
+    it. For the two current callers it is:
+      - ``doctor --check-schema``  -> tests/test_doctor_check_schema_service_mode.py
+      - ``doctor --trim-telemetry``-> tests/test_false_clean_diagnostics_service_mode.py
+    A pin without a named service-half owner silently drops coverage the moment
+    nexus-i711w deletes the SQLite stores these tests ride on.
+
+    Retirement note: callers of this fixture go with the local T2 database
+    itself, in nexus-i711w — not before, and not silently.
+    """
+    monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
+
+
+@pytest.fixture(autouse=True)
+def _reset_shared_service_catalog_client() -> None:
+    """Drop the process-lifetime shared SERVICE catalog client between tests
+    (nexus-aqbrk).
+
+    ``nexus.catalog.factory`` memoises ONE ``HttpCatalogClient`` for the life
+    of the process (nexus-5en9j — it was the largest reconstruction count in
+    the nexus-53x7s shakeout, 394 constructions in one run). Correct in
+    production, where the tenant never changes mid-process. Wrong for a
+    pytest session, where the engine substrate mints a FRESH TENANT AND TOKEN
+    per test: the memoised client keeps the FIRST test's token, so every
+    later test's catalog reads and writes land in the first test's tenant.
+
+    The visible symptom is not "wrong tenant" — it is accumulation. Rows pile
+    up in tenant #1 across the whole module, and eventually a
+    ``register_owner`` that is the first of its name IN ITS OWN TEST hits a
+    row an earlier test already wrote, and the engine correctly refuses:
+    ``HTTP 409: integrity constraint violation`` on ``/v1/catalog/owners/
+    upsert`` (catalog_owners_unique_name_type). Order-dependent, passes in
+    isolation, and the error names a constraint rather than the cause — the
+    same profile as the import-seed-id defect, and the same trap.
+
+    ``reset_shared_service_catalog_client_for_tests`` already existed for
+    exactly this; nothing called it outside the one test that owns the
+    caching behaviour itself. Reset on BOTH sides so a test that constructs
+    the client cannot leak it forward, and a test that inherits one cannot
+    start dirty.
+    """
+    from nexus.catalog import factory
+
+    factory.reset_shared_service_catalog_client_for_tests()
+    yield
+    factory.reset_shared_service_catalog_client_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _reset_service_t2_db() -> None:
+    """Drop the process-lifetime service ``T2Database`` singleton between tests
+    (nexus-aqbrk).
+
+    THE SAME DEFECT AS ``_reset_shared_service_catalog_client`` ABOVE, one
+    tier over, and named as such in nexus-5en9j: ``mcp_infra`` memoises ONE
+    service-backed ``T2Database`` in ``_service_t2_db`` and every service-mode
+    ``t2_index_write`` runs against it (``_service_t2_write_locked``). Its
+    ``Http*Store`` clients bake in the endpoint and BEARER TOKEN they saw at
+    construction, and the engine substrate mints a fresh tenant + token per
+    test — so a singleton built by the first test writes every later test's
+    rows into the FIRST test's tenant.
+
+    The symptom is a test reading an empty store it just wrote to: the write
+    landed in tenant #1, the read-back runs in its own tenant. Order-dependent
+    — passes solo, fails in file order — and harmless on the SQLite substrate,
+    where ``t2_index_write`` never takes the service branch and this reset is
+    a no-op.
+
+    Already diagnosed once, per-file: ``tests/test_rdr_084_plan_grow.py``
+    carries a local autouse fixture calling ``reset_singletons()`` for exactly
+    this reason. That is the same shape the catalog client had before the
+    fixture above — one file working around a session-wide hazard. This
+    promotes the eviction to the whole suite.
+
+    SCOPE IS DELIBERATELY NARROWER THAN ``reset_singletons()``. That helper
+    also drops ``_t1_instance`` / ``_t3_instance`` / ``_collections_cache`` /
+    the plan cache / the vector client; making all of that autouse would
+    invalidate module-scoped T1/T3 injections that tests legitimately expect
+    to survive across a file. Only the credential-bearing T2 handle is evicted
+    here. Reset on BOTH sides, for the same reason as the catalog client: a
+    test cannot leak one forward, and cannot start dirty.
+    """
+    import nexus.mcp_infra as mcp_infra
+
+    def _evict() -> None:
+        with mcp_infra._service_t2_lock:
+            if mcp_infra._service_t2_db is not None:
+                mcp_infra._service_t2_db.close()
+            mcp_infra._service_t2_db = None
+
+    _evict()
+    yield
+    _evict()
 
 
 @pytest.fixture(autouse=True)
@@ -1205,14 +1441,38 @@ def db(tmp_path: Path) -> T2Database:
 
 
 #: Process-wide unique id source for fidelity-import seeding (RDR-155
-#: P4b P0a'). import_topic/import_plan preserve ids VERBATIM without
-#: advancing the engine's serial sequences, and the topics PK is GLOBAL
-#: across tenants on the shared session engine — so per-module counters
-#: collide across modules in one pytest session (bisected finding).
-#: Every module that seeds preserved ids MUST draw from THIS counter.
+#: P4b P0a'). The topics PK is GLOBAL across tenants on the shared session
+#: engine, so per-module counters collide across modules in one pytest
+#: session (bisected finding). Every module that seeds preserved ids MUST
+#: draw from THIS counter.
+#:
+#: THE STRIDE IS LOAD-BEARING (nexus-aqbrk, 2026-07-25). The note here used
+#: to claim imports "preserve ids VERBATIM without advancing the engine's
+#: serial sequences". That is false: TaxonomyRepository.importTopic ends with
+#: advanceTopicsIdSequence(ctx, srcId), a setval to GREATEST(last_value,
+#: srcId) — deliberately, so a migrated tenant's next live topic cannot
+#: collide with its own imported ids. The consequence for a shared session
+#: engine is that ONE import at N drags the global serial sequence to N, and
+#: every subsequent ORDINARY topic creation (persist_discovered,
+#: persist_rebuild, ...) in ANY tenant then consumes N+1, N+2, ... — walking
+#: straight into the ids this counter is about to hand out. The next import
+#: to draw an already-consumed id hits ON CONFLICT (id) against a row owned
+#: by a different tenant, which RLS rejects as a WITH CHECK violation and the
+#: handler reports as "supplied id is not available in this tenant".
+#:
+#: Symptom when this breaks: a cascade of HTTP 409s that looks like an
+#: engine defect and is order-dependent (test_taxonomy.py failed at test 20;
+#: deselecting three topic-creating tests moved it to test 33). A larger
+#: starting offset does NOT help — the serial path just follows the counter
+#: up from wherever it lands. The STRIDE is what fixes it: after an import
+#: at N, ordinary inserts would have to burn a million ids to reach N + STEP,
+#: and a pytest session creates thousands.
 import itertools
 
-_import_seed_ids = itertools.count(1_000_000_000)
+_IMPORT_SEED_ID_BASE = 1_000_000_000
+_IMPORT_SEED_ID_STEP = 1_000_000
+
+_import_seed_ids = itertools.count(_IMPORT_SEED_ID_BASE, _IMPORT_SEED_ID_STEP)
 
 
 def next_import_seed_id() -> int:
@@ -1781,3 +2041,43 @@ def _reap_leaked_test_daemons(tmp_path_factory):
     if reaped:
         print(f"\n[nexus-1odsl] reaped {len(reaped)} leaked daemon(s): {reaped}")
         print(f"\n[nexus-1odsl] reaped {len(reaped)} leaked aspect-worker daemon(s): {reaped}")
+
+
+def fake_credentials(value: str = "test-key", *, passthrough: tuple[str, ...] = (
+    "service_url", "service_token",
+)):
+    """A ``get_credential`` side_effect that does NOT poison the endpoint.
+
+    nexus-aqbrk. The common form in indexer tests is::
+
+        patch("nexus.config.get_credential", side_effect=lambda k: "test-key")
+
+    which answers EVERY key — including ``service_url``. That key is not a
+    generic credential: it is the authoritative FULL service endpoint
+    (``service_endpoint.py``: "used VERBATIM ... NX_SERVICE_URL env FIRST,
+    then nx config set service_url"). So the blanket stub hands endpoint
+    resolution the literal string "test-key", every client builds
+    ``base_url="test-key"``, and the first request dies on
+    ``httpx.UnsupportedProtocol: Request URL is missing an 'http://' or
+    'https://' protocol``.
+
+    Invisible on the SQLite arm, because nothing resolves a service endpoint
+    there. Under the engine substrate it was the single largest failure
+    cause found in this port — 29 of 32 in tests/test_indexer_e2e.py plus 4
+    in tests/test_indexer_duplicate_content.py.
+
+    This keeps the blanket answer for the credential the tests actually care
+    about (embedder routing keys on ``voyage_api_key`` PRESENCE) while
+    delegating the endpoint keys to the real resolver, so the substrate's
+    own configuration survives the mock. It is the same orthogonality bug
+    ``t2_service_env``'s NX_LOCAL pin documents: a stub chosen for one axis
+    silently perturbing a neighbouring one.
+    """
+    from nexus.config import get_credential as _real
+
+    def _side_effect(key: str):
+        if key in passthrough:
+            return _real(key)
+        return value
+
+    return _side_effect

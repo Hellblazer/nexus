@@ -220,7 +220,19 @@ class TestLinkEventSourced:
 # ── _ensure_consistent rebuilds from events.jsonl ────────────────────────
 
 
+@pytest.mark.usefixtures("local_catalog_backend")
 class TestEnsureConsistentEventSourced:
+    """The local catalog's DELETE-and-replay projection rebuild.
+
+    nexus-aqbrk: PINNED. These open a ``Catalog`` against a deliberately
+    STALE .catalog.db and assert ``_ensure_consistent`` deletes the phantom
+    rows and replays ``events.jsonl``. That machinery is the LOCAL catalog's
+    event-sourcing: a SQLite projection rebuilt from a JSONL log. The service
+    catalog is Postgres with no event log and no projection to rebuild, so
+    there is nothing on that side to test — and the writes died on the frozen-
+    migration-source invariant besides ("attempt to write a readonly
+    database").
+    """
     def test_second_catalog_sees_events_jsonl_writes(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch,
     ):
@@ -438,7 +450,17 @@ class TestEnsureConsistentEventSourced:
 # ── Doctor --replay-equality reads events.jsonl ──────────────────────────
 
 
+@pytest.mark.usefixtures("local_catalog_backend")
 class TestDoctorReplayEqualityEventLog:
+    """``doctor --replay-equality`` over events.jsonl.
+
+    nexus-aqbrk: PINNED, same reason, and this verb family is named
+    explicitly in ``local_catalog_backend``'s own contract — the doctor
+    replay/consistency verbs "operate on the LOCAL catalog (event log /
+    JSONL / projection); in service mode the live catalog is owned by the
+    nexus service" (nexus-kmo9h). Already the disposition used for the same
+    verb in tests/test_doc_indexer.py earlier in this arc.
+    """
     """``nx catalog doctor --replay-equality`` reads ``events.jsonl`` when
     it exists and has content — pre-fix it always called
     ``synthesize_from_jsonl``, so once ``NEXUS_EVENT_SOURCED=1`` was on by

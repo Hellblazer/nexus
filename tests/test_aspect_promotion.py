@@ -20,6 +20,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+
+from tests._t2_fixture_ops import bootstrap_migration_source
 from click.testing import CliRunner
 
 from nexus.aspect_extractor import AspectRecord
@@ -48,6 +50,16 @@ def _make_record(*, source_path: str = "/p1.pdf", extras: dict | None = None) ->
 def db_with_papers(tmp_path: Path) -> Path:
     """T2 DB with three papers carrying ``extras.venue`` / ``extras.year``."""
     db_path = tmp_path / "promotion.db"
+    # nexus-aqbrk: build the SQLite schema explicitly. T2Database(path) does
+    # NOT create it under the engine substrate — bootstrap_schema early-returns
+    # so apply_pending cannot re-stamp _nexus_version on what RDR-176 Gap 2
+    # treats as a frozen migration source — so _seed_legacy_history's raw
+    # sqlite3 INSERT died on "no such table: aspect_promotion_log".
+    #
+    # CONVERT, not pin: the subject (list_promotions) is documented as working
+    # on BOTH substrates; only the LEGACY-HISTORY seed is inherently SQLite,
+    # because it reproduces what a pre-retirement install left behind.
+    bootstrap_migration_source(db_path)
     with T2Database(db_path) as db:
         db.document_aspects.upsert(_make_record(
             source_path="/p1.pdf", extras={"venue": "VLDB", "year": 2023}))
@@ -163,6 +175,19 @@ class TestHistoryReadPath:
         finally:
             store.close()
 
+    # nexus-aqbrk: PINNED. This test SEEDS LEGACY HISTORY — rows as a
+    # pre-retirement install would have left them — via raw sqlite3 INSERT
+    # into aspect_promotion_log. That seed is inherently a SQLite artifact:
+    # there is no service-mode way to plant "what the old install left
+    # behind", and reading it back requires the same substrate.
+    #
+    # Only the three _seed_legacy_history tests are pinned; the other nine
+    # exercise list_promotions on freshly-promoted data and pass on BOTH arms.
+    #
+    # SERVICE HALF IS OWNED: HttpDocumentAspectsStore.list_promotions is
+    # implemented (nexus-70x7y, closed) and covered by
+    # tests/db/t2_store_contract.py plus tests/test_aspect_consumer_service_mode.py.
+    @pytest.mark.usefixtures("local_t2_backend")
     def test_reads_pre_retirement_rows_oldest_first(
         self, db_with_papers: Path,
     ) -> None:
@@ -232,6 +257,7 @@ class TestCLI:
             combined = (result.output or "") + (result.stderr or "")
             assert "no such option" in combined.lower(), combined
 
+    @pytest.mark.usefixtures("local_t2_backend")
     def test_history_flag_renders_entries(
         self, db_with_papers: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -250,6 +276,7 @@ class TestCLI:
         assert "year" in result.output
         assert "INTEGER" in result.output
 
+    @pytest.mark.usefixtures("local_t2_backend")
     def test_history_accepts_the_legacy_dummy_argument(
         self, db_with_papers: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

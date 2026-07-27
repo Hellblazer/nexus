@@ -34,6 +34,16 @@ import pytest
 
 import nexus.catalog.factory as factory
 
+# nexus-aqbrk: PINNED (catalog). Both failing tests assert SQLITE-substrate
+# behaviour inline — one checks storage_backend_for('catalog') is SQLITE, the
+# other the 'sqlite mode keeps the conn' half after reverting its own
+# per-test service override.
+#
+# SERVICE HALF IS OWNED IN THIS FILE: test_register_or_lookup_fresh_box_no_
+# local_catalog_created is the direct twin and already passes on both arms.
+pytestmark = pytest.mark.usefixtures("local_catalog_backend")
+
+
 _COLLECTION = "docs__sweep__voyage-context-3__v1"
 
 
@@ -214,7 +224,12 @@ def test_audit_catalog_conn_is_none_in_service_mode(tmp_path, monkeypatch):
         "audit legs must degrade (orphans=[]) rather than report stale data"
     )
 
-    monkeypatch.delenv("NX_STORAGE_BACKEND_CATALOG")
+    # nexus-aqbrk: SET sqlite explicitly; do NOT delenv. This test drives BOTH
+    # branches in one function, and delenv means "fall back to the ambient
+    # default" — which is SERVICE under the engine substrate, so the sqlite half
+    # was asserting against service mode. State the branch instead of inheriting
+    # it (same lesson as tests/test_doctor_dangling_links.py).
+    monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "sqlite")
     conn = _open_catalog_conn()
     try:
         assert conn is not None, "sqlite mode with an initialised catalog keeps the conn"

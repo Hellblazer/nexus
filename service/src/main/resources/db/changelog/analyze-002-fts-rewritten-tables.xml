@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    BUG-0148 follow-up, second occurrence (conexus relay 2026-07-27, T2 [21164]).
+
+    THE MISS. rdr180-16-analyze-rewritten-tables adopted an explicit invariant
+    on 2026-07-19: "a migration that rewrites a table ANALYZEs it in the same
+    changelog pass." memory-002-1 and catalog-017-0 then rewrote two more
+    tables — DROP INDEX -> DROP COLUMN fts_vector -> re-ADD the STORED
+    generated column -> CREATE INDEX GIN — and neither ran ANALYZE. Re-adding
+    a STORED generated column rewrites the table, so the invariant applied
+    squarely and was simply not carried to the new changesets.
+
+    MEASURED ON THE LIVE CLUSTER by conexus immediately after the v0.1.57 boot,
+    against the changesets' own databasechangelog.dateexecuted (02:43:49Z):
+
+        nexus.catalog_documents  n_live_tup=22133  newest stats 5757 min BEFORE the rewrite
+        nexus.memory             n_live_tup=3459   newest stats  715 min BEFORE the rewrite
+
+    They ran ANALYZE by hand before gating. This changeset makes that
+    remediation part of the migration so no future boot depends on someone
+    noticing.
+
+    WHY THIS IS NOT COSMETIC. The precedent is a production outage shape, not a
+    theory: at v0.1.48 a rewrite reset statistics, the stale-stats planner
+    flipped hybrid queries off the GIN-bitmap plan onto the budget-bounded HNSW
+    plan, and hybrid-search returned ZERO rows in production while /health,
+    /version, the smoke round-trip AND the aggregate STEP-6 exit code all
+    stayed green. A rewritten table also looks FRESH to autovacuum, so
+    autoanalyze may never re-trigger on a read-mostly store — the stale stats
+    can persist indefinitely rather than self-healing.
+
+    It did not bite this time: nexus.memory and nexus.catalog_documents are
+    small and off the hybrid path. That is luck about which tables were
+    rewritten, not a property of the change, and it is invisible to every green
+    signal we have.
+
+    WHY A SEPARATE CHANGESET RATHER THAN AN EDIT. memory-002 and catalog-017
+    have already executed — on the production cluster, on every dev box, and in
+    CI. Editing them would break their Liquibase checksums. A new changeset in
+    the same master pass is the only correct repair, and it is idempotent: on
+    any store that already remediated by hand (the cloud did) it is a cheap
+    re-stamp.
+
+    ANALYZE is transaction-safe, RLS-exempt (maintenance, runs as the table
+    owner), and takes no exclusive lock — it does not block readers or writers.
+
+    THREE MORE FOUND BY THE LINT, not by inspection. Writing
+    tests/test_changelog_analyze_lint.py to enforce the invariant immediately
+    surfaced that catalog-015-0 (the 2026-07-13 separator fix on
+    catalog_documents) and catalog-002-1-temporal-typing (an ALTER COLUMN TYPE
+    on catalog_collections) had the SAME omission and had simply never been
+    noticed. catalog-015-0 is covered by the catalog_documents ANALYZE below;
+    catalog_collections needed its own line. So the invariant has now been
+    missed four times across three authors — which is why it is mechanical now
+    rather than a comment.
+
+    NOT flagged, correctly: the *-baseline.xml changesets that add a generated
+    column. Those run against a table created empty in the same pass, so there
+    are no statistics to go stale and ANALYZE would be a no-op.
+
+    FOR THE NEXT AUTHOR: if you write a changeset that rewrites a table, ANALYZE
+    it in that same changeset rather than adding a line here. The lint accepts
+    an ANALYZE anywhere at-or-after the rewrite in master order — that is what
+    "the same changelog pass" means and it is what makes this file legal — but
+    keeping the two together is what stops them drifting apart.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="analyze-002-0" author="nexus-22r1f">
+        <comment>ANALYZE every table rewritten without one — memory-002-1, catalog-017-0, catalog-015-0 and catalog-002-1-temporal-typing (BUG-0148 invariant, conexus relay 2026-07-27)</comment>
+        <sql splitStatements="true" stripComments="false">
+ANALYZE nexus.memory;
+ANALYZE nexus.catalog_documents;
+ANALYZE nexus.catalog_collections;
+        </sql>
+        <rollback/>
+    </changeSet>
+
+</databaseChangeLog>

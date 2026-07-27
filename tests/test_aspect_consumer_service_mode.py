@@ -137,6 +137,17 @@ class TestAspectPromotionServiceModeGuard:
         db_path = tmp_path / "memory.db"
         monkeypatch.setattr("nexus.config.default_db_path", lambda: db_path)
 
+        # nexus-aqbrk: the subject is the NO-ENDPOINT path — "must exit non-zero
+        # with no endpoint". Under the engine substrate t2_service_env sets
+        # NX_SERVICE_URL / TOKEN so the T2 stores can reach the test engine,
+        # which makes that path unreachable BY CONSTRUCTION: the command found a
+        # live endpoint, answered "No promotion history." and exited 0. Strip
+        # the endpoint so the test's own precondition holds — the same idiom as
+        # tests/db/test_om64x_stale_port_recovery.py::_unpin_service_url.
+        for _var in ("NX_SERVICE_URL", "NX_SERVICE_TOKEN",
+                     "NX_SERVICE_HOST", "NX_SERVICE_PORT"):
+            monkeypatch.delenv(_var, raising=False)
+
         runner = CliRunner()
         result = runner.invoke(enrich, ["aspects-promote-field", "--history"])
 

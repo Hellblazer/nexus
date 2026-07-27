@@ -6,6 +6,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+from tests._catalog_fixture_ops import ActiveCatalog
 from click.testing import CliRunner
 
 from nexus.catalog.catalog import Catalog
@@ -407,6 +409,30 @@ def test_enrich_source_auto_uses_s2_when_key_present(
 # ── nexus-9l2lg: --backfill-catalog ─────────────────────────────────────────
 
 
+def _exact(cat, title: str):
+    """Resolve the entry whose title is EXACTLY *title*.
+
+    nexus-aqbrk: these tests used ``cat.find(title)[0]``, but ``find`` is a
+    SUBSTRING search with no ordering contract on either substrate — and this
+    file seeds both "Enriched Paper" and "Non-Enriched Paper", so the query
+    legitimately matches BOTH and position decides which you get.
+
+    On a freshly seeded catalog both arms happened to return the intended row
+    first. After the backfill UPDATES the enriched row, the engine arm returns
+    them reversed, so ``[0]`` silently became the wrong paper and the test read
+    bib_year=0 off "Non-Enriched Paper". Not a service defect — neither
+    Catalog.find nor HttpCatalogClient.find promises an order, and no
+    production caller indexes into find() (grep-checked) — so the fix is to
+    stop depending on one.
+    """
+    hits = [e for e in cat.find(title) if e.title == title]
+    assert len(hits) == 1, (
+        f"expected exactly one entry titled {title!r}, got "
+        f"{[(str(e.tumbler), e.title) for e in hits]}"
+    )
+    return cat.resolve(hits[0].tumbler)
+
+
 def _make_catalog(tmp_path: Path) -> tuple[Path, Catalog]:
     catalog_dir = tmp_path / "catalog"
     cat = Catalog.init(catalog_dir)
@@ -438,9 +464,17 @@ class TestBackfillCatalog:
         self, tmp_path: Path, monkeypatch, local_t3: T3Database,
         collection: str = "knowledge__nexus-1-1__voyage-context-3__v1",
     ) -> tuple[Catalog, str, Tumbler]:
-        catalog_dir, cat = _make_catalog(tmp_path)
+        # nexus-aqbrk: seed through the ACTIVE catalog. `enrich bib
+        # --backfill-catalog` resolves via make_catalog_reader()
+        # (enrich.py:41/:73), so a local-only seed left the service catalog
+        # empty and the verb reported "Backfilled 0 titles ... 1 titles skipped
+        # (no matching catalog row)" — the skip count naming the missing row.
+        # Catalog.init still runs: the SQLite arm's factory writer needs the
+        # directory, and it is inert on the engine arm.
+        catalog_dir, _local_cat = _make_catalog(tmp_path)
         monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
         monkeypatch.setattr("nexus.db.make_t3", lambda: local_t3)
+        cat = ActiveCatalog()
 
         col = local_t3.get_or_create_collection(collection)
         col.add(
@@ -500,13 +534,13 @@ class TestBackfillCatalog:
         runner = CliRunner()
         first = runner.invoke(enrich, ["bib", collection, "--backfill-catalog"])
         assert first.exit_code == 0, first.output
-        before = cat.resolve(cat.find("Enriched Paper")[0].tumbler)
+        before = _exact(cat, "Enriched Paper")
 
         second = runner.invoke(enrich, ["bib", collection, "--backfill-catalog"])
         assert second.exit_code == 0, second.output
         assert "Backfilled 1 titles" in second.output
 
-        after = cat.resolve(cat.find("Enriched Paper")[0].tumbler)
+        after = _exact(cat, "Enriched Paper")
         for key in (
             "bib_year", "bib_venue", "bib_authors", "bib_citation_count",
             "bib_semantic_scholar_id",
@@ -537,10 +571,10 @@ class TestBackfillCatalog:
         assert result.exit_code == 0, result.output
         assert "Backfilled 1 titles" in result.output
 
-        enriched = cat.resolve(cat.find("Enriched Paper")[0].tumbler)
+        enriched = _exact(cat, "Enriched Paper")
         assert enriched.bib_year == 2019
 
-        non_enriched = cat.resolve(cat.find("Non-Enriched Paper")[0].tumbler)
+        non_enriched = _exact(cat, "Non-Enriched Paper")
         assert non_enriched.bib_year == 0
         assert non_enriched.bib_semantic_scholar_id == ""
 

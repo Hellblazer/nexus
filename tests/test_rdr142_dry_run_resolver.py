@@ -85,6 +85,24 @@ def _realistic_catalog(tmp_path: Path) -> Path:
     return cat
 
 
+# nexus-aqbrk: PINNED to the local T2 backend, whole-file. The four failing
+# tests drive `nx upgrade --dry-run`, which in service mode early-returns at
+# upgrade.py:548 — "the local SQLite/Chroma tiers are an immutable migration
+# source — no local schema migration to run" — so every assertion about the
+# dry-run REPORT (remediation hints, drop-source-path gate, label accuracy,
+# force preview) matched against that one advisory line instead.
+#
+# The file's other tests call the resolver functions directly rather than
+# through the CLI and are unaffected either way; the pin is file-level because
+# it costs them nothing and keeps the intent in one place.
+#
+# SERVICE HALF IS OWNED: tests/test_upgrade_cmd.py
+# ::TestUpgradeServiceModeShortCircuit, added earlier in this arc (9056a343),
+# owns upgrade.py:548 — the advisory, exit 0, the local memory.db never being
+# created, T3 steps not firing, and --auto's silence.
+pytestmark = pytest.mark.usefixtures("local_t2_backend")
+
+
 class TestDryRunReportsGatedWithRemediation:
     def test_orphan_gate_reports_remediation_hints(self, runner, tmp_path, monkeypatch) -> None:
         monkeypatch.setenv("NEXUS_MIGRATION_HIGH_VOLUME_THRESHOLD", "1")

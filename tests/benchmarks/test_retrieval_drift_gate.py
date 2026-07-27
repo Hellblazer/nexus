@@ -41,6 +41,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.db._service_fixture import spawn_service, wait_for_service
+
 from tests.benchmarks.test_retrieval_ndcg import ndcg_at_k
 from tests.db._service_fixture import SERVICE_ROLES_SQL, pg_bin_dir
 
@@ -178,13 +180,17 @@ def java_service(pg_instance):
         "NX_CHROMA_PATH": chroma_data,
     }
     env.pop("NX_STORAGE_BACKEND", None)
-    proc = subprocess.Popen(
-        [str(_JAVA), "-jar", str(_JAR)],
-        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        preexec_fn=os.setsid,
-    )
+    # nexus-lom9g: FILE-backed output via the shared primitive; the old
+    # stdout=PIPE/stderr=PIPE form wedged the service once 64KB of Logback
+    # output accumulated before the port bound (nexus-j0nec). This file sits
+    # OUTSIDE tests/db/ and was missed by the first sweep's grep scope.
+    proc, _svc_log = spawn_service([str(_JAVA), "-jar", str(_JAR)], env)
     try:
-        _wait_tcp("127.0.0.1", svc_port)
+        # 120s preserved: this jar also loads the bge-768 ONNX model before
+        # listening, per the local _wait_tcp's own note.
+        wait_for_service(
+            "127.0.0.1", svc_port, proc=proc, log_path=_svc_log, timeout=120.0,
+        )
         yield f"http://127.0.0.1:{svc_port}", _TOKEN
     finally:
         try:

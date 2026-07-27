@@ -32,6 +32,21 @@ from nexus.cli import main
 from nexus.db.t3 import T3Database
 from tests.conftest import make_vector_test_client
 
+# nexus-aqbrk: this file pairs a LOCAL T3Database with a LOCAL Catalog that it
+# injects over _get_catalog / _get_catalog_writer, and asserts the SQLite-era
+# fan-out (T2 cascade + separate T3 rename + catalog cascade). Under the engine
+# substrate storage_backend_for("catalog") is SERVICE, so collection_rename
+# takes its one-atomic-call branch; the injected local Catalog has no
+# rename_collection_cascade, so the branch correctly falls back to
+# make_catalog_reader() and asks the real service to rename a collection that
+# only ever existed in the local fixture — HTTP 404. The code is behaving as
+# designed; the fixture pairing is what is local.
+#
+# The service-mode cascade has its own file and is NOT losing coverage here:
+# tests/test_collection_rename_service_mode.py pins the single-endpoint call,
+# the count mapping, the atomic-failure contract, and both pre-flight guards.
+pytestmark = pytest.mark.usefixtures("local_catalog_backend")
+
 
 @pytest.fixture()
 def runner() -> CliRunner:

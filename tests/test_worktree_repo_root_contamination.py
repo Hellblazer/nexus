@@ -162,7 +162,18 @@ def test_catalog_hook_passes_main_repo_path_to_register_owner(
                 return "1.1"
         return _FakeTumbler()
 
+    # nexus-aqbrk: spy at BOTH layers. Patching only
+    # nexus.catalog.catalog.Catalog.register_owner is a WRONG-LAYER mock — that
+    # is the SQLite class, and in service mode _catalog_hook registers through
+    # HttpCatalogClient, so the spy never fired and `captured` stayed empty
+    # ("register_owner was not called"). The subject is which repo_root the HOOK
+    # passes, which is substrate-independent, so the spy belongs on whichever
+    # class the factory actually returns.
     monkeypatch.setattr("nexus.catalog.catalog.Catalog.register_owner", _spy)
+    monkeypatch.setattr(
+        "nexus.catalog.http_catalog_client.HttpCatalogClient.register_owner",
+        _spy,
+    )
 
     _catalog_hook(
         repo=worktree,

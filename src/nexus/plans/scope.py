@@ -23,6 +23,7 @@ __all__ = [
     "_SCOPE_AGNOSTIC_SENTINELS",
     "_infer_scope_tags",
     "_normalize_scope_string",
+    "normalize_scope_tags",
 ]
 
 _HASH_SUFFIX_RE = re.compile(r"-[0-9a-fA-F]{8}$")
@@ -63,6 +64,32 @@ def _normalize_scope_string(scope: str) -> str:
     if scope.endswith("*"):
         return scope[:-1]
     return _HASH_SUFFIX_RE.sub("", scope)
+
+
+def normalize_scope_tags(scope_tags: str) -> str:
+    """Return a caller-supplied scope-tag CSV in canonical stored form.
+
+    Splits on commas, applies :func:`_normalize_scope_string` to each entry,
+    drops empties and scope-agnostic sentinels (``"all"``), then joins the
+    sorted-unique remainder. Idempotent.
+
+    The sentinel drop is load-bearing: a stored literal ``"all"`` is not read
+    as "any scope" by the matcher, it is read as a scope named ``all``, which
+    then conflicts with every real tag (RDR-091 code-review finding C-3).
+
+    This logic was written out three times — ``PlanLibrary.save_plan``,
+    ``PlanLibrary.set_scope_tags``, and ``HttpPlanLibrary.save_plan`` — and
+    the fourth site that needed it, ``HttpPlanLibrary.set_scope_tags``, simply
+    did not get a copy, so service-mode ``nx plan set-scope`` stored raw
+    values (nexus-aqbrk, found porting the plan-library tests to the engine
+    substrate). Hence one function.
+    """
+    parts = [
+        _normalize_scope_string(p.strip())
+        for p in scope_tags.split(",")
+        if p.strip() and p.strip() not in _SCOPE_AGNOSTIC_SENTINELS
+    ]
+    return ",".join(sorted({p for p in parts if p}))
 
 
 def _infer_scope_tags(plan_json: str) -> str:

@@ -389,10 +389,28 @@ def test_gc_chunk_with_missing_chunk_text_hash_skipped(
     assert "pre-RDR-053" in result.output
 
 
+@pytest.mark.usefixtures("local_catalog_backend")
 def test_gc_aborts_on_uninitialized_catalog(t3_db, tmp_path, runner, monkeypatch):
     """nx t3 gc on an uninitialized catalog must raise a clear error,
     not crash with an opaque traceback or silently produce an empty
     alive-set (which would treat every chunk as orphan).
+
+    nexus-aqbrk: PINNED to the sqlite catalog because the premise is
+    UNREPRESENTABLE in service mode — the guard is `make_catalog_reader()
+    is None`, and the factory always returns a handle there, so nothing
+    aborts and the command exits 0.
+
+    ⚠️ THIS TEST THEREFORE DOES NOT COVER THE SERVICE ARM, and the hazard
+    its own docstring names is UNGUARDED there: filed as nexus-jqrtp (P1).
+    The alive-set comes from cat.chashes_for_collection(), and an empty
+    return makes every chunk an orphan candidate — reachable on a fresh or
+    mis-scoped tenant without anything being wrong with the client. Three
+    other layers still stand (--dry-run default, --yes required,
+    --orphan-window), so it is not a one-keystroke foot-gun; but the last
+    line of defence for a DESTRUCTIVE command is missing on the substrate
+    that is about to become the only one.
+
+    Do not read this test's green as protection for service mode.
     """
     bare_path = tmp_path / "no-such-catalog"
     monkeypatch.setattr(

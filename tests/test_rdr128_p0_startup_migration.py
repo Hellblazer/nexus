@@ -120,6 +120,7 @@ def test_non_lock_operational_error_propagates_immediately() -> None:
     assert calls["n"] == 1, "non-lock errors must not be retried"
 
 
+@pytest.mark.usefixtures("local_t2_backend")
 def test_bootstrap_schema_waits_for_held_writer_lock_then_succeeds(
     tmp_path: Path,
 ) -> None:
