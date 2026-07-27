@@ -142,12 +142,42 @@ jobs:
       # skip. Provisioning without arming would leave the skip able to become
       # permanent the first time provisioning quietly broke.
       NX_T2_SUBSTRATE_EXPECTED: "1"
-    # 30m: the suite runs ~16m on the runners and the post-job cache-save
-    # step counts toward this budget. At 20m a v5.4.2 release run timed
-    # out DURING the cache upload (tests had already passed). Raised 25->30
+      # nexus-aqbrk: ENGINE AT MERGE BOUNDARIES, SQLite on interior PRs.
+      #
+      # The flip made the engine the suite's default, which is the point of the
+      # port — the suite should test what ships. But it also moved both PR
+      # pytest jobs from ~20m to 25-30m, and 3.12 was CANCELLED at 30m18s
+      # against the cap below (PR #1428 run 1; 3.13 scraped through at 24m43s).
+      # Paying that on every interior push is the cost the CI-cost directives
+      # call a deliberate decision rather than a side effect (Hal, 2026-07-27).
+      #
+      # So: pull_request runs the SQLite arm (~13m), and the develop PUSH after
+      # the merge runs the ENGINE default. That push is a real gate, not a
+      # vacuous one — `on.push.branches: [develop]` at the top of this file
+      # genuinely triggers CI, so every merge to develop is exercised against
+      # the shipping substrate.
+      #
+      # ACCEPTED TRADE, stated so it is not rediscovered as a surprise: an
+      # engine-only regression now surfaces at the merge boundary rather than
+      # on the PR that introduced it. That is one merge later, and develop is
+      # the integration branch precisely to absorb that.
+      #
+      # Empty string, not "unset": conftest's engine_substrate_selected() is
+      # `!= "sqlite"`, so "" resolves to the ENGINE. The whole predicate is
+      # spelled inversely on purpose — everything that is not the explicit
+      # opt-out fails toward the substrate the product ships on.
+      NX_TEST_T2_SUBSTRATE: ${{ github.event_name == 'pull_request' && 'sqlite' || '' }}
+    # 45m: the suite runs ~16m on the SQLite arm and the post-job cache-save
+    # step counts toward this budget. At 20m a v5.4.2 release run timed out
+    # DURING the cache upload (tests had already passed). Raised 25->30
     # (nexus-cxsbs) to absorb the HF/docling model cache save (~hundreds of
     # MB) and a cold-cache model fetch on the first run after a uv.lock bump.
-    timeout-minutes: 30
+    # Raised 30->45 (nexus-aqbrk): the develop-push leg now runs the ENGINE
+    # arm, which measured 17:05 locally versus 13:33 for SQLite and 25-30m on
+    # the runners — 3.12 was cancelled at 30m18s under the old cap. A timeout
+    # is a CEILING, not a reservation: GitHub bills actual runtime, so a fast
+    # SQLite PR leg costs exactly the same under 45m as it did under 30m.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
