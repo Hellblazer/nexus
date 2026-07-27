@@ -50,7 +50,7 @@ COLLECTIONS_PATH = "/v1/vectors/collections"
 def _pin_service(monkeypatch: pytest.MonkeyPatch) -> None:
     """Real production pairing: HttpVectorClient always runs under the
     SERVICE storage backend. The global unit-suite default pins SQLITE
-    (tests/conftest.py's ``_pin_storage_backend_sqlite``), which would
+    (tests/conftest.py's ``_pin_t2_substrate``), which would
     route ``rename_collection_data_plane`` into the local/Chroma fan-out
     branch that calls ``t3_db.rename_collection(...)`` — a method
     HttpVectorClient does not implement (SERVICE mode never calls it; the

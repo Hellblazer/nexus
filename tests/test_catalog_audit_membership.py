@@ -84,29 +84,22 @@ def _docs_in(collection: str):
     return _cat_cmd._get_catalog().list_by_collection(collection)
 
 
-def _assert_survivors(collection: str, expected: int, seeded: int) -> None:
-    """Assert the post-purge population, encoding the nexus-23wlw gap.
+def _assert_survivors(collection: str, expected: int) -> None:
+    """Assert the post-purge population — now the SAME on both substrates.
 
-    SQLite hard-deletes, so a purged document leaves the collection. The
-    service TOMBSTONES it (``catalog_documents.deleted_at``) and
-    ``documentsByCollection`` — along with eight sibling list reads — has no
-    ``deleted_at IS NULL`` filter, so every purged row is still listed. The
-    CLI reports "Deleted 3 of 3" and the listing is unchanged.
+    nexus-23wlw RESOLVED 2026-07-26. This used to take a second ``seeded``
+    argument and assert the BROKEN value on the service arm: SQLite
+    hard-deletes so a purged document left the collection, while the service
+    TOMBSTONED it and ``documentsByCollection`` — along with twenty sibling
+    reads — had no ``deleted_at IS NULL`` filter, so every purged row was still
+    listed and the CLI reported "Deleted 3 of 3" over an unchanged listing.
 
-    That is a live service defect, not a SQLite-shaped assumption, so this
-    test keeps asserting the correct user-facing intent. The service arm
-    asserts the known-broken value rather than xfail, so the day nexus-23wlw
-    lands this fails loudly and names its own cleanup.
+    Asserting the broken value rather than xfail is what made this fail loudly
+    the day the fix landed instead of going quietly green with the workaround
+    still in place. It did exactly that, so the branch is gone and both
+    substrates assert the real expectation.
     """
-    rows = len(_docs_in(collection))
-    if storage_backend_for("catalog") is StorageBackend.SQLITE:
-        assert rows == expected
-        return
-    assert rows == seeded, (
-        f"nexus-23wlw looks FIXED (got {rows} rows, expected the broken "
-        f"{seeded} — tombstoned rows no longer listed) — delete this helper "
-        f"and restore `assert rows == {expected}` at every call site"
-    )
+    assert len(_docs_in(collection)) == expected
 
 
 def _seed_contamination(cat: Catalog, *, collection: str = "rdr__myproject") -> None:
@@ -216,7 +209,7 @@ class TestPurge:
         ])
         assert result.exit_code == 0, result.output
         # Only 5 canonical entries should remain (5 myproject, 3 elsewhere → 5).
-        _assert_survivors("rdr__myproject", expected=5, seeded=8)
+        _assert_survivors("rdr__myproject", expected=5)
         # And the surviving rows all point at the canonical home.
         if storage_backend_for("catalog") is StorageBackend.SQLITE:
             homes = {e.source_uri for e in _docs_in("rdr__myproject")}
@@ -262,7 +255,7 @@ class TestPurge:
         ])
         assert result.exit_code == 0, result.output
         # Only the 3 legit entries should remain.
-        _assert_survivors("rdr__inverted", expected=3, seeded=10)
+        _assert_survivors("rdr__inverted", expected=3)
         # And the survivors all match the canonical substring.
         if storage_backend_for("catalog") is StorageBackend.SQLITE:
             homes = {e.source_uri for e in _docs_in("rdr__inverted")}

@@ -316,7 +316,7 @@ def t2_service_env(request: pytest.FixtureRequest,
     tenant name.
 
     Opt-in during the incremental migration; replaces the sqlite pin
-    (set AFTER _pin_storage_backend_sqlite — later setenv wins) and
+    (set AFTER _pin_t2_substrate — later setenv wins) and
     becomes the suite default when the pin flips at the end of P0a'.
     """
     from tests._engine_substrate import ensure_engine, mint_test_tenant
@@ -374,7 +374,7 @@ def _isolate_service_endpoint_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
     Same ambient-pollution class as ``_isolate_config_dir`` /
     ``_isolate_t1_sessions`` / the ``CLAUDE_CODE_SESSION_ID`` scrub above, and
-    the missing half of ``_pin_storage_backend_sqlite``'s stated intent
+    the missing half of ``_pin_t2_substrate``'s stated intent
     ("independent of ambient service/lease state"): that fixture pins the
     BACKEND, but a developer shell that has sourced the managed-service
     credentials still leaks the ENDPOINT into every test.
@@ -396,7 +396,7 @@ def _isolate_service_endpoint_env(monkeypatch: pytest.MonkeyPatch) -> None:
     failed -- and it failed as though the checked-out branch had broken
     something.
 
-    ORDERING: must be defined BEFORE ``_pin_storage_backend_sqlite``. Autouse
+    ORDERING: must be defined BEFORE ``_pin_t2_substrate``. Autouse
     function-scoped fixtures run in definition order, and that fixture may pull
     in ``t2_service_env`` (via ``getfixturevalue``), which ``setenv``s
     ``NX_SERVICE_URL`` / ``NX_SERVICE_TOKEN`` for the engine substrate. Tests
@@ -450,51 +450,77 @@ def engine_substrate_selected() -> bool:
     """True when the suite's autouse pin routes tests to the engine substrate.
 
     THE SINGLE SOURCE OF TRUTH for "which T2 substrate is this session on".
-    ``_pin_storage_backend_sqlite`` below calls it, and so does every
+    ``_pin_t2_substrate`` below calls it, and so does every
     dies-roster ``skipif`` marker across the suite — so the flip changes this
     one function and nothing else, and the pin and the rosters cannot drift
     apart.
 
     WHY THIS EXISTS (nexus-aqbrk, 2026-07-25). 111 sites across 36 files each
     spelled the predicate inline as
-    ``os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"``. That is the
-    PRE-flip spelling: today the engine is opt-IN, so the var is set when the
-    engine is wanted. After the flip the engine is the default and
-    ``NX_TEST_T2_SUBSTRATE=sqlite`` becomes the opt-OUT, so a default engine
-    run leaves the var UNSET and every one of those predicates evaluates
-    False. The dies-roster would then un-skip its entire population at the
-    exact moment the flip lands — the event it exists to survive.
+    ``os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"``. That was the
+    PRE-flip spelling: the engine was opt-IN, so the var was set when the
+    engine was wanted. Now the engine is the DEFAULT and
+    ``NX_TEST_T2_SUBSTRATE=sqlite`` is the opt-OUT, so a default engine run
+    leaves the var UNSET — and every one of those inline predicates would have
+    evaluated False, un-skipping the entire dies-roster at the exact moment the
+    flip landed, the event it exists to survive.
 
     Not a projection: simulated by flipping this fixture's body and running
     tests/test_catalog_cli.py with the var unset. The 36 rostered tests
-    un-skipped and all 36 failed.
+    un-skipped and all 36 failed. Hoisting the predicate here is what made the
+    flip below a ONE-LINE change instead of 111.
 
-    AT FLIP TIME, this function becomes::
+    FLIPPED 2026-07-26 (nexus-aqbrk). The engine substrate is now the default;
+    ``NX_TEST_T2_SUBSTRATE=sqlite`` opts out. Gated on nexus-eqxxh proving green
+    on CI first — it had never executed anywhere before PR #1426, and when it
+    did it showed the CI pytest job could not boot an engine at all (ambient
+    pgvector-less PG, then a missing bge ONNX model). Flipping before that would
+    have turned a broken-by-construction CI job into a red default.
 
-        return os.environ.get("NX_TEST_T2_SUBSTRATE") != "sqlite"
+    The inverse spelling is deliberate: ``!= "sqlite"`` rather than
+    ``== "engine"`` means an unset var, a typo'd value, or a stale
+    ``NX_TEST_T2_SUBSTRATE=engine`` from a pre-flip shell ALL resolve to the
+    engine. Only the explicit opt-out reaches SQLite, so the escape hatch is
+    the only thing that can be misspelled into silence — and it fails toward
+    the substrate the product actually ships on.
     """
-    return os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
+    return os.environ.get("NX_TEST_T2_SUBSTRATE") != "sqlite"
 
 
 @pytest.fixture(autouse=True)
-def _pin_storage_backend_sqlite(request: pytest.FixtureRequest,
+def _pin_t2_substrate(request: pytest.FixtureRequest,
                                 monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin the unit suite to the SQLite storage backend (RDR-152 nexus-fjwxh).
+    """Route every test to the session's T2 substrate — ENGINE by default.
 
-    FLIP MECHANISM (RDR-155 P4b P0a'): ``NX_TEST_T2_SUBSTRATE=engine``
-    routes this autouse pin to the engine-backed substrate instead —
-    every test gets the session PG+JAR with a freshly minted tenant
-    (exactly what the ``t2_service_env`` opt-in fixture provides). This
-    is both the flip dry-run switch (run any subset against the engine
-    without editing files) and, when the migration completes, the
-    default this fixture body becomes.
+    Renamed from ``_pin_storage_backend_sqlite`` at the flip (nexus-aqbrk,
+    2026-07-26): the old name described the branch that is now the OPT-OUT, and
+    a fixture whose name says "sqlite" while it hands out a PG-backed engine
+    tenant is the kind of lie that costs someone an hour. Autouse fixtures
+    resolve by decorator rather than by name, so the rename carries no
+    behavioural risk.
 
-    ``storage_backend_for`` defaults to ``service`` since the T2 cutover, so a
-    bare ``T2Database(path)`` would construct the Http* stores and try to reach
-    the nexus-service — which unit tests neither run nor want. Pinning sqlite
-    here keeps the ~116 T2Database-constructing unit tests deterministic and
-    independent of ambient service/lease state (a dev box with the supervisor
-    running would otherwise auto-discover a real lease mid-unit-test).
+    DEFAULT (var unset) — the engine substrate: every test gets the session
+    PG+JAR with a freshly minted tenant, exactly what the ``t2_service_env``
+    opt-in fixture provides. This is what the product actually ships on;
+    ``storage_backend_for`` has defaulted to ``service`` since the T2 cutover,
+    so the suite now agrees with the shipping default instead of contradicting
+    it.
+
+    OPT-OUT — ``NX_TEST_T2_SUBSTRATE=sqlite`` pins SQLite. Kept for the tests
+    whose SUBJECT is the local substrate (migration sources, the SQLite-only
+    trigger paths) and as the escape hatch for bisecting a suspected
+    engine-side regression against the old baseline. It retires with the
+    SQLite stores themselves in nexus-i711w.
+
+    HISTORY, because the old body's rationale is still worth knowing: this
+    fixture used to pin SQLite so a bare ``T2Database(path)`` would not
+    construct Http* stores and try to reach the nexus-service — which unit
+    tests neither ran nor wanted. That kept ~116 T2Database-constructing tests
+    deterministic and independent of ambient service/lease state (a dev box
+    with the supervisor running would otherwise auto-discover a real lease
+    mid-unit-test). The engine substrate solves the same problem the other way:
+    a per-session JAR + PG with a per-test tenant is hermetic, so ambient
+    leases cannot leak in either.
 
     Tests that exercise the resolver itself (``test_storage_mode.py``) carry
     their own ``_clean_storage_env`` autouse fixture that ``delenv``s the
@@ -531,7 +557,7 @@ def local_t2_backend(monkeypatch: pytest.MonkeyPatch) -> None:
 
     ORDERING: this is deliberately NOT autouse. Non-autouse fixtures resolve
     AFTER autouse ones, so its ``setenv`` lands later than
-    ``_pin_storage_backend_sqlite`` / ``t2_service_env`` on the same
+    ``_pin_t2_substrate`` / ``t2_service_env`` on the same
     monkeypatch and wins — the same contract ``cloud_mode`` relies on. Setting
     the GLOBAL ``NX_STORAGE_BACKEND`` (not a per-domain override) is
     intentional: it re-pins every T2 domain at once, including ``telemetry``,
