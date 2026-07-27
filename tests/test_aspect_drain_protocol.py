@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 from nexus.db.t2 import T2Database
+from tests.conftest import engine_substrate_selected
 
 
 # nexus-9eaz family flake-skip helper retired 2026-05-22: RDR-120 P3b
@@ -769,7 +770,7 @@ class TestDrainTimeoutDefault:
 
 class TestMCPLockDetection:
     @pytest.mark.skipif(
-        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        engine_substrate_selected(),
         reason="pins the sqlite-mode file-lock branch drain_worker deliberately "
         "skips in SERVICE mode; dies with that branch at the RDR-155 P4b flip "
         "(dies-roster)",
@@ -810,7 +811,7 @@ class TestMCPLockDetection:
         )
 
     @pytest.mark.skipif(
-        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        engine_substrate_selected(),
         reason="pins the sqlite-mode file-lock branch drain_worker deliberately "
         "skips in SERVICE mode; dies with that branch at the RDR-155 P4b flip "
         "(dies-roster)",

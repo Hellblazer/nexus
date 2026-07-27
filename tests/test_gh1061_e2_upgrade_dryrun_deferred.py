@@ -28,6 +28,19 @@ from click.testing import CliRunner
 
 from nexus.cli import main
 
+# nexus-aqbrk: PINNED to the local T2 backend. All three failures drive
+# `nx upgrade --dry-run`, which early-returns in service mode at
+# upgrade.py:548 ("the local SQLite/Chroma tiers are an immutable migration
+# source"), so assertions about the dry-run REPORT — high-volume orphan
+# info, deferred-migration info, 'No pending migrations' — matched that one
+# advisory line instead. Third file in this arc with the same cause, after
+# test_upgrade_cmd.py and test_rdr142_dry_run_resolver.py.
+#
+# SERVICE HALF IS OWNED: tests/test_upgrade_cmd.py
+# ::TestUpgradeServiceModeShortCircuit (added at 9056a343).
+pytestmark = pytest.mark.usefixtures("local_t2_backend")
+
+
 
 @pytest.fixture()
 def runner() -> CliRunner:

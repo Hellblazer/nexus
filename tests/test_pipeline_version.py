@@ -195,7 +195,21 @@ def test_doctor_pipeline_sweep_retired_on_service_handle():
     assert "pipeline versions" in result.output
     assert "sweep retired with the Chroma serving path" in result.output
     # The sweep must not report a failure for what is a deliberate retire.
-    assert "check failed" not in result.output
+    #
+    # nexus-aqbrk: scope this to the PIPELINE-VERSIONS line. It was a
+    # whole-output substring match, which any other check's text can trip — on
+    # the engine arm the unrelated "Catalog: check failed (non-critical)" line
+    # matched it. That line is health.py's designed graceful degradation
+    # (ok=True, non-fatal), not a failure of this sweep, so a whole-output match
+    # was never what this assertion meant.
+    pipeline_lines = [
+        ln for ln in result.output.splitlines() if "pipeline versions" in ln
+    ]
+    assert pipeline_lines, result.output
+    assert not any("check failed" in ln for ln in pipeline_lines), (
+        f"the retired pipeline-version sweep must not report a failure: "
+        f"{pipeline_lines}"
+    )
 
 
 def test_stamp_collection_version_noop_on_service_stub() -> None:

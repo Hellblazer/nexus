@@ -17,6 +17,7 @@ from nexus.doc_indexer import (
     _lookup_existing_doc_id, _markdown_chunks, _TokenBucket,
     batch_index_markdowns, batch_index_pdfs, index_markdown, index_pdf,
 )
+from tests._catalog_fixture_ops import ActiveCatalog, documents_by_file_path
 from tests.conftest import set_credentials
 from tests.conftest import make_vector_test_client
 
@@ -358,6 +359,7 @@ def test_index_md_falls_back_to_local_embedder_when_no_credentials(
     )
 
 
+@pytest.mark.usefixtures("local_catalog_backend")
 def test_index_markdown_auto_inits_catalog_when_absent_and_prunes_on_reindex(
     sample_md, tmp_path, monkeypatch,
 ):
@@ -378,6 +380,17 @@ def test_index_markdown_auto_inits_catalog_when_absent_and_prunes_on_reindex(
     and chunks land with ``doc_id``; the re-index after edit finds the
     same ``doc_id`` and prunes stale chunks via the doc_id-keyed where
     filter.
+
+    PINNED to the SQLite catalog (nexus-aqbrk), not converted, because
+    the auto-init branch is SQLite-opt-out-mode ONLY BY DESIGN: in
+    service mode ``make_catalog_reader()`` is never ``None``, so the
+    branch never fires and building a local SQLite catalog there would
+    be the nexus-e9ru2 divergent-substrate bug
+    (``doc_indexer.py::_register_or_lookup_doc_id``). Both halves of
+    that seam are owned outright by
+    ``tests/test_e9ru2_catalog_gate_sweep.py``:
+    ``test_register_or_lookup_sqlite_mode_still_auto_inits`` and
+    ``test_register_or_lookup_fresh_box_no_local_catalog_created``.
     """
 
     from nexus.catalog.catalog import Catalog
@@ -1844,17 +1857,13 @@ def test_index_pdf_writes_doc_id_when_catalog_initialized(
     # authoritative — verify the catalog has manifest rows for this PDF.
     for m in rows["metadatas"]:
         assert "doc_id" not in m
-    from nexus.catalog.catalog import Catalog
-    cat = Catalog(cat_dir, cat_dir / ".catalog.db")
-    documents = cat._db.execute(
-        "SELECT tumbler FROM documents WHERE physical_collection = ?",
-        (f"docs__rdr102-pdf__{_local_token()}__v1",),
-    ).fetchall()
+    cat = ActiveCatalog()
+    documents = cat.list_by_collection(f"docs__rdr102-pdf__{_local_token()}__v1")
     assert documents, "catalog must have a Document for the indexed PDF"
-    for row in documents:
-        assert cat.get_manifest(row[0]), (
+    for entry in documents:
+        assert cat.get_manifest(str(entry.tumbler)), (
             f"manifest_write_batch_hook must populate document_chunks "
-            f"for doc_id={row[0]!r}"
+            f"for doc_id={str(entry.tumbler)!r}"
         )
 
 
@@ -1879,15 +1888,11 @@ def test_index_markdown_writes_doc_id_when_catalog_initialized(
     )
     for m in rows["metadatas"]:
         assert "doc_id" not in m
-    from nexus.catalog.catalog import Catalog
-    cat = Catalog(cat_dir, cat_dir / ".catalog.db")
-    documents = cat._db.execute(
-        "SELECT tumbler FROM documents WHERE physical_collection = ?",
-        (f"docs__rdr102-md__{_local_token()}__v1",),
-    ).fetchall()
+    cat = ActiveCatalog()
+    documents = cat.list_by_collection(f"docs__rdr102-md__{_local_token()}__v1")
     assert documents, "catalog must have a Document for the indexed markdown"
-    for row in documents:
-        assert cat.get_manifest(row[0])
+    for entry in documents:
+        assert cat.get_manifest(str(entry.tumbler))
 
 
 def test_batch_index_markdowns_rdr_mode_writes_doc_id_when_catalog_initialized(
@@ -1922,15 +1927,11 @@ def test_batch_index_markdowns_rdr_mode_writes_doc_id_when_catalog_initialized(
     )
     for m in rows["metadatas"]:
         assert "doc_id" not in m
-    from nexus.catalog.catalog import Catalog
-    cat = Catalog(cat_dir, cat_dir / ".catalog.db")
-    documents = cat._db.execute(
-        "SELECT tumbler FROM documents WHERE physical_collection = ?",
-        (f"rdr__rdr102-rdrmode__{_local_token()}__v1",),
-    ).fetchall()
+    cat = ActiveCatalog()
+    documents = cat.list_by_collection(f"rdr__rdr102-rdrmode__{_local_token()}__v1")
     assert documents, "catalog must have a Document for the indexed RDR md"
-    for row in documents:
-        assert cat.get_manifest(row[0])
+    for entry in documents:
+        assert cat.get_manifest(str(entry.tumbler))
 
 
 def test_index_markdown_post_hook_updates_chunk_count_after_preflight(
@@ -1949,25 +1950,19 @@ def test_index_markdown_post_hook_updates_chunk_count_after_preflight(
     invisible to operators who never read the Document row but a
     structural drift between catalog + T3 chunk counts.
     """
-    from nexus.catalog.catalog import Catalog
-
     cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
 
     n = index_markdown(sample_md, corpus="rdr102-chunkcount", t3=t3)
     assert n > 0, "expected index_markdown to upsert at least one chunk"
 
-    cat = Catalog(cat_dir, cat_dir / ".catalog.db")
-    rows = cat._db.execute(
-        "SELECT chunk_count FROM documents WHERE file_path = ?",
-        (str(sample_md.resolve()),),
-    ).fetchall()
+    rows = documents_by_file_path(str(sample_md.resolve()))
     assert len(rows) == 1, (
         f"expected exactly 1 catalog Document for the markdown file; "
         f"got {len(rows)} rows. Pre-flight + post-hook double-register "
         f"would show >1 here (file_path-form mismatch); a missing "
         f"post-hook would leave chunk_count at 0."
     )
-    cat_chunk_count = rows[0][0]
+    cat_chunk_count = rows[0].chunk_count
     assert cat_chunk_count == n, (
         f"catalog chunk_count={cat_chunk_count} but T3 has n={n} chunks. "
         f"_catalog_markdown_hook must call cat.update() on the existing "
@@ -1985,8 +1980,6 @@ def test_frontmatter_title_year_reach_catalog_despite_preflight(
     title/year NEVER reached the catalog on the standard path. The fix
     threads the parsed frontmatter into the pre-flight AND stem-guard
     backfills on update; the row must carry the frontmatter values."""
-    from nexus.catalog.catalog import Catalog
-
     md = tmp_path / "widget-spec.md"
     md.write_text(
         "---\ntitle: The Widget Specification\ncreated: 2026-03-14\n---\n\n"
@@ -1997,13 +1990,9 @@ def test_frontmatter_title_year_reach_catalog_despite_preflight(
     n = index_markdown(md, corpus="ivzw8-title", t3=t3)
     assert n > 0
 
-    cat = Catalog(cat_dir, cat_dir / ".catalog.db")
-    rows = cat._db.execute(
-        "SELECT title, year FROM documents WHERE file_path = ?",
-        (str(md.resolve()),),
-    ).fetchall()
+    rows = documents_by_file_path(str(md.resolve()))
     assert len(rows) == 1
-    title, year = rows[0]
+    title, year = rows[0].title, rows[0].year
     assert title == "The Widget Specification", (
         f"catalog kept the stem title {title!r} — frontmatter never applied "
         f"(nexus-ivzw8)"
@@ -2014,33 +2003,26 @@ def test_frontmatter_title_year_reach_catalog_despite_preflight(
 def test_curated_title_survives_reindex(tmp_path, monkeypatch):
     """The stem-guard: a curated (non-stem) catalog title must NEVER be
     clobbered by a re-index — backfill applies only to the stem default."""
-    from nexus.catalog.catalog import Catalog
-
     md = tmp_path / "notes.md"
     md.write_text("---\ntitle: Frontmatter Title\n---\n\n# N\n\nBody.\n")
     cat_dir, t3 = _setup_phase_a_catalog(tmp_path, monkeypatch)
 
     assert index_markdown(md, corpus="ivzw8-curated", t3=t3) > 0
 
-    cat = Catalog(cat_dir, cat_dir / ".catalog.db")
-    row = cat._db.execute(
-        "SELECT tumbler FROM documents WHERE file_path = ?",
-        (str(md.resolve()),),
-    ).fetchone()
-    cat.update(row[0], title="Hand-Curated Title")
+    rows = documents_by_file_path(str(md.resolve()))
+    assert len(rows) == 1
+    ActiveCatalog().update(str(rows[0].tumbler), title="Hand-Curated Title")
 
     # touch content so the re-index actually re-runs the hook
     md.write_text("---\ntitle: Frontmatter Title\n---\n\n# N\n\nBody v2.\n")
     assert index_markdown(md, corpus="ivzw8-curated", t3=t3) > 0
 
-    cat2 = Catalog(cat_dir, cat_dir / ".catalog.db")
-    title = cat2._db.execute(
-        "SELECT title FROM documents WHERE file_path = ?",
-        (str(md.resolve()),),
-    ).fetchone()[0]
-    assert title == "Hand-Curated Title"
+    after = documents_by_file_path(str(md.resolve()))
+    assert len(after) == 1
+    assert after[0].title == "Hand-Curated Title"
 
 
+@pytest.mark.usefixtures("local_catalog_backend")
 def test_preflight_registration_idempotent_on_staleness_skip(
     sample_md, tmp_path, monkeypatch,
 ):
@@ -2059,6 +2041,15 @@ def test_preflight_registration_idempotent_on_staleness_skip(
     another path) produces a ``DocumentRegistered`` with no companion
     ``ChunkIndexed`` events; replay-equality must accept that as valid
     because the Document row IS reproducible from the event stream.
+
+    PINNED to the SQLite catalog (nexus-aqbrk), not converted, because
+    both of its instruments are local artifacts BY DESIGN: the
+    ``events.jsonl`` event log this counts, and ``nx catalog doctor
+    --replay-equality``, which is one of the local-only verbs named in
+    ``local_catalog_backend``'s own contract — "in service mode the
+    live catalog is owned by the nexus service" (nexus-kmo9h). There is
+    no service-mode event stream for the projector to replay against,
+    so the assertion is unsatisfiable rather than wrong.
     """
     import json as _json
 

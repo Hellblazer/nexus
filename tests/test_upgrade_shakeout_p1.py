@@ -22,6 +22,7 @@ from pathlib import Path
 import os
 
 import pytest
+from tests.conftest import engine_substrate_selected
 
 
 # ── #1057a: dedup-column resolution picks the live PRIMARY KEY ───────────────
@@ -57,7 +58,7 @@ class TestRenameDedupCol:
 
 
 @pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    engine_substrate_selected(),
     reason="dies-roster: SQLite schema-era rename/dedup semantics (doc_id "
     "PK migration, #1057) die at the RDR-155 P4b flip",
 )
@@ -107,7 +108,7 @@ class TestRenameMigratedSchema:
 
 
 @pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    engine_substrate_selected(),
     reason="dies-roster: SQLite schema-era rename/dedup semantics (doc_id "
     "PK migration, #1057) die at the RDR-155 P4b flip",
 )

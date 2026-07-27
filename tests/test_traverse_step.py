@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._catalog_fixture_ops import ActiveCatalog
+
 
 def _match(plan: dict) -> "Match":  # noqa: F821
     from nexus.plans.match import Match
@@ -180,15 +182,21 @@ def fake_catalog(tmp_path: Path, monkeypatch):
     """
     from nexus.catalog.catalog import Catalog
 
+    # nexus-aqbrk: seed through the ACTIVE catalog. mcp_core.traverse resolves
+    # its catalog through the factory, so a local-only seed left the service
+    # graph empty and every assertion read `assert '1.1.2' in []`. Catalog.init
+    # still runs: the SQLite arm's factory writer needs the directory to exist,
+    # and on the engine arm it is inert.
     cat_dir = tmp_path / "catalog"
-    cat = Catalog.init(cat_dir)
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
+    Catalog.init(cat_dir)
+    cat = ActiveCatalog()
     owner = cat.register_owner("p", "test")
     rdr = cat.register(owner, "RDR", physical_collection="rdr__test")
     impl_a = cat.register(owner, "ImplA", physical_collection="code__test")
     impl_b = cat.register(owner, "ImplB", physical_collection="code__test")
     cat.link(rdr, impl_a, "implements", created_by="t")
     cat.link(rdr, impl_b, "implements-heuristic", created_by="t")
-    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
     return cat, rdr, impl_a, impl_b
 
 
@@ -263,8 +271,11 @@ def fake_catalog_with_paths(tmp_path: Path, monkeypatch):
     """
     from nexus.catalog.catalog import Catalog
 
+    # nexus-aqbrk: seed through the ACTIVE catalog — see fake_catalog above.
     cat_dir = tmp_path / "catalog"
-    cat = Catalog.init(cat_dir)
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
+    Catalog.init(cat_dir)
+    cat = ActiveCatalog()
     owner = cat.register_owner("p", "test")
     rdr = cat.register(
         owner, "RDR",
@@ -277,7 +288,6 @@ def fake_catalog_with_paths(tmp_path: Path, monkeypatch):
         file_path="src/foo.py",
     )
     cat.link(rdr, impl, "implements", created_by="t")
-    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
     return cat, rdr, impl
 
 

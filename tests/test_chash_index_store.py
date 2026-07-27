@@ -16,6 +16,15 @@ from pathlib import Path
 
 import pytest
 
+# nexus-aqbrk: PINNED. One test calls db.chash_index.upsert() — which 410s on
+# the engine ('/v1/chash/upsert retired (RDR-187 chash-router retirement) —
+# chunk ingest is the write path') — and the other reaches db.chash_index.conn,
+# a raw handle the Http store does not have. The file's own comments already
+# treat the remaining chash tests as riding RDR-158/RDR-187 retirement; a
+# sibling class was deleted outright for the same reason.
+pytestmark = pytest.mark.usefixtures("local_t2_backend")
+
+
 
 # ── ChashIndex store — isolated ──────────────────────────────────────────────
 

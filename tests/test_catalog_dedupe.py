@@ -18,6 +18,10 @@ from nexus.catalog.dedupe import (
 from nexus.catalog.tumbler import Tumbler
 from nexus.cli import main
 
+# nexus-aqbrk: dedupe-owners --apply is deep-maintenance and REFUSES in service mode outright (it mutates the local event log; on a migrated install that file is a frozen migration source).
+pytestmark = pytest.mark.usefixtures("local_catalog_backend")
+
+
 
 @pytest.fixture
 def cat(tmp_path):

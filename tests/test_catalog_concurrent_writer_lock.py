@@ -43,6 +43,10 @@ import pytest
 
 from nexus.catalog.catalog import Catalog
 
+# nexus-aqbrk: the contended resource IS the local .catalog.db single-writer lock.
+pytestmark = pytest.mark.usefixtures("local_catalog_backend")
+
+
 
 # Fork is required so the workers inherit pytest's event_sourced env.
 # spawn would re-import everything fresh; fork keeps the parent's flags.

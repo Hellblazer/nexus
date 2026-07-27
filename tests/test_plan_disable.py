@@ -251,6 +251,21 @@ class TestMatcherFiltersDisabled:
 
 
 class TestPlanDisableCli:
+    """CLI behaviour against the LOCAL plans file.
+
+    Every test here seeds rows with a direct ``sqlite3.connect`` and then
+    invokes the CLI with ``default_db_path`` patched at that file, so the
+    backend has to be the local one for the seeded rows to exist at all
+    (nexus-aqbrk). The service-backed routing of ``nx plan disable`` /
+    ``enable`` is not covered in this module either before or after the port;
+    that gap is pre-existing and belongs with the other plan-CLI service
+    coverage in test_plan_cmd.py.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _pin_plans_to_local_snapshot(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("NX_STORAGE_BACKEND_PLANS", "sqlite")
+
     def test_disable_command_round_trips(
         self, runner: CliRunner, tmp_path: Path,
     ):

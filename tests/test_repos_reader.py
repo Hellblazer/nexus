@@ -26,6 +26,7 @@ import structlog
 from structlog.testing import capture_logs
 
 from nexus.catalog.catalog import Catalog
+from tests._catalog_fixture_ops import ActiveCatalog
 from nexus.registry import RepoRegistry
 from nexus.repos import (
     RepoRecord,
@@ -44,12 +45,41 @@ def _enable_debug_logging():
     structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.WARNING))
 
 
+@pytest.fixture(autouse=True)
+def _point_catalog_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Aim ``catalog_path()`` at the dir the ``cat`` fixture initialises.
+
+    nexus-aqbrk: these tests used to hold a direct ``Catalog`` bound to
+    ``tmp_path/"catalog"``, so where ``catalog_path()`` pointed did not
+    matter. ``ActiveCatalog`` resolves through the same factories the code
+    under test uses, and on the SQLite arm those read ``catalog_path()`` —
+    so it has to agree.
+    """
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(tmp_path / "catalog"))
+
+
 @pytest.fixture
-def cat(tmp_path: Path) -> Catalog:
+def cat(tmp_path: Path) -> ActiveCatalog:
+    """A facade over whichever catalog is LIVE (nexus-aqbrk).
+
+    CONVERTED, not pinned, because the production caller resolves through the
+    factory: ``health.py``'s git-hook check does ``cat = make_catalog_reader()``
+    and hands it to :func:`nexus.repos.list_repos_dual`, so in service mode
+    this module's subject genuinely runs against ``HttpCatalogClient``.
+    Pinning to SQLite would have made the tests pass while leaving that real
+    path uncovered — and the pin was tempting, because the engine-arm symptom
+    is ``sqlite3.OperationalError: attempt to write a readonly database``
+    (``Catalog`` forces ``read_only=True`` when the catalog backend is SERVICE
+    and the file exists — the RDR-176 P1 Gap 2 frozen-migration-source
+    invariant), which reads as "this test wants a local catalog".
+
+    The seeding ops used here (``ensure_owner_for_repo``, ``register_collection``)
+    are both on ``CATALOG_WRITE_OPS``, so they route on either arm.
+    """
     cat_dir = tmp_path / "catalog"
-    cat_dir.mkdir()
+    cat_dir.mkdir(exist_ok=True)
     Catalog.init(cat_dir)
-    return Catalog(cat_dir, cat_dir / ".catalog.db")
+    return ActiveCatalog()
 
 
 @pytest.fixture

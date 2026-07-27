@@ -7,7 +7,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
+from tests.conftest import engine_substrate_selected
+
+_ENGINE_SUBSTRATE = engine_substrate_selected()
 
 # Tests below that seed a REAL on-disk SQLite T2 file via T2Database and then
 # probe it with doctor's SQLite integrity check (PRAGMA integrity_check, FTS5,

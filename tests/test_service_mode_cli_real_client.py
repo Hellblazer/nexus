@@ -27,6 +27,8 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+from tests._catalog_fixture_ops import ActiveCatalog
 from click.testing import CliRunner
 
 from nexus.cli import main
@@ -112,7 +114,15 @@ class TestFixPathsRealClient:
         repo_dir = tmp_path / "repo"
         repo_dir.mkdir()
         cat_dir = tmp_path / "catalog"
-        cat = Catalog.init(cat_dir)
+        # nexus-aqbrk: seed through the ACTIVE catalog — doctor --fix-paths reads
+        # via reader.docs_with_absolute_paths(), which doctor.py documents as
+        # "uniform across SQLite and service mode", so a local-only seed left the
+        # service catalog empty ("No absolute file_path entries found").
+        # NEXUS_CATALOG_PATH is set so the SQLite arm's factory agrees with the
+        # catalog_path() patch below.
+        monkeypatch.setenv("NEXUS_CATALOG_PATH", str(cat_dir))
+        Catalog.init(cat_dir)
+        cat = ActiveCatalog()
         owner = cat.register_owner(
             "test-abc12345", "repo", repo_hash="abc12345", repo_root=str(repo_dir),
         )

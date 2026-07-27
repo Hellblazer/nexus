@@ -16,7 +16,16 @@ from nexus.db.http_vector_client import HttpVectorClient
 # (voyage-* embedder names, canonical-set defaults). The cloud_mode
 # fixture sets credentials and forces ``is_local_mode()`` to False so
 # the assertions hold regardless of the host environment.
-pytestmark = pytest.mark.usefixtures("cloud_mode")
+#
+# nexus-aqbrk: consolidate is a deep-maintenance verb over the local event
+# log and is refused outright in service mode, so the catalog is pinned local
+# too. Both marks must live in ONE assignment — a second `pytestmark = ...`
+# REPLACES the first rather than adding to it, which is how the first version
+# of this change silently did nothing.
+pytestmark = [
+    pytest.mark.usefixtures("cloud_mode"),
+    pytest.mark.usefixtures("local_catalog_backend"),
+]
 
 
 @pytest.fixture(autouse=True)
@@ -193,5 +202,5 @@ class TestConsolidateCommand:
 
         runner = CliRunner()
         result = runner.invoke(main, ["catalog", "consolidate", "test", "--dry-run"])
-        assert result.exit_code == 0
+        assert result.exit_code == 0, result.output
         assert "dry-run" in result.output.lower()

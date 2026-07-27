@@ -18,6 +18,18 @@ from unittest.mock import patch
 
 import pytest
 
+# nexus-aqbrk: PINNED. _open_t2db_or_loud_gate_crash builds T2Database(path,
+# run_migrations=True); bootstrap_schema early-returns in service mode, so no
+# migration and no gate ever run and the tests read DID NOT RAISE. This is the
+# T2 DAEMON's own bootstrap gate, and per RDR-152 no Python daemon is spawned
+# in service mode — the Java engine is the writer arbiter directly.
+#
+# SERVICE HALF: UNOWNED, stated rather than guessed. The daemon does not run
+# under service mode, so there may be no Python-level twin at all (only
+# Java-side Liquibase gating, outside this suite).
+pytestmark = pytest.mark.usefixtures("local_t2_backend")
+
+
 
 def _empty_catalog(cat: Path) -> None:
     cat.parent.mkdir(parents=True, exist_ok=True)

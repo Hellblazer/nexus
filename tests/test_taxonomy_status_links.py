@@ -27,6 +27,7 @@ from nexus.db.t2 import T2Database
 # base (1.3e9) — the topics PK is global across tenants, so per-module
 # counters restarting at the same value collide within one engine session.
 from tests.conftest import next_import_seed_id  # session-unique import ids (see conftest note)
+from tests.conftest import engine_substrate_selected
 
 
 def _seed(db_path: Path) -> None:
@@ -79,7 +80,7 @@ def test_status_counts_links_via_public_api_in_service_mode(tmp_path: Path) -> N
 
 
 @pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    engine_substrate_selected(),
     reason="dies-roster: the raw-access status link-count branch (SQLite .conn aggregate) dies at the RDR-155 P4b flip",
 )
 def test_status_raw_access_link_count_unchanged(tmp_path: Path) -> None:

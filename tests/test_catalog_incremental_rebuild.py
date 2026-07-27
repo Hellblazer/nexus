@@ -44,6 +44,11 @@ from nexus.catalog.catalog import (
 from nexus.catalog.catalog_db import CatalogDB
 from nexus.catalog.projector import Projector
 
+# nexus-aqbrk: exercises the LOCAL catalog's own machinery (event log /
+# JSONL / .catalog.db projection), which service mode deliberately opens
+# read-only as a frozen migration source (RDR-176 P1 Gap 2).
+pytestmark = pytest.mark.usefixtures("local_catalog_backend")
+
 
 def _make_catalog(catalog_dir: Path, db_name: str = "catalog.db") -> Catalog:
     return Catalog(catalog_dir, catalog_dir / db_name)

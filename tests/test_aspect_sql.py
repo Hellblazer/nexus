@@ -21,8 +21,9 @@ import pytest
 from nexus.aspect_extractor import AspectRecord
 from nexus.db.t2 import T2Database
 from nexus.operators import aspect_sql
+from tests.conftest import engine_substrate_selected
 
-_ENGINE_SUBSTRATE = os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine"
+_ENGINE_SUBSTRATE = engine_substrate_selected()
 
 
 @pytest.fixture(autouse=True)

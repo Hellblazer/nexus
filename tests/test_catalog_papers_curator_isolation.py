@@ -25,16 +25,24 @@ from pathlib import Path
 import pytest
 
 from nexus.catalog.catalog import Catalog
+from nexus.config import catalog_path
+from tests._catalog_fixture_ops import ActiveCatalog
+from tests._t2_fixture_ops import require_sqlite_substrate
 
 
 @pytest.fixture()
-def papers_owner(tmp_path: Path):
+def papers_owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Fresh Catalog with a papers-curator owner registered. Returns
     (catalog, owner_tumbler).
     """
     catalog_dir = tmp_path / "catalog"
     Catalog.init(catalog_dir)
-    c = Catalog(catalog_dir, catalog_dir / ".catalog.db")
+    monkeypatch.setenv("NEXUS_CATALOG_PATH", str(catalog_dir))
+    # nexus-aqbrk: seed and read through the LIVE catalog. The invariant
+    # under test ("no content_type=paper row in knowledge__knowledge") is a
+    # production data-shape claim, not a SQLite one, so it is worth checking
+    # on whichever catalog is real.
+    c = ActiveCatalog()
     # Mirror the prod shape: papers is a curator owner (no repo_hash
     # required; register_owner enforces repo_hash only for owner_type
     # == "repo"). source_uri rejection in Catalog.register only fires
@@ -50,11 +58,16 @@ def _scan_for_paper_rows_in_knowledge_knowledge(cat: Catalog) -> list[tuple]:
     ``content_type='paper'`` AND ``physical_collection='knowledge__knowledge'``.
     Empty list = invariant holds.
     """
-    return list(cat._db.execute(
-        "SELECT tumbler, title FROM documents "
-        "WHERE content_type = 'paper' "
-        "  AND physical_collection = 'knowledge__knowledge'"
-    ).fetchall())
+    # nexus-aqbrk: the raw SELECT had no service-mode equivalent.
+    # list_by_collection is the public read on both stores; the content_type
+    # filter moves into Python, which is what a doctor verb iterating
+    # all_documents() would do anyway (this helper's own docstring calls that
+    # out as the shape it mirrors).
+    return [
+        (str(e.tumbler), e.title)
+        for e in cat.list_by_collection("knowledge__knowledge")
+        if e.content_type == "paper"
+    ]
 
 
 class TestCatalogPapersCuratorIsolation:
@@ -81,7 +94,15 @@ class TestCatalogPapersCuratorIsolation:
         class, not that the API rejects it (separate test below).
         """
         cat, owner = papers_owner
-        cat._db.execute(  # epsilon-allow: test fixture seeds an invariant-violating row to exercise the read-side scan
+        # nexus-aqbrk: the ONLY test here that cannot run on the service
+        # catalog. It deliberately bypasses the register API to create a row
+        # the API would reject, which requires a raw INSERT into the local
+        # projection — there is no service-mode path that produces this state
+        # (the engine applies the same validation). The other three tests in
+        # this class register through the public API and run on both.
+        require_sqlite_substrate("seeds an API-rejected row via raw INSERT")
+        local = Catalog(catalog_path(), catalog_path() / ".catalog.db")
+        local._db.execute(  # epsilon-allow: test fixture seeds an invariant-violating row to exercise the read-side scan
             "INSERT INTO documents "
             "(tumbler, title, author, year, content_type, file_path, "
             " corpus, physical_collection, chunk_count, head_hash, "
@@ -95,7 +116,7 @@ class TestCatalogPapersCuratorIsolation:
                 "file:///papers/bad.pdf",
             ),
         )
-        cat._db.commit()
+        local._db.commit()
 
         violations = _scan_for_paper_rows_in_knowledge_knowledge(cat)
         assert len(violations) == 1

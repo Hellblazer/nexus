@@ -30,6 +30,11 @@ from nexus.catalog.catalog import Catalog
 from nexus.catalog.tumbler import Tumbler
 from nexus.cli import main
 
+# nexus-aqbrk: exercises the LOCAL catalog's own machinery (event log /
+# JSONL / .catalog.db projection), which service mode deliberately opens
+# read-only as a frozen migration source (RDR-176 P1 Gap 2).
+pytestmark = pytest.mark.usefixtures("local_catalog_backend")
+
 
 @pytest.fixture
 def catalog_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:

@@ -537,6 +537,12 @@ class TestFacadeWiring:
     / ``db.telemetry`` / ``db.chash_index``.
     """
 
+        # nexus-aqbrk: PINNED. Asserts the T2Database FACADE hands back the SQLite
+    # DocumentAspects store; in service mode the facade dispatches to
+    # HttpDocumentAspectsStore by design. SERVICE HALF IS OWNED by
+    # tests/db/test_http_t2_store_parity.py, which pins the Http store's surface
+    # against the frozen contract.
+    @pytest.mark.usefixtures("local_t2_backend")
     def test_t2database_exposes_document_aspects(self, tmp_path: Path) -> None:
         with T2Database(tmp_path / "t2.db") as db:
             assert hasattr(db, "document_aspects")

@@ -21,6 +21,13 @@ from nexus.catalog.catalog import Catalog
 from nexus.db.t3 import T3Database
 from tests.conftest import make_vector_test_client
 
+# nexus-aqbrk: this pairs a LOCAL T3Database with the catalog's
+# document_chunks manifest — span resolution joins the two. Pointing the
+# catalog half at the service while the T3 half stays in-process is the
+# incoherent split that produced the empty-base_url failures in
+# test_catalog_e2e; both halves stay local together.
+pytestmark = pytest.mark.usefixtures("local_catalog_backend")
+
 
 @pytest.fixture()
 def t3_db() -> T3Database:

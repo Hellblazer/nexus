@@ -83,6 +83,11 @@ class TestDoctorReportSchema:
     the new ``event_source`` field. This test pins the schema so a
     future refactor that drops the field breaks loudly."""
 
+        # nexus-aqbrk: PINNED (catalog). doctor --replay-equality is a local-only verb
+    # by design — local_catalog_backend's own contract names the replay/consistency
+    # family (nexus-kmo9h). Same disposition already used in test_doc_indexer.py and
+    # test_rdr101_round3_correctness.py this arc.
+    @pytest.mark.usefixtures("local_catalog_backend")
     def test_replay_equality_report_includes_event_source(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch,
     ):

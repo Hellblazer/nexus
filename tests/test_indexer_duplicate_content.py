@@ -46,6 +46,10 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+from tests._catalog_fixture_ops import ActiveCatalog
+
+from tests.conftest import fake_credentials
 from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
 from nexus.catalog.catalog import Catalog
@@ -115,7 +119,7 @@ def _do_index(
 
     monkeypatch.setenv("NX_LOCAL", "1")
     with patch("nexus.db.make_t3", return_value=t3), patch(
-        "nexus.config.get_credential", side_effect=lambda k: "test-key"
+        "nexus.config.get_credential", side_effect=fake_credentials()
     ):
         index_repository(repo, registry, force=False)
 
@@ -223,13 +227,11 @@ def test_code_indexer_collapses_duplicate_module_across_files(
 
     # Each contributing file's chunks collapse to the same set of T3
     # rows; cross-file duplicates do not multiply the row count.
-    cat = Catalog(catalog_env, catalog_env / ".catalog.db")
-    documents = cat._db.execute(
-        "SELECT tumbler, file_path FROM documents "
-        "WHERE physical_collection = ?",
-        (code_collection,),
-    ).fetchall()
-    by_path = {Path(row[1]).name: row[0] for row in documents if row[1]}
+    cat = ActiveCatalog()
+    documents = cat.list_by_collection(code_collection)
+    by_path = {
+        Path(d.file_path).name: str(d.tumbler) for d in documents if d.file_path
+    }
     assert {"utils_alpha.py", "utils_beta.py"} <= by_path.keys(), (
         f"expected catalog Documents for both copies, got {by_path!r}"
     )
@@ -343,13 +345,11 @@ def test_prose_indexer_collapses_shared_paragraph_across_files(
     shared_chroma_id = next(iter(matching_ids))
 
     # Both per-file manifests must reference the shared chash.
-    cat = Catalog(catalog_env, catalog_env / ".catalog.db")
-    documents = cat._db.execute(
-        "SELECT tumbler, file_path FROM documents "
-        "WHERE physical_collection = ?",
-        (docs_collection,),
-    ).fetchall()
-    by_path = {Path(row[1]).name: row[0] for row in documents if row[1]}
+    cat = ActiveCatalog()
+    documents = cat.list_by_collection(docs_collection)
+    by_path = {
+        Path(d.file_path).name: str(d.tumbler) for d in documents if d.file_path
+    }
     assert {"GUIDE_A.md", "GUIDE_B.md"} <= by_path.keys(), (
         f"expected catalog Documents for both files, got {by_path!r}"
     )
@@ -449,16 +449,13 @@ def test_prose_indexer_handles_within_file_duplicate_paragraph(
     # Manifest must carry TWO positions for this single Document, both
     # pointing at the shared chash. This is the load-bearing contract:
     # T3 rows collapse, but per-doc manifest positions do not.
-    cat = Catalog(catalog_env, catalog_env / ".catalog.db")
-    documents = cat._db.execute(
-        "SELECT tumbler, file_path FROM documents "
-        "WHERE physical_collection = ?",
-        (docs_collection,),
-    ).fetchall()
+    cat = ActiveCatalog()
+    documents = cat.list_by_collection(docs_collection)
     assert len(documents) == 1, (
-        f"expected exactly one catalog Document; got {documents!r}"
+        f"expected exactly one catalog Document; got "
+        f"{[(str(d.tumbler), d.file_path) for d in documents]!r}"
     )
-    manifest = cat.get_manifest(documents[0][0])
+    manifest = cat.get_manifest(str(documents[0].tumbler))
     notice_positions = [r for r in manifest if r.chash == notice_chroma_id]
     assert len(notice_positions) == 2, (
         "manifest must record both positions of the duplicate paragraph; "
@@ -595,13 +592,10 @@ def test_pdf_indexer_handles_duplicate_chunks_within_document(
 
     # Manifest contract: the catalog Document for this PDF must carry
     # two positions, both pointing at the shared chash.
-    cat = Catalog(catalog_env, catalog_env / ".catalog.db")
-    rows = cat._db.execute(
-        "SELECT tumbler FROM documents WHERE physical_collection = ?",
-        (pinned_collection,),
-    ).fetchall()
+    cat = ActiveCatalog()
+    rows = cat.list_by_collection(pinned_collection)
     assert rows, "expected a catalog Document for the indexed PDF"
-    doc_id = rows[0][0]
+    doc_id = str(rows[0].tumbler)
     manifest = cat.get_manifest(doc_id)
     assert len(manifest) == 2, (
         "manifest must preserve both positions even though T3 collapsed; "

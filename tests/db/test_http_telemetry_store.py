@@ -948,8 +948,19 @@ class TestImportDoNothing:
 
 class TestConfigErrors:
     def test_missing_port_raises(self, monkeypatch):
-        monkeypatch.delenv("NX_SERVICE_PORT", raising=False)
-        monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+        # nexus-aqbrk: NX_SERVICE_URL / NX_SERVICE_HOST must go too. They are
+        # HIGHER-PRIORITY tiers than NX_SERVICE_PORT in
+        # nexus.db.service_endpoint's resolution order, so leaving either set
+        # means the endpoint resolves and the store never reaches the
+        # missing-port complaint this asserts. The conftest scrub strips all
+        # four, but under the engine substrate ``t2_service_env`` re-sets URL
+        # and TOKEN afterwards so the T2 Http*Stores can find the test engine
+        # — making the no-endpoint path unreachable BY CONSTRUCTION. The test
+        # previously got its precondition by accident, from the sqlite arm
+        # having no service_url at all.
+        for var in ("NX_SERVICE_URL", "NX_SERVICE_HOST",
+                    "NX_SERVICE_PORT", "NX_SERVICE_TOKEN"):
+            monkeypatch.delenv(var, raising=False)
         with pytest.raises(RuntimeError, match="NX_SERVICE_PORT"):
             HttpTelemetryStore()
 

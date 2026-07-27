@@ -41,6 +41,7 @@ def chroma_client() -> Any:
 # counter in one engine session 500 on /import/topic.
 
 from tests.conftest import next_import_seed_id  # session-unique import ids (see conftest note)
+from tests.conftest import engine_substrate_selected
 
 
 def _seed_topic(
@@ -149,7 +150,7 @@ def _collection_assignment_count(taxonomy: Any, collection: str) -> int:
 
 
 @pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    engine_substrate_selected(),
     reason="dies-roster: raw sqlite_master schema introspection dies at the RDR-155 P4b flip",
 )
 def test_topics_table_created(db: T2Database) -> None:
@@ -566,7 +567,7 @@ def test_assign_topic_updates_doc_count_cache(db: T2Database) -> None:
 
 
 @pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    engine_substrate_selected(),
     reason="dies-roster: CatalogTaxonomy's assign-time topic_links resync (nexus-zq79 F5; the engine maintains links via refresh/cooccurrence passes, not per-assign) dies at the RDR-155 P4b flip",
 )
 def test_assign_topic_resyncs_topic_links_link_count(db: T2Database) -> None:
@@ -1118,7 +1119,7 @@ def test_get_topic_docs_resolves_title_via_join(db: T2Database) -> None:
 
 
 @pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    engine_substrate_selected(),
     reason="dies-roster: SQLite memory-title JOIN known-defect documentation (RDR-063) dies at the RDR-155 P4b flip",
 )
 def test_get_topic_docs_known_defect_project_collection_mismatch(db: T2Database) -> None:
@@ -1248,7 +1249,7 @@ def test_memory_delete_cascade_scoped_to_project(db: T2Database) -> None:
 
 
 @pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    engine_substrate_selected(),
     reason="dies-roster: T2Database.delete(id=...) resolves the row under the raw memory._lock (SQLite-only facade branch) and dies at the RDR-155 P4b flip",
 )
 def test_memory_delete_by_id_cascades(db: T2Database) -> None:
@@ -1361,7 +1362,7 @@ def test_cli_taxonomy_status_missing_projection_count_not_truncated_by_limit(
 
 
 @pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    engine_substrate_selected(),
     reason="dies-roster: raw-SQLite hook_failures table + migrations (status skips the read in service mode) dies at the RDR-155 P4b flip",
 )
 def test_cli_taxonomy_status_surfaces_recent_hook_failures(tmp_path: Path) -> None:
@@ -1432,7 +1433,7 @@ def test_cli_taxonomy_status_surfaces_recent_hook_failures(tmp_path: Path) -> No
 
 
 @pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    engine_substrate_selected(),
     reason="dies-roster: raw-SQLite hook_failures table + migrations (status skips the read in service mode) dies at the RDR-155 P4b flip",
 )
 def test_cli_taxonomy_status_surfaces_batch_doc_count(tmp_path: Path) -> None:
@@ -1511,7 +1512,7 @@ def test_cli_taxonomy_status_surfaces_batch_doc_count(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    engine_substrate_selected(),
     reason="dies-roster: raw-SQLite hook_failures table + migrations (status skips the read in service mode) dies at the RDR-155 P4b flip",
 )
 def test_cli_taxonomy_status_handles_malformed_batch_doc_ids(
@@ -1669,7 +1670,7 @@ def test_cli_taxonomy_list_shows_collection_at_root(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    engine_substrate_selected(),
     reason="dies-roster: raw-path discover_for_collection over a raw chroma client + t2_index_write routing (service branch routes _discover_via_service against a service T3) dies at the RDR-155 P4b flip",
 )
 def test_discover_for_collection(
@@ -1725,7 +1726,7 @@ def test_discover_for_collection(
 
 
 @pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    engine_substrate_selected(),
     reason="dies-roster: raw-path discover_for_collection over a raw chroma client + t2_index_write routing (service branch routes _discover_via_service against a service T3) dies at the RDR-155 P4b flip",
 )
 def test_discover_for_collection_force(
@@ -2070,7 +2071,7 @@ class TestSklearnHdbscanSmoke:
 
 
 @pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    engine_substrate_selected(),
     reason="dies-roster: raw PRAGMA/schema-default introspection of the SQLite twin dies at the RDR-155 P4b flip",
 )
 class TestReviewSchema:
@@ -2875,7 +2876,7 @@ class TestSplitTopic:
         assert parent["doc_count"] == 0
 
     @pytest.mark.skipif(
-        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        engine_substrate_selected(),
         reason="dies-roster: raw-SQLite split_cmd t2_index_write routing (service branch persists via the engine, not t2_index_write) dies at the RDR-155 P4b flip",
     )
     def test_split_cmd_routes_persist_via_t2_index_write(
@@ -3132,7 +3133,7 @@ class TestManualOpsCLI:
             assert set(docs) == {"doc-a", "doc-b"}
 
     @pytest.mark.skipif(
-        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        engine_substrate_selected(),
         reason="dies-roster: raw-path split CLI (CatalogTaxonomy.compute_split patch + t2_index_write routing; service branch bypasses both) dies at the RDR-155 P4b flip",
     )
     def test_split_cli(self, tmp_path: Path) -> None:
@@ -3241,7 +3242,7 @@ class TestManualOpsCLI:
         assert "-c test__split_cli" in result.output
 
     @pytest.mark.skipif(
-        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        engine_substrate_selected(),
         reason="dies-roster: raw-path split CLI (CatalogTaxonomy.compute_split patch + t2_index_write routing; service branch bypasses both) dies at the RDR-155 P4b flip",
     )
     def test_split_cli_action_hint_without_collection_flag(self, tmp_path: Path) -> None:
@@ -3342,7 +3343,7 @@ class TestManualOpsCLI:
         assert "-c test__parent_scope" in result.output
 
     @pytest.mark.skipif(
-        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        engine_substrate_selected(),
         reason="dies-roster: raw-path split CLI (CatalogTaxonomy.compute_split patch + t2_index_write routing; service branch bypasses both) dies at the RDR-155 P4b flip",
     )
     def test_split_cli_no_hint_when_child_count_zero(self, tmp_path: Path) -> None:
@@ -3417,7 +3418,7 @@ class TestRebalanceTrigger:
         assert db.taxonomy.needs_rebalance("test__coll", current_count=100) is True
 
     @pytest.mark.skipif(
-        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        engine_substrate_selected(),
         reason="dies-roster: CatalogTaxonomy's 2x rebalance threshold semantics (engine twin uses 5% growth) dies at the RDR-155 P4b flip",
     )
     def test_below_threshold_no_rebalance(self, db: T2Database) -> None:
@@ -4002,7 +4003,7 @@ class TestTopicLinksTable:
     """topic_links T2 table for search-time linked-topic boost."""
 
     @pytest.mark.skipif(
-        os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+        engine_substrate_selected(),
         reason="dies-roster: raw sqlite_master schema introspection dies at the RDR-155 P4b flip",
     )
     def test_topic_links_table_created(self, db: T2Database) -> None:

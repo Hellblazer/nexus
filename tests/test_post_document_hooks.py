@@ -36,6 +36,7 @@ import pytest
 
 from nexus.db.t2 import T2Database
 from nexus.hook_registry import HookRegistry
+from tests.conftest import engine_substrate_selected
 
 #: hook_failures has record/trim/import endpoints over HTTP but NO read
 #: surface — the persisted-row assertions below can only be made via a raw
@@ -43,10 +44,11 @@ from nexus.hook_registry import HookRegistry
 #: P4b flip (the write path itself is engine-covered by
 #: tests/db/test_http_telemetry_store integration).
 _RAW_HOOK_FAILURES_READ = pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
-    reason="dies-roster: asserts the persisted hook_failures row via a raw "
-    "SQLite conn; the engine exposes record/trim/import but no read "
-    "surface for hook_failures — dies at the RDR-155 P4b flip",
+    engine_substrate_selected(),
+    reason="nexus-onjvy: hook_failures is WRITE-ONLY on the engine — "
+    "TelemetryHandler exposes /hook_failures/record and /trim and no read "
+    "route at all. Not a retirement: the failure log that exists to "
+    "surface silent hook failures cannot be inspected in service mode",
 )
 
 

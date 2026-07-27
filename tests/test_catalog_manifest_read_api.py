@@ -23,6 +23,10 @@ import pytest
 from nexus.catalog.catalog import Catalog
 from nexus.catalog.catalog_db import CatalogDB
 
+# nexus-aqbrk: drives the event-sourced collection backfill, which reads and appends events.jsonl — a local artifact with no service-mode counterpart.
+pytestmark = pytest.mark.usefixtures("local_catalog_backend")
+
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 

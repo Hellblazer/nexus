@@ -24,6 +24,7 @@ import numpy as np
 
 from nexus.db.t2 import T2Database
 from tests.conftest import make_vector_test_client
+from tests.conftest import engine_substrate_selected
 
 
 # ── Cross-domain parallelism ─────────────────────────────────────────────────
@@ -556,7 +557,7 @@ def test_serving_busy_timeout_constant_matches_bootstrap() -> None:
 
 
 @_pytest.mark.skipif(
-    os.environ.get("NX_TEST_T2_SUBSTRATE") == "engine",
+    engine_substrate_selected(),
     reason="dies-roster: the 30s serving busy_timeout PRAGMA is a property of "
     "the raw SQLite store connections; dies with the twins at the RDR-155 "
     "P4b flip (the engine's PG pool owns its own timeouts)",

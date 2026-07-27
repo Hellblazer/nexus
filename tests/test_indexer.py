@@ -16,7 +16,32 @@ from tests.conftest import make_vector_test_client
 # (voyage-* embedder names, canonical-set defaults). The cloud_mode
 # fixture sets credentials and forces ``is_local_mode()`` to False so
 # the assertions hold regardless of the host environment.
-pytestmark = pytest.mark.usefixtures("cloud_mode")
+#
+# local_catalog_backend (nexus-aqbrk): this module drives the indexer with a
+# FULLY STUBBED config — ``_patches`` replaces ``nexus.config.load_config``
+# with ``_DEFAULT_CONFIG`` and ``get_credential`` with a fixed fake, and the
+# autouse ``_legacy_vector_backend`` fixture below pins vectors to chroma. It
+# is a local-mode indexing journey end to end. Under the engine substrate the
+# CATALOG store alone still resolved to SERVICE, and a stubbed config carries
+# no ``service_url`` — so ``_prune_deleted_files`` -> ``chashes_for_collection``
+# reached HttpCatalogClient with an EMPTY base_url and died on
+# ``httpx.UnsupportedProtocol``, which reads as broken endpoint resolution
+# rather than a missing pin. Same shape and same disposition as
+# test_catalog_e2e (commit f4030fe5).
+#
+# NOT scope reduction — the service-mode indexer->catalog journey is a
+# different journey this file never covered, and it IS covered: 33 tests in
+# tests/test_catalog_indexer_hook.py run the hook through ActiveCatalog
+# (owner create/reuse, register/update, batching, fairness yields, per-file
+# fallbacks), and the specific call that failed here has direct service-path
+# coverage in tests/catalog/test_http_catalog_client.py::test_chashes_for_
+# collection plus the tests/catalog/test_shape_parity_tripwire.py entry that
+# asserts both implementations agree.
+#
+# ONE list, not a second assignment: a second ``pytestmark = ...`` REPLACES
+# the first rather than appending (it silently no-opped a pin in
+# test_catalog_consolidation.py — commit 0eefc06a).
+pytestmark = pytest.mark.usefixtures("cloud_mode", "local_catalog_backend")
 
 _DEFAULT_CONFIG = {
     "server": {"ignorePatterns": []},

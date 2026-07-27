@@ -58,7 +58,36 @@ def dangling_catalog(tmp_path: Path) -> Catalog:
     return _seed_dangling_catalog(tmp_path)
 
 
+@pytest.mark.usefixtures("local_catalog_backend")
 class TestSqliteBranchDetectsARealDanglingRow:
+    """The sqlite branch, pinned so the DISPATCHER agrees with the fixture.
+
+    nexus-aqbrk. These inject a real local ``Catalog`` via
+    ``make_catalog_reader``, but ``_run_check_dangling_links`` picks its
+    branch from ``storage_backend_for("catalog")`` — not from the object it
+    is handed. Under the engine substrate that resolver said SERVICE, so the
+    dispatcher called ``_report_dangling_links_service`` and invoked
+    ``orphaned_links()`` on a local Catalog, which only ``HttpCatalogClient``
+    implements:
+
+        AttributeError: 'Catalog' object has no attribute 'orphaned_links'.
+        Did you mean: 'orphaned_docs'?
+
+    NOT A PRODUCTION BUG — worth stating, because the traceback points at
+    production code (doctor.py:982) and reads like one. The dispatch at
+    :1052 is correct on both substrates: SERVICE -> orphaned_links(),
+    SQLITE -> link_audit(), each implemented on the class that gets it. The
+    asymmetry was in this file: the SERVICE class below takes an explicit
+    ``service_mode`` fixture and is therefore substrate-independent, while
+    this class inherited whatever the ambient backend happened to be.
+    Pinning makes both halves declare their branch instead of one declaring
+    and one assuming.
+
+    SERVICE HALF IS OWNED IN THIS FILE: TestServiceBranchRoutesToTheEngine
+    (five cases incl. unreachable -> UNKNOWN/exit-2 and unresolvable
+    endpoint), plus TestWireShapeIsNotTrusted for the response contract.
+    """
+
     def test_check_reports_the_dangling_link(
         self, dangling_catalog: Catalog, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

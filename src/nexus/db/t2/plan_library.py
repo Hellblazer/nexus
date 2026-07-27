@@ -45,6 +45,7 @@ from nexus.plans.scope import (
     _SCOPE_AGNOSTIC_SENTINELS,
     _infer_scope_tags,
     _normalize_scope_string,
+    normalize_scope_tags,
 )
 
 __all__ = [
@@ -54,6 +55,7 @@ __all__ = [
     "_SCOPE_AGNOSTIC_SENTINELS",
     "_infer_scope_tags",
     "_normalize_scope_string",
+    "normalize_scope_tags",
 ]
 
 _log = structlog.get_logger()
@@ -356,12 +358,7 @@ class PlanLibrary:
             # conflict — same failure mode the critic-follow-up inference
             # fix addresses on the inference path. (RDR-091 code-review
             # finding C-3.)
-            parts = [
-                _normalize_scope_string(p.strip())
-                for p in scope_tags.split(",")
-                if p.strip() and p.strip() not in _SCOPE_AGNOSTIC_SENTINELS
-            ]
-            stored_scope_tags = ",".join(sorted({p for p in parts if p}))
+            stored_scope_tags = normalize_scope_tags(scope_tags)
         elif scope_tags is None:
             # Truly unset: infer from plan_json retrieval steps.
             stored_scope_tags = _infer_scope_tags(plan_json)
@@ -512,12 +509,7 @@ class PlanLibrary:
         when the row was updated, ``False`` when *plan_id* does not exist.
         (#1073)
         """
-        parts = [
-            _normalize_scope_string(p.strip())
-            for p in scope_tags.split(",")
-            if p.strip() and p.strip() not in _SCOPE_AGNOSTIC_SENTINELS
-        ]
-        stored = ",".join(sorted({p for p in parts if p}))
+        stored = normalize_scope_tags(scope_tags)
         with self._lock:
             cursor = self.conn.execute(
                 "UPDATE plans SET scope_tags = ? WHERE id = ?",
