@@ -81,51 +81,54 @@ AS $$
 $$;
         </sql>
         <rollback>
-DROP FUNCTION IF EXISTS nexus.search_graph_hop_384(vector, text[], text[], text, int, text, jsonb, int);
-CREATE OR REPLACE FUNCTION nexus.search_graph_hop_384(
-    p_query       vector(384),
-    p_seeds       text[],
-    p_collections text[],
-    p_link_type   text,
-    p_depth       int,
-    p_direction   text,
-    p_n           int
-) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
-LANGUAGE sql
-STABLE
-SECURITY INVOKER
-AS $$
-    WITH RECURSIVE reach(tumbler, d) AS (
-            SELECT s, 0 FROM unnest(p_seeds) AS s
-        UNION
-            SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
-                   r.d + 1
-              FROM reach r
-              JOIN nexus.catalog_links l
-                ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
-                 OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
-                 OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
-             WHERE r.d &lt; p_depth
-               AND (p_link_type IS NULL OR l.link_type = p_link_type)
-    ),
-    reached AS (SELECT DISTINCT tumbler FROM reach)
-    SELECT d.tumbler,
-           c.chunk_text,
-           c.collection,
-           (c.embedding &lt;=&gt; p_query)::float8,
-           c.chash
-      FROM nexus.chunks_384 c
-      JOIN nexus.catalog_document_chunks m
-        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
-      JOIN nexus.catalog_documents d
-        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
-      JOIN reached rd
-        ON rd.tumbler = d.tumbler
-     WHERE c.collection = ANY(p_collections)
-       AND d.deleted_at IS NULL
-     ORDER BY c.embedding &lt;=&gt; p_query
-     LIMIT p_n
-$$;
+            <sql splitStatements="false" stripComments="false">
+    DROP FUNCTION IF EXISTS nexus.search_graph_hop_384(vector, text[], text[], text, int, text, jsonb, int);
+    CREATE OR REPLACE FUNCTION nexus.search_graph_hop_384(
+        p_query       vector(384),
+        p_seeds       text[],
+        p_collections text[],
+        p_link_type   text,
+        p_depth       int,
+        p_direction   text,
+        p_n           int
+    ) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+    LANGUAGE sql
+    STABLE
+    SECURITY INVOKER
+    AS $$
+        WITH RECURSIVE reach(tumbler, d) AS (
+                SELECT s, 0 FROM unnest(p_seeds) AS s
+            UNION
+                SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
+                       r.d + 1
+                  FROM reach r
+                  JOIN nexus.catalog_links l
+                    ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
+                     OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
+                     OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+                 WHERE r.d &lt; p_depth
+                   AND (p_link_type IS NULL OR l.link_type = p_link_type)
+        ),
+        reached AS (SELECT DISTINCT tumbler FROM reach)
+        SELECT d.tumbler,
+               c.chunk_text,
+               c.collection,
+               (c.embedding &lt;=&gt; p_query)::float8,
+               c.chash
+          FROM nexus.chunks_384 c
+          JOIN nexus.catalog_document_chunks m
+            ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+          JOIN nexus.catalog_documents d
+            ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+          JOIN reached rd
+            ON rd.tumbler = d.tumbler
+         WHERE c.collection = ANY(p_collections)
+           AND d.deleted_at IS NULL
+         ORDER BY c.embedding &lt;=&gt; p_query
+         LIMIT p_n
+    $$;
+        
+            </sql>
         </rollback>
     </changeSet>
 
@@ -181,51 +184,54 @@ AS $$
 $$;
         </sql>
         <rollback>
-DROP FUNCTION IF EXISTS nexus.search_graph_hop_768(vector, text[], text[], text, int, text, jsonb, int);
-CREATE OR REPLACE FUNCTION nexus.search_graph_hop_768(
-    p_query       vector(768),
-    p_seeds       text[],
-    p_collections text[],
-    p_link_type   text,
-    p_depth       int,
-    p_direction   text,
-    p_n           int
-) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
-LANGUAGE sql
-STABLE
-SECURITY INVOKER
-AS $$
-    WITH RECURSIVE reach(tumbler, d) AS (
-            SELECT s, 0 FROM unnest(p_seeds) AS s
-        UNION
-            SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
-                   r.d + 1
-              FROM reach r
-              JOIN nexus.catalog_links l
-                ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
-                 OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
-                 OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
-             WHERE r.d &lt; p_depth
-               AND (p_link_type IS NULL OR l.link_type = p_link_type)
-    ),
-    reached AS (SELECT DISTINCT tumbler FROM reach)
-    SELECT d.tumbler,
-           c.chunk_text,
-           c.collection,
-           (c.embedding &lt;=&gt; p_query)::float8,
-           c.chash
-      FROM nexus.chunks_768 c
-      JOIN nexus.catalog_document_chunks m
-        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
-      JOIN nexus.catalog_documents d
-        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
-      JOIN reached rd
-        ON rd.tumbler = d.tumbler
-     WHERE c.collection = ANY(p_collections)
-       AND d.deleted_at IS NULL
-     ORDER BY c.embedding &lt;=&gt; p_query
-     LIMIT p_n
-$$;
+            <sql splitStatements="false" stripComments="false">
+    DROP FUNCTION IF EXISTS nexus.search_graph_hop_768(vector, text[], text[], text, int, text, jsonb, int);
+    CREATE OR REPLACE FUNCTION nexus.search_graph_hop_768(
+        p_query       vector(768),
+        p_seeds       text[],
+        p_collections text[],
+        p_link_type   text,
+        p_depth       int,
+        p_direction   text,
+        p_n           int
+    ) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+    LANGUAGE sql
+    STABLE
+    SECURITY INVOKER
+    AS $$
+        WITH RECURSIVE reach(tumbler, d) AS (
+                SELECT s, 0 FROM unnest(p_seeds) AS s
+            UNION
+                SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
+                       r.d + 1
+                  FROM reach r
+                  JOIN nexus.catalog_links l
+                    ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
+                     OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
+                     OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+                 WHERE r.d &lt; p_depth
+                   AND (p_link_type IS NULL OR l.link_type = p_link_type)
+        ),
+        reached AS (SELECT DISTINCT tumbler FROM reach)
+        SELECT d.tumbler,
+               c.chunk_text,
+               c.collection,
+               (c.embedding &lt;=&gt; p_query)::float8,
+               c.chash
+          FROM nexus.chunks_768 c
+          JOIN nexus.catalog_document_chunks m
+            ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+          JOIN nexus.catalog_documents d
+            ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+          JOIN reached rd
+            ON rd.tumbler = d.tumbler
+         WHERE c.collection = ANY(p_collections)
+           AND d.deleted_at IS NULL
+         ORDER BY c.embedding &lt;=&gt; p_query
+         LIMIT p_n
+    $$;
+        
+            </sql>
         </rollback>
     </changeSet>
 
@@ -281,51 +287,54 @@ AS $$
 $$;
         </sql>
         <rollback>
-DROP FUNCTION IF EXISTS nexus.search_graph_hop_1024(vector, text[], text[], text, int, text, jsonb, int);
-CREATE OR REPLACE FUNCTION nexus.search_graph_hop_1024(
-    p_query       vector(1024),
-    p_seeds       text[],
-    p_collections text[],
-    p_link_type   text,
-    p_depth       int,
-    p_direction   text,
-    p_n           int
-) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
-LANGUAGE sql
-STABLE
-SECURITY INVOKER
-AS $$
-    WITH RECURSIVE reach(tumbler, d) AS (
-            SELECT s, 0 FROM unnest(p_seeds) AS s
-        UNION
-            SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
-                   r.d + 1
-              FROM reach r
-              JOIN nexus.catalog_links l
-                ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
-                 OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
-                 OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
-             WHERE r.d &lt; p_depth
-               AND (p_link_type IS NULL OR l.link_type = p_link_type)
-    ),
-    reached AS (SELECT DISTINCT tumbler FROM reach)
-    SELECT d.tumbler,
-           c.chunk_text,
-           c.collection,
-           (c.embedding &lt;=&gt; p_query)::float8,
-           c.chash
-      FROM nexus.chunks_1024 c
-      JOIN nexus.catalog_document_chunks m
-        ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
-      JOIN nexus.catalog_documents d
-        ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
-      JOIN reached rd
-        ON rd.tumbler = d.tumbler
-     WHERE c.collection = ANY(p_collections)
-       AND d.deleted_at IS NULL
-     ORDER BY c.embedding &lt;=&gt; p_query
-     LIMIT p_n
-$$;
+            <sql splitStatements="false" stripComments="false">
+    DROP FUNCTION IF EXISTS nexus.search_graph_hop_1024(vector, text[], text[], text, int, text, jsonb, int);
+    CREATE OR REPLACE FUNCTION nexus.search_graph_hop_1024(
+        p_query       vector(1024),
+        p_seeds       text[],
+        p_collections text[],
+        p_link_type   text,
+        p_depth       int,
+        p_direction   text,
+        p_n           int
+    ) RETURNS TABLE(id text, content text, collection text, distance float8, chash text)
+    LANGUAGE sql
+    STABLE
+    SECURITY INVOKER
+    AS $$
+        WITH RECURSIVE reach(tumbler, d) AS (
+                SELECT s, 0 FROM unnest(p_seeds) AS s
+            UNION
+                SELECT CASE WHEN l.from_tumbler = r.tumbler THEN l.to_tumbler ELSE l.from_tumbler END,
+                       r.d + 1
+                  FROM reach r
+                  JOIN nexus.catalog_links l
+                    ON ((p_direction = 'out'  AND l.from_tumbler = r.tumbler)
+                     OR (p_direction = 'in'   AND l.to_tumbler   = r.tumbler)
+                     OR (p_direction = 'both' AND (l.from_tumbler = r.tumbler OR l.to_tumbler = r.tumbler)))
+                 WHERE r.d &lt; p_depth
+                   AND (p_link_type IS NULL OR l.link_type = p_link_type)
+        ),
+        reached AS (SELECT DISTINCT tumbler FROM reach)
+        SELECT d.tumbler,
+               c.chunk_text,
+               c.collection,
+               (c.embedding &lt;=&gt; p_query)::float8,
+               c.chash
+          FROM nexus.chunks_1024 c
+          JOIN nexus.catalog_document_chunks m
+            ON m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash
+          JOIN nexus.catalog_documents d
+            ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id
+          JOIN reached rd
+            ON rd.tumbler = d.tumbler
+         WHERE c.collection = ANY(p_collections)
+           AND d.deleted_at IS NULL
+         ORDER BY c.embedding &lt;=&gt; p_query
+         LIMIT p_n
+    $$;
+        
+            </sql>
         </rollback>
     </changeSet>
 
