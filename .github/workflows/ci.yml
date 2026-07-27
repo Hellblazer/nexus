@@ -388,6 +388,21 @@ jobs:
           - { arch: linux-amd64, runner: ubuntu-latest,    image: "quay.io/pypa/manylinux_2_28_x86_64" }
           - { arch: linux-arm64, runner: ubuntu-24.04-arm, image: "quay.io/pypa/manylinux_2_28_aarch64" }
     env:
+      # nexus-aqbrk: this job has NO service JAR and does not need one — its
+      # tests (tests/db/test_pg_provision_ca3_bundle.py) verify PG BINARY
+      # PROVISIONING: discovery, sharedir resolution, control files, pg_trgm.
+      # Zero T2 references in the entire file.
+      #
+      # The flip made the engine the DEFAULT substrate, so the autouse pin
+      # started trying to boot an engine here, found no JAR, and skipped all
+      # 14 tests. scripts/assert_ca3_ran.py then failed the job — correctly,
+      # that is its entire purpose: "core CREATE EXTENSION vector test did
+      # not pass — assemble path unproven". A non-vacuity gate catching a
+      # silent mass-skip the moment one appeared.
+      #
+      # Pinning SQLite restores what these tests always did. It does not
+      # weaken them: the T2 substrate is irrelevant to what they assert.
+      NX_TEST_T2_SUBSTRATE: sqlite
       # Pinned for determinism. pgvector >= 0.8 is the RDR-155 iterative_scan floor
       # (a pgvector version, not a PG major). nexus is aligned on PG17 to match the
       # deployed conexus stack (nexus-41bso); PG16 was incidental.
@@ -605,6 +620,21 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 30
     env:
+      # nexus-aqbrk: this job has NO service JAR and does not need one — its
+      # tests (tests/db/test_pg_provision_ca3_bundle.py) verify PG BINARY
+      # PROVISIONING: discovery, sharedir resolution, control files, pg_trgm.
+      # Zero T2 references in the entire file.
+      #
+      # The flip made the engine the DEFAULT substrate, so the autouse pin
+      # started trying to boot an engine here, found no JAR, and skipped all
+      # 14 tests. scripts/assert_ca3_ran.py then failed the job — correctly,
+      # that is its entire purpose: "core CREATE EXTENSION vector test did
+      # not pass — assemble path unproven". A non-vacuity gate catching a
+      # silent mass-skip the moment one appeared.
+      #
+      # Pinning SQLite restores what these tests always did. It does not
+      # weaken them: the T2 substrate is irrelevant to what they assert.
+      NX_TEST_T2_SUBSTRATE: sqlite
       PG_VERSION: "17.5"
       PGVECTOR_VERSION: "v0.8.2"
       # The dyld analog of the glibc floor: build back-deployable to macOS 13
