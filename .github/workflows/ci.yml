@@ -435,6 +435,36 @@ jobs:
       # compromised to always emit ca3='false' would skip the PG build + tests
       # while the job still reports green — the exact vacuous gate the
       # always-run-job pattern exists to prevent. de90cc6 == v3.0.2.
+      #
+      # THE BASE, AND WHY IT IS LOAD-BEARING (nexus-4k91k, 2026-07-27).
+      # `base:` is deliberately unset. dorny/paths-filter then resolves PUSH
+      # events against the repository DEFAULT branch (main), NOT against the
+      # previous develop commit. develop diverges from main in
+      # .github/workflows/ci.yml and service/.../changelog/** — both ca3_core
+      # paths — so ca3_core is effectively ALWAYS true on a develop push, and
+      # CA-3 runs at EVERY merge boundary.
+      #
+      # That is not an accident to be tidied away; it is the safety net for the
+      # PR side. A PULL REQUEST touching no ca3_core path gets a CA-3 that
+      # reports success having proven nothing — by design, that is what
+      # path-gating an expensive build MEANS — and the develop push is what
+      # re-proves it, one merge later. Verified 2026-07-27: PR run 30213539574
+      # executed ZERO CA-3 tests and reported success, while develop runs
+      # 30187251639 / 30256819508 / 30272066728 each logged
+      # "CA-3 PASS: 12 passed, 0 bundle-skips".
+      #
+      # So do NOT pin `base:` to the previous commit as a cost saving without
+      # first replacing that net (a scheduled unconditional run). It would buy
+      # ~3 min of runner time per develop push, ~74s of it macOS, and sell the
+      # only thing that re-proves a gated-off PR.
+      #
+      # READING THIS GATE: do NOT infer whether it fired from the presence of
+      # build lines (initdb / "Build complete PG" / assemble). Those are
+      # FROM-SOURCE REBUILD lines, absent on a cache hit by design (see the
+      # build step's cache-hit condition below), so a run that executed every
+      # test scores zero on them. nexus-4k91k was filed on exactly that
+      # misreading. The direct signal is scripts/assert_ca3_ran.py's
+      # "CA-3 PASS: N passed" line, which exists so nobody has to infer it.
       - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4.0.1
         id: changes
         with:
@@ -654,6 +684,13 @@ jobs:
       # compromised to always emit ca3='false' would skip the PG build + tests
       # while the job still reports green — the exact vacuous gate the
       # always-run-job pattern exists to prevent. de90cc6 == v3.0.2.
+      # `base:` is unset here for the same load-bearing reason as the linux
+      # CA-3 job — read that comment before changing it. Short version: push
+      # events resolve against main, not the previous develop commit, so this
+      # gate is effectively always true on a develop push, and that is what
+      # re-proves a PR whose CA-3 was gated off. This job is the macOS arch,
+      # so it is also the ~74s of premium runner that pinning `base:` would
+      # save and the reason the trade looks tempting (nexus-4k91k).
       - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4.0.1
         id: changes
         with:
