@@ -53,3 +53,40 @@ source tests/e2e/lib/expectations.sh   # plugin copy: conexus/hooks/scripts/expe
 | Analyze system | codebase-deep-analyzer | -> (if deep) deep-analyst |
 
 For the full routing graph, decision framework, and standard pipelines, see [reference.md](./reference.md).
+
+## Route by shape, not only by task type
+
+The table above routes by what KIND of work it is. It does not route by how
+much raw material the work drags through your context. Both axes decide.
+
+### Distill early — an un-distilled result is paid once per remaining turn
+
+An agentic loop re-sends prior tool results as input on every subsequent
+turn. So the cost of not distilling is `payload x turns_remaining`, not
+`payload`. A 50k dump on turn 3 of a 40-turn session costs far more than
+the identical dump on turn 38.
+
+- Decide what the ONE line you need is BEFORE running the command.
+  `grep -c` over `cat`; `| head -5` over full output; a `python3` heredoc
+  that prints the verdict over a dump you then read.
+- Aggression should scale with how much session remains. Early is where
+  it pays; late-session sloppiness is nearly free.
+- This is not a nexus mechanism. The shell is already the sandbox — the
+  distinction is only whether intermediate bytes cross into context.
+
+### Dispatch a subagent for bulk READS, not only for judgment
+
+A subagent's entire transcript stays in its own context; only its return
+crosses into yours. That property is independent of whether the task
+needs judgment.
+
+| Shape | Route |
+|---|---|
+| Needs reading many files/outputs, you want only the conclusion | subagent — even if mechanical |
+| One known file, one known fact | read it directly; a dispatch costs more than the read |
+| Many items, mechanical, output is the answer itself | one shell command, not N tool calls |
+| Needs judgment AND bulk reading | subagent (the default case) |
+
+The habitual error is reaching for a subagent only when judgment is
+wanted, and doing "find every caller of X and tell me which three
+matter" inline — paying full payload for material you discard.

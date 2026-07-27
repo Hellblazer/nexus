@@ -48,6 +48,11 @@ mechanize, it matters enough to ship.
   `expectations_undeclared`'s exit code is now load-bearing (exit 1 + BLINDSPOT).
 - `conexus/skills/orchestration/SKILL.md` — nexus-mk3tw: same, for the
   orchestration skill's census step.
+- `conexus/skills/orchestration/SKILL.md` — context-economy routing: adds a
+  second routing axis (shape, not only task type) carrying the distill-early
+  heuristic and the bulk-read-to-subagent rule. Until this ships, routing
+  guidance remains task-type-only and says nothing about context cost, so the
+  26-tool-calls shape stays unaddressed at the skill layer.
 - `conexus/skills/plan-first/SKILL.md` — nexus-0yrjr: adds the cue-to-`bindings`
   table so an agent routes "search RDRs for X" into
   `bindings={"content_type": "rdr"}`. Until this ships, `nx_answer`'s new
