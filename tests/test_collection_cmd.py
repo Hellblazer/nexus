@@ -513,7 +513,7 @@ def test_reindex_treats_phase3_chunk_with_chash_only_as_reindexable(
     # Catalog is lazy-imported inside reindex_cmd (`from nexus.catalog
     # import Catalog`); patch the source module's attribute so the
     # lazy import resolves to our stub. The autouse
-    # _pin_storage_backend_sqlite fixture pins the catalog to SQLite
+    # _pin_t2_substrate fixture pins the catalog to SQLite
     # mode by default, so make_catalog_reader() really returns a local
     # Catalog here (not HttpCatalogClient).
     from nexus.catalog.catalog import Catalog

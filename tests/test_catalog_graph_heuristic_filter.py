@@ -18,7 +18,6 @@ from nexus.catalog.catalog_links import (
     _filter_link_types,
 )
 from nexus.catalog.tumbler import Tumbler
-from nexus.db.storage_mode import StorageBackend, storage_backend_for
 from tests._catalog_fixture_ops import ActiveCatalog
 
 
@@ -102,30 +101,25 @@ class TestFilterLinkTypesHelper:
 
 
 def _assert_heuristic_excluded(node_tumblers: set[str], heuristic: object) -> None:
-    """Assert the default-exclude, encoding the nexus-ybj1b service gap.
+    """Assert the default-exclude — now unconditional on both substrates.
 
-    Locally, ``graph``/``graph_many`` drop ``implements-heuristic`` edges
-    unless a caller opts in. In service mode the flag never reaches the
-    query: http_catalog_client sends ``include_heuristic`` with the comment
-    "forwarded to service for future support; currently informational", and
-    CatalogHandler.handleTraverse reads only ``link_types``. So the default
-    does NOT exclude and the opt-in is a no-op in both directions — the
-    heuristic flood the local default exists to suppress (66% of the
-    2026-05-08 prod link graph) is back on.
+    nexus-ybj1b RESOLVED 2026-07-26. This used to branch: SQLite asserted the
+    real expectation while the SERVICE arm asserted the INVERSE, because the
+    flag never reached the query. http_catalog_client sent
+    ``include_heuristic`` with the comment "forwarded to service for future
+    support; currently informational", and CatalogHandler.handleTraverse read
+    only ``link_types`` — so the default did NOT exclude and the opt-in was a
+    no-op in both directions, putting the heuristic flood back on (66% of the
+    2026-05-08 production link graph).
 
-    Asserted at the broken value so the fix fails loudly here.
+    The server honours it now, so the branch is gone. Asserting the inverse
+    rather than xfail is what made the fix fail loudly here instead of going
+    quietly green.
     """
-    if storage_backend_for("catalog") is StorageBackend.SQLITE:
-        assert str(heuristic) not in node_tumblers, (
-            "implements-heuristic neighbor leaked into the default graph "
-            "traversal; reverting the nexus-6ppk default-exclude lets the "
-            "heuristic flood dominate the result"
-        )
-        return
-    assert str(heuristic) in node_tumblers, (
-        "nexus-ybj1b looks FIXED (the service graph now honours the "
-        "default-exclude) — delete this helper and restore the "
-        "unconditional `not in` assertions"
+    assert str(heuristic) not in node_tumblers, (
+        "implements-heuristic neighbor leaked into the default graph "
+        "traversal; reverting the nexus-6ppk default-exclude lets the "
+        "heuristic flood dominate the result"
     )
 
 
