@@ -40,6 +40,7 @@ import java.util.Map;
  *   GET  /v1/telemetry/retention/markers       cumulative-deletes retention markers (nexus-24p05)
  *   POST /v1/telemetry/nx_answer_runs/record   record an nx_answer run
  *   POST /v1/telemetry/hook_failures/record    record a hook failure
+ *   GET  /v1/telemetry/hook_failures/list      list hook failures + exact totals (nexus-onjvy)
  *   POST /v1/telemetry/hook_failures/trim      trim old hook-failure entries
  *   POST /v1/telemetry/frecency/upsert         upsert frecency record
  *   GET  /v1/telemetry/frecency/get            get frecency by chunk_id
@@ -101,6 +102,7 @@ public final class TelemetryHandler implements HttpHandler {
                 case "/retention/markers"      -> handleRetentionMarkers(exchange, tenant, method);
                 case "/nx_answer_runs/record"  -> handleNxAnswerRunRecord(exchange, tenant, method);
                 case "/hook_failures/record"   -> handleHookFailureRecord(exchange, tenant, method);
+                case "/hook_failures/list"     -> handleHookFailureList(exchange, tenant, method);
                 case "/hook_failures/trim"     -> handleHookFailureTrim(exchange, tenant, method);
                 case "/frecency/upsert"        -> handleFrecencyUpsert(exchange, tenant, method);
                 case "/frecency/get"           -> handleFrecencyGet(exchange, tenant, method);
@@ -309,6 +311,29 @@ public final class TelemetryHandler implements HttpHandler {
         repo.recordHookFailure(tenant, docId, collection, hookName, error, occurredAt,
             batchDocIds, isBatch, chain);
         HttpUtil.send(ex, 200, json(Map.of("ok", true)));
+    }
+
+    /**
+     * List hook failures, newest first (nexus-onjvy).
+     *
+     * <p>{@code ?days=N} bounds the window (0 = unbounded), {@code ?hook_name=a,b}
+     * restricts to named hooks, {@code ?limit=N} caps the returned page. The
+     * response carries {@code total} and {@code oldest_occurred_at} computed over
+     * the WHOLE predicate rather than the page, because {@code nx doctor} reports
+     * a count and would otherwise under-report whenever failures exceeded the
+     * page size.
+     */
+    private void handleHookFailureList(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "GET");
+        var params = queryParams(ex);
+        int days  = parseIntParam(params, "days", 0);
+        int limit = parseIntParam(params, "limit", 100);
+        String names = params.getOrDefault("hook_name", "");
+        List<String> hookNames = names.isBlank()
+            ? List.of()
+            : java.util.Arrays.stream(names.split(","))
+                .map(String::trim).filter(s -> !s.isBlank()).toList();
+        HttpUtil.send(ex, 200, json(repo.getHookFailures(tenant, days, hookNames, limit)));
     }
 
     private void handleHookFailureTrim(HttpExchange ex, String tenant, String method) throws IOException {
