@@ -440,7 +440,16 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         return self._get("/assignments/by_label", {"label": label})
 
     def get_assignments_for_docs(self, doc_ids: list[str]) -> dict[str, int]:
-        """Return {doc_id: topic_id} mapping for given doc_ids."""
+        """Return {doc_id: topic_id} mapping for given doc_ids.
+
+        nexus-onjvy: doc_id + topic_id is ALL any route returns.
+        ``assign_topic`` writes ``similarity``, ``assigned_at`` and
+        ``source_collection``, and ``TaxonomyRepository.getAssignmentsForDocs``
+        projects neither — nor does any other route — so an operator cannot ask
+        how confident an assignment is, when it was made, or where it came
+        from. Pinned by tests/db/test_onjvy_write_only_surfaces.py: widen this
+        projection and that test fails with instructions.
+        """
         result = self._post("/assignments/for_docs", {"doc_ids": doc_ids})
         return {r["doc_id"]: r["topic_id"] for r in result}
 
@@ -1474,7 +1483,12 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 matched_stopwords=matched,
                 source_collections=sources,
                 last_assigned_at=last_at,
-                max_last_discover_at=None,   # warn_stale not implemented over HTTP
+                # nexus-onjvy: warn_stale is ACCEPTED AND SILENTLY DROPPED over
+                # HTTP — the caller gets no warning and no error, the same
+                # contract break as nexus-ybj1b (include_heuristic). Pinned by
+                # tests/db/test_onjvy_write_only_surfaces.py; when a real
+                # implementation lands, that test fails and tells you so.
+                max_last_discover_at=None,
                 never_discovered_count=0,
                 is_stale=False,
             ))

@@ -663,6 +663,16 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
 
         # GH #251 + RDR-095: surface recent post-store hook failures.
         # SQLite-only: hook_failures table not accessible in service mode.
+        #
+        # nexus-onjvy: that is an ENGINE GAP, not a design choice. The engine
+        # accepts /hook_failures/record and /trim and exposes NO read route, so
+        # this block and doctor.py's sibling are the only readers that exist —
+        # and both are raw-conn, so they die with the SQLite stores in
+        # nexus-i711w. When that lands, `nx taxonomy status` loses hook-failure
+        # surfacing outright, on exactly the path that exists to make silent
+        # hook failures visible. Deleting this is a USER-VISIBLE regression and
+        # needs to be a decision, not a side effect of the deletion sweep.
+        # Characterized by tests/db/test_onjvy_write_only_surfaces.py.
         rows: list[tuple[str, int, int, str | None]] = []
         try:
             if _has_raw_access(db.taxonomy):
