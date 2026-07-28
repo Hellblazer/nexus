@@ -117,6 +117,27 @@ unprovisioned. Historically this gate caught `nexus-pi3s3` + `nexus-qeoxf`
 this exercises the linux artifact. The mac-arm64 post-signing path is NOT covered
 here — tracked on `nexus-2oh5q`.
 
+**The mac-arm64 gap has a gate — it is just MANUAL and not yet armed.** Once the
+Apple secrets are provisioned and the first Developer-ID-signed tag publishes,
+run on an arm64 Mac, BEFORE setting `APPLE_SIGNING_REQUIRED=true`:
+
+```bash
+NEXUS_SERVICE_TAG=engine-service-vX.Y.Z tests/e2e/mac-signed-binary-gate.sh
+```
+
+Must end `MAC SIGNED-BINARY GATE PASSED`. It downloads the published mac-arm64
+artifact, applies the quarantine xattr a browser download would set (the API
+path `install-binary` uses sets none, which is why this hazard has never bitten
+anyone), asserts Developer-ID signature + Hardened Runtime + the
+disable-library-validation entitlement + `spctl` acceptance, then boots the
+SIGNED binary through `native-smoke.sh` and asserts the bge-768 embed actually
+executed — the DJL tokenizer JNI + onnxruntime `System.load()`s are precisely
+what Library Validation refuses. A skipped embed is a FAILURE there, not a pass.
+
+Why it cannot be a CI job: mac-arm64 is `smoke: false` (macos-14 runners have no
+Docker) and codesign runs AFTER the linux-only smoke, so CI never boots the
+signed mac bytes at all. `codesign --verify` cannot see a runtime dlopen refusal.
+
 `--package-upgrade` is NOT a substitute (checked; do not re-derive): it converges
 to `NEW_ENGINE_TAG`, which `run.sh` derives from `REQUIRED_ENGINE_VERSION` — the
 release's engine identity, not an arbitrary tag — so it can only validate a tag a PyPI release has
