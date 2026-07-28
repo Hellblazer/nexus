@@ -117,8 +117,11 @@ unprovisioned. Historically this gate caught `nexus-pi3s3` + `nexus-qeoxf`
 this exercises the linux artifact. The mac-arm64 post-signing path is NOT covered
 here — tracked on `nexus-2oh5q`.
 
-**The mac-arm64 gap has a gate — it is just MANUAL and not yet armed.** Once the
-Apple secrets are provisioned and the first Developer-ID-signed tag publishes,
+**The mac-arm64 gap has a gate — it is just MANUAL and not yet armed.** The
+provisioning half (six Apple credentials, both portals, the pre-flight and the
+renewal failure modes) is
+[`docs/operations/apple-code-signing.md`](../../../docs/operations/apple-code-signing.md).
+Once those are provisioned and the first Developer-ID-signed tag publishes,
 run on an arm64 Mac, BEFORE setting `APPLE_SIGNING_REQUIRED=true`:
 
 ```bash
