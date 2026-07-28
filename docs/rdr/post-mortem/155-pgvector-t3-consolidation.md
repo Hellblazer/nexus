@@ -1,6 +1,15 @@
 # Post-mortem: RDR-155 — pgvector T3 Consolidation
 
-**Closed:** 2026-06-10 (Chroma serving retired; accepted 2026-06-09). Epic `nexus-skp06` (superseded). Phase beads: `nexus-mf447` (P1), `nexus-tqeg6` (P2), `nexus-eap5l`/`nexus-sbvg0`/`nexus-h3ked` (P3), `nexus-655hc`/`nexus-1k8s1`/`nexus-2ba3x` (P4a), `nexus-unp61`/`nexus-9n4pn`/`nexus-a0i5u` (P5). `close_reason: implemented`.
+**Closed in two stages.** Stage 1, 2026-06-10: Chroma *serving* retired (accepted
+2026-06-09), P4b deletion world-blocked. Stage 2, 2026-07-28: the final deletion
+shipped and the RDR closed — see **P4b: the final deletion** at the end of this
+document. Everything above that section is the stage-1 record, left as written.
+
+Epic `nexus-skp06` (superseded); the P4b arc ran under epic `nexus-rn3wo`.
+Phase beads: `nexus-mf447` (P1), `nexus-tqeg6` (P2),
+`nexus-eap5l`/`nexus-sbvg0`/`nexus-h3ked` (P3), `nexus-655hc`/`nexus-1k8s1`/`nexus-2ba3x`
+(P4a), `nexus-unp61`/`nexus-9n4pn`/`nexus-a0i5u` (P5),
+`nexus-19svb`/`nexus-g37fr`/`nexus-8zpmf` (P4b). `close_reason: implemented`.
 
 ## What shipped
 
@@ -52,3 +61,134 @@ Six phases (P1-P5 + P4a gate = the close boundary; P4b world-blocked):
 - **Missing failure mode**: client timeout defaults calibrated for normal operations were too short for ETL batch operations. Not a new class of failure, but not proactively addressed.
 - **Deferred critical constraint**: the release-boundary hold (`nexus-luxe6`) was not anticipated at RDR accept time. P4a's decision to retire the only user-accessible T3 path (ChromaDB) without a complete install story for the replacement path locked develop unreleasable.
 - **Missing Day 2 operation**: manifest-orphan validation preconditions (catalog tables populated) were not checked before running the validation against empty tables.
+
+---
+
+# P4b: the final deletion (2026-07-25 → 2026-07-28)
+
+The stage-1 record above closes with P4b "world-blocked on `nexus-luxe6`". That
+blocker cleared 2026-06-29; the deletion landed in PR #1422 on 2026-07-25 and
+the gate (`nexus-8zpmf`) closed 2026-07-28.
+
+## What P4b delivered
+
+§Retire's three bullets, verified independently by three reviewers against the
+tree rather than against the gate's own record: zero live `chromadb` imports in
+`src/`, `ModuleNotFoundError` on import, zero `uv.lock` entries;
+`chroma_quotas.py` gone with only prose and deliberate negative-assertion hits
+remaining; no reachable `PersistentClient`/`CloudClient`/`EphemeralClient`
+construction; `service/` Java clean but for the declared survivor. `skp06`
+closed as superseded, exactly as §Retire specified.
+
+Deliberate survivors, recorded so a future reader does not file them as misses:
+`ChromaSchemeHandler.java` and `chroma://` URI literals resolve persisted data
+out of pgvector (RDR-169 G3) — a data format, not a dependency. Frozen Chroma
+directories remain orphan-by-design under the copy-not-move contract; deleting
+that data is a separately consented act.
+
+## The failure mode worth writing down: verifying the claim, not the enforcement
+
+Three incidents in this phase share one shape. A statement about coverage was
+verified by *reading the statement* rather than by checking whether anything
+enforced it.
+
+**1. A guarantee traded for a test that did not exist.**
+`test_storage_boundary_lint.py::test_chromadb_arms_retired_from_banlist`
+justifies REMOVING the `chromadb` arms from the storage-boundary BANLIST on the
+explicit grounds that "tests/test_rdr155_p4b_deletion_gate.py bans any chromadb
+IMPORT anywhere in the package". It did not. That gate banned ~30 dead
+`nexus.*` modules and never `chromadb` itself; the only chromadb-import bans
+were single-file scoped. So this RDR's *primary* claim — §Retire bullet 1 — was
+hand-verified at every gate pass and enforced by nothing, while a real
+guarantee had been given up in exchange for it. Three gate passes missed it.
+Fixed by writing the missing test (`test_no_chromadb_import_anywhere_in_src`,
+AST over all of `src/nexus/`, any nesting depth), mutation-verified against a
+*function-local* import — the shape an anchored regex misses.
+
+**2. A verification run against the wrong knob.** `de07b4f1` recorded verifying
+with `NX_STORAGE_BACKEND=sqlite`. The conftest predicate is
+`NX_TEST_T2_SUBSTRATE`, so that setting leaves `engine_substrate_selected()`
+True and *skips the entire dies-rostered class it claimed to exercise*.
+Measured both ways: `NX_STORAGE_BACKEND=sqlite` gives 5 passed / 3 skipped;
+`NX_TEST_T2_SUBSTRATE=sqlite` gives 2 FAILED. It shipped a refusal with no test
+of its own and left two tests red — under a commit message carrying an explicit
+"COVERAGE CAVEAT" about the suite overstating what was checked.
+
+**3. Ledger rows asserting evidence the tree did not support.** Row 67's
+`validated-by` said "workflow deleted" for a workflow that is in-tree; row 68
+claimed "nightly green post-edit" while the gate was red; row 28 claimed "chroma
+labeling retired" while `doctor.py` still emitted a top-level `"chromadb"` JSON
+key, with the code's own comment saying it would stay "until P4b renames it".
+
+The correction is cheap and worth making routine: **when a record cites coverage
+elsewhere, open that file.** All three survived because the citation was read as
+the evidence.
+
+## The most expensive defect came through a shape, not a deletion
+
+The 71-row capability-disposition ledger (T2 `[21097]`) was built as an
+anti-silent-capability-loss mechanism and earned its keep. But the costliest
+find came from outside it: `HttpTaxonomyStore.get_topic_link_pairs` returned
+triples where the oracle returns a mapping, for the entire life of the RDR-152
+port. Every consumer annotates the mapping, so `scoring.apply_topic_boost`
+raised `ValueError` inside `search_engine`'s best-effort `except Exception`, and
+the *whole* topic boost — same-topic half included — was silently discarded in
+service mode, the default substrate. `tests/db/t2_store_contract.py` could not
+see it: it asserts parameter NAMES and never return shapes.
+
+That is the ledger's own failure class arriving through a shape mismatch rather
+than a deletion, which is why no row covered it. Tracked as `nexus-b8a5a`,
+raised to P1 and sequenced ahead of `nexus-i711w` — the differential oracle
+exists only while both twins do.
+
+## The phase removed its own test fixture
+
+P4b deleted `nx guided-upgrade`, the verb the migrated-box rehearsals
+(`--guided`/`--cold`/`--hole-punch`) drive. So the final phase removed the
+fixture its own pre-cut shakeout requirement depended on. The shakeout was
+performed as a **substitution** — containerized `--shakeout` (32/32: provision,
+14-verb matrix, incremental re-index 3≪41, concurrent load with zero 5xx) plus
+`--package-upgrade` — and recorded as a substitution, not as satisfaction.
+Neither exercises large, real, long-lived migrated data; nothing currently does.
+
+Running `--package-upgrade` once by hand surfaced `nexus-gu4xd` (P1):
+`restart-stale` installs the new engine binary (sha256 provably changed) while
+the running service keeps answering the old version. It went unseen because
+**there is no scheduled workflow for that leg at all** — the only two rehearsal
+workflows are disabled and red respectively. The ungated axis is the more
+important finding than the bug on it.
+
+## Divergences at close
+
+Neither forces `partial`; both are recorded rather than absorbed.
+
+- The pre-cut live shakeout ran on containers, not a real migrated box —
+  because P4b deleted the tooling that would have simulated one, and the single
+  available real box was an unsafe target (client-side T2 migrations plus 11
+  Liquibase changes between its installed version and develop, a moved
+  `REQUIRED_ENGINE_VERSION`, live MCP servers).
+- "The inverse-grep audit ran clean across ALL surfaces" is **not literally
+  true**: `tests/e2e/migration-rehearsal/` carries real executable
+  `chromadb.PersistentClient(...)` that the deletion gate's inverse-grep never
+  sweeps. Inert (separate pinned-chromadb venv, self-guarding driver) and owned
+  by `nexus-8nlj4`.
+
+## Residuals (tracked, not silent)
+
+`nexus-gu4xd` (restart-stale non-convergence) · `nexus-8nlj4` (ungated upgrade
+axis, the migration-rehearsal Chroma surface, the large-migrated-data residual)
+· `nexus-b8a5a` (T2 return-shape parity — **before** `nexus-i711w`) ·
+`nexus-sghyo` and `nexus-4lkmz` (client Voyage credential, tier-0 EF, isolated-T1
+leg: vestiges of a client that no longer embeds) · `nexus-vod2b` (the
+`NX_SERVICE_URL` mode-split tripwire) · `nexus-qvs2h`/`nexus-12m77` (gate-visible
+halves cleared; non-gate items remain theirs) · ledger rows 38/59/60
+cut-deferred until `LAST_MIGRATION_CAPABLE` is stamped at the 7.0.0 cut,
+verified honest rather than smuggled · `NX_GATE_FLOOR` re-pin to ~474 in the
+develop→main promotion commit.
+
+## One thing the RDR got right eleven weeks early
+
+§Migrate specified that if collection-name normalization is ever required, it
+must update `topic_assignments.source_collection` **in lock-step** — "the same
+string-copy-orphan class RDR-108 fixed". That is exactly the constraint binding
+any future 384→768 centroid migration, written long before anyone needed it.
