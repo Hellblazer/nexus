@@ -381,6 +381,18 @@ class TestOperatorFilterServiceParity:
         # --- Service path ---
         base_url, token, svc_port = java_service
         monkeypatch.setenv("NX_STORAGE_BACKEND_DOCUMENT_ASPECTS", "service")
+        # NX_SERVICE_URL must be re-pointed at THIS test's service, not merely
+        # left alone (nexus-qvs2h root cause, 2026-07-28). The URL leg OUTRANKS
+        # the host/port halves in service_endpoint's resolution order, and the
+        # session-scoped engine-substrate fixture (t2_service_env via
+        # _pin_t2_substrate) has already exported an NX_SERVICE_URL pointing at
+        # a DIFFERENT service. Setting only host/port sent every read to that
+        # other service carrying this fixture's bearer, which it does not know:
+        # HTTP 401, surfaced as an empty result set with the error in the
+        # rationale. tests/e2e/local-service-gate.sh documents the same hazard
+        # from the other side ("deliberately NOT NX_SERVICE_URL: the URL leg
+        # outranks the halves").
+        monkeypatch.setenv("NX_SERVICE_URL", base_url)
         monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
         monkeypatch.setenv("NX_SERVICE_PORT", str(svc_port))
         monkeypatch.setenv("NX_SERVICE_TOKEN", token)
@@ -444,6 +456,18 @@ class TestOperatorFilterServiceParity:
 
         base_url, token, svc_port = java_service
         monkeypatch.setenv("NX_STORAGE_BACKEND_DOCUMENT_ASPECTS", "service")
+        # NX_SERVICE_URL must be re-pointed at THIS test's service, not merely
+        # left alone (nexus-qvs2h root cause, 2026-07-28). The URL leg OUTRANKS
+        # the host/port halves in service_endpoint's resolution order, and the
+        # session-scoped engine-substrate fixture (t2_service_env via
+        # _pin_t2_substrate) has already exported an NX_SERVICE_URL pointing at
+        # a DIFFERENT service. Setting only host/port sent every read to that
+        # other service carrying this fixture's bearer, which it does not know:
+        # HTTP 401, surfaced as an empty result set with the error in the
+        # rationale. tests/e2e/local-service-gate.sh documents the same hazard
+        # from the other side ("deliberately NOT NX_SERVICE_URL: the URL leg
+        # outranks the halves").
+        monkeypatch.setenv("NX_SERVICE_URL", base_url)
         monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
         monkeypatch.setenv("NX_SERVICE_PORT", str(svc_port))
         monkeypatch.setenv("NX_SERVICE_TOKEN", token)
@@ -500,6 +524,18 @@ class TestOperatorGroupbyServiceParity:
         # --- Service path ---
         base_url, token, svc_port = java_service
         monkeypatch.setenv("NX_STORAGE_BACKEND_DOCUMENT_ASPECTS", "service")
+        # NX_SERVICE_URL must be re-pointed at THIS test's service, not merely
+        # left alone (nexus-qvs2h root cause, 2026-07-28). The URL leg OUTRANKS
+        # the host/port halves in service_endpoint's resolution order, and the
+        # session-scoped engine-substrate fixture (t2_service_env via
+        # _pin_t2_substrate) has already exported an NX_SERVICE_URL pointing at
+        # a DIFFERENT service. Setting only host/port sent every read to that
+        # other service carrying this fixture's bearer, which it does not know:
+        # HTTP 401, surfaced as an empty result set with the error in the
+        # rationale. tests/e2e/local-service-gate.sh documents the same hazard
+        # from the other side ("deliberately NOT NX_SERVICE_URL: the URL leg
+        # outranks the halves").
+        monkeypatch.setenv("NX_SERVICE_URL", base_url)
         monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
         monkeypatch.setenv("NX_SERVICE_PORT", str(svc_port))
         monkeypatch.setenv("NX_SERVICE_TOKEN", token)
@@ -562,6 +598,18 @@ class TestOperatorGroupbyServiceParity:
 
         base_url, token, svc_port = java_service
         monkeypatch.setenv("NX_STORAGE_BACKEND_DOCUMENT_ASPECTS", "service")
+        # NX_SERVICE_URL must be re-pointed at THIS test's service, not merely
+        # left alone (nexus-qvs2h root cause, 2026-07-28). The URL leg OUTRANKS
+        # the host/port halves in service_endpoint's resolution order, and the
+        # session-scoped engine-substrate fixture (t2_service_env via
+        # _pin_t2_substrate) has already exported an NX_SERVICE_URL pointing at
+        # a DIFFERENT service. Setting only host/port sent every read to that
+        # other service carrying this fixture's bearer, which it does not know:
+        # HTTP 401, surfaced as an empty result set with the error in the
+        # rationale. tests/e2e/local-service-gate.sh documents the same hazard
+        # from the other side ("deliberately NOT NX_SERVICE_URL: the URL leg
+        # outranks the halves").
+        monkeypatch.setenv("NX_SERVICE_URL", base_url)
         monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
         monkeypatch.setenv("NX_SERVICE_PORT", str(svc_port))
         monkeypatch.setenv("NX_SERVICE_TOKEN", token)
@@ -597,6 +645,18 @@ class TestOperatorGroupbyServiceParity:
         # --- Service path ---
         base_url, token, svc_port = java_service
         monkeypatch.setenv("NX_STORAGE_BACKEND_DOCUMENT_ASPECTS", "service")
+        # NX_SERVICE_URL must be re-pointed at THIS test's service, not merely
+        # left alone (nexus-qvs2h root cause, 2026-07-28). The URL leg OUTRANKS
+        # the host/port halves in service_endpoint's resolution order, and the
+        # session-scoped engine-substrate fixture (t2_service_env via
+        # _pin_t2_substrate) has already exported an NX_SERVICE_URL pointing at
+        # a DIFFERENT service. Setting only host/port sent every read to that
+        # other service carrying this fixture's bearer, which it does not know:
+        # HTTP 401, surfaced as an empty result set with the error in the
+        # rationale. tests/e2e/local-service-gate.sh documents the same hazard
+        # from the other side ("deliberately NOT NX_SERVICE_URL: the URL leg
+        # outranks the halves").
+        monkeypatch.setenv("NX_SERVICE_URL", base_url)
         monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
         monkeypatch.setenv("NX_SERVICE_PORT", str(svc_port))
         monkeypatch.setenv("NX_SERVICE_TOKEN", token)
@@ -703,6 +763,18 @@ class TestOperatorGroupbyServiceParity:
         # --- Service path ---
         base_url, token, svc_port = java_service
         monkeypatch.setenv("NX_STORAGE_BACKEND_DOCUMENT_ASPECTS", "service")
+        # NX_SERVICE_URL must be re-pointed at THIS test's service, not merely
+        # left alone (nexus-qvs2h root cause, 2026-07-28). The URL leg OUTRANKS
+        # the host/port halves in service_endpoint's resolution order, and the
+        # session-scoped engine-substrate fixture (t2_service_env via
+        # _pin_t2_substrate) has already exported an NX_SERVICE_URL pointing at
+        # a DIFFERENT service. Setting only host/port sent every read to that
+        # other service carrying this fixture's bearer, which it does not know:
+        # HTTP 401, surfaced as an empty result set with the error in the
+        # rationale. tests/e2e/local-service-gate.sh documents the same hazard
+        # from the other side ("deliberately NOT NX_SERVICE_URL: the URL leg
+        # outranks the halves").
+        monkeypatch.setenv("NX_SERVICE_URL", base_url)
         monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
         monkeypatch.setenv("NX_SERVICE_PORT", str(svc_port))
         monkeypatch.setenv("NX_SERVICE_TOKEN", token)
@@ -770,6 +842,18 @@ class TestOperatorConfidenceAggregateServiceParity:
         # --- Service path ---
         base_url, token, svc_port = java_service
         monkeypatch.setenv("NX_STORAGE_BACKEND_DOCUMENT_ASPECTS", "service")
+        # NX_SERVICE_URL must be re-pointed at THIS test's service, not merely
+        # left alone (nexus-qvs2h root cause, 2026-07-28). The URL leg OUTRANKS
+        # the host/port halves in service_endpoint's resolution order, and the
+        # session-scoped engine-substrate fixture (t2_service_env via
+        # _pin_t2_substrate) has already exported an NX_SERVICE_URL pointing at
+        # a DIFFERENT service. Setting only host/port sent every read to that
+        # other service carrying this fixture's bearer, which it does not know:
+        # HTTP 401, surfaced as an empty result set with the error in the
+        # rationale. tests/e2e/local-service-gate.sh documents the same hazard
+        # from the other side ("deliberately NOT NX_SERVICE_URL: the URL leg
+        # outranks the halves").
+        monkeypatch.setenv("NX_SERVICE_URL", base_url)
         monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
         monkeypatch.setenv("NX_SERVICE_PORT", str(svc_port))
         monkeypatch.setenv("NX_SERVICE_TOKEN", token)
@@ -854,6 +938,18 @@ class TestOperatorConfidenceAggregateServiceParity:
         # --- Service path ---
         base_url, token, svc_port = java_service
         monkeypatch.setenv("NX_STORAGE_BACKEND_DOCUMENT_ASPECTS", "service")
+        # NX_SERVICE_URL must be re-pointed at THIS test's service, not merely
+        # left alone (nexus-qvs2h root cause, 2026-07-28). The URL leg OUTRANKS
+        # the host/port halves in service_endpoint's resolution order, and the
+        # session-scoped engine-substrate fixture (t2_service_env via
+        # _pin_t2_substrate) has already exported an NX_SERVICE_URL pointing at
+        # a DIFFERENT service. Setting only host/port sent every read to that
+        # other service carrying this fixture's bearer, which it does not know:
+        # HTTP 401, surfaced as an empty result set with the error in the
+        # rationale. tests/e2e/local-service-gate.sh documents the same hazard
+        # from the other side ("deliberately NOT NX_SERVICE_URL: the URL leg
+        # outranks the halves").
+        monkeypatch.setenv("NX_SERVICE_URL", base_url)
         monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
         monkeypatch.setenv("NX_SERVICE_PORT", str(svc_port))
         monkeypatch.setenv("NX_SERVICE_TOKEN", token)
@@ -922,6 +1018,18 @@ class TestOperatorConfidenceAggregateServiceParity:
         # --- Service path ---
         base_url, token, svc_port = java_service
         monkeypatch.setenv("NX_STORAGE_BACKEND_DOCUMENT_ASPECTS", "service")
+        # NX_SERVICE_URL must be re-pointed at THIS test's service, not merely
+        # left alone (nexus-qvs2h root cause, 2026-07-28). The URL leg OUTRANKS
+        # the host/port halves in service_endpoint's resolution order, and the
+        # session-scoped engine-substrate fixture (t2_service_env via
+        # _pin_t2_substrate) has already exported an NX_SERVICE_URL pointing at
+        # a DIFFERENT service. Setting only host/port sent every read to that
+        # other service carrying this fixture's bearer, which it does not know:
+        # HTTP 401, surfaced as an empty result set with the error in the
+        # rationale. tests/e2e/local-service-gate.sh documents the same hazard
+        # from the other side ("deliberately NOT NX_SERVICE_URL: the URL leg
+        # outranks the halves").
+        monkeypatch.setenv("NX_SERVICE_URL", base_url)
         monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
         monkeypatch.setenv("NX_SERVICE_PORT", str(svc_port))
         monkeypatch.setenv("NX_SERVICE_TOKEN", token)
@@ -994,6 +1102,18 @@ class TestRLSIsolation:
 
         base_url, token, svc_port = java_service
         monkeypatch.setenv("NX_STORAGE_BACKEND_DOCUMENT_ASPECTS", "service")
+        # NX_SERVICE_URL must be re-pointed at THIS test's service, not merely
+        # left alone (nexus-qvs2h root cause, 2026-07-28). The URL leg OUTRANKS
+        # the host/port halves in service_endpoint's resolution order, and the
+        # session-scoped engine-substrate fixture (t2_service_env via
+        # _pin_t2_substrate) has already exported an NX_SERVICE_URL pointing at
+        # a DIFFERENT service. Setting only host/port sent every read to that
+        # other service carrying this fixture's bearer, which it does not know:
+        # HTTP 401, surfaced as an empty result set with the error in the
+        # rationale. tests/e2e/local-service-gate.sh documents the same hazard
+        # from the other side ("deliberately NOT NX_SERVICE_URL: the URL leg
+        # outranks the halves").
+        monkeypatch.setenv("NX_SERVICE_URL", base_url)
         monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
         monkeypatch.setenv("NX_SERVICE_PORT", str(svc_port))
         # Phase E: tenant is bound to the TOKEN server-side; the tenant env/header
@@ -1023,6 +1143,18 @@ class TestRLSIsolation:
 
         base_url, token, svc_port = java_service
         monkeypatch.setenv("NX_STORAGE_BACKEND_DOCUMENT_ASPECTS", "service")
+        # NX_SERVICE_URL must be re-pointed at THIS test's service, not merely
+        # left alone (nexus-qvs2h root cause, 2026-07-28). The URL leg OUTRANKS
+        # the host/port halves in service_endpoint's resolution order, and the
+        # session-scoped engine-substrate fixture (t2_service_env via
+        # _pin_t2_substrate) has already exported an NX_SERVICE_URL pointing at
+        # a DIFFERENT service. Setting only host/port sent every read to that
+        # other service carrying this fixture's bearer, which it does not know:
+        # HTTP 401, surfaced as an empty result set with the error in the
+        # rationale. tests/e2e/local-service-gate.sh documents the same hazard
+        # from the other side ("deliberately NOT NX_SERVICE_URL: the URL leg
+        # outranks the halves").
+        monkeypatch.setenv("NX_SERVICE_URL", base_url)
         monkeypatch.setenv("NX_SERVICE_HOST", "127.0.0.1")
         monkeypatch.setenv("NX_SERVICE_PORT", str(svc_port))
         monkeypatch.setenv("NX_SERVICE_TOKEN", token)
