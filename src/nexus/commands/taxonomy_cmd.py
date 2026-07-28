@@ -402,16 +402,40 @@ def discover_for_collection(
 
     _progress(f"    fetched {len(all_ids):,} chunks")
 
-    # Use T3 embeddings if all docs have them; else fall back to MiniLM
-    if has_t3_embeddings and len(all_embs) == len(all_ids):
-        _progress(f"    embedding: using T3 native ({len(all_embs[0])}d)")
-        embeddings = np.array(all_embs, dtype=np.float32)
-    else:
-        from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 - deferred to avoid circular import at module load
+    # Cluster the collection's STORED vectors — never re-embed. Fourth copy of
+    # the fix applied to HttpTaxonomyStore.split_topic, CatalogTaxonomy.
+    # split_topic and the raw CLI split path (nexus-9pqoj, d0a3387d /
+    # de07b4f1, whose message reads "all three read stored vectors and none of
+    # them embeds"). This one was discover rather than split, so it escaped
+    # that sweep: a MiniLM-384 re-encode yields topic centroids in a different
+    # space than a bge-768 / voyage-1024 collection's chunks, persists them
+    # into taxonomy_centroids_384, and every later ANN assign then hits the
+    # dimension-mismatch guard and returns [] — a collection full of topics
+    # nothing can be assigned to.
+    #
+    # The service path (_discover_via_service) already refuses this way, so
+    # only the raw path was affected. Refusal happens BEFORE clustering, not
+    # merely before persist: clustering in the wrong space and then discarding
+    # is still minutes of work whose only possible output is wrong.
+    if not (has_t3_embeddings and len(all_embs) == len(all_ids)):
+        _log.warning(
+            "discover_refused_no_stored_vectors",
+            collection=collection_name,
+            chunks=len(all_ids),
+            with_vectors=len(all_embs),
+        )
+        if not quiet:
+            _progress(
+                f"    cannot discover topics for {collection_name}: the "
+                f"collection returned no stored vectors for its documents "
+                f"({len(all_embs):,} of {len(all_ids):,}). Refusing to "
+                f"re-embed, because topic centroids must share the "
+                f"collection's own vector space."
+            )
+        return 0
 
-        _progress(f"    embedding: re-encoding with MiniLM (384d)")
-        ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-        embeddings = np.array(ef(all_texts), dtype=np.float32)
+    _progress(f"    embedding: using T3 native ({len(all_embs[0])}d)")
+    embeddings = np.array(all_embs, dtype=np.float32)
 
     _progress(f"    clustering {len(all_ids):,} x {embeddings.shape[1]}d...")
     t0 = time.monotonic()

@@ -3134,6 +3134,94 @@ class TestManualOpsCLI:
         engine_substrate_selected(),
         reason="dies-roster: raw-path split CLI (CatalogTaxonomy.compute_split patch + t2_index_write routing; service branch bypasses both) dies at the RDR-155 P4b flip",
     )
+    def test_split_cli_refuses_when_collection_has_no_stored_vectors(
+        self, tmp_path: Path,
+    ) -> None:
+        """No stored vectors -> refuse, never re-embed (de07b4f1, nexus-9pqoj).
+
+        The refusal shipped in de07b4f1 with NO test of its own, and the
+        happy-path tests around it were left red because their mocks returned
+        documents without embeddings — invisible because that commit verified
+        with NX_STORAGE_BACKEND=sqlite, which leaves engine_substrate_selected()
+        True so this whole dies-rostered class SKIPS. The predicate is
+        NX_TEST_T2_SUBSTRATE.
+
+        Non-vacuity: asserted on the refusal MESSAGE, not on a topic count.
+        Both the refusing and the broken path can end at zero children (the
+        broken one via the len<k short-circuit that prints "into 0
+        sub-topics"), which is the trap de07b4f1 recorded its first attempt
+        falling into.
+        """
+        import nexus.mcp_infra as _mi
+        from unittest.mock import MagicMock, patch
+
+        from click.testing import CliRunner
+
+        from nexus.commands.taxonomy_cmd import taxonomy
+
+        db_path = tmp_path / "memory.db"
+        with T2Database(db_path) as db:
+            db.taxonomy.conn.execute(
+                "INSERT INTO topics (label, collection, doc_count, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                ("vectorless", "test__split_refuse", 10, "2026-01-01T00:00:00Z"),
+            )
+            parent_id = db.taxonomy.conn.execute(
+                "SELECT last_insert_rowid()"
+            ).fetchone()[0]
+            for i in range(10):
+                db.taxonomy.conn.execute(
+                    "INSERT INTO topic_assignments (doc_id, topic_id) VALUES (?, ?)",
+                    (f"doc-{i}", parent_id),
+                )
+            db.taxonomy.conn.commit()
+
+        mock_t3 = MagicMock(spec=T3Database)
+        mock_coll = MagicMock()
+        # Documents but NO vectors — the exact shape that used to trigger the
+        # MiniLM-384 re-encode into a bge-768/voyage-1024 collection's space.
+        mock_coll.get.return_value = {
+            "ids": [f"doc-{i}" for i in range(10)],
+            "documents": [f"text {i}" for i in range(10)],
+            "embeddings": None,
+        }
+        mock_t3._client = MagicMock(spec=InMemoryVectorClient)
+        mock_t3._client.get_collection.return_value = mock_coll
+        mock_t3._client.get_or_create_collection.return_value = MagicMock()
+
+        def _must_not_split(*_a, **_k):
+            raise AssertionError(
+                "split must refuse BEFORE computing children when the "
+                "collection supplies no stored vectors"
+            )
+
+        runner = CliRunner()
+        with (
+            patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
+            patch("nexus.db.make_t3", return_value=mock_t3),
+            patch(
+                "nexus.db.t2.catalog_taxonomy.CatalogTaxonomy.compute_split",
+                _must_not_split,
+            ),
+            patch.object(_mi, "t2_index_write", _must_not_split),
+        ):
+            result = runner.invoke(
+                taxonomy,
+                ["split", "vectorless", "--k", "2",
+                 "--collection", "test__split_refuse"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "no stored vectors" in result.output, result.output
+        assert "Refusing to re-embed" in result.output, result.output
+        assert "sub-topics" not in result.output, (
+            "the refusal must not be reported as a successful zero-child split"
+        )
+
+    @pytest.mark.skipif(
+        engine_substrate_selected(),
+        reason="dies-roster: raw-path split CLI (CatalogTaxonomy.compute_split patch + t2_index_write routing; service branch bypasses both) dies at the RDR-155 P4b flip",
+    )
     def test_split_cli(self, tmp_path: Path) -> None:
         """nx taxonomy split invokes compute_split+persist_split via t2_index_write."""
         import nexus.mcp_infra as _mi
@@ -3196,6 +3284,11 @@ class TestManualOpsCLI:
         mock_coll.get.return_value = {
             "ids": [f"doc-{i}" for i in range(30)],
             "documents": [f"text {i}" for i in range(30)],
+            # de07b4f1: split reads STORED vectors and refuses when the
+            # collection cannot supply aligned ones, so the mock must
+            # carry them. compute_split is stubbed, so the values are
+            # irrelevant — only presence and alignment matter.
+            "embeddings": [[0.1] * 384 for _ in range(30)],
         }
         # _client is an instance-only attribute of T3Database (assigned in
         # __init__), so it is invisible to dir(T3Database) and thus to
@@ -3313,6 +3406,11 @@ class TestManualOpsCLI:
         mock_coll.get.return_value = {
             "ids": [f"doc-{i}" for i in range(10)],
             "documents": [f"text {i}" for i in range(10)],
+            # de07b4f1: split reads STORED vectors and refuses when the
+            # collection cannot supply aligned ones, so the mock must
+            # carry them. compute_split is stubbed, so the values are
+            # irrelevant — only presence and alignment matter.
+            "embeddings": [[0.1] * 384 for _ in range(10)],
         }
         mock_t3._client = MagicMock(spec=InMemoryVectorClient)
         mock_t3._client.get_collection.return_value = mock_coll
@@ -3381,6 +3479,11 @@ class TestManualOpsCLI:
         mock_coll.get.return_value = {
             "ids": [f"doc-{i}" for i in range(5)],
             "documents": [f"text {i}" for i in range(5)],
+            # de07b4f1: split reads STORED vectors and refuses when the
+            # collection cannot supply aligned ones, so the mock must
+            # carry them. compute_split is stubbed, so the values are
+            # irrelevant — only presence and alignment matter.
+            "embeddings": [[0.1] * 384 for _ in range(5)],
         }
         mock_t3._client = MagicMock(spec=InMemoryVectorClient)
         mock_t3._client.get_collection.return_value = mock_coll
