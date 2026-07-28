@@ -453,6 +453,32 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         result = self._post("/assignments/for_docs", {"doc_ids": doc_ids})
         return {r["doc_id"]: r["topic_id"] for r in result}
 
+    def get_assignment_details(self, doc_ids: list[str]) -> list[dict[str, Any]]:
+        """Full assignment rows including the quality columns (nexus-onjvy).
+
+        SERVICE-MODE ONLY (``T2_SUPPLEMENTAL_CONTRACT``): the SQLite twin read
+        these columns through a raw connection, so there is no oracle method to
+        be at parity with, and the SQLite-derived contract cannot see this.
+
+        :meth:`get_assignments_for_docs` projects ``doc_id`` + ``topic_id`` and
+        nothing else, and until the ``/assignments/details`` route landed no
+        other route returned the rest — so ``similarity``, ``assigned_at`` and
+        ``source_collection`` were written by the assign path and readable by
+        nobody. An operator could not ask how confident an assignment was, when
+        it was made, or which collection it came from.
+
+        Kept SEPARATE from the cheap map read rather than widening it: callers
+        destructure ``get_assignments_for_docs`` as ``{doc_id: topic_id}``, so
+        widening would change a return type they depend on.
+
+        Each row: ``doc_id``, ``topic_id``, ``assigned_by``, ``similarity``,
+        ``source_collection``, ``assigned_at`` (UTC ISO-8601, explicit seconds).
+        """
+        if not doc_ids:
+            return []
+        rows = self._post("/assignments/details", {"doc_ids": doc_ids})
+        return list(rows or [])
+
     def purge_assignments_for_doc(self, project: str, title: str) -> int:
         """Remove assignments for a deleted doc."""
         r = self._post("/assignments/purge_doc", {"project": project, "title": title})
@@ -1445,9 +1471,13 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     ) -> list[HubRow]:
         """Return candidate hub topics, sorted by chunks * (1 - ICF) desc.
 
-        Delegates DF/chunk aggregation to the service (/hubs); computes
-        ICF, stopword matching, and score Python-side for exact parity
-        with CatalogTaxonomy.detect_hubs.
+        Delegates DF/chunk aggregation AND the warn_stale aggregates to the
+        service (/hubs); computes ICF, stopword matching, and score Python-side
+        for exact parity with CatalogTaxonomy.detect_hubs.
+
+        ``warn_stale`` was accepted and silently dropped here until
+        engine-service-v0.1.58 added ``max_last_discover_at`` /
+        ``never_discovered_count`` / ``is_stale`` to the route (nexus-onjvy).
         """
         rows: list[dict[str, Any]] = self._get("/hubs", {"min_collections": min_collections})
         icf_map = self.compute_icf_map()
@@ -1483,14 +1513,35 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 matched_stopwords=matched,
                 source_collections=sources,
                 last_assigned_at=last_at,
-                # nexus-onjvy: warn_stale is ACCEPTED AND SILENTLY DROPPED over
-                # HTTP — the caller gets no warning and no error, the same
-                # contract break as nexus-ybj1b (include_heuristic). Pinned by
-                # tests/db/test_onjvy_write_only_surfaces.py; when a real
-                # implementation lands, that test fails and tells you so.
-                max_last_discover_at=None,
-                never_discovered_count=0,
-                is_stale=False,
+                # nexus-onjvy: warn_stale used to be ACCEPTED AND SILENTLY
+                # DROPPED here — `nx taxonomy hubs --warn-stale` returned
+                # is_stale=False for every row, with no warning and no error,
+                # the same contract break as nexus-ybj1b (include_heuristic).
+                # engine-service-v0.1.58 added the aggregates to /hubs, so the
+                # flag now does what it says.
+                #
+                # is_stale is computed SERVER-side, unlike icf/score above, and
+                # that asymmetry is deliberate: the retired SQLite oracle
+                # compared ISO-8601 strings lexicographically, which was sound
+                # on TEXT timestamps but is not over HTTP, where a naive
+                # OffsetDateTime.toString() renders in the server's LOCAL
+                # offset and elides zero seconds. Comparing real TIMESTAMPTZ
+                # server-side avoids reintroducing that trap; the client passes
+                # the verdict through rather than re-deriving it from strings.
+                # Gated on warn_stale to match the oracle, which only
+                # populated these when asked. The engine computes them
+                # unconditionally (one taxonomy_meta lookup), so without this
+                # gate detect_hubs(warn_stale=False) would report staleness on
+                # the Http twin and zeros on the oracle — a divergence in the
+                # OFF case, introduced while fixing the ON case.
+                max_last_discover_at=(
+                    str(r["max_last_discover_at"])
+                    if warn_stale and r.get("max_last_discover_at") else None
+                ),
+                never_discovered_count=(
+                    int(r.get("never_discovered_count", 0)) if warn_stale else 0
+                ),
+                is_stale=bool(r.get("is_stale", False)) if warn_stale else False,
             ))
 
         hubs.sort(key=lambda h: h.score, reverse=True)

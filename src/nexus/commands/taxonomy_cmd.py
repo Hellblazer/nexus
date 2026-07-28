@@ -674,6 +674,7 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
         # needs to be a decision, not a side effect of the deletion sweep.
         # Characterized by tests/db/test_onjvy_write_only_surfaces.py.
         rows: list[tuple[str, int, int, str | None]] = []
+        service_total: int | None = None
         try:
             if _has_raw_access(db.taxonomy):
                 with db.taxonomy._lock:  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
@@ -693,6 +694,26 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
                             "WHERE occurred_at >= datetime('now', '-1 day')"
                         ).fetchall()
                         rows = [(r[0], 1, 0, None) for r in legacy]
+            else:
+                # SERVICE MODE (nexus-onjvy). Until engine-service-v0.1.58 this
+                # branch did not exist: hook_failures had no read route, so
+                # `nx taxonomy status` silently showed nothing on the default
+                # substrate — the failure log that exists to surface SILENT
+                # hook failures was itself silent. `total` is the server's
+                # exact count over the whole 24h window, independent of the
+                # page below, so the headline cannot under-report when
+                # failures exceed the page.
+                resp = db.telemetry.list_hook_failures(days=1, limit=300)
+                service_total = int(resp.get("total") or 0)
+                rows = [
+                    (
+                        str(r.get("hook_name") or "?"),
+                        1,
+                        1 if r.get("is_batch") else 0,
+                        r.get("batch_doc_ids") or None,
+                    )
+                    for r in resp.get("rows") or []
+                ]
         except Exception:  # noqa: BLE001 - best-effort row read; degrades to empty list
             rows = []
 
@@ -700,7 +721,12 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
             import json as _json  # noqa: PLC0415 - branch-local; deferred to call time
             from collections import Counter  # noqa: PLC0415 - branch-local; deferred to call time
 
-            total_recent = sum(n for _, n, _, _ in rows)
+            # The server's count is exact over the whole window; the raw
+            # branch has no cap so summing its rows is equally exact.
+            total_recent = (
+                service_total if service_total is not None
+                else sum(n for _, n, _, _ in rows)
+            )
             per_hook: Counter[str] = Counter()
             docs_affected = 0
             for name, _count, is_batch, batch_payload in rows:

@@ -278,7 +278,21 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
     'scratch': {
         'close_session': [],
     },
+    'taxonomy': {
+        # nexus-onjvy: the quality columns (similarity / assigned_at /
+        # source_collection) were WRITE-ONLY until engine-service-v0.1.58 added
+        # /assignments/details. The SQLite twin read them through a raw
+        # connection, so there is no oracle method for the parity contract to
+        # see — without this entry the method is silently deletable.
+        'get_assignment_details': ['doc_ids'],
+    },
     'telemetry': {
+        # nexus-onjvy: hook_failures was WRITE-ONLY over HTTP (/record + /trim,
+        # no read route). Its only readers were raw SELECTs in
+        # `nx taxonomy status` / `nx doctor`, which die with the SQLite stores
+        # in nexus-i711w — this is their REPLACEMENT, not a port, so it has no
+        # twin by construction and needs the supplemental entry.
+        'list_hook_failures': ['days', 'hook_names', 'limit'],
         'query_tier_writes': ['session_id', 'since', 'last_n'],
         'query_tier_writes_once': ['session_id', 'timeout'],
     },
