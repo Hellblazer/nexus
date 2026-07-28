@@ -1155,7 +1155,6 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
     """
     import numpy as _np  # noqa: PLC0415 - heavy dep deferred to call time
     from nexus.db import make_t3  # noqa: PLC0415 - deferred to avoid circular import at module load
-    from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 - deferred to avoid circular import at module load
     from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy  # noqa: PLC0415 - deferred to avoid circular import at module load
     from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred to avoid circular import at module load
 
@@ -1206,23 +1205,57 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
             click.echo(f"Collection '{collection_name}' not found in T3.")
             return
 
+        # Read the collection's STORED vectors — never re-embed. Third copy of
+        # the fix applied to HttpTaxonomyStore.split_topic and
+        # CatalogTaxonomy.split_topic (nexus-9pqoj extended 2026-07-28): a
+        # MiniLM-384 re-embed yields child centroids in a different space than
+        # a bge-768 / voyage-1024 collection's chunks, so they persist into
+        # taxonomy_centroids_384, the following ANN assign hits the dimension
+        # -mismatch guard and returns [], and the split silently creates
+        # unassignable topics.
         _PAGE = 250
         fetched_ids: list[str] = []
         texts: list[str] = []
+        vectors: list[list[float]] = []
+        vectors_unavailable = False
         for i in range(0, len(doc_ids), _PAGE):
             batch = doc_ids[i : i + _PAGE]
-            result = coll.get(ids=batch, include=["documents"])
-            for fid, fdoc in zip(result.get("ids") or [], result.get("documents") or []):
-                if fdoc:
-                    fetched_ids.append(fid)
-                    texts.append(fdoc)
+            result = coll.get(ids=batch, include=["documents", "embeddings"])
+            got_ids = result.get("ids") or []
+            got_docs = result.get("documents") or []
+            got_embs = result.get("embeddings")
+            if got_embs is None or len(got_embs) != len(got_ids):
+                vectors_unavailable = True
+                break
+            for fid, fdoc, femb in zip(got_ids, got_docs, got_embs):
+                if not fdoc:
+                    continue
+                # A usable doc with no vector is the unavailable case, not a
+                # row to drop quietly — dropping shrinks `texts` until the
+                # len<k branch prints "into 0 sub-topics", which reads as
+                # "too small to split" rather than "could not be computed".
+                if femb is None:
+                    vectors_unavailable = True
+                    break
+                fetched_ids.append(fid)
+                texts.append(fdoc)
+                vectors.append(list(femb))
+            if vectors_unavailable:
+                break
+
+        if vectors_unavailable:
+            click.echo(
+                f"Cannot split '{topic_label}': the collection returned no stored "
+                f"vectors for its documents. Refusing to re-embed, because child "
+                f"centroids must share the collection's own vector space."
+            )
+            return
 
         if len(texts) < k:
             click.echo(f"Split '{topic_label}' into 0 sub-topics.")
             return
 
-        ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-        embeddings = _np.array(ef(texts), dtype=_np.float32)
+        embeddings = _np.asarray(vectors, dtype=_np.float32)
 
         # COMPUTE: KMeans + c-TF-IDF (pure CPU, no T2 writes)
         split_result = CatalogTaxonomy.compute_split(
