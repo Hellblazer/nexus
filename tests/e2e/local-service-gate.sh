@@ -138,44 +138,15 @@ SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/nx-local-service-gate.XXXXXX")"
 echo "[gate] scratch config: $SCRATCH"
 
 # .env does NOT auto-load anywhere in the suite; source it explicitly, and
-# BEFORE the service starts. pytest inherits the same exports. In CI there is
-# no .env — the workflow supplies VOYAGE_API_KEY from repo secrets and
-# hard-fails before reaching this script if it is empty.
+# BEFORE the service starts — the supervisor plumbs VOYAGE_API_KEY ->
+# NX_VOYAGE_API_KEY into the service env at spawn (storage_service_daemon.py),
+# so the key must be exported by then or the service falls back to ONNX-only
+# and 422s every voyage-* collection. pytest inherits the same exports.
 if [ -f "$REPO_ROOT/.env" ]; then
   set -a
   # shellcheck disable=SC1091
   source "$REPO_ROOT/.env"
   set +a
-fi
-
-# nexus-w6h2m: promote VOYAGE_API_KEY -> NX_VOYAGE_API_KEY explicitly.
-#
-# This used to say "the supervisor plumbs VOYAGE_API_KEY -> NX_VOYAGE_API_KEY
-# at spawn". That stopped being unconditionally true on 2026-07-21 (nexus-r5f3c,
-# commit b745589c). storage_service_daemon.py now consults the CONFIGURED local
-# embed model first and only plumbs the ambient key from the credential chain
-# when that model is a voyage model, or when no choice was recorded — because an
-# ambient key was flipping bge installs voyage-only and 422ing the first store
-# against the bge collections the client builds. That guard is correct and must
-# not be weakened.
-#
-# But step 1 of this gate runs `nx init --service`, which stamps
-# local.embed_model=bge-768 (init.py, "service: bge-768 only" — RDR-160). So the
-# gate configures the exact condition that blocks its own key, and the
-# voyage/CCE subset then 422s with "service (embedding mode onnx-local) has no
-# embedder for model 'voyage-code-3'".
-#
-# storage_service_daemon.py names the sanctioned escape hatch in its own
-# comment: "Explicit NX_VOYAGE_API_KEY still always passes through." Setting it
-# here is caller intent — this gate exists to exercise voyage collections — and
-# leaves the guard intact for real installs. Pinned by
-# tests/daemon/test_storage_service_daemon.py::
-# test_bge_configured_model_explicit_override_still_wins.
-if [ -n "${VOYAGE_API_KEY:-}" ] && [ -z "${NX_VOYAGE_API_KEY:-}" ]; then
-  export NX_VOYAGE_API_KEY="$VOYAGE_API_KEY"
-  echo "[gate] NX_VOYAGE_API_KEY set from VOYAGE_API_KEY (explicit override; the"
-  echo "       r5f3c configured-model guard would otherwise block the chain plumb"
-  echo "       because 'nx init --service' stamps local.embed_model=bge-768)"
 fi
 # NEXUS_GATE_NO_VOYAGE=1: mask the Voyage key AFTER sourcing .env. A DEAD key
 # hard-fails the voyage/CCE subset (the embed 401s surface as typed 502s),
