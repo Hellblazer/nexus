@@ -180,13 +180,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 2026-07-06 CI-cost pass: develop pushes run 3.12 only (~20 min of
-        # ubuntu saved per push — the single largest routine CI cost); PRs
-        # run the full matrix, so the 3.13 required checks on main/develop
-        # still gate every merge. 3.13-only regressions surface at the PR
-        # boundary instead of per push — accepted: 3.13 breakage has
+        # 3.13 RUNS ONLY AT THE MERGE BOUNDARY (Hal, 2026-07-28). i711w deleted
+        # the SQLite arm, so every pytest leg now costs the engine arm's ~33.5
+        # min; paying that twice on interior PRs bought little. `pytest (Python
+        # 3.13)` was removed from DEVELOP's required contexts to match — main
+        # still requires it, and release PRs target main, so the promotion that
+        # actually ships still runs the full matrix.
+        #
+        # Measured before choosing (see T2 nexus/ci-cost-structure): pytest is
+        # 92% of CI time, and the run mix is 31 push / 9 pull_request — so this
+        # reaches only ~22% of runs. It is the smaller half of the clawback;
+        # the larger half is push CADENCE (18 push-triggered runs in one day,
+        # seven inside 40 minutes), which is a habit, not a workflow knob.
+        #
+        # 3.12 remains the representative leg everywhere. 3.13-only regressions
+        # surface at the main boundary — accepted: 3.13 breakage has
         # historically been GHA-flake (nexus-9eaz family), not real drift.
-        python-version: ${{ github.event_name == 'push' && fromJSON('["3.12"]') || fromJSON('["3.12", "3.13"]') }}
+        python-version: ${{ (github.event_name == 'pull_request' && github.base_ref == 'main') && fromJSON('["3.12", "3.13"]') || fromJSON('["3.12"]') }}
 
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
