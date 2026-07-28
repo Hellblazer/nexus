@@ -1836,11 +1836,13 @@ nx doctor --check-quotas            # Vector-store limits + embedder caps + rera
 nx doctor --check-quotas --json     # Structured output for dashboards / CI gates
 ```
 
-The `--check-quotas` flag (introduced 4.9.0, nexus-c590) emits a three-section pre-flight report: (1) the per-request limits drawn from `nexus.db.chroma_quotas.QUOTAS` (`MAX_QUERY_RESULTS`, `MAX_RECORDS_PER_WRITE`, `MAX_CONCURRENT_*`, document size caps) which the managed-cloud path still honours, plus a reachability probe that fires only when a ChromaDB Cloud migration source is configured; (2) Voyage AI per-model token and dimension caps (`voyage-3`, `voyage-code-3`, `voyage-context-3`) with `VOYAGE_API_KEY` presence check; (3) the cumulative retry accumulator from `nexus.retry.get_retry_stats()` so any transient-error backoffs observed in the current process surface alongside the static limits.
+The `--check-quotas` flag (introduced 4.9.0, nexus-c590) emits a four-section pre-flight report: (1) `vector_store` — the per-request limits from `nexus.db.limits.QUOTAS` (`MAX_QUERY_RESULTS`, `MAX_RECORDS_PER_WRITE`, `MAX_CONCURRENT_*`, document size caps), which remain the authoritative chunking and paging caps, plus a reachability probe of the T3 vector store; (2) `voyage` — per-model token and dimension caps (`voyage-3`, `voyage-code-3`, `voyage-context-3`); (3) `cross_encoder` — the reranker's model info; (4) `retry` — the cumulative accumulator from `nexus.retry.get_retry_stats()`, so transient-error backoffs observed in the current process surface alongside the static limits.
 
 Exit codes:
-- `0` — reachable cloud tenant or local-mode (limits are reference-only).
-- `1` — cloud tenant unreachable in cloud mode; the report is not actionable without a working client. Suitable as a CI gate.
+- `0` — the T3 vector store is reachable.
+- `1` — unreachable; the report is not actionable without a working store. Suitable as a CI gate.
+
+**Breaking change in 7.0.0**: the JSON section key `chromadb` was renamed to `vector_store`. It had carried the dependency's name for machine-consumer stability; RDR-155 P4b removed the dependency, and a MAJOR release is the point at which this documented payload's shape changes. Dashboards and CI gates parsing `--json` must read `vector_store`. The `voyage`, `cross_encoder` and `retry` sections are unchanged.
 
 ```
 nx doctor --check-post-store-hooks   # Enumerate registered post-store hook chains

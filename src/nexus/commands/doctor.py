@@ -2172,10 +2172,18 @@ def _run_check_t1() -> None:
 def _collect_quota_report() -> dict:
     """Build the structured quota-headroom report (nexus-c590).
 
-    Returns a dict with three sections: ``chromadb`` (free-tier cloud
+    Returns a dict with three sections: ``vector_store`` (per-request
     limits + T3 reachability), ``voyage`` (per-model token + dimension
     caps), and ``retry`` (cumulative backoff observed in this process
     so far via :func:`nexus.retry.get_retry_stats`).
+
+    The ``vector_store`` section was keyed ``chromadb`` until 7.0.0. It kept
+    the dependency's name "for machine-consumer stability until P4b renames
+    it" — P4b being the wave that removed the dependency. Renamed there
+    rather than later because ``cli-reference.md`` advertises this payload
+    for "dashboards / CI gates", so it is a real contract, and a MAJOR is the
+    only defensible moment to break one. Pinned by
+    ``tests/test_doctor_cmd.py``'s exact-key-set assertion.
 
     Pure data-shape; both the human-readable and ``--json`` renderers
     consume this same dict so they never drift.
@@ -2188,7 +2196,7 @@ def _collect_quota_report() -> dict:
     from nexus.db.limits import QUOTAS  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
     from nexus.retry import get_retry_stats  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
-    chromadb_limits = {
+    vector_store_limits = {
         "max_embedding_dimensions": QUOTAS.MAX_EMBEDDING_DIMENSIONS,
         "max_document_bytes": QUOTAS.MAX_DOCUMENT_BYTES,
         "safe_chunk_bytes": QUOTAS.SAFE_CHUNK_BYTES,
@@ -2290,8 +2298,8 @@ def _collect_quota_report() -> dict:
     }
 
     return {
-        "chromadb": {
-            "limits": chromadb_limits,
+        "vector_store": {
+            "limits": vector_store_limits,
             "reachable": t3_reachable,
             "detail": t3_detail,
         },
@@ -2308,19 +2316,19 @@ def _format_quota_report(report: dict) -> str:
     lines.append("")
 
     # ── Vector store ────────────────────────────────────────────────────
-    # nexus-d01js: T3 serving is PG+pgvector since 6.0.0; the limits table
-    # below is the Chroma-era QUOTAS module, kept because SAFE_CHUNK_BYTES /
-    # MAX_QUERY_RESULTS remain the load-bearing chunking/paging caps (their
-    # pgvector-neutral rehoming is RDR-155 P4b scope). The JSON key stays
-    # "chromadb" for machine-consumer stability until P4b renames it.
-    cdb = report["chromadb"]
-    status = _CHECK if cdb["reachable"] else _WARN
-    lines.append(f"  {status} T3 vector store: {cdb['detail']}")
+    # nexus-d01js: T3 serving is PG+pgvector since 6.0.0. The limits table
+    # below originated as the Chroma-era QUOTAS module and was rehomed to
+    # nexus.db.limits at rn3wo.2, kept because SAFE_CHUNK_BYTES /
+    # MAX_QUERY_RESULTS remain the load-bearing chunking/paging caps. The JSON
+    # key was renamed "chromadb" -> "vector_store" at 7.0.0 (RDR-155 P4b).
+    vs = report["vector_store"]
+    status = _CHECK if vs["reachable"] else _WARN
+    lines.append(f"  {status} T3 vector store: {vs['detail']}")
     lines.append(
-        "    limits (Chroma-era reference table — chunking/paging caps "
-        "still authoritative; pgvector rehoming = RDR-155 P4b):"
+        "    limits (per-request caps from nexus.db.limits — chunking/paging "
+        "caps are authoritative):"
     )
-    for k, v in cdb["limits"].items():
+    for k, v in vs["limits"].items():
         lines.append(f"      {k:32} {v:,}")
     lines.append("")
 
@@ -2495,9 +2503,8 @@ def _run_check_taxonomy_body(conn: Any) -> None:
 def _run_check_quotas(*, json_out: bool = False) -> None:
     """Emit the quota-headroom report (nexus-c590).
 
-    Exits 1 when ChromaDB is unreachable in cloud mode — a quota
-    report without a client connection is not actionable. Local mode
-    and a reachable cloud tenant both exit 0.
+    Exits 1 when the T3 vector store is unreachable — a quota report
+    without a reachable store is not actionable. A reachable store exits 0.
     """
     import json as _json  # noqa: PLC0415 — deferred to keep CLI startup fast
 
@@ -2507,5 +2514,5 @@ def _run_check_quotas(*, json_out: bool = False) -> None:
     else:
         click.echo(_format_quota_report(report))
 
-    if not report["chromadb"]["reachable"]:
+    if not report["vector_store"]["reachable"]:
         raise click.exceptions.Exit(1)
