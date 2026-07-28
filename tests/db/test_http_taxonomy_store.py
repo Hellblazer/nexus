@@ -1747,11 +1747,10 @@ class TestOrchestrators:
             {"collection": "c", "topic_id": 5, "embedding": [1.0, 0.0], "label": "parent", "doc_count": 2},
         ])
 
-        class _EF:
-            def __init__(self, **k): pass
-            def __call__(self, texts): return [[1.0, 0.0]] * len(texts)
-
-        monkeypatch.setattr("nexus.db.local_ef.LocalEmbeddingFunction", _EF)
+        # No embedding function is patched in any more: split_topic reads the
+        # collection's STORED vectors on both branches now (nexus-9pqoj
+        # extended to the non-service handle), so a fake that only carries
+        # documents is no longer a valid stand-in for a real store.
         child_specs = [
             {"label": "c0", "terms_json": "[]", "doc_count": 1, "doc_ids": ["d1"],
              "centroid": [1.0, 0.0], "created_at": "2026-01-01T00:00:00Z"},
@@ -1762,7 +1761,10 @@ class TestOrchestrators:
             CatalogTaxonomy, "compute_split",
             staticmethod(lambda *a, **k: {"topic_id": 5, "collection_name": "c",
                                           "child_specs": child_specs}))
-        fake_client = _FakeChromaClient({"c": _FakeChromaColl(documents={"d1": "t1", "d2": "t2"})})
+        fake_client = _FakeChromaClient({"c": _FakeChromaColl(
+            documents={"d1": "t1", "d2": "t2"},
+            embeddings={"d1": [1.0, 0.0], "d2": [0.0, 1.0]},
+        )})
         n = store.split_topic(5, 2, fake_client)
         assert n == 2
         calls = store._centroid_store.calls
@@ -1770,6 +1772,62 @@ class TestOrchestrators:
         assert ("upsert", 2) in calls
         labels = {t["label"] for t in client.get_all_topics(collection="c")}
         assert {"c0", "c1"} <= labels
+
+    def test_split_refuses_when_store_has_no_vectors(self, client, monkeypatch) -> None:
+        """No stored vectors -> DECLINE the split; never re-embed to fill the gap.
+
+        The regression this pins is not a missing dependency, it is a wrong
+        vector space. split_topic used to re-embed the topic's documents with
+        MiniLM-384 whenever the handle was not service-backed. For a bge-768 or
+        voyage-1024 collection that produced 384-dim child centroids, which land
+        in taxonomy_centroids_384 while the collection's chunks live in the
+        768/1024 space — so the ANN assign that follows hits the dimension
+        -mismatch guard and returns [], and the split's children are silently
+        unassignable. The split reports success; the topics it created are dead.
+
+        NON-VACUITY, and this took two attempts to get right. THREE docs with
+        k=2, and only d3's vector is missing. That asymmetry is the whole
+        design: a simpler "no vectors at all" fixture cannot tell the correct
+        behaviour apart from the bugs, because every candidate returns 0 —
+        refusing returns 0, and silently dropping the vector-less rows also
+        returns 0 via the `len(texts) < k` short-circuit. Identical outcome,
+        opposite meaning. With 3 docs and k=2, dropping d3 leaves 2 usable
+        texts, which CLEARS `len(texts) < k` and produces a 2-child split; so
+        silent-skip returns 2, a restored MiniLM re-embed returns 2, and only
+        an actual refusal returns 0. Verified by mutation, not by inspection.
+        """
+        client.import_topic(
+            src_id=7, label="parent", parent_id=None, collection="c", centroid_hash=None,
+            doc_count=3, created_at="2026-01-01T00:00:00Z", review_status="pending", terms=None)
+        client.assign_topic("d1", 7, "hdbscan")
+        client.assign_topic("d2", 7, "hdbscan")
+        client.assign_topic("d3", 7, "hdbscan")
+        store = self._store(client, [
+            {"collection": "c", "topic_id": 7, "embedding": [1.0, 0.0], "label": "parent", "doc_count": 3},
+        ])
+        monkeypatch.setattr(
+            CatalogTaxonomy, "compute_split",
+            staticmethod(lambda *a, **k: {"topic_id": 7, "collection_name": "c",
+                                          "child_specs": [
+                                              {"label": "c0", "terms_json": "[]", "doc_count": 1,
+                                               "doc_ids": ["d1"], "centroid": [1.0, 0.0],
+                                               "created_at": "2026-01-01T00:00:00Z"},
+                                              {"label": "c1", "terms_json": "[]", "doc_count": 1,
+                                               "doc_ids": ["d2"], "centroid": [0.0, 1.0],
+                                               "created_at": "2026-01-01T00:00:00Z"},
+                                          ]}))
+        # d1 and d2 carry vectors; d3 does not. Dropping d3 would leave exactly
+        # k=2 usable docs and the split would proceed — which is the failure
+        # this pins.
+        fake_client = _FakeChromaClient({"c": _FakeChromaColl(
+            documents={"d1": "t1", "d2": "t2", "d3": "t3"},
+            embeddings={"d1": [1.0, 0.0], "d2": [0.0, 1.0]},
+        )})
+        assert store.split_topic(7, 2, fake_client) == 0
+        # And it refused BEFORE touching the centroid store: a split that
+        # cannot be computed must not delete the parent centroid on its way
+        # out, or a refusal leaves the taxonomy worse than it found it.
+        assert store._centroid_store.calls == []
 
     def test_split_topic_too_few_docs(self, client) -> None:
         client.import_topic(

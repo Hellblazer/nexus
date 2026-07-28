@@ -1118,14 +1118,18 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         chroma_client: Any,
     ) -> int:
         """Split a topic into k children (mirrors CatalogTaxonomy.split_topic):
-        fetch texts from T3 (via chroma_client) + re-embed -> compute_split ->
-        persist_split (Java) -> centroid-port delete parent + upsert children.
+        fetch texts + STORED vectors from T3 (via chroma_client) ->
+        compute_split -> persist_split (Java) -> centroid-port delete parent +
+        upsert children.
 
-        HYBRID: chunk text reads stay on chroma_client (T3); centroids via port.
+        HYBRID: chunk reads stay on chroma_client (T3); centroids via port.
         Returns the number of children created (0 on any short-circuit).
-        """
-        from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
+        No embedding happens here on any branch. Both the service-backed and
+        the in-process handle read the collection's own vectors, so parent and
+        child centroids always share one space (nexus-9pqoj, extended to the
+        non-service handle 2026-07-28).
+        """
         if k < 2:
             return 0
         topic = self.get_topic_by_id(topic_id)
@@ -1157,21 +1161,67 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 _log.warning("split_collection_not_found", collection=collection_name)
                 return 0
 
+            # nexus-9pqoj extended to the non-service handle (2026-07-28): pull
+            # the STORED vectors here too, rather than re-embedding with
+            # MiniLM-384. The re-embed was not merely a tier-0 dependency, it
+            # was a latent correctness bug — a 384-dim centroid computed for a
+            # bge-768 or voyage-1024 collection lands in taxonomy_centroids_384
+            # while the collection's chunks live in the 768/1024 space, so the
+            # ANN assign that follows hits the dimension-mismatch guard
+            # (http_centroid_store._ann_query) and silently returns []. The
+            # split "succeeds" and its children are then unassignable. Parent
+            # and child centroids MUST share the collection's native space.
             _PAGE = 250
-            fetched_ids = []
-            texts = []
+            fetched_ids: list[str] = []
+            texts: list[str] = []
+            vectors: list[list[float]] = []
+            vectors_unavailable = False
             for i in range(0, len(doc_ids), _PAGE):
                 batch = doc_ids[i:i + _PAGE]
-                result = coll.get(ids=batch, include=["documents"])
-                for fid, fdoc in zip(result.get("ids") or [], result.get("documents") or []):
-                    if fdoc:
-                        fetched_ids.append(fid)
-                        texts.append(fdoc)
+                result = coll.get(ids=batch, include=["documents", "embeddings"])
+                got_ids = result.get("ids") or []
+                got_docs = result.get("documents") or []
+                got_embs = result.get("embeddings")
+                # Refuse on skew rather than mis-pair a vector to the wrong
+                # document — same contract as _svc_fetch_by_ids.
+                if got_embs is None or len(got_embs) != len(got_ids):
+                    vectors_unavailable = True
+                    break
+                for fid, fdoc, femb in zip(got_ids, got_docs, got_embs):
+                    if not fdoc:
+                        continue
+                    # A document we WOULD have used whose vector is missing is
+                    # the unavailable case, not a row to quietly drop. Skipping
+                    # it silently would shrink `texts` until the `len < k`
+                    # short-circuit returned 0 with no warning logged — a
+                    # refusal indistinguishable from "this topic was too small
+                    # to split", which is the wrong story to tell an operator.
+                    if femb is None:
+                        vectors_unavailable = True
+                        break
+                    fetched_ids.append(fid)
+                    texts.append(fdoc)
+                    vectors.append(list(femb))
+                if vectors_unavailable:
+                    break
+            if vectors_unavailable:
+                # Fail loud and decline the split. Falling back to a re-embed
+                # here is what produced wrong-space centroids; a split that
+                # cannot be computed in the collection's own space must not be
+                # computed at all.
+                _log.warning(
+                    "split_stored_vectors_unavailable",
+                    collection=collection_name,
+                    topic_id=topic_id,
+                    detail="store returned no embeddings (or a count skew) for "
+                           "the topic's docs; refusing to re-embed into a "
+                           "different vector space",
+                )
+                return 0
             if len(texts) < k:
                 return 0
 
-            ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-            embeddings = np.array(ef(texts), dtype=np.float32)
+            embeddings = np.asarray(vectors, dtype=np.float32)
 
         split_result = self.compute_split(
             topic_id, doc_ids, texts, fetched_ids, embeddings, collection_name, k,
