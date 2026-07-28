@@ -37,6 +37,14 @@ pytestmark = pytest.mark.usefixtures("local_catalog_backend")
 
 _N_DOCS = 6  # > the n < 5 early return
 
+#: The fake collection's name. Deliberately NOT a voyage-* or bge-* token: the
+#: fake supplies 3-d vectors, so naming a real embedder would claim a
+#: dimension the fixture does not produce — and these tests assert nothing
+#: about embedding mode (every client is a fake). The 384d-vs-collection-space
+#: mismatch this suite exists to pin is explained in the module docstring,
+#: which is where that belongs.
+_COLLECTION = "docs__probe__stub-embedder-3d__v1"
+
 
 class _FakeCollection:
     """A T3 collection that has documents but hands back no vectors.
@@ -134,7 +142,7 @@ def test_discover_refuses_when_t3_supplies_no_vectors(
     tax = _FakeTaxonomy()
     t3 = _FakeClient(_FakeCollection(embeddings=None))
 
-    n = discover_for_collection("docs__probe__voyage-context-3__v1", tax, t3)
+    n = discover_for_collection(_COLLECTION, tax, t3)
 
     assert n == 0
     assert clustered == [], (
@@ -157,7 +165,7 @@ def test_discover_clusters_on_stored_vectors_when_present(
     vectors = [[float(i), float(i + 1), 0.5] for i in range(_N_DOCS)]
     t3 = _FakeClient(_FakeCollection(embeddings=vectors))
 
-    discover_for_collection("docs__probe__voyage-context-3__v1", tax, t3)
+    discover_for_collection(_COLLECTION, tax, t3)
 
     assert len(clustered) == 1, "clustering must be reached when vectors exist"
     assert clustered[0].shape == (_N_DOCS, 3), (
