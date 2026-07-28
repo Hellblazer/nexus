@@ -27,7 +27,6 @@ from nexus.catalog.catalog import Catalog
 from nexus.cli import main
 from nexus.db.t3 import T3Database
 from tests.conftest import make_vector_test_client
-from tests.conftest import engine_substrate_selected
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -220,37 +219,6 @@ class TestOBS2MigrationUX:
     """OBS-2: T2Database.__init__ must emit a migration-start message on
     stderr when apply_pending runs, so users don't see a silent hang."""
 
-    @pytest.mark.skipif(
-        engine_substrate_selected(),
-        reason="dies-roster: the SQLite T2 migration (apply_pending on a fresh "
-        "memory.db) and its OBS-2 progress message die at the RDR-155 P4b "
-        "flip — service-backed T2Database construction runs no migrations",
-    )
-    def test_migration_emits_progress_message(self, tmp_path, capsys, monkeypatch):
-        """First construction of T2Database on a fresh DB emits a 'migrating'
-        message to stderr when stderr is a tty.
-
-        The OBS-2 message is gated on ``sys.stderr.isatty()`` so it stays
-        out of CliRunner-mixed output during JSON-parsing tests; force it
-        on here.
-        """
-        from nexus.db.t2 import T2Database
-        import sys
-
-        monkeypatch.setattr(sys.stderr, "isatty", lambda: True, raising=False)
-
-        # Use a unique path: tmp_path is per-test so _upgrade_done won't cache it.
-        db_path = tmp_path / "obs2_fresh.db"
-
-        db = T2Database(db_path)
-        db.close()
-
-        captured = capsys.readouterr()
-        all_stderr = captured.err
-
-        assert "migrat" in all_stderr.lower(), (
-            f"Expected 'migrat' in stderr output but got: {all_stderr!r}"
-        )
 
     def test_migration_quiet_under_non_tty_stderr(self, tmp_path, capsys, monkeypatch):
         """OBS-2 message is suppressed when stderr is not a tty (CI, pipes,

@@ -24,7 +24,6 @@ import numpy as np
 
 from nexus.db.t2 import T2Database
 from tests.conftest import make_vector_test_client
-from tests.conftest import engine_substrate_selected
 
 
 # ── Cross-domain parallelism ─────────────────────────────────────────────────
@@ -554,36 +553,3 @@ def test_serving_busy_timeout_constant_matches_bootstrap() -> None:
 
     assert SERVING_BUSY_TIMEOUT_MS == 30000
     assert SERVING_BUSY_TIMEOUT_MS == _BOOTSTRAP_BUSY_TIMEOUT_MS
-
-
-@_pytest.mark.skipif(
-    engine_substrate_selected(),
-    reason="dies-roster: the 30s serving busy_timeout PRAGMA is a property of "
-    "the raw SQLite store connections; dies with the twins at the RDR-155 "
-    "P4b flip (the engine's PG pool owns its own timeouts)",
-)
-@_pytest.mark.parametrize(
-    "store_attr,conn_attr",
-    [
-        ("memory", "conn"),
-        ("plans", "conn"),
-        ("chash_index", "conn"),
-        ("taxonomy", "conn"),
-        ("telemetry", "conn"),
-        ("document_aspects", "conn"),
-        ("catalog", "_conn"),
-    ],
-)
-def test_every_serving_store_connection_uses_30s_busy_timeout(
-    tmp_path: Path, store_attr: str, conn_attr: str,
-) -> None:
-    """Each daemon-owned domain-store connection applies the 30s serving
-    busy_timeout. A partial bump would leave some stores at 5s and re-open the
-    cross-store contention drop class, so every store is pinned."""
-    from nexus.db.t2._tuning import SERVING_BUSY_TIMEOUT_MS
-
-    with T2Database(tmp_path / "memory.db") as db:
-        store = getattr(db, store_attr)
-        conn = getattr(store, conn_attr)
-        got = conn.execute("PRAGMA busy_timeout").fetchone()[0]
-        assert got == SERVING_BUSY_TIMEOUT_MS == 30000

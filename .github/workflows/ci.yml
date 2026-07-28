@@ -142,41 +142,40 @@ jobs:
       # skip. Provisioning without arming would leave the skip able to become
       # permanent the first time provisioning quietly broke.
       NX_T2_SUBSTRATE_EXPECTED: "1"
-      # nexus-aqbrk: ENGINE AT MERGE BOUNDARIES, SQLite on interior PRs.
+      # ENGINE EVERYWHERE since nexus-i711w (2026-07-28). No pin: the SQLite
+      # substrate is deleted, so there is only one arm left to run.
       #
-      # The flip made the engine the suite's default, which is the point of the
-      # port — the suite should test what ships. But it also moved both PR
-      # pytest jobs from ~20m to 25-30m, and 3.12 was CANCELLED at 30m18s
-      # against the cap below (PR #1428 run 1; 3.13 scraped through at 24m43s).
-      # Paying that on every interior push is the cost the CI-cost directives
-      # call a deliberate decision rather than a side effect (Hal, 2026-07-27).
+      # WHAT THIS REPLACED, because it was a deliberate cost decision and its
+      # reversal should not read as drift. nexus-aqbrk ran ENGINE AT MERGE
+      # BOUNDARIES, SQLite on interior PRs: `pull_request` took the SQLite arm
+      # (~13m) and the develop PUSH after the merge took the engine default,
+      # because the flip moved both PR pytest jobs from ~20m to 25-30m and 3.12
+      # was CANCELLED at 30m18s against the cap below (PR #1428 run 1; 3.13
+      # scraped through at 24m43s). Hal took that trade on 2026-07-27 —
+      # an engine-only regression surfacing one merge later, absorbed by
+      # develop as the integration branch.
       #
-      # So: pull_request runs the SQLite arm (~13m), and the develop PUSH after
-      # the merge runs the ENGINE default. That push is a real gate, not a
-      # vacuous one — `on.push.branches: [develop]` at the top of this file
-      # genuinely triggers CI, so every merge to develop is exercised against
-      # the shipping substrate.
+      # i711w removes the cheaper arm, so the trade is no longer available:
+      # PR pytest now costs the engine arm's 25-30m on BOTH matrix versions.
+      # That is a real, roughly 2x increase in routine PR minutes, and it is a
+      # consequence of the substrate deletion rather than a fresh decision. The
+      # levers if it needs clawing back are the matrix breadth on PRs (3.12
+      # only, at the cost of the 3.13 required check) or path-gating the pytest
+      # job — both are CI-cost calls for Hal, not something to fold in here.
       #
-      # ACCEPTED TRADE, stated so it is not rediscovered as a surprise: an
-      # engine-only regression now surfaces at the merge boundary rather than
-      # on the PR that introduced it. That is one merge later, and develop is
-      # the integration branch precisely to absorb that.
-      #
-      # Empty string, not "unset": conftest's engine_substrate_selected() is
-      # `!= "sqlite"`, so "" resolves to the ENGINE. The whole predicate is
-      # spelled inversely on purpose — everything that is not the explicit
-      # opt-out fails toward the substrate the product ships on.
-      NX_TEST_T2_SUBSTRATE: ${{ github.event_name == 'pull_request' && 'sqlite' || '' }}
-    # 45m: the suite runs ~16m on the SQLite arm and the post-job cache-save
-    # step counts toward this budget. At 20m a v5.4.2 release run timed out
-    # DURING the cache upload (tests had already passed). Raised 25->30
-    # (nexus-cxsbs) to absorb the HF/docling model cache save (~hundreds of
-    # MB) and a cold-cache model fetch on the first run after a uv.lock bump.
-    # Raised 30->45 (nexus-aqbrk): the develop-push leg now runs the ENGINE
-    # arm, which measured 17:05 locally versus 13:33 for SQLite and 25-30m on
-    # the runners — 3.12 was cancelled at 30m18s under the old cap. A timeout
-    # is a CEILING, not a reservation: GitHub bills actual runtime, so a fast
-    # SQLite PR leg costs exactly the same under 45m as it did under 30m.
+      # Left UNSET rather than set to a value: `none` would mean "provision no
+      # T2 substrate", which is true of the CA-3 jobs below but emphatically
+      # not of the unit suite.
+    # 45m: the post-job cache-save step counts toward this budget. At 20m a
+    # v5.4.2 release run timed out DURING the cache upload (tests had already
+    # passed). Raised 25->30 (nexus-cxsbs) to absorb the HF/docling model cache
+    # save (~hundreds of MB) and a cold-cache model fetch on the first run
+    # after a uv.lock bump. Raised 30->45 (nexus-aqbrk) for the ENGINE arm,
+    # which measured 17:05 locally versus 13:33 for the since-deleted SQLite
+    # arm and 25-30m on the runners — 3.12 was cancelled at 30m18s under the
+    # old cap. Since nexus-i711w EVERY leg is the engine arm, so 45m is now the
+    # ceiling for all of them rather than for the push leg alone. A timeout is
+    # a CEILING, not a reservation: GitHub bills actual runtime.
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -400,9 +399,13 @@ jobs:
       # not pass — assemble path unproven". A non-vacuity gate catching a
       # silent mass-skip the moment one appeared.
       #
-      # Pinning SQLite restores what these tests always did. It does not
-      # weaken them: the T2 substrate is irrelevant to what they assert.
-      NX_TEST_T2_SUBSTRATE: sqlite
+      # `none` means PROVISION NOTHING, which is the accurate statement of
+      # what this job needs — verified, not assumed: the file has zero T2,
+      # T2Database, storage_backend or NX_STORAGE references. It said
+      # `sqlite` only because that was the way to spell "do not boot an
+      # engine" before nexus-i711w gave that intent its own value; =sqlite
+      # is now a hard error, so the rename is forced and also more truthful.
+      NX_TEST_T2_SUBSTRATE: none
       # Pinned for determinism. pgvector >= 0.8 is the RDR-155 iterative_scan floor
       # (a pgvector version, not a PG major). nexus is aligned on PG17 to match the
       # deployed conexus stack (nexus-41bso); PG16 was incidental.
@@ -662,9 +665,13 @@ jobs:
       # not pass — assemble path unproven". A non-vacuity gate catching a
       # silent mass-skip the moment one appeared.
       #
-      # Pinning SQLite restores what these tests always did. It does not
-      # weaken them: the T2 substrate is irrelevant to what they assert.
-      NX_TEST_T2_SUBSTRATE: sqlite
+      # `none` means PROVISION NOTHING, which is the accurate statement of
+      # what this job needs — verified, not assumed: the file has zero T2,
+      # T2Database, storage_backend or NX_STORAGE references. It said
+      # `sqlite` only because that was the way to spell "do not boot an
+      # engine" before nexus-i711w gave that intent its own value; =sqlite
+      # is now a hard error, so the rename is forced and also more truthful.
+      NX_TEST_T2_SUBSTRATE: none
       PG_VERSION: "17.5"
       PGVECTOR_VERSION: "v0.8.2"
       # The dyld analog of the glibc floor: build back-deployable to macOS 13

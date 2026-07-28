@@ -18,20 +18,6 @@ from nexus.db.t2 import T2Database
 from nexus.hook_registry import HookRegistry
 from tests.conftest import make_vector_test_client
 from typing import Any
-from tests.conftest import engine_substrate_selected
-
-#: hook_failures has record/trim/import endpoints over HTTP but NO read
-#: surface — the persisted-row assertions below can only be made via a raw
-#: SQLite conn. dies-roster: these die with the raw-read at the RDR-155
-#: P4b flip (the write path itself is engine-covered by
-#: tests/db/test_http_telemetry_store integration).
-_RAW_HOOK_FAILURES_READ = pytest.mark.skipif(
-    engine_substrate_selected(),
-    reason="nexus-onjvy: hook_failures is WRITE-ONLY on the engine — "
-    "TelemetryHandler exposes /hook_failures/record and /trim and no read "
-    "route at all. Not a retirement: the failure log that exists to "
-    "surface silent hook failures cannot be inspected in service mode",
-)
 
 
 @pytest.fixture()
@@ -67,50 +53,6 @@ def test_fire_single_exception_nonfatal(
     registry.register_single(bad_hook)
     # Should not raise
     registry.fire_single("doc-1", "test__coll", "content")
-
-
-@_RAW_HOOK_FAILURES_READ
-def test_fire_single_persists_failure_to_t2(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """GH #251: hook failures are persisted to T2 hook_failures for status surfacing.
-
-    The migration is registered at 4.9.10; the running package is still 4.9.9
-    so T2Database's automatic ``apply_pending`` does not create the table.
-    We apply the migration directly so the write path has a target.
-    """
-    import sqlite3
-
-    import nexus.mcp_infra as mod
-    from nexus.db.migrations import migrate_hook_failures
-
-    db_path = tmp_path / "hook_failures.db"
-    T2Database(db_path).close()  # run base migrations first
-
-    conn = sqlite3.connect(str(db_path))
-    migrate_hook_failures(conn)
-    conn.close()
-
-    monkeypatch.setattr(mod, "t2_ctx", lambda: T2Database(db_path))
-
-    def bad_hook(doc_id, collection, content):
-        raise RuntimeError("simulated centroid failure")
-
-    registry = HookRegistry()
-    registry.register_single(bad_hook)
-    registry.fire_single("doc-xyz", "knowledge__thing", "content")
-
-    with T2Database(db_path) as db:
-        rows = db.taxonomy.conn.execute(
-            "SELECT doc_id, collection, hook_name, error FROM hook_failures"
-        ).fetchall()
-
-    assert len(rows) == 1
-    doc_id, coll, hook_name, error = rows[0]
-    assert doc_id == "doc-xyz"
-    assert coll == "knowledge__thing"
-    assert hook_name == "bad_hook"
-    assert "simulated centroid failure" in error
 
 
 def test_fire_single_persist_swallowed_when_table_missing(

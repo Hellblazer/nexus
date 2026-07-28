@@ -20,7 +20,7 @@ import pytest
 from nexus.db.local_ef import LocalEmbeddingFunction
 from nexus.db.t2 import T2Database
 from nexus.types import SearchResult
-from tests.conftest import engine_substrate_selected, make_vector_test_client
+from tests.conftest import make_vector_test_client
 from typing import Any
 
 # Full e2e pipeline: real ChromaDB clients (Ephemeral + Persistent), real
@@ -404,13 +404,15 @@ class TestFullPipelineEphemeral:
             )
 
             # After discover with 60 docs, doc count is recorded as 60.
-            # No growth: no rebalance on either twin.
+            # No growth: no rebalance.
             assert db.taxonomy.needs_rebalance("code__e2e", current_count=60) is False
-            # 1.5x: under the oracle's 2x bar, over the engine's 5% bar.
+            # 1.5x: under the retired SQLite oracle's 2x bar, over the
+            # engine's 5% growth bar — so this asserted the substrate's
+            # own answer until nexus-i711w left only one substrate.
             assert db.taxonomy.needs_rebalance(
                 "code__e2e", current_count=90,
-            ) is engine_substrate_selected()
-            # 2x: rebalance on either twin.
+            ) is True
+            # 2x: rebalance either way.
             assert db.taxonomy.needs_rebalance("code__e2e", current_count=120) is True
 
     def test_topic_links_persist_and_read(

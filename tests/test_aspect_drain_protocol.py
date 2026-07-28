@@ -25,7 +25,6 @@ from pathlib import Path
 import pytest
 
 from nexus.db.t2 import T2Database
-from tests.conftest import engine_substrate_selected
 
 
 # nexus-9eaz family flake-skip helper retired 2026-05-22: RDR-120 P3b
@@ -769,75 +768,6 @@ class TestDrainTimeoutDefault:
 
 
 class TestMCPLockDetection:
-    @pytest.mark.skipif(
-        engine_substrate_selected(),
-        reason="pins the sqlite-mode file-lock branch drain_worker deliberately "
-        "skips in SERVICE mode; dies with that branch at the RDR-155 P4b flip "
-        "(dies-roster)",
-    )
-    def test_drain_raises_when_mcp_lock_file_present(
-        self, queue_path: Path, locks_dir: Path
-    ) -> None:
-        """drain_worker raises DrainBlockedByActiveWorker when an active
-        MCP process holds an aspect_worker lock file.
-
-        SIG-5 (nexus-1091): drain is process-local. If an MCP server is
-        running a worker in another process, a CLI-invoked migration that
-        drains in its own process will not drain the MCP worker's queue
-        rows. The lock file detects this cross-process conflict and
-        surfaces operator guidance.
-
-        PID 1 (init / launchd) is always alive on any Unix system and is
-        guaranteed to be a different process from the test runner, making
-        it the correct stand-in for a live MCP process.
-        """
-        from nexus.aspect_worker import DrainBlockedByActiveWorker, drain_worker
-
-        # PID 1 is always alive and always a different process.
-        mcp_pid = 1
-        lock_file = locks_dir / f"aspect_worker.{mcp_pid}"
-        lock_file.write_text(str(mcp_pid))
-
-        with pytest.raises(DrainBlockedByActiveWorker) as exc_info:
-            drain_worker(
-                queue_path=queue_path,
-                timeout=5.0,
-                _locks_dir=locks_dir,
-            )
-
-        err_str = str(exc_info.value)
-        assert str(mcp_pid) in err_str, (
-            "DrainBlockedByActiveWorker must include the blocking PID"
-        )
-
-    @pytest.mark.skipif(
-        engine_substrate_selected(),
-        reason="pins the sqlite-mode file-lock branch drain_worker deliberately "
-        "skips in SERVICE mode; dies with that branch at the RDR-155 P4b flip "
-        "(dies-roster)",
-    )
-    def test_drain_ignores_stale_lock_file_for_dead_pid(
-        self, queue_path: Path, locks_dir: Path
-    ) -> None:
-        """A lock file for a PID that no longer exists is treated as stale
-        and removed; drain proceeds normally.
-        """
-        from nexus.aspect_worker import drain_worker
-
-        # PID 99999999 exceeds the Linux kernel's PID limit (~4M) and is
-        # effectively guaranteed not to exist.
-        fake_pid = 99999999
-        lock_file = locks_dir / f"aspect_worker.{fake_pid}"
-        lock_file.write_text(str(fake_pid))
-
-        # drain_worker must NOT raise -- stale lock is cleaned up.
-        drain_worker(queue_path=queue_path, timeout=5.0, _locks_dir=locks_dir)
-
-        # Stale lock file should be removed.
-        assert not lock_file.exists(), (
-            "drain_worker must remove stale lock files for dead PIDs"
-        )
-
     def test_drain_no_lock_dir_proceeds_normally(
         self, queue_path: Path
     ) -> None:

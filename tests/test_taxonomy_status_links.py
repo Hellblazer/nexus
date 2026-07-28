@@ -27,7 +27,6 @@ from nexus.db.t2 import T2Database
 # base (1.3e9) — the topics PK is global across tenants, so per-module
 # counters restarting at the same value collide within one engine session.
 from tests.conftest import next_import_seed_id  # session-unique import ids (see conftest note)
-from tests.conftest import engine_substrate_selected
 
 
 def _seed(db_path: Path) -> None:
@@ -73,24 +72,6 @@ def test_status_counts_links_via_public_api_in_service_mode(tmp_path: Path) -> N
         patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path),
         patch("nexus.commands.taxonomy_cmd._has_raw_access", return_value=False),
     ):
-        result = runner.invoke(taxonomy, ["status"])
-
-    assert result.exit_code == 0, result.output
-    assert "2 topic links" in result.output
-
-
-@pytest.mark.skipif(
-    engine_substrate_selected(),
-    reason="dies-roster: the raw-access status link-count branch (SQLite .conn aggregate) dies at the RDR-155 P4b flip",
-)
-def test_status_raw_access_link_count_unchanged(tmp_path: Path) -> None:
-    from nexus.commands.taxonomy_cmd import taxonomy
-
-    db_path = tmp_path / "memory.db"
-    _seed(db_path)
-
-    runner = CliRunner()
-    with patch("nexus.commands.taxonomy_cmd._default_db_path", return_value=db_path):
         result = runner.invoke(taxonomy, ["status"])
 
     assert result.exit_code == 0, result.output

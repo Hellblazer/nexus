@@ -20,7 +20,6 @@ from unittest.mock import patch
 
 from click.testing import CliRunner
 
-from tests.conftest import engine_substrate_selected
 
 import nexus.db.migrations as migrations
 import nexus.upgrade_ladder.registry as ladder_registry
@@ -428,12 +427,13 @@ def test_deferred_walk_notices_but_exits_cleanly(
 # Skipped rather than left red or force-fitted: porting the ladder's
 # engine-backed rung semantics is its own piece of work, not a disposition.
 # Carved out as residue on nexus-aqbrk.
-@pytest.mark.skipif(
-    engine_substrate_selected(),
+@pytest.mark.skip(
     reason="nexus-aqbrk residue: asserts a LADDER RungOutcome.DEFERRED, and the "
            "ladder ledger is unconditionally engine-backed (upgrade.py:210, "
            "RDR-186 .15) so no storage-backend pin reaches it. Needs its own "
-           "port of the ladder's engine-backed rung semantics.",
+           "port of the ladder's engine-backed rung semantics. Unconditional "
+           "since nexus-i711w Stage 1b deleted the SQLite substrate this "
+           "used to skip against.",
 )
 @pytest.mark.usefixtures("local_t2_backend")
 def test_upgrade_invocation_executes_each_migration_step_exactly_once(

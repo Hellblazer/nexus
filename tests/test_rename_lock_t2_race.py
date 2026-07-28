@@ -48,7 +48,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.conftest import engine_substrate_selected
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -137,94 +136,6 @@ def _assert_queue_fully_cleared(db_path: Path) -> None:
 _OLD = "knowledge__old"
 _NEW = "knowledge__new"
 _SRC = "doc.md"
-
-
-# ── Scenario 1: in-flight claimed row survives a concurrent rename ────────────
-
-
-class TestInflightRowPreservation:
-    """Scenario 1 (queue-loss guardrail).
-
-    An in-flight extraction (worker has ``claim_next``-ed a row but has NOT yet
-    completed it) racing the cascade must NEVER lose the row: it is renamed to
-    NEW and stays ``in_progress``. Looped to exercise both thread orderings.
-
-    This is a guardrail, not a fix-discriminating test: a claim-only worker
-    never deletes, so the row survives with or without the lock. It locks the
-    "in-flight row survives a rename" contract against future regressions
-    (e.g. a future cascade variant that filtered the queue UPDATE by status,
-    or a worker that pre-emptively deleted on claim).
-    """
-
-    _ITERATIONS = 30
-
-    @pytest.mark.skipif(
-        engine_substrate_selected(),
-        reason="dies-roster: the deterministic claim-vs-cascade race outcome "
-        "is the SQLite RENAME_LOCK serialization's guarantee and the harness "
-        "needs a fresh DB file per iteration (the engine tenant is per-TEST, "
-        "so 30 iterations would collide on the (collection, source_path) "
-        "key) — dies at the RDR-155 P4b flip",
-    )
-    def test_inflight_claim_racing_cascade_never_loses_row(
-        self, tmp_path: Path
-    ) -> None:
-        outcomes: list[tuple[int, int]] = []
-        statuses: list[str] = []
-
-        for i in range(self._ITERATIONS):
-            db_path = tmp_path / f"iter{i}" / "memory.db"
-            db_path.parent.mkdir(parents=True)
-
-            db = _make_db(db_path)
-            try:
-                db.aspect_queue.enqueue(_OLD, _SRC, content_hash="h", doc_id="")
-            finally:
-                db.close()
-
-            db = _make_db(db_path)
-            try:
-                barrier = threading.Barrier(2)
-
-                def worker() -> None:
-                    barrier.wait()
-                    # In-flight: claim only, do NOT complete.
-                    db.aspect_queue.claim_next()
-
-                def cascade() -> None:
-                    barrier.wait()
-                    db.rename_collection_cascade(old=_OLD, new=_NEW)
-
-                tw = threading.Thread(target=worker, daemon=True)
-                tc = threading.Thread(target=cascade, daemon=True)
-                tw.start()
-                tc.start()
-                tw.join(timeout=10.0)
-                tc.join(timeout=10.0)
-                assert not tw.is_alive() and not tc.is_alive(), (
-                    "deadlock: claim_next/cascade did not complete"
-                )
-            finally:
-                db.close()
-
-            aq_old, aq_new = _queue_counts(db_path, _OLD, _NEW)
-            outcomes.append((aq_old, aq_new))
-            with _make_db(db_path) as v:
-                row = v.aspect_queue.conn.execute(
-                    "SELECT status FROM aspect_extraction_queue "
-                    "WHERE collection = ?",
-                    (_NEW,),
-                ).fetchone()
-                statuses.append(row[0] if row else "<none>")
-
-        # EXACT: every iteration preserved the row under NEW, never (0, 0).
-        assert outcomes == [(0, 1)] * self._ITERATIONS, (
-            f"in-flight row not deterministically preserved: {outcomes}"
-        )
-        assert outcomes.count((0, 0)) == 0, "total-loss (0,0) observed"
-        assert statuses == ["in_progress"] * self._ITERATIONS, (
-            f"renamed row lost its in_progress status: {statuses}"
-        )
 
 
 # ── Scenario 2a: complete_aspect's two writes are never split by a cascade ────

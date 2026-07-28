@@ -6,13 +6,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tests.conftest import engine_substrate_selected
 from click.testing import CliRunner
 
 from nexus.cli import main
 from nexus.db.http_vector_client import HttpVectorClient
-
-_ENGINE_SUBSTRATE = engine_substrate_selected()
 
 
 @pytest.fixture
@@ -215,21 +212,6 @@ def test_collection_not_found(runner, mock_collection, subcmd, args):
     result = runner.invoke(main, ["collection", subcmd] + args)
     assert result.exit_code != 0
     assert "not found" in result.output.lower()
-
-
-@pytest.mark.parametrize("flag", ["--yes", "--confirm"])
-@pytest.mark.skipif(
-    _ENGINE_SUBSTRATE,
-    reason="dies-roster: RDR-164 P2 routes the whole collection delete through "
-           "ONE atomic engine transaction (make_catalog_reader().delete_collection), "
-           "so the mocked/local T3 handle this asserts on is never called. Same "
-           "mechanism and same precedent as test_nexus_lub_collection_delete_cascade"
-           ".py::TestCollectionDeleteCommandCascades (nexus-aqbrk).",
-)
-def test_collection_delete_with_flag(runner, mock_collection, flag):
-    result = runner.invoke(main, ["collection", "delete", "knowledge__test", flag])
-    assert result.exit_code == 0, result.output
-    mock_collection.delete_collection.assert_called_once_with("knowledge__test")
 
 
 def test_collection_delete_without_yes_prompts(runner, mock_collection):

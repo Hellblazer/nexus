@@ -16,7 +16,6 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
-from tests.conftest import engine_substrate_selected
 
 
 @pytest.fixture()
@@ -77,24 +76,6 @@ class TestSC1VersionTable:
         assert row is not None
         assert row[0] == _current_version()
         conn.close()
-
-    @pytest.mark.skipif(
-        engine_substrate_selected(),
-        reason="dies-roster: SQLite schema-version/migration reporting dies at "
-        "the RDR-155 P4b flip (service mode: immutable migration source)",
-    )
-    def test_t2database_populates_version(self, tmp_path: Path) -> None:
-        from nexus.db.t2 import T2Database
-
-        db_path = tmp_path / "memory.db"
-        db = T2Database(db_path)
-        conn = sqlite3.connect(str(db_path))
-        row = conn.execute(
-            "SELECT value FROM _nexus_version WHERE key='cli_version'"
-        ).fetchone()
-        assert row is not None
-        conn.close()
-        db.close()
 
 
 # ── SC-2: Version-gated migration execution ─────────────────────────────────
@@ -189,30 +170,6 @@ class TestSC3UpgradeFlags:
 # ── SC-4: doctor --check-schema ─────────────────────────────────────────────
 
 
-class TestSC4DoctorSchema:
-    @pytest.mark.skipif(
-        engine_substrate_selected(),
-        reason="dies-roster: SQLite schema-version/migration reporting dies at "
-        "the RDR-155 P4b flip (service mode: immutable migration source)",
-    )
-    def test_healthy_db_passes(self, runner: CliRunner, tmp_path: Path) -> None:
-        from nexus.catalog.catalog import Catalog
-        from nexus.commands.upgrade import _current_version
-        from nexus.db.migrations import apply_pending
-
-        # nexus-4s2o: je0b PK migrations require a catalog to complete.
-        Catalog.init(tmp_path / "catalog")
-        db_path = tmp_path / "memory.db"
-        conn = sqlite3.connect(str(db_path))
-        apply_pending(conn, _current_version())
-        conn.close()
-
-        with patch("nexus.config.default_db_path", return_value=db_path):
-            result = runner.invoke(main, ["doctor", "--check-schema"])
-        assert result.exit_code == 0
-        assert "passed" in result.output.lower()
-
-
 class TestRDR170FrozenBranchReporting:
     """RDR-170 Approach step 3: ``nx doctor --check-schema`` and ``nx upgrade
     --dry-run`` must REPORT a registered step whose ``introduced`` exceeds the
@@ -239,52 +196,6 @@ class TestRDR170FrozenBranchReporting:
         apply_pending(conn, _current_version())  # stored = real registry max
         conn.close()
         return db_path
-
-    @pytest.mark.skipif(
-        engine_substrate_selected(),
-        reason="dies-roster: SQLite schema-version/migration reporting dies at "
-        "the RDR-155 P4b flip (service mode: immutable migration source)",
-    )
-    def test_doctor_check_schema_reports_ahead_of_version_step(
-        self, runner: CliRunner, tmp_path: Path, monkeypatch
-    ) -> None:
-        import nexus.db.migrations as _m
-
-        db_path = self._healthy_db(tmp_path)
-        monkeypatch.setattr(_m, "MIGRATIONS", self._sentinel_registry())
-
-        with patch("nexus.config.default_db_path", return_value=db_path):
-            result = runner.invoke(main, ["doctor", "--check-schema"])
-        out = result.output.lower()
-        assert "pending migrations" in out, out
-        assert "all checks passed" not in out
-
-    @pytest.mark.skipif(
-        engine_substrate_selected(),
-        reason="dies-roster: SQLite schema-version/migration reporting dies at "
-        "the RDR-155 P4b flip (service mode: immutable migration source)",
-    )
-    def test_upgrade_dry_run_reports_ahead_of_version_step(
-        self, runner: CliRunner, tmp_path: Path, monkeypatch
-    ) -> None:
-        import nexus.db.migrations as _m
-
-        db_path = self._healthy_db(tmp_path)
-        sentinel = self._sentinel_registry()
-        # Patch BOTH refs: the source (expected_t2_schema_version computes
-        # registry_max from it) and the upgrade module-level import (pending_t2).
-        monkeypatch.setattr(_m, "MIGRATIONS", sentinel)
-        monkeypatch.setattr("nexus.commands.upgrade.MIGRATIONS", sentinel)
-
-        with (
-            patch("nexus.commands.upgrade._db_path", return_value=db_path),
-            patch("nexus.commands.upgrade.T3_UPGRADES", []),
-        ):
-            result = runner.invoke(main, ["upgrade", "--dry-run"])
-        out = result.output.lower()
-        assert "up to date" not in out, out
-        assert "pending migrations" in out
-        assert "frozen-branch sentinel" in out
 
 
 # ── SC-5: MCP version divergence warning ────────────────────────────────────
