@@ -528,6 +528,16 @@ def _pin_t2_substrate(request: pytest.FixtureRequest,
     test that wants service mode sets ``NX_STORAGE_BACKEND[_<store>]`` itself,
     which overrides this pin (later ``setenv`` wins).
     """
+    # NX_TEST_T2_SUBSTRATE=none — provision NOTHING (nexus-lom9g / i711w).
+    # For tests whose subject needs no T2 store at all: endpoint resolution,
+    # env scrubbing, lease recovery. They previously said "=sqlite" to mean
+    # "don't boot an engine", which worked only while a SQLite substrate
+    # existed to fall back to. i711w deletes it, so the intent needs its own
+    # spelling rather than riding on a backend that is about to vanish.
+    # Checked FIRST: it is a statement about needing no substrate, not a
+    # choice between two.
+    if os.environ.get("NX_TEST_T2_SUBSTRATE") == "none":
+        return
     if engine_substrate_selected():
         request.getfixturevalue("t2_service_env")
         return
