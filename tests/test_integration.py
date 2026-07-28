@@ -287,6 +287,7 @@ def test_nx_search_knowledge_corpus(runner):
 # ── Code search: voyage-code-3 ──────────────────────────────────────────────
 
 @pytest.mark.integration
+@pytest.mark.cloud_mode
 @requires_t3
 @requires_voyage_key
 def test_voyage_code3_index_and_query():
@@ -338,6 +339,7 @@ def test_voyage_code3_index_and_query():
 # ── CCE: voyage-context-3 ───────────────────────────────────────────────────
 
 @pytest.mark.integration
+@pytest.mark.cloud_mode
 @requires_t3
 @requires_voyage_key
 def test_cce_query_retrieves_cce_indexed_markdown():
@@ -380,6 +382,7 @@ def test_cce_query_retrieves_cce_indexed_markdown():
 
 
 @pytest.mark.integration
+@pytest.mark.cloud_mode
 @requires_t3
 @requires_voyage_key
 def test_t3_put_embedding_model_in_search_metadata():
