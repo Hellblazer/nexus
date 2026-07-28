@@ -92,53 +92,37 @@ def isolated_home(tmp_path, monkeypatch):
 
 @pytest.fixture
 def scratch_session(isolated_home, monkeypatch):
-    """Boot a real chroma + publish a session-id lease so CLI invocations
-    share state (RDR-149 P4: T1 rides the leased registry, keyed on the
-    session-id; CLI scratch commands resolve the lease via Path B).
-    """
-    import shutil as _shutil
-    from pathlib import Path as _Path
+    """Pin a session id so CLI scratch invocations share T1 state.
 
-    from nexus.daemon.service_registry import ServiceRegistry
-    from nexus.daemon.t1_lease import T1LeasePublisher
-    from nexus.session import (
-        start_t1_server,
-        stop_t1_server,
-        write_claude_session_id,
-    )
+    RDR-155 P4b (nexus-8zpmf gate): this fixture used to boot a real Chroma T1
+    server and publish a session-id-keyed T1 lease for the CLI to resolve via
+    RDR-149 Path B. Commit 88d91bd5 deleted ``session.start_t1_server`` /
+    ``stop_t1_server`` with the rest of the Chroma client legs and left this
+    fixture importing them — a dangling import the default suite never sees,
+    because these tests are ``-m integration`` and deselected. It stood red on
+    local-service-gate-nightly for three days.
+
+    There is nothing to boot now. CLI T1 scratch routes to the PG-backed
+    :class:`~nexus.db.http_scratch_store.HttpScratchStore` (nexus-rn3wo.1), so
+    the live nexus-service the gate already provisions IS the T1 substrate. All
+    that remains is the session-id pinning: each ``runner.invoke`` builds a
+    fresh store, and without a stable session id T1's session scoping would
+    exclude prior writes.
+    """
+    from nexus.session import write_claude_session_id
 
     config_dir = isolated_home / ".config" / "nexus"
     # ``HOME`` is already isolated by ``isolated_home``;
-    # ``NEXUS_CONFIG_DIR`` makes that explicit for the lease path.
+    # ``NEXUS_CONFIG_DIR`` makes that explicit.
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
+    # Stay on the default (service) T1 backend — the gate's live service.
     monkeypatch.delenv("NX_T1_ISOLATED", raising=False)
-    # Pin the session_id across CLI invocations so all writes/reads
-    # see the same metadata filter scope AND resolve the same lease.
-    # Each ``runner.invoke`` constructs a fresh ``T1Database``; without a
-    # stable session_id the T1 metadata filter excludes prior writes.
     session_id = "integration-test-session"
     monkeypatch.setenv("NX_SESSION_ID", session_id)
 
     write_claude_session_id(session_id)
-    host, port, server_pid, tmpdir = start_t1_server()
-
-    # Publish the session-id-keyed lease the CLI invocations will resolve.
-    registry = ServiceRegistry(dir=_Path(config_dir), tier="t1")
-    publisher = T1LeasePublisher(
-        registry=registry,
-        server_pid=server_pid,
-        host=host,
-        port=port,
-        version="1.0.0",
-        session_resolver=lambda: session_id,
-    )
-    publisher.publish()
 
     yield
-
-    publisher.relinquish()
-    stop_t1_server(server_pid)
-    _shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def _uid(prefix: str = "int") -> str:
