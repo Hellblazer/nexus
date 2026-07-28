@@ -278,11 +278,18 @@ def discover_for_collection(
 ) -> int:
     """Fetch texts + embeddings from a T3 collection, run HDBSCAN discovery.
 
-    Uses the existing T3 embeddings (Voyage on cloud, MiniLM on local)
-    rather than re-embedding. This preserves the quality of the original
-    embedding model — Voyage-code-3 for code, Voyage-context-3 for docs.
-    Falls back to local MiniLM re-embedding when T3 embeddings are not
-    available (e.g., collection stored without embeddings).
+    Clusters the collection's STORED embeddings and never re-embeds. This
+    preserves the original embedding model — Voyage-code-3 for code,
+    Voyage-context-3 for docs, bge-768 on a local service.
+
+    REFUSES (returns 0, logs at WARNING, echoes unless *quiet*) when the
+    collection cannot supply aligned vectors. It formerly fell back to a
+    local MiniLM-384 re-encode, which produced topic centroids in a
+    different vector space than a bge-768 / voyage-1024 collection's chunks
+    — persisted into ``taxonomy_centroids_384``, after which every ANN
+    assign hit the dimension-mismatch guard and returned ``[]``, leaving a
+    collection full of topics nothing could be assigned to. Same fix as
+    ``split_topic``'s (nexus-9pqoj).
 
     Shared entry point for the CLI ``nx taxonomy discover`` and
     programmatic callers (``index_repo_cmd``, ``post_store_hook``).

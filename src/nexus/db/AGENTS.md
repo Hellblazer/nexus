@@ -1,17 +1,26 @@
 # `nexus.db` — AGENTS.md
 
-T1, T2, and T3 implementations. The interesting policy lives in T2's migration registry and the ChromaDB quota wall.
+T1, T2, and T3 implementations. The interesting policy lives in T2's migration registry and the vector-store routing.
+
+**ChromaDB is GONE (RDR-155 P4b, 2026-07-25).** The dependency is dropped, not
+merely unused: it is absent from `uv.lock` and not importable. Serving is the
+pgvector nexus-service in every mode. `chroma://` URI literals and
+`ChromaSchemeHandler.java` survive deliberately — they are a persisted data
+format (RDR-169 G3), not a dependency. Pinned by
+`tests/test_rdr155_p4b_deletion_gate.py`.
 
 ## Modules
 
 | File | Purpose |
 |---|---|
-| `t1.py` | `T1Database` — ephemeral or per-session HTTP `chromadb` client. Session-id lease discovery via `daemon/t1_lease.py` (RDR-149 P4); the MCP lifespan publishes the lease. |
+| `t1.py` | `T1Database` — session scratch. PG-backed `HttpScratchStore` by default (RDR-152); session-id lease discovery via `daemon/t1_lease.py` (RDR-149 P4), published by the MCP lifespan. |
 | `t2/` | Package: seven domain stores + `T2Database` facade. See **T2 domain stores** below. |
-| `t3.py` | `T3Database` — persistent local (`PersistentClient` + ONNX) or cloud (`CloudClient` + Voyage) routing keyed on `is_local_mode()`. |
-| `local_ef.py` | `LocalEmbeddingFunction` — bundled ONNX MiniLM. Used by T1 always and by T3 in local mode. |
-| `chroma_quotas.py` | **Single source of truth** for ChromaDB Cloud caps. Constants + `QuotaValidator`. Imported wherever a ChromaDB call is constructed. |
-| `migrations.py` | Centralised T2 migration registry. `Migration` dataclass, `apply_pending()`, `T3UpgradeStep`, version tracking (RDR-076). |
+| `t3.py` | `T3Database` — a facade retained for INJECTED clients (tests, `--dry-run`). Production `make_t3()` returns `HttpVectorClient` unconditionally and constructs no vector client of its own (RDR-155 P4a.2). |
+| `http_vector_client.py` | `HttpVectorClient` — the production T3: every vector op over `/v1/vectors`, pgvector storage, server-side embedding and rerank (RDR-188). |
+| `inmemory_vector_store.py` | `InMemoryVectorClient` — the in-process substitute for tests, the plan-match session cache, and `nx index --dry-run`. Chroma-parity semantics (cosine, `$eq`/`$in`/`$and` where-grammar, upsert/dedup, dimension pinning) are differentially verified, not assumed. |
+| `local_ef.py` | `LocalEmbeddingFunction` — client-side EF for local-Python paths only; T3 embeds server-side. Retirement is tracked on `nexus-sghyo` (the client does no embedding). |
+| `limits.py` | Load-bearing chunking/paging caps (`SAFE_CHUNK_BYTES`, `MAX_QUERY_RESULTS`), rehomed here from the deleted `chroma_quotas.py` at `nexus-rn3wo.2`. |
+| `migrations.py` | Centralised T2 migration registry. `Migration` dataclass, `apply_pending()`, `T3UpgradeStep`, version tracking (RDR-076). Maintenance only — new persistent state goes to PG via Liquibase. |
 
 ## T2 domain stores
 

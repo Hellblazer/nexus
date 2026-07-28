@@ -186,9 +186,21 @@ def test_chromadb_arms_retired_from_banlist():
     redundant with reality.
 
     This is NOT a weakened guarantee: the resurrection tripwire moved somewhere
-    stronger. tests/test_rdr155_p4b_deletion_gate.py bans any chromadb IMPORT
-    anywhere in the package, which catches a re-introduction that these three
-    call-shape bans would have missed (e.g. `from chromadb import Client`).
+    stronger. tests/test_rdr155_p4b_deletion_gate.py::
+    test_no_chromadb_import_anywhere_in_src AST-scans every file under
+    src/nexus/ and bans any chromadb import at any nesting depth, which catches
+    a re-introduction that these three call-shape bans would have missed
+    (e.g. `from chromadb import Client`, or a function-local deferred import).
+
+    ⚠ That claim was FALSE when written and true only since 2026-07-28. The
+    named test did not exist: the gate banned ~30 dead ``nexus.*`` modules and
+    never ``chromadb`` itself, and the only chromadb-import bans were
+    single-file scoped (health.py, stranded_install.py). So this docstring
+    traded a real BANLIST guarantee for a test that was not there. Found by the
+    p4b-test-validator at the RDR-155 P4b gate; the missing test was written
+    rather than this claim softened, and it is mutation-verified against both a
+    module-level and a function-local import. If you weaken a guarantee on the
+    strength of coverage elsewhere, open that file and confirm it.
     """
     from nexus.storage_boundary_lint import BANLIST
 

@@ -31,6 +31,8 @@ from unittest.mock import patch
 
 import pytest
 
+from nexus.commands.taxonomy_cmd import discover_for_collection
+
 pytestmark = pytest.mark.usefixtures("local_catalog_backend")
 
 _N_DOCS = 6  # > the n < 5 early return
@@ -129,8 +131,6 @@ def test_discover_refuses_when_t3_supplies_no_vectors(
     _no_embedding_allowed: None, clustered: list,
 ) -> None:
     """No stored vectors -> refuse, do not re-encode at 384d."""
-    from nexus.commands.taxonomy_cmd import discover_for_collection
-
     tax = _FakeTaxonomy()
     t3 = _FakeClient(_FakeCollection(embeddings=None))
 
@@ -153,8 +153,6 @@ def test_discover_clusters_on_stored_vectors_when_present(
     must be reached — and the array it receives must be the collection's 3-d
     vectors, which a 384d re-encode could not produce.
     """
-    from nexus.commands.taxonomy_cmd import discover_for_collection
-
     tax = _FakeTaxonomy()
     vectors = [[float(i), float(i + 1), 0.5] for i in range(_N_DOCS)]
     t3 = _FakeClient(_FakeCollection(embeddings=vectors))
