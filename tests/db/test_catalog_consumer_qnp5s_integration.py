@@ -345,13 +345,21 @@ class TestNoSQLiteAccess:
     def test_client_db_sentinel_raises(self, cat) -> None:
         """Accessing HttpCatalogClient._db must raise a clear service-mode error.
 
-        The sentinel property (nexus-xnz0o) converts the bare AttributeError
-        that un-migrated commands/ code would hit into an actionable message,
+        The sentinel property (nexus-xnz0o) replaces the bare AttributeError
+        that un-migrated commands/ code would hit with an actionable message,
         and proves the consumer is on the HTTP service backend — a real SQLite
         ._db handle (silent fallback) would NOT raise.
+
+        It stays an AttributeError, NOT a RuntimeError (nexus-xj744): the
+        message is what changes, never the type, because ``hasattr()`` only
+        swallows AttributeError and every service-mode branch depends on
+        ``hasattr(cat, "_db")`` returning False rather than exploding. The
+        ``match=`` is what keeps this honest — it distinguishes the guarded
+        AttributeError from the un-guarded one. Contract pinned suite-wide by
+        tests/db/test_raw_handle_guard_contract.py.
         """
         import pytest
-        with pytest.raises(RuntimeError, match="service mode"):
+        with pytest.raises(AttributeError, match="service mode"):
             _ = cat._db
 
 

@@ -397,13 +397,23 @@ class TestNoSQLiteAccess:
         from nexus.catalog.http_catalog_client import HttpCatalogClient
         assert isinstance(cat, HttpCatalogClient), type(cat)
 
-    def test_db_property_raises_runtime_error(self, cat) -> None:
-        """._db must raise RuntimeError with 'service mode' in the message.
+    def test_db_property_raises_attributeerror(self, cat) -> None:
+        """._db must raise AttributeError with 'service mode' in the message.
+
+        AttributeError, NOT RuntimeError (nexus-xj744). ``hasattr()`` only
+        swallows AttributeError, so a RuntimeError here would make the
+        sanctioned ``hasattr(cat, "_db")`` / ``has_raw_access(cat)`` probe
+        CRASH in service mode instead of returning False — the guard idiom that
+        exists to make such checks safe would become the thing that breaks
+        them. The contract is pinned suite-wide by
+        tests/db/test_raw_handle_guard_contract.py.
 
         Non-vacuous: a real SQLite Catalog handle would NOT raise — the test
-        fails if someone wires the wrong backend.
+        fails if someone wires the wrong backend. And ``match=`` keeps a bare
+        un-guarded AttributeError (the thing the sentinel replaced) from
+        passing as though the guard were present.
         """
-        with pytest.raises(RuntimeError, match="service mode"):
+        with pytest.raises(AttributeError, match="service mode"):
             _ = cat._db
 
 
