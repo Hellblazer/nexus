@@ -109,34 +109,8 @@ _MAX_CAS_RETRIES = 8
 # ── Row dataclass ───────────────────────────────────────────────────────────
 
 
-@dataclass(frozen=True)
-class QueueRow:
-    """A claimed queue row passed to the worker. Frozen because the
-    worker holds it across the extract → upsert → mark_done sequence
-    without mutation.
-
-    ``content`` is the document text captured at enqueue time. The
-    MCP ``store_put`` path passes ``content=<full text>`` (the only
-    moment the text is in scope before T3 commits); CLI ingest paths
-    pass ``content=""`` because chunk-level scope only; those rows
-    rely on the worker re-reading ``source_path`` from disk at
-    extraction time. The worker prefers ``content`` over file read
-    when non-empty.
-
-    ``doc_id`` (nexus-tdgc / RDR-101 Phase 4) is the catalog identity
-    of the source document. Captured at enqueue time so the worker
-    can build a ``doc_id_lookup`` for the chroma reader without a
-    second catalog round-trip. Empty string for legacy rows
-    enqueued before the column was added; the worker treats empty
-    ``doc_id`` as "fall back to source_path".
-    """
-
-    collection: str
-    source_path: str
-    content_hash: str
-    content: str
-    retry_count: int
-    doc_id: str = ""
+# QueueRow moved to nexus.db.t2.records (nexus-i711w Stage 2 Phase 0).
+from nexus.db.t2.records import QueueRow  # noqa: E402,F401  (re-export)
 
 
 # ── AspectExtractionQueue ───────────────────────────────────────────────────

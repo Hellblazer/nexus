@@ -28,6 +28,11 @@ import numpy as np
 import pytest
 
 from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+# nexus-i711w Stage 2 Phase 0: the twin now imports the compute
+# statics from taxonomy_compute directly, so delegation spies must
+# patch the twin's OWN namespace — patching CatalogTaxonomy no
+# longer intercepts anything.
+import nexus.db.t2.http_taxonomy_store as _hts
 from nexus.db.t2.http_taxonomy_store import DEFAULT_TENANT, HttpTaxonomyStore
 from tests.conftest import make_vector_test_client
 
@@ -1382,23 +1387,23 @@ class TestComputeAndAssign:
             called["args"] = (collection_name, doc_ids, list(embeddings), texts)
             return [{"label": "sentinel"}]
 
-        monkeypatch.setattr(CatalogTaxonomy, "compute_discovered_topics", staticmethod(_fake))
+        monkeypatch.setattr(_hts, "compute_discovered_topics", _fake)
         out = client.compute_discovered_topics("c", ["d1"], np.array([[1.0]]), ["t"])
         assert out == [{"label": "sentinel"}]
         assert called["args"][0] == "c" and called["args"][1] == ["d1"]
 
     def test_compute_split_delegates(self, client, monkeypatch) -> None:
         monkeypatch.setattr(
-            CatalogTaxonomy, "compute_split",
-            staticmethod(lambda *a, **k: {"child_specs": ["S"], "topic_id": a[0]}),
+            _hts, "compute_split",
+            lambda *a, **k: {"child_specs": ["S"], "topic_id": a[0]},
         )
         out = client.compute_split(7, ["d"], ["t"], ["d"], np.array([[1.0]]), "c", 2)
         assert out == {"child_specs": ["S"], "topic_id": 7}
 
     def test_compute_rebuild_plan_delegates(self, client, monkeypatch) -> None:
         monkeypatch.setattr(
-            CatalogTaxonomy, "compute_rebuild_plan",
-            staticmethod(lambda *a, **k: {"specs": [], "manual_transfers": k.get("manual_assignments")}),
+            _hts, "compute_rebuild_plan",
+            lambda *a, **k: {"specs": [], "manual_transfers": k.get("manual_assignments")},
         )
         out = client.compute_rebuild_plan(
             "c", ["d"], np.array([[1.0]]), ["t"],
@@ -1660,7 +1665,7 @@ class TestOrchestrators:
         specs = [{"label": "a", "terms": "[]", "doc_count": 2, "doc_ids": ["x1", "x2"],
                   "centroid": [1.0, 0.0], "assigned_by": "hdbscan"}]
         monkeypatch.setattr(
-            CatalogTaxonomy, "compute_discovered_topics", staticmethod(lambda *a: specs))
+            _hts, "compute_discovered_topics", lambda *a: specs)
         n = store.discover_topics("c", ["x1", "x2"], np.array([[1.0, 0.0], [0.9, 0.1]]), ["t1", "t2"])
         assert n == 1
         assert {t["label"] for t in client.get_all_topics(collection="c")} == {"a"}
@@ -1670,7 +1675,7 @@ class TestOrchestrators:
     def test_discover_topics_empty_specs_returns_zero(self, client, monkeypatch) -> None:
         store = self._store(client, [])
         monkeypatch.setattr(
-            CatalogTaxonomy, "compute_discovered_topics", staticmethod(lambda *a: []))
+            _hts, "compute_discovered_topics", lambda *a: [])
         assert store.discover_topics("c", [], np.array([]), []) == 0
         assert store._centroid_store.calls == []
 
@@ -1695,7 +1700,7 @@ class TestOrchestrators:
                            "doc_ids": ["d1"], "centroid": [0.0, 1.0]}],
                 "manual_transfers": {}}
         monkeypatch.setattr(
-            CatalogTaxonomy, "compute_rebuild_plan", staticmethod(lambda *a, **k: plan))
+            _hts, "compute_rebuild_plan", lambda *a, **k: plan)
         n = store.rebuild_taxonomy("c", ["d1"], np.array([[0.0, 1.0]]), ["t"])
         assert n == 1
         calls = store._centroid_store.calls
@@ -1726,7 +1731,7 @@ class TestOrchestrators:
             captured.update(kwargs)
             return {"specs": [], "manual_transfers": {}}
 
-        monkeypatch.setattr(CatalogTaxonomy, "compute_rebuild_plan", staticmethod(_spy))
+        monkeypatch.setattr(_hts, "compute_rebuild_plan", _spy)
         store.rebuild_taxonomy("c", ["d1"], np.array([[0.0, 1.0]]), ["t"])
 
         # kwargs must match read_rebuild_old_state's reshaped output exactly.
@@ -1758,9 +1763,9 @@ class TestOrchestrators:
              "centroid": [0.0, 1.0], "created_at": "2026-01-01T00:00:00Z"},
         ]
         monkeypatch.setattr(
-            CatalogTaxonomy, "compute_split",
-            staticmethod(lambda *a, **k: {"topic_id": 5, "collection_name": "c",
-                                          "child_specs": child_specs}))
+            _hts, "compute_split",
+            lambda *a, **k: {"topic_id": 5, "collection_name": "c",
+                             "child_specs": child_specs})
         fake_client = _FakeChromaClient({"c": _FakeChromaColl(
             documents={"d1": "t1", "d2": "t2"},
             embeddings={"d1": [1.0, 0.0], "d2": [0.0, 1.0]},
@@ -1806,8 +1811,8 @@ class TestOrchestrators:
             {"collection": "c", "topic_id": 7, "embedding": [1.0, 0.0], "label": "parent", "doc_count": 3},
         ])
         monkeypatch.setattr(
-            CatalogTaxonomy, "compute_split",
-            staticmethod(lambda *a, **k: {"topic_id": 7, "collection_name": "c",
+            _hts, "compute_split",
+            lambda *a, **k: {"topic_id": 7, "collection_name": "c",
                                           "child_specs": [
                                               {"label": "c0", "terms_json": "[]", "doc_count": 1,
                                                "doc_ids": ["d1"], "centroid": [1.0, 0.0],
@@ -1815,7 +1820,7 @@ class TestOrchestrators:
                                               {"label": "c1", "terms_json": "[]", "doc_count": 1,
                                                "doc_ids": ["d2"], "centroid": [0.0, 1.0],
                                                "created_at": "2026-01-01T00:00:00Z"},
-                                          ]}))
+                                          ]})
         # d1 and d2 carry vectors; d3 does not. Dropping d3 would leave exactly
         # k=2 usable docs and the split would proceed — which is the failure
         # this pins.

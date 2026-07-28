@@ -20,7 +20,7 @@ from typing import Any
 import httpx
 import structlog
 
-from nexus.db.t2.document_highlights import HighlightRecord
+from nexus.db.t2.records import HighlightRecord
 
 _log = structlog.get_logger(__name__)
 

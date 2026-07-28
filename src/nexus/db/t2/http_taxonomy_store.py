@@ -49,13 +49,20 @@ import httpx
 import numpy as np
 import structlog
 
-from nexus.db.t2.catalog_taxonomy import (
+# nexus-i711w Stage 2 Phase 0: these all live in taxonomy_compute (the
+# RDR-158 P1 move); catalog_taxonomy merely re-exported them. Importing from
+# the source lets the dying module go without touching this one again — the
+# re-point the 2026-06-12 critic note predicted P4 would own.
+from nexus.db.t2.taxonomy_compute import (
+    PROJECTION_THRESHOLD,
     AssignResult,
     AuditHub,
     AuditReport,
-    CatalogTaxonomy,
     DEFAULT_HUB_STOPWORDS,
     HubRow,
+    compute_discovered_topics,
+    compute_rebuild_plan,
+    compute_split,
 )
 
 _log = structlog.get_logger(__name__)
@@ -592,7 +599,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         texts: list[str],
     ) -> list[dict[str, Any]]:
         """Delegate verbatim to the backend-agnostic oracle static."""
-        return CatalogTaxonomy.compute_discovered_topics(
+        return compute_discovered_topics(
             collection_name, doc_ids, embeddings, texts,
         )
 
@@ -610,7 +617,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         manual_assignments: dict[str, int],
     ) -> dict[str, Any]:
         """Delegate verbatim to the backend-agnostic oracle static."""
-        return CatalogTaxonomy.compute_rebuild_plan(
+        return compute_rebuild_plan(
             collection_name, doc_ids, embeddings, texts,
             old_centroids=old_centroids,
             old_labels=old_labels,
@@ -630,7 +637,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         k: int,
     ) -> dict[str, Any]:
         """Delegate verbatim to the backend-agnostic oracle static."""
-        return CatalogTaxonomy.compute_split(
+        return compute_split(
             topic_id, doc_ids, texts, fetched_ids, embeddings, collection_name, k,
         )
 
@@ -749,7 +756,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         for i, meta in enumerate(new_metas):
             new_tid = int(meta["topic_id"])
             for j in range(sim.shape[1]):
-                if float(sim[i, j]) >= CatalogTaxonomy._PROJECTION_THRESHOLD:
+                if float(sim[i, j]) >= PROJECTION_THRESHOLD:
                     pairs.append((new_tid, int(other_metas[j]["topic_id"])))
         return pairs
 

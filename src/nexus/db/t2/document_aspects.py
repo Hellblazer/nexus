@@ -106,42 +106,14 @@ CREATE INDEX IF NOT EXISTS idx_document_aspects_extractor
 # ── Record dataclass ────────────────────────────────────────────────────────
 
 
-@dataclass
-class AspectRecord:
-    """A single document's extracted aspects.
-
-    JSON-shaped fields (``experimental_datasets``,
-    ``experimental_baselines``, ``extras``) are typed as Python
-    list / dict here; the store handles serialization on write and
-    deserialization on read.
-
-    ``doc_id`` (RDR-108 Phase 1c): catalog tumbler identity for the
-    source document.  After the PK migration, this is the primary key;
-    ``collection`` and ``source_path`` are retained as denorm cache
-    columns.  Empty string on legacy rows written before the migration.
-    """
-
-    collection: str
-    source_path: str
-    problem_formulation: str | None
-    proposed_method: str | None
-    experimental_datasets: list[str] = field(default_factory=list)
-    experimental_baselines: list[str] = field(default_factory=list)
-    experimental_results: str | None = None
-    extras: dict = field(default_factory=dict)
-    confidence: float | None = None
-    extracted_at: str = ""
-    model_version: str = ""
-    extractor_name: str = ""
-    # RDR-096 P2.1: persistent URI identity. ``None`` on legacy rows
-    # written before P2.1 ships; populated for all writes after.
-    source_uri: str | None = None
-    # RDR-108 Phase 1c: catalog tumbler identity. Empty string on legacy
-    # rows written before the PK migration.
-    doc_id: str = ""
-    # RDR-109 Phase 5: salient sentences (attention-guided-v1 extractor).
-    # Empty list when the extractor was not run or returned no candidates.
-    salient_sentences: list[str] = field(default_factory=list)
+# AspectRecord + the _safe_json_* helpers moved to nexus.db.t2.records
+# (nexus-i711w Stage 2 Phase 0) so the SURVIVING Http twin does not import
+# from this dying module. Re-exported here for existing callers.
+from nexus.db.t2.records import (  # noqa: E402,F401  (re-export)
+    AspectRecord,
+    _safe_json_dict,
+    _safe_json_list,
+)
 
 
 def _resolve_doc_id(record: AspectRecord) -> str:
@@ -1019,21 +991,5 @@ def _row_to_record_with_doc_id(row: tuple) -> AspectRecord:
     )
 
 
-def _safe_json_list(s: str | None) -> list:
-    if not s:
-        return []
-    try:
-        v = json.loads(s)
-    except (ValueError, TypeError):
-        return []
-    return v if isinstance(v, list) else []
 
 
-def _safe_json_dict(s: str | None) -> dict:
-    if not s:
-        return {}
-    try:
-        v = json.loads(s)
-    except (ValueError, TypeError):
-        return {}
-    return v if isinstance(v, dict) else {}

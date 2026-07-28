@@ -57,22 +57,8 @@ CREATE INDEX IF NOT EXISTS idx_document_highlights_source_uri
 """
 
 
-@dataclass
-class HighlightRecord:
-    """A document's DEVONthink-sourced highlight + mention notes (RDR-139 Layer E).
-
-    ``doc_id`` is the catalog tumbler of the source document. ``source_uri`` is
-    the ``x-devonthink-item://<uuid>`` identity. ``highlights_md`` /
-    ``mentions_md`` are the markdown blobs from ``extract_record_highlights`` /
-    ``extract_record_mentions`` (either may be empty).
-    """
-
-    doc_id: str
-    source_uri: str
-    collection: str
-    highlights_md: str
-    mentions_md: str
-    ingested_at: str
+# HighlightRecord moved to nexus.db.t2.records (nexus-i711w Stage 2 Phase 0).
+from nexus.db.t2.records import HighlightRecord  # noqa: E402,F401  (re-export)
 
 
 def _row_to_record(row: sqlite3.Row | tuple) -> HighlightRecord:
