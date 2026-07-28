@@ -21,7 +21,26 @@ from tests.conftest import fake_credentials, make_vector_test_client
 # suites belong under the ``integration`` marker. Run explicitly with
 # ``uv run pytest -m integration``; release-shakedown already exercises
 # the same code paths through ``nx index repo`` end-to-end on every tag.
-pytestmark = pytest.mark.integration
+#
+# ``local_catalog_backend`` completes the pin that ``_legacy_vector_backend``
+# below starts (nexus-qvs2h). That fixture pins the VECTOR half local because
+# these tests wire a client-side ``local_t3`` and exercise the client-embed
+# path; the CATALOG half was left on the engine default, so after the
+# nexus-aqbrk substrate flip the flow ran mode-SPLIT — vectors in the test's
+# own client, documents in the engine catalog. No shipping install splits
+# them, and the incoherence was load-bearing on three tests: the legacy ->
+# conformant collection rename's data plane tried to re-home a collection the
+# service had never seen (``HTTP 404: collection not found``), so chunks stayed
+# under the legacy name while ``_repo_collection_or_legacy`` had already
+# started returning the conformant one, and the raw ``cat._db`` manifest reads
+# found an empty local catalog.
+#
+# NOT a substrate workaround, and it removes no real coverage: a mode-split
+# configuration was never a thing to cover. Service-mode indexing is covered by
+# the unit seam-B tests and the live service smokes, as ``_legacy_vector_backend``
+# already says. Retirement: this pin goes with the local catalog in nexus-i711w.
+pytestmark = [pytest.mark.integration,
+              pytest.mark.usefixtures("local_catalog_backend")]
 
 _CORPUS_FILES = [
     "src/nexus/ttl.py",
