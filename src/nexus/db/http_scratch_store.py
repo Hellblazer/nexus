@@ -38,10 +38,14 @@ and returns a :class:`~nexus.types.PromotionReport`.
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import httpx
 import structlog
+
+if TYPE_CHECKING:  # nexus-b8a5a: return-shape parity — the annotation was
+    # `object` while this method's own docstring said PromotionReport.
+    from nexus.types import PromotionReport
 
 _log = structlog.get_logger(__name__)
 
@@ -432,7 +436,9 @@ class HttpScratchStore:
 
     # ── Promote ────────────────────────────────────────────────────────────────
 
-    def promote(self, id: str, project: str, title: str, t2: object) -> object:
+    def promote(
+        self, id: str, project: str, title: str, t2: object,
+    ) -> "PromotionReport":
         """Copy T1 entry *id* to T2 immediately. Returns a PromotionReport.
 
         *t2* may be a direct ``T2Database`` or a daemon-backed ``T2Client``

@@ -283,3 +283,207 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
         'query_tier_writes_once': ['session_id', 'timeout'],
     },
 }
+
+
+# ── Return shapes (nexus-b8a5a) ───────────────────────────────────────────────
+#
+# {store_label: {public_method_name: normalized return annotation}}
+#
+# WHY THIS EXISTS. The parameter snapshot above pins method NAMES and PARAMETER
+# names and nothing else, so a twin could diverge on its RETURN SHAPE and the
+# parity tripwire stayed green. One did, for the entire life of the RDR-152
+# port: HttpTaxonomyStore.get_topic_link_pairs returned
+# ``list[tuple[int,int,int]]`` where CatalogTaxonomy returns
+# ``dict[tuple[int,int],int]``. Every consumer annotates the mapping, so
+# ``scoring.apply_topic_boost``'s ``for (a, b) in links`` raised ValueError
+# inside ``search_engine``'s best-effort ``except Exception`` and the WHOLE
+# topic boost — the same-topic half included — was silently discarded in
+# service mode, the default substrate (nexus-ekn9n, P1).
+#
+# Both annotations were present and plainly different, so a STATIC comparison
+# would have caught it at zero runtime cost. That is what this table enables.
+#
+# COVERAGE, measured at capture: 147 shared public methods across the nine
+# pairs, 147 annotated on BOTH sides. No sampling, no gaps.
+#
+# NORMALIZATION is deliberately shallow — quotes stripped (a forward reference
+# and a resolved one are the same contract) and whitespace removed. Nothing
+# else. Do NOT normalize container kinds: ``list[...]`` vs ``dict[...]`` IS the
+# defect class this table exists to catch, and a normalizer generous enough to
+# call those equal would be green on ekn9n.
+#
+# REGENERATE alongside the parameter snapshot whenever an Http* store
+# legitimately re-signatures a public method. Until RDR-158 P4 deletes the
+# SQLite twins, ``test_contract_matches_live_sqlite_oracle`` cross-checks this
+# against the live oracles every run; after P4 this artifact is the sole
+# authority. That is also why it had to be captured NOW — once the oracle is
+# gone there is nothing left to capture it FROM, and whatever shapes the Http
+# twins happen to have would silently become the contract.
+
+T2_STORE_RETURNS: dict[str, dict[str, str]] = {
+    'memory': {
+        'delete': 'bool',
+        'expire': 'list[int]',
+        'find_overlapping_memories': 'list[tuple[dict[str,Any],dict[str,Any]]]',
+        'flag_stale_memories': 'list[dict[str,Any]]',
+        'get': 'dict[str,Any]|None',
+        'get_all': 'list[dict[str,Any]]',
+        'get_projects_with_prefix': 'list[dict[str,Any]]',
+        'list_entries': 'list[dict[str,Any]]',
+        'merge_memories': 'None',
+        'put': 'int',
+        'put_or_merge': 'tuple[int,str]',
+        'resolve_title': 'tuple[dict[str,Any]|None,list[dict[str,Any]]]',
+        'search': 'list[dict[str,Any]]',
+        'search_by_tag': 'list[dict[str,Any]]',
+        'search_glob': 'list[dict[str,Any]]',
+    },
+    'plans': {
+        'delete_plan': 'int',
+        'get_plan': 'dict[str,Any]|None',
+        'get_plan_by_dimensions': 'dict[str,Any]|None',
+        'increment_match_metrics': 'None',
+        'increment_run_outcome': 'None',
+        'increment_run_started': 'None',
+        'list_active_plans': 'list[dict[str,Any]]',
+        'list_plans': 'list[dict[str,Any]]',
+        'plan_exists': 'bool',
+        'save_plan': 'int',
+        'search_plans': 'list[dict[str,Any]]',
+        'set_plan_disabled': 'bool',
+        'set_plan_enabled': 'bool',
+        'set_scope_tags': 'bool',
+    },
+    'telemetry': {
+        'expire_relevance_log': 'int',
+        'get_relevance_log': 'list[dict[str,Any]]',
+        'get_retention_markers': 'dict[str,int]',
+        'list_consents': 'list[dict[str,Any]]',
+        'log_relevance': 'int',
+        'log_relevance_batch': 'int',
+        'log_search_batch': 'int',
+        'query_collection_stats': 'dict[str,Any]',
+        'record_consent': 'None',
+        'record_hook_failure': 'None',
+        'record_nx_answer_run': 'None',
+        'record_tier_write': 'None',
+        'rename_collection': 'dict[str,int]',
+        'trim_hook_failures': 'int',
+        'trim_search_telemetry': 'int',
+    },
+    'chash_index': {
+        'count_for_collection': 'int',
+        'delete_collection': 'int',
+        'delete_stale': 'int',
+        'distinct_collections': 'set[str]',
+        'is_empty': 'bool',
+        'lookup': 'list[dict[str,Any]]',
+        'registered_chashes_for_collection': 'set[str]',
+        'rename_collection': 'int',
+        'upsert': 'None',
+        'upsert_many': 'None',
+    },
+    'document_aspects': {
+        'delete': 'int',
+        'delete_orphans': 'tuple[int,int]',
+        'get': 'AspectRecord|None',
+        'get_by_doc_id': 'AspectRecord|None',
+        'get_salient_sentences': 'list[str]',
+        'list_by_collection': 'list[AspectRecord]',
+        'list_by_extractor_version': 'list[AspectRecord]',
+        'list_promotions': 'list[dict]',
+        'rename_collection': 'int',
+        'set_salient_sentences': 'bool',
+        'set_salient_sentences_by_key': 'bool',
+        'upsert': 'bool',
+    },
+    'document_highlights': {
+        'delete': 'bool',
+        'get': 'HighlightRecord|None',
+        'get_by_source_uri': 'HighlightRecord|None',
+        'list': 'list[HighlightRecord]',
+        'upsert': 'bool',
+    },
+    'aspect_queue': {
+        'claim_batch': 'list[QueueRow]',
+        'claim_next': 'QueueRow|None',
+        'enqueue': 'None',
+        'is_drained': 'bool',
+        'list_failed': 'list[QueueRow]',
+        'list_pending': 'list[QueueRow]',
+        'mark_done': 'int',
+        'mark_failed': 'None',
+        'mark_retry': 'None',
+        'pending_count': 'int',
+        'reclaim_stale': 'int',
+        'rename_collection': 'int',
+    },
+    'taxonomy': {
+        'assign_batch': 'int',
+        'assign_single': 'AssignResult|None',
+        'assign_topic': 'None',
+        'audit_collection': 'AuditReport',
+        'chunk_grounded_in': 'float|None',
+        'clear_icf_cache': 'None',
+        'compute_assignments': 'list[dict[str,Any]]',
+        'compute_cross_links': 'list[tuple[int,int]]',
+        'compute_discovered_topics': 'list[dict[str,Any]]',
+        'compute_icf_map': 'dict[int,float]',
+        'compute_rebuild_plan': 'dict[str,Any]',
+        'compute_split': 'dict[str,Any]',
+        'delete_topic': 'str|None',
+        'detect_hubs': 'list[HubRow]',
+        'discover_topics': 'int',
+        'generate_cooccurrence_links': 'int',
+        'get_all_topic_doc_ids': 'list[str]',
+        'get_all_topics': 'list[dict[str,Any]]',
+        'get_assignments_for_docs': 'dict[str,int]',
+        'get_distinct_collections': 'list[str]',
+        'get_doc_ids_for_topic': 'list[str]',
+        'get_labels_for_ids': 'dict[int,str]',
+        'get_projection_counts_by_collection': 'dict[str,int]',
+        'get_topic_by_id': 'dict[str,Any]|None',
+        'get_topic_doc_ids': 'list[str]',
+        'get_topic_docs': 'list[dict[str,Any]]',
+        'get_topic_link_pairs': 'dict[tuple[int,int],int]',
+        'get_topic_tree': 'list[dict[str,Any]]',
+        'get_topics': 'list[dict[str,Any]]',
+        'get_topics_for_collection': 'list[dict[str,Any]]',
+        'get_unreviewed_topics': 'list[dict[str,Any]]',
+        'mark_topic_reviewed': 'None',
+        'merge_topics': 'str|None',
+        'needs_rebalance': 'bool',
+        'persist_assignments': 'int',
+        'persist_cross_links': 'int',
+        'persist_discovered_topics': 'list[int]',
+        'persist_rebuild_topics': 'list[int]',
+        'persist_split': 'list[int]',
+        'project_against': 'dict[str,Any]',
+        'purge_assignments_for_doc': 'int',
+        'purge_collection': 'dict[str,int]',
+        'read_rebuild_old_state': 'dict[str,Any]',
+        'rebuild_taxonomy': 'int',
+        'record_discover_count': 'None',
+        'refresh_projection_links': 'int',
+        'rename_collection': 'dict[str,int]',
+        'rename_topic': 'None',
+        'resolve_label': 'int|None',
+        'split_topic': 'int',
+        'top_topics_for_collection': 'list[dict[str,Any]]',
+        'update_topic_label': 'None',
+        'upsert_topic_links': 'int',
+    },
+    'scratch': {
+        'clear': 'int',
+        'delete': 'bool',
+        'flag': 'None',
+        'flagged_entries': 'list[dict]',
+        'get': 'dict|None',
+        'list_entries': 'list[dict]',
+        'promote': 'PromotionReport',
+        'put': 'str',
+        'resolve_prefix_candidates': 'list[str]',
+        'search': 'list[dict]',
+        'unflag': 'None',
+    },
+}

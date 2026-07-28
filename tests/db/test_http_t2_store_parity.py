@@ -36,6 +36,7 @@ import inspect
 import pytest
 
 from tests.db.t2_store_contract import (
+    T2_STORE_RETURNS,
     _UNIVERSAL_IGNORE,
     T2_STORE_CONTRACT,
     T2_SUPPLEMENTAL_CONTRACT,
@@ -402,6 +403,50 @@ def test_contract_covers_all_store_pairs():
     )
 
 
+def _norm_return(ann: object) -> str:
+    """Normalize a return annotation for comparison.
+
+    DELIBERATELY SHALLOW: strip quotes (a forward reference and a resolved one
+    are the same contract) and whitespace. Nothing else. A normalizer generous
+    enough to equate ``list[...]`` with ``dict[...]`` would be GREEN on the very
+    bug this check exists for (nexus-ekn9n).
+    """
+    return str(ann).strip("'\"").replace(" ", "")
+
+
+@pytest.mark.parametrize("label,http_path", _STORE_PAIRS,
+                         ids=[p[0] for p in _STORE_PAIRS])
+def test_http_store_matches_contract_return_shapes(label, http_path):
+    """The HTTP twin's RETURN SHAPE matches the frozen contract (nexus-b8a5a).
+
+    The parameter tripwire above pins names only, so a twin could diverge on
+    what it RETURNS and stay green. One did, for the whole life of the RDR-152
+    port: HttpTaxonomyStore.get_topic_link_pairs returned
+    ``list[tuple[int,int,int]]`` where the oracle returns
+    ``dict[tuple[int,int],int]``. Consumers annotate the mapping, so
+    ``apply_topic_boost``'s ``for (a, b) in links`` raised ValueError inside
+    ``search_engine``'s best-effort except and the entire topic boost was
+    silently dropped in service mode (P1). Both annotations existed and
+    differed — a static check was always sufficient.
+    """
+    expected = T2_STORE_RETURNS.get(label, {})
+    http_cls = _load(http_path)
+    drift = []
+    for method, want in sorted(expected.items()):
+        if method in _EXCLUSIONS.get(label, {}):
+            continue
+        fn = getattr(http_cls, method, None)
+        if fn is None:
+            continue  # coverage is the sibling test's job, not this one's
+        got = _norm_return(inspect.signature(fn).return_annotation)
+        if got != want:
+            drift.append(f"  {label}.{method}\n      contract: {want}\n      http    : {got}")
+    assert not drift, (
+        f"{label}: HTTP store return shape diverges from the frozen contract "
+        f"(nexus-b8a5a — this is the nexus-ekn9n defect class):\n" + "\n".join(drift)
+    )
+
+
 # ---------------------------------------------------------------------------
 # P4-DELETE-MARKER (nexus-i711w): faithfulness guard. This is the ONLY thing in
 # this file that references a SQLite store class. It confirms the frozen contract
@@ -427,6 +472,34 @@ _SQLITE_ORACLES = {
     "taxonomy": "nexus.db.t2.catalog_taxonomy:CatalogTaxonomy",
     "scratch": "nexus.db.t1:T1Database",
 }
+
+
+@pytest.mark.parametrize("label", sorted(_SQLITE_ORACLES),
+                         ids=sorted(_SQLITE_ORACLES))
+def test_contract_returns_match_live_sqlite_oracle(label):
+    """P4-DELETE: the frozen RETURN table reproduces the live oracle exactly.
+
+    Keeps T2_STORE_RETURNS honest while the SQLite twins still exist. After
+    RDR-158 P4 there is no oracle left to capture from, so whatever shapes the
+    Http twins happen to carry would silently become the contract — which is
+    precisely how get_topic_link_pairs would have frozen wrong. Delete with the
+    rest of this block.
+    """
+    sqlite_cls = _load(_SQLITE_ORACLES[label])
+    expected = T2_STORE_RETURNS.get(label, {})
+    drift = []
+    for method, want in sorted(expected.items()):
+        fn = getattr(sqlite_cls, method, None)
+        if fn is None:
+            drift.append(f"  {label}.{method}: in the frozen table, gone from the oracle")
+            continue
+        got = _norm_return(inspect.signature(fn).return_annotation)
+        if got != want:
+            drift.append(f"  {label}.{method}\n      frozen: {want}\n      live  : {got}")
+    assert not drift, (
+        f"{label}: the frozen return table has drifted from the live SQLite "
+        f"oracle — REGENERATE it:\n" + "\n".join(drift)
+    )
 
 
 @pytest.mark.parametrize("label", sorted(_SQLITE_ORACLES),
