@@ -495,10 +495,22 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     def get_topic_link_pairs(
         self,
         topic_ids: list[int],
-    ) -> list[tuple[int, int, int]]:
-        """Return (from_id, to_id, link_count) triples."""
+    ) -> dict[tuple[int, int], int]:
+        """Return ``{(from_id, to_id): link_count}`` (oracle-identical shape).
+
+        Returned a ``list`` of ``(from, to, count)`` triples until nexus-ekn9n.
+        Every consumer annotates the mapping — :func:`nexus.scoring.apply_topic_boost`
+        takes ``topic_links: dict[tuple[int, int], int] | None`` and iterates
+        ``for (a, b) in links`` — so the triples raised ``ValueError: too many
+        values to unpack`` inside ``search_engine``'s best-effort
+        ``except Exception``, silently discarding the WHOLE topic boost in
+        service mode. The wire stays a row list; only the client-side shape
+        changed.
+        """
         result = self._post("/links/pairs", {"topic_ids": topic_ids})
-        return [(r["from_topic_id"], r["to_topic_id"], r["link_count"]) for r in result]
+        return {
+            (r["from_topic_id"], r["to_topic_id"]): r["link_count"] for r in result
+        }
 
     def upsert_topic_links(
         self,

@@ -111,15 +111,13 @@ def _seed_assignment(
 
 
 def _link_pairs(taxonomy: Any, topic_ids: list[int]) -> dict[tuple[int, int], int]:
-    """Normalized {(from_id, to_id): link_count} read.
+    """{(from_id, to_id): link_count} read.
 
-    get_topic_link_pairs returns a dict on the SQLite twin and a list of
-    (from, to, count) triples on the Http twin — normalize both shapes.
+    Both twins return the mapping since nexus-ekn9n (the Http twin returned
+    (from, to, count) triples until then; the shape is pinned substrate-neutrally
+    by tests/test_ekn9n_topic_link_pairs_contract.py).
     """
-    raw = taxonomy.get_topic_link_pairs(list(topic_ids))
-    if isinstance(raw, dict):
-        return dict(raw)
-    return {(f, t): c for f, t, c in raw}
+    return dict(taxonomy.get_topic_link_pairs(list(topic_ids)))
 
 
 def _centroid_state(taxonomy: Any, collection: str, chroma_client: Any) -> dict[str, Any]:

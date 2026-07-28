@@ -1046,7 +1046,7 @@ class TestLinks:
               "link_types": ["cooccurrence"]}])
         stored = {(lk["from_topic_id"], lk["to_topic_id"]): lk for lk in _LINKS}
         assert stored[(1, 2)]["link_count"] == 3  # overwritten, not GREATEST=10
-        assert client.get_topic_link_pairs([1, 2]) == [(1, 2, 3)]
+        assert client.get_topic_link_pairs([1, 2]) == {(1, 2): 3}
 
     def test_upsert_topic_links_does_not_clobber_other_pk(
         self, client: HttpTaxonomyStore,
@@ -1141,7 +1141,7 @@ class TestImportFidelity:
             link_count=99, link_types='["co-occurrence"]',
         )
         pairs = client.get_topic_link_pairs([1])
-        assert any(p[2] == 99 for p in pairs)
+        assert 99 in pairs.values()
 
     def test_import_taxonomy_meta_fidelity(self, client: HttpTaxonomyStore) -> None:
         client.import_taxonomy_meta(

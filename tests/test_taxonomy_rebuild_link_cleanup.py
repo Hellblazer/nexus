@@ -70,12 +70,9 @@ def _seed_topic(db: T2Database, label: str, collection: str) -> int:
 
 def _link_pairs(db: T2Database) -> dict[tuple[int, int], int]:
     """{(from, to): count} across every seeded topic id, via the public
-    get_topic_link_pairs surface (sqlite returns a dict, Http a list of
-    triples — normalize both)."""
-    raw = db.taxonomy.get_topic_link_pairs(list(_seeded_ids))
-    if isinstance(raw, dict):
-        return dict(raw)
-    return {(f, t): c for f, t, c in raw}
+    get_topic_link_pairs surface (both twins return the mapping since
+    nexus-ekn9n)."""
+    return dict(db.taxonomy.get_topic_link_pairs(list(_seeded_ids)))
 
 
 def _link_count(db: T2Database) -> int:

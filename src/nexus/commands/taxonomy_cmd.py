@@ -1494,9 +1494,9 @@ def links_cmd(collection: str, refresh: bool) -> None:
             # Service mode: get link pairs via public API and resolve labels
             _all_topics = {t["id"]: t for t in db.taxonomy.get_all_topics()}
             _topic_ids = list(_all_topics.keys())
-            _pairs = db.taxonomy.get_topic_link_pairs(_topic_ids) if _topic_ids else []
+            _pairs = db.taxonomy.get_topic_link_pairs(_topic_ids) if _topic_ids else {}
             rows = []
-            for from_id, to_id, count in _pairs:
+            for (from_id, to_id), count in _pairs.items():
                 from_t = _all_topics.get(from_id, {})
                 to_t   = _all_topics.get(to_id, {})
                 if collection and (from_t.get("collection") != collection and
