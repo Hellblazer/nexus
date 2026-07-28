@@ -178,7 +178,39 @@ from __future__ import annotations
 #: NOT in this tag, so do not assume them from the floor: analyze-002
 #: (the BUG-0148 ANALYZE invariant, 308522b3) and the staging-4 rollback-split
 #: fix (c13d0c84) both landed AFTER the cut.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 57)
+#: -> (0,1,58) 2026-07-28: the nexus-onjvy write-only-surface cohort, plus the
+#: two changesets the v0.1.57 note above flagged as deliberately absent.
+#: THREE READ ROUTES for data the engine already wrote and no route returned:
+#: GET /v1/telemetry/hook_failures/list (the failure log existed only as
+#: /record + /trim, so the thing that surfaces SILENT hook failures could be
+#: written and never inspected); POST /v1/taxonomy/assignments/details
+#: (similarity / assigned_at / source_collection were written by assign and
+#: projected by nothing, so an operator could not ask how confident an
+#: assignment was); and /hubs now returns max_last_discover_at,
+#: never_discovered_count and is_stale, so detect_hubs(warn_stale=) stops being
+#: accepted-and-silently-dropped. No DDL — every column already existed.
+#: Also carries analyze-002 (307 changesets now, up from 206), which conexus
+#: confirmed working on deploy: both rewritten tables came back FRESH with no
+#: hand-run ANALYZE, where v0.1.57 needed one as nexus_admin.
+#: A TIMESTAMP WIRE FIX rides along and is worth knowing about: these reads
+#: emit UTC ISO-8601 with explicit seconds via each repository's UTC_SECOND
+#: formatter. OffsetDateTime.toString() renders in the JVM's LOCAL offset and
+#: elides zero seconds, so the same instant crossed as "2026-04-08T17:00-07:00"
+#: on one host and "...T00:00:00Z" on another — either property breaks a client
+#: that compares these as strings, which the retired SQLite oracle did.
+#: Gates: full engine suite 1475/0/0 twice consecutively; CANDIDATE SHAKEOUT
+#: PASSED pre-tag (native build + verb matrix + zero 5xx under load); ACQUIRE
+#: GATE PASSED 12/12 on the PUBLISHED, cosign-verified bytes; deployed to
+#: api.conexus-nexus.com (digest sha256:dea44148..., cosign KMS + spdxjson
+#: attestation verified at redeploy). record-deploy written and verified
+#: against the live /version before this bump [21219 relay chain].
+#: ONE THING NOT ESTABLISHED, so nobody infers it from the floor: v0.1.58's
+#: STEP-6 parity moved 105 -> 104 and that is CORPUS DRIFT (+1,514 chunks,
+#: +34 documents between captures), NOT this release. An ekn9n topic-boost
+#: attribution was floated across the bus and WITHDRAWN by both sides:
+#: apply_topic_boost is Python-client-only and absent from the engine, so it
+#: cannot execute on the /v1/vectors/* path STEP-6 measures. See nexus-j46lz.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 58)
 
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:

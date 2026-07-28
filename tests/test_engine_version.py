@@ -107,7 +107,29 @@ class TestRequiredEngineVersion:
         # byte-identical to the v0.1.56 baseline, recall AC-3 12/12),
         # record-deploy verified against the live /version before this bump
         # (T2 [21164]).
-        assert REQUIRED_ENGINE_VERSION == (0, 1, 57)
+        # ->(0,1,58) 2026-07-28: the nexus-onjvy write-only-surface cohort.
+        # Three READ routes for data the engine already wrote and no route
+        # returned: /v1/telemetry/hook_failures/list (the log that surfaces
+        # SILENT hook failures could be written and never inspected),
+        # /v1/taxonomy/assignments/details (similarity / assigned_at /
+        # source_collection written by assign, projected by nothing), and
+        # /hubs' staleness aggregates so detect_hubs(warn_stale=) stops
+        # being accepted-and-dropped. No DDL — the columns all existed.
+        # Also carries analyze-002, which conexus confirmed working on
+        # deploy (both rewritten tables FRESH with no hand-run ANALYZE,
+        # where v0.1.57 needed one as nexus_admin).
+        # Gates: engine suite 1475/0/0 twice; CANDIDATE SHAKEOUT PASSED
+        # pre-tag; ACQUIRE GATE 12/12 on the PUBLISHED cosign-verified
+        # bytes; deployed to api.conexus-nexus.com and record-deploy
+        # verified against the live /version before this bump.
+        # NOT established, so do not infer it: v0.1.58's STEP-6 parity
+        # moved 105 -> 104 and that is CORPUS DRIFT (+1,514 chunks / +34
+        # docs between captures), not this release. An ekn9n topic-boost
+        # attribution was floated across the bus and WITHDRAWN by both
+        # sides — apply_topic_boost is Python-client-only and absent from
+        # the engine, so it cannot run on the /v1/vectors/* path STEP-6
+        # measures (nexus-j46lz).
+        assert REQUIRED_ENGINE_VERSION == (0, 1, 58)
 
 
 class TestParseEngineVersion:
