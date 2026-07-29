@@ -67,7 +67,10 @@ PRIVATE_HANDLE_CENSUS: dict[str, int] = {
     # Guarded: :86 by is_service_backed(t3); :1200 by
     # _require_supported_taxonomy_backend(t3, db.taxonomy) refusing the
     # split-backend config before the raw path.
-    "src/nexus/commands/taxonomy_cmd.py": 2,
+    # 2 -> 1: the `db.taxonomy._lock` / `.conn` reach-ins died with the raw
+    # CatalogTaxonomy branches they guarded (nexus-i711w Stage 2 sub-stage C).
+    # The survivor is `t3._client`, a T3 handle — unrelated to the T2 retirement.
+    "src/nexus/commands/taxonomy_cmd.py": 1,
     # T3Database's own module: db._client_for / db._client on instances of the
     # class defined in this file. Self-access in substance, not syntax.
     "src/nexus/db/t3.py": 2,

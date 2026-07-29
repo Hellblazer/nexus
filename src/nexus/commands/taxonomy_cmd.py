@@ -32,39 +32,10 @@ def _T2Database(path):
     from nexus.db.t2 import T2Database  # noqa: PLC0415 - deferred to avoid circular import at module load
     return T2Database(path)  # epsilon-allow: taxonomy CLI factory — read-only subcommands need raw-cursor SELECTs (no WAL writer contention) and discover/rebuild/split interleave chroma-centroid writes keyed on T2-generated topic_ids; neither can cross the daemon RPC (RDR-128 P3 documented-irreducible)
 
-def _has_raw_access(taxonomy: Any) -> bool:
-    """Return True when taxonomy is a SQLite CatalogTaxonomy (raw .conn / ._lock available).
-
-    Returns False for HttpTaxonomyStore (service mode), where raw cursor
-    access is unavailable.  CLI commands that need aggregate queries not
-    exposed by the public API must guard with this check and either use
-    the public API or skip that display section in service mode.
-    """
-    return hasattr(taxonomy, "_lock") and hasattr(taxonomy, "conn")
-
-
 if TYPE_CHECKING:
-    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy
+    from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
 
 _log = structlog.get_logger(__name__)
-
-
-def _require_supported_taxonomy_backend(t3: Any, taxonomy: Any) -> None:
-    """Block only the unsupported split: service T3 + raw-SQLite taxonomy.
-
-    nexus-7ydks. Supported: both service-backed (6.0 default) or both raw
-    (legacy / ``NX_STORAGE_BACKEND=sqlite``). The split case has no raw Chroma
-    client for the legacy centroid path, so refuse cleanly.
-    """
-    from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 - deferred to avoid circular import at module load
-
-    if is_service_backed(t3) and _has_raw_access(taxonomy):
-        raise click.ClickException(
-            "taxonomy discovery is not supported with a service-backed T3 vector "
-            "store but a raw-SQLite taxonomy store (NX_STORAGE_BACKEND_TAXONOMY="
-            "sqlite). Use a uniform backend: either let both default to the "
-            "service, or set NX_STORAGE_BACKEND=sqlite for both."
-        )
 
 
 def _enumerate_discoverable_collections(t3: Any, exclude: list[str]) -> list[str]:
@@ -270,7 +241,7 @@ def _progress(msg: str) -> None:
 
 def discover_for_collection(
     collection_name: str,
-    taxonomy: "CatalogTaxonomy",
+    taxonomy: "HttpTaxonomyStore",
     t3: Any,
     *,
     force: bool = False,
@@ -299,7 +270,8 @@ def discover_for_collection(
     collection_name:
         ChromaDB collection to discover topics for.
     taxonomy:
-        :class:`CatalogTaxonomy` (raw) or ``HttpTaxonomyStore`` (service).
+        ``HttpTaxonomyStore`` — the only taxonomy store since nexus-i711w
+        sub-stage C deleted the raw SQLite ``CatalogTaxonomy``.
     t3:
         The T3 handle (``T3Database`` raw, or ``HttpVectorClient`` service).
         nexus-7ydks: service-backed handles route through
@@ -341,174 +313,13 @@ def discover_for_collection(
         except Exception:  # noqa: BLE001 — probe is best-effort; the persist-time guard stays authoritative
             _log.debug("discover_topics_probe_failed", exc_info=True)
 
-    # nexus-7ydks: service-backed taxonomy store → fetch from the service and
-    # persist through the HttpTaxonomyStore drop-in (centroids via the service's
-    # /v1/taxonomy/centroids HTTP route).
-    if not _has_raw_access(taxonomy):
-        return _discover_via_service(collection_name, taxonomy, t3, force=force)
-
-    # Raw path (unchanged): daemon-routed persist (RDR-128/151) over a raw
-    # Chroma client. Accept either a ``T3Database`` handle (use ``._client``)
-    # or a raw chroma client passed directly (programmatic / test callers).
-    chroma_client = getattr(t3, "_client", t3)
-    try:
-        coll = chroma_client.get_collection(
-            collection_name, embedding_function=None,
-        )
-    except Exception:  # noqa: BLE001 - collection-missing tolerated; logged via log.warning, returns 0
-        _log.warning("collection_not_found", collection=collection_name)
-        return 0
-
-    n = coll.count()
-    if n < 5:
-        _log.info("too_few_docs", collection=collection_name, n=n)
-        return 0
-
-    # Fetch doc_ids, documents, and existing embeddings in pages.
-    # Uses T3 embeddings (Voyage on cloud) when available.
-    all_ids: list[str] = []
-    all_texts: list[str] = []
-    all_embs: list[list[float]] = []
-    has_t3_embeddings = True
-    offset = 0
-    page_size = 250  # Cloud quota: Get limit 300
-    _milestone_step = max(n // 4, 1)
-    _next_milestone = _milestone_step
-    while offset < n:
-        if offset >= _next_milestone and _next_milestone < n:
-            _progress(f"    fetching {offset:,}/{n:,} chunks ({100 * offset // n}%)")
-            _next_milestone += _milestone_step
-        page = coll.get(
-            include=["documents", "embeddings"],
-            limit=page_size,
-            offset=offset,
-        )
-        page_ids = page["ids"]
-        page_docs = page.get("documents") or []
-        page_embs = page.get("embeddings")
-        if page_embs is None:
-            page_embs = [None] * len(page_ids)
-            has_t3_embeddings = False
-
-        for i, pid in enumerate(page_ids):
-            doc = page_docs[i] if i < len(page_docs) else None
-            emb = page_embs[i] if i < len(page_embs) else None
-            if doc is not None:
-                all_ids.append(pid)
-                all_texts.append(doc)
-                if emb is not None and len(emb) > 0:
-                    all_embs.append(list(emb))
-                else:
-                    has_t3_embeddings = False
-
-        offset += len(page_ids)
-        if len(page_ids) < page_size:
-            break
-
-    import time  # noqa: PLC0415 - branch-local; deferred to call time
-
-    _progress(f"    fetched {len(all_ids):,} chunks")
-
-    # Cluster the collection's STORED vectors — never re-embed. Fourth copy of
-    # the fix applied to HttpTaxonomyStore.split_topic, CatalogTaxonomy.
-    # split_topic and the raw CLI split path (nexus-9pqoj, d0a3387d /
-    # de07b4f1, whose message reads "all three read stored vectors and none of
-    # them embeds"). This one was discover rather than split, so it escaped
-    # that sweep: a MiniLM-384 re-encode yields topic centroids in a different
-    # space than a bge-768 / voyage-1024 collection's chunks, persists them
-    # into taxonomy_centroids_384, and every later ANN assign then hits the
-    # dimension-mismatch guard and returns [] — a collection full of topics
-    # nothing can be assigned to.
-    #
-    # The service path (_discover_via_service) already refuses this way, so
-    # only the raw path was affected. Refusal happens BEFORE clustering, not
-    # merely before persist: clustering in the wrong space and then discarding
-    # is still minutes of work whose only possible output is wrong.
-    if not (has_t3_embeddings and len(all_embs) == len(all_ids)):
-        _log.warning(
-            "discover_refused_no_stored_vectors",
-            collection=collection_name,
-            chunks=len(all_ids),
-            with_vectors=len(all_embs),
-        )
-        if not quiet:
-            _progress(
-                f"    cannot discover topics for {collection_name}: the "
-                f"collection returned no stored vectors for its documents "
-                f"({len(all_embs):,} of {len(all_ids):,}). Refusing to "
-                f"re-embed, because topic centroids must share the "
-                f"collection's own vector space."
-            )
-        return 0
-
-    _progress(f"    embedding: using T3 native ({len(all_embs[0])}d)")
-    embeddings = np.array(all_embs, dtype=np.float32)
-
-    _progress(f"    clustering {len(all_ids):,} x {embeddings.shape[1]}d...")
-    t0 = time.monotonic()
-
-    # RDR-151 Phase 3 (nexus-uzay8): compute the topic clusters/centroids
-    # client-side (chroma + numpy), route the pure-T2 PERSIST through the
-    # daemon (t2_index_write), then write the chroma centroids locally from
-    # the daemon-returned topic_ids. ``taxonomy`` is used only for the
-    # force-path READ of old state (read-only; no WAL writer contention) and
-    # the static centroid helpers — no direct T2 write happens here.
-    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy  # noqa: PLC0415 - deferred to avoid circular import at module load
-    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred to avoid circular import at module load
-
-    centroid_coll = CatalogTaxonomy._create_centroid_collection(chroma_client)
-    if force:
-        old = taxonomy.read_rebuild_old_state(collection_name, centroid_coll)
-        for i in range(0, len(old["old_centroid_ids"]), 300):
-            centroid_coll.delete(ids=old["old_centroid_ids"][i:i + 300])
-        plan = CatalogTaxonomy.compute_rebuild_plan(
-            collection_name, all_ids, embeddings, all_texts,
-            old_centroids=old["old_centroids"],
-            old_labels=old["old_labels"],
-            old_review_statuses=old["old_review_statuses"],
-            old_centroid_topic_ids=old["old_centroid_topic_ids"],
-            manual_assignments=old["manual_assignments"],
-        )
-        specs = plan["specs"]
-        topic_ids = t2_index_write(
-            lambda db: db.taxonomy.persist_rebuild_topics(collection_name, plan)
-        )
-    else:
-        specs = CatalogTaxonomy.compute_discovered_topics(
-            collection_name, all_ids, embeddings, all_texts,
-        )
-        topic_ids = (
-            t2_index_write(
-                lambda db: db.taxonomy.persist_discovered_topics(collection_name, specs)
-            )
-            if specs else []
-        )
-
-    result = len(topic_ids)
-    if topic_ids:
-        c_ids, c_embs, c_metas = CatalogTaxonomy._centroid_records_for(
-            collection_name, specs, topic_ids,
-        )
-        if c_ids:
-            CatalogTaxonomy._batched_upsert(centroid_coll, c_ids, c_embs, c_metas)
-        # Cross-collection links: compute (chroma) local, persist routed.
-        try:
-            pairs = CatalogTaxonomy.compute_cross_links(
-                collection_name, c_embs, c_metas, centroid_coll,
-            )
-            if pairs:
-                t2_index_write(lambda db: db.taxonomy.persist_cross_links(pairs))
-        except Exception:  # noqa: BLE001 - best-effort cross-link discovery; logged via log.debug
-            _log.debug("discover_cross_links_failed", exc_info=True)
-
-    # Record doc count for rebalance tracking (routed).
-    t2_index_write(
-        lambda db: db.taxonomy.record_discover_count(collection_name, len(all_ids))
-    )
-
-    elapsed = time.monotonic() - t0
-    _progress(f"    clustered in {elapsed:.1f}s")
-    return result
+    # Service-backed taxonomy store: fetch from the service and persist through
+    # the HttpTaxonomyStore drop-in (centroids via the service's
+    # /v1/taxonomy/centroids HTTP route). This is now the ONLY path — the raw
+    # branch below it required a SQLite CatalogTaxonomy for its `.conn`/`._lock`
+    # and its five chroma-coupled statics, all deleted in nexus-i711w Stage 2
+    # sub-stage C. _has_raw_access could only ever be True for that class.
+    return _discover_via_service(collection_name, taxonomy, t3, force=force)
 
 
 # ── CLI commands ─────────────────────────────────────────────────────────────
@@ -536,34 +347,24 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
       nx taxonomy status --needs-review               # pending review only
     """
     with _T2Database(_default_db_path()) as db:
-        if _has_raw_access(db.taxonomy):
-            # Storage review I-1: every .conn access goes through the
-            # domain-store lock. These are read-only queries but the lock
-            # protects against a concurrent writer on the same connection.
-            with db.taxonomy._lock:  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
-                all_topics = db.taxonomy.conn.execute(  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
-                    "SELECT collection, COUNT(*), SUM(doc_count), "
-                    "SUM(CASE WHEN review_status = 'pending' THEN 1 ELSE 0 END), "
-                    "SUM(CASE WHEN review_status = 'accepted' THEN 1 ELSE 0 END) "
-                    "FROM topics GROUP BY collection ORDER BY SUM(doc_count) DESC"
-                ).fetchall()
-        else:
-            # Service mode: derive per-collection aggregate from public API
-            raw_topics = db.taxonomy.get_all_topics()
-            from collections import defaultdict  # noqa: PLC0415 - branch-local; deferred to call time
-            _agg: dict[str, list[int, int, int, int]] = defaultdict(lambda: [0, 0, 0, 0])
-            for t in raw_topics:
-                c = t.get("collection", "")
-                _agg[c][0] += 1  # n_topics
-                _agg[c][1] += int(t.get("doc_count") or 0)  # n_docs
-                if t.get("review_status") == "pending":
-                    _agg[c][2] += 1
-                if t.get("review_status") == "accepted":
-                    _agg[c][3] += 1
-            all_topics = [
-                (c, v[0], v[1], v[2], v[3])
-                for c, v in sorted(_agg.items(), key=lambda x: -x[1][1])
-            ]
+        # Derive the per-collection aggregate from the public API. The raw
+        # branch this replaces read the same numbers with a GROUP BY over
+        # `topics` through CatalogTaxonomy's cursor (nexus-i711w sub-stage C).
+        raw_topics = db.taxonomy.get_all_topics()
+        from collections import defaultdict  # noqa: PLC0415 - branch-local; deferred to call time
+        _agg: dict[str, list[int, int, int, int]] = defaultdict(lambda: [0, 0, 0, 0])
+        for t in raw_topics:
+            c = t.get("collection", "")
+            _agg[c][0] += 1  # n_topics
+            _agg[c][1] += int(t.get("doc_count") or 0)  # n_docs
+            if t.get("review_status") == "pending":
+                _agg[c][2] += 1
+            if t.get("review_status") == "accepted":
+                _agg[c][3] += 1
+        all_topics = [
+            (c, v[0], v[1], v[2], v[3])
+            for c, v in sorted(_agg.items(), key=lambda x: -x[1][1])
+        ]
 
         if not all_topics:
             click.echo("No taxonomy data. Run `nx index repo` or `nx taxonomy discover`.")
@@ -586,20 +387,12 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
             if n_topics > 0 and projection_counts.get(coll, 0) == 0
         ]
 
-        if _has_raw_access(db.taxonomy):
-            with db.taxonomy._lock:  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
-                link_count = db.taxonomy.conn.execute(  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
-                    "SELECT COUNT(*) FROM topic_links"
-                ).fetchone()[0]
-        else:
-            # Service mode: count via the public link-pairs API (nexus-ntkr5 —
-            # the previous hardcoded 0 hid 7,520 live links after the first
-            # `links --refresh` run). Works on both stores: SQLite returns a
-            # dict, HttpTaxonomyStore a list; len() is shape-agnostic.
-            # raw_topics was fetched above in this same service-mode branch —
-            # reuse it rather than paying a second HTTP round-trip.
-            _ids = [t["id"] for t in raw_topics]
-            link_count = len(db.taxonomy.get_topic_link_pairs(_ids)) if _ids else 0
+        # Count via the public link-pairs API (nexus-ntkr5 — the previous
+        # hardcoded 0 hid 7,520 live links after the first `links --refresh`
+        # run). raw_topics was fetched above — reuse it rather than paying a
+        # second HTTP round-trip.
+        _ids = [t["id"] for t in raw_topics]
+        link_count = len(db.taxonomy.get_topic_link_pairs(_ids)) if _ids else 0
 
         # Apply filters
         rows = all_topics
@@ -616,22 +409,13 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
         if not summary:
             click.echo("Taxonomy Status\n")
             for coll, n_topics, n_docs, n_pending, n_accepted in rows:
-                if _has_raw_access(db.taxonomy):
-                    with db.taxonomy._lock:  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
-                        meta = db.taxonomy.conn.execute(  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
-                            "SELECT last_discover_doc_count, last_discover_at "
-                            "FROM taxonomy_meta WHERE collection = ?",
-                            (coll,),
-                        ).fetchone()
-                else:
-                    meta = None  # service mode: per-collection meta not yet exposed
-
-                rebal = ""
-                if meta:
-                    _, last_at = meta
-                    if last_at:
-                        rebal = f"  discovered {last_at[:10]}"
-
+                # CAPABILITY LOSS, recorded not absorbed (nexus-i711w sub-stage
+                # C): the "discovered <date>" suffix came from a raw read of
+                # `taxonomy_meta`, which no store exposes on the service path.
+                # It was already absent for every service-backed user — the
+                # shipping default — so this removes dead code rather than a
+                # live feature. Restoring it needs a per-collection meta route
+                # on the service, not a resurrected cursor.
                 status_parts = []
                 if n_accepted:
                     status_parts.append(f"{n_accepted} accepted")
@@ -643,7 +427,7 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
                 proj_note = "  [no projection]" if (proj_count == 0 and n_topics > 0) else ""
 
                 click.echo(f"  {coll}{proj_note}")
-                click.echo(f"    {n_topics} topics, {n_docs} docs assigned ({status_str}){rebal}")
+                click.echo(f"    {n_topics} topics, {n_docs} docs assigned ({status_str})")
 
             click.echo("")
 
@@ -676,44 +460,26 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
         rows: list[tuple[str, int, int, str | None]] = []
         service_total: int | None = None
         try:
-            if _has_raw_access(db.taxonomy):
-                with db.taxonomy._lock:  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
-                    try:
-                        rows = db.taxonomy.conn.execute(  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
-                            "SELECT hook_name, is_batch, "
-                            "       COALESCE(batch_doc_ids, '') "
-                            "FROM hook_failures "
-                            "WHERE occurred_at >= datetime('now', '-1 day')"
-                        ).fetchall()
-                        rows = [(r[0], 1, r[1], r[2]) for r in rows]
-                    except Exception:  # noqa: BLE001 - legacy-schema fallback for pre-4.14.1 batch columns
-                        # Pre-4.14.1 schema: batch columns absent. Read with
-                        # legacy shape and treat every row as scalar.
-                        legacy = db.taxonomy.conn.execute(  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
-                            "SELECT hook_name FROM hook_failures "
-                            "WHERE occurred_at >= datetime('now', '-1 day')"
-                        ).fetchall()
-                        rows = [(r[0], 1, 0, None) for r in legacy]
-            else:
-                # SERVICE MODE (nexus-onjvy). Until engine-service-v0.1.58 this
-                # branch did not exist: hook_failures had no read route, so
-                # `nx taxonomy status` silently showed nothing on the default
-                # substrate — the failure log that exists to surface SILENT
-                # hook failures was itself silent. `total` is the server's
-                # exact count over the whole 24h window, independent of the
-                # page below, so the headline cannot under-report when
-                # failures exceed the page.
-                resp = db.telemetry.list_hook_failures(days=1, limit=300)
-                service_total = int(resp.get("total") or 0)
-                rows = [
-                    (
-                        str(r.get("hook_name") or "?"),
-                        1,
-                        1 if r.get("is_batch") else 0,
-                        r.get("batch_doc_ids") or None,
-                    )
-                    for r in resp.get("rows") or []
-                ]
+            # nexus-onjvy. Until engine-service-v0.1.58 this read did not
+            # exist: hook_failures had no read route, so `nx taxonomy status`
+            # silently showed nothing on the default substrate — the failure
+            # log that exists to surface SILENT hook failures was itself
+            # silent. `total` is the server's exact count over the whole 24h
+            # window, independent of the page below, so the headline cannot
+            # under-report when failures exceed the page. (The raw-cursor twin
+            # this replaces, including its pre-4.14.1 legacy-schema fallback,
+            # died with CatalogTaxonomy in nexus-i711w sub-stage C.)
+            resp = db.telemetry.list_hook_failures(days=1, limit=300)
+            service_total = int(resp.get("total") or 0)
+            rows = [
+                (
+                    str(r.get("hook_name") or "?"),
+                    1,
+                    1 if r.get("is_batch") else 0,
+                    r.get("batch_doc_ids") or None,
+                )
+                for r in resp.get("rows") or []
+            ]
         except Exception:  # noqa: BLE001 - best-effort row read; degrades to empty list
             rows = []
 
@@ -766,25 +532,20 @@ def list_cmd(collection: str, depth: int) -> None:
     depth = min(depth, 4)
     with _T2Database(_default_db_path()) as db:
         tree = get_topic_tree(db, collection, max_depth=depth)
-        # Count docs with no topic assignment (noise / uncategorized).
-        # Lock taken per storage review I-1 (SQLite only).
-        if _has_raw_access(db.taxonomy):
-            with db.taxonomy._lock:  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
-                total_assigned = db.taxonomy.conn.execute(  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
-                    "SELECT COUNT(DISTINCT doc_id) FROM topic_assignments"
-                    + (" WHERE topic_id IN (SELECT id FROM topics WHERE collection = ?)" if collection else ""),
-                    (collection,) if collection else (),
-                ).fetchone()[0]
-        else:
-            total_assigned = 0  # service mode: assignment count not exposed via public API
     if not tree:
         click.echo("No topics found. Run `nx taxonomy discover --collection <name>` first.")
         return
     for node in tree:
         _print_tree(node, indent=0)
-    total_docs = sum(_tree_doc_count(n) for n in tree)
-    if total_docs > total_assigned:
-        click.echo(f"\nUncategorized: {total_docs - total_assigned} docs")
+    # CAPABILITY LOSS, recorded not absorbed (nexus-i711w sub-stage C): the
+    # "Uncategorized: N docs" line needed COUNT(DISTINCT doc_id) over
+    # topic_assignments, a raw-cursor aggregate with no public-API equivalent —
+    # get_assignments_for_docs needs the doc list up front, so there is no cheap
+    # service-side total. The service branch it shared an if/else with hardcoded
+    # total_assigned = 0, which made the line print `total_docs` and call every
+    # assigned doc uncategorized. That was already what every service-backed
+    # user saw. Dropping the line removes a wrong number rather than a right
+    # one; restoring it needs an assignment-count route on the service.
 
 
 def _tree_doc_count(node: dict) -> int:
@@ -879,7 +640,6 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
         for i, col_name in enumerate(targets, 1):
             if len(targets) > 1:
                 click.echo(f"[{i}/{len(targets)}] {col_name}")
-            _require_supported_taxonomy_backend(t3, db.taxonomy)
             count = discover_for_collection(
                 col_name, db.taxonomy, t3, force=force,
             )
@@ -944,7 +704,6 @@ def rebuild_cmd(collection: str, project: str, k: int | None) -> None:
 
     with _T2Database(_default_db_path()) as db:
         t3 = make_t3()
-        _require_supported_taxonomy_backend(t3, db.taxonomy)
         count = discover_for_collection(
             collection, db.taxonomy, t3, force=True,
         )
@@ -978,7 +737,7 @@ def _display_topic(
     topic: dict[str, Any],
     index: int,
     total: int,
-    taxonomy: "CatalogTaxonomy",
+    taxonomy: "HttpTaxonomyStore",
 ) -> None:
     """Display a single topic for review."""
     import json  # noqa: PLC0415 - branch-local; deferred to call time
@@ -1008,7 +767,7 @@ def _display_topic(
 def _show_merge_targets(
     current_id: int,
     collection: str,
-    taxonomy: "CatalogTaxonomy",
+    taxonomy: "HttpTaxonomyStore",
 ) -> None:
     """Show all other topics in the same collection as merge targets."""
     targets = taxonomy.get_topics_for_collection(collection, exclude_id=current_id)
@@ -1220,10 +979,7 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
     daemon via t2_index_write.  Chroma centroid operations happen locally
     before and after the routed persist using the returned child IDs.
     """
-    import numpy as _np  # noqa: PLC0415 - heavy dep deferred to call time
     from nexus.db import make_t3  # noqa: PLC0415 - deferred to avoid circular import at module load
-    from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy  # noqa: PLC0415 - deferred to avoid circular import at module load
-    from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     with _T2Database(_default_db_path()) as db:
         topic_id = db.taxonomy.resolve_label(topic_label, collection=collection)
@@ -1244,126 +1000,16 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
         collection_name = topic["collection"]
         t3 = make_t3()
 
-        # nexus-9pqoj: service-backed split. The store's split_topic does the
-        # full fetch -> compute -> persist -> centroid round-trip via the service.
-        if not _has_raw_access(db.taxonomy):
-            # service-backed split_topic persists through the Java service (the
-            # single writer for HttpTaxonomyStore), not the SQLite WAL writer the
-            # boundary lint guards, so t2_index_write routing does not apply.
-            child_count = db.taxonomy.split_topic(topic_id, k, t3)  # epsilon-allow: service single-writer persist
-            click.echo(f"Split '{topic_label}' into {child_count} sub-topics.")
-            if child_count:
-                coll_scope = collection_name or collection
-                scope = f" -c {coll_scope}" if coll_scope else ""
-                click.echo(
-                    f"Action: {child_count} new sub-topics have n-gram labels. "
-                    f"Run `nx taxonomy label{scope}` to get human-readable labels."
-                )
-            return
-
-        # Raw path (unchanged): refuse the split-backend config, then inline.
-        _require_supported_taxonomy_backend(t3, db.taxonomy)
-        chroma_client = t3._client
-
-        # Fetch texts from T3 collection
-        try:
-            coll = chroma_client.get_collection(collection_name, embedding_function=None)
-        except Exception:  # noqa: BLE001 - collection-missing surfaced to user via click.echo, returns
-            click.echo(f"Collection '{collection_name}' not found in T3.")
-            return
-
-        # Read the collection's STORED vectors — never re-embed. Third copy of
-        # the fix applied to HttpTaxonomyStore.split_topic and
-        # CatalogTaxonomy.split_topic (nexus-9pqoj extended 2026-07-28): a
-        # MiniLM-384 re-embed yields child centroids in a different space than
-        # a bge-768 / voyage-1024 collection's chunks, so they persist into
-        # taxonomy_centroids_384, the following ANN assign hits the dimension
-        # -mismatch guard and returns [], and the split silently creates
-        # unassignable topics.
-        _PAGE = 250
-        fetched_ids: list[str] = []
-        texts: list[str] = []
-        vectors: list[list[float]] = []
-        vectors_unavailable = False
-        for i in range(0, len(doc_ids), _PAGE):
-            batch = doc_ids[i : i + _PAGE]
-            result = coll.get(ids=batch, include=["documents", "embeddings"])
-            got_ids = result.get("ids") or []
-            got_docs = result.get("documents") or []
-            got_embs = result.get("embeddings")
-            if got_embs is None or len(got_embs) != len(got_ids):
-                vectors_unavailable = True
-                break
-            for fid, fdoc, femb in zip(got_ids, got_docs, got_embs):
-                if not fdoc:
-                    continue
-                # A usable doc with no vector is the unavailable case, not a
-                # row to drop quietly — dropping shrinks `texts` until the
-                # len<k branch prints "into 0 sub-topics", which reads as
-                # "too small to split" rather than "could not be computed".
-                if femb is None:
-                    vectors_unavailable = True
-                    break
-                fetched_ids.append(fid)
-                texts.append(fdoc)
-                vectors.append(list(femb))
-            if vectors_unavailable:
-                break
-
-        if vectors_unavailable:
-            click.echo(
-                f"Cannot split '{topic_label}': the collection returned no stored "
-                f"vectors for its documents. Refusing to re-embed, because child "
-                f"centroids must share the collection's own vector space."
-            )
-            return
-
-        if len(texts) < k:
-            click.echo(f"Split '{topic_label}' into 0 sub-topics.")
-            return
-
-        embeddings = _np.asarray(vectors, dtype=_np.float32)
-
-        # COMPUTE: KMeans + c-TF-IDF (pure CPU, no T2 writes)
-        split_result = CatalogTaxonomy.compute_split(
-            topic_id=topic_id,
-            doc_ids=doc_ids,
-            texts=texts,
-            fetched_ids=fetched_ids,
-            embeddings=embeddings,
-            collection_name=collection_name,
-            k=k,
-        )
-        child_specs = split_result["child_specs"]
-        if not child_specs:
-            click.echo(f"Split '{topic_label}' into 0 sub-topics.")
-            return
-
-        # PERSIST: route T2 writes through daemon
-        child_ids = t2_index_write(lambda db: db.taxonomy.persist_split(split_result))
-        child_count = len(child_ids)
-
-        # LOCAL: chroma centroid cleanup (remove parent, add children)
-        if child_count:
-            centroid_coll = CatalogTaxonomy._create_centroid_collection(chroma_client)
-            parent_centroid_id = f"{collection_name}:{topic_id}"
-            try:
-                centroid_coll.delete(ids=[parent_centroid_id])
-            except Exception as exc:  # noqa: BLE001 - best-effort; non-fatal
-                _log.debug("taxonomy_centroid_delete_failed", error=str(exc))
-            c_ids = [f"{collection_name}:{cid}" for cid in child_ids]
-            c_embs = [spec["centroid"] for spec in child_specs]
-            c_metas = [
-                {
-                    "topic_id": cid,
-                    "label": spec["label"],
-                    "collection": collection_name,
-                    "doc_count": spec["doc_count"],
-                }
-                for cid, spec in zip(child_ids, child_specs)
-            ]
-            CatalogTaxonomy._batched_upsert(centroid_coll, c_ids, c_embs, c_metas)
-
+        # nexus-9pqoj: the store's split_topic does the full fetch -> compute
+        # -> persist -> centroid round-trip via the service, which is the
+        # single writer for HttpTaxonomyStore — not the SQLite WAL writer the
+        # boundary lint guards, so t2_index_write routing does not apply.
+        #
+        # This is now the ONLY path. The raw twin below it inlined the same
+        # round-trip against CatalogTaxonomy's cursor and its chroma-coupled
+        # statics (_create_centroid_collection / _batched_upsert), all deleted
+        # in nexus-i711w Stage 2 sub-stage C.
+        child_count = db.taxonomy.split_topic(topic_id, k, t3)  # epsilon-allow: service single-writer persist
         click.echo(f"Split '{topic_label}' into {child_count} sub-topics.")
         if child_count:
             coll_scope = collection_name or collection
@@ -1389,7 +1035,7 @@ def _try_load_catalog() -> Any:
 
 
 def compute_topic_links(
-    taxonomy: "CatalogTaxonomy",
+    taxonomy: "HttpTaxonomyStore",
     catalog: Any,
     *,
     collection: str = "",
@@ -1533,50 +1179,28 @@ def links_cmd(collection: str, refresh: bool) -> None:
                     db.taxonomy, catalog, collection=collection, persist=True,
                 )
 
-        # Display all rows in topic_links, joined with topic labels.
-        # Lock taken per storage review I-1 (SQLite only).
-        if _has_raw_access(db.taxonomy):
-            with db.taxonomy._lock:  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
-                if collection:
-                    rows = db.taxonomy.conn.execute(  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
-                        "SELECT t1.label, t1.collection, t2.label, t2.collection, "
-                        "       tl.link_count, tl.link_types "
-                        "FROM topic_links tl "
-                        "JOIN topics t1 ON tl.from_topic_id = t1.id "
-                        "JOIN topics t2 ON tl.to_topic_id = t2.id "
-                        "WHERE t1.collection = ? OR t2.collection = ? "
-                        "ORDER BY tl.link_count DESC",
-                        (collection, collection),
-                    ).fetchall()
-                else:
-                    rows = db.taxonomy.conn.execute(  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
-                        "SELECT t1.label, t1.collection, t2.label, t2.collection, "
-                        "       tl.link_count, tl.link_types "
-                        "FROM topic_links tl "
-                        "JOIN topics t1 ON tl.from_topic_id = t1.id "
-                        "JOIN topics t2 ON tl.to_topic_id = t2.id "
-                        "ORDER BY tl.link_count DESC"
-                    ).fetchall()
-        else:
-            # Service mode: get link pairs via public API and resolve labels
-            _all_topics = {t["id"]: t for t in db.taxonomy.get_all_topics()}
-            _topic_ids = list(_all_topics.keys())
-            _pairs = db.taxonomy.get_topic_link_pairs(_topic_ids) if _topic_ids else {}
-            rows = []
-            for (from_id, to_id), count in _pairs.items():
-                from_t = _all_topics.get(from_id, {})
-                to_t   = _all_topics.get(to_id, {})
-                if collection and (from_t.get("collection") != collection and
-                                   to_t.get("collection") != collection):
-                    continue
-                rows.append((
-                    from_t.get("label", str(from_id)),
-                    from_t.get("collection", ""),
-                    to_t.get("label", str(to_id)),
-                    to_t.get("collection", ""),
-                    count,
-                    "[]",
-                ))
+        # Display all rows in topic_links, joined with topic labels. Get link
+        # pairs via the public API and resolve labels client-side; the raw twin
+        # this replaces did the same join in SQL through CatalogTaxonomy's
+        # cursor (nexus-i711w sub-stage C).
+        _all_topics = {t["id"]: t for t in db.taxonomy.get_all_topics()}
+        _topic_ids = list(_all_topics.keys())
+        _pairs = db.taxonomy.get_topic_link_pairs(_topic_ids) if _topic_ids else {}
+        rows = []
+        for (from_id, to_id), count in _pairs.items():
+            from_t = _all_topics.get(from_id, {})
+            to_t   = _all_topics.get(to_id, {})
+            if collection and (from_t.get("collection") != collection and
+                               to_t.get("collection") != collection):
+                continue
+            rows.append((
+                from_t.get("label", str(from_id)),
+                from_t.get("collection", ""),
+                to_t.get("label", str(to_id)),
+                to_t.get("collection", ""),
+                count,
+                "[]",
+            ))
 
         if not rows:
             click.echo("No topic links found.")
@@ -2120,7 +1744,7 @@ def _review_auto(
 
 
 def relabel_topics(
-    taxonomy: "CatalogTaxonomy",
+    taxonomy: "HttpTaxonomyStore",
     *,
     collection: str = "",
     only_pending: bool = True,
@@ -2342,10 +1966,10 @@ def project_cmd(
 
     db = _T2Database(_default_db_path())
     t3 = make_t3()
-    # nexus-9pqoj: refuse the split-backend config; project_against handles both
-    # backends, so pass the chroma client (raw T3Database) or the service handle
-    # (HttpVectorClient has no ._client).
-    _require_supported_taxonomy_backend(t3, db.taxonomy)
+    # nexus-9pqoj: project_against handles both handle shapes, so pass the
+    # chroma client (raw T3Database) or the service handle (HttpVectorClient
+    # has no ._client). The split-backend refusal that stood here died with the
+    # raw taxonomy store it guarded against (nexus-i711w sub-stage C).
     _proj_handle = getattr(t3, "_client", t3)
 
     # Resolve threshold: explicit flag wins; otherwise per-corpus default
@@ -2498,7 +2122,7 @@ def _persist_assignments(
 
 
 def _run_backfill(
-    taxonomy: "CatalogTaxonomy",
+    taxonomy: "HttpTaxonomyStore",
     chroma_client: Any,
     *,
     threshold: float | None = None,
