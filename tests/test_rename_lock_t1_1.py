@@ -19,7 +19,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from tests.conftest import engine_substrate_selected
 
 
 # ── T2Database has RENAME_LOCK ────────────────────────────────────────────────
@@ -299,52 +298,6 @@ class TestLockOrdering:
             db.RENAME_LOCK.release()
         finally:
             db.close()
-
-    @pytest.mark.skipif(
-        engine_substrate_selected(),
-        reason="dies-roster: per-store SQLite self._lock ordering is the "
-        "SQLite queue's protocol; HttpAspectQueue exposes no raw '_lock' "
-        "(the engine owns serialization) — dies at the RDR-155 P4b flip",
-    )
-    def test_cascade_bypasses_per_store_lock(self, tmp_path: Path) -> None:
-        """rename_collection_cascade holds RENAME_LOCK, not per-store self._lock.
-
-        The cascade runs on its own dedicated connection (bypassing all seven
-        per-store self._lock regions by design). Verify that the cascade
-        completes even when aspect_queue._lock is held by another thread
-        (which would deadlock if the cascade tried to acquire it).
-        """
-        from nexus.db.t2 import T2Database
-        db = T2Database(tmp_path / "t2.db")
-
-        cascade_completed: list[bool] = []
-        lock_released_after_cascade = threading.Event()
-
-        def hold_aspect_queue_lock_during_cascade() -> None:
-            # Acquire the queue's internal lock so it is held.
-            with db.aspect_queue._lock:
-                # Run the cascade while _lock is held externally.
-                try:
-                    db.rename_collection_cascade(old="code__old", new="code__new")
-                    cascade_completed.append(True)
-                except Exception:
-                    cascade_completed.append(False)
-                lock_released_after_cascade.set()
-
-        t = threading.Thread(target=hold_aspect_queue_lock_during_cascade)
-        t.start()
-        t.join(timeout=10.0)
-
-        assert not t.is_alive(), "Thread should have completed"
-        assert cascade_completed == [True], (
-            "rename_collection_cascade must complete even when aspect_queue._lock "
-            "is held by another thread. Cascade uses its own connection and must "
-            "not attempt to acquire per-store locks."
-        )
-        try:
-            db.close()
-        except Exception:  # noqa: BLE001
-            pass
 
 
 # ── complete_aspect path has rename_lock wiring ──────────────────────────────

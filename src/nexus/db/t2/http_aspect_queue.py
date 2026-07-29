@@ -30,7 +30,7 @@ from typing import Any
 
 import structlog
 
-from nexus.db.t2.aspect_extraction_queue import QueueRow
+from nexus.db.t2.records import QueueRow
 
 _log = structlog.get_logger(__name__)
 

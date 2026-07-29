@@ -103,14 +103,23 @@ def fetch_service_version(
 
 
 def _psql_bin() -> str | None:
-    """psql from the same discovery the supervisor uses for pg_ctl."""
+    """psql from the same discovery the supervisor uses for pg_ctl, or None.
+
+    NO PATH FALLBACK. This used to end with ``shutil.which("psql")``, which
+    resolves the HOST's psql — a PostgreSQL nexus never installs and never uses
+    (see ``_NO_HOST_FALLBACK`` in ``nexus/db/pg_provision.py``). Its only caller
+    (``_pgvector_version``, behind ``nx daemon service status``) already treats
+    None as "version unknown" and omits the field, so returning None degrades
+    the status line by one optional value instead of shelling a foreign client
+    at the cluster. Enforced by tests/db/test_no_host_pg_fallback.py.
+    """
     try:
         from nexus.db.pg_provision import discover_pg_binaries  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         # discover_pg_binaries validates all four binaries incl. psql.
         return str(discover_pg_binaries().psql)
-    except Exception:  # noqa: BLE001 — psql-path resolution fallback to shutil.which
-        import shutil  # noqa: PLC0415 — stdlib import kept branch-local
-        return shutil.which("psql")
+    except Exception as exc:  # noqa: BLE001 — status probe: unresolved psql is "unknown", never the host's
+        _log.debug("psql_bin_unresolved", error=str(exc))
+        return None
 
 
 def _db_name_from_creds(creds: dict) -> str:

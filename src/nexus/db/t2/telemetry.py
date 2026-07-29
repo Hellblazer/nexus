@@ -248,7 +248,7 @@ class Telemetry:
             )
             self.conn.commit()
 
-    def list_consents(self) -> list[dict]:
+    def list_consents(self) -> list[dict[str, Any]]:
         """Read the consent-audit trail (RDR-182 read surface, nexus-ykzbj.15).
 
         Rows in insertion order — grants AND revokes, append-only, so the

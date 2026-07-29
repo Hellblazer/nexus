@@ -119,22 +119,25 @@ class TestNoContentReadProperty:
 # ── Tier 2: real-PG end-to-end (self-provisioning, max-skip) ────────────────
 
 
-def _pg_bins_available() -> bool:
-    from nexus.db.pg_provision import PgBinaryNotFoundError, discover_pg_binaries
+from tests.db._service_fixture import pg_bin_dir
 
-    try:
-        discover_pg_binaries()
-        return True
-    except PgBinaryNotFoundError:
-        return False
+# THE GATE RESOLVES THROUGH THE SELF-PROVISIONING SEAM, NEVER AMBIENT DISCOVERY.
+# Locked policy: nexus ALWAYS uses the PostgreSQL it BUILDS — never Homebrew,
+# never a host install (T2 always-install-pg-bundle-no-fallback). Gating on
+# discover_pg_binaries() asked whether the BOX carries a PostgreSQL, which is a
+# property of the machine rather than of the substrate under test, and silently
+# skipped this whole class on any box without a host install — while every
+# fixture below already resolved its binaries through pg_bin_dir(). Mechanically
+# enforced by tests/db/test_pg_gate_is_self_provisioning.py.
+#
+#: Real max-skip guard (testval-182 Low): clean SKIP when self-provisioning
+#: fails, never an ERROR from a fixture calling a nonexistent initdb.
+_INITDB = pg_bin_dir() / "initdb"
 
-
-#: Real max-skip guard (testval-182 Low): clean SKIP when no PG binaries,
-#: never an ERROR from a fixture calling a nonexistent initdb.
 _requires_pg = pytest.mark.skipif(
-    not _pg_bins_available(),
-    reason="skipped: no PostgreSQL binaries found (install postgresql@16 "
-           "or set NEXUS_PG_BIN)",
+    not _INITDB.exists(),
+    reason=f"skipped: nexus-pg bundle self-provisioning failed (no {_INITDB}). "
+           "NOT a missing host PostgreSQL — these tests never use one.",
 )
 
 

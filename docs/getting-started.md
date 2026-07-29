@@ -181,28 +181,16 @@ Note: `uv tool upgrade` reuses the existing environment's Python — it won't sw
 
 **`nx search` returns no results** — Run `nx doctor` to verify connectivity. If indexing was interrupted, re-run `nx index repo .` to resume.
 
-**`T2DaemonNotReachableError: No T2 daemon discovery resolved`** — Only on the opt-in SQLite T2 backend (`NX_STORAGE_BACKEND=sqlite`); the default service backend does not use this daemon. Start it (one of):
+**`T2DaemonNotReachableError` / `T2SchemaVersionMismatchError`** — These no
+longer occur: the SQLite T2 daemon they came from is retired, along with the
+`nx daemon t2` verb group. T2 is served by the nexus-service. If a storage
+error mentions the service instead, `nx doctor` is the diagnostic.
 
-```bash
-nx daemon t2 ensure-running              # one-shot spawn (idempotent)
-nx daemon t2 install --autostart         # durable LaunchAgent / systemd unit
-```
-
-If `ensure-running` succeeds but the next command still errors, check
-the daemon's log:
-
-- macOS: `~/Library/Logs/nexus-t2.err`
-- Linux: `journalctl --user -u nexus-t2.service`
-
-**`T2SchemaVersionMismatchError`** — The client's conexus version differs from the running daemon's. Restart the daemon so it picks up the new binary:
-
-```bash
-nx daemon t2 stop && nx daemon t2 start
-# or under launchd:
-launchctl kickstart -k gui/$(id -u)/com.nexus.t2
-```
-
-**Daemon is up but the CLI says "discovery file not found"** — Race between `launchctl bootout` / `systemctl stop` and the next CLI call. The daemon's spawn-lock release lags briefly behind process termination. Wait 2–3 seconds and retry, or use `nx daemon t2 ensure-running --timeout=10`.
+**A `com.nexus.t2` LaunchAgent / `nexus-t2.service` unit keeps failing at
+boot** — It is a leftover from a pre-retirement install trying to run
+`nx daemon t2 start`, which no longer exists. `nx upgrade` removes it on the
+next run; to check by hand, `launchctl list | grep com.nexus.t2` (macOS) or
+`systemctl --user list-unit-files | grep nexus-t2` (Linux).
 
 **Upgrading from an earlier version — topics missing from search** — Topic discovery runs automatically on new indexes. To populate topics for collections indexed before this feature was added, run:
 
@@ -258,15 +246,15 @@ environment and **drops `[local]`**, silently downgrading the embedder 768→384
 which dimension-mismatches existing 768-dim collections and makes search return
 nothing. To recover: `uv tool install --reinstall "conexus[local]"`.
 
-After step 1, restart the daemon so it picks up the new binary (step 2's
-`nx upgrade` then converges the data):
+After step 1, restart the storage service so it picks up the new binary
+(step 2's `nx upgrade` then converges the data):
 
 ```bash
-nx daemon t2 stop && nx daemon t2 start    # or: launchctl kickstart -k gui/<uid>/com.nexus.t2
+nx daemon service stop && nx daemon service start
 ```
 
-The schema-version handshake (RDR-120 P3b) fails loud on client/daemon version
-mismatch, so stale daemons fail closed rather than silently corrupting state.
+`nx upgrade` also cycles a stale supervisor for you, so this is the manual
+form. (The T2 daemon that used to need its own restart here is retired.)
 
 When you update the Claude Code plugin (`/plugin update`), run **both** upgrade
 steps above so the CLI stays in lockstep with the plugin version.

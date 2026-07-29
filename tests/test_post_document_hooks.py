@@ -36,20 +36,6 @@ import pytest
 
 from nexus.db.t2 import T2Database
 from nexus.hook_registry import HookRegistry
-from tests.conftest import engine_substrate_selected
-
-#: hook_failures has record/trim/import endpoints over HTTP but NO read
-#: surface — the persisted-row assertions below can only be made via a raw
-#: SQLite conn. dies-roster: these die with the raw-read at the RDR-155
-#: P4b flip (the write path itself is engine-covered by
-#: tests/db/test_http_telemetry_store integration).
-_RAW_HOOK_FAILURES_READ = pytest.mark.skipif(
-    engine_substrate_selected(),
-    reason="nexus-onjvy: hook_failures is WRITE-ONLY on the engine — "
-    "TelemetryHandler exposes /hook_failures/record and /trim and no read "
-    "route at all. Not a retirement: the failure log that exists to "
-    "surface silent hook failures cannot be inspected in service mode",
-)
 
 
 # ── Registration + dispatch ──────────────────────────────────────────────────
@@ -178,51 +164,6 @@ def test_fire_document_exception_nonfatal() -> None:
     registry.fire_document("/path/y.md", "knowledge__delos", "x")
 
     assert survived == ["/path/y.md"]
-
-
-@_RAW_HOOK_FAILURES_READ
-def test_fire_document_persists_failure_to_t2(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Hook failures land in T2 ``hook_failures`` with ``chain='document'``.
-
-    The new column is added by migration 4.14.2; the running package is
-    still 4.14.1 so ``T2Database``'s automatic ``apply_pending`` stops
-    one short. Apply the chain migration directly so the write path has
-    a target, mirroring the 4.9.10 pattern in
-    ``test_post_store_hook.py``.
-    """
-    import nexus.mcp_infra as mod
-    from nexus.db.migrations import migrate_hook_failures_chain_column
-
-    db_path = tmp_path / "doc_hook_failures.db"
-    T2Database(db_path).close()  # base migrations through 4.14.1
-    raw = sqlite3.connect(str(db_path))
-    migrate_hook_failures_chain_column(raw)
-    raw.close()
-    monkeypatch.setattr(mod, "t2_ctx", lambda: T2Database(db_path))
-
-    def bad_hook(source_path, collection, content):
-        raise RuntimeError("doc hook boom")
-
-    registry = HookRegistry()
-    registry.register_document(bad_hook)
-    registry.fire_document("/abs/path/x.md", "knowledge__delos", "x")
-
-    with T2Database(db_path) as db:
-        rows = db.taxonomy.conn.execute(
-            "SELECT doc_id, collection, hook_name, error, chain "
-            "FROM hook_failures"
-        ).fetchall()
-
-    assert len(rows) == 1
-    doc_id, coll, hook_name, error, chain = rows[0]
-    # source_path is stored in doc_id (the column carries 'subject of failure').
-    assert doc_id == "/abs/path/x.md"
-    assert coll == "knowledge__delos"
-    assert hook_name == "bad_hook"
-    assert "doc hook boom" in error
-    assert chain == "document"
 
 
 def test_fire_document_persist_swallowed_when_store_raises(
@@ -387,82 +328,6 @@ def test_migration_4_14_2_no_op_when_table_missing(tmp_path: Path) -> None:
     raw = sqlite3.connect(str(db_path))
     migrate_hook_failures_chain_column(raw)
     raw.close()
-
-
-# ── Existing chains write 'chain' value ──────────────────────────────────────
-
-
-@_RAW_HOOK_FAILURES_READ
-def test_record_hook_failure_writes_chain_single(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The single-doc chain's failure-capture path now populates
-    ``chain='single'`` alongside the existing scalar columns.
-
-    Applies migration manually for the same reason as the document-chain
-    test above (package version still 4.14.1).
-    """
-    import nexus.mcp_infra as mod
-    from nexus.db.migrations import migrate_hook_failures_chain_column
-
-    db_path = tmp_path / "single_chain.db"
-    T2Database(db_path).close()
-    raw = sqlite3.connect(str(db_path))
-    migrate_hook_failures_chain_column(raw)
-    raw.close()
-    monkeypatch.setattr(mod, "t2_ctx", lambda: T2Database(db_path))
-
-    def bad(doc_id, collection, content):
-        raise RuntimeError("single boom")
-
-    registry = HookRegistry()
-    registry.register_single(bad)
-    registry.fire_single("doc-1", "knowledge__delos", "content")
-
-    with T2Database(db_path) as db:
-        row = db.taxonomy.conn.execute(
-            "SELECT doc_id, chain FROM hook_failures"
-        ).fetchone()
-    assert row == ("doc-1", "single")
-
-
-@_RAW_HOOK_FAILURES_READ
-def test_record_batch_hook_failure_writes_chain_batch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The batch chain's failure-capture path now populates
-    ``chain='batch'`` alongside ``is_batch=1`` (dual-write for back-compat).
-    """
-    import nexus.mcp_infra as mod
-    from nexus.db.migrations import migrate_hook_failures_chain_column
-
-    db_path = tmp_path / "batch_chain.db"
-    T2Database(db_path).close()
-    raw = sqlite3.connect(str(db_path))
-    migrate_hook_failures_chain_column(raw)
-    raw.close()
-    monkeypatch.setattr(mod, "t2_ctx", lambda: T2Database(db_path))
-
-    def bad(doc_ids, collection, contents, embeddings, metadatas):
-        raise RuntimeError("batch boom")
-
-    registry = HookRegistry()
-    registry.register_batch(bad)
-    registry.fire_batch(
-        ["d1", "d2"], "knowledge__delos", ["c1", "c2"], None, None,
-    )
-
-    with T2Database(db_path) as db:
-        row = db.taxonomy.conn.execute(
-            "SELECT doc_id, batch_doc_ids, is_batch, chain FROM hook_failures"
-        ).fetchone()
-    import json as _json
-    assert row[0] == "d1"
-    # Decoupled from json serialization whitespace: parse and compare the
-    # list contents rather than the raw string form.
-    assert _json.loads(row[1]) == ["d1", "d2"]
-    assert row[2] == 1
-    assert row[3] == "batch"
 
 
 # ── nexus-w8lg1: document chain must carry the CATALOG doc_id ────────────────

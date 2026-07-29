@@ -17,7 +17,6 @@ import os
 from pathlib import Path
 
 import pytest
-from tests.conftest import engine_substrate_selected
 
 
 @pytest.fixture
@@ -214,7 +213,6 @@ class TestSessionIsolatedUnderOverride:
         assert CLAUDE_SESSION_FILE == sandbox_dir / "current_session"
 
 
-
 class TestCheckpointAndBufferRedirects:
     def test_checkpoint_dir_redirects(self, sandbox_dir: Path):
         from nexus.checkpoint import CHECKPOINT_DIR
@@ -278,36 +276,3 @@ class TestLocalChromaPathUnaffected:
         monkeypatch.delenv("XDG_DATA_HOME", raising=False)
         p = _default_local_path()
         assert p == Path.home() / ".local" / "share" / "nexus" / "chroma"
-
-
-class TestNoProductionT2Writes:
-    """End-to-end assurance: a sandbox-scoped ``T2Database(default_db_path())``
-    writes ONLY under the override, never under the user's home."""
-
-    @pytest.mark.skipif(
-        engine_substrate_selected(),
-        reason="dies-roster: the on-disk sandbox memory.db placement assertion "
-        "(SQLite T2 file substrate) dies at the RDR-155 P4b flip — service-"
-        "backed T2 writes produce no local file to assert on",
-    )
-    def test_t2_writes_land_in_sandbox(self, sandbox_dir: Path):
-        from nexus.commands._helpers import default_db_path
-        from nexus.db.t2 import T2Database
-
-        path = default_db_path()
-        assert path.parent == sandbox_dir
-
-        with T2Database(path) as db:
-            db.memory.put(
-                project="sandbox-test", title="hello",
-                content="isolation check",
-            )
-
-        # T2 file lives under the sandbox, not under ~/.config/nexus
-        assert path.exists()
-        assert path.is_relative_to(sandbox_dir)
-        # No file created under the user's production config dir by this test.
-        production = Path.home() / ".config" / "nexus" / "memory.db"
-        # Can't assert absence (user may have a real one), but assert that
-        # the one we just wrote is not that one.
-        assert path != production

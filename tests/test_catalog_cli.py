@@ -14,9 +14,6 @@ from nexus.cli import main
 from nexus.daemon.catalog_write_shim import CATALOG_WRITE_OPS
 from nexus.db.http_vector_client import HttpVectorClient
 from tests._catalog_fixture_ops import ActiveCatalog, unroutable_write_target
-from tests.conftest import engine_substrate_selected
-
-_ENGINE_SUBSTRATE = engine_substrate_selected()
 
 # nexus-aqbrk: the dies-roster here was OVER-BROAD BY 20 TESTS, and its stated
 # cause was a symptom. It read "the CLI routes catalog commands to the service
@@ -32,8 +29,16 @@ _ENGINE_SUBSTRATE = engine_substrate_selected()
 # gap with its own bead — re-rostering that as "dies at the flip" would bury
 # a defect. See nexus-02avu for the per-symptom grouping and what to check
 # first.
-_needs_diagnosis_nexus_02avu = pytest.mark.skipif(
-    _ENGINE_SUBSTRATE,
+#
+# UNCONDITIONAL since nexus-i711w Stage 1b (2026-07-28). It was a skipif on
+# the SQLite substrate, which no longer exists — so these 15 do not run on any
+# arm, and saying so plainly beats a predicate with one value. The bodies are
+# kept BECAUSE they are portable: none of them reaches for a raw connection,
+# so each is the specification nexus-02avu's diagnosis has to satisfy. (The
+# sixteenth, test_stats_includes_topics_block_when_available, seeded topics
+# through taxonomy.conn and was deleted rather than kept — recorded on the
+# bead.)
+_needs_diagnosis_nexus_02avu = pytest.mark.skip(
     reason="nexus-02avu: engine-substrate behaviour not yet diagnosed — "
     "tracked, not retired (2 are nexus-wnlit, 3 likely nexus-23wlw)",
 )
@@ -909,56 +914,6 @@ class TestStatsCommand:
         assert result.exit_code == 0
         assert "1" in result.output  # at least 1 document
 
-    @_needs_diagnosis_nexus_02avu
-    def test_stats_includes_topics_block_when_available(
-        self, initialized_catalog, catalog_env, tmp_path, monkeypatch,
-    ):
-        """stats surfaces topics / assignments / per-source projection counts.
-
-        Bead nexus-iojz (formerly nexus-1n0t). The catalog has three
-        layers; stats previously enumerated only the first two.
-        """
-        from nexus.db.t2 import T2Database
-
-        # Seed a T2 DB with one topic + one projection assignment and
-        # point the command helper at it via monkeypatched default_db_path.
-        t2_path = tmp_path / "memory.db"
-        with T2Database(t2_path) as db:
-            db.taxonomy.conn.execute(
-                "INSERT INTO topics (label, collection, doc_count, created_at) "
-                "VALUES ('t', 'docs__src', 5, '2026-01-01T00:00:00Z')"
-            )
-            tid = db.taxonomy.conn.execute(
-                "SELECT id FROM topics WHERE label='t'"
-            ).fetchone()[0]
-            db.taxonomy.conn.commit()
-            db.taxonomy.assign_topic(
-                "doc-1", tid, assigned_by="projection",
-                similarity=0.8, source_collection="docs__src",
-            )
-
-        import nexus.commands.catalog_cmds.report as catalog_mod
-
-        monkeypatch.setattr(
-            catalog_mod, "_taxonomy_stats",
-            lambda: {
-                "topics": 1,
-                "assignments": 1,
-                "distinct_topics_assigned": 1,
-                "projection_by_source": {"docs__src": 1},
-            },
-        )
-
-        runner = CliRunner()
-        runner.invoke(main, [
-            "catalog", "register", "--title", "A", "--owner", "1.1",
-        ])
-        result = runner.invoke(main, ["catalog", "stats"])
-        assert result.exit_code == 0, result.output
-        assert "Topics:" in result.output
-        assert "1 topics, 1 assignments" in result.output
-        assert "Projection by source:" in result.output
-        assert "docs__src" in result.output
 
     def test_stats_json_includes_taxonomy_when_available(
         self, initialized_catalog, catalog_env, monkeypatch,
@@ -2017,21 +1972,26 @@ class TestWhh61BackupsCarve:
         vac.assert_called_once()
         assert vac.call_args.args[0] is fake
 
-    def test_undelete_surfaces_daemon_live_guard(self):
+    def test_undelete_surfaces_admin_path_guard(self):
         """undelete uses the admin path (make_catalog_admin), not _get_catalog.
-        Pin the CLI-layer guard: a live daemon surfaces as a ClickException."""
+        Pin the CLI-layer guard: an admin-path refusal surfaces as a
+        ClickException, not a traceback.
+
+        Was pinned against CatalogAdminDaemonLiveError until that retired with
+        the T2 daemon (nexus-i711w Stage 2 sub-stage B); re-pointed at the
+        surviving refusal so the CLI-layer contract keeps its guard."""
         from unittest.mock import patch
 
-        from nexus.catalog.factory import CatalogAdminDaemonLiveError
+        from nexus.catalog.factory import CatalogAdminServiceModeError
         from nexus.cli import main
 
         with patch(
             "nexus.catalog.factory.make_catalog_admin",
-            side_effect=CatalogAdminDaemonLiveError("daemon is live"),
+            side_effect=CatalogAdminServiceModeError("no service-mode equivalent"),
         ):
             result = CliRunner().invoke(main, ["catalog", "undelete", "snap.jsonl"])
         assert result.exit_code != 0
-        assert "daemon is live" in result.output
+        assert "no service-mode equivalent" in result.output
 
 
 class TestWhh61CollectionsCarve:

@@ -136,9 +136,6 @@ class TestCoreMainWiring:
         _pin(monkeypatch, local=True, choice=None, active=_TIER0_MODEL)
         monkeypatch.setattr(core, "_t1_shutdown", lambda: None)
         monkeypatch.setattr(
-            "nexus.mcp._first_run.ensure_installed_and_running", lambda: None
-        )
-        monkeypatch.setattr(
             "nexus.mcp_infra.check_version_compatibility", lambda: None
         )
         # reset any instructions a prior test left on the shared module server

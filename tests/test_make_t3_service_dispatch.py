@@ -29,7 +29,7 @@ def _stub_managed_service_probe(monkeypatch: pytest.MonkeyPatch) -> None:
 
         ManagedServiceIncompatible: ... reported no usable release_version on
         /version (got None) — a dev/unstamped or pre-release engine is older
-        than the minimum this client supports (v0.1.56)
+        than the minimum this client supports (v0.1.57)
 
     That is an ENVIRONMENT artifact of testing against a dev build, not a
     substrate semantic, and the pin is NOT the subject of this file — dispatch

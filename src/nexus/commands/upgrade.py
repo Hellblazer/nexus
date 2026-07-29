@@ -62,15 +62,12 @@ def upgrade(
     a consent channel, making the cost gate actually fire (nexus-k1m2f) traded a
     silent bill for a silent hang on a `click.confirm` no hook can answer.
     """
-    # RDR-128 P2: quiesce the daemon BEFORE migrating so its live T2
-    # connections are released — the migration flock serializes the two
-    # MIGRATOR processes, but only quiescing frees the daemon's serving
-    # connections so the migration DDL has clear access. try/finally brings
-    # the daemon back even if the upgrade fails (a failed upgrade must not
-    # leave the daemon down; its startup migration is idempotent + flocked).
+    # NO pre-migration daemon quiesce: RDR-128 P2 stopped the T2 daemon here so
+    # it released its serving connections before the migration DDL ran. The
+    # daemon is retired (nexus-i711w Stage 2 sub-stage B), so there are no
+    # serving connections to free; the migration flock that serialized the
+    # MIGRATOR processes is untouched and still does its half.
     try:
-        if not dry_run:
-            _quiesce_daemon()
         _run_upgrade(dry_run=dry_run, force=force, auto_mode=auto_mode, skip_t3=skip_t3)
         # RDR-185 P3.1 (nexus-n7u38.23): the two non-data axes converge as
         # STATELESS preconditions before the ladder walks — re-derived from
@@ -132,7 +129,7 @@ def _standing_consent(assume_yes: bool):
     NARROW BY CONSTRUCTION, not by frame ordering. An earlier draft set the env
     for the whole command and restored it in an outer finally — but `nx
     upgrade`'s own finally SPAWNS DAEMONS (`_cycle_supervised_daemons_to_current`
-    and, earlier, `_quiesce_daemon` / `_converge_preconditions`), and those
+    and, earlier, `_converge_preconditions`), and those
     subprocesses pass no ``env=``, so they inherit this process's environment
     and ran BEFORE the outer restore. `--yes`, typed once for one invocation,
     reached every long-lived daemon as standing consent to spend money. The
@@ -339,81 +336,13 @@ def _run_ladder(
 
 
 
-def _quiesce_daemon() -> None:
-    """RDR-128 P2: stop the running T2 daemon and WAIT for it to exit, so it
-    has released its eight T2 connections before ``nx upgrade`` migrates.
-
-    ``nx daemon t2 stop`` only *sends* SIGTERM; the daemon then drains and
-    closes connections asynchronously, so we poll the recorded pid until it
-    is gone (bounded) to close the signal-to-shutdown race. Best-effort:
-    never raises — the migration flock + busy_timeout still protect
-    correctness if a straggler connection lingers.
-    """
-    import json  # noqa: PLC0415 — stdlib import kept branch-local
-    import os  # noqa: PLC0415 — stdlib import kept branch-local
-    import subprocess  # noqa: PLC0415 — stdlib import kept branch-local
-    import time as _time  # noqa: PLC0415 — stdlib import kept branch-local
-
-    try:
-        from nexus.commands.daemon import _resolve_nx_bin  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-        from nexus.daemon.t2_daemon import t2_discovery_path  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-
-        from nexus.commands.daemon import _discovery_record_pid  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-
-        disc = t2_discovery_path(nexus_config_dir())
-        pid: int | None = None
-        if disc.exists():
-            try:
-                # RDR-149 P2: the lease record carries the owner pid under
-                # ``endpoint``; the helper reads both shapes so the
-                # post-stop exit-wait below still fires.
-                pid = _discovery_record_pid(json.loads(disc.read_text()))
-            except (OSError, json.JSONDecodeError):
-                pid = None
-
-        subprocess.run(
-            [*_resolve_nx_bin(), "daemon", "t2", "stop"],
-            timeout=30,
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-        # Wait for the daemon process to actually exit (release its conns).
-        if isinstance(pid, int) and pid > 0:
-            deadline = _time.monotonic() + 10.0
-            while _time.monotonic() < deadline:
-                try:
-                    os.kill(pid, 0)
-                except (ProcessLookupError, PermissionError):
-                    break  # gone
-                _time.sleep(0.1)
-    except Exception as exc:  # noqa: BLE001 — best-effort daemon quiesce; failure logged via _log.warning and upgrade continues
-        _log.warning("upgrade_daemon_quiesce_failed", error=str(exc))
-
-
-def _cycle_daemon_to_current() -> None:
-    """Bring a stale T2 daemon to the just-installed version (best-effort).
-
-    Shells out to ``nx daemon t2 ensure-running --quiet``, the same
-    version-aware primitive the plugin/mcpb session-start hooks use. Never
-    raises: a daemon nudge must not fail the upgrade.
-    """
-    import subprocess  # noqa: PLC0415 — stdlib import kept branch-local
-
-    try:
-        from nexus.commands.daemon import _resolve_nx_bin  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-
-        subprocess.run(
-            [*_resolve_nx_bin(), "daemon", "t2", "ensure-running", "--quiet"],
-            timeout=30,
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception as exc:  # noqa: BLE001 — best-effort daemon cycle; failure logged via _log.warning and upgrade continues
-        _log.warning("upgrade_daemon_cycle_failed", error=str(exc))
+# NO _quiesce_daemon / _cycle_daemon_to_current: both shelled out to the
+# retired `nx daemon t2 stop` / `ensure-running` verbs (nexus-i711w Stage 2
+# sub-stage B). RDR-128 P2 quiesced the daemon so it released its eight T2
+# connections before a migration; with no daemon there are no connections to
+# release, and the migration flock + busy_timeout that backstopped the
+# best-effort quiesce are still in place. The storage-service sibling below
+# (_cycle_storage_service_to_current) is the surviving version-skew cycle.
 
 
 def _cycle_storage_service_to_current(
@@ -520,11 +449,12 @@ def _cycle_supervised_daemons_to_current(*, skip_t3: bool = False) -> None:
     ``ServiceSupervisor.cycle_to_current`` primitive (P1), but a long-lived
     Python daemon cannot refresh its own bytecode in-process — code refresh
     requires a process restart, which only a separate upgrade process can
-    perform. So the per-tier idioms differ (T2 uses version-aware
-    ``ensure-running``; T3 has no ensure-running yet, so stop+start), but
-    they are invoked from this one orchestrator. Best-effort; never raises.
+    perform. The orchestrator therefore survives its tiers: T3's supervised
+    Chroma daemon went with RDR-155 P4b and T2's went with nexus-i711w Stage 2
+    sub-stage B, leaving the Java storage service as the one supervised tier.
+    Keeping the single seam is the point — a new supervised tier is added here
+    once rather than risk being missed. Best-effort; never raises.
     """
-    _cycle_daemon_to_current()  # T2
     if not skip_t3:
         # RDR-155 P4b: the supervised Chroma T3 daemon is retired — the Java
         # storage service serves T3 in every mode.

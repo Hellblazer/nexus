@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import pytest
 import os
-from tests.conftest import engine_substrate_selected
 
 # nexus-aqbrk: this module's dies-roster was WRONG, and measurably so — 6 of
 # its 7 tests pass on the engine substrate. The reason read "sqlite-vs-service

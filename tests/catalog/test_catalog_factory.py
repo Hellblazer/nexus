@@ -14,7 +14,6 @@ import pytest
 
 from nexus.catalog.catalog import Catalog
 from nexus.catalog.factory import (
-    CatalogAdminDaemonLiveError,
     CatalogWriter,
     make_catalog_admin,
     make_catalog_reader,
@@ -194,32 +193,6 @@ def _run_daemon_in_thread(daemon, ready: threading.Event, stop_evt: threading.Ev
         loop.close()
 
 
-class TestWriterDaemonRouted:
-    def test_routes_through_daemon_when_up(self, tmp_path: Path) -> None:
-        cd = Path(tempfile.mkdtemp(prefix="nxwr-", dir="/tmp"))
-        try:
-            from nexus.daemon.t2_daemon import T2Daemon
-
-            daemon = T2Daemon(config_dir=cd, db_path=tmp_path / "memory.db")
-            ready, stop_evt = threading.Event(), threading.Event()
-            th = threading.Thread(
-                target=_run_daemon_in_thread, args=(daemon, ready, stop_evt), daemon=True
-            )
-            th.start()
-            assert ready.wait(timeout=10)
-            try:
-                writer = make_catalog_writer(config_dir=cd)
-                assert writer.routed is True
-                owner = writer.register_owner(
-                    "acme", "project", repo_hash="h1", repo_root="/tmp/acme"
-                )
-                assert isinstance(owner, Tumbler)
-                writer.close()
-            finally:
-                stop_evt.set()
-                th.join(timeout=10)
-        finally:
-            shutil.rmtree(cd, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +209,6 @@ class TestMakeCatalogAdmin:
         from nexus.config import catalog_path
 
         _seed_catalog(catalog_path())
-        # No daemon registered in the isolated config dir -> probe finds none.
         cat = make_catalog_admin()
         try:
             assert cat is not None
@@ -247,17 +219,12 @@ class TestMakeCatalogAdmin:
         finally:
             cat._db.close()
 
-    def test_refuses_when_daemon_live(self, monkeypatch) -> None:
-        """Single-writer guard: a live daemon must block the second writer."""
-        from nexus.config import catalog_path
-
-        _seed_catalog(catalog_path())
-        monkeypatch.setattr(
-            "nexus.daemon.discovery.find_t2_daemon",
-            lambda *a, **k: {"pid": 4242, "uds_path": "/tmp/fake.sock"},
-        )
-        with pytest.raises(CatalogAdminDaemonLiveError):
-            make_catalog_admin()
+    # NO test_refuses_when_daemon_live: the RDR-146 P1.2 single-writer guard
+    # refused a second writer while a T2 daemon held the .catalog.db write
+    # handle. That daemon is retired (nexus-i711w Stage 2 sub-stage B), so no
+    # competing writer can exist to refuse. The surviving refusal is
+    # service-mode (CatalogAdminServiceModeError), covered by
+    # tests/catalog/test_aoqnb_admin_service_mode_refusal.py.
 
 
 class TestReaderColdCache:

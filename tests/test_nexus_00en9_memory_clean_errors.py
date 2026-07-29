@@ -2,18 +2,16 @@
 """nexus-00en9: `nx memory` prints a clean one-liner (no raw traceback) when the
 T2 backend errors mid-RPC — for BOTH backends.
 
-GH-1061 E3 already covers daemon *discovery* failures
-(``T2DaemonNotReachableError`` / ``T2SchemaVersionMismatchError``). This pins the
-two gaps it left open, both of which surface as raw tracebacks today:
+Originally pinned two gaps, one per backend. The daemon/SQLite half (a
+reachable-but-contended daemon returning ``T2ClientError``, the original 00en9
+symptom on 5.10.2) retired with the daemon in nexus-i711w Stage 2 sub-stage B —
+see the tombstones below.
 
-1. **Daemon/SQLite path** — a reachable-but-contended daemon returns a
-   ``T2ClientError`` (e.g. ``database is locked`` under write contention). The
-   original 00en9 symptom on 5.10.2.
-2. **Service path (go-live)** — in SERVICE mode ``t2_handle`` routes to an
-   ``HttpMemoryStore``; a down/unreachable service raises ``httpx.HTTPError``.
-   The service branch had no error catch at all.
+What remains is the **service path**: in SERVICE mode ``t2_handle`` routes to an
+``HttpMemoryStore``, and a down/unreachable service raises ``httpx.HTTPError``.
+That branch originally had no error catch at all.
 
-Both are caught in the single choke point ``t2_handle`` so every ``nx memory``
+Caught in the single choke point ``t2_handle`` so every ``nx memory``
 subcommand benefits.
 """
 from __future__ import annotations
@@ -25,7 +23,6 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
-from nexus.daemon.t2_client import T2ClientError
 
 
 @pytest.fixture()
@@ -33,44 +30,18 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
-class TestDaemonContendedLockError:
-    """SQLite-mode: a reachable daemon returning a locked-DB error must be clean."""
-
-    def _locked_error(self) -> T2ClientError:
-        return T2ClientError(
-            error_type="OperationalError",
-            message="database is locked",
-            op="memory.put",
-        )
-
-    def test_put_locked_db_clean_one_liner(
-        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")  # exercise the daemon branch
-        with patch(
-            "nexus.daemon.t2_client.T2Client.call", side_effect=self._locked_error()
-        ):
-            result = runner.invoke(
-                main, ["memory", "put", "hello", "--project", "p", "--title", "t.md"]
-            )
-        assert result.exit_code != 0, result.output
-        assert "Traceback" not in result.output, result.output
-        assert "T2ClientError" not in result.output, result.output
-        # The daemon-side message must survive into the clean one-liner.
-        assert "database is locked" in result.output, result.output
-        # Actionable hint: the daemon is contended/degraded.
-        assert "nx daemon t2 status" in result.output, result.output
-
-    def test_list_locked_db_clean(
-        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
-        with patch(
-            "nexus.daemon.t2_client.T2Client.call", side_effect=self._locked_error()
-        ):
-            result = runner.invoke(main, ["memory", "list"])
-        assert result.exit_code != 0
-        assert "Traceback" not in result.output, result.output
+# NO TestDaemonContendedLockError: it drove the SQLite/daemon branch with
+# NX_STORAGE_BACKEND=sqlite and injected a T2ClientError ("database is locked")
+# at ``T2Client.call``. Both the client and the daemon retired in nexus-i711w
+# Stage 2 sub-stage B, and `t2_handle`'s SQLite branch now raises before
+# constructing any client, so that patch target is unreachable. Its sibling
+# ``test_list_locked_db_clean`` still PASSED afterwards (it asserts only
+# non-zero exit + no traceback, which the new fail-loud branch satisfies) — a
+# vacuous green, removed with the rest rather than left as false coverage.
+#
+# ``TestServiceUnreachable`` below is the surviving half and always was the
+# go-live-relevant one: the choke point it exercises (`t2_handle`) is the same,
+# only the reachable backend has changed.
 
 
 class TestServiceUnreachable:
@@ -173,23 +144,7 @@ class TestServiceUnreachable:
         assert "Check the storage service: nx doctor" not in result.output, result.output
 
 
-class TestProtocolErrorVersionSkew:
-    """S1: a frame-level ProtocolError (version skew) gets the version-skew remedy,
-    not the transient-contention 'retry' hint."""
-
-    def test_protocol_error_points_at_version_skew(
-        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("NX_STORAGE_BACKEND", "sqlite")
-        exc = T2ClientError(
-            error_type="ProtocolError",
-            message="unknown op id 7",
-            op="memory.list_entries",
-        )
-        with patch("nexus.daemon.t2_client.T2Client.call", side_effect=exc):
-            result = runner.invoke(main, ["memory", "list"])
-        assert result.exit_code != 0, result.output
-        assert "Traceback" not in result.output, result.output
-        assert "version skew" in result.output, result.output
-        # Must NOT give the plain contention retry hint.
-        assert "nx daemon t2 status" not in result.output, result.output
+# NO TestProtocolErrorVersionSkew: a frame-level ProtocolError was a DAEMON
+# wire-protocol condition, signalling client/daemon version skew. With no daemon
+# there is no frame and no skew of that kind; the engine's version relationship
+# is governed by REQUIRED_ENGINE_VERSION, not a per-RPC frame check.

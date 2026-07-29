@@ -29,25 +29,32 @@ import pytest
 from tests.db._service_fixture import pg_bin_dir
 
 
-def _pg_bins_available() -> bool:
-    from nexus.db.pg_provision import PgBinaryNotFoundError, discover_pg_binaries
+# THE GATE RESOLVES THROUGH THE SELF-PROVISIONING SEAM, NEVER AMBIENT DISCOVERY.
+# Locked policy: nexus ALWAYS uses the PostgreSQL it BUILDS — never Homebrew,
+# never a host install (T2 always-install-pg-bundle-no-fallback). pg_bin_dir()
+# downloads the sigstore-verified nexus-pg bundle for PINNED_SERVICE_TAG into
+# ~/.cache/nexus-test-substrate/<tag>/ and returns a nonexistent sentinel ONLY
+# when self-provisioning ITSELF fails.
+#
+# This module previously gated on discover_pg_binaries(), which asks whether the
+# BOX happens to carry a PostgreSQL — a property of the machine, not of the
+# substrate these tests need. Every fixture below already resolved its binaries
+# through pg_bin_dir(), so the gate and the body disagreed: all 15 tests skipped
+# on any box with no host install, while the bundle sat available in the cache
+# (observed 2026-07-27 on a box whose cache already held the pinned tag).
+# Mechanically enforced for every module by tests/db/test_pg_gate_is_self_provisioning.py.
+#
+# max-skip guard (testval-182 Low): still a clean SKIP rather than an ERROR from
+# a fixture invoking a nonexistent initdb.
+_PG_BIN = pg_bin_dir()
+_INITDB = _PG_BIN / "initdb"
 
-    try:
-        discover_pg_binaries()
-        return True
-    except PgBinaryNotFoundError:
-        return False
-
-
-# max-skip guard (testval-182 Low): clean SKIP when no PG, not an ERROR from a
-# fixture calling a nonexistent initdb. Matches the test_pg_provision.py
-# sibling convention.
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
-        not _pg_bins_available(),
-        reason="skipped: no PostgreSQL binaries found (install postgresql@16 "
-               "or set NEXUS_PG_BIN)",
+        not _INITDB.exists(),
+        reason=f"skipped: nexus-pg bundle self-provisioning failed (no {_INITDB}). "
+               "NOT a missing host PostgreSQL — these tests never use one.",
     ),
 ]
 

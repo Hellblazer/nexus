@@ -715,11 +715,22 @@ class TestCheckQuotas:
             )
         assert result.exit_code == 0, result.output
         data = _json.loads(result.stdout)
+        # RDR-155 P4b: the section key is "vector_store", NOT "chromadb".
+        # It carried the dependency's name for machine-consumer stability
+        # ("until P4b renames it", doctor.py's own comment) and P4b is the
+        # wave that removed the dependency. Renamed in 7.0.0 because a MAJOR
+        # is the only defensible moment to break a JSON contract that
+        # cli-reference.md advertises for "dashboards / CI gates".
+        # The exact-set assertion below is what pins the rename: a stray
+        # "chromadb" key coming back fails it.
         assert set(data.keys()) == {
-            "chromadb", "voyage", "cross_encoder", "retry",
+            "vector_store", "voyage", "cross_encoder", "retry",
         }
-        assert data["chromadb"]["reachable"] is True
-        assert data["chromadb"]["limits"]["max_records_per_write"] == 300
+        assert "chromadb" not in data, (
+            "the retired dependency's name is back as a JSON section key"
+        )
+        assert data["vector_store"]["reachable"] is True
+        assert data["vector_store"]["limits"]["max_records_per_write"] == 300
         assert "voyage-code-3" in data["voyage"]["models"]
         assert data["voyage"]["api_key_set"] is True
         assert data["retry"]["total_count"] == 0

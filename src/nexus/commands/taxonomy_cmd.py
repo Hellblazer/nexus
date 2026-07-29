@@ -278,11 +278,18 @@ def discover_for_collection(
 ) -> int:
     """Fetch texts + embeddings from a T3 collection, run HDBSCAN discovery.
 
-    Uses the existing T3 embeddings (Voyage on cloud, MiniLM on local)
-    rather than re-embedding. This preserves the quality of the original
-    embedding model — Voyage-code-3 for code, Voyage-context-3 for docs.
-    Falls back to local MiniLM re-embedding when T3 embeddings are not
-    available (e.g., collection stored without embeddings).
+    Clusters the collection's STORED embeddings and never re-embeds. This
+    preserves the original embedding model — Voyage-code-3 for code,
+    Voyage-context-3 for docs, bge-768 on a local service.
+
+    REFUSES (returns 0, logs at WARNING, echoes unless *quiet*) when the
+    collection cannot supply aligned vectors. It formerly fell back to a
+    local MiniLM-384 re-encode, which produced topic centroids in a
+    different vector space than a bge-768 / voyage-1024 collection's chunks
+    — persisted into ``taxonomy_centroids_384``, after which every ANN
+    assign hit the dimension-mismatch guard and returned ``[]``, leaving a
+    collection full of topics nothing could be assigned to. Same fix as
+    ``split_topic``'s (nexus-9pqoj).
 
     Shared entry point for the CLI ``nx taxonomy discover`` and
     programmatic callers (``index_repo_cmd``, ``post_store_hook``).
@@ -402,16 +409,40 @@ def discover_for_collection(
 
     _progress(f"    fetched {len(all_ids):,} chunks")
 
-    # Use T3 embeddings if all docs have them; else fall back to MiniLM
-    if has_t3_embeddings and len(all_embs) == len(all_ids):
-        _progress(f"    embedding: using T3 native ({len(all_embs[0])}d)")
-        embeddings = np.array(all_embs, dtype=np.float32)
-    else:
-        from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 - deferred to avoid circular import at module load
+    # Cluster the collection's STORED vectors — never re-embed. Fourth copy of
+    # the fix applied to HttpTaxonomyStore.split_topic, CatalogTaxonomy.
+    # split_topic and the raw CLI split path (nexus-9pqoj, d0a3387d /
+    # de07b4f1, whose message reads "all three read stored vectors and none of
+    # them embeds"). This one was discover rather than split, so it escaped
+    # that sweep: a MiniLM-384 re-encode yields topic centroids in a different
+    # space than a bge-768 / voyage-1024 collection's chunks, persists them
+    # into taxonomy_centroids_384, and every later ANN assign then hits the
+    # dimension-mismatch guard and returns [] — a collection full of topics
+    # nothing can be assigned to.
+    #
+    # The service path (_discover_via_service) already refuses this way, so
+    # only the raw path was affected. Refusal happens BEFORE clustering, not
+    # merely before persist: clustering in the wrong space and then discarding
+    # is still minutes of work whose only possible output is wrong.
+    if not (has_t3_embeddings and len(all_embs) == len(all_ids)):
+        _log.warning(
+            "discover_refused_no_stored_vectors",
+            collection=collection_name,
+            chunks=len(all_ids),
+            with_vectors=len(all_embs),
+        )
+        if not quiet:
+            _progress(
+                f"    cannot discover topics for {collection_name}: the "
+                f"collection returned no stored vectors for its documents "
+                f"({len(all_embs):,} of {len(all_ids):,}). Refusing to "
+                f"re-embed, because topic centroids must share the "
+                f"collection's own vector space."
+            )
+        return 0
 
-        _progress(f"    embedding: re-encoding with MiniLM (384d)")
-        ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-        embeddings = np.array(ef(all_texts), dtype=np.float32)
+    _progress(f"    embedding: using T3 native ({len(all_embs[0])}d)")
+    embeddings = np.array(all_embs, dtype=np.float32)
 
     _progress(f"    clustering {len(all_ids):,} x {embeddings.shape[1]}d...")
     t0 = time.monotonic()
@@ -632,7 +663,18 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
 
         # GH #251 + RDR-095: surface recent post-store hook failures.
         # SQLite-only: hook_failures table not accessible in service mode.
+        #
+        # nexus-onjvy: that is an ENGINE GAP, not a design choice. The engine
+        # accepts /hook_failures/record and /trim and exposes NO read route, so
+        # this block and doctor.py's sibling are the only readers that exist —
+        # and both are raw-conn, so they die with the SQLite stores in
+        # nexus-i711w. When that lands, `nx taxonomy status` loses hook-failure
+        # surfacing outright, on exactly the path that exists to make silent
+        # hook failures visible. Deleting this is a USER-VISIBLE regression and
+        # needs to be a decision, not a side effect of the deletion sweep.
+        # Characterized by tests/db/test_onjvy_write_only_surfaces.py.
         rows: list[tuple[str, int, int, str | None]] = []
+        service_total: int | None = None
         try:
             if _has_raw_access(db.taxonomy):
                 with db.taxonomy._lock:  # epsilon-allow: guarded by _has_raw_access (service-mode skip); raw-cursor aggregate not in public API
@@ -652,6 +694,26 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
                             "WHERE occurred_at >= datetime('now', '-1 day')"
                         ).fetchall()
                         rows = [(r[0], 1, 0, None) for r in legacy]
+            else:
+                # SERVICE MODE (nexus-onjvy). Until engine-service-v0.1.58 this
+                # branch did not exist: hook_failures had no read route, so
+                # `nx taxonomy status` silently showed nothing on the default
+                # substrate — the failure log that exists to surface SILENT
+                # hook failures was itself silent. `total` is the server's
+                # exact count over the whole 24h window, independent of the
+                # page below, so the headline cannot under-report when
+                # failures exceed the page.
+                resp = db.telemetry.list_hook_failures(days=1, limit=300)
+                service_total = int(resp.get("total") or 0)
+                rows = [
+                    (
+                        str(r.get("hook_name") or "?"),
+                        1,
+                        1 if r.get("is_batch") else 0,
+                        r.get("batch_doc_ids") or None,
+                    )
+                    for r in resp.get("rows") or []
+                ]
         except Exception:  # noqa: BLE001 - best-effort row read; degrades to empty list
             rows = []
 
@@ -659,7 +721,12 @@ def status_cmd(collection: str, limit: int, summary: bool, needs_review: bool) -
             import json as _json  # noqa: PLC0415 - branch-local; deferred to call time
             from collections import Counter  # noqa: PLC0415 - branch-local; deferred to call time
 
-            total_recent = sum(n for _, n, _, _ in rows)
+            # The server's count is exact over the whole window; the raw
+            # branch has no cap so summing its rows is equally exact.
+            total_recent = (
+                service_total if service_total is not None
+                else sum(n for _, n, _, _ in rows)
+            )
             per_hook: Counter[str] = Counter()
             docs_affected = 0
             for name, _count, is_batch, batch_payload in rows:
@@ -1155,7 +1222,6 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
     """
     import numpy as _np  # noqa: PLC0415 - heavy dep deferred to call time
     from nexus.db import make_t3  # noqa: PLC0415 - deferred to avoid circular import at module load
-    from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 - deferred to avoid circular import at module load
     from nexus.db.t2.catalog_taxonomy import CatalogTaxonomy  # noqa: PLC0415 - deferred to avoid circular import at module load
     from nexus.mcp_infra import t2_index_write  # noqa: PLC0415 - deferred to avoid circular import at module load
 
@@ -1206,23 +1272,57 @@ def split_cmd(topic_label: str, k: int, collection: str) -> None:
             click.echo(f"Collection '{collection_name}' not found in T3.")
             return
 
+        # Read the collection's STORED vectors — never re-embed. Third copy of
+        # the fix applied to HttpTaxonomyStore.split_topic and
+        # CatalogTaxonomy.split_topic (nexus-9pqoj extended 2026-07-28): a
+        # MiniLM-384 re-embed yields child centroids in a different space than
+        # a bge-768 / voyage-1024 collection's chunks, so they persist into
+        # taxonomy_centroids_384, the following ANN assign hits the dimension
+        # -mismatch guard and returns [], and the split silently creates
+        # unassignable topics.
         _PAGE = 250
         fetched_ids: list[str] = []
         texts: list[str] = []
+        vectors: list[list[float]] = []
+        vectors_unavailable = False
         for i in range(0, len(doc_ids), _PAGE):
             batch = doc_ids[i : i + _PAGE]
-            result = coll.get(ids=batch, include=["documents"])
-            for fid, fdoc in zip(result.get("ids") or [], result.get("documents") or []):
-                if fdoc:
-                    fetched_ids.append(fid)
-                    texts.append(fdoc)
+            result = coll.get(ids=batch, include=["documents", "embeddings"])
+            got_ids = result.get("ids") or []
+            got_docs = result.get("documents") or []
+            got_embs = result.get("embeddings")
+            if got_embs is None or len(got_embs) != len(got_ids):
+                vectors_unavailable = True
+                break
+            for fid, fdoc, femb in zip(got_ids, got_docs, got_embs):
+                if not fdoc:
+                    continue
+                # A usable doc with no vector is the unavailable case, not a
+                # row to drop quietly — dropping shrinks `texts` until the
+                # len<k branch prints "into 0 sub-topics", which reads as
+                # "too small to split" rather than "could not be computed".
+                if femb is None:
+                    vectors_unavailable = True
+                    break
+                fetched_ids.append(fid)
+                texts.append(fdoc)
+                vectors.append(list(femb))
+            if vectors_unavailable:
+                break
+
+        if vectors_unavailable:
+            click.echo(
+                f"Cannot split '{topic_label}': the collection returned no stored "
+                f"vectors for its documents. Refusing to re-embed, because child "
+                f"centroids must share the collection's own vector space."
+            )
+            return
 
         if len(texts) < k:
             click.echo(f"Split '{topic_label}' into 0 sub-topics.")
             return
 
-        ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-        embeddings = _np.array(ef(texts), dtype=_np.float32)
+        embeddings = _np.asarray(vectors, dtype=_np.float32)
 
         # COMPUTE: KMeans + c-TF-IDF (pure CPU, no T2 writes)
         split_result = CatalogTaxonomy.compute_split(
@@ -1461,9 +1561,9 @@ def links_cmd(collection: str, refresh: bool) -> None:
             # Service mode: get link pairs via public API and resolve labels
             _all_topics = {t["id"]: t for t in db.taxonomy.get_all_topics()}
             _topic_ids = list(_all_topics.keys())
-            _pairs = db.taxonomy.get_topic_link_pairs(_topic_ids) if _topic_ids else []
+            _pairs = db.taxonomy.get_topic_link_pairs(_topic_ids) if _topic_ids else {}
             rows = []
-            for from_id, to_id, count in _pairs:
+            for (from_id, to_id), count in _pairs.items():
                 from_t = _all_topics.get(from_id, {})
                 to_t   = _all_topics.get(to_id, {})
                 if collection and (from_t.get("collection") != collection and

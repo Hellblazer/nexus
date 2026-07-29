@@ -19,23 +19,9 @@ and starts the nexus-service that serves every tier in the default config, and
 offers to register the OS autostart unit (accept it, or use `--no-autostart`
 for a session-only supervisor).
 
-If you work with the opt-in SQLite T2 backend (`NX_STORAGE_BACKEND=sqlite`) and
-want to hack on the T2 daemon itself, stop the autostart-managed instance and
-run it in the foreground:
-
-```bash
-launchctl bootout gui/$(id -u)/com.nexus.t2     # macOS
-# or
-systemctl --user stop nexus-t2.service          # Linux
-nx daemon t2 start                              # foreground, ^C to stop
-```
-
-After every conexus version bump (including local edits), restart the
-LaunchAgent-managed daemon so it picks up the new code:
-
-```bash
-launchctl kickstart -k gui/$(id -u)/com.nexus.t2
-```
+The SQLite T2 daemon is retired (nexus-i711w), so there is no daemon to hack
+on, restart after a version bump, or run in the foreground. T2 is served by
+the nexus-service; for that stack use `nx daemon service start|stop|status`.
 
 ## Running Tests
 

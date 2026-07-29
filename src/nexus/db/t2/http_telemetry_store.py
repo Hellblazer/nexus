@@ -429,6 +429,52 @@ class HttpTelemetryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         resp = self._post("/v1/telemetry/search/trim", {"days": days})
         return int(resp.get("deleted", 0))
 
+    def list_hook_failures(
+        self,
+        *,
+        days: int = 0,
+        hook_names: list[str] | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """Read hook failures, newest first (nexus-onjvy).
+
+        SERVICE-MODE ONLY — there is no SQLite twin, deliberately. The local
+        store's readers were raw SELECTs in ``nx taxonomy status`` and
+        ``nx doctor``, and they die with the SQLite stores in nexus-i711w; this
+        is their replacement, not a port of them. Registered in
+        ``T2_SUPPLEMENTAL_CONTRACT`` for exactly that reason: the
+        SQLite-derived parity contract cannot see a method with no twin, so
+        without the supplemental entry it would be silently deletable.
+
+        Until this existed, ``hook_failures`` was WRITE-ONLY over HTTP —
+        ``/record`` and ``/trim`` and nothing else — so the failure log that
+        exists to surface SILENT hook failures could be written and never
+        inspected.
+
+        Returns ``{"rows": [...], "total": int, "oldest_occurred_at": str}``.
+        ``total`` and ``oldest_occurred_at`` are computed server-side over the
+        WHOLE filtered set, NOT the returned page: ``nx doctor`` reports a
+        count, and deriving it from a limited page would under-report the
+        moment failures exceeded ``limit``.
+
+        Args:
+            days: only rows within the last N days; ``0`` means no time bound.
+            hook_names: restrict to these hook names; ``None``/empty means all.
+            limit: max rows in the returned page. Does not affect the
+                aggregates.
+        """
+        params: dict[str, Any] = {"days": days, "limit": limit}
+        if hook_names:
+            params["hook_name"] = ",".join(hook_names)
+        resp = self._get("/v1/telemetry/hook_failures/list", params)
+        if not isinstance(resp, dict):  # defensive: a stripped proxy response
+            return {"rows": [], "total": 0, "oldest_occurred_at": ""}
+        return {
+            "rows": list(resp.get("rows") or []),
+            "total": int(resp.get("total") or 0),
+            "oldest_occurred_at": str(resp.get("oldest_occurred_at") or ""),
+        }
+
     def trim_hook_failures(self, days: int = 30) -> int:
         """Delete ``hook_failures`` rows older than *days* days (nexus-7365x).
 

@@ -91,6 +91,16 @@ assert "plans/search"          200 "${A[@]}" "${J[@]}" -X POST -d '{"query":"q",
 assert "taxonomy/topics"       200 "${A[@]}" "$U/v1/taxonomy/topics?collection=knowledge__x"
 assert "chash/distinct"        200 "${A[@]}" "$U/v1/chash/distinct_collections"
 
+# nexus-onjvy read routes. Added WITH the routes, not after the tag: this script
+# is the only place the NATIVE binary's routing is exercised, and a route that
+# works under the JVM can still 404 or 500 in the native image (GraalVM
+# reflection config). Discovering that post-tag is what burned v0.1.53 -> .54.
+# Empty-result 200s are the assertion — these run against a fresh DB, so the
+# point is that the route EXISTS and serves, not that it finds rows.
+assert "telemetry/hook_failures/list" 200 "${A[@]}" "$U/v1/telemetry/hook_failures/list?days=1&limit=5"
+assert "taxonomy/assignments/details" 200 "${A[@]}" "${J[@]}" -X POST -d '{"doc_ids":["native-smoke-doc"]}' "$U/v1/taxonomy/assignments/details"
+assert "taxonomy/hubs (staleness)"    200 "${A[@]}" "$U/v1/taxonomy/hubs?min_collections=2"
+
 # ── T1 scratch (separate jOOQ schema, nexus-opr9m) ───────────────────────────
 # T1 scratch lives in its OWN generated jOOQ schema (t1, e.g.
 # dev.nexus.service.jooq.t1.T1) — a completely separate schema model from every

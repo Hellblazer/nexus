@@ -21,18 +21,6 @@ from nexus.commands.aspects import (
     _is_fixture_collection,
     aspects_group,
 )
-from tests.conftest import engine_substrate_selected
-
-#: gc-fixtures is a SQLite-only verb — it refuses service mode with a
-#: UsageError (raw multi-store SQL DELETE via live cursors; tracked
-#: nexus-gmiaf.37), and the tests seed rows via raw sqlite conns.
-#: dies-roster: these die with the SQLite substrate at the RDR-155 P4b flip.
-_SQLITE_ONLY_VERB = pytest.mark.skipif(
-    engine_substrate_selected(),
-    reason="dies-roster: gc-fixtures is a SQLite-only verb (service mode "
-    "raises UsageError, nexus-gmiaf.37) and its fixtures seed via raw "
-    "sqlite cursors — dies at the RDR-155 P4b flip",
-)
 
 
 # ── Allowlist sanity ──────────────────────────────────────────────────────────
@@ -124,64 +112,6 @@ def t2_with_fixtures(tmp_path: Path, monkeypatch):
 
 
 class TestGcFixturesVerb:
-    @_SQLITE_ONLY_VERB
-    def test_dry_run_default_reports_without_deleting(self, t2_with_fixtures) -> None:
-        db, _ = t2_with_fixtures
-        runner = CliRunner()
-        result = runner.invoke(aspects_group, ["gc-fixtures"])
-        assert result.exit_code == 0, result.output
-        assert "would delete" in result.output
-        assert "Re-run with --yes" in result.output
-        # No row was actually deleted.
-        rows = db.document_aspects.conn.execute(
-            "SELECT COUNT(*) FROM document_aspects"
-        ).fetchone()[0]
-        assert rows == 3
-        qrows = db.aspect_queue.conn.execute(
-            "SELECT COUNT(*) FROM aspect_extraction_queue"
-        ).fetchone()[0]
-        assert qrows == 3
-
-    @_SQLITE_ONLY_VERB
-    def test_yes_flag_deletes_only_fixture_rows(self, t2_with_fixtures) -> None:
-        db, _ = t2_with_fixtures
-        runner = CliRunner()
-        result = runner.invoke(aspects_group, ["gc-fixtures", "--yes"])
-        assert result.exit_code == 0, result.output
-        assert "deleted" in result.output
-        # Fixture rows deleted from both tables; production row preserved.
-        rows = db.document_aspects.conn.execute(
-            "SELECT collection FROM document_aspects"
-        ).fetchall()
-        assert [r[0] for r in rows] == ["knowledge__production-corpus"]
-        qrows = db.aspect_queue.conn.execute(
-            "SELECT collection FROM aspect_extraction_queue"
-        ).fetchall()
-        assert [r[0] for r in qrows] == ["knowledge__production-corpus"]
-
-    @_SQLITE_ONLY_VERB
-    def test_no_fixture_rows_is_clean_noop(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
-        """Empty fixture state → exit 0 with 'No fixture rows found.'"""
-        from nexus.db.t2 import T2Database
-
-        mem_path = tmp_path / "memory.db"
-        monkeypatch.setattr(
-            "nexus.commands._helpers.default_db_path",
-            lambda: mem_path,
-        )
-        db = T2Database(mem_path)
-        try:
-            _seed_aspects(db, collection="knowledge__production-corpus", count=2)
-        finally:
-            db.close()
-
-        runner = CliRunner()
-        result = runner.invoke(aspects_group, ["gc-fixtures", "--yes"])
-        assert result.exit_code == 0, result.output
-        assert "No fixture rows found." in result.output
-
     def test_missing_db_is_clean_noop(self, tmp_path: Path, monkeypatch) -> None:
         """No memory.db at all → exit 0 with the 'nothing to do' message."""
         mem_path = tmp_path / "does_not_exist.db"

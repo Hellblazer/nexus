@@ -151,3 +151,39 @@ def test_secret_names_documented_for_provisioning() -> None:
         "APPLE_NOTARY_ISSUER_ID",
     ):
         assert name in text, f"secret {name} vanished from the workflow"
+
+
+def test_signing_job_is_environment_scoped() -> None:
+    """The APPLE_* secrets must be reachable only from an environment-gated job.
+
+    Repo-level secrets are readable by ANY job in ANY workflow that names them,
+    including one added later. The Developer ID private key is the credential
+    here whose compromise is not cleanly recoverable — Apple's remedy is
+    revoking the cert, and Gatekeeper checks revocation ONLINE, so binaries
+    already published can start failing. Scoping the secrets to the
+    `apple-signing` environment (required reviewer + deployment policy limited
+    to the release tag) is what makes "only an approved release run can read the
+    signing key" true.
+
+    Deleting the one `environment:` line silently reverts that to repo-wide
+    readability with no other visible symptom, which is exactly why it is
+    pinned here rather than left to review.
+    """
+    spec = yaml.safe_load(_text())
+    job = spec["jobs"]["build-publish"]
+
+    assert job.get("environment") == "apple-signing", (
+        "build-publish must declare environment: apple-signing — without it the "
+        "APPLE_* secrets fall back to repo scope, readable by every workflow"
+    )
+
+    # The secrets are consumed by THIS job, so this job is the one that has to
+    # carry the environment. If the signing steps ever move, this assertion
+    # moves with them rather than being quietly satisfied by the wrong job.
+    step_env_blobs = " ".join(
+        str(step.get("env", "")) for step in job["steps"]
+    )
+    assert "APPLE_DEV_ID_CERT_P12" in step_env_blobs, (
+        "the codesign secrets are no longer read by build-publish — move this "
+        "environment assertion to whichever job now reads them"
+    )

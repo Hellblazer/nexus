@@ -289,92 +289,6 @@ def t2_ctx():
     return T2Database(default_db_path())  # epsilon-allow: aspect_worker persist (document_aspects.upsert AspectRecord arg cannot round-trip the daemon RPC); not the every-poll hot path (RDR-128 P3)
 
 
-def _reassert_t2_daemon() -> bool:
-    """RDR-141: re-assert the T2 supervisor after a schema-version mismatch.
-
-    A version mismatch on ``hello()`` means a stale-version daemon is ALIVE,
-    holds the spawn lock, and is serving — so degrading straight to a direct
-    ``T2Database`` would open a SECOND writer on ``memory.db`` (the version-skew
-    double-writer this exists to close). Instead drive the supervisor to reap
-    the stale daemon and spawn a current one, so the caller can route the write
-    through a single current daemon.
-
-    Returns ``True`` iff a current daemon is now reachable. On any non-reachable
-    outcome it emits a DISTINCT, operator-visible WARNING (so the cycle-deferred
-    residual — where the stale daemon is still alive and the caller's direct
-    fallback is a temporary second writer — is never silent) and returns
-    ``False`` so the caller degrades to a bounded direct write.
-
-    Never raises. ``_t2_ensure_running_inner`` returns an outcome rather than
-    ``sys.exit``-ing (RDR-141 P0), but ``SystemExit`` is caught defensively
-    (CA-3) so a future regression in the supervisor cannot terminate the
-    calling MCP process.
-    """
-    import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
-    log = structlog.get_logger()
-    try:
-        from nexus.commands.daemon import (  # noqa: PLC0415 — deferred to avoid circular import (commands.daemon)
-            T2EnsureOutcome,
-            _t2_ensure_running_inner,
-        )
-
-        outcome = _t2_ensure_running_inner(
-            config_dir_str=None, timeout=15.0, quiet=True
-        )
-    except SystemExit as exc:
-        log.warning(
-            "t2_index_write_reassert_systemexit",
-            code=getattr(exc, "code", None),
-            hint="supervisor re-assert exited unexpectedly; degrading to a direct write",
-        )
-        return False
-
-    if outcome is T2EnsureOutcome.REACHABLE:
-        return True
-
-    # Distinct event per outcome — the cycle-deferred residuals (stale daemon
-    # still ALIVE) must be distinguishable from the safe down-arm (no live
-    # incumbent) for operators and for the §Validation acceptance signal.
-    events = {
-        T2EnsureOutcome.DEFERRED_WRITE_LOCK: (
-            "t2_index_write_version_skew_cycle_deferred_writelock",
-            "stale daemon still ALIVE (WAL write-lock held); cycle deferred — the "
-            "direct write below is a temporary second writer (RDR-128 residual, "
-            "WAL non-corrupting, errors loud)",
-        ),
-        T2EnsureOutcome.DEFERRED_SIGTERM: (
-            "t2_index_write_version_skew_cycle_deferred_sigterm",
-            "stale daemon still ALIVE (SIGTERM did not take in window); cycle "
-            "deferred — the direct write below is a temporary second writer "
-            "(RDR-128 residual, WAL non-corrupting, errors loud)",
-        ),
-        T2EnsureOutcome.CRASHLOOP_SUPPRESSED: (
-            "t2_index_write_version_skew_crashloop_down",
-            "no live daemon (crash-loop guard suppressed respawn); the direct "
-            "write below is safe (single-writer down-arm)",
-        ),
-        T2EnsureOutcome.SPAWN_FAILED: (
-            "t2_index_write_version_skew_spawn_failed",
-            "daemon spawn failed; the direct write below is safe (no live daemon)",
-        ),
-        T2EnsureOutcome.SERVICE_MODE_SKIP: (
-            "t2_index_write_version_skew_service_mode_skip",
-            "memory store is in SERVICE mode (RDR-176); the SQLite daemon has no "
-            "role here — this path should not normally be reached (t2_index_write "
-            "already short-circuits to the service-backed writer before ever "
-            "constructing a T2Client), but the direct write below is safe "
-            "regardless (no live SQLite daemon to double-write against)",
-        ),
-    }
-    event, hint = events.get(
-        outcome,
-        (
-            "t2_index_write_version_skew_reassert_unreachable",
-            "supervisor re-assert did not reach a current daemon",
-        ),
-    )
-    log.warning(event, outcome=outcome.value, hint=hint)
-    return False
 
 
 def _service_t2_write_locked(write_fn):
@@ -407,150 +321,34 @@ def _service_t2_write_locked(write_fn):
 
 
 def t2_index_write(write_fn):
-    """Run one T2 write through the daemon (``T2Client``) if it is
-    reachable, else a direct ``T2Database`` (RDR-128 P1, nexus-kg8sj;
-    generalized to all routable writers in P3, nexus-sbxbe.3).
+    """Run one T2 write against the service-backed :class:`T2Database`.
 
-    Returns ``write_fn``'s result so callers that need the write's return
-    value (e.g. the aspect_worker's ``claim_batch`` rows, or
-    ``rename_collection_cascade``'s per-store row counts) can route too;
-    fire-and-forget callers simply ignore the return.
+    ``write_fn(db)`` receives the writer and its return value is passed back,
+    so callers that need it (the aspect_worker's ``claim_batch`` rows,
+    ``rename_collection_cascade``'s per-store counts) can route too;
+    fire-and-forget callers simply ignore it.
 
-    Routing keeps the ``nx index repo`` process from opening ``memory.db``
-    directly and holding its single WAL writer slot — the daemon becomes
-    the writer, so a dead/slow indexer can no longer strand the lock for
-    other processes. The direct-``T2Database`` fallback preserves
-    functionality when the daemon is down (at the cost of the old
-    direct-lock behavior), and is logged so the degraded path is visible.
+    WAS A DAEMON ROUTER (RDR-128 P1/P3, nexus-kg8sj/sbxbe.3). The T2 daemon
+    existed to stop ``nx index repo`` from opening ``memory.db`` directly and
+    holding its single WAL writer slot — a SQLite-only problem. The engine owns
+    write serialization, so the daemon, its reachability probe and its
+    version-skew arm are gone (nexus-i711w Stage 2 sub-stage B).
 
-    ``write_fn(db)`` receives the writer (``T2Client`` or ``T2Database``;
-    both expose the same ``db.<store>.<method>(...)`` surface). Reachability
-    is decided by an explicit up-front probe (``database.hello()``) rather
-    than by catching an error *out of* ``write_fn`` — because some writers
-    (e.g. the best-effort ``dual_write_chash_index``) swallow their own
-    exceptions internally, which would otherwise hide the unreachable
-    signal and silently drop the write. ``write_fn`` is therefore invoked
-    against exactly one writer, never re-run, so there is no double-write
-    risk regardless of how it handles errors.
+    THE DIRECT SQLITE PATH BELOW STAYS FOR NOW, deliberately. It is not daemon
+    machinery — it is the SQLite arm, which sub-stage A removes along with the
+    stores themselves. Collapsing it here as well was scope bleed: it broke the
+    collection-rename cascade tests that legitimately pin the SQLite backend
+    today, which is exactly the signal that this belonged to a different
+    sub-stage.
     """
-    # RDR-152 nexus-fjwxh: in SERVICE mode the Java service (PG) is the write
-    # arbiter — the SQLite single-writer daemon is not in the picture, so route
-    # straight to a direct service-backed T2Database. Short-circuit BEFORE the
-    # daemon probe so service mode does not emit the misleading "start the T2
-    # daemon" degraded-fallback warning on every write (the probe + warning
-    # below are the SQLite-mode arbiter path only).
     from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred to avoid circular import (db.storage_mode)
 
     if storage_backend_for("memory") == StorageBackend.SERVICE:
         with _service_t2_lock:
             return _service_t2_write_locked(write_fn)
 
-    from nexus.daemon.t2_client import (  # noqa: PLC0415 — deferred to avoid circular import (daemon.t2_client)
-        T2DaemonNotReachableError,
-        T2SchemaVersionMismatchError,
-        make_t2_client,
-    )
-
-    import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
-
-    client = None
-    # True once a degraded arm has emitted its OWN distinct, accurate event,
-    # so the generic "start the daemon" banner below is suppressed (its hint is
-    # WRONG when a daemon is actually running — RDR-141 version-skew arm and the
-    # GH #1048 daemon-alive-but-unresponsive arm).
-    degraded_logged = False
-    try:
-        client = make_t2_client()
-        client.database.hello()  # force the lazy connect; raises if down
-    except T2DaemonNotReachableError:
-        # Degrading to a direct write is safe (RDR-128 documented-irreducible
-        # availability fallback). GH #1048: distinguish "daemon absent" from
-        # "daemon alive but unresponsive/timed-out under load" via a read-only
-        # discovery liveness probe (no spawn/reap — that's the supervisor's
-        # job), and rate-limit the warning so a bulk run does not spam it.
-        if client is not None:
-            client.close()
-        client = None
-        # The probe runs on every degraded write (not just emitting ones) so a
-        # state transition is classified accurately each time; the cost is one
-        # stat + os.kill(pid, 0), negligible against the direct DB write this
-        # path is already doing (review M-1/S-3 — accepted by design).
-        from nexus.daemon.discovery import find_t2_daemon  # noqa: PLC0415 — deferred to avoid circular import (daemon.discovery)
-
-        if find_t2_daemon() is not None:
-            # A live daemon IS registered but did not answer hello() — likely
-            # load / timeout / contention (#1046), NOT a missing daemon.
-            # "start the daemon" would be wrong (it is running).
-            _emit_unreachable_warn(
-                "t2_index_write_daemon_unreachable_but_alive",
-                hint=(
-                    "T2 daemon is running but did not respond to hello(); likely "
-                    "load/timeout/contention — writes degraded to direct until it "
-                    "becomes responsive again"
-                ),
-            )
-        else:
-            _emit_unreachable_warn(
-                "t2_index_write_daemon_unreachable_fallback",
-                hint="start the T2 daemon (`nx daemon t2 start`) to route indexer writes",
-            )
-        degraded_logged = True
-    except T2SchemaVersionMismatchError:
-        # RDR-141: a stale-VERSION daemon is ALIVE, holds the spawn lock, and
-        # is actively serving. Opening a direct writer here would put a SECOND
-        # live writer on memory.db (the version-skew double-writer). Instead
-        # re-assert the supervisor (reap the stale daemon, spawn a current
-        # one) and re-probe ONCE through the fresh daemon. Single attempt, no
-        # retry loop: on a second mismatch/unreachable we fall through to the
-        # bounded direct write. Every degraded sub-path here emits its OWN
-        # distinct event (so the generic banner is suppressed via degraded_logged).
-        if client is not None:
-            client.close()
-        client = None
-        if _reassert_t2_daemon():  # emits a distinct event itself when it returns False
-            try:
-                client = make_t2_client()
-                client.database.hello()
-            except (T2DaemonNotReachableError, T2SchemaVersionMismatchError):
-                # Re-assert reported a current daemon but it is no longer
-                # reachable / still skewed on re-probe (single-attempt cap).
-                # _reassert returned True, so it logged nothing — emit the
-                # distinct event for this sub-path here.
-                if client is not None:
-                    client.close()
-                client = None
-                degraded_logged = True
-                structlog.get_logger().warning(
-                    "t2_index_write_version_skew_reprobe_failed",
-                    hint=(
-                        "re-assert reported a current daemon but the re-probe "
-                        "found it unreachable/still-skewed; a bounded direct "
-                        "write follows (single-attempt cap)"
-                    ),
-                )
-        else:
-            degraded_logged = True  # _reassert already emitted its distinct event
-
-    if client is not None:
-        try:
-            return write_fn(client)
-        finally:
-            client.close()
-
-    # Degraded path: this is the direct-lock behavior RDR-128 exists to
-    # eliminate. Every arm that reaches here with ``client is None`` now sets
-    # ``degraded_logged`` after emitting its own accurate, rate-limited event
-    # (GH #1048 absent/alive split + the RDR-141 version-skew events), so in
-    # practice this guard is always True here. Retained as a forward-compat
-    # backstop: any future arm that degrades WITHOUT logging still surfaces a
-    # warning rather than silently falling through to a direct write.
-    if not degraded_logged:
-        structlog.get_logger().warning(
-            "t2_index_write_daemon_unreachable_fallback",
-            hint="start the T2 daemon (`nx daemon t2 start`) to route indexer writes",
-        )
     from nexus.db.t2 import T2Database  # noqa: PLC0415 — deferred to avoid circular import (db.t2)
-    with T2Database(default_db_path()) as db:  # epsilon-allow: by-design daemon-unreachable fallback so writes degrade to direct rather than failing (RDR-128 P3 documented-irreducible)
+    with T2Database(default_db_path()) as db:  # epsilon-allow: SQLite arm, retired with the stores in nexus-i711w sub-stage A
         return write_fn(db)
 
 
@@ -1411,47 +1209,16 @@ def check_version_compatibility() -> None:
 
         cli_ver = _pkg_version("conexus")
 
-        # ── (1) CLI ↔ T2 schema drift ────────────────────────────────────
-        # RDR-120 P4: routed through T2Client when the daemon is reachable;
-        # silently skipped when it isn't (best-effort drift warning, not a
-        # gate). The daemon's ``database.hello`` op surfaces its stored
-        # _nexus_version row.
-        db_path = default_db_path()
-        stored_ver: str | None = None
-        if db_path.exists():
-            try:
-                from nexus.daemon.t2_client import make_t2_client  # noqa: PLC0415 — deferred to avoid circular import (daemon.t2_client)
+        # NO CLI ↔ T2 schema-drift check: RDR-120 P4 read the stored
+        # ``_nexus_version`` via the daemon's ``database.hello`` op, and the
+        # daemon is its ONLY transport. With the daemon retired (nexus-i711w
+        # Stage 2 sub-stage B) there is nothing left to ask, so the check is
+        # removed rather than left permanently reading ``None``. No service-mode
+        # equivalent is built here on purpose: the engine's schema is Liquibase-
+        # managed and its drift surface is the engine-version floor
+        # (``REQUIRED_ENGINE_VERSION``), not a per-boot version compare.
 
-                client = make_t2_client()
-                try:
-                    hello = client.database.hello()
-                    raw = (hello or {}).get("daemon_schema_version") or ""
-                    stored_ver = raw if raw and raw != "0.0.0" else None
-                finally:
-                    client.close()
-            except Exception:  # noqa: BLE001 — drift check best-effort; daemon-unreachable (incl. T2DaemonNotReachableError) / RPC-fail degrades stored_ver to None
-                # Daemon unreachable or RPC failed — drift check is
-                # best-effort. Operator can run `nx doctor` for the
-                # full diagnostic.
-                stored_ver = None
-        if stored_ver is not None:
-            cli_t = _parse_version(cli_ver)
-            stored_t = _parse_version(stored_ver)
-            # Warn on minor or major divergence, not patch.
-            # Tuple slicing is safe for short tuples — (4,)[:2] == (4,).
-            if cli_t[:2] != stored_t[:2]:
-                if cli_t > stored_t:
-                    hint = "run 'nx upgrade' to apply pending migrations"
-                else:
-                    hint = "DB was upgraded by a newer CLI version"
-                log.warning(
-                    "version_mismatch",
-                    cli_version=cli_ver,
-                    stored_version=stored_ver,
-                    hint=hint,
-                )
-
-        # ── (2) Plugin ↔ CLI version drift ──────────────────────────────
+        # ── Plugin ↔ CLI version drift ──────────────────────────────────
         plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT")
         if plugin_root:
             manifest_path = Path(plugin_root) / ".claude-plugin" / "plugin.json"

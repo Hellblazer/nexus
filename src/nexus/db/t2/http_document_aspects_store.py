@@ -25,7 +25,7 @@ from typing import Any
 import httpx
 import structlog
 
-from nexus.db.t2.document_aspects import AspectRecord, _safe_json_dict, _safe_json_list
+from nexus.db.t2.records import AspectRecord, _safe_json_dict, _safe_json_list
 
 _log = structlog.get_logger(__name__)
 

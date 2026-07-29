@@ -171,8 +171,20 @@ ALTER TABLE nexus.chash_index
     ON DELETE RESTRICT
     NOT VALID;
         </sql>
+        <!-- nexus-a0m60: guarded — rdr187-2-drop-chash-index retires
+             nexus.chash_index later in master order, so this table is gone by
+             the time the chain rolls back here. IF EXISTS guards the
+             CONSTRAINT, not the TABLE. -->
         <rollback>
-            ALTER TABLE nexus.chash_index DROP CONSTRAINT IF EXISTS chash_index_collection_fk;
+            <sql splitStatements="false" stripComments="false">
+DO $$
+BEGIN
+    IF to_regclass('nexus.chash_index') IS NOT NULL THEN
+        ALTER TABLE nexus.chash_index DROP CONSTRAINT IF EXISTS chash_index_collection_fk;
+    END IF;
+END
+$$;
+            </sql>
         </rollback>
     </changeSet>
 

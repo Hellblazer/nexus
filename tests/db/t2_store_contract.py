@@ -208,3 +208,296 @@ T2_STORE_CONTRACT: dict[str, dict[str, list[str]]] = {
     },
 }
 
+
+# ── Supplemental contract: service-mode-only methods (nexus-tdkg1.1) ─────────
+#
+# T2_STORE_CONTRACT above is a snapshot of the SQLITE oracle's surface, so by
+# construction it can only ever describe methods that HAVE a SQLite twin. These
+# do not: they are production-called methods that exist ONLY on the Http store.
+# They are therefore invisible to both the coverage tripwire AND to the live
+# oracle behind it, and could be deleted silently — the exact class RF-158-1
+# was built to prevent, arriving through the one door it does not watch.
+#
+# THE GATING RELATIONSHIP. Today `test_contract_matches_live_sqlite_oracle`
+# still cross-checks the primary contract against the live SQLite classes.
+# RDR-158 P4 (nexus-i711w) DELETES that guard along with the SQLite classes,
+# after which the frozen artifacts are the sole authority. This supplemental
+# contract must therefore land BEFORE i711w, not with it — afterwards there is
+# no oracle left to notice these four were never covered.
+#
+# NOT THE FIVE THE BEAD LISTS. nexus-tdkg1.1 names five, including
+# `document_aspects.rename_collection`. Measured 2026-07-27: that one IS in
+# T2_STORE_CONTRACT['document_aspects'] — it has a SQLite twin and is already
+# covered by the primary tripwire. Adding it here would be a duplicate claiming
+# service-mode-only status it does not have, which
+# `test_supplemental_is_service_mode_only` now rejects outright. RDR-158's Open
+# Questions (the document the bead itself calls canonical) lists four, not five;
+# where the two disagree the RDR wins.
+#
+# NOR ONLY THOSE FOUR. The first cut of this dict stopped at the bead's list
+# minus that one, which was an unvalidated assumption — the bead was a starting
+# point, not an enumeration. A substantive critique (2026-07-27) enumerated ALL
+# NINE Http* stores against `primary ∪ supplemental` by script and found four
+# more that meet every entry criterion below, each on a permanent production
+# path, none with a SQLite twin:
+#   scratch.close_session          mcp/core.py:775,835 — every MCP session teardown
+#   aspect_queue.enqueue_many      indexer.py:3583 — the core aspect-enqueue path
+#   telemetry.query_tier_writes    doctor.py:1129, tier_status.py:204
+#   telemetry.query_tier_writes_once  _session_end_launcher.py:250
+# Landing only the first four would have left the blind spot half-open while the
+# comments here asserted it closed. Verified independently before adding.
+#
+# DELIBERATELY EXCLUDED: the ~20 uncovered `import_*` ETL methods across
+# memory/plans/telemetry/chash_index/document_aspects/document_highlights/
+# aspect_queue/taxonomy. They meet the mechanical criteria but are slated for
+# whole-file deletion alongside their `*_etl.py` callers and the engine's
+# /import routes in the same 7.0.0 wave (nexus-i711w recon, T2 [21098]). Freezing
+# a contract for methods being retired would manufacture work for the bead that
+# deletes them. If that disposition changes, they belong here.
+#
+# ENTRY CRITERIA — all enforced by tests, not convention:
+#   1. present on the Http store (a typo cannot silently cover nothing);
+#   2. ABSENT from T2_STORE_CONTRACT for that label (else it belongs there);
+#   3. production-called in src/ on a path that SURVIVES the 7.0.0 wave.
+#
+# Same shape as the primary contract — {label: {method: [ordered non-self
+# params]}} — so the coverage and param-prefix checks consume the union
+# without special-casing.
+T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
+    'aspect_queue': {
+        'enqueue_many': ['rows'],
+    },
+    'document_aspects': {
+        'operator_confidence_aggregate': ['source_uris', 'reducer_kind'],
+        'operator_filter': ['source_uris', 'field', 'predicate'],
+        'operator_groupby': ['source_uris', 'field'],
+    },
+    'document_highlights': {
+        'rename_collection': ['old', 'new'],
+    },
+    'scratch': {
+        'close_session': [],
+    },
+    'taxonomy': {
+        # nexus-onjvy: the quality columns (similarity / assigned_at /
+        # source_collection) were WRITE-ONLY until engine-service-v0.1.58 added
+        # /assignments/details. The SQLite twin read them through a raw
+        # connection, so there is no oracle method for the parity contract to
+        # see — without this entry the method is silently deletable.
+        'get_assignment_details': ['doc_ids'],
+    },
+    'telemetry': {
+        # nexus-onjvy: hook_failures was WRITE-ONLY over HTTP (/record + /trim,
+        # no read route). Its only readers were raw SELECTs in
+        # `nx taxonomy status` / `nx doctor`, which die with the SQLite stores
+        # in nexus-i711w — this is their REPLACEMENT, not a port, so it has no
+        # twin by construction and needs the supplemental entry.
+        'list_hook_failures': ['days', 'hook_names', 'limit'],
+        'query_tier_writes': ['session_id', 'since', 'last_n'],
+        'query_tier_writes_once': ['session_id', 'timeout'],
+    },
+}
+
+
+# ── Return shapes (nexus-b8a5a) ───────────────────────────────────────────────
+#
+# {store_label: {public_method_name: normalized return annotation}}
+#
+# WHY THIS EXISTS. The parameter snapshot above pins method NAMES and PARAMETER
+# names and nothing else, so a twin could diverge on its RETURN SHAPE and the
+# parity tripwire stayed green. One did, for the entire life of the RDR-152
+# port: HttpTaxonomyStore.get_topic_link_pairs returned
+# ``list[tuple[int,int,int]]`` where CatalogTaxonomy returns
+# ``dict[tuple[int,int],int]``. Every consumer annotates the mapping, so
+# ``scoring.apply_topic_boost``'s ``for (a, b) in links`` raised ValueError
+# inside ``search_engine``'s best-effort ``except Exception`` and the WHOLE
+# topic boost — the same-topic half included — was silently discarded in
+# service mode, the default substrate (nexus-ekn9n, P1).
+#
+# Both annotations were present and plainly different, so a STATIC comparison
+# would have caught it at zero runtime cost. That is what this table enables.
+#
+# COVERAGE, measured at capture: 147 shared public methods across the nine
+# pairs, 147 annotated on BOTH sides. No sampling, no gaps.
+#
+# NORMALIZATION is deliberately shallow — quotes stripped (a forward reference
+# and a resolved one are the same contract) and whitespace removed. Nothing
+# else. Do NOT normalize container kinds: ``list[...]`` vs ``dict[...]`` IS the
+# defect class this table exists to catch, and a normalizer generous enough to
+# call those equal would be green on ekn9n.
+#
+# REGENERATE alongside the parameter snapshot whenever an Http* store
+# legitimately re-signatures a public method. Until RDR-158 P4 deletes the
+# SQLite twins, ``test_contract_matches_live_sqlite_oracle`` cross-checks this
+# against the live oracles every run; after P4 this artifact is the sole
+# authority. That is also why it had to be captured NOW — once the oracle is
+# gone there is nothing left to capture it FROM, and whatever shapes the Http
+# twins happen to have would silently become the contract.
+
+T2_STORE_RETURNS: dict[str, dict[str, str]] = {
+    'memory': {
+        'delete': 'bool',
+        'expire': 'list[int]',
+        'find_overlapping_memories': 'list[tuple[dict[str,Any],dict[str,Any]]]',
+        'flag_stale_memories': 'list[dict[str,Any]]',
+        'get': 'dict[str,Any]|None',
+        'get_all': 'list[dict[str,Any]]',
+        'get_projects_with_prefix': 'list[dict[str,Any]]',
+        'list_entries': 'list[dict[str,Any]]',
+        'merge_memories': 'None',
+        'put': 'int',
+        'put_or_merge': 'tuple[int,str]',
+        'resolve_title': 'tuple[dict[str,Any]|None,list[dict[str,Any]]]',
+        'search': 'list[dict[str,Any]]',
+        'search_by_tag': 'list[dict[str,Any]]',
+        'search_glob': 'list[dict[str,Any]]',
+    },
+    'plans': {
+        'delete_plan': 'int',
+        'get_plan': 'dict[str,Any]|None',
+        'get_plan_by_dimensions': 'dict[str,Any]|None',
+        'increment_match_metrics': 'None',
+        'increment_run_outcome': 'None',
+        'increment_run_started': 'None',
+        'list_active_plans': 'list[dict[str,Any]]',
+        'list_plans': 'list[dict[str,Any]]',
+        'plan_exists': 'bool',
+        'save_plan': 'int',
+        'search_plans': 'list[dict[str,Any]]',
+        'set_plan_disabled': 'bool',
+        'set_plan_enabled': 'bool',
+        'set_scope_tags': 'bool',
+    },
+    'telemetry': {
+        'expire_relevance_log': 'int',
+        'get_relevance_log': 'list[dict[str,Any]]',
+        'get_retention_markers': 'dict[str,int]',
+        'list_consents': 'list[dict[str,Any]]',
+        'log_relevance': 'int',
+        'log_relevance_batch': 'int',
+        'log_search_batch': 'int',
+        'query_collection_stats': 'dict[str,Any]',
+        'record_consent': 'None',
+        'record_hook_failure': 'None',
+        'record_nx_answer_run': 'None',
+        'record_tier_write': 'None',
+        'rename_collection': 'dict[str,int]',
+        'trim_hook_failures': 'int',
+        'trim_search_telemetry': 'int',
+    },
+    'chash_index': {
+        'count_for_collection': 'int',
+        'delete_collection': 'int',
+        'delete_stale': 'int',
+        'distinct_collections': 'set[str]',
+        'is_empty': 'bool',
+        'lookup': 'list[dict[str,Any]]',
+        'registered_chashes_for_collection': 'set[str]',
+        'rename_collection': 'int',
+        'upsert': 'None',
+        'upsert_many': 'None',
+    },
+    'document_aspects': {
+        'delete': 'int',
+        'delete_orphans': 'tuple[int,int]',
+        'get': 'AspectRecord|None',
+        'get_by_doc_id': 'AspectRecord|None',
+        'get_salient_sentences': 'list[str]',
+        'list_by_collection': 'list[AspectRecord]',
+        'list_by_extractor_version': 'list[AspectRecord]',
+        'list_promotions': 'list[dict]',
+        'rename_collection': 'int',
+        'set_salient_sentences': 'bool',
+        'set_salient_sentences_by_key': 'bool',
+        'upsert': 'bool',
+    },
+    'document_highlights': {
+        'delete': 'bool',
+        'get': 'HighlightRecord|None',
+        'get_by_source_uri': 'HighlightRecord|None',
+        'list': 'list[HighlightRecord]',
+        'upsert': 'bool',
+    },
+    'aspect_queue': {
+        'claim_batch': 'list[QueueRow]',
+        'claim_next': 'QueueRow|None',
+        'enqueue': 'None',
+        'is_drained': 'bool',
+        'list_failed': 'list[QueueRow]',
+        'list_pending': 'list[QueueRow]',
+        'mark_done': 'int',
+        'mark_failed': 'None',
+        'mark_retry': 'None',
+        'pending_count': 'int',
+        'reclaim_stale': 'int',
+        'rename_collection': 'int',
+    },
+    'taxonomy': {
+        'assign_batch': 'int',
+        'assign_single': 'AssignResult|None',
+        'assign_topic': 'None',
+        'audit_collection': 'AuditReport',
+        'chunk_grounded_in': 'float|None',
+        'clear_icf_cache': 'None',
+        'compute_assignments': 'list[dict[str,Any]]',
+        'compute_cross_links': 'list[tuple[int,int]]',
+        'compute_discovered_topics': 'list[dict[str,Any]]',
+        'compute_icf_map': 'dict[int,float]',
+        'compute_rebuild_plan': 'dict[str,Any]',
+        'compute_split': 'dict[str,Any]',
+        'delete_topic': 'str|None',
+        'detect_hubs': 'list[HubRow]',
+        'discover_topics': 'int',
+        'generate_cooccurrence_links': 'int',
+        'get_all_topic_doc_ids': 'list[str]',
+        'get_all_topics': 'list[dict[str,Any]]',
+        'get_assignments_for_docs': 'dict[str,int]',
+        'get_distinct_collections': 'list[str]',
+        'get_doc_ids_for_topic': 'list[str]',
+        'get_labels_for_ids': 'dict[int,str]',
+        'get_projection_counts_by_collection': 'dict[str,int]',
+        'get_topic_by_id': 'dict[str,Any]|None',
+        'get_topic_doc_ids': 'list[str]',
+        'get_topic_docs': 'list[dict[str,Any]]',
+        'get_topic_link_pairs': 'dict[tuple[int,int],int]',
+        'get_topic_tree': 'list[dict[str,Any]]',
+        'get_topics': 'list[dict[str,Any]]',
+        'get_topics_for_collection': 'list[dict[str,Any]]',
+        'get_unreviewed_topics': 'list[dict[str,Any]]',
+        'mark_topic_reviewed': 'None',
+        'merge_topics': 'str|None',
+        'needs_rebalance': 'bool',
+        'persist_assignments': 'int',
+        'persist_cross_links': 'int',
+        'persist_discovered_topics': 'list[int]',
+        'persist_rebuild_topics': 'list[int]',
+        'persist_split': 'list[int]',
+        'project_against': 'dict[str,Any]',
+        'purge_assignments_for_doc': 'int',
+        'purge_collection': 'dict[str,int]',
+        'read_rebuild_old_state': 'dict[str,Any]',
+        'rebuild_taxonomy': 'int',
+        'record_discover_count': 'None',
+        'refresh_projection_links': 'int',
+        'rename_collection': 'dict[str,int]',
+        'rename_topic': 'None',
+        'resolve_label': 'int|None',
+        'split_topic': 'int',
+        'top_topics_for_collection': 'list[dict[str,Any]]',
+        'update_topic_label': 'None',
+        'upsert_topic_links': 'int',
+    },
+    'scratch': {
+        'clear': 'int',
+        'delete': 'bool',
+        'flag': 'None',
+        'flagged_entries': 'list[dict]',
+        'get': 'dict|None',
+        'list_entries': 'list[dict]',
+        'promote': 'PromotionReport',
+        'put': 'str',
+        'resolve_prefix_candidates': 'list[str]',
+        'search': 'list[dict]',
+        'unflag': 'None',
+    },
+}

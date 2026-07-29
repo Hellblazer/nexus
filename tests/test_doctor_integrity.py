@@ -7,26 +7,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tests.conftest import engine_substrate_selected
-
-_ENGINE_SUBSTRATE = engine_substrate_selected()
-
-# Tests below that seed a REAL on-disk SQLite T2 file via T2Database and then
-# probe it with doctor's SQLite integrity check (PRAGMA integrity_check, FTS5,
-# WAL writer-slot contention). On the engine substrate T2Database routes to the
-# Http* stores and never materialises the SQLite file, so the probe sees "not
-# created yet". The probe's SUBJECT is the SQLite substrate itself.
-_sqlite_probe_dies_at_flip = pytest.mark.skipif(
-    _ENGINE_SUBSTRATE,
-    reason="dies-roster: doctor's SQLite T2 integrity probe (on-disk memory.db "
-    "seeded via the SQLite twin) dies at the RDR-155 P4b flip",
-)
 
 from nexus.health import (
     _check_orphan_t1,
     _check_t2_integrity,
     _check_t2_dropped_writes,
-    _check_t2_daemon_singleton,
     _check_orphan_checkpoints,
     HealthResult,
 )
@@ -58,11 +43,6 @@ def _run_orphan_t1(sessions_dir: Path) -> tuple[bool, list[HealthResult]]:
     return ok, results
 
 
-# ── Step 5: Orphan T1 ───────────────────────────────────────────────────────
-
-
-
-
 # ── Step 6: T2 integrity ────────────────────────────────────────────────────
 
 class TestCheckT2Integrity:
@@ -76,66 +56,6 @@ class TestCheckT2Integrity:
         ok, results = self._run(tmp_path / "nonexistent.db")
         assert ok is True and "not created yet" in results[0].detail
 
-    @_sqlite_probe_dies_at_flip
-    @pytest.mark.parametrize("populate", [True, False], ids=["with_data", "empty"])
-    def test_valid_database_passes(self, tmp_path, populate):
-        db_path = tmp_path / "memory.db"
-        with T2Database(db_path) as db:
-            if populate:
-                db.put(project="test", title="item1", content="hello world", ttl=30)
-        ok, results = self._run(db_path)
-        assert ok is True and "PRAGMA ok" in results[0].detail
-
-    @_sqlite_probe_dies_at_flip
-    @pytest.mark.parametrize("corrupt_fn", [
-        lambda p: open(str(p), "r+b").truncate(512) or None,
-        lambda p: p.write_bytes(b"this is not sqlite" * 100),
-    ], ids=["truncated", "not_sqlite"])
-    def test_corrupt_database_fails(self, tmp_path, corrupt_fn):
-        db_path = tmp_path / "memory.db"
-        with T2Database(db_path) as db:
-            db.put(project="p", title="t", content="data", ttl=1)
-        corrupt_fn(db_path)
-        ok, results = self._run(db_path)
-        # Genuine corruption is a HARD failure, never a soft WARN: warn stays
-        # False so the operator sees a red X, not a yellow ⚠ (RDR-129 B4).
-        assert ok is False
-        assert results[0].ok is False
-        assert results[0].warn is False
-
-    @_sqlite_probe_dies_at_flip
-    def test_transient_write_lock_is_soft_warn(self, tmp_path, monkeypatch):
-        """RDR-129 B4 (nexus-uq8a4): a held WAL writer slot makes the FTS5
-        integrity probe a soft WARN, not a hard red X. The DB is healthy,
-        just busy with a legitimate concurrent writer (e.g. nx index repo)."""
-        import sqlite3 as _sqlite3
-
-        from nexus import health
-
-        db_path = tmp_path / "memory.db"
-        with T2Database(db_path) as db:
-            db.put(project="p", title="t", content="data", ttl=1)
-
-        # Fail fast so the test never waits the production timeout.
-        monkeypatch.setattr(health, "_INTEGRITY_BUSY_TIMEOUT_MS", 50)
-        monkeypatch.setattr(health, "_INTEGRITY_RETRY_SLEEPS_BETWEEN", (0.0,))
-
-        # Hold the single WAL writer slot for the whole probe.
-        holder = _sqlite3.connect(str(db_path), timeout=0)
-        try:
-            holder.execute("PRAGMA busy_timeout = 0")
-            holder.execute("BEGIN IMMEDIATE")
-            ok, results = self._run(db_path)
-        finally:
-            holder.rollback()
-            holder.close()
-
-        assert ok is False
-        r = results[0]
-        assert r.ok is False
-        assert r.warn is True
-        assert r.fatal is False
-        assert "busy" in r.detail.lower()
 
     def test_non_lock_fts_error_stays_hard(self, tmp_path, monkeypatch):
         """A non-lock OperationalError on the FTS5 probe (genuine FTS
@@ -261,60 +181,13 @@ class TestCheckT2DroppedWrites:
 
 # ── T2 daemon singleton / multiplicity (RDR-129 A3, nexus-exa2p) ────────────
 
-class TestCheckT2DaemonSingleton:
-    def _run(self, db_path: Path) -> tuple[bool, list[HealthResult]]:
-        with patch("nexus.health.default_db_path", return_value=db_path):
-            results = _check_t2_daemon_singleton()
-        ok = all(r.ok for r in results)
-        return ok, results
-
-    def test_no_db_is_ok(self, tmp_path):
-        ok, results = self._run(tmp_path / "absent.db")
-        assert ok is True
-        assert results[0].ok is True
-
-    @pytest.mark.parametrize("pids", [[], [4242]], ids=["zero", "one"])
-    def test_zero_or_one_daemon_ok(self, tmp_path, monkeypatch, pids):
-        db = tmp_path / "memory.db"
-        db.write_text("x")
-        monkeypatch.setattr(
-            "nexus.daemon.t2_daemon._enumerate_t2_daemon_pids_for_db",
-            lambda p: list(pids),
-        )
-        ok, results = self._run(db)
-        assert ok is True
-        assert results[0].ok is True
-        assert results[0].fatal is False
-
-    def test_multiple_daemons_hard_error_names_pids(self, tmp_path, monkeypatch):
-        db = tmp_path / "memory.db"
-        db.write_text("x")
-        monkeypatch.setattr(
-            "nexus.daemon.t2_daemon._enumerate_t2_daemon_pids_for_db",
-            lambda p: [4242, 5353],
-        )
-        ok, results = self._run(db)
-        r = results[0]
-        assert ok is False
-        assert r.ok is False
-        assert r.fatal is True  # multiplicity is a HARD failure (A3), unlike B4
-        assert r.warn is False
-        assert "4242" in r.detail and "5353" in r.detail
-
-    def test_probe_failure_degrades_to_ok(self, tmp_path, monkeypatch):
-        """A probe that itself errors must not flip doctor red — absence of
-        evidence is not evidence of multiplicity."""
-        db = tmp_path / "memory.db"
-        db.write_text("x")
-
-        def _boom(p):
-            raise RuntimeError("lsof exploded")
-
-        monkeypatch.setattr(
-            "nexus.daemon.t2_daemon._enumerate_t2_daemon_pids_for_db", _boom
-        )
-        ok, results = self._run(db)
-        assert ok is True
+# NO TestCheckT2DaemonSingleton: RDR-129 A3's doctor census counted T2 daemons
+# per memory.db and failed FATAL on more than one. Both the check and its
+# subject retired with the daemon (nexus-i711w Stage 2 sub-stage B) — with no
+# daemon the count can only be zero, and the fix it suggested named
+# `nx daemon t2 stop` / `ensure-running`. The single-writer invariant it guarded
+# is now Postgres's, not a pid count's. The soft live-contention signal it was
+# complementary to (_check_t2_integrity) is unaffected and still covered above.
 
 
 # ── Orphan checkpoints ──────────────────────────────────────────────────────

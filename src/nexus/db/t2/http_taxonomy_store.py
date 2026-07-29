@@ -49,13 +49,20 @@ import httpx
 import numpy as np
 import structlog
 
-from nexus.db.t2.catalog_taxonomy import (
+# nexus-i711w Stage 2 Phase 0: these all live in taxonomy_compute (the
+# RDR-158 P1 move); catalog_taxonomy merely re-exported them. Importing from
+# the source lets the dying module go without touching this one again — the
+# re-point the 2026-06-12 critic note predicted P4 would own.
+from nexus.db.t2.taxonomy_compute import (
+    PROJECTION_THRESHOLD,
     AssignResult,
     AuditHub,
     AuditReport,
-    CatalogTaxonomy,
     DEFAULT_HUB_STOPWORDS,
     HubRow,
+    compute_discovered_topics,
+    compute_rebuild_plan,
+    compute_split,
 )
 
 _log = structlog.get_logger(__name__)
@@ -440,9 +447,44 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         return self._get("/assignments/by_label", {"label": label})
 
     def get_assignments_for_docs(self, doc_ids: list[str]) -> dict[str, int]:
-        """Return {doc_id: topic_id} mapping for given doc_ids."""
+        """Return {doc_id: topic_id} mapping for given doc_ids.
+
+        nexus-onjvy: doc_id + topic_id is ALL any route returns.
+        ``assign_topic`` writes ``similarity``, ``assigned_at`` and
+        ``source_collection``, and ``TaxonomyRepository.getAssignmentsForDocs``
+        projects neither — nor does any other route — so an operator cannot ask
+        how confident an assignment is, when it was made, or where it came
+        from. Pinned by tests/db/test_onjvy_write_only_surfaces.py: widen this
+        projection and that test fails with instructions.
+        """
         result = self._post("/assignments/for_docs", {"doc_ids": doc_ids})
         return {r["doc_id"]: r["topic_id"] for r in result}
+
+    def get_assignment_details(self, doc_ids: list[str]) -> list[dict[str, Any]]:
+        """Full assignment rows including the quality columns (nexus-onjvy).
+
+        SERVICE-MODE ONLY (``T2_SUPPLEMENTAL_CONTRACT``): the SQLite twin read
+        these columns through a raw connection, so there is no oracle method to
+        be at parity with, and the SQLite-derived contract cannot see this.
+
+        :meth:`get_assignments_for_docs` projects ``doc_id`` + ``topic_id`` and
+        nothing else, and until the ``/assignments/details`` route landed no
+        other route returned the rest — so ``similarity``, ``assigned_at`` and
+        ``source_collection`` were written by the assign path and readable by
+        nobody. An operator could not ask how confident an assignment was, when
+        it was made, or which collection it came from.
+
+        Kept SEPARATE from the cheap map read rather than widening it: callers
+        destructure ``get_assignments_for_docs`` as ``{doc_id: topic_id}``, so
+        widening would change a return type they depend on.
+
+        Each row: ``doc_id``, ``topic_id``, ``assigned_by``, ``similarity``,
+        ``source_collection``, ``assigned_at`` (UTC ISO-8601, explicit seconds).
+        """
+        if not doc_ids:
+            return []
+        rows = self._post("/assignments/details", {"doc_ids": doc_ids})
+        return list(rows or [])
 
     def purge_assignments_for_doc(self, project: str, title: str) -> int:
         """Remove assignments for a deleted doc."""
@@ -495,10 +537,22 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     def get_topic_link_pairs(
         self,
         topic_ids: list[int],
-    ) -> list[tuple[int, int, int]]:
-        """Return (from_id, to_id, link_count) triples."""
+    ) -> dict[tuple[int, int], int]:
+        """Return ``{(from_id, to_id): link_count}`` (oracle-identical shape).
+
+        Returned a ``list`` of ``(from, to, count)`` triples until nexus-ekn9n.
+        Every consumer annotates the mapping — :func:`nexus.scoring.apply_topic_boost`
+        takes ``topic_links: dict[tuple[int, int], int] | None`` and iterates
+        ``for (a, b) in links`` — so the triples raised ``ValueError: too many
+        values to unpack`` inside ``search_engine``'s best-effort
+        ``except Exception``, silently discarding the WHOLE topic boost in
+        service mode. The wire stays a row list; only the client-side shape
+        changed.
+        """
         result = self._post("/links/pairs", {"topic_ids": topic_ids})
-        return [(r["from_topic_id"], r["to_topic_id"], r["link_count"]) for r in result]
+        return {
+            (r["from_topic_id"], r["to_topic_id"]): r["link_count"] for r in result
+        }
 
     def upsert_topic_links(
         self,
@@ -545,7 +599,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         texts: list[str],
     ) -> list[dict[str, Any]]:
         """Delegate verbatim to the backend-agnostic oracle static."""
-        return CatalogTaxonomy.compute_discovered_topics(
+        return compute_discovered_topics(
             collection_name, doc_ids, embeddings, texts,
         )
 
@@ -563,7 +617,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         manual_assignments: dict[str, int],
     ) -> dict[str, Any]:
         """Delegate verbatim to the backend-agnostic oracle static."""
-        return CatalogTaxonomy.compute_rebuild_plan(
+        return compute_rebuild_plan(
             collection_name, doc_ids, embeddings, texts,
             old_centroids=old_centroids,
             old_labels=old_labels,
@@ -583,7 +637,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         k: int,
     ) -> dict[str, Any]:
         """Delegate verbatim to the backend-agnostic oracle static."""
-        return CatalogTaxonomy.compute_split(
+        return compute_split(
             topic_id, doc_ids, texts, fetched_ids, embeddings, collection_name, k,
         )
 
@@ -702,7 +756,7 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         for i, meta in enumerate(new_metas):
             new_tid = int(meta["topic_id"])
             for j in range(sim.shape[1]):
-                if float(sim[i, j]) >= CatalogTaxonomy._PROJECTION_THRESHOLD:
+                if float(sim[i, j]) >= PROJECTION_THRESHOLD:
                     pairs.append((new_tid, int(other_metas[j]["topic_id"])))
         return pairs
 
@@ -1118,14 +1172,18 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         chroma_client: Any,
     ) -> int:
         """Split a topic into k children (mirrors CatalogTaxonomy.split_topic):
-        fetch texts from T3 (via chroma_client) + re-embed -> compute_split ->
-        persist_split (Java) -> centroid-port delete parent + upsert children.
+        fetch texts + STORED vectors from T3 (via chroma_client) ->
+        compute_split -> persist_split (Java) -> centroid-port delete parent +
+        upsert children.
 
-        HYBRID: chunk text reads stay on chroma_client (T3); centroids via port.
+        HYBRID: chunk reads stay on chroma_client (T3); centroids via port.
         Returns the number of children created (0 on any short-circuit).
-        """
-        from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
+        No embedding happens here on any branch. Both the service-backed and
+        the in-process handle read the collection's own vectors, so parent and
+        child centroids always share one space (nexus-9pqoj, extended to the
+        non-service handle 2026-07-28).
+        """
         if k < 2:
             return 0
         topic = self.get_topic_by_id(topic_id)
@@ -1157,21 +1215,67 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 _log.warning("split_collection_not_found", collection=collection_name)
                 return 0
 
+            # nexus-9pqoj extended to the non-service handle (2026-07-28): pull
+            # the STORED vectors here too, rather than re-embedding with
+            # MiniLM-384. The re-embed was not merely a tier-0 dependency, it
+            # was a latent correctness bug — a 384-dim centroid computed for a
+            # bge-768 or voyage-1024 collection lands in taxonomy_centroids_384
+            # while the collection's chunks live in the 768/1024 space, so the
+            # ANN assign that follows hits the dimension-mismatch guard
+            # (http_centroid_store._ann_query) and silently returns []. The
+            # split "succeeds" and its children are then unassignable. Parent
+            # and child centroids MUST share the collection's native space.
             _PAGE = 250
-            fetched_ids = []
-            texts = []
+            fetched_ids: list[str] = []
+            texts: list[str] = []
+            vectors: list[list[float]] = []
+            vectors_unavailable = False
             for i in range(0, len(doc_ids), _PAGE):
                 batch = doc_ids[i:i + _PAGE]
-                result = coll.get(ids=batch, include=["documents"])
-                for fid, fdoc in zip(result.get("ids") or [], result.get("documents") or []):
-                    if fdoc:
-                        fetched_ids.append(fid)
-                        texts.append(fdoc)
+                result = coll.get(ids=batch, include=["documents", "embeddings"])
+                got_ids = result.get("ids") or []
+                got_docs = result.get("documents") or []
+                got_embs = result.get("embeddings")
+                # Refuse on skew rather than mis-pair a vector to the wrong
+                # document — same contract as _svc_fetch_by_ids.
+                if got_embs is None or len(got_embs) != len(got_ids):
+                    vectors_unavailable = True
+                    break
+                for fid, fdoc, femb in zip(got_ids, got_docs, got_embs):
+                    if not fdoc:
+                        continue
+                    # A document we WOULD have used whose vector is missing is
+                    # the unavailable case, not a row to quietly drop. Skipping
+                    # it silently would shrink `texts` until the `len < k`
+                    # short-circuit returned 0 with no warning logged — a
+                    # refusal indistinguishable from "this topic was too small
+                    # to split", which is the wrong story to tell an operator.
+                    if femb is None:
+                        vectors_unavailable = True
+                        break
+                    fetched_ids.append(fid)
+                    texts.append(fdoc)
+                    vectors.append(list(femb))
+                if vectors_unavailable:
+                    break
+            if vectors_unavailable:
+                # Fail loud and decline the split. Falling back to a re-embed
+                # here is what produced wrong-space centroids; a split that
+                # cannot be computed in the collection's own space must not be
+                # computed at all.
+                _log.warning(
+                    "split_stored_vectors_unavailable",
+                    collection=collection_name,
+                    topic_id=topic_id,
+                    detail="store returned no embeddings (or a count skew) for "
+                           "the topic's docs; refusing to re-embed into a "
+                           "different vector space",
+                )
+                return 0
             if len(texts) < k:
                 return 0
 
-            ef = LocalEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-            embeddings = np.array(ef(texts), dtype=np.float32)
+            embeddings = np.asarray(vectors, dtype=np.float32)
 
         split_result = self.compute_split(
             topic_id, doc_ids, texts, fetched_ids, embeddings, collection_name, k,
@@ -1374,9 +1478,13 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     ) -> list[HubRow]:
         """Return candidate hub topics, sorted by chunks * (1 - ICF) desc.
 
-        Delegates DF/chunk aggregation to the service (/hubs); computes
-        ICF, stopword matching, and score Python-side for exact parity
-        with CatalogTaxonomy.detect_hubs.
+        Delegates DF/chunk aggregation AND the warn_stale aggregates to the
+        service (/hubs); computes ICF, stopword matching, and score Python-side
+        for exact parity with CatalogTaxonomy.detect_hubs.
+
+        ``warn_stale`` was accepted and silently dropped here until
+        engine-service-v0.1.58 added ``max_last_discover_at`` /
+        ``never_discovered_count`` / ``is_stale`` to the route (nexus-onjvy).
         """
         rows: list[dict[str, Any]] = self._get("/hubs", {"min_collections": min_collections})
         icf_map = self.compute_icf_map()
@@ -1412,9 +1520,35 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
                 matched_stopwords=matched,
                 source_collections=sources,
                 last_assigned_at=last_at,
-                max_last_discover_at=None,   # warn_stale not implemented over HTTP
-                never_discovered_count=0,
-                is_stale=False,
+                # nexus-onjvy: warn_stale used to be ACCEPTED AND SILENTLY
+                # DROPPED here — `nx taxonomy hubs --warn-stale` returned
+                # is_stale=False for every row, with no warning and no error,
+                # the same contract break as nexus-ybj1b (include_heuristic).
+                # engine-service-v0.1.58 added the aggregates to /hubs, so the
+                # flag now does what it says.
+                #
+                # is_stale is computed SERVER-side, unlike icf/score above, and
+                # that asymmetry is deliberate: the retired SQLite oracle
+                # compared ISO-8601 strings lexicographically, which was sound
+                # on TEXT timestamps but is not over HTTP, where a naive
+                # OffsetDateTime.toString() renders in the server's LOCAL
+                # offset and elides zero seconds. Comparing real TIMESTAMPTZ
+                # server-side avoids reintroducing that trap; the client passes
+                # the verdict through rather than re-deriving it from strings.
+                # Gated on warn_stale to match the oracle, which only
+                # populated these when asked. The engine computes them
+                # unconditionally (one taxonomy_meta lookup), so without this
+                # gate detect_hubs(warn_stale=False) would report staleness on
+                # the Http twin and zeros on the oracle — a divergence in the
+                # OFF case, introduced while fixing the ON case.
+                max_last_discover_at=(
+                    str(r["max_last_discover_at"])
+                    if warn_stale and r.get("max_last_discover_at") else None
+                ),
+                never_discovered_count=(
+                    int(r.get("never_discovered_count", 0)) if warn_stale else 0
+                ),
+                is_stale=bool(r.get("is_stale", False)) if warn_stale else False,
             ))
 
         hubs.sort(key=lambda h: h.score, reverse=True)

@@ -72,7 +72,21 @@ ALTER TABLE nexus.chash_index
     CHECK (length(chash) = 32)
     NOT VALID;
         </sql>
-        <rollback>ALTER TABLE nexus.chash_index DROP CONSTRAINT IF EXISTS chash_index_chash_len_check</rollback>
+        <!-- nexus-a0m60: guarded — rdr187-2-drop-chash-index retires
+             nexus.chash_index later in master order, so this table is gone by
+             the time the chain rolls back here. IF EXISTS guards the
+             CONSTRAINT, not the TABLE. -->
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+DO $$
+BEGIN
+    IF to_regclass('nexus.chash_index') IS NOT NULL THEN
+        ALTER TABLE nexus.chash_index DROP CONSTRAINT IF EXISTS chash_index_chash_len_check;
+    END IF;
+END
+$$;
+            </sql>
+        </rollback>
     </changeSet>
 
     <changeSet id="catalog-013-1b" author="nexus-1wjmq">

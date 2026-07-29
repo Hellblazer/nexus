@@ -19,6 +19,7 @@ file placement / removal is exercised for real under a tmp config dir.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -35,7 +36,7 @@ def _set_platform(monkeypatch: pytest.MonkeyPatch, platform: str) -> None:
 
 @pytest.fixture
 def _env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Isolated config dir + stubbed autostart paths + an installed unit."""
+    """Isolated config dir + stubbed autostart paths + a legacy T2 unit."""
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "cfg"))
     _set_platform(monkeypatch, "darwin")
     monkeypatch.setattr(
@@ -43,12 +44,16 @@ def _env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     )
     monkeypatch.setattr(daemon_cmd, "_autostart_log_dir", lambda: tmp_path / "logs")
     monkeypatch.setattr(daemon_cmd, "_resolve_nx_bin", lambda: ["/opt/conexus/bin/nx"])
-    # Install a unit + write the marker so there is something to remove.
-    with patch.object(daemon_cmd.subprocess, "run") as mock_run:
-        mock_run.return_value.returncode = 0
-        mock_run.return_value.stderr = ""
-        mock_run.return_value.stdout = ""
-        installer.install_autostart()
+    # Plant the T2 unit a pre-retirement install left behind, + the marker, so
+    # there is something to remove. Deliberately written by hand rather than via
+    # install_autostart(tier="t2"): that render arm retired with the T2 daemon
+    # (nexus-i711w Stage 2 sub-stage B), and "a unit this build can no longer
+    # produce" IS the upgrade state daemon_uninstall has to cope with.
+    units = tmp_path / "units"
+    units.mkdir(exist_ok=True)
+    (units / daemon_cmd._autostart_filename_t2()).write_text(
+        "<!-- legacy T2 unit from a pre-retirement install -->\n"
+    )
     _first_run.mark_shown()
     return tmp_path
 
@@ -89,13 +94,20 @@ class TestConfirmedUninstall:
         assert not unit.exists()
         assert report.marker_removed is True
         assert not marker.exists()
+        # `nx daemon t2 stop` retired with the daemon (nexus-i711w Stage 2
+        # sub-stage B). Deactivating the unit is now what stops a surviving
+        # process — launchctl bootout kills the running job — so daemon_stopped
+        # tracks that deactivation.
         assert report.daemon_stopped is True
+        bootout = ["launchctl", "bootout", f"gui/{os.getuid()}/com.nexus.t2"]
+        assert bootout in [c.args[0] for c in mock_run.call_args_list]
+        assert not any(
+            "t2" in argv and "stop" in argv
+            for argv in [c.args[0] for c in mock_run.call_args_list]
+        ), "must not shell out to the retired `nx daemon t2 stop`"
         # Data dir preserved when remove_data is False.
         assert report.data_removed is False
         assert config_dir.exists()
-        # A daemon-stop command was issued (exact argv, not substring).
-        stop_cmds = [c.args[0] for c in mock_run.call_args_list]
-        assert ["/opt/conexus/bin/nx", "daemon", "t2", "stop"] in stop_cmds
 
     def _install_service_unit(self) -> None:
         with patch.object(daemon_cmd.subprocess, "run") as mock_run:

@@ -68,7 +68,7 @@ Note: Claude Code users who ALREADY have the conexus plugin should NOT also inst
 - `nx search foo` → searches the same T3 collections the MCP `search` tool sees
 - `nx index repo .` → indexes show up immediately in all surface tool results
 
-Service lifecycle: `nx daemon service status` / `start` / `stop` are the canonical operations (`nx init` provisions and offers the OS autostart unit). The SQLite-path T2 daemon commands (`nx daemon t2 status` / `start` / `install --autostart`) remain for the `NX_STORAGE_BACKEND=sqlite` opt-out; the Claude surfaces auto-start what they need on first launch either way.
+Service lifecycle: `nx daemon service status` / `start` / `stop` are the canonical operations (`nx init` provisions and offers the OS autostart unit); the Claude surfaces auto-start what they need on first launch. The `nx daemon t2` commands that used to cover the SQLite opt-out are retired (nexus-i711w) — that path no longer has a daemon.
 
 ## Drift detection
 
@@ -125,16 +125,19 @@ What the update does **not** touch: the host T2 daemon, the T3 store, the catalo
 /plugin uninstall conexus@nexus-plugins
 ```
 
-The plugin cache is removed. The host T2 daemon and stored data are unaffected — they belong to the OS / user account, not the plugin.
+The plugin cache is removed. The host storage service and stored data are unaffected — they belong to the OS / user account, not the plugin.
 
 ### Claude Desktop Extension
 
 Settings → Connectors → Desktop → Conexus → Uninstall. **Caveat**: Claude Desktop removes the `.mcpb` bundle but does NOT cascade to the LaunchAgent / systemd unit. To fully remove:
 
 ```
-nx daemon t2 uninstall --autostart
+nx daemon service uninstall --autostart
 # Optionally: rm -rf ~/.config/nexus
 ```
+
+(If the box predates the T2 daemon's retirement it may also carry a
+`com.nexus.t2` / `nexus-t2` unit; `nx upgrade` removes that one for you.)
 
 The MCPB spec has no manifest-level uninstall hook, so this cascade limitation is structural.
 
@@ -145,11 +148,15 @@ Nothing to uninstall on the Cowork side — sessions inherit whatever Claude Des
 ### Daemon + data (full nuke)
 
 ```
-nx daemon t2 uninstall --autostart    # remove autostart unit + stop daemon
-nx daemon service stop                 # stop the nexus-service (T3) supervisor
-rm -rf ~/.config/nexus                 # remove T2 SQLite, the provisioned Postgres cluster, service binary + config
+nx daemon service uninstall --autostart  # remove autostart unit
+nx daemon service stop --with-pg         # stop the nexus-service + Postgres
+rm -rf ~/.config/nexus                   # remove the provisioned Postgres cluster, service binary + config, any legacy SQLite
 # Managed-cloud: your data lives in the managed service, not locally — manage it there.
 ```
+
+The `daemon_uninstall` MCP tool does all of the above in one step (with
+`remove_data=true` for the last line), including booting out a legacy
+`com.nexus.t2` unit if one is still present.
 
 ## Verification
 
@@ -176,7 +183,7 @@ The host-side substrate round-trip is regression-tested by `tests/test_cowork_sd
    nx memory delete -p _cowork_test -t vm-to-host
    ```
 
-Both directions resolving the sentinel confirms the bridge shares one T2 with the host. A failure on step 1 points at the SDK transport (the VM never reached the host daemon); a failure on step 2 points at write-attribution or a stale read in the shared substrate — start with `nx daemon t2 status` then `nx memory list -p _cowork_test`.
+Both directions resolving the sentinel confirms the bridge shares one T2 with the host. A failure on step 1 points at the SDK transport (the VM never reached the host service); a failure on step 2 points at write-attribution or a stale read in the shared substrate — start with `nx daemon service status` then `nx memory list -p _cowork_test`.
 
 ### Minimum Viable Validation (RDR-126 P6)
 
@@ -208,4 +215,4 @@ The first-run banner + `daemon_uninstall` lifecycle is validated in two halves.
   Then fully quit + relaunch Claude Desktop so the extension re-spawns and re-reads `config.yml`. **Verify** it took: search for something specific and ask for the top `file:line` results with scores; confirm the cited locations are real (a great-sounding answer is not proof — the model can reconstruct from `store_get`/FTS even when vector search is skipping), and confirm the Conexus log shows no `dimension_mismatch_skipped`. On a fresh machine with no CLI, you only get local mode (bge-768) — fine for content you index locally at 768d, but it will not reach pre-existing cloud-1024 collections until the creds are in `config.yml`.
 
   Related: a single name/dim-mismatched collection (e.g. a stale collection named `…minilm-l6-v2-384…` that actually stores 1024-dim vectors) produces the same `dimension_mismatch_skipped` line on every search and should be deleted (`nx collection delete <name>`); an `nx doctor` drift check for this class is tracked separately.
-- **Cowork SDK bridge dropped a tool call**: rare; the sentinel test in `tests/test_cowork_sdk_bridge.py` catches structural regressions. Diagnostic recipe: `nx daemon t2 status` then `nx memory list -p _cowork_test`.
+- **Cowork SDK bridge dropped a tool call**: rare; the sentinel test in `tests/test_cowork_sdk_bridge.py` catches structural regressions. Diagnostic recipe: `nx daemon service status` then `nx memory list -p _cowork_test`.

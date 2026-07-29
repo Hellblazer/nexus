@@ -542,8 +542,8 @@ class TestAutostartPrompt:
 class TestT2DaemonDemotion:
     """RDR-174 P3.2 (§Approach 6): in the default all-SERVICE config no T2 store
     resolves to SQLite, so ``nx init`` must NOT register the SQLite T2 autostart
-    unit. The ``nx daemon t2 install`` command stays available as an explicit
-    opt-in (full deletion is RDR-158 P4, two-release window — NOT here).
+    unit. ``nx daemon t2 install`` was kept as an explicit opt-in until RDR-158
+    P4; that deletion has since landed (nexus-i711w Stage 2 sub-stage B).
 
     init.py contains no T2-registration call today; these tests PIN that
     invariant against regression rather than driving a production change."""
@@ -571,15 +571,21 @@ class TestT2DaemonDemotion:
             f"(default config is all-SERVICE); installed tiers: {tiers}"
         )
 
-    def test_t2_install_command_remains_optin(self) -> None:
-        """Guard against accidental deletion: `nx daemon t2 install` stays
-        registered (the demote-now / delete-at-RDR-158-P4 contract)."""
-        from nexus.commands.daemon import t2_group
+    def test_t2_install_command_is_gone(self) -> None:
+        """The demotion guard's own end condition, now reached.
 
-        assert "install" in t2_group.commands, (
-            "nx daemon t2 install must remain an explicit opt-in — deletion is "
-            "RDR-158 P4 (two-release window), not RDR-174 P3.2"
+        It used to assert `nx daemon t2 install` STAYED registered, citing
+        "deletion is RDR-158 P4 (two-release window), not RDR-174 P3.2". This
+        IS RDR-158 P4 (nexus-i711w Stage 2 sub-stage B), so the guard flips:
+        the verb group is gone, and this pins that it does not come back.
+        """
+        from nexus.commands import daemon as daemon_cmd
+
+        assert not hasattr(daemon_cmd, "t2_group"), (
+            "the `nx daemon t2` verb group was deleted in RDR-158 P4; a "
+            "reappearance means the daemon retirement is being partially undone"
         )
+        assert "t2" not in daemon_cmd.daemon_group.commands
 
 
 def _wrap(fn):

@@ -9,7 +9,6 @@ any change to:
   the step-resolver, `resolve_blocking_steps`)
 - `src/nexus/commands/upgrade.py` (`nx upgrade` / `--dry-run`)
 - `src/nexus/commands/doctor.py` (`nx doctor --check-schema`)
-- `src/nexus/daemon/t2_daemon.py` (T2 daemon bootstrap)
 
 ## Why this exists
 
@@ -57,10 +56,10 @@ install), ~2–3 min with the image layer cached.
    remediations (not "no pending"); `doctor --check-schema` reports it too.
 4. **RDR-142 deferred `--dry-run`** — a catalog-absent state DEFERS the PK
    migration; `--dry-run` reports the deferral, not "no pending".
-5. **nexus-3lbhb daemon bootstrap gate** — `nx daemon t2 start` on the gated DB
-   stays **fail-closed** (crashes/restartable, does NOT serve a degraded daemon),
-   surfaces the gate remediation to the operator, and logs the structured
-   `t2_daemon_bootstrap_migration_gated` event.
+5. ~~**nexus-3lbhb daemon bootstrap gate**~~ — RETIRED. It asserted
+   `nx daemon t2 start` stayed fail-closed on a gated DB; the verb and
+   `run_t2_daemon` went with the T2 daemon (nexus-i711w Stage 2 sub-stage B),
+   so there is no bootstrap left to gate.
 
 `seed_gated.py` builds the per-scenario DB state (`catalog-only`,
 `gated-orphan`, `deferred`) with pure stdlib `sqlite3` — no nexus import.
@@ -71,9 +70,9 @@ install), ~2–3 min with the image layer cached.
   (`MigrationRetry`) and so **never stamps the version** (stays `0.0.0`) — the
   deferred-not-complete state RDR-142 exists to surface. The clean-stamp path
   needs a catalog present.
-- The daemon's structured gate event goes to its **rotating log file**, while the
-  operator-facing `MigrationError` (with remediation) surfaces on **stderr** —
-  "loud" holds on both channels.
+- The operator-facing `MigrationError` (with remediation) surfaces on **stderr**.
+  (The daemon-log half of this "loud on both channels" claim retired with
+  scenario 5.)
 
 ## Not (yet) in CI
 

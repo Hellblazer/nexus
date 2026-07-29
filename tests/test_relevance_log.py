@@ -26,7 +26,6 @@ from nexus.mcp_infra import (
     reset_singletons,
 )
 from tests.conftest import make_vector_test_client
-from tests.conftest import engine_substrate_selected
 
 
 # ── T2 relevance_log schema + methods ────────────────────────────────────────
@@ -37,18 +36,6 @@ def t2():
     with tempfile.TemporaryDirectory() as d:
         db = T2Database(Path(d) / "t2.db")
         yield db
-
-
-@pytest.mark.skipif(
-    engine_substrate_selected(),
-    reason="dies-roster: SQLite migration DDL introspection (PRAGMA table_info) "
-    "dies with the twin at the RDR-155 P4b flip; the engine schema is "
-    "Liquibase-governed",
-)
-def test_relevance_log_table_exists(t2):
-    """Migration creates the relevance_log table with correct columns."""
-    cols = {r[1] for r in t2.telemetry.conn.execute("PRAGMA table_info(relevance_log)").fetchall()}
-    assert cols == {"id", "query", "chunk_id", "collection", "action", "session_id", "timestamp"}
 
 
 def test_log_relevance_inserts_row(t2):

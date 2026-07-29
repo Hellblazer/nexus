@@ -18,6 +18,21 @@
          makes it a no-op. -->
     <include file="db/changelog/role-001-nexus-svc.xml"/>
 
+    <!-- NO ROLLBACK-FLOOR TAG HERE, deliberately (nexus-a0m60 / nexus-9vg5g).
+         One was added 2026-07-27 and removed the same day. tagDatabase tags the
+         most recently EXECUTED row, not its own, so a floor retrofitted into an
+         already-migrated cluster lands at the TAIL: a rollback to it reverts
+         almost nothing, exits 0, and revokes nexus_svc's staging grants on the
+         way past. It only ever behaved as documented on a freshly-initialised
+         database, which is the one case that does not matter.
+         The guarantee we actually want is NOT a named operator target — schema
+         rollback is not an operational path here (the engine never calls it;
+         migration is a one-way orchestrated cut). It is that EVERY changeset's
+         <rollback> still executes, so from any future state the chain can walk
+         back to this one. That is what SchemaRollbackRoundTripIntegrationTest
+         proves, on every service PR, by rolling the whole chain back and
+         re-applying it. Do not re-add a tag without reading nexus-9vg5g. -->
+
     <!-- Store 1: memory (bead nexus-gmiaf.5) -->
     <include file="db/changelog/memory-001-baseline.xml"/>
 

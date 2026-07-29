@@ -113,7 +113,6 @@ _FLOCK_ALLOWED_MODULES = frozenset({
     "_locking.py",                       # the general advisory-lock primitive
     "daemon/service_registry.py",        # the ONLY election flock (_elect)
     "daemon/storage_service_daemon.py",  # storage-daemon spawn lock
-    "daemon/t2_daemon.py",               # T2 spawn / heartbeat locks
     "db/migrations.py",                  # migration serialization lock
     "commands/daemon.py",                # daemon CLI single-instance lock
     # verify-fill watermark file lock (nexus-te885.10, review c0e4493e f4):

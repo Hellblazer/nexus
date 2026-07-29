@@ -6707,7 +6707,6 @@ def main():
         apply_embedder_notice,
         apply_first_run_banner_instructions,
         apply_stranded_notice,
-        ensure_installed_and_running,
         install_banner_dispatch_hook,
     )
     from nexus.mcp_infra import check_version_compatibility  # noqa: PLC0415 — circular-dep avoidance (mcp package import deferred)
@@ -6734,13 +6733,11 @@ def main():
     # only: the server still serves (the doctor check and `nx init`
     # refusal carry the blocking surface).
     apply_stranded_notice(mcp)
-    # RDR-126 P2 (nexus-bsjro): ensure the host T2 daemon's OS-level
-    # autostart unit is installed and the daemon is running before
-    # serving any tools. Without this, a Claude-Desktop-only user who
-    # installed the .mcpb has nx-mcp running but no daemon to talk to;
-    # every memory_put / search call fails opaquely. Best-effort:
-    # logs warnings on failure, never blocks startup.
-    ensure_installed_and_running()
+    # NO first-run daemon install here: RDR-126 P2's ensure_installed_and_running
+    # installed the T2 daemon's autostart unit and started it, and both retired
+    # with the daemon (nexus-i711w Stage 2 sub-stage B). It had already stopped
+    # firing on any service-backed install (RDR-176 Phase 1), so nothing that ran
+    # here still runs.
     # RDR-126 §3 amendment (nexus-vlo2b): PRIMARY banner channel — deliver the
     # one-shot first-run banner via the server `instructions` field at the
     # initialize handshake. P6-B (2026-06-02) found Claude Desktop paraphrases

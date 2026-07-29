@@ -172,125 +172,13 @@ def test_bootstrap_schema_waits_on_held_migration_flock(tmp_path: Path) -> None:
     assert "_nexus_version" in tables
 
 
-# ── nx upgrade quiesce ordering ──────────────────────────────────────────────
-
-
-def _patch_upgrade_phases(monkeypatch) -> list[str]:
-    import nexus.commands.upgrade as up
-
-    order: list[str] = []
-    monkeypatch.setattr(up, "_quiesce_daemon", lambda: order.append("quiesce"))
-    monkeypatch.setattr(
-        up, "_run_upgrade", lambda **kw: order.append("migrate"),
-    )
-    monkeypatch.setattr(
-        up, "_cycle_daemon_to_current", lambda: order.append("restore"),
-    )
-    return order
-
-
-def test_upgrade_quiesces_before_migrating_and_restores_after(monkeypatch) -> None:
-    from nexus.cli import main
-
-    order = _patch_upgrade_phases(monkeypatch)
-    result = CliRunner().invoke(main, ["upgrade"])
-    assert result.exit_code == 0, result.output
-    assert order == ["quiesce", "migrate", "restore"]
-
-
-def test_upgrade_dry_run_does_not_touch_daemon(monkeypatch) -> None:
-    from nexus.cli import main
-
-    order = _patch_upgrade_phases(monkeypatch)
-    result = CliRunner().invoke(main, ["upgrade", "--dry-run"])
-    assert result.exit_code == 0, result.output
-    assert order == ["migrate"], "dry-run must not stop or restart the daemon"
-
-
-def test_upgrade_restores_daemon_even_when_migration_fails(monkeypatch) -> None:
-    import nexus.commands.upgrade as up
-    from nexus.cli import main
-
-    order: list[str] = []
-    monkeypatch.setattr(up, "_quiesce_daemon", lambda: order.append("quiesce"))
-
-    def _boom(**kw):  # noqa: ANN001
-        order.append("migrate")
-        raise RuntimeError("migration boom")
-
-    monkeypatch.setattr(up, "_run_upgrade", _boom)
-    monkeypatch.setattr(
-        up, "_cycle_daemon_to_current", lambda: order.append("restore"),
-    )
-
-    result = CliRunner().invoke(main, ["upgrade"])
-    assert result.exit_code != 0  # non-auto mode re-raises
-    # finally-clause must still bring the daemon back.
-    assert order == ["quiesce", "migrate", "restore"]
-
-
-def test_quiesce_daemon_shells_t2_stop(monkeypatch, tmp_path: Path) -> None:
-    """_quiesce_daemon issues `nx daemon t2 stop` (best-effort, never raises)."""
-    import subprocess
-
-    import nexus.commands.upgrade as up
-
-    calls: list[list[str]] = []
-    monkeypatch.setattr(
-        subprocess, "run",
-        lambda argv, **kw: calls.append(argv) or subprocess.CompletedProcess(argv, 0),
-    )
-    # No discovery file under a tmp config dir → no pid → no wait loop.
-    monkeypatch.setattr(
-        "nexus.config.nexus_config_dir", lambda: tmp_path,
-    )
-
-    up._quiesce_daemon()
-
-    assert len(calls) == 1
-    assert calls[0][-3:] == ["daemon", "t2", "stop"]
-
-
-def test_quiesce_daemon_waits_for_recorded_pid_to_exit(
-    monkeypatch, tmp_path: Path,
-) -> None:
-    """_quiesce_daemon polls the recorded pid via os.kill(pid,0) until the
-    process is gone — closing the SIGTERM-to-shutdown race (the poll loop
-    that test_quiesce_daemon_shells_t2_stop does not exercise)."""
-    import json
-    import os
-    import subprocess
-
-    import nexus.commands.upgrade as up
-    from nexus.daemon.t2_daemon import t2_discovery_path
-
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: tmp_path)
-    disc = t2_discovery_path(tmp_path)
-    disc.parent.mkdir(parents=True, exist_ok=True)
-    disc.write_text(json.dumps({"pid": 999999, "daemon_version": "x"}))
-
-    monkeypatch.setattr(
-        subprocess, "run",
-        lambda argv, **kw: subprocess.CompletedProcess(argv, 0),
-    )
-
-    # The daemon is "alive" for the first two polls, then exits.
-    state = {"polls": 0}
-    real_kill = os.kill
-
-    def _fake_kill(pid, sig):  # noqa: ANN001
-        if pid == 999999 and sig == 0:
-            state["polls"] += 1
-            if state["polls"] >= 3:
-                raise ProcessLookupError
-            return
-        return real_kill(pid, sig)
-
-    monkeypatch.setattr(os, "kill", _fake_kill)
-
-    up._quiesce_daemon()
-
-    assert state["polls"] >= 3, "must poll the pid until the process exits"
+# NO nx-upgrade quiesce-ordering section: it pinned the
+# quiesce -> migrate -> restore sequence around `nx upgrade`, and both ends of
+# that sequence (`_quiesce_daemon`, `_cycle_daemon_to_current`) retired with the
+# T2 daemon (nexus-i711w Stage 2 sub-stage B). The flock half of RDR-128 P2 —
+# which is what actually serializes two MIGRATOR processes — is untouched above
+# and below; only the daemon-connection-release half is gone, because there are
+# no daemon connections left to release.
 
 
 # ── Acceptance criterion: two real migrators don't collide ───────────────────

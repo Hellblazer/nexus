@@ -301,6 +301,65 @@ def test_cli_registrations_gone() -> None:
         assert token not in cli_text, f"cli.py still references {token}"
 
 
+def test_no_chromadb_import_anywhere_in_src() -> None:
+    """RDR-155 §Retire bullet 1, pinned by a test rather than by a grep.
+
+    The gate's PRIMARY claim — "zero live chromadb imports in src/" — was
+    verified by hand at every gate pass and asserted by NOTHING. The only
+    chromadb-import bans in the suite were single-file scoped (health.py just
+    below; stranded_install.py via its own AST test), and
+    ``test_no_imports_of_deleted_modules`` bans ~30 named dead ``nexus.*``
+    modules, never ``chromadb`` itself.
+
+    That absence was load-bearing, not cosmetic:
+    ``tests/test_storage_boundary_lint.py::test_chromadb_arms_retired_from_banlist``
+    justifies REMOVING the chromadb arms from the storage-boundary BANLIST on
+    the explicit grounds that "tests/test_rdr155_p4b_deletion_gate.py bans any
+    chromadb IMPORT anywhere in the package, which catches a re-introduction
+    that these three call-shape bans would have missed (e.g. `from chromadb
+    import Client`)". A guarantee was traded away for a test that did not
+    exist. This is that test (found by the p4b-test-validator, 2026-07-28).
+
+    AST-based, not a substring grep: src/ carries ~936 prose and docstring
+    mentions of "chroma", so any text scan would false-green on the first
+    comment. Only real ``import chromadb`` / ``from chromadb import ...``
+    statements — at any nesting depth, including the function-local deferred
+    imports this codebase uses heavily — can trip it.
+    """
+    offenders: list[str] = []
+    for path in sorted(SRC.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                if node.module and node.module.split(".")[0] == "chromadb":
+                    offenders.append(f"{path.relative_to(REPO_ROOT)}:{node.lineno}")
+            elif isinstance(node, ast.Import):
+                offenders.extend(
+                    f"{path.relative_to(REPO_ROOT)}:{node.lineno}"
+                    for alias in node.names
+                    if alias.name.split(".")[0] == "chromadb"
+                )
+    assert offenders == [], (
+        "chromadb is imported in src/ — the dependency was dropped at P4b P3 "
+        f"and is not installed, so these would fail at runtime: {offenders}"
+    )
+
+
+def test_chromadb_absent_from_lockfile() -> None:
+    """The dependency is gone from uv.lock, pinned as lockfile CONTENT.
+
+    ``test_chromadb_is_not_importable`` covers the same ground but reads the
+    live venv, so it answers "is it installed here" rather than "did it come
+    back in the resolved dependency graph" — green on a stale venv, and it
+    cannot catch a transitive re-introduction that nobody has synced yet.
+    """
+    lock = (REPO_ROOT / "uv.lock").read_text(encoding="utf-8")
+    assert 'name = "chromadb"' not in lock, (
+        "chromadb is back in uv.lock — dropped at RDR-155 P4b P3. If a "
+        "transitive dependency pulled it in, that is the finding."
+    )
+
+
 def test_health_has_no_chromadb_import_or_dead_checks() -> None:
     text = (SRC / "health.py").read_text(encoding="utf-8")
     assert not re.search(r"^\s*(?:from|import)\s+chromadb\b", text, re.MULTILINE), (

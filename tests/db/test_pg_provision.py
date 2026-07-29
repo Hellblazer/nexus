@@ -33,7 +33,6 @@ import pytest
 from nexus.db.pg_provision import (
     CREDENTIALS_FILENAME,
     NEXUS_DB_NAME,
-    PgBinaryNotFoundError,
     PgBinaries,
     ProvisionResult,
     _find_free_port,
@@ -47,23 +46,60 @@ from nexus.db.pg_provision import (
 
 # ── Prerequisite detection ─────────────────────────────────────────────────────
 
-def _pg_bins_available() -> bool:
-    try:
-        discover_pg_binaries()
-        return True
-    except PgBinaryNotFoundError:
-        return False
+# THE GATE RESOLVES THROUGH THE SELF-PROVISIONING SEAM, NEVER AMBIENT DISCOVERY.
+# Locked policy: nexus ALWAYS uses the PostgreSQL it BUILDS — never Homebrew,
+# never a host install. This module TESTS discover_pg_binaries (imported above,
+# exercised in the body), but whether it RUNS must not depend on the box
+# happening to carry a PostgreSQL; it depends on our own bundle being
+# obtainable. Gating on discovery made the two identical, and the old skip
+# reason ("install postgresql@16") told the reader to do the one thing this
+# project never does. Enforced by tests/db/test_pg_gate_is_self_provisioning.py.
+from tests.db._service_fixture import pg_bin_dir  # noqa: E402 — gate needs it here
 
-
-_PG_AVAILABLE = _pg_bins_available()
+_PG_BIN = pg_bin_dir()
+_INITDB = _PG_BIN / "initdb"
 
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
-        not _PG_AVAILABLE,
-        reason="skipped: no PostgreSQL binaries found (install postgresql@16)",
+        not _INITDB.exists(),
+        reason=f"skipped: nexus-pg bundle self-provisioning failed (no {_INITDB}). "
+               "NOT a missing host PostgreSQL — these tests never use one.",
     ),
 ]
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _pin_discovery_to_the_built_bundle():
+    """Point the product's OWN discovery at the PG we BUILD, for this module.
+
+    Fixing the skip gate alone was not enough. The gate decided whether to run;
+    the FIXTURES still resolved binaries through ``discover_pg_binaries()``, and
+    ``provision()`` discovers internally with no bin-dir parameter to pass. On a
+    box with no host PostgreSQL the module went straight from "silently skipped"
+    to "40 errors, install postgresql@17" — the module-wide skip had been hiding
+    the deeper coupling all along.
+
+    ``NEXUS_PG_BIN`` is the sanctioned seam for this: it is carve-out #1 of the
+    always-install policy and the highest-priority leg of discovery, so pointing
+    it at the self-provisioned bundle makes the product's real discovery path
+    resolve to the PostgreSQL we build, rather than to whatever the box happens
+    to carry. That is what the nightly gate already does.
+
+    An explicit operator-set ``NEXUS_PG_BIN`` wins untouched, matching product
+    policy (a misconfigured explicit override is a user error and must fail
+    loud, never be silently replaced). Module-scoped and undone afterwards so
+    nothing leaks into modules that exercise discovery without an override.
+    """
+    if os.environ.get("NEXUS_PG_BIN", "").strip():
+        yield
+        return
+    mp = pytest.MonkeyPatch()
+    mp.setenv("NEXUS_PG_BIN", str(_PG_BIN))
+    try:
+        yield
+    finally:
+        mp.undo()
 
 
 # ── Shared helpers ─────────────────────────────────────────────────────────────

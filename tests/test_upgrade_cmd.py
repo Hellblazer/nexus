@@ -56,15 +56,18 @@ def _tmp_db(tmp_path: Path) -> Path:
 
 @pytest.fixture(autouse=True)
 def _no_real_daemon_nudge():
-    """Patch the post-upgrade daemon cycle (nexus-5ldk1) AND the RDR-185
-    precondition stage for all upgrade tests so they never shell out to the
-    real host daemons or cycle a live supervisor (the precondition stage's
-    production defaults read the REAL lease and, on a version mismatch,
-    would stop/start the box's live service — never from a unit test).
-    Yields the daemon-cycle mock so tests can assert whether the nudge
-    fired."""
+    """Patch the post-upgrade supervised-daemon cycle (nexus-5ldk1) AND the
+    RDR-185 precondition stage for all upgrade tests so they never shell out to
+    the real host daemons or cycle a live supervisor (the precondition stage's
+    production defaults read the REAL lease and, on a version mismatch, would
+    stop/start the box's live service — never from a unit test). Yields the
+    cycle mock so tests can assert whether the nudge fired.
+
+    Re-pointed from `_cycle_daemon_to_current` (the T2 leg, retired with the
+    daemon in nexus-i711w Stage 2 sub-stage B) to the surviving orchestrator, so
+    the suppression still covers the one supervised tier that remains."""
     with (
-        patch("nexus.commands.upgrade._cycle_daemon_to_current") as m,
+        patch("nexus.commands.upgrade._cycle_supervised_daemons_to_current") as m,
         patch("nexus.commands.upgrade._converge_preconditions"),
     ):
         yield m
@@ -293,7 +296,6 @@ class TestT3StepsThroughLadderLedger:
         with (
             patch("nexus.commands.upgrade._db_path", return_value=db_path),
             patch("nexus.commands.upgrade.T3_UPGRADES", [step]),
-            patch("nexus.commands.upgrade._quiesce_daemon"),
             patch("nexus.commands.upgrade._cycle_supervised_daemons_to_current"),
             patch("nexus.commands.upgrade._converge_preconditions"),
             patch("nexus.commands.upgrade._run_ladder"),
