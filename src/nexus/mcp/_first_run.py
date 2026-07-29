@@ -1,33 +1,25 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""RDR-126 P2 (nexus-bsjro): first-run daemon install for MCP startup.
+"""MCP startup notices: first-run banner, embedder advisory, stranded-install.
 
-When ``nx-mcp`` / ``nx-mcp-catalog`` boots, ensure the host T2 daemon
-unit (LaunchAgent on macOS, systemd user-unit on Linux) is installed.
-Without this, a Claude-Desktop-only user who installs the .mcpb bundle
-has nx-mcp running but no daemon for it to talk to — every MCP tool
-that touches T2 fails opaquely.
+Originally RDR-126 P2 (nexus-bsjro): first-run T2-daemon install for MCP
+startup. That install path is GONE — it retired with the T2 daemon itself
+(nexus-i711w Stage 2 sub-stage B) and had already stopped firing on any
+service-backed install (RDR-176 Phase 1). What remains here is the notice
+plumbing that grew up around it:
 
-Idempotency model (per RDR-126 §Approach §2):
+- the RDR-126 §3 first-run banner (``maybe_banner`` / ``queue_banner`` /
+  ``deliver_pending_banner`` / ``apply_first_run_banner_instructions``), which
+  now has no production producer — see the tombstone below,
+- the RDR-144 P5b embedder advisory (``apply_embedder_notice``), and
+- the nexus-gynt2 stranded-install redirect (``apply_stranded_notice``).
 
-- The OS unit (LaunchAgent / systemd file) is the source of truth.
-  If it exists, skip install. We do NOT compare contents or
-  overwrite — that's the realm of ``nx daemon t2 install --autostart
-  --force`` which the user can invoke deliberately.
-- We always call ``daemon t2 ensure-running`` so the current MCP
-  session has a daemon to talk to even if install just happened or
-  the previously-installed unit was stopped.
-
-Side effects are silent on success; failures log a structured warning
-and continue (the MCP server still starts; tool calls that need the
-daemon will fail with their own error path).
+Side effects are silent on success; failures log a structured warning and
+continue — a startup notice must never block MCP boot.
 """
 from __future__ import annotations
 
 import os
-import shutil
-import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -40,168 +32,21 @@ if TYPE_CHECKING:
 _log = structlog.get_logger(__name__)
 
 
-def _macos_launchagent_path() -> Path:
-    return Path.home() / "Library" / "LaunchAgents" / "com.nexus.t2.plist"
+# NO ensure_installed_and_running: the MCP first-run path (RDR-126 §2) existed to
+# install the T2 daemon's autostart unit and shell out to
+# ``nx daemon t2 ensure-running``. Both are retired with the T2 daemon itself
+# (nexus-i711w Stage 2 sub-stage B). It was already a no-op wherever the storage
+# backend was SERVICE (RDR-176 Phase 1 made it return before installing
+# anything), which is the only backend Stage 2 leaves standing — so this removes
+# a path that no longer fired, not a live capability.
+#
+# CONSEQUENCE, recorded rather than assumed: this was the sole producer of the
+# RDR-126 §3 first-run banner, so ``maybe_banner`` / ``queue_banner`` below now
+# have no caller in production. The banner subsystem's disposition (delete, or
+# re-point at some post-daemon first-run event) is deliberately NOT decided here
+# — it is RDR-126 §3, a separate numbered surface, and folding it into a daemon
+# sub-stage is exactly the bleed this arc is split to avoid. Tracked separately.
 
-
-def _linux_systemd_unit_path() -> Path:
-    xdg_config = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
-    return xdg_config / "systemd" / "user" / "nexus-t2.service"
-
-
-def _os_unit_exists() -> bool:
-    """Return True if the T2 daemon's OS-level autostart unit is
-    already installed on this host. macOS = LaunchAgent .plist,
-    Linux = systemd user .service. Other platforms (Windows): always
-    return True so the install step skips (no install support yet)."""
-    platform = sys.platform
-    if platform == "darwin":
-        return _macos_launchagent_path().exists()
-    if platform.startswith("linux"):
-        return _linux_systemd_unit_path().exists()
-    return True
-
-
-def _installed_unit_path() -> Path | None:
-    """Path of the installed T2 autostart unit for this platform, or
-    ``None`` on an unsupported platform. Used to surface the unit
-    location in the first-run banner's "already configured" variant."""
-    platform = sys.platform
-    if platform == "darwin":
-        return _macos_launchagent_path()
-    if platform.startswith("linux"):
-        return _linux_systemd_unit_path()
-    return None
-
-
-def _find_nx_binary() -> str | None:
-    """Locate the ``nx`` CLI binary the MCP server can shell out to.
-
-    Strategy:
-    1. ``shutil.which`` on the current PATH (typical CLI-spawned case).
-    2. Sibling of ``sys.argv[0]`` (the ``nx-mcp`` entry point lives in
-       the same bin dir as ``nx`` when conexus is installed via uv tool
-       or pip).
-    3. Standard uv-tool location (~/.local/bin/nx) as last-resort
-       fallback for GUI-spawned subprocesses that may have a sparse PATH.
-    """
-    found = shutil.which("nx")
-    if found:
-        return found
-
-    if sys.argv and sys.argv[0]:
-        sibling = Path(sys.argv[0]).resolve().parent / "nx"
-        if sibling.exists():
-            return str(sibling)
-
-    fallback = Path.home() / ".local" / "bin" / "nx"
-    if fallback.exists():
-        return str(fallback)
-
-    return None
-
-
-def ensure_installed_and_running() -> None:
-    """Best-effort: install the T2 daemon autostart unit if missing,
-    then ensure-running for this session. Never raises; logs warnings.
-
-    Called from each MCP server's ``main()`` once at startup, after
-    logging setup but before serving tools.
-    """
-    nx_bin = _find_nx_binary()
-    if not nx_bin:
-        _log.warning(
-            "first_run_no_nx_binary",
-            hint=(
-                "nx CLI binary not found on PATH; cannot auto-install "
-                "the T2 daemon. Install via 'uv tool install conexus' "
-                "and ensure ~/.local/bin (or your uv tool bin dir) is "
-                "on PATH for GUI-spawned subprocesses."
-            ),
-        )
-        return
-
-    # RDR-176 Phase 1 (Gap 2, non-mutation): the T2 daemon opens the local
-    # ``.db`` read-write with ``run_migrations=True`` and stamps
-    # ``_nexus_version`` forward — the PRIMARY mutation source that broke the
-    # downgrade guarantee in the 6.0.0 dogfood. In service mode the SQLite tier
-    # is a migration SOURCE only (the Java service is the live substrate), so
-    # neither install the autostart unit nor launch the daemon — both are moot
-    # and the install would queue a misleading "daemon configured" banner for a
-    # daemon that ``run_t2_daemon`` immediately no-ops. Enforced by
-    # tests/mcp/test_rdr176_first_run_no_daemon.py.
-    from nexus.db.storage_mode import (  # noqa: PLC0415 — deferred import — keep first-run import-cheap; storage_mode pulls os/enum only
-        StorageBackend,
-        storage_backend_for,
-    )
-
-    if storage_backend_for("memory") == StorageBackend.SERVICE:
-        _log.debug("first_run_t2_daemon_skipped_service_mode")
-        return
-
-    from nexus.daemon import installer  # noqa: PLC0415 — circular-dep avoidance; daemon pulls heavy install deps
-
-    status: InstallStatus
-    dest: Path | None = None
-    if not _os_unit_exists():
-        # OS unit missing — install it in-process via the lifted
-        # ``nexus.daemon.installer`` (RDR-126 §2). Calling the library
-        # function rather than shelling out to ``nx daemon t2 install``
-        # gives us a structured InstallResult (status + dest path) that
-        # the first-run banner (§3) consumes to pick its text variant
-        # and surface the installed unit path.
-        try:
-            result = installer.install_autostart()
-            status = result.status
-            dest = result.dest
-            _log.info(
-                "first_run_install_ok",
-                status=result.status.value,
-                dest=str(result.dest),
-                warnings=list(result.warnings),
-            )
-        except Exception as exc:  # noqa: BLE001 — best-effort first-run install; failure logged, session still works via ensure-running
-            # installer raises typed InstallerError on symlink / content
-            # diff / activation failure; all are best-effort here — the
-            # session still works via ensure-running below.
-            status = installer.InstallStatus.FAILED
-            _log.warning(
-                "first_run_install_failed",
-                error=f"{type(exc).__name__}: {exc}",
-                hint=(
-                    "T2 daemon autostart install failed; current MCP "
-                    "session will work via ensure-running but the "
-                    "daemon will not survive reboots. Re-run "
-                    "'nx daemon t2 install --autostart' manually."
-                ),
-            )
-    else:
-        # OS unit already present — pre-installed user. Surface the
-        # "already configured" banner variant.
-        status = installer.InstallStatus.ALREADY_PRESENT
-        dest = _installed_unit_path()
-
-    # RDR-126 §3: queue the one-shot first-run banner (best-effort; never
-    # blocks startup). Delivered on the first tool response by the
-    # dispatch path (see deliver_pending_banner).
-    try:
-        spec = maybe_banner(status, dest)
-        if spec is not None:
-            queue_banner(spec)
-    except Exception as exc:  # noqa: BLE001 — banner must never break boot
-        _log.debug("first_run_banner_queue_failed", error=f"{type(exc).__name__}: {exc}")
-
-    # Always ensure-running so the current session has a daemon.
-    try:
-        subprocess.run(
-            [nx_bin, "daemon", "t2", "ensure-running", "--quiet"],
-            capture_output=True, text=True, timeout=15, check=False,
-        )
-    except Exception as exc:  # noqa: BLE001 — best-effort ensure-running; subprocess failure logged, must not crash MCP startup
-        _log.warning(
-            "first_run_ensure_running_exception",
-            error=f"{type(exc).__name__}: {exc}",
-        )
 
 
 # ── RDR-144 P5b: user-visible embedder notice ─────────────────────────────────

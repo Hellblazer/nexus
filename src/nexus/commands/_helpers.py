@@ -105,44 +105,16 @@ def t2_handle() -> Iterator[Any]:
             db.close()
         return
 
-    from nexus.daemon.t2_client import (  # noqa: PLC0415 — deliberate function-local import: circular-dep avoidance + SQLite-mode-only path
-        T2ClientError,
-        T2DaemonNotReachableError,
-        T2SchemaVersionMismatchError,
-        make_t2_client,
+    # SQLite mode reached here via the T2 daemon, which arbitrated the single
+    # SQLite writer across host CLI + MCP + dev-container processes. The daemon
+    # is retired (nexus-i711w Stage 2 sub-stage B) and there is no other
+    # arbiter, so this branch FAILS LOUD rather than quietly opening a second
+    # unarbitrated writer — the WAL-racing bug RDR-120 P6 existed to prevent.
+    # The branch itself goes with storage_mode in sub-stage A, at which point
+    # the SERVICE path above becomes unconditional.
+    raise click.ClickException(
+        "The T2 daemon that arbitrated SQLite-mode writes has been retired, and "
+        "this install is not on the storage service. Run `nx doctor` and, if it "
+        "reports a pending substrate migration, `nx upgrade` to converge onto "
+        "Postgres."
     )
-
-    client = make_t2_client()
-    try:
-        yield client
-    except T2ClientError as exc:
-        # nexus-00en9: a REACHABLE daemon that returns an error frame mid-RPC
-        # otherwise escapes as a raw traceback. T2ClientError is a sibling of the
-        # discovery errors below (no inheritance), so this catch never shadows
-        # them. Split by error_type so the operator gets the right remedy: a
-        # frame-level ProtocolError signals version skew (same class
-        # T2SchemaVersionMismatchError surfaces at handshake time), NOT transient
-        # contention.
-        if exc.error_type == "ProtocolError":
-            raise click.ClickException(
-                f"T2 protocol error (possible version skew): {exc.message}. "
-                "Check versions: nx --version vs the running daemon, then "
-                "restart it: nx daemon t2 restart"
-            ) from exc
-        raise click.ClickException(
-            f"T2 store error ({exc.error_type}): {exc.message}. "
-            "Retry, or check daemon state: nx daemon t2 status"
-        ) from exc
-    except T2DaemonNotReachableError:
-        # T2Client connects lazily on first RPC; the error surfaces here,
-        # not during make_t2_client() construction. Convert to a clean
-        # one-liner so the user sees an actionable message, not a traceback.
-        raise click.ClickException(
-            "No T2 daemon discovery resolved. "
-            "Start with: `nx daemon t2 start`"
-        )
-    except T2SchemaVersionMismatchError as exc:
-        # __str__ already carries client/daemon version + recovery hint.
-        raise click.ClickException(str(exc))
-    finally:
-        client.close()

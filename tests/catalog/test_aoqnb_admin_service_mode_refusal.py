@@ -59,11 +59,11 @@ def test_refusal_precedes_initialization_and_daemon_probes(
 ) -> None:
     """Ordering is load-bearing.
 
-    The pre-existing guards return ``None`` for an uninitialised catalog and
-    raise CatalogAdminDaemonLiveError when a daemon is up. If either ran first,
-    a service-mode box with no local catalog would get a bare ``None`` (read by
-    callers as "not initialized — run nx catalog setup", sending the operator to
-    create a SQLite catalog on a PG install) instead of the real explanation.
+    The pre-existing guard returns ``None`` for an uninitialised catalog. If it
+    ran first, a service-mode box with no local catalog would get a bare ``None``
+    (read by callers as "not initialized — run nx catalog setup", sending the
+    operator to create a SQLite catalog on a PG install) instead of the real
+    explanation.
     """
     from nexus.catalog import factory
     from nexus.catalog.factory import CatalogAdminServiceModeError, make_catalog_admin
@@ -87,21 +87,11 @@ def test_refusal_precedes_initialization_and_daemon_probes(
     )
 
 
-def test_it_is_a_distinct_type_from_the_daemon_live_error(service_mode: None) -> None:
-    """Separate exception types because the REMEDIES differ.
-
-    CatalogAdminDaemonLiveError means "stop the daemon and retry" — a real
-    recovery. This one has no retry: the verb has no service-mode
-    implementation. Sharing a type would let a caller offer a remedy that
-    cannot work, and the operator would stop a healthy daemon for nothing.
-    """
-    from nexus.catalog.factory import (
-        CatalogAdminDaemonLiveError,
-        CatalogAdminServiceModeError,
-    )
-
-    assert not issubclass(CatalogAdminServiceModeError, CatalogAdminDaemonLiveError)
-    assert not issubclass(CatalogAdminDaemonLiveError, CatalogAdminServiceModeError)
+# NO test_it_is_a_distinct_type_from_the_daemon_live_error: the distinction was
+# between this error ("no retry exists") and CatalogAdminDaemonLiveError ("stop
+# the daemon and retry"). The latter retired with the T2 daemon (nexus-i711w
+# Stage 2 sub-stage B), so there is no second type left to be distinct from and
+# no wrong remedy a caller could reach for.
 
 
 @pytest.mark.parametrize("argv", [

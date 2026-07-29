@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """RDR-176 Phase 1 (Gap 2) — failing-first coverage for the three defense-in-depth
 service-mode guards the primary tests did not exercise (substantive-critic
-Significant-2): ``_run_upgrade``, ``run_t2_daemon``, and the doctor read-only
-diagnostic connection.
+Significant-2): ``_run_upgrade`` and the doctor read-only diagnostic connection.
+(``run_t2_daemon``'s guard went with the daemon — see the Guard #3 tombstone.)
 """
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from pathlib import Path
 import pytest
 
 from nexus.commands import doctor, upgrade
-from nexus.daemon import t2_daemon
 
 from tests._t2_fixture_ops import bootstrap_migration_source
 from nexus.db.t2 import T2Database
@@ -67,21 +66,12 @@ def test_service_mode_run_upgrade_does_not_mutate_db(
     assert _content_digest(db_path) == digest_before
 
 
-# ── Guard #3: the SQLite T2 daemon does not start in service mode ─────────────
-
-
-def test_service_mode_run_t2_daemon_does_not_construct_daemon(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-
-    def _boom(*_a: object, **_k: object) -> None:
-        raise AssertionError("T2Daemon must not be constructed in service mode")
-
-    monkeypatch.setattr(t2_daemon, "T2Daemon", _boom)
-    monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
-
-    # Must return cleanly without instantiating (or starting) the daemon.
-    t2_daemon.run_t2_daemon(config_dir=tmp_path, db_path=tmp_path / "memory.db")
+# NO Guard #3 (the SQLite T2 daemon does not start in service mode): the guard
+# was an early return inside `run_t2_daemon`, and both it and its module retired
+# with the daemon (nexus-i711w Stage 2 sub-stage B). A daemon that cannot be
+# started needs no service-mode check to stop it starting. Guards #4 (nx upgrade
+# no-ops) and #5 (read-only doctor diagnostics) are the surviving RDR-176 Phase 1
+# non-mutation defenses and are exercised above and below.
 
 
 # ── Guard #5: doctor diagnostics open read-only (no WAL header write) ─────────

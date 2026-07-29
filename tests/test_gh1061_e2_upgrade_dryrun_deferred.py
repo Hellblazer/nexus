@@ -58,13 +58,10 @@ def _clear_module_state() -> None:
     catalog_taxonomy._migrated_paths.clear()
 
 
-@pytest.fixture(autouse=True)
-def _no_real_daemon_nudge():
-    with (
-        patch("nexus.commands.upgrade._cycle_daemon_to_current"),
-        patch("nexus.commands.upgrade._quiesce_daemon"),
-    ):
-        yield
+# NO _no_real_daemon_nudge fixture: it existed only to stop these in-process
+# `nx upgrade` runs from spawning a detached T2 daemon via
+# `_cycle_daemon_to_current` (nexus-scoo5). That function retired with the
+# daemon (nexus-i711w Stage 2 sub-stage B), so there is no spawn to suppress.
 
 
 def _make_db_at_current_version(tmp_path: Path):

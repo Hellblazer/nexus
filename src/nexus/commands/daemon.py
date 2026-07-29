@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """``nx daemon`` command group — manage the storage daemons.
 
-Sub-groups: ``t2`` (SQLite T2 daemon — retirement debt), ``service``
+Sub-groups: ``service``
 (engine-service binary + local Postgres; serves T2 + T3), and
 ``aspect-worker``. RDR-155 P4b: the ``t3`` sub-group (managed
 ``chroma run`` subprocess) is retired — the Java storage service serves
@@ -46,14 +46,23 @@ def daemon_group() -> None:
 # ---------------------------------------------------------------------------
 
 
-_T2_PLIST_NAME = "com.nexus.t2.plist"
-_T2_SERVICE_NAME = "nexus-t2.service"
-_T2_LAUNCHD_LABEL = "com.nexus.t2"
 
 # RDR-174 P2.1 (nexus-y2yj6): the storage SERVICE tier (engine-service binary +
 # local Postgres; serves T2 + T3). Mirrors the T2/T3 autostart-unit identity.
 _SERVICE_PLIST_NAME = "com.nexus.service.plist"
 _SERVICE_SERVICE_NAME = "nexus-service.service"
+# T2 autostart-unit IDENTITY. The T2 DAEMON is gone (nexus-i711w Stage 2
+# sub-stage B), but these OUTLIVE it deliberately: an install upgraded from a
+# version that ran `nx daemon t2 install --autostart` still has a launchd/
+# systemd unit on disk, and upgrade_finish's stray-unit leg needs this identity
+# to FIND and REMOVE it. Delete these only once no supported upgrade path can
+# still be carrying such a unit — otherwise the stale unit lingers forever,
+# firing a `nx daemon t2 start` that no longer exists on every boot.
+_T2_PLIST_NAME = "com.nexus.t2.plist"
+_T2_SERVICE_NAME = "nexus-t2.service"
+_T2_LAUNCHD_LABEL = "com.nexus.t2"
+
+
 _SERVICE_LAUNCHD_LABEL = "com.nexus.service"
 
 
@@ -146,8 +155,6 @@ def _resolve_nx_bin() -> list[str]:
     return [sys.executable, "-m", "nexus.cli"]
 
 
-def _autostart_filename_t2() -> str:
-    return _T2_PLIST_NAME if _autostart_platform() == "darwin" else _T2_SERVICE_NAME
 
 
 def _autostart_filename_service() -> str:
@@ -156,6 +163,15 @@ def _autostart_filename_service() -> str:
         if _autostart_platform() == "darwin"
         else _SERVICE_SERVICE_NAME
     )
+
+
+def _autostart_filename_t2() -> str:
+    """Unit filename for the RETIRED T2 daemon — kept for stale-unit REMOVAL.
+
+    See the _T2_* constants above: this is the identity upgrade_finish needs to
+    detect and bootout a unit left behind by a pre-retirement install.
+    """
+    return _T2_PLIST_NAME if _autostart_platform() == "darwin" else _T2_SERVICE_NAME
 
 
 def _autostart_unit_installed() -> Path | None:
@@ -193,125 +209,14 @@ def _service_autostart_unit_installed() -> Path | None:
 _SUPERVISOR_CMD_TIMEOUT: float = 10.0
 
 
-def _t2_supervisor_spawn(unit_path: Path) -> bool:
-    """Route a T2 cold-spawn through the OS supervisor.
-
-    darwin: try ``launchctl kickstart gui/<uid>/com.nexus.t2``; if it returns
-    non-zero (unit not loaded), run ``launchctl bootstrap gui/<uid> <plist>``
-    first, then kickstart again.  On any non-zero final exit, return False.
-    linux: run ``systemctl --user start nexus-t2.service``.  On non-zero, return False.
-
-    On ANY exception (binary absent, command timeout, permission error)
-    returns False. The caller logs a warning and falls back to
-    subprocess.Popen.
-    """
-    import os as _os  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-
-    try:
-        platform = _autostart_platform()
-        if platform == "darwin":
-            uid = _os.getuid()
-            target = f"gui/{uid}/{_T2_LAUNCHD_LABEL}"
-            res = subprocess.run(
-                ["launchctl", "kickstart", target],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=_SUPERVISOR_CMD_TIMEOUT,
-            )
-            if res.returncode != 0:
-                # Unit may not be bootstrapped yet; bootstrap then retry.
-                br = subprocess.run(
-                    ["launchctl", "bootstrap", f"gui/{uid}", str(unit_path)],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=_SUPERVISOR_CMD_TIMEOUT,
-                )
-                if br.returncode != 0:
-                    return False
-                res = subprocess.run(
-                    ["launchctl", "kickstart", target],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=_SUPERVISOR_CMD_TIMEOUT,
-                )
-                if res.returncode != 0:
-                    return False
-            return True
-        if platform.startswith("linux"):
-            res = subprocess.run(
-                ["systemctl", "--user", "start", _T2_SERVICE_NAME],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=_SUPERVISOR_CMD_TIMEOUT,
-            )
-            return res.returncode == 0
-    except Exception as exc:  # noqa: BLE001 — supervisor spawn boundary; failure logged via log.warning, caller degrades
-        _log.warning(
-            "t2_supervisor_spawn_exception",
-            exc=str(exc),
-            exc_type=type(exc).__name__,
-        )
-        return False
-    return False
 
 
 # ---------------------------------------------------------------------------
-# t2 sub-group (RDR-120 P3a.A, nexus-7aayk)
 # ---------------------------------------------------------------------------
 
 
-@daemon_group.group("t2")
-def t2_group() -> None:
-    """T2 daemon: single-writer process owning the seven domain-store SQLite handles."""
 
 
-@t2_group.command("start")
-@click.option(
-    "--config-dir",
-    "config_dir_str",
-    default=None,
-    help="Config directory override (default: ~/.config/nexus/).",
-)
-@click.option(
-    "--db-path",
-    "db_path_str",
-    default=None,
-    help=(
-        "Override the memory.db path. Default: ``nexus.config.default_db_path()``."
-    ),
-)
-def t2_start_cmd(config_dir_str: str | None, db_path_str: str | None) -> None:
-    """Start the T2 daemon (always foreground; supervisor blocks on this process).
-
-    The T2 daemon IS this Python process (no managed subprocess).
-    ``start`` runs the asyncio event loop until SIGTERM/SIGINT and
-    cleans up sockets + discovery file on exit. Run under launchd /
-    systemd via ``nx daemon t2 install --autostart`` for production
-    use; the foreground requirement is what the supervisor watches.
-
-    If another T2 daemon already holds the spawn lock (a live winner
-    already owns the data file), this process quiet-attaches instead of
-    crashing (RDR-140 P1.3): ``run_t2_daemon`` logs ``t2_daemon_spawn_lost``
-    at info and returns, so the command exits 0 with no traceback. The
-    launchd/systemd template treats a zero exit as "do not restart"
-    (see the install command), so a loser does not trigger a respawn loop.
-    A genuine lifecycle error (bind failed, etc.) still raises
-    ``T2DaemonError`` and exits 2.
-    """
-    from nexus.commands._helpers import default_db_path  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-    from nexus.daemon.t2_daemon import T2DaemonError, run_t2_daemon  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-
-    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
-    db_path = Path(db_path_str) if db_path_str else default_db_path()
-
-    click.echo(
-        f"T2 daemon starting (config_dir={config_dir}, db_path={db_path})..."
-    )
-    try:
-        run_t2_daemon(config_dir=config_dir, db_path=db_path)
-    except T2DaemonError as exc:
-        click.echo(f"Error: {exc}", err=True)
-        sys.exit(2)
 
 
 def _discovery_record_pid(data: dict) -> int | None:
@@ -332,56 +237,6 @@ def _discovery_record_pid(data: dict) -> int | None:
     return None
 
 
-@t2_group.command("stop")
-@click.option(
-    "--config-dir",
-    "config_dir_str",
-    default=None,
-    help="Config directory override.",
-)
-def t2_stop_cmd(config_dir_str: str | None) -> None:
-    """Stop the running T2 daemon by reading the discovery file's PID
-    and sending SIGTERM.
-
-    Returns 0 on success or when no daemon is running. SIGTERM is the
-    canonical stop signal; the daemon's asyncio loop catches it,
-    closes sockets, unlinks the discovery file, and exits 0
-    (rendered as code 143 to launchd / systemd; both supervisor
-    templates list 143 as a non-failure exit).
-    """
-    import json as _json  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-
-    from nexus.daemon.t2_daemon import t2_discovery_path  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-
-    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
-    disc = t2_discovery_path(config_dir)
-    if not disc.exists():
-        click.echo("No T2 daemon discovery file found; already stopped.")
-        return
-    try:
-        payload = _json.loads(disc.read_text())
-    except (OSError, _json.JSONDecodeError) as exc:
-        click.echo(
-            f"Failed to read discovery file: {exc}. Removing stale file.",
-            err=True,
-        )
-        disc.unlink(missing_ok=True)
-        return
-    pid = _discovery_record_pid(payload)
-    if not isinstance(pid, int) or pid <= 0:
-        click.echo(f"Invalid pid in discovery file: {pid!r}", err=True)
-        disc.unlink(missing_ok=True)
-        return
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        click.echo(f"T2 daemon (pid={pid}) already gone; cleaning discovery file.")
-        disc.unlink(missing_ok=True)
-        return
-    except OSError as exc:
-        click.echo(f"Failed to signal pid {pid}: {exc}", err=True)
-        sys.exit(1)
-    click.echo(f"Sent SIGTERM to T2 daemon (pid={pid}).")
 
 
 #: nexus-c0vby (GH #1405 defect 2): the honest, non-error-shaped message a
@@ -397,92 +252,6 @@ _T2_SERVICE_MODE_STATUS_MESSAGE = (
 )
 
 
-@t2_group.command("status")
-@click.option(
-    "--config-dir",
-    "config_dir_str",
-    default=None,
-    help="Config directory override.",
-)
-@click.option(
-    "--json", "as_json", is_flag=True, default=False, help="Output raw JSON.",
-)
-def t2_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
-    """Print the T2 daemon discovery JSON (PID + UDS path + TCP address)."""
-    import json as _json  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-    from nexus.daemon.t2_daemon import t2_discovery_path  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-
-    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
-    disc = t2_discovery_path(config_dir)
-    if not disc.exists():
-        # nexus-c0vby: distinguish "service mode — this is expected" from a
-        # genuine "daemon should be running but isn't" in local mode. The
-        # storage-mode probe itself is best-effort (mirrors
-        # unload_stale_t2_launchagent / _check_t2_launchagent_stray's own
-        # discipline) -- a probe failure falls through to the ORIGINAL
-        # error-shaped message rather than silently claiming service mode.
-        try:
-            from nexus.db.storage_mode import StorageBackend, storage_backend_for  # noqa: PLC0415 — deferred, circular-dep avoidance
-
-            service_mode = storage_backend_for("memory") == StorageBackend.SERVICE
-        except Exception:  # noqa: BLE001 — best-effort probe; falls through to the default error path
-            service_mode = False
-        if service_mode:
-            if as_json:
-                click.echo(_json.dumps(
-                    {"service_mode": True, "message": _T2_SERVICE_MODE_STATUS_MESSAGE},
-                    indent=2,
-                ))
-            else:
-                click.echo(_T2_SERVICE_MODE_STATUS_MESSAGE)
-            return
-        click.echo(
-            "No T2 daemon discovery file found; is the daemon running?",
-            err=True,
-        )
-        sys.exit(1)
-    try:
-        data = _json.loads(disc.read_text())
-    except (OSError, _json.JSONDecodeError) as exc:
-        click.echo(f"Failed to read discovery file: {exc}", err=True)
-        sys.exit(1)
-    # Probe the recorded pid for liveness. A discovery file can outlive
-    # its daemon (e.g. an interrupted graceful stop left the file while
-    # the process died, or a crash). Reporting such a file as "running"
-    # masks a dead daemon (nexus-n8sbw).
-    pid = _discovery_record_pid(data)
-    # RDR-149 P2: liveness is what a CLIENT would resolve. For a lease
-    # record that is freshness (a daemon whose heartbeat loop wedged reads
-    # as down even though its pid is alive); for a legacy payload it is
-    # pid-liveness. ``find_t2_daemon`` applies the right rule per format.
-    from nexus.daemon.discovery import find_t2_daemon  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-
-    alive = find_t2_daemon(config_dir) is not None
-
-    # RDR-140 P4.2 (Gap 5): surface how many restarts the crash-loop guard has
-    # recorded in the current window — a rising count is the crash-loop signal.
-    restarts = _restart_count(config_dir, now=time.time())
-
-    if as_json:
-        click.echo(_json.dumps(
-            {**data, "alive": alive, "restarts_in_window": restarts}, indent=2,
-        ))
-        if not alive:
-            sys.exit(1)
-        return
-
-    click.echo("T2 Daemon Status")
-    click.echo("-" * 40)
-    for key, value in data.items():
-        click.echo(f"  {key}: {value}")
-    click.echo(f"  restarts_in_window: {restarts}")
-    if not alive:
-        click.echo(
-            f"  status: STALE (recorded pid {pid} is not running). "
-            f"Run 'nx daemon t2 start' to respawn."
-        )
-        sys.exit(1)
-    click.echo("  status: running")
 
 
 # RDR-128 P0b (RF-4): bounded timeout for the pre-cycle DB-acquirability
@@ -676,521 +445,18 @@ def _reset_crashloop(config_dir: Path) -> None:
         pass
 
 
-def _predecessor_alive(pid: int) -> bool:
-    """True iff *pid* is alive AND still looks like a t2 daemon.
-
-    The cmdline guard (``_is_t2_daemon_process``) defends the version-cycle
-    wait against PID reuse: if the predecessor's pid is recycled to an
-    unrelated process during the wait, treat the predecessor as gone rather
-    than waiting on (or aborting for) a stranger. Used by ``ensure-running``
-    to poll the predecessor's exit (RDR-129 A2).
-    """
-    from nexus.daemon.t2_daemon import _is_t2_daemon_process, _pid_is_alive  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-
-    return _pid_is_alive(pid) and _is_t2_daemon_process(pid)
 
 
-def _t2_db_write_lock_acquirable(db_path: Path, timeout_ms: int) -> bool:
-    """Probe whether memory.db's single WAL writer lock is acquirable
-    within ``timeout_ms``, without holding it destructively (RDR-128 P0b).
-
-    Opens a throwaway connection and attempts ``BEGIN IMMEDIATE`` — the same
-    write lock the daemon's startup migration needs — then immediately rolls
-    back. Returns:
-
-    * ``True``  — the lock was acquired within the bounded busy_timeout (or
-      the file does not exist yet, so there is nothing to contend with);
-    * ``False`` — it stayed locked/busy for the whole timeout (another
-      process, typically ``nx index repo``, is holding it).
-
-    Bounded by construction: ``busy_timeout`` caps the ``BEGIN IMMEDIATE``
-    wait, so this never hangs. Non-lock ``OperationalError``\\s propagate.
-    """
-    import sqlite3  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-
-    if not db_path.exists():
-        return True
-    # A raw connection is the point of this probe: routing through
-    # T2Database would open eight connections and defeat a single-lock test.
-    conn = sqlite3.connect(str(db_path), timeout=timeout_ms / 1000.0)  # epsilon-allow: RDR-128 P0b raw lock probe
-    try:
-        conn.execute(f"PRAGMA busy_timeout={int(timeout_ms)}")
-        conn.execute("BEGIN IMMEDIATE")
-        conn.rollback()
-        return True
-    except sqlite3.OperationalError as exc:
-        msg = str(exc).lower()
-        if "locked" in msg or "busy" in msg:
-            return False
-        raise
-    finally:
-        conn.close()
 
 
-class T2EnsureOutcome(Enum):
-    """Terminal state of an ensure-running attempt (RDR-141 P0, nexus-cvaip).
-
-    Richer than a bare bool so a programmatic caller (the RDR-141
-    self-healing re-assert in ``mcp_infra.t2_index_write``) can pick the
-    correct WARNING event and decide whether a direct-write fallback is a
-    true single-writer down-arm (D_old dead) or a cycle-deferred residual
-    (D_old still alive).
-    """
-    REACHABLE = "reachable"                      # a current-version daemon is up and serving
-    DEFERRED_WRITE_LOCK = "deferred_write_lock"  # stale daemon ALIVE; cycle deferred (WAL write-lock held)
-    DEFERRED_SIGTERM = "deferred_sigterm"        # stale daemon ALIVE; SIGTERM'd but did not exit in window
-    CRASHLOOP_SUPPRESSED = "crashloop_suppressed"  # no live incumbent daemon (never existed, or was fully reaped); crash-loop guard refused respawn
-    SPAWN_FAILED = "spawn_failed"                # no daemon: cold-spawned process died or never became reachable
-    SERVICE_MODE_SKIP = "service_mode_skip"      # memory store is in SERVICE mode; the SQLite daemon has no role (RDR-176)
 
 
-def _t2_ensure_running_inner(
-    config_dir_str: str | None, timeout: float, quiet: bool,
-) -> T2EnsureOutcome:
-    """Core logic of ``ensure-running``; returns a rich outcome enum.
-
-    Extracted from the Click command (RDR-141 P0, nexus-cvaip) so that
-    programmatic callers (``mcp_infra.t2_index_write``) can invoke the
-    self-healing logic without triggering ``sys.exit``.  The Click
-    command ``t2_ensure_running_cmd`` is a thin wrapper that maps the
-    enum to CLI exit codes.
-    """
-    import time as _time  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-
-    config_dir = Path(config_dir_str) if config_dir_str else nexus_config_dir()
-
-    # RDR-176 Phase 1 (Gap 2): in SERVICE mode the SQLite T2 tier is a frozen
-    # migration source and the Java service is the live substrate — no client
-    # ever connects to this daemon (``run_t2_daemon`` already no-ops for the
-    # same reason). Without this check every caller (nx-mcp's first-run hook,
-    # ``nx upgrade``) cold-spawns a process that exits immediately by design,
-    # and repeated calls across concurrent MCP sessions trip the crash-loop
-    # guard below with a misleading "crash-loop suppressed" error even though
-    # nothing is actually broken (nexus-daemon-6.6.0-service-mode-skip).
-    from nexus.db.storage_mode import (  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-        StorageBackend,
-        storage_backend_for,
-    )
-
-    if storage_backend_for("memory") == StorageBackend.SERVICE:
-        if not quiet:
-            click.echo(
-                "T2 daemon not needed: memory store is in service mode "
-                "(Java service is the live substrate)."
-            )
-        return T2EnsureOutcome.SERVICE_MODE_SKIP
-
-    def _running_daemon() -> tuple[int, str] | None:
-        """Return (pid, daemon_version) of the live daemon, or None.
-
-        RDR-149 P2: liveness is now lease freshness, resolved through
-        ``find_t2_daemon`` (which TTL-checks the lease and falls back to
-        pid-liveness for a legacy payload mid-upgrade). The external
-        contract is unchanged: callers still receive ``(pid, version)`` of
-        a live daemon, with the pid (lifted from the lease endpoint) used
-        for the SIGTERM in the version-skew cycle below.
-        """
-        from nexus.daemon.discovery import find_t2_daemon  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-
-        payload = find_t2_daemon(config_dir)
-        if payload is None:
-            return None
-        pid = payload.get("pid")
-        if not isinstance(pid, int):
-            return None
-        # New lease records carry ``version``; a legacy payload carries
-        # ``daemon_version`` (upgrade-window compatibility).
-        version = payload.get("version") or payload.get("daemon_version") or ""
-        return pid, str(version)
-
-    def _daemon_is_alive() -> bool:
-        return _running_daemon() is not None
-
-    def _installed_version() -> str:
-        from importlib.metadata import PackageNotFoundError  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-        from importlib.metadata import version as _pkg_version  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-
-        try:
-            return _pkg_version("conexus")
-        except PackageNotFoundError:
-            return ""
-
-    # Fast pre-discovery (lock-free common case): a live matching-version
-    # daemon means we are done without ever touching the election lock —
-    # bounded boot latency is paid only on the actual spawn path.
-    running = _running_daemon()
-    if running is not None:
-        _running_pid, running_ver = running
-        installed = _installed_version()
-        if not installed or running_ver == installed:
-            if not quiet:
-                click.echo("T2 daemon already running.")
-            return T2EnsureOutcome.REACHABLE
-
-    # RDR-140 P2.2 (nexus-fkhe2): single-flight election around the
-    # discover→spawn decision. K racing stacks block on this lock; only the
-    # holder cold-spawns. We RE-DISCOVER after acquiring it so a stack that
-    # finished spawning while we waited is attached, not duplicated. The lock
-    # is anchored on the data file and is DISTINCT from the daemon's lifetime
-    # spawn lock; fcntl auto-releases it on the holder's death, so a holder
-    # that dies mid-spawn never deadlocks the waiters (they win the lock,
-    # re-discover no daemon, and exactly one spawns).
-    db_path = config_dir / "memory.db"
-    election_fd = _acquire_election_lock(db_path, _election_wait_for(timeout))
-    if election_fd is None and not quiet:
-        click.echo(
-            "T2 election-lock wait timed out; proceeding to spawn unguarded "
-            "(the daemon spawn lock remains the backstop).",
-            err=True,
-        )
-    try:
-        # Re-discover under the lock — the winner may have come up already.
-        running = _running_daemon()
-        if running is not None:
-            running_pid, running_ver = running
-            installed = _installed_version()
-            # A live daemon whose version matches the installed tool (or whose
-            # installed version can't be determined) is left alone (idempotent).
-            if not installed or running_ver == installed:
-                if not quiet:
-                    click.echo("T2 daemon already running.")
-                return T2EnsureOutcome.REACHABLE
-            # Version skew: the daemon froze its code at start and predates the
-            # last upgrade (nexus-5ldk1). "Ensure running" means ensure a
-            # CURRENT daemon; gracefully cycle the stale one and respawn below.
-            # SIGTERM lets the daemon drain in-flight RPC (stop() awaits
-            # wait_closed) and remove its discovery file before we respawn.
-            #
-            # RDR-128 P0b (RF-4): but do NOT SIGTERM a healthy (if stale)
-            # daemon while memory.db's WAL writer lock is held — the respawn's
-            # startup migration would race the holder (typically `nx index
-            # repo`) and could crash-loop, and because ensure-running is
-            # one-shot we'd be left with NO daemon. Probe the lock with a
-            # bounded timeout; on timeout, ABORT the cycle: leave the
-            # stale-but-working daemon up and defer to the next ensure-running.
-            # Never hang; never trade a working daemon for none.
-            if not _t2_db_write_lock_acquirable(
-                db_path, timeout_ms=_T2_CYCLE_DB_PROBE_TIMEOUT_MS
-            ):
-                click.echo(
-                    f"T2 daemon v{running_ver} stale but memory.db write lock "
-                    f"held; cycle deferred (will retry on next ensure-running).",
-                    err=True,
-                )
-                return T2EnsureOutcome.DEFERRED_WRITE_LOCK
-            if not quiet:
-                click.echo(
-                    f"T2 daemon is stale (running {running_ver}, installed "
-                    f"{installed}); cycling to current."
-                )
-            try:
-                os.kill(running_pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                pass
-            # RDR-129 A2 (nexus-kwqhd): poll the predecessor's PID liveness,
-            # NOT the discovery file. stop() now holds the spawn lock until the
-            # process exits (defer-release-to-exit) while unlinking the
-            # discovery file early; a discovery-file poll would see "gone"
-            # while the pid is still alive and holding the lock, so the cold
-            # spawn below would hit EAGAIN on the spawn lock and leave ZERO
-            # daemons. Wait for the pid to actually exit (lock dropped by the
-            # OS); if it outlives the window, abort and keep the
-            # stale-but-working daemon (RF-4: never trade a working daemon for
-            # none).
-            cycle_deadline = _time.monotonic() + _T2_CYCLE_EXIT_TIMEOUT
-            while _time.monotonic() < cycle_deadline:
-                if not _predecessor_alive(running_pid):
-                    break
-                _time.sleep(0.1)
-            else:
-                click.echo(
-                    f"T2 daemon v{running_ver} (pid {running_pid}) did not "
-                    f"exit within {_T2_CYCLE_EXIT_TIMEOUT}s of SIGTERM; cycle "
-                    "aborted, leaving it up (will retry on next "
-                    "ensure-running).",
-                    err=True,
-                )
-                return T2EnsureOutcome.DEFERRED_SIGTERM
-            # predecessor fully exited; its spawn lock is released — cold spawn.
-
-        # RDR-140 P4.2 (Gap 5): crash-loop guard. If we have already respawned
-        # _CRASHLOOP_MAX_RESTARTS times within the window without converging,
-        # stop — an endless crash-loop with a traceback per attempt helps no
-        # one. Log ONCE at error (the sentinel's tripped_logged flag prevents
-        # re-logging on every suppressed call) and refuse to respawn. A healthy
-        # convergence below clears the counter.
-        _cl_now = _time.time()
-        if _crashloop_tripped(config_dir, now=_cl_now):
-            _data = _read_crashloop(config_dir)
-            if not _data.get("tripped_logged"):
-                _log.error(
-                    "t2_daemon_crash_loop_suppressed",
-                    restarts=_restart_count(config_dir, now=_cl_now),
-                    window_s=_CRASHLOOP_WINDOW_S,
-                    max_restarts=_CRASHLOOP_MAX_RESTARTS,
-                )
-                _data["tripped_logged"] = True
-                _write_crashloop_atomic(config_dir, _data)
-            click.echo(
-                f"Error: T2 daemon crash-loop suppressed "
-                f"({_CRASHLOOP_MAX_RESTARTS}+ restarts in "
-                f"{_CRASHLOOP_WINDOW_S:.0f}s); refusing to respawn. Investigate "
-                "the daemon log, then 'nx daemon t2 status'.",
-                err=True,
-            )
-            return T2EnsureOutcome.CRASHLOOP_SUPPRESSED
-        _record_restart(config_dir, now=_cl_now)
-
-        # Cold spawn.
-        #
-        # nexus-uybp6: single-owner routing. When the OS autostart unit is
-        # installed, route the respawn through the supervisor (launchd/systemd)
-        # so the unit keeps exclusive ownership — an ad-hoc Popen spawn would
-        # race launchd's KeepAlive and make the unit dormant again. On ANY
-        # supervisor failure (non-zero exit, missing binary, exception) we log
-        # a warning and fall through to the existing Popen path: never trade a
-        # working spawn path for zero daemons (RF-4).
-        #
-        # If no unit is installed, skip directly to Popen (unchanged path).
-        #
-        # Supervisor routing is UNQUALIFIED-DEFAULT ONLY: the installed unit's
-        # daemon resolves its config dir in LAUNCHD'S/SYSTEMD'S environment
-        # (bare `nx daemon t2 start`, no --config-dir, no NEXUS_CONFIG_DIR),
-        # i.e. the hard default. Kicking it on behalf of a caller that
-        # overrode the config dir — via the flag OR the env var — would start
-        # a daemon against the wrong data directory and never satisfy this
-        # caller's reachability wait (and repeatedly kick the user's real
-        # daemon: the multistack race harness found exactly that). Any
-        # override therefore Popen-spawns with explicit isolation.
-        proc = None
-        _unit_path = (
-            _autostart_unit_installed()
-            if config_dir_str is None
-            and not os.environ.get("NEXUS_CONFIG_DIR", "").strip()
-            else None
-        )
-        if _unit_path is not None:
-            if not quiet:
-                click.echo(f"Respawning T2 daemon via OS supervisor: {_unit_path.name}")
-            if _t2_supervisor_spawn(_unit_path):
-                # Supervisor accepted the start command — no Popen proc to poll.
-                # The reachability wait below handles convergence; proc stays None.
-                pass
-            else:
-                _log.warning(
-                    "t2_supervisor_spawn_failed",
-                    unit=str(_unit_path),
-                    fallback="popen",
-                )
-                if not quiet:
-                    click.echo(
-                        "Warning: OS supervisor spawn failed; falling back to direct spawn.",
-                        err=True,
-                    )
-                _unit_path = None  # signal: use Popen path
-
-        if _unit_path is None:
-            # Popen path: use the same nx binary the operator invoked (preserves
-            # PATH/virtualenv assumptions). start_new_session detaches the child
-            # so this command can exit while the daemon keeps running.
-            nx_bin = _resolve_nx_bin()
-            argv = [*nx_bin, "daemon", "t2", "start"]
-            if config_dir_str is not None:
-                argv.extend(["--config-dir", config_dir_str])
-            if not quiet:
-                click.echo(f"Spawning T2 daemon: {' '.join(argv)}")
-            # nexus-ovbr7: crash-channel capture (see the storage-service
-            # spawn for the rationale).
-            from nexus.logging_setup import open_child_log_or_devnull  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-
-            spawn_log = open_child_log_or_devnull("t2_daemon.crash", config_dir)
-            try:
-                proc = subprocess.Popen(
-                    argv,
-                    stdout=spawn_log,
-                    stderr=spawn_log,
-                    stdin=subprocess.DEVNULL,
-                    start_new_session=True,
-                )
-            finally:
-                if not isinstance(spawn_log, int):
-                    spawn_log.close()
-
-        # nexus-u3mfr: migration-aware wait. A cold-start daemon runs its
-        # one-time startup migration (multi-second, holds the write lock)
-        # BEFORE it binds and writes the discovery file, so reachability
-        # legitimately lags the spawn by several seconds. The fix is two-fold:
-        # the default budget is generous enough to cover the migration
-        # (--timeout default raised to 15s), AND we distinguish "still alive,
-        # migrating" from "the process died" — if the spawned child exits
-        # without becoming reachable we fail fast with its exit code rather
-        # than waiting out the whole budget on a corpse. The warning therefore
-        # only fires on a genuinely slow/stuck migration, not a healthy boot.
-        # NOTE: the proc.poll() death-check only applies to the Popen path —
-        # on the supervisor path proc is None, so the check is skipped.
-        deadline = _time.monotonic() + timeout
-        while _time.monotonic() < deadline:
-            if _daemon_is_alive():
-                # Healthy convergence: clear the crash-loop counter.
-                _reset_crashloop(config_dir)
-                if not quiet:
-                    click.echo("T2 daemon is reachable.")
-                return T2EnsureOutcome.REACHABLE
-            if proc is not None and proc.poll() is not None:
-                click.echo(
-                    f"Error: T2 daemon process exited (code {proc.returncode}) "
-                    "before becoming reachable. Check "
-                    "~/Library/Logs/nexus-t2.err (macOS) or `journalctl "
-                    "--user -u nexus-t2.service` (Linux) for the failure.",
-                    err=True,
-                )
-                return T2EnsureOutcome.SPAWN_FAILED
-            _time.sleep(0.1)
-
-        click.echo(
-            f"Warning: T2 daemon did not become reachable within {timeout}s "
-            "(process still alive — likely a slow or stalled startup "
-            "migration). Check ~/Library/Logs/nexus-t2.err (macOS) or "
-            "`journalctl --user -u nexus-t2.service` (Linux) for the failure.",
-            err=True,
-        )
-        return T2EnsureOutcome.SPAWN_FAILED
-    finally:
-        _release_election_lock(election_fd)
 
 
-@t2_group.command("ensure-running")
-@click.option(
-    "--config-dir",
-    "config_dir_str",
-    default=None,
-    help="Config directory override.",
-)
-@click.option(
-    "--timeout",
-    default=15.0,
-    type=float,
-    help=(
-        "Seconds to wait for the daemon to become reachable after a "
-        "cold spawn. Default: 15.0 — a cold-start daemon runs its "
-        "one-time startup migration (which can take several seconds and "
-        "holds the write lock) BEFORE it binds, so a tighter budget "
-        "spuriously warns on a healthy boot (nexus-u3mfr). The wait "
-        "fails fast if the spawned process dies, so a larger budget only "
-        "affects a genuinely slow migration, not a failed spawn."
-    ),
-)
-@click.option(
-    "--quiet",
-    is_flag=True,
-    default=False,
-    help="Suppress 'already running' / 'spawned' messages; print only errors.",
-)
-def t2_ensure_running_cmd(
-    config_dir_str: str | None, timeout: float, quiet: bool,
-) -> None:
-    """Ensure the T2 daemon is running; spawn it in the background if not.
-
-    Idempotent — safe to invoke from session-start hooks, post-install
-    scripts, or as a defensive prelude to any operation that needs the
-    daemon. The daemon's own spawn-lock arbitrates concurrent invocations
-    so a race between the plugin hook and a manual ``nx daemon t2 start``
-    can't double-start.
-
-    Exit codes:
-      0 — daemon is reachable (already running or successfully spawned), or
-          a stale-daemon cycle was deferred (a working daemon is still up).
-      1 — daemon could not be made reachable: crash-loop suppressed, or the
-          spawned process died / did not become reachable within ``--timeout``.
-    """
-    outcome = _t2_ensure_running_inner(config_dir_str, timeout, quiet)
-    if outcome in (T2EnsureOutcome.CRASHLOOP_SUPPRESSED, T2EnsureOutcome.SPAWN_FAILED):
-        sys.exit(1)
 
 
-@t2_group.command("install")
-@click.option(
-    "--autostart",
-    is_flag=True,
-    required=True,
-    help=(
-        "Install OS autostart entry (launchd on macOS, systemd user "
-        "unit on Linux) so the T2 daemon starts at login / boot."
-    ),
-)
-@click.option(
-    "--force",
-    is_flag=True,
-    default=False,
-    help="Overwrite an existing plist/unit file even when its content "
-    "differs from the freshly rendered template.",
-)
-def t2_install_cmd(autostart: bool, force: bool) -> None:
-    """Install the T2 daemon autostart entry for the current user.
-
-    Thin wrapper over :func:`nexus.daemon.installer.install_autostart`
-    (RDR-126 §2 lift): the library function owns the file placement /
-    activation logic; this command translates its structured result into
-    ``click.echo`` lines and exit codes.
-    """
-    if not autostart:  # pragma: no cover
-        raise click.UsageError("--autostart is required")
-
-    from nexus.daemon import installer  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-
-    try:
-        result = installer.install_autostart(force=force)
-    except installer.SymlinkRefusedError as exc:
-        click.echo(f"Error: {exc}", err=True)
-        sys.exit(1)
-    except installer.ContentDiffersError as exc:
-        click.echo(f"Error: {exc}", err=True)
-        sys.exit(1)
-    except installer.ActivationError as exc:
-        click.echo(f"Error: {exc}", err=True)
-        sys.exit(1)
-
-    if result.status is installer.InstallStatus.ALREADY_PRESENT:
-        click.echo(result.detail)
-        return
-
-    click.echo(f"Wrote {result.dest}")
-    for warning in result.warnings:
-        click.echo(f"Warning: {warning}", err=True)
-    if result.activated_cmd is not None:
-        click.echo(f"Activated via: {' '.join(result.activated_cmd)}")
 
 
-@t2_group.command("uninstall")
-@click.option(
-    "--autostart",
-    is_flag=True,
-    required=True,
-    help="Remove OS autostart entry installed by ``install --autostart``.",
-)
-def t2_uninstall_cmd(autostart: bool) -> None:
-    """Remove the T2 daemon autostart entry for the current user.
-
-    Thin wrapper over :func:`nexus.daemon.installer.uninstall_autostart`
-    (RDR-126 §2 lift).
-    """
-    if not autostart:  # pragma: no cover
-        raise click.UsageError("--autostart is required")
-
-    from nexus.daemon import installer  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-
-    result = installer.uninstall_autostart()
-    if result.status is installer.UninstallStatus.NOT_INSTALLED:
-        click.echo(f"Autostart not installed (nothing at {result.dest}).")
-        return
-    for warning in result.warnings:
-        click.echo(f"Warning: {warning}", err=True)
-    click.echo(f"Removed {result.dest}")
-    # nexus-dmgvx: same survivor report as the service tier — the shared
-    # primitive scopes the probe by tier, so this is empty for t2 today and
-    # stays correct if t2 ever grows survivors of its own.
-    for survivor in result.survivors:
-        click.echo(f"Still running: {survivor}", err=True)
 
 
 # ---------------------------------------------------------------------------

@@ -14,9 +14,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 from uuid import uuid4
 
-if TYPE_CHECKING:
-    from nexus.daemon.t2_client import T2Client
-
 import structlog
 
 _log = structlog.get_logger(__name__)
@@ -593,16 +590,16 @@ class T1Database:
     # ── Promote ───────────────────────────────────────────────────────────────
 
     def promote(
-        self, id: str, project: str, title: str, t2: T2Database | T2Client,
+        self, id: str, project: str, title: str, t2: T2Database,
     ) -> "PromotionReport":
         """Copy T1 entry *id* to T2 immediately. Returns a PromotionReport.
 
-        *t2* may be a direct ``T2Database`` or a daemon-backed ``T2Client``
-        (RDR-128 P3): ``nx scratch promote`` routes through
-        ``mcp_infra.t2_index_write``, so the overlap-detection ``memory.search``
-        read and the ``put`` write both go over the daemon RPC when one is
-        reachable. Both types expose the ``.put`` / ``.memory`` surface this
-        method uses.
+        *t2* is a ``T2Database``. It could also be a daemon-backed
+        ``T2Client`` until that daemon retired (nexus-i711w Stage 2 sub-stage
+        B); ``nx scratch promote`` still routes through
+        ``mcp_infra.t2_index_write``, which now reaches the storage service
+        rather than a daemon RPC. Only the ``.put`` / ``.memory`` surface is
+        used here.
 
         Overlap detection (RDR-057): pulls the first few non-stopword content
         tokens from the scratch entry and FTS5-searches T2 for any existing

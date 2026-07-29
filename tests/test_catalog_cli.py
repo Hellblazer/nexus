@@ -1972,21 +1972,26 @@ class TestWhh61BackupsCarve:
         vac.assert_called_once()
         assert vac.call_args.args[0] is fake
 
-    def test_undelete_surfaces_daemon_live_guard(self):
+    def test_undelete_surfaces_admin_path_guard(self):
         """undelete uses the admin path (make_catalog_admin), not _get_catalog.
-        Pin the CLI-layer guard: a live daemon surfaces as a ClickException."""
+        Pin the CLI-layer guard: an admin-path refusal surfaces as a
+        ClickException, not a traceback.
+
+        Was pinned against CatalogAdminDaemonLiveError until that retired with
+        the T2 daemon (nexus-i711w Stage 2 sub-stage B); re-pointed at the
+        surviving refusal so the CLI-layer contract keeps its guard."""
         from unittest.mock import patch
 
-        from nexus.catalog.factory import CatalogAdminDaemonLiveError
+        from nexus.catalog.factory import CatalogAdminServiceModeError
         from nexus.cli import main
 
         with patch(
             "nexus.catalog.factory.make_catalog_admin",
-            side_effect=CatalogAdminDaemonLiveError("daemon is live"),
+            side_effect=CatalogAdminServiceModeError("no service-mode equivalent"),
         ):
             result = CliRunner().invoke(main, ["catalog", "undelete", "snap.jsonl"])
         assert result.exit_code != 0
-        assert "daemon is live" in result.output
+        assert "no service-mode equivalent" in result.output
 
 
 class TestWhh61CollectionsCarve:

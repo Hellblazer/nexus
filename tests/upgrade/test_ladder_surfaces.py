@@ -89,7 +89,6 @@ def test_yes_flag_reaches_the_rungs_consent_channel(
 
     seen: list[bool] = []
     monkeypatch.setattr(upgrade_mod, "_run_ladder", lambda **_kw: seen.append(_consent()))
-    monkeypatch.setattr(upgrade_mod, "_quiesce_daemon", lambda: None)
     monkeypatch.setattr(upgrade_mod, "_run_upgrade", lambda **_kw: None)
     monkeypatch.setattr(upgrade_mod, "_converge_preconditions", lambda **_kw: None)
     monkeypatch.setattr(upgrade_mod, "_cycle_supervised_daemons_to_current", lambda **_kw: None)
@@ -125,7 +124,6 @@ def test_yes_flag_is_not_visible_to_the_daemons_the_upgrade_spawns(
     import os
 
     at_spawn: dict[str, str | None] = {}
-    monkeypatch.setattr(upgrade_mod, "_quiesce_daemon", lambda: None)
     monkeypatch.setattr(upgrade_mod, "_run_upgrade", lambda **_kw: None)
     monkeypatch.setattr(upgrade_mod, "_converge_preconditions", lambda **_kw: None)
     monkeypatch.setattr(upgrade_mod, "_run_ladder", lambda **_kw: None)
@@ -460,7 +458,6 @@ def test_upgrade_invocation_executes_each_migration_step_exactly_once(
     with (
         patch("nexus.commands.upgrade._db_path", return_value=db),
         patch("nexus.commands.upgrade.T3_UPGRADES", []),
-        patch("nexus.commands.upgrade._quiesce_daemon"),
         patch("nexus.commands.upgrade._cycle_supervised_daemons_to_current"),
     ):
         result = CliRunner().invoke(main, ["upgrade"])

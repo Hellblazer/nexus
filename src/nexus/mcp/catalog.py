@@ -724,7 +724,6 @@ def main():
     import structlog  # noqa: PLC0415 — deferred to entry-point invocation, keeps module import cheap
 
     from nexus.logging_setup import configure_logging  # noqa: PLC0415 — deferred to entry-point invocation, keeps module import cheap
-    from nexus.mcp._first_run import ensure_installed_and_running  # noqa: PLC0415 — deferred to entry-point invocation, keeps module import cheap
     from nexus.mcp_infra import check_version_compatibility  # noqa: PLC0415 — deferred to entry-point invocation, keeps module import cheap
 
     configure_logging("mcp")
@@ -736,8 +735,8 @@ def main():
         pid=os.getpid(),
         ppid=os.getppid(),
     )
-    # RDR-126 P2 (nexus-bsjro): see nexus/mcp/core.py for rationale.
-    ensure_installed_and_running()
+    # NO first-run daemon install here — retired with the T2 daemon
+    # (nexus-i711w Stage 2 sub-stage B); see nexus/mcp/core.py.
     # nexus-gynt2: stranded-install detector — deliberately wired on BOTH
     # MCP servers, in contrast to the embedder advisory's single-channel-
     # on-core decision (RDR-144 P5b below): that one is cosmetic and

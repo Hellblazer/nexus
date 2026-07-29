@@ -33,7 +33,6 @@ def runner() -> CliRunner:
 @pytest.fixture(autouse=True)
 def _no_real_daemon():
     with (
-        patch("nexus.commands.upgrade._quiesce_daemon"),
         patch("nexus.commands.upgrade._cycle_supervised_daemons_to_current"),
     ):
         yield

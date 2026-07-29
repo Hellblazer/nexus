@@ -1209,47 +1209,16 @@ def check_version_compatibility() -> None:
 
         cli_ver = _pkg_version("conexus")
 
-        # ── (1) CLI ↔ T2 schema drift ────────────────────────────────────
-        # RDR-120 P4: routed through T2Client when the daemon is reachable;
-        # silently skipped when it isn't (best-effort drift warning, not a
-        # gate). The daemon's ``database.hello`` op surfaces its stored
-        # _nexus_version row.
-        db_path = default_db_path()
-        stored_ver: str | None = None
-        if db_path.exists():
-            try:
-                from nexus.daemon.t2_client import make_t2_client  # noqa: PLC0415 — deferred to avoid circular import (daemon.t2_client)
+        # NO CLI ↔ T2 schema-drift check: RDR-120 P4 read the stored
+        # ``_nexus_version`` via the daemon's ``database.hello`` op, and the
+        # daemon is its ONLY transport. With the daemon retired (nexus-i711w
+        # Stage 2 sub-stage B) there is nothing left to ask, so the check is
+        # removed rather than left permanently reading ``None``. No service-mode
+        # equivalent is built here on purpose: the engine's schema is Liquibase-
+        # managed and its drift surface is the engine-version floor
+        # (``REQUIRED_ENGINE_VERSION``), not a per-boot version compare.
 
-                client = make_t2_client()
-                try:
-                    hello = client.database.hello()
-                    raw = (hello or {}).get("daemon_schema_version") or ""
-                    stored_ver = raw if raw and raw != "0.0.0" else None
-                finally:
-                    client.close()
-            except Exception:  # noqa: BLE001 — drift check best-effort; daemon-unreachable (incl. T2DaemonNotReachableError) / RPC-fail degrades stored_ver to None
-                # Daemon unreachable or RPC failed — drift check is
-                # best-effort. Operator can run `nx doctor` for the
-                # full diagnostic.
-                stored_ver = None
-        if stored_ver is not None:
-            cli_t = _parse_version(cli_ver)
-            stored_t = _parse_version(stored_ver)
-            # Warn on minor or major divergence, not patch.
-            # Tuple slicing is safe for short tuples — (4,)[:2] == (4,).
-            if cli_t[:2] != stored_t[:2]:
-                if cli_t > stored_t:
-                    hint = "run 'nx upgrade' to apply pending migrations"
-                else:
-                    hint = "DB was upgraded by a newer CLI version"
-                log.warning(
-                    "version_mismatch",
-                    cli_version=cli_ver,
-                    stored_version=stored_ver,
-                    hint=hint,
-                )
-
-        # ── (2) Plugin ↔ CLI version drift ──────────────────────────────
+        # ── Plugin ↔ CLI version drift ──────────────────────────────────
         plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT")
         if plugin_root:
             manifest_path = Path(plugin_root) / ".claude-plugin" / "plugin.json"

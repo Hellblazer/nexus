@@ -3,7 +3,8 @@
 # wheel. Exercises this session's migration-runner work end-to-end:
 #   RDR-170  registry-aware apply_pending + version stamp + doctor/dry-run
 #   RDR-142  nx upgrade --dry-run reports deferred/gated steps + remediation
-#   nexus-3lbhb  T2 daemon bootstrap surfaces a gated migration loudly, fail-closed
+# (The nexus-3lbhb daemon-bootstrap scenario retired with the T2 daemon — see
+#  the scenario-5 tombstone below.)
 #
 # Completely isolated: a fresh NEXUS_CONFIG_DIR per scenario, sqlite T2 backend,
 # local mode — no service, no host contact.
@@ -79,25 +80,15 @@ nx upgrade --dry-run >/tmp/defer.txt 2>&1
 grep -qi "No pending migrations" /tmp/defer.txt && bad "deferred dry-run LIED ('No pending')" || ok "deferred dry-run does NOT say 'No pending'"
 grep -qiE "defer|catalog" /tmp/defer.txt && ok "deferred/catalog condition reported" || { bad "deferral not reported"; cat /tmp/defer.txt; }
 
-# ── 5. nexus-3lbhb: T2 daemon bootstrap surfaces the gate loudly, fail-closed ─
-say "5 — nexus-3lbhb daemon bootstrap gate (loud + fail-closed)"
-fresh; python3 "$SEED" "$D" gated-orphan >/dev/null
-# nx daemon t2 start is ALWAYS foreground (the supervisor blocks on it). On the
-# gated db, bootstrap hits the gate -> loud log + re-raise -> non-zero exit.
-NEXUS_MIGRATION_HIGH_VOLUME_THRESHOLD=1 timeout 40 nx daemon t2 start --config-dir "$D" >/tmp/daemon.txt 2>&1
-DRC=$?
-note "daemon exit=$DRC (non-zero = fail-closed crash, expected)"
-# Primary 3lbhb guarantee: FAIL-CLOSED (crash + restartable, NOT serve-degraded).
-[ "$DRC" -ne 0 ] && ok "daemon stayed FAIL-CLOSED (did not serve a degraded daemon)" || bad "daemon did NOT crash on the gate (unexpectedly served)"
-# The gate + remediation must reach the operator (the MigrationError surfaces on
-# stderr; the structured event goes to the daemon's rotating log under the config dir).
-( grep -q "rename-collection" /tmp/daemon.txt || grep -rq "rename-collection" "$D" 2>/dev/null ) \
-  && ok "gate remediation surfaced to operator (rename-collection)" || { bad "gate remediation not surfaced"; tail -12 /tmp/daemon.txt; }
-if grep -rq "t2_daemon_bootstrap_migration_gated" "$D" /tmp/daemon.txt 2>/dev/null; then
-  ok "structured loud gate event (t2_daemon_bootstrap_migration_gated) logged"
-else
-  note "(structured event in the daemon log sink, not captured here — unit test asserts it fires)"
-fi
+# ── 5. REMOVED: nexus-3lbhb T2 daemon bootstrap gate ─────────────────────────
+# The scenario started `nx daemon t2 start` on a gated db and asserted the
+# bootstrap hit the migration gate FAIL-CLOSED (crash, not serve-degraded).
+# Both the verb and `run_t2_daemon` retired in nexus-i711w Stage 2 sub-stage B,
+# so there is no bootstrap left to gate. Caught by
+# tests/test_release_artifact_verb_rot.py, which is exactly what that tripwire
+# exists for — the script is release-only and nothing else would have noticed.
+# Scenarios 1-4 (RDR-170 apply_pending + RDR-142 dry-run reporting) are
+# unaffected: they drive `nx upgrade`, not the daemon.
 
 say "RESULT"
 if [ "$FAILS" -eq 0 ]; then printf '\033[32mALL SCENARIOS PASSED\033[0m\n'; exit 0

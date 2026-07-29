@@ -1322,51 +1322,12 @@ def _check_t2_dropped_writes() -> list[HealthResult]:
     )]
 
 
-def _check_t2_daemon_singleton() -> list[HealthResult]:
-    """Fail loud when more than one T2 daemon serves the same db (RDR-129 A3,
-    nexus-exa2p). Exactly one daemon per ``memory.db`` is the single-writer
-    invariant; two daemons contend on the WAL and produce the ``FTS5: database
-    is locked`` flicker. This is the **hard** census error, complementary to
-    the soft live-contention signal in ``_check_t2_integrity``: A1/A2 enforce
-    single occupancy, A3 makes a residual violation observable instead of
-    silent. Names the offending pids so an operator can act without reading
-    code.
-    """
-    db_path = default_db_path()
-    if not db_path.exists():
-        return [HealthResult(
-            label="T2 daemon singleton", ok=True, detail="no T2 database yet",
-        )]
-    try:
-        from nexus.daemon.t2_daemon import _enumerate_t2_daemon_pids_for_db  # noqa: PLC0415 — deferred to avoid circular import
-
-        pids = sorted(set(_enumerate_t2_daemon_pids_for_db(db_path)))
-    except Exception as exc:  # pragma: no cover — defensive  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
-        # Absence of evidence is not evidence of multiplicity: a failed probe
-        # must not flip doctor red.
-        return [HealthResult(
-            label="T2 daemon singleton", ok=True, detail=f"probe unavailable: {exc}",
-        )]
-
-    if len(pids) <= 1:
-        detail = "1 daemon" if pids else "no daemon running"
-        return [HealthResult(label="T2 daemon singleton", ok=True, detail=detail)]
-
-    pid_list = ", ".join(str(p) for p in pids)
-    return [HealthResult(
-        label="T2 daemon singleton",
-        ok=False,
-        fatal=True,
-        detail=(
-            f"{len(pids)} daemons for {db_path.name} (pids: {pid_list}); "
-            f"single-writer invariant violated"
-        ),
-        fix_suggestions=[
-            "two T2 daemons are contending on the same memory.db (RDR-129 A3). "
-            "Stop the extras: `nx daemon t2 stop`, then "
-            "`nx daemon t2 ensure-running` to leave exactly one",
-        ],
-    )]
+# NO _check_t2_daemon_singleton: RDR-129 A3 made a residual two-daemon
+# violation observable, and its subject (the T2 daemon) is retired
+# (nexus-i711w Stage 2 sub-stage B). With no daemon the census can only ever
+# report zero, and its fix_suggestions named `nx daemon t2 stop` /
+# `ensure-running`, both gone. The single-writer invariant it guarded now
+# belongs to Postgres, not to a pid count.
 
 
 def _check_catalog(cat: "Catalog | None", cat_path: "Path") -> list[HealthResult]:
@@ -2967,7 +2928,6 @@ def run_health_checks() -> tuple[list[HealthResult], bool]:
     results.extend(_check_mineru_server())
     results.extend(_check_t2_integrity())
     results.extend(_check_t2_dropped_writes())
-    results.extend(_check_t2_daemon_singleton())
 
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
     from nexus.config import catalog_path  # noqa: PLC0415 — deferred to avoid circular import
