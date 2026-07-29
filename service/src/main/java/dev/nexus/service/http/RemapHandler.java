@@ -189,10 +189,40 @@ public final class RemapHandler implements HttpHandler {
      *                                              id, two digests) — never
      *                                              resolved silently, same
      *                                              contract the sync form had
-     *   410 engine restarted: that transaction rolled back, store unchanged
+     *   410 {status:"lost", store_changed:"unknown"}
+     *                                              the engine restarted since
+     *                                              the id was minted. NOT a
+     *                                              claim that the store is
+     *                                              unchanged — see below
      *   404 unknown job for this tenant
      *   400 malformed job id
      * </pre>
+     *
+     * <p><strong>A 410 is not a safe no-op.</strong> The commit happens inside
+     * {@code TenantScope} and {@link RekeyJobs} marks the job SUCCEEDED only
+     * after the runner returns; a JVM death between those two steps (SIGKILL,
+     * OOM-kill, node eviction) leaves a store that HAS changed and a job that
+     * never reached SUCCEEDED. Rollback is the overwhelmingly likely outcome
+     * but it is not provable from here, so this route reports the outcome as
+     * unknown to this instance rather than as unchanged. An implementer who
+     * reads 410 as "nothing happened" — retrying blind, or telling an operator
+     * the store is untouched — has built the one thing this contract does not
+     * license, and it is the same failure the async rewrite exists to remove
+     * (nexus-b878d: a 504 over a committed transaction).
+     *
+     * <p>Two things settle it, and both are cheap:
+     *
+     * <ul>
+     *   <li>the server-side {@code event=rekey_complete} log — the
+     *       authoritative record of what any completed rekey did, and what
+     *       recovered the envelope the 504 appeared to lose; and</li>
+     *   <li>the rekey's idempotence — a re-run over an already-rekeyed store
+     *       reports all-zero counts, so re-submitting is both safe and
+     *       self-answering.</li>
+     * </ul>
+     *
+     * <p>{@link RekeyJobs} carries why the window exists and why persisting job
+     * state in Postgres would not close it.
      *
      * <p>The job id is tenant-scoped on read: a job belonging to another tenant
      * reads as 404, so holding an id is not a way to observe another tenant's
