@@ -119,16 +119,32 @@ def t2_handle() -> Iterator[Any]:
     # for a new one here. The practical consequence is real and worth stating
     # plainly: on a box holding ``NX_STORAGE_BACKEND=sqlite`` (the RDR-152
     # copy-not-move rollback lever), MCP ``memory_put`` still writes while
-    # ``nx memory`` exits 1. That asymmetry, and whether the CLI should instead
-    # reuse the grandfathered arm, is tracked on nexus-vw7zk.
+    # ``nx memory`` exits 1.
+    #
+    # DECIDED — Hal, 2026-07-28, on nexus-vw7zk: ACCEPT the fail-loud. Both
+    # alternatives invest in the substrate this arc exists to delete. Reusing the
+    # grandfathered ``mcp_infra`` arm would add a ``commands/`` -> ``mcp_infra``
+    # import that sub-stage A must then unpick; raising EPSILON_CENSUS would add
+    # a raw-SQLite site outright. Accepting adds nothing, and the whole branch
+    # goes in one piece in sub-stage A.
+    #
+    # THE COST IS NARROWER THAN IT READS, and this was measured rather than
+    # assumed: migrating FORWARD never touches this helper. ``nx upgrade`` and
+    # ``nx doctor`` construct ``T2Database`` directly (epsilon-allow), and the
+    # SQLite-mode E2E gate ``tests/e2e/t2-migration-sqlite/rehearse_t2.sh`` drives
+    # exactly those two verbs — it is unaffected. The migration rehearsals' SQLite
+    # legs (``seed_legacy.py``, ``rehearse_hole_punch.sh``) open ``T2Database``
+    # in-process, not via the CLI. What is dead is interactive browsing of a
+    # SQLite-mode store; the rollback lever itself still converges.
     #
     # NOTE this blocks READS (``nx memory list/get/search``) as well as writes —
     # the yielded handle is the only path to the store, so there is no read-only
     # half to preserve without the same new connection.
     raise click.ClickException(
         "The T2 daemon that arbitrated SQLite-mode access has been retired, and "
-        "this install is not on the storage service, so `nx memory` and `nx "
-        "config` cannot reach T2 storage (reads included). Run `nx doctor` and, "
-        "if it reports a pending substrate migration, `nx upgrade` to converge "
-        "onto Postgres."
+        "this install is not on the storage service, so `nx memory`, `nx config`, "
+        "`nx remediation` and `nx service` cannot reach T2 storage (reads "
+        "included). Migrating forward is unaffected and is the supported path: "
+        "run `nx doctor` and, if it reports a pending substrate migration, "
+        "`nx upgrade` to converge onto Postgres."
     )

@@ -8,12 +8,16 @@ shipped with NO coverage at all — not the exit code, not the
 one-liner-not-traceback contract, not the presence of a recovery hint — which
 is how its message came to describe only WRITES while it also blocks reads.
 
-These tests pin the contract as it stands. They are deliberately agnostic
-about whether fail-loud is the right END state: the CLI/MCP asymmetry it
-creates (MCP still writes SQLite via the grandfathered ``mcp_infra`` arms
-while ``nx memory`` exits 1) is an open decision on ``nexus-vw7zk``. If that
-bead resolves toward restoring function, these tests are the thing to
-rewrite — which is the point of having them.
+These tests pin the contract. Fail-loud is now the DECIDED end state for the
+remainder of RDR-158 P4 — Hal, 2026-07-28, on ``nexus-vw7zk``: both ways of
+restoring function invest in the substrate the arc is deleting, so the CLI/MCP
+asymmetry (MCP still writes SQLite via the grandfathered ``mcp_infra`` arms
+while ``nx memory`` exits 1) is accepted until sub-stage A removes the branch
+whole. These stop being interim and become the thing that holds the line.
+
+They should be DELETED, not rewritten, when sub-stage A lands: at that point
+``storage_backend_for`` no longer has a SQLite answer for this helper and the
+arm they cover does not exist.
 """
 from __future__ import annotations
 
